@@ -9,6 +9,7 @@ class CardSearch {
     this.loadingIndicator = document.getElementById('loading');
     this.statusMessage = document.getElementById('statusMessage');
     this.queryExplanation = document.getElementById('queryExplanation');
+    this.queryWarnings = document.getElementById('queryWarnings');
     this.orderDropdown = document.getElementById('orderDropdown');
     this.uniqueDropdown = document.getElementById('uniqueDropdown');
     this.preferDropdown = document.getElementById('preferDropdown');
@@ -563,6 +564,9 @@ class CardSearch {
     const totalCards = data.total_cards || cards.length;
     const queryExplanation = data.query_explanation || '';
 
+    // Display query warnings if any
+    this.displayQueryWarnings(data.query_ignored || []);
+
     if (cards.length === 0) {
       this.showNoResults();
       return;
@@ -600,6 +604,49 @@ class CardSearch {
     // Record arrival time; we only push this state when leaving if they stayed > DWELL_MS and it's not already saved (updateURL)
     const url = this.buildCurrentSearchUrl();
     window.history.replaceState({ arrivalTime: Date.now() }, '', url);
+  }
+
+  displayQueryWarnings(ignoredParts) {
+    // Clear any existing warnings
+    this.queryWarnings.innerHTML = '';
+    
+    if (!ignoredParts || ignoredParts.length === 0) {
+      return;
+    }
+    
+    // Create warning container
+    const warningDiv = document.createElement('div');
+    warningDiv.className = 'warning-box';
+    
+    // Add title
+    const title = document.createElement('div');
+    title.className = 'warning-title';
+    title.textContent = ignoredParts.length === 1 
+      ? 'The following part of your query was ignored:' 
+      : 'The following parts of your query were ignored:';
+    warningDiv.appendChild(title);
+    
+    // Add each ignored part
+    ignoredParts.forEach(part => {
+      const partDiv = document.createElement('div');
+      partDiv.className = 'warning-item';
+      
+      const fragmentSpan = document.createElement('span');
+      fragmentSpan.className = 'warning-fragment';
+      fragmentSpan.textContent = `"${part.fragment}"`;
+      partDiv.appendChild(fragmentSpan);
+      
+      if (part.reason) {
+        const reasonSpan = document.createElement('span');
+        reasonSpan.className = 'warning-reason';
+        reasonSpan.textContent = ` — ${part.reason}`;
+        partDiv.appendChild(reasonSpan);
+      }
+      
+      warningDiv.appendChild(partDiv);
+    });
+    
+    this.queryWarnings.appendChild(warningDiv);
   }
 
   getColumnsFromViewportWidth() {
@@ -1006,6 +1053,9 @@ class CardSearch {
   clearMessages() {
     if (this.statusMessage) {
       this.statusMessage.innerHTML = '';
+    }
+    if (this.queryWarnings) {
+      this.queryWarnings.innerHTML = '';
     }
   }
 

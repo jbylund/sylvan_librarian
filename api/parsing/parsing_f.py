@@ -534,6 +534,45 @@ def make_chained_arithmetic(tokens: list[object]) -> QueryNode:
     return result
 
 
+class IgnoredQueryPart:
+    """Represents a part of a query that was ignored during parsing."""
+
+    def __init__(self, fragment: str, reason: str = ""):
+        """Initialize an ignored query part.
+
+        Args:
+            fragment: The raw query fragment that was ignored
+            reason: Optional reason why it was ignored
+        """
+        self.fragment = fragment
+        self.reason = reason
+
+    def to_dict(self) -> dict[str, str]:
+        """Convert to dictionary for JSON serialization."""
+        result = {"fragment": self.fragment}
+        if self.reason:
+            result["reason"] = self.reason
+        return result
+
+
+class ParseResult:
+    """Holds the result of parsing with ignored parts."""
+
+    def __init__(self, query: Query | None, ignored: list[IgnoredQueryPart]):
+        """Initialize a parse result.
+
+        Args:
+            query: The parsed Query AST, or None if nothing valid
+            ignored: List of ignored query parts
+        """
+        self.query = query
+        self.ignored = ignored
+
+    def has_valid_query(self) -> bool:
+        """Check if there is a valid query."""
+        return self.query is not None
+
+
 def parse_scryfall_query(query: str) -> Query:
     """Parse a Scryfall search query and convert to Scryfall-specific AST.
 
@@ -545,6 +584,192 @@ def parse_scryfall_query(query: str) -> Query:
     """
     generic_query = parse_search_query(query)
     return to_card_query_ast(generic_query)
+
+
+def parse_scryfall_query_with_ignored(query: str) -> ParseResult:
+    """Parse a Scryfall search query, ignoring unrecognized parts.
+
+    This function attempts to parse the query and extract valid portions while
+    collecting any parts that could not be parsed. If at least one part is valid,
+    it returns a Query AST with the valid parts and a list of ignored fragments.
+    If nothing is valid, it returns None for the query.
+
+    Args:
+        query: The search query string to parse.
+
+    Returns:
+        ParseResult containing the parsed Query (or None) and list of ignored parts.
+    """
+    if query is None or not query.strip():
+        # Return empty query with no ignored parts
+        return ParseResult(
+            Query(BinaryOperatorNode(CardAttributeNode("name", ParserClass.TEXT), ":", "")),
+            [],
+        )
+
+    # First, try to parse the entire query
+    try:
+        parsed_query = parse_scryfall_query(query)
+        return ParseResult(parsed_query, [])
+    except (ValueError, ParseException):
+        # Query failed to parse completely, try partial parsing
+        pass
+
+    # Preprocess the query to add explicit ANDs
+    # This is necessary so we can properly segment the query
+    preprocessed_query = preprocess_implicit_and(query)
+    
+    # Split query into segments by top-level operators (AND, OR)
+    # We need to be careful to respect parentheses, quotes, and regex patterns
+    segments = _segment_query(preprocessed_query)
+
+    # Try to parse each segment
+    valid_nodes: list[QueryNode] = []
+    ignored_parts: list[IgnoredQueryPart] = []
+
+    for segment in segments:
+        segment_text = segment.strip()
+        if not segment_text:
+            continue
+
+        try:
+            # Try to parse this segment
+            parsed = parse_scryfall_query(segment_text)
+            if parsed.root:
+                valid_nodes.append(parsed.root)
+        except (ValueError, ParseException) as e:
+            # This segment failed, add to ignored
+            reason = _extract_error_reason(str(e), segment_text)
+            ignored_parts.append(IgnoredQueryPart(segment_text, reason))
+
+    # Combine valid nodes
+    if not valid_nodes:
+        # Nothing was valid, return None for query
+        return ParseResult(None, ignored_parts)
+
+    # If we have only one valid node, use it directly
+    if len(valid_nodes) == 1:
+        result_query = Query(valid_nodes[0])
+    else:
+        # Multiple valid nodes, combine with AND
+        result_query = Query(AndNode(valid_nodes))
+
+    return ParseResult(result_query, ignored_parts)
+
+
+def _segment_query(query: str) -> list[str]:
+    """Split query into segments by top-level AND/OR operators.
+
+    This respects parentheses, quotes, and regex patterns to avoid splitting
+    inside grouped expressions.
+
+    Args:
+        query: The query string to segment
+
+    Returns:
+        List of query segments
+    """
+    segments: list[str] = []
+    current_segment = []
+    i = 0
+    paren_depth = 0
+    in_quotes = None  # Track quote type: None, '"', or "'"
+    in_regex = False
+
+    while i < len(query):
+        char = query[i]
+
+        # Handle escape sequences
+        if i > 0 and query[i - 1] == "\\":
+            current_segment.append(char)
+            i += 1
+            continue
+
+        # Handle quotes
+        if char in ('"', "'") and not in_regex:
+            if in_quotes == char:
+                in_quotes = None
+            elif in_quotes is None:
+                in_quotes = char
+            current_segment.append(char)
+            i += 1
+            continue
+
+        # Handle regex patterns
+        if char == "/" and not in_quotes:
+            if in_regex:
+                in_regex = False
+            else:
+                in_regex = True
+            current_segment.append(char)
+            i += 1
+            continue
+
+        # Handle parentheses (only when not in quotes or regex)
+        if not in_quotes and not in_regex:
+            if char == "(":
+                paren_depth += 1
+            elif char == ")":
+                paren_depth -= 1
+
+        # Check for AND/OR at top level
+        if not in_quotes and not in_regex and paren_depth == 0:
+            # Look ahead for " AND " or " OR "
+            remaining = query[i:]
+            is_and = remaining.upper().startswith(" AND ") or remaining.upper().startswith("AND ")
+            is_or = remaining.upper().startswith(" OR ") or remaining.upper().startswith("OR ")
+
+            if is_and or is_or:
+                # Save current segment
+                segment_text = "".join(current_segment).strip()
+                if segment_text:
+                    segments.append(segment_text)
+                current_segment = []
+
+                # Skip the operator
+                if remaining.startswith(" "):
+                    i += 1
+                if remaining[i - (i > 0 and remaining.startswith(" ")):].upper().startswith("AND"):
+                    i += 3
+                else:  # OR
+                    i += 2
+                if i < len(query) and query[i] == " ":
+                    i += 1
+                continue
+
+        current_segment.append(char)
+        i += 1
+
+    # Add final segment
+    segment_text = "".join(current_segment).strip()
+    if segment_text:
+        segments.append(segment_text)
+
+    return segments if segments else [query]
+
+
+def _extract_error_reason(error_msg: str, segment: str) -> str:
+    """Extract a user-friendly error reason from the exception message.
+
+    Args:
+        error_msg: The error message from the exception
+        segment: The query segment that failed
+
+    Returns:
+        A user-friendly reason string
+    """
+    # Check for common patterns in error messages
+    if "unknown attribute" in error_msg.lower() or "invalid expression" in error_msg.lower():
+        # Try to extract attribute name
+        if ">" in segment or "<" in segment or "=" in segment or ":" in segment:
+            return "One or both sides of your comparison must be a card attribute (cmc, pow, tou, etc.)"
+        return "Unrecognized search term or attribute"
+
+    if "failed to parse" in error_msg.lower():
+        return "Invalid search syntax"
+
+    # Default message
+    return "Could not parse this part of the query"
 
 
 @cachebox.cached(cache={})
