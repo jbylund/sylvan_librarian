@@ -761,9 +761,23 @@ class APIResource:
 
         timer = Timer()
 
-        with timer("get_where_clause"):
-            where_clause, params = self._get_where_clause(query)
-
+        # Generate explanation for the query
+        query_explanation = ""
+        parsed_query = None
+        try:
+            with timer("get_where_clause"):
+                parsed_query = parse_scryfall_query(query)
+                where_clause, params = generate_sql_query(parsed_query)
+                # Generate explanation after successful parsing
+                if query:  # Only generate explanation if there's a query
+                    query_explanation = parsed_query.to_human_explanation()
+        except ValueError as err:
+            # Handle parsing errors from parse_scryfall_query
+            logger.info("ValueError caught for query '%s', raising BadRequest", query)
+            raise falcon.HTTPBadRequest(
+                title="Invalid Search Query",
+                description=f'Failed to parse query: "{query}"',
+            ) from err
         sql_orderby: str = {
             # what's in the query => the db column name
             CardOrdering.CMC: "cmc",
@@ -884,6 +898,7 @@ class APIResource:
             "compiled": query_sql,
             "params": params,
             "query": query,
+            "query_explanation": query_explanation,
             "outer_timings": timer.get_timings(),
             "inner_timings": result_bag.pop("timings"),
             "total_cards": total_cards,
