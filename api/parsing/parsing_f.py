@@ -537,7 +537,7 @@ def make_chained_arithmetic(tokens: list[object]) -> QueryNode:
 class IgnoredQueryPart:
     """Represents a part of a query that was ignored during parsing."""
 
-    def __init__(self, fragment: str, reason: str = ""):
+    def __init__(self, fragment: str, reason: str = "") -> None:
         """Initialize an ignored query part.
 
         Args:
@@ -558,7 +558,7 @@ class IgnoredQueryPart:
 class ParseResult:
     """Holds the result of parsing with ignored parts."""
 
-    def __init__(self, query: Query | None, ignored: list[IgnoredQueryPart]):
+    def __init__(self, query: Query | None, ignored: list[IgnoredQueryPart]) -> None:
         """Initialize a parse result.
 
         Args:
@@ -615,13 +615,9 @@ def parse_scryfall_query_with_ignored(query: str) -> ParseResult:
         # Query failed to parse completely, try partial parsing
         pass
 
-    # Preprocess the query to add explicit ANDs
-    # This is necessary so we can properly segment the query
-    preprocessed_query = preprocess_implicit_and(query)
-    
-    # Split query into segments by top-level operators (AND, OR)
-    # We need to be careful to respect parentheses, quotes, and regex patterns
-    segments = _segment_query(preprocessed_query)
+    # Split the ORIGINAL query into segments by top-level operators (AND, OR)
+    # This preserves the original text for better error messages
+    segments = _segment_query(query)
 
     # Try to parse each segment
     valid_nodes: list[QueryNode] = []
@@ -648,20 +644,17 @@ def parse_scryfall_query_with_ignored(query: str) -> ParseResult:
         return ParseResult(None, ignored_parts)
 
     # If we have only one valid node, use it directly
-    if len(valid_nodes) == 1:
-        result_query = Query(valid_nodes[0])
-    else:
-        # Multiple valid nodes, combine with AND
-        result_query = Query(AndNode(valid_nodes))
+    result_query = Query(valid_nodes[0]) if len(valid_nodes) == 1 else Query(AndNode(valid_nodes))
 
     return ParseResult(result_query, ignored_parts)
 
 
-def _segment_query(query: str) -> list[str]:
-    """Split query into segments by top-level AND/OR operators.
+def _segment_query(query: str) -> list[str]:  # noqa: C901, PLR0912, PLR0915
+    """Split query into segments for partial parsing.
 
-    This respects parentheses, quotes, and regex patterns to avoid splitting
-    inside grouped expressions.
+    This splits on top-level AND/OR operators and also on whitespace when not inside
+    parentheses, quotes, or regex patterns. This allows us to try parsing each term
+    independently.
 
     Args:
         query: The query string to segment
@@ -697,10 +690,7 @@ def _segment_query(query: str) -> list[str]:
 
         # Handle regex patterns
         if char == "/" and not in_quotes:
-            if in_regex:
-                in_regex = False
-            else:
-                in_regex = True
+            in_regex = not in_regex
             current_segment.append(char)
             i += 1
             continue
@@ -712,12 +702,19 @@ def _segment_query(query: str) -> list[str]:
             elif char == ")":
                 paren_depth -= 1
 
-        # Check for AND/OR at top level
+        # At top level (not in quotes, regex, or parentheses)
         if not in_quotes and not in_regex and paren_depth == 0:
-            # Look ahead for " AND " or " OR "
+            # Check for explicit AND/OR operators
             remaining = query[i:]
-            is_and = remaining.upper().startswith(" AND ") or remaining.upper().startswith("AND ")
-            is_or = remaining.upper().startswith(" OR ") or remaining.upper().startswith("OR ")
+            is_and = False
+            is_or = False
+
+            # Check for " AND " or "AND " (at start)
+            if remaining.upper().startswith(" AND ") or (i == 0 and remaining.upper().startswith("AND ")):
+                is_and = True
+            # Check for " OR " or "OR " (at start)
+            elif remaining.upper().startswith(" OR ") or (i == 0 and remaining.upper().startswith("OR ")):
+                is_or = True
 
             if is_and or is_or:
                 # Save current segment
@@ -734,6 +731,18 @@ def _segment_query(query: str) -> list[str]:
                 else:  # OR
                     i += 2
                 if i < len(query) and query[i] == " ":
+                    i += 1
+                continue
+
+            # Also split on whitespace (implicit AND) at top level
+            # But only if we're not in the middle of an attribute:value pair
+            if char.isspace():
+                segment_text = "".join(current_segment).strip()
+                if segment_text:
+                    segments.append(segment_text)
+                current_segment = []
+                # Skip consecutive whitespace
+                while i < len(query) and query[i].isspace():
                     i += 1
                 continue
 

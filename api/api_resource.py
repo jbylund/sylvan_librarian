@@ -34,7 +34,7 @@ from psycopg import Connection, Cursor
 from api.card_processing import preprocess_card
 from api.enums import CardOrdering, PreferOrder, SortDirection, UniqueOn
 from api.noscript_helpers import generate_results_count_html, generate_results_html
-from api.parsing import IgnoredQueryPart, ParseResult, generate_sql_query, parse_scryfall_query, parse_scryfall_query_with_ignored
+from api.parsing import IgnoredQueryPart, generate_sql_query, parse_scryfall_query, parse_scryfall_query_with_ignored
 from api.scryfall_bulk_data_fetcher import BulkDataKey, ScryfallBulkDataFetcher
 from api.settings import settings
 from api.tagger_client import TaggerClient
@@ -927,7 +927,7 @@ class APIResource:
         total_cards = count_row["total_cards_count"]
         for icard in cards:
             icard.pop("total_cards_count")
-        
+
         result = {
             "cards": cards,
             "compiled": query_sql,
@@ -938,11 +938,11 @@ class APIResource:
             "inner_timings": result_bag.pop("timings"),
             "total_cards": total_cards,
         }
-        
+
         # Add ignored query parts if any
         if ignored_parts:
             result["query_ignored"] = [part.to_dict() for part in ignored_parts]
-        
+
         return result
 
     def index_html(  # noqa: PLR0913
