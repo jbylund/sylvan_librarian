@@ -726,7 +726,7 @@ def _segment_query(query: str) -> list[str]:  # noqa: C901, PLR0912, PLR0915
                 # Skip the operator
                 if remaining.startswith(" "):
                     i += 1
-                if remaining[i - (i > 0 and remaining.startswith(" ")):].upper().startswith("AND"):
+                if remaining[i - (i > 0 and remaining.startswith(" ")) :].upper().startswith("AND"):
                     i += 3
                 else:  # OR
                     i += 2
