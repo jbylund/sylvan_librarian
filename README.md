@@ -205,6 +205,17 @@ The following environment variables can be configured:
   - Set to `true`, `1`, or `yes` to enable caching
   - Improves performance for repeated queries
   - Can be set in docker-compose.yml or exported before starting services
+- `ENVIRONMENT` - Environment mode (default: `dev`)
+  - Set to `prod` for production mode with restricted CORS
+  - Set in docker-compose.yml for dev/prod profiles
+- `CDN_URL` - CDN URL for static assets (default: `https://d1hot9ps2xugbc.cloudfront.net`)
+  - Override to use a different CDN provider
+  - Used in Content-Security-Policy headers
+  - Format: `https://your-cdn-domain.com`
+- `CORS_ALLOWED_ORIGINS` - Additional CORS allowed origins (optional)
+  - Comma-separated list of origins to allow
+  - Example: `https://example.com,https://app.example.com`
+  - Supplements environment-specific defaults
 
 **Client Service:**
 - `API_URL` - URL of the API service (default: `http://apiservice:8080`)

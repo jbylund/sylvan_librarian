@@ -46,7 +46,7 @@ class CORSMiddleware:
         extra_origins = os.environ.get("CORS_ALLOWED_ORIGINS", "")
         if extra_origins:
             # Filter and strip origins, avoiding duplicate strip() calls
-            stripped_origins = [origin.strip() for origin in extra_origins.split(",") if origin.strip()]
+            stripped_origins = [s for origin in extra_origins.split(",") if (s := origin.strip())]
             self.allowed_origins.extend(stripped_origins)
 
         logger.info("CORS middleware initialized with allowed origins: %s", self.allowed_origins)
