@@ -368,20 +368,18 @@ Not approved/endorsed by Wizards of the Coast.
 
 Arcane Tutor follows security best practices to protect users and data. A comprehensive security audit has been conducted with all critical vulnerabilities remediated.
 
-**Security Status**: 🟢 **SECURE** - All critical and high-priority vulnerabilities fixed
+**Security Status**: SECURE - All critical and high-priority vulnerabilities fixed
 
 **Key Security Documents:**
-- **[Security Audit Report](docs/security/security_audit_report.md)** - Comprehensive security assessment and findings
 - **[Security Best Practices](docs/security/security_best_practices.md)** - Development security guidelines
-- **[Security Checklist](docs/security/SECURITY_CHECKLIST.md)** - PR review security checklist
 
 **Security Features:**
-- ✅ SQL injection prevention with parameterized queries
-- ✅ XSS protection with output encoding
-- ✅ HTTP security headers (CSP, X-Frame-Options, etc.)
-- ✅ CORS restrictions
-- ✅ Input validation on all endpoints
-- ✅ Secure dependency management (pip-audit, npm audit)
+- SQL injection prevention with parameterized queries
+- XSS protection with output encoding
+- HTTP security headers (CSP, X-Frame-Options, etc.)
+- CORS restrictions
+- Input validation on all endpoints
+- Secure dependency management (pip-audit, npm audit)
 
 For security concerns, please review the security documentation or contact the maintainers.
 
@@ -396,7 +394,7 @@ For complete information about data sources, intellectual property attribution, 
 - **[Privacy Policy](docs/user/privacy_policy.md)** - Data collection and privacy practices
 - **[Compliance Review](docs/legal/compliance_review.md)** - Detailed compliance checklist status
 
-**Compliance Status**: ✅ 93% Complete (42/45 items) - Excellent standing with all critical items addressed.
+**Compliance Status**: 93% Complete (42/45 items) - Excellent standing with all critical items addressed.
 
 ## How Arcane Tutor Differs from Scryfall
 
