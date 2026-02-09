@@ -193,13 +193,14 @@ class APIResource:
         """Get the timer for the request."""
         return req.context.setdefault("timer", Timer())
 
-    def _validate_statement_timeout(self, statement_timeout: int) -> None:
-        """Validate that statement_timeout is a safe integer value.
+    def _set_statement_timeout(self, cursor: Cursor, statement_timeout: int) -> None:
+        """Validate and set the statement timeout for a database cursor.
 
         PostgreSQL SET commands don't support parameterized values, so we must
         validate the value before using it in string interpolation.
 
         Args:
+            cursor: Database cursor to execute the SET command on
             statement_timeout: The statement timeout value in milliseconds
 
         Raises:
@@ -208,6 +209,7 @@ class APIResource:
         if not isinstance(statement_timeout, int) or statement_timeout < 0:
             msg = f"statement_timeout must be a non-negative integer, got: {statement_timeout}"
             raise ValueError(msg)
+        cursor.execute(f"set statement_timeout = {statement_timeout}")
 
     def _handle(self, req: falcon.Request, resp: falcon.Response) -> None:
         """Handle a Falcon request and set the response.
@@ -378,9 +380,7 @@ class APIResource:
         result: dict[str, Any] = {}
         with self._conn_pool.connection() as conn, conn.cursor() as cursor:
             # Validate and set statement timeout
-            # PostgreSQL SET commands don't support parameterized values
-            self._validate_statement_timeout(statement_timeout)
-            cursor.execute(f"set statement_timeout = {statement_timeout}")
+            self._set_statement_timeout(cursor, statement_timeout)
             if explain:
                 explain_query = f"EXPLAIN (FORMAT JSON) {query}"
                 cursor.execute(explain_query, params)
@@ -1056,9 +1056,7 @@ class APIResource:
         with self._conn_pool.connection() as conn, conn.cursor() as cursor:
             statement_timeout = 60_000
             # Validate and set statement timeout
-            # PostgreSQL SET commands don't support parameterized values
-            self._validate_statement_timeout(statement_timeout)
-            cursor.execute(f"set statement_timeout = {statement_timeout}")
+            self._set_statement_timeout(cursor, statement_timeout)
             cursor.execute(backfill_sql)
 
             # Get count of updated cards
@@ -2058,9 +2056,7 @@ class APIResource:
             with self._conn_pool.connection() as conn, conn.cursor() as cursor:
                 statement_timeout = 30_000
                 # Validate and set statement timeout
-                # PostgreSQL SET commands don't support parameterized values
-                self._validate_statement_timeout(statement_timeout)
-                cursor.execute(f"set statement_timeout = {statement_timeout}")
+                self._set_statement_timeout(cursor, statement_timeout)
 
                 page_size = 6000
                 cards_loaded = cards_sent = 0
