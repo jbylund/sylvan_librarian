@@ -19,6 +19,8 @@ See [docs/legal.md](docs/legal/legal.md) for full details.
 1. [Card Tagging System](#card-tagging-system)
 1. [API Documentation](#api-documentation)
 1. [Development Notes](#development-notes)
+1. [Security](#security)
+1. [Data Sources & Attribution](#data-sources--attribution)
 
 ## Project Overview
 
@@ -350,6 +352,27 @@ All Magic: The Gathering card names, artwork, and game content are © Wizards of
 
 **Important**: This is unofficial Fan Content.
 Not approved/endorsed by Wizards of the Coast.
+
+### Security
+
+Arcane Tutor follows security best practices to protect users and data. A comprehensive security audit has been conducted with all critical vulnerabilities remediated.
+
+**Security Status**: 🟢 **SECURE** - All critical and high-priority vulnerabilities fixed
+
+**Key Security Documents:**
+- **[Security Audit Report](docs/security/security_audit_report.md)** - Comprehensive security assessment and findings
+- **[Security Best Practices](docs/security/security_best_practices.md)** - Development security guidelines
+- **[Security Checklist](docs/security/SECURITY_CHECKLIST.md)** - PR review security checklist
+
+**Security Features:**
+- ✅ SQL injection prevention with parameterized queries
+- ✅ XSS protection with output encoding
+- ✅ HTTP security headers (CSP, X-Frame-Options, etc.)
+- ✅ CORS restrictions
+- ✅ Input validation on all endpoints
+- ✅ Secure dependency management (pip-audit, npm audit)
+
+For security concerns, please review the security documentation or contact the maintainers.
 
 ### Legal Compliance
 
