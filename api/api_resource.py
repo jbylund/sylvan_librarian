@@ -193,6 +193,22 @@ class APIResource:
         """Get the timer for the request."""
         return req.context.setdefault("timer", Timer())
 
+    def _validate_statement_timeout(self, statement_timeout: int) -> None:
+        """Validate that statement_timeout is a safe integer value.
+
+        PostgreSQL SET commands don't support parameterized values, so we must
+        validate the value before using it in string interpolation.
+
+        Args:
+            statement_timeout: The statement timeout value in milliseconds
+
+        Raises:
+            ValueError: If statement_timeout is not a non-negative integer
+        """
+        if not isinstance(statement_timeout, int) or statement_timeout < 0:
+            msg = f"statement_timeout must be a non-negative integer, got: {statement_timeout}"
+            raise ValueError(msg)
+
     def _handle(self, req: falcon.Request, resp: falcon.Response) -> None:
         """Handle a Falcon request and set the response.
 
@@ -361,12 +377,9 @@ class APIResource:
         timer = Timer()
         result: dict[str, Any] = {}
         with self._conn_pool.connection() as conn, conn.cursor() as cursor:
-            # Validate statement_timeout is a safe integer value
+            # Validate and set statement timeout
             # PostgreSQL SET commands don't support parameterized values
-            if not isinstance(statement_timeout, int) or statement_timeout < 0:
-                msg = f"statement_timeout must be a non-negative integer, got: {statement_timeout}"
-                raise ValueError(msg)
-            # Safe to use since we've validated it's a non-negative integer
+            self._validate_statement_timeout(statement_timeout)
             cursor.execute(f"set statement_timeout = {statement_timeout}")
             if explain:
                 explain_query = f"EXPLAIN (FORMAT JSON) {query}"
@@ -1042,11 +1055,9 @@ class APIResource:
         backfill_sql = self.read_sql("backfill_prefer_scores")
         with self._conn_pool.connection() as conn, conn.cursor() as cursor:
             statement_timeout = 60_000
-            # Validate statement_timeout is a safe integer value
-            if not isinstance(statement_timeout, int) or statement_timeout < 0:
-                msg = f"statement_timeout must be a non-negative integer, got: {statement_timeout}"
-                raise ValueError(msg)
-            # Safe to use since we've validated it's a non-negative integer
+            # Validate and set statement timeout
+            # PostgreSQL SET commands don't support parameterized values
+            self._validate_statement_timeout(statement_timeout)
             cursor.execute(f"set statement_timeout = {statement_timeout}")
             cursor.execute(backfill_sql)
 
@@ -2046,11 +2057,9 @@ class APIResource:
         try:
             with self._conn_pool.connection() as conn, conn.cursor() as cursor:
                 statement_timeout = 30_000
-                # Validate statement_timeout is a safe integer value
-                if not isinstance(statement_timeout, int) or statement_timeout < 0:
-                    msg = f"statement_timeout must be a non-negative integer, got: {statement_timeout}"
-                    raise ValueError(msg)
-                # Safe to use since we've validated it's a non-negative integer
+                # Validate and set statement timeout
+                # PostgreSQL SET commands don't support parameterized values
+                self._validate_statement_timeout(statement_timeout)
                 cursor.execute(f"set statement_timeout = {statement_timeout}")
 
                 page_size = 6000

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -25,13 +26,16 @@ class SecurityHeadersMiddleware:
 
     def __init__(self) -> None:
         """Initialize the security headers middleware."""
+        # Get CDN URL from environment, default to CloudFront URL
+        cdn_url = os.environ.get("CDN_URL", "https://d1hot9ps2xugbc.cloudfront.net")
+
         self.headers = {
-            # Content Security Policy - Allow self, inline styles (needed for app), and CloudFront CDN
+            # Content Security Policy - Allow self, inline styles (needed for app), and CDN
             "Content-Security-Policy": (
                 "default-src 'self'; "
                 "script-src 'self' 'unsafe-inline'; "
-                "style-src 'self' 'unsafe-inline' https://d1hot9ps2xugbc.cloudfront.net; "
-                "font-src 'self' https://d1hot9ps2xugbc.cloudfront.net; "
+                f"style-src 'self' 'unsafe-inline' {cdn_url}; "
+                f"font-src 'self' {cdn_url}; "
                 "img-src 'self' data: https:; "
                 "connect-src 'self'; "
                 "frame-ancestors 'none'; "

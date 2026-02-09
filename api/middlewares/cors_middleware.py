@@ -28,8 +28,8 @@ class CORSMiddleware:
         if environment == "prod":
             # Production: Restrict to specific domains
             self.allowed_origins = [
-                "https://arcanetutor.com",
-                "https://www.arcanetutor.com",
+                "https://arcane-tutor.com",
+                "https://www.arcane-tutor.com",
             ]
         else:
             # Development: Allow localhost for testing
@@ -45,7 +45,7 @@ class CORSMiddleware:
         # Allow additional origins from environment variable (comma-separated)
         extra_origins = os.environ.get("CORS_ALLOWED_ORIGINS", "")
         if extra_origins:
-            self.allowed_origins.extend([origin.strip() for origin in extra_origins.split(",")])
+            self.allowed_origins.extend(origin.strip() for origin in extra_origins.split(","))
 
         logger.info("CORS middleware initialized with allowed origins: %s", self.allowed_origins)
 
@@ -77,4 +77,4 @@ class CORSMiddleware:
             resp.set_header("Access-Control-Allow-Headers", "Content-Type")
             resp.set_header("Access-Control-Max-Age", "86400")  # 24 hours
         else:
-            logger.warning("Blocked CORS request from unauthorized origin: %s", origin)
+            logger.warning("CORS request rejected - origin not in allowed list: %s", origin)
