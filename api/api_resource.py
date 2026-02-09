@@ -361,6 +361,12 @@ class APIResource:
         timer = Timer()
         result: dict[str, Any] = {}
         with self._conn_pool.connection() as conn, conn.cursor() as cursor:
+            # Validate statement_timeout is a safe integer value
+            # PostgreSQL SET commands don't support parameterized values
+            if not isinstance(statement_timeout, int) or statement_timeout < 0:
+                msg = f"statement_timeout must be a non-negative integer, got: {statement_timeout}"
+                raise ValueError(msg)
+            # Safe to use since we've validated it's a non-negative integer
             cursor.execute(f"set statement_timeout = {statement_timeout}")
             if explain:
                 explain_query = f"EXPLAIN (FORMAT JSON) {query}"
@@ -1036,6 +1042,11 @@ class APIResource:
         backfill_sql = self.read_sql("backfill_prefer_scores")
         with self._conn_pool.connection() as conn, conn.cursor() as cursor:
             statement_timeout = 60_000
+            # Validate statement_timeout is a safe integer value
+            if not isinstance(statement_timeout, int) or statement_timeout < 0:
+                msg = f"statement_timeout must be a non-negative integer, got: {statement_timeout}"
+                raise ValueError(msg)
+            # Safe to use since we've validated it's a non-negative integer
             cursor.execute(f"set statement_timeout = {statement_timeout}")
             cursor.execute(backfill_sql)
 
@@ -2035,6 +2046,11 @@ class APIResource:
         try:
             with self._conn_pool.connection() as conn, conn.cursor() as cursor:
                 statement_timeout = 30_000
+                # Validate statement_timeout is a safe integer value
+                if not isinstance(statement_timeout, int) or statement_timeout < 0:
+                    msg = f"statement_timeout must be a non-negative integer, got: {statement_timeout}"
+                    raise ValueError(msg)
+                # Safe to use since we've validated it's a non-negative integer
                 cursor.execute(f"set statement_timeout = {statement_timeout}")
 
                 page_size = 6000
