@@ -27,6 +27,8 @@ class SecurityHeadersMiddleware:
     def __init__(self) -> None:
         """Initialize the security headers middleware."""
         # Get CDN URL from environment, default to CloudFront URL
+        # Expected format: https://domain.cloudfront.net
+        # Override with CDN_URL environment variable if using a different CDN
         cdn_url = os.environ.get("CDN_URL", "https://d1hot9ps2xugbc.cloudfront.net")
 
         self.headers = {
