@@ -19,6 +19,8 @@ See [docs/legal.md](docs/legal/legal.md) for full details.
 1. [Card Tagging System](#card-tagging-system)
 1. [API Documentation](#api-documentation)
 1. [Development Notes](#development-notes)
+1. [Security](#security)
+1. [Data Sources & Attribution](#data-sources--attribution)
 
 ## Project Overview
 
@@ -203,6 +205,17 @@ The following environment variables can be configured:
   - Set to `true`, `1`, or `yes` to enable caching
   - Improves performance for repeated queries
   - Can be set in docker-compose.yml or exported before starting services
+- `ENVIRONMENT` - Environment mode (default: `dev`)
+  - Set to `prod` for production mode with restricted CORS
+  - Set in docker-compose.yml for dev/prod profiles
+- `CDN_URL` - CDN URL for static assets (default: `https://d1hot9ps2xugbc.cloudfront.net`)
+  - Override to use a different CDN provider
+  - Used in Content-Security-Policy headers
+  - Format: `https://your-cdn-domain.com`
+- `CORS_ALLOWED_ORIGINS` - Additional CORS allowed origins (optional)
+  - Comma-separated list of origins to allow
+  - Example: `https://example.com,https://app.example.com`
+  - Supplements environment-specific defaults
 
 **Client Service:**
 - `API_URL` - URL of the API service (default: `http://apiservice:8080`)
@@ -351,6 +364,25 @@ All Magic: The Gathering card names, artwork, and game content are © Wizards of
 **Important**: This is unofficial Fan Content.
 Not approved/endorsed by Wizards of the Coast.
 
+### Security
+
+Arcane Tutor follows security best practices to protect users and data. A comprehensive security audit has been conducted with all critical vulnerabilities remediated.
+
+**Security Status**: SECURE - All critical and high-priority vulnerabilities fixed
+
+**Key Security Documents:**
+- **[Security Best Practices](docs/security/security_best_practices.md)** - Development security guidelines
+
+**Security Features:**
+- SQL injection prevention with parameterized queries
+- XSS protection with output encoding
+- HTTP security headers (CSP, X-Frame-Options, etc.)
+- CORS restrictions
+- Input validation on all endpoints
+- Secure dependency management (pip-audit, npm audit)
+
+For security concerns, please review the security documentation or contact the maintainers.
+
 ### Legal Compliance
 
 For complete information about data sources, intellectual property attribution, and compliance with relevant policies, see [docs/legal.md](docs/legal/legal.md).
@@ -362,7 +394,7 @@ For complete information about data sources, intellectual property attribution, 
 - **[Privacy Policy](docs/user/privacy_policy.md)** - Data collection and privacy practices
 - **[Compliance Review](docs/legal/compliance_review.md)** - Detailed compliance checklist status
 
-**Compliance Status**: ✅ 93% Complete (42/45 items) - Excellent standing with all critical items addressed.
+**Compliance Status**: 93% Complete (42/45 items) - Excellent standing with all critical items addressed.
 
 ## How Arcane Tutor Differs from Scryfall
 

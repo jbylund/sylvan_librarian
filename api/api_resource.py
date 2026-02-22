@@ -193,6 +193,24 @@ class APIResource:
         """Get the timer for the request."""
         return req.context.setdefault("timer", Timer())
 
+    def _set_statement_timeout(self, cursor: Cursor, statement_timeout: int) -> None:
+        """Validate and set the statement timeout for a database cursor.
+
+        PostgreSQL SET commands don't support parameterized values, so we must
+        validate the value before using it in string interpolation.
+
+        Args:
+            cursor: Database cursor to execute the SET command on
+            statement_timeout: The statement timeout value in milliseconds
+
+        Raises:
+            ValueError: If statement_timeout is not a non-negative integer
+        """
+        if not isinstance(statement_timeout, int) or statement_timeout < 0:
+            msg = f"statement_timeout must be a non-negative integer, got: {statement_timeout}"
+            raise ValueError(msg)
+        cursor.execute(f"set statement_timeout = {statement_timeout}")
+
     def _handle(self, req: falcon.Request, resp: falcon.Response) -> None:
         """Handle a Falcon request and set the response.
 
@@ -361,7 +379,8 @@ class APIResource:
         timer = Timer()
         result: dict[str, Any] = {}
         with self._conn_pool.connection() as conn, conn.cursor() as cursor:
-            cursor.execute(f"set statement_timeout = {statement_timeout}")
+            # Validate and set statement timeout
+            self._set_statement_timeout(cursor, statement_timeout)
             if explain:
                 explain_query = f"EXPLAIN (FORMAT JSON) {query}"
                 cursor.execute(explain_query, params)
@@ -1036,7 +1055,8 @@ class APIResource:
         backfill_sql = self.read_sql("backfill_prefer_scores")
         with self._conn_pool.connection() as conn, conn.cursor() as cursor:
             statement_timeout = 60_000
-            cursor.execute(f"set statement_timeout = {statement_timeout}")
+            # Validate and set statement timeout
+            self._set_statement_timeout(cursor, statement_timeout)
             cursor.execute(backfill_sql)
 
             # Get count of updated cards
@@ -2035,7 +2055,8 @@ class APIResource:
         try:
             with self._conn_pool.connection() as conn, conn.cursor() as cursor:
                 statement_timeout = 30_000
-                cursor.execute(f"set statement_timeout = {statement_timeout}")
+                # Validate and set statement timeout
+                self._set_statement_timeout(cursor, statement_timeout)
 
                 page_size = 6000
                 cards_loaded = cards_sent = 0
