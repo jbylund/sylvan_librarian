@@ -394,6 +394,17 @@ def test_arithmetic_vs_negation_ambiguity() -> None:
                 ],
             ),
         ),
+        # Regression: value `r` (rarity alias) and `o` (oracle alias) are both in KNOWN_CARD_ATTRIBUTES,
+        # but `r` here is a value (preceded by `=`), so `-` should be negation not arithmetic.
+        (
+            "id=r -o:enchantment",
+            AndNode(
+                [
+                    BinaryOperatorNode(CardAttributeNode("id", ParserClass.COLOR), "=", StringValueNode("r")),
+                    NotNode(BinaryOperatorNode(CardAttributeNode("o", ParserClass.TEXT), ":", StringValueNode("enchantment"))),
+                ],
+            ),
+        ),
     ]
 
     for query, expected in negation_cases:

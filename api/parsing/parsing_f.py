@@ -51,6 +51,7 @@ ParserElement.enable_packrat(cache_size_limit=2**13)  # 8192 cache entries
 # Constants
 NEGATION_TOKEN_COUNT = 2
 DEFAULT_OPERATORS = oneOf(": > < >= <= = !=")
+COMPARISON_OPERATORS = frozenset([":", "=", "!=", ">", "<", ">=", "<="])
 
 
 def make_regex_pattern(words: Iterable[str]) -> Regex:
@@ -835,7 +836,7 @@ def preprocess_implicit_and(query: str) -> str:  # noqa: C901, PLR0915, PLR0912
             # It's part of a word if:
             # 1. We're in attribute value context, OR
             # 2. The previous token ends with alphanumeric AND the next character is alphanumeric
-            in_attr_value_context = tokens and tokens[-1] in [":", "=", "!=", ">", "<", ">=", "<="]
+            in_attr_value_context = tokens and tokens[-1] in COMPARISON_OPERATORS
             prev_token_ends_alnum = tokens and tokens[-1] and tokens[-1][-1].isalnum()
             next_char_is_alnum = i + 1 < len(query) and query[i + 1].isalnum()
 
@@ -868,7 +869,7 @@ def preprocess_implicit_and(query: str) -> str:  # noqa: C901, PLR0915, PLR0912
             # Handle words (alphanumeric starting) and numeric literals
             word_end = i
             # Check if we're in an attribute value context (previous token was an operator)
-            in_attr_value_context = tokens and tokens[-1] in [":", "=", "!=", ">", "<", ">=", "<="]
+            in_attr_value_context = tokens and tokens[-1] in COMPARISON_OPERATORS
 
             if in_attr_value_context:
                 # In attribute value context, handle different types of values
@@ -939,7 +940,9 @@ def preprocess_implicit_and(query: str) -> str:  # noqa: C901, PLR0915, PLR0912
             # BUT: if the next token after the negation is a word, it might be arithmetic
             elif not is_operator(token) and next_token == "-" and token.upper() not in ["AND", "OR", "("]:
                 # Check if this looks like arithmetic: word - word
-                if i + 2 < len(tokens) and not is_operator(tokens[i + 2]) and tokens[i + 2] not in ["AND", "OR"]:
+                # If the current token is a value (preceded by a comparison operator), it's negation
+                prev_is_comparison = i > 0 and tokens[i - 1] in COMPARISON_OPERATORS
+                if not prev_is_comparison and i + 2 < len(tokens) and not is_operator(tokens[i + 2]) and tokens[i + 2] not in ["AND", "OR"]:
                     # Only treat as arithmetic if both sides are known card attributes
                     if token in KNOWN_CARD_ATTRIBUTES and tokens[i + 2] in KNOWN_CARD_ATTRIBUTES:
                         # This looks like arithmetic: attribute - attribute, so don't insert AND
