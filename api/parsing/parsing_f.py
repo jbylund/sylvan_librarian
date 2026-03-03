@@ -816,8 +816,8 @@ def preprocess_implicit_and(query: str) -> str:  # noqa: C901, PLR0915, PLR0912
             # Handle parentheses
             tokens.append(char)
             i += 1
-        elif char.isspace():
-            # Skip whitespace
+        elif char.isspace() or char == ".":
+            # Skip whitespace and periods (periods are treated as natural language punctuation, e.g. "o:token.")
             i += 1
         elif char in "><=!+-*/":
             # Handle operators including arithmetic operators

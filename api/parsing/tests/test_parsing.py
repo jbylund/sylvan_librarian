@@ -172,6 +172,25 @@ def test_parse_implicit_and() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    argnames=("query_with_period", "equivalent_query"),
+    argvalues=[
+        ("o:token.", "o:token"),
+        ("o:token. -o:counter", "o:token -o:counter"),
+        ("oracle:flying. oracle:haste", "oracle:flying oracle:haste"),
+        ("name:bolt.", "name:bolt"),
+    ],
+)
+def test_period_after_term_is_ignored(query_with_period: str, equivalent_query: str) -> None:
+    """Test that trailing periods in search terms are treated as punctuation and ignored.
+
+    Regression test for issue where 'o:token. -o:counter' failed to parse.
+    """
+    result_with_period = parsing.parse_scryfall_query(query_with_period)
+    result_without_period = parsing.parse_scryfall_query(equivalent_query)
+    assert result_with_period.root == result_without_period.root
+
+
 def test_parse_complex_nested() -> None:
     """Test parsing complex nested queries."""
     query = "cmc:2 AND (oracle:flying OR oracle:haste)"
