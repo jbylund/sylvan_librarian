@@ -770,6 +770,7 @@ def parse_search_query(query: str) -> Query:
         raise ValueError(msg) from e
 
 
+@cachebox.cached(cache={})
 def _get_implicit_and_tokenizer() -> ParserElement:
     """Build a tokenizer for preprocess_implicit_and using the same primitives as the main grammar.
 
@@ -879,7 +880,14 @@ def preprocess_implicit_and(query: str) -> str:
             return not is_operator(t)
 
         # Insert AND between: two operands, operand and negation (-), ) and operand, operand and (
-        need_and = (is_operand(tok) or tok == ")") and (is_operand(next_tok) or next_tok in {"(", "-"})
+        # Do not insert when we're inside a value that spans multiple tokens: the full parser
+        # consumes e.g. "2{r}{g}" as one value (mixed_mana_pattern), but our tokenizer emits
+        # 2 and {r}{g} separately (string_value_tok before mana_tok so "bar" stays one word).
+        # So when the next token starts with "{", treat it as value continuation, not a new term.
+        after_operator = i > 0 and is_operator(tokens[i - 1])
+        value_continuation = next_tok.startswith("{")
+        skip_because_value = after_operator and value_continuation
+        need_and = (is_operand(tok) or tok == ")") and (is_operand(next_tok) or next_tok in {"(", "-"}) and not skip_because_value
         if need_and:
             result.append("AND")
         i += 1

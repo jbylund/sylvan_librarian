@@ -42,6 +42,8 @@ TESTCASES = [
     {"query": "name:/bolt/ type:instant", "expected": "name:/bolt/ AND type:instant", "id": "regex_and_attr"},
     # Comparison operators — no AND between attr op value
     {"query": "cmc=3", "expected": "cmc=3", "id": "cmp_eq"},
+    {"query": "cmc<1r", "expected": "cmc<1r", "id": "cmp_lt_1r_no_space"},
+    {"query": "cmc<1 r", "expected": "cmc<1 AND r", "id": "cmp_lt_1_r_with_space"},
     {"query": "cmc>2 power<5", "expected": "cmc>2 AND power<5", "id": "cmp_gt_lt"},
     {"query": "cmc>=3 cmc<=5", "expected": "cmc>=3 AND cmc<=5", "id": "cmp_gte_lte"},
     {"query": "color!=W", "expected": "color!=W", "id": "cmp_neq"},
@@ -91,6 +93,10 @@ TESTCASES = [
     {"query": "c:{w}{u}", "expected": "c:{w}{u}", "id": "mana_curly"},
     {"query": "c:{W/U}", "expected": "c:{W/U}", "id": "mana_complex_slash"},
     {"query": "c:{1}{G} c:{2}{G}", "expected": "c:{1}{G} AND c:{2}{G}", "id": "mana_two_pairs"},
+    # Mixed mana notation (digit + curly, letter + curly — no AND inside value)
+    {"query": "m:2{R}{G}", "expected": "m:2{R}{G}", "id": "mana_mixed_2RG"},
+    {"query": "mana=1{G}", "expected": "mana=1{G}", "id": "mana_eq_1G"},
+    {"query": "mana=W{U/R}", "expected": "mana=W{U/R}", "id": "mana_eq_WUR"},
     # Date/year (numeric-looking values)
     {"query": "date:2025", "expected": "date:2025", "id": "date_value"},
     {"query": "year:2024", "expected": "year:2024", "id": "year_value"},
