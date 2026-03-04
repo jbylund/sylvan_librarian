@@ -25,7 +25,6 @@ from pyparsing import (
 from api.parsing.card_query_nodes import CardAttributeNode, to_card_query_ast
 from api.parsing.db_info import (
     COLOR_NAME_TO_CODE,
-    KNOWN_CARD_ATTRIBUTES,
     PARSER_CLASS_TO_FIELD_INFOS,
     ParserClass,
 )
@@ -771,191 +770,122 @@ def parse_search_query(query: str) -> Query:
         raise ValueError(msg) from e
 
 
-def preprocess_implicit_and(query: str) -> str:  # noqa: C901, PLR0915, PLR0912
+def _get_implicit_and_tokenizer() -> ParserElement:
+    """Build a tokenizer for preprocess_implicit_and using the same primitives as the main grammar.
+
+    Returns a parser that parses a query string and returns a list of token strings (raw,
+    for serialization). Token order matches the main grammar so boundaries align.
+    """
+    # Quoted strings (raw including quotes)
+    quoted_raw = (
+        QuotedString('"', escChar="\\", unquoteResults=False) | QuotedString("'", escChar="\\", unquoteResults=False)
+    ).setParseAction(lambda t: t[0])
+
+    # Regex /.../ (raw including slashes)
+    regex_raw = QuotedString("/", escChar="\\", unquoteResults=False, convertWhitespaceEscapes=False).setParseAction(lambda t: t[0])
+
+    # Parens (not suppressed so we get them in the list)
+    lparen_tok = Literal("(").setParseAction(lambda t: t[0])
+    rparen_tok = Literal(")").setParseAction(lambda t: t[0])
+
+    # Keywords (must be before word so AND/OR are not consumed as words)
+    and_tok = CaselessKeyword("AND").setParseAction(lambda t: t[0])
+    or_tok = CaselessKeyword("OR").setParseAction(lambda t: t[0])
+
+    # Comparison: longest first so >=, <=, != before single chars
+    comparison_tok = oneOf(">= <= != : = > <").setParseAction(lambda t: t[0])
+    arithmetic_tok = oneOf("+ - * /").setParseAction(lambda t: t[0])
+
+    # Float (before string_value_word so "3.5" is one token)
+    float_tok = Regex(r"\b\d+\.\d*\b").setParseAction(lambda t: t[0])
+
+    # Value/word: alphanumeric, underscores, hyphens (matches bar, 40k-model, name, 1, 2, etc.)
+    # Must come before mana_tok so "bar" and "bolt" are one token, not "b" + mana.
+    string_value_tok = Regex(r"[a-zA-Z0-9_][a-zA-Z0-9_-]*").setParseAction(lambda t: t[0])
+
+    # Mana pattern (e.g. {1}{G}, {w}{u}) as one token; only after word so "bar" isn't "b" + "ar"
+    curly_mana_symbol = Regex(r"\{[^}]+\}")
+    simple_mana_symbol = Regex(r"[0-9WUBRGCXYZwubrgcxyz]")
+    mana_tok = Combine(OneOrMore(curly_mana_symbol | simple_mana_symbol)).setParseAction(lambda t: t[0])
+
+    # One token: try in order (longest / most specific first)
+    one_token = (
+        quoted_raw
+        | regex_raw
+        | lparen_tok
+        | rparen_tok
+        | and_tok
+        | or_tok
+        | comparison_tok
+        | arithmetic_tok
+        | float_tok
+        | string_value_tok
+        | mana_tok
+    )
+
+    # Optional so empty or whitespace-only input yields []
+    return Optional(OneOrMore(one_token)).setParseAction(lambda t: t.asList() if t else [])
+
+
+def _tokenize_for_implicit_and(query: str) -> list[str]:
+    """Tokenize a query string for implicit AND preprocessing. Raises ValueError on invalid input."""
+    if not query.strip():
+        return []
+    tokenizer = _get_implicit_and_tokenizer()
+    try:
+        result = tokenizer.parseString(query, parseAll=True)
+    except ParseException as e:
+        # Pyparsing reports unclosed quotes/regex as "Expected string enclosed in..."
+        msg = "Unmatched quote or regex in query"
+        raise ValueError(msg) from e
+
+    # Detect unclosed regex: leading "/" was tokenized as arithmetic because no closing "/" found
+    stripped = query.strip()
+    if stripped.startswith("/") and result and result[0] == "/" and stripped.count("/") == 1:
+        msg = "Unmatched / in regex pattern in query"
+        raise ValueError(msg)
+    return result
+
+
+def preprocess_implicit_and(query: str) -> str:
     """Pre-process query to convert implicit AND operations to explicit ones.
 
-    For example, 'foo bar' becomes 'foo AND bar'.
+    Tokenizes using the same grammar primitives as the main parser, inserts AND
+    between consecutive operands (and around negation), then serializes with no
+    extra whitespace (e.g. 'foo bar' -> 'foo AND bar', 'cmc=3' -> 'cmc=3').
+    See api/parsing/tests/test_preprocess_implicit_and.py for full behavior.
     """
-    # Split the query into tokens while preserving quoted strings and operators
-    tokens: list[str] = []
-    i = 0
-    while i < len(query):
-        if len(tokens) > len(query):
-            msg = f"tokens is longer than query, {tokens} vs {query}"
-            raise AssertionError(msg)
-        char = query[i]
-        if char in ['"', "'"]:
-            # Handle quoted string (both double and single quotes)
-            quote_char = char
-            end_quote = query.find(quote_char, i + 1)
-            if end_quote == -1:
-                msg = f"Unmatched {quote_char} quote in query '{query}'"
-                raise ValueError(msg)
-            tokens.append(query[i : end_quote + 1])
-            i = end_quote + 1
-        elif char == "/":
-            # Handle regex pattern (forward slash delimited, with backslash escaping)
-            # Find the closing forward slash, respecting escaped slashes
-            j = i + 1
-            while j < len(query):
-                if query[j] == "\\" and j + 1 < len(query):
-                    # Skip escaped character
-                    j += 2
-                elif query[j] == "/":
-                    # Found closing slash
-                    tokens.append(query[i : j + 1])
-                    i = j + 1
-                    break
-                else:
-                    j += 1
-            else:
-                # No closing slash found
-                msg = f"Unmatched / in regex pattern in query '{query}'"
-                raise ValueError(msg)
-        elif char in "()":
-            # Handle parentheses
-            tokens.append(char)
-            i += 1
-        elif char.isspace():
-            # Skip whitespace
-            i += 1
-        elif char in "><=!+-*/":
-            # Handle operators including arithmetic operators
-            if i + 1 < len(query) and query[i : i + 2] in [">=", "<=", "!="]:
-                tokens.append(query[i : i + 2])
-                i += 2
-            else:
-                tokens.append(char)
-                i += 1
-        elif char == ":":
-            # Handle colon operator
-            tokens.append(char)
-            i += 1
-        elif char == "-":
-            # Check if this hyphen is part of a hyphenated word
-            # It's part of a word if:
-            # 1. We're in attribute value context, OR
-            # 2. The previous token ends with alphanumeric AND the next character is alphanumeric
-            in_attr_value_context = tokens and tokens[-1] in COMPARISON_OPERATORS
-            prev_token_ends_alnum = tokens and tokens[-1] and tokens[-1][-1].isalnum()
-            next_char_is_alnum = i + 1 < len(query) and query[i + 1].isalnum()
+    tokens = _tokenize_for_implicit_and(query)
+    if not tokens:
+        return ""
 
-            if in_attr_value_context or (prev_token_ends_alnum and next_char_is_alnum):
-                # This hyphen is part of a word
-                if in_attr_value_context:
-                    # In attribute value context, continue reading from the hyphen position
-                    word_end = i
-                    while word_end < len(query) and (query[word_end].isalnum() or query[word_end] in "_-"):
-                        word_end += 1
-                    tokens.append(query[i:word_end])
-                    i = word_end
-                else:
-                    # We need to extend the previous token to include the hyphen
-                    # Remove the last token, then reconstruct the full hyphenated word
-                    prev_token = tokens.pop()
-                    # Continue reading from the hyphen position
-                    word_end = i
-                    while word_end < len(query) and (query[word_end].isalnum() or query[word_end] in "_-"):
-                        word_end += 1
-                    # Combine previous token with hyphen and rest of word
-                    hyphenated_word = prev_token + query[i:word_end]
-                    tokens.append(hyphenated_word)
-                    i = word_end
-            else:
-                # Handle negation as a separate token
-                tokens.append(char)
-                i += 1
-        else:
-            # Handle words (alphanumeric starting) and numeric literals
-            word_end = i
-            # Check if we're in an attribute value context (previous token was an operator)
-            in_attr_value_context = tokens and tokens[-1] in COMPARISON_OPERATORS
-
-            if in_attr_value_context:
-                # In attribute value context, handle different types of values
-                if query[i].isdigit():
-                    # Check if this looks like a pure numeric literal (only digits and maybe one decimal point)
-                    temp_end = word_end
-                    while temp_end < len(query) and (query[temp_end].isdigit() or query[temp_end] == "."):
-                        temp_end += 1
-
-                    # If the numeric part is followed by letters or other characters, treat as string value
-                    if temp_end < len(query) and (query[temp_end].isalpha() or query[temp_end] in "_-{}/"):
-                        # Treat as string value: alphanumeric, underscore, hyphens, curly braces, and slashes
-                        while word_end < len(query) and (query[word_end].isalnum() or query[word_end] in "_-{}/"):
-                            word_end += 1
-                    else:
-                        # Pure numeric literal
-                        word_end = temp_end
-                else:
-                    # Handle alphanumeric, underscore, hyphens, curly braces, and slashes
-                    # This handles cases like "40k-model" and mana costs like "{1}{G}" and "{W/U}" as single tokens
-                    while word_end < len(query) and (query[word_end].isalnum() or query[word_end] in "_-{}/"):
-                        word_end += 1
-            elif query[i].isdigit():
-                # Handle numeric literal (integer or float) only when not in attribute value context
-                while word_end < len(query) and (query[word_end].isdigit() or query[word_end] == "."):
-                    word_end += 1
-            else:
-                # Regular word context, include alphanumeric, underscore, and hyphens (when followed by alphanumeric)
-                while word_end < len(query):
-                    if query[word_end].isalnum() or query[word_end] == "_":
-                        word_end += 1
-                    elif query[word_end] == "-" and word_end + 1 < len(query) and query[word_end + 1].isalnum():
-                        # Hyphen is part of word if followed by alphanumeric
-                        word_end += 1
-                    else:
-                        # Stop at non-word character
-                        break
-
-            tokens.append(query[i:word_end])
-            i = word_end
-    # Convert implicit AND operations
+    # Operators (comparison, arithmetic, negation): no AND before/after
+    # AND, OR, (, ): no AND between them and adjacent operands in the wrong place
     result: list[str] = []
     i = 0
     while i < len(tokens):
-        token = tokens[i]
-        result.append(token)
-        # Check if we need to insert an implicit AND
-        if i + 1 < len(tokens):
-            next_token = tokens[i + 1]
-            # Insert AND if:
-            # 1. Current token is not an operator
-            # 2. Next token is not an operator (but allow negation)
-            # 3. Current token is not a left parenthesis
-            # 4. Next token is not a right parenthesis
-            # 5. Current token is not AND/OR
-            # 6. Next token is not AND/OR
-            if (
-                not is_operator(token)
-                and not is_operator(next_token)
-                and token != "("
-                and next_token != ")"
-                and token.upper() not in ["AND", "OR"]
-                and next_token.upper() not in ["AND", "OR"]
-            ):
-                result.append("AND")
-            # Special case: if current token is not an operator and next token is negation,
-            # we need to insert AND to separate them as factors
-            # BUT: if the next token after the negation is a word, it might be arithmetic
-            elif not is_operator(token) and next_token == "-" and token.upper() not in ["AND", "OR", "("]:
-                # Check if this looks like arithmetic: word - word
-                # If the current token is a value (preceded by a comparison operator), it's negation
-                prev_is_comparison = i > 0 and tokens[i - 1] in COMPARISON_OPERATORS
-                if not prev_is_comparison and i + 2 < len(tokens) and not is_operator(tokens[i + 2]) and tokens[i + 2] not in ["AND", "OR"]:
-                    # Only treat as arithmetic if both sides are known card attributes
-                    if token in KNOWN_CARD_ATTRIBUTES and tokens[i + 2] in KNOWN_CARD_ATTRIBUTES:
-                        # This looks like arithmetic: attribute - attribute, so don't insert AND
-                        # The - will be treated as an arithmetic operator
-                        pass
-                    else:
-                        # This looks like negation: word - word (but not attributes), so insert AND
-                        result.append("AND")
-                else:
-                    # This looks like negation: word - (something else), so insert AND
-                    result.append("AND")
+        tok = tokens[i]
+        result.append(tok)
+
+        if i + 1 >= len(tokens):
+            i += 1
+            continue
+
+        next_tok = tokens[i + 1]
+
+        def is_operand(t: str) -> bool:
+            if t in ("(", ")", "AND", "OR"):
+                return False
+            return not is_operator(t)
+
+        # Insert AND between: two operands, operand and negation (-), ) and operand, operand and (
+        need_and = (is_operand(tok) or tok == ")") and (is_operand(next_tok) or next_tok in {"(", "-"})
+        if need_and:
+            result.append("AND")
         i += 1
-    return " ".join(result)
+
+    # Serialize: no space between tokens except " AND " and " OR "
+    return "".join(f" {t} " if t in ("AND", "OR") else t for t in result)
 
 
 def is_operator(token: str) -> bool:
