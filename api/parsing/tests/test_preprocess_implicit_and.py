@@ -19,6 +19,17 @@ TESTCASES = [
     {"query": "a OR b OR c", "expected": "a OR b OR c", "id": "or_chain"},
     {"query": "a AND b OR c", "expected": "a AND b OR c", "id": "and_or_mixed_1"},
     {"query": "a OR b AND c", "expected": "a OR b AND c", "id": "and_or_mixed_2"},
+    # Case-insensitive AND/OR keywords — normalised to uppercase
+    {"query": "a and b", "expected": "a AND b", "id": "lowercase_and"},
+    {"query": "a And b", "expected": "a AND b", "id": "mixed_case_and"},
+    {"query": "a or b", "expected": "a OR b", "id": "lowercase_or"},
+    {"query": "a Or b", "expected": "a OR b", "id": "mixed_case_or"},
+    {"query": "a and b and c", "expected": "a AND b AND c", "id": "lowercase_and_chain"},
+    {"query": "a or b or c", "expected": "a OR b OR c", "id": "lowercase_or_chain"},
+    {"query": "a and b OR c", "expected": "a AND b OR c", "id": "lowercase_and_uppercase_or"},
+    {"query": "name:foo and type:creature", "expected": "name:foo AND type:creature", "id": "lowercase_and_with_attrs"},
+    {"query": "cmc>2 and power<5", "expected": "cmc>2 AND power<5", "id": "lowercase_and_comparisons"},
+    {"query": "cmc>2 or power<5", "expected": "cmc>2 OR power<5", "id": "lowercase_or_comparisons"},
     # Attribute:value pairs — AND between pairs, not inside pair
     {"query": "name:foo type:creature", "expected": "name:foo AND type:creature", "id": "two_attr_pairs"},
     {"query": "cmc:3 power:2", "expected": "cmc:3 AND power:2", "id": "cmc_power"},
@@ -59,6 +70,9 @@ TESTCASES = [
     {"query": "flying -t:creature", "expected": "flying AND -t:creature", "id": "negation_keyword_minus"},
     {"query": "id=r -o:enchantment", "expected": "id=r AND -o:enchantment", "id": "attr_negation_attr"},
     # Arithmetic subtraction: numeric-attr - numeric-attr must not get AND (regression guard)
+    # No comparison operator — subtraction is still binary, not negation
+    {"query": "power - cmc", "expected": "power-cmc", "id": "arith_sub_attr_attr_no_cmp"},
+    {"query": "cmc - power", "expected": "cmc-power", "id": "arith_sub_cmc_power_no_cmp"},
     {"query": "power - cmc>1", "expected": "power-cmc>1", "id": "arith_sub_attr_attr_space"},
     {"query": "power - cmc > 1", "expected": "power-cmc>1", "id": "arith_sub_attr_attr_spaces"},
     {"query": "toughness - power > 0", "expected": "toughness-power>0", "id": "arith_sub_toughness_power"},
