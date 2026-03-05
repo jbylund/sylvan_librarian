@@ -865,7 +865,32 @@ def _is_implicit_and_operand(t: str) -> bool:
 
 def _is_numeric_operand(t: str) -> bool:
     """Return True if *t* is a numeric card attribute or a bare numeric literal."""
-    return t in NUMERIC_CARD_ATTRIBUTES or bool(_NUMERIC_LITERAL_RE.match(t))
+    return t.lower() in NUMERIC_CARD_ATTRIBUTES or bool(_NUMERIC_LITERAL_RE.match(t))
+
+
+def _rhs_introduces_comparison(tokens: list[str], start_index: int) -> bool:
+    """Return True if scanning forward from start_index hits a comparison operator before AND/OR/).
+
+    Used to disambiguate binary subtraction on the RHS of a comparison: if the tokens
+    following the '-' operand contain a new comparison operator (before a logical boundary),
+    the '-' is starting a new search term rather than continuing an arithmetic expression.
+    Tracks paren depth so that comparisons inside sub-expressions are not confused with
+    top-level comparisons (e.g. `-(cmc-1)>0` has `>` at depth 0 after the group closes).
+    """
+    depth = 0
+    for j in range(start_index, len(tokens)):
+        t = tokens[j]
+        if t == "(":
+            depth += 1
+        elif t == ")":
+            if depth == 0:
+                return False
+            depth -= 1
+        elif t in _COMPARISON_OPERATORS and depth == 0:
+            return True
+        elif t in {"AND", "OR"} and depth == 0:
+            return False
+    return False
 
 
 def preprocess_implicit_and(query: str) -> str:
@@ -910,12 +935,18 @@ def preprocess_implicit_and(query: str) -> str:
         # left-hand side, because the whole sub-expression is expected to be numeric.
         # A `(` on the right-hand side (e.g. `power-(cmc-1)`) also counts, since it
         # opens a parenthesized numeric sub-expression.
+        # Special case: if we are on the RHS of a comparison (prev token is a comparison
+        # op), still allow arithmetic subtraction UNLESS the tokens after the `-` operand
+        # introduce a new comparison operator before a logical boundary — that would mean
+        # the `-` is the start of a new, separate search term (e.g. `power>2 -cmc>0`),
+        # not arithmetic within the current term (e.g. `power>cmc-1`).
+        prev_is_comparison = i > 0 and tokens[i - 1] in _COMPARISON_OPERATORS
         is_arithmetic_minus = (
             next_tok == "-"
             and i + 2 < len(tokens)
             and (_is_numeric_operand(tok) or tok == ")")
             and (_is_numeric_operand(tokens[i + 2]) or tokens[i + 2] == "(")
-            and not (i > 0 and tokens[i - 1] in _COMPARISON_OPERATORS)
+            and not (prev_is_comparison and _rhs_introduces_comparison(tokens, i + 2))
         )
 
         need_and = (
