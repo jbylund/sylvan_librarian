@@ -85,6 +85,17 @@ TESTCASES = [
     {"query": "power>2 cmc<3", "expected": "power>2 AND cmc<3", "id": "two_comparisons_and"},
     # Arithmetic within comparison (not after comparison RHS): must not insert AND
     {"query": "power*2 - 1 > 0", "expected": "power*2-1>0", "id": "arith_mul_sub_lit"},
+    # Multi-term arithmetic chains (compact / no spaces): tokenizer absorbs as single tokens
+    {"query": "power-cmc-1-toughness>loyalty-cmc-1", "expected": "power-cmc-1-toughness>loyalty-cmc-1", "id": "deep_arith_chain_compact"},
+    # Two consecutive arithmetic comparisons separated by space: AND between them
+    {"query": "power-cmc>1 toughness-loyalty>0", "expected": "power-cmc>1 AND toughness-loyalty>0", "id": "two_arith_comparisons"},
+    {"query": "power-1>3 cmc-1<2", "expected": "power-1>3 AND cmc-1<2", "id": "two_arith_cmp_sub_lit"},
+    # a-b-c-d-e>f-g-h-i -j-k+l>1+2+3 style (with numeric names, space before - signals AND)
+    {
+        "query": "power-cmc-1-toughness>loyalty-cmc-1 -power+toughness>1+2+3",
+        "expected": "power-cmc-1-toughness>loyalty-cmc-1 AND -power+toughness>1+2+3",
+        "id": "deep_arith_chain_then_arith_expr",
+    },
     # Negation with non-numeric attribute on right: must still insert AND
     {"query": "power -type:creature", "expected": "power AND -type:creature", "id": "arith_not_text_attr"},
     # Leading arithmetic expression starting with '-': no implicit AND
