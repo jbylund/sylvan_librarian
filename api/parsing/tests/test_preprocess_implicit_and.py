@@ -58,6 +58,14 @@ TESTCASES = [
     {"query": "a -b", "expected": "a AND -b", "id": "negation_word_minus"},
     {"query": "flying -t:creature", "expected": "flying AND -t:creature", "id": "negation_keyword_minus"},
     {"query": "id=r -o:enchantment", "expected": "id=r AND -o:enchantment", "id": "attr_negation_attr"},
+    # Arithmetic subtraction: numeric-attr - numeric-attr must not get AND (regression guard)
+    {"query": "power - cmc>1", "expected": "power-cmc>1", "id": "arith_sub_attr_attr_space"},
+    {"query": "power - cmc > 1", "expected": "power-cmc>1", "id": "arith_sub_attr_attr_spaces"},
+    {"query": "toughness - power > 0", "expected": "toughness-power>0", "id": "arith_sub_toughness_power"},
+    {"query": "cmc - 1 > 0", "expected": "cmc-1>0", "id": "arith_sub_attr_literal"},
+    {"query": "5 - cmc > 0", "expected": "5-cmc>0", "id": "arith_sub_literal_attr"},
+    # Negation with non-numeric attribute on right: must still insert AND
+    {"query": "power -type:creature", "expected": "power AND -type:creature", "id": "arith_not_text_attr"},
     # Leading negation and multiple negations
     {"query": "-t:creature", "expected": "-t:creature", "id": "leading_negation"},
     {"query": "a -b -c", "expected": "a AND -b AND -c", "id": "multiple_negations"},
