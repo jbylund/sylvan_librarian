@@ -25,6 +25,7 @@ from pyparsing import (
 from api.parsing.card_query_nodes import CardAttributeNode, to_card_query_ast
 from api.parsing.db_info import (
     COLOR_NAME_TO_CODE,
+    NUMERIC_CARD_ATTRIBUTES,
     PARSER_CLASS_TO_FIELD_INFOS,
     ParserClass,
 )
@@ -802,7 +803,9 @@ def _get_implicit_and_tokenizer() -> ParserElement:
 
     # Value/word: alphanumeric, underscores, hyphens (matches bar, 40k-model, name, 1, 2, etc.)
     # Must come before mana_tok so "bar" and "bolt" are one token, not "b" + mana.
-    string_value_tok = Regex(r"[a-zA-Z0-9_][a-zA-Z0-9_-]*").setParseAction(lambda t: t[0])
+    # Trailing hyphens are forbidden so "power-(" is not absorbed as one token "power-";
+    # the regex requires the last character to be alphanumeric/underscore.
+    string_value_tok = Regex(r"[a-zA-Z0-9_]([a-zA-Z0-9_-]*[a-zA-Z0-9_])?").setParseAction(lambda t: t[0])
 
     # Mana pattern (e.g. {1}{G}, {w}{u}) as one token; only after word so "bar" isn't "b" + "ar"
     curly_mana_symbol = Regex(r"\{[^}]+\}")
@@ -849,6 +852,22 @@ def _tokenize_for_implicit_and(query: str) -> list[str]:
     return result
 
 
+_NUMERIC_LITERAL_RE = re.compile(r"^\d+(\.\d+)?$")
+_COMPARISON_OPERATORS = frozenset({">", "<", ">=", "<=", "=", "!=", ":"})
+
+
+def _is_implicit_and_operand(t: str) -> bool:
+    """Return True if *t* counts as an operand for implicit-AND insertion."""
+    if t in ("(", ")", "AND", "OR"):
+        return False
+    return not is_operator(t)
+
+
+def _is_numeric_operand(t: str) -> bool:
+    """Return True if *t* is a numeric card attribute or a bare numeric literal."""
+    return t in NUMERIC_CARD_ATTRIBUTES or bool(_NUMERIC_LITERAL_RE.match(t))
+
+
 def preprocess_implicit_and(query: str) -> str:
     """Pre-process query to convert implicit AND operations to explicit ones.
 
@@ -875,11 +894,6 @@ def preprocess_implicit_and(query: str) -> str:
 
         next_tok = tokens[i + 1]
 
-        def is_operand(t: str) -> bool:
-            if t in ("(", ")", "AND", "OR"):
-                return False
-            return not is_operator(t)
-
         # Insert AND between: two operands, operand and negation (-), ) and operand, operand and (
         # Do not insert when we're inside a value that spans multiple tokens: the full parser
         # consumes e.g. "2{r}{g}" as one value (mixed_mana_pattern), but our tokenizer emits
@@ -888,7 +902,28 @@ def preprocess_implicit_and(query: str) -> str:
         after_operator = i > 0 and is_operator(tokens[i - 1])
         value_continuation = next_tok.startswith("{")
         skip_because_value = after_operator and value_continuation
-        need_and = (is_operand(tok) or tok == ")") and (is_operand(next_tok) or next_tok in {"(", "-"}) and not skip_because_value
+
+        # Disambiguate `-` as arithmetic subtraction vs. negation: if both the current
+        # token and the token after `-` are numeric card attributes or numeric literals,
+        # treat `-` as binary subtraction (no AND inserted).  Otherwise it is negation.
+        # A `)` closing a paren-group (e.g. `(2*power)-1`) also counts as a numeric
+        # left-hand side, because the whole sub-expression is expected to be numeric.
+        # A `(` on the right-hand side (e.g. `power-(cmc-1)`) also counts, since it
+        # opens a parenthesized numeric sub-expression.
+        is_arithmetic_minus = (
+            next_tok == "-"
+            and i + 2 < len(tokens)
+            and (_is_numeric_operand(tok) or tok == ")")
+            and (_is_numeric_operand(tokens[i + 2]) or tokens[i + 2] == "(")
+            and not (i > 0 and tokens[i - 1] in _COMPARISON_OPERATORS)
+        )
+
+        need_and = (
+            (_is_implicit_and_operand(tok) or tok == ")")
+            and (_is_implicit_and_operand(next_tok) or next_tok in {"(", "-"})
+            and not skip_because_value
+            and not is_arithmetic_minus
+        )
         if need_and:
             result.append("AND")
         i += 1

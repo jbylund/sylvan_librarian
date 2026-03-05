@@ -58,6 +58,52 @@ TESTCASES = [
     {"query": "a -b", "expected": "a AND -b", "id": "negation_word_minus"},
     {"query": "flying -t:creature", "expected": "flying AND -t:creature", "id": "negation_keyword_minus"},
     {"query": "id=r -o:enchantment", "expected": "id=r AND -o:enchantment", "id": "attr_negation_attr"},
+    # Arithmetic subtraction: numeric-attr - numeric-attr must not get AND (regression guard)
+    {"query": "power - cmc>1", "expected": "power-cmc>1", "id": "arith_sub_attr_attr_space"},
+    {"query": "power - cmc > 1", "expected": "power-cmc>1", "id": "arith_sub_attr_attr_spaces"},
+    {"query": "toughness - power > 0", "expected": "toughness-power>0", "id": "arith_sub_toughness_power"},
+    {"query": "cmc - 1 > 0", "expected": "cmc-1>0", "id": "arith_sub_attr_literal"},
+    {"query": "5 - cmc > 0", "expected": "5-cmc>0", "id": "arith_sub_literal_attr"},
+    # Arithmetic subtraction after a closing paren (e.g. (expr)-literal>value)
+    {"query": "(2*power)-1>3", "expected": "(2*power)-1>3", "id": "arith_sub_paren_minus_literal"},
+    {"query": "(2*power) - 1 > 3", "expected": "(2*power)-1>3", "id": "arith_sub_paren_minus_literal_spaces"},
+    {"query": "(power+toughness)-cmc>0", "expected": "(power+toughness)-cmc>0", "id": "arith_sub_paren_minus_attr"},
+    {"query": "(power+toughness) - cmc > 0", "expected": "(power+toughness)-cmc>0", "id": "arith_sub_paren_minus_attr_spaces"},
+    # Arithmetic subtraction with a paren group on the right (e.g. attr-(expr)>value)
+    {"query": "power-(cmc-1)>2", "expected": "power-(cmc-1)>2", "id": "arith_sub_attr_minus_paren"},
+    {"query": "power - (cmc - 1) > 2", "expected": "power-(cmc-1)>2", "id": "arith_sub_attr_minus_paren_spaces"},
+    {"query": "(power+1)-(cmc-1)>0", "expected": "(power+1)-(cmc-1)>0", "id": "arith_sub_paren_minus_paren"},
+    {"query": "(power + 1) - (cmc - 1) > 0", "expected": "(power+1)-(cmc-1)>0", "id": "arith_sub_paren_minus_paren_spaces"},
+    # Comparison with negation on right-hand side: power > -cmc+5 must NOT get AND
+    {"query": "power>-cmc+5", "expected": "power>-cmc+5", "id": "cmp_rhs_negation"},
+    {"query": "power > -cmc + 5", "expected": "power>-cmc+5", "id": "cmp_rhs_negation_spaces"},
+    # Comparison then an expression starting with '-': must insert AND (not treat as arithmetic)
+    {"query": "Power>2 -1+CMC<2", "expected": "Power>2 AND -1+CMC<2", "id": "cmp_then_arith_leading_minus"},
+    {"query": "power>2 -cmc>0", "expected": "power>2 AND -cmc>0", "id": "cmp_then_neg_numeric_attr"},
+    {"query": "power>2 -toughness>0", "expected": "power>2 AND -toughness>0", "id": "cmp_then_neg_toughness"},
+    {"query": "power>2 -(cmc-1)>0", "expected": "power>2 AND -(cmc-1)>0", "id": "cmp_then_neg_paren"},
+    {"query": "power>2 cmc<3", "expected": "power>2 AND cmc<3", "id": "two_comparisons_and"},
+    # Arithmetic within comparison (not after comparison RHS): must not insert AND
+    {"query": "power*2 - 1 > 0", "expected": "power*2-1>0", "id": "arith_mul_sub_lit"},
+    # Multi-term arithmetic chains (compact / no spaces): tokenizer absorbs as single tokens
+    {"query": "power-cmc-1-toughness>loyalty-cmc-1", "expected": "power-cmc-1-toughness>loyalty-cmc-1", "id": "deep_arith_chain_compact"},
+    # Two consecutive arithmetic comparisons separated by space: AND between them
+    {"query": "power-cmc>1 toughness-loyalty>0", "expected": "power-cmc>1 AND toughness-loyalty>0", "id": "two_arith_comparisons"},
+    {"query": "power-1>3 cmc-1<2", "expected": "power-1>3 AND cmc-1<2", "id": "two_arith_cmp_sub_lit"},
+    # a-b-c-d-e>f-g-h-i -j-k+l>1+2+3 style (with numeric names, space before - signals AND)
+    {
+        "query": "power-cmc-1-toughness>loyalty-cmc-1 -power+toughness>1+2+3",
+        "expected": "power-cmc-1-toughness>loyalty-cmc-1 AND -power+toughness>1+2+3",
+        "id": "deep_arith_chain_then_arith_expr",
+    },
+    # Negation with non-numeric attribute on right: must still insert AND
+    {"query": "power -type:creature", "expected": "power AND -type:creature", "id": "arith_not_text_attr"},
+    # Leading arithmetic expression starting with '-': no implicit AND
+    {"query": "-cmc+5>1", "expected": "-cmc+5>1", "id": "leading_arith_minus_cmc"},
+    {"query": "-power>0", "expected": "-power>0", "id": "leading_arith_minus_power"},
+    # Word then arithmetic expression starting with '-': implicit AND between word and expression
+    {"query": "fire -cmc+5>1", "expected": "fire AND -cmc+5>1", "id": "word_then_arith_leading_minus"},
+    {"query": "flying -cmc+5>1", "expected": "flying AND -cmc+5>1", "id": "word_then_arith_leading_minus_flying"},
     # Leading negation and multiple negations
     {"query": "-t:creature", "expected": "-t:creature", "id": "leading_negation"},
     {"query": "a -b -c", "expected": "a AND -b AND -c", "id": "multiple_negations"},
