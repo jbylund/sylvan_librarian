@@ -790,8 +790,8 @@ def _get_implicit_and_tokenizer() -> ParserElement:
     rparen_tok = Literal(")").setParseAction(lambda t: t[0])
 
     # Keywords (must be before word so AND/OR are not consumed as words)
-    and_tok = CaselessKeyword("AND").setParseAction(lambda t: t[0])
-    or_tok = CaselessKeyword("OR").setParseAction(lambda t: t[0])
+    and_tok = CaselessKeyword("AND").setParseAction(lambda t: t[0].upper())
+    or_tok = CaselessKeyword("OR").setParseAction(lambda t: t[0].upper())
 
     # Comparison: longest first so >=, <=, != before single chars
     comparison_tok = oneOf(">= <= != : = > <").setParseAction(lambda t: t[0])
