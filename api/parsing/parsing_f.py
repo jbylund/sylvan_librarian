@@ -853,6 +853,7 @@ def _tokenize_for_implicit_and(query: str) -> list[str]:
 
 
 _NUMERIC_LITERAL_RE = re.compile(r"^\d+(\.\d+)?$")
+_COMPARISON_OPERATORS = frozenset({">", "<", ">=", "<=", "=", "!=", ":"})
 
 
 def _is_implicit_and_operand(t: str) -> bool:
@@ -914,6 +915,7 @@ def preprocess_implicit_and(query: str) -> str:
             and i + 2 < len(tokens)
             and (_is_numeric_operand(tok) or tok == ")")
             and (_is_numeric_operand(tokens[i + 2]) or tokens[i + 2] == "(")
+            and not (i > 0 and tokens[i - 1] in _COMPARISON_OPERATORS)
         )
 
         need_and = (

@@ -77,6 +77,14 @@ TESTCASES = [
     # Comparison with negation on right-hand side: power > -cmc+5 must NOT get AND
     {"query": "power>-cmc+5", "expected": "power>-cmc+5", "id": "cmp_rhs_negation"},
     {"query": "power > -cmc + 5", "expected": "power>-cmc+5", "id": "cmp_rhs_negation_spaces"},
+    # Comparison then an expression starting with '-': must insert AND (not treat as arithmetic)
+    {"query": "Power>2 -1+CMC<2", "expected": "Power>2 AND -1+CMC<2", "id": "cmp_then_arith_leading_minus"},
+    {"query": "power>2 -cmc>0", "expected": "power>2 AND -cmc>0", "id": "cmp_then_neg_numeric_attr"},
+    {"query": "power>2 -toughness>0", "expected": "power>2 AND -toughness>0", "id": "cmp_then_neg_toughness"},
+    {"query": "power>2 -(cmc-1)>0", "expected": "power>2 AND -(cmc-1)>0", "id": "cmp_then_neg_paren"},
+    {"query": "power>2 cmc<3", "expected": "power>2 AND cmc<3", "id": "two_comparisons_and"},
+    # Arithmetic within comparison (not after comparison RHS): must not insert AND
+    {"query": "power*2 - 1 > 0", "expected": "power*2-1>0", "id": "arith_mul_sub_lit"},
     # Negation with non-numeric attribute on right: must still insert AND
     {"query": "power -type:creature", "expected": "power AND -type:creature", "id": "arith_not_text_attr"},
     # Leading arithmetic expression starting with '-': no implicit AND
