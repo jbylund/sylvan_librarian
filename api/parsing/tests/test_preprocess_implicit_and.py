@@ -64,6 +64,14 @@ TESTCASES = [
     {"query": "toughness - power > 0", "expected": "toughness-power>0", "id": "arith_sub_toughness_power"},
     {"query": "cmc - 1 > 0", "expected": "cmc-1>0", "id": "arith_sub_attr_literal"},
     {"query": "5 - cmc > 0", "expected": "5-cmc>0", "id": "arith_sub_literal_attr"},
+    # Arithmetic subtraction after a closing paren (e.g. (expr)-literal>value)
+    {"query": "(2*power)-1>3", "expected": "(2*power)-1>3", "id": "arith_sub_paren_minus_literal"},
+    {"query": "(2*power) - 1 > 3", "expected": "(2*power)-1>3", "id": "arith_sub_paren_minus_literal_spaces"},
+    {"query": "(power+toughness)-cmc>0", "expected": "(power+toughness)-cmc>0", "id": "arith_sub_paren_minus_attr"},
+    {"query": "(power+toughness) - cmc > 0", "expected": "(power+toughness)-cmc>0", "id": "arith_sub_paren_minus_attr_spaces"},
+    # Comparison with negation on right-hand side: power > -cmc+5 must NOT get AND
+    {"query": "power>-cmc+5", "expected": "power>-cmc+5", "id": "cmp_rhs_negation"},
+    {"query": "power > -cmc + 5", "expected": "power>-cmc+5", "id": "cmp_rhs_negation_spaces"},
     # Negation with non-numeric attribute on right: must still insert AND
     {"query": "power -type:creature", "expected": "power AND -type:creature", "id": "arith_not_text_attr"},
     # Leading negation and multiple negations

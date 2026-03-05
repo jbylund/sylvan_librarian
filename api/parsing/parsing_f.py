@@ -903,10 +903,12 @@ def preprocess_implicit_and(query: str) -> str:
         # Disambiguate `-` as arithmetic subtraction vs. negation: if both the current
         # token and the token after `-` are numeric card attributes or numeric literals,
         # treat `-` as binary subtraction (no AND inserted).  Otherwise it is negation.
+        # A `)` closing a paren-group (e.g. `(2*power)-1`) also counts as a numeric
+        # left-hand side, because the whole sub-expression is expected to be numeric.
         is_arithmetic_minus = (
             next_tok == "-"
             and i + 2 < len(tokens)
-            and _is_numeric_operand(tok)
+            and (_is_numeric_operand(tok) or tok == ")")
             and _is_numeric_operand(tokens[i + 2])
         )
 
