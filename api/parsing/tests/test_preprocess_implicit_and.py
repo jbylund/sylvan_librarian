@@ -51,6 +51,9 @@ TESTCASES = [
     {"query": "name:/bolt/", "expected": "name:/bolt/", "id": "regex_single"},
     {"query": "/foo/ /bar/", "expected": "/foo/ AND /bar/", "id": "two_regex"},
     {"query": "name:/bolt/ type:instant", "expected": "name:/bolt/ AND type:instant", "id": "regex_and_attr"},
+    # Regex with escaped slash (searching for "/" in pattern, e.g. "life/death")
+    {"query": r"name:/life\/death/", "expected": r"name:/life\/death/", "id": "regex_escaped_slash"},
+    {"query": r"name:/a\/b/ type:/c\/d/", "expected": r"name:/a\/b/ AND type:/c\/d/", "id": "two_regex_escaped_slash"},
     # Comparison operators — no AND between attr op value
     {"query": "cmc=3", "expected": "cmc=3", "id": "cmp_eq"},
     {"query": "cmc<1r", "expected": "cmc<1r", "id": "cmp_lt_1r_no_space"},
@@ -196,8 +199,17 @@ def test_preprocess_implicit_and(query: str, expected: str) -> None:
         ("'unclosed single", "Unmatched"),
         ("/unclosed regex", "Unmatched"),
         ("name:/unclosed", "Unmatched"),
+        # Escaped-slash valid regex followed by a separate unclosed regex: parity-based
+        # counting would give an even slash-count and miss this — must still raise.
+        (r"name:/a\/b/ type:/unclosed", "Unmatched"),
     ],
-    ids=["unclosed_double_quote", "unclosed_single_quote", "unclosed_regex", "unclosed_regex_after_attr"],
+    ids=[
+        "unclosed_double_quote",
+        "unclosed_single_quote",
+        "unclosed_regex",
+        "unclosed_regex_after_attr",
+        "unclosed_regex_after_escaped_slash_regex",
+    ],
 )
 def test_preprocess_implicit_and_raises_on_invalid(query: str, match: str) -> None:
     """Invalid query (unclosed quote/regex) raises ValueError."""

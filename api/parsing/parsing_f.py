@@ -853,18 +853,19 @@ def _tokenize_for_implicit_and(query: str) -> list[str]:
         msg = f"Invalid query syntax{location_suffix}: {msg_text}"
         raise ValueError(msg) from e
 
-    # Detect unclosed regex: a "/" tokenized as arithmetic where a regex pattern can start
-    # (at the start of the query, or immediately after :, (, AND, OR)
-    if "/" in result:
-        slash_count = query.count("/")
-        if slash_count % 2 != 0:
-            for idx, tok in enumerate(result):
-                if tok != "/":
-                    continue
-                prev_tok = result[idx - 1] if idx > 0 else None
-                if idx == 0 or prev_tok in {":", "(", "AND", "OR"}:
-                    msg = "Unmatched / in regex pattern in query"
-                    raise ValueError(msg)
+    # Detect unclosed regex: a "/" was tokenized as a bare arithmetic token because the
+    # tokenizer could not find a matching closing "/".  A valid regex (including those
+    # with escaped slashes like /life\/death/) is consumed as a *single* token by the
+    # QuotedString parser, so it never leaves a bare "/" in the result.  We therefore
+    # check for position only — no raw slash-count is needed (counting "/" in the
+    # original query string would miscount escaped "\/", breaking the parity logic).
+    for idx, tok in enumerate(result):
+        if tok != "/":
+            continue
+        prev_tok = result[idx - 1] if idx > 0 else None
+        if idx == 0 or prev_tok in {":", "(", "AND", "OR"}:
+            msg = "Unmatched / in regex pattern in query"
+            raise ValueError(msg)
     return result
 
 
