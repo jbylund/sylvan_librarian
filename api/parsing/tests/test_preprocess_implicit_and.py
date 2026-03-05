@@ -69,6 +69,11 @@ TESTCASES = [
     {"query": "(2*power) - 1 > 3", "expected": "(2*power)-1>3", "id": "arith_sub_paren_minus_literal_spaces"},
     {"query": "(power+toughness)-cmc>0", "expected": "(power+toughness)-cmc>0", "id": "arith_sub_paren_minus_attr"},
     {"query": "(power+toughness) - cmc > 0", "expected": "(power+toughness)-cmc>0", "id": "arith_sub_paren_minus_attr_spaces"},
+    # Arithmetic subtraction with a paren group on the right (e.g. attr-(expr)>value)
+    {"query": "power-(cmc-1)>2", "expected": "power-(cmc-1)>2", "id": "arith_sub_attr_minus_paren"},
+    {"query": "power - (cmc - 1) > 2", "expected": "power-(cmc-1)>2", "id": "arith_sub_attr_minus_paren_spaces"},
+    {"query": "(power+1)-(cmc-1)>0", "expected": "(power+1)-(cmc-1)>0", "id": "arith_sub_paren_minus_paren"},
+    {"query": "(power + 1) - (cmc - 1) > 0", "expected": "(power+1)-(cmc-1)>0", "id": "arith_sub_paren_minus_paren_spaces"},
     # Comparison with negation on right-hand side: power > -cmc+5 must NOT get AND
     {"query": "power>-cmc+5", "expected": "power>-cmc+5", "id": "cmp_rhs_negation"},
     {"query": "power > -cmc + 5", "expected": "power>-cmc+5", "id": "cmp_rhs_negation_spaces"},

@@ -803,7 +803,9 @@ def _get_implicit_and_tokenizer() -> ParserElement:
 
     # Value/word: alphanumeric, underscores, hyphens (matches bar, 40k-model, name, 1, 2, etc.)
     # Must come before mana_tok so "bar" and "bolt" are one token, not "b" + mana.
-    string_value_tok = Regex(r"[a-zA-Z0-9_][a-zA-Z0-9_-]*").setParseAction(lambda t: t[0])
+    # Trailing hyphens are forbidden so "power-(" is not absorbed as one token "power-";
+    # the regex requires the last character to be alphanumeric/underscore.
+    string_value_tok = Regex(r"[a-zA-Z0-9_]([a-zA-Z0-9_-]*[a-zA-Z0-9_])?").setParseAction(lambda t: t[0])
 
     # Mana pattern (e.g. {1}{G}, {w}{u}) as one token; only after word so "bar" isn't "b" + "ar"
     curly_mana_symbol = Regex(r"\{[^}]+\}")
@@ -905,11 +907,13 @@ def preprocess_implicit_and(query: str) -> str:
         # treat `-` as binary subtraction (no AND inserted).  Otherwise it is negation.
         # A `)` closing a paren-group (e.g. `(2*power)-1`) also counts as a numeric
         # left-hand side, because the whole sub-expression is expected to be numeric.
+        # A `(` on the right-hand side (e.g. `power-(cmc-1)`) also counts, since it
+        # opens a parenthesized numeric sub-expression.
         is_arithmetic_minus = (
             next_tok == "-"
             and i + 2 < len(tokens)
             and (_is_numeric_operand(tok) or tok == ")")
-            and _is_numeric_operand(tokens[i + 2])
+            and (_is_numeric_operand(tokens[i + 2]) or tokens[i + 2] == "(")
         )
 
         need_and = (
