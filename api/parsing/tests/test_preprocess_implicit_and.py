@@ -195,8 +195,9 @@ def test_preprocess_implicit_and(query: str, expected: str) -> None:
         ('"unclosed double', "Unmatched"),
         ("'unclosed single", "Unmatched"),
         ("/unclosed regex", "Unmatched"),
+        ("name:/unclosed", "Unmatched"),
     ],
-    ids=["unclosed_double_quote", "unclosed_single_quote", "unclosed_regex"],
+    ids=["unclosed_double_quote", "unclosed_single_quote", "unclosed_regex", "unclosed_regex_after_attr"],
 )
 def test_preprocess_implicit_and_raises_on_invalid(query: str, match: str) -> None:
     """Invalid query (unclosed quote/regex) raises ValueError."""

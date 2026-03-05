@@ -840,15 +840,31 @@ def _tokenize_for_implicit_and(query: str) -> list[str]:
         # Convert ParseResults to a real list for consistency with the return type
         result = tokenizer.parseString(query, parseAll=True).asList()
     except ParseException as e:
-        # Pyparsing reports unclosed quotes/regex as "Expected string enclosed in..."
-        msg = "Unmatched quote or regex in query"
+        # Pyparsing reports the position where parsing stopped; if that position is a
+        # quote character, it's an unclosed-quote error.
+        full_msg = str(e)
+        msg_text = getattr(e, "msg", full_msg)
+        col = getattr(e, "col", None)
+        if isinstance(col, int) and 1 <= col <= len(query) and query[col - 1] in ('"', "'"):
+            msg = "Unmatched quote or regex in query"
+            raise ValueError(msg) from e
+        # For other parse failures, preserve the original message and location
+        location_suffix = f" at column {col}" if isinstance(col, int) else ""
+        msg = f"Invalid query syntax{location_suffix}: {msg_text}"
         raise ValueError(msg) from e
 
-    # Detect unclosed regex: leading "/" was tokenized as arithmetic because no closing "/" found
-    stripped = query.strip()
-    if stripped.startswith("/") and result and result[0] == "/" and stripped.count("/") == 1:
-        msg = "Unmatched / in regex pattern in query"
-        raise ValueError(msg)
+    # Detect unclosed regex: a "/" tokenized as arithmetic where a regex pattern can start
+    # (at the start of the query, or immediately after :, (, AND, OR)
+    if "/" in result:
+        slash_count = query.count("/")
+        if slash_count % 2 != 0:
+            for idx, tok in enumerate(result):
+                if tok != "/":
+                    continue
+                prev_tok = result[idx - 1] if idx > 0 else None
+                if idx == 0 or prev_tok in {":", "(", "AND", "OR"}:
+                    msg = "Unmatched / in regex pattern in query"
+                    raise ValueError(msg)
     return result
 
 
