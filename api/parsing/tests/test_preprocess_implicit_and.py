@@ -79,6 +79,12 @@ TESTCASES = [
     {"query": "power > -cmc + 5", "expected": "power>-cmc+5", "id": "cmp_rhs_negation_spaces"},
     # Negation with non-numeric attribute on right: must still insert AND
     {"query": "power -type:creature", "expected": "power AND -type:creature", "id": "arith_not_text_attr"},
+    # Leading arithmetic expression starting with '-': no implicit AND
+    {"query": "-cmc+5>1", "expected": "-cmc+5>1", "id": "leading_arith_minus_cmc"},
+    {"query": "-power>0", "expected": "-power>0", "id": "leading_arith_minus_power"},
+    # Word then arithmetic expression starting with '-': implicit AND between word and expression
+    {"query": "fire -cmc+5>1", "expected": "fire AND -cmc+5>1", "id": "word_then_arith_leading_minus"},
+    {"query": "flying -cmc+5>1", "expected": "flying AND -cmc+5>1", "id": "word_then_arith_leading_minus_flying"},
     # Leading negation and multiple negations
     {"query": "-t:creature", "expected": "-t:creature", "id": "leading_negation"},
     {"query": "a -b -c", "expected": "a AND -b AND -c", "id": "multiple_negations"},
