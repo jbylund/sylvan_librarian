@@ -78,6 +78,11 @@ TESTCASES = [
     {"query": "toughness - power > 0", "expected": "toughness-power>0", "id": "arith_sub_toughness_power"},
     {"query": "cmc - 1 > 0", "expected": "cmc-1>0", "id": "arith_sub_attr_literal"},
     {"query": "5 - cmc > 0", "expected": "5-cmc>0", "id": "arith_sub_literal_attr"},
+    # Case-insensitive numeric attribute names: uppercase/mixed-case must still be treated as
+    # numeric operands so binary '-' is not mistaken for negation (exercises t.lower() fix)
+    {"query": "CMC - Power > 1", "expected": "CMC-Power>1", "id": "arith_sub_uppercase_attrs"},
+    {"query": "POWER - TOUGHNESS > 0", "expected": "POWER-TOUGHNESS>0", "id": "arith_sub_all_caps_attrs"},
+    {"query": "Power > CMC - 1", "expected": "Power>CMC-1", "id": "cmp_rhs_arith_sub_mixed_case"},
     # Arithmetic subtraction after a closing paren (e.g. (expr)-literal>value)
     {"query": "(2*power)-1>3", "expected": "(2*power)-1>3", "id": "arith_sub_paren_minus_literal"},
     {"query": "(2*power) - 1 > 3", "expected": "(2*power)-1>3", "id": "arith_sub_paren_minus_literal_spaces"},
@@ -88,6 +93,11 @@ TESTCASES = [
     {"query": "power - (cmc - 1) > 2", "expected": "power-(cmc-1)>2", "id": "arith_sub_attr_minus_paren_spaces"},
     {"query": "(power+1)-(cmc-1)>0", "expected": "(power+1)-(cmc-1)>0", "id": "arith_sub_paren_minus_paren"},
     {"query": "(power + 1) - (cmc - 1) > 0", "expected": "(power+1)-(cmc-1)>0", "id": "arith_sub_paren_minus_paren_spaces"},
+    # Arithmetic subtraction on the RHS of a comparison: must NOT get AND (regression guard)
+    {"query": "power>cmc-1", "expected": "power>cmc-1", "id": "cmp_rhs_arith_sub"},
+    {"query": "power > cmc - 1", "expected": "power>cmc-1", "id": "cmp_rhs_arith_sub_spaces"},
+    {"query": "toughness>=power-cmc", "expected": "toughness>=power-cmc", "id": "cmp_rhs_arith_sub_attrs"},
+    {"query": "toughness >= power - cmc", "expected": "toughness>=power-cmc", "id": "cmp_rhs_arith_sub_attrs_spaces"},
     # Comparison with negation on right-hand side: power > -cmc+5 must NOT get AND
     {"query": "power>-cmc+5", "expected": "power>-cmc+5", "id": "cmp_rhs_negation"},
     {"query": "power > -cmc + 5", "expected": "power>-cmc+5", "id": "cmp_rhs_negation_spaces"},
