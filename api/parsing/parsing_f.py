@@ -834,7 +834,8 @@ def _tokenize_for_implicit_and(query: str) -> list[str]:
         return []
     tokenizer = _get_implicit_and_tokenizer()
     try:
-        result = tokenizer.parseString(query, parseAll=True)
+        # Convert ParseResults to a real list for consistency with the return type
+        result = tokenizer.parseString(query, parseAll=True).asList()
     except ParseException as e:
         # Pyparsing reports unclosed quotes/regex as "Expected string enclosed in..."
         msg = "Unmatched quote or regex in query"
