@@ -58,32 +58,41 @@ DEFAULT_FACE = "1"
 
 
 class CardImage:
-    def __init__(self, set_code: str, collector_number: str, face_idx: str, size: str, png_url: str | None = None):
+    """A card image."""
+
+    def __init__(self, set_code: str, collector_number: str, face_idx: str, size: str, png_url: str | None = None) -> None:
+        """Initialize a card image."""
         self.set_code = set_code
         self.collector_number = collector_number
         self.face_idx = face_idx
         self.size = size
         self.png_url = png_url
         if size not in [SMALL_KEY, MEDIUM_KEY, LARGE_KEY, XLARGE_KEY, ORIGINAL_KEY]:
-            raise ValueError(f"Invalid size: {size}")
+            msg = f"Invalid size: {size}"
+            raise ValueError(msg)
         if face_idx not in [DEFAULT_FACE, "2"]:
-            raise ValueError(f"Invalid face index: {face_idx}")
+            msg = f"Invalid face index: {face_idx}"
+            raise ValueError(msg)
 
     def get_s3_key(self) -> str:
+        """Get the S3 key for the card image."""
         return f"img/{self.set_code}/{self.collector_number}/{self.face_idx}/{self.size}.webp"
 
     def __hash__(self) -> int:
+        """Hash the card image."""
         return hash((self.set_code, self.collector_number, self.face_idx, self.size))
 
     def __eq__(self, other: object) -> bool:
+        """Check if the card image is equal to another object."""
         if not isinstance(other, CardImage):
             return False
         return (
-            self.set_code == other.set_code and
-            self.collector_number == other.collector_number and
-            self.face_idx == other.face_idx and
-            self.size == other.size
+            self.set_code == other.set_code
+            and self.collector_number == other.collector_number
+            and self.face_idx == other.face_idx
+            and self.size == other.size
         )
+
 
 def setup_logging(verbose: bool = False) -> None:
     """Set up logging configuration."""
@@ -557,9 +566,7 @@ def get_s3_cards(args: Args) -> set[CardImage]:
         except ValueError:
             continue
 
-    distinct_s3_cards = {
-        (c.set_code, c.collector_number) for c in s3_cards
-    }
+    distinct_s3_cards = {(c.set_code, c.collector_number) for c in s3_cards}
     logger.info("Found %d image objects in S3, belonging to %d distinct cards", len(s3_cards), len(distinct_s3_cards))
     return s3_cards
 
@@ -587,15 +594,11 @@ def main() -> None:
         set_code = card.set_code
         collector_number = card.collector_number
         face_idx = card.face_idx
-        by_set_code_and_collector_number.setdefault(
-            (set_code, collector_number, face_idx), []
-        ).append(card)
+        by_set_code_and_collector_number.setdefault((set_code, collector_number, face_idx), []).append(card)
 
     cards_with_missing_images = []
     for (set_code, collector_number, face_idx), cards in by_set_code_and_collector_number.items():
-        missing_sizes = [
-            c.size for c in cards
-        ]
+        missing_sizes = [c.size for c in cards]
         missing_info = {
             "bucket": args.bucket,
             "card_set_code": set_code,
