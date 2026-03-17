@@ -113,7 +113,11 @@ TESTCASES = [
     # Arithmetic within comparison (not after comparison RHS): must not insert AND
     {"query": "power*2 - 1 > 0", "expected": "power*2-1>0", "id": "arith_mul_sub_lit"},
     # Multi-term arithmetic chains (compact / no spaces): tokenizer absorbs as single tokens
-    {"query": "power-cmc-1-toughness>loyalty-cmc-1", "expected": "power-cmc-1-toughness>loyalty-cmc-1", "id": "deep_arith_chain_compact"},
+    {
+        "query": "power-cmc-1-toughness>loyalty-cmc-1",
+        "expected": "power-cmc-1-toughness>loyalty-cmc-1",
+        "id": "deep_arith_chain_compact",
+    },
     # Two consecutive arithmetic comparisons separated by space: AND between them
     {"query": "power-cmc>1 toughness-loyalty>0", "expected": "power-cmc>1 AND toughness-loyalty>0", "id": "two_arith_comparisons"},
     {"query": "power-1>3 cmc-1<2", "expected": "power-1>3 AND cmc-1<2", "id": "two_arith_cmp_sub_lit"},
@@ -173,6 +177,9 @@ TESTCASES = [
     # Date/year (numeric-looking values)
     {"query": "date:2025", "expected": "date:2025", "id": "date_value"},
     {"query": "year:2024", "expected": "year:2024", "id": "year_value"},
+    # Dots in attribute values (e.g. sentence-ending period in oracle text search)
+    {"query": "o:token.", "expected": "o:token.", "id": "oracle_value_trailing_dot"},
+    {"query": "o:token. -o:counter", "expected": "o:token. AND -o:counter", "id": "oracle_value_trailing_dot_with_negation"},
     # Whitespace normalization (multiple spaces between tokens)
     {"query": "a   b", "expected": "a AND b", "id": "multiple_spaces"},
     {"query": "  a  b  ", "expected": "a AND b", "id": "leading_trailing_space"},
