@@ -202,6 +202,9 @@ def test_preprocess_implicit_and(query: str, expected: str) -> None:
         # Escaped-slash valid regex followed by a separate unclosed regex: parity-based
         # counting would give an even slash-count and miss this — must still raise.
         (r"name:/a\/b/ type:/unclosed", "Unmatched"),
+        # Unclosed regex after a plain word token (prev_tok is not a numeric operand).
+        ("type:instant /unclosed", "Unmatched"),
+        ("a /unclosed", "Unmatched"),
     ],
     ids=[
         "unclosed_double_quote",
@@ -209,6 +212,8 @@ def test_preprocess_implicit_and(query: str, expected: str) -> None:
         "unclosed_regex",
         "unclosed_regex_after_attr",
         "unclosed_regex_after_escaped_slash_regex",
+        "unclosed_regex_after_plain_value",
+        "unclosed_regex_after_plain_word",
     ],
 )
 def test_preprocess_implicit_and_raises_on_invalid(query: str, match: str) -> None:

@@ -807,7 +807,12 @@ def _get_implicit_and_tokenizer() -> ParserElement:
     # the regex requires the last character to be alphanumeric/underscore.
     string_value_tok = Regex(r"[a-zA-Z0-9_]([a-zA-Z0-9_-]*[a-zA-Z0-9_])?").setParseAction(lambda t: t[0])
 
-    # Mana pattern (e.g. {1}{G}, {w}{u}) as one token; only after word so "bar" isn't "b" + "ar"
+    # Mana pattern (e.g. {1}{G}, {w}{u}, {2/W}G) as one token.
+    # mana_tok only fires when the sequence STARTS with "{" (string_value_tok above would
+    # have matched otherwise).  Once inside OneOrMore, simple_mana_symbol can absorb bare
+    # mana chars (G, 1, …) that follow a curly symbol, e.g. {2/W}G → one token.
+    # string_value_tok must precede mana_tok in one_token so "bar" stays one word, not
+    # "b" (simple mana) + "ar".
     curly_mana_symbol = Regex(r"\{[^}]+\}")
     simple_mana_symbol = Regex(r"[0-9WUBRGCXYZwubrgcxyz]")
     mana_tok = Combine(OneOrMore(curly_mana_symbol | simple_mana_symbol)).setParseAction(lambda t: t[0])
@@ -863,7 +868,10 @@ def _tokenize_for_implicit_and(query: str) -> list[str]:
         if tok != "/":
             continue
         prev_tok = result[idx - 1] if idx > 0 else None
-        if idx == 0 or prev_tok in {":", "(", "AND", "OR"}:
+        # Division `/` is only valid between numeric operands or after `)`.
+        # Any other left-hand context (`:`, `(`, `AND`, `OR`, plain word, …) means the
+        # `/` is an opening regex delimiter without a closing `/`.
+        if idx == 0 or (not _is_numeric_operand(prev_tok) and prev_tok != ")"):
             msg = "Unmatched / in regex pattern in query"
             raise ValueError(msg)
     return result
@@ -893,6 +901,10 @@ def _rhs_introduces_comparison(tokens: list[str], start_index: int) -> bool:
     the '-' is starting a new search term rather than continuing an arithmetic expression.
     Tracks paren depth so that comparisons inside sub-expressions are not confused with
     top-level comparisons (e.g. `-(cmc-1)>0` has `>` at depth 0 after the group closes).
+
+    Assumes start_index is positioned at top-level paren depth (depth 0). If called from
+    inside a paren group the depth tracking will be off and a `)` that closes the outer
+    group would incorrectly terminate the scan early.
     """
     depth = 0
     for j in range(start_index, len(tokens)):
