@@ -57,6 +57,33 @@ ORIGINAL_KEY = "o"
 DEFAULT_FACE = "1"
 
 
+class CardImage:
+    def __init__(self, set_code: str, collector_number: str, face_idx: str, size: str):
+        self.set_code = set_code
+        self.collector_number = collector_number
+        self.face_idx = face_idx
+        self.size = size
+        if size not in [SMALL_KEY, MEDIUM_KEY, LARGE_KEY, XLARGE_KEY, ORIGINAL_KEY]:
+            raise ValueError(f"Invalid size: {size}")
+        if face_idx not in [DEFAULT_FACE, "2"]:
+            raise ValueError(f"Invalid face index: {face_idx}")
+
+    def get_s3_key(self) -> str:
+        return f"img/{self.set_code}/{self.collector_number}/{self.face_idx}/{self.size}.webp"
+
+    def __hash__(self) -> int:
+        return hash((self.set_code, self.collector_number, self.face_idx, self.size))
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, CardImage):
+            return False
+        return (
+            self.set_code == other.set_code and
+            self.collector_number == other.collector_number and
+            self.face_idx == other.face_idx and
+            self.size == other.size
+        )
+
 def setup_logging(verbose: bool = False) -> None:
     """Set up logging configuration."""
     level = logging.DEBUG if verbose else logging.INFO
@@ -469,20 +496,21 @@ def get_db_cards(args: Args) -> set[tuple[str, str, str, str]]:
         logger.warning("No cards found to process")
         return None
 
-    logger.info("Found %d cards in database, should create %d images", len(db_cards), len(db_cards) * 4)
+    sizes = [SMALL_KEY, MEDIUM_KEY, LARGE_KEY, XLARGE_KEY]
+    logger.info("Found %d cards in database, should create %d images", len(db_cards), len(db_cards) * len(sizes))
     return {
-        (
+        CardImage(
             card["card_set_code"],
             card["collector_number"],
             card["face_idx"],
             size,
         )
         for card in db_cards
-        for size in [SMALL_KEY, MEDIUM_KEY, LARGE_KEY, XLARGE_KEY]
+        for size in sizes
     }
 
 
-def get_s3_cards(args: Args) -> set[tuple[str, str, str, str]]:
+def get_s3_cards(args: Args) -> set[CardImage]:
     """Get all cards in S3.
 
     Args:
@@ -516,11 +544,15 @@ def get_s3_cards(args: Args) -> set[tuple[str, str, str, str]]:
             except ValueError:
                 continue
             size = size_webp.partition(".")[0]
-            s3_cards.add((set_code, collector_number, face_idx, size))
+            s3_cards.add(
+                CardImage(set_code, collector_number, face_idx, size)
+            )
         except ValueError:
             continue
 
-    distinct_s3_cards = {(set_code, collector_number) for (set_code, collector_number, _size) in s3_cards}
+    distinct_s3_cards = {
+        (c.set_code, c.collector_number) for c in s3_cards
+    }
     logger.info("Found %d image objects in S3, belonging to %d distinct cards", len(s3_cards), len(distinct_s3_cards))
     return s3_cards
 
