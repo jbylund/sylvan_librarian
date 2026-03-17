@@ -142,7 +142,7 @@ def fetch_cards_from_db(
                 card_set_code,
                 collector_number,
                 raw_card_blob->'image_uris'->>'png' as png_url,
-                (raw_card_blob->>'face_idx')::int as face_idx
+                coalesce((raw_card_blob->>'face_idx')::int, 1) as face_idx
             FROM
                 magic.cards
             WHERE
@@ -503,7 +503,7 @@ def get_db_cards(args: Args) -> set[tuple[str, str, str, str]]:
         CardImage(
             set_code=card["card_set_code"],
             collector_number=card["collector_number"],
-            face_idx=card["face_idx"],
+            face_idx=str(card["face_idx"]),
             png_url=card["png_url"],
             size=size,
         )
