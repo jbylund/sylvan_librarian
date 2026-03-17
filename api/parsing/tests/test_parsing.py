@@ -1181,6 +1181,21 @@ def test_parse_combined_produces_queries() -> None:
             "a-b-c",
             BinaryOperatorNode(CardAttributeNode("name", ParserClass.TEXT), ":", StringValueNode("a-b-c")),
         ),
+        # Trailing dot in oracle text value (sentence-ending period)
+        (
+            "o:token.",
+            BinaryOperatorNode(CardAttributeNode("o", ParserClass.TEXT), ":", StringValueNode("token.")),
+        ),
+        # Trailing dot with negation
+        (
+            "o:token. -o:counter",
+            AndNode(
+                [
+                    BinaryOperatorNode(CardAttributeNode("o", ParserClass.TEXT), ":", StringValueNode("token.")),
+                    NotNode(BinaryOperatorNode(CardAttributeNode("o", ParserClass.TEXT), ":", StringValueNode("counter"))),
+                ],
+            ),
+        ),
     ],
 )
 def test_parse_hyphenated_words(test_input: str, expected_ast: QueryNode) -> None:
