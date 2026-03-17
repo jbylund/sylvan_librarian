@@ -57,6 +57,43 @@ ORIGINAL_KEY = "o"
 DEFAULT_FACE = "1"
 
 
+class CardImage:
+    """A card image."""
+
+    def __init__(self, set_code: str, collector_number: str, face_idx: str, size: str, png_url: str | None = None) -> None:
+        """Initialize a card image."""
+        self.set_code = set_code
+        self.collector_number = collector_number
+        self.face_idx = face_idx
+        self.size = size
+        self.png_url = png_url
+        if size not in [SMALL_KEY, MEDIUM_KEY, LARGE_KEY, XLARGE_KEY, ORIGINAL_KEY]:
+            msg = f"Invalid size: {size}"
+            raise ValueError(msg)
+        if face_idx not in [DEFAULT_FACE, "2"]:
+            msg = f"Invalid face index: {face_idx}"
+            raise ValueError(msg)
+
+    def get_s3_key(self) -> str:
+        """Get the S3 key for the card image."""
+        return f"img/{self.set_code}/{self.collector_number}/{self.face_idx}/{self.size}.webp"
+
+    def __hash__(self) -> int:
+        """Hash the card image."""
+        return hash((self.set_code, self.collector_number, self.face_idx, self.size))
+
+    def __eq__(self, other: object) -> bool:
+        """Check if the card image is equal to another object."""
+        if not isinstance(other, CardImage):
+            return False
+        return (
+            self.set_code == other.set_code
+            and self.collector_number == other.collector_number
+            and self.face_idx == other.face_idx
+            and self.size == other.size
+        )
+
+
 def setup_logging(verbose: bool = False) -> None:
     """Set up logging configuration."""
     level = logging.DEBUG if verbose else logging.INFO
@@ -114,7 +151,7 @@ def fetch_cards_from_db(
                 card_set_code,
                 collector_number,
                 raw_card_blob->'image_uris'->>'png' as png_url,
-                (raw_card_blob->>'face_idx')::int as face_idx
+                coalesce((raw_card_blob->>'face_idx')::int, 1) as face_idx
             FROM
                 magic.cards
             WHERE
@@ -130,7 +167,7 @@ def fetch_cards_from_db(
         cursor.execute(query, params)
         cards = cursor.fetchall()
 
-    logger.info(f"Fetched {len(cards)} cards from database")
+    logger.info("Fetched %d cards from database", len(cards))
     return cards
 
 
@@ -152,10 +189,10 @@ def download_image(url: str, output_path: Path) -> bool:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
 
-        logger.debug(f"Downloaded image to {output_path}")
+        logger.debug("Downloaded image to %s", output_path)
         return True
     except requests.RequestException as e:
-        logger.error(f"Failed to download image from {url}: {e}")
+        logger.error("Failed to download image from %s: %s", url, e)
         return False
 
 
@@ -201,16 +238,16 @@ def convert_to_webp(
             timeout=30,
         )
 
-        logger.debug(f"Converted image to WebP: {output_path} (width={width}px)")
+        logger.debug("Converted image to WebP: %s (width=%dpx)", output_path, width)
         return True
     except subprocess.CalledProcessError as e:
-        logger.error(f"Failed to convert image to WebP: {e.stderr}")
+        logger.error("Failed to convert image to WebP: %s", e.stderr)
         return False
     except FileNotFoundError:
         logger.error("cwebp command not found. Please install webp tools: apt-get install webp")
         return False
     except subprocess.TimeoutExpired:
-        logger.error(f"Timeout converting image {input_path}")
+        logger.error("Timeout converting image %s", input_path)
         return False
 
 
@@ -243,10 +280,10 @@ def upload_to_s3(
                 "ContentType": "image/webp",
             },
         )
-        logger.debug(f"Uploaded to S3: s3://{bucket}/{key}")
+        logger.debug("Uploaded to S3: s3://%s/%s", bucket, key)
         return True
     except ClientError as e:
-        logger.error(f"Failed to upload to S3 {bucket}/{key}: {e}")
+        logger.error("Failed to upload to S3 %s/%s: %s", bucket, key, e)
         return False
 
 
@@ -272,13 +309,13 @@ def process_card(
     png_url = card["png_url"]
 
     if not set_code or not collector_number or not png_url:
-        logger.warning(f"Skipping card with missing data: {card}")
+        logger.warning("Skipping card with missing data: %s", card)
         return {SMALL_KEY: False, MEDIUM_KEY: False, LARGE_KEY: False, XLARGE_KEY: False}
 
     logger.info("Processing %s/%s", set_code, collector_number)
 
     if dry_run:
-        logger.info(f"[DRY RUN] Would process {set_code}/{collector_number}")
+        logger.info("[DRY RUN] Would process %s/%s", set_code, collector_number)
         return {SMALL_KEY: True, MEDIUM_KEY: True, LARGE_KEY: True, XLARGE_KEY: True}
 
     results = {SMALL_KEY: False, MEDIUM_KEY: False, LARGE_KEY: False, XLARGE_KEY: False}
@@ -313,7 +350,7 @@ def process_card(
                 results[size_name] = True
 
     success_count = sum(results.values())
-    logger.info(f"Completed {set_code}/{collector_number}: {success_count}/4 sizes uploaded")
+    logger.info("Completed %s/%s: %d/4 sizes uploaded", set_code, collector_number, success_count)
 
     return results
 
@@ -469,20 +506,22 @@ def get_db_cards(args: Args) -> set[tuple[str, str, str, str]]:
         logger.warning("No cards found to process")
         return None
 
-    logger.info("Found %d cards in database, should create %d images", len(db_cards), len(db_cards) * 4)
+    sizes = [SMALL_KEY, MEDIUM_KEY, LARGE_KEY, XLARGE_KEY]
+    logger.info("Found %d cards in database, should create %d images", len(db_cards), len(db_cards) * len(sizes))
     return {
-        (
-            card["card_set_code"],
-            card["collector_number"],
-            card["face_idx"],
-            size,
+        CardImage(
+            set_code=card["card_set_code"],
+            collector_number=card["collector_number"],
+            face_idx=str(card["face_idx"]),
+            png_url=card["png_url"],
+            size=size,
         )
         for card in db_cards
-        for size in [SMALL_KEY, MEDIUM_KEY, LARGE_KEY, XLARGE_KEY]
+        for size in sizes
     }
 
 
-def get_s3_cards(args: Args) -> set[tuple[str, str, str, str]]:
+def get_s3_cards(args: Args) -> set[CardImage]:
     """Get all cards in S3.
 
     Args:
@@ -516,11 +555,18 @@ def get_s3_cards(args: Args) -> set[tuple[str, str, str, str]]:
             except ValueError:
                 continue
             size = size_webp.partition(".")[0]
-            s3_cards.add((set_code, collector_number, face_idx, size))
+            s3_cards.add(
+                CardImage(
+                    set_code=set_code,
+                    collector_number=collector_number,
+                    face_idx=face_idx,
+                    size=size,
+                )
+            )
         except ValueError:
             continue
 
-    distinct_s3_cards = {(set_code, collector_number) for (set_code, collector_number, _size) in s3_cards}
+    distinct_s3_cards = {(c.set_code, c.collector_number) for c in s3_cards}
     logger.info("Found %d image objects in S3, belonging to %d distinct cards", len(s3_cards), len(distinct_s3_cards))
     return s3_cards
 
@@ -539,29 +585,30 @@ def main() -> None:
     db_cards = get_db_cards(args)
     s3_cards = get_s3_cards(args)
 
-    cards_with_missing_images = []
-    for icard in db_cards:
-        collector_number = icard["collector_number"]
-        face_idx = icard["face_idx"]
-        set_code = icard["card_set_code"]
+    missing_cards = db_cards - s3_cards
 
-        missing_for_card = []
-        for size in [SMALL_KEY, MEDIUM_KEY, LARGE_KEY, XLARGE_KEY]:
-            key = (set_code, collector_number, face_idx, size)
-            if key not in s3_cards:
-                missing_for_card.append(size)
-        if missing_for_card:
-            cards_with_missing_images.append(
-                {
-                    "bucket": args.bucket,
-                    "card_set_code": set_code,
-                    "collector_number": collector_number,
-                    "dry_run": args.dry_run,
-                    "face_idx": face_idx,
-                    "png_url": icard["png_url"],
-                    "sizes": missing_for_card,
-                },
-            )
+    # group by set_code and collector_number
+    by_set_code_and_collector_number = {}
+
+    for card in missing_cards:
+        set_code = card.set_code
+        collector_number = card.collector_number
+        face_idx = card.face_idx
+        by_set_code_and_collector_number.setdefault((set_code, collector_number, face_idx), []).append(card)
+
+    cards_with_missing_images = []
+    for (set_code, collector_number, face_idx), cards in by_set_code_and_collector_number.items():
+        missing_sizes = [c.size for c in cards]
+        missing_info = {
+            "bucket": args.bucket,
+            "card_set_code": set_code,
+            "collector_number": collector_number,
+            "dry_run": args.dry_run,
+            "face_idx": face_idx,
+            "png_url": cards[0].png_url,
+            "sizes": missing_sizes,
+        }
+        cards_with_missing_images.append(missing_info)
     logger.info("Found %d cards with missing images", len(cards_with_missing_images))
 
     # Process cards in parallel
