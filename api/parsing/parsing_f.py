@@ -303,9 +303,10 @@ def create_basic_parsers() -> dict[str, ParserElement]:
     literal_number = float_number | integer
 
     # For attribute values, we want the raw string
-    # Use Regex to match words that may contain hyphens for string values
+    # Use Regex to match words that may contain hyphens or dots for string values
     # Allow values starting with digits, letters, or underscores to handle cases like "40k-model"
-    string_value_word = Regex(r"[a-zA-Z0-9_][a-zA-Z0-9_-]*")
+    # Allow dots so queries like o:token. parse correctly (period as sentence-end punctuation)
+    string_value_word = Regex(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]*")
 
     return {
         "attrop": attrop,
@@ -801,11 +802,12 @@ def _get_implicit_and_tokenizer() -> ParserElement:
     # Float (before string_value_word so "3.5" is one token)
     float_tok = Regex(r"\b\d+\.\d*\b").setParseAction(lambda t: t[0])
 
-    # Value/word: alphanumeric, underscores, hyphens (matches bar, 40k-model, name, 1, 2, etc.)
+    # Value/word: alphanumeric, underscores, hyphens, dots (matches bar, 40k-model, token., etc.)
     # Must come before mana_tok so "bar" and "bolt" are one token, not "b" + mana.
     # Trailing hyphens are forbidden so "power-(" is not absorbed as one token "power-";
-    # the regex requires the last character to be alphanumeric/underscore.
-    string_value_tok = Regex(r"[a-zA-Z0-9_]([a-zA-Z0-9_-]*[a-zA-Z0-9_])?").setParseAction(lambda t: t[0])
+    # the regex requires the last character to be alphanumeric/underscore/dot.
+    # Dots are allowed so queries like o:token. parse correctly (period as sentence-end punctuation).
+    string_value_tok = Regex(r"[a-zA-Z0-9_]([a-zA-Z0-9_.-]*[a-zA-Z0-9_.])?").setParseAction(lambda t: t[0])
 
     # Mana pattern (e.g. {1}{G}, {w}{u}, {2/W}G) as one token.
     # mana_tok only fires when the sequence STARTS with "{" (string_value_tok above would
