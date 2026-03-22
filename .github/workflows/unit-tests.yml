@@ -37,6 +37,15 @@ jobs:
           fi
           uv pip install --system --break-system-packages -r requirements/base.txt -r requirements/test.txt
 
-      - name: Run tests
+      - name: Run Python tests
         run: |
           python -m pytest -vvv --durations=10
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run JavaScript tests
+        run: |
+          npm test

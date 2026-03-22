@@ -4,7 +4,8 @@
   "description": "An open source Magic: The Gathering card search engine. Unofficial Fan Content permitted under the Wizards of the Coast Fan Content Policy. Not approved/endorsed by Wizards. Card data from Scryfall.",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node api/tests/test_index_js.mjs",
+    "test:js": "node api/tests/test_index_js.mjs",
     "format": "prettier --write api/index.html",
     "format:check": "prettier --check api/index.html"
   },

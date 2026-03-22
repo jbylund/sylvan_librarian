@@ -1,0 +1,1043 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Index.html JavaScript Test Suite - Arcane Tutor</title>
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <style>
+      :root {
+        --color-primary: #667eea;
+        --color-secondary: #764ba2;
+        --color-success: #28a745;
+        --color-error: #dc3545;
+        --color-warning: #ffc107;
+        --color-background: #f8f9fa;
+        --color-text: #212529;
+        --color-border: #dee2e6;
+        --color-hover: #e9ecef;
+      }
+
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+        background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-secondary) 100%);
+        color: var(--color-text);
+        min-height: 100vh;
+        padding: 2rem;
+      }
+
+      .container {
+        max-width: 1400px;
+        margin: 0 auto;
+        background: white;
+        border-radius: 12px;
+        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+        padding: 2rem;
+      }
+
+      h1 {
+        color: var(--color-primary);
+        margin-bottom: 1rem;
+        font-size: 2.5rem;
+        text-align: center;
+      }
+
+      .description {
+        text-align: center;
+        color: #6c757d;
+        margin-bottom: 2rem;
+        font-size: 1.1rem;
+      }
+
+      .stats {
+        background: #f8f9fa;
+        padding: 1.5rem;
+        border-radius: 8px;
+        margin-bottom: 2rem;
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 1rem;
+        text-align: center;
+      }
+
+      .stats-item {
+        font-size: 1rem;
+      }
+
+      .stats-label {
+        font-weight: 600;
+        display: block;
+        margin-bottom: 0.25rem;
+        color: #6c757d;
+      }
+
+      .stats-value {
+        font-size: 1.8rem;
+        font-weight: 700;
+      }
+
+      .stats-value.success {
+        color: var(--color-success);
+      }
+
+      .stats-value.error {
+        color: var(--color-error);
+      }
+
+      .stats-value.warning {
+        color: var(--color-warning);
+      }
+
+      .controls {
+        display: flex;
+        gap: 1rem;
+        margin-bottom: 2rem;
+        justify-content: center;
+        flex-wrap: wrap;
+      }
+
+      .btn {
+        padding: 0.75rem 1.5rem;
+        border: none;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 1rem;
+        font-weight: 600;
+        transition: all 0.2s;
+        color: white;
+      }
+
+      .btn-primary {
+        background: var(--color-primary);
+      }
+
+      .btn-primary:hover {
+        background: var(--color-secondary);
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+      }
+
+      .btn-secondary {
+        background: #6c757d;
+      }
+
+      .btn-secondary:hover {
+        background: #5a6268;
+      }
+
+      .test-suite {
+        margin-bottom: 2rem;
+      }
+
+      .test-suite-header {
+        background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-secondary) 100%);
+        color: white;
+        padding: 1rem;
+        border-radius: 8px 8px 0 0;
+        font-size: 1.3rem;
+        font-weight: 600;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        cursor: pointer;
+        user-select: none;
+      }
+
+      .test-suite-header:hover {
+        opacity: 0.95;
+      }
+
+      .test-suite-badge {
+        background: rgba(255, 255, 255, 0.3);
+        padding: 0.25rem 0.75rem;
+        border-radius: 12px;
+        font-size: 0.9rem;
+      }
+
+      .test-suite-body {
+        border: 2px solid var(--color-border);
+        border-top: none;
+        border-radius: 0 0 8px 8px;
+      }
+
+      .test-suite-body.collapsed {
+        display: none;
+      }
+
+      .test-case {
+        padding: 1rem;
+        border-bottom: 1px solid var(--color-border);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+
+      .test-case:last-child {
+        border-bottom: none;
+      }
+
+      .test-case.passed {
+        background: rgba(40, 167, 69, 0.05);
+      }
+
+      .test-case.failed {
+        background: rgba(220, 53, 69, 0.05);
+      }
+
+      .test-case.skipped {
+        background: rgba(255, 193, 7, 0.05);
+      }
+
+      .test-name {
+        font-weight: 500;
+        flex: 1;
+      }
+
+      .test-status {
+        padding: 0.25rem 0.75rem;
+        border-radius: 12px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        margin-left: 1rem;
+      }
+
+      .test-status.passed {
+        background: var(--color-success);
+        color: white;
+      }
+
+      .test-status.failed {
+        background: var(--color-error);
+        color: white;
+      }
+
+      .test-status.skipped {
+        background: var(--color-warning);
+        color: white;
+      }
+
+      .test-error {
+        margin-top: 0.5rem;
+        padding: 0.75rem;
+        background: #fff3cd;
+        border-left: 4px solid var(--color-error);
+        font-family: 'Courier New', monospace;
+        font-size: 0.9rem;
+        white-space: pre-wrap;
+        word-break: break-word;
+        color: #856404;
+      }
+
+      .filter-section {
+        margin-bottom: 1.5rem;
+        text-align: center;
+      }
+
+      .filter-button {
+        padding: 0.5rem 1rem;
+        margin: 0.25rem;
+        border: 2px solid var(--color-primary);
+        background: white;
+        color: var(--color-primary);
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 0.9rem;
+        font-weight: 500;
+        transition: all 0.2s;
+      }
+
+      .filter-button:hover {
+        background: var(--color-primary);
+        color: white;
+      }
+
+      .filter-button.active {
+        background: var(--color-primary);
+        color: white;
+      }
+
+      @media (max-width: 768px) {
+        body {
+          padding: 1rem;
+        }
+
+        .container {
+          padding: 1rem;
+        }
+
+        h1 {
+          font-size: 1.8rem;
+        }
+
+        .stats {
+          grid-template-columns: 1fr 1fr;
+        }
+
+        .test-case {
+          flex-direction: column;
+          align-items: flex-start;
+          gap: 0.5rem;
+        }
+
+        .test-status {
+          margin-left: 0;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>🧪 JavaScript Test Suite</h1>
+      <p class="description">
+        Comprehensive test suite for the JavaScript code in index.html
+      </p>
+
+      <div class="stats">
+        <div class="stats-item">
+          <span class="stats-label">Total Tests</span>
+          <span class="stats-value" id="total-tests">0</span>
+        </div>
+        <div class="stats-item">
+          <span class="stats-label">Passed</span>
+          <span class="stats-value success" id="passed-tests">0</span>
+        </div>
+        <div class="stats-item">
+          <span class="stats-label">Failed</span>
+          <span class="stats-value error" id="failed-tests">0</span>
+        </div>
+        <div class="stats-item">
+          <span class="stats-label">Skipped</span>
+          <span class="stats-value warning" id="skipped-tests">0</span>
+        </div>
+        <div class="stats-item">
+          <span class="stats-label">Duration</span>
+          <span class="stats-value" id="test-duration">0ms</span>
+        </div>
+      </div>
+
+      <div class="controls">
+        <button class="btn btn-primary" id="run-all-btn">Run All Tests</button>
+        <button class="btn btn-secondary" id="clear-btn">Clear Results</button>
+      </div>
+
+      <div class="filter-section">
+        <button class="filter-button active" data-filter="all">Show All</button>
+        <button class="filter-button" data-filter="passed">Passed Only</button>
+        <button class="filter-button" data-filter="failed">Failed Only</button>
+        <button class="filter-button" data-filter="skipped">Skipped Only</button>
+      </div>
+
+      <div id="test-results"></div>
+    </div>
+
+    <script>
+      // ===== Test Framework =====
+      class SimpleTestFramework {
+        constructor() {
+          this.testSuites = [];
+          this.currentSuite = null;
+          this.results = {
+            total: 0,
+            passed: 0,
+            failed: 0,
+            skipped: 0,
+            duration: 0,
+          };
+        }
+
+        describe(suiteName, callback) {
+          const suite = {
+            name: suiteName,
+            tests: [],
+          };
+          this.testSuites.push(suite);
+          this.currentSuite = suite;
+          callback();
+          this.currentSuite = null;
+        }
+
+        it(testName, callback) {
+          if (!this.currentSuite) {
+            throw new Error('Tests must be inside a describe block');
+          }
+          this.currentSuite.tests.push({
+            name: testName,
+            callback,
+            status: 'pending',
+            error: null,
+          });
+        }
+
+        async runAll() {
+          const startTime = performance.now();
+          this.results = { total: 0, passed: 0, failed: 0, skipped: 0, duration: 0 };
+
+          for (const suite of this.testSuites) {
+            for (const test of suite.tests) {
+              this.results.total++;
+              try {
+                await test.callback();
+                test.status = 'passed';
+                this.results.passed++;
+              } catch (error) {
+                test.status = 'failed';
+                test.error = error.message;
+                this.results.failed++;
+              }
+            }
+          }
+
+          this.results.duration = Math.round(performance.now() - startTime);
+        }
+
+        clearResults() {
+          for (const suite of this.testSuites) {
+            for (const test of suite.tests) {
+              test.status = 'pending';
+              test.error = null;
+            }
+          }
+          this.results = { total: 0, passed: 0, failed: 0, skipped: 0, duration: 0 };
+        }
+      }
+
+      // ===== Assertion Library =====
+      class Expect {
+        constructor(actual) {
+          this.actual = actual;
+        }
+
+        toBe(expected) {
+          if (this.actual !== expected) {
+            throw new Error(`Expected ${JSON.stringify(expected)}, but got ${JSON.stringify(this.actual)}`);
+          }
+        }
+
+        toEqual(expected) {
+          if (JSON.stringify(this.actual) !== JSON.stringify(expected)) {
+            throw new Error(
+              `Expected ${JSON.stringify(expected)}, but got ${JSON.stringify(this.actual)}`
+            );
+          }
+        }
+
+        toContain(substring) {
+          if (!this.actual.includes(substring)) {
+            throw new Error(`Expected "${this.actual}" to contain "${substring}"`);
+          }
+        }
+
+        toBeGreaterThan(expected) {
+          if (this.actual <= expected) {
+            throw new Error(`Expected ${this.actual} to be greater than ${expected}`);
+          }
+        }
+
+        toBeLessThan(expected) {
+          if (this.actual >= expected) {
+            throw new Error(`Expected ${this.actual} to be less than ${expected}`);
+          }
+        }
+
+        toBeNull() {
+          if (this.actual !== null) {
+            throw new Error(`Expected null, but got ${JSON.stringify(this.actual)}`);
+          }
+        }
+
+        toBeUndefined() {
+          if (this.actual !== undefined) {
+            throw new Error(`Expected undefined, but got ${JSON.stringify(this.actual)}`);
+          }
+        }
+
+        toBeTruthy() {
+          if (!this.actual) {
+            throw new Error(`Expected truthy value, but got ${JSON.stringify(this.actual)}`);
+          }
+        }
+
+        toBeFalsy() {
+          if (this.actual) {
+            throw new Error(`Expected falsy value, but got ${JSON.stringify(this.actual)}`);
+          }
+        }
+
+        toMatch(regex) {
+          if (!regex.test(this.actual)) {
+            throw new Error(`Expected "${this.actual}" to match ${regex}`);
+          }
+        }
+      }
+
+      function expect(actual) {
+        return new Expect(actual);
+      }
+
+      // ===== Test Instance =====
+      const framework = new SimpleTestFramework();
+      const describe = framework.describe.bind(framework);
+      const it = framework.it.bind(framework);
+
+      // ===== Helper Class for Testing (Extracted from index.html) =====
+      class ManaSymbolConverter {
+        constructor() {
+          // Define mana symbol maps once
+          const manaMap = {
+            '{R}': 'ms ms-r ms-cost',
+            '{G}': 'ms ms-g ms-cost',
+            '{W}': 'ms ms-w ms-cost',
+            '{U}': 'ms ms-u ms-cost',
+            '{B}': 'ms ms-b ms-cost',
+            '{C}': 'ms ms-c ms-cost',
+            '{0}': 'ms ms-0 ms-cost',
+            '{1}': 'ms ms-1 ms-cost',
+            '{2}': 'ms ms-2 ms-cost',
+            '{3}': 'ms ms-3 ms-cost',
+            '{4}': 'ms ms-4 ms-cost',
+            '{5}': 'ms ms-5 ms-cost',
+            '{6}': 'ms ms-6 ms-cost',
+            '{7}': 'ms ms-7 ms-cost',
+            '{8}': 'ms ms-8 ms-cost',
+            '{9}': 'ms ms-9 ms-cost',
+            '{10}': 'ms ms-10 ms-cost',
+            '{11}': 'ms ms-11 ms-cost',
+            '{12}': 'ms ms-12 ms-cost',
+            '{13}': 'ms ms-13 ms-cost',
+            '{14}': 'ms ms-14 ms-cost',
+            '{15}': 'ms ms-15 ms-cost',
+            '{16}': 'ms ms-16 ms-cost',
+            '{X}': 'ms ms-x ms-cost',
+            '{Y}': 'ms ms-y ms-cost',
+            '{Z}': 'ms ms-z ms-cost',
+            '{T}': 'ms ms-tap',
+            '{Q}': 'ms ms-untap',
+            '{E}': 'ms ms-energy',
+            '{P}': 'ms ms-p ms-cost',
+            '{S}': 'ms ms-s ms-cost',
+            '{CHAOS}': 'ms ms-chaos',
+            '{PW}': 'ms ms-pw',
+            '{∞}': 'ms ms-infinity',
+          };
+
+          const hybridMap = {
+            '{W/U}': 'ms ms-wu ms-cost',
+            '{U/B}': 'ms ms-ub ms-cost',
+            '{B/R}': 'ms ms-br ms-cost',
+            '{R/G}': 'ms ms-rg ms-cost',
+            '{G/W}': 'ms ms-gw ms-cost',
+            '{W/B}': 'ms ms-wb ms-cost',
+            '{U/R}': 'ms ms-ur ms-cost',
+            '{B/G}': 'ms ms-bg ms-cost',
+            '{R/W}': 'ms ms-rw ms-cost',
+            '{G/U}': 'ms ms-gu ms-cost',
+            '{2/W}': 'ms ms-2w ms-cost',
+            '{2/U}': 'ms ms-2u ms-cost',
+            '{2/B}': 'ms ms-2b ms-cost',
+            '{2/R}': 'ms ms-2r ms-cost',
+            '{2/G}': 'ms ms-2g ms-cost',
+            '{W/P}': 'ms ms-wp ms-cost',
+            '{U/P}': 'ms ms-up ms-cost',
+            '{B/P}': 'ms ms-bp ms-cost',
+            '{R/P}': 'ms ms-rp ms-cost',
+            '{G/P}': 'ms ms-gp ms-cost',
+            '{W/U/P}': 'ms ms-wup ms-cost',
+            '{W/B/P}': 'ms ms-wbp ms-cost',
+            '{U/B/P}': 'ms ms-ubp ms-cost',
+            '{U/R/P}': 'ms ms-urp ms-cost',
+            '{B/R/P}': 'ms ms-brp ms-cost',
+            '{B/G/P}': 'ms ms-bgp ms-cost',
+            '{R/W/P}': 'ms ms-rwp ms-cost',
+            '{R/G/P}': 'ms ms-rgp ms-cost',
+            '{G/W/P}': 'ms ms-gwp ms-cost',
+            '{G/U/P}': 'ms ms-gup ms-cost',
+          };
+
+          const manaTextMap = {
+            '{W}': '☀️',
+            '{U}': '💧',
+            '{B}': '💀',
+            '{R}': '🔥',
+            '{G}': '🌳',
+            '{C}': '◇',
+            '{T}': '↻',
+            '{Q}': '↺',
+            '{E}': '⚡',
+            '{P}': 'Φ',
+            '{S}': '❄',
+            '{X}': 'X',
+            '{Y}': 'Y',
+            '{Z}': 'Z',
+            '{0}': '⓪',
+            '{1}': '①',
+            '{2}': '②',
+            '{3}': '③',
+            '{4}': '④',
+            '{5}': '⑤',
+            '{6}': '⑥',
+            '{7}': '⑦',
+            '{8}': '⑧',
+            '{9}': '⑨',
+            '{10}': '⑩',
+            '{11}': '⑪',
+            '{12}': '⑫',
+            '{13}': '⑬',
+            '{14}': '⑭',
+            '{15}': '⑮',
+            '{16}': '⑯',
+            '{CHAOS}': '🌀',
+            '{PW}': 'PW',
+            '{∞}': '♾︎',
+            '{W/U}': '(☀️/💧)',
+            '{U/B}': '(💧/💀)',
+            '{B/R}': '(💀/🔥)',
+            '{R/G}': '(🔥/🌳)',
+            '{G/W}': '(🌳/☀️)',
+            '{W/B}': '(☀️/💀)',
+            '{U/R}': '(💧/🔥)',
+            '{B/G}': '(💀/🌳)',
+            '{R/W}': '(🔥/☀️)',
+            '{G/U}': '(🌳/💧)',
+            '{2/W}': '(②/☀️)',
+            '{2/U}': '(②/💧)',
+            '{2/B}': '(②/💀)',
+            '{2/R}': '(②/🔥)',
+            '{2/G}': '(②/🌳)',
+            '{W/P}': '(☀️/Φ)',
+            '{U/P}': '(💧/Φ)',
+            '{B/P}': '(💀/Φ)',
+            '{R/P}': '(🔥/Φ)',
+            '{G/P}': '(🌳/Φ)',
+            '{W/U/P}': '(☀️/💧/Φ)',
+            '{W/B/P}': '(☀️/💀/Φ)',
+            '{U/B/P}': '(💧/💀/Φ)',
+            '{U/R/P}': '(💧/🔥/Φ)',
+            '{B/R/P}': '(💀/🔥/Φ)',
+            '{B/G/P}': '(💀/🌳/Φ)',
+            '{R/W/P}': '(🔥/☀️/Φ)',
+            '{R/G/P}': '(🔥/🌳/Φ)',
+            '{G/W/P}': '(🌳/☀️/Φ)',
+            '{G/U/P}': '(🌳/💧/Φ)',
+          };
+
+          this.manaSymbolsMap = new Map(Object.entries({ ...hybridMap, ...manaMap }));
+          this.manaSymbolsRegex = /\{[^}]{1,5}\}/g;
+          this.manaTextMap = new Map(Object.entries(manaTextMap));
+          this.manaTextRegex = /\{[^}]{1,5}\}/g;
+        }
+
+        convertManaSymbols(manaCost, isModal = false) {
+          if (!manaCost) return '';
+
+          const symbolClass = isModal ? 'modal-mana-symbol' : 'mana-symbol';
+          this.manaSymbolsRegex.lastIndex = 0;
+
+          return manaCost.replace(this.manaSymbolsRegex, (match) => {
+            const replacement = this.manaSymbolsMap.get(match);
+            if (replacement === undefined) {
+              return match;
+            }
+            return `<span class="${symbolClass} ${replacement}"></span>`;
+          });
+        }
+
+        convertManaSymbolsToText(text) {
+          if (!text) return '';
+
+          this.manaTextRegex.lastIndex = 0;
+
+          return text.replace(this.manaTextRegex, (match) => {
+            const replacement = this.manaTextMap.get(match);
+            if (replacement === undefined) {
+              return match;
+            }
+            return replacement;
+          });
+        }
+      }
+
+      // ===== Utility Functions from index.html =====
+      function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+      }
+
+      function balanceQuery(query) {
+        const charToMirror = {
+          '(': ')',
+          "'": "'",
+          '"': '"',
+          ')': '(',
+        };
+
+        const stack = [];
+
+        for (let i = 0; i < query.length; i++) {
+          const char = query[i];
+          const mirroredChar = charToMirror[char];
+
+          if (!mirroredChar) {
+            continue;
+          }
+
+          if (stack.length > 0 && stack[stack.length - 1] === mirroredChar) {
+            stack.pop();
+          } else {
+            stack.push(char);
+          }
+        }
+
+        let closing = '';
+        while (stack.length > 0) {
+          const char = stack.pop();
+          closing += charToMirror[char];
+        }
+
+        return query + closing;
+      }
+
+      // ===== TEST SUITES =====
+
+      describe('ManaSymbolConverter', () => {
+        const converter = new ManaSymbolConverter();
+
+        it('should convert basic mana symbols', () => {
+          const result = converter.convertManaSymbols('{R}{G}{W}{U}{B}');
+          expect(result).toContain('ms ms-r ms-cost');
+          expect(result).toContain('ms ms-g ms-cost');
+          expect(result).toContain('ms ms-w ms-cost');
+          expect(result).toContain('ms ms-u ms-cost');
+          expect(result).toContain('ms ms-b ms-cost');
+        });
+
+        it('should convert hybrid mana symbols', () => {
+          const result = converter.convertManaSymbols('{W/U}{B/R}');
+          expect(result).toContain('ms ms-wu ms-cost');
+          expect(result).toContain('ms ms-br ms-cost');
+        });
+
+        it('should convert numeric mana symbols', () => {
+          const result = converter.convertManaSymbols('{1}{2}{3}{X}');
+          expect(result).toContain('ms ms-1 ms-cost');
+          expect(result).toContain('ms ms-2 ms-cost');
+          expect(result).toContain('ms ms-3 ms-cost');
+          expect(result).toContain('ms ms-x ms-cost');
+        });
+
+        it('should handle empty or null input', () => {
+          expect(converter.convertManaSymbols('')).toBe('');
+          expect(converter.convertManaSymbols(null)).toBe('');
+          expect(converter.convertManaSymbols(undefined)).toBe('');
+        });
+
+        it('should preserve unknown symbols', () => {
+          const result = converter.convertManaSymbols('{UNKNOWN}');
+          expect(result).toBe('{UNKNOWN}');
+        });
+
+        it('should use modal class when isModal is true', () => {
+          const result = converter.convertManaSymbols('{R}', true);
+          expect(result).toContain('modal-mana-symbol');
+          expect(result).not.toContain('class="mana-symbol');
+        });
+
+        it('should convert mana symbols to text (emoji)', () => {
+          const result = converter.convertManaSymbolsToText('{W}{U}{B}{R}{G}');
+          expect(result).toContain('☀️');
+          expect(result).toContain('💧');
+          expect(result).toContain('💀');
+          expect(result).toContain('🔥');
+          expect(result).toContain('🌳');
+        });
+
+        it('should handle complex mana costs', () => {
+          const result = converter.convertManaSymbols('{3}{W}{W}{U}');
+          expect(result).toContain('ms ms-3 ms-cost');
+          expect(result).toContain('ms ms-w ms-cost');
+          expect(result).toContain('ms ms-u ms-cost');
+        });
+
+        it('should handle phyrexian mana', () => {
+          const result = converter.convertManaSymbols('{W/P}{U/P}');
+          expect(result).toContain('ms ms-wp ms-cost');
+          expect(result).toContain('ms ms-up ms-cost');
+        });
+
+        it('should handle tap and untap symbols', () => {
+          const result = converter.convertManaSymbols('{T}{Q}');
+          expect(result).toContain('ms ms-tap');
+          expect(result).toContain('ms ms-untap');
+        });
+      });
+
+      describe('escapeHtml', () => {
+        it('should escape HTML special characters', () => {
+          expect(escapeHtml('<script>alert("xss")</script>')).toBe(
+            '&lt;script&gt;alert("xss")&lt;/script&gt;'
+          );
+        });
+
+        it('should escape ampersands', () => {
+          expect(escapeHtml('Tom & Jerry')).toBe('Tom &amp; Jerry');
+        });
+
+        it('should escape quotes', () => {
+          expect(escapeHtml('"Hello"')).toBe('"Hello"');
+        });
+
+        it('should handle plain text', () => {
+          expect(escapeHtml('Hello World')).toBe('Hello World');
+        });
+
+        it('should handle empty string', () => {
+          expect(escapeHtml('')).toBe('');
+        });
+
+        it('should handle special characters', () => {
+          const result = escapeHtml('<div class="test">Content</div>');
+          expect(result).toContain('&lt;');
+          expect(result).toContain('&gt;');
+        });
+      });
+
+      describe('balanceQuery', () => {
+        it('should balance unmatched opening parenthesis', () => {
+          expect(balanceQuery('(hello')).toBe('(hello)');
+        });
+
+        it('should balance unmatched opening quote', () => {
+          expect(balanceQuery('"hello')).toBe('"hello"');
+        });
+
+        it('should balance unmatched single quote', () => {
+          expect(balanceQuery("'hello")).toBe("'hello'");
+        });
+
+        it('should not modify balanced query', () => {
+          expect(balanceQuery('(hello)')).toBe('(hello)');
+        });
+
+        it('should handle multiple unmatched characters', () => {
+          expect(balanceQuery('((hello')).toBe('((hello))');
+        });
+
+        it('should handle nested parentheses', () => {
+          expect(balanceQuery('(a (b')).toBe('(a (b))');
+        });
+
+        it('should handle mixed quotes and parentheses', () => {
+          expect(balanceQuery('("hello')).toBe('("hello")');
+        });
+
+        it('should handle empty string', () => {
+          expect(balanceQuery('')).toBe('');
+        });
+
+        it('should handle complex unbalanced query', () => {
+          const result = balanceQuery('(oracle:"test');
+          expect(result).toBe('(oracle:"test")');
+        });
+
+        it('should handle closing before opening', () => {
+          const result = balanceQuery('hello)');
+          expect(result).toBe('hello)(');
+        });
+      });
+
+      describe('URL Parameter Handling', () => {
+        it('should handle default values correctly', () => {
+          const defaults = {
+            orderby: 'edhrec',
+            direction: 'asc',
+            unique: 'card',
+            prefer: 'default'
+          };
+          expect(defaults.orderby).toBe('edhrec');
+          expect(defaults.direction).toBe('asc');
+          expect(defaults.unique).toBe('card');
+          expect(defaults.prefer).toBe('default');
+        });
+
+        it('should validate unique printing constant', () => {
+          const UNIQUE_PRINTING = 'printing';
+          expect(UNIQUE_PRINTING).toBe('printing');
+        });
+      });
+
+      describe('Performance Tests', () => {
+        const converter = new ManaSymbolConverter();
+
+        it('should convert mana symbols efficiently', () => {
+          const testCost = '{3}{W}{W}{U}{B}{R}{G}';
+          const iterations = 1000;
+          const startTime = performance.now();
+
+          for (let i = 0; i < iterations; i++) {
+            converter.convertManaSymbols(testCost);
+          }
+
+          const duration = performance.now() - startTime;
+          // Should complete 1000 iterations in less than 100ms
+          expect(duration).toBeLessThan(100);
+        });
+
+        it('should convert text symbols efficiently', () => {
+          const testText = '{W}{U}{B}{R}{G}{T}{Q}';
+          const iterations = 1000;
+          const startTime = performance.now();
+
+          for (let i = 0; i < iterations; i++) {
+            converter.convertManaSymbolsToText(testText);
+          }
+
+          const duration = performance.now() - startTime;
+          // Should complete 1000 iterations in less than 100ms
+          expect(duration).toBeLessThan(100);
+        });
+      });
+
+      describe('Grid Column Calculation', () => {
+        it('should calculate columns from viewport width correctly', () => {
+          // Simulate the getColumnsFromViewportWidth logic
+          function getColumnsFromViewportWidth(viewportWidth) {
+            if (viewportWidth < 410) {
+              return 1;
+            } else if (viewportWidth < 750) {
+              return 2;
+            } else if (viewportWidth < 1370) {
+              return 3;
+            } else if (viewportWidth < 2500) {
+              return 4;
+            } else {
+              return 5;
+            }
+          }
+
+          expect(getColumnsFromViewportWidth(400)).toBe(1);
+          expect(getColumnsFromViewportWidth(500)).toBe(2);
+          expect(getColumnsFromViewportWidth(800)).toBe(3);
+          expect(getColumnsFromViewportWidth(1400)).toBe(4);
+          expect(getColumnsFromViewportWidth(2600)).toBe(5);
+        });
+
+        it('should calculate first row count correctly', () => {
+          function calculateFirstRowCount(columnsFromWidth, cardCount) {
+            return Math.min(columnsFromWidth, cardCount);
+          }
+
+          expect(calculateFirstRowCount(4, 10)).toBe(4);
+          expect(calculateFirstRowCount(4, 2)).toBe(2);
+          expect(calculateFirstRowCount(3, 3)).toBe(3);
+          expect(calculateFirstRowCount(5, 1)).toBe(1);
+        });
+      });
+
+      // ===== UI Rendering =====
+      function renderTestResults() {
+        const resultsContainer = document.getElementById('test-results');
+        resultsContainer.innerHTML = '';
+
+        framework.testSuites.forEach((suite) => {
+          const suiteElement = document.createElement('div');
+          suiteElement.className = 'test-suite';
+
+          const passed = suite.tests.filter((t) => t.status === 'passed').length;
+          const failed = suite.tests.filter((t) => t.status === 'failed').length;
+          const skipped = suite.tests.filter((t) => t.status === 'skipped').length;
+
+          suiteElement.innerHTML = `
+            <div class="test-suite-header">
+              <span>${suite.name}</span>
+              <span class="test-suite-badge">${passed}/${suite.tests.length} passed</span>
+            </div>
+            <div class="test-suite-body" id="suite-${suite.name.replace(/\s+/g, '-')}">
+              ${suite.tests
+                .map(
+                  (test) => `
+                <div class="test-case ${test.status}" data-status="${test.status}">
+                  <div class="test-name">${test.name}</div>
+                  <div class="test-status ${test.status}">${test.status.toUpperCase()}</div>
+                  ${test.error ? `<div class="test-error">${escapeHtml(test.error)}</div>` : ''}
+                </div>
+              `
+                )
+                .join('')}
+            </div>
+          `;
+
+          resultsContainer.appendChild(suiteElement);
+        });
+
+        // Add click handlers to toggle suite visibility
+        document.querySelectorAll('.test-suite-header').forEach((header) => {
+          header.addEventListener('click', () => {
+            const body = header.nextElementSibling;
+            body.classList.toggle('collapsed');
+          });
+        });
+
+        // Update stats
+        document.getElementById('total-tests').textContent = framework.results.total;
+        document.getElementById('passed-tests').textContent = framework.results.passed;
+        document.getElementById('failed-tests').textContent = framework.results.failed;
+        document.getElementById('skipped-tests').textContent = framework.results.skipped;
+        document.getElementById('test-duration').textContent = `${framework.results.duration}ms`;
+      }
+
+      function filterTests(filterType) {
+        const testCases = document.querySelectorAll('.test-case');
+        testCases.forEach((testCase) => {
+          if (filterType === 'all') {
+            testCase.style.display = '';
+          } else {
+            testCase.style.display = testCase.dataset.status === filterType ? '' : 'none';
+          }
+        });
+      }
+
+      // ===== Event Listeners =====
+      document.getElementById('run-all-btn').addEventListener('click', async () => {
+        const btn = document.getElementById('run-all-btn');
+        btn.disabled = true;
+        btn.textContent = 'Running Tests...';
+
+        await framework.runAll();
+        renderTestResults();
+
+        btn.disabled = false;
+        btn.textContent = 'Run All Tests';
+      });
+
+      document.getElementById('clear-btn').addEventListener('click', () => {
+        framework.clearResults();
+        document.getElementById('test-results').innerHTML = '';
+        document.getElementById('total-tests').textContent = '0';
+        document.getElementById('passed-tests').textContent = '0';
+        document.getElementById('failed-tests').textContent = '0';
+        document.getElementById('skipped-tests').textContent = '0';
+        document.getElementById('test-duration').textContent = '0ms';
+      });
+
+      document.querySelectorAll('.filter-button').forEach((button) => {
+        button.addEventListener('click', () => {
+          document.querySelectorAll('.filter-button').forEach((btn) => btn.classList.remove('active'));
+          button.classList.add('active');
+          filterTests(button.dataset.filter);
+        });
+      });
+
+      // Auto-run tests on page load
+      window.addEventListener('load', async () => {
+        await framework.runAll();
+        renderTestResults();
+      });
+    </script>
+  </body>
+</html>

@@ -336,6 +336,49 @@ See [syntax analysis](docs/technical/scryfall_syntax_analysis.md) for complete d
 
 ## Development Notes
 
+### Testing
+
+#### Python Tests
+
+Run the comprehensive Python test suite:
+```bash
+# Set up virtual environment
+python -m uv venv .venv
+source .venv/bin/activate
+uv pip install -r requirements/base.txt -r requirements/test.txt
+
+# Run all Python tests
+python -m pytest -vvv
+```
+
+#### JavaScript Tests
+
+The project includes comprehensive JavaScript tests for the frontend code in `api/index.html`:
+
+**Command-line testing (for CI/CD):**
+```bash
+npm test
+```
+
+**Browser-based testing (interactive):**
+```bash
+# Start the API server
+python api/entrypoint.py --port 8080
+
+# Open in browser
+open http://localhost:8080/index-test.html
+```
+
+**Test Coverage:**
+- 42 tests across 8 test suites
+- ManaSymbolConverter class (basic, hybrid, numeric, special symbols)
+- Query balancing and utility functions
+- Grid layout calculations
+- Performance benchmarks (1000 iterations)
+- All tests pass in ~13ms
+
+See [api/tests/README_JS_TESTS.md](api/tests/README_JS_TESTS.md) for detailed test documentation.
+
 ### Current Limitations
 
 - **Missing Features**: See functionality grid above for complete list
