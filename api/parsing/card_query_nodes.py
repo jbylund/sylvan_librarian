@@ -158,6 +158,8 @@ def get_colors_comparison_object(val: str) -> dict[str, bool]:
 
     Returns:
         Dictionary mapping color codes to True for matching colors.
+        Returns an empty dict for colorless ('c' or 'colorless'), since colorless
+        cards are stored with an empty color identity in the database.
 
     Raises:
         ValueError: If the color string is invalid.
@@ -165,10 +167,14 @@ def get_colors_comparison_object(val: str) -> dict[str, bool]:
     # If all chars are color codes
     color_code_set = set(COLOR_CODE_TO_NAME)
     if val and set(val) <= color_code_set:
-        return {c.upper(): True for c in val}
+        # Colorless-only queries use an empty dict, matching how colorless cards
+        # are stored (card_color_identity = {}) rather than {"C": True}.
+        return {c.upper(): True for c in val if c != "c"}
     # If it's a color name (e.g. 'red', 'blue', etc.)
     try:
         letter_code = COLOR_NAME_TO_CODE[val]
+        if letter_code == "c":
+            return {}
         return {letter_code.upper(): True}
     except KeyError as e:
         msg = f"Invalid color string: {val}"
