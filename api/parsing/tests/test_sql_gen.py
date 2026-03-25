@@ -178,6 +178,26 @@ def test_full_sql_translation_jsonb_colors(input_query: str, expected_sql: str, 
             r"(card.card_color_identity <@ %(p_dict_eydSJzogVHJ1ZSwgJ0cnOiBUcnVlfQ)s AND card.card_color_identity <> %(p_dict_eydSJzogVHJ1ZSwgJ0cnOiBUcnVlfQ)s)",
             {"p_dict_eydSJzogVHJ1ZSwgJ0cnOiBUcnVlfQ": {"R": True, "G": True}},
         ),  # < maps to < (no inversion for <)
+        (
+            "id=c",
+            r"(card.card_color_identity = %(p_dict_e30)s)",
+            {"p_dict_e30": {}},
+        ),  # colorless identity = {} (empty), not {"C": True}
+        (
+            "id:c",
+            r"(card.card_color_identity <@ %(p_dict_e30)s)",
+            {"p_dict_e30": {}},
+        ),  # colorless: cards whose identity is contained by {} (i.e. only colorless)
+        (
+            "id:colorless",
+            r"(card.card_color_identity <@ %(p_dict_e30)s)",
+            {"p_dict_e30": {}},
+        ),  # 'colorless' name resolves to same empty dict
+        (
+            "id=colorless",
+            r"(card.card_color_identity = %(p_dict_e30)s)",
+            {"p_dict_e30": {}},
+        ),  # equality with colorless name
     ],
 )
 def test_color_identity_sql_translation(input_query: str, expected_sql: str, expected_parameters: dict) -> None:
