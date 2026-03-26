@@ -528,16 +528,25 @@ class CardSearch {
       } else {
         elapsed = computedRoundTripMs;
       }
-      this.displayResults(data, normalizedQuery, elapsed);
+      // Only render if this response is still current (a newer request may have started)
+      if (this.currentController === controller) {
+        this.displayResults(data, normalizedQuery, elapsed);
+      }
     } catch (error) {
       if (error.name === 'AbortError') {
-        // Request was cancelled, ignore
+        // If this request wasn't superseded by a newer one, reset lastRequestedUrl
+        // so the same query can be retried later
+        if (this.currentController === controller && this.lastRequestedUrl === url) {
+          this.lastRequestedUrl = null;
+        }
         return;
       }
       // Reset so the user can retry the same query after a transient error
       this.lastRequestedUrl = null;
-      console.error('Search error:', error);
-      this.showError(`Failed to search: ${error.message}`);
+      if (this.currentController === controller) {
+        console.error('Search error:', error);
+        this.showError(`Failed to search: ${error.message}`);
+      }
     } finally {
       // Only clear the shared reference if it still points to this request's controller
       if (this.currentController === controller) {
