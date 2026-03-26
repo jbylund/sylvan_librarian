@@ -319,15 +319,14 @@ class CardSearch {
     // Clear previous timeout
     clearTimeout(this.debounceTimeout);
 
-    // Cancel previous request if still pending
-    if (this.currentController) {
-      this.currentController.abort();
-    }
-
     // Clear results if query is empty
     if (!query.trim()) {
+      if (this.currentController) {
+        this.currentController.abort();
+        this.currentController = null;
+      }
       this.clearResults();
-      this.lastRequestedUrl = null; // Reset URL tracking when clearing
+      this.lastRequestedUrl = null;
       return;
     }
 
@@ -451,10 +450,15 @@ class CardSearch {
     // Generate the URL for this request
     const url = `/search?q=${encodeURIComponent(normalizedQuery)}&orderby=${order}&direction=${orderDirection}&unique=${unique}&prefer=${prefer}`;
 
-    // Check if this is the same URL as the last request - if so, skip the request
     if (this.lastRequestedUrl === url) {
+      // Same URL is already in-flight or just completed — no need to re-fire
       console.log('Skipping duplicate request for URL:', url);
       return;
+    }
+
+    // Different URL: abort any in-flight request before starting the new one
+    if (this.currentController) {
+      this.currentController.abort();
     }
 
     // Show loading state
@@ -462,7 +466,8 @@ class CardSearch {
     this.clearMessages();
 
     // Create new AbortController for this request
-    this.currentController = new AbortController();
+    const controller = new AbortController();
+    this.currentController = controller;
     // Update the last requested URL
     this.lastRequestedUrl = url;
 
@@ -476,7 +481,7 @@ class CardSearch {
         headers: {
           'Content-Type': 'application/json',
         },
-        signal: this.currentController.signal,
+        signal: controller.signal,
       });
       if (!response.ok) {
         // Try to get the error message from the response body
@@ -529,10 +534,15 @@ class CardSearch {
         // Request was cancelled, ignore
         return;
       }
+      // Reset so the user can retry the same query after a transient error
+      this.lastRequestedUrl = null;
       console.error('Search error:', error);
       this.showError(`Failed to search: ${error.message}`);
     } finally {
-      this.currentController = null;
+      // Only clear the shared reference if it still points to this request's controller
+      if (this.currentController === controller) {
+        this.currentController = null;
+      }
     }
   }
 
