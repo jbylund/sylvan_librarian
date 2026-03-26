@@ -22,8 +22,7 @@ class CardSearch {
     this.currentController = null;
     this.imageObserver = null;
     this.cardsData = new Map(); // Store card data by ID
-    this.lastRequestedUrl = null; // Track the last requested URL to prevent duplicate requests
-    this.requestId = 0; // Monotonically increasing; used to discard responses for stale requests
+    this.lastCompletedUrl = null; // URL whose results are currently displayed; null when results are cleared
     this.isAscending = true; // Track order direction
     this.currentCardCount = 0; // Track current number of cards displayed for resize handling
 
@@ -245,19 +244,16 @@ class CardSearch {
       if (q) {
         this.performSearch(q);
       } else {
+        this.lastCompletedUrl = null;
         this.clearResults();
-        this.lastRequestedUrl = null;
       }
     });
 
     // Prevent form submission when JavaScript is enabled
     this.searchForm.addEventListener('submit', e => {
       e.preventDefault();
-      const query = this.searchInput.value.trim();
-      if (query) {
-        clearTimeout(this.debounceTimeout);
-        this.performSearch(query);
-      }
+      clearTimeout(this.debounceTimeout);
+      this.performSearch(this.searchInput.value);
     });
 
     this.searchInput.addEventListener('input', e => {
@@ -322,12 +318,9 @@ class CardSearch {
 
     // Clear results if query is empty
     if (!query.trim()) {
-      if (this.currentController) {
-        this.currentController.abort();
-        this.currentController = null;
-      }
+      this.currentController?.abort();
+      this.lastCompletedUrl = null;
       this.clearResults();
-      this.lastRequestedUrl = null;
       return;
     }
 
@@ -431,7 +424,9 @@ class CardSearch {
   }
 
   async performSearch(query) {
-    if (!query.trim()) return;
+    if (!query.trim()) {
+      return;
+    }
 
     // First, try to autocomplete the query
     const completedQuery = this.autoCompleteQuery(query);
@@ -451,27 +446,21 @@ class CardSearch {
     // Generate the URL for this request
     const url = `/search?q=${encodeURIComponent(normalizedQuery)}&orderby=${order}&direction=${orderDirection}&unique=${unique}&prefer=${prefer}`;
 
-    if (this.lastRequestedUrl === url) {
-      // Same URL is already in-flight or just completed — no need to re-fire
-      console.log('Skipping duplicate request for URL:', url);
-      return;
-    }
+    // Same URL already in-flight — let it finish
+    if (this.currentController?.url === url) return;
+    // Same URL already completed — results are already showing
+    if (this.lastCompletedUrl === url) return;
 
-    // Different URL: abort any in-flight request before starting the new one
-    if (this.currentController) {
-      this.currentController.abort();
-    }
+    // Different URL: abort in-flight and start fresh
+    this.currentController?.abort();
+    const controller = new AbortController();
+    controller.url = url;
+    this.currentController = controller;
+    this.lastCompletedUrl = null; // cleared until this search successfully completes
 
     // Show loading state
     this.showLoading();
     this.clearMessages();
-
-    // Create new AbortController for this request
-    const controller = new AbortController();
-    this.currentController = controller;
-    const requestId = ++this.requestId;
-    // Update the last requested URL
-    this.lastRequestedUrl = url;
 
     try {
       // Clear any previous resource timing entries for this URL
@@ -485,11 +474,14 @@ class CardSearch {
         },
         signal: controller.signal,
       });
+      if (controller.signal.aborted) return;
+
       if (!response.ok) {
         // Try to get the error message from the response body
         let errorMessage = `HTTP error! status: ${response.status}`;
         try {
           const errorData = await response.json();
+          if (controller.signal.aborted) return;
           if (errorData.title && errorData.description) {
             // If description is an object (like with 500 errors), just use the title
             if (typeof errorData.description === 'object') {
@@ -508,7 +500,9 @@ class CardSearch {
         }
         throw new Error(errorMessage);
       }
+
       const data = await response.json();
+      if (controller.signal.aborted) return;
 
       // Compute round-trip duration from our own timestamps
       const computedRoundTripMs = Math.round(performance.now() - startTimestampMs);
@@ -530,26 +524,13 @@ class CardSearch {
       } else {
         elapsed = computedRoundTripMs;
       }
-      // Only render if this response is still current (input may have changed since request started)
-      if (this.requestId === requestId) {
-        this.displayResults(data, normalizedQuery, elapsed);
-      }
+
+      this.lastCompletedUrl = url;
+      this.displayResults(data, normalizedQuery, elapsed);
     } catch (error) {
-      if (error.name === 'AbortError') {
-        // If this request wasn't superseded by a newer one, reset lastRequestedUrl
-        // so the same query can be retried later
-        if (this.requestId === requestId && this.lastRequestedUrl === url) {
-          this.lastRequestedUrl = null;
-        }
-        return;
-      }
-      // Only handle error UI/state if this request hasn't been superseded by a newer one
-      if (this.requestId === requestId) {
-        // Reset so the user can retry the same query after a transient error
-        this.lastRequestedUrl = null;
-        console.error('Search error:', error);
-        this.showError(`Failed to search: ${error.message}`);
-      }
+      if (error.name === 'AbortError') return;
+      console.error('Search error:', error);
+      this.showError(`Failed to search: ${error.message}`);
     } finally {
       // Only clear the shared reference if it still points to this request's controller
       if (this.currentController === controller) {
@@ -921,6 +902,10 @@ class CardSearch {
   }
 
   clearSearch() {
+    clearTimeout(this.debounceTimeout);
+    this.currentController?.abort();
+    this.lastCompletedUrl = null;
+
     // Clear the search input
     this.searchInput.value = '';
 
@@ -1083,67 +1068,47 @@ class CardSearch {
   }
 
   handleOrderChange() {
-    // Update URL with current state
-    const query = this.searchInput.value.trim();
+    const query = this.searchInput.value;
     const order = this.orderDropdown.value;
     const unique = this.uniqueDropdown.value;
     const prefer = this.preferDropdown.value;
     const direction = this.isAscending ? 'asc' : 'desc';
     this.updateURL(query, order, direction, unique, prefer);
-
-    // Trigger a new search with the current query and new order
-    if (query) {
-      this.performSearch(query);
-    }
+    this.performSearch(query);
   }
 
   handleUniqueChange() {
-    // Update URL with current state
-    const query = this.searchInput.value.trim();
+    const query = this.searchInput.value;
     const order = this.orderDropdown.value;
     const unique = this.uniqueDropdown.value;
     const prefer = this.preferDropdown.value;
     const direction = this.isAscending ? 'asc' : 'desc';
     this.updateURL(query, order, direction, unique, prefer);
-
-    // Trigger a new search with the current query and new unique setting
-    if (query) {
-      this.performSearch(query);
-    }
+    this.performSearch(query);
   }
 
   handlePreferChange() {
-    // Update URL with current state
-    const query = this.searchInput.value.trim();
+    const query = this.searchInput.value;
     const order = this.orderDropdown.value;
     const unique = this.uniqueDropdown.value;
     const prefer = this.preferDropdown.value;
     const direction = this.isAscending ? 'asc' : 'desc';
     this.updateURL(query, order, direction, unique, prefer);
-
-    // Trigger a new search with the current query and new prefer setting
-    if (query) {
-      this.performSearch(query);
-    }
+    this.performSearch(query);
   }
 
   toggleOrderDirection() {
     this.isAscending = !this.isAscending;
     this.updateOrderToggleAppearance();
 
-    // Update URL with current state
-    const query = this.searchInput.value.trim();
+    const query = this.searchInput.value;
     const order = this.orderDropdown.value;
     const unique = this.uniqueDropdown.value;
     const prefer = this.preferDropdown.value;
     const direction = this.isAscending ? 'asc' : 'desc';
     this.directionInput.value = direction;
     this.updateURL(query, order, direction, unique, prefer);
-
-    // Trigger a new search with the current query and new order direction
-    if (query) {
-      this.performSearch(query);
-    }
+    this.performSearch(query);
   }
 }
 
