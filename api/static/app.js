@@ -20,9 +20,10 @@ class CardSearch {
     this.debounceTimeout = null;
     this.debounceDelay = 140; // milliseconds
     this.currentController = null;
+    this.currentRequestUrl = null; // URL of the in-flight request, if any
     this.imageObserver = null;
     this.cardsData = new Map(); // Store card data by ID
-    this.lastRequestedUrl = null; // Track the last requested URL to prevent duplicate requests
+    this.lastCompletedUrl = null; // URL whose results are currently displayed; null when results are cleared
     this.isAscending = true; // Track order direction
     this.currentCardCount = 0; // Track current number of cards displayed for resize handling
 
@@ -244,19 +245,18 @@ class CardSearch {
       if (q) {
         this.performSearch(q);
       } else {
+        clearTimeout(this.debounceTimeout);
+        this.currentController?.abort();
+        this.lastCompletedUrl = null;
         this.clearResults();
-        this.lastRequestedUrl = null;
       }
     });
 
     // Prevent form submission when JavaScript is enabled
     this.searchForm.addEventListener('submit', e => {
       e.preventDefault();
-      const query = this.searchInput.value.trim();
-      if (query) {
-        clearTimeout(this.debounceTimeout);
-        this.performSearch(query);
-      }
+      clearTimeout(this.debounceTimeout);
+      this.performSearch(this.searchInput.value);
     });
 
     this.searchInput.addEventListener('input', e => {
@@ -319,22 +319,37 @@ class CardSearch {
     // Clear previous timeout
     clearTimeout(this.debounceTimeout);
 
-    // Cancel previous request if still pending
-    if (this.currentController) {
-      this.currentController.abort();
-    }
-
     // Clear results if query is empty
     if (!query.trim()) {
+      this.currentController?.abort();
+      this.lastCompletedUrl = null;
       this.clearResults();
-      this.lastRequestedUrl = null; // Reset URL tracking when clearing
       return;
+    }
+
+    // If the query has changed from what's currently in-flight, abort immediately
+    // rather than waiting for the debounce to fire a new request.
+    if (this.currentController && !this.currentController.signal.aborted) {
+      const inFlightQuery = this.currentRequestUrl
+        ? new URLSearchParams(this.currentRequestUrl.split('?')[1]).get('q')
+        : null;
+      if (inFlightQuery !== this._processQuery(query)) {
+        this.currentController.abort();
+      }
     }
 
     // Set up debounced search
     this.debounceTimeout = setTimeout(() => {
       this.performSearch(query);
     }, this.debounceDelay);
+  }
+
+  // Applies autocomplete, bracket-balancing, and whitespace normalisation to a raw query string.
+  _processQuery(query) {
+    const autocompleted = this.autoCompleteQuery(query);
+    const balanced = this.balanceQuery(autocompleted);
+    const normalized = balanced.trim().replace(/\s+/g, ' ');
+    return normalized;
   }
 
   async fetchCommonCardTypes() {
@@ -431,16 +446,11 @@ class CardSearch {
   }
 
   async performSearch(query) {
-    if (!query.trim()) return;
+    if (!query.trim()) {
+      return;
+    }
 
-    // First, try to autocomplete the query
-    const completedQuery = this.autoCompleteQuery(query);
-
-    // Balance the query for better typeahead results
-    const balancedQuery = this.balanceQuery(completedQuery);
-
-    // Normalize whitespace to prevent duplicate requests for queries that differ only in whitespace
-    const normalizedQuery = balancedQuery.trim().replace(/\s+/g, ' ');
+    const normalizedQuery = this._processQuery(query);
 
     // Get current order settings
     const order = this.orderDropdown.value;
@@ -451,20 +461,19 @@ class CardSearch {
     // Generate the URL for this request
     const url = `/search?q=${encodeURIComponent(normalizedQuery)}&orderby=${order}&direction=${orderDirection}&unique=${unique}&prefer=${prefer}`;
 
-    // Check if this is the same URL as the last request - if so, skip the request
-    if (this.lastRequestedUrl === url) {
-      console.log('Skipping duplicate request for URL:', url);
-      return;
-    }
+    // Same URL already in-flight (and not already aborted) — let it finish
+    if (this.currentRequestUrl === url && !this.currentController.signal.aborted) return;
+    // Same URL already completed — results are already showing
+    if (this.lastCompletedUrl === url) return;
 
-    // Show loading state
+    // Different URL: abort in-flight and start fresh
+    this.currentController?.abort();
+    const controller = new AbortController();
+    this.currentController = controller;
+    this.currentRequestUrl = url;
+    this.lastCompletedUrl = null; // cleared until this search successfully completes
+
     this.showLoading();
-    this.clearMessages();
-
-    // Create new AbortController for this request
-    this.currentController = new AbortController();
-    // Update the last requested URL
-    this.lastRequestedUrl = url;
 
     try {
       // Clear any previous resource timing entries for this URL
@@ -474,15 +483,18 @@ class CardSearch {
       const response = await fetch(url, {
         method: 'GET',
         headers: {
-          'Content-Type': 'application/json',
+          Accept: 'application/json',
         },
-        signal: this.currentController.signal,
+        signal: controller.signal,
       });
+      if (controller.signal.aborted) return;
+
       if (!response.ok) {
         // Try to get the error message from the response body
         let errorMessage = `HTTP error! status: ${response.status}`;
         try {
           const errorData = await response.json();
+          if (controller.signal.aborted) return;
           if (errorData.title && errorData.description) {
             // If description is an object (like with 500 errors), just use the title
             if (typeof errorData.description === 'object') {
@@ -501,7 +513,9 @@ class CardSearch {
         }
         throw new Error(errorMessage);
       }
+
       const data = await response.json();
+      if (controller.signal.aborted) return;
 
       // Compute round-trip duration from our own timestamps
       const computedRoundTripMs = Math.round(performance.now() - startTimestampMs);
@@ -523,16 +537,20 @@ class CardSearch {
       } else {
         elapsed = computedRoundTripMs;
       }
+
+      if (controller.signal.aborted) return;
+      this.lastCompletedUrl = url;
       this.displayResults(data, normalizedQuery, elapsed);
     } catch (error) {
-      if (error.name === 'AbortError') {
-        // Request was cancelled, ignore
-        return;
-      }
+      if (error.name === 'AbortError') return;
       console.error('Search error:', error);
       this.showError(`Failed to search: ${error.message}`);
     } finally {
-      this.currentController = null;
+      // Only clear the shared references if they still belong to this request
+      if (this.currentController === controller) {
+        this.currentController = null;
+        this.currentRequestUrl = null;
+      }
     }
   }
 
@@ -899,6 +917,10 @@ class CardSearch {
   }
 
   clearSearch() {
+    clearTimeout(this.debounceTimeout);
+    this.currentController?.abort();
+    this.lastCompletedUrl = null;
+
     // Clear the search input
     this.searchInput.value = '';
 
@@ -1061,67 +1083,47 @@ class CardSearch {
   }
 
   handleOrderChange() {
-    // Update URL with current state
-    const query = this.searchInput.value.trim();
+    const query = this.searchInput.value;
     const order = this.orderDropdown.value;
     const unique = this.uniqueDropdown.value;
     const prefer = this.preferDropdown.value;
     const direction = this.isAscending ? 'asc' : 'desc';
     this.updateURL(query, order, direction, unique, prefer);
-
-    // Trigger a new search with the current query and new order
-    if (query) {
-      this.performSearch(query);
-    }
+    this.performSearch(query);
   }
 
   handleUniqueChange() {
-    // Update URL with current state
-    const query = this.searchInput.value.trim();
+    const query = this.searchInput.value;
     const order = this.orderDropdown.value;
     const unique = this.uniqueDropdown.value;
     const prefer = this.preferDropdown.value;
     const direction = this.isAscending ? 'asc' : 'desc';
     this.updateURL(query, order, direction, unique, prefer);
-
-    // Trigger a new search with the current query and new unique setting
-    if (query) {
-      this.performSearch(query);
-    }
+    this.performSearch(query);
   }
 
   handlePreferChange() {
-    // Update URL with current state
-    const query = this.searchInput.value.trim();
+    const query = this.searchInput.value;
     const order = this.orderDropdown.value;
     const unique = this.uniqueDropdown.value;
     const prefer = this.preferDropdown.value;
     const direction = this.isAscending ? 'asc' : 'desc';
     this.updateURL(query, order, direction, unique, prefer);
-
-    // Trigger a new search with the current query and new prefer setting
-    if (query) {
-      this.performSearch(query);
-    }
+    this.performSearch(query);
   }
 
   toggleOrderDirection() {
     this.isAscending = !this.isAscending;
     this.updateOrderToggleAppearance();
 
-    // Update URL with current state
-    const query = this.searchInput.value.trim();
+    const query = this.searchInput.value;
     const order = this.orderDropdown.value;
     const unique = this.uniqueDropdown.value;
     const prefer = this.preferDropdown.value;
     const direction = this.isAscending ? 'asc' : 'desc';
     this.directionInput.value = direction;
     this.updateURL(query, order, direction, unique, prefer);
-
-    // Trigger a new search with the current query and new order direction
-    if (query) {
-      this.performSearch(query);
-    }
+    this.performSearch(query);
   }
 }
 
