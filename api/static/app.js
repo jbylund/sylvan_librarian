@@ -327,10 +327,29 @@ class CardSearch {
       return;
     }
 
+    // If the query has changed from what's currently in-flight, abort immediately
+    // rather than waiting for the debounce to fire a new request.
+    if (this.currentController && !this.currentController.signal.aborted) {
+      const inFlightQuery = this.currentRequestUrl
+        ? new URLSearchParams(this.currentRequestUrl.split('?')[1]).get('q')
+        : null;
+      if (inFlightQuery !== this._processQuery(query)) {
+        this.currentController.abort();
+      }
+    }
+
     // Set up debounced search
     this.debounceTimeout = setTimeout(() => {
       this.performSearch(query);
     }, this.debounceDelay);
+  }
+
+  // Applies autocomplete, bracket-balancing, and whitespace normalisation to a raw query string.
+  _processQuery(query) {
+    const autocompleted = this.autoCompleteQuery(query);
+    const balanced = this.balanceQuery(autocompleted);
+    const normalized = balanced.trim().replace(/\s+/g, ' ');
+    return normalized;
   }
 
   async fetchCommonCardTypes() {
@@ -431,14 +450,7 @@ class CardSearch {
       return;
     }
 
-    // First, try to autocomplete the query
-    const completedQuery = this.autoCompleteQuery(query);
-
-    // Balance the query for better typeahead results
-    const balancedQuery = this.balanceQuery(completedQuery);
-
-    // Normalize whitespace to prevent duplicate requests for queries that differ only in whitespace
-    const normalizedQuery = balancedQuery.trim().replace(/\s+/g, ' ');
+    const normalizedQuery = this._processQuery(query);
 
     // Get current order settings
     const order = this.orderDropdown.value;
