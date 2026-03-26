@@ -20,6 +20,7 @@ class CardSearch {
     this.debounceTimeout = null;
     this.debounceDelay = 140; // milliseconds
     this.currentController = null;
+    this.currentRequestUrl = null; // URL of the in-flight request, if any
     this.imageObserver = null;
     this.cardsData = new Map(); // Store card data by ID
     this.lastCompletedUrl = null; // URL whose results are currently displayed; null when results are cleared
@@ -244,6 +245,7 @@ class CardSearch {
       if (q) {
         this.performSearch(q);
       } else {
+        clearTimeout(this.debounceTimeout);
         this.currentController?.abort();
         this.lastCompletedUrl = null;
         this.clearResults();
@@ -448,20 +450,18 @@ class CardSearch {
     const url = `/search?q=${encodeURIComponent(normalizedQuery)}&orderby=${order}&direction=${orderDirection}&unique=${unique}&prefer=${prefer}`;
 
     // Same URL already in-flight (and not already aborted) — let it finish
-    if (this.currentController?.url === url && !this.currentController.signal.aborted) return;
+    if (this.currentRequestUrl === url && !this.currentController.signal.aborted) return;
     // Same URL already completed — results are already showing
     if (this.lastCompletedUrl === url) return;
 
     // Different URL: abort in-flight and start fresh
     this.currentController?.abort();
     const controller = new AbortController();
-    controller.url = url;
     this.currentController = controller;
+    this.currentRequestUrl = url;
     this.lastCompletedUrl = null; // cleared until this search successfully completes
 
-    // Show loading state
     this.showLoading();
-    this.clearMessages();
 
     try {
       // Clear any previous resource timing entries for this URL
@@ -533,9 +533,10 @@ class CardSearch {
       console.error('Search error:', error);
       this.showError(`Failed to search: ${error.message}`);
     } finally {
-      // Only clear the shared reference if it still points to this request's controller
+      // Only clear the shared references if they still belong to this request
       if (this.currentController === controller) {
         this.currentController = null;
+        this.currentRequestUrl = null;
       }
     }
   }
