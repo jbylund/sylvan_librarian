@@ -59,6 +59,60 @@ MIN_IMPORT_INTERVAL = 300
 IMPORT_LOCK_TIMEOUT = 2
 MIN_IMPORT_CARDS = 90_000
 
+CUSTOM_IS_TAGS = [
+    "historic",  # artifact, legendary, saga
+    "pathway",  # land and name contains pathway
+    "permanent",  # ...
+    "reprint",
+    "spell",  # ...
+    "unique",  # has exactly one printing
+    "old",  # 93/97 frame
+    "new",  # newer frames
+    "foil",  # foil version of a card
+    "nonfoil",  # non-foil version of a card
+    "datestamped",  # can get from the json promo_types array
+    "universesbeyond",  # can get from the json promo_types array
+    # I don't know how to do this, I just don't want to make the normal requests
+    "booster",
+    "default",
+]
+
+# default/atypical are complementary and disjoint
+# so in theory we could query for one and build the other by
+# querying and inverting
+
+LAND_IS_TAGS = [
+    "bikeland",
+    "bondland",
+    "bounceland",
+    "canopyland",
+    "checkland",
+    "creatureland",
+    "fastland",
+    "fetchland",
+    "filterland",
+    "gainland",
+    "manland",
+    "painland",
+    "scryland",
+    "shadowland",
+    "shockland",
+    "slowland",
+    "storageland",
+    "surveilland",
+    "tangoland",
+    "tricycleland",
+    "triland",
+]
+CARD_IS_TAGS = LAND_IS_TAGS + [  # noqa: RUF005
+    "bear",  # easy to make custom, but also small
+    "commander",
+    "outlaw",  # based on creature type
+    "party",  # based on creature type
+    "reserved",
+    "vanilla",
+]
+
 
 def cached(cache: Any, key: Any = None) -> Any:  # noqa: ANN401
     """Decorator that respects the settings.enable_cache flag at runtime.
@@ -1097,7 +1151,7 @@ class APIResource:
 
         # Fetch cards with this tag from Scryfall API (handles pagination)
         cards = self._scryfall_search(query=f"oracletag:{tag}")
-        card_names = [c["name"] for c in cards]
+        card_names = {c["name"] for c in cards}
 
         if not cards:
             return {
@@ -1109,19 +1163,23 @@ class APIResource:
         logger.info("Updating %d cards with tag '%s'", len(card_names), tag)
         # Update cards in database with the new tag
         updated_count = 0
-        card_names.sort()
+        new_tag = orjson.dumps({tag: True}).decode("utf-8")
         with self._conn_pool.connection() as conn, conn.cursor() as cursor:
             # Use SQL update with jsonb concatenation to add the tag
-            for card_name_batch in itertools.batched(card_names, 200):
+            for card_name_batch in itertools.batched(sorted(card_names), 500):
                 cursor.execute(
                     """
-                    UPDATE magic.cards
-                    SET card_oracle_tags = card_oracle_tags || %(new_tag)s::jsonb
-                    WHERE card_name = ANY(%(card_names)s)
+                    UPDATE
+                        magic.cards
+                    SET
+                        card_oracle_tags = card_oracle_tags || %(new_tag)s::jsonb
+                    WHERE
+                        card_name = ANY(%(card_names)s) AND
+                        not(card_oracle_tags @> %(new_tag)s::jsonb)
                     """,
                     {
                         "card_names": list(card_name_batch),
-                        "new_tag": orjson.dumps({tag: True}).decode("utf-8"),
+                        "new_tag": new_tag,
                     },
                 )
                 updated_count += cursor.rowcount
@@ -1132,6 +1190,43 @@ class APIResource:
             "cards_updated": updated_count,
             "total_cards_found": len(card_names),
             "message": f"Successfully updated {updated_count} cards with tag '{tag}'",
+        }
+
+    def _add_is_tag_to_cards_or_printings(self, *, is_tag: str) -> dict[str, Any]:
+        """Add a specific is: tag to all cards or printings matching that tag using Scryfall search.
+
+        Args:
+        ----
+            is_tag (str): The is: tag to fetch and apply to cards (e.g., 'creature', 'spell').
+
+        Returns:
+        -------
+            Dict[str, Any]: Result summary with updated card count and tag info.
+
+        """
+        # TODO: is tags are not based on card name, but rather specific printing
+        # meaning this needs to not use unique on cards, but instead do unique printing
+        # which means it's gonna be hella slow
+
+        if not is_tag:
+            msg = "is_tag parameter is required"
+            raise ValueError(msg)
+
+        if is_tag in CUSTOM_IS_TAGS:
+            return self._add_is_tag_to_custom(is_tag=is_tag)
+        if is_tag in CARD_IS_TAGS:
+            return self._add_is_tag_to_cards(is_tag=is_tag)
+        return self._add_is_tag_to_printings(is_tag=is_tag)
+
+    def _add_is_tag_to_custom(self, *, is_tag: str) -> dict[str, Any]:
+        """Add a specific is: tag to all custom cards matching that tag using Scryfall search."""
+        # these are special cases where you can phrase the tag as a query over other properties
+        logger.info("Adding is:%s to custom cards", is_tag)
+        return {
+            "cards_updated": 0,
+            "is_tag": is_tag,
+            "message": f"Custom is: tag {is_tag} is not supported",
+            "total_cards_found": 0,
         }
 
     def _add_is_tag_to_cards(self, *, is_tag: str) -> dict[str, Any]:
@@ -1146,37 +1241,39 @@ class APIResource:
             Dict[str, Any]: Result summary with updated card count and tag info.
 
         """
-        if not is_tag:
-            msg = "is_tag parameter is required"
-            raise ValueError(msg)
-
         # Fetch cards with this is: tag from Scryfall API (handles pagination)
-        cards = self._scryfall_search(query=f"is:{is_tag}")
-        card_names = [c["name"] for c in cards]
+        cards = self._scryfall_search(query=f"is:{is_tag}", unique="cards")
+        card_names = {c["name"] for c in cards}
 
         if not cards:
+            logger.warning("No cards found with is:%s in Scryfall API", is_tag)
             return {
                 "is_tag": is_tag,
                 "cards_updated": 0,
+                "total_cards_found": 0,
                 "message": f"No cards found with is:{is_tag} in Scryfall API",
             }
 
         logger.info("Updating %d cards with is:%s", len(card_names), is_tag)
         # Update cards in database with the new is: tag
         updated_count = 0
-        card_names.sort()
+        new_tag = orjson.dumps({is_tag: True}).decode("utf-8")
         with self._conn_pool.connection() as conn, conn.cursor() as cursor:
             # Use SQL update with jsonb concatenation to add the is: tag
-            for card_name_batch in itertools.batched(card_names, 200):
+            for card_name_batch in itertools.batched(sorted(card_names), 500):
                 cursor.execute(
                     """
-                    UPDATE magic.cards
-                    SET card_is_tags = card_is_tags || %(new_tag)s::jsonb
-                    WHERE card_name = ANY(%(card_names)s)
+                    UPDATE
+                        magic.cards
+                    SET
+                        card_is_tags = card_is_tags || %(new_tag)s::jsonb
+                    WHERE
+                        card_name = ANY(%(card_names)s) AND
+                        not(card_is_tags @> %(new_tag)s::jsonb)
                     """,
                     {
                         "card_names": list(card_name_batch),
-                        "new_tag": orjson.dumps({is_tag: True}).decode("utf-8"),
+                        "new_tag": new_tag,
                     },
                 )
                 updated_count += cursor.rowcount
@@ -1187,6 +1284,63 @@ class APIResource:
             "cards_updated": updated_count,
             "total_cards_found": len(card_names),
             "message": f"Successfully updated {updated_count} cards with is:{is_tag}",
+        }
+
+    def _add_is_tag_to_printings(self, *, is_tag: str) -> dict[str, Any]:
+        """Add a specific is: tag to all printings matching that tag using Scryfall search.
+
+        Args:
+        ----
+            is_tag (str): The is: tag to fetch and apply to printings (e.g., 'creature', 'spell').
+
+        Returns:
+        -------
+            Dict[str, Any]: Result summary with updated card count and tag info.
+
+        """
+        # Fetch cards with this is: tag from Scryfall API (handles pagination)
+        printings = self._scryfall_search(query=f"is:{is_tag}", unique="printings")
+
+        if not printings:
+            logger.warning("No printings found with is:%s in Scryfall API", is_tag)
+            return {
+                "is_tag": is_tag,
+                "cards_updated": 0,
+                "total_cards_found": 0,
+                "message": f"No cards found with is:{is_tag} in Scryfall API",
+            }
+
+        logger.info("Updating %d printings with is:%s", len(printings), is_tag)
+        # Update cards in database with the new is: tag
+        updated_count = 0
+        new_tag = orjson.dumps({is_tag: True}).decode("utf-8")
+        scryfall_ids = {p["id"] for p in printings}
+        with self._conn_pool.connection() as conn, conn.cursor() as cursor:
+            # Use SQL update with jsonb concatenation to add the is: tag
+            for scryfall_id_batch in itertools.batched(sorted(scryfall_ids), 500):
+                cursor.execute(
+                    """
+                    UPDATE
+                        magic.cards
+                    SET
+                        card_is_tags = card_is_tags || %(new_tag)s::jsonb
+                    WHERE
+                        scryfall_id = ANY(%(scryfall_ids)s) AND
+                        not(card_is_tags @> %(new_tag)s::jsonb)
+                    """,
+                    {
+                        "scryfall_ids": list(scryfall_id_batch),
+                        "new_tag": new_tag,
+                    },
+                )
+                updated_count += cursor.rowcount
+                conn.commit()
+
+        return {
+            "is_tag": is_tag,
+            "cards_updated": updated_count,
+            "total_cards_found": len(scryfall_ids),
+            "message": f"Successfully updated {updated_count} printings with is:{is_tag}",
         }
 
     def discover_tags_from_scryfall(self, **_: object) -> list[str]:
@@ -1517,7 +1671,7 @@ class APIResource:
                         estimated_duration,
                     )
 
-                tag_result = self._add_is_tag_to_cards(is_tag=is_tag)
+                tag_result = self._add_is_tag_to_cards_or_printings(is_tag=is_tag)
                 imported_tags.append(
                     {
                         "is_tag": is_tag,
@@ -1664,7 +1818,7 @@ class APIResource:
 
         return load_result
 
-    def _scryfall_search(self, *, query: str) -> list[dict[str, Any]]:
+    def _scryfall_search(self, *, query: str, unique: str = "prints") -> list[dict[str, Any]]:
         """Search Scryfall API for cards matching the given query.
 
         This method handles pagination to get the complete list of cards and
@@ -1673,6 +1827,7 @@ class APIResource:
         Args:
         ----
             query (str): The search query string for Scryfall.
+            unique (str): The unique parameter to pass to the Scryfall API.
 
         Returns:
         -------
@@ -1688,7 +1843,7 @@ class APIResource:
         filters = [
             "(f:m or f:l or f:c or f:v)",
             "game:paper",
-            "unique:prints",
+            f"unique:{unique}",
         ]
         full_query = f"({query}) {' '.join(filters)}"
 
@@ -1696,12 +1851,22 @@ class APIResource:
         params = {"q": full_query, "format": "json"}
         all_cards = []
 
+        total_cards = "?"
         try:
             while True:
                 time.sleep(1 / 10)  # Rate limiting - 10 requests per second max
+                logger.info(
+                    "Making request to Scryfall API: %s %s (have %d of %s total cards)",
+                    base_url,
+                    params,
+                    len(all_cards),
+                    total_cards,
+                )
                 response = self._session.get(base_url, params=params, timeout=30)
                 response.raise_for_status()
                 data = orjson.loads(response.content)
+
+                total_cards = data.get("total_cards", 1) or 1
 
                 if "data" not in data:
                     break
