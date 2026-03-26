@@ -23,6 +23,7 @@ class CardSearch {
     this.imageObserver = null;
     this.cardsData = new Map(); // Store card data by ID
     this.lastRequestedUrl = null; // Track the last requested URL to prevent duplicate requests
+    this.requestId = 0; // Monotonically increasing; used to discard responses for stale requests
     this.isAscending = true; // Track order direction
     this.currentCardCount = 0; // Track current number of cards displayed for resize handling
 
@@ -468,6 +469,7 @@ class CardSearch {
     // Create new AbortController for this request
     const controller = new AbortController();
     this.currentController = controller;
+    const requestId = ++this.requestId;
     // Update the last requested URL
     this.lastRequestedUrl = url;
 
@@ -528,21 +530,21 @@ class CardSearch {
       } else {
         elapsed = computedRoundTripMs;
       }
-      // Only render if this response is still current (a newer request may have started)
-      if (this.currentController === controller) {
+      // Only render if this response is still current (input may have changed since request started)
+      if (this.requestId === requestId) {
         this.displayResults(data, normalizedQuery, elapsed);
       }
     } catch (error) {
       if (error.name === 'AbortError') {
         // If this request wasn't superseded by a newer one, reset lastRequestedUrl
         // so the same query can be retried later
-        if (this.currentController === controller && this.lastRequestedUrl === url) {
+        if (this.requestId === requestId && this.lastRequestedUrl === url) {
           this.lastRequestedUrl = null;
         }
         return;
       }
       // Only handle error UI/state if this request hasn't been superseded by a newer one
-      if (this.currentController === controller) {
+      if (this.requestId === requestId) {
         // Reset so the user can retry the same query after a transient error
         this.lastRequestedUrl = null;
         console.error('Search error:', error);
