@@ -109,6 +109,13 @@ def preprocess_card(card: dict[str, Any]) -> list[dict[str, Any]]:  # noqa: PLR0
         if "Card" in card_types or "Token" in card_types:
             return []
 
+    # Filter out "X // X" cards (same name on both faces, e.g. "Name // Name")
+    card_name = card.get("name", "")
+    if "//" in card_name:
+        left_name, _, right_name = card_name.partition("//")
+        if left_name.strip() == right_name.strip():
+            return []
+
     if "raw_card_blob" in card:
         # Already processed, don't need to re-process
         return [card]

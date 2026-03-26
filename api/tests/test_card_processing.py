@@ -134,6 +134,34 @@ class TestCardProcessing:
         assert result[1]["face_name"] == "Back"
         assert result[1]["card_name"] == "Test Card"
 
+    def test_preprocess_card_filters_same_faced_double_side_cards(self) -> None:
+        """Test preprocess_card filters out cards with the same name on both faces (X // X)."""
+        same_faced_card = create_test_card(name="Soulflayer // Soulflayer")
+
+        result = preprocess_card(same_faced_card)
+        assert result == []
+
+    def test_preprocess_card_filters_same_faced_cards_with_extra_whitespace(self) -> None:
+        """Test preprocess_card filters out X // X cards regardless of whitespace."""
+        same_faced_card = create_test_card(name="Aberrant  //  Aberrant")
+
+        result = preprocess_card(same_faced_card)
+        assert result == []
+
+    def test_preprocess_card_allows_different_faced_double_side_cards(self) -> None:
+        """Test preprocess_card does NOT filter out cards with different names on each face."""
+        normal_dfc = create_test_card(
+            name="Hound Tamer // Untamed Pup",
+            card_faces=[
+                {"name": "Hound Tamer", "type_line": "Creature — Human", "colors": ["G"], "color_identity": ["G"]},
+                {"name": "Untamed Pup", "type_line": "Creature — Dog", "colors": [], "color_identity": ["G"]},
+            ],
+        )
+
+        result = preprocess_card(normal_dfc)
+        # Different names — should be processed normally (2 faces)
+        assert len(result) == 2
+
     def test_preprocess_card_filters_funny_sets(self) -> None:
         """Test preprocess_card filters out funny set types."""
         invalid_card = create_test_card(
