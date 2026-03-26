@@ -526,6 +526,7 @@ class CardSearch {
         elapsed = computedRoundTripMs;
       }
 
+      if (controller.signal.aborted) return;
       this.lastCompletedUrl = url;
       this.displayResults(data, normalizedQuery, elapsed);
     } catch (error) {
