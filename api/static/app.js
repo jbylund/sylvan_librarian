@@ -541,9 +541,10 @@ class CardSearch {
         }
         return;
       }
-      // Reset so the user can retry the same query after a transient error
-      this.lastRequestedUrl = null;
+      // Only handle error UI/state if this request hasn't been superseded by a newer one
       if (this.currentController === controller) {
+        // Reset so the user can retry the same query after a transient error
+        this.lastRequestedUrl = null;
         console.error('Search error:', error);
         this.showError(`Failed to search: ${error.message}`);
       }
