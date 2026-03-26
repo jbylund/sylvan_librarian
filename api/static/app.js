@@ -244,6 +244,7 @@ class CardSearch {
       if (q) {
         this.performSearch(q);
       } else {
+        this.currentController?.abort();
         this.lastCompletedUrl = null;
         this.clearResults();
       }
@@ -446,8 +447,8 @@ class CardSearch {
     // Generate the URL for this request
     const url = `/search?q=${encodeURIComponent(normalizedQuery)}&orderby=${order}&direction=${orderDirection}&unique=${unique}&prefer=${prefer}`;
 
-    // Same URL already in-flight — let it finish
-    if (this.currentController?.url === url) return;
+    // Same URL already in-flight (and not already aborted) — let it finish
+    if (this.currentController?.url === url && !this.currentController.signal.aborted) return;
     // Same URL already completed — results are already showing
     if (this.lastCompletedUrl === url) return;
 
