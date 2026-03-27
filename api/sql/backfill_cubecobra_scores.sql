@@ -1,7 +1,9 @@
 -- Backfill cubecobra_score for all cards.
 --
--- Score is a weighted average of per-dimension PERCENT_RANK values (0=best, 1=worst).
--- Weights are passed as named parameters and must sum to 1.0:
+-- Score is a weighted average of per-dimension PERCENT_RANK values (0=best, 1=worst),
+-- scaled to a 0–100 range where 0 is best and 100 is worst.
+-- Weights are passed as named parameters (relative importance only; they are normalized by
+-- backfill_cubecobra_scores so that they sum to 100):
 --   %(w_edhrec)s, %(w_elo)s, %(w_cube_count)s, %(w_pick_count)s
 --
 -- Cards with NULL on a dimension are ranked last (worst) for that dimension via NULLS LAST.
