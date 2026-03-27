@@ -2482,51 +2482,46 @@ class APIResource:
                 "message": f"Error loading cards: {e}",
             }
 
-    def random_search(self, *, num_cards: int = 1, **_: object) -> list[dict[str, Any]]:
-        """Return one or more random cards.
+    def random_search(self, *, num_cards: int = 1, **_: object) -> dict[str, Any]:
+        """Return one or more random cards in the same envelope shape as search().
 
         Args:
             num_cards: The number of random cards to return (default is 1).
 
         Returns:
-            A list of dictionaries, each representing a random card.
+            A dict with a "cards" key (list of card dicts) and "total_cards" key,
+            matching the shape returned by search().
         """
+        if not self._setup_complete():
+            raise falcon.HTTPServiceUnavailable(
+                title="Service Unavailable",
+                description="Setup is not complete, please try again later.",
+            ) from None
+        num_cards = min(num_cards, 1000)
+        num_cards = max(num_cards, 1)
+
         # TODO: how to keep this query in sync with the larger search query?
         query_sql = """
-        WITH query_uuid_cte AS (
-            SELECT gen_random_uuid() AS query_uuid
-        ),
-        limit_cte AS (
-            SELECT 100 AS limit_value
-        ),
-        full_batch_of_cards_cte AS (
-            (
-                SELECT
-                    1 AS source_id,
-                    *
-                FROM
-                    magic.cards
-                WHERE
-                    scryfall_id >= (SELECT query_uuid FROM query_uuid_cte)
-                ORDER BY
-                    scryfall_id ASC
-                LIMIT (SELECT limit_value FROM limit_cte)
-            )
-            UNION
-            (
-                SELECT
-                    2 AS source_id,
-                    *
-                FROM
-                    magic.cards
-                ORDER BY
-                    scryfall_id ASC
-                LIMIT (SELECT limit_value FROM limit_cte)
-            )
+        WITH cte1 AS (
+            SELECT DISTINCT ON (card_name)
+                scryfall_id
+            FROM
+                magic.cards
             ORDER BY
-                source_id ASC,
-                scryfall_id ASC
-            LIMIT (SELECT limit_value FROM limit_cte)
+                card_name,
+                prefer_score DESC NULLS LAST,
+                scryfall_id
+        ),
+        cte2 AS (
+            SELECT
+                scryfall_id
+            FROM
+                cte1
+            WHERE
+                RANDOM() < %(card_sample_rate)s
+            ORDER BY
+                RANDOM()
+            LIMIT %(num_cards)s
         )
         SELECT
             card_artist,
@@ -2542,14 +2537,16 @@ class APIResource:
             set_name,
             type_line
         FROM
-            full_batch_of_cards_cte
-        ORDER BY
-            RANDOM()
-        LIMIT 1
+            cte2
+        JOIN
+            magic.cards
+        ON
+            cte2.scryfall_id = magic.cards.scryfall_id
         """
-        results = []
         with self._conn_pool.connection() as conn, conn.cursor() as cursor:
-            while len(results) < num_cards:
-                cursor.execute(query_sql)
-                results.extend(dict(r) for r in cursor.fetchall())
-        return results
+            for samplerate in [0.01, 1.0]:
+                cursor.execute(query_sql, {"num_cards": num_cards, "card_sample_rate": samplerate})
+                cards = [dict(r) for r in cursor.fetchall()]
+                if len(cards) == num_cards:
+                    break
+        return {"cards": cards, "total_cards": len(cards)}

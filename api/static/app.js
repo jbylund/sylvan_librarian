@@ -222,6 +222,9 @@ class CardSearch {
         // No embedded results, perform the search via API
         this.performSearch(initialQuery);
       }
+    } else {
+      // No query on load — show a random selection of cards as a discovery prompt
+      this.loadRandomCards();
     }
 
     // Back/forward: restore search state from URL and re-fetch results
@@ -555,8 +558,7 @@ class CardSearch {
   }
 
   displayResults(data, query, elapsed) {
-    // Assume the API returns an array of cards or an object with a cards array
-    const cards = Array.isArray(data) ? data : data.cards || [];
+    const cards = data.cards || [];
     const totalCards = data.total_cards || cards.length;
 
     if (cards.length === 0) {
@@ -897,12 +899,49 @@ class CardSearch {
     const uniqueValue = this.uniqueDropdown.value;
     const itemType = uniqueValue + (count !== 1 ? 's' : '');
 
-    let msg = `Found ${formattedCount} ${itemType} matching "${query}"`;
-    if (typeof elapsed === 'number') {
-      msg += ` (completed in ${elapsed}ms)`;
+    let msg;
+    if (query) {
+      msg = `Found ${formattedCount} ${itemType} matching "${query}"`;
+      if (typeof elapsed === 'number') {
+        msg += ` (completed in ${elapsed}ms)`;
+      }
+    } else {
+      msg = `Showing a random selection of ${formattedCount} ${itemType}`;
     }
     if (this.statusMessage) {
       this.statusMessage.innerHTML = `<div class="results-count">${this.escapeHtml(msg)}</div>`;
+    }
+  }
+
+  async loadRandomCards() {
+    this.currentController?.abort();
+    const controller = new AbortController();
+    this.currentController = controller;
+    this.currentRequestUrl = null;
+
+    this.showLoading();
+    try {
+      const response = await fetch('/random_search?num_cards=10', {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+      if (!response.ok) {
+        this.clearMessages();
+        return;
+      }
+      const data = await response.json();
+      if (controller.signal.aborted) return;
+      this.displayResults(data, null, null);
+    } catch (error) {
+      if (error.name === 'AbortError') return;
+      this.clearMessages();
+    } finally {
+      if (this.currentController === controller) {
+        this.currentController = null;
+        this.currentRequestUrl = null;
+      }
     }
   }
 

@@ -236,6 +236,21 @@ class TestContainerIntegration:
         expected_names = {"Lightning Bolt", "Serra Angel", "Black Lotus"}
         assert card_names == expected_names
 
+    def test_random_search_shape_matches_search(self: TestContainerIntegration, api_resource: APIResource) -> None:
+        """Test that random_search cards have the same keys as search result cards."""
+        random_result = api_resource.random_search(num_cards=1)
+        assert "cards" in random_result
+        assert len(random_result["cards"]) >= 1
+        random_card_keys = set(random_result["cards"][0].keys())
+
+        search_result = api_resource.search(q="cmc>=0", limit=1)
+        assert len(search_result["cards"]) >= 1
+        search_card_keys = set(search_result["cards"][0].keys())
+
+        assert random_card_keys == search_card_keys, (
+            f"random_search card keys {random_card_keys} != search card keys {search_card_keys}"
+        )
+
     def test_get_pid(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """Test basic API functionality with real database."""
         pid = api_resource.get_pid()
