@@ -43,6 +43,8 @@ class CachingMiddleware:
             tuple(sorted({k: req.headers.get(k) for k in cached_headers}.items())),
         )
 
+    _UNCACHED_PATHS: frozenset[str] = frozenset({"/random_search"})
+
     def process_request(self: CachingMiddleware, req: falcon.Request, resp: falcon.Response) -> None:
         """Process incoming request and check for cached response.
 
@@ -51,6 +53,8 @@ class CachingMiddleware:
             resp: The response object to populate if cache hit.
         """
         if not settings.enable_cache:
+            return
+        if req.path in self._UNCACHED_PATHS:
             return
 
         cache_key = self._cache_key(req)
@@ -83,6 +87,8 @@ class CachingMiddleware:
             req_succeeded: Whether the request was successful (unused).
         """
         if not settings.enable_cache:
+            return
+        if req.path in self._UNCACHED_PATHS:
             return
 
         del resource, req_succeeded

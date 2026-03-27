@@ -2310,14 +2310,15 @@ class APIResource:
                 "message": f"Error loading cards: {e}",
             }
 
-    def random_search(self, *, num_cards: int = 1, **_: object) -> list[dict[str, Any]]:
-        """Return one or more random cards.
+    def random_search(self, *, num_cards: int = 1, **_: object) -> dict[str, Any]:
+        """Return one or more random cards in the same envelope shape as search().
 
         Args:
             num_cards: The number of random cards to return (default is 1).
 
         Returns:
-            A list of dictionaries, each representing a random card.
+            A dict with a "cards" key (list of card dicts) and "total_cards" key,
+            matching the shape returned by search().
         """
         # TODO: how to keep this query in sync with the larger search query?
         query_sql = """
@@ -2375,9 +2376,9 @@ class APIResource:
             RANDOM()
         LIMIT 1
         """
-        results = []
+        cards = []
         with self._conn_pool.connection() as conn, conn.cursor() as cursor:
-            while len(results) < num_cards:
+            while len(cards) < num_cards:
                 cursor.execute(query_sql)
-                results.extend(dict(r) for r in cursor.fetchall())
-        return results
+                cards.extend(dict(r) for r in cursor.fetchall())
+        return {"cards": cards, "total_cards": len(cards)}

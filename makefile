@@ -129,11 +129,11 @@ prettier_lint: /tmp/prettier.stamp
 	touch /tmp/prettier.stamp
 
 ruff_fix: ensure_ruff
-	find . -type f -name "*.py" | xargs python -m ruff check --fix --unsafe-fixes >/dev/null 2>/dev/null || true
-	find . -type f -name "*.py" | xargs python -m ruff format
+	git ls-files '*.py' | xargs python -m ruff check --fix --unsafe-fixes >/dev/null 2>/dev/null || true
+	git ls-files '*.py' | xargs python -m ruff format
 
 ruff_lint: ruff_fix
-	find . -type f -name "*.py" | xargs python -m ruff check --fix --unsafe-fixes
+	git ls-files '*.py' | xargs python -m ruff check --fix --unsafe-fixes
 
 # pylint_lint: ruff_fix ensure_pylint
 # 	find . -type f -name "*.py" | xargs python -m pylint --fail-under 7.0 --max-line-length=132
