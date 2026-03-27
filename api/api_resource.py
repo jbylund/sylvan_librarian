@@ -2320,6 +2320,11 @@ class APIResource:
             A dict with a "cards" key (list of card dicts) and "total_cards" key,
             matching the shape returned by search().
         """
+        if not self._setup_complete():
+            raise falcon.HTTPServiceUnavailable(
+                title="Service Unavailable",
+                description="Setup is not complete, please try again later.",
+            ) from None
         num_cards = min(num_cards, 1000)
         num_cards = max(num_cards, 1)
 
@@ -2367,6 +2372,9 @@ class APIResource:
             cte2.scryfall_id = magic.cards.scryfall_id
         """
         with self._conn_pool.connection() as conn, conn.cursor() as cursor:
-            cursor.execute(query_sql, {"num_cards": num_cards, "card_sample_rate": 0.01})
-            cards = [dict(r) for r in cursor.fetchall()]
+            for samplerate in [0.01, 1.0]:
+                cursor.execute(query_sql, {"num_cards": num_cards, "card_sample_rate": samplerate})
+                cards = [dict(r) for r in cursor.fetchall()]
+                if len(cards) == num_cards:
+                    break
         return {"cards": cards, "total_cards": len(cards)}
