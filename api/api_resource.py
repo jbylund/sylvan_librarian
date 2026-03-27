@@ -2322,40 +2322,23 @@ class APIResource:
         """
         # TODO: how to keep this query in sync with the larger search query?
         query_sql = """
-        WITH query_uuid_cte AS (
-            SELECT gen_random_uuid() AS query_uuid
-        ),
-        limit_cte AS (
-            SELECT 100 AS limit_value
-        ),
-        full_batch_of_cards_cte AS (
-            (
-                SELECT
-                    1 AS source_id,
-                    *
-                FROM
-                    magic.cards
-                WHERE
-                    scryfall_id >= (SELECT query_uuid FROM query_uuid_cte)
-                ORDER BY
-                    scryfall_id ASC
-                LIMIT (SELECT limit_value FROM limit_cte)
-            )
-            UNION
-            (
-                SELECT
-                    2 AS source_id,
-                    *
-                FROM
-                    magic.cards
-                ORDER BY
-                    scryfall_id ASC
-                LIMIT (SELECT limit_value FROM limit_cte)
-            )
+        WITH cte1 AS (
+            SELECT DISTINCT ON (card_name)
+                scryfall_id
+            FROM
+                magic.cards
             ORDER BY
-                source_id ASC,
-                scryfall_id ASC
-            LIMIT (SELECT limit_value FROM limit_cte)
+                card_name,
+                prefer_score desc
+        ),
+        cte2 AS (
+            SELECT
+                scryfall_id
+            FROM
+                cte1
+            ORDER BY
+                RANDOM()
+            LIMIT %(num_cards)s
         )
         SELECT
             card_artist,
@@ -2371,14 +2354,13 @@ class APIResource:
             set_name,
             type_line
         FROM
-            full_batch_of_cards_cte
-        ORDER BY
-            RANDOM()
-        LIMIT 1
+            cte2
+        JOIN
+            magic.cards
+        ON
+            cte2.scryfall_id = magic.cards.scryfall_id
         """
-        cards = []
         with self._conn_pool.connection() as conn, conn.cursor() as cursor:
-            while len(cards) < num_cards:
-                cursor.execute(query_sql)
-                cards.extend(dict(r) for r in cursor.fetchall())
+            cursor.execute(query_sql, {"num_cards": num_cards})
+            cards = [dict(r) for r in cursor.fetchall()]
         return {"cards": cards, "total_cards": len(cards)}
