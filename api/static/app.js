@@ -914,20 +914,34 @@ class CardSearch {
   }
 
   async loadRandomCards() {
+    this.currentController?.abort();
+    const controller = new AbortController();
+    this.currentController = controller;
+    this.currentRequestUrl = null;
+
     this.showLoading();
     try {
       const response = await fetch('/random_search?num_cards=10', {
         method: 'GET',
         headers: { Accept: 'application/json' },
+        signal: controller.signal,
       });
+      if (controller.signal.aborted) return;
       if (!response.ok) {
         this.clearMessages();
         return;
       }
       const data = await response.json();
+      if (controller.signal.aborted) return;
       this.displayResults(data, null, null);
-    } catch {
+    } catch (error) {
+      if (error.name === 'AbortError') return;
       this.clearMessages();
+    } finally {
+      if (this.currentController === controller) {
+        this.currentController = null;
+        this.currentRequestUrl = null;
+      }
     }
   }
 
