@@ -2329,7 +2329,8 @@ class APIResource:
                 magic.cards
             ORDER BY
                 card_name,
-                prefer_score desc
+                prefer_score DESC NULLS LAST,
+                scryfall_id
         ),
         cte2 AS (
             SELECT
