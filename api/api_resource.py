@@ -1256,9 +1256,11 @@ class APIResource:
             Dict with status and count of rows updated.
         """
         logger.info("Starting CubeCobra ingest")
-        # fetch the oracle ids that are in the db
+        # fetch the distinct, non-null oracle ids that are in the db
         with self._conn_pool.connection() as conn, conn.cursor() as cursor:
-            cursor.execute("SELECT oracle_id FROM magic.cards")
+            cursor.execute(
+                "SELECT DISTINCT oracle_id FROM magic.cards WHERE oracle_id IS NOT NULL",
+            )
             db_oracle_ids = {r["oracle_id"] for r in cursor.fetchall()}
 
         for cubecobra_page in self._fetch_cubecobra_data(db_oracle_ids):
