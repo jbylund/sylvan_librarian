@@ -6,8 +6,8 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "test:js": "jest",
-    "format": "prettier --write api/index.html",
-    "format:check": "prettier --check api/index.html"
+    "format": "prettier --write api/static/index.html",
+    "format:check": "prettier --check api/static/index.html"
   },
   "jest": {
     "testEnvironment": "jsdom"
