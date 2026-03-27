@@ -920,11 +920,14 @@ class CardSearch {
         method: 'GET',
         headers: { Accept: 'application/json' },
       });
-      if (!response.ok) return;
+      if (!response.ok) {
+        this.clearMessages();
+        return;
+      }
       const data = await response.json();
       this.displayResults(data, null, null);
     } catch {
-      // silently fail on network error — a blank page is acceptable
+      this.clearMessages();
     }
   }
 

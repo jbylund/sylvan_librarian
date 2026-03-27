@@ -43,7 +43,10 @@ class CachingMiddleware:
             tuple(sorted({k: req.headers.get(k) for k in cached_headers}.items())),
         )
 
-    _UNCACHED_PATHS: frozenset[str] = frozenset({"/random_search"})
+    _UNCACHED_PATHS: frozenset[str] = frozenset({x.strip("/") for x in ["/random_search"]})
+
+    def _is_uncached(self: CachingMiddleware, req: falcon.Request) -> bool:
+        return req.path.strip("/") in self._UNCACHED_PATHS
 
     def process_request(self: CachingMiddleware, req: falcon.Request, resp: falcon.Response) -> None:
         """Process incoming request and check for cached response.
@@ -54,7 +57,7 @@ class CachingMiddleware:
         """
         if not settings.enable_cache:
             return
-        if req.path in self._UNCACHED_PATHS:
+        if self._is_uncached(req):
             return
 
         cache_key = self._cache_key(req)
@@ -88,7 +91,7 @@ class CachingMiddleware:
         """
         if not settings.enable_cache:
             return
-        if req.path in self._UNCACHED_PATHS:
+        if self._is_uncached(req):
             return
 
         del resource, req_succeeded
