@@ -26,6 +26,7 @@ class CardOrdering(enum.StrEnum):
     """Enum for the ordering of the cards."""
 
     CMC = enum.auto()
+    CUBECOBRA = enum.auto()
     EDHREC = enum.auto()
     POWER = enum.auto()
     RARITY = enum.auto()

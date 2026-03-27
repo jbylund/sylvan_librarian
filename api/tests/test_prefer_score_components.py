@@ -115,7 +115,9 @@ class TestPreferScoreComponents(unittest.TestCase):
         """Test that non-showcase scoring logic is correct."""
         # Test case 1: Card with showcase frame effect should get score of 0
         assert calculate_non_showcase_score(["showcase"]) == 0, "Showcase card should get score of 0"
-        assert calculate_non_showcase_score(["showcase", "legendary"]) == 0, "Showcase card with other effects should get score of 0"
+        assert calculate_non_showcase_score(["showcase", "legendary"]) == 0, (
+            "Showcase card with other effects should get score of 0"
+        )
 
         # Test case 2: Card without showcase frame effect should get score of 10
         assert calculate_non_showcase_score(["legendary"]) == 10, "Non-showcase card should get score of 10"
