@@ -93,7 +93,7 @@ def preprocess_card(card: dict[str, Any]) -> list[dict[str, Any]]:  # noqa: PLR0
     For single-faced cards, returns a list with one dictionary.
     Returns an empty list for invalid/filtered cards.
     """
-    if set(card["legalities"].values()) == {"not_legal"}:
+    if not set(card["legalities"].values()) & {"legal", "restricted"}:
         return []
     if "playtest" in card.get("promo_types", []):
         return []
