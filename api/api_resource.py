@@ -2379,7 +2379,7 @@ class APIResource:
                 self._set_statement_timeout(cursor, statement_timeout)
 
                 # fetch already imported cards...
-                cursor.execute("SELECT scryfall_id FROM magic.cards")
+                cursor.execute("SELECT scryfall_id FROM magic.cards GROUP BY scryfall_id")
                 already_imported_cards = {r["scryfall_id"] for r in cursor.fetchall()}
 
                 # filter cards to only those which are not already imported
