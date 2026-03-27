@@ -1,6 +1,6 @@
 -- Migration: Add CubeCobra columns
 -- Raw per-oracle-id data from the CubeCobra top-cards API; NULL means card not found in CubeCobra.
--- cubecobra_score is a pre-computed combined score (0=best, 1=worst, consistent with edhrec_rank).
+-- cubecobra_score is a pre-computed combined score (0=best, 100=worst; lower is better, conceptually similar to edhrec_rank).
 -- Populated by POST /ingest_cubecobra and POST /backfill_cubecobra_scores.
 
 ALTER TABLE magic.cards ADD COLUMN IF NOT EXISTS cubecobra_elo        real    DEFAULT NULL;
