@@ -162,6 +162,24 @@ class TestCardProcessing:
         # Different names — should be processed normally (2 faces)
         assert len(result) == 2
 
+    def test_preprocess_card_filters_all_not_legal_cards(self) -> None:
+        """Test preprocess_card filters out cards that are not legal in any format."""
+        no_legal_card = create_test_card(
+            legalities=dict.fromkeys(["standard", "modern", "legacy", "vintage", "commander"], "not_legal"),
+        )
+
+        result = preprocess_card(no_legal_card)
+        assert result == []
+
+    def test_preprocess_card_allows_banned_cards(self) -> None:
+        """Test preprocess_card does NOT filter cards that are banned (not the same as not_legal)."""
+        banned_card = create_test_card(
+            legalities={"standard": "not_legal", "modern": "not_legal", "legacy": "banned", "vintage": "restricted", "commander": "banned"},
+        )
+
+        result = preprocess_card(banned_card)
+        assert len(result) == 1
+
     def test_preprocess_card_filters_funny_sets(self) -> None:
         """Test preprocess_card filters out funny set types."""
         invalid_card = create_test_card(

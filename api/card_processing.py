@@ -94,7 +94,7 @@ def preprocess_card(card: dict[str, Any]) -> list[dict[str, Any]]:  # noqa: PLR0
     Returns an empty list for invalid/filtered cards.
     """
     if set(card["legalities"].values()) == {"not_legal"}:
-        pass
+        return []
     if "playtest" in card.get("promo_types", []):
         return []
     if "paper" not in card.get("games", []):
