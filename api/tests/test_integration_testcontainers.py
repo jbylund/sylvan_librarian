@@ -402,3 +402,27 @@ class TestContainerIntegration:
                 break
 
         assert brainstorm_in_combined, "Brainstorm should be found by combined search"
+
+    def test_cubecobra_ordering(self: TestContainerIntegration, api_resource: APIResource) -> None:
+        """Test that orderby=cubecobra sorts by cubecobra_score ascending (lower = better)."""
+        # Assign distinct cubecobra_score values to three known cards
+        scores = {
+            "Lightning Bolt": 10.0,
+            "Black Lotus": 50.0,
+            "Serra Angel": 90.0,
+        }
+        with api_resource._conn_pool.connection() as conn, conn.cursor() as cursor:
+            for name, score in scores.items():
+                cursor.execute(
+                    "UPDATE magic.cards SET cubecobra_score = %s WHERE card_name = %s",
+                    (score, name),
+                )
+            conn.commit()
+
+        result = api_resource.search(orderby="cubecobra", direction="asc", limit=100)
+        names = [card["name"] for card in result["cards"] if card["name"] in scores]
+        assert names == ["Lightning Bolt", "Black Lotus", "Serra Angel"]
+
+        result = api_resource.search(orderby="cubecobra", direction="desc", limit=100)
+        names = [card["name"] for card in result["cards"] if card["name"] in scores]
+        assert names == ["Serra Angel", "Black Lotus", "Lightning Bolt"]

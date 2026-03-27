@@ -1151,7 +1151,7 @@ class APIResource:
             cards = response.json().get("data") or []
 
             if not cards:
-                logger.info("Empty page %d — done paginating CubeCobra", page)
+                logger.info("Empty page %d - done paginating CubeCobra", page)
                 break
 
             results: dict[str, dict[str, Any]] = {}
