@@ -2340,6 +2340,8 @@ class APIResource:
                 scryfall_id
             FROM
                 cte1
+            WHERE
+                RANDOM() < %(card_sample_rate)s
             ORDER BY
                 RANDOM()
             LIMIT %(num_cards)s
@@ -2365,6 +2367,6 @@ class APIResource:
             cte2.scryfall_id = magic.cards.scryfall_id
         """
         with self._conn_pool.connection() as conn, conn.cursor() as cursor:
-            cursor.execute(query_sql, {"num_cards": num_cards})
+            cursor.execute(query_sql, {"num_cards": num_cards, "card_sample_rate": 0.01})
             cards = [dict(r) for r in cursor.fetchall()]
         return {"cards": cards, "total_cards": len(cards)}
