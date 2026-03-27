@@ -1215,8 +1215,8 @@ class APIResource:
     def backfill_cubecobra_scores(self, **_: object) -> dict[str, Any]:
         """Backfill cubecobra_score for all cards.
 
-        Computes a weighted average of per-dimension PERCENT_RANK values (each in the 0–1
-        range, where 0 is best and 1 is worst) and scales the result to a 0–100 score
+        Computes a weighted average of per-dimension PERCENT_RANK values (each in the 0-1
+        range, where 0 is best and 1 is worst) and scales the result to a 0-100 score
         (0 = best, 100 = worst).
 
         The per-dimension weights are treated as relative and are internally normalized so
@@ -1224,6 +1224,7 @@ class APIResource:
         to sum to 1.0.
 
         One score per distinct card_name is computed and then propagated to all printings.
+
         Returns:
             Dict with status and count of cards updated.
         """
