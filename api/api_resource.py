@@ -2320,6 +2320,9 @@ class APIResource:
             A dict with a "cards" key (list of card dicts) and "total_cards" key,
             matching the shape returned by search().
         """
+        num_cards = min(num_cards, 1000)
+        num_cards = max(num_cards, 1)
+
         # TODO: how to keep this query in sync with the larger search query?
         query_sql = """
         WITH cte1 AS (
