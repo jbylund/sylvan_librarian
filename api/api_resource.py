@@ -628,6 +628,7 @@ class APIResource:
                 rate,
             )
             self.backfill_prefer_scores()
+            self.backfill_cubecobra_scores()
             self._last_import_time.value = time.time()
             return result["sample_cards"]
         logger.error("Failed to import data: %s", result["message"])
@@ -759,6 +760,7 @@ class APIResource:
             CardOrdering.RARITY: "card_rarity_int",
             CardOrdering.TOUGHNESS: "creature_toughness",
             CardOrdering.USD: "price_usd",
+            CardOrdering.CUBECOBRA: "cubecobra_score",
         }.get(orderby, "edhrec_rank")
         sql_direction = {
             "asc": "ASC",
@@ -1126,6 +1128,159 @@ class APIResource:
             "status": "success",
             "cards_updated": count,
             "message": f"Successfully backfilled prefer scores for {count} cards",
+        }
+
+    def _fetch_cubecobra_data(self, db_oracle_ids: set[str]) -> dict[str, dict[str, Any]]:
+        """Paginate the CubeCobra top-cards API and return data keyed by oracle_id.
+
+        Returns:
+            Mapping of oracle_id -> {elo, cube_count, pick_count, popularity}.
+        """
+        cubecobra_url = "https://cubecobra.com/tool/api/topcards/"
+        page = 1
+
+        while True:
+            time.sleep(0.5)
+            logger.info("Fetching CubeCobra page %d", page)
+            response = self._session.get(
+                cubecobra_url,
+                params={"p": page, "f": "", "s": "Elo", "d": "descending"},
+                timeout=30,
+            )
+            response.raise_for_status()
+            cards = response.json().get("data") or []
+
+            if not cards:
+                logger.info("Empty page %d - done paginating CubeCobra", page)
+                break
+
+            results: dict[str, dict[str, Any]] = {}
+            for card in cards:
+                oracle_id = card.get("oracle_id")
+                if oracle_id in db_oracle_ids:
+                    results[oracle_id] = {
+                        "elo": card.get("elo"),
+                        "cube_count": card.get("cubeCount"),
+                        "pick_count": card.get("pickCount"),
+                    }
+
+            logger.info("CubeCobra page %d: %d cards (total: %d)", page, len(cards), len(results))
+            page += 1
+            yield results
+
+    def _insert_cubecobra_data(self, cubecobra_data: dict[str, dict[str, Any]]) -> int:
+        """Write CubeCobra data into magic.cards, matching on oracle_id.
+
+        Args:
+            cubecobra_data: Mapping of oracle_id -> data dict from _fetch_cubecobra_data().
+
+        Returns:
+            Total number of card rows updated.
+        """
+        records = db_utils.maybe_json(
+            [
+                {
+                    "elo": data["elo"],
+                    "cube_count": data["cube_count"],
+                    "pick_count": data["pick_count"],
+                    "oracle_id": oracle_id,
+                }
+                for oracle_id, data in cubecobra_data.items()
+            ]
+        )
+
+        with self._conn_pool.connection() as conn, conn.cursor() as cursor:
+            cursor.execute(
+                """
+                WITH incoming AS (
+                    SELECT * FROM jsonb_to_recordset(%(records)s) AS t(
+                        elo real, cube_count integer, pick_count integer, oracle_id uuid
+                    )
+                )
+                UPDATE magic.cards
+                SET
+                    cubecobra_elo        = incoming.elo,
+                    cubecobra_cube_count = incoming.cube_count,
+                    cubecobra_pick_count = incoming.pick_count
+                FROM incoming
+                WHERE magic.cards.oracle_id = incoming.oracle_id
+                """,
+                {"records": records},
+            )
+            total_updated = cursor.rowcount
+            conn.commit()
+
+        return total_updated
+
+    def backfill_cubecobra_scores(self, **_: object) -> dict[str, Any]:
+        """Backfill cubecobra_score for all cards.
+
+        Computes a weighted average of per-dimension PERCENT_RANK values (each in the 0-1
+        range, where 0 is best and 1 is worst) and scales the result to a 0-100 score
+        (0 = best, 100 = worst).
+
+        The per-dimension weights are treated as relative and are internally normalized so
+        that their sum is 100. Callers may supply any non-negative weights; they do not need
+        to sum to 1.0.
+
+        One score per distinct card_name is computed and then propagated to all printings.
+
+        Returns:
+            Dict with status and count of cards updated.
+        """
+        weights = {
+            "w_cube_count": 1,
+            "w_edhrec": 1,
+            "w_elo": 1,
+            "w_pick_count": 1,
+        }
+        scale_factor = sum(weights.values()) / 100.0
+        weights = {k: v / scale_factor for k, v in weights.items()}
+        logger.info("Starting CubeCobra score backfill with weights: %s", weights)
+
+        backfill_sql = self.read_sql("backfill_cubecobra_scores")
+        with self._conn_pool.connection() as conn, conn.cursor() as cursor:
+            self._set_statement_timeout(cursor, 60_000)
+            cursor.execute(backfill_sql, weights)
+            updated_count = cursor.rowcount
+            conn.commit()
+
+        logger.info("CubeCobra score backfill complete: %d cards updated", updated_count)
+        return {
+            "status": "success",
+            "cards_updated": updated_count,
+            "weights": weights,
+        }
+
+    def ingest_cubecobra(self, **_: object) -> dict[str, Any]:
+        """Fetch card data from CubeCobra and store it in magic.cards.
+
+        Paginates the CubeCobra top-cards API, then updates all matching rows
+        in magic.cards (matched on oracle_id). Cards not present in CubeCobra
+        are left with NULL values for the cubecobra_* columns.
+
+        Returns:
+            Dict with status and count of rows updated.
+        """
+        logger.info("Starting CubeCobra ingest")
+        # fetch the distinct, non-null oracle ids that are in the db
+        with self._conn_pool.connection() as conn, conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT DISTINCT oracle_id FROM magic.cards WHERE oracle_id IS NOT NULL",
+            )
+            db_oracle_ids = {r["oracle_id"] for r in cursor.fetchall()}
+
+        for cubecobra_page in self._fetch_cubecobra_data(db_oracle_ids):
+            logger.info("Fetched %d oracle_ids from CubeCobra", len(cubecobra_page))
+            cards_updated = self._insert_cubecobra_data(cubecobra_page)
+        logger.info("CubeCobra ingest complete: %d card rows updated", cards_updated)
+
+        backfill_result = self.backfill_cubecobra_scores()
+
+        return {
+            "status": "success",
+            "cards_updated": cards_updated,
+            "scores_backfilled": backfill_result["cards_updated"],
         }
 
     def update_tagged_cards(
@@ -2222,6 +2377,23 @@ class APIResource:
                 statement_timeout = 30_000
                 # Validate and set statement timeout
                 self._set_statement_timeout(cursor, statement_timeout)
+
+                # fetch already imported cards...
+                cursor.execute("SELECT scryfall_id FROM magic.cards GROUP BY scryfall_id")
+                already_imported_cards = {r["scryfall_id"] for r in cursor.fetchall()}
+
+                # filter cards to only those which are not already imported
+                num_before_filtering = len(cards)
+                cards = [card for card in cards if card["scryfall_id"] not in already_imported_cards]
+                logger.info("Filtered %d cards to %d cards to import", num_before_filtering, len(cards))
+                if not cards:
+                    logger.info("No remaining cards to import")
+                    return {
+                        "status": "all_cards_already_present",
+                        "cards_loaded": 0,
+                        "sample_cards": [],
+                        "message": "All cards already present",
+                    }
 
                 page_size = 6000
                 cards_loaded = cards_sent = 0

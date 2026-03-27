@@ -1,0 +1,51 @@
+"""Tests for CardOrdering SQL wiring."""
+
+import multiprocessing
+import time
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from api.api_resource import APIResource
+from api.enums import CardOrdering
+
+
+@pytest.fixture
+def api_resource() -> APIResource:
+    api = APIResource(last_import_time=multiprocessing.Value("d", time.time(), lock=True))
+    api._import_recent = lambda: True
+    return api
+
+
+def _compiled_sql(api_resource: APIResource, ordering: CardOrdering) -> str:
+    """Return the compiled SQL string for a search with the given ordering."""
+    with (
+        patch.object(api_resource, "_conn_pool") as mock_pool,
+        patch.object(api_resource, "_setup_complete", return_value=True),
+    ):
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = [{"total_cards_count": 0, "name": None}]
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_pool.connection.return_value.__enter__.return_value = mock_conn
+
+        result = api_resource.search(query="cmc=1", orderby=ordering)
+        return result["compiled"]
+
+
+@pytest.mark.parametrize(
+    argnames=("ordering", "expected_column"),
+    argvalues=[
+        (CardOrdering.CMC, "cmc"),
+        (CardOrdering.CUBECOBRA, "cubecobra_score"),
+        (CardOrdering.EDHREC, "edhrec_rank"),
+        (CardOrdering.POWER, "creature_power"),
+        (CardOrdering.RARITY, "card_rarity_int"),
+        (CardOrdering.TOUGHNESS, "creature_toughness"),
+        (CardOrdering.USD, "price_usd"),
+    ],
+)
+def test_orderby_column_in_compiled_sql(api_resource: APIResource, ordering: CardOrdering, expected_column: str) -> None:
+    """Every CardOrdering value should produce its mapped column in the compiled SQL."""
+    needle = f", {expected_column} AS sort_value FROM magic.cards"
+    assert needle in _compiled_sql(api_resource, ordering)
