@@ -1,3 +1,9 @@
+ifndef MAKEFLAGS
+CPUS ?= $(shell nproc)
+MAKEFLAGS += -j $(CPUS) -l $(CPUS) -s
+$(info Note: running on $(CPUS) CPU cores by default, use flag -j to override.)
+endif
+
 .EXPORT_ALL_VARIABLES:
 
 SHELL:=/bin/bash
@@ -11,24 +17,26 @@ GIT_SHA := $(shell git rev-parse HEAD 2>/dev/null || echo "unknown")
 GIT_BRANCH := $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 MAYBENORUN := $(shell if echo | xargs --no-run-if-empty >/dev/null 2>/dev/null; then echo "--no-run-if-empty"; else echo ""; fi)
 BASE_COMPOSE := $(mkfile_dir)/docker-compose.yml
+ENVS := $(shell ls envs)
 LINTABLE_DIRS := .
 
 XPGDATABASE=magic
 XPGPASSWORD=foopassword
-XPGPORT=15432
 XPGUSER=foouser
 HOSTNAME := $(shell hostname)
+
+S3_BUCKET=biblioplex
 
 html_files := $(shell find . -type f -name "*.html")
 js_files := $(shell find . -type f -name "*.js" | grep -v node_modules)
 
-S3_BUCKET=biblioplex
+
 
 .PHONY: \
-	/tmp/PIP_ACCESS_TOKEN \
-	/tmp/PIP_INDEX_URL \
-	/tmp/auth.toml \
-	/tmp/pip.conf \
+	$(addprefix reset-,$(ENVS)) \
+	$(addsuffix -down,$(ENVS)) \
+	$(addsuffix -up,$(ENVS)) \
+	$(addsuffix -up-detach,$(ENVS)) \
 	beleren_font \
 	build_images \
 	check_env \
@@ -36,9 +44,6 @@ S3_BUCKET=biblioplex
 	coverage \
 	dockerclean \
 	down \
-	ensure_black \
-	ensure_isort \
-	ensure_pylint \
 	fonts \
 	help \
 	hlep \
@@ -47,10 +52,10 @@ S3_BUCKET=biblioplex
 	mplantin_font \
 	pull_images \
 	reset \
+	status \
 	test \
 	test-integration \
-	test-unit \
-	up
+	test-unit
 
 help: # @doc show this help and exit
 	@python ./scripts/show_makefile_help.py $(mkfile_path)
@@ -60,7 +65,7 @@ hlep: help
 
 ###  Entry points
 
-up_deps: datadir images check_env .env app.min.js
+up_deps: images check_env .env api/static/app.min.js
 
 env.json: # @doc create env.json from template only if it does not exist (never overwrite)
 	@test -f env.json || echo '{}' > env.json
@@ -68,43 +73,31 @@ env.json: # @doc create env.json from template only if it does not exist (never 
 .env: env.json
 	cat env.json | jq -r 'to_entries[] | "\(.key)=\(.value)"' | sort > $@
 
-dev-up: up_deps # @doc start services
-	cd $(GIT_ROOT) && docker compose --profile=dev --file $(BASE_COMPOSE) up --remove-orphans --abort-on-container-exit
+# Usage: make dev-up, make prod-up, make dev-up-detach, make prod-down, etc.
+%-up: up_deps
+	cd $(GIT_ROOT) && docker compose --project-name arcane_$* --env-file .env --env-file envs/$* --file $(BASE_COMPOSE) up --remove-orphans --abort-on-container-exit
 
-prod-up: up_deps # @doc start services
-	cd $(GIT_ROOT) && docker compose --profile=prod --file $(BASE_COMPOSE) up --remove-orphans --abort-on-container-exit
+%-up-detach: up_deps
+	cd $(GIT_ROOT) && docker compose --project-name arcane_$* --env-file .env --env-file envs/$* --file $(BASE_COMPOSE) up --remove-orphans --detach
 
-prod-up-detach: up_deps
-	cd $(GIT_ROOT) && docker compose --profile=prod --file $(BASE_COMPOSE) up --remove-orphans --detach
+%-down:
+	cd $(GIT_ROOT) && docker compose --project-name arcane_$* --env-file .env --env-file envs/$* --file $(BASE_COMPOSE) down --remove-orphans
 
-down: dev-down prod-down
+status: # @doc show container status for all environments
+	@$(foreach env,$(ENVS), \
+	  python -c "import shutil; w=shutil.get_terminal_size().columns; print(' $(env) '.center(w, '='))" && \
+	  cd $(GIT_ROOT) && docker compose --project-name arcane_$(env) --env-file .env --env-file envs/$(env) --file $(BASE_COMPOSE) ps --all ; \
+	)
 
-dev-down: # @doc stop all services
-	docker compose --profile=dev --file $(BASE_COMPOSE) down --remove-orphans > /dev/null
-
-prod-down: # @doc stop all services
-	docker compose --profile=prod --file $(BASE_COMPOSE) down --remove-orphans > /dev/null
+down: $(addsuffix -down,$(ENVS))
 
 images: build_images pull_images # @doc refresh images
 
 build_images: # @doc refresh locally built images
-	cd $(GIT_ROOT) && \
-	docker compose --progress=plain --profile=dev --profile=prod --file $(BASE_COMPOSE) build
+	cd $(GIT_ROOT) && docker compose --progress=plain --env-file .env --env-file envs/dev --file $(BASE_COMPOSE) build
 
 pull_images: $(BASE_COMPOSE) # @doc pull images from remote repos
-	true || docker compose --file $(BASE_COMPOSE) pull
-
-ensure_black: ensure_uv
-	@python -m black --version > /dev/null || \
-	python -m uv pip install black
-
-ensure_isort: ensure_uv
-	@python -m isort --version > /dev/null || \
-	python -m uv pip install isort
-
-ensure_pylint: ensure_uv
-	@python -m pylint /dev/null || \
-	python -m uv pip install pylint
+	true || docker compose --env-file .env --env-file envs/dev --file $(BASE_COMPOSE) pull
 
 ensure_pydocker: ensure_uv
 	@python -c "import docker" 2>/dev/null || \
@@ -135,9 +128,6 @@ ruff_fix: ensure_ruff
 ruff_lint: ruff_fix
 	git ls-files '*.py' | xargs python -m ruff check --fix --unsafe-fixes
 
-# pylint_lint: ruff_fix ensure_pylint
-# 	find . -type f -name "*.py" | xargs python -m pylint --fail-under 7.0 --max-line-length=132
-
 check_env: ensure_pydocker
 	true
 
@@ -146,23 +136,19 @@ dockerclean:
 	docker ps --all --format '{{.ID}}' | xargs $(MAYBENORUN) docker rm --force
 	docker images --format '{{.ID}}' | xargs $(MAYBENORUN) docker rmi --force
 
-dbconn: # @doc connect to the local database
+# Usage: make dbconn-dev, make dbconn-prod
+dbconn-%:
+	test -f ~/.psqlrc || touch ~/.psqlrc
+	test -f ~/.psql_history || touch ~/.psql_history
+	docker compose --project-name arcane_$* --env-file .env --env-file envs/$* --file $(BASE_COMPOSE) \
+	  exec -e PSQLRC=/var/lib/postgresql/.psqlrc -e PSQL_HISTORY=/var/lib/postgresql/.psql_history \
+	  postgres psql -U $(XPGUSER) -d $(XPGDATABASE)
 
-	@PGDATABASE=$(XPGDATABASE) \
-	PGHOST=127.0.0.1 \
-	PGPASSWORD=$(XPGPASSWORD) \
-	PGPORT=25432 \
-	PGUSER=$(XPGUSER) \
-	$(shell find /usr/bin /opt/homebrew -name psql)
+reset-%:
+	docker compose --project-name arcane_$* --env-file .env --env-file envs/$* --file $(BASE_COMPOSE) down --volumes --remove-orphans
+	rm -rvf data/api/$* data/postgres/$*
 
-dump_schema: # @doc dump database schema to file using container's pg_dump
-	docker exec $(PROJECTNAME)postgres $(shell find /usr/bin /opt/homebrew -name pg_dump) -U $(XPGUSER) -d $(XPGDATABASE) -s
-
-datadir:
-	bash ./scripts/make_datadirs.sh
-
-reset:
-	rm -rvf data
+reset: $(addprefix reset-,$(ENVS))
 
 install_deps:
 	python -m uv pip install -r requirements/base.txt
@@ -218,8 +204,8 @@ compare-minification: # @doc compare file sizes: uncompressed, compressed, minif
 	@npm install --no-save cssnano-cli terser > /dev/null 2>&1 || true
 	@python scripts/compare_minification.py
 
-app.min.js: api/static/app.js # @doc minify app.js (used in both dev and prod)
-	@echo "Minifying app.js..."
+api/static/app.min.js: api/static/app.js # @doc minify app.js (used in both dev and prod)
+	@echo "Minifying $^..."
 	@npm install --no-save terser > /dev/null 2>&1 || true
-	@npx terser api/static/app.js --compress --mangle --output api/static/app.min.js
-	@echo "Created api/static/app.min.js"
+	@npx terser api/static/app.js --compress --mangle --output $@
+	@echo "Created $@"

@@ -41,9 +41,9 @@ Always reference these instructions first and fallback to search or bash command
 - **Format HTML**: `npx prettier --write api/index.html` -- takes ~2 seconds.
 
 ### Docker Environment (Working)
-- **Create data directories**: `make datadir` -- takes <1 second.
 - **Build images**: `make build_images` -- takes ~30-60 seconds. NEVER CANCEL.
-- **Start services**: `make up` -- will start PostgreSQL and API services.
+- **Start services (dev)**: `make dev-up` -- will start PostgreSQL and API services.
+- **Start services (prod)**: `make prod-up` -- will start PostgreSQL and API services.
 
 ### Local Development (Recommended)
 - **Run API locally**: `python api/entrypoint.py --port 8080 --workers 4` -- starts the API. Requires bjoern installation.
@@ -116,9 +116,9 @@ sudo apt-get update && sudo apt-get install -y libev-dev
 uv pip install -r requirements/webserver.txt  # Required for local API testing (in venv)
 
 # Docker workflow (works)
-make datadir                             # Create data directories (<1 second)
 make build_images                        # Build Docker images (~30 seconds)
-make up                                  # Start all services (may have permission issues)
+make dev-up                              # Start all services - dev environment
+make prod-up                             # Start all services - prod environment
 ```
 
 ### Development Commands With Known Issues

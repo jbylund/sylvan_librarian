@@ -1,5 +1,3 @@
-name: arcane_tutor
-
 # Volume anchors - reusable volume definitions
 x-pg-hba: &pg-hba
   ./configs/postgres/conf/pg_hba.conf:/pg_hba.conf
@@ -10,177 +8,107 @@ x-pg-conf: &pg-conf
 x-pg-init: &pg-init
   ./configs/postgres/init/:/docker-entrypoint-initdb.d
 
-# Service anchors - reusable service definitions
-x-postgres: &postgres
-  cap_add:
-    - ALL
-  command:
-    - /usr/local/bin/docker-entrypoint.sh
-    - -c
-    - config_file=/postgresql.conf
-  env_file:
-    - .env
-  environment:
-    PGDATA: /data/pg
-    POSTGRES_DB: ${XPGDATABASE}
-    POSTGRES_PASSWORD: ${XPGPASSWORD}
-    POSTGRES_USER: ${XPGUSER}
-  healthcheck:
-    test: ["CMD-SHELL", "psql -U ${XPGUSER} -d ${XPGDATABASE} -c 'SELECT 1'"]
-    interval: 100ms
-    timeout: 1s
-    retries: 5
-    start_period: 30s
-  image: registry.hub.docker.com/library/postgres:18
-  shm_size: 1024M
-  ulimits:
-    core: 0
-
-x-apiservice-env: &apiservice-env
-  ENABLE_CACHE: ${ENABLE_CACHE:-false}
-  HONEYBADGER_API_KEY: ${HONEYBADGER_API_KEY:-}
-  HOSTNAME: ${HOSTNAME}
-  PGDATABASE: ${XPGDATABASE}
-  PGPASSWORD: ${XPGPASSWORD}
-  PGUSER: ${XPGUSER}
-  PYTHONUNBUFFERED: true
-
-x-apiservice: &apiservice
-  build:
-    context: ./
-    dockerfile: ./api/Dockerfile
-    args:
-      GIT_SHA: ${GIT_SHA:-unknown}
-      GIT_BRANCH: ${GIT_BRANCH:-unknown}
-  cap_add:
-    - ALL
-  command:
-    - dumb-init
-    - --
-    - python
-    - -m
-    - api.entrypoint
-  env_file:
-    - .env
-  environment:
-    <<: *apiservice-env
-  healthcheck:
-    test: ["CMD", "curl", "--fail", "--user-agent", "healthcheck", "localhost:8080/get_pid"]
-    interval: 5s
-    timeout: 1s
-    retries: 3
-    start_period: 40s
-  ulimits:
-    core: 0
-  user: 1000:1000
-
-x-client: &client
-  build:
-    context: ./
-    dockerfile: ./client/Dockerfile
-  command:
-    - dumb-init
-    - --
-    - sleep
-    - infinity
-  env_file:
-    - .env
-  environment:
-    API_URL: http://apiservice:8080
-    BATCH_SIZE: 50
-    PYTHONUNBUFFERED: true
-    QUERY_DELAY: 0.1
-  ulimits:
-    core: 0
-  user: 1000:1000
-
 volumes:
-  pgdata-dev:
-  pgdata-prod:
+  pgdata:
 
 services:
-  # Development environment services
-  postgres-dev:
-    <<: *postgres
-    container_name: ${PROJECTNAME}_postgres_dev
-    ports:
-      - "25432:5432"
+  postgres:
+    cap_add:
+      - ALL
+    command:
+      - /usr/local/bin/docker-entrypoint.sh
+      - -c
+      - config_file=/postgresql.conf
+    env_file:
+      - .env
+    environment:
+      PGDATA: /data/pg
+      POSTGRES_DB: ${XPGDATABASE}
+      POSTGRES_PASSWORD: ${XPGPASSWORD}
+      POSTGRES_USER: ${XPGUSER}
+    healthcheck:
+      test: ["CMD-SHELL", "psql -U ${XPGUSER} -d ${XPGDATABASE} -c 'SELECT 1'"]
+      interval: 100ms
+      timeout: 1s
+      retries: 5
+      start_period: 30s
+    image: registry.hub.docker.com/library/postgres:18
+    shm_size: 1024M
+    ulimits:
+      core: 0
     volumes:
       - *pg-hba
       - *pg-conf
       - *pg-init
-      - pgdata-dev:/data/pg
-      - ./data/postgres/dev/logs/:/var/log/postgresql
-    profiles:
-      - dev
+      - pgdata:/data/pg
+      - ./data/postgres/${APP_ENV:-dev}/logs/:/var/log/postgresql
+      - ${HOME}/.psqlrc:/var/lib/postgresql/.psqlrc:ro
+      - ${HOME}/.psql_history:/var/lib/postgresql/.psql_history
 
-  apiservice-dev:
-    <<: *apiservice
-    container_name: ${PROJECTNAME}_apiservice_dev
+  apiservice:
+    build:
+      context: ./
+      dockerfile: ./api/Dockerfile
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+        GIT_BRANCH: ${GIT_BRANCH:-unknown}
+    cap_add:
+      - ALL
+    command:
+      - dumb-init
+      - --
+      - python
+      - -m
+      - api.entrypoint
     depends_on:
-      postgres-dev:
+      postgres:
         condition: service_healthy
+    env_file:
+      - .env
     environment:
-      <<: *apiservice-env
-      ENABLE_CACHE: true
-      ENVIRONMENT: dev
-      PGHOST: ${PROJECTNAME}_postgres_dev
+      ENABLE_CACHE: ${ENABLE_CACHE:-false}
+      ENVIRONMENT: ${APP_ENV:-dev}
+      HONEYBADGER_API_KEY: ${HONEYBADGER_API_KEY:-}
+      HOSTNAME: ${HOSTNAME}
+      PGDATABASE: ${XPGDATABASE}
+      PGHOST: postgres
+      PGPASSWORD: ${XPGPASSWORD}
+      PGUSER: ${XPGUSER}
+      PYTHONUNBUFFERED: true
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--user-agent", "healthcheck", "localhost:8080/get_pid"]
+      interval: 5s
+      timeout: 1s
+      retries: 3
+      start_period: 40s
     ports:
-      - "28080:8080"
+      - "${API_PORT:-28080}:8080"
+    ulimits:
+      core: 0
+    user: 1000:1000
     volumes:
-      - ./data/api/dev/:/data/api
+      - ./data/api/${APP_ENV:-dev}/:/data/api
       - ./api/static:/app/api/static
-    profiles:
-      - dev
 
-  client-dev:
-    <<: *client
-    container_name: ${PROJECTNAME}_query_runner_dev
+  client:
+    build:
+      context: ./
+      dockerfile: ./client/Dockerfile
+    command:
+      - dumb-init
+      - --
+      - sleep
+      - infinity
     depends_on:
-      apiservice-dev:
+      apiservice:
         condition: service_started
-    profiles:
-      - dev
-
-  # Production environment services
-  postgres-prod:
-    <<: *postgres
-    container_name: ${PROJECTNAME}_postgres_prod
-    ports:
-      - "15432:5432"
-    volumes:
-      - *pg-hba
-      - *pg-conf
-      - *pg-init
-      - pgdata-prod:/data/pg
-      - ./data/postgres/prod/logs/:/var/log/postgresql
-    profiles:
-      - prod
-
-  apiservice-prod:
-    <<: *apiservice
-    container_name: ${PROJECTNAME}_apiservice_prod
-    depends_on:
-      postgres-prod:
-        condition: service_healthy
+    env_file:
+      - .env
     environment:
-      <<: *apiservice-env
-      PGHOST: ${PROJECTNAME}_postgres_prod
-      ENVIRONMENT: prod
-      ENABLE_CACHE: true
-    ports:
-      - "18080:8080"
-    volumes:
-      - ./data/api/prod/:/data/api
-      - ./api/static:/app/api/static
-    profiles:
-      - prod
-
-  client-prod:
-    <<: *client
-    container_name: ${PROJECTNAME}_query_runner_prod
-    depends_on:
-      apiservice-prod:
-        condition: service_started
-    profiles:
-      - prod
+      API_URL: http://apiservice:8080
+      BATCH_SIZE: 50
+      PYTHONUNBUFFERED: true
+      QUERY_DELAY: 0.1
+    ulimits:
+      core: 0
+    user: 1000:1000

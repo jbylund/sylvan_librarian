@@ -39,7 +39,9 @@ class ScryfallBulkDataFetcher:
     @cachebox_cached(cache=TTLCache(maxsize=2, ttl=5 * MINUTE))
     def list_bulk_data(self) -> dict[BulkDataKey, dict]:
         """Fetch bulk data from Scryfall."""
-        return {BulkDataKey(r["type"]): r for r in self.session.get("https://api.scryfall.com/bulk-data", timeout=5).json()["data"]}
+        return {
+            BulkDataKey(r["type"]): r for r in self.session.get("https://api.scryfall.com/bulk-data", timeout=20).json()["data"]
+        }
 
     def get_download_uri_for_key(self, data_key: BulkDataKey) -> str:
         """Get the download URI for a given data key."""
