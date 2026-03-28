@@ -550,6 +550,47 @@ class TestAPIResourceCaching(unittest.TestCase):
             # Search cache should be cleared after successful load
             assert "test_key" not in self.api_resource._search.cache
 
+    def test_repeated_random_search_calls_search_once(self) -> None:
+        """Test that repeated random_search calls only invoke _search once when the preferred-cards cache is warm."""
+        fake_cards = [{"name": "Lightning Bolt"}, {"name": "Counterspell"}]
+        fake_search_result = {"cards": fake_cards, "total_cards": 2}
+
+        # Ensure the preferred-cards cache starts empty for this test
+        self.api_resource._get_all_preferred_cards.cache.clear()
+
+        with patch.object(self.api_resource, "_search", return_value=fake_search_result) as mock_search:
+            result1 = self.api_resource.random_search(num_cards=1)
+            result2 = self.api_resource.random_search(num_cards=1)
+
+        # _search should only have been called once; the second random_search hit the cache
+        assert mock_search.call_count == 1
+        assert len(result1["cards"]) == 1
+        assert len(result2["cards"]) == 1
+
+    def test_preferred_cards_cache_clears_after_load(self) -> None:
+        """Test that the preferred-cards cache is invalidated after a successful card load."""
+        with patch.object(self.api_resource, "_conn_pool") as mock_pool:
+            mock_conn = MagicMock()
+            mock_cursor = MagicMock()
+            mock_cursor.rowcount = 1
+            mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+            mock_pool.connection.return_value.__enter__.return_value = mock_conn
+
+            valid_card = create_test_card(
+                card_id="00000000-0000-0000-0000-000000000009",
+                keywords=[],
+                prices={},
+            )
+
+            # Seed the preferred-cards cache with a sentinel value
+            self.api_resource._get_all_preferred_cards.cache[None] = [{"name": "sentinel"}]
+            assert None in self.api_resource._get_all_preferred_cards.cache
+
+            self.api_resource._load_cards_with_staging([valid_card])
+
+            # Cache should be cleared after successful load
+            assert None not in self.api_resource._get_all_preferred_cards.cache
+
     def test_cache_clear_method_works(self) -> None:
         """Test that cache.clear() method works for cachebox caches."""
         # Test query cache clearing

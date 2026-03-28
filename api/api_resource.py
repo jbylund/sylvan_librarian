@@ -572,7 +572,7 @@ class APIResource:
             key_frequency.update(k for k, v in card.items() if v not in [None, [], {}])
         return key_frequency.most_common()
 
-    @cached(cache=TTLCache(maxsize=1, ttl=60), key=lambda _args, _kwds: None)
+    @cached(cache=TTLCache(maxsize=1, ttl=60))
     def _setup_complete(self) -> True:
         """Return True if the setup is complete."""
         try:
@@ -636,7 +636,6 @@ class APIResource:
 
     @cached(
         cache=TTLCache(maxsize=1, ttl=MIN_IMPORT_INTERVAL),
-        key=lambda _args, _kwds: None,
     )
     def import_data(self, **_: object) -> None:
         """Import data from Scryfall and insert into the database."""
@@ -2484,7 +2483,7 @@ class APIResource:
         getattr(self._search, "cache", {}).clear()
         getattr(self._get_all_preferred_cards, "cache", {}).clear()
 
-    @cached(cache=TTLCache(maxsize=1, ttl=600), key=lambda _args, _kwds: None)
+    @cached(cache=TTLCache(maxsize=1, ttl=600))
     def _get_all_preferred_cards(self) -> list[dict[str, Any]]:
         """Return all preferred printings (one per card name), cached for 10 minutes."""
         result = self._search(query="", limit=None)
