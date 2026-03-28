@@ -2485,7 +2485,7 @@ class APIResource:
     @cached(cache=TTLCache(maxsize=1, ttl=600), key=lambda _args, _kwds: None)
     def _get_all_preferred_cards(self) -> list[dict[str, Any]]:
         """Return all preferred printings (one per card name), cached for 10 minutes."""
-        result = self._search(query=None, limit=None, unique=UniqueOn.CARD)
+        result = self._search(query="", limit=None)
         return result["cards"]
 
     def random_search(self, *, num_cards: int = 1, **_: object) -> dict[str, Any]:
