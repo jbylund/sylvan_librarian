@@ -33,10 +33,6 @@ js_files := $(shell find . -type f -name "*.js" | grep -v node_modules)
 
 
 .PHONY: \
-	$(addprefix reset-,$(ENVS)) \
-	$(addsuffix -down,$(ENVS)) \
-	$(addsuffix -up,$(ENVS)) \
-	$(addsuffix -up-detach,$(ENVS)) \
 	beleren_font \
 	build_images \
 	check_env \
