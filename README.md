@@ -187,13 +187,13 @@ arcane_tutor/
 #### Docker Development (Recommended)
 
 ```bash
-# Quick start - just run this!
-make up              # Creates directories, builds images, starts all services
+# Quick start
+make dev-up          # Builds images, starts all services (dev environment)
 
 # Or step by step:
-make datadir          # Create data directories
 make build_images     # Build Docker images (~30-60 seconds)
-make up              # Start PostgreSQL and API services
+make dev-up          # Start PostgreSQL and API services (dev)
+make prod-up         # Start PostgreSQL and API services (prod)
 ```
 
 #### Environment Variables
@@ -207,7 +207,7 @@ The following environment variables can be configured:
   - Can be set in docker-compose.yml or exported before starting services
 - `ENVIRONMENT` - Environment mode (default: `dev`)
   - Set to `prod` for production mode with restricted CORS
-  - Set in docker-compose.yml for dev/prod profiles
+  - Controlled via `APP_ENV` in `envs/dev` / `envs/prod`
 - `CDN_URL` - CDN URL for static assets (default: `https://d1hot9ps2xugbc.cloudfront.net`)
   - Override to use a different CDN provider
   - Used in Content-Security-Policy headers
@@ -224,11 +224,9 @@ The following environment variables can be configured:
 
 Example with caching enabled:
 ```bash
-# Set environment variable
-export ENABLE_CACHE=true
-
-# Start services
-make up
+# Caching is controlled per environment in envs/dev / envs/prod via ENABLE_CACHE
+make dev-up   # ENABLE_CACHE=false (dev default)
+make prod-up  # ENABLE_CACHE=true (prod default)
 ```
 
 #### Local Development
@@ -257,11 +255,11 @@ npx prettier --write api/index.html        # Format frontend code
 
 #### Query Runner Client (for Index Analysis)
 
-The client container runs automatically when you start all services with `make up` or `docker compose up`.
+The client container runs automatically when you start all services with `make dev-up` or `make prod-up`.
 
 ```bash
 # Client runs automatically with all services
-make up
+make dev-up
 
 # Or run locally for development
 python -m client.query_runner
