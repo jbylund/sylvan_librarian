@@ -572,7 +572,7 @@ class APIResource:
             key_frequency.update(k for k, v in card.items() if v not in [None, [], {}])
         return key_frequency.most_common()
 
-    @cached(cache=TTLCache(maxsize=1, ttl=60), key=lambda _args, _kwds: None)
+    @cached(cache=TTLCache(maxsize=1, ttl=60))
     def _setup_complete(self) -> True:
         """Return True if the setup is complete."""
         try:
@@ -636,7 +636,6 @@ class APIResource:
 
     @cached(
         cache=TTLCache(maxsize=1, ttl=MIN_IMPORT_INTERVAL),
-        key=lambda _args, _kwds: None,
     )
     def import_data(self, **_: object) -> None:
         """Import data from Scryfall and insert into the database."""
@@ -2458,11 +2457,7 @@ class APIResource:
 
                 # Clear caches when cards are successfully loaded
                 if cards_loaded > 0:
-                    self._query_cache.clear()
-                    # Clear the search cache by accessing its cache attribute
-                    if hasattr(self._search, "cache"):
-                        self._search.cache.clear()
-
+                    self._clear_caches()
                 return result
 
         except (psycopg.Error, ValueError, KeyError) as e:
@@ -2482,6 +2477,20 @@ class APIResource:
                 "message": f"Error loading cards: {e}",
             }
 
+    def _clear_caches(self) -> None:
+        self._query_cache.clear()
+        # Clear the search cache by accessing its cache attribute
+        getattr(self._search, "cache", {}).clear()
+        getattr(self._get_all_preferred_cards, "cache", {}).clear()
+
+    @cached(cache=TTLCache(maxsize=1, ttl=600))
+    def _get_all_preferred_cards(self) -> list[dict[str, Any]]:
+        """Return all preferred printings (one per card name), cached for 10 minutes."""
+        # if _search is wrapped, use the inner function to avoid
+        # double caching of all records in the normal _search cache
+        search_method = getattr(self._search, "__wrapped__", self._search)
+        return search_method(self, query="", limit=None)["cards"]
+
     def random_search(self, *, num_cards: int = 1, **_: object) -> dict[str, Any]:
         """Return one or more random cards in the same envelope shape as search().
 
@@ -2492,61 +2501,8 @@ class APIResource:
             A dict with a "cards" key (list of card dicts) and "total_cards" key,
             matching the shape returned by search().
         """
-        if not self._setup_complete():
-            raise falcon.HTTPServiceUnavailable(
-                title="Service Unavailable",
-                description="Setup is not complete, please try again later.",
-            ) from None
         num_cards = min(num_cards, 1000)
         num_cards = max(num_cards, 1)
-
-        # TODO: how to keep this query in sync with the larger search query?
-        query_sql = """
-        WITH cte1 AS (
-            SELECT DISTINCT ON (card_name)
-                scryfall_id
-            FROM
-                magic.cards
-            ORDER BY
-                card_name,
-                prefer_score DESC NULLS LAST,
-                scryfall_id
-        ),
-        cte2 AS (
-            SELECT
-                scryfall_id
-            FROM
-                cte1
-            WHERE
-                RANDOM() < %(card_sample_rate)s
-            ORDER BY
-                RANDOM()
-            LIMIT %(num_cards)s
-        )
-        SELECT
-            card_artist,
-            card_name AS name,
-            card_set_code AS set_code,
-            cmc,
-            collector_number,
-            creature_power_text AS power,
-            creature_toughness_text AS toughness,
-            edhrec_rank,
-            mana_cost_text AS mana_cost,
-            oracle_text,
-            set_name,
-            type_line
-        FROM
-            cte2
-        JOIN
-            magic.cards
-        ON
-            cte2.scryfall_id = magic.cards.scryfall_id
-        """
-        with self._conn_pool.connection() as conn, conn.cursor() as cursor:
-            for samplerate in [0.01, 1.0]:
-                cursor.execute(query_sql, {"num_cards": num_cards, "card_sample_rate": samplerate})
-                cards = [dict(r) for r in cursor.fetchall()]
-                if len(cards) == num_cards:
-                    break
+        all_cards = self._get_all_preferred_cards()
+        cards = random.sample(all_cards, min(num_cards, len(all_cards)))
         return {"cards": cards, "total_cards": len(cards)}

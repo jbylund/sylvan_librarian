@@ -174,7 +174,13 @@ class TestCardProcessing:
     def test_preprocess_card_filters_cards_only_banned(self) -> None:
         """Test preprocess_card filters out cards that are only banned (legal in no format)."""
         only_banned_card = create_test_card(
-            legalities={"standard": "not_legal", "modern": "banned", "legacy": "banned", "vintage": "banned", "commander": "banned"},
+            legalities={
+                "standard": "not_legal",
+                "modern": "banned",
+                "legacy": "banned",
+                "vintage": "banned",
+                "commander": "banned",
+            },
         )
 
         result = preprocess_card(only_banned_card)
@@ -183,7 +189,13 @@ class TestCardProcessing:
     def test_preprocess_card_allows_restricted_cards(self) -> None:
         """Test preprocess_card keeps cards that are legal or restricted in at least one format."""
         restricted_card = create_test_card(
-            legalities={"standard": "not_legal", "modern": "not_legal", "legacy": "banned", "vintage": "restricted", "commander": "banned"},
+            legalities={
+                "standard": "not_legal",
+                "modern": "not_legal",
+                "legacy": "banned",
+                "vintage": "restricted",
+                "commander": "banned",
+            },
         )
 
         result = preprocess_card(restricted_card)
