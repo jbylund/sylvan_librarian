@@ -2486,8 +2486,10 @@ class APIResource:
     @cached(cache=TTLCache(maxsize=1, ttl=600))
     def _get_all_preferred_cards(self) -> list[dict[str, Any]]:
         """Return all preferred printings (one per card name), cached for 10 minutes."""
-        result = self._search(query="", limit=None)
-        return result["cards"]
+        # if _search is wrapped, use the inner function to avoid
+        # double caching of all records in the normal _search cache
+        search_method = getattr(self._search, "__wrapped__", self._search)
+        return search_method(self, query="", limit=None)["cards"]
 
     def random_search(self, *, num_cards: int = 1, **_: object) -> dict[str, Any]:
         """Return one or more random cards in the same envelope shape as search().
