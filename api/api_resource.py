@@ -2458,11 +2458,7 @@ class APIResource:
 
                 # Clear caches when cards are successfully loaded
                 if cards_loaded > 0:
-                    self._query_cache.clear()
-                    # Clear the search cache by accessing its cache attribute
-                    if hasattr(self._search, "cache"):
-                        self._search.cache.clear()
-
+                    self._clear_caches()
                 return result
 
         except (psycopg.Error, ValueError, KeyError) as e:
@@ -2481,6 +2477,12 @@ class APIResource:
                 "sample_cards": [],
                 "message": f"Error loading cards: {e}",
             }
+
+    def _clear_caches(self) -> None:
+        self._query_cache.clear()
+        # Clear the search cache by accessing its cache attribute
+        getattr(self._search, "cache", {}).clear()
+        getattr(self._get_all_preferred_cards, "cache", {}).clear()
 
     @cached(cache=TTLCache(maxsize=1, ttl=600), key=lambda _args, _kwds: None)
     def _get_all_preferred_cards(self) -> list[dict[str, Any]]:
