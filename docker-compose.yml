@@ -41,7 +41,6 @@ services:
       - *pg-conf
       - *pg-init
       - pgdata:/data/pg
-      - ./data/postgres/${APP_ENV:-dev}/logs/:/var/log/postgresql
       - ${HOME}/.psqlrc:/var/lib/postgresql/.psqlrc:ro
       - ${HOME}/.psql_history:/var/lib/postgresql/.psql_history
 
@@ -52,6 +51,7 @@ services:
       args:
         GIT_SHA: ${GIT_SHA:-unknown}
         GIT_BRANCH: ${GIT_BRANCH:-unknown}
+    image: arcane_tutor/apiservice:${IMAGE_TAG:-latest}
     cap_add:
       - ALL
     command:
@@ -67,7 +67,7 @@ services:
       - .env
     environment:
       ENABLE_CACHE: ${ENABLE_CACHE:-false}
-      ENVIRONMENT: ${APP_ENV:-dev}
+      ENVIRONMENT: ${ENVIRONMENT:-dev}
       HONEYBADGER_API_KEY: ${HONEYBADGER_API_KEY:-}
       HOSTNAME: ${HOSTNAME}
       PGDATABASE: ${XPGDATABASE}
@@ -79,7 +79,7 @@ services:
       test: ["CMD", "curl", "--fail", "--user-agent", "healthcheck", "localhost:8080/get_pid"]
       interval: 5s
       timeout: 1s
-      retries: 3
+      retries: 60
       start_period: 40s
     ports:
       - "${API_PORT:-28080}:8080"
@@ -94,6 +94,7 @@ services:
     build:
       context: ./
       dockerfile: ./client/Dockerfile
+    image: arcane_tutor/client:${IMAGE_TAG:-latest}
     command:
       - dumb-init
       - --
