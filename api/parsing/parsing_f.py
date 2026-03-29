@@ -727,8 +727,7 @@ def parse_search_query(query: str) -> Query:
 
     Returns:
         Query: A Query AST node containing the parsed query structure.
-            For empty queries, returns a default query that searches for
-            empty name values.
+            For empty queries, returns a default query that is always true.
 
     Raises:
         ValueError: If parsing fails due to syntax errors, invalid operators,
