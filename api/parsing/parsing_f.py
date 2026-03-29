@@ -40,6 +40,7 @@ from api.parsing.nodes import (
     QueryNode,
     RegexValueNode,
     StringValueNode,
+    TrueNode,
 )
 
 if TYPE_CHECKING:
@@ -743,12 +744,11 @@ def parse_search_query(query: str) -> Query:
                        BinaryOperatorNode(AttributeNode("name"), ":", StringValueNode("creature"))]))
 
         >>> parse_search_query("")
-        Query(BinaryOperatorNode(AttributeNode("name"), ":", StringValueNode("")))
+        Query(TrueNode())
     """
     original_query = query
     if query is None or not query.strip():
-        # Return empty query
-        return Query(BinaryOperatorNode(CardAttributeNode("name", ParserClass.TEXT), ":", ""))
+        return Query(TrueNode())
 
     # Pre-process the query to handle implicit AND operations
     # Convert "a b" to "a AND b" when b is not an operator
