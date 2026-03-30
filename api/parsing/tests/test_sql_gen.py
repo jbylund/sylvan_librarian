@@ -1121,3 +1121,14 @@ def test_name_titlecasing() -> None:
     observed_sql = parsed.to_sql(observed_params)
     assert observed_params == {"p_str_VXJ6YSdzIFNhZ2E": r"Urza's Saga"}
     assert observed_sql == r"(card.card_name = %(p_str_VXJ6YSdzIFNhZ2E)s)"
+
+
+@pytest.mark.parametrize(
+    argnames="query",
+    argvalues=["", "   ", None],
+)
+def test_empty_query_generates_true(query: str | None) -> None:
+    """Empty/whitespace/None queries should produce TRUE with no bound parameters."""
+    sql, params = generate_sql_query(parsing.parse_search_query(query))
+    assert sql == "TRUE"
+    assert params == {}

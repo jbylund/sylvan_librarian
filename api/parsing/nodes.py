@@ -303,6 +303,27 @@ class NotNode(QueryNode):
         return hash(("Not", self.operand))
 
 
+class TrueNode(LeafNode):
+    """Represents an always-true condition, used for empty queries."""
+
+    def to_sql(self: TrueNode, context: dict) -> str:
+        """Serialize this node to the SQL literal TRUE."""
+        del context
+        return "TRUE"
+
+    def __repr__(self: TrueNode) -> str:
+        """Return a string representation of the TrueNode."""
+        return "TrueNode()"
+
+    def __eq__(self: TrueNode, other: object) -> bool:
+        """Check equality with another TrueNode."""
+        return isinstance(other, TrueNode)
+
+    def __hash__(self: TrueNode) -> int:
+        """Return a hash for TrueNode."""
+        return hash("TrueNode")
+
+
 class Query(QueryNode):
     """Top-level query container node for the AST."""
 

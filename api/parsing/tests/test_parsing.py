@@ -281,15 +281,15 @@ def test_parse_combined_pricing_queries() -> None:
     assert result2.root == expected2
 
 
-def test_parse_empty_query() -> None:
-    """Test parsing empty or None queries."""
-    # Empty string
-    result = parsing.parse_search_query("")
+@pytest.mark.parametrize(
+    argnames="query",
+    argvalues=["", "   ", None],
+)
+def test_parse_empty_query(query: str | None) -> None:
+    """Test that empty/whitespace/None queries produce a TrueNode root."""
+    result = parsing.parse_search_query(query)
     assert isinstance(result, parsing.Query)
-
-    # None
-    result = parsing.parse_search_query(None)
-    assert isinstance(result, parsing.Query)
+    assert isinstance(result.root, parsing.TrueNode)
 
 
 def test_name_vs_name_attribute() -> None:

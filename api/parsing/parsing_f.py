@@ -40,6 +40,7 @@ from api.parsing.nodes import (
     QueryNode,
     RegexValueNode,
     StringValueNode,
+    TrueNode,
 )
 
 if TYPE_CHECKING:
@@ -707,7 +708,7 @@ def get_parse_expr() -> ParserElement:  # noqa: C901, PLR0915
     return expr
 
 
-def parse_search_query(query: str) -> Query:
+def parse_search_query(query: str | None) -> Query:
     """Parse a search query string into a Query AST.
 
     This function is the main entry point for parsing Scryfall-style search queries.
@@ -726,8 +727,7 @@ def parse_search_query(query: str) -> Query:
 
     Returns:
         Query: A Query AST node containing the parsed query structure.
-            For empty queries, returns a default query that searches for
-            empty name values.
+            For empty queries, returns a default query that is always true.
 
     Raises:
         ValueError: If parsing fails due to syntax errors, invalid operators,
@@ -743,12 +743,11 @@ def parse_search_query(query: str) -> Query:
                        BinaryOperatorNode(AttributeNode("name"), ":", StringValueNode("creature"))]))
 
         >>> parse_search_query("")
-        Query(BinaryOperatorNode(AttributeNode("name"), ":", StringValueNode("")))
+        Query(TrueNode())
     """
     original_query = query
     if query is None or not query.strip():
-        # Return empty query
-        return Query(BinaryOperatorNode(CardAttributeNode("name", ParserClass.TEXT), ":", ""))
+        return Query(TrueNode())
 
     # Pre-process the query to handle implicit AND operations
     # Convert "a b" to "a AND b" when b is not an operator
