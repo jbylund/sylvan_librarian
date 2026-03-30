@@ -708,7 +708,7 @@ def get_parse_expr() -> ParserElement:  # noqa: C901, PLR0915
     return expr
 
 
-def parse_search_query(query: str) -> Query:
+def parse_search_query(query: str | None) -> Query:
     """Parse a search query string into a Query AST.
 
     This function is the main entry point for parsing Scryfall-style search queries.
