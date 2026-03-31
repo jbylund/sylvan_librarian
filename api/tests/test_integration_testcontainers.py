@@ -377,7 +377,8 @@ class TestContainerIntegration:
             if card["name"] == "Brainstorm":
                 break
         else:
-            raise RuntimeError("Brainstorm should be found by artist search")
+            msg = "Brainstorm should be found by artist search"
+            raise RuntimeError(msg)
 
         # Test artist search by partial name (case insensitive)
         result_partial = api_resource.search(q="artist:murai")
@@ -407,7 +408,8 @@ class TestContainerIntegration:
             if card["name"] == "Brainstorm":
                 break
         else:
-            raise RuntimeError("Brainstorm should be found by combined search")
+            msg = "Brainstorm should be found by combined search"
+            raise RuntimeError(msg)
 
     def test_cubecobra_ordering(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """Test that orderby=cubecobra sorts by cubecobra_score ascending (lower = better)."""

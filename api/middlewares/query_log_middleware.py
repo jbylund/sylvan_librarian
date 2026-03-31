@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import queue
 import threading
@@ -64,10 +65,8 @@ class QueryLogMiddleware:
             except Exception:
                 logger.exception("QueryLogMiddleware: failed to write log entry")
                 if conn is not None:
-                    try:
+                    with contextlib.suppress(Exception):
                         conn.close()
-                    except Exception:
-                        pass
                     conn = None
                 time.sleep(1)  # brief back-off before reconnect
 

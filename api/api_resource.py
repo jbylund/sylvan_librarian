@@ -29,7 +29,7 @@ import psycopg
 import requests
 from cachebox import LRUCache, TTLCache
 from cachebox import cached as cachebox_cached
-from psycopg import Connection, Cursor
+from psycopg import Cursor
 
 from api.card_processing import preprocess_card
 from api.enums import CardOrdering, PreferOrder, SortDirection, UniqueOn
@@ -581,11 +581,13 @@ class APIResource:
                     cursor.execute("SELECT COUNT(1) AS num_cards FROM magic.cards")
                     cards_found = cursor.fetchall()[0]["num_cards"]
                     logger.info("Found %d cards in pid %d", cards_found, os.getpid())
-                    complete = (cards_found > MIN_IMPORT_CARDS)
+                    complete = cards_found > MIN_IMPORT_CARDS
                     if complete:
+
                         def new_setup_complete() -> True:
                             """Return True if the setup is complete."""
                             return True
+
                         self._setup_complete = new_setup_complete
                     return complete
         except Exception as oops:
