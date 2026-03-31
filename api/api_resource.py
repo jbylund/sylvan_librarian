@@ -587,6 +587,14 @@ class APIResource:
             logger.error("Error checking if setup is complete: %s", oops, exc_info=True)
             return False
 
+    def _require_setup_complete(self) -> None:
+        """Require that setup is complete or raise a ServiceUnavailable error."""
+        if not self._setup_complete():
+            raise falcon.HTTPServiceUnavailable(
+                title="Service Unavailable",
+                description="Setup is not complete, please try again later.",
+            ) from None
+
     def _import_recent(self) -> bool:
         """Return True if a bulk import completed in the last 5 minutes (or setup is complete when no shared timestamp)."""
         if self._last_import_time is None:
@@ -705,6 +713,35 @@ class APIResource:
             prefer=prefer,
         )
 
+    def _validate_limit(self, limit: int | None) -> int | None:
+        """Validate the limit and return it if valid."""
+        if limit is None:
+            pass
+        elif isinstance(limit, int):
+            if limit < 0:
+                raise falcon.HTTPBadRequest(
+                    title="Invalid Limit",
+                    description="Limit must be a positive integer.",
+                )
+        else:
+            raise falcon.HTTPBadRequest(
+                title="Invalid Limit",
+                description="Limit must be an integer.",
+            )
+        return limit
+
+    def _get_where_clause(self, query: str | None) -> tuple[str, dict[str, Any]]:
+        try:
+            where_clause, params = get_where_clause(query)
+        except ValueError as err:
+            # Handle parsing errors from parse_scryfall_query
+            logger.info("ValueError caught for query '%s', raising BadRequest", query)
+            raise falcon.HTTPBadRequest(
+                title="Invalid Search Query",
+                description=f'Failed to parse query: "{query}"',
+            ) from err
+        return where_clause, params
+
     @cached(
         cache=TTLCache(maxsize=1000, ttl=60),
         key=lambda args, kwds: (args, tuple(sorted(kwds.items()))),
@@ -719,38 +756,14 @@ class APIResource:
         query: str | None = None,
         unique: UniqueOn = UniqueOn.CARD,
     ) -> dict[str, Any]:
-        if not self._setup_complete():
-            raise falcon.HTTPServiceUnavailable(
-                title="Service Unavailable",
-                description="Setup is not complete, please try again later.",
-            ) from None
-
-        if limit is None:
-            pass
-        elif isinstance(limit, int):
-            if limit < 0:
-                raise falcon.HTTPBadRequest(
-                    title="Invalid Limit",
-                    description="Limit must be a positive integer.",
-                )
-        else:
-            raise falcon.HTTPBadRequest(
-                title="Invalid Limit",
-                description="Limit must be an integer.",
-            )
+        self._require_setup_complete()
+        limit = self._validate_limit(limit)
 
         timer = Timer()
 
-        try:
-            with timer("get_where_clause"):
-                where_clause, params = get_where_clause(query)
-        except ValueError as err:
-            # Handle parsing errors from parse_scryfall_query
-            logger.info("ValueError caught for query '%s', raising BadRequest", query)
-            raise falcon.HTTPBadRequest(
-                title="Invalid Search Query",
-                description=f'Failed to parse query: "{query}"',
-            ) from err
+        with timer("get_where_clause"):
+            where_clause, params = self._get_where_clause(query)
+
         sql_orderby: str = {
             # what's in the query => the db column name
             CardOrdering.CMC: "cmc",
