@@ -6,6 +6,7 @@ honeybadger
 orjson
 psycopg[binary,pool]
 pyparsing
+sqlglot
 requests
 tenacity
 testcontainers[postgres]

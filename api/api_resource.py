@@ -27,6 +27,8 @@ import falcon
 import orjson
 import psycopg
 import requests
+import sqlglot
+import sqlglot.expressions as sqle
 from cachebox import LRUCache, TTLCache
 from cachebox import cached as cachebox_cached
 from psycopg import Connection, Cursor
@@ -709,7 +711,7 @@ class APIResource:
         cache=TTLCache(maxsize=1000, ttl=60),
         key=lambda args, kwds: (args, tuple(sorted(kwds.items()))),
     )
-    def _search(  # noqa: PLR0913
+    def _search_raw_sql(  # noqa: PLR0913
         self,
         *,
         direction: SortDirection = SortDirection.ASC,
@@ -898,6 +900,216 @@ class APIResource:
             "inner_timings": result_bag.pop("timings"),
             "total_cards": total_cards,
         }
+
+    def _search_sqlglot(  # noqa: PLR0913
+        self,
+        *,
+        direction: SortDirection = SortDirection.ASC,
+        limit: int = 100,
+        orderby: CardOrdering = CardOrdering.EDHREC,
+        prefer: PreferOrder = PreferOrder.DEFAULT,
+        query: str | None = None,
+        unique: UniqueOn = UniqueOn.CARD,
+    ) -> dict[str, Any]:
+        if not self._setup_complete():
+            raise falcon.HTTPServiceUnavailable(
+                title="Service Unavailable",
+                description="Setup is not complete, please try again later.",
+            ) from None
+
+        if limit is None:
+            pass
+        elif isinstance(limit, int):
+            if limit < 0:
+                raise falcon.HTTPBadRequest(
+                    title="Invalid Limit",
+                    description="Limit must be a positive integer.",
+                )
+        else:
+            raise falcon.HTTPBadRequest(
+                title="Invalid Limit",
+                description="Limit must be an integer.",
+            )
+
+        timer = Timer()
+
+        try:
+            with timer("get_where_clause"):
+                where_clause, params = get_where_clause(query)
+        except ValueError as err:
+            logger.info("ValueError caught for query '%s', raising BadRequest", query)
+            raise falcon.HTTPBadRequest(
+                title="Invalid Search Query",
+                description=f'Failed to parse query: "{query}"',
+            ) from err
+
+        sql_orderby: str = {
+            CardOrdering.CMC: "cmc",
+            CardOrdering.EDHREC: "edhrec_rank",
+            CardOrdering.POWER: "creature_power",
+            CardOrdering.RARITY: "card_rarity_int",
+            CardOrdering.TOUGHNESS: "creature_toughness",
+            CardOrdering.USD: "price_usd",
+            CardOrdering.CUBECOBRA: "cubecobra_score",
+        }.get(orderby, "edhrec_rank")
+        sql_direction_desc = str(direction) == "desc"
+
+        prefer_mapping = {
+            PreferOrder.OLDEST: ("released_at", False),
+            PreferOrder.NEWEST: ("released_at", True),
+            PreferOrder.USD_LOW: ("price_usd", False),
+            PreferOrder.USD_HIGH: ("price_usd", True),
+            PreferOrder.PROMO: ("edhrec_rank", False),
+            PreferOrder.DEFAULT: ("prefer_score", True),
+        }
+        prefer_column, prefer_desc = prefer_mapping.get(prefer, ("edhrec_rank", False))
+
+        def _ordered(col: str, desc: bool) -> sqle.Ordered:
+            return sqle.Ordered(this=sqle.column(col), desc=desc, nulls_first=False)
+
+        # Build CTE inner SELECT
+        where_expr = sqlglot.condition(where_clause, dialect="postgres")
+        cte_select = (
+            sqle.select(
+                "card_artist",
+                "card_name",
+                "card_set_code",
+                "cmc",
+                "collector_number",
+                "creature_power_text",
+                "creature_toughness_text",
+                "edhrec_rank",
+                "mana_cost_text",
+                "oracle_text",
+                "set_name",
+                "type_line",
+                "prefer_score",
+                sqle.alias_(sqle.column(sql_orderby), "sort_value"),
+            )
+            .from_(sqle.alias_(sqle.to_table("magic.cards"), "card"))
+            .where(where_expr)
+        )
+
+        if unique != UniqueOn.PRINTING:
+            distinct_col = "illustration_id" if unique == UniqueOn.ARTWORK else "card_name"
+            cte_select = cte_select.distinct(sqle.column(distinct_col))
+            cte_select = cte_select.order_by(
+                _ordered(distinct_col, False),
+                _ordered(prefer_column, prefer_desc),
+                _ordered("prefer_score", True),
+            )
+        else:
+            cte_select = cte_select.order_by(
+                _ordered(prefer_column, prefer_desc),
+                _ordered("prefer_score", True),
+            )
+
+        # Build first UNION branch: paginated results
+        first_branch = (
+            sqle.select(
+                sqle.null().as_("total_cards_count"),
+                "card_artist",
+                sqle.alias_("card_name", "name"),
+                sqle.alias_("card_set_code", "set_code"),
+                "cmc",
+                "collector_number",
+                sqle.alias_("creature_power_text", "power"),
+                sqle.alias_("creature_toughness_text", "toughness"),
+                "edhrec_rank",
+                sqle.alias_("mana_cost_text", "mana_cost"),
+                "oracle_text",
+                "set_name",
+                "type_line",
+            )
+            .from_("distinct_cards")
+            .order_by(
+                _ordered("sort_value", sql_direction_desc),
+                _ordered("edhrec_rank", False),
+                _ordered("prefer_score", True),
+            )
+            .limit(sqle.Placeholder(this="limit"))
+        )
+
+        # Build second UNION branch: count row
+        count_branch = sqle.select(
+            sqle.func("COUNT", sqle.Literal.number(1)).as_("total_cards_count"),
+            sqle.null().as_("card_artist"),
+            sqle.null().as_("name"),
+            sqle.null().as_("set_code"),
+            sqle.null().as_("cmc"),
+            sqle.null().as_("collector_number"),
+            sqle.null().as_("power"),
+            sqle.null().as_("toughness"),
+            sqle.null().as_("edhrec_rank"),
+            sqle.null().as_("mana_cost"),
+            sqle.null().as_("oracle_text"),
+            sqle.null().as_("set_name"),
+            sqle.null().as_("type_line"),
+        ).from_("distinct_cards")
+
+        # Wrap branches in subqueries so ORDER BY / LIMIT scope correctly
+        full_query = sqle.Subquery(this=first_branch).union(
+            sqle.Subquery(this=count_branch), distinct=False
+        )
+        full_query = full_query.with_("distinct_cards", as_=cte_select)
+
+        params["limit"] = limit
+        query_sql = rewrap(full_query.sql(dialect="postgres"))
+        logger.info("Full query: %s", query_sql)
+        logger.info("Params: %s", params)
+        try:
+            with timer("run_query"):
+                result_bag = self._run_query(query=query_sql, params=params, explain=False)
+        except psycopg.errors.DatatypeMismatch as err:
+            logger.info("DatatypeMismatch caught for query '%s', raising BadRequest", query)
+            raise falcon.HTTPBadRequest(
+                title="Invalid Search Query",
+                description=f"The search query '{query}' contains invalid syntax. "
+                "Arithmetic expressions like 'cmc+1' need to be part of a comparison (e.g., 'cmc+1>3').",
+            ) from err
+
+        cards = result_bag.pop("result", [])
+        count_row = cards.pop()
+        total_cards = count_row["total_cards_count"]
+        for icard in cards:
+            icard.pop("total_cards_count")
+        return {
+            "cards": cards,
+            "compiled": query_sql,
+            "params": params,
+            "query": query,
+            "outer_timings": timer.get_timings(),
+            "inner_timings": result_bag.pop("timings"),
+            "total_cards": total_cards,
+        }
+
+    def _search(  # noqa: PLR0913
+        self,
+        *,
+        direction: SortDirection = SortDirection.ASC,
+        limit: int = 100,
+        orderby: CardOrdering = CardOrdering.EDHREC,
+        prefer: PreferOrder = PreferOrder.DEFAULT,
+        query: str | None = None,
+        unique: UniqueOn = UniqueOn.CARD,
+    ) -> dict[str, Any]:
+        if settings.use_sqlglot:
+            return self._search_sqlglot(
+                direction=direction,
+                limit=limit,
+                orderby=orderby,
+                prefer=prefer,
+                query=query,
+                unique=unique,
+            )
+        return self._search_raw_sql(
+            direction=direction,
+            limit=limit,
+            orderby=orderby,
+            prefer=prefer,
+            query=query,
+            unique=unique,
+        )
 
     def index_html(  # noqa: PLR0913
         self,
