@@ -765,13 +765,23 @@ class APIResource:
             "asc": "ASC",
             "desc": "DESC",
         }.get(str(direction), "ASC")
-        # scryfall supports distinct:
-        # cards, prints, arts
-        distinct_on = {
-            UniqueOn.ARTWORK: "illustration_id",
-            UniqueOn.CARD: "card_name",
-            UniqueOn.PRINTING: "scryfall_id",
-        }.get(unique, "card_name")
+
+        if unique == UniqueOn.PRINTING:
+            # we don't need to distinct on anything
+            # the table is already distinct on scryfall id
+            # which _is_ printing
+            distinct_on_clause = ""
+            distinct_on_orderby_clause = ""
+        else:
+            # scryfall supports distinct:
+            # cards, prints, arts
+            distinct_on = {
+                UniqueOn.ARTWORK: "illustration_id",
+                UniqueOn.CARD: "card_name",
+            }.get(unique, "card_name")
+            distinct_on_clause = f"DISTINCT ON ({distinct_on})"
+            distinct_on_orderby_clause = f"{distinct_on} ASC NULLS LAST,"
+
         # Map prefer values to SQL columns and directions
         prefer_mapping = {
             PreferOrder.OLDEST: ("released_at", "ASC"),
@@ -787,7 +797,7 @@ class APIResource:
         )
         query_sql = f"""
             WITH distinct_cards AS (
-                SELECT DISTINCT ON ({distinct_on})
+                SELECT {distinct_on_clause}
                     card_artist,
                     card_name,
                     card_set_code,
@@ -807,13 +817,14 @@ class APIResource:
                 WHERE
                     {where_clause}
                 ORDER BY
-                    {distinct_on},
+                    {distinct_on_orderby_clause}
                     {prefer_column} {prefer_direction} NULLS LAST,
                     prefer_score DESC NULLS LAST
             )
             (
                 SELECT
                     null AS total_cards_count,
+
                     card_artist,
                     card_name AS name,
                     card_set_code AS set_code,
@@ -839,7 +850,19 @@ class APIResource:
             (
                 SELECT
                     COUNT(1) AS total_cards_count,
-                    null, null, null, null, null, null, null, null, null, null, null, null
+
+                    null as card_artist,
+                    null as name,
+                    null as set_code,
+                    null as cmc,
+                    null as collector_number,
+                    null as power,
+                    null as toughness,
+                    null as edhrec_rank,
+                    null as mana_cost,
+                    null as oracle_text,
+                    null as set_name,
+                    null as type_line
                 FROM
                     distinct_cards
             )"""

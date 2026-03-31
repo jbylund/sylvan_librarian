@@ -13,6 +13,7 @@ import pytest
 import requests
 
 from api.api_resource import APIResource
+from api.enums import UniqueOn
 from api.settings import settings
 
 
@@ -820,5 +821,43 @@ class TestAPIResourceTagHierarchy(unittest.TestCase):
                 assert result["tags_processed"] == 1
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestSearchDistinctOnClause(unittest.TestCase):
+    """Test that the correct DISTINCT ON clause is generated for each unique mode."""
+
+    def setUp(self) -> None:
+        self.api_resource = APIResource(
+            last_import_time=multiprocessing.Value("d", time.time(), lock=True),
+        )
+        self.api_resource._conn_pool = MagicMock()
+
+    def _captured_sql(self, unique: Any) -> str:
+        """Call _search with the given unique mode and return the SQL passed to _run_query."""
+        captured = {}
+
+        def fake_run_query(*, query: str, params: Any = None, explain: bool = False, statement_timeout: int = 10_000) -> dict:
+            captured["sql"] = query
+            # Return the minimal shape _search expects
+            return {"result": [{"total_cards_count": 0}], "timings": {}, "plan": None}
+
+        with (
+            patch.object(self.api_resource, "_setup_complete", return_value=True),
+            patch.object(self.api_resource, "_run_query", side_effect=fake_run_query),
+        ):
+            self.api_resource._search(unique=unique, query="")
+
+        return captured["sql"]
+
+    def test_unique_card_uses_distinct_on_card_name(self) -> None:
+        sql = self._captured_sql(UniqueOn.CARD)
+        assert "DISTINCT ON (card_name)" in sql
+        # Leading ORDER BY key must be present
+        assert "ORDER BY card_name" in sql
+
+    def test_unique_artwork_uses_distinct_on_illustration_id(self) -> None:
+        sql = self._captured_sql(UniqueOn.ARTWORK)
+        assert "DISTINCT ON (illustration_id)" in sql
+        assert "ORDER BY illustration_id" in sql
+
+    def test_unique_printing_omits_distinct_on(self) -> None:
+        sql = self._captured_sql(UniqueOn.PRINTING)
+        assert "DISTINCT ON" not in sql
