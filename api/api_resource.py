@@ -707,10 +707,6 @@ class APIResource:
             prefer=prefer,
         )
 
-    @cached(
-        cache=TTLCache(maxsize=1000, ttl=60),
-        key=lambda args, kwds: (args, tuple(sorted(kwds.items()))),
-    )
     def _search_raw_sql(  # noqa: PLR0913
         self,
         *,
@@ -720,39 +716,10 @@ class APIResource:
         prefer: PreferOrder = PreferOrder.DEFAULT,
         query: str | None = None,
         unique: UniqueOn = UniqueOn.CARD,
+        where_clause: str,
+        params: dict,
+        timer: Timer,
     ) -> dict[str, Any]:
-        if not self._setup_complete():
-            raise falcon.HTTPServiceUnavailable(
-                title="Service Unavailable",
-                description="Setup is not complete, please try again later.",
-            ) from None
-
-        if limit is None:
-            pass
-        elif isinstance(limit, int):
-            if limit < 0:
-                raise falcon.HTTPBadRequest(
-                    title="Invalid Limit",
-                    description="Limit must be a positive integer.",
-                )
-        else:
-            raise falcon.HTTPBadRequest(
-                title="Invalid Limit",
-                description="Limit must be an integer.",
-            )
-
-        timer = Timer()
-
-        try:
-            with timer("get_where_clause"):
-                where_clause, params = get_where_clause(query)
-        except ValueError as err:
-            # Handle parsing errors from parse_scryfall_query
-            logger.info("ValueError caught for query '%s', raising BadRequest", query)
-            raise falcon.HTTPBadRequest(
-                title="Invalid Search Query",
-                description=f'Failed to parse query: "{query}"',
-            ) from err
         sql_orderby: str = {
             # what's in the query => the db column name
             CardOrdering.CMC: "cmc",
@@ -910,39 +877,10 @@ class APIResource:
         prefer: PreferOrder = PreferOrder.DEFAULT,
         query: str | None = None,
         unique: UniqueOn = UniqueOn.CARD,
+        where_clause: str,
+        params: dict,
+        timer: Timer,
     ) -> dict[str, Any]:
-        if not self._setup_complete():
-            raise falcon.HTTPServiceUnavailable(
-                title="Service Unavailable",
-                description="Setup is not complete, please try again later.",
-            ) from None
-
-        if limit is None:
-            pass
-        elif isinstance(limit, int):
-            if limit < 0:
-                raise falcon.HTTPBadRequest(
-                    title="Invalid Limit",
-                    description="Limit must be a positive integer.",
-                )
-        else:
-            raise falcon.HTTPBadRequest(
-                title="Invalid Limit",
-                description="Limit must be an integer.",
-            )
-
-        timer = Timer()
-
-        try:
-            with timer("get_where_clause"):
-                where_clause, params = get_where_clause(query)
-        except ValueError as err:
-            logger.info("ValueError caught for query '%s', raising BadRequest", query)
-            raise falcon.HTTPBadRequest(
-                title="Invalid Search Query",
-                description=f'Failed to parse query: "{query}"',
-            ) from err
-
         sql_orderby: str = {
             CardOrdering.CMC: "cmc",
             CardOrdering.EDHREC: "edhrec_rank",
@@ -1083,6 +1021,10 @@ class APIResource:
             "total_cards": total_cards,
         }
 
+    @cached(
+        cache=TTLCache(maxsize=1000, ttl=60),
+        key=lambda args, kwds: (args, tuple(sorted(kwds.items()))),
+    )
     def _search(  # noqa: PLR0913
         self,
         *,
@@ -1093,22 +1035,42 @@ class APIResource:
         query: str | None = None,
         unique: UniqueOn = UniqueOn.CARD,
     ) -> dict[str, Any]:
-        if settings.use_sqlglot:
-            return self._search_sqlglot(
-                direction=direction,
-                limit=limit,
-                orderby=orderby,
-                prefer=prefer,
-                query=query,
-                unique=unique,
+        if not self._setup_complete():
+            raise falcon.HTTPServiceUnavailable(
+                title="Service Unavailable",
+                description="Setup is not complete, please try again later.",
+            ) from None
+
+        if limit < 0:
+            raise falcon.HTTPBadRequest(
+                title="Invalid Limit",
+                description="Limit must be a positive integer.",
             )
-        return self._search_raw_sql(
+
+        timer = Timer()
+
+        try:
+            with timer("get_where_clause"):
+                where_clause, params = get_where_clause(query)
+        except ValueError as err:
+            # Handle parsing errors from parse_scryfall_query
+            logger.info("ValueError caught for query '%s', raising BadRequest", query)
+            raise falcon.HTTPBadRequest(
+                title="Invalid Search Query",
+                description=f'Failed to parse query: "{query}"',
+            ) from err
+
+        impl = self._search_sqlglot if settings.use_sqlglot else self._search_raw_sql
+        return impl(
             direction=direction,
             limit=limit,
             orderby=orderby,
             prefer=prefer,
             query=query,
             unique=unique,
+            where_clause=where_clause,
+            params=params,
+            timer=timer,
         )
 
     def index_html(  # noqa: PLR0913
