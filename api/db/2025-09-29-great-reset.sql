@@ -248,36 +248,7 @@ CREATE TABLE magic.cards (
     CONSTRAINT raw_card_is_object CHECK ((jsonb_typeof(raw_card_blob) = 'object'::text))
 );
 
-
-CREATE INDEX IF NOT EXISTS idx_cards_artist_trgm ON magic.cards USING gin (card_artist magic.gin_trgm_ops) WHERE (card_artist IS NOT NULL);
-CREATE INDEX IF NOT EXISTS idx_cards_cardname_trgm ON magic.cards USING gin (card_name magic.gin_trgm_ops) WHERE (card_name IS NOT NULL);
-CREATE INDEX IF NOT EXISTS idx_cards_border ON magic.cards USING hash (card_border) WHERE (card_border IS NOT NULL);
-CREATE INDEX IF NOT EXISTS idx_cards_collector_number ON magic.cards USING btree (collector_number) WHERE (collector_number IS NOT NULL);
-CREATE INDEX IF NOT EXISTS idx_cards_collector_number_int ON magic.cards USING btree (collector_number_int) WHERE (collector_number_int IS NOT NULL);
-CREATE INDEX IF NOT EXISTS idx_cards_color_identity_gin ON magic.cards USING gin (card_color_identity);
-CREATE INDEX IF NOT EXISTS idx_cards_colors_gin ON magic.cards USING gin (card_colors);
-CREATE INDEX IF NOT EXISTS idx_cards_creature_power_btree ON magic.cards USING btree (creature_power) WHERE (creature_power IS NOT NULL);
-CREATE INDEX IF NOT EXISTS idx_cards_creature_toughness_btree ON magic.cards USING btree (creature_toughness) WHERE (creature_toughness IS NOT NULL);
-CREATE INDEX IF NOT EXISTS idx_cards_edhrec_rank_btree ON magic.cards USING btree (edhrec_rank);
-CREATE INDEX IF NOT EXISTS idx_cards_flavor_text_trgm ON magic.cards USING gin (flavor_text magic.gin_trgm_ops) WHERE (flavor_text IS NOT NULL);
-CREATE INDEX IF NOT EXISTS idx_cards_frame_data_gin ON magic.cards USING gin (card_frame_data);
-CREATE INDEX IF NOT EXISTS idx_cards_is_tags_gin ON magic.cards USING gin (card_is_tags);
-CREATE INDEX IF NOT EXISTS idx_cards_layout ON magic.cards USING hash (card_layout) WHERE (card_layout IS NOT NULL);
-CREATE INDEX IF NOT EXISTS idx_cards_legalities ON magic.cards USING gin (card_legalities);
-CREATE INDEX IF NOT EXISTS idx_cards_oracle_text_trgm ON magic.cards USING gin (oracle_text magic.gin_trgm_ops);
-CREATE INDEX IF NOT EXISTS idx_cards_price_eur ON magic.cards USING btree (price_eur) WHERE (price_eur IS NOT NULL);
-CREATE INDEX IF NOT EXISTS idx_cards_price_tix ON magic.cards USING btree (price_tix) WHERE (price_tix IS NOT NULL);
-CREATE INDEX IF NOT EXISTS idx_cards_price_usd ON magic.cards USING btree (price_usd) WHERE (price_usd IS NOT NULL);
-CREATE INDEX IF NOT EXISTS idx_cards_produced_mana ON magic.cards USING gin (produced_mana);
-CREATE INDEX IF NOT EXISTS idx_cards_devotion ON magic.cards USING gin (devotion);
-CREATE INDEX IF NOT EXISTS idx_cards_set_code ON magic.cards USING hash (card_set_code) WHERE (card_set_code IS NOT NULL);
-CREATE INDEX IF NOT EXISTS idx_cards_watermark ON magic.cards USING hash (card_watermark) WHERE (card_watermark IS NOT NULL);
-CREATE INDEX IF NOT EXISTS idx_cards_name ON magic.cards USING btree (card_name);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_cards_scryfall_id ON magic.cards USING btree (scryfall_id);
-CREATE INDEX IF NOT EXISTS idx_cards_cardtypes_gin ON magic.cards USING gin (card_types);
-CREATE INDEX IF NOT EXISTS idx_cards_cardsubtypes_gin ON magic.cards USING gin (card_subtypes);
-CREATE INDEX IF NOT EXISTS idx_cards_releasedat ON magic.cards USING btree (released_at);
-
 
 COMMENT ON COLUMN magic.cards.card_artist IS 'Artist name for the card artwork - will be null for cards without artist information';
 COMMENT ON COLUMN magic.cards.card_border IS 'Card border color (black, white, borderless, silver, gold) - stored in lowercase';
@@ -373,36 +344,37 @@ ALTER TABLE ONLY magic.tag_relationships
 
 
 /*
-these indexes help support index only scans for a couple of specific queries
+boilerplate indexes
 */
+/* gin indexes */
+CREATE INDEX IF NOT EXISTS idx_cards_artist_trgm ON magic.cards USING gin (card_artist magic.gin_trgm_ops) WHERE (card_artist IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_cards_cardname_trgm ON magic.cards USING gin (card_name magic.gin_trgm_ops) WHERE (card_name IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_cards_flavor_text_trgm ON magic.cards USING gin (flavor_text magic.gin_trgm_ops) WHERE (flavor_text IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_cards_oracle_text_trgm ON magic.cards USING gin (oracle_text magic.gin_trgm_ops);
 
-CREATE INDEX IF NOT EXISTS idx_cards_cmc_edhrec_btree_include ON magic.cards USING btree (cmc, edhrec_rank) include (
-    card_artist,
-    card_name,
-    illustration_id,
-    mana_cost_text,
-    oracle_text,
-    set_name,
-    type_line
-);
+/* hash indexes */
+CREATE INDEX IF NOT EXISTS idx_cards_border ON magic.cards USING hash (card_border) WHERE (card_border IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_cards_layout ON magic.cards USING hash (card_layout) WHERE (card_layout IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_cards_set_code ON magic.cards USING hash (card_set_code) WHERE (card_set_code IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_cards_watermark ON magic.cards USING hash (card_watermark) WHERE (card_watermark IS NOT NULL);
 
-CREATE INDEX IF NOT EXISTS idx_cards_setcode_edhrec_btree_include ON magic.cards USING btree (card_set_code, edhrec_rank) include (
-    card_artist,
-    card_name,
-    cmc,
-    illustration_id,
-    mana_cost_text,
-    oracle_text,
-    set_name,
-    type_line
-);
+/* gin indexes */
+CREATE INDEX IF NOT EXISTS idx_cards_cardsubtypes_gin ON magic.cards USING gin (card_subtypes);
+CREATE INDEX IF NOT EXISTS idx_cards_cardtypes_gin ON magic.cards USING gin (card_types);
+CREATE INDEX IF NOT EXISTS idx_cards_devotion ON magic.cards USING gin (devotion);
+CREATE INDEX IF NOT EXISTS idx_cards_frame_data_gin ON magic.cards USING gin (card_frame_data);
+CREATE INDEX IF NOT EXISTS idx_cards_is_tags_gin ON magic.cards USING gin (card_is_tags);
+CREATE INDEX IF NOT EXISTS idx_cards_legalities ON magic.cards USING gin (card_legalities);
+CREATE INDEX IF NOT EXISTS idx_cards_produced_mana ON magic.cards USING gin (produced_mana);
 
-CREATE INDEX IF NOT EXISTS idx_cards_cardname_edhrec_btree_include ON magic.cards USING btree (card_name, edhrec_rank) include (
-    card_artist,
-    cmc,
-    illustration_id,
-    mana_cost_text,
-    oracle_text,
-    set_name,
-    type_line
-);
+/* btree */
+CREATE INDEX IF NOT EXISTS idx_cards_collector_number ON magic.cards USING btree (collector_number) WHERE (collector_number IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_cards_collector_number_int ON magic.cards USING btree (collector_number_int) WHERE (collector_number_int IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_cards_color_identity_gin ON magic.cards USING gin (card_color_identity);
+CREATE INDEX IF NOT EXISTS idx_cards_colors_gin ON magic.cards USING gin (card_colors);
+CREATE INDEX IF NOT EXISTS idx_cards_creature_power_btree ON magic.cards USING btree (creature_power) WHERE (creature_power IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_cards_creature_toughness_btree ON magic.cards USING btree (creature_toughness) WHERE (creature_toughness IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_cards_price_eur ON magic.cards USING btree (price_eur) WHERE (price_eur IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_cards_price_tix ON magic.cards USING btree (price_tix) WHERE (price_tix IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_cards_price_usd ON magic.cards USING btree (price_usd) WHERE (price_usd IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_cards_releasedat ON magic.cards USING btree (released_at);

@@ -67,7 +67,11 @@ class CachingMiddleware:
                 cached_value = typecast("falcon.Response", cached_value)
             resp.complete = True
             resp.data = cached_value.data
-            resp.media = cached_value.media
+            if isinstance(cached_value.media, dict):
+                resp.media = dict(cached_value.media)
+                resp.media["cache_hit"] = True
+            else:
+                resp.media = cached_value.media
             resp._headers.update(cached_value._headers)
             resp.status = cached_value.status
             logger.info("Cache hit: %s / %s response_id: %d", req.relative_uri, resp.status, id(resp))

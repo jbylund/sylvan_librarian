@@ -7,12 +7,3 @@ ALTER TABLE magic.cards ADD COLUMN IF NOT EXISTS cubecobra_elo        real    DE
 ALTER TABLE magic.cards ADD COLUMN IF NOT EXISTS cubecobra_cube_count integer DEFAULT NULL;
 ALTER TABLE magic.cards ADD COLUMN IF NOT EXISTS cubecobra_pick_count integer DEFAULT NULL;
 ALTER TABLE magic.cards ADD COLUMN IF NOT EXISTS cubecobra_score      real    DEFAULT NULL;
-
-CREATE INDEX IF NOT EXISTS idx_cards_cubecobra_elo_btree
-    ON magic.cards (cubecobra_elo DESC NULLS LAST);
-
-CREATE INDEX IF NOT EXISTS idx_cards_cubecobra_cube_count_btree
-    ON magic.cards (cubecobra_cube_count DESC NULLS LAST);
-
-CREATE INDEX IF NOT EXISTS idx_cards_cubecobra_score_btree
-    ON magic.cards (cubecobra_score ASC NULLS LAST);

@@ -42,7 +42,7 @@ def get_testcontainers_creds() -> dict[str, str]:
     logger.warning("Using an ephemeral postgres container...")
     from testcontainers.postgres import PostgresContainer  # noqa: PLC0415
 
-    exposed_port = random.randint(1024, 49151)  # noqa: S311
+    exposed_port = random.randint(1024, 49151)
     container = (
         PostgresContainer(
             image="postgres:18",

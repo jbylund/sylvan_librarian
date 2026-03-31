@@ -46,6 +46,7 @@ services:
       - ${HOME}/.psql_history:/var/lib/postgresql/.psql_history
 
   apiservice:
+    image: arcane_tutor/apiservice:latest
     build:
       context: ./
       dockerfile: ./api/Dockerfile
@@ -79,7 +80,7 @@ services:
       test: ["CMD", "curl", "--fail", "--user-agent", "healthcheck", "localhost:8080/get_pid"]
       interval: 5s
       timeout: 1s
-      retries: 3
+      retries: 60
       start_period: 40s
     ports:
       - "${API_PORT:-28080}:8080"
@@ -91,24 +92,26 @@ services:
       - ./api/static:/app/api/static
 
   client:
+    image: arcane_tutor/client:latest
     build:
       context: ./
       dockerfile: ./client/Dockerfile
     command:
       - dumb-init
       - --
-      - sleep
-      - infinity
+      - python
+      - -m
+      - client.query_runner
     depends_on:
       apiservice:
-        condition: service_started
+        condition: service_healthy
     env_file:
       - .env
     environment:
       API_URL: http://apiservice:8080
       BATCH_SIZE: 50
       PYTHONUNBUFFERED: true
-      QUERY_DELAY: 0.1
+      QUERY_DELAY: 0.001
     ulimits:
       core: 0
     user: 1000:1000

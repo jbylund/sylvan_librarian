@@ -90,7 +90,7 @@ down: $(addsuffix -down,$(ENVS))
 images: build_images pull_images # @doc refresh images
 
 build_images: # @doc refresh locally built images
-	cd $(GIT_ROOT) && docker compose --progress=plain --env-file .env --env-file envs/dev --file $(BASE_COMPOSE) build
+	cd $(GIT_ROOT) && docker compose --progress=plain --env-file .env --env-file envs/dev --file $(BASE_COMPOSE) build --no-cache
 
 pull_images: $(BASE_COMPOSE) # @doc pull images from remote repos
 	true || docker compose --env-file .env --env-file envs/dev --file $(BASE_COMPOSE) pull
