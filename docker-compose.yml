@@ -27,7 +27,9 @@ services:
       POSTGRES_PASSWORD: ${XPGPASSWORD}
       POSTGRES_USER: ${XPGUSER}
     healthcheck:
-      test: ["CMD-SHELL", "psql -U ${XPGUSER} -d ${XPGDATABASE} -c 'SELECT 1'"]
+      test:
+        - CMD-SHELL
+        - pg_isready -U $POSTGRES_USER -d $POSTGRES_DB
       interval: 100ms
       timeout: 1s
       retries: 5
@@ -76,7 +78,13 @@ services:
       PGUSER: ${XPGUSER}
       PYTHONUNBUFFERED: true
     healthcheck:
-      test: ["CMD", "curl", "--fail", "--user-agent", "healthcheck", "localhost:8080/get_pid"]
+      test:
+        - CMD
+        - curl
+        - --fail
+        - --user-agent
+        - healthcheck
+        - localhost:8080/get_pid
       interval: 5s
       timeout: 1s
       retries: 60
