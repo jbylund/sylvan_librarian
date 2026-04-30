@@ -1252,7 +1252,7 @@ class APIResource:
 
         backfill_sql = self.read_sql("backfill_cubecobra_scores")
         with self._conn_pool.connection() as conn, conn.cursor() as cursor:
-            self._set_statement_timeout(cursor, 60_000)
+            self._set_statement_timeout(cursor, 600_000)
             cursor.execute(backfill_sql, weights)
             updated_count = cursor.rowcount
             conn.commit()
@@ -1288,6 +1288,7 @@ class APIResource:
         logger.info("CubeCobra ingest complete: %d card rows updated", cards_updated)
 
         backfill_result = self.backfill_cubecobra_scores()
+        self._clear_caches()
 
         return {
             "status": "success",
