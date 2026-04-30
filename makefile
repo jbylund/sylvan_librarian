@@ -31,6 +31,7 @@ html_files := $(shell find . -type f -name "*.html")
 js_files := $(shell find . -type f -name "*.js" | grep -v node_modules)
 
 requirements_sources := $(shell find requirements -type f -name "*.txt")
+PYTHON_DIRS := $(shell git ls-files "*.py" | cut -f 1 -d/ | sort -u)
 python_sources := $(shell find api client -type f -name "*.py")
 image_sources := $(python_sources) api/Dockerfile client/Dockerfile $(requirements_sources) $(BASE_COMPOSE)
 
@@ -141,11 +142,11 @@ prettier_lint: /tmp/prettier.stamp
 	touch /tmp/prettier.stamp
 
 ruff_fix: ensure_ruff
-	find . -name "*.py" | xargs python -m ruff check --fix --unsafe-fixes >/dev/null 2>/dev/null || true
-	find . -name "*.py" | xargs python -m ruff format
+	find $(PYTHON_DIRS) -name "*.py" | xargs python -m ruff check --fix --unsafe-fixes >/dev/null 2>/dev/null || true
+	find $(PYTHON_DIRS) -name "*.py" | xargs python -m ruff format
 
 ruff_lint: ruff_fix
-	find . -name "*.py" | xargs python -m ruff check --fix --unsafe-fixes
+	find $(PYTHON_DIRS) -name "*.py" | xargs python -m ruff check --fix --unsafe-fixes
 
 check_env: ensure_pydocker
 	true
