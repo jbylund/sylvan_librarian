@@ -95,6 +95,8 @@ class CachingMiddleware:
             return
 
         del resource, req_succeeded
+        if resp.status and resp.status.startswith("5"):
+            return
         cache_key = self._cache_key(req)
         cached_val = self.cache.get(cache_key)
         if cached_val is None:
