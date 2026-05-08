@@ -387,6 +387,37 @@ def calculate_devotion(mana_cost_str: str) -> dict:
     return {color: color_devotion for color, color_devotion in devotion.items() if color_devotion}
 
 
+class ExactNameNode(QueryNode):
+    """Represents an exact card name search using the ! prefix syntax from Scryfall.
+
+    For example, !"Lightning Bolt" finds only cards with that exact name (case-insensitive).
+    """
+
+    def __init__(self, value: str) -> None:
+        """Initialize an ExactNameNode with the exact name to search for."""
+        self.value = value
+
+    def to_sql(self, context: dict) -> str:
+        """Generate SQL for exact name matching (case-insensitive, no wildcards)."""
+        _param_name = param_name(self.value)
+        context[_param_name] = self.value
+        return f"(card.card_name ILIKE %({_param_name})s)"
+
+    def __repr__(self) -> str:
+        """Return a string representation of the ExactNameNode."""
+        return f"ExactNameNode({self.value!r})"
+
+    def __eq__(self, other: object) -> bool:
+        """Check equality with another ExactNameNode based on value."""
+        if not isinstance(other, ExactNameNode):
+            return False
+        return self.value == other.value
+
+    def __hash__(self) -> int:
+        """Return a hash based on the value."""
+        return hash(("ExactNameNode", self.value))
+
+
 class CardBinaryOperatorNode(BinaryOperatorNode):
     """Card-specific binary operator node with custom SQL generation."""
 
