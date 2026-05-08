@@ -398,9 +398,15 @@ class ExactNameNode(QueryNode):
         self.value = value
 
     def to_sql(self, context: dict) -> str:
-        """Generate SQL for exact name matching (case-insensitive, no wildcards)."""
-        _param_name = param_name(self.value)
-        context[_param_name] = self.value
+        """Generate SQL for exact name matching (case-insensitive, no wildcards).
+
+        ILIKE wildcard characters (% and _) are escaped so the value is matched
+        literally rather than as a pattern.
+        """
+        # Escape ILIKE special characters so the search is truly exact
+        escaped = self.value.replace("%", r"\%").replace("_", r"\_")
+        _param_name = param_name(escaped)
+        context[_param_name] = escaped
         return f"(card.card_name ILIKE %({_param_name})s)"
 
     def __repr__(self) -> str:

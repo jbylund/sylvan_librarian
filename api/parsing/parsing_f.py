@@ -610,7 +610,11 @@ def get_parse_expr() -> ParserElement:  # noqa: C901, PLR0915
     exact_name_prefix = Literal("!").suppress()
 
     def make_exact_name(tokens: list[object]) -> ExactNameNode:
-        """Create an ExactNameNode for exact card name matching."""
+        """Create an ExactNameNode for exact card name matching.
+
+        The token is either a ("quoted", value) tuple produced by quoted_string,
+        or a plain string produced by the word parser.
+        """
         token = tokens[0]
         value = token[1] if isinstance(token, tuple) and token[0] == "quoted" else str(token)
         return ExactNameNode(value)
