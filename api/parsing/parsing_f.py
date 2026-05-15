@@ -22,7 +22,7 @@ from pyparsing import (
     oneOf,
 )
 
-from api.parsing.card_query_nodes import CardAttributeNode, to_card_query_ast
+from api.parsing.card_query_nodes import CardAttributeNode, ExactNameNode, to_card_query_ast
 from api.parsing.db_info import (
     COLOR_NAME_TO_CODE,
     NUMERIC_CARD_ATTRIBUTES,
@@ -603,6 +603,25 @@ def get_parse_expr() -> ParserElement:  # noqa: C901, PLR0915
     hyphenated_condition = condition_parsers["hyphenated_condition"]
     attr_attr_condition = condition_parsers["attr_attr_condition"]
 
+    # Exact name search using ! prefix (Scryfall syntax: !"Lightning Bolt" or !bolt)
+    # Must create a copy of word before single_word changes its parse action
+    _word_for_exact = word.copy()
+    _quoted_string_for_exact = basic_parsers["quoted_string"]
+    exact_name_prefix = Literal("!").suppress()
+
+    def make_exact_name(tokens: list[object]) -> ExactNameNode:
+        """Create an ExactNameNode for exact card name matching.
+
+        The token is either a ("quoted", value) tuple produced by quoted_string,
+        or a plain string produced by the word parser.
+        """
+        token = tokens[0]
+        value = token[1] if isinstance(token, tuple) and token[0] == "quoted" else str(token)
+        return ExactNameNode(value)
+
+    exact_name = exact_name_prefix + (_quoted_string_for_exact | _word_for_exact)
+    exact_name.setParseAction(make_exact_name)
+
     # Single word (implicit name search)
     def make_single_word(tokens: list[str]) -> BinaryOperatorNode:
         """For single words, always search in the name field."""
@@ -646,7 +665,7 @@ def get_parse_expr() -> ParserElement:  # noqa: C901, PLR0915
 
     # For negation, we exclude arithmetic expressions from being negated
     # Test: revert to original order to confirm this breaks it
-    negatable_primary = attr_attr_condition | condition | group | single_word
+    negatable_primary = attr_attr_condition | condition | group | exact_name | single_word
     negatable_factor = Optional(operator_not) + negatable_primary
     negatable_factor.setParseAction(handle_negation)
 
@@ -798,6 +817,9 @@ def _get_implicit_and_tokenizer() -> ParserElement:
     comparison_tok = oneOf(">= <= != : = > <").setParseAction(lambda t: t[0])
     arithmetic_tok = oneOf("+ - * /").setParseAction(lambda t: t[0])
 
+    # Exact name prefix ! - must come after comparison_tok so that != is consumed first
+    exact_name_tok = Literal("!").setParseAction(lambda t: t[0])
+
     # Float (before string_value_word so "3.5" is one token)
     float_tok = Regex(r"\b\d+\.\d*\b").setParseAction(lambda t: t[0])
 
@@ -828,6 +850,7 @@ def _get_implicit_and_tokenizer() -> ParserElement:
         | or_tok
         | comparison_tok
         | arithmetic_tok
+        | exact_name_tok
         | float_tok
         | string_value_tok
         | mana_tok
@@ -884,7 +907,7 @@ _COMPARISON_OPERATORS = frozenset({">", "<", ">=", "<=", "=", "!=", ":"})
 
 def _is_implicit_and_operand(t: str) -> bool:
     """Return True if *t* counts as an operand for implicit-AND insertion."""
-    if t in ("(", ")", "AND", "OR"):
+    if t in ("(", ")", "AND", "OR", "!"):
         return False
     return not is_operator(t)
 
@@ -981,7 +1004,7 @@ def preprocess_implicit_and(query: str) -> str:
 
         need_and = (
             (_is_implicit_and_operand(tok) or tok == ")")
-            and (_is_implicit_and_operand(next_tok) or next_tok in {"(", "-"})
+            and (_is_implicit_and_operand(next_tok) or next_tok in {"(", "-", "!"})
             and not skip_because_value
             and not is_arithmetic_minus
         )
