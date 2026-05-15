@@ -572,7 +572,7 @@ class APIResource:
             key_frequency.update(k for k, v in card.items() if v not in [None, [], {}])
         return key_frequency.most_common()
 
-    @cached(cache=TTLCache(maxsize=1, ttl=60))
+    @cached(cache=TTLCache(maxsize=1, ttl=60 * 60), key=lambda _args, _kwds: None)
     def _setup_complete(self) -> True:
         """Return True if the setup is complete."""
         try:
