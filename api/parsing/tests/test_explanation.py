@@ -31,11 +31,17 @@ from api.parsing import parse_scryfall_query
         # OR combinations
         ("power>3 or toughness>3", "(the power > 3 or the toughness > 3)"),
         # Complex query from the issue - with parens around each AND group
-        ("(power>3 or toughness>3) and id=g f=m", "(the power > 3 or the toughness > 3) and the color identity is Green and it's legal in Modern"),
+        (
+            "(power>3 or toughness>3) and id=g f=m",
+            "(the power > 3 or the toughness > 3) and the color identity is Green and it's legal in Modern",
+        ),
         # Another complex query
         ("power>3 and (id=g or id=u)", "the power > 3 and (the color identity is Green or the color identity is Blue)"),
         # Complex OR with AND groups - matches ((...) or (...)) pattern
-        ("(id=g and t:bird) or (id=r and t:goblin)", "((the color identity is Green and the type contains bird) or (the color identity is Red and the type contains goblin))"),
+        (
+            "(id=g and t:bird) or (id=r and t:goblin)",
+            "((the color identity is Green and the type contains bird) or (the color identity is Red and the type contains goblin))",
+        ),
         # NOT queries
         ("-power>3", "not (the power > 3)"),
         # Rarity

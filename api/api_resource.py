@@ -572,9 +572,16 @@ class APIResource:
             key_frequency.update(k for k, v in card.items() if v not in [None, [], {}])
         return key_frequency.most_common()
 
-    @cached(cache=TTLCache(maxsize=1, ttl=60 * 60), key=lambda _args, _kwds: None)
-    def _setup_complete(self) -> True:
+    _SETUP_COMPLETE_TTL = 60 * 60  # 1 hour; invalidated immediately on successful import
+    _setup_complete_cache: tuple[bool, float] | None = None
+
+    def _setup_complete(self) -> bool:
         """Return True if the setup is complete."""
+        now = time.monotonic()
+        if self._setup_complete_cache is not None:
+            result, expires_at = self._setup_complete_cache
+            if now < expires_at:
+                return result
         try:
             with self._conn_pool.connection() as conn:
                 conn = typecast("Connection", conn)
@@ -582,10 +589,12 @@ class APIResource:
                     cursor.execute("SELECT COUNT(1) AS num_cards FROM magic.cards")
                     cards_found = cursor.fetchall()[0]["num_cards"]
                     logger.info("Found %d cards in pid %d", cards_found, os.getpid())
-                    return cards_found > MIN_IMPORT_CARDS
+                    result = cards_found > MIN_IMPORT_CARDS
         except Exception as oops:
             logger.error("Error checking if setup is complete: %s", oops, exc_info=True)
-            return False
+            result = False
+        self._setup_complete_cache = (result, now + self._SETUP_COMPLETE_TTL)
+        return result
 
     def _require_setup_complete(self) -> None:
         """Require that setup is complete or raise a ServiceUnavailable error."""
@@ -638,6 +647,7 @@ class APIResource:
             self.backfill_prefer_scores()
             self.backfill_cubecobra_scores()
             self._last_import_time.value = time.time()
+            self._setup_complete_cache = None
             return result["sample_cards"]
         logger.error("Failed to import data: %s", result["message"])
         return None

@@ -458,6 +458,10 @@ class ExactNameNode(QueryNode):
         """Return a hash based on the value."""
         return hash(("ExactNameNode", self.value))
 
+    def to_human_explanation(self) -> str:
+        """Return a human-readable explanation for an exact name search."""
+        return f'exact name is "{self.value}"'
+
 
 class CardBinaryOperatorNode(BinaryOperatorNode):
     """Card-specific binary operator node with custom SQL generation."""

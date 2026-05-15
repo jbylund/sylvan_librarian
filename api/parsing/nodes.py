@@ -397,6 +397,10 @@ class TrueNode(LeafNode):
         """Return a hash for TrueNode."""
         return hash("TrueNode")
 
+    def to_human_explanation(self: TrueNode) -> str:
+        """Return an empty explanation for the always-true node."""
+        return ""
+
 
 class Query(QueryNode):
     """Top-level query container node for the AST."""
