@@ -29,6 +29,10 @@ class QueryNode(ABC):
     def to_sql(self: QueryNode, context: dict) -> str:
         """Convert this node to a SQL WHERE clause string representation."""
 
+    @abstractmethod
+    def to_human_explanation(self: QueryNode) -> str:
+        """Convert this node to a human-readable explanation."""
+
 
 class LeafNode(QueryNode):
     """Abstract base class for leaf nodes in the AST.
@@ -55,6 +59,10 @@ class ValueNode(LeafNode):
     def __hash__(self: ValueNode) -> int:
         """Return a hash based on the class name and value."""
         return hash((self.__class__.__name__, self.value))
+
+    def to_human_explanation(self: ValueNode) -> str:
+        """Convert to human-readable explanation."""
+        return str(self.value)
 
 
 class StringValueNode(ValueNode):
@@ -125,6 +133,11 @@ class AttributeNode(LeafNode):
         del context
         return f"card.{self.attribute_name}"
 
+    def to_human_explanation(self: AttributeNode) -> str:
+        """Convert to human-readable explanation."""
+        # This is a simple fallback; CardAttributeNode will override with better logic
+        return self.attribute_name.replace("_", " ")
+
     def __eq__(self: AttributeNode, other: object) -> bool:
         """Check equality with another AttributeNode based on attribute name.
 
@@ -185,6 +198,27 @@ class BinaryOperatorNode(QueryNode):
             sql_operator = "="
         return f"({self.lhs.to_sql(context)} {sql_operator} {self.rhs.to_sql(context)})"
 
+    def to_human_explanation(self: BinaryOperatorNode) -> str:
+        """Convert to human-readable explanation."""
+        # Get explanations from left and right
+        lhs_str = self.lhs.to_human_explanation()
+        rhs_str = self.rhs.to_human_explanation()
+
+        # Get operator explanation
+        operator_map = {
+            "=": "is",
+            "!=": "is not",
+            ">=": "≥",
+            "<=": "≤",
+            ":": "contains",
+            "*": "×",  # noqa: RUF001
+            "/": "÷",
+        }
+        operator_str = operator_map.get(self.operator, self.operator)
+
+        # Default format
+        return f"{lhs_str} {operator_str} {rhs_str}"
+
     def __repr__(self: BinaryOperatorNode) -> str:
         """Return a string representation of the binary operator node."""
         return f"{self.__class__.__name__}({self.lhs}, {self.operator}, {self.rhs})"
@@ -237,6 +271,33 @@ class NaryOperatorNode(QueryNode):
         """
         raise NotImplementedError
 
+    def to_human_explanation(self: NaryOperatorNode) -> str:
+        """Convert to human-explanation."""
+        if not self.operands:
+            return ""
+        if len(self.operands) == 1:
+            return self.operands[0].to_human_explanation()
+
+        # Get explanations for each operand
+        parts = []
+        for op in self.operands:
+            explanation = op.to_human_explanation()
+            # If this is an OrNode and the operand is an AndNode with multiple parts,
+            # we need to ensure proper grouping with parentheses
+            if isinstance(self, OrNode) and isinstance(op, AndNode) and len(op.operands) > 1:
+                # The AndNode will join with " and " but needs parens in OR context
+                explanation = f"({explanation})"
+            parts.append(explanation)
+
+        return self._join_explanations(parts)
+
+    def _join_explanations(self: NaryOperatorNode, parts: list[str]) -> str:
+        """Join explanation parts with the appropriate connector.
+
+        To be implemented by subclasses.
+        """
+        raise NotImplementedError
+
     def __repr__(self: NaryOperatorNode) -> str:
         """Return a string representation of the n-ary operator node."""
         return f"{self.__class__.__name__}({', '.join(repr(op) for op in self.operands)})"
@@ -263,6 +324,10 @@ class AndNode(NaryOperatorNode):
         """Return the SQL result for an empty AND (always TRUE)."""
         return "TRUE"
 
+    def _join_explanations(self: AndNode, parts: list[str]) -> str:
+        """Join explanation parts with 'and'."""
+        return " and ".join(parts)
+
 
 class OrNode(NaryOperatorNode):
     """Represents an OR operation between multiple conditions."""
@@ -274,6 +339,10 @@ class OrNode(NaryOperatorNode):
     def _empty_result(self: OrNode) -> str:
         """Return the SQL result for an empty OR (always FALSE)."""
         return "FALSE"
+
+    def _join_explanations(self: OrNode, parts: list[str]) -> str:
+        """Join explanation parts with 'or' and wrap in parentheses."""
+        return f"({' or '.join(parts)})"
 
 
 class NotNode(QueryNode):
@@ -287,6 +356,11 @@ class NotNode(QueryNode):
         """Serialize this NOT node to a SQL expression."""
         operand_sql = self.operand.to_sql(context)
         return f"NOT ({operand_sql})"
+
+    def to_human_explanation(self: NotNode) -> str:
+        """Convert to human-readable explanation."""
+        operand_explanation = self.operand.to_human_explanation()
+        return f"not ({operand_explanation})"
 
     def __repr__(self: NotNode) -> str:
         """Return a string representation of the NOT node."""
@@ -323,6 +397,10 @@ class TrueNode(LeafNode):
         """Return a hash for TrueNode."""
         return hash("TrueNode")
 
+    def to_human_explanation(self: TrueNode) -> str:
+        """Return an empty explanation for the always-true node."""
+        return ""
+
 
 class Query(QueryNode):
     """Top-level query container node for the AST."""
@@ -334,6 +412,10 @@ class Query(QueryNode):
     def to_sql(self: Query, context: dict) -> str:
         """Serialize this query to a SQL string."""
         return self.root.to_sql(context)
+
+    def to_human_explanation(self: Query) -> str:
+        """Convert to human-readable explanation."""
+        return self.root.to_human_explanation()
 
     def __repr__(self: Query) -> str:
         """Return a string representation of the Query node."""
