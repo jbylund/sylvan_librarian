@@ -14,7 +14,15 @@ from api.parsing.nodes import (
     StringValueNode,
     TrueNode,
 )
-from api.parsing.parsing_f import balance_partial_query, generate_sql_query, parse_scryfall_query, parse_search_query
+from api.parsing.parsing_f import (
+    IgnoredQueryPart,
+    ParseResult,
+    balance_partial_query,
+    generate_sql_query,
+    parse_scryfall_query,
+    parse_scryfall_query_with_ignored,
+    parse_search_query,
+)
 
 node_types = [
     AndNode,
@@ -30,5 +38,6 @@ node_types = [
     StringValueNode,
     TrueNode,
 ]
-functions = [parse_search_query, generate_sql_query, parse_scryfall_query, balance_partial_query]
-__all__ = [x.__name__ for x in node_types + functions]
+functions = [parse_search_query, generate_sql_query, parse_scryfall_query, parse_scryfall_query_with_ignored, balance_partial_query]
+classes = [IgnoredQueryPart, ParseResult]
+__all__ = [x.__name__ for x in node_types + functions + classes]

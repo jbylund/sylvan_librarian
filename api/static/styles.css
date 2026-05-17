@@ -644,6 +644,45 @@ body {
   margin-top: 0;
 }
 
+.query-warnings {
+  margin-bottom: 20px;
+}
+
+.warning-box {
+  background: rgba(255, 193, 7, 0.15);
+  border-left: 4px solid #ffc107;
+  padding: 12px 16px;
+  border-radius: 6px;
+  color: var(--color-text-primary);
+}
+
+[data-theme='dark'] .warning-box {
+  background: rgba(255, 193, 7, 0.1);
+  border-left-color: #ffb300;
+}
+
+.warning-title {
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--color-text-primary);
+}
+
+.warning-item {
+  margin: 4px 0;
+  padding-left: 8px;
+}
+
+.warning-fragment {
+  font-weight: 500;
+  font-family: 'Courier New', Courier, monospace;
+  color: var(--color-text-primary);
+}
+
+.warning-reason {
+  color: var(--color-text-secondary);
+  font-size: 0.95em;
+}
+
 .no-results {
   text-align: center;
   color: var(--color-text-inverted);

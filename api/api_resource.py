@@ -34,7 +34,7 @@ from psycopg import Connection, Cursor
 from api.card_processing import preprocess_card
 from api.enums import CardOrdering, PreferOrder, SortDirection, UniqueOn
 from api.noscript_helpers import generate_results_count_html, generate_results_html
-from api.parsing import generate_sql_query, parse_scryfall_query
+from api.parsing import IgnoredQueryPart, generate_sql_query, parse_scryfall_query, parse_scryfall_query_with_ignored
 from api.scryfall_bulk_data_fetcher import BulkDataKey, ScryfallBulkDataFetcher
 from api.settings import settings
 from api.tagger_client import TaggerClient
@@ -163,6 +163,28 @@ def get_where_clause(query: str) -> tuple[str, dict]:
     """
     parsed_query = parse_scryfall_query(query)
     return generate_sql_query(parsed_query)
+
+
+@cached(cache=LRUCache(maxsize=10_000))
+def get_where_clause_with_ignored(query: str) -> tuple[str, dict, list[IgnoredQueryPart]]:
+    """Generate SQL WHERE clause and parameters from a search query, ignoring unrecognized parts.
+
+    Args:
+        query: The search query string to parse.
+
+    Returns:
+        Tuple of (SQL WHERE clause, parameter dictionary, list of ignored query parts).
+        If no valid query parts are found, raises ValueError.
+    """
+    parse_result = parse_scryfall_query_with_ignored(query)
+
+    if not parse_result.has_valid_query():
+        # Nothing was valid, raise error
+        msg = f'Failed to parse query: "{query}"'
+        raise ValueError(msg)
+
+    where_clause, params = generate_sql_query(parse_result.query)
+    return where_clause, params, parse_result.ignored
 
 
 def rewrap(query: str) -> str:
@@ -773,14 +795,17 @@ class APIResource:
 
         # Generate explanation for the query
         query_explanation = ""
-        parsed_query = None
+        ignored_parts: list[IgnoredQueryPart] = []
         try:
             with timer("get_where_clause"):
-                parsed_query = parse_scryfall_query(query)
-                where_clause, params = generate_sql_query(parsed_query)
-                # Generate explanation after successful parsing
-                if query:  # Only generate explanation if there's a query
-                    query_explanation = parsed_query.to_human_explanation()
+                _parse_result = parse_scryfall_query_with_ignored(query)
+                if not _parse_result.has_valid_query():
+                    msg = f'Failed to parse query: "{query}"'
+                    raise ValueError(msg)
+                where_clause, params = generate_sql_query(_parse_result.query)
+                ignored_parts = _parse_result.ignored
+                if query:
+                    query_explanation = _parse_result.query.to_human_explanation()
         except ValueError as err:
             # Handle parsing errors from parse_scryfall_query
             logger.info("ValueError caught for query '%s', raising BadRequest", query)
@@ -903,7 +928,8 @@ class APIResource:
         total_cards = count_row["total_cards_count"]
         for icard in cards:
             icard.pop("total_cards_count")
-        return {
+
+        result = {
             "cards": cards,
             "compiled": query_sql,
             "params": params,
@@ -913,6 +939,12 @@ class APIResource:
             "inner_timings": result_bag.pop("timings"),
             "total_cards": total_cards,
         }
+
+        # Add ignored query parts if any
+        if ignored_parts:
+            result["query_ignored"] = [part.to_dict() for part in ignored_parts]
+
+        return result
 
     def index_html(  # noqa: PLR0913
         self,
