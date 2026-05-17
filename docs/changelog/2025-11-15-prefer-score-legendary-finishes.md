@@ -32,6 +32,7 @@ This ordering reflects the general preference for non-foil cards for readability
 ### Talrand, Sky Summoner (2X2 - Etched)
 
 This etched legendary card would receive:
+
 - Legendary frame: +5 points
 - Etched finish: 0 points
 - **Total from new components**: 5 points
@@ -41,6 +42,7 @@ Combined with other prefer score components (frame version, language, rarity, et
 ### Lightning Bolt Variants
 
 For different printings of the same card:
+
 - Non-foil version: +10 points (finish)
 - Foil version: +5 points (finish)
 - Etched version: 0 points (finish)
@@ -65,15 +67,15 @@ Located in `api/sql/backfill_prefer_scores.sql`:
 
 ```sql
 'legendary_frame', (
-    SELECT 
-        CASE 
+    SELECT
+        CASE
             WHEN raw_card_blob -> 'frame_effects' ? 'legendary' THEN 5
             ELSE 0
         END
 ),
 'finish', (
-    SELECT 
-        CASE 
+    SELECT
+        CASE
             WHEN raw_card_blob -> 'finishes' ? 'nonfoil' THEN 10
             WHEN raw_card_blob -> 'finishes' ? 'foil' THEN 5
             WHEN raw_card_blob -> 'finishes' ? 'etched' THEN 0
@@ -85,6 +87,7 @@ Located in `api/sql/backfill_prefer_scores.sql`:
 ### Data Source
 
 Both components read from the Scryfall card data stored in `raw_card_blob`:
+
 - `frame_effects`: Array field containing frame effect keywords (e.g., ["legendary", "etched"])
 - `finishes`: Array field containing available finishes (e.g., ["foil"], ["nonfoil"], ["etched"])
 
@@ -107,6 +110,7 @@ The prefer score backfill script automatically recalculates scores for all cards
 ```
 
 Or via the API endpoint:
+
 ```bash
 curl -X POST http://localhost:8080/backfill_prefer_scores
 ```
@@ -115,18 +119,18 @@ curl -X POST http://localhost:8080/backfill_prefer_scores
 
 The new components fit into the overall prefer score system:
 
-| Component | Score Range | Weight |
-|-----------|-------------|--------|
-| Language (English) | 0-40 | High |
-| Frame version | 0-42 | High |
-| Illustration count | 0-23 | Medium |
-| Border color | 0-14 | Medium |
-| Rarity | 0-16 | Medium |
-| High-res scan | 0-16 | Medium |
-| Extended art | 0-12 | Low |
-| **Finish** | **0-10** | **Low** |
-| Has paper | 0-6 | Low |
-| **Legendary frame** | **0-5** | **Very Low** |
+| Component           | Score Range | Weight       |
+| ------------------- | ----------- | ------------ |
+| Language (English)  | 0-40        | High         |
+| Frame version       | 0-42        | High         |
+| Illustration count  | 0-23        | Medium       |
+| Border color        | 0-14        | Medium       |
+| Rarity              | 0-16        | Medium       |
+| High-res scan       | 0-16        | Medium       |
+| Extended art        | 0-12        | Low          |
+| **Finish**          | **0-10**    | **Low**      |
+| Has paper           | 0-6         | Low          |
+| **Legendary frame** | **0-5**     | **Very Low** |
 
 ## Future Considerations
 

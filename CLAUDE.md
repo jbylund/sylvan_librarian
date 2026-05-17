@@ -28,7 +28,7 @@ make test-integration
 # Coverage report
 make coverage
 
-# Lint (ruff + prettier)
+# Lint (ruff + oxfmt)
 make lint
 
 # Auto-fix lint issues
@@ -88,5 +88,5 @@ Browser → GET /search?q=<query>
 ## Linting / Style
 
 - **Python:** `ruff` (line length 132, Google docstring convention, target Python 3.13). Config in `pyproject.toml`.
-- **HTML/JS:** `prettier` (config in `.prettierrc`).
+- **HTML/JS:** `oxfmt` (config in `.oxfmtrc.json`).
 - Tests relax many ruff rules (see `per-file-ignores` in `pyproject.toml`).

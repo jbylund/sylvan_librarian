@@ -54,6 +54,7 @@ IMAGE_TAG := $(BUILD_HASH)
 	images \
 	lint \
 	mplantin_font \
+	oxfmt_lint \
 	pull_images \
 	reset \
 	rolling-deploy \
@@ -131,15 +132,15 @@ ensure_uv:
 	@python -m uv --version > /dev/null || \
 	python -m pip install uv
 
-lint: ruff_lint prettier_lint # @doc lint all python files
+lint: ruff_lint oxfmt_lint # @doc lint all python files
 	true
 
-prettier_lint: /tmp/prettier.stamp
+oxfmt_lint: /tmp/oxfmt.stamp
 	true
 
-/tmp/prettier.stamp: $(html_files) $(js_files)
-	npx prettier --write $(html_files) $(js_files)
-	touch /tmp/prettier.stamp
+/tmp/oxfmt.stamp: $(html_files) $(js_files)
+	npx oxfmt .
+	touch /tmp/oxfmt.stamp
 
 ruff_fix: ensure_ruff
 	find $(PYTHON_DIRS) -name "*.py" | xargs python -m ruff check --fix --unsafe-fixes >/dev/null 2>/dev/null || true

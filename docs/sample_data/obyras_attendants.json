@@ -2,9 +2,7 @@
   "object": "card",
   "id": "0001e77a-7fff-49d2-a55c-42f6fdf6db08",
   "oracle_id": "396b088d-f9af-4ee1-843f-dbe1633f9cc8",
-  "multiverse_ids": [
-    629564
-  ],
+  "multiverse_ids": [629564],
   "mtgo_id": 116428,
   "arena_id": 86752,
   "tcgplayer_id": 513888,
@@ -30,15 +28,9 @@
   "type_line": "Creature — Faerie Wizard // Instant — Adventure",
   "power": "3",
   "toughness": "4",
-  "colors": [
-    "U"
-  ],
-  "color_identity": [
-    "U"
-  ],
-  "keywords": [
-    "Flying"
-  ],
+  "colors": ["U"],
+  "color_identity": ["U"],
+  "keywords": ["Flying"],
   "card_faces": [
     {
       "object": "card_face",
@@ -104,19 +96,12 @@
     "premodern": "not_legal",
     "predh": "not_legal"
   },
-  "games": [
-    "paper",
-    "arena",
-    "mtgo"
-  ],
+  "games": ["paper", "arena", "mtgo"],
   "reserved": false,
   "game_changer": false,
   "foil": true,
   "nonfoil": true,
-  "finishes": [
-    "nonfoil",
-    "foil"
-  ],
+  "finishes": ["nonfoil", "foil"],
   "oversized": false,
   "promo": false,
   "reprint": false,
@@ -136,9 +121,7 @@
   "flavor_text": "Obyra's devoted servants shrieked as their sleeping mistress slashed at them, unseeing.",
   "card_back_id": "0aeebaf5-8c7d-4636-9e82-8c27447861f7",
   "artist": "Andreas Zafiratos",
-  "artist_ids": [
-    "e2f13a9a-57c5-40de-81d4-3b0723899cdf"
-  ],
+  "artist_ids": ["e2f13a9a-57c5-40de-81d4-3b0723899cdf"],
   "illustration_id": "d1ea5321-62e2-4894-a79f-03b792daf2c8",
   "border_color": "black",
   "frame": "2015",

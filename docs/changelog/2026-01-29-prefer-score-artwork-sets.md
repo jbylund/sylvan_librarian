@@ -26,6 +26,7 @@ The **dbl** set contains black/white artwork that differs from the standard full
 ### Lightning Bolt from Different Sets
 
 For different printings of the same card across sets:
+
 - **Lightning Bolt (M21, full-color)**: +20 points (artwork_set)
 - **Lightning Bolt (dbl, black/white)**: 0 points (artwork_set)
 
@@ -64,8 +65,8 @@ Located in `api/sql/backfill_prefer_scores.sql`:
 
 ```sql
 'artwork_set', (
-    SELECT 
-        CASE 
+    SELECT
+        CASE
             WHEN card_set_code IS NULL OR card_set_code NOT IN ('dbl') THEN 20
             ELSE 0
         END
@@ -75,6 +76,7 @@ Located in `api/sql/backfill_prefer_scores.sql`:
 ### Data Source
 
 The component reads from the `card_set_code` column in the `magic.cards` table:
+
 - Cards with `card_set_code = 'dbl'` receive 0 points
 - All other cards (including those with `NULL` set codes) receive 20 points
 
@@ -97,6 +99,7 @@ The prefer score backfill script automatically recalculates scores for all cards
 ```
 
 Or via the API endpoint:
+
 ```bash
 curl -X POST http://localhost:8080/backfill_prefer_scores
 ```
@@ -105,19 +108,19 @@ curl -X POST http://localhost:8080/backfill_prefer_scores
 
 The new component fits into the overall prefer score system:
 
-| Component | Score Range | Weight |
-|-----------|-------------|--------|
-| Language (English) | 0-40 | High |
-| Frame version | 0-42 | High |
-| Illustration count | 0-23 | Medium |
-| **Artwork Set** | **0-20** | **Medium** |
-| Border color | 0-14 | Medium |
-| Rarity | 0-16 | Medium |
-| High-res scan | 0-16 | Medium |
-| Extended art | 0-12 | Low |
-| Finish | 0-10 | Low |
-| Has paper | 0-6 | Low |
-| Legendary frame | 0-5 | Very Low |
+| Component          | Score Range | Weight     |
+| ------------------ | ----------- | ---------- |
+| Language (English) | 0-40        | High       |
+| Frame version      | 0-42        | High       |
+| Illustration count | 0-23        | Medium     |
+| **Artwork Set**    | **0-20**    | **Medium** |
+| Border color       | 0-14        | Medium     |
+| Rarity             | 0-16        | Medium     |
+| High-res scan      | 0-16        | Medium     |
+| Extended art       | 0-12        | Low        |
+| Finish             | 0-10        | Low        |
+| Has paper          | 0-6         | Low        |
+| Legendary frame    | 0-5         | Very Low   |
 
 ## Future Considerations
 

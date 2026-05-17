@@ -2,7 +2,7 @@
 
 ![Web Interface](screenshot.webp)
 
-*Web interface in dark mode showing cards with CMC less than 10, ordered by USD price descending*
+_Web interface in dark mode showing cards with CMC less than 10, ordered by USD price descending_
 
 **Legal Notice**: Magic: The Gathering is trademark and property of Wizards of the Coast LLC, a subsidiary of Hasbro, Inc. This project is unofficial Fan Content permitted under the [Wizards of the Coast Fan Content Policy](https://company.wizards.com/en/legal/fancontentpolicy).
 Not approved/endorsed by Wizards of the Coast.
@@ -28,36 +28,35 @@ Arcane Tutor is an open source implementation of Scryfall, a Magic: The Gatherin
 
 ### Arcane Tutor vs Official Scryfall
 
-| Feature                    | Syntax                                        | Scryfall | Arcane Tutor | Description                                               |
-|----------------------------|-----------------------------------------------|----------|-------------|-----------------------------------------------------------|
-| **Basic Search**           | `name:`, `oracle:`                            | ✔        | ✔           | Full substring search with pattern matching               |
-| **Type Search**            | `type:`, `t:`                                 | ✔        | ✔           | Exact matching with intelligent autocomplete              |
-| **Flavor Text**            | `flavor:`                                     | ✔        | ✔           | Full text search with pattern matching                    |
-| **Artist Search**          | `artist:`, `a:`                               | ✔        | ✔           | Full text search with trigram indexing                    |
-| **Set Search**             | `set:`, `s:`                                  | ✔        | ✔           | Dedicated indexed column with exact matching              |
-| **Rarity Search**          | `rarity:`, `r:`                               | ✔        | ✔           | Integer-based ordering with all comparison operators      |
-| **Frame Search**           | `frame:`                                      | ✔        | ✔           | Card frame type and visual properties search              |
-| **Watermark Search**       | `watermark:`                                  | ✔        | ✔           | Card watermark and visual properties search               |
-| **Mana Production**        | `produces:`                                   | ✔        | ✔           | Search for lands and mana-producing cards                 |
-| **Numeric Attributes**     | `cmc:`, `power:`, `toughness:`, `loyalty:`    | ✔        | ✔           | Complete with all comparison operators                    |
-| **Colors & Identity**      | `color:`, `identity:`, `c:`, `id:`            | ✔        | ✔           | JSONB-based with complex color logic                      |
-| **Pricing Data**           | `usd:`, `eur:`, `tix:`                        | ✔        | ✔           | Complete with all comparison operators                    |
-| **Advanced Logic**         | `AND`, `OR`, `NOT`, `()`                      | ✔        | ✔           | Full boolean logic support                                |
-| **Keywords**               | `keyword:`                                    | ✔        | ✔           | JSONB object storage                                      |
-| **Mana Costs**             | `mana:`, `m:`                                 | ✔        | ✔           | Both JSONB and text representations                       |
-| **Oracle Tags**            | `oracle_tags:`, `ot:`                         | ✔        | ✔           | Standard Scryfall feature                                 |
-| **Date Search**            | `date:`, `year:`                              | ✔        | ✔           | Card release date filtering with comparison operators     |
-| **Devotion Search**        | `devotion:`                                   | ✔        | ✔           | Mana cost devotion calculations with split mana support   |
-| **Format Legality**        | `format:`, `legal:`, `banned:`, `restricted:` | ✔        | ✔           | Competitive play support                                  |
-| **Collector Numbers**      | `number:`, `cn:`                              | ✔        | ✔           | Card collector number search                              |
-| **Card Layout**            | `layout:`                                     | ✔        | ✔           | Card layout types (normal, split, transform, etc.)        |
-| **Card Border**            | `border:`                                     | ✔        | ✔           | Border colors (black, white, borderless, etc.)            |
-| **Special Properties**     | `is:`                                         | ✔        | ✔           | Card classifications (creature, spell, permanent, etc.)   |
-| **Comparison Operators**   | `=`, `<`, `>`, `<=`, `>=`, `!=`, `<>`         | ✔        | ✔           | All comparison operators supported                        |
-| **Regular Expressions**    | `/pattern/`                                   | ✔        | ✔           | Pattern matching with regex syntax                        |
-| **Collection Features**    | `cube:`, `papersets:`                         | ✔        | ✘           | Collection and cube inclusion features                    |
-| **Arithmetic Expressions** | `cmc+1<power`, `power-toughness=0`            | ✘        | ✔           | Advanced mathematical expressions                         |
-
+| Feature                    | Syntax                                        | Scryfall | Arcane Tutor | Description                                             |
+| -------------------------- | --------------------------------------------- | -------- | ------------ | ------------------------------------------------------- |
+| **Basic Search**           | `name:`, `oracle:`                            | ✔        | ✔            | Full substring search with pattern matching             |
+| **Type Search**            | `type:`, `t:`                                 | ✔        | ✔            | Exact matching with intelligent autocomplete            |
+| **Flavor Text**            | `flavor:`                                     | ✔        | ✔            | Full text search with pattern matching                  |
+| **Artist Search**          | `artist:`, `a:`                               | ✔        | ✔            | Full text search with trigram indexing                  |
+| **Set Search**             | `set:`, `s:`                                  | ✔        | ✔            | Dedicated indexed column with exact matching            |
+| **Rarity Search**          | `rarity:`, `r:`                               | ✔        | ✔            | Integer-based ordering with all comparison operators    |
+| **Frame Search**           | `frame:`                                      | ✔        | ✔            | Card frame type and visual properties search            |
+| **Watermark Search**       | `watermark:`                                  | ✔        | ✔            | Card watermark and visual properties search             |
+| **Mana Production**        | `produces:`                                   | ✔        | ✔            | Search for lands and mana-producing cards               |
+| **Numeric Attributes**     | `cmc:`, `power:`, `toughness:`, `loyalty:`    | ✔        | ✔            | Complete with all comparison operators                  |
+| **Colors & Identity**      | `color:`, `identity:`, `c:`, `id:`            | ✔        | ✔            | JSONB-based with complex color logic                    |
+| **Pricing Data**           | `usd:`, `eur:`, `tix:`                        | ✔        | ✔            | Complete with all comparison operators                  |
+| **Advanced Logic**         | `AND`, `OR`, `NOT`, `()`                      | ✔        | ✔            | Full boolean logic support                              |
+| **Keywords**               | `keyword:`                                    | ✔        | ✔            | JSONB object storage                                    |
+| **Mana Costs**             | `mana:`, `m:`                                 | ✔        | ✔            | Both JSONB and text representations                     |
+| **Oracle Tags**            | `oracle_tags:`, `ot:`                         | ✔        | ✔            | Standard Scryfall feature                               |
+| **Date Search**            | `date:`, `year:`                              | ✔        | ✔            | Card release date filtering with comparison operators   |
+| **Devotion Search**        | `devotion:`                                   | ✔        | ✔            | Mana cost devotion calculations with split mana support |
+| **Format Legality**        | `format:`, `legal:`, `banned:`, `restricted:` | ✔        | ✔            | Competitive play support                                |
+| **Collector Numbers**      | `number:`, `cn:`                              | ✔        | ✔            | Card collector number search                            |
+| **Card Layout**            | `layout:`                                     | ✔        | ✔            | Card layout types (normal, split, transform, etc.)      |
+| **Card Border**            | `border:`                                     | ✔        | ✔            | Border colors (black, white, borderless, etc.)          |
+| **Special Properties**     | `is:`                                         | ✔        | ✔            | Card classifications (creature, spell, permanent, etc.) |
+| **Comparison Operators**   | `=`, `<`, `>`, `<=`, `>=`, `!=`, `<>`         | ✔        | ✔            | All comparison operators supported                      |
+| **Regular Expressions**    | `/pattern/`                                   | ✔        | ✔            | Pattern matching with regex syntax                      |
+| **Collection Features**    | `cube:`, `papersets:`                         | ✔        | ✘            | Collection and cube inclusion features                  |
+| **Arithmetic Expressions** | `cmc+1<power`, `power-toughness=0`            | ✘        | ✔            | Advanced mathematical expressions                       |
 
 ### Arcane Tutor Unique Features
 
@@ -85,15 +84,14 @@ Arcane Tutor is an open source implementation of Scryfall, a Magic: The Gatherin
 1. More comprehensive tagging info - per card, per card-printing, per artwork
 1. `cube:`, `papersets:`
 
-
 ### Missing Functionality - Complexity vs Impact Grid
 
 Based on [comprehensive functionality analysis](docs/technical/scryfall_functionality_analysis.md), here's the updated priority matrix:
 
-| **Complexity**   | **Lower impact**             | **Higher impact**                                                                             |
-| ---------------- | -----------------------------|-----------------------------------------------------------------------------------------------|
-| **Simpler**      | **Cube Inclusion** (`cube:`) |                                                                                               |
-| **More complex** |                              | **Reprint Info** (`papersets:`) - [Scryfall Docs](https://scryfall.com/docs/syntax#reprints)  |
+| **Complexity**   | **Lower impact**             | **Higher impact**                                                                            |
+| ---------------- | ---------------------------- | -------------------------------------------------------------------------------------------- |
+| **Simpler**      | **Cube Inclusion** (`cube:`) |                                                                                              |
+| **More complex** |                              | **Reprint Info** (`papersets:`) - [Scryfall Docs](https://scryfall.com/docs/syntax#reprints) |
 
 ### Implementation Status
 
@@ -201,6 +199,7 @@ make prod-up         # Start PostgreSQL and API services (prod)
 The following environment variables can be configured:
 
 **API Service:**
+
 - `ENABLE_CACHE` - Enable/disable API response caching (default: `false`)
   - Set to `true`, `1`, or `yes` to enable caching
   - Improves performance for repeated queries
@@ -218,11 +217,13 @@ The following environment variables can be configured:
   - Supplements environment-specific defaults
 
 **Client Service:**
+
 - `API_URL` - URL of the API service (default: `http://apiservice:8080`)
 - `QUERY_DELAY` - Delay between queries in seconds (default: `1.0`)
 - `BATCH_SIZE` - Number of queries before reporting statistics (default: `50`)
 
 Example with caching enabled:
+
 ```bash
 # Caching is controlled per environment in envs/dev / envs/prod via ENABLE_CACHE
 make dev-up   # ENABLE_CACHE=false (dev default)
@@ -250,7 +251,7 @@ make test-integration # Integration tests (requires Docker)
 # Code quality
 make lint            # Run ruff and pylint
 python -m ruff check --fix --unsafe-fixes  # Auto-fix style issues
-npx prettier --write api/index.html        # Format frontend code
+npx oxfmt                                  # Format frontend code
 ```
 
 #### Query Runner Client (for Index Analysis)
@@ -369,9 +370,11 @@ Arcane Tutor follows security best practices to protect users and data. A compre
 **Security Status**: SECURE - All critical and high-priority vulnerabilities fixed
 
 **Key Security Documents:**
+
 - **[Security Best Practices](docs/security/security_best_practices.md)** - Development security guidelines
 
 **Security Features:**
+
 - SQL injection prevention with parameterized queries
 - XSS protection with output encoding
 - HTTP security headers (CSP, X-Frame-Options, etc.)
@@ -386,6 +389,7 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
 For complete information about data sources, intellectual property attribution, and compliance with relevant policies, see [docs/legal.md](docs/legal/legal.md).
 
 **Key Compliance Documents:**
+
 - **[Legal Compliance Summary](docs/legal/legal_compliance_summary.md)** - Quick status overview (93% complete - excellent standing)
 - **[Legal & Data Sources](docs/legal/legal.md)** - Attribution, IP rights, data sources
 - **[Terms of Service](docs/user/terms_of_service.md)** - User agreement and service terms

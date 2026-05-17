@@ -9,6 +9,7 @@ Report vulnerabilities privately using GitHub's security advisory system:
 **[Submit a private security report](https://github.com/jbylund/arcane_tutor/security/advisories/new)**
 
 Include:
+
 - A description of the vulnerability and its potential impact
 - Steps to reproduce
 - Any proof-of-concept code or screenshots

@@ -9,16 +9,18 @@ Replaced `cachetools` with `cachebox`, a high-performance caching library implem
 Cachebox offers similar APIs to cachetools but with significantly better performance due to its Rust implementation. Based on our benchmarks:
 
 - **LRUCache Insert**: 10,000 items in ~5.8ms
-- **LRUCache Lookup**: 10,000 items in ~2.5ms  
+- **LRUCache Lookup**: 10,000 items in ~2.5ms
 - **TTLCache Insert**: 10,000 items in ~4.8ms
 - **TTLCache Lookup**: 10,000 items in ~3.8ms
 
 ## Changes Made
 
 ### 1. Dependencies
+
 - Updated `requirements/base.txt` to use `cachebox` instead of `cachetools`
 
 ### 2. Import Updates
+
 All cachetools imports were replaced with cachebox equivalents:
 
 ```python
@@ -46,17 +48,19 @@ def hashkey(*args: Any, **kwargs: Any) -> int:
 ### 4. Decorator Changes
 
 #### a) Parameter Name Update
+
 Cachebox uses `key_maker` instead of `key`:
 
 ```python
 # Before
 cached_func = cachetools_cached(cache, key=key)(func)
 
-# After  
+# After
 cached_func = cachebox_cached(cache, key_maker=key_maker)(func)
 ```
 
 #### b) Method Caching
+
 Cachebox's `cachedmethod` is deprecated, so we use the regular `cached` decorator which works for both functions and methods:
 
 ```python
@@ -97,8 +101,9 @@ if not settings.enable_cache:
 ## Testing
 
 All 743 existing tests pass with the new implementation:
+
 - Cache clearing behavior preserved
-- TTL functionality maintained  
+- TTL functionality maintained
 - LRU eviction working correctly
 - Decorator functionality identical
 
@@ -109,6 +114,7 @@ None - this is a drop-in replacement. The API differences are handled by compati
 ## Performance Impact
 
 Expected improvements:
+
 - Faster cache operations (inserts and lookups)
 - Lower CPU usage for cache management
 - Better memory efficiency

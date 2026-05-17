@@ -19,7 +19,7 @@ attribute:/pattern/
 From Scryfall documentation:
 
 - `t:creature o:/^{T}:/` - Creatures that tap with no other payment
-- `t:instant o:/\spp/` - Instants that provide +X/+X effects  
+- `t:instant o:/\spp/` - Instants that provide +X/+X effects
 - `name:/\bizzet\b/` - Card names with "izzet" but not words like "mizzet"
 
 ## Supported Attributes
@@ -52,15 +52,18 @@ Scryfall regex patterns support:
 ## Technical Notes
 
 ### Database
+
 - Uses PostgreSQL's `~*` operator for case-insensitive regex matching
 - Regular text searches continue to use `ILIKE` with `%` wildcards
 
 ### AST
+
 - New `RegexValueNode` class represents regex patterns in the query AST
 - Parser uses pyparsing's `QuotedString` with forward-slash delimiter
 - Preprocessing handles forward-slash delimiters alongside quotes and parentheses
 
 ### Testing
+
 - 28 comprehensive tests covering regex parsing and SQL generation
 - All existing tests (473 total) continue to pass with no regressions
 - Tests validate examples from Scryfall documentation

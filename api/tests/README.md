@@ -26,16 +26,19 @@ The integration tests are located in `test_integration_testcontainers.py` and pr
 - Python dependencies installed: `pip install -r requirements.txt -r test-requirements.txt`
 
 ### Run integration tests only:
+
 ```bash
 python -m pytest api/tests/test_integration_testcontainers.py -v
 ```
 
 ### Run all tests (unit + integration):
+
 ```bash
 python -m pytest -v
 ```
 
 ### Run with more verbose output:
+
 ```bash
 python -m pytest api/tests/test_integration_testcontainers.py -vvv --tb=short
 ```
@@ -43,18 +46,23 @@ python -m pytest api/tests/test_integration_testcontainers.py -vvv --tb=short
 ## Test Structure
 
 ### Fixtures
+
 - **postgres_container**: Manages PostgreSQL testcontainer lifecycle
 - **db_connection**: Provides database connection to the test container
 - **setup_test_database**: Loads test schema and data
 - **api_resource_with_test_db**: Creates APIResource configured for test database
 
 ### Test Data
+
 The `fixtures/` directory contains:
+
 - `test_schema.sql`: Minimal database schema for testing
 - `test_data.sql`: Sample card data for testing search functionality
 
 ### Test Coverage
+
 Current integration tests cover:
+
 - Database connectivity and readiness
 - Card search by various criteria (type, name, color, CMC, power/toughness)
 - Query parsing and SQL generation
@@ -78,17 +86,21 @@ Current integration tests cover:
 ## Troubleshooting
 
 ### Docker Issues
+
 If tests fail with Docker-related errors:
+
 - Ensure Docker daemon is running: `docker ps`
 - Check Docker permissions: User must be able to run Docker commands
 - Verify Docker images can be pulled: `docker pull postgres:15-alpine`
 
 ### Database Connection Issues
+
 - Check that no other services are using the exposed ports
 - Verify network connectivity to the container
 - Look for PostgreSQL startup errors in container logs
 
 ### Test Data Issues
+
 - Verify `fixtures/test_schema.sql` contains all required tables
 - Check that `fixtures/test_data.sql` provides sufficient test data
 - Ensure foreign key constraints are satisfied in test data

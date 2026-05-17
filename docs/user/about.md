@@ -10,6 +10,7 @@ Our goal is to create a feature-rich search tool that respects intellectual prop
 ### Open Source Philosophy
 
 We believe in:
+
 - **Transparency**: All code is open and available for review
 - **Community ownership**: Anyone can contribute, fork, or self-host
 - **Educational value**: Learn how card search engines work
@@ -28,6 +29,7 @@ Arcane Tutor offers capabilities beyond traditional card search:
 ### Alternative Implementation
 
 While we use Scryfall's excellent card data (with attribution and compliance), Arcane Tutor is a completely independent implementation:
+
 - All code written from scratch
 - Original query parser and search algorithms
 - Custom database schema
@@ -40,6 +42,7 @@ Arcane Tutor is not a clone of Scryfall.
 Here's how we're different:
 
 ### Technical Differences
+
 - **Original Codebase**: 100% original code, no copied implementation
 - **Independent Database**: Custom PostgreSQL schema optimized for our use cases
 - **Different Architecture**: Falcon-based API with bjoern WSGI server
@@ -47,12 +50,14 @@ Here's how we're different:
 - **Extended Features**: Arithmetic expressions and other unique capabilities
 
 ### Visual Design
+
 - **Different Color Scheme**: Blue gradient theme (Tolarian Academy inspired)
 - **Original Layout**: Custom card grid and modal display
 - **Unique UI Components**: Original search controls and dropdowns
 - **Different Typography**: Custom font choices (Beleren, MPlantin)
 
 ### Philosophy
+
 - **Open Source First**: Complete transparency and community ownership
 - **Self-Hostable**: Run your own instance with Docker
 - **No Limits**: Designed for power users who need more data
@@ -61,6 +66,7 @@ Here's how we're different:
 ## Technology Stack
 
 See [README.md](../README.md#code-organization) for detailed information about:
+
 - Backend architecture (Python, Falcon, bjoern)
 - Database design (PostgreSQL with optimized schema)
 - Frontend implementation
@@ -76,6 +82,7 @@ For complete details on data sources, attribution, and intellectual property, se
 ## Project Status
 
 ### Current Features ✅
+
 - Complete search syntax support (matching Scryfall)
 - Arithmetic expressions in queries
 - Optimized database performance
@@ -85,6 +92,7 @@ For complete details on data sources, attribution, and intellectual property, se
 - Light/dark theme support
 
 ### In Development 🚧
+
 - Double-faced card support improvements
 - Comprehensive tagging features
 - Additional search operators (`cube:`, `papersets:`)
@@ -95,6 +103,7 @@ For complete details on data sources, attribution, and intellectual property, se
 We take compliance seriously with original code, proper attribution, and adherence to all relevant policies.
 
 See our compliance documentation:
+
 - [legal.md](../legal/legal.md) - Data sources, attribution, and IP rights
 - [terms_of_service.md](../user/terms_of_service.md) - User terms
 - [privacy_policy.md](../user/privacy_policy.md) - Privacy practices
@@ -106,6 +115,7 @@ See our compliance documentation:
 
 Arcane Tutor is community-driven and welcomes contributions.
 See [README.md](../README.md#developer-quick-start) for:
+
 - Developer setup instructions
 - How to report issues
 - Pull request guidelines
@@ -114,6 +124,7 @@ See [README.md](../README.md#developer-quick-start) for:
 ## Acknowledgments
 
 We are deeply grateful to:
+
 - **[Scryfall](https://scryfall.com)** for comprehensive card data and public APIs
 - **Wizards of the Coast** for creating Magic: The Gathering and supporting fan content
 - **Open Source Community** for the tools that make this possible
@@ -135,6 +146,7 @@ This license applies only to our original code - see [legal.md](legal.md#license
 ## Future Vision
 
 We aim to:
+
 - Continue expanding search capabilities
 - Improve performance and user experience
 - Add more unique features not found elsewhere
@@ -146,4 +158,4 @@ We aim to:
 
 **Arcane Tutor**: An open-source Magic: The Gathering card search engine by the community, for the community.
 
-*Last Updated: October 2025*
+_Last Updated: October 2025_

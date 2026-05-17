@@ -75,26 +75,26 @@ This directory contains comprehensive documentation of our legal compliance stat
 ### 🎨 Outstanding Work
 
 1. **[issue_template_custom_logo.md](../legal/issue_template_custom_logo.md)**
-    - Issue template for custom logo
-    - Design requirements and concepts
-    - Implementation tasks
-    - Timeline and resources
+   - Issue template for custom logo
+   - Design requirements and concepts
+   - Implementation tasks
+   - Timeline and resources
 
 ---
 
 ## Compliance Status by Category
 
-| Category | Complete | Total | Status |
-|----------|----------|-------|--------|
-| Data & Content | 5/6 | 83% | ✅ Complete |
-| Visual Design & UI | 5/6 | 83% | ⚠️ 1 cosmetic item |
-| Features & Functionality | 5/5 | 100% | ✅ Complete |
-| Code & Implementation | 5/5 | 100% | ✅ Complete |
-| Legal & Compliance | 7/7 | 100% | ✅ Complete |
-| Content & Documentation | 5/5 | 100% | ✅ Complete |
-| Red Flags Avoided | 5/5 | 100% | ✅ Complete |
-| Documentation Tasks | 4/4 | 100% | ✅ Complete |
-| **OVERALL** | **42/45** | **93%** | ✅ **Excellent** |
+| Category                 | Complete  | Total   | Status             |
+| ------------------------ | --------- | ------- | ------------------ |
+| Data & Content           | 5/6       | 83%     | ✅ Complete        |
+| Visual Design & UI       | 5/6       | 83%     | ⚠️ 1 cosmetic item |
+| Features & Functionality | 5/5       | 100%    | ✅ Complete        |
+| Code & Implementation    | 5/5       | 100%    | ✅ Complete        |
+| Legal & Compliance       | 7/7       | 100%    | ✅ Complete        |
+| Content & Documentation  | 5/5       | 100%    | ✅ Complete        |
+| Red Flags Avoided        | 5/5       | 100%    | ✅ Complete        |
+| Documentation Tasks      | 4/4       | 100%    | ✅ Complete        |
+| **OVERALL**              | **42/45** | **93%** | ✅ **Excellent**   |
 
 ---
 
@@ -224,6 +224,7 @@ The project can safely proceed with normal development.
 ## Contact
 
 For legal compliance questions:
+
 - Open an issue on [GitHub](https://github.com/jbylund/arcane_tutor/issues)
 - Contact repository owner
 - Review documentation in this directory
@@ -241,5 +242,5 @@ This project is not affiliated with or endorsed by Scryfall.
 
 ---
 
-*Last Updated: October 19, 2025*  
-*Next Review: January 2026*
+_Last Updated: October 19, 2025_  
+_Next Review: January 2026_

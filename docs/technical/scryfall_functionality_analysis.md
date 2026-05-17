@@ -59,8 +59,8 @@ Based on the codebase analysis and successful API comparisons:
    - `watermark:` - Card watermarks
 
 1. **Temporal Features** ✅ Recently Implemented
-    - `date:` - Specific release date filtering with all comparison operators
-    - `year:` - Release year filtering with optimized date range queries
+   - `date:` - Specific release date filtering with all comparison operators
+   - `year:` - Release year filtering with optimized date range queries
 
 1. **Operators**
    - Comparison: `=`, `<`, `>`, `<=`, `>=`, `!=`, `<>`
@@ -249,6 +249,7 @@ The Scryfall OS project has achieved excellent maturity and feature completeness
 With comprehensive support for basic search, advanced querying, pricing data, format legality, and specialized features like Oracle tags, the system provides robust coverage of most common use cases.
 
 **Major Achievements:**
+
 - ✅ Complete core search functionality (name, oracle, type, numeric attributes)
 - ✅ Advanced features (rarity, pricing, legality, artist search)
 - ✅ Excellent API stability and data quality (100% success rates)
@@ -256,6 +257,7 @@ With comprehensive support for basic search, advanced querying, pricing data, fo
 - ✅ Performance optimization with proper database indexing
 
 **Current Focus Areas:**
+
 - Ongoing data synchronization improvements and monitoring
 - Implementation of advanced mechanics (`devotion:`)
 - Enhanced specialized features for advanced users

@@ -5,11 +5,13 @@ This directory contains utility scripts for the Scryfall OS project.
 ## Scryfall Comparison Script
 
 ### Overview
+
 `scryfall_comparison_script.py` compares search results between the official Scryfall API and the local Scryfall OS implementation to identify functionality gaps and data discrepancies.
 
 ### Usage
 
 #### Full Comparison Suite
+
 ```bash
 python scripts/scryfall_comparison_script.py
 ```
@@ -17,6 +19,7 @@ python scripts/scryfall_comparison_script.py
 This runs 23 test queries covering various search features and generates a detailed report.
 
 #### Programmatic Usage
+
 ```python
 from scripts.scryfall_comparison_script import ScryfallAPIComparator
 
@@ -31,6 +34,7 @@ print(f"Correlation: {result.position_correlation:.2f}")
 ### Output
 
 The script generates:
+
 1. **Console output** - Real-time progress and summary
 1. **Report file** - Detailed markdown report saved to `/tmp/scryfall_comparison_report.md`
 
@@ -43,6 +47,7 @@ The script generates:
 ### Test Queries
 
 The script tests various functionality including:
+
 - Basic text search (`lightning`)
 - Type searches (`t:beast`)
 - Color searches (`c:g`, `id:g`)
@@ -72,26 +77,31 @@ The script includes automatic rate limiting (0.1-0.2 second delays) to be respec
 ## Copy Images to S3 Script
 
 ### Overview
+
 `copy_images_to_s3.py` downloads card images from Scryfall, converts them to WebP format at multiple sizes, and uploads them to AWS S3.
 
 ### Usage
 
 #### Basic Usage
+
 ```bash
 python -m scripts.copy_images_to_s3
 ```
 
 #### Filter by Set
+
 ```bash
 python -m scripts.copy_images_to_s3 --set iko
 ```
 
 #### Limit Processing
+
 ```bash
 python -m scripts.copy_images_to_s3 --limit 100
 ```
 
 #### Dry Run
+
 ```bash
 python -m scripts.copy_images_to_s3 --dry-run --limit 10 --verbose
 ```
@@ -105,6 +115,7 @@ python -m scripts.copy_images_to_s3 --dry-run --limit 10 --verbose
 ### Image Sizes
 
 Generates four WebP versions per card:
+
 - **745px**: Full resolution
 - **538px**: Large resolution
 - **388px**: Medium resolution

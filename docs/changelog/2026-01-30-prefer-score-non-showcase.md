@@ -34,6 +34,7 @@ A card is considered a showcase card if and only if its `frame_effects` array co
 ### Showcase vs. Non-Showcase Printings
 
 For different printings of the same card:
+
 - **Lightning Bolt (standard frame)**: +10 points (non_showcase)
 - **Lightning Bolt (showcase frame)**: 0 points (non_showcase)
 
@@ -42,6 +43,7 @@ Combined with other prefer score components (frame version, language, rarity, et
 ### Frame Effects Combinations
 
 The showcase check is independent of other frame effects:
+
 - **Card with `frame_effects: ["legendary"]`**: +10 points (non-showcase, no showcase in array)
 - **Card with `frame_effects: ["showcase", "legendary"]`**: 0 points (showcase, contains showcase)
 - **Card with `frame_effects: []`**: +10 points (non-showcase, empty array)
@@ -66,8 +68,8 @@ Located in `api/sql/backfill_prefer_scores.sql`:
 
 ```sql
 'non_showcase', (
-    SELECT 
-        CASE 
+    SELECT
+        CASE
             WHEN NOT (COALESCE(raw_card_blob -> 'frame_effects', '[]'::jsonb) ? 'showcase') THEN 10
             ELSE 0
         END
@@ -77,6 +79,7 @@ Located in `api/sql/backfill_prefer_scores.sql`:
 ### Data Source
 
 The component reads from the `raw_card_blob` JSONB column in the `magic.cards` table:
+
 - Uses the JSONB `?` operator to check if the `frame_effects` array contains `"showcase"`
 - Uses `COALESCE` to treat missing `frame_effects` as an empty array `[]`
 - Cards without showcase in their frame_effects receive 10 points
@@ -104,6 +107,7 @@ The prefer score backfill script automatically recalculates scores for all cards
 ```
 
 Or via the API endpoint:
+
 ```bash
 curl -X POST http://localhost:8080/backfill_prefer_scores
 ```
@@ -112,26 +116,27 @@ curl -X POST http://localhost:8080/backfill_prefer_scores
 
 The new component fits into the overall prefer score system:
 
-| Component | Score Range | Weight |
-|-----------|-------------|--------|
-| Language (English) | 0-40 | High |
-| Frame version | 0-42 | High |
-| Illustration count | 0-23 | Medium |
-| Artwork Set | 0-20 | Medium |
-| Border color | 0-14 | Medium |
-| Rarity | 0-16 | Medium |
-| High-res scan | 0-16 | Medium |
-| Extended art | 0-12 | Low |
-| **Non-Showcase** | **0-10** | **Low** |
-| Finish | 0-10 | Low |
-| Has paper | 0-6 | Low |
-| Legendary frame | 0-5 | Very Low |
+| Component          | Score Range | Weight   |
+| ------------------ | ----------- | -------- |
+| Language (English) | 0-40        | High     |
+| Frame version      | 0-42        | High     |
+| Illustration count | 0-23        | Medium   |
+| Artwork Set        | 0-20        | Medium   |
+| Border color       | 0-14        | Medium   |
+| Rarity             | 0-16        | Medium   |
+| High-res scan      | 0-16        | Medium   |
+| Extended art       | 0-12        | Low      |
+| **Non-Showcase**   | **0-10**    | **Low**  |
+| Finish             | 0-10        | Low      |
+| Has paper          | 0-6         | Low      |
+| Legendary frame    | 0-5         | Very Low |
 
 ## Implementation Notes
 
 ### JSONB Operator Usage
 
 The implementation uses PostgreSQL's JSONB `?` operator to efficiently test for the presence of a specific string in an array:
+
 - `raw_card_blob -> 'frame_effects' ? 'showcase'` returns `true` if "showcase" is in the array
 - The `NOT` operator inverts this to give the bonus when showcase is absent
 - `COALESCE` handles the case where `frame_effects` is missing or NULL
@@ -139,6 +144,7 @@ The implementation uses PostgreSQL's JSONB `?` operator to efficiently test for 
 ### Consistency with Legendary Frame
 
 This component follows the same pattern as the existing `legendary_frame` component, which also checks the `frame_effects` array for a specific value. Both components:
+
 - Read from `raw_card_blob -> 'frame_effects'`
 - Use the JSONB `?` operator for detection
 - Give a bonus for specific frame characteristics

@@ -19,6 +19,7 @@ This document outlines security best practices for developing and maintaining th
 ### SQL Injection Prevention
 
 **✅ DO:**
+
 - Always use parameterized queries with `%(placeholder)s` syntax
 - Validate user inputs before using them in queries
 - Use type hints to enforce expected types
@@ -37,6 +38,7 @@ cursor.execute(f"set statement_timeout = {timeout}")
 ```
 
 **❌ DON'T:**
+
 - Never use f-strings or string concatenation with user input
 - Don't trust client-side validation alone
 
@@ -53,6 +55,7 @@ cursor.execute(f"set timeout = {user_provided_value}")
 ### Cross-Site Scripting (XSS) Prevention
 
 **✅ DO:**
+
 - Escape all user-generated content before rendering
 - Use `textContent` instead of `innerHTML` in JavaScript
 - Implement Content Security Policy headers
@@ -72,6 +75,7 @@ element.innerHTML = escapeHtml(userInput);
 ```
 
 **❌ DON'T:**
+
 - Never insert raw user input into HTML
 - Don't use `innerHTML` with untrusted content
 
@@ -85,6 +89,7 @@ element.innerHTML = userInput;
 ### Input Validation
 
 **✅ DO:**
+
 - Validate all inputs server-side
 - Use type hints and Pydantic models
 - Implement whitelist validation where possible
@@ -99,6 +104,7 @@ def search_cards(limit: int = 100) -> list:
 ```
 
 **❌ DON'T:**
+
 - Don't rely solely on client-side validation
 - Don't accept arbitrary file paths from users
 
@@ -107,6 +113,7 @@ def search_cards(limit: int = 100) -> list:
 ### Secrets Management
 
 **✅ DO:**
+
 - Use environment variables for secrets
 - Keep `.env` files out of version control
 - Use separate credentials for dev/test/prod
@@ -121,6 +128,7 @@ password = "testpass"  # noqa: S106
 ```
 
 **❌ DON'T:**
+
 - Never hardcode production credentials
 - Don't commit secrets to git
 - Don't log sensitive information
@@ -137,6 +145,7 @@ api_key = "sk-1234567890abcdef"  # DON'T DO THIS
 ### Connection Security
 
 **✅ DO:**
+
 - Use connection pooling for efficiency
 - Implement proper connection timeouts
 - Use SSL/TLS for production connections
@@ -153,6 +162,7 @@ pool = ConnectionPool(
 ```
 
 **❌ DON'T:**
+
 - Don't use root/admin credentials for application
 - Don't leave connections open indefinitely
 
@@ -161,12 +171,14 @@ pool = ConnectionPool(
 ### Query Safety
 
 **✅ DO:**
+
 - Use prepared statements via parameterized queries
 - Validate data types before queries
 - Implement query timeouts
 - Log slow queries for monitoring
 
 **❌ DON'T:**
+
 - Don't construct queries with string concatenation
 - Don't allow unbounded queries
 
@@ -190,11 +202,13 @@ The application implements the following security headers via `SecurityHeadersMi
 ```
 
 **✅ DO:**
+
 - Keep security headers updated
 - Test CSP in report-only mode first
 - Adjust CSP for legitimate external resources
 
 **❌ DON'T:**
+
 - Don't disable security headers
 - Don't use overly permissive CSP policies
 
@@ -203,6 +217,7 @@ The application implements the following security headers via `SecurityHeadersMi
 ### CORS Configuration
 
 **✅ DO:**
+
 - Restrict origins to known domains in production
 - Use environment-specific configurations
 - Log unauthorized CORS requests
@@ -216,6 +231,7 @@ allowed_origins = [
 ```
 
 **❌ DON'T:**
+
 - Don't use wildcard `*` in production
 - Don't allow untrusted origins
 
@@ -229,6 +245,7 @@ Access-Control-Allow-Origin: *
 ### Rate Limiting (Future Enhancement)
 
 **Recommended:**
+
 - Implement per-IP rate limiting
 - Use different limits for different endpoints
 - Provide clear rate limit headers
@@ -240,12 +257,14 @@ Access-Control-Allow-Origin: *
 ### Client-Side Best Practices
 
 **✅ DO:**
+
 - Validate inputs client-side for UX (but also server-side for security)
 - Use `textContent` for dynamic content
 - Sanitize URLs before navigation
 - Implement CSP-compliant inline scripts
 
 **❌ DON'T:**
+
 - Don't trust client-side validation alone
 - Don't use `eval()` or `Function()` constructor
 - Don't include sensitive data in client code
@@ -255,17 +274,14 @@ Access-Control-Allow-Origin: *
 ### Third-Party Resources
 
 **✅ DO:**
+
 - Use Subresource Integrity (SRI) for CDN resources
 - Verify CDN SSL certificates
 - Keep track of all external dependencies
 
 ```html
 <!-- Good: SRI hash -->
-<script 
-  src="https://cdn.example.com/lib.js"
-  integrity="sha384-..."
-  crossorigin="anonymous">
-</script>
+<script src="https://cdn.example.com/lib.js" integrity="sha384-..." crossorigin="anonymous"></script>
 ```
 
 ---
@@ -275,6 +291,7 @@ Access-Control-Allow-Origin: *
 ### Python Dependencies
 
 **✅ DO:**
+
 - Run `pip-audit` regularly to check for vulnerabilities
 - Keep dependencies up to date
 - Pin versions in requirements files
@@ -289,6 +306,7 @@ pip install --upgrade package-name
 ```
 
 **❌ DON'T:**
+
 - Don't use unmaintained packages
 - Don't install packages from untrusted sources
 
@@ -297,6 +315,7 @@ pip install --upgrade package-name
 ### JavaScript Dependencies
 
 **✅ DO:**
+
 - Run `npm audit` regularly
 - Use `npm audit fix` for automatic fixes
 - Review package.json for unused dependencies
@@ -316,6 +335,7 @@ npm audit fix
 ### Docker Security
 
 **✅ DO:**
+
 - Run containers as non-root user
 - Use official base images
 - Scan images for vulnerabilities
@@ -327,6 +347,7 @@ USER 1000:1000
 ```
 
 **❌ DON'T:**
+
 - Don't run containers as root
 - Don't include secrets in images
 
@@ -335,6 +356,7 @@ USER 1000:1000
 ### Environment Variables
 
 **✅ DO:**
+
 - Use `.env` files for local development
 - Use secret management in production (e.g., AWS Secrets Manager)
 - Validate required variables at startup
@@ -352,6 +374,7 @@ if not os.environ.get("PGPASSWORD"):
 ### Automated Testing
 
 **✅ DO:**
+
 - Include security tests in test suite
 - Run security scans in CI/CD pipeline
 - Test authentication and authorization
@@ -369,6 +392,7 @@ def test_sql_injection_prevention():
 ### Manual Testing
 
 **✅ DO:**
+
 - Test for common vulnerabilities (OWASP Top 10)
 - Attempt SQL injection, XSS, CSRF
 - Test with unexpected inputs
@@ -379,6 +403,7 @@ def test_sql_injection_prevention():
 ### Security Scanning Tools
 
 Recommended tools:
+
 - **Static Analysis:** `ruff`, `bandit`, `pylint`
 - **Dependency Scanning:** `pip-audit`, `npm audit`, Snyk
 - **Container Scanning:** Trivy, Clair

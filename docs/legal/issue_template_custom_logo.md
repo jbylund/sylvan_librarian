@@ -18,6 +18,7 @@ Arcane Tutor currently uses a text-only header displaying "Arcane Tutor" in the 
 While this is legally compliant and clearly differentiates from Scryfall, a custom logo would enhance the project's visual identity and branding.
 
 **Related Documentation**:
+
 - [legal_compliance_final_status.md](../legal/legal_compliance_final_status.md) - Final compliance review
 - [compliance_review.md](../legal/compliance_review.md) - Detailed compliance status
 - [about.md](../user/about.md) - Project mission and differentiation
@@ -73,11 +74,13 @@ While this is legally compliant and clearly differentiates from Scryfall, a cust
 ### Color Palette
 
 **Primary Colors** (matching current theme):
+
 - Blue gradient: #2b8fdf → #3da8f5
 - Accent: Lighter blue tints for highlights
 - Contrast: Dark blue/navy for depth
 
 **Avoid**:
+
 - Scryfall's purple/blue palette
 - Direct copies of existing MTG card art colors
 
@@ -124,16 +127,19 @@ While this is legally compliant and clearly differentiates from Scryfall, a cust
 ### Option 1: Community Design Contest
 
 **Pros**:
+
 - Multiple design variations to choose from
 - Community engagement and ownership
 - Potentially professional-quality results
 
 **Cons**:
+
 - Takes longer to organize and execute
 - Need clear judging criteria
 - Requires community participation
 
 **Implementation**:
+
 1. Create separate GitHub issue for design contest
 1. Define submission guidelines and requirements
 1. Set submission deadline (e.g., 2-4 weeks)
@@ -143,16 +149,19 @@ While this is legally compliant and clearly differentiates from Scryfall, a cust
 ### Option 2: Direct Design by Maintainer/Contributor
 
 **Pros**:
+
 - Faster implementation
 - Direct control over design direction
 - Immediate iteration possible
 
 **Cons**:
+
 - Limited to available design skills
 - Less community involvement
 - Single design perspective
 
 **Implementation**:
+
 1. Maintainer or volunteer designs logo
 1. Share draft for feedback
 1. Iterate based on feedback
@@ -161,16 +170,19 @@ While this is legally compliant and clearly differentiates from Scryfall, a cust
 ### Option 3: Professional Designer (If Budget Available)
 
 **Pros**:
+
 - Highest quality professional result
 - Clear design brief and deliverables
 - Multiple concepts and iterations
 
 **Cons**:
+
 - Requires budget for design work
 - May take longer for back-and-forth
 - Need to ensure open source licensing
 
 **Implementation**:
+
 1. Write design brief
 1. Engage designer (freelance or agency)
 1. Review and iterate on concepts

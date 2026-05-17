@@ -21,14 +21,14 @@ The single remaining item (custom logo) is purely cosmetic and does not affect l
 
 ### Data & Content - ✅ 83% (5/6 Complete)
 
-| Item | Status | Evidence | Notes |
-|------|--------|----------|-------|
-| ✅ Verify using official WotC APIs/data sources | **COMPLETE** | [legal.md](legal.md#primary-data-source) | Using Scryfall's official bulk data API (api.scryfall.com/bulk-data) |
-| ✅ Review and comply with Scryfall's API terms | **COMPLETE** | [legal.md](legal.md#scryfall-api-terms-of-service) | Documented compliance, using bulk data appropriately |
-| ✅ Document proper attribution requirements | **COMPLETE** | [README.md](../README.md), [legal.md](../legal/legal.md), UI footer | Attribution present in all user-facing locations |
-| ✅ Card images from official sources | **COMPLETE** | [legal.md](legal.md#card-images) | Using CloudFront CDN with proper attribution |
-| ✅ Write original help documentation | **COMPLETE** | [help.md](../user/help.md) | Comprehensive user-facing help guide with tutorials |
-| 🔲 Source rulings from official Wizards channels | **N/A** | - | Feature not currently implemented |
+| Item                                             | Status       | Evidence                                                            | Notes                                                                |
+| ------------------------------------------------ | ------------ | ------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| ✅ Verify using official WotC APIs/data sources  | **COMPLETE** | [legal.md](legal.md#primary-data-source)                            | Using Scryfall's official bulk data API (api.scryfall.com/bulk-data) |
+| ✅ Review and comply with Scryfall's API terms   | **COMPLETE** | [legal.md](legal.md#scryfall-api-terms-of-service)                  | Documented compliance, using bulk data appropriately                 |
+| ✅ Document proper attribution requirements      | **COMPLETE** | [README.md](../README.md), [legal.md](../legal/legal.md), UI footer | Attribution present in all user-facing locations                     |
+| ✅ Card images from official sources             | **COMPLETE** | [legal.md](legal.md#card-images)                                    | Using CloudFront CDN with proper attribution                         |
+| ✅ Write original help documentation             | **COMPLETE** | [help.md](../user/help.md)                                          | Comprehensive user-facing help guide with tutorials                  |
+| 🔲 Source rulings from official Wizards channels | **N/A**      | -                                                                   | Feature not currently implemented                                    |
 
 **Category Status**: ✅ Complete (all applicable items done)
 
@@ -36,14 +36,14 @@ The single remaining item (custom logo) is purely cosmetic and does not affect l
 
 ### Visual Design & UI - ✅ 83% (5/6 Complete)
 
-| Item | Status | Evidence | Notes |
-|------|--------|----------|-------|
-| ✅ Distinct color scheme | **COMPLETE** | [compliance_review.md](../legal/compliance_review.md) | Blue gradient theme (#2b8fdf, #3da8f5) - distinct from Scryfall's purple |
-| ✅ Different layout structure | **COMPLETE** | api/index.html | Custom grid layout, different search controls |
-| ❌ Original logo and branding | **TODO** | - | Currently using text-only header "Arcane Tutor" |
-| ✅ Unique card display format | **COMPLETE** | api/index.html | Custom card grid and modal display |
-| ✅ Original iconography | **COMPLETE** | api/index.html | Custom theme toggle, minimal icons |
-| ✅ Different typography | **COMPLETE** | [legal.md](legal.md#font-assets) | Custom fonts (Beleren, MPlantin) with proper documentation |
+| Item                          | Status       | Evidence                                              | Notes                                                                    |
+| ----------------------------- | ------------ | ----------------------------------------------------- | ------------------------------------------------------------------------ |
+| ✅ Distinct color scheme      | **COMPLETE** | [compliance_review.md](../legal/compliance_review.md) | Blue gradient theme (#2b8fdf, #3da8f5) - distinct from Scryfall's purple |
+| ✅ Different layout structure | **COMPLETE** | api/index.html                                        | Custom grid layout, different search controls                            |
+| ❌ Original logo and branding | **TODO**     | -                                                     | Currently using text-only header "Arcane Tutor"                          |
+| ✅ Unique card display format | **COMPLETE** | api/index.html                                        | Custom card grid and modal display                                       |
+| ✅ Original iconography       | **COMPLETE** | api/index.html                                        | Custom theme toggle, minimal icons                                       |
+| ✅ Different typography       | **COMPLETE** | [legal.md](legal.md#font-assets)                      | Custom fonts (Beleren, MPlantin) with proper documentation               |
 
 **Category Status**: ⚠️ Nearly Complete - 1 cosmetic item remaining (custom logo)
 
@@ -53,13 +53,13 @@ The single remaining item (custom logo) is purely cosmetic and does not affect l
 
 ### Features & Functionality - ✅ 100% (5/5 Complete)
 
-| Item | Status | Evidence | Notes |
-|------|--------|----------|-------|
-| ✅ Original search syntax documentation | **COMPLETE** | [scryfall_functionality_analysis.md](../technical/scryfall_functionality_analysis.md) | Comprehensive documentation of search capabilities |
-| ✅ Unique feature set | **COMPLETE** | [README.md](../README.md) | Arithmetic expressions, larger data fetch, custom sorting |
-| ✅ Different URL/routing structure | **COMPLETE** | api/api_resource.py | Simple routing: /, /search, custom API endpoints |
-| ✅ Original advanced search interface | **COMPLETE** | api/index.html | Custom search controls and dropdowns |
-| ✅ Unique API structure | **COMPLETE** | api/api_resource.py | Different endpoint names and response formats |
+| Item                                    | Status       | Evidence                                                                              | Notes                                                     |
+| --------------------------------------- | ------------ | ------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| ✅ Original search syntax documentation | **COMPLETE** | [scryfall_functionality_analysis.md](../technical/scryfall_functionality_analysis.md) | Comprehensive documentation of search capabilities        |
+| ✅ Unique feature set                   | **COMPLETE** | [README.md](../README.md)                                                             | Arithmetic expressions, larger data fetch, custom sorting |
+| ✅ Different URL/routing structure      | **COMPLETE** | api/api_resource.py                                                                   | Simple routing: /, /search, custom API endpoints          |
+| ✅ Original advanced search interface   | **COMPLETE** | api/index.html                                                                        | Custom search controls and dropdowns                      |
+| ✅ Unique API structure                 | **COMPLETE** | api/api_resource.py                                                                   | Different endpoint names and response formats             |
 
 **Category Status**: ✅ Complete
 
@@ -67,13 +67,13 @@ The single remaining item (custom logo) is purely cosmetic and does not affect l
 
 ### Code & Implementation - ✅ 100% (5/5 Complete)
 
-| Item | Status | Evidence | Notes |
-|------|--------|----------|-------|
-| ✅ Audit codebase for copied code | **COMPLETE** | Entire codebase | All original code, no copied content from Scryfall |
-| ✅ Original search algorithms | **COMPLETE** | api/parsing/ | Custom query parser using pyparsing |
-| ✅ Independent database schema | **COMPLETE** | api/db/ | Custom PostgreSQL schema |
-| ✅ Review third-party library licenses | **COMPLETE** | requirements/ | Using standard open-source libraries (Falcon, psycopg, etc.) |
-| ✅ Original autocomplete functionality | **COMPLETE** | api/index.html | Custom typeahead implementation |
+| Item                                   | Status       | Evidence        | Notes                                                        |
+| -------------------------------------- | ------------ | --------------- | ------------------------------------------------------------ |
+| ✅ Audit codebase for copied code      | **COMPLETE** | Entire codebase | All original code, no copied content from Scryfall           |
+| ✅ Original search algorithms          | **COMPLETE** | api/parsing/    | Custom query parser using pyparsing                          |
+| ✅ Independent database schema         | **COMPLETE** | api/db/         | Custom PostgreSQL schema                                     |
+| ✅ Review third-party library licenses | **COMPLETE** | requirements/   | Using standard open-source libraries (Falcon, psycopg, etc.) |
+| ✅ Original autocomplete functionality | **COMPLETE** | api/index.html  | Custom typeahead implementation                              |
 
 **Category Status**: ✅ Complete
 
@@ -81,15 +81,15 @@ The single remaining item (custom logo) is purely cosmetic and does not affect l
 
 ### Legal & Compliance - ✅ 100% (7/7 Complete)
 
-| Item | Status | Evidence | Notes |
-|------|--------|----------|-------|
-| ✅ Review Wizards' Fan Content Policy | **COMPLETE** | [legal.md](legal.md#wizards-of-the-coast-fan-content-policy) | Full compliance documented |
-| ✅ Draft Terms of Service | **COMPLETE** | [terms_of_service.md](../user/terms_of_service.md) | Formal TOS with all required sections |
-| ✅ Draft Privacy Policy | **COMPLETE** | [privacy_policy.md](../user/privacy_policy.md) | Comprehensive privacy policy |
-| ✅ Proper trademark usage for MTG | **COMPLETE** | [legal.md](legal.md#magic-the-gathering) | Using "Magic: The Gathering™" with proper attribution |
-| ✅ Attribution acknowledging Wizards as IP owner | **COMPLETE** | [README.md](../README.md), [legal.md](../legal/legal.md), UI footer | Present in all locations |
-| ✅ Not infringing "Scryfall" trademark | **COMPLETE** | [legal.md](legal.md#scryfall) | Clear differentiation with "Arcane Tutor" name |
-| ⏳ Consider reaching out to Scryfall | **OPTIONAL** | - | Optional future action for community relations |
+| Item                                             | Status       | Evidence                                                            | Notes                                                 |
+| ------------------------------------------------ | ------------ | ------------------------------------------------------------------- | ----------------------------------------------------- |
+| ✅ Review Wizards' Fan Content Policy            | **COMPLETE** | [legal.md](legal.md#wizards-of-the-coast-fan-content-policy)        | Full compliance documented                            |
+| ✅ Draft Terms of Service                        | **COMPLETE** | [terms_of_service.md](../user/terms_of_service.md)                  | Formal TOS with all required sections                 |
+| ✅ Draft Privacy Policy                          | **COMPLETE** | [privacy_policy.md](../user/privacy_policy.md)                      | Comprehensive privacy policy                          |
+| ✅ Proper trademark usage for MTG                | **COMPLETE** | [legal.md](legal.md#magic-the-gathering)                            | Using "Magic: The Gathering™" with proper attribution |
+| ✅ Attribution acknowledging Wizards as IP owner | **COMPLETE** | [README.md](../README.md), [legal.md](../legal/legal.md), UI footer | Present in all locations                              |
+| ✅ Not infringing "Scryfall" trademark           | **COMPLETE** | [legal.md](legal.md#scryfall)                                       | Clear differentiation with "Arcane Tutor" name        |
+| ⏳ Consider reaching out to Scryfall             | **OPTIONAL** | -                                                                   | Optional future action for community relations        |
 
 **Category Status**: ✅ Complete (all required items done, 1 optional item)
 
@@ -97,13 +97,13 @@ The single remaining item (custom logo) is purely cosmetic and does not affect l
 
 ### Content & Documentation - ✅ 100% (5/5 Complete)
 
-| Item | Status | Evidence | Notes |
-|------|--------|----------|-------|
-| ✅ Original About page | **COMPLETE** | [about.md](../user/about.md) | Comprehensive project mission and differentiation |
-| ✅ Unique help documentation | **COMPLETE** | [help.md](../user/help.md) | User-facing help guide with tutorials |
-| ✅ Original tutorials | **COMPLETE** | [help.md](../user/help.md) | Tutorial content included |
-| ✅ Different naming conventions | **COMPLETE** | Throughout codebase | Using different terminology where possible |
-| ✅ Original README | **COMPLETE** | [README.md](../README.md) | Comprehensive, original documentation |
+| Item                            | Status       | Evidence                     | Notes                                             |
+| ------------------------------- | ------------ | ---------------------------- | ------------------------------------------------- |
+| ✅ Original About page          | **COMPLETE** | [about.md](../user/about.md) | Comprehensive project mission and differentiation |
+| ✅ Unique help documentation    | **COMPLETE** | [help.md](../user/help.md)   | User-facing help guide with tutorials             |
+| ✅ Original tutorials           | **COMPLETE** | [help.md](../user/help.md)   | Tutorial content included                         |
+| ✅ Different naming conventions | **COMPLETE** | Throughout codebase          | Using different terminology where possible        |
+| ✅ Original README              | **COMPLETE** | [README.md](../README.md)    | Comprehensive, original documentation             |
 
 **Category Status**: ✅ Complete
 
@@ -111,13 +111,13 @@ The single remaining item (custom logo) is purely cosmetic and does not affect l
 
 ### Red Flags to Actively Avoid - ✅ 100% (5/5 Complete)
 
-| Item | Status | Evidence | Notes |
-|------|--------|----------|-------|
-| ✅ Don't replicate exact search result layouts | **COMPLETE** | api/index.html | Custom grid layout, different styling |
-| ✅ Error messages and UI copy are original | **COMPLETE** | api/index.html, api/api_resource.py | All UI text is original |
-| ✅ Not using identical feature names | **COMPLETE** | Throughout codebase | No Scryfall-specific names (e.g., "Tagger") |
-| ✅ API responses don't mirror Scryfall | **COMPLETE** | api/api_resource.py | Different response structure and format |
-| ✅ Domain name doesn't cause confusion | **COMPLETE** | - | Using scryfallos.com (different from scryfall.com) |
+| Item                                           | Status       | Evidence                            | Notes                                              |
+| ---------------------------------------------- | ------------ | ----------------------------------- | -------------------------------------------------- |
+| ✅ Don't replicate exact search result layouts | **COMPLETE** | api/index.html                      | Custom grid layout, different styling              |
+| ✅ Error messages and UI copy are original     | **COMPLETE** | api/index.html, api/api_resource.py | All UI text is original                            |
+| ✅ Not using identical feature names           | **COMPLETE** | Throughout codebase                 | No Scryfall-specific names (e.g., "Tagger")        |
+| ✅ API responses don't mirror Scryfall         | **COMPLETE** | api/api_resource.py                 | Different response structure and format            |
+| ✅ Domain name doesn't cause confusion         | **COMPLETE** | -                                   | Using scryfallos.com (different from scryfall.com) |
 
 **Category Status**: ✅ Complete - All red flags successfully avoided
 
@@ -125,12 +125,12 @@ The single remaining item (custom logo) is purely cosmetic and does not affect l
 
 ### Documentation Tasks - ✅ 100% (4/4 Complete)
 
-| Item | Status | Evidence | Notes |
-|------|--------|----------|-------|
-| ✅ Create LEGAL.md | **COMPLETE** | [legal.md](../legal/legal.md) | Comprehensive legal documentation |
-| ✅ Document attribution in README | **COMPLETE** | [README.md](../README.md) | Legal notice and attribution section present |
-| ✅ Explain how we differ from Scryfall | **COMPLETE** | [README.md](../README.md), [about.md](../user/about.md) | Detailed differentiation sections |
-| ✅ Include Wizards copyright notices | **COMPLETE** | [README.md](../README.md), [legal.md](../legal/legal.md), UI footer | Present in all locations |
+| Item                                   | Status       | Evidence                                                            | Notes                                        |
+| -------------------------------------- | ------------ | ------------------------------------------------------------------- | -------------------------------------------- |
+| ✅ Create LEGAL.md                     | **COMPLETE** | [legal.md](../legal/legal.md)                                       | Comprehensive legal documentation            |
+| ✅ Document attribution in README      | **COMPLETE** | [README.md](../README.md)                                           | Legal notice and attribution section present |
+| ✅ Explain how we differ from Scryfall | **COMPLETE** | [README.md](../README.md), [about.md](../user/about.md)             | Detailed differentiation sections            |
+| ✅ Include Wizards copyright notices   | **COMPLETE** | [README.md](../README.md), [legal.md](../legal/legal.md), UI footer | Present in all locations                     |
 
 **Category Status**: ✅ Complete
 
@@ -138,11 +138,11 @@ The single remaining item (custom logo) is purely cosmetic and does not affect l
 
 ### Future Considerations - ⏳ Ongoing (1/3 Active)
 
-| Item | Status | Notes |
-|------|--------|-------|
-| ⏳ Monitor growth for legal consultation | **ONGOING** | Quarterly reviews as project scales |
-| ⚠️ Process for cease & desist requests | **PARTIAL** | Basic contact info in legal.md, could formalize further |
-| ⏳ Regular compliance audits | **ONGOING** | This review represents first comprehensive audit |
+| Item                                     | Status      | Notes                                                   |
+| ---------------------------------------- | ----------- | ------------------------------------------------------- |
+| ⏳ Monitor growth for legal consultation | **ONGOING** | Quarterly reviews as project scales                     |
+| ⚠️ Process for cease & desist requests   | **PARTIAL** | Basic contact info in legal.md, could formalize further |
+| ⏳ Regular compliance audits             | **ONGOING** | This review represents first comprehensive audit        |
 
 **Category Status**: ⏳ Ongoing - These are continuous process items
 
@@ -160,18 +160,18 @@ The single remaining item (custom logo) is purely cosmetic and does not affect l
 
 ### By Category
 
-| Category | Complete | Total | Percentage | Status |
-|----------|----------|-------|------------|--------|
-| Data & Content | 5 | 6 | 83% | ✅ Complete (1 N/A) |
-| Visual Design & UI | 5 | 6 | 83% | ⚠️ 1 cosmetic item |
-| Features & Functionality | 5 | 5 | 100% | ✅ Complete |
-| Code & Implementation | 5 | 5 | 100% | ✅ Complete |
-| Legal & Compliance | 7 | 7 | 100% | ✅ Complete |
-| Content & Documentation | 5 | 5 | 100% | ✅ Complete |
-| Red Flags Avoided | 5 | 5 | 100% | ✅ Complete |
-| Documentation Tasks | 4 | 4 | 100% | ✅ Complete |
-| Future Considerations | 1 | 3 | 33% | ⏳ Ongoing |
-| **OVERALL** | **42** | **45** | **93%** | ✅ **Excellent** |
+| Category                 | Complete | Total  | Percentage | Status              |
+| ------------------------ | -------- | ------ | ---------- | ------------------- |
+| Data & Content           | 5        | 6      | 83%        | ✅ Complete (1 N/A) |
+| Visual Design & UI       | 5        | 6      | 83%        | ⚠️ 1 cosmetic item  |
+| Features & Functionality | 5        | 5      | 100%       | ✅ Complete         |
+| Code & Implementation    | 5        | 5      | 100%       | ✅ Complete         |
+| Legal & Compliance       | 7        | 7      | 100%       | ✅ Complete         |
+| Content & Documentation  | 5        | 5      | 100%       | ✅ Complete         |
+| Red Flags Avoided        | 5        | 5      | 100%       | ✅ Complete         |
+| Documentation Tasks      | 4        | 4      | 100%       | ✅ Complete         |
+| Future Considerations    | 1        | 3      | 33%        | ⏳ Ongoing          |
+| **OVERALL**              | **42**   | **45** | **93%**    | ✅ **Excellent**    |
 
 ---
 
@@ -201,9 +201,10 @@ The single outstanding item (custom logo) is purely cosmetic and does not affect
 **Status**: ❌ TODO  
 **Priority**: Low (cosmetic enhancement)  
 **Impact**: Not required for legal compliance  
-**Current State**: Text-only header displaying "Arcane Tutor"  
+**Current State**: Text-only header displaying "Arcane Tutor"
 
 **Recommendations**:
+
 - Design a custom logo when resources permit
 - Consider community design contest
 - Ensure logo is original and distinct from Scryfall's branding

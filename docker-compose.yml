@@ -1,12 +1,9 @@
 # Volume anchors - reusable volume definitions
-x-pg-hba: &pg-hba
-  ./configs/postgres/conf/pg_hba.conf:/pg_hba.conf
+x-pg-hba: &pg-hba ./configs/postgres/conf/pg_hba.conf:/pg_hba.conf
 
-x-pg-conf: &pg-conf
-  ./configs/postgres/conf/postgresql.conf:/postgresql.conf
+x-pg-conf: &pg-conf ./configs/postgres/conf/postgresql.conf:/postgresql.conf
 
-x-pg-init: &pg-init
-  ./configs/postgres/init/:/docker-entrypoint-initdb.d
+x-pg-init: &pg-init ./configs/postgres/init/:/docker-entrypoint-initdb.d
 
 volumes:
   pgdata:
@@ -91,7 +88,7 @@ services:
       retries: 60
       start_period: 40s
     ports:
-      - "${API_PORT:-28080}:8080"
+      - '${API_PORT:-28080}:8080'
     ulimits:
       core: 0
     user: 1000:1000

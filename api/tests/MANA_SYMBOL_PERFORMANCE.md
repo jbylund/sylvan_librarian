@@ -17,21 +17,21 @@ The original implementation had two major performance issues:
 ```javascript
 convertManaSymbols(manaCost, isModal = false) {
   // ... manaMap and hybridMap definitions ...
-  
+
   let converted = manaCost;
-  
+
   // Process hybrid symbols first
   Object.keys(hybridMap).forEach(symbol => {
     const regex = new RegExp(symbol.replace(/[{}]/g, '\\$&'), 'g');  // RegExp created 30 times
     converted = converted.replace(regex, ...);  // 30 replace calls
   });
-  
+
   // Process regular mana symbols
   Object.keys(manaMap).forEach(symbol => {
     const regex = new RegExp(symbol.replace(/[{}]/g, '\\$&'), 'g');  // RegExp created 40 times
     converted = converted.replace(regex, ...);  // 40 replace calls
   });
-  
+
   return converted;
 }
 ```
@@ -52,7 +52,7 @@ The optimized implementation uses a simple, elegant approach:
 initManaSymbolPatterns() {
   const manaMap = { /* ... */ };
   const hybridMap = { /* ... */ };
-  
+
   // Simple pattern: match any content between braces (1-5 chars)
   // Use Map for O(1) lookup with single get() operation
   this.manaSymbolsMap = new Map(Object.entries({ ...hybridMap, ...manaMap }));
@@ -62,10 +62,10 @@ initManaSymbolPatterns() {
 // In the method:
 convertManaSymbols(manaCost, isModal = false) {
   if (!manaCost) return '';
-  
+
   const symbolClass = isModal ? 'modal-mana-symbol' : 'mana-symbol';
   this.manaSymbolsRegex.lastIndex = 0;
-  
+
   return manaCost.replace(this.manaSymbolsRegex, match => {
     const replacement = this.manaSymbolsMap.get(match);
     if (replacement === undefined) {
@@ -80,10 +80,10 @@ convertManaSymbols(manaCost, isModal = false) {
 
 Test performed with 10,000 iterations × 14 test cases (140,000 conversions total):
 
-| Implementation | Time (ms) | Speedup |
-|---------------|-----------|---------|
-| Old (forEach loops) | 7,246.31 | 1.0x (baseline) |
-| New (simple pattern with Map) | 119.37 | **60.70x** |
+| Implementation                | Time (ms) | Speedup         |
+| ----------------------------- | --------- | --------------- |
+| Old (forEach loops)           | 7,246.31  | 1.0x (baseline) |
+| New (simple pattern with Map) | 119.37    | **60.70x**      |
 
 **Performance Improvement: 98.35%**
 
@@ -95,11 +95,11 @@ We evaluated three different optimization approaches:
 1. **Cached alternation**: Single regex with all symbols joined (`{W/U/P}|{W/U}|{W}|...`)
 1. **Simple pattern with Map** (chosen): Single regex `/\{[^}]{1,5}\}/g` with Map.get() lookup
 
-| Approach | Time (ms) | vs Original | Code Complexity |
-|----------|-----------|-------------|-----------------|
-| forEach loops | 7,246.31 | baseline | Medium (nested loops) |
-| Cached alternation | 142.60 | 50.81x faster | Medium (requires sorting, ~1000 char pattern) |
-| **Simple pattern with Map** | **119.37** | **60.70x faster** | **Low (12 char pattern)** |
+| Approach                    | Time (ms)  | vs Original       | Code Complexity                               |
+| --------------------------- | ---------- | ----------------- | --------------------------------------------- |
+| forEach loops               | 7,246.31   | baseline          | Medium (nested loops)                         |
+| Cached alternation          | 142.60     | 50.81x faster     | Medium (requires sorting, ~1000 char pattern) |
+| **Simple pattern with Map** | **119.37** | **60.70x faster** | **Low (12 char pattern)**                     |
 
 The simple pattern approach was chosen because:
 
@@ -133,6 +133,7 @@ node test_mana_symbol_performance.js
 ```
 
 Expected output:
+
 ```
 === Mana Symbol Replacement Test ===
 

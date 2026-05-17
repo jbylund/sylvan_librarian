@@ -8,6 +8,7 @@ The Mana font is used to display Magic: The Gathering mana symbols in the applic
 The full font is ~200-300KB and contains hundreds of glyphs for set symbols, planeswalker loyalty, and other symbols we don't use.
 
 By subsetting the font to include only the 64 mana symbols we actually use, we can reduce the font size to ~20-40KB, significantly improving:
+
 - Initial page load time
 - Lighthouse performance score
 - Bandwidth usage for users
@@ -15,6 +16,7 @@ By subsetting the font to include only the 64 mana symbols we actually use, we c
 ## Used Symbols
 
 Our application uses only these symbol types:
+
 - **Basic colors**: W, U, B, R, G, C (6 symbols)
 - **Numbers**: 0-16 (17 symbols)
 - **Variables**: X, Y, Z (3 symbols)
@@ -35,6 +37,7 @@ pip install fonttools brotli requests boto3
 ```
 
 Configure AWS credentials (if uploading to S3):
+
 ```bash
 aws configure
 ```
@@ -50,6 +53,7 @@ make fonts S3_BUCKET=your-bucket-name
 ```
 
 Or directly:
+
 ```bash
 python scripts/subset_mana_font.py \
   --output-dir data/fonts/mana \
@@ -59,6 +63,7 @@ python scripts/subset_mana_font.py \
 ```
 
 This will:
+
 - Download the original Mana font from GitHub
 - Subset it to include only the glyphs we use
 - Generate both WOFF2 and WOFF formats (for browser compatibility)
@@ -72,6 +77,7 @@ make fonts
 ```
 
 Or:
+
 ```bash
 python scripts/subset_mana_font.py \
   --output-dir data/fonts/mana \
@@ -84,6 +90,7 @@ Then manually upload to S3.
 ### 2. Verify Upload (if auto-uploaded)
 
 The script automatically:
+
 - Configures **CORS** on the S3 bucket (required for font loading!)
 - Uploads with proper headers:
   - `Cache-Control: public, max-age=31536000, immutable` (1 year)
@@ -92,6 +99,7 @@ The script automatically:
 **Note**: The bucket must allow public read access via a bucket policy (not ACLs)
 
 Files are uploaded to:
+
 ```
 s3://your-bucket/cdn/fonts/mana/mana-subset.woff2
 s3://your-bucket/cdn/fonts/mana/mana-subset.woff
@@ -106,6 +114,7 @@ This is essential for fonts served from CloudFront/S3.
 Replace the current jsdelivr CDN link in `api/index.html`:
 
 **Before:**
+
 ```html
 <link
   href="https://cdn.jsdelivr.net/npm/mana-font@latest/css/mana.min.css"
@@ -117,6 +126,7 @@ Replace the current jsdelivr CDN link in `api/index.html`:
 ```
 
 **After:**
+
 ```html
 <link
   href="https://d1hot9ps2xugbc.cloudfront.net/cdn/fonts/mana/mana-subset.css"
@@ -128,6 +138,7 @@ Replace the current jsdelivr CDN link in `api/index.html`:
 ```
 
 Also update the noscript fallback:
+
 ```html
 <noscript>
   <link href="https://d1hot9ps2xugbc.cloudfront.net/cdn/fonts/mana/mana-subset.css" rel="stylesheet" type="text/css" />
@@ -139,6 +150,7 @@ Also update the noscript fallback:
 Remove the `@font-face` override in the `<style>` section since the CSS file now has the proper `font-display: swap` declaration:
 
 **Remove:**
+
 ```css
 /* Ensure Mana font displays with swap to prevent invisible text */
 @font-face {
@@ -150,6 +162,7 @@ Remove the `@font-face` override in the `<style>` section since the CSS file now
 ## Benefits
 
 After implementing this optimization, you should see:
+
 - ✅ Reduced font file size (80-90% smaller)
 - ✅ Faster initial page load
 - ✅ Better Lighthouse performance score
@@ -171,6 +184,7 @@ If you need to add new mana symbols in the future:
 ## Testing
 
 After deployment, verify:
+
 1. Mana symbols display correctly on the page
 1. Network tab shows the subsetted font loading from CloudFront
 1. Font size is significantly reduced
@@ -181,6 +195,7 @@ After deployment, verify:
 
 **CORS Missing / Font blocked**: This is the most common issue.
 The script configures CORS automatically, but if you uploaded manually:
+
 1. Re-run the script with `--s3-bucket` to configure CORS automatically
 1. Or manually configure CORS on your S3 bucket:
    - Go to S3 bucket → Permissions → CORS
@@ -209,16 +224,18 @@ The WOFF2 file should be under 50KB.
 
 **403 Forbidden**: Ensure your S3 bucket policy allows public read access for the files.
 The bucket should have a policy like:
+
 ```json
 {
   "Version": "2012-10-17",
-  "Statement": [{
-    "Sid": "PublicReadGetObject",
-    "Effect": "Allow",
-    "Principal": "*",
-    "Action": "s3:GetObject",
-    "Resource": "arn:aws:s3:::your-bucket/*"
-  }]
+  "Statement": [
+    {
+      "Sid": "PublicReadGetObject",
+      "Effect": "Allow",
+      "Principal": "*",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::your-bucket/*"
+    }
+  ]
 }
 ```
-

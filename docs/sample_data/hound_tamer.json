@@ -1,191 +1,165 @@
 {
-    "all_parts": [
-        {
-            "component": "combo_piece",
-            "id": "9c0f7843-4cbb-4d0f-8887-ec823a9238da",
-            "name": "Day // Night",
-            "object": "related_card",
-            "type_line": "Card // Card",
-            "uri": "https://api.scryfall.com/cards/9c0f7843-4cbb-4d0f-8887-ec823a9238da"
-        },
-        {
-            "component": "combo_piece",
-            "id": "83218607-240e-4473-8b0b-6b4670b010e6",
-            "name": "Hound Tamer // Untamed Pup",
-            "object": "related_card",
-            "type_line": "Creature \u2014 Human Werewolf // Creature \u2014 Werewolf",
-            "uri": "https://api.scryfall.com/cards/83218607-240e-4473-8b0b-6b4670b010e6"
-        }
-    ],
-    "arena_id": 78545,
-    "artist": "Randy Vargas",
-    "artist_ids": [
-        "d20672ca-0555-4238-a984-fd171d36b247"
-    ],
-    "booster": true,
-    "border_color": "black",
-    "card_faces": [
-        {
-            "artist": "Randy Vargas",
-            "artist_id": "d20672ca-0555-4238-a984-fd171d36b247",
-            "colors": [
-                "G"
-            ],
-            "flavor_text": "\"You and me, we're not built for captivity.\"",
-            "illustration_id": "0920ec28-3ab9-4533-bb5d-e0a2b2d2afdd",
-            "image_uris": {
-                "art_crop": "https://cards.scryfall.io/art_crop/front/2/8/28e2119b-ed78-4b98-a956-f2b453d0b164.jpg?1636224412",
-                "border_crop": "https://cards.scryfall.io/border_crop/front/2/8/28e2119b-ed78-4b98-a956-f2b453d0b164.jpg?1636224412",
-                "large": "https://cards.scryfall.io/large/front/2/8/28e2119b-ed78-4b98-a956-f2b453d0b164.jpg?1636224412",
-                "normal": "https://cards.scryfall.io/normal/front/2/8/28e2119b-ed78-4b98-a956-f2b453d0b164.jpg?1636224412",
-                "png": "https://cards.scryfall.io/png/front/2/8/28e2119b-ed78-4b98-a956-f2b453d0b164.png?1636224412",
-                "small": "https://cards.scryfall.io/small/front/2/8/28e2119b-ed78-4b98-a956-f2b453d0b164.jpg?1636224412"
-            },
-            "mana_cost": "{2}{G}",
-            "name": "Hound Tamer",
-            "object": "card_face",
-            "oracle_text": "Trample\n{3}{G}: Put a +1/+1 counter on target creature.\nDaybound (If a player casts no spells during their own turn, it becomes night next turn.)",
-            "power": "3",
-            "toughness": "3",
-            "type_line": "Creature \u2014 Human Werewolf"
-        },
-        {
-            "artist": "Randy Vargas",
-            "artist_id": "d20672ca-0555-4238-a984-fd171d36b247",
-            "color_indicator": [
-                "G"
-            ],
-            "colors": [
-                "G"
-            ],
-            "illustration_id": "749e01e6-9221-4e21-896a-ace5d0c6f8ea",
-            "image_uris": {
-                "art_crop": "https://cards.scryfall.io/art_crop/back/2/8/28e2119b-ed78-4b98-a956-f2b453d0b164.jpg?1636224412",
-                "border_crop": "https://cards.scryfall.io/border_crop/back/2/8/28e2119b-ed78-4b98-a956-f2b453d0b164.jpg?1636224412",
-                "large": "https://cards.scryfall.io/large/back/2/8/28e2119b-ed78-4b98-a956-f2b453d0b164.jpg?1636224412",
-                "normal": "https://cards.scryfall.io/normal/back/2/8/28e2119b-ed78-4b98-a956-f2b453d0b164.jpg?1636224412",
-                "png": "https://cards.scryfall.io/png/back/2/8/28e2119b-ed78-4b98-a956-f2b453d0b164.png?1636224412",
-                "small": "https://cards.scryfall.io/small/back/2/8/28e2119b-ed78-4b98-a956-f2b453d0b164.jpg?1636224412"
-            },
-            "mana_cost": "",
-            "name": "Untamed Pup",
-            "object": "card_face",
-            "oracle_text": "Trample\nOther Wolves and Werewolves you control have trample.\n{3}{G}: Put a +1/+1 counter on target creature.\nNightbound (If a player casts at least two spells during their own turn, it becomes day next turn.)",
-            "power": "4",
-            "toughness": "4",
-            "type_line": "Creature \u2014 Werewolf"
-        }
-    ],
-    "cardmarket_id": 574971,
-    "cmc": 3.0,
-    "collector_number": "187",
-    "color_identity": [
-        "G"
-    ],
-    "digital": false,
-    "edhrec_rank": 7692,
-    "finishes": [
-        "nonfoil",
-        "foil"
-    ],
-    "foil": true,
-    "frame": "2015",
-    "frame_effects": [
-        "sunmoondfc"
-    ],
-    "full_art": false,
-    "game_changer": false,
-    "games": [
-        "arena",
-        "paper",
-        "mtgo"
-    ],
-    "highres_image": true,
-    "id": "28e2119b-ed78-4b98-a956-f2b453d0b164",
-    "image_status": "highres_scan",
-    "keywords": [
-        "Daybound",
-        "Trample",
-        "Nightbound"
-    ],
-    "lang": "en",
-    "layout": "transform",
-    "legalities": {
-        "alchemy": "not_legal",
-        "brawl": "legal",
-        "commander": "legal",
-        "duel": "legal",
-        "future": "not_legal",
-        "gladiator": "legal",
-        "historic": "legal",
-        "legacy": "legal",
-        "modern": "legal",
-        "oathbreaker": "legal",
-        "oldschool": "not_legal",
-        "pauper": "not_legal",
-        "paupercommander": "not_legal",
-        "penny": "not_legal",
-        "pioneer": "legal",
-        "predh": "not_legal",
-        "premodern": "not_legal",
-        "standard": "not_legal",
-        "standardbrawl": "not_legal",
-        "timeless": "legal",
-        "vintage": "legal"
+  "all_parts": [
+    {
+      "component": "combo_piece",
+      "id": "9c0f7843-4cbb-4d0f-8887-ec823a9238da",
+      "name": "Day // Night",
+      "object": "related_card",
+      "type_line": "Card // Card",
+      "uri": "https://api.scryfall.com/cards/9c0f7843-4cbb-4d0f-8887-ec823a9238da"
     },
-    "mtgo_id": 93362,
-    "multiverse_ids": [
-        534974,
-        534975
-    ],
-    "name": "Hound Tamer // Untamed Pup",
-    "nonfoil": true,
-    "object": "card",
-    "oracle_id": "e9208fc2-616d-4c32-bd66-76a8bf85a6b5",
-    "oversized": false,
-    "preview": {
-        "previewed_at": "2021-09-08",
-        "source": "Amy the Amazonian",
-        "source_uri": "https://twitter.com/coL_Amazonian/status/1435660439682179079"
+    {
+      "component": "combo_piece",
+      "id": "83218607-240e-4473-8b0b-6b4670b010e6",
+      "name": "Hound Tamer // Untamed Pup",
+      "object": "related_card",
+      "type_line": "Creature \u2014 Human Werewolf // Creature \u2014 Werewolf",
+      "uri": "https://api.scryfall.com/cards/83218607-240e-4473-8b0b-6b4670b010e6"
+    }
+  ],
+  "arena_id": 78545,
+  "artist": "Randy Vargas",
+  "artist_ids": ["d20672ca-0555-4238-a984-fd171d36b247"],
+  "booster": true,
+  "border_color": "black",
+  "card_faces": [
+    {
+      "artist": "Randy Vargas",
+      "artist_id": "d20672ca-0555-4238-a984-fd171d36b247",
+      "colors": ["G"],
+      "flavor_text": "\"You and me, we're not built for captivity.\"",
+      "illustration_id": "0920ec28-3ab9-4533-bb5d-e0a2b2d2afdd",
+      "image_uris": {
+        "art_crop": "https://cards.scryfall.io/art_crop/front/2/8/28e2119b-ed78-4b98-a956-f2b453d0b164.jpg?1636224412",
+        "border_crop": "https://cards.scryfall.io/border_crop/front/2/8/28e2119b-ed78-4b98-a956-f2b453d0b164.jpg?1636224412",
+        "large": "https://cards.scryfall.io/large/front/2/8/28e2119b-ed78-4b98-a956-f2b453d0b164.jpg?1636224412",
+        "normal": "https://cards.scryfall.io/normal/front/2/8/28e2119b-ed78-4b98-a956-f2b453d0b164.jpg?1636224412",
+        "png": "https://cards.scryfall.io/png/front/2/8/28e2119b-ed78-4b98-a956-f2b453d0b164.png?1636224412",
+        "small": "https://cards.scryfall.io/small/front/2/8/28e2119b-ed78-4b98-a956-f2b453d0b164.jpg?1636224412"
+      },
+      "mana_cost": "{2}{G}",
+      "name": "Hound Tamer",
+      "object": "card_face",
+      "oracle_text": "Trample\n{3}{G}: Put a +1/+1 counter on target creature.\nDaybound (If a player casts no spells during their own turn, it becomes night next turn.)",
+      "power": "3",
+      "toughness": "3",
+      "type_line": "Creature \u2014 Human Werewolf"
     },
-    "prices": {
-        "eur": "0.11",
-        "eur_foil": "0.22",
-        "tix": "0.03",
-        "usd": "0.12",
-        "usd_etched": null,
-        "usd_foil": "0.22"
-    },
-    "prints_search_uri": "https://api.scryfall.com/cards/search?order=released&q=oracleid%3Ae9208fc2-616d-4c32-bd66-76a8bf85a6b5&unique=prints",
-    "promo": false,
-    "purchase_uris": {
-        "cardhoarder": "https://www.cardhoarder.com/cards/93362?affiliate_id=scryfall&ref=card-profile&utm_campaign=affiliate&utm_medium=card&utm_source=scryfall",
-        "cardmarket": "https://www.cardmarket.com/en/Magic/Products?idProduct=574971&referrer=scryfall&utm_campaign=card_prices&utm_medium=text&utm_source=scryfall",
-        "tcgplayer": "https://partner.tcgplayer.com/c/4931599/1830156/21018?subId1=api&u=https%3A%2F%2Fwww.tcgplayer.com%2Fproduct%2F248174%3Fpage%3D1"
-    },
-    "rarity": "uncommon",
-    "related_uris": {
-        "edhrec": "https://edhrec.com/route/?cc=Hound+Tamer",
-        "gatherer": "https://gatherer.wizards.com/Pages/Card/Details.aspx?multiverseid=534974&printed=false",
-        "tcgplayer_infinite_articles": "https://partner.tcgplayer.com/c/4931599/1830156/21018?subId1=api&trafcat=tcgplayer.com%2Fsearch%2Farticles&u=https%3A%2F%2Fwww.tcgplayer.com%2Fsearch%2Farticles%3FproductLineName%3Dmagic%26q%3DHound%2BTamer%2B%252F%252F%2BUntamed%2BPup",
-        "tcgplayer_infinite_decks": "https://partner.tcgplayer.com/c/4931599/1830156/21018?subId1=api&trafcat=tcgplayer.com%2Fsearch%2Fdecks&u=https%3A%2F%2Fwww.tcgplayer.com%2Fsearch%2Fdecks%3FproductLineName%3Dmagic%26q%3DHound%2BTamer%2B%252F%252F%2BUntamed%2BPup"
-    },
-    "released_at": "2021-09-24",
-    "reprint": false,
-    "reserved": false,
-    "rulings_uri": "https://api.scryfall.com/cards/28e2119b-ed78-4b98-a956-f2b453d0b164/rulings",
-    "scryfall_set_uri": "https://scryfall.com/sets/mid?utm_source=api",
-    "scryfall_uri": "https://scryfall.com/card/mid/187/hound-tamer-untamed-pup?utm_source=api",
-    "set": "mid",
-    "set_id": "44b8eb8f-fa23-401a-98b5-1fbb9871128e",
-    "set_name": "Innistrad: Midnight Hunt",
-    "set_search_uri": "https://api.scryfall.com/cards/search?order=set&q=e%3Amid&unique=prints",
-    "set_type": "expansion",
-    "set_uri": "https://api.scryfall.com/sets/44b8eb8f-fa23-401a-98b5-1fbb9871128e",
-    "story_spotlight": false,
-    "tcgplayer_id": 248174,
-    "textless": false,
-    "type_line": "Creature \u2014 Human Werewolf // Creature \u2014 Werewolf",
-    "uri": "https://api.scryfall.com/cards/28e2119b-ed78-4b98-a956-f2b453d0b164",
-    "variation": false
+    {
+      "artist": "Randy Vargas",
+      "artist_id": "d20672ca-0555-4238-a984-fd171d36b247",
+      "color_indicator": ["G"],
+      "colors": ["G"],
+      "illustration_id": "749e01e6-9221-4e21-896a-ace5d0c6f8ea",
+      "image_uris": {
+        "art_crop": "https://cards.scryfall.io/art_crop/back/2/8/28e2119b-ed78-4b98-a956-f2b453d0b164.jpg?1636224412",
+        "border_crop": "https://cards.scryfall.io/border_crop/back/2/8/28e2119b-ed78-4b98-a956-f2b453d0b164.jpg?1636224412",
+        "large": "https://cards.scryfall.io/large/back/2/8/28e2119b-ed78-4b98-a956-f2b453d0b164.jpg?1636224412",
+        "normal": "https://cards.scryfall.io/normal/back/2/8/28e2119b-ed78-4b98-a956-f2b453d0b164.jpg?1636224412",
+        "png": "https://cards.scryfall.io/png/back/2/8/28e2119b-ed78-4b98-a956-f2b453d0b164.png?1636224412",
+        "small": "https://cards.scryfall.io/small/back/2/8/28e2119b-ed78-4b98-a956-f2b453d0b164.jpg?1636224412"
+      },
+      "mana_cost": "",
+      "name": "Untamed Pup",
+      "object": "card_face",
+      "oracle_text": "Trample\nOther Wolves and Werewolves you control have trample.\n{3}{G}: Put a +1/+1 counter on target creature.\nNightbound (If a player casts at least two spells during their own turn, it becomes day next turn.)",
+      "power": "4",
+      "toughness": "4",
+      "type_line": "Creature \u2014 Werewolf"
+    }
+  ],
+  "cardmarket_id": 574971,
+  "cmc": 3.0,
+  "collector_number": "187",
+  "color_identity": ["G"],
+  "digital": false,
+  "edhrec_rank": 7692,
+  "finishes": ["nonfoil", "foil"],
+  "foil": true,
+  "frame": "2015",
+  "frame_effects": ["sunmoondfc"],
+  "full_art": false,
+  "game_changer": false,
+  "games": ["arena", "paper", "mtgo"],
+  "highres_image": true,
+  "id": "28e2119b-ed78-4b98-a956-f2b453d0b164",
+  "image_status": "highres_scan",
+  "keywords": ["Daybound", "Trample", "Nightbound"],
+  "lang": "en",
+  "layout": "transform",
+  "legalities": {
+    "alchemy": "not_legal",
+    "brawl": "legal",
+    "commander": "legal",
+    "duel": "legal",
+    "future": "not_legal",
+    "gladiator": "legal",
+    "historic": "legal",
+    "legacy": "legal",
+    "modern": "legal",
+    "oathbreaker": "legal",
+    "oldschool": "not_legal",
+    "pauper": "not_legal",
+    "paupercommander": "not_legal",
+    "penny": "not_legal",
+    "pioneer": "legal",
+    "predh": "not_legal",
+    "premodern": "not_legal",
+    "standard": "not_legal",
+    "standardbrawl": "not_legal",
+    "timeless": "legal",
+    "vintage": "legal"
+  },
+  "mtgo_id": 93362,
+  "multiverse_ids": [534974, 534975],
+  "name": "Hound Tamer // Untamed Pup",
+  "nonfoil": true,
+  "object": "card",
+  "oracle_id": "e9208fc2-616d-4c32-bd66-76a8bf85a6b5",
+  "oversized": false,
+  "preview": {
+    "previewed_at": "2021-09-08",
+    "source": "Amy the Amazonian",
+    "source_uri": "https://twitter.com/coL_Amazonian/status/1435660439682179079"
+  },
+  "prices": {
+    "eur": "0.11",
+    "eur_foil": "0.22",
+    "tix": "0.03",
+    "usd": "0.12",
+    "usd_etched": null,
+    "usd_foil": "0.22"
+  },
+  "prints_search_uri": "https://api.scryfall.com/cards/search?order=released&q=oracleid%3Ae9208fc2-616d-4c32-bd66-76a8bf85a6b5&unique=prints",
+  "promo": false,
+  "purchase_uris": {
+    "cardhoarder": "https://www.cardhoarder.com/cards/93362?affiliate_id=scryfall&ref=card-profile&utm_campaign=affiliate&utm_medium=card&utm_source=scryfall",
+    "cardmarket": "https://www.cardmarket.com/en/Magic/Products?idProduct=574971&referrer=scryfall&utm_campaign=card_prices&utm_medium=text&utm_source=scryfall",
+    "tcgplayer": "https://partner.tcgplayer.com/c/4931599/1830156/21018?subId1=api&u=https%3A%2F%2Fwww.tcgplayer.com%2Fproduct%2F248174%3Fpage%3D1"
+  },
+  "rarity": "uncommon",
+  "related_uris": {
+    "edhrec": "https://edhrec.com/route/?cc=Hound+Tamer",
+    "gatherer": "https://gatherer.wizards.com/Pages/Card/Details.aspx?multiverseid=534974&printed=false",
+    "tcgplayer_infinite_articles": "https://partner.tcgplayer.com/c/4931599/1830156/21018?subId1=api&trafcat=tcgplayer.com%2Fsearch%2Farticles&u=https%3A%2F%2Fwww.tcgplayer.com%2Fsearch%2Farticles%3FproductLineName%3Dmagic%26q%3DHound%2BTamer%2B%252F%252F%2BUntamed%2BPup",
+    "tcgplayer_infinite_decks": "https://partner.tcgplayer.com/c/4931599/1830156/21018?subId1=api&trafcat=tcgplayer.com%2Fsearch%2Fdecks&u=https%3A%2F%2Fwww.tcgplayer.com%2Fsearch%2Fdecks%3FproductLineName%3Dmagic%26q%3DHound%2BTamer%2B%252F%252F%2BUntamed%2BPup"
+  },
+  "released_at": "2021-09-24",
+  "reprint": false,
+  "reserved": false,
+  "rulings_uri": "https://api.scryfall.com/cards/28e2119b-ed78-4b98-a956-f2b453d0b164/rulings",
+  "scryfall_set_uri": "https://scryfall.com/sets/mid?utm_source=api",
+  "scryfall_uri": "https://scryfall.com/card/mid/187/hound-tamer-untamed-pup?utm_source=api",
+  "set": "mid",
+  "set_id": "44b8eb8f-fa23-401a-98b5-1fbb9871128e",
+  "set_name": "Innistrad: Midnight Hunt",
+  "set_search_uri": "https://api.scryfall.com/cards/search?order=set&q=e%3Amid&unique=prints",
+  "set_type": "expansion",
+  "set_uri": "https://api.scryfall.com/sets/44b8eb8f-fa23-401a-98b5-1fbb9871128e",
+  "story_spotlight": false,
+  "tcgplayer_id": 248174,
+  "textless": false,
+  "type_line": "Creature \u2014 Human Werewolf // Creature \u2014 Werewolf",
+  "uri": "https://api.scryfall.com/cards/28e2119b-ed78-4b98-a956-f2b453d0b164",
+  "variation": false
 }

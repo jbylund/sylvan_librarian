@@ -5,6 +5,7 @@
 Based on the official Scryfall syntax documentation and analysis of the existing codebase, here are the search features:
 
 ### 1. Basic Text Search
+
 - **name:** - Card name searches
 - **o:** or **oracle:** - Oracle text searches
 - **t:** or **type:** - Type line searches
@@ -13,6 +14,7 @@ Based on the official Scryfall syntax documentation and analysis of the existing
 - **lore:** - Lore/story searches
 
 ### 2. Card Properties
+
 - **cmc:** - Converted mana cost (numeric)
 - **power:** or **pow:** - Creature power (numeric)
 - **toughness:** or **tou:** - Creature toughness (numeric)
@@ -21,11 +23,13 @@ Based on the official Scryfall syntax documentation and analysis of the existing
 - **devotion:** - Mana symbol devotion (numeric)
 
 ### 3. Color and Identity
+
 - **c:** or **color:** - Card colors
 - **id:** or **identity:** or **coloridentity:** - Color identity
 - **colorless** - Colorless cards
 
 ### 4. Rarity and Sets
+
 - **r:** or **rarity:** - Card rarity (common, uncommon, rare, mythic)
 - **s:** or **set:** - Set code
 - **e:** or **edition:** - Set searches
@@ -34,12 +38,14 @@ Based on the official Scryfall syntax documentation and analysis of the existing
 - **frame:** - Frame version
 
 ### 5. Legality and Formats
+
 - **f:** or **format:** - Format legality
 - **legal:** - Legal in format
 - **banned:** - Banned in format
 - **restricted:** - Restricted in format
 
 ### 6. Card Layout and Features
+
 - **layout:** - Card layout (normal, split, flip, etc.)
 - **is:** - Special properties (permanent, spell, historic, etc.)
 - **keyword:** or **k:** - Keyword abilities
@@ -47,18 +53,22 @@ Based on the official Scryfall syntax documentation and analysis of the existing
 - **watermark:** - Watermark searches ✅ Implemented
 
 ### 7. Prices and Market
+
 - **usd:** - USD price (numeric)
 - **eur:** - EUR price (numeric)
 - **tix:** - MTGO ticket price (numeric)
 
 ### 8. Dates and Releases ✅ Implemented
+
 - **year:** - Release year (numeric) with optimized date range queries
 - **date:** - Specific release dates with all comparison operators
 
 ### 9. Game Mechanics
+
 - **devotion:** - Mana symbol devotion counting
 
 ### 10. Advanced Features
+
 - **cube:** - Cube inclusion
 - **commander:** or **cmd:** - Commander-related searches
 - **papersets:** - Paper set inclusion
@@ -69,15 +79,18 @@ Based on the official Scryfall syntax documentation and analysis of the existing
 - **is:futureshifted** - Futureshifted cards
 
 ### 11. Operators and Logic
+
 - **Comparison operators**: `=`, `<`, `>`, `<=`, `>=`, `!=`, `<>`
 - **Logic operators**: `AND`, `OR`, `NOT`, `-` (negation)
 - **Parentheses**: `()` for grouping
 - **Quotes**: `"text"` for exact phrases
 
 ### 12. Special Syntax
+
 - **Regular expressions**: `/pattern/`
 
 ### 13. Oracle Tags
+
 - **ot:** or **oracle_tags:** - Oracle tags
 
 ## Analysis Notes
@@ -88,11 +101,13 @@ The current Scryfall OS implementation supports most of these features, with wat
 ### Scryfall OS Extensions
 
 **Enhanced Features**: Scryfall OS includes additional functionality beyond official Scryfall:
+
 - **Arithmetic operations**: `cmc+power>5`, `power-toughness=0` (Scryfall OS extension)
 
 ### Excluded Features
 
 **Alchemy-Only Features**: The following features are specific to Magic: The Gathering Arena's Alchemy format and are not implemented in Scryfall OS:
+
 - `spellpower:` - Spell power (Alchemy format only)
 - `spellresistance:` - Spell resistance (Alchemy format only)
 

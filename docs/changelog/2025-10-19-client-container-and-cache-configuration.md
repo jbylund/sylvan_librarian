@@ -13,11 +13,13 @@ Restored the client container functionality and added configurable caching suppo
 The API now supports runtime cache configuration via the `ENABLE_CACHE` environment variable.
 
 **Benefits:**
+
 - Improved performance for repeated queries
 - Reduced database load
 - Configurable per deployment environment
 
 **Configuration:**
+
 ```bash
 # Enable caching
 export ENABLE_CACHE=true
@@ -27,6 +29,7 @@ docker compose up
 ```
 
 **Default Behavior:**
+
 - Caching is **disabled by default** to maintain backward compatibility
 - Can be enabled by setting `ENABLE_CACHE` to `true`, `1`, or `yes`
 
@@ -35,12 +38,14 @@ docker compose up
 A dedicated container that generates random queries to test API performance and index usage.
 
 **Features:**
+
 - Generates 144 unique query patterns
 - Configurable query rate and batch size
 - Statistics reporting
 - Runs automatically with all services
 
 **Usage:**
+
 ```bash
 # Client runs automatically with all services
 docker compose up
@@ -50,6 +55,7 @@ make up
 ```
 
 **Configuration:**
+
 - `API_URL`: API endpoint (default: `http://apiservice:8080`)
 - `QUERY_DELAY`: Delay between queries in seconds (default: `1.0`)
 - `BATCH_SIZE`: Queries before reporting stats (default: `50`)
@@ -74,6 +80,7 @@ make up
 ### Query Patterns Generated
 
 The client generates diverse queries covering:
+
 - **Color queries**: Single and multicolor combinations
 - **CMC queries**: Exact values and ranges
 - **Type queries**: All card types and rarities
@@ -124,6 +131,7 @@ docker compose up
 This work addresses the issue: "Bring Back Client Container" which was deleted in commit 97cc27a.
 
 The implementation focuses on:
+
 1. Making the client container functional
 2. Adding cache enable/disable configuration
 3. No database migrations (as per instructions)
@@ -131,6 +139,7 @@ The implementation focuses on:
 ## Future Enhancements
 
 Possible improvements based on the use of this feature:
+
 - Database index optimization based on query patterns
 - Additional query pattern generators
 - Performance metrics collection

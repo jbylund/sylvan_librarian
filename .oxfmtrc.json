@@ -1,4 +1,5 @@
 {
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
   "arrowParens": "avoid",
   "bracketSpacing": true,
   "embeddedLanguageFormatting": "auto",
@@ -9,5 +10,7 @@
   "singleQuote": true,
   "tabWidth": 2,
   "trailingComma": "es5",
-  "useTabs": false
+  "useTabs": false,
+  "sortPackageJson": false,
+  "ignorePatterns": []
 }

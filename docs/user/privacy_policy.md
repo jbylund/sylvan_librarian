@@ -8,11 +8,13 @@ Arcane Tutor is committed to protecting your privacy.
 This Privacy Policy explains how we handle information when you use our Magic: The Gathering card search engine.
 
 **Related Documentation:**
+
 - [terms_of_service.md](../user/terms_of_service.md) - User agreement and service terms
 - [legal.md](../legal/legal.md) - Data sources and legal compliance
 - [about.md](../user/about.md) - Project information
 
 **Key Points:**
+
 - We do not require user accounts
 - We do not collect or store personal information
 - We do not sell or share any data
@@ -38,6 +40,7 @@ We use your browser's `localStorage` feature to store **only**:
 - **Theme preference**: Whether you prefer light or dark mode
 
 This information:
+
 - Is stored locally on your device only
 - Is never transmitted to our servers
 - Can be cleared by clearing your browser's local storage
@@ -55,6 +58,7 @@ Our web servers may automatically log standard technical information:
 - Pages requested
 
 This information:
+
 - Is used only for technical maintenance and security
 - Is not linked to personally identifiable information
 - May be retained for a limited time for operational purposes
@@ -138,6 +142,7 @@ The Service is not directed at children, and we do not market to children.
 ### 8.1 Theme Preference
 
 You can:
+
 - Clear your theme preference by clearing browser local storage
 - Toggle between light and dark themes using the theme button
 

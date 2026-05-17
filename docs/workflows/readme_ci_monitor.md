@@ -49,6 +49,7 @@ The automated CI monitor has detected failing checks on the main branch.
   - [View details](https://github.com/jbylund/arcane_tutor/actions/runs/17803973764)
 
 **What to do:**
+
 1. Review the failing checks above
 2. Fix any linting errors by running: `python -m ruff check --fix --unsafe-fixes`
 3. Fix any failing tests by running: `python -m pytest -vvv`
@@ -71,7 +72,7 @@ The workflow is configured in `.github/workflows/ci-monitor.yml` with:
 When a CI failure issue is created:
 
 1. **Review**: Check the linked workflow runs to understand the failures
-1. **Fix Locally**: 
+1. **Fix Locally**:
    - For linting: `python -m ruff check --fix --unsafe-fixes`
    - For tests: `python -m pytest -vvv` and fix failing tests
 1. **Commit**: Push fixes to the main branch
@@ -89,6 +90,7 @@ When a CI failure issue is created:
 ## Monitoring Workflows
 
 The CI Monitor currently tracks these workflows:
+
 - **Lint**: Python code style and quality checks
 - **Unit Tests**: Comprehensive test suite execution
 - **Any other workflows**: Automatically detects and monitors all repository workflows
@@ -96,11 +98,13 @@ The CI Monitor currently tracks these workflows:
 ## Testing
 
 The workflow can be tested by:
+
 1. Manually triggering via GitHub Actions UI
 1. Introducing intentional CI failures on main branch
 1. Verifying issue creation and content accuracy
 
 The workflow has been designed to handle edge cases like:
+
 - No existing issues with `ci-failure` label
 - Multiple simultaneous workflow failures
 - Temporary API errors when checking workflow status

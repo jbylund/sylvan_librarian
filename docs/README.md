@@ -5,6 +5,7 @@ This directory contains all project documentation organized by topic.
 ## 📂 Directory Structure
 
 ### [user/](user/) - User-Facing Documentation
+
 Documentation for end users of Arcane Tutor.
 
 - **[about.md](user/about.md)** - Project mission, philosophy, and how we differ from Scryfall
@@ -13,6 +14,7 @@ Documentation for end users of Arcane Tutor.
 - **[terms_of_service.md](user/terms_of_service.md)** - Terms of service and user agreement
 
 ### [legal/](legal/) - Legal & Compliance
+
 Legal compliance documentation and status tracking.
 
 - **[readme_legal.md](legal/readme_legal.md)** - Legal documentation navigation hub (START HERE)
@@ -24,6 +26,7 @@ Legal compliance documentation and status tracking.
 - **[issue_template_custom_logo.md](legal/issue_template_custom_logo.md)** - Template for custom logo work
 
 ### [fonts/](fonts/) - Font & Typography
+
 Documentation for custom fonts and typography used in the application.
 
 - **[font_licensing_investigation.md](fonts/font_licensing_investigation.md)** - Font licensing analysis
@@ -34,6 +37,7 @@ Documentation for custom fonts and typography used in the application.
 - **[readme-mana-symbols-test.md](fonts/readme-mana-symbols-test.md)** - Mana symbols testing
 
 ### [technical/](technical/) - Technical Documentation
+
 Technical implementation details and development documentation.
 
 - **[scryfall_functionality_analysis.md](technical/scryfall_functionality_analysis.md)** - Feature comparison with Scryfall
@@ -51,24 +55,29 @@ Technical implementation details and development documentation.
 ## 🚀 Quick Links
 
 ### For Users
+
 - **Getting Started**: [help.md](user/help.md)
 - **About the Project**: [about.md](user/about.md)
 
 ### For Developers
+
 - **Search Syntax**: [scryfall_syntax_analysis.md](technical/scryfall_syntax_analysis.md)
 - **Feature Analysis**: [scryfall_functionality_analysis.md](technical/scryfall_functionality_analysis.md)
 
 ### For Legal/Compliance
+
 - **Legal Hub**: [readme_legal.md](legal/readme_legal.md)
 - **Quick Status**: [legal_compliance_summary.md](legal/legal_compliance_summary.md)
 
 ### For Font Work
+
 - **Font Licensing**: [font_licensing_investigation.md](fonts/font_licensing_investigation.md)
 - **Font Optimization**: [font_optimization.md](fonts/font_optimization.md)
 
 ## 📝 Contributing
 
 When adding new documentation:
+
 1. Place it in the appropriate topical directory
 1. Update this README with a link to the new document
 1. Use relative links within documentation

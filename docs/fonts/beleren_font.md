@@ -35,7 +35,7 @@ Following the authentic Magic card typography:
 - **MPlantin** (see `docs/mplantin_font.md`) is used for:
   - `.card-text` - Oracle text in search results
   - `.modal-card-text` - Oracle text in the modal view
-  
+
   Oracle text uses `font-family: 'MPlantin', Georgia, serif;` which loads from CloudFront. The MPlantin font is subsetted from `fonts/mplantin.otf` and hosted on the CDN. If the CDN font fails to load, it falls back to Georgia (a similar serif font).
 
 ## Generating and Uploading the Font
@@ -49,6 +49,7 @@ pip install fonttools brotli requests boto3
 ```
 
 Configure AWS credentials (if uploading to S3):
+
 ```bash
 aws configure
 ```
@@ -62,6 +63,7 @@ make beleren_font S3_BUCKET=your-bucket-name
 ```
 
 Or directly:
+
 ```bash
 python scripts/subset_beleren_font.py \
   --output-dir data/fonts/beleren \
@@ -77,6 +79,7 @@ make beleren_font
 ```
 
 Or:
+
 ```bash
 python scripts/subset_beleren_font.py \
   --output-dir data/fonts/beleren \
@@ -89,6 +92,7 @@ Then manually upload to S3.
 ### Verify Upload
 
 The script automatically:
+
 - Configures **CORS** on the S3 bucket (required for font loading!)
 - Uploads with proper headers:
   - `Cache-Control: public, max-age=31536000, immutable` (1 year)
@@ -97,6 +101,7 @@ The script automatically:
 **Note**: The bucket must allow public read access via a bucket policy (not ACLs)
 
 Files are uploaded to:
+
 ```
 s3://your-bucket/cdn/fonts/beleren/beleren-subset.woff2
 s3://your-bucket/cdn/fonts/beleren/beleren-subset.woff
@@ -132,6 +137,7 @@ The `media="print"` trick ensures the CSS loads asynchronously without blocking 
 ## Benefits
 
 After implementing the Beleren font:
+
 - ✅ More authentic Magic card appearance
 - ✅ Oracle text matches physical cards
 - ✅ Optimized file size (56.7% smaller than original)
@@ -143,6 +149,7 @@ After implementing the Beleren font:
 ## Subsetting Details
 
 The font includes these Unicode ranges:
+
 - **U+0020-007F**: Basic Latin (space through tilde)
 - **U+00A0-00FF**: Latin-1 Supplement
 - **U+0100-017F**: Latin Extended-A
@@ -151,6 +158,7 @@ The font includes these Unicode ranges:
 - **U+2026**: Ellipsis
 
 This covers all characters needed for English card text, including:
+
 - Letters: A-Z, a-z
 - Numbers: 0-9
 - Punctuation: .,;:!?'"()-
@@ -160,6 +168,7 @@ This covers all characters needed for English card text, including:
 ## Testing
 
 After deployment, verify:
+
 1. Oracle text displays in Beleren font on card search results
 1. Oracle text displays in Beleren font in the card modal
 1. Network tab shows `beleren-subset.woff2` loading from CloudFront
@@ -170,14 +179,14 @@ After deployment, verify:
 
 ## Comparison with Mana Font
 
-| Feature | Mana Font | Beleren Font |
-|---------|-----------|--------------|
-| **Purpose** | Mana symbols | Oracle text |
-| **Original Size** | ~200-300KB | ~58KB |
-| **Subset Size** | ~20-40KB | ~25KB |
-| **Subsetting** | 64 specific glyphs | Latin characters |
-| **Usage** | `.mana-symbol` spans | `.card-text` and `.card-type` |
-| **Font Format** | Icon font | Text font |
+| Feature           | Mana Font            | Beleren Font                  |
+| ----------------- | -------------------- | ----------------------------- |
+| **Purpose**       | Mana symbols         | Oracle text                   |
+| **Original Size** | ~200-300KB           | ~58KB                         |
+| **Subset Size**   | ~20-40KB             | ~25KB                         |
+| **Subsetting**    | 64 specific glyphs   | Latin characters              |
+| **Usage**         | `.mana-symbol` spans | `.card-text` and `.card-type` |
+| **Font Format**   | Icon font            | Text font                     |
 
 ## Troubleshooting
 
@@ -193,16 +202,19 @@ The CSS should specify `font-weight: bold`.
 The WOFF2 file should be ~25KB, not 58KB.
 
 **403 Forbidden**: Ensure your S3 bucket policy allows public read access:
+
 ```json
 {
   "Version": "2012-10-17",
-  "Statement": [{
-    "Sid": "PublicReadGetObject",
-    "Effect": "Allow",
-    "Principal": "*",
-    "Action": "s3:GetObject",
-    "Resource": "arn:aws:s3:::your-bucket/*"
-  }]
+  "Statement": [
+    {
+      "Sid": "PublicReadGetObject",
+      "Effect": "Allow",
+      "Principal": "*",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::your-bucket/*"
+    }
+  ]
 }
 ```
 

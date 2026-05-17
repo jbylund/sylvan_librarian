@@ -22,6 +22,7 @@ This document investigates the licensing situation for all fonts used in Arcane 
 **Status**: ✅ **Fully Compliant**
 
 **Details**:
+
 - License allows free use, modification, and redistribution
 - We are subsetting and hosting our own optimized version
 - Attribution is maintained in documentation
@@ -40,6 +41,7 @@ This document investigates the licensing situation for all fonts used in Arcane 
 **Status**: ✅ **Fully Compliant**
 
 **Details**:
+
 - Licensed under MIT by Drake Costa
 - Allows free use, modification, and redistribution
 - We are subsetting and hosting our own optimized version
@@ -47,6 +49,7 @@ This document investigates the licensing situation for all fonts used in Arcane 
 - No legal concerns
 
 **License Text**:
+
 ```
 Copyright (c) 2018 Drake Costa
 
@@ -79,6 +82,7 @@ copies or substantial portions of the Software.
 1. **Redistribution**: The font file `fonts/mplantin.otf` is checked into the repository, which may violate licensing terms if we don't have redistribution rights.
 
 1. **Documentation Claims**: The file [docs/mplantin_font.md](../fonts/mplantin_font.md) states:
+
    > "MPlantin (Plantin MT) is a commercial font by Monotype. The font file in this repository (`fonts/mplantin.otf`) is used under license for this project."
 
 1. **License Verification Needed**: We need to verify:
@@ -92,11 +96,13 @@ copies or substantial portions of the Software.
 ## Risk Assessment
 
 ### Mana Font: ✅ **No Risk**
+
 - Open license (OFL)
 - Properly attributed
 - Legal to use and redistribute
 
 ### Beleren Font: ✅ **No Risk**
+
 - Open license (MIT)
 - Properly attributed
 - Legal to use and redistribute
@@ -104,12 +110,14 @@ copies or substantial portions of the Software.
 ### MPlantin Font: ⚠️ **HIGH RISK**
 
 **Legal Risks**:
+
 1. **Copyright Infringement**: Distributing a commercial font without proper license
 1. **License Violation**: Using font beyond scope of any existing license
 1. **Trademark Issues**: Potential issues with Monotype's intellectual property
 1. **Repository Liability**: All users cloning the repository may be receiving unlicensed content
 
 **Impact on Compliance**:
+
 - This could affect our overall legal compliance standing
 - May need to be addressed before claiming full compliance
 - Could be flagged in legal review or audit
@@ -164,6 +172,7 @@ copies or substantial portions of the Software.
 ## Recommended Solution: Option D (System Fonts)
 
 **Rationale**:
+
 1. **Immediate Compliance**: No licensing issues
 1. **No Cost**: Free for all users
 1. **Simplest Implementation**: Just update CSS
@@ -172,6 +181,7 @@ copies or substantial portions of the Software.
 1. **Performance**: No font download needed
 
 **Implementation**:
+
 1. Remove `fonts/mplantin.otf`
 1. Update CSS to: `font-family: Georgia, 'Palatino Linotype', 'Book Antiqua', Palatino, serif;`
 1. Remove MPlantin documentation
@@ -195,16 +205,19 @@ echo "fonts/*.ttf" >> .gitignore
 ### Step 2: Update CSS
 
 In `api/index.html`, replace:
+
 ```css
 font-family: 'MPlantin', Georgia, serif;
 ```
 
 With:
+
 ```css
 font-family: Georgia, 'Palatino Linotype', 'Book Antiqua', Palatino, serif;
 ```
 
 Also remove the link to MPlantin CSS from CDN:
+
 ```html
 <!-- Remove this -->
 <link
@@ -219,6 +232,7 @@ Also remove the link to MPlantin CSS from CDN:
 ### Step 3: Update Documentation
 
 Files to update:
+
 - [x] Remove or archive `docs/mplantin_font.md`
 - [x] Update `docs/legal.md` to remove MPlantin references
 - [x] Update `docs/beleren_font.md` to remove MPlantin cross-references
@@ -229,6 +243,7 @@ Files to update:
 ### Step 4: Update Scripts
 
 Remove or archive:
+
 - `scripts/subset_mplantin_font.py` (if it exists)
 - Any Makefile targets for MPlantin
 
@@ -243,20 +258,21 @@ Remove or archive:
 
 ## Alternative Fonts Comparison
 
-| Font | License | Quality | Cost | Compliance Risk |
-|------|---------|---------|------|-----------------|
-| **Georgia** (system) | Free | High | $0 | ✅ None |
-| **Palatino** (system) | Free | High | $0 | ✅ None |
-| **Garamond** (system) | Free | Medium | $0 | ✅ None |
-| **Libre Baskerville** (Google) | OFL | High | $0 | ✅ None |
-| **Crimson Text** (Google) | OFL | High | $0 | ✅ None |
-| **MPlantin** (commercial) | Commercial | High | $$$ | ⚠️ High |
+| Font                           | License    | Quality | Cost | Compliance Risk |
+| ------------------------------ | ---------- | ------- | ---- | --------------- |
+| **Georgia** (system)           | Free       | High    | $0   | ✅ None         |
+| **Palatino** (system)          | Free       | High    | $0   | ✅ None         |
+| **Garamond** (system)          | Free       | Medium  | $0   | ✅ None         |
+| **Libre Baskerville** (Google) | OFL        | High    | $0   | ✅ None         |
+| **Crimson Text** (Google)      | OFL        | High    | $0   | ✅ None         |
+| **MPlantin** (commercial)      | Commercial | High    | $$$  | ⚠️ High         |
 
 ---
 
 ## Updated Font Stack Recommendation
 
 For oracle text, use this font stack:
+
 ```css
 .card-text,
 .modal-card-text {
@@ -266,6 +282,7 @@ For oracle text, use this font stack:
 ```
 
 This provides:
+
 - ✅ Professional serif appearance
 - ✅ Excellent readability
 - ✅ No licensing concerns
@@ -278,17 +295,20 @@ This provides:
 ## Impact on Legal Compliance
 
 **Before MPlantin Removal**:
+
 - ⚠️ Potential copyright infringement risk
 - ⚠️ Commercial font in open-source repository
 - ⚠️ Unclear licensing status
 
 **After MPlantin Removal**:
+
 - ✅ All fonts properly licensed
 - ✅ No commercial font concerns
 - ✅ Full compliance with open-source principles
 - ✅ No redistribution restrictions
 
 **Compliance Score Impact**:
+
 - Current: May reduce compliance from 93% to lower due to licensing concern
 - After fix: Maintains or improves 93% compliance rating
 - Risk Level: Reduced from Medium to Very Low
@@ -300,6 +320,7 @@ This provides:
 **Recommendation**: Remove MPlantin font and use system fonts (Georgia) for oracle text.
 
 **Benefits**:
+
 1. ✅ Immediate legal compliance
 1. ✅ No licensing costs
 1. ✅ Simpler implementation

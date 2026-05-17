@@ -7,6 +7,7 @@ The `mana-symbols-test.html` page is a diagnostic tool created to help identify 
 ## Purpose
 
 This page displays all mana symbols used in Scryfall OS in a comprehensive table format, making it easy to:
+
 - Identify symbols that are not rendering correctly
 - Compare the emoji representation with the mana font representation
 - Verify that all symbols in the codebase have proper mappings
@@ -32,6 +33,7 @@ The page shows three columns for each symbol:
 ### Search
 
 The search box allows you to filter symbols by:
+
 - Symbol text (e.g., "W/U", "tap", "phyrexian")
 - Emoji representation
 - CSS class names
@@ -39,6 +41,7 @@ The search box allows you to filter symbols by:
 ### Statistics
 
 Live counters show:
+
 - Total symbols currently displayed
 - Count of regular symbols
 - Count of hybrid symbols
@@ -46,12 +49,14 @@ Live counters show:
 ## Symbol Categories
 
 ### Regular Mana Symbols (34)
+
 - Basic colors: `{W}`, `{U}`, `{B}`, `{R}`, `{G}`, `{C}`
 - Numbers: `{0}` through `{16}`
 - Variables: `{X}`, `{Y}`, `{Z}`
 - Special: `{T}` (tap), `{Q}` (untap), `{E}` (energy), `{P}` (phyrexian), `{S}` (snow), `{CHAOS}`, `{PW}`, `{∞}`
 
 ### Hybrid Mana Symbols (30)
+
 - Two-color hybrid: `{W/U}`, `{U/B}`, `{B/R}`, `{R/G}`, `{G/W}`, `{W/B}`, `{U/R}`, `{B/G}`, `{R/W}`, `{G/U}`
 - Generic hybrid (2/color): `{2/W}`, `{2/U}`, `{2/B}`, `{2/R}`, `{2/G}`
 - Phyrexian mana: `{W/P}`, `{U/P}`, `{B/P}`, `{R/P}`, `{G/P}`
@@ -62,6 +67,7 @@ Live counters show:
 ### Local Development
 
 1. Start a local web server in the `api` directory:
+
    ```bash
    cd api
    python -m http.server 8888
@@ -83,6 +89,7 @@ Access the page at `/mana-symbols-test.html` on your deployed instance.
 If the third column (Symbol Representation) shows empty spaces:
 
 1. **Check CDN Loading**: The page loads the Mana font from CloudFront CDN:
+
    ```
    https://d1hot9ps2xugbc.cloudfront.net/cdn/fonts/mana/mana-subset.css
    ```
@@ -108,6 +115,7 @@ When adding a new mana symbol to the application:
 ### Data Sources
 
 The page uses the same symbol maps as the main application (`index.html`):
+
 - `manaMap`: Regular mana symbols and their CSS classes
 - `hybridMap`: Hybrid mana symbols and their CSS classes
 - `manaTextMap`: Emoji/unicode representations for tooltips
@@ -115,6 +123,7 @@ The page uses the same symbol maps as the main application (`index.html`):
 ### Styling
 
 The page uses:
+
 - CSS Grid for the table layout
 - Same gradient theme as the main application
 - Responsive design for mobile and desktop
@@ -130,6 +139,7 @@ The page uses:
 ## Maintenance
 
 This page should be updated whenever:
+
 - New mana symbols are added to Magic: The Gathering
 - Symbol mappings change in the main application
 - The Mana font is updated to a new version

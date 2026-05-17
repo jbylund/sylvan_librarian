@@ -43,6 +43,7 @@ pip install fonttools brotli boto3
 ```
 
 Configure AWS credentials (if uploading to S3):
+
 ```bash
 aws configure
 ```
@@ -56,6 +57,7 @@ make mplantin_font S3_BUCKET=your-bucket-name
 ```
 
 Or directly:
+
 ```bash
 python scripts/subset_mplantin_font.py \
   --input-font fonts/mplantin.otf \
@@ -66,6 +68,7 @@ python scripts/subset_mplantin_font.py \
 ```
 
 This will:
+
 - Take the MPlantin OTF font from `fonts/mplantin.otf`
 - Subset it to include only the glyphs we use
 - Generate both WOFF2 and WOFF formats (for browser compatibility)
@@ -79,6 +82,7 @@ make mplantin_font
 ```
 
 Or:
+
 ```bash
 python scripts/subset_mplantin_font.py \
   --input-font fonts/mplantin.otf \
@@ -92,6 +96,7 @@ Then manually upload to S3.
 ### Verify Upload
 
 The script automatically:
+
 - Configures **CORS** on the S3 bucket (required for font loading!)
 - Uploads with proper headers:
   - `Cache-Control: public, max-age=31536000, immutable` (1 year)
@@ -100,6 +105,7 @@ The script automatically:
 **Note**: The bucket must allow public read access via a bucket policy (not ACLs)
 
 Files are uploaded to:
+
 ```
 s3://your-bucket/cdn/fonts/mplantin/mplantin-subset.woff2
 s3://your-bucket/cdn/fonts/mplantin/mplantin-subset.woff
@@ -135,6 +141,7 @@ The `media="print"` trick ensures the CSS loads asynchronously without blocking 
 ## Benefits
 
 After implementing the MPlantin font:
+
 - ✅ Authentic Magic card oracle text appearance
 - ✅ Oracle text matches physical cards
 - ✅ Optimized file size (68.7% smaller than original)
@@ -146,6 +153,7 @@ After implementing the MPlantin font:
 ## Subsetting Details
 
 The font includes these Unicode ranges:
+
 - **U+0020-007F**: Basic Latin (space through tilde)
 - **U+00A0-00FF**: Latin-1 Supplement
 - **U+0100-017F**: Latin Extended-A
@@ -154,6 +162,7 @@ The font includes these Unicode ranges:
 - **U+2026**: Ellipsis
 
 This covers all characters needed for English card text, including:
+
 - Letters: A-Z, a-z
 - Numbers: 0-9
 - Punctuation: .,;:!?'"()-
@@ -163,6 +172,7 @@ This covers all characters needed for English card text, including:
 ## Testing
 
 After deployment, verify:
+
 1. Oracle text displays in MPlantin font on card search results
 1. Oracle text displays in MPlantin font in the card modal
 1. Network tab shows `mplantin-subset.woff2` loading from CloudFront
@@ -173,15 +183,15 @@ After deployment, verify:
 
 ## Font Comparison
 
-| Feature | Beleren Font | MPlantin Font |
-|---------|--------------|---------------|
-| **Purpose** | Card titles, type lines | Oracle text |
-| **Original Size** | ~58KB (WOFF) | ~105KB (OTF) |
-| **Subset Size** | ~25KB (WOFF2) | ~33KB (WOFF2) |
-| **Reduction** | 56.7% | 68.7% |
-| **Usage** | `.card-name`, `.card-type` | `.card-text`, `.modal-card-text` |
-| **Style** | Bold sans-serif | Regular serif |
-| **Source** | npm package | Local OTF file |
+| Feature           | Beleren Font               | MPlantin Font                    |
+| ----------------- | -------------------------- | -------------------------------- |
+| **Purpose**       | Card titles, type lines    | Oracle text                      |
+| **Original Size** | ~58KB (WOFF)               | ~105KB (OTF)                     |
+| **Subset Size**   | ~25KB (WOFF2)              | ~33KB (WOFF2)                    |
+| **Reduction**     | 56.7%                      | 68.7%                            |
+| **Usage**         | `.card-name`, `.card-type` | `.card-text`, `.modal-card-text` |
+| **Style**         | Bold sans-serif            | Regular serif                    |
+| **Source**        | npm package                | Local OTF file                   |
 
 ## Troubleshooting
 
@@ -197,16 +207,19 @@ Check Network tab in DevTools.
 The WOFF2 file should be ~33KB, not 105KB.
 
 **403 Forbidden**: Ensure your S3 bucket policy allows public read access:
+
 ```json
 {
   "Version": "2012-10-17",
-  "Statement": [{
-    "Sid": "PublicReadGetObject",
-    "Effect": "Allow",
-    "Principal": "*",
-    "Action": "s3:GetObject",
-    "Resource": "arn:aws:s3:::your-bucket/*"
-  }]
+  "Statement": [
+    {
+      "Sid": "PublicReadGetObject",
+      "Effect": "Allow",
+      "Principal": "*",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::your-bucket/*"
+    }
+  ]
 }
 ```
 

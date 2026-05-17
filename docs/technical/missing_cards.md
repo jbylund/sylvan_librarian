@@ -63,6 +63,7 @@ curl "http://localhost:8080/import_card_by_name?card_name=Lightning%20Bolt"
 ### Response Examples
 
 **Success:**
+
 ```json
 {
   "card_name": "Lightning Bolt",
@@ -72,24 +73,27 @@ curl "http://localhost:8080/import_card_by_name?card_name=Lightning%20Bolt"
 ```
 
 **Already Exists:**
+
 ```json
 {
-  "card_name": "Lightning Bolt", 
+  "card_name": "Lightning Bolt",
   "status": "already_exists",
   "message": "Card 'Lightning Bolt' already exists in database"
 }
 ```
 
 **Not Found:**
+
 ```json
 {
   "card_name": "Nonexistent Card",
-  "status": "not_found", 
+  "status": "not_found",
   "message": "Card 'Nonexistent Card' not found in Scryfall API"
 }
 ```
 
 **Filtered Out:**
+
 ```json
 {
   "card_name": "Some Card",
@@ -111,7 +115,7 @@ The system automatically filters cards to only include:
 - Paper Magic cards (`game:paper`)
 - Cards legal in at least one major format (`f:m or f:l or f:c or f:v`)
 - Excludes double-faced cards (`-is:dfc`)
-- Excludes adventure cards (`-is:adventure`) 
+- Excludes adventure cards (`-is:adventure`)
 - Excludes split cards (`-is:split`)
 
 ## Error Handling

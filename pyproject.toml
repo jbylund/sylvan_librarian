@@ -4,31 +4,93 @@ exclude = [".venv", "venv", "build", "dist", "migrations"]
 target-version = "py313"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "C90", "I", "N", "D", "UP", "YTT", "ANN", "S", "BLE", "B", "A", "COM", "C4", "DTZ", "EM", "EXE", "FBT", "ICN", "INP", "PIE", "PT", "Q", "RET", "SIM", "T20", "TID", "TCH", "ARG", "PTH", "ERA", "PL", "RUF"]
+select = [
+  "E",
+  "F",
+  "W",
+  "C90",
+  "I",
+  "N",
+  "D",
+  "UP",
+  "YTT",
+  "ANN",
+  "S",
+  "BLE",
+  "B",
+  "A",
+  "COM",
+  "C4",
+  "DTZ",
+  "EM",
+  "EXE",
+  "FBT",
+  "ICN",
+  "INP",
+  "PIE",
+  "PT",
+  "Q",
+  "RET",
+  "SIM",
+  "T20",
+  "TID",
+  "TCH",
+  "ARG",
+  "PTH",
+  "ERA",
+  "PL",
+  "RUF",
+]
 # E501: Ignore line too long
 # S105: Ignore hardcoded password string
 ignore = [
-    "B911",
-    "E501", # line too long
-    "FBT001",
-    "FBT002",
-    "FBT003",
-    "S105",
-    "S608",
-    "SIM117",
-    "COM812", # trailing comma - enforced by ruff format
+  "B911",
+  "E501", # line too long
+  "FBT001",
+  "FBT002",
+  "FBT003",
+  "S105",
+  "S608",
+  "SIM117",
+  "COM812", # trailing comma - enforced by ruff format
 ]
-per-file-ignores = {"**/tests/**/*.py" = ["ANN401", "ARG001", "D101", "D102", "D103", "PLR2004", "PT004", "S101", "S311"], "conftest.py" = ["ANN401", "ARG001", "D101", "D102", "D103", "PLR2004", "PT004", "S101"], "api_worker.py" = ["PLC0415"], "**/scripts/**/*.py" = ["T201", "S603", "S607", "PTH123"]}
+per-file-ignores = { "**/tests/**/*.py" = [
+  "ANN401",
+  "ARG001",
+  "D101",
+  "D102",
+  "D103",
+  "PLR2004",
+  "PT004",
+  "S101",
+  "S311",
+], "conftest.py" = [
+  "ANN401",
+  "ARG001",
+  "D101",
+  "D102",
+  "D103",
+  "PLR2004",
+  "PT004",
+  "S101",
+], "api_worker.py" = [
+  "PLC0415",
+], "**/scripts/**/*.py" = [
+  "T201",
+  "S603",
+  "S607",
+  "PTH123",
+] }
 
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
 [tool.ruff.lint.mccabe]
-max-complexity = 15  # Increase from default 10 to 15
+max-complexity = 15 # Increase from default 10 to 15
 
 [tool.ruff.lint.pylint]
-max-returns = 10  # Increase from default 6 to 10
+max-returns = 10 # Increase from default 6 to 10
 
 [tool.pylint]
 max-line-length = 120

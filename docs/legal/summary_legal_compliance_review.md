@@ -23,6 +23,7 @@
 ✅ **All critical legal compliance requirements are met.**
 
 The project demonstrates:
+
 - Full compliance with Wizards of the Coast Fan Content Policy
 - Proper attribution to all intellectual property owners
 - Clear differentiation from Scryfall
@@ -66,7 +67,7 @@ The project demonstrates:
 **Status**: ❌ TODO  
 **Category**: Visual Design & UI  
 **Impact**: Cosmetic enhancement only  
-**Legal Impact**: None - text-only header is fully compliant  
+**Legal Impact**: None - text-only header is fully compliant
 
 **Current State**: Using text-only header "Arcane Tutor"  
 **Desired State**: Custom visual logo distinct from Scryfall
@@ -80,6 +81,7 @@ The project demonstrates:
 **Location**: `docs/issue_template_custom_logo.md`
 
 **Contents**:
+
 - Complete requirements (legal, design, technical)
 - Design concepts and theme ideas
 - Implementation tasks (design, technical, documentation, verification)
@@ -97,6 +99,7 @@ The project demonstrates:
 ### 1. legal_compliance_final_status.md
 
 Comprehensive final status report including:
+
 - Executive summary with overall score
 - Detailed item-by-item checklist with evidence
 - Category-by-category breakdown
@@ -107,6 +110,7 @@ Comprehensive final status report including:
 ### 2. issue_template_custom_logo.md
 
 Complete issue template for the custom logo including:
+
 - Background and requirements
 - Design concepts and options
 - Implementation phases
@@ -144,11 +148,13 @@ Complete issue template for the custom logo including:
 ## Files Modified/Created
 
 ### New Files
+
 1. `docs/legal_compliance_final_status.md` - Comprehensive status report
 1. `docs/issue_template_custom_logo.md` - Issue template for logo work
 1. `docs/summary_legal_compliance_review.md` - This summary document
 
 ### Existing Files
+
 - No modifications to existing files required
 - All documentation is additive
 
@@ -192,6 +198,7 @@ To create the new GitHub issue for the custom logo:
 1. Body: Copy content from `docs/issue_template_custom_logo.md`
 
 Or use GitHub CLI:
+
 ```bash
 gh issue create --title "Design and Implement Custom Logo for Arcane Tutor" \
   --body-file docs/issue_template_custom_logo.md \

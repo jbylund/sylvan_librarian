@@ -6,8 +6,8 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "test:js": "jest",
-    "format": "prettier --write api/static/index.html",
-    "format:check": "prettier --check api/static/index.html"
+    "fmt": "oxfmt",
+    "fmt:check": "oxfmt --check"
   },
   "jest": {
     "testEnvironment": "jsdom"
@@ -36,9 +36,9 @@
     "cssnano": "^8.0.1",
     "jest": "^30.3.0",
     "jest-environment-jsdom": "^30.3.0",
+    "oxfmt": "^0.50.0",
     "postcss": "^8.5.14",
     "postcss-cli": "^11.0.1",
-    "prettier": "^3.6.2",
     "terser": "^5.36.0"
   }
 }

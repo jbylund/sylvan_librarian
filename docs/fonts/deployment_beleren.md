@@ -17,6 +17,7 @@ make beleren_font S3_BUCKET=your-bucket-name
 ```
 
 This will:
+
 - Download the original Beleren Bold font
 - Subset it to Latin characters only (56.7% size reduction)
 - Generate WOFF2 and WOFF formats
@@ -27,6 +28,7 @@ This will:
 ### 2. Verify Upload
 
 Files should be available at:
+
 ```
 https://d1hot9ps2xugbc.cloudfront.net/cdn/fonts/beleren/beleren-subset.woff2
 https://d1hot9ps2xugbc.cloudfront.net/cdn/fonts/beleren/beleren-subset.woff
@@ -46,11 +48,11 @@ https://d1hot9ps2xugbc.cloudfront.net/cdn/fonts/beleren/beleren-subset.css
 
 ## What Gets Uploaded
 
-| File | Size | Content-Type | Purpose |
-|------|------|--------------|---------|
-| `beleren-subset.woff2` | ~25KB | `font/woff2` | Primary font (modern browsers) |
-| `beleren-subset.woff` | ~37KB | `font/woff` | Fallback font (older browsers) |
-| `beleren-subset.css` | ~0.5KB | `text/css` | Font-face declarations |
+| File                   | Size   | Content-Type | Purpose                        |
+| ---------------------- | ------ | ------------ | ------------------------------ |
+| `beleren-subset.woff2` | ~25KB  | `font/woff2` | Primary font (modern browsers) |
+| `beleren-subset.woff`  | ~37KB  | `font/woff`  | Fallback font (older browsers) |
+| `beleren-subset.css`   | ~0.5KB | `text/css`   | Font-face declarations         |
 
 ## S3 Configuration
 
@@ -65,13 +67,15 @@ Ensure your S3 bucket has this policy:
 ```json
 {
   "Version": "2012-10-17",
-  "Statement": [{
-    "Sid": "PublicReadGetObject",
-    "Effect": "Allow",
-    "Principal": "*",
-    "Action": "s3:GetObject",
-    "Resource": "arn:aws:s3:::your-bucket/*"
-  }]
+  "Statement": [
+    {
+      "Sid": "PublicReadGetObject",
+      "Effect": "Allow",
+      "Principal": "*",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::your-bucket/*"
+    }
+  ]
 }
 ```
 
@@ -80,6 +84,7 @@ Ensure your S3 bucket has this policy:
 ### Font not loading (CORS error)
 
 Re-run the script to reconfigure CORS:
+
 ```bash
 make beleren_font S3_BUCKET=your-bucket-name
 ```
@@ -144,6 +149,7 @@ The font files can remain on CDN (they won't be loaded if not referenced).
 ## Next Steps
 
 After deployment:
+
 1. Monitor CloudFront logs for font file requests
 1. Check Lighthouse performance score
 1. Gather user feedback on appearance

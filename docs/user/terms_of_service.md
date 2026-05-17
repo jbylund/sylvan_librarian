@@ -68,6 +68,7 @@ We reserve the right to modify, suspend, or discontinue the Service at any time 
 THE SERVICE IS PROVIDED "AS IS" WITHOUT ANY WARRANTIES, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, OR NON-INFRINGEMENT.
 
 We do not warrant that:
+
 - The Service will be uninterrupted or error-free
 - Card data will be accurate, complete, or up-to-date
 - Defects will be corrected
