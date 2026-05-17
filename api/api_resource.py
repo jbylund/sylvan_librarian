@@ -800,7 +800,8 @@ class APIResource:
             with timer("get_where_clause"):
                 _parse_result = parse_scryfall_query_with_ignored(query)
                 if not _parse_result.has_valid_query():
-                    raise ValueError(f'Failed to parse query: "{query}"')
+                    msg = f'Failed to parse query: "{query}"'
+                    raise ValueError(msg)
                 where_clause, params = generate_sql_query(_parse_result.query)
                 ignored_parts = _parse_result.ignored
                 if query:

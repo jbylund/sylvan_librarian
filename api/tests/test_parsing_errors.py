@@ -1,8 +1,8 @@
 """Tests for parsing error handling in search queries.
 
-This module tests that parsing errors in queries (like "cmc=2 and id=")
-are handled gracefully by returning BadRequest errors instead of
-throwing generic server errors.
+This module tests that parsing errors in queries (like "t=") are handled
+gracefully, and that partially-valid queries (like "cmc=2 and id=") now
+succeed via partial parsing with the invalid parts reported as ignored.
 """
 
 from __future__ import annotations
@@ -34,45 +34,65 @@ class TestParsingErrorHandling:
     def teardown_method(self) -> None:
         """Clean up test fixtures."""
         if hasattr(self, "api_resource") and self.api_resource:
-            # Close the connection pool to prevent thread pool warnings
             self.api_resource._conn_pool.close()
 
-    def test_search_handles_parsing_error_incomplete_query(self) -> None:
-        """Test that parsing errors in search raise HTTPBadRequest."""
-        # Test the specific case mentioned in the issue
+    def test_search_partial_query_succeeds_with_ignored_parts(self) -> None:
+        """Partially-valid queries succeed and report the invalid fragment."""
         query = "cmc=2 and id="
 
-        # Call _search with the problematic query and expect HTTPBadRequest
-        with pytest.raises(falcon.HTTPBadRequest) as exc_info:
-            self.api_resource._search(query=query)
+        with patch.object(self.api_resource, "_run_query") as mock_run_query:
+            mock_run_query.return_value = {
+                "result": [{"name": "Opt", "total_cards_count": None}, {"total_cards_count": 1}],
+                "timings": {},
+            }
+            result = self.api_resource._search(query=query)
 
-        # Verify the error details
-        assert exc_info.value.title == "Invalid Search Query"
-        assert query in exc_info.value.description
-        assert f'Failed to parse query: "{query}"' == exc_info.value.description
+        assert result["total_cards"] == 1
+        assert "id=" in [part["fragment"] for part in result.get("query_ignored", [])]
 
     @pytest.mark.parametrize(
-        "query",
-        [
-            "cmc=2 and id=",  # The original issue case
-            "name:test and",  # Trailing AND
-            "power>1 or",  # Trailing OR
-            "cmc=3 and ()",  # Empty parentheses
+        argnames="query",
+        argvalues=[
+            "cmc=2 and id=",  # valid part: cmc=2; ignored: id=
+            "name:test and",  # valid part: name:test; trailing AND ignored
+            "power>1 or",  # valid part: power>1; trailing OR ignored
+            "cmc=3 and ()",  # valid part: cmc=3; ignored: ()
         ],
     )
-    def test_search_handles_parsing_error_various_cases(self, query: str) -> None:
-        """Test that various parsing errors raise HTTPBadRequest."""
-        with pytest.raises(falcon.HTTPBadRequest) as exc_info:
-            self.api_resource._search(query=query)
+    def test_search_partial_queries_succeed(self, query: str) -> None:
+        """Queries with at least one valid part succeed via partial parsing."""
+        with patch.object(self.api_resource, "_run_query") as mock_run_query:
+            mock_run_query.return_value = {
+                "result": [{"total_cards_count": 0}],
+                "timings": {},
+            }
+            result = self.api_resource._search(query=query)
 
-        # Verify the error details
+        assert "cards" in result
+
+    @pytest.mark.parametrize(
+        argnames="query",
+        argvalues=[
+            "t=",  # no valid part at all
+            "id=",  # no valid part at all
+            "x>3",  # unrecognized field with no valid part
+        ],
+    )
+    def test_search_fully_invalid_queries_raise_bad_request(self, query: str) -> None:
+        """Queries with no valid part at all still raise HTTPBadRequest."""
+        with patch.object(
+            self.api_resource,
+            "_run_query",
+            side_effect=AssertionError(f"query reached DB execution — should have failed at parse time: {query!r}"),
+        ):
+            with pytest.raises(falcon.HTTPBadRequest) as exc_info:
+                self.api_resource._search(query=query)
+
         assert exc_info.value.title == "Invalid Search Query"
-        assert query in exc_info.value.description
         assert f'Failed to parse query: "{query}"' == exc_info.value.description
 
     def test_search_normal_parsing_unaffected(self) -> None:
         """Test that normal queries still work correctly."""
-        # Mock successful query execution
         with patch.object(self.api_resource, "_run_query") as mock_run_query:
             mock_run_query.return_value = {
                 "result": [
@@ -84,7 +104,6 @@ class TestParsingErrorHandling:
 
             result = self.api_resource._search(query="name:bolt")
 
-            # Verify normal operation
             assert len(result["cards"]) == 1
             assert result["cards"][0]["name"] == "Lightning Bolt"
             assert result["total_cards"] == 1
@@ -132,12 +151,21 @@ class TestSearchValidation:
 
     @pytest.mark.parametrize(
         argnames="query",
-        argvalues=["t=", "cmc=2 and id=", "name:test and", "power>1 or"],
+        argvalues=[
+            "t=",  # no valid part at all
+            "id=",  # no valid part at all
+            "x>3",  # unrecognized field with no valid part
+        ],
     )
     def test_search_raises_bad_request_for_unparseable_query(self, query: str) -> None:
-        """Queries that fail to parse raise HTTPBadRequest."""
-        with pytest.raises(falcon.HTTPBadRequest) as exc_info:
-            self.api_resource._search(query=query)
+        """Queries with no valid part raise HTTPBadRequest."""
+        with patch.object(
+            self.api_resource,
+            "_run_query",
+            side_effect=AssertionError(f"query reached DB execution — should have failed at parse time: {query!r}"),
+        ):
+            with pytest.raises(falcon.HTTPBadRequest) as exc_info:
+                self.api_resource._search(query=query)
         assert exc_info.value.title == "Invalid Search Query"
         assert f'Failed to parse query: "{query}"' == exc_info.value.description
 
