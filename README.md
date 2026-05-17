@@ -146,7 +146,7 @@ arcane_tutor/
 - Python 3.13+ (tested with 3.13)
 - PostgreSQL 17+ (for full functionality)
 - Docker and Docker Compose (for containerized development)
-- Node.js (for HTML formatting tools)
+- Node.js 26.1.0+ (for HTML formatting tools)
 
 ### Setup Instructions
 
