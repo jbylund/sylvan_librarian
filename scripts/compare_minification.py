@@ -32,10 +32,10 @@ def compress_with_zstd(data: bytes, level: int = 4) -> bytes:
 
 
 def minify_css(input_path: Path, output_path: Path) -> None:
-    """Minify CSS file using cssnano-cli."""
+    """Minify CSS file using postcss-cli with cssnano."""
     try:
         subprocess.run(
-            ["npx", "cssnano-cli", str(input_path), str(output_path)],
+            ["npx", "postcss", str(input_path), "--use", "cssnano", "--output", str(output_path)],
             check=True,
             capture_output=True,
         )
@@ -168,7 +168,7 @@ def main() -> None:
     print("Summary:")
     print("  - Original: Uncompressed file size")
     print("  - Compressed: Original file compressed with zstd (level 4)")
-    print("  - Minified: File minified with cssnano-cli (CSS) or terser (JS)")
+    print("  - Minified: File minified with postcss-cli + cssnano (CSS) or terser (JS)")
     print("  - Minified + Compressed: Minified file then compressed with zstd")
     print(f"{'=' * 70}\n")
 

@@ -221,7 +221,7 @@ mplantin_font: font-dependencies # @doc subset and optimize the MPlantin font fo
 
 compare-minification: # @doc compare file sizes: uncompressed, compressed, minified, and minified+compressed
 	@echo "Installing minifier dependencies..."
-	@npm install --no-save cssnano-cli terser > /dev/null 2>&1 || true
+	@npm install --no-save cssnano postcss postcss-cli terser > /dev/null 2>&1 || true
 	@python scripts/compare_minification.py
 
 api/static/app.min.js: api/static/app.js # @doc minify app.js (used in both dev and prod)
