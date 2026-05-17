@@ -132,7 +132,7 @@ ensure_uv:
 	@python -m uv --version > /dev/null || \
 	python -m pip install uv
 
-lint: ruff_lint oxfmt_lint # @doc lint all python files
+lint: ruff_lint oxfmt_lint # @doc lint and format all code files
 	true
 
 oxfmt_lint: /tmp/oxfmt.stamp
