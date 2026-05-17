@@ -379,7 +379,7 @@ Arcane Tutor follows security best practices to protect users and data. A compre
 - Input validation on all endpoints
 - Secure dependency management (pip-audit, npm audit)
 
-For security concerns, please review the security documentation or contact the maintainers.
+To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ### Legal Compliance
 
