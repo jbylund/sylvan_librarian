@@ -194,11 +194,11 @@ def _color_dict_to_mask(color_dict: dict[str, bool]) -> int:
 
 
 def _subset_masks(query_mask: int) -> list[int]:
-    return [v for v in range(32) if (v & ~query_mask) == 0]
+    return [v for v in range(32) if (v & ~query_mask) == 0]  # 5 colors => 2^5 possible bitmask values
 
 
 def _proper_subset_masks(query_mask: int) -> list[int]:
-    return [v for v in range(32) if (v & ~query_mask) == 0 and v != query_mask]
+    return [v for v in range(32) if (v & ~query_mask) == 0 and v != query_mask]  # 5 colors => 2^5 possible bitmask values
 
 
 def get_colors_comparison_object(val: str) -> dict[str, bool]:
