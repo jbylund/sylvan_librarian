@@ -19,10 +19,10 @@ from pyparsing import (
     QuotedString,
     Regex,
     ZeroOrMore,
-    oneOf,
+    one_of,
 )
 
-from api.parsing.card_query_nodes import CardAttributeNode, to_card_query_ast
+from api.parsing.card_query_nodes import CardAttributeNode, ExactNameNode, to_card_query_ast
 from api.parsing.db_info import (
     COLOR_NAME_TO_CODE,
     NUMERIC_CARD_ATTRIBUTES,
@@ -51,7 +51,7 @@ ParserElement.enable_packrat(cache_size_limit=2**13)  # 8192 cache entries
 
 # Constants
 NEGATION_TOKEN_COUNT = 2
-DEFAULT_OPERATORS = oneOf(": > < >= <= = !=")
+DEFAULT_OPERATORS = one_of(": > < >= <= = !=")
 COMPARISON_OPERATORS = frozenset([":", "=", "!=", ">", "<", ">=", "<="])
 
 
@@ -189,7 +189,7 @@ def create_attribute_parser(parser_class: ParserClass) -> ParserElement:
             matched_parser_class=parser_class,
         )
 
-    parser.setParseAction(parse_action)
+    parser.set_parse_action(parse_action)
     return parser
 
 
@@ -209,7 +209,7 @@ def create_condition_parser(
         Parser element that matches attribute operator value patterns
     """
     condition = attr_parser + operators + value_parser
-    condition.setParseAction(make_binary_operator_node)
+    condition.set_parse_action(make_binary_operator_node)
     return condition
 
 
@@ -239,13 +239,13 @@ def create_basic_parsers() -> dict[str, ParserElement]:
     """
     # Basic operators and keywords
     attrop = DEFAULT_OPERATORS
-    arithmetic_op = oneOf("+ - * /")
+    arithmetic_op = one_of("+ - * /")
     # Integer with word boundary - prevents partial matches like "1" from "1a" or "10" from "100b"
     # Word boundary ensures the number is a complete token, not part of an alphanumeric string
-    integer = Regex(r"\b\d+\b").setParseAction(lambda t: int(t[0]))
+    integer = Regex(r"\b\d+\b").set_parse_action(lambda t: int(t[0]))
     # Float must have a decimal point to distinguish from integer
     # Also uses word boundary to prevent matching prefixes
-    float_number = Regex(r"\b\d+\.\d*\b").setParseAction(lambda t: float(t[0]))
+    float_number = Regex(r"\b\d+\.\d*\b").set_parse_action(lambda t: float(t[0]))
     lparen = Literal("(").suppress()
     rparen = Literal(")").suppress()
 
@@ -259,7 +259,7 @@ def create_basic_parsers() -> dict[str, ParserElement]:
         """Mark quoted strings so they're always treated as string values."""
         return ("quoted", tokens[0])
 
-    quoted_string = (QuotedString('"', escChar="\\") | QuotedString("'", escChar="\\")).setParseAction(make_quoted_string)
+    quoted_string = (QuotedString('"', esc_char="\\") | QuotedString("'", esc_char="\\")).set_parse_action(make_quoted_string)
 
     # Regex pattern parser - matches /pattern/ with escaped forward slashes
     def make_regex_pattern_value(tokens: list[str]) -> tuple[str, str]:
@@ -268,16 +268,16 @@ def create_basic_parsers() -> dict[str, ParserElement]:
         Note: We preserve backslashes in the pattern because they're significant in regex.
         We only convert escaped forward slashes \/ back to /.
         """
-        # With unquoteResults=False, the string includes the delimiters, so strip them
+        # With unquote_results=False, the string includes the delimiters, so strip them
         # Then convert escaped forward slashes \/ back to /
         pattern = tokens[0][1:-1]  # Strip leading and trailing /
         pattern = pattern.replace("\\/", "/")
         return ("regex", pattern)
 
     # Use QuotedString with forward slash delimiter
-    # unquoteResults=False keeps the original string with backslashes intact
-    # convertWhitespaceEscapes=False prevents \n, \t, \b, etc. from being interpreted
-    regex_pattern = QuotedString("/", escChar="\\", unquoteResults=False, convertWhitespaceEscapes=False).setParseAction(
+    # unquote_results=False keeps the original string with backslashes intact
+    # convert_whitespace_escapes=False prevents \n, \t, \b, etc. from being interpreted
+    regex_pattern = QuotedString("/", esc_char="\\", unquote_results=False, convert_whitespace_escapes=False).set_parse_action(
         make_regex_pattern_value,
     )
 
@@ -296,7 +296,7 @@ def create_basic_parsers() -> dict[str, ParserElement]:
 
     # Word parser that accepts hyphens when between alphanumeric characters
     # Pattern: starts with alphanumeric/underscore, can contain hyphens in the middle, ends with alphanumeric/underscore
-    word = Regex(r"[a-zA-Z_][a-zA-Z0-9_-]*[a-zA-Z0-9_]|[a-zA-Z_]").setParseAction(make_word)
+    word = Regex(r"[a-zA-Z_][a-zA-Z0-9_-]*[a-zA-Z0-9_]|[a-zA-Z_]").set_parse_action(make_word)
 
     # Create a literal number parser for numeric constants
     # Note: float_number must come before integer to match decimal numbers
@@ -353,7 +353,7 @@ def create_mana_parsers() -> dict[str, ParserElement]:
         """
         return ManaValueNode(tokens[0].upper())
 
-    mana_value = mixed_mana_pattern.setParseAction(make_mana_value_node)
+    mana_value = mixed_mana_pattern.set_parse_action(make_mana_value_node)
 
     return {
         "mana_value": mana_value,
@@ -425,7 +425,7 @@ def create_all_condition_parsers(basic_parsers: dict, mana_parsers: dict, color_
     # Only match if there's at least one arithmetic operator
     arithmetic_expr = Forward()
     arithmetic_expr <<= arithmetic_term + arithmetic_op + arithmetic_term + ZeroOrMore(arithmetic_op + arithmetic_term)
-    arithmetic_expr.setParseAction(make_chained_arithmetic)
+    arithmetic_expr.set_parse_action(make_chained_arithmetic)
 
     # Unified numeric comparison rule: handles all combinations of arithmetic expressions, numeric attributes, and literals
     # This consolidates the previous arithmetic_comparison and numeric_condition rules
@@ -434,7 +434,7 @@ def create_all_condition_parsers(basic_parsers: dict, mana_parsers: dict, color_
         + DEFAULT_OPERATORS
         + (arithmetic_expr | numeric_attr_word | literal_number)
     )
-    unified_numeric_comparison.setParseAction(make_binary_operator_node)
+    unified_numeric_comparison.set_parse_action(make_binary_operator_node)
 
     # Create condition parsers using factory function where possible
     # For complex value types, we still need custom definitions
@@ -474,7 +474,7 @@ def create_all_condition_parsers(basic_parsers: dict, mana_parsers: dict, color_
         | (date_attr_word + DEFAULT_OPERATORS + date_attr_word)
         | (year_attr_word + DEFAULT_OPERATORS + year_attr_word)
     )
-    attr_attr_condition.setParseAction(make_binary_operator_node)
+    attr_attr_condition.set_parse_action(make_binary_operator_node)
 
     # Combine all conditions with clear precedence - no more special cases needed
     condition = (
@@ -493,7 +493,7 @@ def create_all_condition_parsers(basic_parsers: dict, mana_parsers: dict, color_
     # Only text attributes should have hyphenated string values (not numeric, mana, rarity, or legality)
     # Allow values starting with digits, letters, or underscores
     hyphenated_condition = text_attr_word + Literal(":") + Regex(r"[a-zA-Z0-9_][a-zA-Z0-9_-]*")
-    hyphenated_condition.setParseAction(make_binary_operator_node)
+    hyphenated_condition.set_parse_action(make_binary_operator_node)
 
     return {
         "expr": expr,
@@ -603,26 +603,45 @@ def get_parse_expr() -> ParserElement:  # noqa: C901, PLR0915
     hyphenated_condition = condition_parsers["hyphenated_condition"]
     attr_attr_condition = condition_parsers["attr_attr_condition"]
 
+    # Exact name search using ! prefix (Scryfall syntax: !"Lightning Bolt" or !bolt)
+    # Must create a copy of word before single_word changes its parse action
+    _word_for_exact = word.copy()
+    _quoted_string_for_exact = basic_parsers["quoted_string"]
+    exact_name_prefix = Literal("!").suppress()
+
+    def make_exact_name(tokens: list[object]) -> ExactNameNode:
+        """Create an ExactNameNode for exact card name matching.
+
+        The token is either a ("quoted", value) tuple produced by quoted_string,
+        or a plain string produced by the word parser.
+        """
+        token = tokens[0]
+        value = token[1] if isinstance(token, tuple) and token[0] == "quoted" else str(token)
+        return ExactNameNode(value)
+
+    exact_name = exact_name_prefix + (_quoted_string_for_exact | _word_for_exact)
+    exact_name.set_parse_action(make_exact_name)
+
     # Single word (implicit name search)
     def make_single_word(tokens: list[str]) -> BinaryOperatorNode:
         """For single words, always search in the name field."""
         return BinaryOperatorNode(CardAttributeNode("name", ParserClass.TEXT), ":", StringValueNode(tokens[0]))
 
-    single_word = word.setParseAction(make_single_word)
+    single_word = word.set_parse_action(make_single_word)
 
     # Standalone numeric literal
     def make_numeric_literal(tokens: list[object]) -> NumericValueNode:
         """Create a NumericValueNode for standalone numeric literals."""
         return NumericValueNode(tokens[0])
 
-    standalone_numeric = literal_number.setParseAction(make_numeric_literal)
+    standalone_numeric = literal_number.set_parse_action(make_numeric_literal)
 
     # Grouped expression
     def make_group(tokens: list[object]) -> object:
         """Return the grouped expression inside parentheses."""
         return tokens[0]
 
-    group = Group(lparen + expr + rparen).setParseAction(make_group)
+    group = Group(lparen + expr + rparen).set_parse_action(make_group)
 
     # Factor: can be negated (but not arithmetic expressions)
     def handle_negation(tokens: list[object]) -> object:
@@ -646,9 +665,9 @@ def get_parse_expr() -> ParserElement:  # noqa: C901, PLR0915
 
     # For negation, we exclude arithmetic expressions from being negated
     # Test: revert to original order to confirm this breaks it
-    negatable_primary = attr_attr_condition | condition | group | single_word
+    negatable_primary = attr_attr_condition | condition | group | exact_name | single_word
     negatable_factor = Optional(operator_not) + negatable_primary
-    negatable_factor.setParseAction(handle_negation)
+    negatable_factor.set_parse_action(handle_negation)
 
     # Factor includes both negatable expressions and arithmetic expressions
     # SPECIAL: hyphenated_condition first to handle "otag:dual-land", then condition (includes comparisons) before standalone arithmetic
@@ -704,7 +723,7 @@ def get_parse_expr() -> ParserElement:  # noqa: C901, PLR0915
 
     # The main expression: factors separated by AND/OR operators
     expr <<= factor + ZeroOrMore((operator_and | operator_or) + factor)
-    expr.setParseAction(handle_operators)
+    expr.set_parse_action(handle_operators)
     return expr
 
 
@@ -756,7 +775,7 @@ def parse_search_query(query: str | None) -> Query:
 
     # Parse the query
     try:
-        parsed = expr.parseString(query, parseAll=True)
+        parsed = expr.parse_string(query, parse_all=True)
         if parsed:
             # Flatten nested operations to create canonical n-ary forms
             return flatten_nested_operations(Query(parsed[0]))
@@ -780,33 +799,38 @@ def _get_implicit_and_tokenizer() -> ParserElement:
     """
     # Quoted strings (raw including quotes)
     quoted_raw = (
-        QuotedString('"', escChar="\\", unquoteResults=False) | QuotedString("'", escChar="\\", unquoteResults=False)
-    ).setParseAction(lambda t: t[0])
+        QuotedString('"', esc_char="\\", unquote_results=False) | QuotedString("'", esc_char="\\", unquote_results=False)
+    ).set_parse_action(lambda t: t[0])
 
     # Regex /.../ (raw including slashes)
-    regex_raw = QuotedString("/", escChar="\\", unquoteResults=False, convertWhitespaceEscapes=False).setParseAction(lambda t: t[0])
+    regex_raw = QuotedString("/", esc_char="\\", unquote_results=False, convert_whitespace_escapes=False).set_parse_action(
+        lambda t: t[0]
+    )
 
     # Parens (not suppressed so we get them in the list)
-    lparen_tok = Literal("(").setParseAction(lambda t: t[0])
-    rparen_tok = Literal(")").setParseAction(lambda t: t[0])
+    lparen_tok = Literal("(").set_parse_action(lambda t: t[0])
+    rparen_tok = Literal(")").set_parse_action(lambda t: t[0])
 
     # Keywords (must be before word so AND/OR are not consumed as words)
-    and_tok = CaselessKeyword("AND").setParseAction(lambda t: t[0].upper())
-    or_tok = CaselessKeyword("OR").setParseAction(lambda t: t[0].upper())
+    and_tok = CaselessKeyword("AND").set_parse_action(lambda t: t[0].upper())
+    or_tok = CaselessKeyword("OR").set_parse_action(lambda t: t[0].upper())
 
     # Comparison: longest first so >=, <=, != before single chars
-    comparison_tok = oneOf(">= <= != : = > <").setParseAction(lambda t: t[0])
-    arithmetic_tok = oneOf("+ - * /").setParseAction(lambda t: t[0])
+    comparison_tok = one_of(">= <= != : = > <").set_parse_action(lambda t: t[0])
+    arithmetic_tok = one_of("+ - * /").set_parse_action(lambda t: t[0])
+
+    # Exact name prefix ! - must come after comparison_tok so that != is consumed first
+    exact_name_tok = Literal("!").set_parse_action(lambda t: t[0])
 
     # Float (before string_value_word so "3.5" is one token)
-    float_tok = Regex(r"\b\d+\.\d*\b").setParseAction(lambda t: t[0])
+    float_tok = Regex(r"\b\d+\.\d*\b").set_parse_action(lambda t: t[0])
 
     # Value/word: alphanumeric, underscores, hyphens, dots (matches bar, 40k-model, token., etc.)
     # Must come before mana_tok so "bar" and "bolt" are one token, not "b" + mana.
     # Trailing hyphens are forbidden so "power-(" is not absorbed as one token "power-";
     # the regex requires the last character to be alphanumeric/underscore/dot.
     # Dots are allowed so queries like o:token. parse correctly (period as sentence-end punctuation).
-    string_value_tok = Regex(r"[a-zA-Z0-9_]([a-zA-Z0-9_.-]*[a-zA-Z0-9_.])?").setParseAction(lambda t: t[0])
+    string_value_tok = Regex(r"[a-zA-Z0-9_]([a-zA-Z0-9_.-]*[a-zA-Z0-9_.])?").set_parse_action(lambda t: t[0])
 
     # Mana pattern (e.g. {1}{G}, {w}{u}, {2/W}G) as one token.
     # mana_tok only fires when the sequence STARTS with "{" (string_value_tok above would
@@ -816,7 +840,7 @@ def _get_implicit_and_tokenizer() -> ParserElement:
     # "b" (simple mana) + "ar".
     curly_mana_symbol = Regex(r"\{[^}]+\}")
     simple_mana_symbol = Regex(r"[0-9WUBRGCXYZwubrgcxyz]")
-    mana_tok = Combine(OneOrMore(curly_mana_symbol | simple_mana_symbol)).setParseAction(lambda t: t[0])
+    mana_tok = Combine(OneOrMore(curly_mana_symbol | simple_mana_symbol)).set_parse_action(lambda t: t[0])
 
     # One token: try in order (longest / most specific first)
     one_token = (
@@ -828,13 +852,14 @@ def _get_implicit_and_tokenizer() -> ParserElement:
         | or_tok
         | comparison_tok
         | arithmetic_tok
+        | exact_name_tok
         | float_tok
         | string_value_tok
         | mana_tok
     )
 
     # Optional so empty or whitespace-only input yields []
-    return Optional(OneOrMore(one_token)).setParseAction(lambda t: t.asList() if t else [])
+    return Optional(OneOrMore(one_token)).set_parse_action(lambda t: t.asList() if t else [])
 
 
 def _tokenize_for_implicit_and(query: str) -> list[str]:
@@ -844,7 +869,7 @@ def _tokenize_for_implicit_and(query: str) -> list[str]:
     tokenizer = _get_implicit_and_tokenizer()
     try:
         # Convert ParseResults to a real list for consistency with the return type
-        result = tokenizer.parseString(query, parseAll=True).asList()
+        result = tokenizer.parse_string(query, parse_all=True).asList()
     except ParseException as e:
         # Pyparsing reports the position where parsing stopped; if that position is a
         # quote character, it's an unclosed-quote error.
@@ -884,7 +909,7 @@ _COMPARISON_OPERATORS = frozenset({">", "<", ">=", "<=", "=", "!=", ":"})
 
 def _is_implicit_and_operand(t: str) -> bool:
     """Return True if *t* counts as an operand for implicit-AND insertion."""
-    if t in ("(", ")", "AND", "OR"):
+    if t in ("(", ")", "AND", "OR", "!"):
         return False
     return not is_operator(t)
 
@@ -981,7 +1006,7 @@ def preprocess_implicit_and(query: str) -> str:
 
         need_and = (
             (_is_implicit_and_operand(tok) or tok == ")")
-            and (_is_implicit_and_operand(next_tok) or next_tok in {"(", "-"})
+            and (_is_implicit_and_operand(next_tok) or next_tok in {"(", "-", "!"})
             and not skip_because_value
             and not is_arithmetic_minus
         )

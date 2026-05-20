@@ -3,7 +3,7 @@
 import pytest
 
 from api import parsing
-from api.parsing.card_query_nodes import get_legality_comparison_object
+from api.parsing.card_query_nodes import _color_dict_to_mask, _proper_subset_masks, _subset_masks, get_legality_comparison_object
 from api.parsing.parsing_f import generate_sql_query
 
 
@@ -145,39 +145,39 @@ def test_full_sql_translation_jsonb_colors(input_query: str, expected_sql: str, 
     argvalues=[
         (
             "color_identity:g",
-            r"(card.card_color_identity <@ %(p_dict_eydHJzogVHJ1ZX0)s)",
-            {"p_dict_eydHJzogVHJ1ZX0": {"G": True}},
-        ),  # : maps to <= for color identity
+            r"(magic.color_identity_mask(card.card_color_identity) = ANY(%(p_IntArray_WzAsIDFd)s::smallint[]))",
+            {"p_IntArray_WzAsIDFd": [0, 1]},
+        ),  # : uses bitmask subset lookup; G=1, subsets of 1 are [0,1]
         (
             "id:rg",
-            r"(card.card_color_identity <@ %(p_dict_eydSJzogVHJ1ZSwgJ0cnOiBUcnVlfQ)s)",
-            {"p_dict_eydSJzogVHJ1ZSwgJ0cnOiBUcnVlfQ": {"R": True, "G": True}},
-        ),  # id is an alias for color_identity
+            r"(magic.color_identity_mask(card.card_color_identity) = ANY(%(p_IntArray_WzAsIDEsIDIsIDNd)s::smallint[]))",
+            {"p_IntArray_WzAsIDEsIDIsIDNd": [0, 1, 2, 3]},
+        ),  # RG mask=3, subsets=[0,1,2,3]
         (
             "identity=rg",
             r"(card.card_color_identity = %(p_dict_eydSJzogVHJ1ZSwgJ0cnOiBUcnVlfQ)s)",
             {"p_dict_eydSJzogVHJ1ZSwgJ0cnOiBUcnVlfQ": {"R": True, "G": True}},
-        ),  # = still means equality
+        ),  # = still means JSONB equality
         (
             "coloridentity>=rg",
             r"(card.card_color_identity @> %(p_dict_eydSJzogVHJ1ZSwgJ0cnOiBUcnVlfQ)s)",
             {"p_dict_eydSJzogVHJ1ZSwgJ0cnOiBUcnVlfQ": {"R": True, "G": True}},
-        ),  # >= maps to >= (no inversion for >=)
+        ),  # >= uses @> against JSONB column (GIN index)
         (
             "color_identity<=rg",
-            r"(card.card_color_identity <@ %(p_dict_eydSJzogVHJ1ZSwgJ0cnOiBUcnVlfQ)s)",
-            {"p_dict_eydSJzogVHJ1ZSwgJ0cnOiBUcnVlfQ": {"R": True, "G": True}},
-        ),  # <= maps to <= (no inversion for <=)
+            r"(magic.color_identity_mask(card.card_color_identity) = ANY(%(p_IntArray_WzAsIDEsIDIsIDNd)s::smallint[]))",
+            {"p_IntArray_WzAsIDEsIDIsIDNd": [0, 1, 2, 3]},
+        ),  # <= uses bitmask subset lookup same as :
         (
             "identity>g",
             r"(card.card_color_identity @> %(p_dict_eydHJzogVHJ1ZX0)s AND card.card_color_identity <> %(p_dict_eydHJzogVHJ1ZX0)s)",
             {"p_dict_eydHJzogVHJ1ZX0": {"G": True}},
-        ),  # > maps to > (no inversion for >)
+        ),  # > uses @> against JSONB column (GIN index)
         (
             "id<rg",
-            r"(card.card_color_identity <@ %(p_dict_eydSJzogVHJ1ZSwgJ0cnOiBUcnVlfQ)s AND card.card_color_identity <> %(p_dict_eydSJzogVHJ1ZSwgJ0cnOiBUcnVlfQ)s)",
-            {"p_dict_eydSJzogVHJ1ZSwgJ0cnOiBUcnVlfQ": {"R": True, "G": True}},
-        ),  # < maps to < (no inversion for <)
+            r"(magic.color_identity_mask(card.card_color_identity) = ANY(%(p_IntArray_WzAsIDEsIDJd)s::smallint[]))",
+            {"p_IntArray_WzAsIDEsIDJd": [0, 1, 2]},
+        ),  # < uses proper subsets; RG mask=3, proper subsets=[0,1,2]
         (
             "id=c",
             r"(card.card_color_identity = %(p_dict_e30)s)",
@@ -185,14 +185,14 @@ def test_full_sql_translation_jsonb_colors(input_query: str, expected_sql: str, 
         ),  # colorless identity = {} (empty), not {"C": True}
         (
             "id:c",
-            r"(card.card_color_identity <@ %(p_dict_e30)s)",
-            {"p_dict_e30": {}},
-        ),  # colorless: cards whose identity is contained by {} (i.e. only colorless)
+            r"(magic.color_identity_mask(card.card_color_identity) = ANY(%(p_IntArray_WzBd)s::smallint[]))",
+            {"p_IntArray_WzBd": [0]},
+        ),  # colorless mask=0, subsets=[0] — only colorless cards
         (
             "id:colorless",
-            r"(card.card_color_identity <@ %(p_dict_e30)s)",
-            {"p_dict_e30": {}},
-        ),  # 'colorless' name resolves to same empty dict
+            r"(magic.color_identity_mask(card.card_color_identity) = ANY(%(p_IntArray_WzBd)s::smallint[]))",
+            {"p_IntArray_WzBd": [0]},
+        ),  # 'colorless' name resolves to same mask=0
         (
             "id=colorless",
             r"(card.card_color_identity = %(p_dict_e30)s)",
@@ -1132,3 +1132,54 @@ def test_empty_query_generates_true(query: str | None) -> None:
     sql, params = generate_sql_query(parsing.parse_search_query(query))
     assert sql == "TRUE"
     assert params == {}
+
+
+testcases_color_dict_to_mask = {
+    "colorless": {"color_dict": {}, "expected": 0},
+    "white_only": {"color_dict": {"W": True}, "expected": 16},
+    "red_green": {"color_dict": {"R": True, "G": True}, "expected": 3},
+    "all_five": {"color_dict": {"W": True, "U": True, "B": True, "R": True, "G": True}, "expected": 31},
+}
+
+
+@pytest.mark.parametrize(
+    argnames=sorted(next(iter(testcases_color_dict_to_mask.values()))),
+    argvalues=[[v for k, v in sorted(testcases_color_dict_to_mask[t].items())] for t in sorted(testcases_color_dict_to_mask)],
+    ids=sorted(testcases_color_dict_to_mask),
+)
+def test_color_dict_to_mask(color_dict: dict, expected: int) -> None:
+    assert _color_dict_to_mask(color_dict) == expected
+
+
+testcases_subset_masks = {
+    "colorless": {"query_mask": 0, "expected": [0]},
+    "white_only": {"query_mask": 16, "expected": [0, 16]},
+    "red_green": {"query_mask": 3, "expected": [0, 1, 2, 3]},
+    "wub": {"query_mask": 28, "expected": [0, 4, 8, 12, 16, 20, 24, 28]},
+    "all_five": {"query_mask": 31, "expected": list(range(32))},
+}
+
+
+@pytest.mark.parametrize(
+    argnames=sorted(next(iter(testcases_subset_masks.values()))),
+    argvalues=[[v for k, v in sorted(testcases_subset_masks[t].items())] for t in sorted(testcases_subset_masks)],
+    ids=sorted(testcases_subset_masks),
+)
+def test_subset_masks(query_mask: int, expected: list[int]) -> None:
+    assert _subset_masks(query_mask) == expected
+
+
+testcases_proper_subset_masks = {
+    "colorless": {"query_mask": 0, "expected": []},
+    "white_only": {"query_mask": 16, "expected": [0]},
+    "red_green": {"query_mask": 3, "expected": [0, 1, 2]},
+}
+
+
+@pytest.mark.parametrize(
+    argnames=sorted(next(iter(testcases_proper_subset_masks.values()))),
+    argvalues=[[v for k, v in sorted(testcases_proper_subset_masks[t].items())] for t in sorted(testcases_proper_subset_masks)],
+    ids=sorted(testcases_proper_subset_masks),
+)
+def test_proper_subset_masks(query_mask: int, expected: list[int]) -> None:
+    assert _proper_subset_masks(query_mask) == expected

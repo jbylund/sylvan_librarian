@@ -146,8 +146,14 @@ def get_migrations() -> list[dict[str, str]]:
     return migrations
 
 
+class IntArray(list):
+    """A list that psycopg sends as a native PostgreSQL integer array, not JSONB."""
+
+
 def maybe_json(v: object) -> object:
-    """Wrap a value in a Jsonb object if it is a list or dict."""
+    """Wrap plain list/dict values in Jsonb, but pass IntArray through unchanged."""
+    if isinstance(v, IntArray):
+        return v
     if isinstance(v, list | dict):
         return psycopg.types.json.Jsonb(v)
     return v

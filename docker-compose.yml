@@ -15,6 +15,7 @@ services:
   postgres:
     cap_add:
       - ALL
+    init: true
     command:
       - /usr/local/bin/docker-entrypoint.sh
       - -c
@@ -27,8 +28,10 @@ services:
       POSTGRES_PASSWORD: ${XPGPASSWORD}
       POSTGRES_USER: ${XPGUSER}
     healthcheck:
-      test: ["CMD-SHELL", "psql -U ${XPGUSER} -d ${XPGDATABASE} -c 'SELECT 1'"]
-      interval: 100ms
+      test:
+        - CMD-SHELL
+        - pg_isready --host localhost -U $$POSTGRES_USER -d $$POSTGRES_DB
+      interval: 1s
       timeout: 1s
       retries: 5
       start_period: 30s
@@ -41,7 +44,6 @@ services:
       - *pg-conf
       - *pg-init
       - pgdata:/data/pg
-      - ./data/postgres/${APP_ENV:-dev}/logs/:/var/log/postgresql
       - ${HOME}/.psqlrc:/var/lib/postgresql/.psqlrc:ro
       - ${HOME}/.psql_history:/var/lib/postgresql/.psql_history
 
@@ -53,6 +55,7 @@ services:
       args:
         GIT_SHA: ${GIT_SHA:-unknown}
         GIT_BRANCH: ${GIT_BRANCH:-unknown}
+    image: arcane_tutor/apiservice:${IMAGE_TAG:-latest}
     cap_add:
       - ALL
     command:
@@ -68,7 +71,7 @@ services:
       - .env
     environment:
       ENABLE_CACHE: ${ENABLE_CACHE:-false}
-      ENVIRONMENT: ${APP_ENV:-dev}
+      ENVIRONMENT: ${ENVIRONMENT:-dev}
       HONEYBADGER_API_KEY: ${HONEYBADGER_API_KEY:-}
       HOSTNAME: ${HOSTNAME}
       PGDATABASE: ${XPGDATABASE}
@@ -77,7 +80,13 @@ services:
       PGUSER: ${XPGUSER}
       PYTHONUNBUFFERED: true
     healthcheck:
-      test: ["CMD", "curl", "--fail", "--user-agent", "healthcheck", "localhost:8080/get_pid"]
+      test:
+        - CMD
+        - curl
+        - --fail
+        - --user-agent
+        - healthcheck
+        - localhost:8080/get_pid
       interval: 5s
       timeout: 1s
       retries: 60
@@ -96,6 +105,7 @@ services:
     build:
       context: ./
       dockerfile: ./client/Dockerfile
+    image: arcane_tutor/client:${IMAGE_TAG:-latest}
     command:
       - dumb-init
       - --

@@ -659,6 +659,18 @@ body {
   font-size: 1.27rem;
 }
 
+.query-explanation {
+  color: var(--color-text-secondary);
+  text-align: center;
+  margin: 0.5rem auto;
+  font-size: 1rem;
+  font-style: italic;
+  padding: 0.5rem 1rem;
+  background-color: rgba(255, 255, 255, 0.05);
+  border-radius: 4px;
+  max-width: 90%;
+}
+
 #statusMessage {
   margin-bottom: 0;
 }

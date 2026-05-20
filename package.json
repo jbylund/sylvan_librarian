@@ -25,14 +25,19 @@
   ],
   "author": "",
   "license": "ISC",
+  "engines": {
+    "node": ">=26.1.0"
+  },
   "bugs": {
     "url": "https://github.com/jbylund/arcane_tutor/issues"
   },
   "homepage": "https://github.com/jbylund/arcane_tutor#readme",
   "devDependencies": {
-    "cssnano-cli": "^1.0.5",
+    "cssnano": "^8.0.1",
     "jest": "^30.3.0",
     "jest-environment-jsdom": "^30.3.0",
+    "postcss": "^8.5.14",
+    "postcss-cli": "^11.0.1",
     "prettier": "^3.6.2",
     "terser": "^5.36.0"
   }

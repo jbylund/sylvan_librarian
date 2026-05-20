@@ -30,7 +30,15 @@ S3_BUCKET=biblioplex
 html_files := $(shell find . -type f -name "*.html")
 js_files := $(shell find . -type f -name "*.js" | grep -v node_modules)
 
+requirements_sources := $(shell find requirements -type f -name "*.txt")
+PYTHON_DIRS := $(shell git ls-files "*.py" | cut -f 1 -d/ | sort -u)
+python_sources := $(shell find api client -type f -name "*.py")
+image_sources := $(python_sources) api/Dockerfile client/Dockerfile $(requirements_sources) $(BASE_COMPOSE)
 
+BUILD_STAMP_DIR := $(GIT_ROOT)/.tmp/build-stamps
+BUILD_HASH := $(shell { git rev-parse HEAD 2>/dev/null; git diff origin/main 2>/dev/null; } | md5sum | cut -d' ' -f1)
+BUILD_STAMP := $(BUILD_STAMP_DIR)/$(BUILD_HASH).stamp
+IMAGE_TAG := $(BUILD_HASH)
 
 .PHONY: \
 	beleren_font \
@@ -48,6 +56,7 @@ js_files := $(shell find . -type f -name "*.js" | grep -v node_modules)
 	mplantin_font \
 	pull_images \
 	reset \
+	rolling-deploy \
 	status \
 	test \
 	test-integration \
@@ -63,6 +72,9 @@ hlep: help
 
 up_deps: images check_env .env api/static/app.min.js
 
+deps-%: up_deps
+	mkdir -p $(GIT_ROOT)/data/api/$* && chmod 755 $(GIT_ROOT)/data/api/$*
+
 env.json: # @doc create env.json from template only if it does not exist (never overwrite)
 	@test -f env.json || echo '{}' > env.json
 
@@ -70,10 +82,10 @@ env.json: # @doc create env.json from template only if it does not exist (never 
 	cat env.json | jq -r 'to_entries[] | "\(.key)=\(.value)"' | sort > $@
 
 # Usage: make dev-up, make prod-up, make dev-up-detach, make prod-down, etc.
-%-up: up_deps
+%-up: deps-%
 	cd $(GIT_ROOT) && docker compose --project-name arcane_$* --env-file .env --env-file envs/$* --file $(BASE_COMPOSE) up --remove-orphans --abort-on-container-exit
 
-%-up-detach: up_deps
+%-up-detach: deps-%
 	cd $(GIT_ROOT) && docker compose --project-name arcane_$* --env-file .env --env-file envs/$* --file $(BASE_COMPOSE) up --remove-orphans --detach
 
 %-down:
@@ -85,12 +97,24 @@ status: # @doc show container status for all environments
 	  cd $(GIT_ROOT) && docker compose --project-name arcane_$(env) --env-file .env --env-file envs/$(env) --file $(BASE_COMPOSE) ps --all ; \
 	)
 
+rolling-deploy: deps-blue deps-green # @doc rolling blue/green deploy — update blue (wait for healthy), then green
+	@echo "=== Deploying blue ==="
+	cd $(GIT_ROOT) && docker compose --project-name arcane_blue --env-file .env --env-file envs/blue --file $(BASE_COMPOSE) up --remove-orphans --detach --wait
+	@echo "=== Blue healthy. Deploying green ==="
+	cd $(GIT_ROOT) && docker compose --project-name arcane_green --env-file .env --env-file envs/green --file $(BASE_COMPOSE) up --remove-orphans --detach --wait
+	@echo "=== Rolling deploy complete ==="
+
 down: $(addsuffix -down,$(ENVS))
 
 images: build_images pull_images # @doc refresh images
 
-build_images: # @doc refresh locally built images
-	cd $(GIT_ROOT) && docker compose --progress=plain --env-file .env --env-file envs/dev --file $(BASE_COMPOSE) build --no-cache
+build_images: $(BUILD_STAMP) # @doc refresh locally built images
+
+$(BUILD_STAMP): $(image_sources)
+	mkdir -p $(BUILD_STAMP_DIR)
+	find $(BUILD_STAMP_DIR) -name "*.stamp" -mtime +3 -delete 2>/dev/null || true
+	cd $(GIT_ROOT) && docker compose --progress=plain --env-file .env --env-file envs/dev --file $(BASE_COMPOSE) build
+	touch $@
 
 pull_images: $(BASE_COMPOSE) # @doc pull images from remote repos
 	true || docker compose --env-file .env --env-file envs/dev --file $(BASE_COMPOSE) pull
@@ -118,11 +142,11 @@ prettier_lint: /tmp/prettier.stamp
 	touch /tmp/prettier.stamp
 
 ruff_fix: ensure_ruff
-	git ls-files '*.py' | xargs python -m ruff check --fix --unsafe-fixes >/dev/null 2>/dev/null || true
-	git ls-files '*.py' | xargs python -m ruff format
+	find $(PYTHON_DIRS) -name "*.py" | xargs python -m ruff check --fix --unsafe-fixes >/dev/null 2>/dev/null || true
+	find $(PYTHON_DIRS) -name "*.py" | xargs python -m ruff format
 
 ruff_lint: ruff_fix
-	git ls-files '*.py' | xargs python -m ruff check --fix --unsafe-fixes
+	find $(PYTHON_DIRS) -name "*.py" | xargs python -m ruff check --fix --unsafe-fixes
 
 check_env: ensure_pydocker
 	true
@@ -136,9 +160,9 @@ dockerclean:
 dbconn-%:
 	test -f ~/.psqlrc || touch ~/.psqlrc
 	test -f ~/.psql_history || touch ~/.psql_history
-	docker compose --project-name arcane_$* --env-file .env --env-file envs/$* --file $(BASE_COMPOSE) \
+	cd $(GIT_ROOT) && docker compose --project-name arcane_$* --env-file .env --env-file envs/$* --file $(BASE_COMPOSE) \
 	  exec -e PSQLRC=/var/lib/postgresql/.psqlrc -e PSQL_HISTORY=/var/lib/postgresql/.psql_history \
-	  postgres psql -U $(XPGUSER) -d $(XPGDATABASE)
+	  postgres psql -U $(XPGUSER) -d $(XPGDATABASE) --host=localhost
 
 reset-%:
 	docker compose --project-name arcane_$* --env-file .env --env-file envs/$* --file $(BASE_COMPOSE) down --volumes --remove-orphans
@@ -197,7 +221,7 @@ mplantin_font: font-dependencies # @doc subset and optimize the MPlantin font fo
 
 compare-minification: # @doc compare file sizes: uncompressed, compressed, minified, and minified+compressed
 	@echo "Installing minifier dependencies..."
-	@npm install --no-save cssnano-cli terser > /dev/null 2>&1 || true
+	@npm install --no-save cssnano postcss postcss-cli terser > /dev/null 2>&1 || true
 	@python scripts/compare_minification.py
 
 api/static/app.min.js: api/static/app.js # @doc minify app.js (used in both dev and prod)

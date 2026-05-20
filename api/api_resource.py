@@ -572,27 +572,36 @@ class APIResource:
             key_frequency.update(k for k, v in card.items() if v not in [None, [], {}])
         return key_frequency.most_common()
 
-    @cached(cache=TTLCache(maxsize=1, ttl=60))
-    def _setup_complete(self) -> True:
+    _SETUP_COMPLETE_TTL = 60 * 60  # 1 hour; invalidated immediately on successful import
+    _setup_complete_cache: tuple[bool, float] | None = None
+
+    def _setup_complete(self) -> bool:
         """Return True if the setup is complete."""
+        now = time.monotonic()
+        if self._setup_complete_cache is not None:
+            result, expires_at = self._setup_complete_cache
+            if now < expires_at:
+                return result
         try:
             with self._conn_pool.connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("SELECT COUNT(1) AS num_cards FROM magic.cards")
                     cards_found = cursor.fetchall()[0]["num_cards"]
                     logger.info("Found %d cards in pid %d", cards_found, os.getpid())
-                    complete = cards_found > MIN_IMPORT_CARDS
-                    if complete:
-
-                        def new_setup_complete() -> True:
-                            """Return True if the setup is complete."""
-                            return True
-
-                        self._setup_complete = new_setup_complete
-                    return complete
+                    result = cards_found > MIN_IMPORT_CARDS
         except Exception as oops:
             logger.error("Error checking if setup is complete: %s", oops, exc_info=True)
-            return False
+            result = False
+        self._setup_complete_cache = (result, now + self._SETUP_COMPLETE_TTL)
+        return result
+
+    def _require_setup_complete(self) -> None:
+        """Require that setup is complete or raise a ServiceUnavailable error."""
+        if not self._setup_complete():
+            raise falcon.HTTPServiceUnavailable(
+                title="Service Unavailable",
+                description="Setup is not complete, please try again later.",
+            ) from None
 
     def _import_recent(self) -> bool:
         """Return True if a bulk import completed in the last 5 minutes (or setup is complete when no shared timestamp)."""
@@ -637,6 +646,7 @@ class APIResource:
             self.backfill_prefer_scores()
             self.backfill_cubecobra_scores()
             self._last_import_time.value = time.time()
+            self._setup_complete_cache = None
             return result["sample_cards"]
         logger.error("Failed to import data: %s", result["message"])
         return None
@@ -712,6 +722,35 @@ class APIResource:
             prefer=prefer,
         )
 
+    def _validate_limit(self, limit: int | None) -> int | None:
+        """Validate the limit and return it if valid."""
+        if limit is None:
+            pass
+        elif isinstance(limit, int):
+            if limit < 0:
+                raise falcon.HTTPBadRequest(
+                    title="Invalid Limit",
+                    description="Limit must be a positive integer.",
+                )
+        else:
+            raise falcon.HTTPBadRequest(
+                title="Invalid Limit",
+                description="Limit must be an integer.",
+            )
+        return limit
+
+    def _get_where_clause(self, query: str | None) -> tuple[str, dict[str, Any]]:
+        try:
+            where_clause, params = get_where_clause(query)
+        except ValueError as err:
+            # Handle parsing errors from parse_scryfall_query
+            logger.info("ValueError caught for query '%s', raising BadRequest", query)
+            raise falcon.HTTPBadRequest(
+                title="Invalid Search Query",
+                description=f'Failed to parse query: "{query}"',
+            ) from err
+        return where_clause, params
+
     @cached(
         cache=TTLCache(maxsize=1000, ttl=60),
         key=lambda args, kwds: (args, tuple(sorted(kwds.items()))),
@@ -726,31 +765,21 @@ class APIResource:
         query: str | None = None,
         unique: UniqueOn = UniqueOn.CARD,
     ) -> dict[str, Any]:
-        if not self._setup_complete():
-            raise falcon.HTTPServiceUnavailable(
-                title="Service Unavailable",
-                description="Setup is not complete, please try again later.",
-            ) from None
-
-        if limit is None:
-            pass
-        elif isinstance(limit, int):
-            if limit < 0:
-                raise falcon.HTTPBadRequest(
-                    title="Invalid Limit",
-                    description="Limit must be a positive integer.",
-                )
-        else:
-            raise falcon.HTTPBadRequest(
-                title="Invalid Limit",
-                description="Limit must be an integer.",
-            )
+        self._require_setup_complete()
+        limit = self._validate_limit(limit)
 
         timer = Timer()
 
+        # Generate explanation for the query
+        query_explanation = ""
+        parsed_query = None
         try:
             with timer("get_where_clause"):
-                where_clause, params = get_where_clause(query)
+                parsed_query = parse_scryfall_query(query)
+                where_clause, params = generate_sql_query(parsed_query)
+                # Generate explanation after successful parsing
+                if query:  # Only generate explanation if there's a query
+                    query_explanation = parsed_query.to_human_explanation()
         except ValueError as err:
             # Handle parsing errors from parse_scryfall_query
             logger.info("ValueError caught for query '%s', raising BadRequest", query)
@@ -902,6 +931,7 @@ class APIResource:
             "compiled": query_sql,
             "params": params,
             "query": query,
+            "query_explanation": query_explanation,
             "outer_timings": timer.get_timings(),
             "inner_timings": result_bag.pop("timings"),
             "total_cards": total_cards,
@@ -1270,7 +1300,7 @@ class APIResource:
 
         backfill_sql = self.read_sql("backfill_cubecobra_scores")
         with self._conn_pool.connection() as conn, conn.cursor() as cursor:
-            self._set_statement_timeout(cursor, 60_000)
+            self._set_statement_timeout(cursor, 600_000)
             cursor.execute(backfill_sql, weights)
             updated_count = cursor.rowcount
             conn.commit()
@@ -1306,6 +1336,7 @@ class APIResource:
         logger.info("CubeCobra ingest complete: %d card rows updated", cards_updated)
 
         backfill_result = self.backfill_cubecobra_scores()
+        self._clear_caches()
 
         return {
             "status": "success",
