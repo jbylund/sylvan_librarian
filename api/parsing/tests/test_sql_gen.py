@@ -28,12 +28,12 @@ from api.parsing.parsing_f import generate_sql_query
         # Test field-specific : operator behavior
         (
             "name:lightning",
-            r"(card.card_name ILIKE %(p_str_JWxpZ2h0bmluZyU)s)",
+            r"(lower(card.card_name) LIKE %(p_str_JWxpZ2h0bmluZyU)s)",
             {"p_str_JWxpZ2h0bmluZyU": r"%lightning%"},
         ),
         (
             "name:'lightning bolt'",
-            r"(card.card_name ILIKE %(p_str_JWxpZ2h0bmluZyVib2x0JQ)s)",
+            r"(lower(card.card_name) LIKE %(p_str_JWxpZ2h0bmluZyVib2x0JQ)s)",
             {"p_str_JWxpZ2h0bmluZyVib2x0JQ": r"%lightning%bolt%"},
         ),
         ("cmc:3", "(card.cmc = %(p_int_Mw)s)", {"p_int_Mw": 3}),  # Numeric field uses exact equality
@@ -239,28 +239,28 @@ def test_full_sql_translation_jsonb_card_types(input_query: str, expected_sql: s
     argnames=("input_query", "expected_sql", "expected_parameters"),
     argvalues=[
         # Oracle text search tests
-        ("oracle:flying", "(card.oracle_text ILIKE %(p_str_JWZseWluZyU)s)", {"p_str_JWZseWluZyU": "%flying%"}),
+        ("oracle:flying", "(lower(card.oracle_text) LIKE %(p_str_JWZseWluZyU)s)", {"p_str_JWZseWluZyU": "%flying%"}),
         (
             "oracle:'gain life'",
-            "(card.oracle_text ILIKE %(p_str_JWdhaW4lbGlmZSU)s)",
+            "(lower(card.oracle_text) LIKE %(p_str_JWdhaW4lbGlmZSU)s)",
             {"p_str_JWdhaW4lbGlmZSU": "%gain%life%"},
         ),
         (
             'oracle:"gain life"',
-            "(card.oracle_text ILIKE %(p_str_JWdhaW4lbGlmZSU)s)",
+            "(lower(card.oracle_text) LIKE %(p_str_JWdhaW4lbGlmZSU)s)",
             {"p_str_JWdhaW4lbGlmZSU": "%gain%life%"},
         ),
-        ("oracle:haste", "(card.oracle_text ILIKE %(p_str_JWhhc3RlJQ)s)", {"p_str_JWhhc3RlJQ": "%haste%"}),
+        ("oracle:haste", "(lower(card.oracle_text) LIKE %(p_str_JWhhc3RlJQ)s)", {"p_str_JWhhc3RlJQ": "%haste%"}),
         # Test oracle search with complex phrases
         (
             "oracle:'tap target creature'",
-            "(card.oracle_text ILIKE %(p_str_JXRhcCV0YXJnZXQlY3JlYXR1cmUl)s)",
+            "(lower(card.oracle_text) LIKE %(p_str_JXRhcCV0YXJnZXQlY3JlYXR1cmUl)s)",
             {"p_str_JXRhcCV0YXJnZXQlY3JlYXR1cmUl": "%tap%target%creature%"},
         ),
     ],
 )
 def test_oracle_text_sql_translation(input_query: str, expected_sql: str, expected_parameters: dict) -> None:
-    """Test that oracle text search generates correct SQL with ILIKE patterns."""
+    """Test that oracle text search generates correct SQL with LIKE patterns."""
     parsed = parsing.parse_scryfall_query(input_query)
     context = {}
     observed_sql = parsed.to_sql(context)
@@ -272,28 +272,28 @@ def test_oracle_text_sql_translation(input_query: str, expected_sql: str, expect
     argnames=("input_query", "expected_sql", "expected_parameters"),
     argvalues=[
         # Flavor text search tests
-        ("flavor:exile", "(card.flavor_text ILIKE %(p_str_JWV4aWxlJQ)s)", {"p_str_JWV4aWxlJQ": "%exile%"}),
+        ("flavor:exile", "(lower(card.flavor_text) LIKE %(p_str_JWV4aWxlJQ)s)", {"p_str_JWV4aWxlJQ": "%exile%"}),
         (
             "flavor:'ancient power'",
-            "(card.flavor_text ILIKE %(p_str_JWFuY2llbnQlcG93ZXIl)s)",
+            "(lower(card.flavor_text) LIKE %(p_str_JWFuY2llbnQlcG93ZXIl)s)",
             {"p_str_JWFuY2llbnQlcG93ZXIl": "%ancient%power%"},
         ),
         (
             'flavor:"ancient power"',
-            "(card.flavor_text ILIKE %(p_str_JWFuY2llbnQlcG93ZXIl)s)",
+            "(lower(card.flavor_text) LIKE %(p_str_JWFuY2llbnQlcG93ZXIl)s)",
             {"p_str_JWFuY2llbnQlcG93ZXIl": "%ancient%power%"},
         ),
-        ("flavor:magic", "(card.flavor_text ILIKE %(p_str_JW1hZ2ljJQ)s)", {"p_str_JW1hZ2ljJQ": "%magic%"}),
+        ("flavor:magic", "(lower(card.flavor_text) LIKE %(p_str_JW1hZ2ljJQ)s)", {"p_str_JW1hZ2ljJQ": "%magic%"}),
         # Test flavor search with complex phrases
         (
             "flavor:'power of darkness'",
-            "(card.flavor_text ILIKE %(p_str_JXBvd2VyJW9mJWRhcmtuZXNzJQ)s)",
+            "(lower(card.flavor_text) LIKE %(p_str_JXBvd2VyJW9mJWRhcmtuZXNzJQ)s)",
             {"p_str_JXBvd2VyJW9mJWRhcmtuZXNzJQ": "%power%of%darkness%"},
         ),
     ],
 )
 def test_flavor_text_sql_translation(input_query: str, expected_sql: str, expected_parameters: dict) -> None:
-    """Test that flavor text search generates correct SQL with ILIKE patterns."""
+    """Test that flavor text search generates correct SQL with LIKE patterns."""
     parsed = parsing.parse_scryfall_query(input_query)
     context = {}
     observed_sql = parsed.to_sql(context)
@@ -722,15 +722,15 @@ def test_rarity_case_insensitive() -> None:
 @pytest.mark.parametrize(
     argnames=("input_query", "expected_sql", "expected_parameters"),
     argvalues=[
-        ("artist:moeller", r"(card.card_artist ILIKE %(p_str_JW1vZWxsZXIl)s)", {"p_str_JW1vZWxsZXIl": r"%moeller%"}),
-        ("a:moeller", r"(card.card_artist ILIKE %(p_str_JW1vZWxsZXIl)s)", {"p_str_JW1vZWxsZXIl": r"%moeller%"}),
+        ("artist:moeller", r"(lower(card.card_artist) LIKE %(p_str_JW1vZWxsZXIl)s)", {"p_str_JW1vZWxsZXIl": r"%moeller%"}),
+        ("a:moeller", r"(lower(card.card_artist) LIKE %(p_str_JW1vZWxsZXIl)s)", {"p_str_JW1vZWxsZXIl": r"%moeller%"}),
         (
             'artist:"Christopher Moeller"',
-            r"(card.card_artist ILIKE %(p_str_JUNocmlzdG9waGVyJU1vZWxsZXIl)s)",
-            {"p_str_JUNocmlzdG9waGVyJU1vZWxsZXIl": r"%Christopher%Moeller%"},
+            r"(lower(card.card_artist) LIKE %(p_str_JWNocmlzdG9waGVyJW1vZWxsZXIl)s)",
+            {"p_str_JWNocmlzdG9waGVyJW1vZWxsZXIl": r"%christopher%moeller%"},
         ),
-        ("artist:nielsen", r"(card.card_artist ILIKE %(p_str_JW5pZWxzZW4l)s)", {"p_str_JW5pZWxzZW4l": r"%nielsen%"}),
-        ("ARTIST:moeller", r"(card.card_artist ILIKE %(p_str_JW1vZWxsZXIl)s)", {"p_str_JW1vZWxsZXIl": r"%moeller%"}),
+        ("artist:nielsen", r"(lower(card.card_artist) LIKE %(p_str_JW5pZWxzZW4l)s)", {"p_str_JW5pZWxzZW4l": r"%nielsen%"}),
+        ("ARTIST:moeller", r"(lower(card.card_artist) LIKE %(p_str_JW1vZWxsZXIl)s)", {"p_str_JW1vZWxsZXIl": r"%moeller%"}),
         (
             'artist="todd lockwood"',
             r"(card.card_artist = %(p_str_VG9kZCBMb2Nrd29vZA)s)",

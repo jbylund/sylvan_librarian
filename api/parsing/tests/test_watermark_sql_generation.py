@@ -49,16 +49,18 @@ class TestWatermarkSQLGeneration:
         assert param_value == expected_value
         assert "%" not in param_value  # No wildcards
 
-    def test_watermark_search_still_uses_ilike_pattern_matching(self) -> None:
-        """Test that regular text fields like name still use ILIKE pattern matching."""
+    def test_name_search_uses_lower_like_pattern_matching(self) -> None:
+        """Test that regular text fields like name use lower() LIKE pattern matching."""
         result = parse_scryfall_query("name:lightning")
         assert isinstance(result, Query)
 
         context: dict[str, Any] = {}
         sql = result.to_sql(context)
 
-        # Should generate ILIKE pattern matching
-        assert "ILIKE" in sql
+        # Should generate lower() LIKE pattern matching
+        assert "lower(" in sql
+        assert "LIKE" in sql
+        assert "ILIKE" not in sql
         assert "card.card_name" in sql
 
         # Context should contain wildcards

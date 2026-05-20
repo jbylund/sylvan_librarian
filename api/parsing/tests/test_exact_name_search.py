@@ -63,18 +63,18 @@ def test_exact_name_combined_with_other_conditions(query: str) -> None:
     argvalues=[
         (
             '!"Lightning Bolt"',
-            "(card.card_name ILIKE %(p_str_TGlnaHRuaW5nIEJvbHQ)s)",
-            {"p_str_TGlnaHRuaW5nIEJvbHQ": "Lightning Bolt"},
+            "(lower(card.card_name) LIKE %(p_str_bGlnaHRuaW5nIGJvbHQ)s)",
+            {"p_str_bGlnaHRuaW5nIGJvbHQ": "lightning bolt"},
         ),
         (
             "!bolt",
-            "(card.card_name ILIKE %(p_str_Ym9sdA)s)",
+            "(lower(card.card_name) LIKE %(p_str_Ym9sdA)s)",
             {"p_str_Ym9sdA": "bolt"},
         ),
         (
             '-!"Lightning Bolt"',
-            "NOT ((card.card_name ILIKE %(p_str_TGlnaHRuaW5nIEJvbHQ)s))",
-            {"p_str_TGlnaHRuaW5nIEJvbHQ": "Lightning Bolt"},
+            "NOT ((lower(card.card_name) LIKE %(p_str_bGlnaHRuaW5nIGJvbHQ)s))",
+            {"p_str_bGlnaHRuaW5nIGJvbHQ": "lightning bolt"},
         ),
     ],
 )
