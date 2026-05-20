@@ -32,6 +32,7 @@ from api.parsing.nodes import (
     ValueNode,
     param_name,
 )
+from api.utils.db_utils import IntArray
 
 """
 
@@ -183,6 +184,21 @@ class CardAttributeNode(AttributeNode):
             f"field_infos={self.field_infos}"
             ")"
         )
+
+
+_COLOR_BITS: dict[str, int] = {"W": 16, "U": 8, "B": 4, "R": 2, "G": 1}
+
+
+def _color_dict_to_mask(color_dict: dict[str, bool]) -> int:
+    return sum(bit for color, bit in _COLOR_BITS.items() if color_dict.get(color))
+
+
+def _subset_masks(query_mask: int) -> list[int]:
+    return [v for v in range(32) if (v & ~query_mask) == 0]  # 5 colors => 2^5 possible bitmask values
+
+
+def _proper_subset_masks(query_mask: int) -> list[int]:
+    return [v for v in range(32) if (v & ~query_mask) == 0 and v != query_mask]  # 5 colors => 2^5 possible bitmask values
 
 
 def get_colors_comparison_object(val: str) -> dict[str, bool]:
@@ -873,17 +889,26 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
     query ?& col AND not(col ?& query) # as array
     """
 
-    def _handle_jsonb_object(self, context: dict) -> str:  # noqa: PLR0912
+    def _handle_jsonb_object(self, context: dict) -> str:  # noqa: PLR0912, PLR0915, C901
         # Produce the query as a jsonb object
         lhs_sql = self.lhs.to_sql(context)
         attr = self.lhs.attribute_name
         is_color_identity = False
         if attr in ("card_colors", "card_color_identity", "produced_mana"):
             rhs = get_colors_comparison_object(self.rhs.value.strip().lower())
+            is_color_identity = attr == "card_color_identity"
+            if is_color_identity and self.operator in (":", "<="):
+                subsets = IntArray(_subset_masks(_color_dict_to_mask(rhs)))
+                pmask = param_name(subsets)
+                context[pmask] = subsets
+                return f"(magic.color_identity_mask({lhs_sql}) = ANY(%({pmask})s::smallint[]))"
+            if is_color_identity and self.operator == "<":
+                subsets = IntArray(_proper_subset_masks(_color_dict_to_mask(rhs)))
+                pmask = param_name(subsets)
+                context[pmask] = subsets
+                return f"(magic.color_identity_mask({lhs_sql}) = ANY(%({pmask})s::smallint[]))"
             pname = param_name(rhs)
             context[pname] = rhs
-            # Color identity has inverted semantics for the : operator only
-            is_color_identity = attr == "card_color_identity"
         elif attr == "devotion":
             # Devotion uses mana cost syntax, so we need to convert it to color comparison
             # Extract color codes from mana cost syntax like {G}, {R}{G}, etc.
@@ -922,9 +947,6 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         if self.operator == "=":
             return f"({lhs_sql} = %({pname})s)"
         if self.operator in (">=", ":"):
-            # For color identity, : should behave like <=, but >= should still be >=
-            if is_color_identity and self.operator == ":":
-                return f"({lhs_sql} <@ %({pname})s)"
             return f"({lhs_sql} @> %({pname})s)"
         if self.operator == "<=":
             return f"({lhs_sql} <@ %({pname})s)"
