@@ -30,7 +30,7 @@ logging.basicConfig(
 @pytest.fixture(scope="session", name="postgres_container", autouse=True)
 def postgres_container_fixture() -> Generator[None]:
     """Fixture to start and stop a postgres container for the session."""
-    exposed_port = random.randint(1024, 49151)  # noqa: S311
+    exposed_port = random.randint(1024, 49151)
     container = PostgresContainer(
         image="postgres:18",
         username="testuser",
