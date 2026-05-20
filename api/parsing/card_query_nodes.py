@@ -901,12 +901,12 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
                 subsets = IntArray(_subset_masks(_color_dict_to_mask(rhs)))
                 pmask = param_name(subsets)
                 context[pmask] = subsets
-                return f"(magic.color_identity_mask(card.card_color_identity) = ANY(%({pmask})s))"
+                return f"(magic.color_identity_mask({lhs_sql}) = ANY(%({pmask})s))"
             if is_color_identity and self.operator == "<":
                 subsets = IntArray(_proper_subset_masks(_color_dict_to_mask(rhs)))
                 pmask = param_name(subsets)
                 context[pmask] = subsets
-                return f"(magic.color_identity_mask(card.card_color_identity) = ANY(%({pmask})s))"
+                return f"(magic.color_identity_mask({lhs_sql}) = ANY(%({pmask})s))"
             pname = param_name(rhs)
             context[pname] = rhs
         elif attr == "devotion":
