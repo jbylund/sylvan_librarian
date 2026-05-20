@@ -451,14 +451,13 @@ class ExactNameNode(QueryNode):
     def to_sql(self, context: dict) -> str:
         """Generate SQL for exact name matching (case-insensitive, no wildcards).
 
-        ILIKE wildcard characters (% and _) are escaped so the value is matched
+        LIKE wildcard characters (% and _) are escaped so the value is matched
         literally rather than as a pattern.
         """
-        # Escape ILIKE special characters so the search is truly exact
-        escaped = self.value.replace("%", r"\%").replace("_", r"\_")
+        escaped = self.value.lower().replace("%", r"\%").replace("_", r"\_")
         _param_name = param_name(escaped)
         context[_param_name] = escaped
-        return f"(card.card_name ILIKE %({_param_name})s)"
+        return f"(lower(card.card_name) LIKE %({_param_name})s)"
 
     def __repr__(self) -> str:
         """Return a string representation of the ExactNameNode."""
@@ -853,7 +852,6 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
             # Use PostgreSQL ~* operator for case-insensitive regex matching
             return f"({lhs_sql} ~* %({_param_name})s)"
 
-        # Regular text pattern matching with ILIKE
         if isinstance(self.rhs, StringValueNode | ManaValueNode):
             txt_val = self.rhs.value.strip()
         elif isinstance(self.rhs, str):
@@ -861,11 +859,11 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         else:
             msg = f"Unknown type: {type(self.rhs)}, {locals()}"
             raise TypeError(msg)
-        words = ["", *txt_val.split(), ""]
+        words = ["", *txt_val.lower().split(), ""]
         pattern = "%".join(words)
         _param_name = param_name(pattern)
         context[_param_name] = pattern
-        return f"({lhs_sql} ILIKE %({_param_name})s)"
+        return f"(lower({lhs_sql}) LIKE %({_param_name})s)"
 
     """
     col = query

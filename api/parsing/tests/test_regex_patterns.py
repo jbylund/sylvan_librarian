@@ -129,13 +129,15 @@ class TestRegexSQLGeneration:
         # Should have two parameters
         assert len(params) == 2
 
-    def test_regular_text_search_still_uses_ilike(self) -> None:
-        """Test that regular text searches still use ILIKE, not regex."""
+    def test_regular_text_search_uses_lower_like(self) -> None:
+        """Test that regular text searches use lower() LIKE, not regex."""
         result = parsing.parse_scryfall_query("name:lightning")
         sql, params = generate_sql_query(result)
 
-        # Should use ILIKE pattern matching, not regex
-        assert "ILIKE" in sql
+        # Should use lower() LIKE pattern matching, not regex
+        assert "lower(" in sql
+        assert "LIKE" in sql
+        assert "ILIKE" not in sql
         assert "~*" not in sql
 
         # Should have wildcards in the parameter
