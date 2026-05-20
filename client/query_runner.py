@@ -271,7 +271,7 @@ def main() -> None:
     try:
         while True:
             # Pick a random query from the pool
-            query = random.choice(query_pool)  # noqa: S311
+            query = random.choice(query_pool)
 
             # Run the query
             result = run_query(api_url, query, session)
