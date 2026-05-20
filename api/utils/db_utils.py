@@ -151,7 +151,7 @@ class IntArray(list):
 
 
 def maybe_json(v: object) -> object:
-    """Wrap a value in a Jsonb object if it is a list or dict."""
+    """Wrap plain list/dict values in Jsonb, but pass IntArray through unchanged."""
     if isinstance(v, IntArray):
         return v
     if isinstance(v, list | dict):
