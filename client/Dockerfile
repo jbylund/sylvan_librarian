@@ -19,7 +19,7 @@ RUN python -m uv pip install --quiet --system --upgrade --break-system-packages 
     -r /tmp/requirements/base.txt
 
 RUN mkdir -p /app/client
-COPY ./client/query_runner.py /app/client/
+COPY ./client/ /app/client/
 WORKDIR /app
 
 # Disable core dumps
