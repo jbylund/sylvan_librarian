@@ -145,12 +145,12 @@ def test_full_sql_translation_jsonb_colors(input_query: str, expected_sql: str, 
     argvalues=[
         (
             "color_identity:g",
-            r"(magic.color_identity_mask(card.card_color_identity) = ANY(%(p_IntArray_WzAsIDFd)s))",
+            r"(magic.color_identity_mask(card.card_color_identity) = ANY(%(p_IntArray_WzAsIDFd)s::smallint[]))",
             {"p_IntArray_WzAsIDFd": [0, 1]},
         ),  # : uses bitmask subset lookup; G=1, subsets of 1 are [0,1]
         (
             "id:rg",
-            r"(magic.color_identity_mask(card.card_color_identity) = ANY(%(p_IntArray_WzAsIDEsIDIsIDNd)s))",
+            r"(magic.color_identity_mask(card.card_color_identity) = ANY(%(p_IntArray_WzAsIDEsIDIsIDNd)s::smallint[]))",
             {"p_IntArray_WzAsIDEsIDIsIDNd": [0, 1, 2, 3]},
         ),  # RG mask=3, subsets=[0,1,2,3]
         (
@@ -165,7 +165,7 @@ def test_full_sql_translation_jsonb_colors(input_query: str, expected_sql: str, 
         ),  # >= uses @> against JSONB column (GIN index)
         (
             "color_identity<=rg",
-            r"(magic.color_identity_mask(card.card_color_identity) = ANY(%(p_IntArray_WzAsIDEsIDIsIDNd)s))",
+            r"(magic.color_identity_mask(card.card_color_identity) = ANY(%(p_IntArray_WzAsIDEsIDIsIDNd)s::smallint[]))",
             {"p_IntArray_WzAsIDEsIDIsIDNd": [0, 1, 2, 3]},
         ),  # <= uses bitmask subset lookup same as :
         (
@@ -175,7 +175,7 @@ def test_full_sql_translation_jsonb_colors(input_query: str, expected_sql: str, 
         ),  # > uses @> against JSONB column (GIN index)
         (
             "id<rg",
-            r"(magic.color_identity_mask(card.card_color_identity) = ANY(%(p_IntArray_WzAsIDEsIDJd)s))",
+            r"(magic.color_identity_mask(card.card_color_identity) = ANY(%(p_IntArray_WzAsIDEsIDJd)s::smallint[]))",
             {"p_IntArray_WzAsIDEsIDJd": [0, 1, 2]},
         ),  # < uses proper subsets; RG mask=3, proper subsets=[0,1,2]
         (
@@ -185,12 +185,12 @@ def test_full_sql_translation_jsonb_colors(input_query: str, expected_sql: str, 
         ),  # colorless identity = {} (empty), not {"C": True}
         (
             "id:c",
-            r"(magic.color_identity_mask(card.card_color_identity) = ANY(%(p_IntArray_WzBd)s))",
+            r"(magic.color_identity_mask(card.card_color_identity) = ANY(%(p_IntArray_WzBd)s::smallint[]))",
             {"p_IntArray_WzBd": [0]},
         ),  # colorless mask=0, subsets=[0] — only colorless cards
         (
             "id:colorless",
-            r"(magic.color_identity_mask(card.card_color_identity) = ANY(%(p_IntArray_WzBd)s))",
+            r"(magic.color_identity_mask(card.card_color_identity) = ANY(%(p_IntArray_WzBd)s::smallint[]))",
             {"p_IntArray_WzBd": [0]},
         ),  # 'colorless' name resolves to same mask=0
         (

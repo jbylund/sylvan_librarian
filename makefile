@@ -160,9 +160,9 @@ dockerclean:
 dbconn-%:
 	test -f ~/.psqlrc || touch ~/.psqlrc
 	test -f ~/.psql_history || touch ~/.psql_history
-	docker compose --project-name arcane_$* --env-file .env --env-file envs/$* --file $(BASE_COMPOSE) \
+	cd $(GIT_ROOT) && docker compose --project-name arcane_$* --env-file .env --env-file envs/$* --file $(BASE_COMPOSE) \
 	  exec -e PSQLRC=/var/lib/postgresql/.psqlrc -e PSQL_HISTORY=/var/lib/postgresql/.psql_history \
-	  postgres psql -U $(XPGUSER) -d $(XPGDATABASE)
+	  postgres psql -U $(XPGUSER) -d $(XPGDATABASE) --host=localhost
 
 reset-%:
 	docker compose --project-name arcane_$* --env-file .env --env-file envs/$* --file $(BASE_COMPOSE) down --volumes --remove-orphans
