@@ -420,12 +420,23 @@ class CardSearch {
       '"': '"', // double quote is own mirror
       ')': '(',
     };
+    const quoteChars = new Set(["'", '"']);
 
     const stack = [];
 
     // Process each character in the query
     for (let i = 0; i < query.length; i++) {
       const char = query[i];
+
+      // When inside a quoted string, only the matching closing quote ends it.
+      // All other characters (including other quote types and parentheses) are ignored.
+      if (stack.length > 0 && quoteChars.has(stack[stack.length - 1])) {
+        if (char === stack[stack.length - 1]) {
+          stack.pop();
+        }
+        continue;
+      }
+
       const mirroredChar = charToMirror[char];
 
       if (!mirroredChar) {

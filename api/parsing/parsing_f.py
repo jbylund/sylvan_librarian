@@ -82,9 +82,17 @@ def balance_partial_query(query: str) -> str:
         ")": "(",
     }
     unbalanced_closing_chars = {")"}
+    quote_chars = {"'", '"'}
 
     current_stack = []
     for char in query:
+        # When inside a quoted string, only the matching closing quote ends it.
+        # All other characters (including other quote types and parentheses) are ignored.
+        if current_stack and current_stack[-1] in quote_chars:
+            if char == current_stack[-1]:
+                current_stack.pop()
+            continue
+
         mirrored_char = char_to_mirror.get(char)
         if not mirrored_char:
             continue
