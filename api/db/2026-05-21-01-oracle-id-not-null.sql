@@ -1,0 +1,1 @@
+ALTER TABLE magic.cards ALTER COLUMN oracle_id SET NOT NULL;
