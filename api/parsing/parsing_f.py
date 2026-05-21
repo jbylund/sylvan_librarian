@@ -929,6 +929,15 @@ _BARE_WORD_RE = re.compile(r"^(?:[a-zA-Z_][a-zA-Z0-9_-]*[a-zA-Z0-9_]|[a-zA-Z_])$
 # Pre-built singleton — CardAttributeNode.__init__ does a dict lookup; reuse it.
 _IMPLICIT_NAME_ATTR_NODE = CardAttributeNode("name", ParserClass.TEXT)
 
+# Characters that make a query ineligible for the fast preprocess_implicit_and path:
+# parens, quotes, regex delimiters, mana braces, and arithmetic +/*.
+# (Hyphen and slash are handled at the term level below.)
+_FP_UNSAFE_CHARS = frozenset("()\"'/{+*")
+# An operator character that cannot legally start a term ('-' is OK as negation prefix).
+_FP_TERM_START_OPS = frozenset("><=!:")
+# An operator character that cannot legally end a term.
+_FP_TERM_END_OPS = frozenset("><=!:-")
+
 
 def _is_implicit_and_operand(t: str) -> bool:
     """Return True if *t* counts as an operand for implicit-AND insertion."""
@@ -979,6 +988,27 @@ def preprocess_implicit_and(query: str) -> str:
     extra whitespace (e.g. 'foo bar' -> 'foo AND bar', 'cmc=3' -> 'cmc=3').
     See api/parsing/tests/test_preprocess_implicit_and.py for full behavior.
     """
+    # Fast path: if every whitespace-split chunk is a self-contained term
+    # (no parens, quotes, regex, mana, arithmetic) we can join with AND directly
+    # without running the pyparsing tokenizer.  A term is self-contained when:
+    #   - it doesn't start with a comparison operator (but '-' negation is fine)
+    #   - it doesn't end with any operator (including trailing '-')
+    #   - it isn't the AND/OR keyword (e.g. 'foo and bar' must not become
+    #     'foo and AND and bar')
+    if not any(c in _FP_UNSAFE_CHARS for c in query):
+        parts = query.split()
+        if parts and all(
+            part.upper() in ("AND", "OR") or (part[0] not in _FP_TERM_START_OPS and part[-1] not in _FP_TERM_END_OPS)
+            for part in parts
+        ):
+            out: list[str] = []
+            for i, part in enumerate(parts):
+                is_kw = part.upper() in ("AND", "OR")
+                out.append(part.upper() if is_kw else part)
+                if i + 1 < len(parts) and not is_kw and parts[i + 1].upper() not in ("AND", "OR"):
+                    out.append("AND")
+            return " ".join(out)
+
     tokens = _tokenize_for_implicit_and(query)
     if not tokens:
         return ""
