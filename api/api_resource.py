@@ -803,13 +803,12 @@ class APIResource:
             "asc": "ASC",
             "desc": "DESC",
         }.get(str(direction), "ASC")
-        # scryfall supports distinct:
-        # cards, prints, arts
         distinct_on = {
             UniqueOn.ARTWORK: "illustration_id",
-            UniqueOn.CARD: "card_name",
-            UniqueOn.PRINTING: "scryfall_id",
-        }.get(unique, "card_name")
+            UniqueOn.CARD: "oracle_id",
+            # there is no DISTINCT ON for printing
+            # as printing is unique in the cards table
+        }.get(unique)
         # Map prefer values to SQL columns and directions
         prefer_mapping = {
             PreferOrder.OLDEST: ("released_at", "ASC"),
@@ -823,13 +822,9 @@ class APIResource:
             prefer,
             ("edhrec_rank", "ASC"),
         )
-        query_sql = f"""
-            WITH distinct_cards AS (
-                SELECT DISTINCT ON ({distinct_on})
-                    card_artist,
+        _select_cols = """
                     card_name,
                     card_set_code,
-                    cmc,
                     collector_number,
                     creature_power_text,
                     creature_toughness_text,
@@ -838,7 +833,67 @@ class APIResource:
                     oracle_text,
                     set_name,
                     type_line,
-                    prefer_score,
+                    prefer_score,"""
+        _result_cols = """
+                    card_name AS name,
+                    card_set_code AS set_code,
+                    collector_number,
+                    creature_power_text AS power,
+                    creature_toughness_text AS toughness,
+                    mana_cost_text AS mana_cost,
+                    oracle_text,
+                    set_name,
+                    type_line"""
+        _order_by = f"""sort_value {sql_direction} NULLS LAST,
+                    edhrec_rank ASC NULLS LAST,
+                    prefer_score DESC NULLS LAST"""
+        _count_nulls = """
+                    null AS name,
+                    null AS set_code,
+                    null AS collector_number,
+                    null AS power,
+                    null AS toughness,
+                    null AS mana_cost,
+                    null AS oracle_text,
+                    null AS set_name,
+                    null AS type_line"""
+        if unique == UniqueOn.PRINTING:
+            # scryfall_id is the PK — every row is already unique, no dedup needed.
+            # The CTE has no ORDER BY; only the LIMIT branch sorts.
+            query_sql = f"""
+            WITH matching_cards AS (
+                SELECT
+                    {_select_cols}
+                    {sql_orderby} AS sort_value
+                FROM
+                    magic.cards AS card
+                WHERE
+                    {where_clause}
+            )
+            (
+                SELECT
+                    null::integer AS total_cards_count,
+                    {_result_cols}
+                FROM
+                    matching_cards
+                ORDER BY
+                    {_order_by}
+                LIMIT
+                    %(limit)s
+            )
+            UNION ALL
+            (
+                SELECT
+                    COUNT(1) AS total_cards_count,
+                    {_count_nulls}
+                FROM
+                    matching_cards
+            )"""
+        else:
+            query_sql = f"""
+            WITH distinct_cards AS (
+                SELECT DISTINCT ON ({distinct_on})
+                    {_select_cols}
                     {sql_orderby} AS sort_value
                 FROM
                     magic.cards AS card
@@ -851,25 +906,12 @@ class APIResource:
             )
             (
                 SELECT
-                    null AS total_cards_count,
-                    card_artist,
-                    card_name AS name,
-                    card_set_code AS set_code,
-                    cmc,
-                    collector_number,
-                    creature_power_text AS power,
-                    creature_toughness_text AS toughness,
-                    edhrec_rank,
-                    mana_cost_text AS mana_cost,
-                    oracle_text,
-                    set_name,
-                    type_line
+                    null::integer AS total_cards_count,
+                    {_result_cols}
                 FROM
                     distinct_cards
                 ORDER BY
-                    sort_value {sql_direction} NULLS LAST,
-                    edhrec_rank ASC NULLS LAST,
-                    prefer_score DESC NULLS LAST
+                    {_order_by}
                 LIMIT
                     %(limit)s
             )
@@ -877,7 +919,7 @@ class APIResource:
             (
                 SELECT
                     COUNT(1) AS total_cards_count,
-                    null, null, null, null, null, null, null, null, null, null, null, null
+                    {_count_nulls}
                 FROM
                     distinct_cards
             )"""

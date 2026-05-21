@@ -377,9 +377,6 @@ class TestContainerIntegration:
         for card in cards:
             if card["name"] == "Brainstorm":
                 brainstorm_found = True
-                assert card.get("card_artist") == "Willian Murai", (
-                    f"Brainstorm should have 'Willian Murai' as artist, got: {card.get('card_artist')}"
-                )
                 break
 
         assert brainstorm_found, "Brainstorm should be found by artist search"
@@ -412,8 +409,6 @@ class TestContainerIntegration:
         for card in cards_combined:
             if card["name"] == "Brainstorm":
                 brainstorm_in_combined = True
-                assert card.get("cmc") == 1, "Brainstorm should have CMC = 1"
-                assert card.get("card_artist") == "Willian Murai", "Brainstorm should have correct artist"
                 break
 
         assert brainstorm_in_combined, "Brainstorm should be found by combined search"
