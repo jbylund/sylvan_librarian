@@ -6,7 +6,6 @@ from api import parsing
 from api.parsing import (
     AndNode,
     AttributeNode,
-    BinaryOperatorNode,
     NotNode,
     NumericValueNode,
     OrNode,
@@ -14,6 +13,7 @@ from api.parsing import (
     StringValueNode,
 )
 from api.parsing.card_query_nodes import CardAttributeNode, calculate_cmc, mana_cost_str_to_dict
+from api.parsing.card_query_nodes import CardBinaryOperatorNode as BinaryOperatorNode
 from api.parsing.db_info import ParserClass
 
 
