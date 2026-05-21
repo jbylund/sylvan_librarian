@@ -63,29 +63,34 @@ class QueryLogMiddleware:
         """Drain the queue and write entries to magic.query_log."""
         conn: psycopg.Connection | None = None
         dropped = 0
-        while not self._stop.is_set():
-            try:
-                entry = self._queue.get(timeout=0.05)
-            except queue.Empty:
-                continue
-            try:
-                if conn is None or conn.closed:
-                    conn = self._connect()
-                if conn is None:
-                    dropped += 1
-                    if dropped % self._DROP_LOG_INTERVAL == 1:
-                        logger.warning("QueryLogMiddleware: no PG* env vars set — %d log entries dropped so far", dropped)
+        try:
+            while not self._stop.is_set():
+                try:
+                    entry = self._queue.get(timeout=0.05)
+                except queue.Empty:
                     continue
-                with conn.cursor() as cur:
-                    cur.execute(_INSERT_SQL, entry)
-                conn.commit()
-            except Exception:
-                logger.exception("QueryLogMiddleware: failed to write log entry")
-                if conn is not None:
+                try:
+                    if conn is None or conn.closed:
+                        conn = self._connect()
+                    if conn is None:
+                        dropped += 1
+                        if dropped % self._DROP_LOG_INTERVAL == 1:
+                            logger.warning("QueryLogMiddleware: no PG* env vars set — %d log entries dropped so far", dropped)
+                        continue
+                    with conn.cursor() as cur:
+                        cur.execute(_INSERT_SQL, entry)
+                    conn.commit()
+                except Exception:
+                    logger.exception("QueryLogMiddleware: failed to write log entry")
                     with contextlib.suppress(Exception):
-                        conn.close()
+                        if conn is not None:
+                            conn.close()
                     conn = None
-                time.sleep(1)  # brief back-off before reconnect
+                    time.sleep(1)  # brief back-off before reconnect
+        finally:
+            with contextlib.suppress(Exception):
+                if conn is not None:
+                    conn.close()
 
     # ------------------------------------------------------------------
     # Falcon middleware hook
