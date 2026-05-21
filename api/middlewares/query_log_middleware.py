@@ -86,7 +86,7 @@ class _QueryLogWriter:
                     self._conn.close()
 
     def _drain_loop(self) -> None:
-        while not self._stop.is_set():
+        while not self._stop.is_set() or not self._q.empty():
             try:
                 entry = self._q.get(timeout=0.05)
             except queue.Empty:
