@@ -12,6 +12,7 @@ from api.middlewares.caching_middleware import CachingMiddleware
 from api.middlewares.compression import CompressionMiddleware
 from api.middlewares.cors_middleware import CORSMiddleware
 from api.middlewares.logging_middleware import LoggingMiddleware
+from api.middlewares.query_log_middleware import QueryLogMiddleware
 from api.middlewares.security_headers import SecurityHeadersMiddleware
 from api.middlewares.timing import ProfilingMiddleware, TimingMiddleware
 
@@ -21,6 +22,7 @@ __all__ = [
     "CompressionMiddleware",
     "LoggingMiddleware",
     "ProfilingMiddleware",
+    "QueryLogMiddleware",
     "SecurityHeadersMiddleware",
     "TimingMiddleware",
 ]

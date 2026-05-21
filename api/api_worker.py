@@ -96,6 +96,7 @@ class ApiWorker(multiprocessing.Process):
             CachingMiddleware,
             CompressionMiddleware,
             CORSMiddleware,
+            QueryLogMiddleware,
             SecurityHeadersMiddleware,
             TimingMiddleware,
         )
@@ -103,7 +104,8 @@ class ApiWorker(multiprocessing.Process):
         api = falcon.App(
             middleware=[
                 TimingMiddleware(),
-                CachingMiddleware(),  # important that this is first
+                QueryLogMiddleware(),  # process_response fires before TimingMiddleware's
+                CachingMiddleware(),
                 CompressionMiddleware(),
                 SecurityHeadersMiddleware(),  # Add security headers to all responses
                 CORSMiddleware(),  # Handle CORS requests

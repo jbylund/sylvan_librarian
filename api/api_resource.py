@@ -29,7 +29,7 @@ import psycopg
 import requests
 from cachebox import LRUCache, TTLCache
 from cachebox import cached as cachebox_cached
-from psycopg import Connection, Cursor
+from psycopg import Cursor
 
 from api.card_processing import preprocess_card
 from api.enums import CardOrdering, PreferOrder, SortDirection, UniqueOn
@@ -584,7 +584,6 @@ class APIResource:
                 return result
         try:
             with self._conn_pool.connection() as conn:
-                conn = typecast("Connection", conn)
                 with conn.cursor() as cursor:
                     cursor.execute("SELECT COUNT(1) AS num_cards FROM magic.cards")
                     cards_found = cursor.fetchall()[0]["num_cards"]
@@ -807,8 +806,7 @@ class APIResource:
         distinct_on = {
             UniqueOn.ARTWORK: "illustration_id",
             UniqueOn.CARD: "card_name",
-            UniqueOn.PRINTING: "scryfall_id",
-        }.get(unique, "card_name")
+        }.get(unique)  # None means unique=printing; scryfall_id is the PK so DISTINCT ON is a no-op
         # Map prefer values to SQL columns and directions
         prefer_mapping = {
             PreferOrder.OLDEST: ("released_at", "ASC"),
@@ -822,43 +820,62 @@ class APIResource:
             prefer,
             ("edhrec_rank", "ASC"),
         )
+        if distinct_on is not None:
+            distinct_clause = f"DISTINCT ON ({distinct_on})"
+            order_by_distinct = f"{distinct_on},"
+        else:
+            distinct_clause = ""
+            order_by_distinct = ""
+        inner_columns = {
+            "card_name",
+            "card_set_code",
+            "cmc",
+            "collector_number",
+            "creature_power_text",
+            "creature_toughness_text",
+            "edhrec_rank",
+            "mana_cost_text",
+            "oracle_text",
+            "set_name",
+            "type_line",
+            "prefer_score",
+        }
+        inner_columns.add(sql_orderby)
+        inner_columns_sql = ",\n    ".join(sorted(inner_columns))
+
+        outer_orderby_clauses = [
+            f"{sql_orderby} {sql_direction} NULLS LAST",
+        ]
+        if orderby not in (CardOrdering.EDHREC, CardOrdering.CUBECOBRA):
+            outer_orderby_clauses.append("edhrec_rank ASC NULLS LAST")
+        # there will only be multiple prefer scores per
+        # grouping if the grouping is card
+        if unique == UniqueOn.CARD:
+            outer_orderby_clauses.append("prefer_score DESC NULLS LAST")
+        outer_orderby_sql = ",\n    ".join(outer_orderby_clauses)
+
         query_sql = f"""
             WITH distinct_cards AS (
-                SELECT DISTINCT ON ({distinct_on})
-                    card_artist,
-                    card_name,
-                    card_set_code,
-                    cmc,
-                    collector_number,
-                    creature_power_text,
-                    creature_toughness_text,
-                    edhrec_rank,
-                    mana_cost_text,
-                    oracle_text,
-                    set_name,
-                    type_line,
-                    prefer_score,
-                    {sql_orderby} AS sort_value
+                SELECT {distinct_clause}
+                    {inner_columns_sql}
                 FROM
                     magic.cards AS card
                 WHERE
                     {where_clause}
                 ORDER BY
-                    {distinct_on},
+                    {order_by_distinct}
                     {prefer_column} {prefer_direction} NULLS LAST,
                     prefer_score DESC NULLS LAST
             )
             (
                 SELECT
                     null AS total_cards_count,
-                    card_artist,
+
                     card_name AS name,
                     card_set_code AS set_code,
-                    cmc,
                     collector_number,
                     creature_power_text AS power,
                     creature_toughness_text AS toughness,
-                    edhrec_rank,
                     mana_cost_text AS mana_cost,
                     oracle_text,
                     set_name,
@@ -866,9 +883,7 @@ class APIResource:
                 FROM
                     distinct_cards
                 ORDER BY
-                    sort_value {sql_direction} NULLS LAST,
-                    edhrec_rank ASC NULLS LAST,
-                    prefer_score DESC NULLS LAST
+                    {outer_orderby_sql}
                 LIMIT
                     %(limit)s
             )
@@ -876,7 +891,15 @@ class APIResource:
             (
                 SELECT
                     COUNT(1) AS total_cards_count,
-                    null, null, null, null, null, null, null, null, null, null, null, null
+                    null as name,
+                    null as set_code,
+                    null as collector_number,
+                    null as creature_power_text,
+                    null as creature_toughness_text,
+                    null as mana_cost_text,
+                    null as oracle_text,
+                    null as set_name,
+                    null as type_line
                 FROM
                     distinct_cards
             )"""

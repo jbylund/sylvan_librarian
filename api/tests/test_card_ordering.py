@@ -47,5 +47,5 @@ def _compiled_sql(api_resource: APIResource, ordering: CardOrdering) -> str:
 )
 def test_orderby_column_in_compiled_sql(api_resource: APIResource, ordering: CardOrdering, expected_column: str) -> None:
     """Every CardOrdering value should produce its mapped column in the compiled SQL."""
-    needle = f", {expected_column} AS sort_value FROM magic.cards"
+    needle = f"ORDER BY {expected_column} ASC NULLS LAST"
     assert needle in _compiled_sql(api_resource, ordering)

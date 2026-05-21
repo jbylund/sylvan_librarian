@@ -4,6 +4,11 @@
 This script continuously generates random card search queries and executes them
 against the Scryfall OS API to help identify which database indexes are being used
 and which queries perform well or poorly.
+
+Modes:
+  default    Generate a fixed synthetic query corpus.
+  --realistic  Pull the most common/slowest real queries from magic.query_log
+               (requires PG* env vars pointing at the database).
 """
 
 import argparse
@@ -12,6 +17,7 @@ import os
 import random
 import time
 
+import psycopg
 import requests
 
 logger = logging.getLogger(__name__)
@@ -19,6 +25,17 @@ logger = logging.getLogger(__name__)
 DEFAULT_API_URL = "http://apiservice:8080"
 DEFAULT_QUERY_DELAY = 1.0  # Delay between queries in seconds
 DEFAULT_BATCH_SIZE = 50  # Number of queries before reporting stats
+
+_REALISTIC_SQL = """
+SELECT q
+FROM magic.query_log
+WHERE had_error = false
+  AND cache_hit = false
+  AND q IS NOT NULL
+GROUP BY q
+ORDER BY AVG(execute_ms) DESC NULLS LAST, COUNT(*) DESC
+LIMIT %(limit)s
+"""
 
 
 def setup_logging() -> None:
@@ -38,6 +55,7 @@ _UNIQUE_VALUES = ["card"] * 75 + ["printing"] * 20 + ["artwork"] * 5
 # query fragments.  Weights are approximate — they reflect realistic user search patterns.
 # Higher weight = picked more often as one of the 1-4 dimensions in a random query.
 _DIMENSIONS: list[tuple[int, str, list[str]]] = [
+    # (weight, name, fragments)
     (
         30,
         "name",
@@ -396,6 +414,32 @@ def random_query() -> str:
     return " ".join(sorted(fragments))
 
 
+def fetch_realistic_queries(limit: int = 500) -> list[str]:
+    """Pull real queries from magic.query_log, ordered by average DB execution time.
+
+    Requires PG* environment variables (PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD)
+    to be set so the script can connect directly to the database.
+
+    Args:
+        limit: Maximum number of distinct queries to return.
+
+    Returns:
+        List of query strings from actual user searches, slowest first.
+    """
+    mapping = {"database": "dbname"}
+    creds = {mapping.get(k[2:].lower(), k[2:].lower()): v for k, v in os.environ.items() if k.startswith("PG")}
+    if not creds:
+        msg = "No PG* env vars found; cannot connect to DB for realistic queries"
+        raise RuntimeError(msg)
+    conninfo = " ".join(f"{k}={v}" for k, v in creds.items())
+    with psycopg.connect(conninfo) as conn, conn.cursor() as cur:
+        cur.execute(_REALISTIC_SQL, {"limit": limit})
+        rows = cur.fetchall()
+    queries = [row[0] for row in rows]
+    logger.info("Fetched %d realistic queries from magic.query_log", len(queries))
+    return queries
+
+
 def run_query(api_url: str, query: str, session: requests.Session, orderby: str, unique: str) -> dict:
     """Run a single search query against the API.
 
@@ -502,6 +546,11 @@ def parse_args() -> argparse.Namespace:
     """Parse command-line arguments, falling back to environment variables then module defaults."""
     parser = argparse.ArgumentParser(description="Run search queries against the Arcane Tutor API.")
     parser.add_argument(
+        "--realistic",
+        action="store_true",
+        help="Use real queries from magic.query_log (requires PG* env vars) instead of synthetic ones.",
+    )
+    parser.add_argument(
         "--api-url",
         default=os.environ.get("API_URL", DEFAULT_API_URL),
         help=f"Base URL for the API (default: {DEFAULT_API_URL}).",
@@ -542,12 +591,23 @@ def main() -> None:
         },
     )
 
+    # Build query pool (realistic mode only; synthetic generates on the fly)
+    if args.realistic:
+        logger.info("Mode: realistic (from magic.query_log)")
+        query_pool = fetch_realistic_queries()
+
+        def get_query() -> str:
+            return random.choice(query_pool)
+    else:
+        get_query = random_query
+        logger.info("Mode: synthetic")
+
     results = []
     query_count = 0
 
     try:
         while True:
-            query = random_query()
+            query = get_query()
             orderby = random.choice(_ORDERBY_VALUES)
             unique = random.choice(_UNIQUE_VALUES)
 
