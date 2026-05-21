@@ -630,22 +630,16 @@ def get_parse_expr() -> ParserElement:  # noqa: C901, PLR0915
     exact_name = exact_name_prefix + (_quoted_string_for_exact | _word_for_exact)
     exact_name.set_parse_action(make_exact_name)
 
-    # Standalone quoted string (implicit name search, e.g. "stormchaser's talent")
-    # Must copy so the original quoted_string parse action is not affected
-    _quoted_string_for_name = basic_parsers["quoted_string"].copy()
+    # Implicit name search: standalone quoted string or bare word (e.g. "stormchaser's talent" or bolt)
+    # Copy quoted_string so the original ("quoted", value) parse action is preserved for use in conditions.
+    _implicit_name_value = basic_parsers["quoted_string"].copy() | word
 
-    def make_quoted_name(tokens: list[str]) -> BinaryOperatorNode:
-        """For standalone quoted strings, search in the name field."""
-        return BinaryOperatorNode(CardAttributeNode("name", ParserClass.TEXT), ":", StringValueNode(tokens[0]))
+    def make_implicit_name(tokens: list[object]) -> BinaryOperatorNode:
+        token = tokens[0]
+        value = token[1] if isinstance(token, tuple) and token[0] == "quoted" else str(token)
+        return BinaryOperatorNode(CardAttributeNode("name", ParserClass.TEXT), ":", StringValueNode(value))
 
-    quoted_name = _quoted_string_for_name.set_parse_action(make_quoted_name)
-
-    # Single word (implicit name search)
-    def make_single_word(tokens: list[str]) -> BinaryOperatorNode:
-        """For single words, always search in the name field."""
-        return BinaryOperatorNode(CardAttributeNode("name", ParserClass.TEXT), ":", StringValueNode(tokens[0]))
-
-    single_word = word.set_parse_action(make_single_word)
+    implicit_name = _implicit_name_value.set_parse_action(make_implicit_name)
 
     # Standalone numeric literal
     def make_numeric_literal(tokens: list[object]) -> NumericValueNode:
@@ -683,7 +677,7 @@ def get_parse_expr() -> ParserElement:  # noqa: C901, PLR0915
 
     # For negation, we exclude arithmetic expressions from being negated
     # Test: revert to original order to confirm this breaks it
-    negatable_primary = attr_attr_condition | condition | group | exact_name | quoted_name | single_word
+    negatable_primary = attr_attr_condition | condition | group | exact_name | implicit_name
     negatable_factor = Optional(operator_not) + negatable_primary
     negatable_factor.set_parse_action(handle_negation)
 
