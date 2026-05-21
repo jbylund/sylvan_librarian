@@ -16,6 +16,8 @@ from api.parsing.nodes import AndNode, NotNode
         ('!"Black Lotus"', "Black Lotus"),
         ('!"Serra Angel"', "Serra Angel"),
         ("!sol", "sol"),
+        ("!\"stormchaser's talent\"", "stormchaser's talent"),
+        ("!\"dragon's breath\"", "dragon's breath"),
     ],
 )
 def test_exact_name_parses_to_exact_name_node(query: str, expected_value: str) -> None:
