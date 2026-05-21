@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import sys
-from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
+import pytest
 import requests
 
 from client.query_runner import (
@@ -13,14 +13,12 @@ from client.query_runner import (
     DEFAULT_API_URL,
     DEFAULT_BATCH_SIZE,
     DEFAULT_QUERY_DELAY,
+    fetch_realistic_queries,
     parse_args,
     print_statistics,
     random_query,
     run_query,
 )
-
-if TYPE_CHECKING:
-    import pytest
 
 
 class TestRandomQuery:
@@ -59,6 +57,7 @@ class TestParseArgs:
         assert args.api_url == DEFAULT_API_URL
         assert args.query_delay == DEFAULT_QUERY_DELAY
         assert args.batch_size == DEFAULT_BATCH_SIZE
+        assert args.realistic is False
 
     def test_env_var_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("API_URL", "http://env-host:9090")
@@ -81,6 +80,12 @@ class TestParseArgs:
         assert args.api_url == "http://cli-host:7070"
         assert args.query_delay == 0.1
         assert args.batch_size == 10
+
+    def test_realistic_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("API_URL", raising=False)
+        with patch.object(sys, "argv", ["query_runner", "--realistic"]):
+            args = parse_args()
+        assert args.realistic is True
 
 
 def _make_session(json_data: dict | None = None, raise_exc: Exception | None = None) -> MagicMock:
@@ -156,3 +161,11 @@ class TestPrintStatistics:
             {"success": False, "error": "timeout", "elapsed_ms": 30000.0},
         ]
         print_statistics(results)
+
+
+class TestFetchRealisticQueries:
+    def test_raises_without_pg_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for key in [k for k in __import__("os").environ if k.startswith("PG")]:
+            monkeypatch.delenv(key, raising=False)
+        with pytest.raises(RuntimeError, match="No PG\\* env vars"):
+            fetch_realistic_queries()
