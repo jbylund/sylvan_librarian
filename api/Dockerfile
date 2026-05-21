@@ -4,6 +4,8 @@ FROM ubuntu:latest
 ARG GIT_SHA=unknown
 ARG GIT_BRANCH=unknown
 
+ENV DEBIAN_FRONTEND=noninteractive
+
 RUN apt-get update -qqq && apt-get install -qqq -y \
     build-essential \
     curl \
