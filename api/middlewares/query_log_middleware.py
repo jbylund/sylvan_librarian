@@ -29,20 +29,15 @@ VALUES (%(q)s, %(cache_hit)s, %(execute_ms)s, %(fetch_ms)s, %(total_ms)s,
 class _QueryLogWriter:
     """Background writer: owns the DB connection, batching, and commit logic."""
 
-    _COMMIT_EVERY_N = 50
-    _COMMIT_EVERY_S = 2.0
-    _DROP_LOG_INTERVAL = 100
+    _FLUSH_EVERY_N = 50
+    _FLUSH_EVERY_S = 2.0
 
     def __init__(self, q: queue.Queue[dict], stop: threading.Event) -> None:
         self._q = q
         self._stop = stop
         self._conn: psycopg.Connection | None = None
-        self._uncommitted = 0
+        self._pending: list[dict] = []
         self._last_commit = time.monotonic()
-
-    # ------------------------------------------------------------------
-    # Connection management
-    # ------------------------------------------------------------------
 
     def _connect(self) -> psycopg.Connection | None:
         creds = get_pg_creds()
@@ -55,70 +50,55 @@ class _QueryLogWriter:
             if self._conn is not None:
                 self._conn.close()
         self._conn = None
-        self._uncommitted = 0
+        self._pending.clear()
         self._last_commit = time.monotonic()
 
-    # ------------------------------------------------------------------
-    # Batching / commit
-    # ------------------------------------------------------------------
-
     def _flush(self) -> None:
-        if self._conn is not None and self._uncommitted:
-            self._conn.commit()
-            self._uncommitted = 0
-            self._last_commit = time.monotonic()
-
-    def _due_for_commit(self) -> bool:
-        return (
-            self._uncommitted >= self._COMMIT_EVERY_N
-            or (time.monotonic() - self._last_commit) >= self._COMMIT_EVERY_S
-        )
-
-    # ------------------------------------------------------------------
-    # Write one entry
-    # ------------------------------------------------------------------
-
-    def _write(self, entry: dict) -> bool:
-        """Insert one entry. Returns False if there is no DB connection (no creds)."""
+        if not self._pending:
+            return
         if self._conn is None or self._conn.closed:
             self._conn = self._connect()
         if self._conn is None:
-            return False
+            logger.warning("QueryLogMiddleware: no PG* env vars set — dropping %d log entries", len(self._pending))
+            self._pending.clear()
+            return
         with self._conn.cursor() as cur:
-            cur.execute(_INSERT_SQL, entry)
-        self._uncommitted += 1
-        if self._due_for_commit():
-            self._flush()
-        return True
+            cur.executemany(_INSERT_SQL, self._pending)
+        self._conn.commit()
+        self._pending.clear()
+        self._last_commit = time.monotonic()
 
-    # ------------------------------------------------------------------
-    # Main loop
-    # ------------------------------------------------------------------
+    def _due_for_flush(self) -> bool:
+        return len(self._pending) >= self._FLUSH_EVERY_N or (time.monotonic() - self._last_commit) >= self._FLUSH_EVERY_S
+
+    def _write(self, entry: dict) -> None:
+        self._pending.append(entry)
+        if self._due_for_flush():
+            self._flush()
 
     def run(self) -> None:
-        dropped = 0
         try:
-            while not self._stop.is_set():
-                try:
-                    entry = self._q.get(timeout=0.05)
-                except queue.Empty:
-                    with contextlib.suppress(Exception):
-                        self._flush()
-                    continue
-                try:
-                    if not self._write(entry):
-                        dropped += 1
-                        if dropped % self._DROP_LOG_INTERVAL == 1:
-                            logger.warning("QueryLogMiddleware: no PG* env vars set — %d log entries dropped so far", dropped)
-                except Exception:
-                    logger.exception("QueryLogMiddleware: failed to write log entry")
-                    self._reset()
-                    time.sleep(1)  # brief back-off before reconnect
+            self._drain_loop()
         finally:
             with contextlib.suppress(Exception):
                 self._flush()
                 if self._conn is not None:
                     self._conn.close()
+
+    def _drain_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                entry = self._q.get(timeout=0.05)
+            except queue.Empty:
+                with contextlib.suppress(Exception):
+                    self._flush()
+                continue
+            try:
+                self._write(entry)
+            except Exception:
+                logger.exception("QueryLogMiddleware: failed to write log entry")
+                self._reset()
+                time.sleep(1)  # brief back-off before reconnect
 
 
 class QueryLogMiddleware:
@@ -129,7 +109,7 @@ class QueryLogMiddleware:
     NULL DB timings) so query frequency can be analysed alongside raw latency.
     """
 
-    def __init__(self: QueryLogMiddleware) -> None:
+    def __init__(self) -> None:
         """Start the background writer thread."""
         self._queue: queue.Queue[dict] = queue.Queue(maxsize=10_000)
         self._stop = threading.Event()
@@ -140,19 +120,15 @@ class QueryLogMiddleware:
         )
         self._writer.start()
 
-    def stop(self: QueryLogMiddleware) -> None:
+    def stop(self) -> None:
         """Signal the background writer to exit and wait for it to finish."""
         self._stop.set()
         self._writer.join(timeout=3)
         if self._writer.is_alive():
             logger.warning("QueryLogMiddleware: writer thread did not exit within 3 seconds")
 
-    # ------------------------------------------------------------------
-    # Falcon middleware hook
-    # ------------------------------------------------------------------
-
     def process_response(
-        self: QueryLogMiddleware,
+        self,
         req: falcon.Request,
         resp: falcon.Response,
         resource: object,
@@ -178,7 +154,7 @@ class QueryLogMiddleware:
         start = req.context.get("_start_time")
         total_ms = (time.monotonic() - start) * 1000 if start is not None else None
 
-        cache_hit = bool(media.get("cache_hit", False))
+        cache_hit = media.get("cache_hit", False)
         children = (media.get("inner_timings") or {}).get("_children") or {}
 
         entry: dict = {
@@ -189,7 +165,7 @@ class QueryLogMiddleware:
             "total_ms": total_ms,
             "result_count": len(media.get("cards") or []),
             "total_cards": media.get("total_cards"),
-            "had_error": not req_succeeded or (resp.status or "")[:1] in ("4", "5"),
+            "had_error": not req_succeeded or (resp.status or "").startswith(("4", "5")),
             "orderby": req.params.get("orderby"),
             "unique_by": req.params.get("unique"),
         }
