@@ -572,15 +572,16 @@ class APIResource:
             key_frequency.update(k for k, v in card.items() if v not in [None, [], {}])
         return key_frequency.most_common()
 
-    _SETUP_COMPLETE_TTL = 60 * 60  # 1 hour; invalidated immediately on successful import
-    _setup_complete_cache: tuple[bool, float] | None = None
+    _SETUP_COMPLETE_TTL = 60 * 60  # 1 hour; also invalidated when _last_import_time changes
+    _setup_complete_cache: tuple[bool, float, float] | None = None  # (result, expires_at, import_time)
 
     def _setup_complete(self) -> bool:
         """Return True if the setup is complete."""
         now = time.monotonic()
+        current_import_time = self._last_import_time.get_obj().value
         if self._setup_complete_cache is not None:
-            result, expires_at = self._setup_complete_cache
-            if now < expires_at:
+            result, expires_at, cached_import_time = self._setup_complete_cache
+            if now < expires_at and current_import_time == cached_import_time:
                 return result
         try:
             with self._conn_pool.connection() as conn:
@@ -593,7 +594,7 @@ class APIResource:
         except Exception as oops:
             logger.error("Error checking if setup is complete: %s", oops, exc_info=True)
             result = False
-        self._setup_complete_cache = (result, now + self._SETUP_COMPLETE_TTL)
+        self._setup_complete_cache = (result, now + self._SETUP_COMPLETE_TTL, current_import_time)
         return result
 
     def _require_setup_complete(self) -> None:
