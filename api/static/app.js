@@ -1,22 +1,22 @@
-const UNIQUE_PRINTING = "printing";
+const UNIQUE_PRINTING = 'printing';
 const DWELL_MS = 2500; // milliseconds user must stay on results before adding a history entry
 
 class CardSearch {
   constructor() {
-    this.searchForm = document.querySelector(".search-container");
-    this.searchInput = document.getElementById("searchInput");
-    this.resultsContainer = document.getElementById("results");
-    this.loadingIndicator = document.getElementById("loading");
-    this.statusMessage = document.getElementById("statusMessage");
-    this.queryExplanation = document.getElementById("queryExplanation");
-    this.orderDropdown = document.getElementById("orderDropdown");
-    this.uniqueDropdown = document.getElementById("uniqueDropdown");
-    this.preferDropdown = document.getElementById("preferDropdown");
-    this.orderToggle = document.getElementById("orderToggle");
-    this.directionInput = document.getElementById("directionInput");
+    this.searchForm = document.querySelector('.search-container');
+    this.searchInput = document.getElementById('searchInput');
+    this.resultsContainer = document.getElementById('results');
+    this.loadingIndicator = document.getElementById('loading');
+    this.statusMessage = document.getElementById('statusMessage');
+    this.queryExplanation = document.getElementById('queryExplanation');
+    this.orderDropdown = document.getElementById('orderDropdown');
+    this.uniqueDropdown = document.getElementById('uniqueDropdown');
+    this.preferDropdown = document.getElementById('preferDropdown');
+    this.orderToggle = document.getElementById('orderToggle');
+    this.directionInput = document.getElementById('directionInput');
 
     // Disable browser autocomplete when JavaScript is enabled
-    this.searchInput.setAttribute("autocomplete", "off");
+    this.searchInput.setAttribute('autocomplete', 'off');
 
     this.debounceTimeout = null;
     this.debounceDelay = 140; // milliseconds
@@ -40,140 +40,140 @@ class CardSearch {
   initManaSymbolPatterns() {
     // Define mana symbol maps once
     const manaMap = {
-      "{R}": "ms ms-r ms-cost",
-      "{G}": "ms ms-g ms-cost",
-      "{W}": "ms ms-w ms-cost",
-      "{U}": "ms ms-u ms-cost",
-      "{B}": "ms ms-b ms-cost",
-      "{C}": "ms ms-c ms-cost",
-      "{0}": "ms ms-0 ms-cost",
-      "{1}": "ms ms-1 ms-cost",
-      "{2}": "ms ms-2 ms-cost",
-      "{3}": "ms ms-3 ms-cost",
-      "{4}": "ms ms-4 ms-cost",
-      "{5}": "ms ms-5 ms-cost",
-      "{6}": "ms ms-6 ms-cost",
-      "{7}": "ms ms-7 ms-cost",
-      "{8}": "ms ms-8 ms-cost",
-      "{9}": "ms ms-9 ms-cost",
-      "{10}": "ms ms-10 ms-cost",
-      "{11}": "ms ms-11 ms-cost",
-      "{12}": "ms ms-12 ms-cost",
-      "{13}": "ms ms-13 ms-cost",
-      "{14}": "ms ms-14 ms-cost",
-      "{15}": "ms ms-15 ms-cost",
-      "{16}": "ms ms-16 ms-cost",
-      "{X}": "ms ms-x ms-cost",
-      "{Y}": "ms ms-y ms-cost",
-      "{Z}": "ms ms-z ms-cost",
-      "{T}": "ms ms-tap",
-      "{Q}": "ms ms-untap",
-      "{E}": "ms ms-energy",
-      "{P}": "ms ms-p ms-cost",
-      "{S}": "ms ms-s ms-cost",
-      "{CHAOS}": "ms ms-chaos",
-      "{PW}": "ms ms-pw",
-      "{∞}": "ms ms-infinity",
+      '{R}': 'ms ms-r ms-cost',
+      '{G}': 'ms ms-g ms-cost',
+      '{W}': 'ms ms-w ms-cost',
+      '{U}': 'ms ms-u ms-cost',
+      '{B}': 'ms ms-b ms-cost',
+      '{C}': 'ms ms-c ms-cost',
+      '{0}': 'ms ms-0 ms-cost',
+      '{1}': 'ms ms-1 ms-cost',
+      '{2}': 'ms ms-2 ms-cost',
+      '{3}': 'ms ms-3 ms-cost',
+      '{4}': 'ms ms-4 ms-cost',
+      '{5}': 'ms ms-5 ms-cost',
+      '{6}': 'ms ms-6 ms-cost',
+      '{7}': 'ms ms-7 ms-cost',
+      '{8}': 'ms ms-8 ms-cost',
+      '{9}': 'ms ms-9 ms-cost',
+      '{10}': 'ms ms-10 ms-cost',
+      '{11}': 'ms ms-11 ms-cost',
+      '{12}': 'ms ms-12 ms-cost',
+      '{13}': 'ms ms-13 ms-cost',
+      '{14}': 'ms ms-14 ms-cost',
+      '{15}': 'ms ms-15 ms-cost',
+      '{16}': 'ms ms-16 ms-cost',
+      '{X}': 'ms ms-x ms-cost',
+      '{Y}': 'ms ms-y ms-cost',
+      '{Z}': 'ms ms-z ms-cost',
+      '{T}': 'ms ms-tap',
+      '{Q}': 'ms ms-untap',
+      '{E}': 'ms ms-energy',
+      '{P}': 'ms ms-p ms-cost',
+      '{S}': 'ms ms-s ms-cost',
+      '{CHAOS}': 'ms ms-chaos',
+      '{PW}': 'ms ms-pw',
+      '{∞}': 'ms ms-infinity',
     };
 
     const hybridMap = {
-      "{W/U}": "ms ms-wu ms-cost",
-      "{U/B}": "ms ms-ub ms-cost",
-      "{B/R}": "ms ms-br ms-cost",
-      "{R/G}": "ms ms-rg ms-cost",
-      "{G/W}": "ms ms-gw ms-cost",
-      "{W/B}": "ms ms-wb ms-cost",
-      "{U/R}": "ms ms-ur ms-cost",
-      "{B/G}": "ms ms-bg ms-cost",
-      "{R/W}": "ms ms-rw ms-cost",
-      "{G/U}": "ms ms-gu ms-cost",
-      "{2/W}": "ms ms-2w ms-cost",
-      "{2/U}": "ms ms-2u ms-cost",
-      "{2/B}": "ms ms-2b ms-cost",
-      "{2/R}": "ms ms-2r ms-cost",
-      "{2/G}": "ms ms-2g ms-cost",
-      "{W/P}": "ms ms-wp ms-cost",
-      "{U/P}": "ms ms-up ms-cost",
-      "{B/P}": "ms ms-bp ms-cost",
-      "{R/P}": "ms ms-rp ms-cost",
-      "{G/P}": "ms ms-gp ms-cost",
-      "{W/U/P}": "ms ms-wup ms-cost",
-      "{W/B/P}": "ms ms-wbp ms-cost",
-      "{U/B/P}": "ms ms-ubp ms-cost",
-      "{U/R/P}": "ms ms-urp ms-cost",
-      "{B/R/P}": "ms ms-brp ms-cost",
-      "{B/G/P}": "ms ms-bgp ms-cost",
-      "{R/W/P}": "ms ms-rwp ms-cost",
-      "{R/G/P}": "ms ms-rgp ms-cost",
-      "{G/W/P}": "ms ms-gwp ms-cost",
-      "{G/U/P}": "ms ms-gup ms-cost",
+      '{W/U}': 'ms ms-wu ms-cost',
+      '{U/B}': 'ms ms-ub ms-cost',
+      '{B/R}': 'ms ms-br ms-cost',
+      '{R/G}': 'ms ms-rg ms-cost',
+      '{G/W}': 'ms ms-gw ms-cost',
+      '{W/B}': 'ms ms-wb ms-cost',
+      '{U/R}': 'ms ms-ur ms-cost',
+      '{B/G}': 'ms ms-bg ms-cost',
+      '{R/W}': 'ms ms-rw ms-cost',
+      '{G/U}': 'ms ms-gu ms-cost',
+      '{2/W}': 'ms ms-2w ms-cost',
+      '{2/U}': 'ms ms-2u ms-cost',
+      '{2/B}': 'ms ms-2b ms-cost',
+      '{2/R}': 'ms ms-2r ms-cost',
+      '{2/G}': 'ms ms-2g ms-cost',
+      '{W/P}': 'ms ms-wp ms-cost',
+      '{U/P}': 'ms ms-up ms-cost',
+      '{B/P}': 'ms ms-bp ms-cost',
+      '{R/P}': 'ms ms-rp ms-cost',
+      '{G/P}': 'ms ms-gp ms-cost',
+      '{W/U/P}': 'ms ms-wup ms-cost',
+      '{W/B/P}': 'ms ms-wbp ms-cost',
+      '{U/B/P}': 'ms ms-ubp ms-cost',
+      '{U/R/P}': 'ms ms-urp ms-cost',
+      '{B/R/P}': 'ms ms-brp ms-cost',
+      '{B/G/P}': 'ms ms-bgp ms-cost',
+      '{R/W/P}': 'ms ms-rwp ms-cost',
+      '{R/G/P}': 'ms ms-rgp ms-cost',
+      '{G/W/P}': 'ms ms-gwp ms-cost',
+      '{G/U/P}': 'ms ms-gup ms-cost',
     };
 
     const manaTextMap = {
-      "{W}": "☀️",
-      "{U}": "💧",
-      "{B}": "💀",
-      "{R}": "🔥",
-      "{G}": "🌳",
-      "{C}": "◇",
-      "{T}": "↻",
-      "{Q}": "↺",
-      "{E}": "⚡",
-      "{P}": "Φ",
-      "{S}": "❄",
-      "{X}": "X",
-      "{Y}": "Y",
-      "{Z}": "Z",
-      "{0}": "⓪",
-      "{1}": "①",
-      "{2}": "②",
-      "{3}": "③",
-      "{4}": "④",
-      "{5}": "⑤",
-      "{6}": "⑥",
-      "{7}": "⑦",
-      "{8}": "⑧",
-      "{9}": "⑨",
-      "{10}": "⑩",
-      "{11}": "⑪",
-      "{12}": "⑫",
-      "{13}": "⑬",
-      "{14}": "⑭",
-      "{15}": "⑮",
-      "{16}": "⑯",
-      "{CHAOS}": "🌀",
-      "{PW}": "PW",
-      "{∞}": "♾︎",
-      "{W/U}": "(☀️/💧)",
-      "{U/B}": "(💧/💀)",
-      "{B/R}": "(💀/🔥)",
-      "{R/G}": "(🔥/🌳)",
-      "{G/W}": "(🌳/☀️)",
-      "{W/B}": "(☀️/💀)",
-      "{U/R}": "(💧/🔥)",
-      "{B/G}": "(💀/🌳)",
-      "{R/W}": "(🔥/☀️)",
-      "{G/U}": "(🌳/💧)",
-      "{2/W}": "(②/☀️)",
-      "{2/U}": "(②/💧)",
-      "{2/B}": "(②/💀)",
-      "{2/R}": "(②/🔥)",
-      "{2/G}": "(②/🌳)",
-      "{W/P}": "(☀️/Φ)",
-      "{U/P}": "(💧/Φ)",
-      "{B/P}": "(💀/Φ)",
-      "{R/P}": "(🔥/Φ)",
-      "{G/P}": "(🌳/Φ)",
-      "{W/U/P}": "(☀️/💧/Φ)",
-      "{W/B/P}": "(☀️/💀/Φ)",
-      "{U/B/P}": "(💧/💀/Φ)",
-      "{U/R/P}": "(💧/🔥/Φ)",
-      "{B/R/P}": "(💀/🔥/Φ)",
-      "{B/G/P}": "(💀/🌳/Φ)",
-      "{R/W/P}": "(🔥/☀️/Φ)",
-      "{R/G/P}": "(🔥/🌳/Φ)",
-      "{G/W/P}": "(🌳/☀️/Φ)",
-      "{G/U/P}": "(🌳/💧/Φ)",
+      '{W}': '☀️',
+      '{U}': '💧',
+      '{B}': '💀',
+      '{R}': '🔥',
+      '{G}': '🌳',
+      '{C}': '◇',
+      '{T}': '↻',
+      '{Q}': '↺',
+      '{E}': '⚡',
+      '{P}': 'Φ',
+      '{S}': '❄',
+      '{X}': 'X',
+      '{Y}': 'Y',
+      '{Z}': 'Z',
+      '{0}': '⓪',
+      '{1}': '①',
+      '{2}': '②',
+      '{3}': '③',
+      '{4}': '④',
+      '{5}': '⑤',
+      '{6}': '⑥',
+      '{7}': '⑦',
+      '{8}': '⑧',
+      '{9}': '⑨',
+      '{10}': '⑩',
+      '{11}': '⑪',
+      '{12}': '⑫',
+      '{13}': '⑬',
+      '{14}': '⑭',
+      '{15}': '⑮',
+      '{16}': '⑯',
+      '{CHAOS}': '🌀',
+      '{PW}': 'PW',
+      '{∞}': '♾︎',
+      '{W/U}': '(☀️/💧)',
+      '{U/B}': '(💧/💀)',
+      '{B/R}': '(💀/🔥)',
+      '{R/G}': '(🔥/🌳)',
+      '{G/W}': '(🌳/☀️)',
+      '{W/B}': '(☀️/💀)',
+      '{U/R}': '(💧/🔥)',
+      '{B/G}': '(💀/🌳)',
+      '{R/W}': '(🔥/☀️)',
+      '{G/U}': '(🌳/💧)',
+      '{2/W}': '(②/☀️)',
+      '{2/U}': '(②/💧)',
+      '{2/B}': '(②/💀)',
+      '{2/R}': '(②/🔥)',
+      '{2/G}': '(②/🌳)',
+      '{W/P}': '(☀️/Φ)',
+      '{U/P}': '(💧/Φ)',
+      '{B/P}': '(💀/Φ)',
+      '{R/P}': '(🔥/Φ)',
+      '{G/P}': '(🌳/Φ)',
+      '{W/U/P}': '(☀️/💧/Φ)',
+      '{W/B/P}': '(☀️/💀/Φ)',
+      '{U/B/P}': '(💧/💀/Φ)',
+      '{U/R/P}': '(💧/🔥/Φ)',
+      '{B/R/P}': '(💀/🔥/Φ)',
+      '{B/G/P}': '(💀/🌳/Φ)',
+      '{R/W/P}': '(🔥/☀️/Φ)',
+      '{R/G/P}': '(🔥/🌳/Φ)',
+      '{G/W/P}': '(🌳/☀️/Φ)',
+      '{G/U/P}': '(🌳/💧/Φ)',
     };
 
     // Cache the merged symbol map for convertManaSymbols
@@ -193,17 +193,17 @@ class CardSearch {
 
     // On page load, check for query params and restore state
     const params = new URLSearchParams(window.location.search);
-    const initialQuery = params.get("q") || "";
-    const initialOrder = params.get("orderby") || "edhrec";
-    const initialDirection = params.get("direction") || "asc";
-    const initialUnique = params.get("unique") || "card";
-    const initialPrefer = params.get("prefer") || "default";
+    const initialQuery = params.get('q') || '';
+    const initialOrder = params.get('orderby') || 'edhrec';
+    const initialDirection = params.get('direction') || 'asc';
+    const initialUnique = params.get('unique') || 'card';
+    const initialPrefer = params.get('prefer') || 'default';
 
     // Set the order controls to match URL params
     this.orderDropdown.value = initialOrder;
     this.uniqueDropdown.value = initialUnique;
     this.preferDropdown.value = initialPrefer;
-    this.isAscending = initialDirection === "asc";
+    this.isAscending = initialDirection === 'asc';
     this.directionInput.value = initialDirection;
     this.updateOrderToggleAppearance();
     this.updatePreferVisibility();
@@ -212,7 +212,7 @@ class CardSearch {
       this.searchInput.value = initialQuery;
       // Record arrival time so we only push this state when leaving if they stayed > DWELL_MS
       const initialUrl = this.buildCurrentSearchUrl();
-      window.history.replaceState({ arrivalTime: Date.now() }, "", initialUrl);
+      window.history.replaceState({ arrivalTime: Date.now() }, '', initialUrl);
       // Check if we have embedded search results from the server
       if (window.EMBEDDED_SEARCH_RESULTS) {
         // Use the embedded results directly without making an API call
@@ -229,19 +229,19 @@ class CardSearch {
     }
 
     // Back/forward: restore search state from URL and re-fetch results
-    window.addEventListener("popstate", () => {
+    window.addEventListener('popstate', () => {
       const params = new URLSearchParams(window.location.search);
-      const q = params.get("q") || "";
-      const orderby = params.get("orderby") || "edhrec";
-      const direction = params.get("direction") || "asc";
-      const unique = params.get("unique") || "card";
-      const prefer = params.get("prefer") || "default";
+      const q = params.get('q') || '';
+      const orderby = params.get('orderby') || 'edhrec';
+      const direction = params.get('direction') || 'asc';
+      const unique = params.get('unique') || 'card';
+      const prefer = params.get('prefer') || 'default';
 
       this.searchInput.value = q;
       this.orderDropdown.value = orderby;
       this.uniqueDropdown.value = unique;
       this.preferDropdown.value = prefer;
-      this.isAscending = direction === "asc";
+      this.isAscending = direction === 'asc';
       this.directionInput.value = direction;
       this.updateOrderToggleAppearance();
       this.updatePreferVisibility();
@@ -257,64 +257,64 @@ class CardSearch {
     });
 
     // Prevent form submission when JavaScript is enabled
-    this.searchForm.addEventListener("submit", (e) => {
+    this.searchForm.addEventListener('submit', e => {
       e.preventDefault();
       clearTimeout(this.debounceTimeout);
       this.performSearch(this.searchInput.value);
     });
 
-    this.searchInput.addEventListener("input", (e) => {
+    this.searchInput.addEventListener('input', e => {
       const query = e.target.value;
       this.handleSearch(query);
       // Update the URL as the user types
       const order = this.orderDropdown.value;
       const unique = this.uniqueDropdown.value;
       const prefer = this.preferDropdown.value;
-      const direction = this.isAscending ? "asc" : "desc";
+      const direction = this.isAscending ? 'asc' : 'desc';
       this.updateURL(query, order, direction, unique, prefer);
     });
 
     // Handle enter key for immediate search
-    this.searchInput.addEventListener("keypress", (e) => {
-      if (e.key === "Enter") {
+    this.searchInput.addEventListener('keypress', e => {
+      if (e.key === 'Enter') {
         clearTimeout(this.debounceTimeout);
         this.performSearch(e.target.value);
       }
     });
 
     // Add event delegation for card clicks
-    this.resultsContainer.addEventListener("click", (e) => {
-      const cardItem = e.target.closest(".card-item");
+    this.resultsContainer.addEventListener('click', e => {
+      const cardItem = e.target.closest('.card-item');
       if (cardItem) {
         this.handleCardClick(cardItem);
       }
     });
 
     // Add click handler for header to clear search
-    document.querySelector(".header h1").addEventListener("click", () => {
+    document.querySelector('.header h1').addEventListener('click', () => {
       this.clearSearch();
     });
 
     // Add event listeners for order controls
-    this.orderDropdown.addEventListener("change", () => {
+    this.orderDropdown.addEventListener('change', () => {
       this.handleOrderChange();
     });
 
-    this.uniqueDropdown.addEventListener("change", () => {
+    this.uniqueDropdown.addEventListener('change', () => {
       this.updatePreferVisibility();
       this.handleUniqueChange();
     });
 
-    this.preferDropdown.addEventListener("change", () => {
+    this.preferDropdown.addEventListener('change', () => {
       this.handlePreferChange();
     });
 
-    this.orderToggle.addEventListener("click", () => {
+    this.orderToggle.addEventListener('click', () => {
       this.toggleOrderDirection();
     });
 
     // Add resize listener to update columns dynamically
-    window.addEventListener("resize", () => {
+    window.addEventListener('resize', () => {
       this.updateGridColumns(this.currentCardCount);
     });
   }
@@ -335,7 +335,7 @@ class CardSearch {
     // rather than waiting for the debounce to fire a new request.
     if (this.currentController && !this.currentController.signal.aborted) {
       const inFlightQuery = this.currentRequestUrl
-        ? new URLSearchParams(this.currentRequestUrl.split("?")[1]).get("q")
+        ? new URLSearchParams(this.currentRequestUrl.split('?')[1]).get('q')
         : null;
       if (inFlightQuery !== this._processQuery(query)) {
         this.currentController.abort();
@@ -352,14 +352,14 @@ class CardSearch {
   _processQuery(query) {
     const autocompleted = this.autoCompleteQuery(query);
     const balanced = this.balanceQuery(autocompleted);
-    const normalized = balanced.trim().replace(/\s+/g, " ");
+    const normalized = balanced.trim().replace(/\s+/g, ' ');
     return normalized;
   }
 
   async fetchCommonCardTypes() {
     // Use the promise that was started at the very top of the page (before CSS parsing)
     this.commonCardTypes = await (window.commonCardTypesPromise || Promise.resolve([]));
-    console.debug("Loaded", this.commonCardTypes.length, "common card types");
+    console.debug('Loaded', this.commonCardTypes.length, 'common card types');
   }
 
   autoCompleteQuery(query) {
@@ -377,7 +377,7 @@ class CardSearch {
 
     // Find the most common type that starts with this prefix
     const bestMatch = this.commonCardTypes
-      .filter((type) => type.t.toLowerCase().startsWith(prefix))
+      .filter(type => type.t.toLowerCase().startsWith(prefix))
       .sort((a, b) => b.n - a.n)[0]; // Get the most frequent match
 
     if (!bestMatch) {
@@ -405,7 +405,7 @@ class CardSearch {
     }
 
     // Auto-complete the query
-    const completedQuery = query.replace(/(?:^|\s)(?:t|type):[a-zA-Z]*$/i, (match) => {
+    const completedQuery = query.replace(/(?:^|\s)(?:t|type):[a-zA-Z]*$/i, match => {
       return match.replace(/[a-zA-Z]+$/, completedType);
     });
 
@@ -415,10 +415,10 @@ class CardSearch {
   balanceQuery(query) {
     // Balance quotes and parentheses for typeahead searches using a stack
     const charToMirror = {
-      "(": ")",
+      '(': ')',
       "'": "'", // single quote is own mirror
       '"': '"', // double quote is own mirror
-      ")": "(",
+      ')': '(',
     };
     const quoteChars = new Set(["'", '"']);
 
@@ -451,7 +451,7 @@ class CardSearch {
     }
 
     // Build the closing characters from the stack in reverse order
-    let closing = "";
+    let closing = '';
     while (stack.length > 0) {
       const char = stack.pop();
       closing += charToMirror[char];
@@ -471,7 +471,7 @@ class CardSearch {
     const order = this.orderDropdown.value;
     const unique = this.uniqueDropdown.value;
     const prefer = this.preferDropdown.value;
-    const orderDirection = this.isAscending ? "asc" : "desc";
+    const orderDirection = this.isAscending ? 'asc' : 'desc';
 
     // Generate the URL for this request
     const url = `/search?q=${encodeURIComponent(normalizedQuery)}&orderby=${order}&direction=${orderDirection}&unique=${unique}&prefer=${prefer}`;
@@ -496,9 +496,9 @@ class CardSearch {
       // Take a timestamp just before sending the request
       const startTimestampMs = performance.now();
       const response = await fetch(url, {
-        method: "GET",
+        method: 'GET',
         headers: {
-          Accept: "application/json",
+          Accept: 'application/json',
         },
         signal: controller.signal,
       });
@@ -512,14 +512,14 @@ class CardSearch {
           if (controller.signal.aborted) return;
           if (errorData.title && errorData.description) {
             // If description is an object (like with 500 errors), just use the title
-            if (typeof errorData.description === "object") {
+            if (typeof errorData.description === 'object') {
               errorMessage = errorData.title;
             } else {
               errorMessage = `${errorData.title}: ${errorData.description}`;
             }
           } else if (errorData.description) {
             // Only use description if it's a string, not an object
-            if (typeof errorData.description === "string") {
+            if (typeof errorData.description === 'string') {
               errorMessage = errorData.description;
             }
           }
@@ -537,17 +537,17 @@ class CardSearch {
 
       // Use PerformanceResourceTiming to get the network time
       let elapsed = null;
-      const resources = performance.getEntriesByType("resource");
+      const resources = performance.getEntriesByType('resource');
       // Find the most recent entry for this URL
       // (If there are multiple, pick the last one)
-      const matching = resources.filter((e) => e.name.includes(url));
+      const matching = resources.filter(e => e.name.includes(url));
       if (matching.length > 0) {
         const entry = matching[matching.length - 1];
         // responseEnd - startTime is the total time as shown in dev tools
         elapsed = Math.round(entry.responseEnd - entry.startTime);
       }
       // Use the minimum of PerformanceResourceTiming and our computed duration
-      if (typeof elapsed === "number") {
+      if (typeof elapsed === 'number') {
         elapsed = Math.min(elapsed, computedRoundTripMs);
       } else {
         elapsed = computedRoundTripMs;
@@ -557,8 +557,8 @@ class CardSearch {
       this.lastCompletedUrl = url;
       this.displayResults(data, normalizedQuery, elapsed);
     } catch (error) {
-      if (error.name === "AbortError") return;
-      console.error("Search error:", error);
+      if (error.name === 'AbortError') return;
+      console.error('Search error:', error);
       this.showError(`Failed to search: ${error.message}`);
     } finally {
       // Only clear the shared references if they still belong to this request
@@ -572,7 +572,7 @@ class CardSearch {
   displayResults(data, query, elapsed) {
     const cards = data.cards || [];
     const totalCards = data.total_cards || cards.length;
-    const queryExplanation = data.query_explanation || "";
+    const queryExplanation = data.query_explanation || '';
 
     if (cards.length === 0) {
       this.showNoResults();
@@ -586,12 +586,12 @@ class CardSearch {
     this.cardsData.clear();
     cards.forEach((card, index) => {
       const cardId = index.toString();
-      console.debug("Storing card with ID:", cardId, "Card data:", card);
+      console.debug('Storing card with ID:', cardId, 'Card data:', card);
       this.cardsData.set(cardId, card);
     });
 
-    console.debug("Total cards stored in cardsData:", this.cardsData.size);
-    console.debug("CardsData keys:", Array.from(this.cardsData.keys()));
+    console.debug('Total cards stored in cardsData:', this.cardsData.size);
+    console.debug('CardsData keys:', Array.from(this.cardsData.keys()));
 
     this.showResultsCount(totalCards, query, elapsed);
 
@@ -606,11 +606,11 @@ class CardSearch {
 
     this.resultsContainer.innerHTML = cards
       .map((card, index) => this.createCardHTML(card, index, index < firstRowCount))
-      .join("");
+      .join('');
 
     // Record arrival time; we only push this state when leaving if they stayed > DWELL_MS and it's not already saved (updateURL)
     const url = this.buildCurrentSearchUrl();
-    window.history.replaceState({ arrivalTime: Date.now() }, "", url);
+    window.history.replaceState({ arrivalTime: Date.now() }, '', url);
   }
 
   getColumnsFromViewportWidth() {
@@ -663,30 +663,30 @@ class CardSearch {
     const cardId = index.toString();
 
     // Build image URLs for srcset - using 4 sizes uniformly spread between 280 and 745
-    const image280 = this.buildImageUrl(card, "280");
-    const image388 = this.buildImageUrl(card, "388");
-    const image538 = this.buildImageUrl(card, "538");
-    const image745 = this.buildImageUrl(card, "745");
+    const image280 = this.buildImageUrl(card, '280');
+    const image388 = this.buildImageUrl(card, '388');
+    const image538 = this.buildImageUrl(card, '538');
+    const image745 = this.buildImageUrl(card, '745');
 
     // Debug logging
-    console.debug("Creating card HTML for:", card);
-    console.debug("Card ID will be:", cardId);
+    console.debug('Creating card HTML for:', card);
+    console.debug('Card ID will be:', cardId);
 
     // Create descriptive alt text with card name, mana cost, and oracle text
-    let altText = this.escapeHtml(card.name || "Unknown Card");
+    let altText = this.escapeHtml(card.name || 'Unknown Card');
     if (card.mana_cost) {
       // Convert mana symbols to Unicode for alt text
       const manaTextRepresentation = this.convertManaSymbolsToText(card.mana_cost);
       altText += ` / ${this.escapeHtml(manaTextRepresentation)}`;
     }
-    altText += "\n\n";
+    altText += '\n\n';
     if (card.oracle_text) {
       // Convert mana symbols in oracle text to Unicode for alt text first, then truncate
       const oracleTextWithSymbols = this.convertManaSymbolsToText(card.oracle_text);
       const maxLength = 300;
       const truncatedText =
         oracleTextWithSymbols.length > maxLength
-          ? oracleTextWithSymbols.substring(0, maxLength) + "..."
+          ? oracleTextWithSymbols.substring(0, maxLength) + '...'
           : oracleTextWithSymbols;
       altText += this.escapeHtml(truncatedText);
     }
@@ -700,24 +700,24 @@ class CardSearch {
     // - >= 2500px: 5 columns (20vw minus gap/padding)
     const srcset = `${this.escapeHtml(image280)} 280w, ${this.escapeHtml(image388)} 388w, ${this.escapeHtml(image538)} 538w, ${this.escapeHtml(image745)} 745w`;
     const sizes =
-      "(max-width: 410px) calc(100vw - 60px), (max-width: 750px) calc(50vw - 30px), (max-width: 1370px) calc(33.33vw - 25px), (max-width: 2500px) calc(25vw - 20px), calc(20vw - 15px)";
+      '(max-width: 410px) calc(100vw - 60px), (max-width: 750px) calc(50vw - 30px), (max-width: 1370px) calc(33.33vw - 25px), (max-width: 2500px) calc(25vw - 20px), calc(20vw - 15px)';
 
     // Use 388px as default src (good middle ground for initial load)
     // Add fetchpriority="high" for first row cards to improve LCP
     // Add loading="lazy" for non-first-row images to improve initial load
-    const fetchPriorityAttr = isFirstRow ? ' fetchpriority="high"' : "";
-    const loadingAttr = isFirstRow ? "" : ' loading="lazy"';
+    const fetchPriorityAttr = isFirstRow ? ' fetchpriority="high"' : '';
+    const loadingAttr = isFirstRow ? '' : ' loading="lazy"';
     const imageHtml = `<img class="card-image" src="${this.escapeHtml(image388)}" srcset="${srcset}" sizes="${sizes}" alt="${altText}" title="${altText}"${fetchPriorityAttr}${loadingAttr} />`;
 
     return `
        <div class="card-item" data-card-id="${this.escapeHtml(cardId)}">
            ${imageHtml}
            <div class="card-name-mana-row">
-               <div class="card-name">${this.escapeHtml(card.name || "Unknown Card")}</div>
-               ${card.mana_cost ? `<div class="card-mana">${this.convertManaSymbols(card.mana_cost, false)}</div>` : ""}
+               <div class="card-name">${this.escapeHtml(card.name || 'Unknown Card')}</div>
+               ${card.mana_cost ? `<div class="card-mana">${this.convertManaSymbols(card.mana_cost, false)}</div>` : ''}
            </div>
-           ${card.type_line ? `<div class="card-type">${this.escapeHtml(card.type_line)}</div>` : ""}
-           ${card.oracle_text ? `<div class="card-text">${this.formatOracleText(card.oracle_text.substring(0, 200), false)}${card.oracle_text.length > 200 ? "..." : ""}</div>` : ""}
+           ${card.type_line ? `<div class="card-type">${this.escapeHtml(card.type_line)}</div>` : ''}
+           ${card.oracle_text ? `<div class="card-text">${this.formatOracleText(card.oracle_text.substring(0, 200), false)}${card.oracle_text.length > 200 ? '...' : ''}</div>` : ''}
            ${(() => {
              const hasPowerToughness =
                card.power !== null &&
@@ -728,10 +728,10 @@ class CardSearch {
                ? `
            <div class="card-set-power-row">
                ${card.set_name ? `<div class="card-set">${this.escapeHtml(card.set_name)}</div>` : '<div class="card-set"></div>'}
-               ${hasPowerToughness ? `<div class="card-power-toughness">${this.escapeHtml(card.power)} / ${this.escapeHtml(card.toughness)}</div>` : ""}
+               ${hasPowerToughness ? `<div class="card-power-toughness">${this.escapeHtml(card.power)} / ${this.escapeHtml(card.toughness)}</div>` : ''}
            </div>
            `
-               : "";
+               : '';
            })()}
        </div>
    `;
@@ -739,35 +739,35 @@ class CardSearch {
 
   handleCardClick(cardItem) {
     try {
-      const cardId = cardItem.getAttribute("data-card-id");
-      console.log("Clicked card with ID:", cardId);
-      console.log("Available cards in cardsData:", Array.from(this.cardsData.keys()));
-      console.log("Looking for card with ID:", cardId);
+      const cardId = cardItem.getAttribute('data-card-id');
+      console.log('Clicked card with ID:', cardId);
+      console.log('Available cards in cardsData:', Array.from(this.cardsData.keys()));
+      console.log('Looking for card with ID:', cardId);
 
       const cardData = this.cardsData.get(cardId);
 
       if (cardData) {
-        console.log("Selected card:", cardData.name);
+        console.log('Selected card:', cardData.name);
         this.showCardModal(cardData);
       } else {
-        console.error("Card data not found for ID:", cardId);
-        console.error("Available card IDs:", Array.from(this.cardsData.keys()));
+        console.error('Card data not found for ID:', cardId);
+        console.error('Available card IDs:', Array.from(this.cardsData.keys()));
       }
     } catch (e) {
-      console.error("Error handling card click:", e);
+      console.error('Error handling card click:', e);
     }
   }
 
   showCardModal(card) {
-    const modalOverlay = document.getElementById("modalOverlay");
-    const modalContent = document.getElementById("modalContent");
+    const modalOverlay = document.getElementById('modalOverlay');
+    const modalContent = document.getElementById('modalContent');
 
     // Create modal content
-    const imageLarge = this.buildImageUrl(card, "745");
+    const imageLarge = this.buildImageUrl(card, '745');
     // Build image element
-    let imageHtml = "";
+    let imageHtml = '';
     if (imageLarge) {
-      const imgTag = `<img class="modal-image" src="${this.escapeHtml(imageLarge)}" width="745" height="1040" alt="${this.escapeHtml(card.name || "Card Image")}" />`;
+      const imgTag = `<img class="modal-image" src="${this.escapeHtml(imageLarge)}" width="745" height="1040" alt="${this.escapeHtml(card.name || 'Card Image')}" />`;
       if (card.set_code && card.collector_number) {
         // Build manapool.com referral URL
         // Set codes and collector numbers from our database are safe for URLs
@@ -783,64 +783,61 @@ class CardSearch {
       ${imageHtml}
       <div class="modal-card-info">
         <div class="modal-card-name-mana-row">
-          <div class="modal-card-name">${this.escapeHtml(card.name || "Unknown Card")}</div>
-          ${card.mana_cost ? `<div class="modal-card-mana">${this.convertManaSymbols(card.mana_cost, true)}</div>` : ""}
+          <div class="modal-card-name">${this.escapeHtml(card.name || 'Unknown Card')}</div>
+          ${card.mana_cost ? `<div class="modal-card-mana">${this.convertManaSymbols(card.mana_cost, true)}</div>` : ''}
         </div>
-        ${card.type_line ? `<div class="modal-card-type">${this.escapeHtml(card.type_line)}</div>` : ""}
-        ${card.oracle_text ? `<div class="modal-card-text">${this.formatOracleText(card.oracle_text, true)}</div>` : ""}
+        ${card.type_line ? `<div class="modal-card-type">${this.escapeHtml(card.type_line)}</div>` : ''}
+        ${card.oracle_text ? `<div class="modal-card-text">${this.formatOracleText(card.oracle_text, true)}</div>` : ''}
         ${(() => {
           const hasPowerToughness =
-            card.power !== null &&
-            card.power !== undefined &&
-            card.toughness !== null &&
-            card.toughness !== undefined;
+            card.power !== null && card.power !== undefined && card.toughness !== null && card.toughness !== undefined;
           return card.set_name || hasPowerToughness
             ? `
         <div class="modal-card-set-power-row">
           ${card.set_name ? `<div class="modal-card-set">${this.escapeHtml(card.set_name)}</div>` : '<div class="modal-card-set"></div>'}
-          ${hasPowerToughness ? `<div class="modal-card-power-toughness">${this.escapeHtml(card.power)} / ${this.escapeHtml(card.toughness)}</div>` : ""}
+          ${hasPowerToughness ? `<div class="modal-card-power-toughness">${this.escapeHtml(card.power)} / ${this.escapeHtml(card.toughness)}</div>` : ''}
         </div>
         `
-            : "";
+            : '';
         })()}
       </div>
     `;
 
     // Show modal
-    modalOverlay.style.display = "flex";
+    modalOverlay.style.display = 'flex';
 
     // Reset scroll position to top for both modal content and card info
     // (different elements scroll on different viewport sizes)
     modalContent.scrollTop = 0;
-    const modalCardInfo = modalContent.querySelector(".modal-card-info");
+    const modalCardInfo = modalContent.querySelector('.modal-card-info');
     modalCardInfo.scrollTop = 0;
 
     // Prevent background scrolling more comprehensively
     this.preventBackgroundScroll();
 
     // Add click outside to close
-    modalOverlay.onclick = (e) => {
+    modalOverlay.onclick = e => {
       if (e.target === modalOverlay) {
         this.closeModal();
       }
     };
 
     // Add escape key to close
-    document.addEventListener("keydown", this.handleEscapeKey);
+    document.addEventListener('keydown', this.handleEscapeKey);
   }
 
   closeModal() {
-    const modalOverlay = document.getElementById("modalOverlay");
-    modalOverlay.style.display = "none";
+    const modalOverlay = document.getElementById('modalOverlay');
+    modalOverlay.style.display = 'none';
 
     // Restore background scrolling
     this.restoreBackgroundScroll();
 
-    document.removeEventListener("keydown", this.handleEscapeKey);
+    document.removeEventListener('keydown', this.handleEscapeKey);
   }
 
-  handleEscapeKey = (e) => {
-    if (e.key === "Escape") {
+  handleEscapeKey = e => {
+    if (e.key === 'Escape') {
       this.closeModal();
     }
   };
@@ -850,21 +847,21 @@ class CardSearch {
     this.scrollPosition = window.pageYOffset || document.documentElement.scrollTop;
 
     // Prevent scrolling on body
-    document.body.style.overflow = "hidden";
-    document.body.style.position = "fixed";
+    document.body.style.overflow = 'hidden';
+    document.body.style.position = 'fixed';
     document.body.style.top = `-${this.scrollPosition}px`;
-    document.body.style.width = "100%";
+    document.body.style.width = '100%';
 
     // Prevent touch events on the body (for mobile)
-    document.body.addEventListener("touchmove", this.preventTouchMove, { passive: false });
+    document.body.addEventListener('touchmove', this.preventTouchMove, { passive: false });
   }
 
   restoreBackgroundScroll() {
     // Restore body styles
-    document.body.style.overflow = "";
-    document.body.style.position = "";
-    document.body.style.top = "";
-    document.body.style.width = "";
+    document.body.style.overflow = '';
+    document.body.style.position = '';
+    document.body.style.top = '';
+    document.body.style.width = '';
 
     // Restore scroll position
     if (this.scrollPosition !== undefined) {
@@ -872,19 +869,19 @@ class CardSearch {
     }
 
     // Remove touch event listener
-    document.body.removeEventListener("touchmove", this.preventTouchMove);
+    document.body.removeEventListener('touchmove', this.preventTouchMove);
   }
 
-  preventTouchMove = (e) => {
+  preventTouchMove = e => {
     // Allow touch events only on the modal content
-    const modalContent = document.getElementById("modalContent");
+    const modalContent = document.getElementById('modalContent');
     if (modalContent && !modalContent.contains(e.target)) {
       e.preventDefault();
     }
   };
 
   showLoading() {
-    console.debug("Showing loading");
+    console.debug('Showing loading');
     // Do not toggle card/result visibility; only update the status container
     if (this.statusMessage) {
       this.statusMessage.innerHTML = '<div class="results-count">Loading…</div>';
@@ -893,7 +890,7 @@ class CardSearch {
   }
 
   showError(message) {
-    console.log("Showing error:", message);
+    console.log('Showing error:', message);
     if (this.statusMessage) {
       this.statusMessage.innerHTML = `<div class="error-message">${this.escapeHtml(message)}</div>`;
     }
@@ -901,28 +898,27 @@ class CardSearch {
   }
 
   showNoResults() {
-    console.log("Showing no results");
+    console.log('Showing no results');
     if (this.statusMessage) {
-      this.statusMessage.innerHTML =
-        '<div class="no-results">No cards found matching your search.</div>';
+      this.statusMessage.innerHTML = '<div class="no-results">No cards found matching your search.</div>';
     }
     this.clearResultsContainer();
   }
 
   clearResultsContainer() {
-    this.resultsContainer.innerHTML = "";
+    this.resultsContainer.innerHTML = '';
   }
 
   showResultsCount(count, query, elapsed) {
     console.log(`Showing results: count: ${count}, query: ${query}, elapsed: ${elapsed}`);
     const formattedCount = count.toLocaleString();
     const uniqueValue = this.uniqueDropdown.value;
-    const itemType = uniqueValue + (count !== 1 ? "s" : "");
+    const itemType = uniqueValue + (count !== 1 ? 's' : '');
 
     let msg;
     if (query) {
       msg = `Found ${formattedCount} ${itemType} matching "${query}"`;
-      if (typeof elapsed === "number") {
+      if (typeof elapsed === 'number') {
         msg += ` (completed in ${elapsed}ms)`;
       }
     } else {
@@ -941,9 +937,9 @@ class CardSearch {
 
     this.showLoading();
     try {
-      const response = await fetch("/random_search?num_cards=10", {
-        method: "GET",
-        headers: { Accept: "application/json" },
+      const response = await fetch('/random_search?num_cards=10', {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
         signal: controller.signal,
       });
       if (controller.signal.aborted) return;
@@ -955,7 +951,7 @@ class CardSearch {
       if (controller.signal.aborted) return;
       this.displayResults(data, null, null);
     } catch (error) {
-      if (error.name === "AbortError") return;
+      if (error.name === 'AbortError') return;
       this.clearMessages();
     } finally {
       if (this.currentController === controller) {
@@ -973,10 +969,10 @@ class CardSearch {
     if (explanation && explanation.trim()) {
       // Display the explanation
       this.queryExplanation.textContent = explanation;
-      this.queryExplanation.style.display = "block";
+      this.queryExplanation.style.display = 'block';
     } else {
       // Hide the explanation if empty
-      this.queryExplanation.style.display = "none";
+      this.queryExplanation.style.display = 'none';
     }
   }
 
@@ -985,12 +981,12 @@ class CardSearch {
     if (this.imageObserver) {
       this.imageObserver.disconnect();
     }
-    this.resultsContainer.innerHTML = "";
+    this.resultsContainer.innerHTML = '';
     this.currentCardCount = 0; // Reset card count
     this.clearMessages();
     // Clear query explanation
     if (this.queryExplanation) {
-      this.queryExplanation.style.display = "none";
+      this.queryExplanation.style.display = 'none';
     }
   }
 
@@ -1000,18 +996,18 @@ class CardSearch {
     this.lastCompletedUrl = null;
 
     // Clear the search input
-    this.searchInput.value = "";
+    this.searchInput.value = '';
 
     // Clear results
     this.clearResults();
 
     // Clear URL parameters
     this.updateURL(
-      "",
+      '',
       this.orderDropdown.value,
-      this.isAscending ? "asc" : "desc",
+      this.isAscending ? 'asc' : 'desc',
       this.uniqueDropdown.value,
-      this.preferDropdown.value,
+      this.preferDropdown.value
     );
 
     // Focus back on search input
@@ -1020,18 +1016,18 @@ class CardSearch {
 
   clearMessages() {
     if (this.statusMessage) {
-      this.statusMessage.innerHTML = "";
+      this.statusMessage.innerHTML = '';
     }
   }
 
   escapeHtml(text) {
-    const div = document.createElement("div");
+    const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
   }
 
   convertManaSymbolsToText(text) {
-    if (!text) return "";
+    if (!text) return '';
 
     // Use cached regex pattern and map for performance
     // Reset regex state before use (important for 'g' flag)
@@ -1039,7 +1035,7 @@ class CardSearch {
 
     // Replace all symbols in a single pass using a callback function
     // Only replace if the symbol exists in our map, otherwise return unchanged
-    return text.replace(this.manaTextRegex, (match) => {
+    return text.replace(this.manaTextRegex, match => {
       const replacement = this.manaTextMap.get(match);
       if (replacement === undefined) {
         return match;
@@ -1049,9 +1045,9 @@ class CardSearch {
   }
 
   convertManaSymbols(manaCost, isModal = false) {
-    if (!manaCost) return "";
+    if (!manaCost) return '';
 
-    const symbolClass = isModal ? "modal-mana-symbol" : "mana-symbol";
+    const symbolClass = isModal ? 'modal-mana-symbol' : 'mana-symbol';
 
     // Use cached regex pattern and map for performance
     // Reset regex state before use (important for 'g' flag)
@@ -1059,7 +1055,7 @@ class CardSearch {
 
     // Replace all symbols in a single pass using a callback function
     // Only replace if the symbol exists in our map, otherwise return unchanged
-    return manaCost.replace(this.manaSymbolsRegex, (match) => {
+    return manaCost.replace(this.manaSymbolsRegex, match => {
       const replacement = this.manaSymbolsMap.get(match);
       if (replacement === undefined) {
         return match;
@@ -1069,22 +1065,22 @@ class CardSearch {
   }
 
   formatOracleText(oracleText, isModal = false) {
-    if (!oracleText) return "";
+    if (!oracleText) return '';
 
     // First convert mana symbols
     let formatted = this.convertManaSymbols(oracleText, isModal);
 
     // Then convert newlines to HTML line breaks
-    formatted = formatted.replace(/\n/g, "<br>");
+    formatted = formatted.replace(/\n/g, '<br>');
 
     return formatted;
   }
 
   updateOrderToggleAppearance() {
     if (this.isAscending) {
-      this.orderToggle.classList.remove("descending");
+      this.orderToggle.classList.remove('descending');
     } else {
-      this.orderToggle.classList.add("descending");
+      this.orderToggle.classList.add('descending');
     }
   }
 
@@ -1095,29 +1091,28 @@ class CardSearch {
   buildSearchUrlFromParams(query, order, direction, unique, prefer) {
     const url = new URL(window.location);
     const defaults = {
-      orderby: "edhrec",
-      direction: "asc",
-      unique: "card",
-      prefer: "default",
+      orderby: 'edhrec',
+      direction: 'asc',
+      unique: 'card',
+      prefer: 'default',
     };
 
     if (query && query.trim()) {
-      url.searchParams.set("q", query.trim());
-      if (order !== defaults.orderby) url.searchParams.set("orderby", order);
-      else url.searchParams.delete("orderby");
-      if (direction !== defaults.direction) url.searchParams.set("direction", direction);
-      else url.searchParams.delete("direction");
-      if (unique !== defaults.unique) url.searchParams.set("unique", unique);
-      else url.searchParams.delete("unique");
-      if (unique !== UNIQUE_PRINTING && prefer !== defaults.prefer)
-        url.searchParams.set("prefer", prefer);
-      else url.searchParams.delete("prefer");
+      url.searchParams.set('q', query.trim());
+      if (order !== defaults.orderby) url.searchParams.set('orderby', order);
+      else url.searchParams.delete('orderby');
+      if (direction !== defaults.direction) url.searchParams.set('direction', direction);
+      else url.searchParams.delete('direction');
+      if (unique !== defaults.unique) url.searchParams.set('unique', unique);
+      else url.searchParams.delete('unique');
+      if (unique !== UNIQUE_PRINTING && prefer !== defaults.prefer) url.searchParams.set('prefer', prefer);
+      else url.searchParams.delete('prefer');
     } else {
-      url.searchParams.delete("q");
-      url.searchParams.delete("orderby");
-      url.searchParams.delete("direction");
-      url.searchParams.delete("unique");
-      url.searchParams.delete("prefer");
+      url.searchParams.delete('q');
+      url.searchParams.delete('orderby');
+      url.searchParams.delete('direction');
+      url.searchParams.delete('unique');
+      url.searchParams.delete('prefer');
     }
     return url.href;
   }
@@ -1126,7 +1121,7 @@ class CardSearch {
   buildCurrentSearchUrl() {
     const query = this.searchInput.value.trim();
     const order = this.orderDropdown.value;
-    const direction = this.isAscending ? "asc" : "desc";
+    const direction = this.isAscending ? 'asc' : 'desc';
     const unique = this.uniqueDropdown.value;
     const prefer = this.preferDropdown.value;
     return this.buildSearchUrlFromParams(query, order, direction, unique, prefer);
@@ -1138,26 +1133,26 @@ class CardSearch {
     const arrivalTime = state && state.arrivalTime;
     const alreadySaved = state && state.saved === true;
     let stayTime = 0;
-    if (typeof arrivalTime === "number") {
+    if (typeof arrivalTime === 'number') {
       stayTime = Date.now() - arrivalTime;
     }
     const stayedLongEnough = stayTime > DWELL_MS;
     const isNewUrl = newUrl !== window.location.href;
     if (!alreadySaved && stayedLongEnough && isNewUrl) {
       const pushedUrl = window.location.href;
-      window.history.pushState({ arrivalTime: arrivalTime, saved: true }, "", pushedUrl);
+      window.history.pushState({ arrivalTime: arrivalTime, saved: true }, '', pushedUrl);
       console.log(`+Pushing ${pushedUrl} to history`);
     } else {
       console.log(
-        `-Not pushing history: stayTime: ${stayTime}, newUrl: ${newUrl}, window.location.href: ${window.location.href}`,
+        `-Not pushing history: stayTime: ${stayTime}, newUrl: ${newUrl}, window.location.href: ${window.location.href}`
       );
     }
-    window.history.replaceState({ arrivalTime: Date.now() }, "", newUrl);
+    window.history.replaceState({ arrivalTime: Date.now() }, '', newUrl);
   }
 
   updatePreferVisibility() {
     const isPrinting = this.uniqueDropdown.value === UNIQUE_PRINTING;
-    this.preferDropdown.style.display = isPrinting ? "none" : "";
+    this.preferDropdown.style.display = isPrinting ? 'none' : '';
     this.preferDropdown.disabled = isPrinting;
   }
 
@@ -1166,7 +1161,7 @@ class CardSearch {
     const order = this.orderDropdown.value;
     const unique = this.uniqueDropdown.value;
     const prefer = this.preferDropdown.value;
-    const direction = this.isAscending ? "asc" : "desc";
+    const direction = this.isAscending ? 'asc' : 'desc';
     this.updateURL(query, order, direction, unique, prefer);
     this.performSearch(query);
   }
@@ -1176,7 +1171,7 @@ class CardSearch {
     const order = this.orderDropdown.value;
     const unique = this.uniqueDropdown.value;
     const prefer = this.preferDropdown.value;
-    const direction = this.isAscending ? "asc" : "desc";
+    const direction = this.isAscending ? 'asc' : 'desc';
     this.updateURL(query, order, direction, unique, prefer);
     this.performSearch(query);
   }
@@ -1186,7 +1181,7 @@ class CardSearch {
     const order = this.orderDropdown.value;
     const unique = this.uniqueDropdown.value;
     const prefer = this.preferDropdown.value;
-    const direction = this.isAscending ? "asc" : "desc";
+    const direction = this.isAscending ? 'asc' : 'desc';
     this.updateURL(query, order, direction, unique, prefer);
     this.performSearch(query);
   }
@@ -1199,7 +1194,7 @@ class CardSearch {
     const order = this.orderDropdown.value;
     const unique = this.uniqueDropdown.value;
     const prefer = this.preferDropdown.value;
-    const direction = this.isAscending ? "asc" : "desc";
+    const direction = this.isAscending ? 'asc' : 'desc';
     this.directionInput.value = direction;
     this.updateURL(query, order, direction, unique, prefer);
     this.performSearch(query);
@@ -1209,9 +1204,9 @@ class CardSearch {
 /* Theme switching functionality */
 class ThemeManager {
   constructor() {
-    this.themeToggle = document.getElementById("themeToggle");
-    this.themeIcon = document.getElementById("themeIcon");
-    this.currentTheme = localStorage.getItem("theme") || "dark";
+    this.themeToggle = document.getElementById('themeToggle');
+    this.themeIcon = document.getElementById('themeIcon');
+    this.currentTheme = localStorage.getItem('theme') || 'dark';
 
     this.init();
   }
@@ -1222,7 +1217,7 @@ class ThemeManager {
 
     // Add click event listener
     if (this.themeToggle) {
-      this.themeToggle.addEventListener("click", (e) => {
+      this.themeToggle.addEventListener('click', e => {
         e.preventDefault();
         e.stopPropagation();
         this.toggleTheme();
@@ -1231,37 +1226,37 @@ class ThemeManager {
   }
 
   toggleTheme() {
-    this.currentTheme = this.currentTheme === "light" ? "dark" : "light";
+    this.currentTheme = this.currentTheme === 'light' ? 'dark' : 'light';
     this.applyTheme(this.currentTheme);
     this.saveTheme();
   }
 
   applyTheme(theme) {
-    document.documentElement.setAttribute("data-theme", theme);
+    document.documentElement.setAttribute('data-theme', theme);
     this.updateIcon(theme);
   }
 
   updateIcon(theme) {
     if (this.themeIcon) {
-      this.themeIcon.textContent = theme === "light" ? "🌙" : "☀️";
+      this.themeIcon.textContent = theme === 'light' ? '🌙' : '☀️';
     }
   }
 
   saveTheme() {
-    localStorage.setItem("theme", this.currentTheme);
+    localStorage.setItem('theme', this.currentTheme);
   }
 }
 
 // Apply initial theme immediately to prevent flash
 (function () {
-  let savedTheme = "dark";
+  let savedTheme = 'dark';
   try {
-    const theme = localStorage.getItem("theme");
+    const theme = localStorage.getItem('theme');
     if (theme) savedTheme = theme;
   } catch (e) {
     // localStorage may be unavailable; fallback to default theme
   }
-  document.documentElement.setAttribute("data-theme", savedTheme);
+  document.documentElement.setAttribute('data-theme', savedTheme);
 })();
 
 window.cardSearchMain = function () {

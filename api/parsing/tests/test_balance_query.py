@@ -29,9 +29,9 @@ from api.parsing import balance_partial_query, parse_scryfall_query
         ("name:hydra", "name:hydra"),
         # Apostrophe inside double-quoted strings should not be treated as a quote delimiter
         ('!"stormchaser\'s talent"', '!"stormchaser\'s talent"'),  # already balanced
-        ('!"stormchaser\'s tal', '!"stormchaser\'s tal"'),  # partial, needs closing "
-        ("name:\"dragon's breath\"", "name:\"dragon's breath\""),  # already balanced
-        ("name:\"dragon's brea", "name:\"dragon's brea\""),  # partial, needs closing "
+        ("!\"stormchaser's tal", '!"stormchaser\'s tal"'),  # partial, needs closing "
+        ('name:"dragon\'s breath"', 'name:"dragon\'s breath"'),  # already balanced
+        ("name:\"dragon's brea", 'name:"dragon\'s brea"'),  # partial, needs closing "
         # Double quotes inside single-quoted strings should not be treated as quote delimiters
         ("name:'say \"hello\"'", "name:'say \"hello\"'"),  # already balanced
         ("name:'say \"hel", "name:'say \"hel'"),  # partial, needs closing '
