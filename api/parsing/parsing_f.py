@@ -630,12 +630,17 @@ def get_parse_expr() -> ParserElement:  # noqa: C901, PLR0915
     exact_name = exact_name_prefix + (_quoted_string_for_exact | _word_for_exact)
     exact_name.set_parse_action(make_exact_name)
 
-    # Single word (implicit name search)
-    def make_single_word(tokens: list[str]) -> BinaryOperatorNode:
-        """For single words, always search in the name field."""
-        return BinaryOperatorNode(CardAttributeNode("name", ParserClass.TEXT), ":", StringValueNode(tokens[0]))
+    # Implicit name search: standalone quoted string or bare word (e.g. "stormchaser's talent" or bolt)
+    # Copy quoted_string to give the implicit-name branch its own parser element while
+    # preserving the existing ("quoted", value) token shape used by shared quoted-string parsing.
+    _implicit_name_value = basic_parsers["quoted_string"].copy() | word
 
-    single_word = word.set_parse_action(make_single_word)
+    def make_implicit_name(tokens: list[object]) -> BinaryOperatorNode:
+        token = tokens[0]
+        value = token[1] if isinstance(token, tuple) and token[0] == "quoted" else str(token)
+        return BinaryOperatorNode(CardAttributeNode("name", ParserClass.TEXT), ":", StringValueNode(value))
+
+    implicit_name = _implicit_name_value.set_parse_action(make_implicit_name)
 
     # Standalone numeric literal
     def make_numeric_literal(tokens: list[object]) -> NumericValueNode:
@@ -673,7 +678,7 @@ def get_parse_expr() -> ParserElement:  # noqa: C901, PLR0915
 
     # For negation, we exclude arithmetic expressions from being negated
     # Test: revert to original order to confirm this breaks it
-    negatable_primary = attr_attr_condition | condition | group | exact_name | single_word
+    negatable_primary = attr_attr_condition | condition | group | exact_name | implicit_name
     negatable_factor = Optional(operator_not) + negatable_primary
     negatable_factor.set_parse_action(handle_negation)
 
