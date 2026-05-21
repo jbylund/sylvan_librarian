@@ -22,7 +22,7 @@ from pyparsing import (
     one_of,
 )
 
-from api.parsing.card_query_nodes import CardAttributeNode, ExactNameNode, to_card_query_ast
+from api.parsing.card_query_nodes import CardAttributeNode, CardBinaryOperatorNode, ExactNameNode, to_card_query_ast
 from api.parsing.db_info import (
     COLOR_NAME_TO_CODE,
     NUMERIC_CARD_ATTRIBUTES,
@@ -551,6 +551,10 @@ def parse_scryfall_query(query: str) -> Query:
     Returns:
         A Scryfall-specific Query AST.
     """
+    # Bare single word (e.g. "dragon") → always an implicit name search.
+    # Bypass preprocess_implicit_and and pyparsing entirely.
+    if query and _BARE_WORD_RE.match(query):
+        return Query(CardBinaryOperatorNode(_IMPLICIT_NAME_ATTR_NODE, ":", StringValueNode(query)))
     generic_query = parse_search_query(query)
     return to_card_query_ast(generic_query)
 
@@ -918,6 +922,12 @@ def _tokenize_for_implicit_and(query: str) -> list[str]:
 
 _NUMERIC_LITERAL_RE = re.compile(r"^\d+(\.\d+)?$")
 _COMPARISON_OPERATORS = frozenset({">", "<", ">=", "<=", "=", "!=", ":"})
+
+# Matches exactly the same pattern as the `word` parser in create_basic_parsers().
+# Used for the bare-word fastpath in parse_scryfall_query.
+_BARE_WORD_RE = re.compile(r"^(?:[a-zA-Z_][a-zA-Z0-9_-]*[a-zA-Z0-9_]|[a-zA-Z_])$")
+# Pre-built singleton — CardAttributeNode.__init__ does a dict lookup; reuse it.
+_IMPLICIT_NAME_ATTR_NODE = CardAttributeNode("name", ParserClass.TEXT)
 
 
 def _is_implicit_and_operand(t: str) -> bool:
