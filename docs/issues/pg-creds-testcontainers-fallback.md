@@ -16,9 +16,10 @@ This conflates two distinct situations:
 - **Production** — no `PG*` env vars is a misconfiguration; testcontainers is the wrong backend
   and will silently spin up an ephemeral container instead of surfacing the error.
 
-`QueryLogMiddleware._connect` has the same issue: it calls `get_pg_creds()` directly and would
-call `psycopg.connect("")` if no env vars are set, which either errors or picks up unexpected
-local defaults.
+`QueryLogMiddleware._connect` has the same issue in a different form: it calls
+`get_pg_creds()` directly, returns `None` when no `PG*` env vars are set, and the drain loop
+drops queued query log entries with a warning instead of sharing the main database
+connection-selection logic.
 
 ## Proposed fix
 
