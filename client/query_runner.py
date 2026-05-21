@@ -6,6 +6,7 @@ against the Scryfall OS API to help identify which database indexes are being us
 and which queries perform well or poorly.
 """
 
+import argparse
 import logging
 import os
 import random
@@ -28,136 +29,382 @@ def setup_logging() -> None:
     )
 
 
-def _generate_basic_queries() -> list[str]:
-    """Generate basic search queries.
+_ORDERBY_VALUES = ["edhrec", "cubecobra", "cmc", "power", "toughness", "rarity", "usd"]
+
+# unique=card 75%, printing 20%, artwork 5%
+_UNIQUE_VALUES = ["card"] * 75 + ["printing"] * 20 + ["artwork"] * 5
+
+# Each dimension has a relative weight controlling how often it is chosen, and a list of
+# query fragments.  Weights are approximate — they reflect realistic user search patterns.
+# Higher weight = picked more often as one of the 1-4 dimensions in a random query.
+_DIMENSIONS: list[tuple[int, str, list[str]]] = [
+    (
+        30,
+        "name",
+        [
+            "name:bolt",
+            "name:angel",
+            "name:dragon",
+            "name:counter",
+            "name:force",
+            "name:fire",
+            "name:dark",
+            "name:ancient",
+            "name:storm",
+            "name:path",
+            "name:bo",
+            "name:an",
+            "name:dr",
+            "name:co",
+            "name:fo",
+            "name:fi",
+            "name:da",
+            "name:st",
+            "name:pa",
+        ],
+    ),
+    (
+        20,
+        "oracle_text",
+        [
+            "oracle:flying",
+            "oracle:haste",
+            "oracle:trample",
+            "oracle:deathtouch",
+            "oracle:lifelink",
+            "oracle:vigilance",
+            "oracle:draw",
+            "oracle:counter",
+            "oracle:destroy",
+            "oracle:exile",
+            "oracle:return",
+            "oracle:token",
+            "oracle:sacrifice",
+            "oracle:search",
+        ],
+    ),
+    (
+        18,
+        "card_type",
+        [
+            "type:creature",
+            "type:instant",
+            "type:sorcery",
+            "type:enchantment",
+            "type:artifact",
+            "type:planeswalker",
+            "type:land",
+        ],
+    ),
+    (
+        14,
+        "color",
+        [
+            "color:w",
+            "color:u",
+            "color:b",
+            "color:r",
+            "color:g",
+            "color:wu",
+            "color:ub",
+            "color:br",
+            "color:rg",
+            "color:gw",
+            "color:wub",
+            "color:ubr",
+            "color:brg",
+        ],
+    ),
+    (
+        15,
+        "color_identity",
+        [
+            "id:w",
+            "id:u",
+            "id:b",
+            "id:r",
+            "id:g",
+            "id:wu",
+            "id:ub",
+            "id:br",
+            "id:rg",
+            "id:gw",
+            "id:wub",
+            "id:ubr",
+            "id:brg",
+        ],
+    ),
+    (
+        12,
+        "set_code",
+        [
+            "set:m21",
+            "set:znr",
+            "set:khm",
+            "set:stx",
+            "set:mid",
+            "set:neo",
+            "set:snc",
+            "set:dmu",
+            "set:bro",
+            "set:mom",
+            "set:ltr",
+            "set:woe",
+            "set:mkm",
+            "set:otj",
+            "set:blb",
+        ],
+    ),
+    (
+        10,
+        "card_subtype",
+        [
+            "type:dragon",
+            "type:wizard",
+            "type:goblin",
+            "type:zombie",
+            "type:elf",
+            "type:angel",
+            "type:vampire",
+            "type:merfolk",
+            "type:equipment",
+            "type:aura",
+        ],
+    ),
+    (
+        8,
+        "legality",
+        [
+            "format:standard",
+            "format:modern",
+            "format:commander",
+            "format:legacy",
+            "format:vintage",
+            "format:pioneer",
+            "format:pauper",
+        ],
+    ),
+    (
+        7,
+        "year",
+        [
+            "year:2019",
+            "year:2020",
+            "year:2021",
+            "year:2022",
+            "year:2023",
+            "year:2024",
+        ],
+    ),
+    (
+        6,
+        "power",
+        [
+            "pow=0",
+            "pow=1",
+            "pow=2",
+            "pow=3",
+            "pow=4",
+            "pow=5",
+            "pow=6",
+            "pow<2",
+            "pow<4",
+            "pow>2",
+            "pow>4",
+            "pow>=5",
+        ],
+    ),
+    (
+        6,
+        "toughness",
+        [
+            "tou=0",
+            "tou=1",
+            "tou=2",
+            "tou=3",
+            "tou=4",
+            "tou=5",
+            "tou=6",
+            "tou<2",
+            "tou<4",
+            "tou>2",
+            "tou>4",
+            "tou>=5",
+        ],
+    ),
+    (
+        5,
+        "price_usd",
+        [
+            "usd<0.25",
+            "usd<1",
+            "usd<5",
+            "usd>1",
+            "usd>5",
+            "usd>20",
+            "usd>50",
+        ],
+    ),
+    (
+        3,
+        "artist",
+        [
+            "artist:tedin",
+            "artist:rahn",
+            "artist:avon",
+            "artist:burns",
+            "artist:thomas",
+            "artist:foglio",
+        ],
+    ),
+    (
+        3,
+        "is_tag",
+        [
+            "is:spell",
+            "is:permanent",
+            "is:historic",
+            "is:modal",
+            "is:token",
+            "is:commander",
+        ],
+    ),
+    (
+        2,
+        "price_tix",
+        [
+            "tix<0.1",
+            "tix<1",
+            "tix>1",
+            "tix>5",
+        ],
+    ),
+    (
+        2,
+        "price_eur",
+        [
+            "eur<1",
+            "eur<5",
+            "eur>5",
+            "eur>20",
+        ],
+    ),
+    (
+        2,
+        "produced_mana",
+        [
+            "produces:w",
+            "produces:u",
+            "produces:b",
+            "produces:r",
+            "produces:g",
+            "produces:c",
+        ],
+    ),
+    (
+        1,
+        "flavor_text",
+        [
+            "flavor:death",
+            "flavor:fire",
+            "flavor:light",
+            "flavor:darkness",
+            "flavor:power",
+            "flavor:ancient",
+        ],
+    ),
+    (
+        1,
+        "border",
+        [
+            "border:black",
+            "border:white",
+            "border:silver",
+            "border:borderless",
+        ],
+    ),
+    (
+        1,
+        "frame",
+        [
+            "frame:old",
+            "frame:modern",
+            "frame:future",
+            "frame:showcase",
+            "frame:extendedart",
+        ],
+    ),
+    (
+        1,
+        "watermark",
+        [
+            "watermark:set",
+            "watermark:planeswalker",
+            "watermark:guild",
+        ],
+    ),
+    (
+        1,
+        "collector_number",
+        [
+            "cn:1",
+            "cn:100",
+            "cn:200",
+            "cn:300",
+        ],
+    ),
+    (
+        1,
+        "devotion",
+        [
+            "devotion:w",
+            "devotion:u",
+            "devotion:b",
+            "devotion:r",
+            "devotion:g",
+            "devotion:www",
+            "devotion:uuu",
+            "devotion:bbb",
+            "devotion:rrr",
+            "devotion:ggg",
+        ],
+    ),
+]
+
+# Pre-split for use with random.choices
+_DIM_WEIGHTS = [w for w, _, _ in _DIMENSIONS]
+_DIM_NAMES = [n for _, n, _ in _DIMENSIONS]
+_DIM_VALUES = {n: v for _, n, v in _DIMENSIONS}
+
+
+def random_query() -> str:
+    """Generate a single random multi-dimensional query.
+
+    Picks 1-4 dimensions weighted by search frequency, then picks one value
+    from each, giving realistic coverage without enumerating the full cross-product.
 
     Returns:
-        List of basic query strings.
+        A query string combining fragments from the chosen dimensions.
     """
-    queries = []
-    colors = ["w", "u", "b", "r", "g"]
-
-    # Color queries
-    for color in colors:
-        queries.append(f"color:{color}")
-        queries.append(f"c:{color}")
-        queries.append(f"id:{color}")
-
-    # Multicolor queries
-    queries.extend(["color:wu", "color:ub", "color:br", "color:rg", "color:gw"])
-
-    # CMC queries
-    for cmc in range(10):
-        queries.append(f"cmc={cmc}")
-        queries.append(f"mv={cmc}")
-
-    queries.extend(["cmc<3", "cmc>5", "cmc>=4", "cmc<=2"])
-
-    return queries
+    r = random.randint(1, 4)
+    chosen_dims = random.choices(_DIM_NAMES, weights=_DIM_WEIGHTS, k=r)
+    fragments = set()
+    for idx, cd in enumerate(chosen_dims, start=1):
+        dimension_choices = _DIM_VALUES[cd]
+        while len(fragments) < idx:
+            fragments.add(random.choice(dimension_choices))
+    return " ".join(sorted(fragments))
 
 
-def _generate_type_queries() -> list[str]:
-    """Generate type and rarity queries.
-
-    Returns:
-        List of type query strings.
-    """
-    queries = []
-
-    # Type queries
-    types = ["creature", "instant", "sorcery", "enchantment", "artifact", "planeswalker", "land"]
-    for card_type in types:
-        queries.append(f"type:{card_type}")
-        queries.append(f"t:{card_type}")
-
-    # Rarity queries
-    rarities = ["common", "uncommon", "rare", "mythic"]
-    for rarity in rarities:
-        queries.append(f"rarity:{rarity}")
-        queries.append(f"r:{rarity}")
-
-    # Power/Toughness queries
-    for power in range(1, 6):
-        queries.append(f"pow={power}")
-        queries.append(f"tou={power}")
-
-    return queries
-
-
-def _generate_combined_queries() -> list[str]:
-    """Generate combined queries.
-
-    Returns:
-        List of combined query strings.
-    """
-    queries = []
-    colors = ["w", "u", "b", "r", "g"]
-
-    # Combined queries (color + type)
-    for color in colors:
-        for card_type in ["creature", "instant", "sorcery"]:
-            queries.append(f"color:{color} type:{card_type}")
-
-    # Combined queries (color + cmc)
-    for color in colors:
-        for cmc in range(5):
-            queries.append(f"color:{color} cmc={cmc}")
-
-    return queries
-
-
-def _generate_text_queries() -> list[str]:
-    """Generate text and keyword queries.
-
-    Returns:
-        List of text query strings.
-    """
-    queries = []
-
-    # Keyword queries
-    keywords = ["flying", "haste", "trample", "deathtouch", "lifelink", "vigilance"]
-    for keyword in keywords:
-        queries.append(f"oracle:{keyword}")
-
-    # Text search queries
-    common_words = ["draw", "counter", "destroy", "exile", "return", "token"]
-    for word in common_words:
-        queries.append(f"oracle:{word}")
-
-    # Set queries (using common set codes)
-    sets = ["m21", "znr", "khm", "stx", "afr", "mid", "neo", "snc", "dmu", "bro"]
-    for set_code in sets:
-        queries.append(f"set:{set_code}")
-
-    # Format queries
-    formats = ["standard", "modern", "commander", "legacy", "vintage", "pioneer"]
-    for format_name in formats:
-        queries.append(f"format:{format_name}")
-
-    return queries
-
-
-def generate_random_queries() -> list[str]:
-    """Generate a diverse set of random search queries.
-
-    Returns:
-        List of random search query strings.
-    """
-    queries = []
-    queries.extend(_generate_basic_queries())
-    queries.extend(_generate_type_queries())
-    queries.extend(_generate_combined_queries())
-    queries.extend(_generate_text_queries())
-    return queries
-
-
-def run_query(api_url: str, query: str, session: requests.Session) -> dict:
+def run_query(api_url: str, query: str, session: requests.Session, orderby: str, unique: str) -> dict:
     """Run a single search query against the API.
 
     Args:
         api_url: Base URL for the API.
         query: The search query string.
         session: Requests session for API calls.
+        orderby: The orderby parameter value.
+        unique: The unique parameter value.
 
     Returns:
         Dictionary with query results and timing information.
@@ -170,7 +417,7 @@ def run_query(api_url: str, query: str, session: requests.Session) -> dict:
     try:
         response = session.get(
             f"{api_url}/search",
-            params={"q": query, "limit": 100},
+            params={"q": query, "limit": 100, "orderby": orderby, "unique": unique},
             timeout=30,
         )
         response.raise_for_status()
@@ -179,6 +426,7 @@ def run_query(api_url: str, query: str, session: requests.Session) -> dict:
         result["success"] = True
         card_count = len(data.get("cards", []))
         result["card_count"] = card_count
+        result["execute_ms"] = (data.get("inner_timings") or {}).get("execute_query")
     except requests.RequestException as oops:
         result["success"] = False
         result["error"] = str(oops)
@@ -188,10 +436,15 @@ def run_query(api_url: str, query: str, session: requests.Session) -> dict:
         result["elapsed_ms"] = elapsed_ms
 
     if result["success"]:
+        execute_ms = result.get("execute_ms")
+        execute_str = f" | DB execute: {execute_ms:.1f}ms" if execute_ms is not None else ""
         logging.info(
-            "Query: '%s' | Duration: %.1fms | Cards: %d",
+            "Query: '%s' orderby=%s unique=%s | HTTP: %.1fms%s | Cards: %d",
             query,
+            orderby,
+            unique,
             elapsed_ms,
+            execute_str,
             card_count,
         )
     else:
@@ -228,26 +481,54 @@ def print_statistics(results: list[dict]) -> None:
 
         total_cards = sum(r["card_count"] for r in successful)
 
+        execute_times = [r["execute_ms"] for r in successful if r.get("execute_ms") is not None]
+        execute_str = ""
+        if execute_times:
+            execute_str = f"\n  Avg DB execute: {sum(execute_times) / len(execute_times):.1f}ms | Max: {max(execute_times):.1f}ms"
+
         logger.info("=" * 60)
         logger.info("Statistics for %d queries:", total_queries)
         logger.info("  Success rate: %.1f%%", success_rate)
         logger.info("  Successful queries: %d", len(successful))
         logger.info("  Failed queries: %d", len(failed))
         logger.info("  Total cards returned: %d", total_cards)
-        logger.info("  Average duration: %.3fms", avg_duration)
-        logger.info("  Min duration: %.3fms", min_duration)
-        logger.info("  Max duration: %.3fms", max_duration)
+        logger.info(
+            "  Avg HTTP duration: %.1fms | Min: %.1fms | Max: %.1fms%s", avg_duration, min_duration, max_duration, execute_str
+        )
         logger.info("=" * 60)
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments, falling back to environment variables then module defaults."""
+    parser = argparse.ArgumentParser(description="Run search queries against the Arcane Tutor API.")
+    parser.add_argument(
+        "--api-url",
+        default=os.environ.get("API_URL", DEFAULT_API_URL),
+        help=f"Base URL for the API (default: {DEFAULT_API_URL}).",
+    )
+    parser.add_argument(
+        "--query-delay",
+        type=float,
+        default=float(os.environ.get("QUERY_DELAY", DEFAULT_QUERY_DELAY)),
+        help=f"Seconds to wait between queries (default: {DEFAULT_QUERY_DELAY}).",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=int(os.environ.get("BATCH_SIZE", DEFAULT_BATCH_SIZE)),
+        help=f"Queries per stats report (default: {DEFAULT_BATCH_SIZE}).",
+    )
+    return parser.parse_args()
 
 
 def main() -> None:
     """Main function to continuously run random queries."""
     setup_logging()
 
-    # Configuration from environment variables
-    api_url = os.environ.get("API_URL", DEFAULT_API_URL)
-    query_delay = float(os.environ.get("QUERY_DELAY", DEFAULT_QUERY_DELAY))
-    batch_size = int(os.environ.get("BATCH_SIZE", DEFAULT_BATCH_SIZE))
+    args = parse_args()
+    api_url = args.api_url
+    query_delay = args.query_delay
+    batch_size = args.batch_size
 
     logger.info("Starting query runner against API: %s", api_url)
     logger.info("Query delay: %ss", query_delay)
@@ -261,20 +542,17 @@ def main() -> None:
         },
     )
 
-    # Generate query pool
-    query_pool = generate_random_queries()
-    logger.info("Generated %d unique query patterns", len(query_pool))
-
     results = []
     query_count = 0
 
     try:
         while True:
-            # Pick a random query from the pool
-            query = random.choice(query_pool)
+            query = random_query()
+            orderby = random.choice(_ORDERBY_VALUES)
+            unique = random.choice(_UNIQUE_VALUES)
 
             # Run the query
-            result = run_query(api_url, query, session)
+            result = run_query(api_url, query, session, orderby=orderby, unique=unique)
             results.append(result)
             query_count += 1
 
