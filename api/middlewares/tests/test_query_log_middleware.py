@@ -66,12 +66,14 @@ class TestQueryLogMiddlewareProcessResponse:
 
     def test_cache_hit_nulls_db_timings(self) -> None:
         mw = _make_middleware()
-        resp = _make_resp(media={
-            "cards": [],
-            "total_cards": 5,
-            "cache_hit": True,
-            "inner_timings": {"_children": {"execute_query": {"_meta": {"duration_ms": 99.0}}}},
-        })
+        resp = _make_resp(
+            media={
+                "cards": [],
+                "total_cards": 5,
+                "cache_hit": True,
+                "inner_timings": {"_children": {"execute_query": {"_meta": {"duration_ms": 99.0}}}},
+            }
+        )
         mw.process_response(_make_req(), resp, None, True)
         entry = mw._queue.get_nowait()
         assert entry["cache_hit"] is True
@@ -80,17 +82,19 @@ class TestQueryLogMiddlewareProcessResponse:
 
     def test_timing_extraction_from_nested_structure(self) -> None:
         mw = _make_middleware()
-        resp = _make_resp(media={
-            "cards": [],
-            "total_cards": 0,
-            "inner_timings": {
-                "_meta": {"duration_ms": 150.0},
-                "_children": {
-                    "execute_query": {"_meta": {"duration_ms": 100.0}},
-                    "fetch_results": {"_meta": {"duration_ms": 50.0}},
+        resp = _make_resp(
+            media={
+                "cards": [],
+                "total_cards": 0,
+                "inner_timings": {
+                    "_meta": {"duration_ms": 150.0},
+                    "_children": {
+                        "execute_query": {"_meta": {"duration_ms": 100.0}},
+                        "fetch_results": {"_meta": {"duration_ms": 50.0}},
+                    },
                 },
-            },
-        })
+            }
+        )
         mw.process_response(_make_req(), resp, None, True)
         entry = mw._queue.get_nowait()
         assert entry["execute_ms"] == 100.0
