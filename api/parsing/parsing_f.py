@@ -631,7 +631,8 @@ def get_parse_expr() -> ParserElement:  # noqa: C901, PLR0915
     exact_name.set_parse_action(make_exact_name)
 
     # Implicit name search: standalone quoted string or bare word (e.g. "stormchaser's talent" or bolt)
-    # Copy quoted_string so the original ("quoted", value) parse action is preserved for use in conditions.
+    # Copy quoted_string to give the implicit-name branch its own parser element while
+    # preserving the existing ("quoted", value) token shape used by shared quoted-string parsing.
     _implicit_name_value = basic_parsers["quoted_string"].copy() | word
 
     def make_implicit_name(tokens: list[object]) -> BinaryOperatorNode:
