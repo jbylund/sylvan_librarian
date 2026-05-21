@@ -59,7 +59,6 @@ _DIMENSIONS: list[tuple[int, str, list[str]]] = [
             "name:fo",
             "name:fi",
             "name:da",
-            "name:an",
             "name:st",
             "name:pa",
         ],
