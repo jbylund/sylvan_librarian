@@ -3,26 +3,22 @@
 from __future__ import annotations
 
 import sys
-from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
+import pytest
 import requests
 
 from client.query_runner import (
+    _DIM_VALUES,
     DEFAULT_API_URL,
     DEFAULT_BATCH_SIZE,
     DEFAULT_QUERY_DELAY,
-    _DIM_VALUES,
     fetch_realistic_queries,
     parse_args,
     print_statistics,
     random_query,
     run_query,
 )
-
-if TYPE_CHECKING:
-    import pytest
-
 
 
 class TestRandomQuery:
@@ -169,7 +165,7 @@ class TestPrintStatistics:
 
 class TestFetchRealisticQueries:
     def test_raises_without_pg_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        for key in list(k for k in __import__("os").environ if k.startswith("PG")):
+        for key in [k for k in __import__("os").environ if k.startswith("PG")]:
             monkeypatch.delenv(key, raising=False)
         with pytest.raises(RuntimeError, match="No PG\\* env vars"):
             fetch_realistic_queries()

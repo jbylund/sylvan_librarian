@@ -55,7 +55,6 @@ _UNIQUE_VALUES = ["card"] * 75 + ["printing"] * 20 + ["artwork"] * 5
 # query fragments.  Weights are approximate — they reflect realistic user search patterns.
 # Higher weight = picked more often as one of the 1-4 dimensions in a random query.
 _DIMENSIONS: list[tuple[int, str, list[str]]] = [
-    # (weight, name, fragments)
     (
         30,
         "name",
