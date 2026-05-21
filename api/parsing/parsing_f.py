@@ -22,7 +22,8 @@ from pyparsing import (
     one_of,
 )
 
-from api.parsing.card_query_nodes import CardAttributeNode, CardBinaryOperatorNode, ExactNameNode, to_card_query_ast
+from api.parsing import hand_parser
+from api.parsing.card_query_nodes import CardAttributeNode, ExactNameNode, to_card_query_ast
 from api.parsing.db_info import (
     COLOR_NAME_TO_CODE,
     NUMERIC_CARD_ATTRIBUTES,
@@ -551,12 +552,7 @@ def parse_scryfall_query(query: str) -> Query:
     Returns:
         A Scryfall-specific Query AST.
     """
-    # Bare single word (e.g. "dragon") → always an implicit name search.
-    # Bypass preprocess_implicit_and and pyparsing entirely.
-    if query and _BARE_WORD_RE.match(query):
-        return Query(CardBinaryOperatorNode(_IMPLICIT_NAME_ATTR_NODE, ":", StringValueNode(query)))
-    generic_query = parse_search_query(query)
-    return to_card_query_ast(generic_query)
+    return hand_parser.parse_query(query)
 
 
 @cachebox.cached(cache={})
