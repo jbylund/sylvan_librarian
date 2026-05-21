@@ -90,7 +90,7 @@ class QueryLogMiddleware:
             req_succeeded: Whether the request completed without an unhandled exception.
         """
         del resource
-        if req.path != "/search":
+        if req.path.strip("/") != "search":
             return
 
         media = resp.media
@@ -101,13 +101,13 @@ class QueryLogMiddleware:
         total_ms = (time.monotonic() - start) * 1000 if start is not None else None
 
         cache_hit = bool(media.get("cache_hit", False))
-        inner = media.get("inner_timings") or {}
+        children = (media.get("inner_timings") or {}).get("_children") or {}
 
         entry: dict = {
             "q": req.params.get("q"),
             "cache_hit": cache_hit,
-            "execute_ms": inner.get("execute_query") if not cache_hit else None,
-            "fetch_ms": inner.get("fetch_results") if not cache_hit else None,
+            "execute_ms": children.get("execute_query", {}).get("_meta", {}).get("duration_ms") if not cache_hit else None,
+            "fetch_ms": children.get("fetch_results", {}).get("_meta", {}).get("duration_ms") if not cache_hit else None,
             "total_ms": total_ms,
             "result_count": len(media.get("cards") or []),
             "total_cards": media.get("total_cards"),

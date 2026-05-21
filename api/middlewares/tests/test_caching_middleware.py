@@ -60,3 +60,47 @@ class TestCachingMiddleware:
             middleware.process_response(req, resp, None, False)
 
         assert len(cache) == 0
+
+    def test_cache_hit_sets_cache_hit_flag(self) -> None:
+        """A cache hit should inject cache_hit=True into the response media."""
+        cached_resp = MagicMock()
+        cached_resp.status = "200 OK"
+        cached_resp._headers = {}
+        cached_resp.media = {"cards": [], "total_cards": 0}
+        cached_resp.data = None
+
+        cache_key = ("/search?q=lightning+bolt", (("q", "lightning bolt"),), (("ACCEPT-ENCODING", None),))
+        cache = {cache_key: cached_resp}
+
+        middleware = CachingMiddleware(cache=cache)
+        req = self._make_req()
+        resp = self._make_resp()
+        resp.media = None
+
+        with patch("api.middlewares.caching_middleware.settings") as mock_settings:
+            mock_settings.enable_cache = True
+            middleware.process_request(req, resp)
+
+        assert resp.media["cache_hit"] is True
+
+    def test_cache_hit_does_not_mutate_cached_media(self) -> None:
+        """A cache hit should copy the media dict, not mutate the stored response."""
+        original_media = {"cards": [], "total_cards": 0}
+        cached_resp = MagicMock()
+        cached_resp.status = "200 OK"
+        cached_resp._headers = {}
+        cached_resp.media = original_media
+        cached_resp.data = None
+
+        cache_key = ("/search?q=lightning+bolt", (("q", "lightning bolt"),), (("ACCEPT-ENCODING", None),))
+        cache = {cache_key: cached_resp}
+
+        middleware = CachingMiddleware(cache=cache)
+        req = self._make_req()
+        resp = self._make_resp()
+
+        with patch("api.middlewares.caching_middleware.settings") as mock_settings:
+            mock_settings.enable_cache = True
+            middleware.process_request(req, resp)
+
+        assert "cache_hit" not in original_media
