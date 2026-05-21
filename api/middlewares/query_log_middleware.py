@@ -56,8 +56,7 @@ class QueryLogMiddleware:
         creds = get_pg_creds()
         if not creds:
             return None
-        conninfo = " ".join(f"{k}={v}" for k, v in creds.items())
-        return psycopg.connect(conninfo)
+        return psycopg.connect(**creds)
 
     def _drain(self: QueryLogMiddleware) -> None:
         """Drain the queue and write entries to magic.query_log."""
