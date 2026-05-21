@@ -2,7 +2,6 @@
 
 import pytest
 
-from api.parsing import parse_scryfall_query
 from api.parsing.card_query_nodes import ExactNameNode, _escape_like_pattern
 
 # ---------------------------------------------------------------------------
@@ -90,9 +89,9 @@ testcases_pattern = {
     argvalues=[[v for k, v in sorted(testcases_pattern[tc].items())] for tc in sorted(testcases_pattern)],
     ids=sorted(testcases_pattern),
 )
-def test_pattern_matching_escapes_special_chars(expected_param: str, query: str) -> None:
+def test_pattern_matching_escapes_special_chars(parse_query, expected_param: str, query: str) -> None:
     """Pattern-matching queries escape % and _ so they never act as LIKE wildcards."""
-    parsed = parse_scryfall_query(query)
+    parsed = parse_query(query)
     context: dict = {}
     parsed.to_sql(context)
     assert list(context.values()) == [expected_param]

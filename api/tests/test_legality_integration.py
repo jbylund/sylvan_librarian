@@ -3,7 +3,7 @@
 import pytest
 
 from api.parsing import parse_scryfall_query
-from api.parsing.parsing_f import generate_sql_query
+from api.parsing import generate_sql_query
 
 
 class TestLegalityIntegration:

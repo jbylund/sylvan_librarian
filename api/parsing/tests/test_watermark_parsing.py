@@ -8,7 +8,6 @@ import pytest
 
 from api.parsing.card_query_nodes import CardAttributeNode, CardBinaryOperatorNode
 from api.parsing.nodes import AndNode, Query
-from api.parsing.parsing_f import parse_scryfall_query
 
 
 class TestWatermarkParsing:
@@ -24,9 +23,9 @@ class TestWatermarkParsing:
             ("watermark:selesnya", "card_watermark", "selesnya"),
         ],
     )
-    def test_parse_watermark_queries(self, query: str, expected_attr: str, expected_value: str) -> None:
+    def test_parse_watermark_queries(self, parse_query, query: str, expected_attr: str, expected_value: str) -> None:
         """Test parsing of watermark search queries."""
-        result = parse_scryfall_query(query)
+        result = parse_query(query)
 
         assert isinstance(result, Query)
         binary_op = result.root
@@ -36,10 +35,10 @@ class TestWatermarkParsing:
         assert binary_op.operator == ":"
         assert binary_op.rhs.value == expected_value
 
-    def test_parse_watermark_case_insensitive(self) -> None:
+    def test_parse_watermark_case_insensitive(self, parse_query) -> None:
         """Test that watermark searches are case-insensitive."""
         query = "watermark:AZORIUS"
-        result = parse_scryfall_query(query)
+        result = parse_query(query)
 
         assert isinstance(result, Query)
         binary_op = result.root
@@ -48,10 +47,10 @@ class TestWatermarkParsing:
         # The value is preserved during parsing, but will be lowercased during SQL generation
         assert binary_op.rhs.value == "AZORIUS"
 
-    def test_parse_watermark_with_quotes(self) -> None:
+    def test_parse_watermark_with_quotes(self, parse_query) -> None:
         """Test parsing watermark searches with quoted values."""
         query = 'watermark:"azorius"'
-        result = parse_scryfall_query(query)
+        result = parse_query(query)
 
         assert isinstance(result, Query)
         binary_op = result.root
@@ -59,10 +58,10 @@ class TestWatermarkParsing:
         assert binary_op.lhs.attribute_name == "card_watermark"
         assert binary_op.rhs.value == "azorius"
 
-    def test_parse_combined_watermark_query(self) -> None:
+    def test_parse_combined_watermark_query(self, parse_query) -> None:
         """Test parsing combined watermark queries."""
         query = "watermark:azorius watermark:dimir"
-        result = parse_scryfall_query(query)
+        result = parse_query(query)
 
         assert isinstance(result, Query)
         # Should be an AND operation between two binary operator nodes
@@ -80,10 +79,10 @@ class TestWatermarkParsing:
         values = {cond.rhs.value for cond in conditions}
         assert values == {"azorius", "dimir"}
 
-    def test_parse_watermark_with_other_attributes(self) -> None:
+    def test_parse_watermark_with_other_attributes(self, parse_query) -> None:
         """Test parsing watermark searches combined with other attributes."""
         query = "watermark:azorius border:black"
-        result = parse_scryfall_query(query)
+        result = parse_query(query)
 
         assert isinstance(result, Query)
         # Should be an AND operation
@@ -110,10 +109,10 @@ class TestWatermarkParsing:
         expected_attrs.sort()
         assert attributes == expected_attrs
 
-    def test_parse_complex_query_with_watermark(self) -> None:
+    def test_parse_complex_query_with_watermark(self, parse_query) -> None:
         """Test parsing complex queries that include watermark."""
         query = "watermark:azorius border:black cmc=3"
-        result = parse_scryfall_query(query)
+        result = parse_query(query)
 
         assert isinstance(result, Query)
 

@@ -7,7 +7,6 @@ from typing import Any
 import pytest
 
 from api.parsing.nodes import Query
-from api.parsing.parsing_f import parse_scryfall_query
 
 
 class TestWatermarkSQLGeneration:
@@ -30,9 +29,9 @@ class TestWatermarkSQLGeneration:
             ("watermark:planeswalker", "card.card_watermark", "planeswalker"),
         ],
     )
-    def test_watermark_generate_exact_equality_sql(self, query: str, expected_column: str, expected_value: str) -> None:
+    def test_watermark_generate_exact_equality_sql(self, parse_query, query: str, expected_column: str, expected_value: str) -> None:
         """Test that watermark searches generate exact equality SQL (not ILIKE)."""
-        result = parse_scryfall_query(query)
+        result = parse_query(query)
         assert isinstance(result, Query)
 
         context: dict[str, Any] = {}
@@ -49,9 +48,9 @@ class TestWatermarkSQLGeneration:
         assert param_value == expected_value
         assert "%" not in param_value  # No wildcards
 
-    def test_name_search_uses_lower_like_pattern_matching(self) -> None:
+    def test_name_search_uses_lower_like_pattern_matching(self, parse_query) -> None:
         """Test that regular text fields like name use lower() LIKE pattern matching."""
-        result = parse_scryfall_query("name:lightning")
+        result = parse_query("name:lightning")
         assert isinstance(result, Query)
 
         context: dict[str, Any] = {}
@@ -70,9 +69,9 @@ class TestWatermarkSQLGeneration:
         assert param_value.startswith("%")
         assert param_value.endswith("%")
 
-    def test_combined_watermark_query_sql(self) -> None:
+    def test_combined_watermark_query_sql(self, parse_query) -> None:
         """Test that combined watermark queries generate correct SQL."""
-        result = parse_scryfall_query("watermark:azorius watermark:dimir")
+        result = parse_query("watermark:azorius watermark:dimir")
         assert isinstance(result, Query)
 
         context: dict[str, Any] = {}
@@ -91,9 +90,9 @@ class TestWatermarkSQLGeneration:
         for value in values:
             assert "%" not in str(value)
 
-    def test_watermark_with_other_attributes_sql(self) -> None:
+    def test_watermark_with_other_attributes_sql(self, parse_query) -> None:
         """Test that watermark combined with other attributes generates correct SQL."""
-        result = parse_scryfall_query("watermark:azorius border:black")
+        result = parse_query("watermark:azorius border:black")
         assert isinstance(result, Query)
 
         context: dict[str, Any] = {}
@@ -130,9 +129,9 @@ class TestWatermarkSQLGeneration:
             ("watermark:PLANESWALKER", "planeswalker"),
         ],
     )
-    def test_case_insensitive_watermark_searches(self, query: str, expected_lowercase: str) -> None:
+    def test_case_insensitive_watermark_searches(self, parse_query, query: str, expected_lowercase: str) -> None:
         """Test that watermark searches are case-insensitive."""
-        result = parse_scryfall_query(query)
+        result = parse_query(query)
         assert isinstance(result, Query)
 
         context: dict[str, Any] = {}
@@ -148,9 +147,9 @@ class TestWatermarkSQLGeneration:
         assert param_value == expected_lowercase
         assert "%" not in param_value
 
-    def test_complex_query_with_watermark_sql(self) -> None:
+    def test_complex_query_with_watermark_sql(self, parse_query) -> None:
         """Test that complex queries with watermark generate correct SQL."""
-        result = parse_scryfall_query("watermark:azorius border:black cmc=3")
+        result = parse_query("watermark:azorius border:black cmc=3")
         assert isinstance(result, Query)
 
         context: dict[str, Any] = {}

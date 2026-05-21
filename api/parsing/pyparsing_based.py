@@ -1,4 +1,4 @@
-"""pyparsing-based parser and SQL generation for Scryfall query syntax."""
+"""pyparsing-based parser for Scryfall query syntax."""
 
 from __future__ import annotations
 
@@ -782,7 +782,3 @@ def is_operator(token: str) -> bool:
     return token in [":", ">", "<", ">=", "<=", "=", "!=", "-", "+", "*", "/"]
 
 
-def generate_sql_query(parsed_query: Query) -> tuple[str, dict]:
-    """Generate a SQL WHERE clause string from a parsed Query AST."""
-    query_context = {}
-    return parsed_query.to_sql(query_context), query_context

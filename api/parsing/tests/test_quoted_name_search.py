@@ -2,7 +2,6 @@
 
 import pytest
 
-from api.parsing import parse_scryfall_query
 from api.parsing.card_query_nodes import CardAttributeNode, ExactNameNode
 from api.parsing.db_info import ParserClass
 from api.parsing.nodes import AndNode, BinaryOperatorNode, NotNode, StringValueNode
@@ -19,9 +18,9 @@ from api.parsing.nodes import AndNode, BinaryOperatorNode, NotNode, StringValueN
         ('"Serra Angel"', "Serra Angel"),
     ],
 )
-def test_standalone_quoted_string_parses_to_name_search(query: str, expected_value: str) -> None:
+def test_standalone_quoted_string_parses_to_name_search(parse_query, query: str, expected_value: str) -> None:
     """Test that a standalone quoted string is treated as an implicit name search."""
-    result = parse_scryfall_query(query)
+    result = parse_query(query)
     node = result.root
     assert isinstance(node, BinaryOperatorNode), f"Expected BinaryOperatorNode, got {type(node)}"
     assert isinstance(node.lhs, CardAttributeNode)
@@ -40,9 +39,9 @@ def test_standalone_quoted_string_parses_to_name_search(query: str, expected_val
         ('-"stormchaser\'s talent"', "stormchaser's talent"),
     ],
 )
-def test_negated_quoted_name_search(query: str, expected_value: str) -> None:
+def test_negated_quoted_name_search(parse_query, query: str, expected_value: str) -> None:
     """Test that a negated standalone quoted string parses to NotNode wrapping a name search."""
-    result = parse_scryfall_query(query)
+    result = parse_query(query)
     node = result.root
     assert isinstance(node, NotNode), f"Expected NotNode, got {type(node)}"
     inner = node.operand
@@ -58,15 +57,15 @@ def test_negated_quoted_name_search(query: str, expected_value: str) -> None:
         '"Black Lotus" color:b',
     ],
 )
-def test_quoted_name_combined_with_other_conditions(query: str) -> None:
+def test_quoted_name_combined_with_other_conditions(parse_query, query: str) -> None:
     """Test that standalone quoted string searches combine correctly with other conditions via AND."""
-    result = parse_scryfall_query(query)
+    result = parse_query(query)
     assert isinstance(result.root, AndNode), f"Expected AndNode, got {type(result.root)}"
     assert len(result.root.operands) == 2
 
 
-def test_quoted_name_does_not_interfere_with_exact_name() -> None:
+def test_quoted_name_does_not_interfere_with_exact_name(parse_query) -> None:
     """Test that exact name search (!) still produces ExactNameNode, not BinaryOperatorNode."""
-    result = parse_scryfall_query('!"stormchaser\'s talent"')
+    result = parse_query('!"stormchaser\'s talent"')
     assert isinstance(result.root, ExactNameNode), f"Expected ExactNameNode, got {type(result.root)}"
     assert result.root.value == "stormchaser's talent"

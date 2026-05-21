@@ -2,8 +2,6 @@
 
 import pytest
 
-from api.parsing import parse_scryfall_query
-
 
 @pytest.mark.parametrize(
     argnames=("query_str", "expected_explanation"),
@@ -60,24 +58,24 @@ from api.parsing import parse_scryfall_query
         ("artist:Nielsen", "the artist contains Nielsen"),
     ],
 )
-def test_explain_query(query_str: str, expected_explanation: str) -> None:
+def test_explain_query(parse_query, query_str: str, expected_explanation: str) -> None:
     """Test that query explanation generates expected human-readable strings."""
-    parsed_query = parse_scryfall_query(query_str)
+    parsed_query = parse_query(query_str)
     explanation = parsed_query.to_human_explanation()
     assert explanation == expected_explanation
 
 
-def test_explain_empty_query() -> None:
+def test_explain_empty_query(parse_query) -> None:
     """Test that empty queries produce empty explanations."""
-    parsed_query = parse_scryfall_query("")
+    parsed_query = parse_query("")
     explanation = parsed_query.to_human_explanation()
     # Empty query should produce empty explanation
     assert explanation == ""
 
 
-def test_explain_multiple_and_conditions() -> None:
+def test_explain_multiple_and_conditions(parse_query) -> None:
     """Test explanation with multiple AND conditions."""
-    parsed_query = parse_scryfall_query("power>3 toughness>3 cmc=5")
+    parsed_query = parse_query("power>3 toughness>3 cmc=5")
     explanation = parsed_query.to_human_explanation()
     assert "the power > 3" in explanation
     assert "the toughness > 3" in explanation
@@ -85,9 +83,9 @@ def test_explain_multiple_and_conditions() -> None:
     assert " and " in explanation
 
 
-def test_explain_nested_or_and_and() -> None:
+def test_explain_nested_or_and_and(parse_query) -> None:
     """Test explanation with nested OR and AND."""
-    parsed_query = parse_scryfall_query("(power>3 or toughness>3) and cmc=5")
+    parsed_query = parse_query("(power>3 or toughness>3) and cmc=5")
     explanation = parsed_query.to_human_explanation()
     assert "power > 3 or" in explanation
     assert "toughness > 3" in explanation
@@ -95,7 +93,7 @@ def test_explain_nested_or_and_and() -> None:
     assert "mana value is 5" in explanation
 
 
-def test_explain_color_combinations() -> None:
+def test_explain_color_combinations(parse_query) -> None:
     """Test color code expansion."""
     test_cases = [
         ("id=wubrg", "White/Blue/Black/Red/Green"),
@@ -103,12 +101,12 @@ def test_explain_color_combinations() -> None:
         ("c=ub", "Blue/Black"),
     ]
     for query_str, expected_colors in test_cases:
-        parsed_query = parse_scryfall_query(query_str)
+        parsed_query = parse_query(query_str)
         explanation = parsed_query.to_human_explanation()
         assert expected_colors in explanation
 
 
-def test_explain_format_expansion() -> None:
+def test_explain_format_expansion(parse_query) -> None:
     """Test format code expansion."""
     test_cases = [
         ("f=m", "Modern"),
@@ -119,6 +117,6 @@ def test_explain_format_expansion() -> None:
         ("f=c", "Commander"),
     ]
     for query_str, expected_format in test_cases:
-        parsed_query = parse_scryfall_query(query_str)
+        parsed_query = parse_query(query_str)
         explanation = parsed_query.to_human_explanation()
         assert expected_format in explanation

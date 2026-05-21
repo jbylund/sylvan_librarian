@@ -2,7 +2,6 @@
 
 import pytest
 
-from api.parsing import parse_scryfall_query
 from api.parsing.card_query_nodes import ExactNameNode
 from api.parsing.nodes import AndNode, NotNode
 
@@ -20,9 +19,9 @@ from api.parsing.nodes import AndNode, NotNode
         ('!"dragon\'s breath"', "dragon's breath"),
     ],
 )
-def test_exact_name_parses_to_exact_name_node(query: str, expected_value: str) -> None:
+def test_exact_name_parses_to_exact_name_node(parse_query, query: str, expected_value: str) -> None:
     """Test that ! prefix queries parse into ExactNameNode with the correct value."""
-    result = parse_scryfall_query(query)
+    result = parse_query(query)
     assert isinstance(result.root, ExactNameNode), f"Expected ExactNameNode, got {type(result.root)}"
     assert result.root.value == expected_value, f"Expected {expected_value!r}, got {result.root.value!r}"
 
@@ -34,9 +33,9 @@ def test_exact_name_parses_to_exact_name_node(query: str, expected_value: str) -
         ("-!bolt", "bolt"),
     ],
 )
-def test_negated_exact_name_parses_to_not_exact_name_node(query: str, expected_value: str) -> None:
+def test_negated_exact_name_parses_to_not_exact_name_node(parse_query, query: str, expected_value: str) -> None:
     """Test that -! prefix queries parse into NotNode(ExactNameNode(...))."""
-    result = parse_scryfall_query(query)
+    result = parse_query(query)
     assert isinstance(result.root, NotNode), f"Expected NotNode, got {type(result.root)}"
     assert isinstance(result.root.operand, ExactNameNode), f"Expected ExactNameNode operand, got {type(result.root.operand)}"
     assert result.root.operand.value == expected_value
@@ -50,9 +49,9 @@ def test_negated_exact_name_parses_to_not_exact_name_node(query: str, expected_v
         '!"Black Lotus" color:b',
     ],
 )
-def test_exact_name_combined_with_other_conditions(query: str) -> None:
+def test_exact_name_combined_with_other_conditions(parse_query, query: str) -> None:
     """Test that exact name queries combine correctly with other conditions via AND."""
-    result = parse_scryfall_query(query)
+    result = parse_query(query)
     assert isinstance(result.root, AndNode), f"Expected AndNode, got {type(result.root)}"
     assert len(result.root.operands) == 2
     # One of the operands should be an ExactNameNode
@@ -80,9 +79,9 @@ def test_exact_name_combined_with_other_conditions(query: str) -> None:
         ),
     ],
 )
-def test_exact_name_sql_generation(query: str, expected_sql: str, expected_parameters: dict) -> None:
+def test_exact_name_sql_generation(parse_query, query: str, expected_sql: str, expected_parameters: dict) -> None:
     """Test that exact name queries generate the correct SQL."""
-    parsed = parse_scryfall_query(query)
+    parsed = parse_query(query)
     context: dict = {}
     observed_sql = parsed.to_sql(context)
     assert observed_sql == expected_sql, f"SQL mismatch: {observed_sql!r}"

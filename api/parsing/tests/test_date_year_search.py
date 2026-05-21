@@ -25,10 +25,10 @@ from api.parsing import AttributeNode, BinaryOperatorNode, StringValueNode
         ),
     ),
 )
-def test_date_year_search_parsing(searchattr: str, searchoperator: str, searchvalue: str) -> None:
+def test_date_year_search_parsing(parse_query, searchattr: str, searchoperator: str, searchvalue: str) -> None:
     """Test that date and year searches parse correctly with all operators."""
     query_str = f"{searchattr}{searchoperator}{searchvalue}"
-    parsed = parsing.parse_scryfall_query(query_str)
+    parsed = parse_query(query_str)
 
     # Should parse to a BinaryOperatorNode
     assert isinstance(parsed.root, BinaryOperatorNode)
@@ -59,9 +59,9 @@ def test_date_year_search_parsing(searchattr: str, searchoperator: str, searchva
         ("year<=2025", "card.released_at <"),
     ],
 )
-def test_date_year_sql_generation(query: str, expected_sql_fragment: str) -> None:
+def test_date_year_sql_generation(parse_query, query: str, expected_sql_fragment: str) -> None:
     """Test that date and year searches generate correct SQL."""
-    parsed = parsing.parse_scryfall_query(query)
+    parsed = parse_query(query)
     context = {}
     sql = parsed.to_sql(context)
 
@@ -71,9 +71,9 @@ def test_date_year_sql_generation(query: str, expected_sql_fragment: str) -> Non
     assert len(context) >= 1
 
 
-def test_date_search_full_date() -> None:
+def test_date_search_full_date(parse_query) -> None:
     """Test date search with full date format."""
-    parsed = parsing.parse_scryfall_query("date:2025-02-02")
+    parsed = parse_query("date:2025-02-02")
     context = {}
     sql = parsed.to_sql(context)
 
@@ -82,9 +82,9 @@ def test_date_search_full_date() -> None:
     assert "2025-02-02" in context.values()
 
 
-def test_year_search_numeric() -> None:
+def test_year_search_numeric(parse_query) -> None:
     """Test year search with numeric year."""
-    parsed = parsing.parse_scryfall_query("year:2025")
+    parsed = parse_query("year:2025")
     context = {}
     sql = parsed.to_sql(context)
 
@@ -96,17 +96,17 @@ def test_year_search_numeric() -> None:
     assert "2026-01-01" in context.values()
 
 
-def test_year_search_rejects_date_format() -> None:
+def test_year_search_rejects_date_format(parse_query) -> None:
     """Test year search rejects date format (YYYY-MM-DD)."""
     # Year search should only accept 4-digit years
     # Parsing with date format should fail
     with pytest.raises(ValueError, match="Failed to parse query"):
-        parsing.parse_scryfall_query("year:2025-02-02")
+        parse_query("year:2025-02-02")
 
 
-def test_date_year_combined_query() -> None:
+def test_date_year_combined_query(parse_query) -> None:
     """Test combining date/year searches with other conditions."""
-    parsed = parsing.parse_scryfall_query("year:2025 AND cmc=3")
+    parsed = parse_query("year:2025 AND cmc=3")
     context = {}
     sql = parsed.to_sql(context)
 
