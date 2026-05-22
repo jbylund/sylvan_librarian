@@ -7,6 +7,7 @@ pyparsing-based parse_search_query pipeline.
 
 from __future__ import annotations
 
+import datetime
 from dataclasses import dataclass
 from enum import Enum, auto
 
@@ -48,6 +49,13 @@ _NUMERIC_ALIASES: frozenset[str] = frozenset(alias for alias, pc in _ALIAS_TO_PC
 
 _VALID_COLOR_NAMES: frozenset[str] = frozenset(COLOR_NAME_TO_CODE)
 _COLOR_LETTERS: frozenset[str] = frozenset("wubrgcWUBRGC")
+_MIN_MTG_YEAR: int = 1992
+
+
+def _validate_mtg_year(year: int, pos: int) -> None:
+    if year < _MIN_MTG_YEAR:
+        msg = f"Year must be {_MIN_MTG_YEAR} or later, got {year!r} at position {pos}"
+        raise ParseError(msg)
 
 
 # ── Token types ───────────────────────────────────────────────────────────────
@@ -647,11 +655,12 @@ class Parser:
     def parse_date_value(self) -> QueryNode:
         """Parse a date value: YYYY or YYYY-MM-DD (hyphens must have no surrounding spaces)."""
         tok = self.peek()
-        if tok.type not in (TT.NUMBER, TT.WORD):
+        if tok.type != TT.NUMBER:
             msg = f"Expected date, got {tok.value!r} at position {tok.pos}"
             raise ParseError(msg)
         self.consume()
-        year = str(int(tok.value) if tok.type == TT.NUMBER else tok.value)
+        year = int(tok.value)
+        _validate_mtg_year(year, tok.pos)
         # Consume YYYY-MM-DD: two MINUS+NUMBER pairs without spaces
         if (
             self.peek().type == TT.MINUS
@@ -669,20 +678,26 @@ class Parser:
             ):
                 self.consume()
                 day_tok = self.consume()
-                return StringValueNode(f"{year}-{int(month_tok.value):02d}-{int(day_tok.value):02d}")
-        return StringValueNode(year)
+                month = int(month_tok.value)
+                day = int(day_tok.value)
+                try:
+                    datetime.date(year=year, month=month, day=day)
+                except ValueError as exc:
+                    msg = f"Invalid date {year}-{month:02d}-{day:02d} at position {tok.pos}: {exc}"
+                    raise ParseError(msg) from exc
+                return StringValueNode(f"{year}-{month:02d}-{day:02d}")
+        return StringValueNode(str(year))
 
     def parse_year_value(self) -> QueryNode:
-        """Parse a year value: integer or bare word."""
+        """Parse a year value: 4-digit integer >= 1992."""
         tok = self.peek()
-        if tok.type == TT.NUMBER:
-            self.consume()
-            return StringValueNode(str(int(tok.value)))
-        if tok.type == TT.WORD:
-            self.consume()
-            return StringValueNode(str(tok.value))
-        msg = f"Expected year, got {tok.value!r} at position {tok.pos}"
-        raise ParseError(msg)
+        if tok.type != TT.NUMBER:
+            msg = f"Expected year, got {tok.value!r} at position {tok.pos}"
+            raise ParseError(msg)
+        self.consume()
+        year = int(tok.value)
+        _validate_mtg_year(year, tok.pos)
+        return StringValueNode(str(year))
 
 
 # ── entry point ───────────────────────────────────────────────────────────────

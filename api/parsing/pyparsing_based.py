@@ -667,7 +667,7 @@ def preprocess_implicit_and(query: str) -> str:
     Tokenizes using the same grammar primitives as the main parser, inserts AND
     between consecutive operands (and around negation), then serializes with no
     extra whitespace (e.g. 'foo bar' -> 'foo AND bar', 'cmc=3' -> 'cmc=3').
-    See api/parsing/tests/test_preprocess_implicit_and.py for full behavior.
+    See api/parsing/tests/implicit_and_cases.py for cases and test_pyparsing_preprocess.py for the test runner.
     """
     if not any(c in _FP_UNSAFE_CHARS for c in query):
         parts = query.split()
