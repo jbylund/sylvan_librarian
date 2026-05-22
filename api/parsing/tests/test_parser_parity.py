@@ -8,7 +8,7 @@ from api.parsing.tests.implicit_and_cases import TESTCASES
 
 
 @pytest.mark.parametrize(
-    argnames="query",
+    argnames=["query"],
     argvalues=[[c["query"]] for c in TESTCASES if c["query"].strip()],
     ids=[c["id"] for c in TESTCASES if c["query"].strip()],
 )
