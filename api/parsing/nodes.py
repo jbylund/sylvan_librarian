@@ -430,3 +430,35 @@ class Query(QueryNode):
     def __hash__(self: Query) -> int:
         """Return a hash based on the root node."""
         return hash(("Query", self.root))
+
+
+def flatten_nested_operations(node: QueryNode) -> QueryNode:
+    """Flatten nested AND/OR chains into canonical n-ary form.
+
+    AndNode(a, AndNode(b, c)) → AndNode(a, b, c)
+    """
+    # the node is class tests are faster than isinstance
+    nodecls = node.__class__
+    if nodecls is AndNode:
+        operands: list[QueryNode] = []
+        for operand in node.operands:
+            flattened = flatten_nested_operations(operand)
+            if isinstance(flattened, AndNode):
+                operands.extend(flattened.operands)
+            else:
+                operands.append(flattened)
+        return AndNode(operands)
+    if nodecls is OrNode:
+        operands = []
+        for operand in node.operands:
+            flattened = flatten_nested_operations(operand)
+            if isinstance(flattened, OrNode):
+                operands.extend(flattened.operands)
+            else:
+                operands.append(flattened)
+        return OrNode(operands)
+    if nodecls is NotNode:
+        return NotNode(flatten_nested_operations(node.operand))
+    if nodecls is Query:
+        return Query(flatten_nested_operations(node.root))
+    return node

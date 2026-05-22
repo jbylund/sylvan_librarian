@@ -41,6 +41,7 @@ from api.parsing.nodes import (
     RegexValueNode,
     StringValueNode,
     TrueNode,
+    flatten_nested_operations,
 )
 
 if TYPE_CHECKING:
@@ -80,35 +81,6 @@ def make_regex_pattern(words: Iterable[str]) -> Regex:
     pattern = r"\b(" + "|".join(sorted(words, key=len, reverse=True)) + r")\b"
     return Regex(pattern, flags=re.IGNORECASE)
 
-
-def flatten_nested_operations(node: QueryNode) -> QueryNode:
-    """Flatten nested operations of the same type to create canonical n-ary forms.
-
-    For example, (A AND (B AND C)) becomes (A AND B AND C).
-    """
-    if isinstance(node, AndNode):
-        operands: list[QueryNode] = []
-        for operand in node.operands:
-            if isinstance(operand, AndNode):
-                flattened = flatten_nested_operations(operand)
-                operands.extend(flattened.operands)
-            else:
-                operands.append(flatten_nested_operations(operand))
-        return AndNode(operands)
-    if isinstance(node, OrNode):
-        operands: list[QueryNode] = []
-        for operand in node.operands:
-            if isinstance(operand, OrNode):
-                flattened = flatten_nested_operations(operand)
-                operands.extend(flattened.operands)
-            else:
-                operands.append(flatten_nested_operations(operand))
-        return OrNode(operands)
-    if isinstance(node, NotNode):
-        return NotNode(flatten_nested_operations(node.operand))
-    if isinstance(node, Query):
-        return Query(flatten_nested_operations(node.root))
-    return node
 
 
 def create_value_node(value: object) -> QueryNode:
@@ -342,15 +314,17 @@ def create_all_condition_parsers(basic_parsers: dict, mana_parsers: dict, color_
 
     expr = Forward()
 
-    arithmetic_term = numeric_attr_word | literal_number | Group(lparen + expr + rparen)
+    paren_expr_term = lparen + expr + rparen
+    arithmetic_term = numeric_attr_word | literal_number | paren_expr_term
     arithmetic_expr = Forward()
     arithmetic_expr <<= arithmetic_term + arithmetic_op + arithmetic_term + ZeroOrMore(arithmetic_op + arithmetic_term)
     arithmetic_expr.set_parse_action(make_chained_arithmetic)
 
+    numeric_comparison_lhs = arithmetic_expr | paren_expr_term | numeric_attr_word | literal_number
     unified_numeric_comparison = (
-        (arithmetic_expr | numeric_attr_word | literal_number)
+        numeric_comparison_lhs
         + DEFAULT_OPERATORS
-        + (arithmetic_expr | numeric_attr_word | literal_number)
+        + numeric_comparison_lhs
     )
     unified_numeric_comparison.set_parse_action(make_binary_operator_node)
 
@@ -528,39 +502,25 @@ def get_parse_expr() -> ParserElement:  # noqa: C901, PLR0915
 
     factor = condition | hyphenated_condition | arithmetic_expr | negatable_factor | standalone_numeric
 
-    def handle_operators(tokens: list[object]) -> object:
-        """Handle AND/OR operators, grouping operands by operator type and building n-ary nodes."""
-        if len(tokens) == 1:
-            return tokens[0]
-        current_operands = [tokens[0]]
-        current_operator = None
-        for i in range(1, len(tokens), 2):
-            if i + 1 < len(tokens):
-                operator = tokens[i]
-                right = tokens[i + 1]
-                if current_operator is None:
-                    current_operator = operator.upper()
-                    current_operands.append(right)
-                elif operator.upper() == current_operator:
-                    current_operands.append(right)
-                else:
-                    if current_operator == "AND":
-                        result = AndNode(current_operands)
-                    elif current_operator == "OR":
-                        result = OrNode(current_operands)
-                    else:
-                        msg = f"Unknown operator: {current_operator}"
-                        raise ValueError(msg)
-                    current_operands = [result, right]
-                    current_operator = operator.upper()
-        if current_operator == "AND":
-            return AndNode(current_operands)
-        if current_operator == "OR":
-            return OrNode(current_operands)
-        return current_operands[0]
+    def handle_and(tokens: list[object]) -> object:
+        """Group AND operands into an AndNode (AND binds tighter than OR)."""
+        items = list(tokens)
+        if len(items) == 1:
+            return items[0]
+        return AndNode(items[0::2])
 
-    expr <<= factor + ZeroOrMore((operator_and | operator_or) + factor)
-    expr.set_parse_action(handle_operators)
+    def handle_or(tokens: list[object]) -> object:
+        """Group OR operands into an OrNode."""
+        items = list(tokens)
+        if len(items) == 1:
+            return items[0]
+        return OrNode(items[0::2])
+
+    and_expr = factor + ZeroOrMore(operator_and + factor)
+    and_expr.set_parse_action(handle_and)
+
+    expr <<= and_expr + ZeroOrMore(operator_or + and_expr)
+    expr.set_parse_action(handle_or)
     return expr
 
 

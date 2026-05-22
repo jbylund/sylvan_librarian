@@ -12,6 +12,7 @@ from enum import Enum, auto
 
 from api.parsing.card_query_nodes import CardAttributeNode, CardBinaryOperatorNode, ExactNameNode
 from api.parsing.db_info import ALIAS_TO_FIELD_INFOS, COLOR_NAME_TO_CODE, ParserClass
+from api.parsing.nodes import flatten_nested_operations
 from api.parsing.nodes import (
     AndNode,
     BinaryOperatorNode,
@@ -361,7 +362,14 @@ class Parser:
         """Parse a primary expression: group, exact-name, quoted string, word, number, or mana."""
         tok = self.peek()
         if tok.type == TT.LPAREN:
-            return self.parse_group()
+            lhs = self.parse_group()
+            if self.peek().type in _ARITH_OPS and not self.peek().space_before:
+                lhs = self._arith_tail(lhs)
+            lhs = self._spaced_arith_tail(lhs)
+            if self.peek().type == TT.OP:
+                op = self.consume().value
+                return CardBinaryOperatorNode(lhs, op, self.parse_num_expr_value())
+            return lhs
         if tok.type == TT.BANG:
             return self.parse_exact_name()
         if tok.type == TT.QUOTED:
@@ -428,20 +436,27 @@ class Parser:
                 return CardBinaryOperatorNode(CardAttributeNode(wl, ParserClass.NUMERIC), op, self.parse_num_expr_value())
             if next_tok.type in _ARITH_OPS and not next_tok.space_before:
                 lhs = self._arith_tail(CardAttributeNode(wl, ParserClass.NUMERIC))
+                lhs = self._spaced_arith_tail(lhs)
                 if self.peek().type == TT.OP:
                     op = self.consume().value
                     return CardBinaryOperatorNode(lhs, op, self.parse_num_expr_value())
                 return lhs  # standalone arith expression (e.g. cmc-power)
-            # no op / no adjacent arith → implicit name
-            return _name_node(word)
+            lhs = self._spaced_arith_tail(CardAttributeNode(wl, ParserClass.NUMERIC))
+            if isinstance(lhs, CardAttributeNode):
+                # no arithmetic consumed → implicit name
+                return _name_node(word)
+            if self.peek().type == TT.OP:
+                op = self.consume().value
+                return CardBinaryOperatorNode(lhs, op, self.parse_num_expr_value())
+            return lhs
 
         # ── known non-NUMERIC attribute ──
         if pc is not None and next_tok.type == TT.OP:
             op = self.consume().value
             return CardBinaryOperatorNode(CardAttributeNode(wl, pc), op, self.parse_value_for_class(pc, wl))
         if pc is not None:
-            # alias recognised but not followed by an operator → implicit name
-            return _name_node(word)
+            # alias recognised but no operator → might still be a hyphenated bare word (e.g. "a-b-c")
+            return self.parse_hyphenated_name(word)
 
         # ── unknown alias → implicit name, possibly hyphenated ──
         return self.parse_hyphenated_name(word)
@@ -450,15 +465,34 @@ class Parser:
         """Parse a bare numeric literal, optionally followed by an arithmetic tail and comparison."""
         tok = self.consume()  # NUMBER
         lhs: QueryNode = NumericValueNode(tok.value)
-        # arithmetic tail (no-space, next is a valid num term)
         if self.peek().type in _ARITH_OPS and not self.peek().space_before and self._num_term_start(self.peek(1)):
             lhs = self._arith_tail(lhs)
+        lhs = self._spaced_arith_tail(lhs)
         if self.peek().type == TT.OP:
             op = self.consume().value
             return CardBinaryOperatorNode(lhs, op, self.parse_num_expr_value())
         return lhs  # standalone numeric literal
 
     # ── arithmetic helpers ────────────────────────────────────────────────────
+
+    def _spaced_arith_tail(self, lhs: QueryNode) -> QueryNode:
+        """Consume spaced arithmetic operators (e.g. 'power - cmc', 'power + 1').
+
+        For MINUS: requires space before the following operand too, distinguishing
+        'power - cmc' (arithmetic) from 'power -cmc' (negation of next factor).
+        For +, *, /: no such requirement — they have no negation ambiguity.
+        """
+        while True:
+            tok = self.peek()
+            if tok.type not in _ARITH_OPS or not tok.space_before:
+                break
+            if tok.type == TT.MINUS and not self.peek(1).space_before:
+                break
+            if not self._num_term_start(self.peek(1)):
+                break
+            op = self.consume().value
+            lhs = CardBinaryOperatorNode(lhs, op, self.parse_num_term())
+        return lhs
 
     def _num_term_start(self, tok: Token) -> bool:
         return tok.type in (TT.NUMBER, TT.LPAREN) or (tok.type == TT.WORD and tok.value.lower() in _NUMERIC_ALIASES)
@@ -493,6 +527,9 @@ class Parser:
         """Numeric expression in value context (spaces around arith ops are OK)."""
         lhs = self.parse_num_term()
         while self.peek().type in _ARITH_OPS and self._num_term_start(self.peek(1)):
+            tok = self.peek()
+            if tok.type == TT.MINUS and tok.space_before and not self.peek(1).space_before:
+                break
             op = self.consume().value
             lhs = CardBinaryOperatorNode(lhs, op, self.parse_num_term())
         return lhs
@@ -665,7 +702,8 @@ def parse_query(src: str | None) -> Query:
         msg = f'Failed to lex query: "{src}"'
         raise ValueError(msg) from exc
     try:
-        return Parser(tokens).parse()
+        result = Parser(tokens).parse()
     except ParseError as exc:
         msg = f'Failed to parse query: "{src}"'
         raise ValueError(msg) from exc
+    return flatten_nested_operations(result)
