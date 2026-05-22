@@ -8,7 +8,6 @@ import pytest
 
 from api.parsing.card_query_nodes import CardAttributeNode, CardBinaryOperatorNode
 from api.parsing.nodes import AndNode, Query
-from api.parsing.parsing_f import parse_scryfall_query
 
 
 class TestLayoutBorderParsing:
@@ -38,9 +37,9 @@ class TestLayoutBorderParsing:
             ("border:gold", "card_border", "gold"),
         ],
     )
-    def test_parse_layout_and_border_queries(self, query: str, expected_attr: str, expected_value: str) -> None:
+    def test_parse_layout_and_border_queries(self, parse_query, query: str, expected_attr: str, expected_value: str) -> None:
         """Test parsing of layout and border search queries."""
-        result = parse_scryfall_query(query)
+        result = parse_query(query)
 
         assert isinstance(result, Query)
         binary_op = result.root
@@ -50,10 +49,10 @@ class TestLayoutBorderParsing:
         assert binary_op.operator == ":"
         assert binary_op.rhs.value == expected_value
 
-    def test_parse_combined_layout_border_query(self) -> None:
+    def test_parse_combined_layout_border_query(self, parse_query) -> None:
         """Test parsing combined layout and border queries."""
         query = "layout:split border:black"
-        result = parse_scryfall_query(query)
+        result = parse_query(query)
 
         assert isinstance(result, Query)
         # Should be an AND operation between two binary operator nodes
@@ -71,10 +70,10 @@ class TestLayoutBorderParsing:
         values = {cond.rhs.value for cond in conditions}
         assert values == {"split", "black"}
 
-    def test_parse_layout_with_quotes(self) -> None:
+    def test_parse_layout_with_quotes(self, parse_query) -> None:
         """Test parsing layout searches with quoted values."""
         query = 'layout:"double_faced_token"'
-        result = parse_scryfall_query(query)
+        result = parse_query(query)
 
         assert isinstance(result, Query)
         binary_op = result.root
@@ -82,10 +81,10 @@ class TestLayoutBorderParsing:
         assert binary_op.lhs.attribute_name == "card_layout"
         assert binary_op.rhs.value == "double_faced_token"
 
-    def test_parse_border_with_quotes(self) -> None:
+    def test_parse_border_with_quotes(self, parse_query) -> None:
         """Test parsing border searches with quoted values."""
         query = 'border:"borderless"'
-        result = parse_scryfall_query(query)
+        result = parse_query(query)
 
         assert isinstance(result, Query)
         binary_op = result.root
@@ -93,10 +92,10 @@ class TestLayoutBorderParsing:
         assert binary_op.lhs.attribute_name == "card_border"
         assert binary_op.rhs.value == "borderless"
 
-    def test_parse_complex_query_with_layout_border(self) -> None:
+    def test_parse_complex_query_with_layout_border(self, parse_query) -> None:
         """Test parsing complex queries that include layout and border."""
         query = "layout:normal border:black cmc=3"
-        result = parse_scryfall_query(query)
+        result = parse_query(query)
 
         assert isinstance(result, Query)
 

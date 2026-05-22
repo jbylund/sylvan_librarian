@@ -3,8 +3,8 @@
 import pytest
 
 from api import parsing
+from api.parsing import generate_sql_query
 from api.parsing.card_query_nodes import _color_dict_to_mask, _proper_subset_masks, _subset_masks, get_legality_comparison_object
-from api.parsing.parsing_f import generate_sql_query
 
 
 @pytest.mark.parametrize(
@@ -60,8 +60,8 @@ from api.parsing.parsing_f import generate_sql_query
         ),  # <
     ],
 )
-def test_full_sql_translation(input_query: str, expected_sql: str, expected_parameters: dict) -> None:
-    parsed = parsing.parse_scryfall_query(input_query)
+def test_full_sql_translation(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
+    parsed = parse_query(input_query)
     context = {}
     observed_sql = parsed.to_sql(context)
     assert observed_sql == expected_sql
@@ -130,8 +130,8 @@ def test_full_sql_translation(input_query: str, expected_sql: str, expected_para
         ),
     ],
 )
-def test_full_sql_translation_jsonb_colors(input_query: str, expected_sql: str, expected_parameters: dict) -> None:
-    parsed = parsing.parse_scryfall_query(input_query)
+def test_full_sql_translation_jsonb_colors(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
+    parsed = parse_query(input_query)
     observed_params = {}
     observed_sql = parsed.to_sql(observed_params)
     assert (observed_sql, observed_params) == (
@@ -200,8 +200,8 @@ def test_full_sql_translation_jsonb_colors(input_query: str, expected_sql: str, 
         ),  # equality with colorless name
     ],
 )
-def test_color_identity_sql_translation(input_query: str, expected_sql: str, expected_parameters: dict) -> None:
-    parsed = parsing.parse_scryfall_query(input_query)
+def test_color_identity_sql_translation(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
+    parsed = parse_query(input_query)
     observed_params = {}
     observed_sql = parsed.to_sql(observed_params)
     assert (observed_sql, observed_params) == (
@@ -225,8 +225,8 @@ def test_color_identity_sql_translation(input_query: str, expected_sql: str, exp
         ),
     ],
 )
-def test_full_sql_translation_jsonb_card_types(input_query: str, expected_sql: str, expected_parameters: dict) -> None:
-    parsed = parsing.parse_scryfall_query(input_query)
+def test_full_sql_translation_jsonb_card_types(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
+    parsed = parse_query(input_query)
     observed_params = {}
     observed_sql = parsed.to_sql(observed_params)
     assert (observed_sql, observed_params) == (
@@ -259,9 +259,9 @@ def test_full_sql_translation_jsonb_card_types(input_query: str, expected_sql: s
         ),
     ],
 )
-def test_oracle_text_sql_translation(input_query: str, expected_sql: str, expected_parameters: dict) -> None:
+def test_oracle_text_sql_translation(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
     """Test that oracle text search generates correct SQL with LIKE patterns."""
-    parsed = parsing.parse_scryfall_query(input_query)
+    parsed = parse_query(input_query)
     context = {}
     observed_sql = parsed.to_sql(context)
     assert observed_sql == expected_sql
@@ -292,9 +292,9 @@ def test_oracle_text_sql_translation(input_query: str, expected_sql: str, expect
         ),
     ],
 )
-def test_flavor_text_sql_translation(input_query: str, expected_sql: str, expected_parameters: dict) -> None:
+def test_flavor_text_sql_translation(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
     """Test that flavor text search generates correct SQL with LIKE patterns."""
-    parsed = parsing.parse_scryfall_query(input_query)
+    parsed = parse_query(input_query)
     context = {}
     observed_sql = parsed.to_sql(context)
     assert observed_sql == expected_sql
@@ -362,9 +362,9 @@ def test_flavor_text_sql_translation(input_query: str, expected_sql: str, expect
         ),
     ],
 )
-def test_keyword_sql_translation(input_query: str, expected_sql: str, expected_parameters: dict) -> None:
+def test_keyword_sql_translation(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
     """Test that keyword search generates correct SQL with JSONB operators."""
-    parsed = parsing.parse_scryfall_query(input_query)
+    parsed = parse_query(input_query)
     context = {}
     observed_sql = parsed.to_sql(context)
     assert observed_sql == expected_sql, f"\nExpected: {expected_sql}\nObserved: {observed_sql}"
@@ -412,9 +412,9 @@ def test_keyword_sql_translation(input_query: str, expected_sql: str, expected_p
         ),
     ],
 )
-def test_oracle_tag_sql_translation(input_query: str, expected_sql: str, expected_parameters: dict) -> None:
+def test_oracle_tag_sql_translation(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
     """Test that oracle tag search generates correct SQL with lowercase tags."""
-    parsed = parsing.parse_scryfall_query(input_query)
+    parsed = parse_query(input_query)
     context = {}
     observed_sql = parsed.to_sql(context)
     assert observed_sql == expected_sql, f"\nExpected: {expected_sql}\nObserved: {observed_sql}"
@@ -455,9 +455,9 @@ def test_oracle_tag_sql_translation(input_query: str, expected_sql: str, expecte
         ),
     ],
 )
-def test_is_tag_sql_translation(input_query: str, expected_sql: str, expected_parameters: dict) -> None:
+def test_is_tag_sql_translation(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
     """Test that is: tag search generates correct SQL with lowercase tags."""
-    parsed = parsing.parse_scryfall_query(input_query)
+    parsed = parse_query(input_query)
     context = {}
     observed_sql = parsed.to_sql(context)
     assert observed_sql == expected_sql, f"\nExpected: {expected_sql}\nObserved: {observed_sql}"
@@ -519,9 +519,9 @@ def test_is_tag_sql_translation(input_query: str, expected_sql: str, expected_pa
         ),
     ],
 )
-def test_case_insensitive_attributes(input_query: str, expected_sql: str, expected_parameters: dict) -> None:
+def test_case_insensitive_attributes(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
     """Test that attribute names are case-insensitive."""
-    parsed = parsing.parse_scryfall_query(input_query)
+    parsed = parse_query(input_query)
     context = {}
     observed_sql = parsed.to_sql(context)
     assert observed_sql == expected_sql, f"\nExpected: {expected_sql}\nObserved: {observed_sql}"
@@ -574,9 +574,9 @@ def test_case_insensitive_attributes(input_query: str, expected_sql: str, expect
         ),
     ],
 )
-def test_set_search_sql_translation(input_query: str, expected_sql: str, expected_parameters: dict) -> None:
+def test_set_search_sql_translation(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
     """Test that set searches generate correct SQL."""
-    parsed = parsing.parse_scryfall_query(input_query)
+    parsed = parse_query(input_query)
     context = {}
     observed_sql = parsed.to_sql(context)
     assert observed_sql == expected_sql, f"\nExpected: {expected_sql}\nObserved: {observed_sql}"
@@ -671,39 +671,39 @@ def test_set_search_sql_translation(input_query: str, expected_sql: str, expecte
         ),
     ],
 )
-def test_rarity_search_sql_translation(input_query: str, expected_sql: str, expected_parameters: dict) -> None:
+def test_rarity_search_sql_translation(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
     """Test that rarity search generates correct SQL with proper ordering."""
-    parsed = parsing.parse_scryfall_query(input_query)
+    parsed = parse_query(input_query)
     context = {}
     observed_sql = parsed.to_sql(context)
     assert observed_sql == expected_sql, f"\nExpected: {expected_sql}\nObserved: {observed_sql}"
     assert context == expected_parameters, f"\nExpected params: {expected_parameters}\nObserved params: {context}"
 
 
-def test_rarity_invalid_values() -> None:
+def test_rarity_invalid_values(parse_query) -> None:
     """Test that invalid rarity values raise appropriate errors."""
     # This should parse successfully but fail during SQL generation
 
-    parsed = parsing.parse_scryfall_query("rarity>invalid")
+    parsed = parse_query("rarity>invalid")
 
     # Should raise ValueError when generating SQL due to invalid rarity
     with pytest.raises(ValueError, match="Invalid rarity in comparison"):
         generate_sql_query(parsed)
 
     # Test with another invalid rarity
-    parsed2 = parsing.parse_scryfall_query("r<unknown")
+    parsed2 = parse_query("r<unknown")
 
     with pytest.raises(ValueError, match="Invalid rarity in comparison"):
         generate_sql_query(parsed2)
 
 
-def test_rarity_case_insensitive() -> None:
+def test_rarity_case_insensitive(parse_query) -> None:
     """Test that rarity values are case-insensitive."""
     # Test different cases for equality
     queries = ["rarity:Common", "rarity:RARE", "r:Mythic", "rarity:UnComMoN"]
 
     for query_str in queries:
-        parsed = parsing.parse_scryfall_query(query_str)
+        parsed = parse_query(query_str)
         sql, params = generate_sql_query(parsed)
 
         # Should not raise errors and should generate valid SQL
@@ -711,7 +711,7 @@ def test_rarity_case_insensitive() -> None:
         assert len(params) == 1
 
     # Test different cases for comparisons
-    parsed_comparison = parsing.parse_scryfall_query("rarity>Common")
+    parsed_comparison = parse_query("rarity>Common")
     sql, params = generate_sql_query(parsed_comparison)
 
     # Should contain simple numeric comparison and not raise errors
@@ -748,9 +748,9 @@ def test_rarity_case_insensitive() -> None:
         ),
     ],
 )
-def test_artist_sql_translation(input_query: str, expected_sql: str, expected_parameters: dict) -> None:
+def test_artist_sql_translation(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
     """Test SQL generation for artist search queries."""
-    parsed = parsing.parse_scryfall_query(input_query)
+    parsed = parse_query(input_query)
     context = {}
     observed_sql = parsed.to_sql(context)
     assert observed_sql == expected_sql
@@ -850,9 +850,9 @@ def test_artist_sql_translation(input_query: str, expected_sql: str, expected_pa
         ),
     ],
 )
-def test_legality_search_sql_translation(input_query: str, expected_parameters: dict) -> None:
+def test_legality_search_sql_translation(parse_query, input_query: str, expected_parameters: dict) -> None:
     """Test that legality search generates correct SQL with JSONB operators."""
-    parsed = parsing.parse_scryfall_query(input_query)
+    parsed = parse_query(input_query)
     context = {}
     observed_sql = parsed.to_sql(context)
     # Note: The parameter names will be auto-generated hashes, so we need a more flexible comparison
@@ -901,9 +901,11 @@ def test_legality_invalid_attribute() -> None:
         ),
     ],
 )
-def test_collector_number_sql_translation(input_query: str, expected_sql_fragment: str, expected_parameters: set) -> None:
+def test_collector_number_sql_translation(
+    parse_query, input_query: str, expected_sql_fragment: str, expected_parameters: set
+) -> None:
     """Test that collector number searches generate correct SQL with exact matching for colon operator."""
-    parsed = parsing.parse_scryfall_query(input_query)
+    parsed = parse_query(input_query)
     context = {}
     observed_sql = parsed.to_sql(context)
     assert expected_sql_fragment in observed_sql, f"Expected SQL fragment in: {observed_sql}"
@@ -940,12 +942,13 @@ def test_collector_number_sql_translation(input_query: str, expected_sql_fragmen
     ],
 )
 def test_collector_number_numeric_comparison_sql_translation(
+    parse_query,
     input_query: str,
     expected_sql_fragment: str,
     expected_parameters: set,
 ) -> None:
     """Test that collector number numeric comparisons generate correct SQL using the integer column."""
-    parsed = parsing.parse_scryfall_query(input_query)
+    parsed = parse_query(input_query)
     context = {}
     observed_sql = parsed.to_sql(context)
     assert expected_sql_fragment in observed_sql, f"Expected SQL fragment in: {observed_sql}"
@@ -956,7 +959,7 @@ def test_collector_number_numeric_comparison_sql_translation(
     assert param_value in expected_parameters, f"Expected parameter value in {expected_parameters}, got: {param_value}"
 
 
-def test_standalone_numeric_query_parses() -> None:
+def test_standalone_numeric_query_parses(parse_query) -> None:
     """Test that standalone numeric queries like '1' parse to NumericValueNode.
 
     Per issue #90, queries like '1' should parse successfully to a NumericValueNode,
@@ -964,12 +967,12 @@ def test_standalone_numeric_query_parses() -> None:
     PostgreSQL expects boolean values in WHERE clauses, not integers.
     """
     # Test integer
-    parsed_query = parsing.parse_scryfall_query("1")
+    parsed_query = parse_query("1")
     assert isinstance(parsed_query.root, parsing.NumericValueNode)
     assert parsed_query.root.value == 1
 
     # Test float
-    parsed_query_float = parsing.parse_scryfall_query("2.5")
+    parsed_query_float = parse_query("2.5")
     assert isinstance(parsed_query_float.root, parsing.NumericValueNode)
     assert parsed_query_float.root.value == 2.5
 
@@ -991,7 +994,7 @@ def test_standalone_numeric_query_parses() -> None:
         "power>1 or 5",  # Valid parse but semantically invalid: OR between boolean and integer
     ],
 )
-def test_semantically_invalid_queries_parse_but_fail_at_db_level(semantically_invalid_query: str) -> None:
+def test_semantically_invalid_queries_parse_but_fail_at_db_level(parse_query, semantically_invalid_query: str) -> None:
     """Test that queries with standalone numeric literals parse but would fail at DB level.
 
     These queries are syntactically valid after issue #90 (allowing standalone numeric literals),
@@ -999,7 +1002,7 @@ def test_semantically_invalid_queries_parse_but_fail_at_db_level(semantically_in
     They should parse successfully but would fail at the database level with datatype mismatch errors.
     """
     # These should parse without errors
-    parsed_query = parsing.parse_scryfall_query(semantically_invalid_query)
+    parsed_query = parse_query(semantically_invalid_query)
 
     # Should be able to generate SQL (though it would fail at execution)
     sql, context = generate_sql_query(parsed_query)
@@ -1042,11 +1045,11 @@ def test_semantically_invalid_queries_parse_but_fail_at_db_level(semantically_in
         ("color:xyz", False),  # Invalid color name should fail to parse
     ],
 )
-def test_color_parser_patterns(input_query: str, should_parse: bool) -> None:
+def test_color_parser_patterns(parse_query, input_query: str, should_parse: bool) -> None:
     """Test that color parser patterns work correctly."""
     if should_parse:
         # Should parse without raising an exception
-        parsed = parsing.parse_scryfall_query(input_query)
+        parsed = parse_query(input_query)
         assert parsed is not None
 
         # Should be able to generate SQL
@@ -1057,7 +1060,7 @@ def test_color_parser_patterns(input_query: str, should_parse: bool) -> None:
     else:
         # Should raise a ValueError (which wraps ParseException)
         with pytest.raises(ValueError, match="Failed to parse query"):
-            parsing.parse_scryfall_query(input_query)
+            parse_query(input_query)
 
 
 @pytest.mark.parametrize(
@@ -1070,9 +1073,9 @@ def test_color_parser_patterns(input_query: str, should_parse: bool) -> None:
         ("-type:creature", "NOT ((%(p_list_WydDcmVhdHVyZSdd)s <@ card.card_types))"),
     ],
 )
-def test_negated_type_queries_generate_simple_sql(input_query: str, expected_sql_fragment: str) -> None:
+def test_negated_type_queries_generate_simple_sql(parse_query, input_query: str, expected_sql_fragment: str) -> None:
     """Test that negated type queries generate simple, clean SQL without NULL handling."""
-    parsed = parsing.parse_scryfall_query(input_query)
+    parsed = parse_query(input_query)
     observed_params = {}
     observed_sql = parsed.to_sql(observed_params)
     assert expected_sql_fragment in observed_sql, f"Expected fragment '{expected_sql_fragment}' not found in SQL: {observed_sql}"
@@ -1105,18 +1108,18 @@ def test_negated_type_queries_generate_simple_sql(input_query: str, expected_sql
         ),
     ],
 )
-def test_frame_sql_translation(input_query: str, expected_sql: str, expected_parameters: dict) -> None:
+def test_frame_sql_translation(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
     """Test that frame search generates correct SQL with exact matching."""
-    parsed = parsing.parse_scryfall_query(input_query)
+    parsed = parse_query(input_query)
     observed_params = {}
     observed_sql = parsed.to_sql(observed_params)
     assert observed_sql == expected_sql, f"\nExpected: {expected_sql}\nObserved: {observed_sql}"
     assert observed_params == expected_parameters, f"\nExpected params: {expected_parameters}\nObserved params: {observed_params}"
 
 
-def test_name_titlecasing() -> None:
+def test_name_titlecasing(parse_query) -> None:
     """Test that name is titlecased."""
-    parsed = parsing.parse_scryfall_query(""" name="Urza's Saga" """.strip())
+    parsed = parse_query(""" name="Urza's Saga" """.strip())
     observed_params = {}
     observed_sql = parsed.to_sql(observed_params)
     assert observed_params == {"p_str_VXJ6YSdzIFNhZ2E": r"Urza's Saga"}
@@ -1127,9 +1130,9 @@ def test_name_titlecasing() -> None:
     argnames="query",
     argvalues=["", "   ", None],
 )
-def test_empty_query_generates_true(query: str | None) -> None:
+def test_empty_query_generates_true(parse_query, query: str | None) -> None:
     """Empty/whitespace/None queries should produce TRUE with no bound parameters."""
-    sql, params = generate_sql_query(parsing.parse_search_query(query))
+    sql, params = generate_sql_query(parse_query(query))
     assert sql == "TRUE"
     assert params == {}
 
