@@ -50,12 +50,17 @@ _NUMERIC_ALIASES: frozenset[str] = frozenset(alias for alias, pc in _ALIAS_TO_PC
 _VALID_COLOR_NAMES: frozenset[str] = frozenset(COLOR_NAME_TO_CODE)
 _COLOR_LETTERS: frozenset[str] = frozenset("wubrgcWUBRGC")
 _MIN_MTG_YEAR: int = 1992
+_MAX_YEAR: int = 2040
 
 
-def _validate_mtg_year(year: int, pos: int) -> None:
-    if year < _MIN_MTG_YEAR:
-        msg = f"Year must be {_MIN_MTG_YEAR} or later, got {year!r} at position {pos}"
+def _validate_mtg_year(value: int | float, pos: int) -> int:
+    if isinstance(value, float):
+        msg = f"Expected integer year, got {value!r} at position {pos}"
         raise ParseError(msg)
+    if not (_MIN_MTG_YEAR <= value <= _MAX_YEAR):
+        msg = f"Year must be between {_MIN_MTG_YEAR} and {_MAX_YEAR}, got {value!r} at position {pos}"
+        raise ParseError(msg)
+    return value
 
 
 # ── Token types ───────────────────────────────────────────────────────────────
@@ -659,8 +664,7 @@ class Parser:
             msg = f"Expected date, got {tok.value!r} at position {tok.pos}"
             raise ParseError(msg)
         self.consume()
-        year = int(tok.value)
-        _validate_mtg_year(year, tok.pos)
+        year = _validate_mtg_year(tok.value, tok.pos)
         # Consume YYYY-MM-DD: two MINUS+NUMBER pairs without spaces
         if (
             self.peek().type == TT.MINUS
@@ -695,8 +699,7 @@ class Parser:
             msg = f"Expected year, got {tok.value!r} at position {tok.pos}"
             raise ParseError(msg)
         self.consume()
-        year = int(tok.value)
-        _validate_mtg_year(year, tok.pos)
+        year = _validate_mtg_year(tok.value, tok.pos)
         return StringValueNode(str(year))
 
 
