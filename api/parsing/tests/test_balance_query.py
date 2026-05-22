@@ -56,7 +56,7 @@ def test_balance_query_integration_with_parsing(parse_query, original_query: str
 
     # Original should fail (at least for quote cases)
     if '"' in original_query and original_query.count('"') % 2 == 1:
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=r"(quote|lex query)"):
             parse_query(original_query)
 
     # Balanced should succeed

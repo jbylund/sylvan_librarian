@@ -82,7 +82,6 @@ def make_regex_pattern(words: Iterable[str]) -> Regex:
     return Regex(pattern, flags=re.IGNORECASE)
 
 
-
 def create_value_node(value: object) -> QueryNode:
     """Create the appropriate QueryNode type for a value.
 
@@ -321,11 +320,7 @@ def create_all_condition_parsers(basic_parsers: dict, mana_parsers: dict, color_
     arithmetic_expr.set_parse_action(make_chained_arithmetic)
 
     numeric_comparison_lhs = arithmetic_expr | paren_expr_term | numeric_attr_word | literal_number
-    unified_numeric_comparison = (
-        numeric_comparison_lhs
-        + DEFAULT_OPERATORS
-        + numeric_comparison_lhs
-    )
+    unified_numeric_comparison = numeric_comparison_lhs + DEFAULT_OPERATORS + numeric_comparison_lhs
     unified_numeric_comparison.set_parse_action(make_binary_operator_node)
 
     mana_value_or_string = mana_value | quoted_string | string_value_word
@@ -407,7 +402,7 @@ def make_chained_arithmetic(tokens: list[object]) -> QueryNode:
 
 
 @cachebox.cached(cache={})
-def get_parse_expr() -> ParserElement:  # noqa: C901, PLR0915
+def get_parse_expr() -> ParserElement:  # noqa: PLR0915
     """Create and return the main parser expression for Scryfall search queries.
 
     This function builds a comprehensive parsing grammar that supports the full
@@ -740,5 +735,3 @@ def is_operator(token: str) -> bool:
         True if the token is an operator, False otherwise.
     """
     return token in [":", ">", "<", ">=", "<=", "=", "!=", "-", "+", "*", "/"]
-
-

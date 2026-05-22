@@ -29,7 +29,9 @@ class TestWatermarkSQLGeneration:
             ("watermark:planeswalker", "card.card_watermark", "planeswalker"),
         ],
     )
-    def test_watermark_generate_exact_equality_sql(self, parse_query, query: str, expected_column: str, expected_value: str) -> None:
+    def test_watermark_generate_exact_equality_sql(
+        self, parse_query, query: str, expected_column: str, expected_value: str
+    ) -> None:
         """Test that watermark searches generate exact equality SQL (not ILIKE)."""
         result = parse_query(query)
         assert isinstance(result, Query)

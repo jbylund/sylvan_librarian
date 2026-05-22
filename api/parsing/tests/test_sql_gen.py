@@ -3,8 +3,8 @@
 import pytest
 
 from api import parsing
-from api.parsing.card_query_nodes import _color_dict_to_mask, _proper_subset_masks, _subset_masks, get_legality_comparison_object
 from api.parsing import generate_sql_query
+from api.parsing.card_query_nodes import _color_dict_to_mask, _proper_subset_masks, _subset_masks, get_legality_comparison_object
 
 
 @pytest.mark.parametrize(
@@ -901,7 +901,9 @@ def test_legality_invalid_attribute() -> None:
         ),
     ],
 )
-def test_collector_number_sql_translation(parse_query, input_query: str, expected_sql_fragment: str, expected_parameters: set) -> None:
+def test_collector_number_sql_translation(
+    parse_query, input_query: str, expected_sql_fragment: str, expected_parameters: set
+) -> None:
     """Test that collector number searches generate correct SQL with exact matching for colon operator."""
     parsed = parse_query(input_query)
     context = {}

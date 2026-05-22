@@ -4,7 +4,6 @@ import itertools
 
 import pytest
 
-from api import parsing
 from api.parsing import AttributeNode, BinaryOperatorNode, StringValueNode
 
 

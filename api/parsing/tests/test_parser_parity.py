@@ -8,7 +8,7 @@ from api.parsing.tests.implicit_and_cases import TESTCASES
 
 
 @pytest.mark.parametrize(
-    argnames=["query"],
+    argnames="query",
     argvalues=[[c["query"]] for c in TESTCASES if c["query"].strip()],
     ids=[c["id"] for c in TESTCASES if c["query"].strip()],
 )
@@ -36,7 +36,5 @@ def test_both_parsers_agree(query: str) -> None:
     )
     if hand_result is not None:
         assert hand_result == pyp_result, (
-            f"Parsers produce different SQL for {query!r}:\n"
-            f"  hand_rolled: {hand_result}\n"
-            f"  pyparsing:   {pyp_result}"
+            f"Parsers produce different SQL for {query!r}:\n  hand_rolled: {hand_result}\n  pyparsing:   {pyp_result}"
         )

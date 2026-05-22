@@ -169,7 +169,7 @@ class TestTypeConversion:
         def no_params_func() -> str:
             return "no params"
 
-        def only_self_func(self) -> str:  # noqa: ANN001
+        def only_self_func(self) -> str:
             return "only self"
 
         # Functions that don't need wrapping should return the same function

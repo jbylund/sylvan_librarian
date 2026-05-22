@@ -2,14 +2,13 @@
 
 import pytest
 
-from api import parsing
 from api.parsing import (
     AndNode,
     AttributeNode,
     BinaryOperatorNode,
     RegexValueNode,
+    generate_sql_query,
 )
-from api.parsing import generate_sql_query
 
 
 class TestRegexPatternParsing:
