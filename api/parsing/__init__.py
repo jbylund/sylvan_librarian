@@ -1,5 +1,7 @@
 """Query parsing and AST generation for Scryfall search queries."""
 
+from api.parsing.hand_parser import ParseError
+from api.parsing.hand_parser import parse_query as parse_search_query
 from api.parsing.nodes import (
     AndNode,
     AttributeNode,
@@ -15,7 +17,6 @@ from api.parsing.nodes import (
     TrueNode,
 )
 from api.parsing.parsing_f import balance_partial_query, parse_scryfall_query
-from api.parsing.pyparsing_based import parse_search_query
 from api.parsing.sql_generation import generate_sql_query
 
 __all__ = [
@@ -26,6 +27,7 @@ __all__ = [
     "NotNode",
     "NumericValueNode",
     "OrNode",
+    "ParseError",
     "Query",
     "QueryNode",
     "RegexValueNode",
