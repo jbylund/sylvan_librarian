@@ -33,6 +33,7 @@ from psycopg import Connection, Cursor
 
 from api.card_processing import preprocess_card
 from api.enums import CardOrdering, PreferOrder, SortDirection, UniqueOn
+from api.middlewares.timing import record_span
 from api.noscript_helpers import generate_results_count_html, generate_results_html
 from api.parsing import generate_sql_query, parse_scryfall_query
 from api.scryfall_bulk_data_fetcher import BulkDataKey, ScryfallBulkDataFetcher
@@ -294,6 +295,7 @@ class APIResource:
             path,
             self._raise_not_found,
         )
+        res = None
         before = time.monotonic()
         try:
             res = action(falcon_response=resp, **req.params)
@@ -330,6 +332,13 @@ class APIResource:
         finally:
             duration = (time.monotonic() - before) * 1000
             logger.info("Request duration: %.1f ms / %s", duration, resp.status)
+            record_span(req, "handler", duration)
+            if isinstance(res, dict):
+                outer = res.get("outer_timings", {})
+                if "get_where_clause" in outer:
+                    record_span(req, "parse", outer["get_where_clause"].get("_meta", {}).get("duration_ms", 0))
+                if "run_query" in outer:
+                    record_span(req, "db", outer["run_query"].get("_meta", {}).get("duration_ms", 0))
 
     def _raise_not_found(self, **_: object) -> None:
         """Raise a Falcon HTTPNotFound error with available routes."""
