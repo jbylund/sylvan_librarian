@@ -75,7 +75,7 @@ class CompressionMiddleware:
             "Server priorities: %s / Accept encoding: %s / Selected compressor: %s",
             {k: v.priority for k, v in self._compressors.items()},
             accept_encoding_header,
-            compressor.encoding,
+            compressor.encoding if compressor is not None else None,
         )
         return compressor
 
