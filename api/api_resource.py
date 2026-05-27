@@ -201,7 +201,14 @@ class APIResource:
             method = getattr(self, method_name)
             if callable(method):
                 self.action_map[method_name] = make_type_converting_wrapper(method)
-        self.action_map["index"] = make_type_converting_wrapper(self.index_html)
+        self.action_map["_root"] = make_type_converting_wrapper(self._root)
+
+        def redirect_to_root(**_: object) -> None:
+            msg = "/"
+            raise falcon.HTTPMovedPermanently(msg)
+
+        self.action_map["index"] = redirect_to_root
+        self.action_map["index_html"] = redirect_to_root
 
         # add static file serving actions
         self.action_map["static/app_js"] = self.app_js
@@ -278,7 +285,7 @@ class APIResource:
             logger.info("Request already handled: %s", req.relative_uri)
             return
 
-        path = req.path.strip("/") or "index"
+        path = req.path.strip("/") or "_root"
 
         if path in ("db_ready", "pid"):
             return
@@ -957,7 +964,7 @@ class APIResource:
             "total_cards": total_cards,
         }
 
-    def index_html(  # noqa: PLR0913
+    def _root(  # noqa: PLR0913
         self,
         *,
         falcon_response: falcon.Response | None = None,

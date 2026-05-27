@@ -364,10 +364,10 @@ class TestAPIResourceStaticFileServing(unittest.TestCase):
             assert mock_response.text == "file content"
 
     def test_index_html_serves_static_file(self) -> None:
-        """Test index_html serves the index.html file."""
+        """Test _root serves the index.html file."""
         mock_response = MagicMock()
 
-        self.api_resource.index_html(falcon_response=mock_response)
+        self.api_resource._root(falcon_response=mock_response)
 
         # Verify the response contains HTML content
         assert mock_response.text is not None
@@ -377,7 +377,7 @@ class TestAPIResourceStaticFileServing(unittest.TestCase):
         mock_response.set_header.assert_called_with("Cache-Control", "public, max-age=3600")
 
     def test_index_html_with_query_embeds_search_results(self) -> None:
-        """Test index_html embeds search results when query parameter is provided."""
+        """Test _root embeds search results when query parameter is provided."""
         mock_response = MagicMock()
 
         # Mock the _search method to return test results
@@ -388,8 +388,8 @@ class TestAPIResourceStaticFileServing(unittest.TestCase):
         }
 
         with patch.object(self.api_resource, "_search", return_value=mock_search_results):
-            # Call index_html with a search query
-            self.api_resource.index_html(falcon_response=mock_response, q="elf")
+            # Call _root with a search query
+            self.api_resource._root(falcon_response=mock_response, q="elf")
 
         # Verify the response contains HTML content
         assert mock_response.text is not None

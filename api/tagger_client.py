@@ -199,7 +199,7 @@ class TaggerClient:
         )
 
         def get_response() -> requests.Response:
-            time.sleep(0.43)
+            time.sleep(0.51)
             response = retryer(self.session.post)(
                 f"{self.base_url}/graphql",
                 json={
