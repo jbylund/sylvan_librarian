@@ -50,7 +50,10 @@ class TimingMiddleware:
         """
         del resource, req_succeeded
         start = req.context.get("_start_time")
-        duration = time.monotonic() - start if start is not None else -1.0
+        if start is None:
+            logger.warning("TimingMiddleware: start time not found for request %s", req.relative_uri)
+            return
+        duration = time.monotonic() - start
         duration_ms = duration * 1000
         logger.info(
             "[timing] %.2f ms | pid: %d | %s | %s | %s",

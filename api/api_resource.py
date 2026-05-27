@@ -2616,12 +2616,15 @@ class APIResource:
         except KeyError:
             stale = next(iter(self._preferred_cards_map.values()), None)
             if stale is not None:
-                # Stale-while-revalidate: serve old data instantly, refresh in background
-                threading.Thread(
-                    target=self._fetch_and_cache_preferred_cards,
-                    args=(gen,),
-                    daemon=True,
-                ).start()
+                # Stale-while-revalidate: serve old data instantly, refresh in background.
+                # Best-effort check: skip spawning if a refresh is already in progress so we
+                # don't create a flood of threads that immediately no-op on the inner lock.
+                if not self._preferred_cards_refresh_lock.locked():
+                    threading.Thread(
+                        target=self._fetch_and_cache_preferred_cards,
+                        args=(gen,),
+                        daemon=True,
+                    ).start()
                 return stale
             # No previous generation (startup): block until cards are loaded
             self._fetch_and_cache_preferred_cards(gen)

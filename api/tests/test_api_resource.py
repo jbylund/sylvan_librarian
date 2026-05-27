@@ -635,6 +635,7 @@ class TestAPIResourceCaching(unittest.TestCase):
 
         with (
             patch.object(threading.Thread, "__init__", tracking_init),
+            patch.object(threading.Thread, "start", lambda _: None),
             patch.object(self.api_resource, "_search", return_value={"cards": []}),
         ):
             self.api_resource._get_all_preferred_cards()
