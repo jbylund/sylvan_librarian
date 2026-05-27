@@ -57,6 +57,7 @@ class ApiWorker(multiprocessing.Process):
         import_guard: LockType = multiprocessing_utils.DEFAULT_LOCK,
         last_import_time: Synchronized | None = None,
         schema_setup_event: EventType = multiprocessing_utils.DEFAULT_EVENT,
+        cache_generation: Synchronized | None = None,
     ) -> None:
         """Initialize the API worker process.
 
@@ -68,6 +69,7 @@ class ApiWorker(multiprocessing.Process):
             last_import_time (Synchronized | None): Shared value for last bulk import timestamp (Unix time).
             schema_setup_event (multiprocessing.Event): Event denoting schema setup has been completed.
             debug (bool): Whether to run in debug mode.
+            cache_generation (Synchronized | None): Shared counter incremented on cache invalidation.
         """
         super().__init__()
         self.host = host
@@ -77,6 +79,7 @@ class ApiWorker(multiprocessing.Process):
         self.last_import_time = last_import_time
         self.debug = debug
         self.schema_setup_event = schema_setup_event
+        self.cache_generation = cache_generation
 
     @classmethod
     def get_api(
@@ -84,6 +87,7 @@ class ApiWorker(multiprocessing.Process):
         import_guard: LockType,
         last_import_time: Synchronized | None,
         schema_setup_event: EventType,
+        cache_generation: Synchronized | None = None,
     ) -> falcon.App:
         """Create and configure the Falcon API application.
 
@@ -113,10 +117,12 @@ class ApiWorker(multiprocessing.Process):
         )
         api.set_error_serializer(json_error_serializer)  # Use custom JSON error serializer
         sink = APIResource(
+            cache_generation=cache_generation,
             import_guard=import_guard,
             last_import_time=last_import_time,
             schema_setup_event=schema_setup_event,
         )  # Create the main API resource
+        sink._get_all_preferred_cards()  # warm preferred-cards cache before serving traffic
         api.add_sink(sink._handle, prefix="/")  # Route all requests to the sink handler
 
         json_handler = falcon.media.JSONHandler(
@@ -144,6 +150,7 @@ class ApiWorker(multiprocessing.Process):
             import bjoern
 
             app = self.get_api(
+                cache_generation=self.cache_generation,
                 import_guard=self.import_guard,
                 last_import_time=self.last_import_time,
                 schema_setup_event=self.schema_setup_event,

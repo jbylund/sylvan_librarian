@@ -55,10 +55,12 @@ def run_server(
     import_guard = multiprocessing.RLock()
     last_import_time = multiprocessing.Value("d", 0.0, lock=True)
     schema_setup_event = multiprocessing.Event()
+    cache_generation = multiprocessing.Value("i", 0, lock=True)
 
     # start workers
     for _ in range(num_workers):
         iworker = ApiWorker(
+            cache_generation=cache_generation,
             exit_flag=exit_flag,
             host=ALL_INTERFACES,
             import_guard=import_guard,

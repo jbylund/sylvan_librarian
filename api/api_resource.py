@@ -15,6 +15,7 @@ import pathlib
 import random
 import re
 import secrets
+import threading
 import time
 import urllib.parse
 from datetime import timedelta
@@ -33,12 +34,14 @@ from psycopg import Connection, Cursor
 
 from api.card_processing import preprocess_card
 from api.enums import CardOrdering, PreferOrder, SortDirection, UniqueOn
+from api.middlewares.timing import record_span
 from api.noscript_helpers import generate_results_count_html, generate_results_html
 from api.parsing import generate_sql_query, parse_scryfall_query
 from api.scryfall_bulk_data_fetcher import BulkDataKey, ScryfallBulkDataFetcher
 from api.settings import settings
 from api.tagger_client import TaggerClient
 from api.utils import db_utils, error_monitoring, multiprocessing_utils
+from api.utils.generation_cache import GenerationCache
 from api.utils.timer import Timer
 from api.utils.type_conversions import _get_type_name, make_type_converting_wrapper
 
@@ -186,6 +189,7 @@ class APIResource:
         import_guard: LockType = multiprocessing_utils.DEFAULT_LOCK,
         last_import_time: Synchronized | None = None,
         schema_setup_event: EventType = multiprocessing_utils.DEFAULT_EVENT,
+        cache_generation: Synchronized | None = None,
     ) -> None:
         """Initialize an APIResource object, set up connection pool and action map.
 
@@ -216,10 +220,14 @@ class APIResource:
         self.action_map["static/favicon_ico"] = self.favicon_ico
         self.action_map["static/styles_css"] = self.styles_css
 
-        self._query_cache = LRUCache(maxsize=1_000)
-        if not settings.enable_cache:
-            # cachebox doesn't support ttl=0, so we use a minimal cache when disabled
-            self._query_cache = LRUCache(maxsize=1)
+        self._cache_generation: Synchronized = cache_generation or multiprocessing.Value("i", 0)
+        self._query_cache: GenerationCache = GenerationCache(
+            factory=lambda: LRUCache(maxsize=1_000 if settings.enable_cache else 1),
+            generation=self._cache_generation,
+        )
+        self._search_gen_cache: LRUCache = LRUCache(maxsize=1)  # generation → TTLCache
+        self._preferred_cards_map: LRUCache = LRUCache(maxsize=1)  # generation → list
+        self._preferred_cards_refresh_lock = threading.Lock()
         self._session = requests.Session()
         self._import_guard: LockType = import_guard
         self._last_import_time: Synchronized = last_import_time or multiprocessing.Value("d", 0.0, lock=True)
@@ -301,6 +309,7 @@ class APIResource:
             path,
             self._raise_not_found,
         )
+        res = None
         before = time.monotonic()
         try:
             res = action(falcon_response=resp, **req.params)
@@ -337,6 +346,13 @@ class APIResource:
         finally:
             duration = (time.monotonic() - before) * 1000
             logger.info("Request duration: %.1f ms / %s", duration, resp.status)
+            record_span(req, "handler", duration)
+            if isinstance(res, dict):
+                outer = res.get("outer_timings", {})
+                if "get_where_clause" in outer:
+                    record_span(req, "parse", outer["get_where_clause"].get("_meta", {}).get("duration_ms", 0))
+                if "run_query" in outer:
+                    record_span(req, "db", outer["run_query"].get("_meta", {}).get("duration_ms", 0))
 
     def _raise_not_found(self, **_: object) -> None:
         """Raise a Falcon HTTPNotFound error with available routes."""
@@ -760,11 +776,7 @@ class APIResource:
             ) from err
         return where_clause, params
 
-    @cached(
-        cache=TTLCache(maxsize=1000, ttl=60),
-        key=lambda args, kwds: (args, tuple(sorted(kwds.items()))),
-    )
-    def _search(  # noqa: PLR0913
+    def _search(  # noqa: PLR0913,PLR0915
         self,
         *,
         direction: SortDirection = SortDirection.ASC,
@@ -776,6 +788,17 @@ class APIResource:
     ) -> dict[str, Any]:
         self._require_setup_complete()
         limit = self._validate_limit(limit)
+
+        if settings.enable_cache:
+            cache_key = (direction, limit, orderby, prefer, query, unique)
+            gen = self._cache_generation.value
+            try:
+                search_cache = self._search_gen_cache[gen]
+            except KeyError:
+                search_cache = TTLCache(maxsize=1000, ttl=60)
+                self._search_gen_cache[gen] = search_cache
+            if cache_key in search_cache:
+                return search_cache[cache_key]
 
         timer = Timer()
 
@@ -953,7 +976,7 @@ class APIResource:
         total_cards = count_row["total_cards_count"]
         for icard in cards:
             icard.pop("total_cards_count")
-        return {
+        result = {
             "cards": cards,
             "compiled": query_sql,
             "params": params,
@@ -963,6 +986,9 @@ class APIResource:
             "inner_timings": result_bag.pop("timings"),
             "total_cards": total_cards,
         }
+        if settings.enable_cache:
+            search_cache[cache_key] = result
+        return result
 
     def _root(  # noqa: PLR0913
         self,
@@ -2274,6 +2300,7 @@ class APIResource:
                         conn.commit()
 
                         logger.info("Import completed successfully")
+                        self._clear_caches()
                         return {
                             "status": "success",
                             "timestamp": timestamp,
@@ -2567,18 +2594,40 @@ class APIResource:
             }
 
     def _clear_caches(self) -> None:
-        self._query_cache.clear()
-        # Clear the search cache by accessing its cache attribute
-        getattr(self._search, "cache", {}).clear()
-        getattr(self._get_all_preferred_cards, "cache", {}).clear()
+        with self._cache_generation.get_lock():
+            self._cache_generation.value += 1
 
-    @cached(cache=TTLCache(maxsize=1, ttl=600))
+    def _fetch_and_cache_preferred_cards(self, gen: int) -> None:
+        if not self._preferred_cards_refresh_lock.acquire(blocking=False):
+            return
+        try:
+            cards = self._search(query="", limit=None)["cards"]
+            self._preferred_cards_map[gen] = cards
+        except Exception:
+            logger.exception("Background preferred cards refresh failed for generation %d", gen)
+        finally:
+            self._preferred_cards_refresh_lock.release()
+
     def _get_all_preferred_cards(self) -> list[dict[str, Any]]:
-        """Return all preferred printings (one per card name), cached for 10 minutes."""
-        # if _search is wrapped, use the inner function to avoid
-        # double caching of all records in the normal _search cache
-        search_method = getattr(self._search, "__wrapped__", self._search)
-        return search_method(self, query="", limit=None)["cards"]
+        gen = self._cache_generation.value
+        try:
+            return self._preferred_cards_map[gen]
+        except KeyError:
+            stale = next(iter(self._preferred_cards_map.values()), None)
+            if stale is not None:
+                # Stale-while-revalidate: serve old data instantly, refresh in background.
+                # Best-effort check: skip spawning if a refresh is already in progress so we
+                # don't create a flood of threads that immediately no-op on the inner lock.
+                if not self._preferred_cards_refresh_lock.locked():
+                    threading.Thread(
+                        target=self._fetch_and_cache_preferred_cards,
+                        args=(gen,),
+                        daemon=True,
+                    ).start()
+                return stale
+            # No previous generation (startup): block until cards are loaded
+            self._fetch_and_cache_preferred_cards(gen)
+            return self._preferred_cards_map.get(gen, [])
 
     def random_search(self, *, num_cards: int = 1, **_: object) -> dict[str, Any]:
         """Return one or more random cards in the same envelope shape as search().

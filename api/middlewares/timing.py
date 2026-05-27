@@ -15,6 +15,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def record_span(req: falcon.Request, name: str, dur_ms: float) -> None:
+    """Record a named timing span on the request context for inclusion in Server-Timing."""
+    req.context.setdefault("_timing_spans", []).append((name, dur_ms))
+
+
 class TimingMiddleware:
     """Middleware to log the duration, status, URL, and user agent for each request."""
 
@@ -45,15 +50,22 @@ class TimingMiddleware:
         """
         del resource, req_succeeded
         start = req.context.get("_start_time")
-        duration = time.monotonic() - start if start is not None else -1.0
+        if start is None:
+            logger.warning("TimingMiddleware: start time not found for request %s", req.relative_uri)
+            return
+        duration = time.monotonic() - start
+        duration_ms = duration * 1000
         logger.info(
             "[timing] %.2f ms | pid: %d | %s | %s | %s",
-            duration * 1000,
+            duration_ms,
             os.getpid(),
             resp.status,
             req.relative_uri,
             req.get_header("User-Agent", "-"),
         )
+        spans = req.context.get("_timing_spans", [])
+        spans.append(("total", duration_ms))
+        resp.set_header("Server-Timing", ", ".join(f"{name};dur={dur:.1f}" for name, dur in spans))
 
 
 class ProfilingMiddleware:
