@@ -1026,7 +1026,7 @@ class CardSearch {
   }
 
   escapeHtml(text) {
-    if (text == null) return '';
+    if (text === null || text === undefined) return '';
     // Single-pass string replace — no DOM element allocation on every call.
     // Regex and replacement callback are hoisted to module-level constants so they
     // are not re-allocated per call.  Single quotes don't need escaping: all
