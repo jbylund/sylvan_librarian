@@ -1,6 +1,11 @@
 const UNIQUE_PRINTING = 'printing';
 const DWELL_MS = 2500; // milliseconds user must stay on results before adding a history entry
 
+// Hoisted so escapeHtml() doesn't allocate a new RegExp or callback on every call.
+const HTML_ESCAPE_RE = /[&<>"]/g;
+const HTML_ESCAPE_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
+const htmlEscapeChar = c => HTML_ESCAPE_MAP[c];
+
 class CardSearch {
   constructor() {
     this.searchForm = document.querySelector('.search-container');
@@ -1023,12 +1028,10 @@ class CardSearch {
   escapeHtml(text) {
     if (text == null) return '';
     // Single-pass string replace — no DOM element allocation on every call.
-    // Single quotes don't need escaping: all attributes use double quotes and
-    // single quotes are safe in HTML text content.
-    return String(text).replace(
-      /[&<>"]/g,
-      c => (c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : '&quot;'),
-    );
+    // Regex and replacement callback are hoisted to module-level constants so they
+    // are not re-allocated per call.  Single quotes don't need escaping: all
+    // attributes use double quotes and single quotes are safe in HTML text content.
+    return String(text).replace(HTML_ESCAPE_RE, htmlEscapeChar);
   }
 
   convertManaSymbolsToText(text) {
