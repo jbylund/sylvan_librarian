@@ -1021,9 +1021,14 @@ class CardSearch {
   }
 
   escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    if (text == null) return '';
+    // Single-pass string replace — no DOM element allocation on every call.
+    // Single quotes don't need escaping: all attributes use double quotes and
+    // single quotes are safe in HTML text content.
+    return String(text).replace(
+      /[&<>"]/g,
+      c => (c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : '&quot;'),
+    );
   }
 
   convertManaSymbolsToText(text) {
