@@ -349,10 +349,14 @@ class APIResource:
             record_span(req, "handler", duration)
             if isinstance(res, dict):
                 outer = res.get("outer_timings", {})
-                if "get_where_clause" in outer:
-                    record_span(req, "parse", outer["get_where_clause"].get("_meta", {}).get("duration_ms", 0))
-                if "run_query" in outer:
-                    record_span(req, "db", outer["run_query"].get("_meta", {}).get("duration_ms", 0))
+                for span_name, timer_key in [
+                    ("parse", "get_where_clause"),
+                    ("sql_build", "sql_build"),
+                    ("db", "run_query"),
+                    ("result_processing", "result_processing"),
+                ]:
+                    if timer_key in outer:
+                        record_span(req, span_name, outer[timer_key].get("_meta", {}).get("duration_ms", 0))
 
     def _raise_not_found(self, **_: object) -> None:
         """Raise a Falcon HTTPNotFound error with available routes."""
@@ -954,10 +958,11 @@ class APIResource:
                     distinct_cards
             )"""
 
-        params["limit"] = limit
-        query_sql = rewrap(query_sql)
-        logger.info("Full query: %s", query_sql)
-        logger.info("Params: %s", params)
+        with timer("sql_build"):
+            params["limit"] = limit
+            query_sql = rewrap(query_sql)
+            logger.info("Full query: %s", query_sql)
+            logger.info("Params: %s", params)
         try:
             with timer("run_query"):
                 result_bag = self._run_query(query=query_sql, params=params, explain=False)
@@ -971,11 +976,12 @@ class APIResource:
                 "Arithmetic expressions like 'cmc+1' need to be part of a comparison (e.g., 'cmc+1>3').",
             ) from err
 
-        cards = result_bag.pop("result", [])
-        count_row = cards.pop()
-        total_cards = count_row["total_cards_count"]
-        for icard in cards:
-            icard.pop("total_cards_count")
+        with timer("result_processing"):
+            cards = result_bag.pop("result", [])
+            count_row = cards.pop()
+            total_cards = count_row["total_cards_count"]
+            for icard in cards:
+                icard.pop("total_cards_count")
         result = {
             "cards": cards,
             "compiled": query_sql,
