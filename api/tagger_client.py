@@ -15,6 +15,34 @@ logger = logging.getLogger(__name__)
 class TaggerClient:
     """Client for interacting with Scryfall Tagger GraphQL API."""
 
+    _exp_wait = tenacity.wait_exponential(multiplier=0.1, min=0.1, max=10)
+
+    @classmethod
+    def _before_sleep(cls, retry_state: tenacity.RetryCallState) -> None:
+        exc = retry_state.outcome.exception()
+        if isinstance(exc, requests.HTTPError) and exc.response is not None:
+            retry_after = exc.response.headers.get("Retry-After")
+            logger.warning(
+                "Tagger API request failed (attempt %s, status %s, retry-after: %s)",
+                retry_state.attempt_number,
+                exc.response.status_code,
+                retry_after,
+            )
+        else:
+            logger.warning("Tagger API request failed (attempt %s): %s", retry_state.attempt_number, exc)
+
+    @classmethod
+    def _wait(cls, retry_state: tenacity.RetryCallState) -> float:
+        exc = retry_state.outcome.exception()
+        if isinstance(exc, requests.HTTPError) and exc.response is not None:
+            header = exc.response.headers.get("Retry-After")
+            if header is not None:
+                try:
+                    return float(header)
+                except (ValueError, TypeError):
+                    pass
+        return cls._exp_wait(retry_state)
+
     def __init__(self) -> None:
         """Initialize the TaggerClient."""
         self.session = requests.Session()
@@ -188,37 +216,11 @@ class TaggerClient:
                 + tag_attrs
             )
 
-        def before_sleep_fn(retry_state: tenacity.RetryCallState) -> None:
-            exc = retry_state.outcome.exception()
-            if isinstance(exc, requests.HTTPError) and exc.response is not None:
-                retry_after = exc.response.headers.get("Retry-After")
-                logger.warning(
-                    "Tagger API request failed (attempt %s, status %s, retry-after: %s)",
-                    retry_state.attempt_number,
-                    exc.response.status_code,
-                    retry_after,
-                )
-            else:
-                logger.warning("Tagger API request failed (attempt %s): %s", retry_state.attempt_number, exc)
-
-        _exp_wait = tenacity.wait_exponential(multiplier=0.1, min=0.1, max=10)
-
-        def wait_fn(retry_state: tenacity.RetryCallState) -> float:
-            exc = retry_state.outcome.exception()
-            if isinstance(exc, requests.HTTPError) and exc.response is not None:
-                header = exc.response.headers.get("Retry-After")
-                if header is not None:
-                    try:
-                        return float(header)
-                    except (ValueError, TypeError):
-                        pass
-            return _exp_wait(retry_state)
-
         retryer = tenacity.retry(
-            wait=wait_fn,
+            wait=self._wait,
             reraise=True,
             stop=tenacity.stop_after_attempt(7),
-            before_sleep=before_sleep_fn,
+            before_sleep=self._before_sleep,
         )
 
         def get_response() -> requests.Response:
