@@ -7,6 +7,7 @@ import time
 from typing import TYPE_CHECKING
 
 from api.middlewares.compression.compressors import BrotliCompressor, GzipCompressor, ZstdCompressor
+from api.middlewares.timing import record_span
 
 if TYPE_CHECKING:
     import falcon
@@ -127,6 +128,7 @@ class CompressionMiddleware:
             after_compression = time.monotonic()
             resp.text = None
             size_after_compression = len(compressed)
+            compress_ms = 1000 * (after_compression - before_compression)
             logger.info(
                 "%s: Compressed %s bytes to %s bytes using %s (%.2f x compression) in %.2f ms - %s",
                 req.url,
@@ -134,9 +136,10 @@ class CompressionMiddleware:
                 f"{size_after_compression:,}",
                 compressor.encoding,
                 size_before_compression / size_after_compression,
-                1000 * (after_compression - before_compression),
+                compress_ms,
                 req.get_header("User-Agent"),
             )
+            record_span(req, "compress", compress_ms)
 
         resp.set_header("Content-Encoding", compressor.encoding)
         resp.append_header("Vary", "Accept-Encoding")
