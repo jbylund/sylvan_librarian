@@ -1,9 +1,11 @@
 """Client for interacting with Scryfall Tagger GraphQL API."""
 
 import collections
+import datetime
 import logging
 import re
 import time
+from email.utils import parsedate_to_datetime
 
 import requests
 import tenacity
@@ -37,8 +39,15 @@ class TaggerClient:
         if isinstance(exc, requests.HTTPError) and exc.response is not None:
             header = exc.response.headers.get("Retry-After")
             if header is not None:
+                # RFC 9110: Retry-After is either delta-seconds or an HTTP-date.
                 try:
                     return float(header)
+                except (ValueError, TypeError):
+                    pass
+                try:
+                    retry_time = parsedate_to_datetime(header)
+                    delay = (retry_time - datetime.datetime.now(tz=datetime.UTC)).total_seconds()
+                    return max(0.0, delay)
                 except (ValueError, TypeError):
                     pass
         return cls._exp_wait(retry_state)

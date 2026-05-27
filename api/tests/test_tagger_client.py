@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -66,6 +67,26 @@ class TestTaggerClient:
         result_1 = TaggerClient._wait(_make_retry_state(exc, attempt_number=1))
         result_2 = TaggerClient._wait(_make_retry_state(exc, attempt_number=2))
         assert result_2 > result_1
+
+    def test_wait_parses_http_date_in_future(self) -> None:
+        future = datetime.datetime.now(tz=datetime.UTC) + datetime.timedelta(seconds=30)
+        header = future.strftime("%a, %d %b %Y %H:%M:%S GMT")
+        exc = _make_http_error(429, {"Retry-After": header})
+        state = _make_retry_state(exc)
+        result = TaggerClient._wait(state)
+        assert 28.0 <= result <= 32.0
+
+    def test_wait_returns_zero_for_http_date_in_past(self) -> None:
+        past = datetime.datetime.now(tz=datetime.UTC) - datetime.timedelta(seconds=10)
+        header = past.strftime("%a, %d %b %Y %H:%M:%S GMT")
+        exc = _make_http_error(429, {"Retry-After": header})
+        state = _make_retry_state(exc)
+        assert TaggerClient._wait(state) == 0.0
+
+    def test_wait_falls_back_to_exponential_for_malformed_date(self) -> None:
+        exc = _make_http_error(429, {"Retry-After": "not-a-date-or-number"})
+        state = _make_retry_state(exc, attempt_number=1)
+        assert TaggerClient._wait(state) == pytest.approx(0.1)
 
     # ------------------------------------------------------------------
     # _before_sleep
