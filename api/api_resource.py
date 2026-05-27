@@ -241,7 +241,6 @@ class APIResource:
         logger.info("Worker with pid %d has conn pool %s", os.getpid(), self._conn_pool)
         self.setup_schema()
         self.import_data()  # ensures that database is setup
-        self._get_all_preferred_cards()  # warm preferred cards cache eagerly
 
     @cached(cache={}, key=lambda args, kwds: args[1] if len(args) > 1 else kwds.get("filename"))
     def read_sql(self, filename: str) -> str:
