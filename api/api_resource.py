@@ -204,7 +204,8 @@ class APIResource:
         self.action_map["_root"] = make_type_converting_wrapper(self._root)
 
         def redirect_to_root(**_: object) -> None:
-            raise falcon.HTTPMovedPermanently("/")
+            msg = "/"
+            raise falcon.HTTPMovedPermanently(msg)
 
         self.action_map["index"] = redirect_to_root
         self.action_map["index_html"] = redirect_to_root
