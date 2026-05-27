@@ -1,9 +1,11 @@
 """Client for interacting with Scryfall Tagger GraphQL API."""
 
 import collections
+import datetime
 import logging
 import re
 import time
+from email.utils import parsedate_to_datetime
 
 import requests
 import tenacity
@@ -14,6 +16,41 @@ logger = logging.getLogger(__name__)
 
 class TaggerClient:
     """Client for interacting with Scryfall Tagger GraphQL API."""
+
+    _exp_wait = tenacity.wait_exponential(multiplier=0.1, min=0.1, max=10)
+
+    @classmethod
+    def _before_sleep(cls, retry_state: tenacity.RetryCallState) -> None:
+        exc = retry_state.outcome.exception()
+        if isinstance(exc, requests.HTTPError) and exc.response is not None:
+            retry_after = exc.response.headers.get("Retry-After")
+            logger.warning(
+                "Tagger API request failed (attempt %s, status %s, retry-after: %s)",
+                retry_state.attempt_number,
+                exc.response.status_code,
+                retry_after,
+            )
+        else:
+            logger.warning("Tagger API request failed (attempt %s): %s", retry_state.attempt_number, exc)
+
+    @classmethod
+    def _wait(cls, retry_state: tenacity.RetryCallState) -> float:
+        exc = retry_state.outcome.exception()
+        if isinstance(exc, requests.HTTPError) and exc.response is not None:
+            header = exc.response.headers.get("Retry-After")
+            if header is not None:
+                # RFC 9110: Retry-After is either delta-seconds or an HTTP-date.
+                try:
+                    return float(header)
+                except (ValueError, TypeError):
+                    pass
+                try:
+                    retry_time = parsedate_to_datetime(header)
+                    delay = (retry_time - datetime.datetime.now(tz=datetime.UTC)).total_seconds()
+                    return max(0.0, delay)
+                except (ValueError, TypeError):
+                    pass
+        return cls._exp_wait(retry_state)
 
     def __init__(self) -> None:
         """Initialize the TaggerClient."""
@@ -188,14 +225,11 @@ class TaggerClient:
                 + tag_attrs
             )
 
-        def before_sleep_fn(*args: object, **kwargs: object) -> None:
-            logger.warning("Had failure talking to tagger api %s %s", args, kwargs)
-
         retryer = tenacity.retry(
-            wait=tenacity.wait_exponential(multiplier=0.1, min=0.1, max=2) + tenacity.wait_random(0, 0.1),
+            wait=self._wait,
             reraise=True,
             stop=tenacity.stop_after_attempt(7),
-            before_sleep=before_sleep_fn,
+            before_sleep=self._before_sleep,
         )
 
         def get_response() -> requests.Response:
