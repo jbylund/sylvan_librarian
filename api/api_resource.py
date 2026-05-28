@@ -34,6 +34,7 @@ from psycopg import Connection, Cursor
 
 from api import card_store
 from api.card_processing import preprocess_card
+from api.card_store import CardField
 from api.enums import CardOrdering, PreferOrder, SortDirection, UniqueOn
 from api.middlewares.timing import record_span
 from api.noscript_helpers import generate_results_count_html, generate_results_html
@@ -826,12 +827,12 @@ class APIResource:
             ) from err
 
         if card_store.size() > 0:
-            _sample = card_store.all_cards()[0] if card_store.all_cards() else {}
+            _sample = card_store.all_cards()[0] if card_store.all_cards() else None
             logger.info(
                 "Using in-process filter: store has %d cards, query=%r, sample_card_name=%r",
                 card_store.size(),
                 query,
-                _sample.get("card_name"),
+                _sample[CardField.card_name] if _sample is not None else None,
             )
             result = self._search_in_process(
                 parsed_query=parsed_query,
@@ -1042,25 +1043,34 @@ class APIResource:
         }.get(orderby, "edhrec_rank")
         descending = direction == SortDirection.DESC
 
+        _released_at = CardField.released_at
+        _price_usd   = CardField.price_usd
+        _edhrec_rank = CardField.edhrec_rank
+        _prefer_score = CardField.prefer_score
         prefer_key_fn = {
-            PreferOrder.OLDEST: lambda c: -int((c.get("released_at") or "9999-99-99").replace("-", "")),
-            PreferOrder.NEWEST: lambda c: int((c.get("released_at") or "0000-00-00").replace("-", "")),
-            PreferOrder.USD_LOW: lambda c: -(c.get("price_usd") or 0),
-            PreferOrder.USD_HIGH: lambda c: c.get("price_usd") or 0,
-            PreferOrder.PROMO: lambda c: -(c.get("edhrec_rank") or 0),
-            PreferOrder.DEFAULT: lambda c: c.get("prefer_score") or 0,
+            PreferOrder.OLDEST: lambda c: -int((c[_released_at] or "9999-99-99").replace("-", "")),
+            PreferOrder.NEWEST: lambda c: int((c[_released_at] or "0000-00-00").replace("-", "")),
+            PreferOrder.USD_LOW: lambda c: -(c[_price_usd] or 0),
+            PreferOrder.USD_HIGH: lambda c: c[_price_usd] or 0,
+            PreferOrder.PROMO: lambda c: -(c[_edhrec_rank] or 0),
+            PreferOrder.DEFAULT: lambda c: c[_prefer_score] or 0,
         }[prefer]
 
+        _oracle_id      = CardField.oracle_id
+        _illustration_id = CardField.illustration_id
+        _scryfall_id    = CardField.scryfall_id
         partition_key_fn = {
-            UniqueOn.CARD: lambda c: c.get("oracle_id"),
-            UniqueOn.ARTWORK: lambda c: c.get("illustration_id"),
-            UniqueOn.PRINTING: lambda c: c.get("scryfall_id"),
+            UniqueOn.CARD: lambda c: c[_oracle_id],
+            UniqueOn.ARTWORK: lambda c: c[_illustration_id],
+            UniqueOn.PRINTING: lambda c: c[_scryfall_id],
         }[unique]
 
-        def sort_key(card: dict) -> tuple:
-            primary = card.get(sort_col)
-            edhrec = card.get("edhrec_rank")
-            pscore = card.get("prefer_score")
+        sort_col_idx = CardField[sort_col]
+
+        def sort_key(card: list) -> tuple:
+            primary = card[sort_col_idx]
+            edhrec = card[_edhrec_rank]
+            pscore = card[_prefer_score]
             primary_val = -(primary or 0) if descending else (primary or 0)
             return (
                 primary is None,
@@ -1074,7 +1084,7 @@ class APIResource:
         filter_func = parsed_query.to_filter_func()
 
         with timer("in_process_filter"):
-            partitions: dict[Any, list[dict]] = {}
+            partitions: dict[Any, list[list]] = {}
             for c in card_store.all_cards():
                 if filter_func(c):
                     partitions.setdefault(partition_key_fn(c), []).append(c)
@@ -1089,17 +1099,27 @@ class APIResource:
             total = len(best)
             page = best[:limit]
 
-        def _fmt(c: dict) -> dict:
+        _card_name           = CardField.card_name
+        _card_set_code       = CardField.card_set_code
+        _collector_number    = CardField.collector_number
+        _creature_power_text = CardField.creature_power_text
+        _creature_toughness_text = CardField.creature_toughness_text
+        _mana_cost_text      = CardField.mana_cost_text
+        _oracle_text         = CardField.oracle_text
+        _set_name            = CardField.set_name
+        _type_line           = CardField.type_line
+
+        def _fmt(c: list) -> dict:
             return {
-                "name": c.get("card_name"),
-                "set_code": c.get("card_set_code"),
-                "collector_number": c.get("collector_number"),
-                "power": c.get("creature_power_text"),
-                "toughness": c.get("creature_toughness_text"),
-                "mana_cost": c.get("mana_cost_text"),
-                "oracle_text": c.get("oracle_text"),
-                "set_name": c.get("set_name"),
-                "type_line": c.get("type_line"),
+                "name": c[_card_name],
+                "set_code": c[_card_set_code],
+                "collector_number": c[_collector_number],
+                "power": c[_creature_power_text],
+                "toughness": c[_creature_toughness_text],
+                "mana_cost": c[_mana_cost_text],
+                "oracle_text": c[_oracle_text],
+                "set_name": c[_set_name],
+                "type_line": c[_type_line],
             }
 
         return {

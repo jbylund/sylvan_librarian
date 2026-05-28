@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
 from titlecase import titlecase
 
+from api.card_store import CardField
 from api.parsing.db_info import (
     ALIAS_TO_FIELD_INFOS,
     CARD_SUPERTYPES,
@@ -483,12 +484,13 @@ class ExactNameNode(QueryNode):
         """Return a hash based on the value."""
         return hash(("ExactNameNode", self.value))
 
-    def to_filter_func(self) -> Callable[[dict], bool]:
+    def to_filter_func(self) -> Callable[[list], bool]:
         """Return a function that matches card_name exactly (case-insensitive)."""
         pattern = re.compile(r"^" + re.escape(self.value) + r"$", re.IGNORECASE)
+        name_idx = CardField.card_name
 
-        def check(card: dict) -> bool:
-            name = card.get("card_name")
+        def check(card: list) -> bool:
+            name = card[name_idx]
             return name is not None and bool(pattern.search(name))
 
         return check
@@ -560,31 +562,33 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         ">=": op.ge,
     }
 
-    def _filter_numeric(self, attr: str) -> Callable[[dict], bool]:
+    def _filter_numeric(self, attr: str) -> Callable[[list], bool]:
         operator = "=" if self.operator == ":" else self.operator
         fn = self._NUMERIC_OPS[operator]
         value = self.rhs.value
-        field = attr
+        field_idx = CardField[attr]
 
-        def check(card: dict) -> bool:
-            v = card.get(field)
+        def check(card: list) -> bool:
+            v = card[field_idx]
             return v is not None and fn(v, value)
 
         return check
 
-    def _filter_rarity(self) -> Callable[[dict], bool]:
+    def _filter_rarity(self) -> Callable[[list], bool]:
         rarity_value = get_rarity_number(self.rhs.value) if isinstance(self.rhs, StringValueNode) else self.rhs.value
         operator = "=" if self.operator == ":" else self.operator
         fn = self._NUMERIC_OPS[operator]
+        rarity_idx = CardField.card_rarity_int
 
-        def check(card: dict) -> bool:
-            v = card.get("card_rarity_int")
+        def check(card: list) -> bool:
+            v = card[rarity_idx]
             return v is not None and fn(v, rarity_value)
 
         return check
 
-    def _filter_text(self, attr: str) -> Callable[[dict], bool]:
+    def _filter_text(self, attr: str) -> Callable[[list], bool]:
         rhs_value = self.rhs.value if hasattr(self.rhs, "value") else str(self.rhs)
+        field_idx = CardField[attr]
 
         if isinstance(self.rhs, RegexValueNode):
             pattern = re.compile(rhs_value, re.IGNORECASE)
@@ -598,7 +602,19 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
             pattern = re.compile(r"^" + re.escape(rhs_value) + r"$", re.IGNORECASE)
         elif self.operator == ":":
             words = rhs_value.lower().split()
-            pattern = re.compile(".*".join(re.escape(w) for w in words), re.IGNORECASE)
+            lower_idx = CardField[f"{attr}_lower"]
+            if len(words) == 1:
+                word = words[0]
+                def check(card: list) -> bool:
+                    v = card[lower_idx]
+                    return v is not None and word in v
+                return check
+            # multi-word: case-sensitive regex on pre-lowercased field (no IGNORECASE needed)
+            pattern = re.compile(".*".join(re.escape(w) for w in words))
+            def check(card: list) -> bool:
+                v = card[lower_idx]
+                return v is not None and bool(pattern.search(v))
+            return check
         else:
             # =, !=
             if attr in ("card_artist", "card_name"):
@@ -608,10 +624,9 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
             pattern = re.compile(r"^" + re.escape(rhs_value) + r"$", re.IGNORECASE)
 
         negate = self.operator == "!="
-        field = attr
 
-        def check(card: dict) -> bool:
-            v = card.get(field)
+        def check(card: list) -> bool:
+            v = card[field_idx]
             if v is None:
                 return False
             matched = bool(pattern.search(v))
@@ -625,43 +640,46 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         operator = "=" if self.operator == ":" else self.operator
         fn = self._NUMERIC_OPS[operator]
 
-        def check(card: dict) -> bool:
-            v = card.get("released_at")
+        released_at_idx = CardField.released_at
+
+        def check(card: list) -> bool:
+            v = card[released_at_idx]
             return v is not None and fn(str(v), search_value)
 
         return check
 
-    def _filter_year(self) -> Callable[[dict], bool]:
+    def _filter_year(self) -> Callable[[list], bool]:
         search_value = self.rhs.value if isinstance(self.rhs, StringValueNode | NumericValueNode) else str(self.rhs)
         year_value = int(search_value)
         operator = "=" if self.operator == ":" else self.operator
         start_of_year = f"{year_value}-01-01"
         start_of_next_year = f"{year_value + 1}-01-01"
+        released_at_idx = CardField.released_at
 
         if operator == "=":
 
-            def check(card: dict) -> bool:
-                v = card.get("released_at")
+            def check(card: list) -> bool:
+                v = card[released_at_idx]
                 return v is not None and start_of_year <= str(v) < start_of_next_year
         elif operator == ">":
 
-            def check(card: dict) -> bool:
-                v = card.get("released_at")
+            def check(card: list) -> bool:
+                v = card[released_at_idx]
                 return v is not None and str(v) >= start_of_next_year
         elif operator == "<":
 
-            def check(card: dict) -> bool:
-                v = card.get("released_at")
+            def check(card: list) -> bool:
+                v = card[released_at_idx]
                 return v is not None and str(v) < start_of_year
         elif operator == ">=":
 
-            def check(card: dict) -> bool:
-                v = card.get("released_at")
+            def check(card: list) -> bool:
+                v = card[released_at_idx]
                 return v is not None and str(v) >= start_of_year
         elif operator == "<=":
 
-            def check(card: dict) -> bool:
-                v = card.get("released_at")
+            def check(card: list) -> bool:
+                v = card[released_at_idx]
                 return v is not None and str(v) < start_of_next_year
         else:
             msg = f"Unsupported operator for year filter: {operator}"
@@ -683,30 +701,33 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
             """card_mana <@ q_mana: card has no more pips of each color than query."""
             return all(len(card_mana.get(color, [])) <= len(q_mana.get(color, [])) for color in card_mana)
 
+        mana_jsonb_idx = CardField.mana_cost_jsonb
+        cmc_idx = CardField.cmc
+
         if operator == "=":
 
-            def check(card: dict) -> bool:
-                return card.get("mana_cost_jsonb") == query_mana and card.get("cmc") == query_cmc
+            def check(card: list) -> bool:
+                return card[mana_jsonb_idx] == query_mana and card[cmc_idx] == query_cmc
         elif operator == ">=":
 
-            def check(card: dict) -> bool:
-                cm = card.get("mana_cost_jsonb") or {}
-                return _mana_contains(cm, query_mana) and (card.get("cmc") or 0) >= query_cmc
+            def check(card: list) -> bool:
+                cm = card[mana_jsonb_idx] or {}
+                return _mana_contains(cm, query_mana) and (card[cmc_idx] or 0) >= query_cmc
         elif operator == ">":
 
-            def check(card: dict) -> bool:
-                cm = card.get("mana_cost_jsonb") or {}
-                return _mana_contains(cm, query_mana) and (card.get("cmc") or 0) >= query_cmc and cm != query_mana
+            def check(card: list) -> bool:
+                cm = card[mana_jsonb_idx] or {}
+                return _mana_contains(cm, query_mana) and (card[cmc_idx] or 0) >= query_cmc and cm != query_mana
         elif operator == "<=":
 
-            def check(card: dict) -> bool:
-                cm = card.get("mana_cost_jsonb") or {}
-                return _mana_contained_by(cm, query_mana) and (card.get("cmc") or 0) <= query_cmc
+            def check(card: list) -> bool:
+                cm = card[mana_jsonb_idx] or {}
+                return _mana_contained_by(cm, query_mana) and (card[cmc_idx] or 0) <= query_cmc
         elif operator == "<":
 
-            def check(card: dict) -> bool:
-                cm = card.get("mana_cost_jsonb") or {}
-                return _mana_contained_by(cm, query_mana) and (card.get("cmc") or 0) <= query_cmc and cm != query_mana
+            def check(card: list) -> bool:
+                cm = card[mana_jsonb_idx] or {}
+                return _mana_contained_by(cm, query_mana) and (card[cmc_idx] or 0) <= query_cmc and cm != query_mana
         else:
             msg = f"Unsupported mana cost operator: {operator}"
             raise ValueError(msg)
@@ -721,38 +742,32 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         if attr in ("card_colors", "card_color_identity", "produced_mana"):
             query_colors = get_colors_comparison_object(rhs_value.lower())
             query_keys = set(query_colors.keys())
-            field = attr
+            field_idx = CardField[attr]
 
             if operator in (":", ">="):
 
-                def check(card: dict) -> bool:
-                    card_keys = set((card.get(field) or {}).keys())
-                    return query_keys <= card_keys
+                def check(card: list) -> bool:
+                    return query_keys <= (card[field_idx] or {}).keys()
             elif operator == "<=":
 
-                def check(card: dict) -> bool:
-                    card_keys = set((card.get(field) or {}).keys())
-                    return card_keys <= query_keys
+                def check(card: list) -> bool:
+                    return (card[field_idx] or {}).keys() <= query_keys
             elif operator == "=":
 
-                def check(card: dict) -> bool:
-                    card_keys = set((card.get(field) or {}).keys())
-                    return card_keys == query_keys
+                def check(card: list) -> bool:
+                    return (card[field_idx] or {}).keys() == query_keys
             elif operator == ">":
 
-                def check(card: dict) -> bool:
-                    card_keys = set((card.get(field) or {}).keys())
-                    return query_keys < card_keys
+                def check(card: list) -> bool:
+                    return query_keys < (card[field_idx] or {}).keys()
             elif operator == "<":
 
-                def check(card: dict) -> bool:
-                    card_keys = set((card.get(field) or {}).keys())
-                    return card_keys < query_keys
+                def check(card: list) -> bool:
+                    return (card[field_idx] or {}).keys() < query_keys
             elif operator in ("!=", "<>"):
 
-                def check(card: dict) -> bool:
-                    card_keys = set((card.get(field) or {}).keys())
-                    return card_keys != query_keys
+                def check(card: list) -> bool:
+                    return (card[field_idx] or {}).keys() != query_keys
             else:
                 msg = f"Unknown operator for colors: {operator}"
                 raise ValueError(msg)
@@ -760,9 +775,10 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
 
         if attr == "devotion":
             query_devotion = calculate_devotion(rhs_value)
+            devotion_idx = CardField.devotion
 
-            def check(card: dict) -> bool:
-                card_devotion = card.get("devotion") or {}
+            def check(card: list) -> bool:
+                card_devotion = card[devotion_idx] or {}
                 return all(len(card_devotion.get(color, [])) >= len(pips) for color, pips in query_devotion.items())
 
             return check
@@ -782,36 +798,50 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
             msg = f"Unknown JSONB object attribute: {attr}"
             raise ValueError(msg)
 
-        field = attr
+        field_idx = CardField[attr]
+        rhs_items = tuple(rhs.items())
 
         if operator == "=":
 
-            def check(card: dict) -> bool:
-                return (card.get(field) or {}) == rhs
+            def check(card: list) -> bool:
+                return (card[field_idx] or {}) == rhs
         elif operator in (">=", ":"):
+            if len(rhs_items) == 1:
+                (rk, rv) = rhs_items[0]
 
-            def check(card: dict) -> bool:
-                cd = card.get(field) or {}
-                return all(cd.get(k) == v for k, v in rhs.items())
+                def check(card: list) -> bool:
+                    cd = card[field_idx] or {}
+                    return cd.get(rk) == rv
+            else:
+
+                def check(card: list) -> bool:
+                    cd = card[field_idx] or {}
+                    for k, v in rhs_items:  # noqa: SIM110
+                        if cd.get(k) != v:
+                            return False
+                    return True
         elif operator == "<=":
 
-            def check(card: dict) -> bool:
-                cd = card.get(field) or {}
+            def check(card: list) -> bool:
+                cd = card[field_idx] or {}
                 return all(rhs.get(k) == v for k, v in cd.items())
         elif operator == ">":
 
-            def check(card: dict) -> bool:
-                cd = card.get(field) or {}
-                return all(cd.get(k) == v for k, v in rhs.items()) and cd != rhs
+            def check(card: list) -> bool:
+                cd = card[field_idx] or {}
+                for k, v in rhs_items:
+                    if cd.get(k) != v:
+                        return False
+                return cd != rhs
         elif operator == "<":
 
-            def check(card: dict) -> bool:
-                cd = card.get(field) or {}
+            def check(card: list) -> bool:
+                cd = card[field_idx] or {}
                 return all(rhs.get(k) == v for k, v in cd.items()) and cd != rhs
         elif operator in ("!=", "<>"):
 
-            def check(card: dict) -> bool:
-                return (card.get(field) or {}) != rhs
+            def check(card: list) -> bool:
+                return (card[field_idx] or {}) != rhs
         else:
             msg = f"Unknown operator: {operator}"
             raise ValueError(msg)
@@ -825,26 +855,28 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
             field = "card_types" if rhs_val in CARD_SUPERTYPES | CARD_TYPES else "card_subtypes"
         else:
             field = attr
-        query_set = {rhs_val}
         operator = self.operator
+        field_idx = CardField[field]
 
         if operator in (">=", ":"):
 
-            def check(card: dict) -> bool:
-                return query_set <= set(card.get(field) or [])
+            def check(card: list) -> bool:
+                return rhs_val in (card[field_idx] or [])
         elif operator == "<=":
 
-            def check(card: dict) -> bool:
-                return set(card.get(field) or []) <= query_set
+            def check(card: list) -> bool:
+                v = card[field_idx] or []
+                return all(x == rhs_val for x in v)
         elif operator == "=":
 
-            def check(card: dict) -> bool:
-                card_set = set(card.get(field) or [])
-                return card_set == query_set
+            def check(card: list) -> bool:
+                v = card[field_idx] or []
+                return len(v) == 1 and v[0] == rhs_val
         elif operator == ">":
 
-            def check(card: dict) -> bool:
-                return query_set < set(card.get(field) or [])
+            def check(card: list) -> bool:
+                v = card[field_idx] or []
+                return rhs_val in v and len(v) > 1
         else:
             msg = f"Unknown operator for JSONB array: {operator}"
             raise ValueError(msg)

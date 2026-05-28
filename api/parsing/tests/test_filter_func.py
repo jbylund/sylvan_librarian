@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import pytest
 
+from api.card_store import CardField, _LOWER_PAIRS
 from api.parsing import parse_scryfall_query
 
-# Minimal card dict with all fields used by the filter functions.
-_BASE: dict = {
+# Minimal base card values keyed by field name.
+_BASE_DICT: dict = {
     "scryfall_id": "aaaaaaaa-0000-0000-0000-000000000000",
     "oracle_id": "bbbbbbbb-0000-0000-0000-000000000000",
     "illustration_id": "cccccccc-0000-0000-0000-000000000000",
@@ -27,7 +28,6 @@ _BASE: dict = {
     "card_keywords": {},
     "card_types": ["Instant"],
     "card_subtypes": [],
-    "card_supertypes": [],
     "card_rarity_int": 0,
     "card_legalities": {"modern": "legal", "legacy": "legal", "vintage": "legal", "standard": "not_legal"},
     "card_oracle_tags": {"direct-damage": True, "burn": True},
@@ -53,12 +53,24 @@ _BASE: dict = {
     "cubecobra_score": None,
 }
 
+# Pre-built base card as a list, matching the CardField index layout.
+_BASE: list = [None] * len(CardField)
+for _name, _value in _BASE_DICT.items():
+    _BASE[CardField[_name]] = _value
 
-def card(**overrides: object) -> dict:
-    return {**_BASE, **overrides}
+
+def card(**overrides: object) -> list:
+    """Build a card list from _BASE, applying overrides and refreshing _lower fields."""
+    result = list(_BASE)
+    for name, value in overrides.items():
+        result[CardField[name]] = value
+    for src, dst in _LOWER_PAIRS:
+        v = result[src]
+        result[dst] = v.lower() if v is not None else None
+    return result
 
 
-def _run(query: str, c: dict) -> bool:
+def _run(query: str, c: list) -> bool:
     return parse_scryfall_query(query).to_filter_func()(c)
 
 

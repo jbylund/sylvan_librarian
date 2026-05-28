@@ -341,7 +341,10 @@ class AndNode(NaryOperatorNode):
         funcs = [op.to_filter_func() for op in self.operands]
 
         def check(card: dict) -> bool:
-            return all(func(card) for func in funcs)
+            for func in funcs:  # noqa: SIM110
+                if not func(card):
+                    return False
+            return True
 
         return check
 
@@ -366,7 +369,10 @@ class OrNode(NaryOperatorNode):
         funcs = [op.to_filter_func() for op in self.operands]
 
         def check(card: dict) -> bool:
-            return any(func(card) for func in funcs)
+            for func in funcs:  # noqa: SIM110
+                if func(card):
+                    return True
+            return False
 
         return check
 
