@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from base64 import b64encode
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def param_name(ival: object) -> str:
@@ -28,6 +31,11 @@ class QueryNode(ABC):
     @abstractmethod
     def to_sql(self: QueryNode, context: dict) -> str:
         """Convert this node to a SQL WHERE clause string representation."""
+
+    def to_filter_func(self: QueryNode) -> Callable[[dict], bool]:
+        """Return a function that tests a single card dict against this node."""
+        msg = f"to_filter_func not implemented for {type(self).__name__}"
+        raise NotImplementedError(msg)
 
     @abstractmethod
     def to_human_explanation(self: QueryNode) -> str:
@@ -328,6 +336,15 @@ class AndNode(NaryOperatorNode):
         """Join explanation parts with 'and'."""
         return " and ".join(parts)
 
+    def to_filter_func(self: AndNode) -> Callable[[dict], bool]:
+        """Return a function that short-circuits when any operand returns False."""
+        funcs = [op.to_filter_func() for op in self.operands]
+
+        def check(card: dict) -> bool:
+            return all(func(card) for func in funcs)
+
+        return check
+
 
 class OrNode(NaryOperatorNode):
     """Represents an OR operation between multiple conditions."""
@@ -344,6 +361,15 @@ class OrNode(NaryOperatorNode):
         """Join explanation parts with 'or' and wrap in parentheses."""
         return f"({' or '.join(parts)})"
 
+    def to_filter_func(self: OrNode) -> Callable[[dict], bool]:
+        """Return a function that short-circuits when any operand returns True."""
+        funcs = [op.to_filter_func() for op in self.operands]
+
+        def check(card: dict) -> bool:
+            return any(func(card) for func in funcs)
+
+        return check
+
 
 class NotNode(QueryNode):
     """Represents a NOT operation on a single operand."""
@@ -356,6 +382,15 @@ class NotNode(QueryNode):
         """Serialize this NOT node to a SQL expression."""
         operand_sql = self.operand.to_sql(context)
         return f"NOT ({operand_sql})"
+
+    def to_filter_func(self: NotNode) -> Callable[[dict], bool]:
+        """Return a function that negates the operand's result."""
+        func = self.operand.to_filter_func()
+
+        def check(card: dict) -> bool:
+            return not func(card)
+
+        return check
 
     def to_human_explanation(self: NotNode) -> str:
         """Convert to human-readable explanation."""
@@ -385,6 +420,14 @@ class TrueNode(LeafNode):
         del context
         return "TRUE"
 
+    def to_filter_func(self: TrueNode) -> Callable[[dict], bool]:
+        """Return a function that always passes."""
+
+        def check(_card: dict) -> bool:
+            return True
+
+        return check
+
     def __repr__(self: TrueNode) -> str:
         """Return a string representation of the TrueNode."""
         return "TrueNode()"
@@ -412,6 +455,10 @@ class Query(QueryNode):
     def to_sql(self: Query, context: dict) -> str:
         """Serialize this query to a SQL string."""
         return self.root.to_sql(context)
+
+    def to_filter_func(self: Query) -> Callable[[dict], bool]:
+        """Delegate to the root node's filter function."""
+        return self.root.to_filter_func()
 
     def to_human_explanation(self: Query) -> str:
         """Convert to human-readable explanation."""

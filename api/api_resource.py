@@ -32,6 +32,7 @@ from cachebox import LRUCache, TTLCache
 from cachebox import cached as cachebox_cached
 from psycopg import Connection, Cursor
 
+from api import card_store
 from api.card_processing import preprocess_card
 from api.enums import CardOrdering, PreferOrder, SortDirection, UniqueOn
 from api.middlewares.timing import record_span
@@ -672,6 +673,8 @@ class APIResource:
             self.backfill_cubecobra_scores()
             self._last_import_time.value = time.time()
             self._setup_complete_cache = None
+            with self._conn_pool.connection() as conn:
+                card_store.load(conn)
             return result["sample_cards"]
         logger.error("Failed to import data: %s", result["message"])
         return None
@@ -686,7 +689,9 @@ class APIResource:
             after = time.monotonic()
             total_time = after - before
             logger.info("Import recent fastpath took %.2f seconds in pid %d", total_time, os.getpid())
-            # check without taking the lock so the majority of the time we never take the lock
+            if card_store.size() == 0:
+                with self._conn_pool.connection() as conn:
+                    card_store.load(conn)
             return None
 
         logger.info("Hitting slowpath in pid %d", os.getpid())
@@ -819,6 +824,29 @@ class APIResource:
                 title="Invalid Search Query",
                 description=f'Failed to parse query: "{query}"',
             ) from err
+
+        if card_store.size() > 0:
+            _sample = card_store.all_cards()[0] if card_store.all_cards() else {}
+            logger.info(
+                "Using in-process filter: store has %d cards, query=%r, sample_card_name=%r",
+                card_store.size(),
+                query,
+                _sample.get("card_name"),
+            )
+            result = self._search_in_process(
+                parsed_query=parsed_query,
+                query=query,
+                query_explanation=query_explanation,
+                direction=direction,
+                limit=limit,
+                orderby=orderby,
+                prefer=prefer,
+                unique=unique,
+                timer=timer,
+            )
+            if settings.enable_cache:
+                search_cache[cache_key] = result
+            return result
         sql_orderby: str = {
             # what's in the query => the db column name
             CardOrdering.CMC: "cmc",
@@ -989,6 +1017,101 @@ class APIResource:
         if settings.enable_cache:
             search_cache[cache_key] = result
         return result
+
+    def _search_in_process(
+        self,
+        *,
+        parsed_query: Any,
+        query: str | None,
+        query_explanation: str,
+        direction: SortDirection,
+        limit: int,
+        orderby: CardOrdering,
+        prefer: PreferOrder,
+        unique: UniqueOn,
+        timer: Timer,
+    ) -> dict[str, Any]:
+        sort_col = {
+            CardOrdering.CMC: "cmc",
+            CardOrdering.EDHREC: "edhrec_rank",
+            CardOrdering.POWER: "creature_power",
+            CardOrdering.RARITY: "card_rarity_int",
+            CardOrdering.TOUGHNESS: "creature_toughness",
+            CardOrdering.USD: "price_usd",
+            CardOrdering.CUBECOBRA: "cubecobra_score",
+        }.get(orderby, "edhrec_rank")
+        descending = direction == SortDirection.DESC
+
+        prefer_key_fn = {
+            PreferOrder.OLDEST: lambda c: -int((c.get("released_at") or "9999-99-99").replace("-", "")),
+            PreferOrder.NEWEST: lambda c: int((c.get("released_at") or "0000-00-00").replace("-", "")),
+            PreferOrder.USD_LOW: lambda c: -(c.get("price_usd") or 0),
+            PreferOrder.USD_HIGH: lambda c: c.get("price_usd") or 0,
+            PreferOrder.PROMO: lambda c: -(c.get("edhrec_rank") or 0),
+            PreferOrder.DEFAULT: lambda c: c.get("prefer_score") or 0,
+        }[prefer]
+
+        partition_key_fn = {
+            UniqueOn.CARD: lambda c: c.get("oracle_id"),
+            UniqueOn.ARTWORK: lambda c: c.get("illustration_id"),
+            UniqueOn.PRINTING: lambda c: c.get("scryfall_id"),
+        }[unique]
+
+        def sort_key(card: dict) -> tuple:
+            primary = card.get(sort_col)
+            edhrec = card.get("edhrec_rank")
+            pscore = card.get("prefer_score")
+            primary_val = -(primary or 0) if descending else (primary or 0)
+            return (
+                primary is None,
+                primary_val,
+                edhrec is None,
+                edhrec or 0,
+                pscore is None,
+                -(pscore or 0),
+            )
+
+        filter_func = parsed_query.to_filter_func()
+
+        with timer("in_process_filter"):
+            partitions: dict[Any, list[dict]] = {}
+            for c in card_store.all_cards():
+                if filter_func(c):
+                    partitions.setdefault(partition_key_fn(c), []).append(c)
+
+        logger.info("in_process_filter: %d partitions matched for query=%r", len(partitions), query)
+
+        with timer("in_process_dedup"):
+            best = [max(candidates, key=prefer_key_fn) for candidates in partitions.values()]
+
+        with timer("in_process_sort"):
+            best.sort(key=sort_key)
+            total = len(best)
+            page = best[:limit]
+
+        def _fmt(c: dict) -> dict:
+            return {
+                "name": c.get("card_name"),
+                "set_code": c.get("card_set_code"),
+                "collector_number": c.get("collector_number"),
+                "power": c.get("creature_power_text"),
+                "toughness": c.get("creature_toughness_text"),
+                "mana_cost": c.get("mana_cost_text"),
+                "oracle_text": c.get("oracle_text"),
+                "set_name": c.get("set_name"),
+                "type_line": c.get("type_line"),
+            }
+
+        return {
+            "cards": [_fmt(c) for c in page],
+            "compiled": "(in-process filter)",
+            "params": {},
+            "query": query,
+            "query_explanation": query_explanation,
+            "outer_timings": timer.get_timings(),
+            "inner_timings": {},
+            "total_cards": total,
+        }
 
     def _root(  # noqa: PLR0913
         self,
@@ -1198,6 +1321,18 @@ class APIResource:
         return self._run_query(
             query=self.read_sql("get_common_keywords"),
         )["result"]
+
+    def _load_card_store(self) -> None:
+        """Load the in-memory card store from the database in this process."""
+        with self._conn_pool.connection() as conn:
+            card_store.load(conn)
+
+    def reload_card_store(self, **_: object) -> dict[str, Any]:
+        """Reload the in-memory card store from the database."""
+        before = time.monotonic()
+        self._load_card_store()
+        elapsed_ms = (time.monotonic() - before) * 1000
+        return {"cards_loaded": card_store.size(), "elapsed_ms": round(elapsed_ms, 1)}
 
     def backfill_prefer_scores(self, **_: object) -> dict[str, Any]:
         """Backfill prefer_score and prefer_score_components for all cards.

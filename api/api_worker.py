@@ -123,6 +123,7 @@ class ApiWorker(multiprocessing.Process):
             schema_setup_event=schema_setup_event,
         )  # Create the main API resource
         sink._get_all_preferred_cards()  # warm preferred-cards cache before serving traffic
+        sink._load_card_store()  # populate in-process card store in this worker
         api.add_sink(sink._handle, prefix="/")  # Route all requests to the sink handler
 
         json_handler = falcon.media.JSONHandler(
