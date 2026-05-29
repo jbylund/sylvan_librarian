@@ -56,11 +56,13 @@ def run_server(
     last_import_time = multiprocessing.Value("d", 0.0, lock=True)
     schema_setup_event = multiprocessing.Event()
     cache_generation = multiprocessing.Value("i", 0, lock=True)
+    engine_reload_guard = multiprocessing.Lock()
 
     # start workers
     for _ in range(num_workers):
         iworker = ApiWorker(
             cache_generation=cache_generation,
+            engine_reload_guard=engine_reload_guard,
             exit_flag=exit_flag,
             host=ALL_INTERFACES,
             import_guard=import_guard,
@@ -94,6 +96,8 @@ def run_server(
             if response:
                 logger.info("Exit flag set, terminating workers")
                 break
+        else:
+            logger.info("Some workers died")
     except KeyboardInterrupt:
         graceful_shutdown(signal.SIGINT, None)
 

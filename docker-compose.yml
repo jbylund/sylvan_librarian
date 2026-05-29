@@ -60,6 +60,7 @@ services:
         GIT_SHA: ${GIT_SHA:-unknown}
         GIT_BRANCH: ${GIT_BRANCH:-unknown}
     image: arcane_tutor/apiservice:${IMAGE_TAG:-latest}
+    shm_size: 3000M
     cap_add:
       - ALL
     command:

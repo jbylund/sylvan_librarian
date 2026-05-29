@@ -8,7 +8,7 @@ import pytest
 
 from api.api_resource import APIResource
 from api.enums import CardOrdering, PreferOrder, SortDirection, UniqueOn
-from api.parsing import generate_sql_query, parse_scryfall_query
+from api.parsing import parse_scryfall_query
 from api.utils.timer import Timer
 
 
@@ -22,7 +22,6 @@ def api_resource_fixture() -> APIResource:
 def _compiled_sql(api_resource: APIResource, ordering: CardOrdering) -> str:
     """Return the compiled SQL string via the SQL path directly."""
     parsed_query = parse_scryfall_query("cmc=1")
-    where_clause, params = generate_sql_query(parsed_query)
     with (
         patch.object(api_resource, "_conn_pool") as mock_pool,
         patch.object(api_resource, "_setup_complete", return_value=True),
@@ -34,9 +33,7 @@ def _compiled_sql(api_resource: APIResource, ordering: CardOrdering) -> str:
         mock_pool.connection.return_value.__enter__.return_value = mock_conn
 
         result = api_resource._search_sql(
-            where_clause=where_clause,
-            params=params,
-            query_explanation="",
+            parsed_query=parsed_query,
             query="cmc=1",
             unique=UniqueOn.CARD,
             prefer=PreferOrder.DEFAULT,
