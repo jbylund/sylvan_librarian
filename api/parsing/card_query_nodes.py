@@ -30,6 +30,7 @@ from api.parsing.nodes import (
     RegexValueNode,
     StringValueNode,
     ValueNode,
+    _node_to_json,
     param_name,
 )
 from api.utils.db_utils import IntArray
@@ -127,6 +128,11 @@ class CardAttributeNode(AttributeNode):
         db_column_name = field_info.db_column_name
 
         super().__init__(db_column_name)
+
+    @property
+    def kwargs(self) -> dict:
+        """Return this node's kwargs dict for Rust engine JSON serialization."""
+        return {"attribute_name": self.attribute_name, "original_attribute": self.original_attribute}
 
     def to_sql(self, context: dict) -> str:
         """Generate SQL for card attribute node.
@@ -453,6 +459,11 @@ class ExactNameNode(QueryNode):
         """Initialize an ExactNameNode with the exact name to search for."""
         self.value = value
 
+    @property
+    def kwargs(self) -> dict:
+        """Return this node's kwargs dict for Rust engine JSON serialization."""
+        return {"value": self.value.lower()}
+
     def to_sql(self, context: dict) -> str:
         """Generate SQL for exact name matching (case-insensitive, no wildcards).
 
@@ -485,6 +496,66 @@ class ExactNameNode(QueryNode):
 
 class CardBinaryOperatorNode(BinaryOperatorNode):
     """Card-specific binary operator node with custom SQL generation."""
+
+    @property
+    def kwargs(self) -> dict:
+        """Return this node's kwargs dict for Rust engine JSON serialization."""
+        if not isinstance(self.lhs, CardAttributeNode):
+            # Arithmetic / non-card-attribute lhs: generic serialization
+            return {"lhs": _node_to_json(self.lhs), "op": self.operator, "rhs": _node_to_json(self.rhs)}
+
+        field_infos = self.lhs.field_infos
+        field_type = field_infos[0].field_type if field_infos else None
+
+        if field_type == FieldType.JSONB_ARRAY:
+            # Resolve type vs subtype without mutating self.lhs — build lhs JSON explicitly.
+            rhs_val = self.rhs.value.strip().title()
+            attr = self.lhs.attribute_name.lower()
+            if attr in ("card_types", "card_subtypes", "type"):
+                resolved_attr = "card_types" if rhs_val in CARD_SUPERTYPES | CARD_TYPES else "card_subtypes"
+            else:
+                resolved_attr = self.lhs.attribute_name
+            lhs_json = {
+                "node_type": "CardAttributeNode",
+                "kwargs": {
+                    "attribute_name": resolved_attr,
+                    "original_attribute": self.lhs.original_attribute,
+                },
+            }
+            return {"lhs": lhs_json, "op": self.operator, "rhs": [rhs_val]}
+
+        return {"lhs": self.lhs.to_json(), "op": self.operator, "rhs": self._rhs_to_json()}
+
+    def _rhs_to_json(self) -> object:
+        """Compute the JSON-serializable rhs for non-JSONB_ARRAY CardAttributeNode LHS."""
+        if not self.lhs.field_infos:
+            return _node_to_json(self.rhs)
+        field_info = self.lhs.field_infos[0]
+        field_type = field_info.field_type
+        attr = self.lhs.attribute_name
+
+        if field_type == FieldType.JSONB_OBJECT:
+            # Mana cost and devotion: pass raw ManaValueNode for Rust to parse pip counts
+            if field_info.parser_class == ParserClass.MANA:
+                return _node_to_json(self.rhs)
+            val = self.rhs.value.strip()
+            if attr in ("card_colors", "card_color_identity", "produced_mana"):
+                return list(get_colors_comparison_object(val.lower()).keys())
+            if attr == "card_keywords":
+                return list(get_keywords_comparison_object(val).keys())
+            if attr == "card_frame_data":
+                return list(get_frame_data_comparison_object(val).keys())
+            if attr == "card_oracle_tags":
+                return list(get_oracle_tags_comparison_object(val).keys())
+            if attr == "card_is_tags":
+                return list(get_is_tags_comparison_object(val).keys())
+            if attr == "card_legalities":
+                return list(get_legality_comparison_object(val, self.lhs.original_attribute).keys())
+
+        if field_info.parser_class == ParserClass.RARITY and isinstance(self.rhs, StringValueNode):
+            return NumericValueNode(get_rarity_number(self.rhs.value)).to_json()
+
+        return _node_to_json(self.rhs)
 
     def to_sql(self, context: dict) -> str:
         """Generate SQL for card-specific binary operations.
