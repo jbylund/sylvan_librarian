@@ -7,6 +7,11 @@ from base64 import b64encode
 from typing import Any
 
 
+def _node_to_json(obj: object) -> object:
+    """Serialize obj if it's a QueryNode, otherwise return it as-is."""
+    return obj.to_json() if isinstance(obj, QueryNode) else obj
+
+
 def param_name(ival: object) -> str:
     """Generate a unique parameter name for SQL queries.
 
@@ -32,6 +37,16 @@ class QueryNode(ABC):
     @abstractmethod
     def to_human_explanation(self: QueryNode) -> str:
         """Convert this node to a human-readable explanation."""
+
+    def to_json(self) -> dict:
+        """Serialize this node to a JSON-compatible dict for the Rust filter engine."""
+        return {"node_type": self.__class__.__name__, "kwargs": self.kwargs}
+
+    @property
+    def kwargs(self) -> dict:
+        """Return this node's kwargs dict for Rust engine JSON serialization."""
+        msg = f"{self.__class__.__name__} must implement kwargs"
+        raise NotImplementedError(msg)
 
 
 class LeafNode(QueryNode):
@@ -72,6 +87,11 @@ class StringValueNode(ValueNode):
         """Initialize a StringValueNode with a string value."""
         self.value = value
 
+    @property
+    def kwargs(self) -> dict:
+        """Return this node's kwargs dict for Rust engine JSON serialization."""
+        return {"value": self.value}
+
     def to_sql(self: StringValueNode, context: dict) -> str:
         """Serialize this string value node to a SQL string literal."""
         _param_name = param_name(self.value)
@@ -85,6 +105,11 @@ class NumericValueNode(ValueNode):
     def __init__(self: NumericValueNode, value: float) -> None:
         """Initialize a NumericValueNode with a numeric value."""
         self.value = value
+
+    @property
+    def kwargs(self) -> dict:
+        """Return this node's kwargs dict for Rust engine JSON serialization."""
+        return {"value": self.value}
 
     def to_sql(self: NumericValueNode, context: dict) -> str:
         """Serialize this numeric value node to a SQL number literal."""
@@ -100,6 +125,11 @@ class ManaValueNode(ValueNode):
         """Initialize a ManaValueNode with a mana cost string."""
         self.value = value
 
+    @property
+    def kwargs(self) -> dict:
+        """Return this node's kwargs dict for Rust engine JSON serialization."""
+        return {"value": self.value}
+
     def to_sql(self: ManaValueNode, context: dict) -> str:
         """Serialize this mana value node to a SQL string literal."""
         _param_name = param_name(self.value)
@@ -113,6 +143,11 @@ class RegexValueNode(ValueNode):
     def __init__(self: RegexValueNode, value: str) -> None:
         """Initialize a RegexValueNode with a regex pattern string."""
         self.value = value
+
+    @property
+    def kwargs(self) -> dict:
+        """Return this node's kwargs dict for Rust engine JSON serialization."""
+        return {"value": self.value}
 
     def to_sql(self: RegexValueNode, context: dict) -> str:
         """Serialize this regex value node to a SQL string literal."""
@@ -191,6 +226,11 @@ class BinaryOperatorNode(QueryNode):
             msg = f"Unknown operator: {operator}"
             raise ValueError(msg)
 
+    @property
+    def kwargs(self) -> dict:
+        """Return this node's kwargs dict for Rust engine JSON serialization."""
+        return {"lhs": _node_to_json(self.lhs), "op": self.operator, "rhs": _node_to_json(self.rhs)}
+
     def to_sql(self: BinaryOperatorNode, context: dict) -> str:
         """Serialize this binary operator node to a SQL expression."""
         sql_operator = self.operator
@@ -247,6 +287,11 @@ class NaryOperatorNode(QueryNode):
     def __init__(self: NaryOperatorNode, operands: list[QueryNode]) -> None:
         """Initialize an NaryOperatorNode with a list of operand nodes."""
         self.operands = operands
+
+    @property
+    def kwargs(self) -> dict:
+        """Return this node's kwargs dict for Rust engine JSON serialization."""
+        return {"operands": [_node_to_json(op) for op in self.operands]}
 
     def to_sql(self: NaryOperatorNode, context: dict) -> str:
         """Serialize this n-ary operator node to a SQL expression."""
@@ -352,6 +397,11 @@ class NotNode(QueryNode):
         """Initialize a NotNode with a single operand node."""
         self.operand = operand
 
+    @property
+    def kwargs(self) -> dict:
+        """Return this node's kwargs dict for Rust engine JSON serialization."""
+        return {"operand": _node_to_json(self.operand)}
+
     def to_sql(self: NotNode, context: dict) -> str:
         """Serialize this NOT node to a SQL expression."""
         operand_sql = self.operand.to_sql(context)
@@ -379,6 +429,11 @@ class NotNode(QueryNode):
 
 class TrueNode(LeafNode):
     """Represents an always-true condition, used for empty queries."""
+
+    @property
+    def kwargs(self) -> dict:
+        """Return this node's kwargs dict for Rust engine JSON serialization."""
+        return {}
 
     def to_sql(self: TrueNode, context: dict) -> str:
         """Serialize this node to the SQL literal TRUE."""
@@ -408,6 +463,10 @@ class Query(QueryNode):
     def __init__(self: Query, root: QueryNode) -> None:
         """Initialize a Query with the root QueryNode."""
         self.root = root
+
+    def to_json(self) -> dict:
+        """Delegate to the root node."""
+        return self.root.to_json()
 
     def to_sql(self: Query, context: dict) -> str:
         """Serialize this query to a SQL string."""

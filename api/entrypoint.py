@@ -14,7 +14,7 @@ logger = logging.getLogger("api")
 
 ALL_INTERFACES = "0.0.0.0"  # noqa: S104
 DEFAULT_PORT = 8080
-DEFAULT_WORKERS = 10
+DEFAULT_WORKERS = max(2, int((os.cpu_count() or 1) * 0.6))
 
 
 def get_args() -> dict:

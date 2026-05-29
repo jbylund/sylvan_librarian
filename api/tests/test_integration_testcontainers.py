@@ -429,6 +429,9 @@ class TestContainerIntegration:
                 )
             conn.commit()
 
+        # Reload the engine so it picks up the direct DB update
+        api_resource._reload_engine()
+
         result = api_resource.search(orderby="cubecobra", direction="asc", limit=100)
         names = [card["name"] for card in result["cards"] if card["name"] in scores]
         assert names == ["Lightning Bolt", "Black Lotus", "Serra Angel"]
