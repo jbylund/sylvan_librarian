@@ -1,16 +1,56 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDate, PyDateAccess, PyDict, PyList, PyTuple};
 use regex::Regex;
+use rkyv::{Archive, Archived, Deserialize, Serialize};
+use memmap2::Mmap;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::io::Write as IoWrite;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::os::unix::io::AsRawFd;
+use std::os::unix::fs::MetadataExt;
 
 // ─── Inline string (no heap allocation) ──────────────────────────────────────
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 struct InlineStr<const N: usize> {
     bytes: [u8; N],
     len: u8,
+}
+
+// Safety: InlineStr<N> is plain bytes (Copy), has no padding that could be
+// uninitialized, and carries no internal references — it is safe to treat as
+// a flat, relocatable value in an rkyv archive.
+unsafe impl<const N: usize> rkyv::Portable for InlineStr<N> {}
+
+impl<const N: usize> Archive for InlineStr<N> {
+    type Archived = InlineStr<N>;
+    type Resolver = ();
+    fn resolve(&self, _: (), out: rkyv::Place<InlineStr<N>>) {
+        // Safety: InlineStr<N> is Copy and Portable; writing it verbatim is correct.
+        unsafe { out.ptr().write(*self); }
+    }
+}
+
+impl<const N: usize, S: rkyv::rancor::Fallible + ?Sized> Serialize<S> for InlineStr<N> {
+    fn serialize(&self, _serializer: &mut S) -> Result<(), S::Error> { Ok(()) }
+}
+
+impl<const N: usize, D: rkyv::rancor::Fallible + ?Sized> Deserialize<InlineStr<N>, D> for InlineStr<N> {
+    fn deserialize(&self, _: &mut D) -> Result<InlineStr<N>, D::Error> { Ok(*self) }
+}
+
+// Safety: InlineStr<N> contains only a [u8; N] and a u8 len -- both are always
+// valid regardless of their byte contents. No pointers, no enums, no invariants
+// that could be violated by arbitrary bytes. This impl simply trusts the data.
+unsafe impl<const N: usize, C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C> for InlineStr<N> {
+    unsafe fn check_bytes(
+        _value: *const Self,
+        _context: &mut C,
+    ) -> Result<(), C::Error> {
+        Ok(())
+    }
 }
 
 impl<const N: usize> InlineStr<N> {
@@ -144,12 +184,14 @@ fn mana_cmc(s: &str) -> f32 {
 
 // ─── Card struct ─────────────────────────────────────────────────────────────
 
+#[derive(Archive, Serialize, Deserialize)]
 struct ManaCost {
     pips: HashMap<String, u8>,              // faithful to mana_cost_jsonb; used for mana= queries
     devotion: Option<HashMap<String, u8>>,  // Some only when hybrids are present; used for devotion queries
     cmc: f32,
 }
 
+#[derive(Archive, Serialize, Deserialize)]
 struct Card {
     // Hot fields first — fits in the first two cache lines for fast filter short-circuiting.
     card_name_lower: InlineStr<61>, // 61 bytes covers every card name in the Scryfall dataset
@@ -189,8 +231,8 @@ struct Card {
     cmc: Option<u8>,                   // always an integer; max ~16 in practice
     creature_power: Option<i8>,        // can be negative (e.g. Char-Rumbler)
     creature_toughness: Option<i8>,
-    planeswalker_loyalty: Option<u8>,  // always 1–12
-    card_rarity_int: Option<u8>,       // 0–5
+    planeswalker_loyalty: Option<u8>,  // always 1-12
+    card_rarity_int: Option<u8>,       // 0-5
     collector_number_int: Option<u16>, // some sets exceed i8::MAX
     edhrec_rank: Option<u32>,          // up to ~30k unique cards
     price_usd: Option<f32>,
@@ -211,6 +253,9 @@ struct Card {
     creature_power_text: Option<String>,
     creature_toughness_text: Option<String>,
 }
+
+// Type alias for the archived (mmap-backed) card type
+type ACard = Archived<Card>;
 
 // ─── Loading helpers ─────────────────────────────────────────────────────────
 
@@ -514,19 +559,19 @@ fn attr_to_num_field(attr: &str) -> Option<NumField> {
     }
 }
 
-fn card_num(card: &Card, f: NumField) -> Option<f32> {
+fn card_num(card: &ACard, f: NumField) -> Option<f32> {
     match f {
-        NumField::Cmc                => card.cmc.map(|v| v as f32),
-        NumField::Power              => card.creature_power.map(|v| v as f32),
-        NumField::Toughness          => card.creature_toughness.map(|v| v as f32),
-        NumField::Loyalty            => card.planeswalker_loyalty.map(|v| v as f32),
-        NumField::RarityInt          => card.card_rarity_int.map(|v| v as f32),
-        NumField::CollectorNumberInt => card.collector_number_int.map(|v| v as f32),
-        NumField::EdhrEc             => card.edhrec_rank.map(|v| v as f32),
-        NumField::PriceUsd           => card.price_usd,
-        NumField::PriceEur           => card.price_eur,
-        NumField::PriceTix           => card.price_tix,
-        NumField::PreferScore        => card.prefer_score,
+        NumField::Cmc                => card.cmc.as_ref().map(|v| u8::from(*v) as f32),
+        NumField::Power              => card.creature_power.as_ref().map(|v| i8::from(*v) as f32),
+        NumField::Toughness          => card.creature_toughness.as_ref().map(|v| i8::from(*v) as f32),
+        NumField::Loyalty            => card.planeswalker_loyalty.as_ref().map(|v| u8::from(*v) as f32),
+        NumField::RarityInt          => card.card_rarity_int.as_ref().map(|v| u8::from(*v) as f32),
+        NumField::CollectorNumberInt => card.collector_number_int.as_ref().map(|v| u16::from(*v) as f32),
+        NumField::EdhrEc             => card.edhrec_rank.as_ref().map(|v| u32::from(*v) as f32),
+        NumField::PriceUsd           => card.price_usd.as_ref().map(|v| f32::from(*v)),
+        NumField::PriceEur           => card.price_eur.as_ref().map(|v| f32::from(*v)),
+        NumField::PriceTix           => card.price_tix.as_ref().map(|v| f32::from(*v)),
+        NumField::PreferScore        => card.prefer_score.as_ref().map(|v| f32::from(*v)),
     }
 }
 
@@ -537,7 +582,7 @@ enum NumExpr {
 }
 
 impl NumExpr {
-    fn eval(&self, card: &Card) -> Option<f64> {
+    fn eval(&self, card: &ACard) -> Option<f64> {
         match self {
             NumExpr::Const(v) => Some(*v),
             NumExpr::Field(f) => card_num(card, *f).map(|v| v as f64),
@@ -576,11 +621,11 @@ enum ColorField {
     ProducedMana,
 }
 
-fn card_colors(card: &Card, f: ColorField) -> u8 {
+fn card_colors(card: &ACard, f: ColorField) -> u8 {
     match f {
-        ColorField::Colors        => card.card_colors,
-        ColorField::ColorIdentity => card.card_color_identity,
-        ColorField::ProducedMana  => card.produced_mana,
+        ColorField::Colors        => u8::from(card.card_colors),
+        ColorField::ColorIdentity => u8::from(card.card_color_identity),
+        ColorField::ProducedMana  => u8::from(card.produced_mana),
     }
 }
 
@@ -593,7 +638,7 @@ enum CollField {
     FrameData,
 }
 
-fn card_collection<'a>(card: &'a Card, f: CollField) -> CollRef<'a> {
+fn card_collection<'a>(card: &'a ACard, f: CollField) -> CollRef<'a> {
     match f {
         CollField::Subtypes   => CollRef::List(&card.card_subtypes),
         CollField::Keywords   => CollRef::Set(&card.card_keywords),
@@ -604,14 +649,14 @@ fn card_collection<'a>(card: &'a Card, f: CollField) -> CollRef<'a> {
 }
 
 enum CollRef<'a> {
-    List(&'a Vec<String>),
-    Set(&'a HashSet<String>),
+    List(&'a rkyv::vec::ArchivedVec<rkyv::string::ArchivedString>),
+    Set(&'a rkyv::collections::swiss_table::ArchivedHashSet<rkyv::string::ArchivedString>),
 }
 
 impl CollRef<'_> {
     fn contains(&self, v: &str) -> bool {
         match self {
-            CollRef::List(l) => l.iter().any(|s| s == v),
+            CollRef::List(l) => l.iter().any(|s| s.as_str() == v),
             CollRef::Set(s)  => s.contains(v),
         }
     }
@@ -623,8 +668,8 @@ impl CollRef<'_> {
     }
     fn all_equal(&self, v: &str) -> bool {
         match self {
-            CollRef::List(l) => l.iter().all(|s| s == v),
-            CollRef::Set(s)  => s.iter().all(|s| s == v),
+            CollRef::List(l) => l.iter().all(|s| s.as_str() == v),
+            CollRef::Set(s)  => s.iter().all(|s| s.as_str() == v),
         }
     }
 }
@@ -637,12 +682,42 @@ enum TextSearchField {
     ArtistLower,
 }
 
-fn text_field_value<'a>(card: &'a Card, field: TextSearchField) -> Option<&'a str> {
+fn text_search_field_value<'a>(card: &'a ACard, field: TextSearchField) -> Option<&'a str> {
     match field {
         TextSearchField::NameLower       => Some(card.card_name_lower.as_str()),
         TextSearchField::OracleTextLower => Some(card.oracle_text_lower.as_str()),
         TextSearchField::FlavorTextLower => Some(card.flavor_text_lower.as_str()),
-        TextSearchField::ArtistLower     => card.card_artist_lower.as_deref(),
+        TextSearchField::ArtistLower     => card.card_artist_lower.as_ref().map(|s| s.as_str()),
+    }
+}
+
+/// Enum that replaces fn-pointer fields in TextExact / TextRegex.
+/// Function pointers cannot be parameterized over &Card vs &ACard, so enum
+/// dispatch is used instead.
+#[derive(Clone, Copy)]
+enum TextField {
+    NameLower,
+    OracleTextLower,
+    FlavorTextLower,
+    ArtistLower,
+    SetCode,
+    Layout,
+    Border,
+    Watermark,
+    CollectorNumber,
+}
+
+fn text_field_value<'a>(card: &'a ACard, field: TextField) -> Option<&'a str> {
+    match field {
+        TextField::NameLower       => Some(card.card_name_lower.as_str()),
+        TextField::OracleTextLower => Some(card.oracle_text_lower.as_str()),
+        TextField::FlavorTextLower => Some(card.flavor_text_lower.as_str()),
+        TextField::ArtistLower     => card.card_artist_lower.as_ref().map(|s| s.as_str()),
+        TextField::SetCode         => Some(card.card_set_code.as_str()),
+        TextField::Layout          => Some(card.card_layout.as_str()),
+        TextField::Border          => Some(card.card_border.as_str()),
+        TextField::Watermark       => card.card_watermark.as_ref().map(|s| s.as_str()),
+        TextField::CollectorNumber => Some(card.collector_number.as_str()),
     }
 }
 
@@ -664,12 +739,12 @@ enum FilterExpr {
         word: String,
     },
     TextExact {
-        field: fn(&Card) -> Option<&str>,
+        field: TextField,
         op: CmpOp,
         value: String,
     },
     TextRegex {
-        field: fn(&Card) -> Option<&str>,
+        field: TextField,
         regex: Regex,
     },
 
@@ -718,7 +793,7 @@ enum FilterExpr {
 }
 
 impl FilterExpr {
-    fn matches(&self, card: &Card) -> bool {
+    fn matches(&self, card: &ACard) -> bool {
         self.tri(card) == Some(true)
     }
 
@@ -729,7 +804,7 @@ impl FilterExpr {
     /// filters only match cards that have the attribute", while
     /// -(power>2 and t:creature) still matches instants (NULL AND false =
     /// false, NOT false = true). Only Some(true) counts as a match.
-    fn tri(&self, card: &Card) -> Option<bool> {
+    fn tri(&self, card: &ACard) -> Option<bool> {
         match self {
             FilterExpr::True => Some(true),
 
@@ -767,11 +842,11 @@ impl FilterExpr {
             }
 
             FilterExpr::TextContains { field, word } => {
-                text_field_value(card, *field).map(|s| s.contains(word.as_str()))
+                text_search_field_value(card, *field).map(|s| s.contains(word.as_str()))
             }
 
             FilterExpr::TextExact { field, op, value } => {
-                field(card).map(|s| match op {
+                text_field_value(card, *field).map(|s| match op {
                     CmpOp::Eq => s == value,
                     CmpOp::Ne => s != value,
                     CmpOp::Lt => s < value.as_str(),
@@ -782,7 +857,7 @@ impl FilterExpr {
             }
 
             FilterExpr::TextRegex { field, regex } => {
-                field(card).map(|s| regex.is_match(s))
+                text_field_value(card, *field).map(|s| regex.is_match(s))
             }
 
             FilterExpr::ColorCmp { field, op, mask } => {
@@ -798,7 +873,7 @@ impl FilterExpr {
             }
 
             FilterExpr::TypeCmp { mask, op } => {
-                let bits = card.card_types;
+                let bits = u16::from(card.card_types);
                 Some(match op {
                     CmpOp::Ge => bits & mask != 0,
                     CmpOp::Eq => bits == *mask,
@@ -827,48 +902,58 @@ impl FilterExpr {
             }
 
             FilterExpr::Legality { shift, expected } => {
-                Some(shift.is_some_and(|s| (card.card_legalities >> s) & 0b11 == *expected))
+                Some(shift.is_some_and(|s| (u64::from(card.card_legalities) >> s) & 0b11 == *expected))
             }
 
             FilterExpr::ManaCostCmp { op, pips, cmc } => {
-                let card_cmc = card.mana_cost.cmc;
+                let card_cmc = f32::from(card.mana_cost.cmc);
                 let card_pips = &card.mana_cost.pips;
                 Some(match op {
                     CmpOp::Ge => {
-                        pips.iter().all(|(sym, &n)| card_pips.get(sym).copied().unwrap_or(0) >= n)
-                            && card_cmc >= *cmc
+                        pips.iter().all(|(sym, &n)| {
+                            card_pips.get(sym.as_str()).map(|v| u8::from(*v)).unwrap_or(0) >= n
+                        }) && card_cmc >= *cmc
                     }
                     CmpOp::Le => {
-                        card_pips
-                            .iter()
-                            .all(|(sym, &n)| pips.get(sym).copied().unwrap_or(0) >= n)
-                            && card_cmc <= *cmc
+                        card_pips.iter().all(|(sym, n)| {
+                            pips.get(sym.as_str()).copied().unwrap_or(0) >= u8::from(*n)
+                        }) && card_cmc <= *cmc
                     }
                     CmpOp::Eq => {
                         card_cmc == *cmc
                             && card_pips.len() == pips.len()
-                            && pips.iter().all(|(sym, &n)| card_pips.get(sym).copied().unwrap_or(0) == n)
+                            && pips.iter().all(|(sym, &n)| {
+                                card_pips.get(sym.as_str()).map(|v| u8::from(*v)).unwrap_or(0) == n
+                            })
                     }
                     CmpOp::Gt => {
-                        let contains = pips.iter().all(|(sym, &n)| card_pips.get(sym).copied().unwrap_or(0) >= n)
-                            && card_cmc >= *cmc;
+                        let contains = pips.iter().all(|(sym, &n)| {
+                            card_pips.get(sym.as_str()).map(|v| u8::from(*v)).unwrap_or(0) >= n
+                        }) && card_cmc >= *cmc;
                         let exact = card_cmc == *cmc
                             && card_pips.len() == pips.len()
-                            && pips.iter().all(|(sym, &n)| card_pips.get(sym).copied().unwrap_or(0) == n);
+                            && pips.iter().all(|(sym, &n)| {
+                                card_pips.get(sym.as_str()).map(|v| u8::from(*v)).unwrap_or(0) == n
+                            });
                         contains && !exact
                     }
                     CmpOp::Lt => {
-                        let subset = card_pips.iter().all(|(sym, &n)| pips.get(sym).copied().unwrap_or(0) >= n)
-                            && card_cmc <= *cmc;
+                        let subset = card_pips.iter().all(|(sym, n)| {
+                            pips.get(sym.as_str()).copied().unwrap_or(0) >= u8::from(*n)
+                        }) && card_cmc <= *cmc;
                         let exact = card_cmc == *cmc
                             && card_pips.len() == pips.len()
-                            && pips.iter().all(|(sym, &n)| card_pips.get(sym).copied().unwrap_or(0) == n);
+                            && pips.iter().all(|(sym, &n)| {
+                                card_pips.get(sym.as_str()).map(|v| u8::from(*v)).unwrap_or(0) == n
+                            });
                         subset && !exact
                     }
                     CmpOp::Ne => {
                         !(card_cmc == *cmc
                             && card_pips.len() == pips.len()
-                            && pips.iter().all(|(sym, &n)| card_pips.get(sym).copied().unwrap_or(0) == n))
+                            && pips.iter().all(|(sym, &n)| {
+                                card_pips.get(sym.as_str()).map(|v| u8::from(*v)).unwrap_or(0) == n
+                            }))
                     }
                 })
             }
@@ -882,13 +967,21 @@ impl FilterExpr {
                 // come straight from mana_cost_jsonb) that the DB's devotion column
                 // never holds, so only WUBRGC entries participate — query pips are
                 // already color-only (see build_binary).
-                let devotion = card.mana_cost.devotion.as_ref().unwrap_or(&card.mana_cost.pips);
-                let ge = pips.iter().all(|(sym, &n)| devotion.get(sym).copied().unwrap_or(0) >= n);
+                let devotion = if card.mana_cost.devotion.is_some() {
+                    card.mana_cost.devotion.as_ref().unwrap()
+                } else {
+                    &card.mana_cost.pips
+                };
+                let ge = pips.iter().all(|(sym, &n)| {
+                    devotion.get(sym.as_str()).map(|v| u8::from(*v)).unwrap_or(0) >= n
+                });
                 let le = devotion.iter()
-                    .filter(|(sym, _)| is_devotion_sym(sym))
-                    .all(|(sym, &n)| pips.get(sym).copied().unwrap_or(0) >= n);
-                let eq = devotion.keys().filter(|sym| is_devotion_sym(sym)).count() == pips.len()
-                    && pips.iter().all(|(sym, &n)| devotion.get(sym).copied().unwrap_or(0) == n);
+                    .filter(|(sym, _)| is_devotion_sym(sym.as_str()))
+                    .all(|(sym, n)| pips.get(sym.as_str()).copied().unwrap_or(0) >= u8::from(*n));
+                let eq = devotion.keys().filter(|sym| is_devotion_sym(sym.as_str())).count() == pips.len()
+                    && pips.iter().all(|(sym, &n)| {
+                        devotion.get(sym.as_str()).map(|v| u8::from(*v)).unwrap_or(0) == n
+                    });
                 Some(match op {
                     CmpOp::Ge => ge,
                     CmpOp::Eq => eq,
@@ -914,16 +1007,16 @@ impl FilterExpr {
 
             FilterExpr::YearCmp { op, year } => {
                 if card.released_at.is_empty() { return None; } // missing date: SQL NULL
-                let s = &card.released_at;
+                let s = card.released_at.as_str();
                 let start = format!("{year:04}-01-01");
                 let end   = format!("{:04}-01-01", year + 1);
                 Some(match op {
-                    CmpOp::Eq => s.as_str() >= start.as_str() && s.as_str() < end.as_str(),
-                    CmpOp::Gt => s.as_str() >= end.as_str(),
-                    CmpOp::Lt => s.as_str() < start.as_str(),
-                    CmpOp::Ge => s.as_str() >= start.as_str(),
-                    CmpOp::Le => s.as_str() < end.as_str(),
-                    CmpOp::Ne => s.as_str() < start.as_str() || s.as_str() >= end.as_str(),
+                    CmpOp::Eq => s >= start.as_str() && s < end.as_str(),
+                    CmpOp::Gt => s >= end.as_str(),
+                    CmpOp::Lt => s < start.as_str(),
+                    CmpOp::Ge => s >= start.as_str(),
+                    CmpOp::Le => s < end.as_str(),
+                    CmpOp::Ne => s < start.as_str() || s >= end.as_str(),
                 })
             }
         }
@@ -1087,7 +1180,7 @@ fn build_binary(kw: &Value) -> Result<FilterExpr, String> {
 
     if attr == "devotion" {
         let mana_str = rhs_value_str(rhs);
-        // Split hybrid symbols ({R/G} → R:1, G:1) and keep only WUBRGC, matching
+        // Split hybrid symbols ({R/G} -> R:1, G:1) and keep only WUBRGC, matching
         // calculate_devotion() in SQL (which counts only color characters).
         // mana_pip_counts is NOT used directly because it keeps hybrids as single keys.
         let mut pips: HashMap<String, u8> = HashMap::new();
@@ -1185,14 +1278,14 @@ fn build_text_filter(attr: &str, op: &str, rhs: &Value) -> Result<FilterExpr, St
         let pattern  = rhs["kwargs"]["value"].as_str().unwrap_or("");
         let re = Regex::new(&format!("(?i){pattern}"))
             .map_err(|e| format!("invalid regex '{pattern}': {e}"))?;
-        let field_fn: fn(&Card) -> Option<&str> = match attr {
-            "card_name"   => |c| Some(c.card_name.as_str()),
-            "oracle_text" => |c| Some(c.oracle_text.as_str()),
-            "flavor_text" => |c| Some(c.flavor_text.as_str()),
-            "card_artist" => |c| c.card_artist.as_deref(),
+        let field = match attr {
+            "card_name"   => TextField::NameLower,
+            "oracle_text" => TextField::OracleTextLower,
+            "flavor_text" => TextField::FlavorTextLower,
+            "card_artist" => TextField::ArtistLower,
             _ => return Err(format!("regex not supported on {attr}")),
         };
-        return Ok(FilterExpr::TextRegex { field: field_fn, regex: re });
+        return Ok(FilterExpr::TextRegex { field, regex: re });
     }
 
     let raw_value = rhs["kwargs"]["value"].as_str().unwrap_or("");
@@ -1203,15 +1296,15 @@ fn build_text_filter(attr: &str, op: &str, rhs: &Value) -> Result<FilterExpr, St
         // the query value gives case-insensitive matching with a plain equality.
         let value = if attr == "collector_number" { raw_value.to_string() } else { raw_value.to_lowercase() };
         let cmp_op = str_op_to_cmp(op)?;
-        let lower_fn: fn(&Card) -> Option<&str> = match attr {
-            "card_set_code"      => |c| Some(c.card_set_code.as_str() as &str),
-            "card_layout"        => |c| Some(c.card_layout.as_str()),
-            "card_border"        => |c| Some(c.card_border.as_str()),
-            "card_watermark"     => |c| c.card_watermark.as_deref(),
-            "collector_number"   => |c| Some(c.collector_number.as_str()),
-            _                    => unreachable!(),
+        let field = match attr {
+            "card_set_code"    => TextField::SetCode,
+            "card_layout"      => TextField::Layout,
+            "card_border"      => TextField::Border,
+            "card_watermark"   => TextField::Watermark,
+            "collector_number" => TextField::CollectorNumber,
+            _                  => unreachable!(),
         };
-        return Ok(FilterExpr::TextExact { field: lower_fn, op: cmp_op, value });
+        return Ok(FilterExpr::TextExact { field, op: cmp_op, value });
     }
 
     let lower_word = raw_value.to_lowercase();
@@ -1226,15 +1319,15 @@ fn build_text_filter(attr: &str, op: &str, rhs: &Value) -> Result<FilterExpr, St
         return Ok(FilterExpr::TextContains { field: tsf, word: lower_word });
     }
 
-    let field_fn: fn(&Card) -> Option<&str> = match attr {
-        "card_name"   => |c| Some(c.card_name_lower.as_str()),
-        "oracle_text" => |c| Some(c.oracle_text_lower.as_str()),
-        "flavor_text" => |c| Some(c.flavor_text_lower.as_str()),
-        "card_artist" => |c| c.card_artist_lower.as_deref(),
+    let field = match attr {
+        "card_name"   => TextField::NameLower,
+        "oracle_text" => TextField::OracleTextLower,
+        "flavor_text" => TextField::FlavorTextLower,
+        "card_artist" => TextField::ArtistLower,
         _ => return Err(format!("unknown text field: {attr}")),
     };
     let cmp_op = str_op_to_cmp(op)?;
-    Ok(FilterExpr::TextExact { field: field_fn, op: cmp_op, value: raw_value.to_lowercase() })
+    Ok(FilterExpr::TextExact { field, op: cmp_op, value: raw_value.to_lowercase() })
 }
 
 // ─── Trigram index ────────────────────────────────────────────────────────────
@@ -1269,23 +1362,23 @@ fn intersect_sorted(a: &[u32], b: &[u32]) -> Vec<u32> {
     out
 }
 
-fn trigram_candidates(idx: &TrigramIndex, word: &str) -> Option<Vec<u32>> {
+fn trigram_candidates(idx: &Archived<TrigramIndex>, word: &str) -> Option<Vec<u32>> {
     let bytes = word.as_bytes();
     if bytes.len() < 3 { return None; }
 
-    let mut lists: Vec<&Vec<u32>> = Vec::with_capacity(bytes.len() - 2);
+    let mut lists: Vec<Vec<u32>> = Vec::with_capacity(bytes.len() - 2);
     for w in bytes.windows(3) {
         match idx.get(&[w[0], w[1], w[2]]) {
-            Some(list) => lists.push(list),
+            Some(list) => lists.push(list.iter().map(|x| u32::from(*x)).collect()),
             // A trigram absent from the index appears in no card: nothing can match.
             None => return Some(Vec::new()),
         }
     }
     lists.sort_unstable_by_key(|l| l.len());
-    lists.dedup_by(|a, b| std::ptr::eq(*a, *b));
 
-    let mut result = lists[0].clone();
-    for list in &lists[1..] {
+    let mut result = lists.swap_remove(0);
+    result.sort_unstable();
+    for list in &lists {
         if result.is_empty() { break; }
         result = intersect_sorted(&result, list);
     }
@@ -1308,8 +1401,8 @@ fn union_sorted(a: Vec<u32>, b: Vec<u32>) -> Vec<u32> {
 }
 
 // ─── Numeric index ────────────────────────────────────────────────────────────
-// Sorted Vec<(i16, u32)> maps field value → card index for cmc/power/toughness.
-// i16 covers both u8 (cmc: 0–255) and i8 (power/toughness: -128–127) without loss.
+// Sorted Vec<(i16, u32)> maps field value -> card index for cmc/power/toughness.
+// i16 covers both u8 (cmc: 0-255) and i8 (power/toughness: -128-127) without loss.
 // Binary search gives the candidate slice; sort by card index for intersection.
 
 type NumericIndex = Vec<(i16, u32)>;
@@ -1337,27 +1430,27 @@ fn flip_op(op: CmpOp) -> CmpOp {
 
 /// Return sorted card indices satisfying `field op val` using the numeric index.
 /// Returns None for Ne (not selective) and Some(empty) when no cards can match.
-fn numeric_candidates(idx: &NumericIndex, op: CmpOp, val: f64) -> Option<Vec<u32>> {
+fn numeric_candidates(idx: &Archived<NumericIndex>, op: CmpOp, val: f64) -> Option<Vec<u32>> {
     let (start, end) = match op {
         CmpOp::Ne => return None,
         CmpOp::Eq => {
             if val.fract() != 0.0 { return Some(Vec::new()); }
-            let s = idx.partition_point(|&(x, _)| (x as f64) < val);
-            let e = idx.partition_point(|&(x, _)| (x as f64) <= val);
+            let s = idx.partition_point(|p| (i16::from(p.0) as f64) < val);
+            let e = idx.partition_point(|p| (i16::from(p.0) as f64) <= val);
             (s, e)
         }
-        CmpOp::Lt => (0, idx.partition_point(|&(x, _)| (x as f64) < val)),
-        CmpOp::Le => (0, idx.partition_point(|&(x, _)| (x as f64) <= val)),
-        CmpOp::Gt => (idx.partition_point(|&(x, _)| (x as f64) <= val), idx.len()),
-        CmpOp::Ge => (idx.partition_point(|&(x, _)| (x as f64) < val), idx.len()),
+        CmpOp::Lt => (0, idx.partition_point(|p| (i16::from(p.0) as f64) < val)),
+        CmpOp::Le => (0, idx.partition_point(|p| (i16::from(p.0) as f64) <= val)),
+        CmpOp::Gt => (idx.partition_point(|p| (i16::from(p.0) as f64) <= val), idx.len()),
+        CmpOp::Ge => (idx.partition_point(|p| (i16::from(p.0) as f64) < val), idx.len()),
     };
-    let mut result: Vec<u32> = idx[start..end].iter().map(|&(_, i)| i).collect();
+    let mut result: Vec<u32> = idx[start..end].iter().map(|p| u32::from(p.1)).collect();
     result.sort_unstable();
     Some(result)
 }
 
 // ─── Tag index ───────────────────────────────────────────────────────────────
-// tag name → sorted list of card indices that have that tag.
+// tag name -> sorted list of card indices that have that tag.
 // Lists are naturally sorted because cards are iterated in index order.
 
 type TagIndex = HashMap<String, Vec<u32>>;
@@ -1403,6 +1496,7 @@ fn build_list_index(cards: &[Card], get_list: impl Fn(&Card) -> &Vec<String>) ->
 
 // ─── Combined indexes ────────────────────────────────────────────────────────
 
+#[derive(Archive, Serialize, Deserialize)]
 struct CardIndexes {
     name_trigram:   TrigramIndex,
     oracle_trigram: TrigramIndex,
@@ -1433,14 +1527,33 @@ impl Default for CardIndexes {
     }
 }
 
+#[derive(Archive, Serialize, Deserialize)]
 struct CardData {
     cards:   Vec<Card>,
     indexes: CardIndexes,
+    // The writer's format→shift assignments. Persisted so reader processes —
+    // which never run the load path that feeds FORMAT_SHIFTS — resolve
+    // legality shifts identically to the worker that built the archive.
+    format_shifts: HashMap<String, u8>,
+}
+
+/// Adopt the archive's format→shift assignments into this process's registry.
+/// Cheap no-op (one read lock) once the registry has caught up.
+fn sync_format_shifts(archived: &Archived<HashMap<String, u8>>) {
+    let behind = format_shifts().read().map(|m| m.len() < archived.len()).unwrap_or(false);
+    if !behind {
+        return;
+    }
+    if let Ok(mut shifts) = format_shifts().write() {
+        for (format, shift) in archived.iter() {
+            shifts.insert(format.as_str().to_string(), *shift);
+        }
+    }
 }
 
 // ─── Candidate narrowing ─────────────────────────────────────────────────────
 
-fn narrow_candidates(filter: &FilterExpr, indexes: &CardIndexes) -> Option<Vec<u32>> {
+fn narrow_candidates(filter: &FilterExpr, indexes: &Archived<CardIndexes>) -> Option<Vec<u32>> {
     match filter {
         FilterExpr::TextContains { field, word }
             if word.len() >= 3
@@ -1473,7 +1586,8 @@ fn narrow_candidates(filter: &FilterExpr, indexes: &CardIndexes) -> Option<Vec<u
                 let bit = m.trailing_zeros() as usize;
                 m &= m - 1;
                 if bit < 14 {
-                    result = union_sorted(result, indexes.type_bits[bit].clone());
+                    let bit_list: Vec<u32> = indexes.type_bits[bit].iter().map(|x| u32::from(*x)).collect();
+                    result = union_sorted(result, bit_list);
                 }
             }
             Some(result)
@@ -1482,25 +1596,25 @@ fn narrow_candidates(filter: &FilterExpr, indexes: &CardIndexes) -> Option<Vec<u
         FilterExpr::CollectionCmp { field, op, value }
             if matches!(field, CollField::Subtypes) && matches!(op, CmpOp::Ge) =>
         {
-            indexes.subtypes.get(value.as_str()).cloned()
+            indexes.subtypes.get(value.as_str()).map(|v| v.iter().map(|x| u32::from(*x)).collect())
         }
 
         FilterExpr::CollectionCmp { field, op, value }
             if matches!(field, CollField::Keywords) && matches!(op, CmpOp::Ge) =>
         {
-            indexes.keywords.get(value.as_str()).cloned()
+            indexes.keywords.get(value.as_str()).map(|v| v.iter().map(|x| u32::from(*x)).collect())
         }
 
         FilterExpr::CollectionCmp { field, op, value }
             if matches!(field, CollField::OracleTags) && matches!(op, CmpOp::Ge) =>
         {
-            indexes.oracle_tags.get(value.as_str()).cloned()
+            indexes.oracle_tags.get(value.as_str()).map(|v| v.iter().map(|x| u32::from(*x)).collect())
         }
 
         FilterExpr::CollectionCmp { field, op, value }
             if matches!(field, CollField::IsTags) && matches!(op, CmpOp::Ge) =>
         {
-            indexes.is_tags.get(value.as_str()).cloned()
+            indexes.is_tags.get(value.as_str()).map(|v| v.iter().map(|x| u32::from(*x)).collect())
         }
 
         FilterExpr::And(children) => {
@@ -1549,14 +1663,14 @@ fn prefer_from_str(s: &str) -> Prefer {
     }
 }
 
-fn prefer_score(card: &Card, prefer: Prefer) -> f64 {
+fn prefer_score(card: &ACard, prefer: Prefer) -> f64 {
     match prefer {
-        Prefer::Oldest  => -(card.released_at_int.unwrap_or(99_999_999) as f64),
-        Prefer::Newest  => card.released_at_int.unwrap_or(0) as f64,
-        Prefer::UsdLow  => -(card.price_usd.unwrap_or(f32::INFINITY) as f64),
-        Prefer::UsdHigh => card.price_usd.unwrap_or(0.0) as f64,
-        Prefer::Promo   => -(card.edhrec_rank.map(|r| r as f64).unwrap_or(f64::INFINITY)),
-        Prefer::Default => card.prefer_score.unwrap_or(0.0) as f64,
+        Prefer::Oldest  => -(card.released_at_int.as_ref().map(|v| u32::from(*v)).unwrap_or(99_999_999) as f64),
+        Prefer::Newest  => card.released_at_int.as_ref().map(|v| u32::from(*v)).unwrap_or(0) as f64,
+        Prefer::UsdLow  => -(card.price_usd.as_ref().map(|v| f32::from(*v)).unwrap_or(f32::INFINITY) as f64),
+        Prefer::UsdHigh => card.price_usd.as_ref().map(|v| f32::from(*v)).unwrap_or(0.0) as f64,
+        Prefer::Promo   => -(card.edhrec_rank.as_ref().map(|r| u32::from(*r) as f64).unwrap_or(f64::INFINITY)),
+        Prefer::Default => card.prefer_score.as_ref().map(|v| f32::from(*v)).unwrap_or(0.0) as f64,
     }
 }
 
@@ -1586,19 +1700,19 @@ fn f32_sort_bits(v: f32) -> u32 {
 /// then edhrec rank ascending (missing last), then prefer score descending (missing
 /// last). Selection then compares plain u128s; full ties fall back to store pointer
 /// order in `select_page` — the same tie order the original stable sort produced.
-fn sort_key_bits(card: &Card, sort_col: SortCol, descending: bool) -> u128 {
+fn sort_key_bits(card: &ACard, sort_col: SortCol, descending: bool) -> u128 {
     let primary: Option<f32> = match sort_col {
-        SortCol::Cmc        => card.cmc.map(|v| v as f32),
-        SortCol::Power      => card.creature_power.map(|v| v as f32),
-        SortCol::Toughness  => card.creature_toughness.map(|v| v as f32),
-        SortCol::Rarity     => card.card_rarity_int.map(|v| v as f32),
-        SortCol::PriceUsd   => card.price_usd,
-        SortCol::Cubecobra  => card.cubecobra_score,
-        SortCol::EdhrecRank => card.edhrec_rank.map(|v| v as f32),
+        SortCol::Cmc        => card.cmc.as_ref().map(|v| u8::from(*v) as f32),
+        SortCol::Power      => card.creature_power.as_ref().map(|v| i8::from(*v) as f32),
+        SortCol::Toughness  => card.creature_toughness.as_ref().map(|v| i8::from(*v) as f32),
+        SortCol::Rarity     => card.card_rarity_int.as_ref().map(|v| u8::from(*v) as f32),
+        SortCol::PriceUsd   => card.price_usd.as_ref().map(|v| f32::from(*v)),
+        SortCol::Cubecobra  => card.cubecobra_score.as_ref().map(|v| f32::from(*v)),
+        SortCol::EdhrecRank => card.edhrec_rank.as_ref().map(|v| u32::from(*v) as f32),
     };
     let p = primary.map_or(u32::MAX, |v| f32_sort_bits(if descending { -v } else { v }));
-    let e = card.edhrec_rank.unwrap_or(u32::MAX);
-    let s = card.prefer_score.map_or(u32::MAX, |v| f32_sort_bits(-v));
+    let e = card.edhrec_rank.as_ref().map(|v| u32::from(*v)).unwrap_or(u32::MAX);
+    let s = card.prefer_score.as_ref().map_or(u32::MAX, |v| f32_sort_bits(-f32::from(*v)));
     ((p as u128) << 64) | ((e as u128) << 32) | (s as u128)
 }
 
@@ -1606,12 +1720,12 @@ fn sort_key_bits(card: &Card, sort_col: SortCol, descending: bool) -> u128 {
 /// segment. The first select bounds the page from above (everything past it stays
 /// unsorted); the second bounds it from below and is skipped in the common
 /// offset == 0 case. O(n + limit·log limit) instead of O(n·log n).
-fn select_page<'a>(mut v: Vec<(u128, &'a Card)>, offset: usize, limit: usize) -> Vec<&'a Card> {
+fn select_page<'a>(mut v: Vec<(u128, &'a ACard)>, offset: usize, limit: usize) -> Vec<&'a ACard> {
     let end = offset.saturating_add(limit).min(v.len());
     if offset >= end {
         return Vec::new();
     }
-    let cmp = |a: &(u128, &Card), b: &(u128, &Card)| {
+    let cmp = |a: &(u128, &ACard), b: &(u128, &ACard)| {
         a.0.cmp(&b.0).then_with(|| std::ptr::from_ref(a.1).cmp(&std::ptr::from_ref(b.1)))
     };
     if end < v.len() {
@@ -1627,7 +1741,7 @@ fn select_page<'a>(mut v: Vec<(u128, &'a Card)>, offset: usize, limit: usize) ->
 }
 
 fn run_query_hashmap<'a>(
-    store: &'a [Card],
+    store: &'a [ACard],
     filter: &FilterExpr,
     unique: &str,
     prefer: &str,
@@ -1635,7 +1749,7 @@ fn run_query_hashmap<'a>(
     direction: &str,
     limit: usize,
     offset: usize,
-) -> (usize, Vec<&'a Card>) {
+) -> (usize, Vec<&'a ACard>) {
     let sort_col   = orderby_to_col(orderby);
     let descending = direction == "desc";
     let prefer     = prefer_from_str(prefer);
@@ -1647,12 +1761,12 @@ fn run_query_hashmap<'a>(
         _          => GroupBy::Oracle,
     };
 
-    let mut partitions: HashMap<usize, (&Card, f64)> = HashMap::new();
+    let mut partitions: HashMap<usize, (&ACard, f64)> = HashMap::new();
     for card in store {
         if filter.matches(card) {
             let key = match group_by {
-                GroupBy::Oracle   => card.oracle_group as usize,
-                GroupBy::Artwork  => card.artwork_group as usize,
+                GroupBy::Oracle   => u32::from(card.oracle_group) as usize,
+                GroupBy::Artwork  => u32::from(card.artwork_group) as usize,
                 // every printing is its own partition — the pointer is a free unique key
                 GroupBy::Printing => std::ptr::from_ref(card) as usize,
             };
@@ -1662,7 +1776,7 @@ fn run_query_hashmap<'a>(
         }
     }
 
-    let best: Vec<(u128, &Card)> = partitions
+    let best: Vec<(u128, &ACard)> = partitions
         .into_values()
         .map(|(c, _)| (sort_key_bits(c, sort_col, descending), c))
         .collect();
@@ -1679,17 +1793,17 @@ fn run_query_linear<'a, I, F>(
     direction: &str,
     limit: usize,
     offset: usize,
-) -> (usize, Vec<&'a Card>)
+) -> (usize, Vec<&'a ACard>)
 where
-    I: Iterator<Item = &'a Card>,
-    F: Fn(&Card) -> u32,
+    I: Iterator<Item = &'a ACard>,
+    F: Fn(&ACard) -> u32,
 {
     let sort_col   = orderby_to_col(orderby);
     let descending = direction == "desc";
     let prefer     = prefer_from_str(prefer);
 
-    let mut best: Vec<(u128, &Card)> = Vec::new();
-    let mut group_best: Option<(&Card, f64)> = None;
+    let mut best: Vec<(u128, &ACard)> = Vec::new();
+    let mut group_best: Option<(&ACard, f64)> = None;
     let mut prev_key: u32 = u32::MAX; // group ids are dense from 0, so MAX is a safe sentinel
 
     for card in cards {
@@ -1713,16 +1827,16 @@ where
 }
 
 fn run_query_no_dedup<'a>(
-    cards: impl Iterator<Item = &'a Card>,
+    cards: impl Iterator<Item = &'a ACard>,
     filter: &FilterExpr,
     orderby: &str,
     direction: &str,
     limit: usize,
     offset: usize,
-) -> (usize, Vec<&'a Card>) {
+) -> (usize, Vec<&'a ACard>) {
     let sort_col   = orderby_to_col(orderby);
     let descending = direction == "desc";
-    let matched: Vec<(u128, &Card)> = cards
+    let matched: Vec<(u128, &ACard)> = cards
         .filter(|c| filter.matches(c))
         .map(|c| (sort_key_bits(c, sort_col, descending), c))
         .collect();
@@ -1731,7 +1845,7 @@ fn run_query_no_dedup<'a>(
 }
 
 fn run_query<'a>(
-    store: &'a [Card],
+    store: &'a [ACard],
     filter: &FilterExpr,
     unique: &str,
     prefer: &str,
@@ -1739,64 +1853,137 @@ fn run_query<'a>(
     direction: &str,
     limit: usize,
     offset: usize,
-    indexes: &CardIndexes,
-) -> (usize, Vec<&'a Card>) {
+    indexes: &Archived<CardIndexes>,
+) -> (usize, Vec<&'a ACard>) {
     let candidates = narrow_candidates(filter, indexes);
 
     macro_rules! cards_iter {
         () => {
             match &candidates {
-                Some(idxs) => Box::new(idxs.iter().map(|&i| &store[i as usize])) as Box<dyn Iterator<Item = &Card>>,
+                Some(idxs) => Box::new(idxs.iter().map(|&i| &store[i as usize])) as Box<dyn Iterator<Item = &ACard>>,
                 None       => Box::new(store.iter()),
             }
         };
     }
 
     match unique {
-        "card" => run_query_linear(cards_iter!(), filter, |c| c.oracle_group, prefer, orderby, direction, limit, offset),
+        "card" => run_query_linear(cards_iter!(), filter, |c| u32::from(c.oracle_group), prefer, orderby, direction, limit, offset),
         // Scryfall assigns each illustration_id to exactly one oracle_id, so cards sharing an
         // illustration_id are always contiguous in the (oracle_id, illustration_id) sort order.
         // The linear dedup path is therefore correct here — no HashMap needed.
-        "artwork"  => run_query_linear(cards_iter!(), filter, |c| c.artwork_group, prefer, orderby, direction, limit, offset),
+        "artwork"  => run_query_linear(cards_iter!(), filter, |c| u32::from(c.artwork_group), prefer, orderby, direction, limit, offset),
         "printing" => run_query_no_dedup(cards_iter!(), filter, orderby, direction, limit, offset),
         _          => run_query_hashmap(store, filter, unique, prefer, orderby, direction, limit, offset),
     }
 }
 
-fn card_to_pydict<'py>(py: Python<'py>, card: &Card) -> PyResult<Bound<'py, PyDict>> {
+fn card_to_pydict<'py>(py: Python<'py>, card: &ACard) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
-    d.set_item("name", &card.card_name)?;
+    d.set_item("name", card.card_name.as_str())?;
     d.set_item("set_code", card.card_set_code.as_str())?;
-    d.set_item("collector_number", &card.collector_number)?;
-    d.set_item("power", card.creature_power_text.as_deref())?;
-    d.set_item("toughness", card.creature_toughness_text.as_deref())?;
-    d.set_item("mana_cost", card.mana_cost_text.as_deref())?;
-    d.set_item("oracle_text", &card.oracle_text)?;
-    d.set_item("set_name", &card.set_name)?;
-    d.set_item("type_line", &card.type_line)?;
+    d.set_item("collector_number", card.collector_number.as_str())?;
+    d.set_item("power", card.creature_power_text.as_ref().map(|s| s.as_str()))?;
+    d.set_item("toughness", card.creature_toughness_text.as_ref().map(|s| s.as_str()))?;
+    d.set_item("mana_cost", card.mana_cost_text.as_ref().map(|s| s.as_str()))?;
+    d.set_item("oracle_text", card.oracle_text.as_str())?;
+    d.set_item("set_name", card.set_name.as_str())?;
+    d.set_item("type_line", card.type_line.as_str())?;
     Ok(d)
 }
 
 // ─── PyO3 bindings ───────────────────────────────────────────────────────────
 
+struct CachedMmap {
+    mmap: Arc<Mmap>,
+    inode: u64,
+}
+
 #[pyclass]
 struct QueryEngine {
-    data: Arc<RwLock<CardData>>,
+    shm_path: PathBuf,
+    write_lock: Mutex<()>,
+    cached_mmap: Mutex<Option<CachedMmap>>,
+}
+
+impl QueryEngine {
+    // Returns the cached mmap, remapping if the on-disk inode has changed since
+    // the last remap (i.e. another worker wrote a new archive via rename).
+    // One stat(2) per query; remap only when the inode actually changes.
+    fn get_mmap(&self) -> PyResult<Arc<Mmap>> {
+        let path_inode = std::fs::metadata(&self.shm_path)
+            .map(|m| m.ino())
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("stat shm: {e}")))?;
+
+        let mut guard = self.cached_mmap.lock().unwrap();
+        if let Some(ref c) = *guard {
+            if c.inode == path_inode {
+                return Ok(Arc::clone(&c.mmap));
+            }
+        }
+        // Inode changed (new reload) or first call: open and map the current file.
+        let file = std::fs::File::open(&self.shm_path)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("open shm: {e}")))?;
+        // Safety: bytes written by rkyv::to_bytes on this platform; file is replaced
+        // atomically (rename), never modified in place while mapped.
+        let mmap = Arc::new(unsafe { Mmap::map(&file) }
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("mmap: {e}")))?);
+        *guard = Some(CachedMmap { mmap: Arc::clone(&mmap), inode: path_inode });
+        Ok(mmap)
+    }
 }
 
 #[pymethods]
 impl QueryEngine {
     #[new]
-    fn new() -> Self {
+    #[pyo3(signature = (shm_path=None))]
+    fn new(shm_path: Option<&str>) -> Self {
+        // Use /dev/shm on Linux (shared memory), fall back to /tmp on macOS.
+        let default_path = if cfg!(target_os = "linux") {
+            "/dev/shm/arcane_tutor_cards"
+        } else {
+            "/tmp/arcane_tutor_cards"
+        };
         QueryEngine {
-            data: Arc::new(RwLock::new(CardData {
-                cards:   Vec::new(),
-                indexes: CardIndexes::default(),
-            })),
+            shm_path: PathBuf::from(shm_path.unwrap_or(default_path)),
+            write_lock: Mutex::new(()),
+            cached_mmap: Mutex::new(None),  // populated by first reload()
         }
     }
 
+    fn remap(&self) -> PyResult<()> {
+        // Force a remap by clearing the cached inode so get_mmap() re-opens.
+        if let Some(ref mut c) = *self.cached_mmap.lock().unwrap() {
+            c.inode = 0;
+        }
+        self.get_mmap().map(|_| ())
+    }
+
     fn reload(&self, db_rows: &Bound<PyList>) -> PyResult<()> {
+        let _guard = self.write_lock.lock().unwrap();
+
+        // Record when we started waiting so we can detect whether another worker
+        // wrote the file while we were blocked on the cross-process flock below.
+        let started_at = std::time::SystemTime::now();
+
+        // Cross-process exclusive lock: only one worker writes per reload cycle.
+        // The lock file is separate so it persists across archive replacements.
+        let lock_path = self.shm_path.with_extension("lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .write(true).create(true).open(&lock_path)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("open lock: {e}")))?;
+        // LOCK_EX blocks until we hold the lock; released automatically on drop.
+        unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
+
+        // If another worker already wrote the file while we were waiting, skip
+        // the rebuild and just remap our local handle.
+        let already_written = std::fs::metadata(&self.shm_path)
+            .and_then(|m| m.modified())
+            .map(|mtime| mtime > started_at)
+            .unwrap_or(false);
+        if already_written {
+            return self.get_mmap().map(|_| ());
+        }
+
         let mut cards: Vec<Card> = db_rows
             .iter()
             .filter_map(|item| item.cast::<PyDict>().ok().map(|d| card_from_pydict(&d)))
@@ -1855,9 +2042,32 @@ impl QueryEngine {
             is_tags:        build_tag_index(&cards, |c| &c.card_is_tags),
         };
 
-        *self.data.write().map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("data lock: {e}")))? =
-            CardData { cards, indexes };
-        Ok(())
+        // Snapshot the registry card_from_pydict just populated so reader
+        // processes can adopt the same format→shift assignments.
+        let format_shifts_snapshot = format_shifts().read().map(|m| m.clone()).unwrap_or_default();
+        let card_data = CardData { cards, indexes, format_shifts: format_shifts_snapshot };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&card_data)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("rkyv serialize: {e}")))?;
+
+        // Write atomically: write to a per-PID .tmp, then rename over shm_path.
+        // Per-PID avoids the race where two workers write to the same .tmp and
+        // one's rename consumes the file before the other can rename it.
+        let tmp_name = format!(
+            "{}.{}.tmp",
+            self.shm_path.file_name().unwrap_or_default().to_string_lossy(),
+            std::process::id(),
+        );
+        let tmp_path = self.shm_path.with_file_name(tmp_name);
+        {
+            let mut f = std::fs::File::create(&tmp_path)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("create tmp: {e}")))?;
+            f.write_all(&bytes)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("write tmp: {e}")))?;
+        }
+        std::fs::rename(&tmp_path, &self.shm_path)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("rename shm: {e}")))?;
+
+        self.get_mmap().map(|_| ())
     }
 
     #[pyo3(signature = (*, filters, unique="card", prefer="default", orderby="edhrec", direction="asc", limit=100, offset=0))]
@@ -1881,13 +2091,23 @@ impl QueryEngine {
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("bad UTF-8 from orjson: {e}")))?;
         let json_val: Value = serde_json::from_str(json_str)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("bad query JSON: {e}")))?;
+        // get_mmap() remaps automatically if the on-disk inode has changed since
+        // the last reload, keeping workers off stale (deleted) mappings.
+        let mmap = self.get_mmap()?;
+        // Safety: bytes were written by rkyv::to_bytes on this platform.
+        // The archive is immutable once written; reloads atomically replace the
+        // file, never modifying it in place. The Arc keeps the mapping alive.
+        let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(&mmap) };
+
+        // Must run before build_filter so legality shifts resolve in workers
+        // that never executed the load path themselves.
+        sync_format_shifts(&data.format_shifts);
         let filter_expr = build_filter(&json_val)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("build_filter: {e}")))?;
 
-        let data = self.data.read()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("data lock: {e}")))?;
+        let store: &[ACard] = &data.cards;
         let (total, page) = run_query(
-            &data.cards, &filter_expr, unique, prefer, orderby, direction, limit, offset, &data.indexes,
+            store, &filter_expr, unique, prefer, orderby, direction, limit, offset, &data.indexes,
         );
 
         let matches: Vec<Bound<PyDict>> = page.iter().map(|c| card_to_pydict(py, c)).collect::<PyResult<Vec<_>>>()?;
@@ -1917,21 +2137,28 @@ impl QueryEngine {
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("bad UTF-8 from orjson: {e}")))?;
         let json_val: Value = serde_json::from_str(json_str)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("bad query JSON: {e}")))?;
+        let mmap = self.get_mmap()?;
+        // Safety: same as query().
+        let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(&mmap) };
+
+        // Must run before build_filter; see query().
+        sync_format_shifts(&data.format_shifts);
         let filter_expr = build_filter(&json_val)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("build_filter: {e}")))?;
 
-        let data = self.data.read()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("data lock: {e}")))?;
-        let (total, page) = run_query_hashmap(&data.cards, &filter_expr, unique, prefer, orderby, direction, limit, offset);
+        let store: &[ACard] = &data.cards;
+        let (total, page) = run_query_hashmap(store, &filter_expr, unique, prefer, orderby, direction, limit, offset);
         let matches: Vec<Bound<PyDict>> = page.iter().map(|c| card_to_pydict(py, c)).collect::<PyResult<Vec<_>>>()?;
         let matches_list = PyList::new(py, matches)?;
         PyTuple::new(py, [total.into_pyobject(py)?.into_any(), matches_list.into_any()])
     }
 
     fn size(&self) -> PyResult<usize> {
-        let data = self.data.read()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("data lock: {e}")))?;
-        Ok(data.cards.len())
+        match self.get_mmap() {
+            Err(_) => Ok(0),
+            // Safety: same as query().
+            Ok(mmap) => Ok(unsafe { rkyv::access_unchecked::<Archived<CardData>>(&mmap) }.cards.len()),
+        }
     }
 }
 
@@ -1944,6 +2171,7 @@ mod card_engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rkyv::rancor::Error;
 
     /// Build a TrigramIndex mapping each word's trigrams to the given card ids.
     fn index_of(words: &[(&str, &[u32])]) -> TrigramIndex {
@@ -1960,17 +2188,24 @@ mod tests {
         idx
     }
 
+    /// Archive the index and query it, matching how the engine reads the shared snapshot.
+    fn candidates(idx: &TrigramIndex, word: &str) -> Option<Vec<u32>> {
+        let bytes = rkyv::to_bytes::<Error>(idx).expect("serialize trigram index");
+        let archived = rkyv::access::<Archived<TrigramIndex>, Error>(&bytes).expect("access trigram index");
+        trigram_candidates(archived, word)
+    }
+
     #[test]
     fn trigram_short_word_cannot_narrow() {
         let idx = index_of(&[("bolt", &[1, 2])]);
-        assert_eq!(trigram_candidates(&idx, "bo"), None);
+        assert_eq!(candidates(&idx, "bo"), None);
     }
 
     #[test]
     fn trigram_all_present_intersects() {
         // "bol" → {1,2,3}, "olt" → {1,2}: intersection is {1,2}
         let idx = index_of(&[("bol", &[1, 2, 3]), ("olt", &[1, 2])]);
-        assert_eq!(trigram_candidates(&idx, "bolt"), Some(vec![1, 2]));
+        assert_eq!(candidates(&idx, "bolt"), Some(vec![1, 2]));
     }
 
     #[test]
@@ -1979,12 +2214,82 @@ mod tests {
         // match — the result must be the empty candidate set, not an intersection
         // of whichever trigrams happen to exist.
         let idx = index_of(&[("bolt", &[1, 2])]);
-        assert_eq!(trigram_candidates(&idx, "bolx"), Some(Vec::new()));
+        assert_eq!(candidates(&idx, "bolx"), Some(Vec::new()));
     }
 
     #[test]
     fn trigram_fully_unindexed_word_is_empty_not_unnarrowed() {
         let idx = index_of(&[("bolt", &[1, 2])]);
-        assert_eq!(trigram_candidates(&idx, "zzz"), Some(Vec::new()));
+        assert_eq!(candidates(&idx, "zzz"), Some(Vec::new()));
+    }
+
+    // Verify that HashMap<[u8; 3], Vec<u32>> (the trigram index key type) round-trips
+    // through rkyv and supports lookup via the same [u8; 3] key type.
+    #[test]
+    fn test_trigram_index_archive_and_lookup() {
+        let mut idx: HashMap<[u8; 3], Vec<u32>> = HashMap::new();
+        idx.insert([b'a', b'b', b'c'], vec![1, 2, 3]);
+        idx.insert([b'x', b'y', b'z'], vec![4, 5]);
+        idx.insert([b'f', b'o', b'o'], vec![10, 20, 30, 40]);
+
+        let bytes = rkyv::to_bytes::<Error>(&idx).expect("serialize trigram index");
+        let archived = rkyv::access::<rkyv::Archived<HashMap<[u8; 3], Vec<u32>>>, Error>(&bytes)
+            .expect("access trigram index");
+
+        // Key present -- length check
+        let abc = archived.get(&[b'a', b'b', b'c']).expect("abc must be present");
+        assert_eq!(abc.len(), 3);
+
+        // Key present -- value iteration (elements are rend::u32_le, not u32)
+        let foo: Vec<u32> = archived
+            .get(&[b'f', b'o', b'o'])
+            .expect("foo must be present")
+            .iter()
+            .map(|x| u32::from(*x))
+            .collect();
+        assert_eq!(foo, vec![10, 20, 30, 40]);
+
+        // Key absent
+        assert!(archived.get(&[b'z', b'z', b'z']).is_none());
+    }
+
+    // Verify that HashSet<String> supports contains() via &str (Borrow-based lookup).
+    // This is used for card_keywords, card_oracle_tags, card_is_tags, card_frame_data.
+    #[test]
+    fn test_hashset_string_str_lookup() {
+        let mut set: HashSet<String> = HashSet::new();
+        set.insert("Flying".to_string());
+        set.insert("Vigilance".to_string());
+        set.insert("Trample".to_string());
+
+        let bytes = rkyv::to_bytes::<Error>(&set).expect("serialize hashset");
+        let archived = rkyv::access::<rkyv::Archived<HashSet<String>>, Error>(&bytes)
+            .expect("access hashset");
+
+        assert!(archived.contains("Flying"));
+        assert!(archived.contains("Trample"));
+        assert!(!archived.contains("Deathtouch"));
+    }
+
+    // Verify that HashMap<String, Vec<u32>> (the tag index value type) supports
+    // get() via &str, which is needed for narrow_candidates tag lookups.
+    #[test]
+    fn test_tag_index_str_lookup() {
+        let mut idx: HashMap<String, Vec<u32>> = HashMap::new();
+        idx.insert("merfolk".to_string(), vec![1, 5, 9]);
+        idx.insert("dragon".to_string(), vec![2, 7]);
+
+        let bytes = rkyv::to_bytes::<Error>(&idx).expect("serialize tag index");
+        let archived = rkyv::access::<rkyv::Archived<HashMap<String, Vec<u32>>>, Error>(&bytes)
+            .expect("access tag index");
+
+        let merfolk: Vec<u32> = archived
+            .get("merfolk")
+            .expect("merfolk must be present")
+            .iter()
+            .map(|x| u32::from(*x))
+            .collect();
+        assert_eq!(merfolk, vec![1, 5, 9]);
+        assert!(archived.get("angel").is_none());
     }
 }

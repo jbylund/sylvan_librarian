@@ -14,3 +14,6 @@ crate-type = ["cdylib"]
 pyo3 = { version = "0.28.3" }
 regex = "1"
 serde_json = "1"
+rkyv = "0.8"
+memmap2 = "0.9"
+libc = "0.2"
