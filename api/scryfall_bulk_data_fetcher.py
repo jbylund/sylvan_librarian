@@ -10,6 +10,8 @@ import requests
 import zstandard as zstd
 from cachebox import TTLCache
 from cachebox import cached as cachebox_cached
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
 MINUTE = 60
@@ -35,13 +37,66 @@ class ScryfallBulkDataFetcher:
             self.cache_directory = pathlib.Path("/tmp/api")  # noqa: S108
             self.cache_directory.mkdir(parents=True, exist_ok=True)
         self.session = requests.Session()
+        # Scryfall's API requires a User-Agent and Accept header; requests without
+        # them may be rejected. https://scryfall.com/docs/api
+        self.session.headers.update(
+            {
+                "User-Agent": "arcane-tutor-bulk-fetcher/1.0",
+                "Accept": "application/json",
+            }
+        )
+        # Retry connection errors and retryable statuses with backoff at the
+        # transport layer. raise_on_status=False returns the last response after
+        # retries are exhausted so _get() can log its body before raising.
+        retry = Retry(
+            total=5,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["GET"],
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retry)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
+
+    def _get(self, url: str, *, timeout: int) -> requests.Response:
+        """GET a URL via the retrying session, logging the response body on HTTP errors.
+
+        Args:
+            url: The URL to fetch.
+            timeout: Per-attempt request timeout in seconds.
+
+        Returns:
+            The successful (2xx) response.
+
+        Raises:
+            requests.HTTPError: If the final response after retries is not 2xx.
+            requests.RequestException: If the request fails at the transport level.
+        """
+        response = self.session.get(url, timeout=timeout)
+        if not response.ok:
+            logger.error("GET %s returned HTTP %d, body[:500]=%r", url, response.status_code, response.text[:500])
+            response.raise_for_status()
+        return response
 
     @cachebox_cached(cache=TTLCache(maxsize=2, global_ttl=5 * MINUTE))
     def list_bulk_data(self) -> dict[BulkDataKey, dict]:
         """Fetch bulk data from Scryfall."""
-        return {
-            BulkDataKey(r["type"]): r for r in self.session.get("https://api.scryfall.com/bulk-data", timeout=20).json()["data"]
-        }
+        response = self._get("https://api.scryfall.com/bulk-data", timeout=20)
+        payload = response.json()
+        if "data" not in payload:
+            logger.error("Scryfall bulk-data listing had no 'data' key, body[:500]=%r", response.text[:500])
+            msg = "Scryfall bulk-data listing response missing 'data'"
+            raise RuntimeError(msg)
+        listing: dict[BulkDataKey, dict] = {}
+        for record in payload["data"]:
+            try:
+                listing[BulkDataKey(record["type"])] = record
+            except ValueError:
+                # Scryfall occasionally adds new bulk data types (e.g. art_tags);
+                # ignore ones we don't use rather than failing the whole listing.
+                logger.info("Ignoring unrecognized Scryfall bulk data type %r", record.get("type"))
+        return listing
 
     def get_download_uri_for_key(self, data_key: BulkDataKey) -> str:
         """Get the download URI for a given data key."""
@@ -97,8 +152,7 @@ class ScryfallBulkDataFetcher:
 
         # if it doesn't exist, download and cache
         before = time.monotonic()
-        response = self.session.get(download_uri, timeout=30)
-        response.raise_for_status()
+        response = self._get(download_uri, timeout=30)
         logger.info(
             "Downloaded %d bytes from %s in %.3f seconds",
             len(response.content),
