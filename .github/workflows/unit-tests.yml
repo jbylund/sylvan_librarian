@@ -37,6 +37,12 @@ jobs:
           fi
           uv pip install --system --break-system-packages -r requirements/base.txt -r requirements/test.txt
 
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build and install card_engine extension
+        run: pip install ./card_engine
+
       - name: Run tests
         run: |
           python -m pytest -vvv --durations=10

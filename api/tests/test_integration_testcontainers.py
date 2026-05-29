@@ -13,6 +13,30 @@ import pytest
 from testcontainers.postgres import PostgresContainer
 
 from api.api_resource import APIResource
+from api.enums import CardOrdering, PreferOrder, SortDirection, UniqueOn
+from api.parsing import parse_scryfall_query
+from api.utils.timer import Timer
+
+
+def _search_kwargs(
+    query: str,
+    limit: int = 10,
+    orderby: CardOrdering = CardOrdering.EDHREC,
+    direction: SortDirection = SortDirection.ASC,
+) -> dict:
+    """Build kwargs for _search_sql or _search_engine from a query string."""
+    parsed = parse_scryfall_query(query)
+    return {
+        "parsed_query": parsed,
+        "query": query,
+        "unique": UniqueOn.CARD,
+        "prefer": PreferOrder.DEFAULT,
+        "orderby": orderby,
+        "direction": direction,
+        "limit": limit,
+        "timer": Timer(),
+    }
+
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -140,10 +164,7 @@ class TestContainerIntegration:
     def test_query_parsing_with_database(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """Test query parsing and execution against real database."""
         # Test a simple search query
-        result = api_resource.search(
-            q="type:creature",
-            limit=10,
-        )
+        result = api_resource._search_sql(**_search_kwargs("type:creature", limit=10))
 
         assert isinstance(result, dict)
         assert "cards" in result
@@ -155,10 +176,7 @@ class TestContainerIntegration:
 
     def test_card_search_by_name(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """Test searching for cards by name."""
-        result = api_resource.search(
-            q='name:"Lightning Bolt"',
-            limit=10,
-        )
+        result = api_resource._search_sql(**_search_kwargs('name:"Lightning Bolt"', limit=10))
 
         assert isinstance(result, dict)
         assert "cards" in result
@@ -171,10 +189,7 @@ class TestContainerIntegration:
 
     def test_color_search(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """Test searching for cards by color."""
-        result = api_resource.search(
-            q="c:red",
-            limit=10,
-        )
+        result = api_resource._search_sql(**_search_kwargs("c:red", limit=10))
 
         assert isinstance(result, dict)
         assert "cards" in result
@@ -186,10 +201,7 @@ class TestContainerIntegration:
 
     def test_cmc_search(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """Test searching for cards by converted mana cost."""
-        result = api_resource.search(
-            q="cmc=0",
-            limit=10,
-        )
+        result = api_resource._search_sql(**_search_kwargs("cmc=0", limit=10))
 
         assert isinstance(result, dict)
         assert "cards" in result
@@ -201,10 +213,7 @@ class TestContainerIntegration:
 
     def test_power_toughness_search(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """Test searching for creatures by power and toughness."""
-        result = api_resource.search(
-            q="power=4 toughness=4",
-            limit=10,
-        )
+        result = api_resource._search_sql(**_search_kwargs("power=4 toughness=4", limit=10))
 
         assert isinstance(result, dict)
         assert "cards" in result
@@ -227,7 +236,7 @@ class TestContainerIntegration:
         # and not affecting the main application database
 
         # Count cards in test database using a query that matches all cards
-        result = api_resource.search(q="cmc>=0", limit=100)
+        result = api_resource._search_sql(**_search_kwargs("cmc>=0", limit=100))
 
         # Should only have our test cards
         cards = result["cards"]
@@ -243,7 +252,7 @@ class TestContainerIntegration:
         assert len(random_result["cards"]) >= 1
         random_card_keys = set(random_result["cards"][0].keys())
 
-        search_result = api_resource.search(q="cmc>=0", limit=1)
+        search_result = api_resource._search_sql(**_search_kwargs("cmc>=0", limit=1))
         assert len(search_result["cards"]) >= 1
         search_card_keys = set(search_result["cards"][0].keys())
 
@@ -429,10 +438,17 @@ class TestContainerIntegration:
                 )
             conn.commit()
 
-        result = api_resource.search(orderby="cubecobra", direction="asc", limit=100)
+        # Reload the engine so it picks up the direct DB update
+        api_resource._reload_engine(force=True)
+
+        result = api_resource._search_engine(
+            **_search_kwargs("cmc>=0", limit=100, orderby=CardOrdering.CUBECOBRA, direction=SortDirection.ASC)
+        )
         names = [card["name"] for card in result["cards"] if card["name"] in scores]
         assert names == ["Lightning Bolt", "Black Lotus", "Serra Angel"]
 
-        result = api_resource.search(orderby="cubecobra", direction="desc", limit=100)
+        result = api_resource._search_engine(
+            **_search_kwargs("cmc>=0", limit=100, orderby=CardOrdering.CUBECOBRA, direction=SortDirection.DESC)
+        )
         names = [card["name"] for card in result["cards"] if card["name"] in scores]
         assert names == ["Serra Angel", "Black Lotus", "Lightning Bolt"]

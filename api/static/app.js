@@ -24,7 +24,7 @@ class CardSearch {
     this.searchInput.setAttribute('autocomplete', 'off');
 
     this.debounceTimeout = null;
-    this.debounceDelay = 140; // milliseconds
+    this.debounceDelay = 50; // milliseconds
     this.currentController = null;
     this.currentRequestUrl = null; // URL of the in-flight request, if any
     this.imageObserver = null;

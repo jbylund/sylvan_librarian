@@ -14,6 +14,8 @@ import requests
 import zstandard as zstd
 from cachebox import TTLCache
 from cachebox import cached as cachebox_cached
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from api.utils.http_utils import make_user_agent
 
@@ -59,12 +61,45 @@ class ScryfallBulkDataFetcher:
         # Scryfall rejects default HTTP-library User-Agents (400 generic_user_agent),
         # and asks for an explicit Accept header.
         self.session.headers.update({"User-Agent": make_user_agent(), "Accept": "application/json"})
+        # Retry connection errors and retryable statuses with backoff at the
+        # transport layer. raise_on_status=False returns the last response after
+        # retries are exhausted so _get() can log its body before raising.
+        retry = Retry(
+            total=5,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["GET"],
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retry)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
+
+    def _get(self, url: str, *, timeout: int, **kwargs: object) -> requests.Response:
+        """GET a URL via the retrying session, logging the response body on HTTP errors.
+
+        Args:
+            url: The URL to fetch.
+            timeout: Per-attempt request timeout in seconds.
+            **kwargs: Extra arguments passed through to session.get (e.g. stream=True).
+
+        Returns:
+            The successful (2xx) response.
+
+        Raises:
+            requests.HTTPError: If the final response after retries is not 2xx.
+            requests.RequestException: If the request fails at the transport level.
+        """
+        response = self.session.get(url, timeout=timeout, **kwargs)
+        if not response.ok:
+            logger.error("GET %s returned HTTP %d, body[:500]=%r", url, response.status_code, response.text[:500])
+        response.raise_for_status()
+        return response
 
     @cachebox_cached(cache=TTLCache(maxsize=2, global_ttl=5 * MINUTE))
     def list_bulk_data(self) -> dict[BulkDataKey, dict]:
         """Fetch bulk data from Scryfall, ignoring bulk data types we don't recognize."""
-        response = self.session.get("https://api.scryfall.com/bulk-data", timeout=20)
-        response.raise_for_status()
+        response = self._get("https://api.scryfall.com/bulk-data", timeout=20)
         known_types = {key.value for key in BulkDataKey}
         records = response.json()["data"]
         unknown_types = sorted({r["type"] for r in records} - known_types)
@@ -108,8 +143,7 @@ class ScryfallBulkDataFetcher:
         tmp_path = cache_file_path.with_name(f"{cache_file_path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
         cctx = zstd.ZstdCompressor(write_content_size=True)
         try:
-            with self.session.get(download_uri, stream=True, timeout=60) as response:
-                response.raise_for_status()
+            with self._get(download_uri, stream=True, timeout=60) as response:
                 with tmp_path.open("wb") as f, cctx.stream_writer(f) as compressor:
                     for chunk in response.iter_content(chunk_size=65536):
                         compressor.write(chunk)

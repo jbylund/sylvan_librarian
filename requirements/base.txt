@@ -1,6 +1,6 @@
 boto3
 brotli
-cachebox
+cachebox>=6.0.0
 falcon
 honeybadger
 orjson
