@@ -144,7 +144,7 @@ struct ManaCost {
 
 struct Card {
     // Hot fields first — fits in the first two cache lines for fast filter short-circuiting.
-    card_name_lower: InlineStr<61>,
+    card_name_lower: InlineStr<61>, // 61 bytes covers every card name in the Scryfall dataset
     card_colors: u8,
     card_color_identity: u8,
     produced_mana: u8,
@@ -185,7 +185,7 @@ struct Card {
     cubecobra_score: Option<f32>,
 
     card_subtypes: Vec<String>,
-    card_keywords: Vec<String>,
+    card_keywords: HashSet<String>,
     card_legalities: HashMap<String, String>,
     card_oracle_tags: HashSet<String>,
     card_is_tags: HashSet<String>,
@@ -350,7 +350,7 @@ fn card_from_pydict(d: &Bound<PyDict>) -> Card {
 
         card_types: card_types_list_to_bits(&str_list(d, "card_types")),
         card_subtypes: str_list(d, "card_subtypes"),
-        card_keywords: str_list(d, "card_keywords"),
+        card_keywords: jsonb_obj_to_hashset(d, "card_keywords"),
         card_legalities: jsonb_obj_to_string_map(d, "card_legalities"),
         card_oracle_tags: jsonb_obj_to_hashset(d, "card_oracle_tags"),
         card_is_tags: jsonb_obj_to_hashset(d, "card_is_tags"),
@@ -497,7 +497,7 @@ enum CollField {
 fn card_collection<'a>(card: &'a Card, f: CollField) -> CollRef<'a> {
     match f {
         CollField::Subtypes   => CollRef::List(&card.card_subtypes),
-        CollField::Keywords   => CollRef::List(&card.card_keywords),
+        CollField::Keywords   => CollRef::Set(&card.card_keywords),
         CollField::OracleTags => CollRef::Set(&card.card_oracle_tags),
         CollField::IsTags     => CollRef::Set(&card.card_is_tags),
         CollField::FrameData  => CollRef::Set(&card.card_frame_data),
@@ -937,8 +937,13 @@ fn build_binary(kw: &Value) -> Result<FilterExpr, String> {
             .as_array()
             .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
             .unwrap_or_default();
-        let mask   = color_list_to_mask(&color_strs);
-        let cmp_op = op_to_color_cmp(op);
+        let mask = color_list_to_mask(&color_strs);
+        // id:/identity: means "card's identity is a subset of query colors" (Le), not superset (Ge)
+        let cmp_op = if attr == "card_color_identity" && op == ":" {
+            CmpOp::Le
+        } else {
+            op_to_color_cmp(op)
+        };
         return Ok(FilterExpr::ColorCmp { field: color_field, op: cmp_op, mask });
     }
 
@@ -1222,6 +1227,7 @@ struct CardIndexes {
     toughness:      NumericIndex,
     type_bits:      TypeIndex,
     subtypes:       TagIndex,
+    keywords:       TagIndex,
     oracle_tags:    TagIndex,
     is_tags:        TagIndex,
 }
@@ -1236,6 +1242,7 @@ impl Default for CardIndexes {
             toughness:      Vec::new(),
             type_bits:      Default::default(),
             subtypes:       HashMap::new(),
+            keywords:       HashMap::new(),
             oracle_tags:    HashMap::new(),
             is_tags:        HashMap::new(),
         }
@@ -1295,6 +1302,12 @@ fn narrow_candidates(filter: &FilterExpr, indexes: &CardIndexes) -> Option<Vec<u
         }
 
         FilterExpr::CollectionCmp { field, op, value }
+            if matches!(field, CollField::Keywords) && matches!(op, CmpOp::Ge) =>
+        {
+            indexes.keywords.get(value.as_str()).cloned()
+        }
+
+        FilterExpr::CollectionCmp { field, op, value }
             if matches!(field, CollField::OracleTags) && matches!(op, CmpOp::Ge) =>
         {
             indexes.oracle_tags.get(value.as_str()).cloned()
@@ -1344,7 +1357,7 @@ fn prefer_score(card: &Card, prefer: &str) -> f64 {
         "newest"   => { let d: i64 = card.released_at.replace('-', "").parse().unwrap_or(0); d as f64 }
         "usd_low"  => -(card.price_usd.unwrap_or(0.0) as f64),
         "usd_high" => card.price_usd.unwrap_or(0.0) as f64,
-        "promo"    => -(card.edhrec_rank.unwrap_or(0) as f64),
+        "promo"    => -(card.edhrec_rank.map(|r| r as f64).unwrap_or(f64::INFINITY)),
         _          => card.prefer_score.unwrap_or(0.0) as f64,
     }
 }
@@ -1573,6 +1586,7 @@ impl QueryEngine {
             toughness:      build_numeric_index(&cards, |c| c.creature_toughness.map(|v| v as i16)),
             type_bits:      build_type_index(&cards),
             subtypes:       build_list_index(&cards, |c| &c.card_subtypes),
+            keywords:       build_tag_index(&cards, |c| &c.card_keywords),
             oracle_tags:    build_tag_index(&cards, |c| &c.card_oracle_tags),
             is_tags:        build_tag_index(&cards, |c| &c.card_is_tags),
         };
