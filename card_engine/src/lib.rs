@@ -542,8 +542,8 @@ impl CollRef<'_> {
     }
     fn all_equal(&self, v: &str) -> bool {
         match self {
-            CollRef::List(l) => !l.is_empty() && l.iter().all(|s| s == v),
-            CollRef::Set(s)  => s.len() == 1 && s.contains(v),
+            CollRef::List(l) => l.iter().all(|s| s == v),
+            CollRef::Set(s)  => s.iter().all(|s| s == v),
         }
     }
 }
@@ -1561,18 +1561,18 @@ fn run_query<'a>(
     }
 }
 
-fn card_to_pydict<'py>(py: Python<'py>, card: &Card) -> Bound<'py, PyDict> {
+fn card_to_pydict<'py>(py: Python<'py>, card: &Card) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
-    d.set_item("name", &card.card_name).unwrap();
-    d.set_item("set_code", card.card_set_code.as_str()).unwrap();
-    d.set_item("collector_number", &card.collector_number).unwrap();
-    d.set_item("power", card.creature_power_text.as_deref()).unwrap();
-    d.set_item("toughness", card.creature_toughness_text.as_deref()).unwrap();
-    d.set_item("mana_cost", card.mana_cost_text.as_deref()).unwrap();
-    d.set_item("oracle_text", &card.oracle_text).unwrap();
-    d.set_item("set_name", &card.set_name).unwrap();
-    d.set_item("type_line", &card.type_line).unwrap();
-    d
+    d.set_item("name", &card.card_name)?;
+    d.set_item("set_code", card.card_set_code.as_str())?;
+    d.set_item("collector_number", &card.collector_number)?;
+    d.set_item("power", card.creature_power_text.as_deref())?;
+    d.set_item("toughness", card.creature_toughness_text.as_deref())?;
+    d.set_item("mana_cost", card.mana_cost_text.as_deref())?;
+    d.set_item("oracle_text", &card.oracle_text)?;
+    d.set_item("set_name", &card.set_name)?;
+    d.set_item("type_line", &card.type_line)?;
+    Ok(d)
 }
 
 // ─── PyO3 bindings ───────────────────────────────────────────────────────────
@@ -1656,7 +1656,7 @@ impl QueryEngine {
             &data.cards, &filter_expr, unique, prefer, orderby, direction, limit, &data.indexes,
         );
 
-        let matches: Vec<Bound<PyDict>> = page.iter().map(|c| card_to_pydict(py, c)).collect();
+        let matches: Vec<Bound<PyDict>> = page.iter().map(|c| card_to_pydict(py, c)).collect::<PyResult<Vec<_>>>()?;
         let matches_list = PyList::new(py, matches)?;
         PyTuple::new(py, [total.into_pyobject(py)?.into_any(), matches_list.into_any()])
     }
@@ -1688,7 +1688,7 @@ impl QueryEngine {
         let data = self.data.read()
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("data lock: {e}")))?;
         let (total, page) = run_query_hashmap(&data.cards, &filter_expr, unique, prefer, orderby, direction, limit);
-        let matches: Vec<Bound<PyDict>> = page.iter().map(|c| card_to_pydict(py, c)).collect();
+        let matches: Vec<Bound<PyDict>> = page.iter().map(|c| card_to_pydict(py, c)).collect::<PyResult<Vec<_>>>()?;
         let matches_list = PyList::new(py, matches)?;
         PyTuple::new(py, [total.into_pyobject(py)?.into_any(), matches_list.into_any()])
     }

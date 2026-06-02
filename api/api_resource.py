@@ -689,6 +689,7 @@ class APIResource:
             self.backfill_prefer_scores()
             self.backfill_cubecobra_scores()
             self._reload_engine()
+            self._clear_caches()
             self._last_import_time.value = time.time()
             self._setup_complete_cache = None
             return result["sample_cards"]

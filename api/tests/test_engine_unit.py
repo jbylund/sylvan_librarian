@@ -204,6 +204,25 @@ class TestFilters:
         assert all(c["name"] != "Serra Angel" for c in cards)
 
 
+class TestArithmetic:
+    def test_power_minus_toughness_eq_zero(self, engine: QueryEngine) -> None:
+        # Serra Angel (4/4), Shivan Dragon (5/5), Boggart Ram-Gang (3/3)
+        total, cards = _run(engine, "pow-tou=0")
+        assert total == 16
+        assert {c["name"] for c in cards} == {"Serra Angel", "Shivan Dragon", "Boggart Ram-Gang"}
+
+    def test_power_plus_toughness_gt(self, engine: QueryEngine) -> None:
+        # Only Shivan Dragon (5+5=10 > 8); Serra Angel (4+4=8) is excluded
+        total, cards = _run(engine, "pow+tou>8")
+        assert total == 5
+        assert {c["name"] for c in cards} == {"Shivan Dragon"}
+
+    def test_cmc_plus_constant_gt_power(self, engine: QueryEngine) -> None:
+        # All 4 creature types: cmc+1 > power for all of them
+        total, _ = _run(engine, "cmc+1>power")
+        assert total == 22
+
+
 class TestUnique:
     def test_unique_printing_returns_all(self, engine: QueryEngine) -> None:
         total, _ = _run(engine, unique="printing")
@@ -483,6 +502,14 @@ class TestKeywordsAndSubtypes:
     def test_subtype_no_match(self, engine: QueryEngine) -> None:
         total, _ = _run(engine, "t:elf")
         assert total == 0
+
+    def test_subtype_le_empty_collection_matches(self, engine: QueryEngine) -> None:
+        # SQL: col <@ ARRAY['Dragon'] is true for an empty array (vacuously).
+        # Cards with no subtypes should match t<="Dragon" on both paths.
+        total_le, _ = _run(engine, 't<="Dragon"')
+        total_dragon, _ = _run(engine, "t:dragon")
+        # LE includes Dragon-only cards plus all cards with no subtypes (37 in fixture)
+        assert total_le == total_dragon + 37
 
 
 class TestLegalityAndFormats:

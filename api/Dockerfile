@@ -1,5 +1,5 @@
 # Stage 1: build the Rust extension wheel
-FROM ubuntu:latest AS rust-builder
+FROM ubuntu:26.04 AS rust-builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -18,7 +18,7 @@ WORKDIR /card_engine
 RUN maturin build --release --out /wheels
 
 # Stage 2: application image
-FROM ubuntu:latest
+FROM ubuntu:26.04
 
 # Build arguments for git metadata
 ARG GIT_SHA=unknown
