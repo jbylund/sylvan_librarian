@@ -138,7 +138,8 @@ fn mana_cmc(s: &str) -> f32 {
 // ─── Card struct ─────────────────────────────────────────────────────────────
 
 struct ManaCost {
-    pips: HashMap<String, u8>,
+    pips: HashMap<String, u8>,              // faithful to mana_cost_jsonb; used for mana= queries
+    devotion: Option<HashMap<String, u8>>,  // Some only when hybrids are present; used for devotion queries
     cmc: f32,
 }
 
@@ -295,7 +296,24 @@ fn mana_cost_from_pydict(d: &Bound<PyDict>, cmc_val: Option<f32>) -> ManaCost {
             })
         })
         .unwrap_or_default();
-    ManaCost { pips, cmc: cmc_val.unwrap_or(0.0) }
+    let devotion = if pips.keys().any(|s| s.contains('/')) {
+        let mut d: HashMap<String, u8> = HashMap::new();
+        for (sym, &n) in &pips {
+            if sym.contains('/') {
+                for part in sym.split('/') {
+                    if part.len() == 1 && "WUBRG".contains(part) {
+                        *d.entry(part.to_string()).or_insert(0) += n;
+                    }
+                }
+            } else {
+                *d.entry(sym.clone()).or_insert(0) += n;
+            }
+        }
+        Some(d)
+    } else {
+        None
+    };
+    ManaCost { pips, devotion, cmc: cmc_val.unwrap_or(0.0) }
 }
 
 fn card_from_pydict(d: &Bound<PyDict>) -> Card {
@@ -731,8 +749,8 @@ impl FilterExpr {
             }
 
             FilterExpr::Devotion { pips } => {
-                let card_pips = &card.mana_cost.pips;
-                pips.iter().all(|(sym, &n)| card_pips.get(sym).copied().unwrap_or(0) >= n)
+                let devotion = card.mana_cost.devotion.as_ref().unwrap_or(&card.mana_cost.pips);
+                pips.iter().all(|(sym, &n)| devotion.get(sym).copied().unwrap_or(0) >= n)
             }
 
             FilterExpr::DateCmp { op, value } => {
@@ -923,7 +941,20 @@ fn build_binary(kw: &Value) -> Result<FilterExpr, String> {
 
     if attr == "devotion" {
         let mana_str = rhs_value_str(rhs);
-        let pips = mana_pip_counts(mana_str);
+        // Split hybrid symbols ({R/G} → R:1, G:1) to match calculate_devotion() in SQL.
+        // mana_pip_counts is NOT used here because it keeps hybrids as single keys.
+        let mut pips: HashMap<String, u8> = HashMap::new();
+        for (sym, n) in mana_pip_counts(mana_str) {
+            if sym.contains('/') {
+                for part in sym.split('/') {
+                    if part.len() == 1 && "WUBRG".contains(part) {
+                        *pips.entry(part.to_string()).or_insert(0) += n;
+                    }
+                }
+            } else {
+                *pips.entry(sym).or_insert(0) += n;
+            }
+        }
         return Ok(FilterExpr::Devotion { pips });
     }
 

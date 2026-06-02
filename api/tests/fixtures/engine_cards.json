@@ -10,7 +10,9 @@
     "card_frame_data": {
       "1993": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -86,7 +88,9 @@
     "card_frame_data": {
       "1993": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -162,7 +166,9 @@
     "card_frame_data": {
       "1993": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -238,7 +244,9 @@
     "card_frame_data": {
       "1993": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -314,7 +322,9 @@
     "card_frame_data": {
       "1993": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -394,7 +404,9 @@
     "card_frame_data": {
       "1993": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "spell": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -422,7 +434,9 @@
       "paupercommander": "legal"
     },
     "card_name": "Counterspell",
-    "card_oracle_tags": {},
+    "card_oracle_tags": {
+      "counter-spell": true
+    },
     "card_rarity_int": 1,
     "card_set_code": "lea",
     "card_subtypes": [],
@@ -473,7 +487,9 @@
     "card_frame_data": {
       "1993": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "spell": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -501,7 +517,9 @@
       "paupercommander": "legal"
     },
     "card_name": "Counterspell",
-    "card_oracle_tags": {},
+    "card_oracle_tags": {
+      "counter-spell": true
+    },
     "card_rarity_int": 1,
     "card_set_code": "leb",
     "card_subtypes": [],
@@ -552,7 +570,9 @@
     "card_frame_data": {
       "2015": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "spell": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -580,7 +600,9 @@
       "paupercommander": "legal"
     },
     "card_name": "Counterspell",
-    "card_oracle_tags": {},
+    "card_oracle_tags": {
+      "counter-spell": true
+    },
     "card_rarity_int": 0,
     "card_set_code": "ema",
     "card_subtypes": [],
@@ -631,7 +653,9 @@
     "card_frame_data": {
       "2015": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "spell": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -659,7 +683,9 @@
       "paupercommander": "legal"
     },
     "card_name": "Counterspell",
-    "card_oracle_tags": {},
+    "card_oracle_tags": {
+      "counter-spell": true
+    },
     "card_rarity_int": 0,
     "card_set_code": "a25",
     "card_subtypes": [],
@@ -710,7 +736,9 @@
     "card_frame_data": {
       "2015": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "spell": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -738,7 +766,9 @@
       "paupercommander": "legal"
     },
     "card_name": "Counterspell",
-    "card_oracle_tags": {},
+    "card_oracle_tags": {
+      "counter-spell": true
+    },
     "card_rarity_int": 2,
     "card_set_code": "pmei",
     "card_subtypes": [],
@@ -789,7 +819,9 @@
     "card_frame_data": {
       "2015": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "spell": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -817,7 +849,9 @@
       "paupercommander": "legal"
     },
     "card_name": "Counterspell",
-    "card_oracle_tags": {},
+    "card_oracle_tags": {
+      "counter-spell": true
+    },
     "card_rarity_int": 2,
     "card_set_code": "sld",
     "card_subtypes": [],
@@ -868,7 +902,9 @@
     "card_frame_data": {
       "1993": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "spell": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -948,7 +984,9 @@
     "card_frame_data": {
       "1993": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "spell": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -1028,7 +1066,9 @@
     "card_frame_data": {
       "1993": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "spell": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -1108,7 +1148,9 @@
     "card_frame_data": {
       "1993": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "spell": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -1188,7 +1230,9 @@
     "card_frame_data": {
       "1993": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "spell": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -1268,7 +1312,9 @@
     "card_frame_data": {
       "2003": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -1350,7 +1396,9 @@
     "card_frame_data": {
       "2003": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -1432,7 +1480,9 @@
     "card_frame_data": {
       "2015": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -1514,7 +1564,9 @@
     "card_frame_data": {
       "2015": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -1596,7 +1648,9 @@
     "card_frame_data": {
       "2015": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -1678,7 +1732,9 @@
     "card_frame_data": {
       "2015": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -1760,7 +1816,9 @@
     "card_frame_data": {
       "2015": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -1842,7 +1900,9 @@
     "card_frame_data": {
       "2015": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -1924,7 +1984,9 @@
     "card_frame_data": {
       "2015": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -2007,7 +2069,9 @@
       "2015": true,
       "Inverted": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -2089,7 +2153,9 @@
     "card_frame_data": {
       "1993": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "spell": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -2117,7 +2183,9 @@
       "paupercommander": "legal"
     },
     "card_name": "Lightning Bolt",
-    "card_oracle_tags": {},
+    "card_oracle_tags": {
+      "burn": true
+    },
     "card_rarity_int": 0,
     "card_set_code": "lea",
     "card_subtypes": [],
@@ -2167,7 +2235,9 @@
     "card_frame_data": {
       "1993": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "spell": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -2195,7 +2265,9 @@
       "paupercommander": "legal"
     },
     "card_name": "Lightning Bolt",
-    "card_oracle_tags": {},
+    "card_oracle_tags": {
+      "burn": true
+    },
     "card_rarity_int": 0,
     "card_set_code": "leb",
     "card_subtypes": [],
@@ -2245,7 +2317,9 @@
     "card_frame_data": {
       "1993": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "spell": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -2273,7 +2347,9 @@
       "paupercommander": "legal"
     },
     "card_name": "Lightning Bolt",
-    "card_oracle_tags": {},
+    "card_oracle_tags": {
+      "burn": true
+    },
     "card_rarity_int": 0,
     "card_set_code": "2ed",
     "card_subtypes": [],
@@ -2323,7 +2399,9 @@
     "card_frame_data": {
       "2003": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "spell": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -2351,7 +2429,9 @@
       "paupercommander": "legal"
     },
     "card_name": "Lightning Bolt",
-    "card_oracle_tags": {},
+    "card_oracle_tags": {
+      "burn": true
+    },
     "card_rarity_int": 0,
     "card_set_code": "p09",
     "card_subtypes": [],
@@ -2401,7 +2481,9 @@
     "card_frame_data": {
       "2003": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "spell": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -2429,7 +2511,9 @@
       "paupercommander": "legal"
     },
     "card_name": "Lightning Bolt",
-    "card_oracle_tags": {},
+    "card_oracle_tags": {
+      "burn": true
+    },
     "card_rarity_int": 0,
     "card_set_code": "m10",
     "card_subtypes": [],
@@ -2479,7 +2563,9 @@
     "card_frame_data": {
       "2003": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "spell": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -2507,7 +2593,9 @@
       "paupercommander": "legal"
     },
     "card_name": "Lightning Bolt",
-    "card_oracle_tags": {},
+    "card_oracle_tags": {
+      "burn": true
+    },
     "card_rarity_int": 0,
     "card_set_code": "m11",
     "card_subtypes": [],
@@ -2558,7 +2646,9 @@
       "2015": true,
       "Inverted": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "spell": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -2586,7 +2676,9 @@
       "paupercommander": "legal"
     },
     "card_name": "Lightning Bolt",
-    "card_oracle_tags": {},
+    "card_oracle_tags": {
+      "burn": true
+    },
     "card_rarity_int": 3,
     "card_set_code": "tle",
     "card_subtypes": [],
@@ -2637,7 +2729,9 @@
       "2015": true,
       "Inverted": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "spell": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -2665,7 +2759,9 @@
       "paupercommander": "legal"
     },
     "card_name": "Lightning Bolt",
-    "card_oracle_tags": {},
+    "card_oracle_tags": {
+      "burn": true
+    },
     "card_rarity_int": 2,
     "card_set_code": "pw26",
     "card_subtypes": [],
@@ -2715,7 +2811,9 @@
     "card_frame_data": {
       "2015": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "spell": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -2743,7 +2841,9 @@
       "paupercommander": "legal"
     },
     "card_name": "Lightning Bolt",
-    "card_oracle_tags": {},
+    "card_oracle_tags": {
+      "burn": true
+    },
     "card_rarity_int": 0,
     "card_set_code": "sld",
     "card_subtypes": [],
@@ -2793,7 +2893,9 @@
     "card_frame_data": {
       "2015": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "spell": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -2821,7 +2923,9 @@
       "paupercommander": "legal"
     },
     "card_name": "Lightning Bolt",
-    "card_oracle_tags": {},
+    "card_oracle_tags": {
+      "burn": true
+    },
     "card_rarity_int": 0,
     "card_set_code": "sld",
     "card_subtypes": [],
@@ -2875,7 +2979,9 @@
     "card_frame_data": {
       "2003": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -2967,7 +3073,9 @@
     "card_frame_data": {
       "2003": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -3059,7 +3167,9 @@
     "card_frame_data": {
       "2003": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -3151,7 +3261,9 @@
     "card_frame_data": {
       "2015": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -3243,7 +3355,9 @@
     "card_frame_data": {
       "2015": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -3335,7 +3449,9 @@
     "card_frame_data": {
       "2015": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -3427,7 +3543,9 @@
     "card_frame_data": {
       "2015": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -3515,7 +3633,9 @@
     "card_frame_data": {
       "1993": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {
       "Flying": true,
       "Vigilance": true
@@ -3599,7 +3719,9 @@
     "card_frame_data": {
       "1993": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {
       "Flying": true,
       "Vigilance": true
@@ -3683,7 +3805,9 @@
     "card_frame_data": {
       "2003": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {
       "Flying": true,
       "Vigilance": true
@@ -3767,7 +3891,9 @@
     "card_frame_data": {
       "2003": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {
       "Flying": true,
       "Vigilance": true
@@ -3851,7 +3977,9 @@
     "card_frame_data": {
       "2003": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {
       "Flying": true,
       "Vigilance": true
@@ -3935,7 +4063,9 @@
     "card_frame_data": {
       "2015": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {
       "Flying": true,
       "Vigilance": true
@@ -4019,7 +4149,9 @@
     "card_frame_data": {
       "1997": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {
       "Flying": true,
       "Vigilance": true
@@ -4103,7 +4235,9 @@
     "card_frame_data": {
       "1993": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {
       "Flying": true
     },
@@ -4186,7 +4320,9 @@
     "card_frame_data": {
       "1993": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {
       "Flying": true
     },
@@ -4269,7 +4405,9 @@
     "card_frame_data": {
       "1993": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {
       "Flying": true
     },
@@ -4352,7 +4490,9 @@
     "card_frame_data": {
       "1993": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {
       "Flying": true
     },
@@ -4435,7 +4575,9 @@
     "card_frame_data": {
       "1993": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {
       "Flying": true
     },
@@ -4514,7 +4656,9 @@
     "card_frame_data": {
       "1993": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -4586,7 +4730,9 @@
     "card_frame_data": {
       "1993": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -4658,7 +4804,9 @@
     "card_frame_data": {
       "1993": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -4730,7 +4878,9 @@
     "card_frame_data": {
       "1993": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -4802,7 +4952,9 @@
     "card_frame_data": {
       "1993": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -4878,7 +5030,9 @@
     "card_frame_data": {
       "Future": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -4958,7 +5112,9 @@
     "card_frame_data": {
       "2003": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -5038,7 +5194,9 @@
     "card_frame_data": {
       "2015": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -5118,7 +5276,9 @@
     "card_frame_data": {
       "2015": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -5199,7 +5359,9 @@
       "2015": true,
       "Extendedart": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -5279,7 +5441,9 @@
     "card_frame_data": {
       "2015": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -5359,7 +5523,9 @@
     "card_frame_data": {
       "2015": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -5439,7 +5605,9 @@
     "card_frame_data": {
       "Future": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -5519,7 +5687,9 @@
     "card_frame_data": {
       "Future": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -5601,7 +5771,9 @@
       "Inverted": true,
       "Showcase": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -5683,7 +5855,9 @@
       "Inverted": true,
       "Showcase": true
     },
-    "card_is_tags": {},
+    "card_is_tags": {
+      "permanent": true
+    },
     "card_keywords": {},
     "card_layout": "normal",
     "card_legalities": {
@@ -5747,5 +5921,1380 @@
     "type_line": "Creature \u2014 Lhurgoyf",
     "prefer_score": 149.8498,
     "cubecobra_score": 6.9296994
+  },
+  {
+    "scryfall_id": "63e25b70-fa21-4663-aabd-34b7e0b75c34",
+    "oracle_id": "30d2437a-87c9-4f88-8fb8-b686d6522677",
+    "illustration_id": "3c0419e2-4e5a-4b72-b275-e424b3e7eef3",
+    "card_artist": "Dave Allsop",
+    "card_border": "black",
+    "card_color_identity": {
+      "G": true,
+      "R": true
+    },
+    "card_colors": {
+      "G": true,
+      "R": true
+    },
+    "card_frame_data": {
+      "2003": true
+    },
+    "card_is_tags": {
+      "permanent": true
+    },
+    "card_keywords": {
+      "Haste": true,
+      "Wither": true
+    },
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "not_legal",
+      "penny": "legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "legal",
+      "gladiator": "not_legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Boggart Ram-Gang",
+    "card_oracle_tags": {},
+    "card_rarity_int": 1,
+    "card_set_code": "shm",
+    "card_subtypes": [
+      "Goblin",
+      "Warrior"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 3,
+    "collector_number": "203",
+    "collector_number_int": 203,
+    "creature_power": 3,
+    "creature_toughness": 3,
+    "edhrec_rank": 22985,
+    "flavor_text": "\"We're going to need a bigger gate.\"\n\u2014Bowen, Barrenton guardcaptain",
+    "mana_cost_jsonb": {
+      "R/G": [
+        1,
+        2,
+        3
+      ]
+    },
+    "mana_cost_text": "{R/G}{R/G}{R/G}",
+    "oracle_text": "Haste\nWither (This deals damage to creatures in the form of -1/-1 counters.)",
+    "planeswalker_loyalty": null,
+    "price_eur": 0.12,
+    "price_tix": 0.03,
+    "price_usd": 0.3,
+    "produced_mana": {},
+    "released_at": "2008-05-02",
+    "creature_power_text": "3",
+    "creature_toughness_text": "3",
+    "set_name": "Shadowmoor",
+    "type_line": "Creature \u2014 Goblin Warrior",
+    "prefer_score": 170.64348,
+    "cubecobra_score": 18.537998
+  },
+  {
+    "scryfall_id": "a7aef473-2c55-494a-ba9a-4a14fad02ba8",
+    "oracle_id": "30d2437a-87c9-4f88-8fb8-b686d6522677",
+    "illustration_id": "d75f8180-df41-41dd-a1fc-4eccef43088f",
+    "card_artist": "Lucio Parrillo",
+    "card_border": "black",
+    "card_color_identity": {
+      "G": true,
+      "R": true
+    },
+    "card_colors": {
+      "G": true,
+      "R": true
+    },
+    "card_frame_data": {
+      "2003": true
+    },
+    "card_is_tags": {
+      "permanent": true
+    },
+    "card_keywords": {
+      "Haste": true,
+      "Wither": true
+    },
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "not_legal",
+      "penny": "legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "legal",
+      "gladiator": "not_legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Boggart Ram-Gang",
+    "card_oracle_tags": {},
+    "card_rarity_int": 2,
+    "card_set_code": "dci",
+    "card_subtypes": [
+      "Goblin",
+      "Warrior"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": "dci",
+    "cmc": 3,
+    "collector_number": "17",
+    "collector_number_int": 17,
+    "creature_power": 3,
+    "creature_toughness": 3,
+    "edhrec_rank": 22985,
+    "flavor_text": "\"We're going to need a bigger gate.\"\n\u2014Bowen, Barrenton guardcaptain",
+    "mana_cost_jsonb": {
+      "R/G": [
+        1,
+        2,
+        3
+      ]
+    },
+    "mana_cost_text": "{R/G}{R/G}{R/G}",
+    "oracle_text": "Haste\nWither (This deals damage to creatures in the form of -1/-1 counters.)",
+    "planeswalker_loyalty": null,
+    "price_eur": null,
+    "price_tix": null,
+    "price_usd": null,
+    "produced_mana": {},
+    "released_at": "2008-05-31",
+    "creature_power_text": "3",
+    "creature_toughness_text": "3",
+    "set_name": "DCI Promos",
+    "type_line": "Creature \u2014 Goblin Warrior",
+    "prefer_score": 156.32175,
+    "cubecobra_score": 18.537998
+  },
+  {
+    "scryfall_id": "b2bf6d5b-2bcc-42a0-98db-33faf090df23",
+    "oracle_id": "30d2437a-87c9-4f88-8fb8-b686d6522677",
+    "illustration_id": "3c0419e2-4e5a-4b72-b275-e424b3e7eef3",
+    "card_artist": "Dave Allsop",
+    "card_border": "black",
+    "card_color_identity": {
+      "G": true,
+      "R": true
+    },
+    "card_colors": {
+      "G": true,
+      "R": true
+    },
+    "card_frame_data": {
+      "2003": true
+    },
+    "card_is_tags": {
+      "permanent": true
+    },
+    "card_keywords": {
+      "Haste": true,
+      "Wither": true
+    },
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "not_legal",
+      "penny": "legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "legal",
+      "gladiator": "not_legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Boggart Ram-Gang",
+    "card_oracle_tags": {},
+    "card_rarity_int": 1,
+    "card_set_code": "pd2",
+    "card_subtypes": [
+      "Goblin",
+      "Warrior"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 3,
+    "collector_number": "13",
+    "collector_number_int": 13,
+    "creature_power": 3,
+    "creature_toughness": 3,
+    "edhrec_rank": 22985,
+    "flavor_text": "\"We're going to need a bigger gate.\"\n\u2014Bowen, Barrenton guardcaptain",
+    "mana_cost_jsonb": {
+      "R/G": [
+        1,
+        2,
+        3
+      ]
+    },
+    "mana_cost_text": "{R/G}{R/G}{R/G}",
+    "oracle_text": "Haste\nWither (This deals damage to creatures in the form of -1/-1 counters.)",
+    "planeswalker_loyalty": null,
+    "price_eur": null,
+    "price_tix": null,
+    "price_usd": null,
+    "produced_mana": {},
+    "released_at": "2010-11-19",
+    "creature_power_text": "3",
+    "creature_toughness_text": "3",
+    "set_name": "Premium Deck Series: Fire and Lightning",
+    "type_line": "Creature \u2014 Goblin Warrior",
+    "prefer_score": 165.64348,
+    "cubecobra_score": 18.537998
+  },
+  {
+    "scryfall_id": "922cba01-6767-4f61-a2a0-fe37a36ee9d3",
+    "oracle_id": "30d2437a-87c9-4f88-8fb8-b686d6522677",
+    "illustration_id": "3c0419e2-4e5a-4b72-b275-e424b3e7eef3",
+    "card_artist": "Dave Allsop",
+    "card_border": "black",
+    "card_color_identity": {
+      "G": true,
+      "R": true
+    },
+    "card_colors": {
+      "G": true,
+      "R": true
+    },
+    "card_frame_data": {
+      "2003": true
+    },
+    "card_is_tags": {
+      "permanent": true
+    },
+    "card_keywords": {
+      "Haste": true,
+      "Wither": true
+    },
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "not_legal",
+      "penny": "legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "legal",
+      "gladiator": "not_legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Boggart Ram-Gang",
+    "card_oracle_tags": {},
+    "card_rarity_int": 1,
+    "card_set_code": "plst",
+    "card_subtypes": [
+      "Goblin",
+      "Warrior"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 3,
+    "collector_number": "SHM-203",
+    "collector_number_int": 203,
+    "creature_power": 3,
+    "creature_toughness": 3,
+    "edhrec_rank": 22985,
+    "flavor_text": "\"We're going to need a bigger gate.\"\n\u2014Bowen, Barrenton guardcaptain",
+    "mana_cost_jsonb": {
+      "R/G": [
+        1,
+        2,
+        3
+      ]
+    },
+    "mana_cost_text": "{R/G}{R/G}{R/G}",
+    "oracle_text": "Haste\nWither (This deals damage to creatures in the form of -1/-1 counters.)",
+    "planeswalker_loyalty": null,
+    "price_eur": 0.17,
+    "price_tix": null,
+    "price_usd": 0.14,
+    "produced_mana": {},
+    "released_at": "2024-08-02",
+    "creature_power_text": "3",
+    "creature_toughness_text": "3",
+    "set_name": "The List",
+    "type_line": "Creature \u2014 Goblin Warrior",
+    "prefer_score": 170.64348,
+    "cubecobra_score": 18.537998
+  },
+  {
+    "scryfall_id": "7d203208-8a21-4c68-afa2-4efd8726f026",
+    "oracle_id": "5470dcfa-4eff-43da-abf7-19922841f719",
+    "illustration_id": "bc0b9563-df7a-4e0f-a584-01a699770d3c",
+    "card_artist": "Kev Walker",
+    "card_border": "black",
+    "card_color_identity": {
+      "G": true,
+      "W": true
+    },
+    "card_colors": {
+      "G": true,
+      "W": true
+    },
+    "card_frame_data": {
+      "2003": true
+    },
+    "card_is_tags": {
+      "permanent": true
+    },
+    "card_keywords": {
+      "Persist": true
+    },
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "not_legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "legal",
+      "gladiator": "not_legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Kitchen Finks",
+    "card_oracle_tags": {},
+    "card_rarity_int": 1,
+    "card_set_code": "shm",
+    "card_subtypes": [
+      "Ouphe"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 3,
+    "collector_number": "229",
+    "collector_number_int": 229,
+    "creature_power": 3,
+    "creature_toughness": 2,
+    "edhrec_rank": 14052,
+    "flavor_text": "Accept one favor from an ouphe, and you're doomed to accept another.",
+    "mana_cost_jsonb": {
+      "G/W": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{1}{G/W}{G/W}",
+    "oracle_text": "When this creature enters, you gain 2 life.\nPersist (When this creature dies, if it had no -1/-1 counters on it, return it to the battlefield under its owner's control with a -1/-1 counter on it.)",
+    "planeswalker_loyalty": null,
+    "price_eur": 0.45,
+    "price_tix": 0.03,
+    "price_usd": 0.56,
+    "produced_mana": {},
+    "released_at": "2008-05-02",
+    "creature_power_text": "3",
+    "creature_toughness_text": "2",
+    "set_name": "Shadowmoor",
+    "type_line": "Creature \u2014 Ouphe",
+    "prefer_score": 173.17154,
+    "cubecobra_score": 11.342083
+  },
+  {
+    "scryfall_id": "4c14ca74-fc08-46ea-926f-82d987f6798e",
+    "oracle_id": "5470dcfa-4eff-43da-abf7-19922841f719",
+    "illustration_id": "fe9cd45b-0daf-4e32-87b2-024d1cea38bd",
+    "card_artist": "Larry MacDougall",
+    "card_border": "black",
+    "card_color_identity": {
+      "G": true,
+      "W": true
+    },
+    "card_colors": {
+      "G": true,
+      "W": true
+    },
+    "card_frame_data": {
+      "2003": true
+    },
+    "card_is_tags": {
+      "permanent": true
+    },
+    "card_keywords": {
+      "Persist": true
+    },
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "not_legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "legal",
+      "gladiator": "not_legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Kitchen Finks",
+    "card_oracle_tags": {},
+    "card_rarity_int": 2,
+    "card_set_code": "f09",
+    "card_subtypes": [
+      "Ouphe"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": "fnm",
+    "cmc": 3,
+    "collector_number": "3",
+    "collector_number_int": 3,
+    "creature_power": 3,
+    "creature_toughness": 2,
+    "edhrec_rank": 14052,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "G/W": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{1}{G/W}{G/W}",
+    "oracle_text": "When this creature enters, you gain 2 life.\nPersist (When this creature dies, if it had no -1/-1 counters on it, return it to the battlefield under its owner's control with a -1/-1 counter on it.)",
+    "planeswalker_loyalty": null,
+    "price_eur": null,
+    "price_tix": null,
+    "price_usd": null,
+    "produced_mana": {},
+    "released_at": "2009-01-01",
+    "creature_power_text": "3",
+    "creature_toughness_text": "2",
+    "set_name": "Friday Night Magic 2009",
+    "type_line": "Creature \u2014 Ouphe",
+    "prefer_score": 156.32175,
+    "cubecobra_score": 11.342083
+  },
+  {
+    "scryfall_id": "90df8bd5-cc06-4a95-a089-938fb7e4b650",
+    "oracle_id": "5470dcfa-4eff-43da-abf7-19922841f719",
+    "illustration_id": "bc0b9563-df7a-4e0f-a584-01a699770d3c",
+    "card_artist": "Kev Walker",
+    "card_border": "black",
+    "card_color_identity": {
+      "G": true,
+      "W": true
+    },
+    "card_colors": {
+      "G": true,
+      "W": true
+    },
+    "card_frame_data": {
+      "2003": true
+    },
+    "card_is_tags": {
+      "permanent": true
+    },
+    "card_keywords": {
+      "Persist": true
+    },
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "not_legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "legal",
+      "gladiator": "not_legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Kitchen Finks",
+    "card_oracle_tags": {},
+    "card_rarity_int": 1,
+    "card_set_code": "mma",
+    "card_subtypes": [
+      "Ouphe"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 3,
+    "collector_number": "190",
+    "collector_number_int": 190,
+    "creature_power": 3,
+    "creature_toughness": 2,
+    "edhrec_rank": 14052,
+    "flavor_text": "Accept one favor from an ouphe, and you're doomed to accept another.",
+    "mana_cost_jsonb": {
+      "G/W": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{1}{G/W}{G/W}",
+    "oracle_text": "When this creature enters, you gain 2 life.\nPersist (When this creature dies, if it had no -1/-1 counters on it, return it to the battlefield under its owner's control with a -1/-1 counter on it.)",
+    "planeswalker_loyalty": null,
+    "price_eur": 0.39,
+    "price_tix": 0.03,
+    "price_usd": 0.41,
+    "produced_mana": {},
+    "released_at": "2013-06-07",
+    "creature_power_text": "3",
+    "creature_toughness_text": "2",
+    "set_name": "Modern Masters",
+    "type_line": "Creature \u2014 Ouphe",
+    "prefer_score": 173.17154,
+    "cubecobra_score": 11.342083
+  },
+  {
+    "scryfall_id": "763083c4-a1ec-4e90-af70-26b203b369ce",
+    "oracle_id": "5470dcfa-4eff-43da-abf7-19922841f719",
+    "illustration_id": "bc0b9563-df7a-4e0f-a584-01a699770d3c",
+    "card_artist": "Kev Walker",
+    "card_border": "black",
+    "card_color_identity": {
+      "G": true,
+      "W": true
+    },
+    "card_colors": {
+      "G": true,
+      "W": true
+    },
+    "card_frame_data": {
+      "2015": true,
+      "Extendedart": true
+    },
+    "card_is_tags": {
+      "permanent": true
+    },
+    "card_keywords": {
+      "Persist": true
+    },
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "not_legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "legal",
+      "gladiator": "not_legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Kitchen Finks",
+    "card_oracle_tags": {},
+    "card_rarity_int": 3,
+    "card_set_code": "puma",
+    "card_subtypes": [
+      "Ouphe"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 3,
+    "collector_number": "U27",
+    "collector_number_int": 27,
+    "creature_power": 3,
+    "creature_toughness": 2,
+    "edhrec_rank": 14052,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "G/W": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{1}{G/W}{G/W}",
+    "oracle_text": "When this creature enters, you gain 2 life.\nPersist (When this creature dies, if it had no -1/-1 counters on it, return it to the battlefield under its owner's control with a -1/-1 counter on it.)",
+    "planeswalker_loyalty": null,
+    "price_eur": null,
+    "price_tix": 0.08,
+    "price_usd": null,
+    "produced_mana": {},
+    "released_at": "2018-12-07",
+    "creature_power_text": "3",
+    "creature_toughness_text": "2",
+    "set_name": "Ultimate Box Topper",
+    "type_line": "Creature \u2014 Ouphe",
+    "prefer_score": 176.17154,
+    "cubecobra_score": 11.342083
+  },
+  {
+    "scryfall_id": "a844d537-df73-422d-a154-f1c6b92d0469",
+    "oracle_id": "5470dcfa-4eff-43da-abf7-19922841f719",
+    "illustration_id": "bc0b9563-df7a-4e0f-a584-01a699770d3c",
+    "card_artist": "Kev Walker",
+    "card_border": "black",
+    "card_color_identity": {
+      "G": true,
+      "W": true
+    },
+    "card_colors": {
+      "G": true,
+      "W": true
+    },
+    "card_frame_data": {
+      "2015": true
+    },
+    "card_is_tags": {
+      "permanent": true
+    },
+    "card_keywords": {
+      "Persist": true
+    },
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "not_legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "legal",
+      "gladiator": "not_legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Kitchen Finks",
+    "card_oracle_tags": {},
+    "card_rarity_int": 1,
+    "card_set_code": "uma",
+    "card_subtypes": [
+      "Ouphe"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 3,
+    "collector_number": "216",
+    "collector_number_int": 216,
+    "creature_power": 3,
+    "creature_toughness": 2,
+    "edhrec_rank": 14052,
+    "flavor_text": "Accept one favor from an ouphe, and you're doomed to accept another.",
+    "mana_cost_jsonb": {
+      "G/W": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{1}{G/W}{G/W}",
+    "oracle_text": "When this creature enters, you gain 2 life.\nPersist (When this creature dies, if it had no -1/-1 counters on it, return it to the battlefield under its owner's control with a -1/-1 counter on it.)",
+    "planeswalker_loyalty": null,
+    "price_eur": 0.19,
+    "price_tix": 0.06,
+    "price_usd": 0.33,
+    "produced_mana": {},
+    "released_at": "2018-12-07",
+    "creature_power_text": "3",
+    "creature_toughness_text": "2",
+    "set_name": "Ultimate Masters",
+    "type_line": "Creature \u2014 Ouphe",
+    "prefer_score": 185.17154,
+    "cubecobra_score": 11.342083
+  },
+  {
+    "scryfall_id": "68ed60d5-6a61-4da4-b2c7-df2be2d72762",
+    "oracle_id": "5470dcfa-4eff-43da-abf7-19922841f719",
+    "illustration_id": "bc0b9563-df7a-4e0f-a584-01a699770d3c",
+    "card_artist": "Kev Walker",
+    "card_border": "white",
+    "card_color_identity": {
+      "G": true,
+      "W": true
+    },
+    "card_colors": {
+      "G": true,
+      "W": true
+    },
+    "card_frame_data": {
+      "2015": true
+    },
+    "card_is_tags": {
+      "permanent": true
+    },
+    "card_keywords": {
+      "Persist": true
+    },
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "not_legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "legal",
+      "gladiator": "not_legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Kitchen Finks",
+    "card_oracle_tags": {},
+    "card_rarity_int": 1,
+    "card_set_code": "mb2",
+    "card_subtypes": [
+      "Ouphe"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 3,
+    "collector_number": "85",
+    "collector_number_int": 85,
+    "creature_power": 3,
+    "creature_toughness": 2,
+    "edhrec_rank": 14052,
+    "flavor_text": "Accept one favor from an ouphe, and you're doomed to accept another.",
+    "mana_cost_jsonb": {
+      "G/W": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{1}{G/W}{G/W}",
+    "oracle_text": "When this creature enters, you gain 2 life.\nPersist (When this creature dies, if it had no -1/-1 counters on it, return it to the battlefield under its owner's control with a -1/-1 counter on it.)",
+    "planeswalker_loyalty": null,
+    "price_eur": 0.24,
+    "price_tix": 0.02,
+    "price_usd": 0.18,
+    "produced_mana": {},
+    "released_at": "2024-08-02",
+    "creature_power_text": "3",
+    "creature_toughness_text": "2",
+    "set_name": "Mystery Booster 2",
+    "type_line": "Creature \u2014 Ouphe",
+    "prefer_score": 171.17154,
+    "cubecobra_score": 11.342083
+  },
+  {
+    "scryfall_id": "5e26bd0c-5ec7-4653-8e63-747157c20af1",
+    "oracle_id": "376271a6-80f0-47a6-990a-5ec5517aae42",
+    "illustration_id": "589b5f85-297b-47cc-b700-d63ef36bafcf",
+    "card_artist": "Jeremy Enecio",
+    "card_border": "black",
+    "card_color_identity": {
+      "W": true
+    },
+    "card_colors": {
+      "W": true
+    },
+    "card_frame_data": {
+      "2003": true
+    },
+    "card_is_tags": {
+      "spell": true
+    },
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "not_legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "legal",
+      "gladiator": "not_legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Spectral Procession",
+    "card_oracle_tags": {},
+    "card_rarity_int": 1,
+    "card_set_code": "shm",
+    "card_subtypes": [],
+    "card_types": [
+      "Sorcery"
+    ],
+    "card_watermark": null,
+    "cmc": 6,
+    "collector_number": "23",
+    "collector_number_int": 23,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 11565,
+    "flavor_text": "\"The dead have it easy. They suffer no more. If breaking their rest helps the living, so be it.\"\n\u2014Olka, mistmeadow witch",
+    "mana_cost_jsonb": {
+      "2/W": [
+        1,
+        2,
+        3
+      ]
+    },
+    "mana_cost_text": "{2/W}{2/W}{2/W}",
+    "oracle_text": "Create three 1/1 white Spirit creature tokens with flying.",
+    "planeswalker_loyalty": null,
+    "price_eur": 0.32,
+    "price_tix": 0.03,
+    "price_usd": 0.34,
+    "produced_mana": {},
+    "released_at": "2008-05-02",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Shadowmoor",
+    "type_line": "Sorcery",
+    "prefer_score": 170.64348,
+    "cubecobra_score": 9.339396
+  },
+  {
+    "scryfall_id": "74e91e61-f1e8-4028-9bcd-c1ea25694d20",
+    "oracle_id": "376271a6-80f0-47a6-990a-5ec5517aae42",
+    "illustration_id": "07e86e33-4491-4abc-b081-af1ed986b71f",
+    "card_artist": "Tomasz Jedruszek",
+    "card_border": "black",
+    "card_color_identity": {
+      "W": true
+    },
+    "card_colors": {
+      "W": true
+    },
+    "card_frame_data": {
+      "2003": true
+    },
+    "card_is_tags": {
+      "spell": true
+    },
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "not_legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "legal",
+      "gladiator": "not_legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Spectral Procession",
+    "card_oracle_tags": {},
+    "card_rarity_int": 1,
+    "card_set_code": "ddk",
+    "card_subtypes": [],
+    "card_types": [
+      "Sorcery"
+    ],
+    "card_watermark": null,
+    "cmc": 6,
+    "collector_number": "26",
+    "collector_number_int": 26,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 11565,
+    "flavor_text": "\"I need never remember my past associates, my victims, my mistakes. Innistrad preserves them all for me.\"\n\u2014Sorin Markov",
+    "mana_cost_jsonb": {
+      "2/W": [
+        1,
+        2,
+        3
+      ]
+    },
+    "mana_cost_text": "{2/W}{2/W}{2/W}",
+    "oracle_text": "Create three 1/1 white Spirit creature tokens with flying.",
+    "planeswalker_loyalty": null,
+    "price_eur": 0.25,
+    "price_tix": 0.04,
+    "price_usd": 0.26,
+    "produced_mana": {},
+    "released_at": "2013-03-15",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Duel Decks: Sorin vs. Tibalt",
+    "type_line": "Sorcery",
+    "prefer_score": 170.64348,
+    "cubecobra_score": 9.339396
+  },
+  {
+    "scryfall_id": "9ac8b456-4a5e-4255-ab5b-694e83a2bbaa",
+    "oracle_id": "376271a6-80f0-47a6-990a-5ec5517aae42",
+    "illustration_id": "07e86e33-4491-4abc-b081-af1ed986b71f",
+    "card_artist": "Tomasz Jedruszek",
+    "card_border": "black",
+    "card_color_identity": {
+      "W": true
+    },
+    "card_colors": {
+      "W": true
+    },
+    "card_frame_data": {
+      "2003": true
+    },
+    "card_is_tags": {
+      "spell": true
+    },
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "not_legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "legal",
+      "gladiator": "not_legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Spectral Procession",
+    "card_oracle_tags": {},
+    "card_rarity_int": 1,
+    "card_set_code": "md1",
+    "card_subtypes": [],
+    "card_types": [
+      "Sorcery"
+    ],
+    "card_watermark": null,
+    "cmc": 6,
+    "collector_number": "12",
+    "collector_number_int": 12,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 11565,
+    "flavor_text": "\"I need never remember my past associates, my victims, my mistakes. Innistrad preserves them all for me.\"\n\u2014Sorin Markov",
+    "mana_cost_jsonb": {
+      "2/W": [
+        1,
+        2,
+        3
+      ]
+    },
+    "mana_cost_text": "{2/W}{2/W}{2/W}",
+    "oracle_text": "Create three 1/1 white Spirit creature tokens with flying.",
+    "planeswalker_loyalty": null,
+    "price_eur": 0.28,
+    "price_tix": null,
+    "price_usd": 0.3,
+    "produced_mana": {},
+    "released_at": "2014-05-30",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Modern Event Deck 2014",
+    "type_line": "Sorcery",
+    "prefer_score": 170.64348,
+    "cubecobra_score": 9.339396
+  },
+  {
+    "scryfall_id": "fbafbfe0-50c0-46a3-8a47-188857e3cb42",
+    "oracle_id": "376271a6-80f0-47a6-990a-5ec5517aae42",
+    "illustration_id": "589b5f85-297b-47cc-b700-d63ef36bafcf",
+    "card_artist": "Jeremy Enecio",
+    "card_border": "black",
+    "card_color_identity": {
+      "W": true
+    },
+    "card_colors": {
+      "W": true
+    },
+    "card_frame_data": {
+      "2015": true
+    },
+    "card_is_tags": {
+      "spell": true
+    },
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "not_legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "legal",
+      "gladiator": "not_legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Spectral Procession",
+    "card_oracle_tags": {},
+    "card_rarity_int": 1,
+    "card_set_code": "c14",
+    "card_subtypes": [],
+    "card_types": [
+      "Sorcery"
+    ],
+    "card_watermark": null,
+    "cmc": 6,
+    "collector_number": "90",
+    "collector_number_int": 90,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 11565,
+    "flavor_text": "\"The dead have it easy. They suffer no more. If breaking their rest helps the living, so be it.\"\n\u2014Olka, mistmeadow witch",
+    "mana_cost_jsonb": {
+      "2/W": [
+        1,
+        2,
+        3
+      ]
+    },
+    "mana_cost_text": "{2/W}{2/W}{2/W}",
+    "oracle_text": "Create three 1/1 white Spirit creature tokens with flying.",
+    "planeswalker_loyalty": null,
+    "price_eur": 0.28,
+    "price_tix": 0.04,
+    "price_usd": 0.38,
+    "produced_mana": {},
+    "released_at": "2014-11-07",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Commander 2014",
+    "type_line": "Sorcery",
+    "prefer_score": 182.64348,
+    "cubecobra_score": 9.339396
+  },
+  {
+    "scryfall_id": "9964629e-d79e-46e4-b3fd-e7d1759cbc60",
+    "oracle_id": "376271a6-80f0-47a6-990a-5ec5517aae42",
+    "illustration_id": "07e86e33-4491-4abc-b081-af1ed986b71f",
+    "card_artist": "Tomasz Jedruszek",
+    "card_border": "black",
+    "card_color_identity": {
+      "W": true
+    },
+    "card_colors": {
+      "W": true
+    },
+    "card_frame_data": {
+      "2015": true
+    },
+    "card_is_tags": {
+      "spell": true
+    },
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "not_legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "legal",
+      "gladiator": "not_legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Spectral Procession",
+    "card_oracle_tags": {},
+    "card_rarity_int": 1,
+    "card_set_code": "mm2",
+    "card_subtypes": [],
+    "card_types": [
+      "Sorcery"
+    ],
+    "card_watermark": null,
+    "cmc": 6,
+    "collector_number": "33",
+    "collector_number_int": 33,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 11565,
+    "flavor_text": "\"I need never remember my past associates, my victims, my mistakes. Innistrad preserves them all for me.\"\n\u2014Sorin Markov",
+    "mana_cost_jsonb": {
+      "2/W": [
+        1,
+        2,
+        3
+      ]
+    },
+    "mana_cost_text": "{2/W}{2/W}{2/W}",
+    "oracle_text": "Create three 1/1 white Spirit creature tokens with flying.",
+    "planeswalker_loyalty": null,
+    "price_eur": 0.17,
+    "price_tix": 0.03,
+    "price_usd": 0.21,
+    "produced_mana": {},
+    "released_at": "2015-05-22",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Modern Masters 2015",
+    "type_line": "Sorcery",
+    "prefer_score": 182.64348,
+    "cubecobra_score": 9.339396
+  },
+  {
+    "scryfall_id": "5e1ae45c-ac55-468d-8e27-e72b5954ce94",
+    "oracle_id": "376271a6-80f0-47a6-990a-5ec5517aae42",
+    "illustration_id": "589b5f85-297b-47cc-b700-d63ef36bafcf",
+    "card_artist": "Jeremy Enecio",
+    "card_border": "black",
+    "card_color_identity": {
+      "W": true
+    },
+    "card_colors": {
+      "W": true
+    },
+    "card_frame_data": {
+      "2003": true
+    },
+    "card_is_tags": {
+      "spell": true
+    },
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "not_legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "legal",
+      "gladiator": "not_legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Spectral Procession",
+    "card_oracle_tags": {},
+    "card_rarity_int": 1,
+    "card_set_code": "plst",
+    "card_subtypes": [],
+    "card_types": [
+      "Sorcery"
+    ],
+    "card_watermark": null,
+    "cmc": 6,
+    "collector_number": "SHM-23",
+    "collector_number_int": 23,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 11565,
+    "flavor_text": "\"The dead have it easy. They suffer no more. If breaking their rest helps the living, so be it.\"\n\u2014Olka, mistmeadow witch",
+    "mana_cost_jsonb": {
+      "2/W": [
+        1,
+        2,
+        3
+      ]
+    },
+    "mana_cost_text": "{2/W}{2/W}{2/W}",
+    "oracle_text": "Create three 1/1 white Spirit creature tokens with flying.",
+    "planeswalker_loyalty": null,
+    "price_eur": null,
+    "price_tix": null,
+    "price_usd": 0.2,
+    "produced_mana": {},
+    "released_at": "2024-08-02",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "The List",
+    "type_line": "Sorcery",
+    "prefer_score": 170.64348,
+    "cubecobra_score": 9.339396
   }
 ]
