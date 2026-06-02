@@ -1,0 +1,5751 @@
+[
+  {
+    "scryfall_id": "b0faa7f2-b547-42c4-a810-839da50dadfe",
+    "oracle_id": "5089ec1a-f881-4d55-af14-5d996171203b",
+    "illustration_id": "54436824-977b-4dc7-8de1-8498e73e5ef2",
+    "card_artist": "Christopher Rush",
+    "card_border": "black",
+    "card_color_identity": {},
+    "card_colors": {},
+    "card_frame_data": {
+      "1993": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "banned",
+      "duel": "banned",
+      "brawl": "not_legal",
+      "penny": "not_legal",
+      "predh": "banned",
+      "future": "not_legal",
+      "legacy": "banned",
+      "modern": "not_legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "restricted",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "banned",
+      "gladiator": "not_legal",
+      "oldschool": "restricted",
+      "premodern": "not_legal",
+      "oathbreaker": "banned",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Black Lotus",
+    "card_oracle_tags": {},
+    "card_rarity_int": 2,
+    "card_set_code": "lea",
+    "card_subtypes": [],
+    "card_types": [
+      "Artifact"
+    ],
+    "card_watermark": null,
+    "cmc": 0,
+    "collector_number": "232",
+    "collector_number_int": 232,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": null,
+    "flavor_text": null,
+    "mana_cost_jsonb": {},
+    "mana_cost_text": "{0}",
+    "oracle_text": "{T}, Sacrifice this artifact: Add three mana of any one color.",
+    "planeswalker_loyalty": null,
+    "price_eur": 30975.14,
+    "price_tix": 491.06,
+    "price_usd": null,
+    "produced_mana": {
+      "B": true,
+      "G": true,
+      "R": true,
+      "U": true,
+      "W": true
+    },
+    "released_at": "1993-08-05",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Limited Edition Alpha",
+    "type_line": "Artifact",
+    "prefer_score": 150.6996,
+    "cubecobra_score": 24.927984
+  },
+  {
+    "scryfall_id": "b3a69a1c-c80f-4413-a6fd-ae54cabbce28",
+    "oracle_id": "5089ec1a-f881-4d55-af14-5d996171203b",
+    "illustration_id": "54436824-977b-4dc7-8de1-8498e73e5ef2",
+    "card_artist": "Christopher Rush",
+    "card_border": "black",
+    "card_color_identity": {},
+    "card_colors": {},
+    "card_frame_data": {
+      "1993": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "banned",
+      "duel": "banned",
+      "brawl": "not_legal",
+      "penny": "not_legal",
+      "predh": "banned",
+      "future": "not_legal",
+      "legacy": "banned",
+      "modern": "not_legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "restricted",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "banned",
+      "gladiator": "not_legal",
+      "oldschool": "restricted",
+      "premodern": "not_legal",
+      "oathbreaker": "banned",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Black Lotus",
+    "card_oracle_tags": {},
+    "card_rarity_int": 2,
+    "card_set_code": "leb",
+    "card_subtypes": [],
+    "card_types": [
+      "Artifact"
+    ],
+    "card_watermark": null,
+    "cmc": 0,
+    "collector_number": "233",
+    "collector_number_int": 233,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": null,
+    "flavor_text": null,
+    "mana_cost_jsonb": {},
+    "mana_cost_text": "{0}",
+    "oracle_text": "{T}, Sacrifice this artifact: Add three mana of any one color.",
+    "planeswalker_loyalty": null,
+    "price_eur": 22454.09,
+    "price_tix": null,
+    "price_usd": null,
+    "produced_mana": {
+      "B": true,
+      "G": true,
+      "R": true,
+      "U": true,
+      "W": true
+    },
+    "released_at": "1993-10-04",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Limited Edition Beta",
+    "type_line": "Artifact",
+    "prefer_score": 150.6996,
+    "cubecobra_score": 24.927984
+  },
+  {
+    "scryfall_id": "4a2e428c-dd25-484c-bbc8-2d6ce10ef42c",
+    "oracle_id": "5089ec1a-f881-4d55-af14-5d996171203b",
+    "illustration_id": "54436824-977b-4dc7-8de1-8498e73e5ef2",
+    "card_artist": "Christopher Rush",
+    "card_border": "white",
+    "card_color_identity": {},
+    "card_colors": {},
+    "card_frame_data": {
+      "1993": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "banned",
+      "duel": "banned",
+      "brawl": "not_legal",
+      "penny": "not_legal",
+      "predh": "banned",
+      "future": "not_legal",
+      "legacy": "banned",
+      "modern": "not_legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "restricted",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "banned",
+      "gladiator": "not_legal",
+      "oldschool": "restricted",
+      "premodern": "not_legal",
+      "oathbreaker": "banned",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Black Lotus",
+    "card_oracle_tags": {},
+    "card_rarity_int": 2,
+    "card_set_code": "2ed",
+    "card_subtypes": [],
+    "card_types": [
+      "Artifact"
+    ],
+    "card_watermark": null,
+    "cmc": 0,
+    "collector_number": "233",
+    "collector_number_int": 233,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": null,
+    "flavor_text": null,
+    "mana_cost_jsonb": {},
+    "mana_cost_text": "{0}",
+    "oracle_text": "{T}, Sacrifice this artifact: Add three mana of any one color.",
+    "planeswalker_loyalty": null,
+    "price_eur": 10496.06,
+    "price_tix": null,
+    "price_usd": null,
+    "produced_mana": {
+      "B": true,
+      "G": true,
+      "R": true,
+      "U": true,
+      "W": true
+    },
+    "released_at": "1993-12-01",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Unlimited Edition",
+    "type_line": "Artifact",
+    "prefer_score": 136.6996,
+    "cubecobra_score": 24.927984
+  },
+  {
+    "scryfall_id": "bad6b494-d773-4f7d-ac39-85d82e1d3015",
+    "oracle_id": "5089ec1a-f881-4d55-af14-5d996171203b",
+    "illustration_id": "54436824-977b-4dc7-8de1-8498e73e5ef2",
+    "card_artist": "Christopher Rush",
+    "card_border": "black",
+    "card_color_identity": {},
+    "card_colors": {},
+    "card_frame_data": {
+      "1993": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "banned",
+      "duel": "banned",
+      "brawl": "not_legal",
+      "penny": "not_legal",
+      "predh": "banned",
+      "future": "not_legal",
+      "legacy": "banned",
+      "modern": "not_legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "restricted",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "banned",
+      "gladiator": "not_legal",
+      "oldschool": "restricted",
+      "premodern": "not_legal",
+      "oathbreaker": "banned",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Black Lotus",
+    "card_oracle_tags": {},
+    "card_rarity_int": 2,
+    "card_set_code": "cei",
+    "card_subtypes": [],
+    "card_types": [
+      "Artifact"
+    ],
+    "card_watermark": null,
+    "cmc": 0,
+    "collector_number": "233",
+    "collector_number_int": 233,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": null,
+    "flavor_text": null,
+    "mana_cost_jsonb": {},
+    "mana_cost_text": "{0}",
+    "oracle_text": "{T}, Sacrifice this artifact: Add three mana of any one color.",
+    "planeswalker_loyalty": null,
+    "price_eur": 2358.8,
+    "price_tix": null,
+    "price_usd": null,
+    "produced_mana": {
+      "B": true,
+      "G": true,
+      "R": true,
+      "U": true,
+      "W": true
+    },
+    "released_at": "1993-12-10",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Intl. Collectors' Edition",
+    "type_line": "Artifact",
+    "prefer_score": 150.6996,
+    "cubecobra_score": 24.927984
+  },
+  {
+    "scryfall_id": "0948e6dc-8af7-45d3-91de-a2aebee83e82",
+    "oracle_id": "5089ec1a-f881-4d55-af14-5d996171203b",
+    "illustration_id": "54436824-977b-4dc7-8de1-8498e73e5ef2",
+    "card_artist": "Christopher Rush",
+    "card_border": "black",
+    "card_color_identity": {},
+    "card_colors": {},
+    "card_frame_data": {
+      "1993": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "banned",
+      "duel": "banned",
+      "brawl": "not_legal",
+      "penny": "not_legal",
+      "predh": "banned",
+      "future": "not_legal",
+      "legacy": "banned",
+      "modern": "not_legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "restricted",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "banned",
+      "gladiator": "not_legal",
+      "oldschool": "restricted",
+      "premodern": "not_legal",
+      "oathbreaker": "banned",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Black Lotus",
+    "card_oracle_tags": {},
+    "card_rarity_int": 2,
+    "card_set_code": "ced",
+    "card_subtypes": [],
+    "card_types": [
+      "Artifact"
+    ],
+    "card_watermark": null,
+    "cmc": 0,
+    "collector_number": "233",
+    "collector_number_int": 233,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": null,
+    "flavor_text": null,
+    "mana_cost_jsonb": {},
+    "mana_cost_text": "{0}",
+    "oracle_text": "{T}, Sacrifice this artifact: Add three mana of any one color.",
+    "planeswalker_loyalty": null,
+    "price_eur": 2624.31,
+    "price_tix": null,
+    "price_usd": 3000,
+    "produced_mana": {
+      "B": true,
+      "G": true,
+      "R": true,
+      "U": true,
+      "W": true
+    },
+    "released_at": "1993-12-10",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Collectors' Edition",
+    "type_line": "Artifact",
+    "prefer_score": 150.6996,
+    "cubecobra_score": 24.927984
+  },
+  {
+    "scryfall_id": "0df55e3f-14de-46ef-b6b1-616618724d9e",
+    "oracle_id": "cc187110-1148-4090-bbb8-e205694a39f5",
+    "illustration_id": "911ff9e4-cc26-4d32-a3ab-887d55af04c6",
+    "card_artist": "Mark Poole",
+    "card_border": "black",
+    "card_color_identity": {
+      "U": true
+    },
+    "card_colors": {
+      "U": true
+    },
+    "card_frame_data": {
+      "1993": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "legal",
+      "premodern": "legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "legal"
+    },
+    "card_name": "Counterspell",
+    "card_oracle_tags": {},
+    "card_rarity_int": 1,
+    "card_set_code": "lea",
+    "card_subtypes": [],
+    "card_types": [
+      "Instant"
+    ],
+    "card_watermark": null,
+    "cmc": 2,
+    "collector_number": "54",
+    "collector_number_int": 54,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 16,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "U": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{U}{U}",
+    "oracle_text": "Counter target spell.",
+    "planeswalker_loyalty": null,
+    "price_eur": 734.79,
+    "price_tix": null,
+    "price_usd": 548.98,
+    "produced_mana": {},
+    "released_at": "1993-08-05",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Limited Edition Alpha",
+    "type_line": "Instant",
+    "prefer_score": 160.02135,
+    "cubecobra_score": 0.008091662
+  },
+  {
+    "scryfall_id": "9e11bf7c-f439-4529-b29a-d711359807ef",
+    "oracle_id": "cc187110-1148-4090-bbb8-e205694a39f5",
+    "illustration_id": "911ff9e4-cc26-4d32-a3ab-887d55af04c6",
+    "card_artist": "Mark Poole",
+    "card_border": "black",
+    "card_color_identity": {
+      "U": true
+    },
+    "card_colors": {
+      "U": true
+    },
+    "card_frame_data": {
+      "1993": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "legal",
+      "premodern": "legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "legal"
+    },
+    "card_name": "Counterspell",
+    "card_oracle_tags": {},
+    "card_rarity_int": 1,
+    "card_set_code": "leb",
+    "card_subtypes": [],
+    "card_types": [
+      "Instant"
+    ],
+    "card_watermark": null,
+    "cmc": 2,
+    "collector_number": "55",
+    "collector_number_int": 55,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 16,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "U": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{U}{U}",
+    "oracle_text": "Counter target spell.",
+    "planeswalker_loyalty": null,
+    "price_eur": 330.97,
+    "price_tix": null,
+    "price_usd": 623.3,
+    "produced_mana": {},
+    "released_at": "1993-10-04",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Limited Edition Beta",
+    "type_line": "Instant",
+    "prefer_score": 160.02135,
+    "cubecobra_score": 0.008091662
+  },
+  {
+    "scryfall_id": "0c9a7cb0-5bff-48ff-b620-2838816ac9b5",
+    "oracle_id": "cc187110-1148-4090-bbb8-e205694a39f5",
+    "illustration_id": "1044055e-a362-4edb-8101-96655e15da95",
+    "card_artist": "Zack Stella",
+    "card_border": "black",
+    "card_color_identity": {
+      "U": true
+    },
+    "card_colors": {
+      "U": true
+    },
+    "card_frame_data": {
+      "2015": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "legal"
+    },
+    "card_name": "Counterspell",
+    "card_oracle_tags": {},
+    "card_rarity_int": 0,
+    "card_set_code": "ema",
+    "card_subtypes": [],
+    "card_types": [
+      "Instant"
+    ],
+    "card_watermark": null,
+    "cmc": 2,
+    "collector_number": "43",
+    "collector_number_int": 43,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 16,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "U": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{U}{U}",
+    "oracle_text": "Counter target spell.",
+    "planeswalker_loyalty": null,
+    "price_eur": 1.24,
+    "price_tix": 0.05,
+    "price_usd": 3.32,
+    "produced_mana": {},
+    "released_at": "2016-06-10",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Eternal Masters",
+    "type_line": "Instant",
+    "prefer_score": 189.99234,
+    "cubecobra_score": 0.008091662
+  },
+  {
+    "scryfall_id": "cca8eb95-d071-46a4-885c-3da25b401806",
+    "oracle_id": "cc187110-1148-4090-bbb8-e205694a39f5",
+    "illustration_id": "1044055e-a362-4edb-8101-96655e15da95",
+    "card_artist": "Zack Stella",
+    "card_border": "black",
+    "card_color_identity": {
+      "U": true
+    },
+    "card_colors": {
+      "U": true
+    },
+    "card_frame_data": {
+      "2015": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "legal"
+    },
+    "card_name": "Counterspell",
+    "card_oracle_tags": {},
+    "card_rarity_int": 0,
+    "card_set_code": "a25",
+    "card_subtypes": [],
+    "card_types": [
+      "Instant"
+    ],
+    "card_watermark": "set",
+    "cmc": 2,
+    "collector_number": "50",
+    "collector_number_int": 50,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 16,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "U": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{U}{U}",
+    "oracle_text": "Counter target spell.",
+    "planeswalker_loyalty": null,
+    "price_eur": 1.68,
+    "price_tix": 0.04,
+    "price_usd": 2.35,
+    "produced_mana": {},
+    "released_at": "2018-03-16",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Masters 25",
+    "type_line": "Instant",
+    "prefer_score": 189.99234,
+    "cubecobra_score": 0.008091662
+  },
+  {
+    "scryfall_id": "1f97c640-c580-420d-8454-7ea2a257d343",
+    "oracle_id": "cc187110-1148-4090-bbb8-e205694a39f5",
+    "illustration_id": "717edff6-c8e9-4dfd-9cc1-1128aee55915",
+    "card_artist": "Hannibal King",
+    "card_border": "black",
+    "card_color_identity": {
+      "U": true
+    },
+    "card_colors": {
+      "U": true
+    },
+    "card_frame_data": {
+      "2015": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "legal"
+    },
+    "card_name": "Counterspell",
+    "card_oracle_tags": {},
+    "card_rarity_int": 2,
+    "card_set_code": "pmei",
+    "card_subtypes": [],
+    "card_types": [
+      "Instant"
+    ],
+    "card_watermark": null,
+    "cmc": 2,
+    "collector_number": "2026-7",
+    "collector_number_int": 20267,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 16,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "U": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{U}{U}",
+    "oracle_text": "Counter target spell.",
+    "planeswalker_loyalty": null,
+    "price_eur": null,
+    "price_tix": null,
+    "price_usd": null,
+    "produced_mana": {},
+    "released_at": "2026-04-14",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Media and Collaboration Promos",
+    "type_line": "Instant",
+    "prefer_score": 162.35652,
+    "cubecobra_score": 0.008091662
+  },
+  {
+    "scryfall_id": "6522cc61-397d-4754-9a7f-9f9d50f85922",
+    "oracle_id": "cc187110-1148-4090-bbb8-e205694a39f5",
+    "illustration_id": "f91cbf17-c8ed-49f4-a3d6-217b8ea75fae",
+    "card_artist": "Caleb Meurer",
+    "card_border": "borderless",
+    "card_color_identity": {
+      "U": true
+    },
+    "card_colors": {
+      "U": true
+    },
+    "card_frame_data": {
+      "2015": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "legal"
+    },
+    "card_name": "Counterspell",
+    "card_oracle_tags": {},
+    "card_rarity_int": 2,
+    "card_set_code": "sld",
+    "card_subtypes": [],
+    "card_types": [
+      "Instant"
+    ],
+    "card_watermark": null,
+    "cmc": 2,
+    "collector_number": "2664",
+    "collector_number_int": 2664,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 16,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "U": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{U}{U}",
+    "oracle_text": "Counter target spell.",
+    "planeswalker_loyalty": null,
+    "price_eur": null,
+    "price_tix": null,
+    "price_usd": null,
+    "produced_mana": {},
+    "released_at": "2026-06-15",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Secret Lair Drop",
+    "type_line": "Instant",
+    "prefer_score": 159.32175,
+    "cubecobra_score": 0.008091662
+  },
+  {
+    "scryfall_id": "ebb6664d-23ca-456e-9916-afcd6f26aa7f",
+    "oracle_id": "53f7c868-b03e-4fc2-8dcf-a75bbfa3272b",
+    "illustration_id": "827c7f7b-1c5b-4bc0-91d7-b9894f7a2674",
+    "card_artist": "Sandra Everingham",
+    "card_border": "black",
+    "card_color_identity": {
+      "B": true
+    },
+    "card_colors": {
+      "B": true
+    },
+    "card_frame_data": {
+      "1993": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "banned",
+      "brawl": "legal",
+      "penny": "legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "not_legal",
+      "pauper": "legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "banned",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "legal",
+      "premodern": "legal",
+      "oathbreaker": "banned",
+      "standardbrawl": "not_legal",
+      "paupercommander": "legal"
+    },
+    "card_name": "Dark Ritual",
+    "card_oracle_tags": {},
+    "card_rarity_int": 0,
+    "card_set_code": "lea",
+    "card_subtypes": [],
+    "card_types": [
+      "Instant"
+    ],
+    "card_watermark": null,
+    "cmc": 1,
+    "collector_number": "98",
+    "collector_number_int": 98,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 34,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "B": [
+        1
+      ]
+    },
+    "mana_cost_text": "{B}",
+    "oracle_text": "Add {B}{B}{B}.",
+    "planeswalker_loyalty": null,
+    "price_eur": 289.66,
+    "price_tix": null,
+    "price_usd": 300,
+    "produced_mana": {
+      "B": true
+    },
+    "released_at": "1993-08-05",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Limited Edition Alpha",
+    "type_line": "Instant",
+    "prefer_score": 159.66496,
+    "cubecobra_score": 0.022656655
+  },
+  {
+    "scryfall_id": "0690f724-eb95-416b-b064-f1239e2a30e8",
+    "oracle_id": "53f7c868-b03e-4fc2-8dcf-a75bbfa3272b",
+    "illustration_id": "827c7f7b-1c5b-4bc0-91d7-b9894f7a2674",
+    "card_artist": "Sandra Everingham",
+    "card_border": "black",
+    "card_color_identity": {
+      "B": true
+    },
+    "card_colors": {
+      "B": true
+    },
+    "card_frame_data": {
+      "1993": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "banned",
+      "brawl": "legal",
+      "penny": "legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "not_legal",
+      "pauper": "legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "banned",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "legal",
+      "premodern": "legal",
+      "oathbreaker": "banned",
+      "standardbrawl": "not_legal",
+      "paupercommander": "legal"
+    },
+    "card_name": "Dark Ritual",
+    "card_oracle_tags": {},
+    "card_rarity_int": 0,
+    "card_set_code": "leb",
+    "card_subtypes": [],
+    "card_types": [
+      "Instant"
+    ],
+    "card_watermark": null,
+    "cmc": 1,
+    "collector_number": "99",
+    "collector_number_int": 99,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 34,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "B": [
+        1
+      ]
+    },
+    "mana_cost_text": "{B}",
+    "oracle_text": "Add {B}{B}{B}.",
+    "planeswalker_loyalty": null,
+    "price_eur": 104.37,
+    "price_tix": null,
+    "price_usd": 198.82,
+    "produced_mana": {
+      "B": true
+    },
+    "released_at": "1993-10-04",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Limited Edition Beta",
+    "type_line": "Instant",
+    "prefer_score": 159.66496,
+    "cubecobra_score": 0.022656655
+  },
+  {
+    "scryfall_id": "c4d24ff3-315d-44cd-8c27-d8ad6972e027",
+    "oracle_id": "53f7c868-b03e-4fc2-8dcf-a75bbfa3272b",
+    "illustration_id": "827c7f7b-1c5b-4bc0-91d7-b9894f7a2674",
+    "card_artist": "Sandra Everingham",
+    "card_border": "white",
+    "card_color_identity": {
+      "B": true
+    },
+    "card_colors": {
+      "B": true
+    },
+    "card_frame_data": {
+      "1993": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "banned",
+      "brawl": "legal",
+      "penny": "legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "not_legal",
+      "pauper": "legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "banned",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "legal",
+      "premodern": "legal",
+      "oathbreaker": "banned",
+      "standardbrawl": "not_legal",
+      "paupercommander": "legal"
+    },
+    "card_name": "Dark Ritual",
+    "card_oracle_tags": {},
+    "card_rarity_int": 0,
+    "card_set_code": "2ed",
+    "card_subtypes": [],
+    "card_types": [
+      "Instant"
+    ],
+    "card_watermark": null,
+    "cmc": 1,
+    "collector_number": "99",
+    "collector_number_int": 99,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 34,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "B": [
+        1
+      ]
+    },
+    "mana_cost_text": "{B}",
+    "oracle_text": "Add {B}{B}{B}.",
+    "planeswalker_loyalty": null,
+    "price_eur": 10.98,
+    "price_tix": null,
+    "price_usd": 14.46,
+    "produced_mana": {
+      "B": true
+    },
+    "released_at": "1993-12-01",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Unlimited Edition",
+    "type_line": "Instant",
+    "prefer_score": 145.66496,
+    "cubecobra_score": 0.022656655
+  },
+  {
+    "scryfall_id": "06df3f4b-3d94-4792-9460-485d2230c0e0",
+    "oracle_id": "53f7c868-b03e-4fc2-8dcf-a75bbfa3272b",
+    "illustration_id": "827c7f7b-1c5b-4bc0-91d7-b9894f7a2674",
+    "card_artist": "Sandra Everingham",
+    "card_border": "black",
+    "card_color_identity": {
+      "B": true
+    },
+    "card_colors": {
+      "B": true
+    },
+    "card_frame_data": {
+      "1993": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "banned",
+      "brawl": "legal",
+      "penny": "legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "not_legal",
+      "pauper": "legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "banned",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "legal",
+      "premodern": "legal",
+      "oathbreaker": "banned",
+      "standardbrawl": "not_legal",
+      "paupercommander": "legal"
+    },
+    "card_name": "Dark Ritual",
+    "card_oracle_tags": {},
+    "card_rarity_int": 0,
+    "card_set_code": "ced",
+    "card_subtypes": [],
+    "card_types": [
+      "Instant"
+    ],
+    "card_watermark": null,
+    "cmc": 1,
+    "collector_number": "99",
+    "collector_number_int": 99,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 34,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "B": [
+        1
+      ]
+    },
+    "mana_cost_text": "{B}",
+    "oracle_text": "Add {B}{B}{B}.",
+    "planeswalker_loyalty": null,
+    "price_eur": 26.91,
+    "price_tix": null,
+    "price_usd": 34.65,
+    "produced_mana": {
+      "B": true
+    },
+    "released_at": "1993-12-10",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Collectors' Edition",
+    "type_line": "Instant",
+    "prefer_score": 159.66496,
+    "cubecobra_score": 0.022656655
+  },
+  {
+    "scryfall_id": "de158058-b2ff-46c5-bbb3-5f76e5c2782e",
+    "oracle_id": "53f7c868-b03e-4fc2-8dcf-a75bbfa3272b",
+    "illustration_id": "827c7f7b-1c5b-4bc0-91d7-b9894f7a2674",
+    "card_artist": "Sandra Everingham",
+    "card_border": "black",
+    "card_color_identity": {
+      "B": true
+    },
+    "card_colors": {
+      "B": true
+    },
+    "card_frame_data": {
+      "1993": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "banned",
+      "brawl": "legal",
+      "penny": "legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "not_legal",
+      "pauper": "legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "banned",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "legal",
+      "premodern": "legal",
+      "oathbreaker": "banned",
+      "standardbrawl": "not_legal",
+      "paupercommander": "legal"
+    },
+    "card_name": "Dark Ritual",
+    "card_oracle_tags": {},
+    "card_rarity_int": 0,
+    "card_set_code": "cei",
+    "card_subtypes": [],
+    "card_types": [
+      "Instant"
+    ],
+    "card_watermark": null,
+    "cmc": 1,
+    "collector_number": "99",
+    "collector_number_int": 99,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 34,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "B": [
+        1
+      ]
+    },
+    "mana_cost_text": "{B}",
+    "oracle_text": "Add {B}{B}{B}.",
+    "planeswalker_loyalty": null,
+    "price_eur": 22.77,
+    "price_tix": null,
+    "price_usd": null,
+    "produced_mana": {
+      "B": true
+    },
+    "released_at": "1993-12-10",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Intl. Collectors' Edition",
+    "type_line": "Instant",
+    "prefer_score": 159.66496,
+    "cubecobra_score": 0.022656655
+  },
+  {
+    "scryfall_id": "0e606072-a3aa-4300-ba90-ec92a721fa76",
+    "oracle_id": "7f77a84e-5a4b-4834-aefa-3cecc175ae8e",
+    "illustration_id": "b0ab416a-c7a8-4531-8e6a-00a167db4f76",
+    "card_artist": "Jason Chan",
+    "card_border": "black",
+    "card_color_identity": {
+      "U": true
+    },
+    "card_colors": {
+      "U": true
+    },
+    "card_frame_data": {
+      "2003": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Jace, the Mind Sculptor",
+    "card_oracle_tags": {},
+    "card_rarity_int": 3,
+    "card_set_code": "wwk",
+    "card_subtypes": [
+      "Jace"
+    ],
+    "card_types": [
+      "Legendary",
+      "Planeswalker"
+    ],
+    "card_watermark": null,
+    "cmc": 4,
+    "collector_number": "31",
+    "collector_number_int": 31,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 3450,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "U": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{2}{U}{U}",
+    "oracle_text": "+2: Look at the top card of target player's library. You may put that card on the bottom of that player's library.\n0: Draw three cards, then put two cards from your hand on top of your library in any order.\n\u22121: Return target creature to its owner's hand.\n\u221212: Exile all cards from target player's library, then that player shuffles their hand into their library.",
+    "planeswalker_loyalty": 3,
+    "price_eur": 17.1,
+    "price_tix": 0.3,
+    "price_usd": 24.64,
+    "produced_mana": {},
+    "released_at": "2010-02-05",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Worldwake",
+    "type_line": "Legendary Planeswalker \u2014 Jace",
+    "prefer_score": 158.13266,
+    "cubecobra_score": 2.7819135
+  },
+  {
+    "scryfall_id": "2b9942a3-39e6-4e2c-918d-0c2e2f456135",
+    "oracle_id": "7f77a84e-5a4b-4834-aefa-3cecc175ae8e",
+    "illustration_id": "b0ab416a-c7a8-4531-8e6a-00a167db4f76",
+    "card_artist": "Jason Chan",
+    "card_border": "black",
+    "card_color_identity": {
+      "U": true
+    },
+    "card_colors": {
+      "U": true
+    },
+    "card_frame_data": {
+      "2003": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Jace, the Mind Sculptor",
+    "card_oracle_tags": {},
+    "card_rarity_int": 3,
+    "card_set_code": "v13",
+    "card_subtypes": [
+      "Jace"
+    ],
+    "card_types": [
+      "Legendary",
+      "Planeswalker"
+    ],
+    "card_watermark": null,
+    "cmc": 4,
+    "collector_number": "18",
+    "collector_number_int": 18,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 3450,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "U": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{2}{U}{U}",
+    "oracle_text": "+2: Look at the top card of target player's library. You may put that card on the bottom of that player's library.\n0: Draw three cards, then put two cards from your hand on top of your library in any order.\n\u22121: Return target creature to its owner's hand.\n\u221212: Exile all cards from target player's library, then that player shuffles their hand into their library.",
+    "planeswalker_loyalty": 3,
+    "price_eur": null,
+    "price_tix": null,
+    "price_usd": null,
+    "produced_mana": {},
+    "released_at": "2013-08-23",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "From the Vault: Twenty",
+    "type_line": "Legendary Planeswalker \u2014 Jace",
+    "prefer_score": 153.13266,
+    "cubecobra_score": 2.7819135
+  },
+  {
+    "scryfall_id": "3a1a1910-9587-481c-9e5c-5eb0c3b098c6",
+    "oracle_id": "7f77a84e-5a4b-4834-aefa-3cecc175ae8e",
+    "illustration_id": "b0ab416a-c7a8-4531-8e6a-00a167db4f76",
+    "card_artist": "Jason Chan",
+    "card_border": "black",
+    "card_color_identity": {
+      "U": true
+    },
+    "card_colors": {
+      "U": true
+    },
+    "card_frame_data": {
+      "2015": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Jace, the Mind Sculptor",
+    "card_oracle_tags": {},
+    "card_rarity_int": 3,
+    "card_set_code": "ema",
+    "card_subtypes": [
+      "Jace"
+    ],
+    "card_types": [
+      "Legendary",
+      "Planeswalker"
+    ],
+    "card_watermark": null,
+    "cmc": 4,
+    "collector_number": "57",
+    "collector_number_int": 57,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 3450,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "U": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{2}{U}{U}",
+    "oracle_text": "+2: Look at the top card of target player's library. You may put that card on the bottom of that player's library.\n0: Draw three cards, then put two cards from your hand on top of your library in any order.\n\u22121: Return target creature to its owner's hand.\n\u221212: Exile all cards from target player's library, then that player shuffles their hand into their library.",
+    "planeswalker_loyalty": 3,
+    "price_eur": 14.42,
+    "price_tix": 0.3,
+    "price_usd": 18.45,
+    "produced_mana": {},
+    "released_at": "2016-06-10",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Eternal Masters",
+    "type_line": "Legendary Planeswalker \u2014 Jace",
+    "prefer_score": 170.13266,
+    "cubecobra_score": 2.7819135
+  },
+  {
+    "scryfall_id": "c057dc0d-4017-4e60-9c5e-45fc569a8d31",
+    "oracle_id": "7f77a84e-5a4b-4834-aefa-3cecc175ae8e",
+    "illustration_id": "b0ab416a-c7a8-4531-8e6a-00a167db4f76",
+    "card_artist": "Jason Chan",
+    "card_border": "black",
+    "card_color_identity": {
+      "U": true
+    },
+    "card_colors": {
+      "U": true
+    },
+    "card_frame_data": {
+      "2015": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Jace, the Mind Sculptor",
+    "card_oracle_tags": {},
+    "card_rarity_int": 3,
+    "card_set_code": "a25",
+    "card_subtypes": [
+      "Jace"
+    ],
+    "card_types": [
+      "Legendary",
+      "Planeswalker"
+    ],
+    "card_watermark": null,
+    "cmc": 4,
+    "collector_number": "62",
+    "collector_number_int": 62,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 3450,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "U": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{2}{U}{U}",
+    "oracle_text": "+2: Look at the top card of target player's library. You may put that card on the bottom of that player's library.\n0: Draw three cards, then put two cards from your hand on top of your library in any order.\n\u22121: Return target creature to its owner's hand.\n\u221212: Exile all cards from target player's library, then that player shuffles their hand into their library.",
+    "planeswalker_loyalty": 3,
+    "price_eur": 14.98,
+    "price_tix": 0.7,
+    "price_usd": 17.42,
+    "produced_mana": {},
+    "released_at": "2018-03-16",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Masters 25",
+    "type_line": "Legendary Planeswalker \u2014 Jace",
+    "prefer_score": 170.13266,
+    "cubecobra_score": 2.7819135
+  },
+  {
+    "scryfall_id": "a5d1f66f-75b5-4a9b-8b98-f237f065de9c",
+    "oracle_id": "7f77a84e-5a4b-4834-aefa-3cecc175ae8e",
+    "illustration_id": "d058819e-a796-48a6-9802-8b6d975dcf06",
+    "card_artist": "Chris Rallis",
+    "card_border": "borderless",
+    "card_color_identity": {
+      "U": true
+    },
+    "card_colors": {
+      "U": true
+    },
+    "card_frame_data": {
+      "2015": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Jace, the Mind Sculptor",
+    "card_oracle_tags": {},
+    "card_rarity_int": 3,
+    "card_set_code": "med",
+    "card_subtypes": [
+      "Jace"
+    ],
+    "card_types": [
+      "Legendary",
+      "Planeswalker"
+    ],
+    "card_watermark": null,
+    "cmc": 4,
+    "collector_number": "WS3",
+    "collector_number_int": 3,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 3450,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "U": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{2}{U}{U}",
+    "oracle_text": "+2: Look at the top card of target player's library. You may put that card on the bottom of that player's library.\n0: Draw three cards, then put two cards from your hand on top of your library in any order.\n\u22121: Return target creature to its owner's hand.\n\u221212: Exile all cards from target player's library, then that player shuffles their hand into their library.",
+    "planeswalker_loyalty": 3,
+    "price_eur": null,
+    "price_tix": 2.82,
+    "price_usd": null,
+    "produced_mana": {},
+    "released_at": "2019-05-03",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Mythic Edition",
+    "type_line": "Legendary Planeswalker \u2014 Jace",
+    "prefer_score": 143.32175,
+    "cubecobra_score": 2.7819135
+  },
+  {
+    "scryfall_id": "c8817585-0d32-4d56-9142-0d29512e86a9",
+    "oracle_id": "7f77a84e-5a4b-4834-aefa-3cecc175ae8e",
+    "illustration_id": "b0ab416a-c7a8-4531-8e6a-00a167db4f76",
+    "card_artist": "Jason Chan",
+    "card_border": "black",
+    "card_color_identity": {
+      "U": true
+    },
+    "card_colors": {
+      "U": true
+    },
+    "card_frame_data": {
+      "2015": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Jace, the Mind Sculptor",
+    "card_oracle_tags": {},
+    "card_rarity_int": 3,
+    "card_set_code": "2xm",
+    "card_subtypes": [
+      "Jace"
+    ],
+    "card_types": [
+      "Legendary",
+      "Planeswalker"
+    ],
+    "card_watermark": null,
+    "cmc": 4,
+    "collector_number": "56",
+    "collector_number_int": 56,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 3450,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "U": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{2}{U}{U}",
+    "oracle_text": "+2: Look at the top card of target player's library. You may put that card on the bottom of that player's library.\n0: Draw three cards, then put two cards from your hand on top of your library in any order.\n\u22121: Return target creature to its owner's hand.\n\u221212: Exile all cards from target player's library, then that player shuffles their hand into their library.",
+    "planeswalker_loyalty": 3,
+    "price_eur": 14.67,
+    "price_tix": 2.42,
+    "price_usd": 17.42,
+    "produced_mana": {},
+    "released_at": "2020-08-07",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Double Masters",
+    "type_line": "Legendary Planeswalker \u2014 Jace",
+    "prefer_score": 170.13266,
+    "cubecobra_score": 2.7819135
+  },
+  {
+    "scryfall_id": "ec386bc3-137b-49b5-8380-8daff470f0bc",
+    "oracle_id": "7f77a84e-5a4b-4834-aefa-3cecc175ae8e",
+    "illustration_id": "b0ab416a-c7a8-4531-8e6a-00a167db4f76",
+    "card_artist": "Jason Chan",
+    "card_border": "borderless",
+    "card_color_identity": {
+      "U": true
+    },
+    "card_colors": {
+      "U": true
+    },
+    "card_frame_data": {
+      "2015": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Jace, the Mind Sculptor",
+    "card_oracle_tags": {},
+    "card_rarity_int": 3,
+    "card_set_code": "2xm",
+    "card_subtypes": [
+      "Jace"
+    ],
+    "card_types": [
+      "Legendary",
+      "Planeswalker"
+    ],
+    "card_watermark": null,
+    "cmc": 4,
+    "collector_number": "334",
+    "collector_number_int": 334,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 3450,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "U": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{2}{U}{U}",
+    "oracle_text": "+2: Look at the top card of target player's library. You may put that card on the bottom of that player's library.\n0: Draw three cards, then put two cards from your hand on top of your library in any order.\n\u22121: Return target creature to its owner's hand.\n\u221212: Exile all cards from target player's library, then that player shuffles their hand into their library.",
+    "planeswalker_loyalty": 3,
+    "price_eur": 18.01,
+    "price_tix": null,
+    "price_usd": 24.16,
+    "produced_mana": {},
+    "released_at": "2020-08-07",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Double Masters",
+    "type_line": "Legendary Planeswalker \u2014 Jace",
+    "prefer_score": 156.13266,
+    "cubecobra_score": 2.7819135
+  },
+  {
+    "scryfall_id": "9d20e671-9b41-4591-b1ef-2a297411beb7",
+    "oracle_id": "7f77a84e-5a4b-4834-aefa-3cecc175ae8e",
+    "illustration_id": "12a25265-f625-4a0f-a7c3-4e488ee717f2",
+    "card_artist": "Wizard of Barge",
+    "card_border": "borderless",
+    "card_color_identity": {
+      "U": true
+    },
+    "card_colors": {
+      "U": true
+    },
+    "card_frame_data": {
+      "2015": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Jace, the Mind Sculptor",
+    "card_oracle_tags": {},
+    "card_rarity_int": 3,
+    "card_set_code": "sld",
+    "card_subtypes": [
+      "Jace"
+    ],
+    "card_types": [
+      "Legendary",
+      "Planeswalker"
+    ],
+    "card_watermark": null,
+    "cmc": 4,
+    "collector_number": "8001",
+    "collector_number_int": 8001,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 3450,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "U": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{2}{U}{U}",
+    "oracle_text": "+2: Look at the top card of target player's library. You may put that card on the bottom of that player's library.\n0: Draw three cards, then put two cards from your hand on top of your library in any order.\n\u22121: Return target creature to its owner's hand.\n\u221212: Exile all cards from target player's library, then that player shuffles their hand into their library.",
+    "planeswalker_loyalty": 3,
+    "price_eur": 122.14,
+    "price_tix": null,
+    "price_usd": 306.59,
+    "produced_mana": {},
+    "released_at": "2023-02-17",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Secret Lair Drop",
+    "type_line": "Legendary Planeswalker \u2014 Jace",
+    "prefer_score": 148.32175,
+    "cubecobra_score": 2.7819135
+  },
+  {
+    "scryfall_id": "cbe639bb-5797-4bec-b55b-aed296337e92",
+    "oracle_id": "7f77a84e-5a4b-4834-aefa-3cecc175ae8e",
+    "illustration_id": "fb2eece8-6e0e-4131-87e6-b84581cf2d81",
+    "card_artist": "Justin Gerard",
+    "card_border": "borderless",
+    "card_color_identity": {
+      "U": true
+    },
+    "card_colors": {
+      "U": true
+    },
+    "card_frame_data": {
+      "2015": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Jace, the Mind Sculptor",
+    "card_oracle_tags": {},
+    "card_rarity_int": 3,
+    "card_set_code": "blc",
+    "card_subtypes": [
+      "Jace"
+    ],
+    "card_types": [
+      "Legendary",
+      "Planeswalker"
+    ],
+    "card_watermark": null,
+    "cmc": 4,
+    "collector_number": "75",
+    "collector_number_int": 75,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 3450,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "U": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{2}{U}{U}",
+    "oracle_text": "+2: Look at the top card of target player's library. You may put that card on the bottom of that player's library.\n0: Draw three cards, then put two cards from your hand on top of your library in any order.\n\u22121: Return target creature to its owner's hand.\n\u221212: Exile all cards from target player's library, then that player shuffles their hand into their library.",
+    "planeswalker_loyalty": 3,
+    "price_eur": 24.09,
+    "price_tix": 2.35,
+    "price_usd": 25.55,
+    "produced_mana": {},
+    "released_at": "2024-08-02",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Bloomburrow Commander",
+    "type_line": "Legendary Planeswalker \u2014 Jace",
+    "prefer_score": 148.32175,
+    "cubecobra_score": 2.7819135
+  },
+  {
+    "scryfall_id": "97c67e86-5aa5-4136-a15c-c0c5704e2b94",
+    "oracle_id": "7f77a84e-5a4b-4834-aefa-3cecc175ae8e",
+    "illustration_id": "f9a557cf-31d1-4da4-a68c-560ce8dfc54f",
+    "card_artist": "TAPIOCA",
+    "card_border": "borderless",
+    "card_color_identity": {
+      "U": true
+    },
+    "card_colors": {
+      "U": true
+    },
+    "card_frame_data": {
+      "2015": true,
+      "Inverted": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Jace, the Mind Sculptor",
+    "card_oracle_tags": {},
+    "card_rarity_int": 3,
+    "card_set_code": "blc",
+    "card_subtypes": [
+      "Jace"
+    ],
+    "card_types": [
+      "Legendary",
+      "Planeswalker"
+    ],
+    "card_watermark": null,
+    "cmc": 4,
+    "collector_number": "93",
+    "collector_number_int": 93,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 3450,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "U": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{2}{U}{U}",
+    "oracle_text": "+2: Look at the top card of target player's library. You may put that card on the bottom of that player's library.\n0: Draw three cards, then put two cards from your hand on top of your library in any order.\n\u22121: Return target creature to its owner's hand.\n\u221212: Exile all cards from target player's library, then that player shuffles their hand into their library.",
+    "planeswalker_loyalty": 3,
+    "price_eur": null,
+    "price_tix": 1.5,
+    "price_usd": null,
+    "produced_mana": {},
+    "released_at": "2024-08-02",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Bloomburrow Commander",
+    "type_line": "Legendary Planeswalker \u2014 Jace",
+    "prefer_score": 143.32175,
+    "cubecobra_score": 2.7819135
+  },
+  {
+    "scryfall_id": "d573ef03-4730-45aa-93dd-e45ac1dbaf4a",
+    "oracle_id": "4457ed35-7c10-48c8-9776-456485fdf070",
+    "illustration_id": "2cb6200c-d05b-419c-bd10-8b9c146e2339",
+    "card_artist": "Christopher Rush",
+    "card_border": "black",
+    "card_color_identity": {
+      "R": true
+    },
+    "card_colors": {
+      "R": true
+    },
+    "card_frame_data": {
+      "1993": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "banned",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "legal",
+      "premodern": "legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "legal"
+    },
+    "card_name": "Lightning Bolt",
+    "card_oracle_tags": {},
+    "card_rarity_int": 0,
+    "card_set_code": "lea",
+    "card_subtypes": [],
+    "card_types": [
+      "Instant"
+    ],
+    "card_watermark": null,
+    "cmc": 1,
+    "collector_number": "161",
+    "collector_number_int": 161,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 155,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "R": [
+        1
+      ]
+    },
+    "mana_cost_text": "{R}",
+    "oracle_text": "Lightning Bolt deals 3 damage to any target.",
+    "planeswalker_loyalty": null,
+    "price_eur": 402.22,
+    "price_tix": null,
+    "price_usd": 620,
+    "produced_mana": {},
+    "released_at": "1993-08-05",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Limited Edition Alpha",
+    "type_line": "Instant",
+    "prefer_score": 160.67825,
+    "cubecobra_score": 0.12056577
+  },
+  {
+    "scryfall_id": "b5d3dcab-2260-479d-9ef6-dfb92d4f6061",
+    "oracle_id": "4457ed35-7c10-48c8-9776-456485fdf070",
+    "illustration_id": "2cb6200c-d05b-419c-bd10-8b9c146e2339",
+    "card_artist": "Christopher Rush",
+    "card_border": "black",
+    "card_color_identity": {
+      "R": true
+    },
+    "card_colors": {
+      "R": true
+    },
+    "card_frame_data": {
+      "1993": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "banned",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "legal",
+      "premodern": "legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "legal"
+    },
+    "card_name": "Lightning Bolt",
+    "card_oracle_tags": {},
+    "card_rarity_int": 0,
+    "card_set_code": "leb",
+    "card_subtypes": [],
+    "card_types": [
+      "Instant"
+    ],
+    "card_watermark": null,
+    "cmc": 1,
+    "collector_number": "162",
+    "collector_number_int": 162,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 155,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "R": [
+        1
+      ]
+    },
+    "mana_cost_text": "{R}",
+    "oracle_text": "Lightning Bolt deals 3 damage to any target.",
+    "planeswalker_loyalty": null,
+    "price_eur": 197.96,
+    "price_tix": null,
+    "price_usd": 281.73,
+    "produced_mana": {},
+    "released_at": "1993-10-04",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Limited Edition Beta",
+    "type_line": "Instant",
+    "prefer_score": 160.67825,
+    "cubecobra_score": 0.12056577
+  },
+  {
+    "scryfall_id": "ff1b8fc5-604a-4449-a73d-861e53642a70",
+    "oracle_id": "4457ed35-7c10-48c8-9776-456485fdf070",
+    "illustration_id": "2cb6200c-d05b-419c-bd10-8b9c146e2339",
+    "card_artist": "Christopher Rush",
+    "card_border": "white",
+    "card_color_identity": {
+      "R": true
+    },
+    "card_colors": {
+      "R": true
+    },
+    "card_frame_data": {
+      "1993": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "banned",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "legal",
+      "premodern": "legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "legal"
+    },
+    "card_name": "Lightning Bolt",
+    "card_oracle_tags": {},
+    "card_rarity_int": 0,
+    "card_set_code": "2ed",
+    "card_subtypes": [],
+    "card_types": [
+      "Instant"
+    ],
+    "card_watermark": null,
+    "cmc": 1,
+    "collector_number": "162",
+    "collector_number_int": 162,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 155,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "R": [
+        1
+      ]
+    },
+    "mana_cost_text": "{R}",
+    "oracle_text": "Lightning Bolt deals 3 damage to any target.",
+    "planeswalker_loyalty": null,
+    "price_eur": 21.12,
+    "price_tix": null,
+    "price_usd": 23.92,
+    "produced_mana": {},
+    "released_at": "1993-12-01",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Unlimited Edition",
+    "type_line": "Instant",
+    "prefer_score": 146.67825,
+    "cubecobra_score": 0.12056577
+  },
+  {
+    "scryfall_id": "b539a9de-037a-4b7a-80a5-0514680af095",
+    "oracle_id": "4457ed35-7c10-48c8-9776-456485fdf070",
+    "illustration_id": "013e7eda-ef8e-44cd-9832-4033d9de1c34",
+    "card_artist": "Christopher Moeller",
+    "card_border": "black",
+    "card_color_identity": {
+      "R": true
+    },
+    "card_colors": {
+      "R": true
+    },
+    "card_frame_data": {
+      "2003": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "banned",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "legal"
+    },
+    "card_name": "Lightning Bolt",
+    "card_oracle_tags": {},
+    "card_rarity_int": 0,
+    "card_set_code": "p09",
+    "card_subtypes": [],
+    "card_types": [
+      "Instant"
+    ],
+    "card_watermark": null,
+    "cmc": 1,
+    "collector_number": "146",
+    "collector_number_int": 146,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 155,
+    "flavor_text": "The sparkmage shrieked, calling on the rage of the storms of his youth. To his surprise, the sky responded with a fierce energy he'd never thought to see again.",
+    "mana_cost_jsonb": {
+      "R": [
+        1
+      ]
+    },
+    "mana_cost_text": "{R}",
+    "oracle_text": "Lightning Bolt deals 3 damage to any target.",
+    "planeswalker_loyalty": null,
+    "price_eur": 2.14,
+    "price_tix": null,
+    "price_usd": null,
+    "produced_mana": {},
+    "released_at": "2009-07-17",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Magic Player Rewards 2009",
+    "type_line": "Instant",
+    "prefer_score": 162.88457,
+    "cubecobra_score": 0.12056577
+  },
+  {
+    "scryfall_id": "435589bb-27c6-4a6d-9d63-394d5092b9d8",
+    "oracle_id": "4457ed35-7c10-48c8-9776-456485fdf070",
+    "illustration_id": "013e7eda-ef8e-44cd-9832-4033d9de1c34",
+    "card_artist": "Christopher Moeller",
+    "card_border": "black",
+    "card_color_identity": {
+      "R": true
+    },
+    "card_colors": {
+      "R": true
+    },
+    "card_frame_data": {
+      "2003": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "banned",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "legal"
+    },
+    "card_name": "Lightning Bolt",
+    "card_oracle_tags": {},
+    "card_rarity_int": 0,
+    "card_set_code": "m10",
+    "card_subtypes": [],
+    "card_types": [
+      "Instant"
+    ],
+    "card_watermark": null,
+    "cmc": 1,
+    "collector_number": "146",
+    "collector_number_int": 146,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 155,
+    "flavor_text": "The sparkmage shrieked, calling on the rage of the storms of his youth. To his surprise, the sky responded with a fierce energy he'd never thought to see again.",
+    "mana_cost_jsonb": {
+      "R": [
+        1
+      ]
+    },
+    "mana_cost_text": "{R}",
+    "oracle_text": "Lightning Bolt deals 3 damage to any target.",
+    "planeswalker_loyalty": null,
+    "price_eur": 1.07,
+    "price_tix": 0.83,
+    "price_usd": 1.82,
+    "produced_mana": {},
+    "released_at": "2009-07-17",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Magic 2010",
+    "type_line": "Instant",
+    "prefer_score": 178.88457,
+    "cubecobra_score": 0.12056577
+  },
+  {
+    "scryfall_id": "e768c957-3a1f-42f5-853a-96942f645df5",
+    "oracle_id": "4457ed35-7c10-48c8-9776-456485fdf070",
+    "illustration_id": "013e7eda-ef8e-44cd-9832-4033d9de1c34",
+    "card_artist": "Christopher Moeller",
+    "card_border": "black",
+    "card_color_identity": {
+      "R": true
+    },
+    "card_colors": {
+      "R": true
+    },
+    "card_frame_data": {
+      "2003": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "banned",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "legal"
+    },
+    "card_name": "Lightning Bolt",
+    "card_oracle_tags": {},
+    "card_rarity_int": 0,
+    "card_set_code": "m11",
+    "card_subtypes": [],
+    "card_types": [
+      "Instant"
+    ],
+    "card_watermark": null,
+    "cmc": 1,
+    "collector_number": "149",
+    "collector_number_int": 149,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 155,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "R": [
+        1
+      ]
+    },
+    "mana_cost_text": "{R}",
+    "oracle_text": "Lightning Bolt deals 3 damage to any target.",
+    "planeswalker_loyalty": null,
+    "price_eur": 1.24,
+    "price_tix": 0.92,
+    "price_usd": 1.47,
+    "produced_mana": {},
+    "released_at": "2010-07-16",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Magic 2011",
+    "type_line": "Instant",
+    "prefer_score": 178.88457,
+    "cubecobra_score": 0.12056577
+  },
+  {
+    "scryfall_id": "6881d7c8-5bb7-4f8c-9f03-50fb1309d9c8",
+    "oracle_id": "4457ed35-7c10-48c8-9776-456485fdf070",
+    "illustration_id": "4fdf93e7-094e-478c-a4e1-e004c83f682e",
+    "card_artist": "Viacom",
+    "card_border": "borderless",
+    "card_color_identity": {
+      "R": true
+    },
+    "card_colors": {
+      "R": true
+    },
+    "card_frame_data": {
+      "2015": true,
+      "Inverted": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "banned",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "legal"
+    },
+    "card_name": "Lightning Bolt",
+    "card_oracle_tags": {},
+    "card_rarity_int": 3,
+    "card_set_code": "tle",
+    "card_subtypes": [],
+    "card_types": [
+      "Instant"
+    ],
+    "card_watermark": null,
+    "cmc": 1,
+    "collector_number": "32",
+    "collector_number_int": 32,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 155,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "R": [
+        1
+      ]
+    },
+    "mana_cost_text": "{R}",
+    "oracle_text": "Lightning Bolt deals 3 damage to any target.",
+    "planeswalker_loyalty": null,
+    "price_eur": 4.95,
+    "price_tix": 1.73,
+    "price_usd": 4.5,
+    "produced_mana": {},
+    "released_at": "2025-11-21",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Avatar: The Last Airbender Eternal",
+    "type_line": "Instant",
+    "prefer_score": 148.32175,
+    "cubecobra_score": 0.12056577
+  },
+  {
+    "scryfall_id": "b6bc6ff3-f466-4cb0-8b4e-a20d8ed129c8",
+    "oracle_id": "4457ed35-7c10-48c8-9776-456485fdf070",
+    "illustration_id": "d6a96e90-165e-4c31-bb4f-9ca665e4b437",
+    "card_artist": "Fahmi Fauzi",
+    "card_border": "borderless",
+    "card_color_identity": {
+      "R": true
+    },
+    "card_colors": {
+      "R": true
+    },
+    "card_frame_data": {
+      "2015": true,
+      "Inverted": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "banned",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "legal"
+    },
+    "card_name": "Lightning Bolt",
+    "card_oracle_tags": {},
+    "card_rarity_int": 2,
+    "card_set_code": "pw26",
+    "card_subtypes": [],
+    "card_types": [
+      "Instant"
+    ],
+    "card_watermark": null,
+    "cmc": 1,
+    "collector_number": "5",
+    "collector_number_int": 5,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 155,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "R": [
+        1
+      ]
+    },
+    "mana_cost_text": "{R}",
+    "oracle_text": "Lightning Bolt deals 3 damage to any target.",
+    "planeswalker_loyalty": null,
+    "price_eur": 1.48,
+    "price_tix": null,
+    "price_usd": 2.28,
+    "produced_mana": {},
+    "released_at": "2026-01-01",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Wizards Play Network 2026",
+    "type_line": "Instant",
+    "prefer_score": 159.32175,
+    "cubecobra_score": 0.12056577
+  },
+  {
+    "scryfall_id": "dc12105d-7536-429b-9510-4f56bfc0c497",
+    "oracle_id": "4457ed35-7c10-48c8-9776-456485fdf070",
+    "illustration_id": "392029ce-54a4-45d6-9550-ba05194709e6",
+    "card_artist": "Justine Cruz & Adam Paquette",
+    "card_border": "black",
+    "card_color_identity": {
+      "R": true
+    },
+    "card_colors": {
+      "R": true
+    },
+    "card_frame_data": {
+      "2015": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "banned",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "legal"
+    },
+    "card_name": "Lightning Bolt",
+    "card_oracle_tags": {},
+    "card_rarity_int": 0,
+    "card_set_code": "sld",
+    "card_subtypes": [],
+    "card_types": [
+      "Instant"
+    ],
+    "card_watermark": null,
+    "cmc": 1,
+    "collector_number": "IFIYW-2",
+    "collector_number_int": 2,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 155,
+    "flavor_text": "To wield lightning is to tame chaos.",
+    "mana_cost_jsonb": {
+      "R": [
+        1
+      ]
+    },
+    "mana_cost_text": "{R}",
+    "oracle_text": "Lightning Bolt deals 3 damage to any target.",
+    "planeswalker_loyalty": null,
+    "price_eur": 4.79,
+    "price_tix": null,
+    "price_usd": 2.65,
+    "produced_mana": {},
+    "released_at": "2026-04-01",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Secret Lair Drop",
+    "type_line": "Instant",
+    "prefer_score": 178.32175,
+    "cubecobra_score": 0.12056577
+  },
+  {
+    "scryfall_id": "bde26955-6de3-4212-9e1a-5e11f73ebf44",
+    "oracle_id": "4457ed35-7c10-48c8-9776-456485fdf070",
+    "illustration_id": "4bec8dcd-1ae8-4aed-ad43-b99bcfaee39e",
+    "card_artist": "Justine Cruz & Adam Paquette",
+    "card_border": "black",
+    "card_color_identity": {
+      "R": true
+    },
+    "card_colors": {
+      "R": true
+    },
+    "card_frame_data": {
+      "2015": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "banned",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "legal"
+    },
+    "card_name": "Lightning Bolt",
+    "card_oracle_tags": {},
+    "card_rarity_int": 0,
+    "card_set_code": "sld",
+    "card_subtypes": [],
+    "card_types": [
+      "Instant"
+    ],
+    "card_watermark": null,
+    "cmc": 1,
+    "collector_number": "IFIYW-7",
+    "collector_number_int": 7,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 155,
+    "flavor_text": "To wield lightning is to tame chaos.",
+    "mana_cost_jsonb": {
+      "R": [
+        1
+      ]
+    },
+    "mana_cost_text": "{R}",
+    "oracle_text": "Lightning Bolt deals 3 damage to any target.",
+    "planeswalker_loyalty": null,
+    "price_eur": null,
+    "price_tix": null,
+    "price_usd": null,
+    "produced_mana": {},
+    "released_at": "2026-04-01",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Secret Lair Drop",
+    "type_line": "Instant",
+    "prefer_score": 173.32175,
+    "cubecobra_score": 0.12056577
+  },
+  {
+    "scryfall_id": "48ee3939-bc12-4275-a446-9de36f0b4672",
+    "oracle_id": "05e9b55e-6329-48ec-b7d7-24c6b9692244",
+    "illustration_id": "aaaa918a-ae2c-4bf9-8926-4d5a7b39613d",
+    "card_artist": "D. Alexander Gregory",
+    "card_border": "black",
+    "card_color_identity": {
+      "B": true,
+      "R": true,
+      "U": true
+    },
+    "card_colors": {
+      "B": true,
+      "R": true,
+      "U": true
+    },
+    "card_frame_data": {
+      "2003": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "not_legal",
+      "penny": "legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "legal",
+      "gladiator": "not_legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Nicol Bolas, Planeswalker",
+    "card_oracle_tags": {},
+    "card_rarity_int": 3,
+    "card_set_code": "con",
+    "card_subtypes": [
+      "Bolas"
+    ],
+    "card_types": [
+      "Legendary",
+      "Planeswalker"
+    ],
+    "card_watermark": null,
+    "cmc": 8,
+    "collector_number": "120",
+    "collector_number_int": 120,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 7398,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "B": [
+        1,
+        2
+      ],
+      "R": [
+        1
+      ],
+      "U": [
+        1
+      ]
+    },
+    "mana_cost_text": "{4}{U}{B}{B}{R}",
+    "oracle_text": "+3: Destroy target noncreature permanent.\n\u22122: Gain control of target creature.\n\u22129: Nicol Bolas deals 7 damage to target player or planeswalker. That player or that planeswalker's controller discards seven cards, then sacrifices seven permanents of their choice.",
+    "planeswalker_loyalty": 5,
+    "price_eur": 2.94,
+    "price_tix": 0.02,
+    "price_usd": 3.81,
+    "produced_mana": {},
+    "released_at": "2009-02-06",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Conflux",
+    "type_line": "Legendary Planeswalker \u2014 Bolas",
+    "prefer_score": 154.64348,
+    "cubecobra_score": 5.9748836
+  },
+  {
+    "scryfall_id": "4d156ed8-ca04-43ca-887e-6c411bf6332e",
+    "oracle_id": "05e9b55e-6329-48ec-b7d7-24c6b9692244",
+    "illustration_id": "2ffcf4b5-2f91-4b9e-a070-aede59fa01e6",
+    "card_artist": "Izzy",
+    "card_border": "black",
+    "card_color_identity": {
+      "B": true,
+      "R": true,
+      "U": true
+    },
+    "card_colors": {
+      "B": true,
+      "R": true,
+      "U": true
+    },
+    "card_frame_data": {
+      "2003": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "not_legal",
+      "penny": "legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "legal",
+      "gladiator": "not_legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Nicol Bolas, Planeswalker",
+    "card_oracle_tags": {},
+    "card_rarity_int": 3,
+    "card_set_code": "ddh",
+    "card_subtypes": [
+      "Bolas"
+    ],
+    "card_types": [
+      "Legendary",
+      "Planeswalker"
+    ],
+    "card_watermark": null,
+    "cmc": 8,
+    "collector_number": "42",
+    "collector_number_int": 42,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 7398,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "B": [
+        1,
+        2
+      ],
+      "R": [
+        1
+      ],
+      "U": [
+        1
+      ]
+    },
+    "mana_cost_text": "{4}{U}{B}{B}{R}",
+    "oracle_text": "+3: Destroy target noncreature permanent.\n\u22122: Gain control of target creature.\n\u22129: Nicol Bolas deals 7 damage to target player or planeswalker. That player or that planeswalker's controller discards seven cards, then sacrifices seven permanents of their choice.",
+    "planeswalker_loyalty": 5,
+    "price_eur": null,
+    "price_tix": null,
+    "price_usd": null,
+    "produced_mana": {},
+    "released_at": "2011-09-02",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Duel Decks: Ajani vs. Nicol Bolas",
+    "type_line": "Legendary Planeswalker \u2014 Bolas",
+    "prefer_score": 145.32175,
+    "cubecobra_score": 5.9748836
+  },
+  {
+    "scryfall_id": "0e3b1fea-5c2c-4848-8109-548f56b99d49",
+    "oracle_id": "05e9b55e-6329-48ec-b7d7-24c6b9692244",
+    "illustration_id": "aaaa918a-ae2c-4bf9-8926-4d5a7b39613d",
+    "card_artist": "D. Alexander Gregory",
+    "card_border": "black",
+    "card_color_identity": {
+      "B": true,
+      "R": true,
+      "U": true
+    },
+    "card_colors": {
+      "B": true,
+      "R": true,
+      "U": true
+    },
+    "card_frame_data": {
+      "2003": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "not_legal",
+      "penny": "legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "legal",
+      "gladiator": "not_legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Nicol Bolas, Planeswalker",
+    "card_oracle_tags": {},
+    "card_rarity_int": 3,
+    "card_set_code": "m13",
+    "card_subtypes": [
+      "Bolas"
+    ],
+    "card_types": [
+      "Legendary",
+      "Planeswalker"
+    ],
+    "card_watermark": null,
+    "cmc": 8,
+    "collector_number": "199",
+    "collector_number_int": 199,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 7398,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "B": [
+        1,
+        2
+      ],
+      "R": [
+        1
+      ],
+      "U": [
+        1
+      ]
+    },
+    "mana_cost_text": "{4}{U}{B}{B}{R}",
+    "oracle_text": "+3: Destroy target noncreature permanent.\n\u22122: Gain control of target creature.\n\u22129: Nicol Bolas deals 7 damage to target player or planeswalker. That player or that planeswalker's controller discards seven cards, then sacrifices seven permanents of their choice.",
+    "planeswalker_loyalty": 5,
+    "price_eur": 2.66,
+    "price_tix": 0.02,
+    "price_usd": 3.53,
+    "produced_mana": {},
+    "released_at": "2012-07-13",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Magic 2013",
+    "type_line": "Legendary Planeswalker \u2014 Bolas",
+    "prefer_score": 154.64348,
+    "cubecobra_score": 5.9748836
+  },
+  {
+    "scryfall_id": "9e80f2fc-06d4-4ce9-b23b-3e4af1208fa5",
+    "oracle_id": "05e9b55e-6329-48ec-b7d7-24c6b9692244",
+    "illustration_id": "49935712-5bee-4a7b-af42-aa6ec4fe2335",
+    "card_artist": "Chris Rahn",
+    "card_border": "black",
+    "card_color_identity": {
+      "B": true,
+      "R": true,
+      "U": true
+    },
+    "card_colors": {
+      "B": true,
+      "R": true,
+      "U": true
+    },
+    "card_frame_data": {
+      "2015": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "not_legal",
+      "penny": "legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "legal",
+      "gladiator": "not_legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Nicol Bolas, Planeswalker",
+    "card_oracle_tags": {},
+    "card_rarity_int": 3,
+    "card_set_code": "e01",
+    "card_subtypes": [
+      "Bolas"
+    ],
+    "card_types": [
+      "Legendary",
+      "Planeswalker"
+    ],
+    "card_watermark": null,
+    "cmc": 8,
+    "collector_number": "85",
+    "collector_number_int": 85,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 7398,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "B": [
+        1,
+        2
+      ],
+      "R": [
+        1
+      ],
+      "U": [
+        1
+      ]
+    },
+    "mana_cost_text": "{4}{U}{B}{B}{R}",
+    "oracle_text": "+3: Destroy target noncreature permanent.\n\u22122: Gain control of target creature.\n\u22129: Nicol Bolas deals 7 damage to target player or planeswalker. That player or that planeswalker's controller discards seven cards, then sacrifices seven permanents of their choice.",
+    "planeswalker_loyalty": 5,
+    "price_eur": 2.78,
+    "price_tix": null,
+    "price_usd": 2.78,
+    "produced_mana": {},
+    "released_at": "2017-06-16",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Archenemy: Nicol Bolas",
+    "type_line": "Legendary Planeswalker \u2014 Bolas",
+    "prefer_score": 162.32175,
+    "cubecobra_score": 5.9748836
+  },
+  {
+    "scryfall_id": "605a6165-bf78-486b-b186-6a55e0ffe28f",
+    "oracle_id": "05e9b55e-6329-48ec-b7d7-24c6b9692244",
+    "illustration_id": "73456446-df09-4325-b90c-93d7b5723420",
+    "card_artist": "Slawomir Maniak",
+    "card_border": "borderless",
+    "card_color_identity": {
+      "B": true,
+      "R": true,
+      "U": true
+    },
+    "card_colors": {
+      "B": true,
+      "R": true,
+      "U": true
+    },
+    "card_frame_data": {
+      "2015": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "not_legal",
+      "penny": "legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "legal",
+      "gladiator": "not_legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Nicol Bolas, Planeswalker",
+    "card_oracle_tags": {},
+    "card_rarity_int": 3,
+    "card_set_code": "med",
+    "card_subtypes": [
+      "Bolas"
+    ],
+    "card_types": [
+      "Legendary",
+      "Planeswalker"
+    ],
+    "card_watermark": null,
+    "cmc": 8,
+    "collector_number": "GR4",
+    "collector_number_int": 4,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 7398,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "B": [
+        1,
+        2
+      ],
+      "R": [
+        1
+      ],
+      "U": [
+        1
+      ]
+    },
+    "mana_cost_text": "{4}{U}{B}{B}{R}",
+    "oracle_text": "+3: Destroy target noncreature permanent.\n\u22122: Gain control of target creature.\n\u22129: Nicol Bolas deals 7 damage to target player or planeswalker. That player or that planeswalker's controller discards seven cards, then sacrifices seven permanents of their choice.",
+    "planeswalker_loyalty": 5,
+    "price_eur": null,
+    "price_tix": 4.61,
+    "price_usd": null,
+    "produced_mana": {},
+    "released_at": "2018-10-05",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Mythic Edition",
+    "type_line": "Legendary Planeswalker \u2014 Bolas",
+    "prefer_score": 143.32175,
+    "cubecobra_score": 5.9748836
+  },
+  {
+    "scryfall_id": "74ab6843-6bdd-439a-b81c-0be83b8d4c52",
+    "oracle_id": "05e9b55e-6329-48ec-b7d7-24c6b9692244",
+    "illustration_id": "419bc9b5-0485-48c1-abc6-9b9182f7eea8",
+    "card_artist": "Aaron J. Riley & Scott Okumura",
+    "card_border": "borderless",
+    "card_color_identity": {
+      "B": true,
+      "R": true,
+      "U": true
+    },
+    "card_colors": {
+      "B": true,
+      "R": true,
+      "U": true
+    },
+    "card_frame_data": {
+      "2015": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "not_legal",
+      "penny": "legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "legal",
+      "gladiator": "not_legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Nicol Bolas, Planeswalker",
+    "card_oracle_tags": {},
+    "card_rarity_int": 3,
+    "card_set_code": "sld",
+    "card_subtypes": [
+      "Bolas"
+    ],
+    "card_types": [
+      "Legendary",
+      "Planeswalker"
+    ],
+    "card_watermark": null,
+    "cmc": 8,
+    "collector_number": "1622",
+    "collector_number_int": 1622,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 7398,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "B": [
+        1,
+        2
+      ],
+      "R": [
+        1
+      ],
+      "U": [
+        1
+      ]
+    },
+    "mana_cost_text": "{4}{U}{B}{B}{R}",
+    "oracle_text": "+3: Destroy target noncreature permanent.\n\u22122: Gain control of target creature.\n\u22129: Nicol Bolas deals 7 damage to target player or planeswalker. That player or that planeswalker's controller discards seven cards, then sacrifices seven permanents of their choice.",
+    "planeswalker_loyalty": 5,
+    "price_eur": 5.91,
+    "price_tix": null,
+    "price_usd": 8.58,
+    "produced_mana": {},
+    "released_at": "2024-05-13",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Secret Lair Drop",
+    "type_line": "Legendary Planeswalker \u2014 Bolas",
+    "prefer_score": 148.32175,
+    "cubecobra_score": 5.9748836
+  },
+  {
+    "scryfall_id": "bc05da83-c3ec-4a60-a205-3c0f537d55b0",
+    "oracle_id": "05e9b55e-6329-48ec-b7d7-24c6b9692244",
+    "illustration_id": "aaaa918a-ae2c-4bf9-8926-4d5a7b39613d",
+    "card_artist": "D. Alexander Gregory",
+    "card_border": "black",
+    "card_color_identity": {
+      "B": true,
+      "R": true,
+      "U": true
+    },
+    "card_colors": {
+      "B": true,
+      "R": true,
+      "U": true
+    },
+    "card_frame_data": {
+      "2015": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "not_legal",
+      "penny": "legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "legal",
+      "gladiator": "not_legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Nicol Bolas, Planeswalker",
+    "card_oracle_tags": {},
+    "card_rarity_int": 3,
+    "card_set_code": "pmei",
+    "card_subtypes": [
+      "Bolas"
+    ],
+    "card_types": [
+      "Legendary",
+      "Planeswalker"
+    ],
+    "card_watermark": null,
+    "cmc": 8,
+    "collector_number": "2025-10",
+    "collector_number_int": 202510,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 7398,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "B": [
+        1,
+        2
+      ],
+      "R": [
+        1
+      ],
+      "U": [
+        1
+      ]
+    },
+    "mana_cost_text": "{4}{U}{B}{B}{R}",
+    "oracle_text": "+3: Destroy target noncreature permanent.\n\u22122: Gain control of target creature.\n\u22129: Nicol Bolas deals 7 damage to target player or planeswalker. That player or that planeswalker's controller discards seven cards, then sacrifices seven permanents of their choice.",
+    "planeswalker_loyalty": 5,
+    "price_eur": null,
+    "price_tix": null,
+    "price_usd": null,
+    "produced_mana": {},
+    "released_at": "2025-03-07",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Media and Collaboration Promos",
+    "type_line": "Legendary Planeswalker \u2014 Bolas",
+    "prefer_score": 161.64348,
+    "cubecobra_score": 5.9748836
+  },
+  {
+    "scryfall_id": "f8ac5006-91bd-4803-93da-f87cf196dd2f",
+    "oracle_id": "4b7ac066-e5c7-43e6-9e7e-2739b24a905d",
+    "illustration_id": "6eb98f0e-e947-4efd-a84f-a4b20de70872",
+    "card_artist": "Douglas Shuler",
+    "card_border": "black",
+    "card_color_identity": {
+      "W": true
+    },
+    "card_colors": {
+      "W": true
+    },
+    "card_frame_data": {
+      "1993": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {
+      "Flying": true,
+      "Vigilance": true
+    },
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "legal",
+      "predh": "legal",
+      "future": "legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "legal",
+      "pioneer": "legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "legal",
+      "premodern": "legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Serra Angel",
+    "card_oracle_tags": {},
+    "card_rarity_int": 1,
+    "card_set_code": "lea",
+    "card_subtypes": [
+      "Angel"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 5,
+    "collector_number": "39",
+    "collector_number_int": 39,
+    "creature_power": 4,
+    "creature_toughness": 4,
+    "edhrec_rank": 9412,
+    "flavor_text": "Born with wings of light and a sword of faith, this heavenly incarnation embodies both fury and purity.",
+    "mana_cost_jsonb": {
+      "W": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{3}{W}{W}",
+    "oracle_text": "Flying\nVigilance (Attacking doesn't cause this creature to tap.)",
+    "planeswalker_loyalty": null,
+    "price_eur": 1116.34,
+    "price_tix": null,
+    "price_usd": 692,
+    "produced_mana": {},
+    "released_at": "1993-08-05",
+    "creature_power_text": "4",
+    "creature_toughness_text": "4",
+    "set_name": "Limited Edition Alpha",
+    "type_line": "Creature \u2014 Angel",
+    "prefer_score": 159.66496,
+    "cubecobra_score": 7.6021166
+  },
+  {
+    "scryfall_id": "5669f9c8-2e94-47e2-a551-7efff317fb34",
+    "oracle_id": "4b7ac066-e5c7-43e6-9e7e-2739b24a905d",
+    "illustration_id": "6eb98f0e-e947-4efd-a84f-a4b20de70872",
+    "card_artist": "Douglas Shuler",
+    "card_border": "black",
+    "card_color_identity": {
+      "W": true
+    },
+    "card_colors": {
+      "W": true
+    },
+    "card_frame_data": {
+      "1993": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {
+      "Flying": true,
+      "Vigilance": true
+    },
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "legal",
+      "predh": "legal",
+      "future": "legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "legal",
+      "pioneer": "legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "legal",
+      "premodern": "legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Serra Angel",
+    "card_oracle_tags": {},
+    "card_rarity_int": 1,
+    "card_set_code": "leb",
+    "card_subtypes": [
+      "Angel"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 5,
+    "collector_number": "40",
+    "collector_number_int": 40,
+    "creature_power": 4,
+    "creature_toughness": 4,
+    "edhrec_rank": 9412,
+    "flavor_text": "Born with wings of light and a sword of faith, this heavenly incarnation embodies both fury and purity.",
+    "mana_cost_jsonb": {
+      "W": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{3}{W}{W}",
+    "oracle_text": "Flying\nVigilance (Attacking doesn't cause this creature to tap.)",
+    "planeswalker_loyalty": null,
+    "price_eur": 392.43,
+    "price_tix": null,
+    "price_usd": 353.71,
+    "produced_mana": {},
+    "released_at": "1993-10-04",
+    "creature_power_text": "4",
+    "creature_toughness_text": "4",
+    "set_name": "Limited Edition Beta",
+    "type_line": "Creature \u2014 Angel",
+    "prefer_score": 159.66496,
+    "cubecobra_score": 7.6021166
+  },
+  {
+    "scryfall_id": "b16cb23f-52d2-49b2-b07b-39679d695fc1",
+    "oracle_id": "4b7ac066-e5c7-43e6-9e7e-2739b24a905d",
+    "illustration_id": "5f5651af-22fb-4fb8-a04c-1f34b5104bd9",
+    "card_artist": "Greg Staples",
+    "card_border": "black",
+    "card_color_identity": {
+      "W": true
+    },
+    "card_colors": {
+      "W": true
+    },
+    "card_frame_data": {
+      "2003": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {
+      "Flying": true,
+      "Vigilance": true
+    },
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "legal",
+      "predh": "legal",
+      "future": "legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "legal",
+      "pioneer": "legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Serra Angel",
+    "card_oracle_tags": {},
+    "card_rarity_int": 2,
+    "card_set_code": "9ed",
+    "card_subtypes": [
+      "Angel"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 5,
+    "collector_number": "43\u2605",
+    "collector_number_int": 43,
+    "creature_power": 4,
+    "creature_toughness": 4,
+    "edhrec_rank": 9412,
+    "flavor_text": "When she flies above the good, they consider themselves blessed. When she flies above the wicked, they consider themselves dead.",
+    "mana_cost_jsonb": {
+      "W": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{3}{W}{W}",
+    "oracle_text": "Flying\nVigilance (Attacking doesn't cause this creature to tap.)",
+    "planeswalker_loyalty": null,
+    "price_eur": null,
+    "price_tix": null,
+    "price_usd": null,
+    "produced_mana": {},
+    "released_at": "2005-07-29",
+    "creature_power_text": "4",
+    "creature_toughness_text": "4",
+    "set_name": "Ninth Edition",
+    "type_line": "Creature \u2014 Angel",
+    "prefer_score": 171.81502,
+    "cubecobra_score": 7.6021166
+  },
+  {
+    "scryfall_id": "71567cb0-f4f3-4e86-a9d3-c207119a3185",
+    "oracle_id": "4b7ac066-e5c7-43e6-9e7e-2739b24a905d",
+    "illustration_id": "5f5651af-22fb-4fb8-a04c-1f34b5104bd9",
+    "card_artist": "Greg Staples",
+    "card_border": "white",
+    "card_color_identity": {
+      "W": true
+    },
+    "card_colors": {
+      "W": true
+    },
+    "card_frame_data": {
+      "2003": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {
+      "Flying": true,
+      "Vigilance": true
+    },
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "legal",
+      "predh": "legal",
+      "future": "legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "legal",
+      "pioneer": "legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Serra Angel",
+    "card_oracle_tags": {},
+    "card_rarity_int": 2,
+    "card_set_code": "9ed",
+    "card_subtypes": [
+      "Angel"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 5,
+    "collector_number": "43",
+    "collector_number_int": 43,
+    "creature_power": 4,
+    "creature_toughness": 4,
+    "edhrec_rank": 9412,
+    "flavor_text": "When she flies above the good, they consider themselves blessed. When she flies above the wicked, they consider themselves dead.",
+    "mana_cost_jsonb": {
+      "W": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{3}{W}{W}",
+    "oracle_text": "Flying\nVigilance (Attacking doesn't cause this creature to tap.)",
+    "planeswalker_loyalty": null,
+    "price_eur": 0.31,
+    "price_tix": 0.03,
+    "price_usd": 0.43,
+    "produced_mana": {},
+    "released_at": "2005-07-29",
+    "creature_power_text": "4",
+    "creature_toughness_text": "4",
+    "set_name": "Ninth Edition",
+    "type_line": "Creature \u2014 Angel",
+    "prefer_score": 162.81502,
+    "cubecobra_score": 7.6021166
+  },
+  {
+    "scryfall_id": "354aa649-0261-4fb3-ac83-babc0e957be2",
+    "oracle_id": "4b7ac066-e5c7-43e6-9e7e-2739b24a905d",
+    "illustration_id": "5f5651af-22fb-4fb8-a04c-1f34b5104bd9",
+    "card_artist": "Greg Staples",
+    "card_border": "black",
+    "card_color_identity": {
+      "W": true
+    },
+    "card_colors": {
+      "W": true
+    },
+    "card_frame_data": {
+      "2003": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {
+      "Flying": true,
+      "Vigilance": true
+    },
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "legal",
+      "predh": "legal",
+      "future": "legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "legal",
+      "pioneer": "legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Serra Angel",
+    "card_oracle_tags": {},
+    "card_rarity_int": 2,
+    "card_set_code": "10e",
+    "card_subtypes": [
+      "Angel"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 5,
+    "collector_number": "39\u2605",
+    "collector_number_int": 39,
+    "creature_power": 4,
+    "creature_toughness": 4,
+    "edhrec_rank": 9412,
+    "flavor_text": "Her sword sings more beautifully than any choir.",
+    "mana_cost_jsonb": {
+      "W": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{3}{W}{W}",
+    "oracle_text": "Flying\nVigilance (Attacking doesn't cause this creature to tap.)",
+    "planeswalker_loyalty": null,
+    "price_eur": null,
+    "price_tix": null,
+    "price_usd": null,
+    "produced_mana": {},
+    "released_at": "2007-07-13",
+    "creature_power_text": "4",
+    "creature_toughness_text": "4",
+    "set_name": "Tenth Edition",
+    "type_line": "Creature \u2014 Angel",
+    "prefer_score": 171.81502,
+    "cubecobra_score": 7.6021166
+  },
+  {
+    "scryfall_id": "cad4c850-097e-4909-87ec-a33ef8f2ba34",
+    "oracle_id": "4b7ac066-e5c7-43e6-9e7e-2739b24a905d",
+    "illustration_id": "6fa2c9a8-2b74-457d-884d-ba3914dc9280",
+    "card_artist": "John Avon",
+    "card_border": "black",
+    "card_color_identity": {
+      "W": true
+    },
+    "card_colors": {
+      "W": true
+    },
+    "card_frame_data": {
+      "2015": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {
+      "Flying": true,
+      "Vigilance": true
+    },
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "legal",
+      "predh": "legal",
+      "future": "legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "legal",
+      "pioneer": "legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Serra Angel",
+    "card_oracle_tags": {},
+    "card_rarity_int": 2,
+    "card_set_code": "sld",
+    "card_subtypes": [
+      "Angel"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 5,
+    "collector_number": "1161",
+    "collector_number_int": 1161,
+    "creature_power": 4,
+    "creature_toughness": 4,
+    "edhrec_rank": 9412,
+    "flavor_text": "Through vulnerability and compassion,\nWe find the humility of truth.",
+    "mana_cost_jsonb": {
+      "W": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{3}{W}{W}",
+    "oracle_text": "Flying\nVigilance (Attacking doesn't cause this creature to tap.)",
+    "planeswalker_loyalty": null,
+    "price_eur": 0.47,
+    "price_tix": null,
+    "price_usd": 1.72,
+    "produced_mana": {},
+    "released_at": "2023-10-02",
+    "creature_power_text": "4",
+    "creature_toughness_text": "4",
+    "set_name": "Secret Lair Drop",
+    "type_line": "Creature \u2014 Angel",
+    "prefer_score": 173.32175,
+    "cubecobra_score": 7.6021166
+  },
+  {
+    "scryfall_id": "da497cf0-942e-48a5-943e-16183a4567fd",
+    "oracle_id": "4b7ac066-e5c7-43e6-9e7e-2739b24a905d",
+    "illustration_id": "7aa16de3-4ff9-4ed9-9d62-62c140599508",
+    "card_artist": "Donato Giancola",
+    "card_border": "black",
+    "card_color_identity": {
+      "W": true
+    },
+    "card_colors": {
+      "W": true
+    },
+    "card_frame_data": {
+      "1997": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {
+      "Flying": true,
+      "Vigilance": true
+    },
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "legal",
+      "predh": "legal",
+      "future": "legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "legal",
+      "pioneer": "legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Serra Angel",
+    "card_oracle_tags": {},
+    "card_rarity_int": 1,
+    "card_set_code": "plst",
+    "card_subtypes": [
+      "Angel"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 5,
+    "collector_number": "DMR-271",
+    "collector_number_int": 271,
+    "creature_power": 4,
+    "creature_toughness": 4,
+    "edhrec_rank": 9412,
+    "flavor_text": "The angel remembers her past lives like dreams. Her song held up meadows. Her blade drove back darkness. Her wings carried her across the ages.",
+    "mana_cost_jsonb": {
+      "W": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{3}{W}{W}",
+    "oracle_text": "Flying\nVigilance (Attacking doesn't cause this creature to tap.)",
+    "planeswalker_loyalty": null,
+    "price_eur": null,
+    "price_tix": null,
+    "price_usd": 0.12,
+    "produced_mana": {},
+    "released_at": "2025-04-11",
+    "creature_power_text": "4",
+    "creature_toughness_text": "4",
+    "set_name": "The List",
+    "type_line": "Creature \u2014 Angel",
+    "prefer_score": 169.96523,
+    "cubecobra_score": 7.6021166
+  },
+  {
+    "scryfall_id": "fefbf149-f988-4f8b-9f53-56f5878116a6",
+    "oracle_id": "711eea87-0fa3-46e0-a42b-fa5a86455f04",
+    "illustration_id": "d326c884-fed0-4b92-bd88-fd4989597c20",
+    "card_artist": "Melissa A. Benson",
+    "card_border": "black",
+    "card_color_identity": {
+      "R": true
+    },
+    "card_colors": {
+      "R": true
+    },
+    "card_frame_data": {
+      "1993": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {
+      "Flying": true
+    },
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "legal",
+      "predh": "legal",
+      "future": "legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "legal",
+      "pioneer": "legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "legal",
+      "premodern": "legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Shivan Dragon",
+    "card_oracle_tags": {},
+    "card_rarity_int": 2,
+    "card_set_code": "lea",
+    "card_subtypes": [
+      "Dragon"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 6,
+    "collector_number": "174",
+    "collector_number_int": 174,
+    "creature_power": 5,
+    "creature_toughness": 5,
+    "edhrec_rank": 10926,
+    "flavor_text": "While it's true most Dragons are cruel, the Shivan Dragon seems to take particular glee in the misery of others, often tormenting its victims much like a cat plays with a mouse before delivering the final blow.",
+    "mana_cost_jsonb": {
+      "R": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{4}{R}{R}",
+    "oracle_text": "Flying\n{R}: This creature gets +1/+0 until end of turn.",
+    "planeswalker_loyalty": null,
+    "price_eur": 7028.29,
+    "price_tix": null,
+    "price_usd": null,
+    "produced_mana": {},
+    "released_at": "1993-08-05",
+    "creature_power_text": "5",
+    "creature_toughness_text": "5",
+    "set_name": "Limited Edition Alpha",
+    "type_line": "Creature \u2014 Dragon",
+    "prefer_score": 154.66496,
+    "cubecobra_score": 8.824767
+  },
+  {
+    "scryfall_id": "5e64822a-6817-4e1e-8155-3e95f8e3763f",
+    "oracle_id": "711eea87-0fa3-46e0-a42b-fa5a86455f04",
+    "illustration_id": "d326c884-fed0-4b92-bd88-fd4989597c20",
+    "card_artist": "Melissa A. Benson",
+    "card_border": "black",
+    "card_color_identity": {
+      "R": true
+    },
+    "card_colors": {
+      "R": true
+    },
+    "card_frame_data": {
+      "1993": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {
+      "Flying": true
+    },
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "legal",
+      "predh": "legal",
+      "future": "legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "legal",
+      "pioneer": "legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "legal",
+      "premodern": "legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Shivan Dragon",
+    "card_oracle_tags": {},
+    "card_rarity_int": 2,
+    "card_set_code": "leb",
+    "card_subtypes": [
+      "Dragon"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 6,
+    "collector_number": "175",
+    "collector_number_int": 175,
+    "creature_power": 5,
+    "creature_toughness": 5,
+    "edhrec_rank": 10926,
+    "flavor_text": "While it's true most Dragons are cruel, the Shivan Dragon seems to take particular glee in the misery of others, often tormenting its victims much like a cat plays with a mouse before delivering the final blow.",
+    "mana_cost_jsonb": {
+      "R": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{4}{R}{R}",
+    "oracle_text": "Flying\n{R}: This creature gets +1/+0 until end of turn.",
+    "planeswalker_loyalty": null,
+    "price_eur": 1837.85,
+    "price_tix": null,
+    "price_usd": null,
+    "produced_mana": {},
+    "released_at": "1993-10-04",
+    "creature_power_text": "5",
+    "creature_toughness_text": "5",
+    "set_name": "Limited Edition Beta",
+    "type_line": "Creature \u2014 Dragon",
+    "prefer_score": 154.66496,
+    "cubecobra_score": 8.824767
+  },
+  {
+    "scryfall_id": "fd4f6e34-3f66-4e10-8170-56039c5f6fcc",
+    "oracle_id": "711eea87-0fa3-46e0-a42b-fa5a86455f04",
+    "illustration_id": "d326c884-fed0-4b92-bd88-fd4989597c20",
+    "card_artist": "Melissa A. Benson",
+    "card_border": "white",
+    "card_color_identity": {
+      "R": true
+    },
+    "card_colors": {
+      "R": true
+    },
+    "card_frame_data": {
+      "1993": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {
+      "Flying": true
+    },
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "legal",
+      "predh": "legal",
+      "future": "legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "legal",
+      "pioneer": "legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "legal",
+      "premodern": "legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Shivan Dragon",
+    "card_oracle_tags": {},
+    "card_rarity_int": 2,
+    "card_set_code": "2ed",
+    "card_subtypes": [
+      "Dragon"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 6,
+    "collector_number": "175",
+    "collector_number_int": 175,
+    "creature_power": 5,
+    "creature_toughness": 5,
+    "edhrec_rank": 10926,
+    "flavor_text": "While it's true most Dragons are cruel, the Shivan Dragon seems to take particular glee in the misery of others, often tormenting its victims much like a cat plays with a mouse before delivering the final blow.",
+    "mana_cost_jsonb": {
+      "R": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{4}{R}{R}",
+    "oracle_text": "Flying\n{R}: This creature gets +1/+0 until end of turn.",
+    "planeswalker_loyalty": null,
+    "price_eur": 170.33,
+    "price_tix": null,
+    "price_usd": 400,
+    "produced_mana": {},
+    "released_at": "1993-12-01",
+    "creature_power_text": "5",
+    "creature_toughness_text": "5",
+    "set_name": "Unlimited Edition",
+    "type_line": "Creature \u2014 Dragon",
+    "prefer_score": 140.66496,
+    "cubecobra_score": 8.824767
+  },
+  {
+    "scryfall_id": "4310cc73-79bc-4d06-b71a-679c9c6cca5c",
+    "oracle_id": "711eea87-0fa3-46e0-a42b-fa5a86455f04",
+    "illustration_id": "d326c884-fed0-4b92-bd88-fd4989597c20",
+    "card_artist": "Melissa A. Benson",
+    "card_border": "black",
+    "card_color_identity": {
+      "R": true
+    },
+    "card_colors": {
+      "R": true
+    },
+    "card_frame_data": {
+      "1993": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {
+      "Flying": true
+    },
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "legal",
+      "predh": "legal",
+      "future": "legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "legal",
+      "pioneer": "legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "legal",
+      "premodern": "legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Shivan Dragon",
+    "card_oracle_tags": {},
+    "card_rarity_int": 2,
+    "card_set_code": "cei",
+    "card_subtypes": [
+      "Dragon"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 6,
+    "collector_number": "175",
+    "collector_number_int": 175,
+    "creature_power": 5,
+    "creature_toughness": 5,
+    "edhrec_rank": 10926,
+    "flavor_text": "While it's true most Dragons are cruel, the Shivan Dragon seems to take particular glee in the misery of others, often tormenting its victims much like a cat plays with a mouse before delivering the final blow.",
+    "mana_cost_jsonb": {
+      "R": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{4}{R}{R}",
+    "oracle_text": "Flying\n{R}: This creature gets +1/+0 until end of turn.",
+    "planeswalker_loyalty": null,
+    "price_eur": 62.43,
+    "price_tix": null,
+    "price_usd": 80,
+    "produced_mana": {},
+    "released_at": "1993-12-10",
+    "creature_power_text": "5",
+    "creature_toughness_text": "5",
+    "set_name": "Intl. Collectors' Edition",
+    "type_line": "Creature \u2014 Dragon",
+    "prefer_score": 154.66496,
+    "cubecobra_score": 8.824767
+  },
+  {
+    "scryfall_id": "05082d18-ad43-43e0-8d90-973b7959aa6b",
+    "oracle_id": "711eea87-0fa3-46e0-a42b-fa5a86455f04",
+    "illustration_id": "d326c884-fed0-4b92-bd88-fd4989597c20",
+    "card_artist": "Melissa A. Benson",
+    "card_border": "black",
+    "card_color_identity": {
+      "R": true
+    },
+    "card_colors": {
+      "R": true
+    },
+    "card_frame_data": {
+      "1993": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {
+      "Flying": true
+    },
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "legal",
+      "predh": "legal",
+      "future": "legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "legal",
+      "pioneer": "legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "legal",
+      "premodern": "legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Shivan Dragon",
+    "card_oracle_tags": {},
+    "card_rarity_int": 2,
+    "card_set_code": "ced",
+    "card_subtypes": [
+      "Dragon"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 6,
+    "collector_number": "175",
+    "collector_number_int": 175,
+    "creature_power": 5,
+    "creature_toughness": 5,
+    "edhrec_rank": 10926,
+    "flavor_text": "While it's true most Dragons are cruel, the Shivan Dragon seems to take particular glee in the misery of others, often tormenting its victims much like a cat plays with a mouse before delivering the final blow.",
+    "mana_cost_jsonb": {
+      "R": [
+        1,
+        2
+      ]
+    },
+    "mana_cost_text": "{4}{R}{R}",
+    "oracle_text": "Flying\n{R}: This creature gets +1/+0 until end of turn.",
+    "planeswalker_loyalty": null,
+    "price_eur": 53.21,
+    "price_tix": null,
+    "price_usd": 82.5,
+    "produced_mana": {},
+    "released_at": "1993-12-10",
+    "creature_power_text": "5",
+    "creature_toughness_text": "5",
+    "set_name": "Collectors' Edition",
+    "type_line": "Creature \u2014 Dragon",
+    "prefer_score": 154.66496,
+    "cubecobra_score": 8.824767
+  },
+  {
+    "scryfall_id": "c4300d24-1cae-4dd5-be7e-38cc677cf5bd",
+    "oracle_id": "6ad8011d-3471-4369-9d68-b264cc027487",
+    "illustration_id": "54462260-8d64-4ec2-bac7-f2d469f187f3",
+    "card_artist": "Mark Tedin",
+    "card_border": "black",
+    "card_color_identity": {},
+    "card_colors": {},
+    "card_frame_data": {
+      "1993": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "banned",
+      "duel": "banned",
+      "brawl": "not_legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "banned",
+      "modern": "not_legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "restricted",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "legal",
+      "gladiator": "not_legal",
+      "oldschool": "restricted",
+      "premodern": "not_legal",
+      "oathbreaker": "banned",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Sol Ring",
+    "card_oracle_tags": {},
+    "card_rarity_int": 1,
+    "card_set_code": "lea",
+    "card_subtypes": [],
+    "card_types": [
+      "Artifact"
+    ],
+    "card_watermark": null,
+    "cmc": 1,
+    "collector_number": "269",
+    "collector_number_int": 269,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 1,
+    "flavor_text": null,
+    "mana_cost_jsonb": {},
+    "mana_cost_text": "{1}",
+    "oracle_text": "{T}: Add {C}{C}.",
+    "planeswalker_loyalty": null,
+    "price_eur": 1166.83,
+    "price_tix": null,
+    "price_usd": null,
+    "produced_mana": {
+      "C": true
+    },
+    "released_at": "1993-08-05",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Limited Edition Alpha",
+    "type_line": "Artifact",
+    "prefer_score": 158.4544,
+    "cubecobra_score": 0
+  },
+  {
+    "scryfall_id": "c0fb91ec-20a8-4c13-9469-18885b1ecca3",
+    "oracle_id": "6ad8011d-3471-4369-9d68-b264cc027487",
+    "illustration_id": "54462260-8d64-4ec2-bac7-f2d469f187f3",
+    "card_artist": "Mark Tedin",
+    "card_border": "black",
+    "card_color_identity": {},
+    "card_colors": {},
+    "card_frame_data": {
+      "1993": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "banned",
+      "duel": "banned",
+      "brawl": "not_legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "banned",
+      "modern": "not_legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "restricted",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "legal",
+      "gladiator": "not_legal",
+      "oldschool": "restricted",
+      "premodern": "not_legal",
+      "oathbreaker": "banned",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Sol Ring",
+    "card_oracle_tags": {},
+    "card_rarity_int": 1,
+    "card_set_code": "leb",
+    "card_subtypes": [],
+    "card_types": [
+      "Artifact"
+    ],
+    "card_watermark": null,
+    "cmc": 1,
+    "collector_number": "270",
+    "collector_number_int": 270,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 1,
+    "flavor_text": null,
+    "mana_cost_jsonb": {},
+    "mana_cost_text": "{1}",
+    "oracle_text": "{T}: Add {C}{C}.",
+    "planeswalker_loyalty": null,
+    "price_eur": 524.74,
+    "price_tix": null,
+    "price_usd": 289.85,
+    "produced_mana": {
+      "C": true
+    },
+    "released_at": "1993-10-04",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Limited Edition Beta",
+    "type_line": "Artifact",
+    "prefer_score": 158.4544,
+    "cubecobra_score": 0
+  },
+  {
+    "scryfall_id": "e07f656c-97b5-4147-821a-edbb49f34e19",
+    "oracle_id": "6ad8011d-3471-4369-9d68-b264cc027487",
+    "illustration_id": "54462260-8d64-4ec2-bac7-f2d469f187f3",
+    "card_artist": "Mark Tedin",
+    "card_border": "white",
+    "card_color_identity": {},
+    "card_colors": {},
+    "card_frame_data": {
+      "1993": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "banned",
+      "duel": "banned",
+      "brawl": "not_legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "banned",
+      "modern": "not_legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "restricted",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "legal",
+      "gladiator": "not_legal",
+      "oldschool": "restricted",
+      "premodern": "not_legal",
+      "oathbreaker": "banned",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Sol Ring",
+    "card_oracle_tags": {},
+    "card_rarity_int": 1,
+    "card_set_code": "2ed",
+    "card_subtypes": [],
+    "card_types": [
+      "Artifact"
+    ],
+    "card_watermark": null,
+    "cmc": 1,
+    "collector_number": "270",
+    "collector_number_int": 270,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 1,
+    "flavor_text": null,
+    "mana_cost_jsonb": {},
+    "mana_cost_text": "{1}",
+    "oracle_text": "{T}: Add {C}{C}.",
+    "planeswalker_loyalty": null,
+    "price_eur": 72.1,
+    "price_tix": null,
+    "price_usd": 116.99,
+    "produced_mana": {
+      "C": true
+    },
+    "released_at": "1993-12-01",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Unlimited Edition",
+    "type_line": "Artifact",
+    "prefer_score": 144.4544,
+    "cubecobra_score": 0
+  },
+  {
+    "scryfall_id": "dfae7531-693e-4325-8207-3ea4368e6c2c",
+    "oracle_id": "6ad8011d-3471-4369-9d68-b264cc027487",
+    "illustration_id": "54462260-8d64-4ec2-bac7-f2d469f187f3",
+    "card_artist": "Mark Tedin",
+    "card_border": "black",
+    "card_color_identity": {},
+    "card_colors": {},
+    "card_frame_data": {
+      "1993": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "banned",
+      "duel": "banned",
+      "brawl": "not_legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "banned",
+      "modern": "not_legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "restricted",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "legal",
+      "gladiator": "not_legal",
+      "oldschool": "restricted",
+      "premodern": "not_legal",
+      "oathbreaker": "banned",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Sol Ring",
+    "card_oracle_tags": {},
+    "card_rarity_int": 1,
+    "card_set_code": "ced",
+    "card_subtypes": [],
+    "card_types": [
+      "Artifact"
+    ],
+    "card_watermark": null,
+    "cmc": 1,
+    "collector_number": "270",
+    "collector_number_int": 270,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 1,
+    "flavor_text": null,
+    "mana_cost_jsonb": {},
+    "mana_cost_text": "{1}",
+    "oracle_text": "{T}: Add {C}{C}.",
+    "planeswalker_loyalty": null,
+    "price_eur": 62.53,
+    "price_tix": null,
+    "price_usd": 74.99,
+    "produced_mana": {
+      "C": true
+    },
+    "released_at": "1993-12-10",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Collectors' Edition",
+    "type_line": "Artifact",
+    "prefer_score": 158.4544,
+    "cubecobra_score": 0
+  },
+  {
+    "scryfall_id": "9ffc356f-9053-435c-ac1c-e36c2806b6fa",
+    "oracle_id": "6ad8011d-3471-4369-9d68-b264cc027487",
+    "illustration_id": "54462260-8d64-4ec2-bac7-f2d469f187f3",
+    "card_artist": "Mark Tedin",
+    "card_border": "black",
+    "card_color_identity": {},
+    "card_colors": {},
+    "card_frame_data": {
+      "1993": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "banned",
+      "duel": "banned",
+      "brawl": "not_legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "banned",
+      "modern": "not_legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "restricted",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "legal",
+      "gladiator": "not_legal",
+      "oldschool": "restricted",
+      "premodern": "not_legal",
+      "oathbreaker": "banned",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Sol Ring",
+    "card_oracle_tags": {},
+    "card_rarity_int": 1,
+    "card_set_code": "cei",
+    "card_subtypes": [],
+    "card_types": [
+      "Artifact"
+    ],
+    "card_watermark": null,
+    "cmc": 1,
+    "collector_number": "270",
+    "collector_number_int": 270,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 1,
+    "flavor_text": null,
+    "mana_cost_jsonb": {},
+    "mana_cost_text": "{1}",
+    "oracle_text": "{T}: Add {C}{C}.",
+    "planeswalker_loyalty": null,
+    "price_eur": 50.96,
+    "price_tix": null,
+    "price_usd": null,
+    "produced_mana": {
+      "C": true
+    },
+    "released_at": "1993-12-10",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Intl. Collectors' Edition",
+    "type_line": "Artifact",
+    "prefer_score": 158.4544,
+    "cubecobra_score": 0
+  },
+  {
+    "scryfall_id": "b6876d9e-0908-43ac-8542-09c7aa02b5ba",
+    "oracle_id": "45900b2f-f6a9-4c42-9642-008f3c1cf6dd",
+    "illustration_id": "abf5b6d9-61e7-47f0-b187-a6bdfec68f58",
+    "card_artist": "Justin Murray",
+    "card_border": "black",
+    "card_color_identity": {
+      "G": true
+    },
+    "card_colors": {
+      "G": true
+    },
+    "card_frame_data": {
+      "Future": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Tarmogoyf",
+    "card_oracle_tags": {},
+    "card_rarity_int": 2,
+    "card_set_code": "fut",
+    "card_subtypes": [
+      "Lhurgoyf"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 2,
+    "collector_number": "153",
+    "collector_number_int": 153,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 8580,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "G": [
+        1
+      ]
+    },
+    "mana_cost_text": "{1}{G}",
+    "oracle_text": "Tarmogoyf's power is equal to the number of card types among cards in all graveyards and its toughness is equal to that number plus 1.",
+    "planeswalker_loyalty": null,
+    "price_eur": 9.14,
+    "price_tix": 0.06,
+    "price_usd": 17.66,
+    "produced_mana": {},
+    "released_at": "2007-05-04",
+    "creature_power_text": "*",
+    "creature_toughness_text": "1+*",
+    "set_name": "Future Sight",
+    "type_line": "Creature \u2014 Lhurgoyf",
+    "prefer_score": 135.64348,
+    "cubecobra_score": 6.9296994
+  },
+  {
+    "scryfall_id": "5ea82414-3f16-4c8c-8668-1f1ee7566c7b",
+    "oracle_id": "45900b2f-f6a9-4c42-9642-008f3c1cf6dd",
+    "illustration_id": "7e547829-bbc2-42f6-81c8-a908fe2f011e",
+    "card_artist": "Ryan Barger",
+    "card_border": "black",
+    "card_color_identity": {
+      "G": true
+    },
+    "card_colors": {
+      "G": true
+    },
+    "card_frame_data": {
+      "2003": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Tarmogoyf",
+    "card_oracle_tags": {},
+    "card_rarity_int": 3,
+    "card_set_code": "mma",
+    "card_subtypes": [
+      "Lhurgoyf"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 2,
+    "collector_number": "166",
+    "collector_number_int": 166,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 8580,
+    "flavor_text": "What doesn't grow, dies. And what dies grows the tarmogoyf.",
+    "mana_cost_jsonb": {
+      "G": [
+        1
+      ]
+    },
+    "mana_cost_text": "{1}{G}",
+    "oracle_text": "Tarmogoyf's power is equal to the number of card types among cards in all graveyards and its toughness is equal to that number plus 1.",
+    "planeswalker_loyalty": null,
+    "price_eur": 9.3,
+    "price_tix": 0.17,
+    "price_usd": 7.99,
+    "produced_mana": {},
+    "released_at": "2013-06-07",
+    "creature_power_text": "*",
+    "creature_toughness_text": "1+*",
+    "set_name": "Modern Masters",
+    "type_line": "Creature \u2014 Lhurgoyf",
+    "prefer_score": 156.03477,
+    "cubecobra_score": 6.9296994
+  },
+  {
+    "scryfall_id": "1cfdd410-391b-4b71-8139-f5a30653097a",
+    "oracle_id": "45900b2f-f6a9-4c42-9642-008f3c1cf6dd",
+    "illustration_id": "7e547829-bbc2-42f6-81c8-a908fe2f011e",
+    "card_artist": "Ryan Barger",
+    "card_border": "black",
+    "card_color_identity": {
+      "G": true
+    },
+    "card_colors": {
+      "G": true
+    },
+    "card_frame_data": {
+      "2015": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Tarmogoyf",
+    "card_oracle_tags": {},
+    "card_rarity_int": 3,
+    "card_set_code": "mm2",
+    "card_subtypes": [
+      "Lhurgoyf"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 2,
+    "collector_number": "165",
+    "collector_number_int": 165,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 8580,
+    "flavor_text": "What doesn't grow, dies. And what dies grows the tarmogoyf.",
+    "mana_cost_jsonb": {
+      "G": [
+        1
+      ]
+    },
+    "mana_cost_text": "{1}{G}",
+    "oracle_text": "Tarmogoyf's power is equal to the number of card types among cards in all graveyards and its toughness is equal to that number plus 1.",
+    "planeswalker_loyalty": null,
+    "price_eur": 8.05,
+    "price_tix": 0.12,
+    "price_usd": 6.29,
+    "produced_mana": {},
+    "released_at": "2015-05-22",
+    "creature_power_text": "*",
+    "creature_toughness_text": "1+*",
+    "set_name": "Modern Masters 2015",
+    "type_line": "Creature \u2014 Lhurgoyf",
+    "prefer_score": 168.03477,
+    "cubecobra_score": 6.9296994
+  },
+  {
+    "scryfall_id": "2b49dfb7-dbe7-4a2b-b9de-c620a0db2e47",
+    "oracle_id": "45900b2f-f6a9-4c42-9642-008f3c1cf6dd",
+    "illustration_id": "7e547829-bbc2-42f6-81c8-a908fe2f011e",
+    "card_artist": "Ryan Barger",
+    "card_border": "black",
+    "card_color_identity": {
+      "G": true
+    },
+    "card_colors": {
+      "G": true
+    },
+    "card_frame_data": {
+      "2015": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Tarmogoyf",
+    "card_oracle_tags": {},
+    "card_rarity_int": 3,
+    "card_set_code": "mm3",
+    "card_subtypes": [
+      "Lhurgoyf"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 2,
+    "collector_number": "141",
+    "collector_number_int": 141,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 8580,
+    "flavor_text": "What doesn't grow, dies. And what dies grows the tarmogoyf.",
+    "mana_cost_jsonb": {
+      "G": [
+        1
+      ]
+    },
+    "mana_cost_text": "{1}{G}",
+    "oracle_text": "Tarmogoyf's power is equal to the number of card types among cards in all graveyards and its toughness is equal to that number plus 1.",
+    "planeswalker_loyalty": null,
+    "price_eur": 6.9,
+    "price_tix": 0.13,
+    "price_usd": 5.85,
+    "produced_mana": {},
+    "released_at": "2017-03-17",
+    "creature_power_text": "*",
+    "creature_toughness_text": "1+*",
+    "set_name": "Modern Masters 2017",
+    "type_line": "Creature \u2014 Lhurgoyf",
+    "prefer_score": 168.03477,
+    "cubecobra_score": 6.9296994
+  },
+  {
+    "scryfall_id": "8a34e2df-a9ee-4c61-bc4c-518475a39925",
+    "oracle_id": "45900b2f-f6a9-4c42-9642-008f3c1cf6dd",
+    "illustration_id": "c32c2488-d604-46ad-b8bc-62782ff1f222",
+    "card_artist": "Filip Burburan",
+    "card_border": "black",
+    "card_color_identity": {
+      "G": true
+    },
+    "card_colors": {
+      "G": true
+    },
+    "card_frame_data": {
+      "2015": true,
+      "Extendedart": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Tarmogoyf",
+    "card_oracle_tags": {},
+    "card_rarity_int": 3,
+    "card_set_code": "puma",
+    "card_subtypes": [
+      "Lhurgoyf"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 2,
+    "collector_number": "U19",
+    "collector_number_int": 19,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 8580,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "G": [
+        1
+      ]
+    },
+    "mana_cost_text": "{1}{G}",
+    "oracle_text": "Tarmogoyf's power is equal to the number of card types among cards in all graveyards and its toughness is equal to that number plus 1.",
+    "planeswalker_loyalty": null,
+    "price_eur": null,
+    "price_tix": 0.71,
+    "price_usd": null,
+    "produced_mana": {},
+    "released_at": "2018-12-07",
+    "creature_power_text": "*",
+    "creature_toughness_text": "1+*",
+    "set_name": "Ultimate Box Topper",
+    "type_line": "Creature \u2014 Lhurgoyf",
+    "prefer_score": 171.8498,
+    "cubecobra_score": 6.9296994
+  },
+  {
+    "scryfall_id": "42e56220-81c3-4440-9f97-8616d630a8ee",
+    "oracle_id": "45900b2f-f6a9-4c42-9642-008f3c1cf6dd",
+    "illustration_id": "c32c2488-d604-46ad-b8bc-62782ff1f222",
+    "card_artist": "Filip Burburan",
+    "card_border": "black",
+    "card_color_identity": {
+      "G": true
+    },
+    "card_colors": {
+      "G": true
+    },
+    "card_frame_data": {
+      "2015": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Tarmogoyf",
+    "card_oracle_tags": {},
+    "card_rarity_int": 3,
+    "card_set_code": "uma",
+    "card_subtypes": [
+      "Lhurgoyf"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 2,
+    "collector_number": "187",
+    "collector_number_int": 187,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 8580,
+    "flavor_text": "What doesn't grow, dies. And what dies grows the tarmogoyf.",
+    "mana_cost_jsonb": {
+      "G": [
+        1
+      ]
+    },
+    "mana_cost_text": "{1}{G}",
+    "oracle_text": "Tarmogoyf's power is equal to the number of card types among cards in all graveyards and its toughness is equal to that number plus 1.",
+    "planeswalker_loyalty": null,
+    "price_eur": 7.76,
+    "price_tix": 0.64,
+    "price_usd": 6.2,
+    "produced_mana": {},
+    "released_at": "2018-12-07",
+    "creature_power_text": "*",
+    "creature_toughness_text": "1+*",
+    "set_name": "Ultimate Masters",
+    "type_line": "Creature \u2014 Lhurgoyf",
+    "prefer_score": 164.8498,
+    "cubecobra_score": 6.9296994
+  },
+  {
+    "scryfall_id": "69daba76-96e8-4bcc-ab79-2f00189ad8fb",
+    "oracle_id": "45900b2f-f6a9-4c42-9642-008f3c1cf6dd",
+    "illustration_id": "abf5b6d9-61e7-47f0-b187-a6bdfec68f58",
+    "card_artist": "Justin Murray",
+    "card_border": "black",
+    "card_color_identity": {
+      "G": true
+    },
+    "card_colors": {
+      "G": true
+    },
+    "card_frame_data": {
+      "2015": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Tarmogoyf",
+    "card_oracle_tags": {},
+    "card_rarity_int": 3,
+    "card_set_code": "tsr",
+    "card_subtypes": [
+      "Lhurgoyf"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 2,
+    "collector_number": "235",
+    "collector_number_int": 235,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 8580,
+    "flavor_text": "What doesn't grow, dies. And what dies grows the tarmogoyf.",
+    "mana_cost_jsonb": {
+      "G": [
+        1
+      ]
+    },
+    "mana_cost_text": "{1}{G}",
+    "oracle_text": "Tarmogoyf's power is equal to the number of card types among cards in all graveyards and its toughness is equal to that number plus 1.",
+    "planeswalker_loyalty": null,
+    "price_eur": 6.86,
+    "price_tix": 0.2,
+    "price_usd": 5.99,
+    "produced_mana": {},
+    "released_at": "2021-03-19",
+    "creature_power_text": "*",
+    "creature_toughness_text": "1+*",
+    "set_name": "Time Spiral Remastered",
+    "type_line": "Creature \u2014 Lhurgoyf",
+    "prefer_score": 166.64348,
+    "cubecobra_score": 6.9296994
+  },
+  {
+    "scryfall_id": "dd6b4509-61b6-45dc-b7c9-1582626de090",
+    "oracle_id": "45900b2f-f6a9-4c42-9642-008f3c1cf6dd",
+    "illustration_id": "abf5b6d9-61e7-47f0-b187-a6bdfec68f58",
+    "card_artist": "Justin Murray",
+    "card_border": "black",
+    "card_color_identity": {
+      "G": true
+    },
+    "card_colors": {
+      "G": true
+    },
+    "card_frame_data": {
+      "Future": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Tarmogoyf",
+    "card_oracle_tags": {},
+    "card_rarity_int": 2,
+    "card_set_code": "plst",
+    "card_subtypes": [
+      "Lhurgoyf"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 2,
+    "collector_number": "FUT-153",
+    "collector_number_int": 153,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 8580,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "G": [
+        1
+      ]
+    },
+    "mana_cost_text": "{1}{G}",
+    "oracle_text": "Tarmogoyf's power is equal to the number of card types among cards in all graveyards and its toughness is equal to that number plus 1.",
+    "planeswalker_loyalty": null,
+    "price_eur": 8.82,
+    "price_tix": null,
+    "price_usd": 12.04,
+    "produced_mana": {},
+    "released_at": "2021-06-19",
+    "creature_power_text": "*",
+    "creature_toughness_text": "1+*",
+    "set_name": "The List",
+    "type_line": "Creature \u2014 Lhurgoyf",
+    "prefer_score": 135.64348,
+    "cubecobra_score": 6.9296994
+  },
+  {
+    "scryfall_id": "25785684-7cee-4663-adb2-a9bd86a7bb79",
+    "oracle_id": "45900b2f-f6a9-4c42-9642-008f3c1cf6dd",
+    "illustration_id": "7e547829-bbc2-42f6-81c8-a908fe2f011e",
+    "card_artist": "Ryan Barger",
+    "card_border": "black",
+    "card_color_identity": {
+      "G": true
+    },
+    "card_colors": {
+      "G": true
+    },
+    "card_frame_data": {
+      "Future": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Tarmogoyf",
+    "card_oracle_tags": {},
+    "card_rarity_int": 2,
+    "card_set_code": "p30a",
+    "card_subtypes": [
+      "Lhurgoyf"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 2,
+    "collector_number": "15",
+    "collector_number_int": 15,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 8580,
+    "flavor_text": "What doesn't grow, dies. And what dies grows the tarmogoyf.",
+    "mana_cost_jsonb": {
+      "G": [
+        1
+      ]
+    },
+    "mana_cost_text": "{1}{G}",
+    "oracle_text": "Tarmogoyf's power is equal to the number of card types among cards in all graveyards and its toughness is equal to that number plus 1.",
+    "planeswalker_loyalty": null,
+    "price_eur": null,
+    "price_tix": null,
+    "price_usd": null,
+    "produced_mana": {},
+    "released_at": "2022-09-02",
+    "creature_power_text": "*",
+    "creature_toughness_text": "1+*",
+    "set_name": "30th Anniversary Play Promos",
+    "type_line": "Creature \u2014 Lhurgoyf",
+    "prefer_score": 92.034775,
+    "cubecobra_score": 6.9296994
+  },
+  {
+    "scryfall_id": "4d514db4-cf57-4442-a7c9-7373a2a42c0d",
+    "oracle_id": "45900b2f-f6a9-4c42-9642-008f3c1cf6dd",
+    "illustration_id": "de7fe334-4ae4-490a-b236-079b45be4017",
+    "card_artist": "Robin Olausson",
+    "card_border": "black",
+    "card_color_identity": {
+      "G": true
+    },
+    "card_colors": {
+      "G": true
+    },
+    "card_frame_data": {
+      "2015": true,
+      "Inverted": true,
+      "Showcase": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Tarmogoyf",
+    "card_oracle_tags": {},
+    "card_rarity_int": 3,
+    "card_set_code": "pip",
+    "card_subtypes": [
+      "Lhurgoyf"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 2,
+    "collector_number": "349",
+    "collector_number_int": 349,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 8580,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "G": [
+        1
+      ]
+    },
+    "mana_cost_text": "{1}{G}",
+    "oracle_text": "Tarmogoyf's power is equal to the number of card types among cards in all graveyards and its toughness is equal to that number plus 1.",
+    "planeswalker_loyalty": null,
+    "price_eur": 7.36,
+    "price_tix": 1.99,
+    "price_usd": 7.18,
+    "produced_mana": {},
+    "released_at": "2024-03-08",
+    "creature_power_text": "*",
+    "creature_toughness_text": "1+*",
+    "set_name": "Fallout",
+    "type_line": "Creature \u2014 Lhurgoyf",
+    "prefer_score": 154.8498,
+    "cubecobra_score": 6.9296994
+  },
+  {
+    "scryfall_id": "f8eb6278-9b1d-4bac-bebd-e084e713d54a",
+    "oracle_id": "45900b2f-f6a9-4c42-9642-008f3c1cf6dd",
+    "illustration_id": "de7fe334-4ae4-490a-b236-079b45be4017",
+    "card_artist": "Robin Olausson",
+    "card_border": "black",
+    "card_color_identity": {
+      "G": true
+    },
+    "card_colors": {
+      "G": true
+    },
+    "card_frame_data": {
+      "2015": true,
+      "Inverted": true,
+      "Showcase": true
+    },
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Tarmogoyf",
+    "card_oracle_tags": {},
+    "card_rarity_int": 3,
+    "card_set_code": "pip",
+    "card_subtypes": [
+      "Lhurgoyf"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 2,
+    "collector_number": "877",
+    "collector_number_int": 877,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": 8580,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "G": [
+        1
+      ]
+    },
+    "mana_cost_text": "{1}{G}",
+    "oracle_text": "Tarmogoyf's power is equal to the number of card types among cards in all graveyards and its toughness is equal to that number plus 1.",
+    "planeswalker_loyalty": null,
+    "price_eur": null,
+    "price_tix": null,
+    "price_usd": null,
+    "produced_mana": {},
+    "released_at": "2024-03-08",
+    "creature_power_text": "*",
+    "creature_toughness_text": "1+*",
+    "set_name": "Fallout",
+    "type_line": "Creature \u2014 Lhurgoyf",
+    "prefer_score": 149.8498,
+    "cubecobra_score": 6.9296994
+  }
+]

@@ -555,6 +555,9 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         if field_info.parser_class == ParserClass.RARITY and isinstance(self.rhs, StringValueNode):
             return NumericValueNode(get_rarity_number(self.rhs.value)).to_json()
 
+        if attr in ("card_name", "card_artist") and isinstance(self.rhs, StringValueNode):
+            return {"node_type": "StringValueNode", "kwargs": {"value": titlecase(self.rhs.value)}}
+
         return _node_to_json(self.rhs)
 
     def to_sql(self, context: dict) -> str:

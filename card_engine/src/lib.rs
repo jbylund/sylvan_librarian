@@ -335,7 +335,7 @@ fn card_from_pydict(d: &Bound<PyDict>) -> Card {
         card_color_identity: jsonb_color_to_bits(d, "card_color_identity"),
         produced_mana: jsonb_color_to_bits(d, "produced_mana"),
 
-        cmc: opt_u8(d, "cmc"),
+        cmc: opt_u8(d, "cmc"), // Un-set cards have fractional cmc, but we don't load those into the dataset
         creature_power: opt_i8(d, "creature_power"),
         creature_toughness: opt_i8(d, "creature_toughness"),
         planeswalker_loyalty: opt_u8(d, "planeswalker_loyalty"),
@@ -1355,7 +1355,7 @@ fn prefer_score(card: &Card, prefer: &str) -> f64 {
     match prefer {
         "oldest"   => { let d: i64 = card.released_at.replace('-', "").parse().unwrap_or(99999999); -(d as f64) }
         "newest"   => { let d: i64 = card.released_at.replace('-', "").parse().unwrap_or(0); d as f64 }
-        "usd_low"  => -(card.price_usd.unwrap_or(0.0) as f64),
+        "usd_low"  => -(card.price_usd.unwrap_or(f32::INFINITY) as f64),
         "usd_high" => card.price_usd.unwrap_or(0.0) as f64,
         "promo"    => -(card.edhrec_rank.map(|r| r as f64).unwrap_or(f64::INFINITY)),
         _          => card.prefer_score.unwrap_or(0.0) as f64,
