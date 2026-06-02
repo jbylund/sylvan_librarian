@@ -1,3 +1,4 @@
+# ruff: noqa: ERA001, PLR0913
 """Unit tests for the Rust QueryEngine — filters, dedup, prefer, and sort.
 
 Fixture: api/tests/fixtures/engine_cards.json
@@ -282,7 +283,7 @@ class TestSort:
 
     def test_limit_caps_returned_cards(self, engine: QueryEngine) -> None:
         total, cards = _run(engine, limit=5)
-        assert total == 87   # total reflects full match count
+        assert total == 87  # total reflects full match count
         assert len(cards) == 5
 
     def test_sort_direction_desc_reverses_order(self, engine: QueryEngine) -> None:
@@ -308,28 +309,28 @@ class TestDevotion:
     def test_devotion_hybrid_rg_counts_as_red(self, engine: QueryEngine) -> None:
         # Boggart Ram-Gang {R/G}{R/G}{R/G}: each {R/G} counts as 1 R pip
         # devotion:{R} should match all 4 printings
-        total, cards = _run(engine, 'devotion:{R} name="Boggart Ram-Gang"')
+        total, _cards = _run(engine, 'devotion:{R} name="Boggart Ram-Gang"')
         assert total == 4
 
     def test_devotion_hybrid_rg_counts_as_green(self, engine: QueryEngine) -> None:
         # Same card: each {R/G} also counts as 1 G pip
-        total, cards = _run(engine, 'devotion:{G} name="Boggart Ram-Gang"')
+        total, _cards = _run(engine, 'devotion:{G} name="Boggart Ram-Gang"')
         assert total == 4
 
     def test_devotion_hybrid_gw_counts_as_green(self, engine: QueryEngine) -> None:
         # Kitchen Finks {1}{G/W}{G/W}: 2 G pips via hybrid
-        total, cards = _run(engine, 'devotion:{G}{G} name="Kitchen Finks"')
+        total, _cards = _run(engine, 'devotion:{G}{G} name="Kitchen Finks"')
         assert total == 6
 
     def test_devotion_hybrid_gw_counts_as_white(self, engine: QueryEngine) -> None:
         # Kitchen Finks: 2 W pips via hybrid
-        total, cards = _run(engine, 'devotion:{W}{W} name="Kitchen Finks"')
+        total, _cards = _run(engine, 'devotion:{W}{W} name="Kitchen Finks"')
         assert total == 6
 
     def test_devotion_2w_hybrid_counts_as_white(self, engine: QueryEngine) -> None:
         # Spectral Procession {2/W}{2/W}{2/W}: the W in each {2/W} counts as 1 W pip
         # devotion:{W} (at least 1 W) should match all 6 printings
-        total, cards = _run(engine, 'devotion:{W} name="Spectral Procession"')
+        total, _cards = _run(engine, 'devotion:{W} name="Spectral Procession"')
         assert total == 6
 
     def test_devotion_threshold_hybrid(self, engine: QueryEngine) -> None:
@@ -406,8 +407,8 @@ class TestColorIdentity:
     def test_identity_differs_from_color(self, engine: QueryEngine) -> None:
         # Nicol Bolas (UBR) has c:r but only cards with identity ⊆ {R} fit in a mono-red deck
         # Nicol Bolas has B+U+R identity so does NOT match id:r
-        total_color, _ = _run(engine, "c:r")          # includes Nicol Bolas
-        total_identity, _ = _run(engine, "id:r")       # excludes Nicol Bolas
+        total_color, _ = _run(engine, "c:r")  # includes Nicol Bolas
+        total_identity, _ = _run(engine, "id:r")  # excludes Nicol Bolas
         assert total_color > total_identity
 
 
