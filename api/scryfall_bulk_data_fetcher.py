@@ -36,7 +36,7 @@ class ScryfallBulkDataFetcher:
             self.cache_directory.mkdir(parents=True, exist_ok=True)
         self.session = requests.Session()
 
-    @cachebox_cached(cache=TTLCache(maxsize=2, ttl=5 * MINUTE))
+    @cachebox_cached(cache=TTLCache(maxsize=2, global_ttl=5 * MINUTE))
     def list_bulk_data(self) -> dict[BulkDataKey, dict]:
         """Fetch bulk data from Scryfall."""
         return {
