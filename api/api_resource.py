@@ -242,7 +242,7 @@ class APIResource:
         self.setup_schema()
         self.import_data()  # ensures that database is setup
 
-    @cached(cache={}, key=lambda args, kwds: args[1] if len(args) > 1 else kwds.get("filename"))
+    @cached(cache={}, key=lambda *args, **kwds: args[1] if len(args) > 1 else kwds.get("filename"))
     def read_sql(self, filename: str) -> str:
         """Read SQL content from a file with caching.
 
