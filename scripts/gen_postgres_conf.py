@@ -52,26 +52,58 @@ def fmt_mb(n_bytes: int) -> str:
     return f"{n_bytes // (1024 * 1024)}MB"
 
 
-def compute_settings(total_bytes: int) -> dict[str, str]:
-    """Compute PostgreSQL memory settings sized for two concurrent instances (blue/green)."""
-    # Sized to leave headroom when both blue and green postgres containers are running.
-    shared_buffers = int(total_bytes * 0.15)
-    effective_cache_size = int(total_bytes * 0.40)
-    # maintenance_work_mem: 4% of RAM, clamped to [64 MB, 2 GB]
-    maintenance_work_mem = max(
-        64 * 1024 * 1024,
-        min(int(total_bytes * 0.04), 2 * 1024 * 1024 * 1024),
-    )
-    # work_mem: 0.1% of RAM (safe under 100 connections * 4 parallel workers), minimum 16 MB
-    work_mem = max(16 * 1024 * 1024, int(total_bytes * 0.001))
+def _compute_raw(total_bytes: int) -> dict[str, int]:
+    """Compute PostgreSQL memory settings in bytes, sized for two concurrent instances (blue/green)."""
+    mb = 1024 * 1024
+    gb = 1024 * mb
+    return {
+        "shared_buffers": int(total_bytes * 0.05),
+        "effective_cache_size": int(total_bytes * 0.40),
+        # 2% of RAM, clamped to [64 MB, 2 GB]
+        "maintenance_work_mem": max(64 * mb, min(int(total_bytes * 0.02), 2 * gb)),
+        # 0.1% of RAM (safe under 100 connections * 4 parallel workers), minimum 16 MB
+        "work_mem": max(16 * mb, int(total_bytes * 0.001)),
+    }
 
+
+def compute_settings(total_bytes: int) -> dict[str, str]:
+    """Compute PostgreSQL memory settings as formatted strings for postgresql.conf."""
+    raw = _compute_raw(total_bytes)
     return {
         "available_memory": fmt_mb(total_bytes),
-        "shared_buffers": fmt_mb(shared_buffers),
-        "effective_cache_size": fmt_mb(effective_cache_size),
-        "maintenance_work_mem": fmt_mb(maintenance_work_mem),
-        "work_mem": fmt_mb(work_mem),
+        "shared_buffers": fmt_mb(raw["shared_buffers"]),
+        "effective_cache_size": fmt_mb(raw["effective_cache_size"]),
+        "maintenance_work_mem": fmt_mb(raw["maintenance_work_mem"]),
+        "work_mem": fmt_mb(raw["work_mem"]),
     }
+
+
+def compute_pg_mem_limit_bytes(total_bytes: int) -> int:
+    """Compute Docker memory limit for a single postgres container.
+
+    shared_buffers + maintenance_work_mem + 256 MB overhead for process memory.
+    """
+    raw = _compute_raw(total_bytes)
+    return raw["shared_buffers"] + raw["maintenance_work_mem"] + 256 * 1024 * 1024
+
+
+def update_env_file(env_path: Path, key: str, value: str) -> None:
+    """Update or append key=value in an env file, leaving all other lines untouched."""
+    line = f"{key}={value}\n"
+    if env_path.exists():
+        content = env_path.read_text()
+        lines = content.splitlines(keepends=True)
+        for i, existing in enumerate(lines):
+            if existing.startswith(f"{key}="):
+                lines[i] = line
+                env_path.write_text("".join(lines))
+                return
+        # Key not present — append, ensuring there's a trailing newline first.
+        if content and not content.endswith("\n"):
+            content += "\n"
+        env_path.write_text(content + line)
+    else:
+        env_path.write_text(line)
 
 
 def main() -> None:
@@ -79,6 +111,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--template", required=True, help="path to postgresql.conf.template")
     parser.add_argument("--output", required=True, help="path to write postgresql.conf")
+    parser.add_argument("--env-output", help="directory of env files to update with POSTGRES_MEM_LIMIT (e.g. envs/)")
     args = parser.parse_args()
 
     total_bytes = get_available_memory_bytes()
@@ -91,6 +124,15 @@ def main() -> None:
     print(f"Generated {args.output}")
     for key, val in settings.items():
         print(f"  {key}: {val}")
+
+    if args.env_output:
+        limit_mb = compute_pg_mem_limit_bytes(total_bytes) // (1024 * 1024)
+        limit_str = f"{limit_mb}m"
+        env_dir = Path(args.env_output)
+        for env_file in sorted(env_dir.iterdir()):
+            if env_file.is_file():
+                update_env_file(env_file, "POSTGRES_MEM_LIMIT", limit_str)
+                print(f"  POSTGRES_MEM_LIMIT: {limit_str} -> {env_file}")
 
 
 if __name__ == "__main__":

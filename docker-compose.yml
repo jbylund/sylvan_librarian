@@ -37,6 +37,10 @@ services:
       start_period: 30s
     image: registry.hub.docker.com/library/postgres:18
     shm_size: 1024M
+    deploy:
+      resources:
+        limits:
+          memory: ${POSTGRES_MEM_LIMIT:-3g}
     ulimits:
       core: 0
     volumes:
@@ -90,6 +94,10 @@ services:
       timeout: 1s
       retries: 60
       start_period: 40s
+    deploy:
+      resources:
+        limits:
+          memory: 1875m
     ports:
       - "${API_PORT:-28080}:8080"
     ulimits:
@@ -119,6 +127,10 @@ services:
       BATCH_SIZE: 50
       PYTHONUNBUFFERED: true
       QUERY_DELAY: 0.1
+    deploy:
+      resources:
+        limits:
+          memory: 8m
     ulimits:
       core: 0
     user: 1000:1000
