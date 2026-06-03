@@ -78,7 +78,7 @@ class TaggerClient:
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:142.0) Gecko/20100101 Firefox/142.0",
             },
         )
-        self._auth_cache = TTLCache(maxsize=2**10, ttl=10 * 60)
+        self._auth_cache = TTLCache(maxsize=2**10, global_ttl=10 * 60)
         self._request_timestamps = collections.deque(maxlen=500)
 
     def _get_csrf_token_from_meta(self, html_content: str) -> str | None:

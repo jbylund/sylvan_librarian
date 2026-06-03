@@ -10,3 +10,4 @@ gatherer_data/
 .env
 prof
 *.min.js
+configs/postgres/conf/postgresql.conf

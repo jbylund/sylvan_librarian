@@ -242,7 +242,7 @@ class APIResource:
         self.setup_schema()
         self.import_data()  # ensures that database is setup
 
-    @cached(cache={}, key=lambda args, kwds: args[1] if len(args) > 1 else kwds.get("filename"))
+    @cached(cache={}, key=lambda *args, **kwds: args[1] if len(args) > 1 else kwds.get("filename"))
     def read_sql(self, filename: str) -> str:
         """Read SQL content from a file with caching.
 
@@ -677,7 +677,7 @@ class APIResource:
         return None
 
     @cached(
-        cache=TTLCache(maxsize=1, ttl=MIN_IMPORT_INTERVAL),
+        cache=TTLCache(maxsize=1, global_ttl=MIN_IMPORT_INTERVAL),
     )
     def import_data(self, **_: object) -> None:
         """Import data from Scryfall and insert into the database."""
@@ -795,7 +795,7 @@ class APIResource:
             try:
                 search_cache = self._search_gen_cache[gen]
             except KeyError:
-                search_cache = TTLCache(maxsize=1000, ttl=60)
+                search_cache = TTLCache(maxsize=1000, global_ttl=60)
                 self._search_gen_cache[gen] = search_cache
             if cache_key in search_cache:
                 return search_cache[cache_key]
