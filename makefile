@@ -68,7 +68,8 @@ postgres-config: configs/postgres/conf/postgresql.conf # @doc generate postgresq
 configs/postgres/conf/postgresql.conf: configs/postgres/conf/postgresql.conf.template scripts/gen_postgres_conf.py
 	python scripts/gen_postgres_conf.py \
 		--template $< \
-		--output $@
+		--output $@ \
+		--env-output envs
 
 help: # @doc show this help and exit
 	@python ./scripts/show_makefile_help.py $(mkfile_path)

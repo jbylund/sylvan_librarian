@@ -74,11 +74,47 @@ def compute_settings(total_bytes: int) -> dict[str, str]:
     }
 
 
+def compute_pg_mem_limit_bytes(total_bytes: int) -> int:
+    """Compute Docker memory limit for a single postgres container.
+
+    shared_buffers + maintenance_work_mem + 256 MB overhead for process memory.
+    Both operands use the same ratios as compute_settings so the limit stays
+    in sync with the generated postgresql.conf.
+    """
+    shared_buffers = int(total_bytes * 0.15)
+    maintenance_work_mem = max(
+        64 * 1024 * 1024,
+        min(int(total_bytes * 0.04), 2 * 1024 * 1024 * 1024),
+    )
+    overhead = 256 * 1024 * 1024
+    return shared_buffers + maintenance_work_mem + overhead
+
+
+def update_env_file(env_path: Path, key: str, value: str) -> None:
+    """Update or append key=value in an env file, leaving all other lines untouched."""
+    line = f"{key}={value}\n"
+    if env_path.exists():
+        content = env_path.read_text()
+        lines = content.splitlines(keepends=True)
+        for i, existing in enumerate(lines):
+            if existing.startswith(f"{key}="):
+                lines[i] = line
+                env_path.write_text("".join(lines))
+                return
+        # Key not present — append, ensuring there's a trailing newline first.
+        if content and not content.endswith("\n"):
+            content += "\n"
+        env_path.write_text(content + line)
+    else:
+        env_path.write_text(line)
+
+
 def main() -> None:
     """Parse args, detect available memory, and render the postgresql.conf template."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--template", required=True, help="path to postgresql.conf.template")
     parser.add_argument("--output", required=True, help="path to write postgresql.conf")
+    parser.add_argument("--env-output", help="directory of env files to update with POSTGRES_MEM_LIMIT (e.g. envs/)")
     args = parser.parse_args()
 
     total_bytes = get_available_memory_bytes()
@@ -91,6 +127,15 @@ def main() -> None:
     print(f"Generated {args.output}")
     for key, val in settings.items():
         print(f"  {key}: {val}")
+
+    if args.env_output:
+        limit_mb = compute_pg_mem_limit_bytes(total_bytes) // (1024 * 1024)
+        limit_str = f"{limit_mb}m"
+        env_dir = Path(args.env_output)
+        for env_file in sorted(env_dir.iterdir()):
+            if env_file.is_file():
+                update_env_file(env_file, "POSTGRES_MEM_LIMIT", limit_str)
+                print(f"  POSTGRES_MEM_LIMIT: {limit_str} -> {env_file}")
 
 
 if __name__ == "__main__":

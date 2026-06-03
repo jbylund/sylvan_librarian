@@ -40,7 +40,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1200m
+          memory: ${POSTGRES_MEM_LIMIT:-3g}
     ulimits:
       core: 0
     volumes:
