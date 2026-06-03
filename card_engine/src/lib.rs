@@ -56,6 +56,7 @@ fn card_type_str_to_bit(s: &str) -> u16 {
         "Enchantment"  => TYPE_ENCHANTMENT,
         "Instant"      => TYPE_INSTANT,
         "Kindred"      => TYPE_KINDRED,
+        "Tribal"       => TYPE_KINDRED,
         "Land"         => TYPE_LAND,
         "Legendary"    => TYPE_LEGENDARY,
         "Planeswalker" => TYPE_PLANESWALKER,
