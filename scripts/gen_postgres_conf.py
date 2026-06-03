@@ -4,6 +4,7 @@
 Memory values are computed as 75% of standard PostgreSQL ratios so that two
 concurrent instances (blue/green) fit comfortably on the host.
 """
+
 import argparse
 import platform
 import subprocess
@@ -24,16 +25,17 @@ def get_available_memory_bytes() -> int:
             capture_output=True,
             text=True,
             timeout=10,
+            check=False,
         )
         if result.returncode == 0:
             mem = int(result.stdout.strip())
             if mem > 0:
                 return mem
-    except Exception:
+    except OSError:
         pass
 
     if platform.system() == "Darwin":
-        result = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True)
+        result = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, check=False)
         return int(result.stdout.strip())
 
     with open("/proc/meminfo") as f:
@@ -41,7 +43,8 @@ def get_available_memory_bytes() -> int:
             if line.startswith("MemTotal:"):
                 return int(line.split()[1]) * 1024
 
-    raise RuntimeError("Could not determine available memory")
+    msg = "Could not determine available memory"
+    raise RuntimeError(msg)
 
 
 def fmt_mb(n_bytes: int) -> str:
@@ -72,6 +75,7 @@ def compute_settings(total_bytes: int) -> dict[str, str]:
 
 
 def main() -> None:
+    """Parse args, detect available memory, and render the postgresql.conf template."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--template", required=True, help="path to postgresql.conf.template")
     parser.add_argument("--output", required=True, help="path to write postgresql.conf")
