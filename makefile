@@ -54,6 +54,7 @@ IMAGE_TAG := $(BUILD_HASH)
 	images \
 	lint \
 	mplantin_font \
+	postgres-config \
 	pull_images \
 	reset \
 	rolling-deploy \
@@ -61,6 +62,13 @@ IMAGE_TAG := $(BUILD_HASH)
 	test \
 	test-integration \
 	test-unit
+
+postgres-config: configs/postgres/conf/postgresql.conf # @doc generate postgresql.conf from template scaled to available memory
+
+configs/postgres/conf/postgresql.conf: configs/postgres/conf/postgresql.conf.template scripts/gen_postgres_conf.py
+	python scripts/gen_postgres_conf.py \
+		--template $< \
+		--output $@
 
 help: # @doc show this help and exit
 	@python ./scripts/show_makefile_help.py $(mkfile_path)
@@ -70,7 +78,7 @@ hlep: help
 
 ###  Entry points
 
-up_deps: images check_env .env api/static/app.min.js
+up_deps: images check_env .env api/static/app.min.js configs/postgres/conf/postgresql.conf
 
 deps-%: up_deps
 	mkdir -p $(GIT_ROOT)/data/api/$* && chmod 755 $(GIT_ROOT)/data/api/$*
