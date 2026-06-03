@@ -52,25 +52,29 @@ def fmt_mb(n_bytes: int) -> str:
     return f"{n_bytes // (1024 * 1024)}MB"
 
 
-def compute_settings(total_bytes: int) -> dict[str, str]:
-    """Compute PostgreSQL memory settings sized for two concurrent instances (blue/green)."""
-    # Sized to leave headroom when both blue and green postgres containers are running.
-    shared_buffers = int(total_bytes * 0.15)
-    effective_cache_size = int(total_bytes * 0.40)
-    # maintenance_work_mem: 4% of RAM, clamped to [64 MB, 2 GB]
-    maintenance_work_mem = max(
-        64 * 1024 * 1024,
-        min(int(total_bytes * 0.04), 2 * 1024 * 1024 * 1024),
-    )
-    # work_mem: 0.1% of RAM (safe under 100 connections * 4 parallel workers), minimum 16 MB
-    work_mem = max(16 * 1024 * 1024, int(total_bytes * 0.001))
+def _compute_raw(total_bytes: int) -> dict[str, int]:
+    """Compute PostgreSQL memory settings in bytes, sized for two concurrent instances (blue/green)."""
+    mb = 1024 * 1024
+    gb = 1024 * mb
+    return {
+        "shared_buffers": int(total_bytes * 0.05),
+        "effective_cache_size": int(total_bytes * 0.40),
+        # 2% of RAM, clamped to [64 MB, 2 GB]
+        "maintenance_work_mem": max(64 * mb, min(int(total_bytes * 0.02), 2 * gb)),
+        # 0.1% of RAM (safe under 100 connections * 4 parallel workers), minimum 16 MB
+        "work_mem": max(16 * mb, int(total_bytes * 0.001)),
+    }
 
+
+def compute_settings(total_bytes: int) -> dict[str, str]:
+    """Compute PostgreSQL memory settings as formatted strings for postgresql.conf."""
+    raw = _compute_raw(total_bytes)
     return {
         "available_memory": fmt_mb(total_bytes),
-        "shared_buffers": fmt_mb(shared_buffers),
-        "effective_cache_size": fmt_mb(effective_cache_size),
-        "maintenance_work_mem": fmt_mb(maintenance_work_mem),
-        "work_mem": fmt_mb(work_mem),
+        "shared_buffers": fmt_mb(raw["shared_buffers"]),
+        "effective_cache_size": fmt_mb(raw["effective_cache_size"]),
+        "maintenance_work_mem": fmt_mb(raw["maintenance_work_mem"]),
+        "work_mem": fmt_mb(raw["work_mem"]),
     }
 
 
@@ -78,16 +82,9 @@ def compute_pg_mem_limit_bytes(total_bytes: int) -> int:
     """Compute Docker memory limit for a single postgres container.
 
     shared_buffers + maintenance_work_mem + 256 MB overhead for process memory.
-    Both operands use the same ratios as compute_settings so the limit stays
-    in sync with the generated postgresql.conf.
     """
-    shared_buffers = int(total_bytes * 0.15)
-    maintenance_work_mem = max(
-        64 * 1024 * 1024,
-        min(int(total_bytes * 0.04), 2 * 1024 * 1024 * 1024),
-    )
-    overhead = 256 * 1024 * 1024
-    return shared_buffers + maintenance_work_mem + overhead
+    raw = _compute_raw(total_bytes)
+    return raw["shared_buffers"] + raw["maintenance_work_mem"] + 256 * 1024 * 1024
 
 
 def update_env_file(env_path: Path, key: str, value: str) -> None:
