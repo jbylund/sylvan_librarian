@@ -129,7 +129,6 @@ class CardAttributeNode(AttributeNode):
 
         super().__init__(db_column_name)
 
-    @property
     def kwargs(self) -> dict:
         """Return this node's kwargs dict for Rust engine JSON serialization."""
         return {"attribute_name": self.attribute_name, "original_attribute": self.original_attribute}
@@ -459,7 +458,6 @@ class ExactNameNode(QueryNode):
         """Initialize an ExactNameNode with the exact name to search for."""
         self.value = value
 
-    @property
     def kwargs(self) -> dict:
         """Return this node's kwargs dict for Rust engine JSON serialization."""
         return {"value": self.value.lower()}
@@ -497,7 +495,6 @@ class ExactNameNode(QueryNode):
 class CardBinaryOperatorNode(BinaryOperatorNode):
     """Card-specific binary operator node with custom SQL generation."""
 
-    @property
     def kwargs(self) -> dict:
         """Return this node's kwargs dict for Rust engine JSON serialization."""
         if not isinstance(self.lhs, CardAttributeNode):

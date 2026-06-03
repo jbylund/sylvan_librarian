@@ -40,9 +40,8 @@ class QueryNode(ABC):
 
     def to_json(self) -> dict:
         """Serialize this node to a JSON-compatible dict for the Rust filter engine."""
-        return {"node_type": self.__class__.__name__, "kwargs": self.kwargs}
+        return {"node_type": self.__class__.__name__, "kwargs": self.kwargs()}
 
-    @property
     def kwargs(self) -> dict:
         """Return this node's kwargs dict for Rust engine JSON serialization."""
         msg = f"{self.__class__.__name__} must implement kwargs"
@@ -87,7 +86,6 @@ class StringValueNode(ValueNode):
         """Initialize a StringValueNode with a string value."""
         self.value = value
 
-    @property
     def kwargs(self) -> dict:
         """Return this node's kwargs dict for Rust engine JSON serialization."""
         return {"value": self.value}
@@ -106,7 +104,6 @@ class NumericValueNode(ValueNode):
         """Initialize a NumericValueNode with a numeric value."""
         self.value = value
 
-    @property
     def kwargs(self) -> dict:
         """Return this node's kwargs dict for Rust engine JSON serialization."""
         return {"value": self.value}
@@ -125,7 +122,6 @@ class ManaValueNode(ValueNode):
         """Initialize a ManaValueNode with a mana cost string."""
         self.value = value
 
-    @property
     def kwargs(self) -> dict:
         """Return this node's kwargs dict for Rust engine JSON serialization."""
         return {"value": self.value}
@@ -144,7 +140,6 @@ class RegexValueNode(ValueNode):
         """Initialize a RegexValueNode with a regex pattern string."""
         self.value = value
 
-    @property
     def kwargs(self) -> dict:
         """Return this node's kwargs dict for Rust engine JSON serialization."""
         return {"value": self.value}
@@ -226,7 +221,6 @@ class BinaryOperatorNode(QueryNode):
             msg = f"Unknown operator: {operator}"
             raise ValueError(msg)
 
-    @property
     def kwargs(self) -> dict:
         """Return this node's kwargs dict for Rust engine JSON serialization."""
         return {"lhs": _node_to_json(self.lhs), "op": self.operator, "rhs": _node_to_json(self.rhs)}
@@ -288,7 +282,6 @@ class NaryOperatorNode(QueryNode):
         """Initialize an NaryOperatorNode with a list of operand nodes."""
         self.operands = operands
 
-    @property
     def kwargs(self) -> dict:
         """Return this node's kwargs dict for Rust engine JSON serialization."""
         return {"operands": [_node_to_json(op) for op in self.operands]}
@@ -397,7 +390,6 @@ class NotNode(QueryNode):
         """Initialize a NotNode with a single operand node."""
         self.operand = operand
 
-    @property
     def kwargs(self) -> dict:
         """Return this node's kwargs dict for Rust engine JSON serialization."""
         return {"operand": _node_to_json(self.operand)}
@@ -430,7 +422,6 @@ class NotNode(QueryNode):
 class TrueNode(LeafNode):
     """Represents an always-true condition, used for empty queries."""
 
-    @property
     def kwargs(self) -> dict:
         """Return this node's kwargs dict for Rust engine JSON serialization."""
         return {}
