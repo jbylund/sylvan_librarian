@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate postgresql.conf from template with memory settings tuned to available memory.
 
-Memory values are computed as 75% of standard PostgreSQL ratios so that two
+Memory values are computed from the available memory with conservative ratios so that two
 concurrent instances (blue/green) fit comfortably on the host.
 """
 
