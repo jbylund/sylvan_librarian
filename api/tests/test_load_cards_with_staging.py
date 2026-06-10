@@ -264,22 +264,6 @@ class TestRunImportUnderLockStreaming:
             api._run_import_under_lock()
         mock_stream.assert_called_once_with(BulkDataKey.DEFAULT_CARDS)
 
-    def test_does_not_call_get_cards_to_insert(self) -> None:
-        api = self._make_api()
-        with (
-            patch.object(api, "_import_recent", return_value=False),
-            patch.object(api, "setup_schema"),
-            patch.object(
-                api,
-                "_load_cards_with_staging",
-                return_value={"status": "no_cards_before_preprocessing", "cards_loaded": 0, "sample_cards": [], "message": ""},
-            ),
-            patch.object(api._bulk_data_fetcher, "stream_data_for_key", return_value=iter([])),
-            patch.object(api, "_get_cards_to_insert") as mock_old_path,
-        ):
-            api._run_import_under_lock()
-        mock_old_path.assert_not_called()
-
     def test_stream_iterator_passed_directly_to_load_cards_with_staging(self) -> None:
         """The exact iterator returned by stream_data_for_key is forwarded to _load_cards_with_staging."""
         api = self._make_api()

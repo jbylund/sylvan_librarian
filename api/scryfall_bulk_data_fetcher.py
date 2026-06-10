@@ -49,70 +49,6 @@ class ScryfallBulkDataFetcher:
         """Get the download URI for a given data key."""
         return self.list_bulk_data()[data_key]["download_uri"]
 
-    def get_data_for_key(self, data_key: BulkDataKey) -> list[dict]:
-        """Get the data for a given data key."""
-
-        def _load_data(decompressed_data: bytes) -> list[dict]:
-            """Load data from a bytes object."""
-            before = time.monotonic()
-            data = orjson.loads(decompressed_data)
-            logger.info(
-                "Parsed %d bytes to objects in %.3f seconds using orjson",
-                len(decompressed_data),
-                time.monotonic() - before,
-            )
-            return data
-
-        download_uri = self.get_download_uri_for_key(data_key)
-        suffix = download_uri.rpartition("/")[-1]
-        cache_file_path = self.cache_directory / data_key / suffix
-        cache_file_path = cache_file_path.with_suffix(".json.zstd")
-        cache_file_path.parent.mkdir(parents=True, exist_ok=True)
-        # if it exists, load and return
-        try:
-            with cache_file_path.open("rb") as f:
-                before = time.monotonic()
-                compressed_data = f.read()
-                logger.info(
-                    "Read %d bytes from %s in %.3f seconds",
-                    len(compressed_data),
-                    cache_file_path,
-                    time.monotonic() - before,
-                )
-
-            # decompress
-            before = time.monotonic()
-            decompressed_data = zstd.decompress(compressed_data)
-            logger.info(
-                "Decompressed %d bytes from %s in %.3f seconds",
-                len(decompressed_data),
-                cache_file_path,
-                time.monotonic() - before,
-            )
-            return _load_data(decompressed_data)
-        except FileNotFoundError:
-            pass
-
-        # prune other files from the directory - they've been superseded
-        for ifile in cache_file_path.parent.iterdir():
-            ifile.unlink()
-
-        # if it doesn't exist, download and cache
-        before = time.monotonic()
-        response = self.session.get(download_uri, timeout=30)
-        response.raise_for_status()
-        logger.info(
-            "Downloaded %d bytes from %s in %.3f seconds",
-            len(response.content),
-            download_uri,
-            time.monotonic() - before,
-        )
-        compressed_data = zstd.compress(data=response.content)
-        with cache_file_path.open("wb") as f:
-            f.write(compressed_data)
-
-        return _load_data(response.content)
-
     def _cache_file_path_for_key(self, data_key: BulkDataKey) -> pathlib.Path:
         download_uri = self.get_download_uri_for_key(data_key)
         suffix = download_uri.rpartition("/")[-1]
@@ -176,12 +112,11 @@ class ScryfallBulkDataFetcher:
 
 
 def main() -> None:
-    """Main function."""
+    """Stream and count cards from the default bulk data dump."""
     logging.basicConfig(level=logging.INFO)
     fetcher = ScryfallBulkDataFetcher()
-    fetcher.get_data_for_key(BulkDataKey.DEFAULT_CARDS)
-    fetcher.get_data_for_key(BulkDataKey.DEFAULT_CARDS)
-    fetcher.get_data_for_key(BulkDataKey.DEFAULT_CARDS)
+    count = sum(1 for _ in fetcher.stream_data_for_key(BulkDataKey.DEFAULT_CARDS))
+    logger.info("Total cards: %d", count)
 
 
 if __name__ == "__main__":

@@ -500,16 +500,6 @@ class APIResource:
         existing_tables = {r["relname"] for r in records}
         return "migrations" in existing_tables
 
-    def get_data(self) -> list[dict]:
-        """Retrieve card data from cache or Scryfall API.
-
-        Returns:
-        -------
-            Any: The card data (likely a list of dicts).
-
-        """
-        return self._bulk_data_fetcher.get_data_for_key(data_key=BulkDataKey.DEFAULT_CARDS)
-
     def setup_schema(self, *_: object, **__: object) -> None:
         """Set up the database schema and apply migrations as needed."""
         if self._schema_setup_event.is_set():
@@ -572,28 +562,12 @@ class APIResource:
             self._schema_setup_event.set()
             logger.info("Schema setup complete in pid %d", os.getpid())
 
-    def _get_cards_to_insert(self) -> list[dict[str, Any]]:
-        """Get the cards to insert into the database.
-
-        For DFCs (Double-Faced Cards), each face is returned as a separate dictionary.
-        The deduplication key is (scryfall_id, face_idx) to support multiple faces per printing.
-        """
-        all_cards = self.get_data()
-        key_to_card: dict[tuple[str, int], dict[str, Any]] = {}
-        for card in all_cards:
-            processed_cards = preprocess_card(card)
-            for processed_card in processed_cards:
-                scryfall_id = processed_card["scryfall_id"]
-                face_idx = processed_card["face_idx"]
-                key_to_card[(scryfall_id, face_idx)] = processed_card
-        return list(key_to_card.values())
-
     def get_stats(self, **_: object) -> dict[str, Any]:
         """Get stats about the cards."""
-        to_insert = self._get_cards_to_insert()
         key_frequency = collections.Counter()
-        for card in to_insert:
-            key_frequency.update(k for k, v in card.items() if v not in [None, [], {}])
+        for raw_card in self._bulk_data_fetcher.stream_data_for_key(BulkDataKey.DEFAULT_CARDS):
+            for processed in preprocess_card(raw_card):
+                key_frequency.update(k for k, v in processed.items() if v not in [None, [], {}])
         return key_frequency.most_common()
 
     _SETUP_COMPLETE_TTL = 60 * 60  # 1 hour; also invalidated when _last_import_time changes
