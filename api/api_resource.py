@@ -2478,6 +2478,7 @@ class APIResource:
     def _load_cards_with_staging(
         self,
         cards: Iterable[dict[str, Any]],
+        page_size: int = 6000,
     ) -> dict[str, Any]:
         """Load cards into the database using a randomly-named staging table.
 
@@ -2523,7 +2524,7 @@ class APIResource:
                 cards_loaded = cards_sent = 0
                 sample_cards: list[dict[str, Any]] = []
 
-                for page in itertools.batched(stream, 6000):
+                for page in itertools.batched(stream, page_size):
                     rows, sample_cards = self._copy_batch_to_staging(cursor, staging_table_name, page)
                     cards_sent += len(page)
                     cards_loaded += rows
