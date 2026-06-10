@@ -42,10 +42,12 @@ from api.settings import settings
 from api.tagger_client import TaggerClient
 from api.utils import db_utils, error_monitoring, multiprocessing_utils
 from api.utils.generation_cache import GenerationCache
+from api.utils.http_utils import make_user_agent
 from api.utils.timer import Timer
 from api.utils.type_conversions import _get_type_name, make_type_converting_wrapper
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Iterator
     from multiprocessing.sharedctypes import Synchronized
     from multiprocessing.synchronize import Event as EventType
     from multiprocessing.synchronize import RLock as LockType
@@ -233,9 +235,7 @@ class APIResource:
         self._last_import_time: Synchronized = last_import_time or multiprocessing.Value("d", 0.0, lock=True)
         self._schema_setup_event: EventType = schema_setup_event
 
-        version = datetime.datetime.now(tz=datetime.UTC).strftime("%Y%m%d")
-        version = f"magic-api/{version}"
-        self._session.headers.update({"User-Agent": version})
+        self._session.headers.update({"User-Agent": make_user_agent()})
         # Initialize Tagger client for GraphQL API access
         self._tagger_client = TaggerClient()
         logger.info("Worker with pid %d has conn pool %s", os.getpid(), self._conn_pool)
@@ -499,16 +499,6 @@ class APIResource:
         existing_tables = {r["relname"] for r in records}
         return "migrations" in existing_tables
 
-    def get_data(self) -> list[dict]:
-        """Retrieve card data from cache or Scryfall API.
-
-        Returns:
-        -------
-            Any: The card data (likely a list of dicts).
-
-        """
-        return self._bulk_data_fetcher.get_data_for_key(data_key=BulkDataKey.DEFAULT_CARDS)
-
     def setup_schema(self, *_: object, **__: object) -> None:
         """Set up the database schema and apply migrations as needed."""
         if self._schema_setup_event.is_set():
@@ -571,28 +561,12 @@ class APIResource:
             self._schema_setup_event.set()
             logger.info("Schema setup complete in pid %d", os.getpid())
 
-    def _get_cards_to_insert(self) -> list[dict[str, Any]]:
-        """Get the cards to insert into the database.
-
-        For DFCs (Double-Faced Cards), each face is returned as a separate dictionary.
-        The deduplication key is (scryfall_id, face_idx) to support multiple faces per printing.
-        """
-        all_cards = self.get_data()
-        key_to_card: dict[tuple[str, int], dict[str, Any]] = {}
-        for card in all_cards:
-            processed_cards = preprocess_card(card)
-            for processed_card in processed_cards:
-                scryfall_id = processed_card["scryfall_id"]
-                face_idx = processed_card["face_idx"]
-                key_to_card[(scryfall_id, face_idx)] = processed_card
-        return list(key_to_card.values())
-
     def get_stats(self, **_: object) -> dict[str, Any]:
         """Get stats about the cards."""
-        to_insert = self._get_cards_to_insert()
         key_frequency = collections.Counter()
-        for card in to_insert:
-            key_frequency.update(k for k, v in card.items() if v not in [None, [], {}])
+        for raw_card in self._bulk_data_fetcher.stream_data_for_key(BulkDataKey.DEFAULT_CARDS):
+            for processed in preprocess_card(raw_card):
+                key_frequency.update(k for k, v in processed.items() if v not in [None, [], {}])
         return key_frequency.most_common()
 
     _SETUP_COMPLETE_TTL = 60 * 60  # 1 hour; also invalidated when _last_import_time changes
@@ -649,11 +623,9 @@ class APIResource:
             return None
         self.setup_schema()
 
-        to_insert = self._get_cards_to_insert()
-
         before = time.monotonic()
 
-        result = self._load_cards_with_staging(to_insert)
+        result = self._load_cards_with_staging(self._bulk_data_fetcher.stream_data_for_key(BulkDataKey.DEFAULT_CARDS))
 
         after_transfer = time.monotonic()
 
@@ -661,7 +633,8 @@ class APIResource:
             if self._last_import_time is not None:
                 self._last_import_time.value = time.time()
             total_time = after_transfer - before
-            rate = len(to_insert) / total_time if total_time > 0 else 0
+            cards_sent = result.get("cards_sent", result["cards_loaded"])
+            rate = cards_sent / total_time if total_time > 0 else 0
             logger.info(
                 "Loaded %d cards in %.2f seconds, rate: %.2f cards/s...",
                 result["cards_loaded"],
@@ -2434,163 +2407,137 @@ class APIResource:
 
             return import_results
 
+    def _copy_batch_to_staging(
+        self,
+        cursor: Cursor,
+        staging_table_name: str,
+        page: tuple[dict[str, Any], ...],
+    ) -> tuple[int, list[dict[str, Any]]]:
+        """COPY one batch of preprocessed cards through a temp staging table into magic.cards.
+
+        Returns (rows_inserted, sample_cards).
+        """
+        # ON COMMIT DROP is a safety net: the table is dropped explicitly below, but if an error
+        # aborts the batch the transaction rollback (or any later commit) removes it as well.
+        cursor.execute(f"CREATE TEMPORARY TABLE {staging_table_name} (card_blob jsonb) ON COMMIT DROP")
+
+        with cursor.copy(
+            f"COPY {staging_table_name} (card_blob) FROM STDIN WITH (FORMAT csv, HEADER false)",
+        ) as copy_filehandle:
+            writer = csv.writer(copy_filehandle, quoting=csv.QUOTE_ALL)
+            writer.writerows([orjson.dumps(card, option=orjson.OPT_SORT_KEYS).decode("utf-8")] for card in page)
+
+        random_threshold = 20 / len(page)  # selects ~20 candidates, capped at 10 by LIMIT
+        cursor.execute(
+            f"""
+            SELECT (jsonb_populate_record(null::magic.cards, card_blob)).*
+            FROM {staging_table_name}
+            WHERE RANDOM() < {random_threshold}
+            ORDER BY RANDOM()
+            LIMIT 10""",
+        )
+        sample_cards = [dict(r) for r in cursor.fetchall()]
+
+        cursor.execute(
+            f"""
+            INSERT INTO magic.cards
+            SELECT (jsonb_populate_record(null::magic.cards, card_blob)).*
+            FROM {staging_table_name}
+            ON CONFLICT DO NOTHING
+            """,
+        )
+        rows_inserted = cursor.rowcount
+        cursor.execute(f"DROP TABLE {staging_table_name}")
+        return rows_inserted, sample_cards
+
     def _load_cards_with_staging(
         self,
-        cards: list[dict[str, Any]],
+        cards: Iterable[dict[str, Any]],
+        page_size: int = 6000,
     ) -> dict[str, Any]:
         """Load cards into the database using a randomly-named staging table.
 
-        This method consolidates card loading functionality by:
-        1. Creating a staging table with a randomly generated suffix
-        2. Loading card data into the staging table using COPY for efficiency
-        3. Transferring data from staging to the main magic.cards table
-        4. Returning random sample cards from staging before cleanup
-        5. Dropping the staging table
+        Accepts any iterable of raw card dicts (as returned by the Scryfall API or
+        stream_data_for_key). Preprocessing and already-imported filtering are applied
+        lazily as cards flow through, so the full dataset is never held in memory.
 
-        Args:
-        ----
-            cards (List[Dict[str, Any]]): List of card data to load.
-
-        Returns:
-        -------
-            Dict[str, Any]: Result with:
-                - cards_loaded: number of cards successfully loaded
-                - sample_cards: list of up to 10 random cards from staging
-                - status: "success", "no_cards", or "database_error"
-                - message: descriptive message
-
+        Returns a dict with:
+            - cards_loaded: rows actually inserted (after ON CONFLICT DO NOTHING)
+            - cards_sent: rows attempted (after preprocessing + filtering)
+            - sample_cards: up to 10 random cards from the final batch
+            - status: "success", "no_cards_before_preprocessing", "no_cards_after_preprocessing", "all_cards_already_present", "database_error"
+            - message: descriptive message
         """
-        if not cards:
-            return {
-                "status": "no_cards_before_preprocessing",
-                "cards_loaded": 0,
-                "sample_cards": [],
-                "message": "No cards provided for loading",
-            }
-
         self.setup_schema()
 
-        processed_cards = []
-        for icard in cards:
-            processed_cards.extend(preprocess_card(icard))
-        cards = processed_cards
-
-        if not cards:
-            return {
-                "status": "no_cards_after_preprocessing",
-                "cards_loaded": 0,
-                "sample_cards": [],
-                "message": "No cards remaining after preprocessing",
-            }
-
-        # Generate random staging table name
         staging_suffix = secrets.token_hex(8)
         staging_table_name = f"import_staging_{staging_suffix}"
 
         try:
             with self._conn_pool.connection() as conn, conn.cursor() as cursor:
-                statement_timeout = 30_000
-                # Validate and set statement timeout
-                self._set_statement_timeout(cursor, statement_timeout)
+                self._set_statement_timeout(cursor, 30_000)
 
-                # fetch already imported cards...
                 cursor.execute("SELECT scryfall_id FROM magic.cards GROUP BY scryfall_id")
-                already_imported_cards = {r["scryfall_id"] for r in cursor.fetchall()}
+                already_imported_ids = {r["scryfall_id"] for r in cursor.fetchall()}
 
-                # filter cards to only those which are not already imported
-                num_before_filtering = len(cards)
-                cards = [card for card in cards if card["scryfall_id"] not in already_imported_cards]
-                logger.info("Filtered %d cards to %d cards to import", num_before_filtering, len(cards))
-                if not cards:
-                    logger.info("No remaining cards to import")
-                    return {
-                        "status": "all_cards_already_present",
-                        "cards_loaded": 0,
-                        "sample_cards": [],
-                        "message": "All cards already present",
-                    }
+                class _CardStream:
+                    """Preprocesses and filters raw cards lazily, tracking stage counts."""
 
-                page_size = 6000
+                    def __init__(self) -> None:
+                        self.raw = 0
+                        self.preprocessed = 0
+
+                    def __iter__(self) -> Iterator[dict[str, Any]]:
+                        for card in cards:
+                            self.raw += 1
+                            for processed in preprocess_card(card):
+                                self.preprocessed += 1
+                                if processed["scryfall_id"] not in already_imported_ids:
+                                    yield processed
+
+                stream = _CardStream()
                 cards_loaded = cards_sent = 0
-                for page in itertools.batched(cards, page_size):
-                    # Create staging table with unique name
-                    cursor.execute(f"CREATE TEMPORARY TABLE {staging_table_name} (card_blob jsonb)")
+                sample_cards: list[dict[str, Any]] = []
 
-                    # Load cards into staging table using COPY for efficiency
-                    with cursor.copy(
-                        f"COPY {staging_table_name} (card_blob) FROM STDIN WITH (FORMAT csv, HEADER false)",
-                    ) as copy_filehandle:
-                        writer = csv.writer(copy_filehandle, quoting=csv.QUOTE_ALL)
-                        writer.writerows([orjson.dumps(card, option=orjson.OPT_SORT_KEYS).decode("utf-8")] for card in page)
-
-                    target_sample_size = 10
-                    random_threshold = 2 * target_sample_size / len(page)
-                    cursor.execute(
-                        f"""
-                        SELECT
-                            (jsonb_populate_record(null::magic.cards, card_blob)).*
-                        FROM
-                            {staging_table_name}
-                        WHERE
-                            RANDOM() < {random_threshold}
-                        ORDER BY RANDOM()
-                        LIMIT {target_sample_size}""",
-                    )
-                    sample_cards = [dict(r) for r in cursor.fetchall()]
-
-                    # Transfer from staging to main table using direct jsonb_populate_record
-                    insert_query = f"""
-                        INSERT INTO magic.cards
-                        SELECT
-                            (jsonb_populate_record(null::magic.cards, card_blob)).*
-                        FROM
-                            {staging_table_name}
-                        ON CONFLICT DO NOTHING
-                    """
-                    # could we update the on conflict to replace?
-
-                    cursor.execute(insert_query)
+                for page in itertools.batched(stream, page_size):
+                    rows, sample_cards = self._copy_batch_to_staging(cursor, staging_table_name, page)
                     cards_sent += len(page)
-                    cards_loaded += cursor.rowcount
-
-                    # Drop the staging table
-                    cursor.execute(f"DROP TABLE {staging_table_name}")
-                    logger.info(
-                        "%d cards loaded, %d cards sent, of %d cards",
-                        cards_loaded,
-                        cards_sent,
-                        len(cards),
-                    )
+                    cards_loaded += rows
+                    logger.info("%d cards loaded, %d cards sent so far", cards_loaded, cards_sent)
 
                 conn.commit()
 
-                result = {
+                if cards_sent == 0:
+                    if stream.raw == 0:
+                        status, message = "no_cards_before_preprocessing", "No cards provided for loading"
+                    elif stream.preprocessed == 0:
+                        status, message = "no_cards_after_preprocessing", "No cards remaining after preprocessing"
+                    else:
+                        status, message = "all_cards_already_present", "All cards already present"
+                    logger.info("No cards imported: %s (raw=%d preprocessed=%d)", message, stream.raw, stream.preprocessed)
+                    return {"status": status, "cards_loaded": 0, "cards_sent": 0, "sample_cards": [], "message": message}
+
+                if cards_loaded > 0:
+                    self._clear_caches()
+
+                return {
                     "status": "success",
                     "cards_loaded": cards_loaded,
+                    "cards_sent": cards_sent,
                     "sample_cards": sample_cards,
                     "message": f"Successfully loaded {cards_loaded} cards",
                 }
 
-                # Clear caches when cards are successfully loaded
-                if cards_loaded > 0:
-                    self._clear_caches()
-                return result
-
         except (psycopg.Error, ValueError, KeyError) as e:
-            logger.error("Error loading cards with staging table %s: %s", staging_table_name, e)
-            # Try to clean up staging table on error
-            try:
-                with self._conn_pool.connection() as conn, conn.cursor() as cursor:
-                    cursor.execute(f"DROP TABLE IF EXISTS {staging_table_name}")
-                    conn.commit()
-            except (psycopg.Error, ValueError) as cleanup_error:
-                logger.warning("Failed to cleanup staging table %s: %s", staging_table_name, cleanup_error)
-
+            # No staging-table cleanup is needed (or possible) here: the temp table is session-scoped
+            # and created within the still-open transaction, so the pool's rollback-on-error removes it.
+            logger.exception("Error loading cards with staging table %s", staging_table_name)
             return {
                 "status": "database_error",
                 "cards_loaded": 0,
+                "cards_sent": 0,
                 "sample_cards": [],
-                "message": f"Error loading cards: {e}",
+                "message": f"Error loading cards: {type(e).__name__}: {e}",
             }
 
     def _clear_caches(self) -> None:

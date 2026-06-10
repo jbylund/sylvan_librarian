@@ -172,6 +172,7 @@ class TestImportCardByName(unittest.TestCase):
         assert result == {
             "status": "no_cards_after_preprocessing",
             "cards_loaded": 0,
+            "cards_sent": 0,
             "sample_cards": [],
             "message": "No cards remaining after preprocessing",
             "search_query": '!"TestCard"',
