@@ -64,7 +64,7 @@ def _insert_card(api: APIResource, raw: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(scope="class")
+@pytest.fixture(scope="module")
 def postgres_container() -> Generator[PostgresContainer]:
     container = PostgresContainer(
         image="postgres:18",
@@ -76,7 +76,7 @@ def postgres_container() -> Generator[PostgresContainer]:
         yield pg
 
 
-@pytest.fixture(scope="class")
+@pytest.fixture(scope="module")
 def api_resource(postgres_container: PostgresContainer) -> Generator[APIResource]:
     host = postgres_container.get_container_host_ip()
     port = postgres_container.get_exposed_port(5432)

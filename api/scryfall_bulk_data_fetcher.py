@@ -131,12 +131,18 @@ class ScryfallBulkDataFetcher:
 
         download_uri = self.get_download_uri_for_key(data_key)
         before = time.monotonic()
-        cctx = zstd.ZstdCompressor()
-        with self.session.get(download_uri, stream=True, timeout=60) as response:
-            response.raise_for_status()
-            with cache_file_path.open("wb") as f, cctx.stream_writer(f) as compressor:
-                for chunk in response.iter_content(chunk_size=65536):
-                    compressor.write(chunk)
+        tmp_path = cache_file_path.with_suffix(".zstd.tmp")
+        cctx = zstd.ZstdCompressor(write_content_size=True)
+        try:
+            with self.session.get(download_uri, stream=True, timeout=60) as response:
+                response.raise_for_status()
+                with tmp_path.open("wb") as f, cctx.stream_writer(f) as compressor:
+                    for chunk in response.iter_content(chunk_size=65536):
+                        compressor.write(chunk)
+            tmp_path.rename(cache_file_path)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
         logger.info("Downloaded and cached %s in %.3f seconds", cache_file_path, time.monotonic() - before)
 
     def stream_data_for_key(self, data_key: BulkDataKey) -> Iterator[dict]:
