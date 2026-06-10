@@ -42,6 +42,7 @@ from api.settings import settings
 from api.tagger_client import TaggerClient
 from api.utils import db_utils, error_monitoring, multiprocessing_utils
 from api.utils.generation_cache import GenerationCache
+from api.utils.http_utils import make_user_agent
 from api.utils.timer import Timer
 from api.utils.type_conversions import _get_type_name, make_type_converting_wrapper
 
@@ -234,9 +235,7 @@ class APIResource:
         self._last_import_time: Synchronized = last_import_time or multiprocessing.Value("d", 0.0, lock=True)
         self._schema_setup_event: EventType = schema_setup_event
 
-        version = datetime.datetime.now(tz=datetime.UTC).strftime("%Y%m%d")
-        version = f"magic-api/{version}"
-        self._session.headers.update({"User-Agent": version})
+        self._session.headers.update({"User-Agent": make_user_agent()})
         # Initialize Tagger client for GraphQL API access
         self._tagger_client = TaggerClient()
         logger.info("Worker with pid %d has conn pool %s", os.getpid(), self._conn_pool)

@@ -1,6 +1,5 @@
 """Fetcher for Scryfall bulk data."""
 
-import datetime
 import io
 import logging
 import os
@@ -15,6 +14,8 @@ import requests
 import zstandard as zstd
 from cachebox import TTLCache
 from cachebox import cached as cachebox_cached
+
+from api.utils.http_utils import make_user_agent
 
 logger = logging.getLogger(__name__)
 MINUTE = 60
@@ -57,8 +58,7 @@ class ScryfallBulkDataFetcher:
         self.session = requests.Session()
         # Scryfall rejects default HTTP-library User-Agents (400 generic_user_agent),
         # and asks for an explicit Accept header.
-        version = datetime.datetime.now(tz=datetime.UTC).strftime("%Y%m%d")
-        self.session.headers.update({"User-Agent": f"magic-api/{version}", "Accept": "application/json"})
+        self.session.headers.update({"User-Agent": make_user_agent(), "Accept": "application/json"})
 
     @cachebox_cached(cache=TTLCache(maxsize=2, global_ttl=5 * MINUTE))
     def list_bulk_data(self) -> dict[BulkDataKey, dict]:
@@ -94,11 +94,14 @@ class ScryfallBulkDataFetcher:
             return
 
         for ifile in cache_file_path.parent.iterdir():
-            if not ifile.is_file():
-                continue
-            if ifile.suffix == ".tmp" and time.time() - ifile.stat().st_mtime < _TMP_PRUNE_AGE_SECONDS:
-                continue  # likely another worker's in-flight download
-            ifile.unlink()
+            try:
+                if not ifile.is_file():
+                    continue
+                if ifile.suffix == ".tmp" and time.time() - ifile.stat().st_mtime < _TMP_PRUNE_AGE_SECONDS:
+                    continue  # likely another worker's in-flight download
+                ifile.unlink(missing_ok=True)
+            except FileNotFoundError:
+                continue  # another worker pruned it between iterdir() and stat()
 
         download_uri = self.get_download_uri_for_key(data_key)
         before = time.monotonic()
@@ -124,6 +127,10 @@ class ScryfallBulkDataFetcher:
         Unparseable lines are logged and skipped, but if a non-trivially-sized file ends up with
         less than _PARSE_COVERAGE_THRESHOLD of its content parsed into cards (e.g. the dump is no
         longer one-object-per-line), BulkDataParseError is raised instead of silently under-yielding.
+
+        Note: the coverage check runs after the last line is read, so it only fires for consumers
+        that iterate to exhaustion. A consumer that stops early (break, islice, etc.) gets no
+        integrity guarantee about the portion it consumed.
         """
         cache_file_path = self._cache_file_path_for_key(data_key)
         self._ensure_cached(data_key, cache_file_path)
@@ -155,7 +162,9 @@ class ScryfallBulkDataFetcher:
                     card_count += 1
                     parsed_chars += len(raw_line)
                     yield card
-        except zstd.ZstdError:
+        except (zstd.ZstdError, UnicodeDecodeError):
+            # ZstdError: not a valid zstd stream. UnicodeDecodeError: valid zstd whose
+            # decompressed bytes are not valid UTF-8 (e.g. truncated mid-character).
             logger.exception("Corrupt cache file %s; deleting it so the next call re-downloads", cache_file_path)
             cache_file_path.unlink(missing_ok=True)
             raise

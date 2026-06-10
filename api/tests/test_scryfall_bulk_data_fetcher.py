@@ -289,6 +289,16 @@ class TestStreamDataForKeyCorruptCache:
 
         assert not cache_file.exists(), "corrupt cache file should have been deleted"
 
+    def test_invalid_utf8_cache_file_is_deleted_and_raises(self, fetcher: ScryfallBulkDataFetcher, tmp_path: pathlib.Path) -> None:
+        """A valid zstd file whose content is not valid UTF-8 is also treated as corrupt and deleted."""
+        invalid_utf8 = b'[\n{"id":"c1","name":"truncated \xe2\x82'  # multibyte char cut short
+        cache_file = _write_cache_file(tmp_path, invalid_utf8)
+
+        with patch.object(fetcher, "list_bulk_data", return_value=_FAKE_BULK_DATA), pytest.raises(UnicodeDecodeError):
+            list(fetcher.stream_data_for_key(BulkDataKey.DEFAULT_CARDS))
+
+        assert not cache_file.exists(), "invalid-utf8 cache file should have been deleted"
+
     def test_call_after_corruption_re_downloads(self, fetcher: ScryfallBulkDataFetcher, tmp_path: pathlib.Path) -> None:
         """After a corrupt cache file is deleted, the next call downloads a fresh copy and succeeds."""
         cache_file = tmp_path / "default_cards" / "default-cards-test.json.zstd"
