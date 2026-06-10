@@ -1,8 +1,10 @@
 """Fetcher for Scryfall bulk data."""
 
+import io
 import logging
 import pathlib
 import time
+from collections.abc import Iterator
 from enum import StrEnum
 
 import orjson
@@ -110,6 +112,57 @@ class ScryfallBulkDataFetcher:
             f.write(compressed_data)
 
         return _load_data(response.content)
+
+    def _cache_file_path_for_key(self, data_key: BulkDataKey) -> pathlib.Path:
+        download_uri = self.get_download_uri_for_key(data_key)
+        suffix = download_uri.rpartition("/")[-1]
+        cache_file_path = self.cache_directory / data_key / suffix
+        return cache_file_path.with_suffix(".json.zstd")
+
+    def _ensure_cached(self, data_key: BulkDataKey, cache_file_path: pathlib.Path) -> None:
+        """Download and cache the bulk data file if not already present."""
+        cache_file_path.parent.mkdir(parents=True, exist_ok=True)
+        if cache_file_path.exists():
+            return
+
+        for ifile in cache_file_path.parent.iterdir():
+            ifile.unlink()
+
+        download_uri = self.get_download_uri_for_key(data_key)
+        before = time.monotonic()
+        response = self.session.get(download_uri, stream=True, timeout=60)
+        response.raise_for_status()
+        cctx = zstd.ZstdCompressor()
+        with cache_file_path.open("wb") as f, cctx.stream_writer(f) as compressor:
+            for chunk in response.iter_content(chunk_size=65536):
+                compressor.write(chunk)
+        logger.info("Downloaded and cached %s in %.3f seconds", cache_file_path, time.monotonic() - before)
+
+    def stream_data_for_key(self, data_key: BulkDataKey) -> Iterator[dict]:
+        """Yield card dicts one at a time without loading the full file into memory.
+
+        Reads the cached .json.zstd file line-by-line; downloads and caches first if needed.
+        Each line that starts with '{' is treated as one card JSON object (trailing comma stripped).
+        Unparseable lines are logged and skipped rather than raising.
+        """
+        cache_file_path = self._cache_file_path_for_key(data_key)
+        self._ensure_cached(data_key, cache_file_path)
+
+        before = time.monotonic()
+        card_count = 0
+        dctx = zstd.ZstdDecompressor()
+        with cache_file_path.open("rb") as f, dctx.stream_reader(f) as reader:
+            text_reader = io.TextIOWrapper(io.BufferedReader(reader), encoding="utf-8")
+            for raw_line in text_reader:
+                stripped = raw_line.strip().rstrip(",")
+                if not stripped.startswith("{"):
+                    continue
+                try:
+                    yield orjson.loads(stripped)
+                    card_count += 1
+                except orjson.JSONDecodeError:
+                    logger.warning("Skipping unparseable line: %.120s", stripped)
+        logger.info("Streamed %d cards from %s in %.3f seconds", card_count, cache_file_path, time.monotonic() - before)
 
 
 def main() -> None:
