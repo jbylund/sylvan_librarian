@@ -157,7 +157,7 @@ class TestStreamDataForKeyCacheMiss:
 
         cache_file = tmp_path / "default_cards" / "default-cards-test.json.zstd"
         assert cache_file.exists(), "cache file should have been written"
-        # The streaming compressor omits content size, so use ZstdDecompressor instead of zstd.decompress()
+        # Use ZstdDecompressor so we can bound output size via max_output_size.
         dctx = zstd.ZstdDecompressor()
         decompressed = dctx.decompress(cache_file.read_bytes(), max_output_size=10 * 1024 * 1024)
         assert b"Downloaded Card" in decompressed
