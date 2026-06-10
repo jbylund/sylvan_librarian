@@ -2,54 +2,19 @@
 
 from __future__ import annotations
 
-import multiprocessing
-import os
-import time
 import uuid
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
-import pytest
-from testcontainers.postgres import PostgresContainer
-
-from api.api_resource import APIResource
 from api.card_processing import preprocess_card
+from api.tests.helpers import make_raw_card
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from api.api_resource import APIResource
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _raw_card(card_id: str | None = None, name: str = "Test Card") -> dict:
-    cid = card_id or str(uuid.uuid4())
-    jpg = f"{cid[0]}/{cid[1]}/{cid}.jpg"
-    return {
-        "id": cid,
-        "oracle_id": str(uuid.uuid4()),
-        "name": name,
-        "released_at": "2020-01-01",
-        "legalities": {"vintage": "legal"},
-        "games": ["paper"],
-        "type_line": "Instant",
-        "colors": [],
-        "color_identity": [],
-        "keywords": [],
-        "prices": {"usd": "0.10"},
-        "set": "tst",
-        "rarity": "common",
-        "collector_number": "1",
-        "image_uris": {
-            "small": f"https://cards.scryfall.io/small/front/{jpg}",
-            "normal": f"https://cards.scryfall.io/normal/front/{jpg}",
-            "large": f"https://cards.scryfall.io/large/front/{jpg}",
-            "png": f"https://cards.scryfall.io/png/front/{jpg}",
-            "art_crop": f"https://cards.scryfall.io/art_crop/front/{jpg}",
-            "border_crop": f"https://cards.scryfall.io/border_crop/front/{jpg}",
-        },
-    }
 
 
 def _insert_card(api: APIResource, raw: dict) -> str:
@@ -60,56 +25,13 @@ def _insert_card(api: APIResource, raw: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture(scope="module")
-def postgres_container() -> Generator[PostgresContainer]:
-    container = PostgresContainer(
-        image="postgres:18",
-        username="testuser",
-        password="testpass",  # noqa: S106
-        dbname="testdb",
-    )
-    with container as pg:
-        yield pg
-
-
-@pytest.fixture(scope="module")
-def api_resource(postgres_container: PostgresContainer) -> Generator[APIResource]:
-    host = postgres_container.get_container_host_ip()
-    port = postgres_container.get_exposed_port(5432)
-    original = {k: os.environ.get(k) for k in ["PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD"]}
-    os.environ.update({"PGHOST": host, "PGPORT": str(port), "PGDATABASE": "testdb", "PGUSER": "testuser", "PGPASSWORD": "testpass"})
-    api = None
-    try:
-        api = APIResource(
-            last_import_time=multiprocessing.Value("d", time.time(), lock=True),
-            schema_setup_event=multiprocessing.Event(),
-        )
-        api._setup_complete = lambda: True
-        api._import_recent = lambda: True
-        api.setup_schema()
-        yield api
-    finally:
-        for k, v in original.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-        if api is not None and hasattr(api, "_conn_pool"):
-            api._conn_pool.close()
-
-
-# ---------------------------------------------------------------------------
 # _insert_cubecobra_data
 # ---------------------------------------------------------------------------
 
 
 class TestInsertCubecobraData:
     def test_updates_matching_oracle_id(self, api_resource: APIResource) -> None:
-        oracle_id = _insert_card(api_resource, _raw_card(name="Cubecobra Insert Test"))
+        oracle_id = _insert_card(api_resource, make_raw_card(name="Cubecobra Insert Test"))
 
         cubecobra_data = {oracle_id: {"elo": 1200.5, "cube_count": 42, "pick_count": 100}}
         rows_updated = api_resource._insert_cubecobra_data(cubecobra_data)
@@ -138,8 +60,8 @@ class TestInsertCubecobraData:
         assert rows_updated == 0
 
     def test_multiple_cards_updated_in_one_call(self, api_resource: APIResource) -> None:
-        oid1 = _insert_card(api_resource, _raw_card(name=f"Multi CubeCobra A {uuid.uuid4()}"))
-        oid2 = _insert_card(api_resource, _raw_card(name=f"Multi CubeCobra B {uuid.uuid4()}"))
+        oid1 = _insert_card(api_resource, make_raw_card(name=f"Multi CubeCobra A {uuid.uuid4()}"))
+        oid2 = _insert_card(api_resource, make_raw_card(name=f"Multi CubeCobra B {uuid.uuid4()}"))
 
         cubecobra_data = {
             oid1: {"elo": 1100.0, "cube_count": 10, "pick_count": 20},
@@ -227,7 +149,7 @@ class TestBackfillPreferScores:
         assert result["status"] == "success"
 
     def test_returns_cards_updated_count(self, api_resource: APIResource) -> None:
-        _insert_card(api_resource, _raw_card(name=f"Prefer Score Card {uuid.uuid4()}"))
+        _insert_card(api_resource, make_raw_card(name=f"Prefer Score Card {uuid.uuid4()}"))
         result = api_resource.backfill_prefer_scores()
         assert result["cards_updated"] >= 1
 
@@ -236,7 +158,7 @@ class TestBackfillPreferScores:
         assert str(result["cards_updated"]) in result["message"]
 
     def test_prefer_score_populated_in_db(self, api_resource: APIResource) -> None:
-        oracle_id = _insert_card(api_resource, _raw_card(name=f"Prefer Score Check {uuid.uuid4()}"))
+        oracle_id = _insert_card(api_resource, make_raw_card(name=f"Prefer Score Check {uuid.uuid4()}"))
         api_resource.backfill_prefer_scores()
 
         with api_resource._conn_pool.connection() as conn, conn.cursor() as cursor:

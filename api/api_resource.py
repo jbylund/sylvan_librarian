@@ -2418,7 +2418,9 @@ class APIResource:
 
         Returns (rows_inserted, sample_cards).
         """
-        cursor.execute(f"CREATE TEMPORARY TABLE {staging_table_name} (card_blob jsonb)")
+        # ON COMMIT DROP is a safety net: the table is dropped explicitly below, but if an error
+        # aborts the batch the transaction rollback (or any later commit) removes it as well.
+        cursor.execute(f"CREATE TEMPORARY TABLE {staging_table_name} (card_blob jsonb) ON COMMIT DROP")
 
         with cursor.copy(
             f"COPY {staging_table_name} (card_blob) FROM STDIN WITH (FORMAT csv, HEADER false)",
@@ -2528,20 +2530,15 @@ class APIResource:
                 }
 
         except (psycopg.Error, ValueError, KeyError) as e:
-            logger.error("Error loading cards with staging table %s: %s", staging_table_name, e)
-            try:
-                with self._conn_pool.connection() as conn, conn.cursor() as cursor:
-                    cursor.execute(f"DROP TABLE IF EXISTS {staging_table_name}")
-                    conn.commit()
-            except (psycopg.Error, ValueError) as cleanup_error:
-                logger.warning("Failed to cleanup staging table %s: %s", staging_table_name, cleanup_error)
-
+            # No staging-table cleanup is needed (or possible) here: the temp table is session-scoped
+            # and created within the still-open transaction, so the pool's rollback-on-error removes it.
+            logger.exception("Error loading cards with staging table %s", staging_table_name)
             return {
                 "status": "database_error",
                 "cards_loaded": 0,
                 "cards_sent": 0,
                 "sample_cards": [],
-                "message": f"Error loading cards: {e}",
+                "message": f"Error loading cards: {type(e).__name__}: {e}",
             }
 
     def _clear_caches(self) -> None:

@@ -2,100 +2,21 @@
 
 from __future__ import annotations
 
+import logging
 import multiprocessing
-import os
-import time
 import uuid
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
-import pytest
-from testcontainers.postgres import PostgresContainer
+import psycopg
 
 from api.api_resource import APIResource
-from api.card_processing import preprocess_card
-from api.scryfall_bulk_data_fetcher import BulkDataKey
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _raw_card(card_id: str | None = None, name: str = "Test Card") -> dict:
-    """Minimal raw Scryfall card dict that passes preprocess_card and satisfies NOT NULL constraints."""
-    cid = card_id or str(uuid.uuid4())
-    jpg = f"{cid[0]}/{cid[1]}/{cid}.jpg"
-    return {
-        "id": cid,
-        "oracle_id": str(uuid.uuid4()),
-        "name": name,
-        "released_at": "2020-01-01",
-        "legalities": {"vintage": "legal"},
-        "games": ["paper"],
-        "type_line": "Instant",
-        "colors": [],
-        "color_identity": [],
-        "keywords": [],
-        "prices": {"usd": "0.10"},
-        "set": "tst",
-        "rarity": "common",
-        "collector_number": "1",
-        "image_uris": {
-            "small": f"https://cards.scryfall.io/small/front/{jpg}",
-            "normal": f"https://cards.scryfall.io/normal/front/{jpg}",
-            "large": f"https://cards.scryfall.io/large/front/{jpg}",
-            "png": f"https://cards.scryfall.io/png/front/{jpg}",
-            "art_crop": f"https://cards.scryfall.io/art_crop/front/{jpg}",
-            "border_crop": f"https://cards.scryfall.io/border_crop/front/{jpg}",
-        },
-    }
-
-
-# ---------------------------------------------------------------------------
-# Testcontainer fixtures (class-scoped — one container per test class)
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture(scope="module")
-def postgres_container() -> Generator[PostgresContainer]:
-    container = PostgresContainer(
-        image="postgres:18",
-        username="testuser",
-        password="testpass",  # noqa: S106
-        dbname="testdb",
-    )
-    with container as pg:
-        yield pg
-
-
-@pytest.fixture(scope="module")
-def api_resource(postgres_container: PostgresContainer) -> Generator[APIResource]:
-    host = postgres_container.get_container_host_ip()
-    port = postgres_container.get_exposed_port(5432)
-    original = {k: os.environ.get(k) for k in ["PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD"]}
-    os.environ.update({"PGHOST": host, "PGPORT": str(port), "PGDATABASE": "testdb", "PGUSER": "testuser", "PGPASSWORD": "testpass"})
-    api = None
-    try:
-        api = APIResource(
-            last_import_time=multiprocessing.Value("d", time.time(), lock=True),
-            schema_setup_event=multiprocessing.Event(),
-        )
-        api._setup_complete = lambda: True
-        api._import_recent = lambda: True
-        api.setup_schema()
-        yield api
-    finally:
-        for k, v in original.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-        if api is not None and hasattr(api, "_conn_pool"):
-            api._conn_pool.close()
-
+    import pytest
+from api.card_processing import preprocess_card
+from api.scryfall_bulk_data_fetcher import BulkDataKey
+from api.tests.helpers import make_raw_card
 
 # ---------------------------------------------------------------------------
 # Status-code tests
@@ -118,13 +39,13 @@ class TestLoadCardsWithStagingStatus:
     def test_preprocessing_filters_all_cards_returns_no_cards_after_preprocessing(self, api_resource: APIResource) -> None:
         """When preprocess_card returns [] for all inputs, status is no_cards_after_preprocessing."""
         with patch("api.api_resource.preprocess_card", return_value=[]):
-            result = api_resource._load_cards_with_staging([_raw_card()])
+            result = api_resource._load_cards_with_staging([make_raw_card()])
         assert result["status"] == "no_cards_after_preprocessing"
         assert result["cards_loaded"] == 0
 
     def test_already_imported_cards_return_all_cards_already_present(self, api_resource: APIResource) -> None:
         """Cards already in the DB are skipped; if all are skipped the status is all_cards_already_present."""
-        card = _raw_card(name="Already Present Card")
+        card = make_raw_card(name="Already Present Card")
         api_resource._load_cards_with_staging([card])  # first insert
 
         result = api_resource._load_cards_with_staging([card])  # second attempt
@@ -132,7 +53,7 @@ class TestLoadCardsWithStagingStatus:
         assert result["cards_loaded"] == 0
 
     def test_success_result_includes_cards_sent(self, api_resource: APIResource) -> None:
-        result = api_resource._load_cards_with_staging([_raw_card(name="Cards Sent Test")])
+        result = api_resource._load_cards_with_staging([make_raw_card(name="Cards Sent Test")])
         assert result["status"] == "success"
         assert result["cards_sent"] >= 1
         assert "cards_loaded" in result
@@ -148,7 +69,7 @@ class TestCardStreamCounting:
 
     def test_multiple_preprocessed_but_all_already_imported_gives_correct_status(self, api_resource: APIResource) -> None:
         """Raw > 0 and preprocessed > 0 but all filtered by already_imported_ids → all_cards_already_present."""
-        cards = [_raw_card(name=f"Count Card {i}") for i in range(3)]
+        cards = [make_raw_card(name=f"Count Card {i}") for i in range(3)]
         api_resource._load_cards_with_staging(cards)  # seed the DB
 
         result = api_resource._load_cards_with_staging(cards)
@@ -160,7 +81,7 @@ class TestCardStreamCounting:
     def test_preprocessing_filter_distinguished_from_empty_input(self, api_resource: APIResource) -> None:
         """no_cards_after_preprocessing is distinct from no_cards_before_preprocessing."""
         with patch("api.api_resource.preprocess_card", return_value=[]):
-            filtered = api_resource._load_cards_with_staging([_raw_card(), _raw_card()])
+            filtered = api_resource._load_cards_with_staging([make_raw_card(), make_raw_card()])
         empty = api_resource._load_cards_with_staging([])
 
         assert filtered["status"] == "no_cards_after_preprocessing"
@@ -176,14 +97,14 @@ class TestCopyBatchToStaging:
     """_copy_batch_to_staging COPYs one batch through a temp staging table."""
 
     def test_inserts_card_and_returns_row_count(self, api_resource: APIResource) -> None:
-        (preprocessed,) = preprocess_card(_raw_card(name="Staging Insert Card"))
+        (preprocessed,) = preprocess_card(make_raw_card(name="Staging Insert Card"))
         with api_resource._conn_pool.connection() as conn, conn.cursor() as cursor:
             rows, _ = api_resource._copy_batch_to_staging(cursor, "test_stg_insert", (preprocessed,))
             conn.commit()
         assert rows == 1
 
     def test_returns_sample_cards_as_list_of_dicts(self, api_resource: APIResource) -> None:
-        (preprocessed,) = preprocess_card(_raw_card(name="Staging Sample Card"))
+        (preprocessed,) = preprocess_card(make_raw_card(name="Staging Sample Card"))
         with api_resource._conn_pool.connection() as conn, conn.cursor() as cursor:
             _, sample_cards = api_resource._copy_batch_to_staging(cursor, "test_stg_sample", (preprocessed,))
             conn.commit()
@@ -192,7 +113,7 @@ class TestCopyBatchToStaging:
 
     def test_on_conflict_does_nothing_returns_zero(self, api_resource: APIResource) -> None:
         """Re-inserting the same card returns rowcount 0 (ON CONFLICT DO NOTHING)."""
-        (preprocessed,) = preprocess_card(_raw_card(name="Staging Conflict Card"))
+        (preprocessed,) = preprocess_card(make_raw_card(name="Staging Conflict Card"))
         with api_resource._conn_pool.connection() as conn, conn.cursor() as cursor:
             api_resource._copy_batch_to_staging(cursor, "test_stg_conflict_a", (preprocessed,))
             conn.commit()
@@ -211,7 +132,7 @@ class TestMultiBatchLoad:
     """Cards spanning multiple batches are fully inserted."""
 
     def test_all_cards_inserted_across_batches(self, api_resource: APIResource) -> None:
-        cards = [_raw_card(name=f"Batch Card {uuid.uuid4()}") for _ in range(7)]
+        cards = [make_raw_card(name=f"Batch Card {uuid.uuid4()}") for _ in range(7)]
         result = api_resource._load_cards_with_staging(cards, page_size=3)
         assert result["status"] == "success"
         assert result["cards_loaded"] == 7
@@ -219,20 +140,69 @@ class TestMultiBatchLoad:
 
     def test_batch_boundary_at_exact_multiple(self, api_resource: APIResource) -> None:
         """page_size=4, 8 cards → two full batches of 4."""
-        cards = [_raw_card(name=f"Exact Batch {uuid.uuid4()}") for _ in range(8)]
+        cards = [make_raw_card(name=f"Exact Batch {uuid.uuid4()}") for _ in range(8)]
         result = api_resource._load_cards_with_staging(cards, page_size=4)
         assert result["status"] == "success"
         assert result["cards_loaded"] == 8
 
     def test_already_imported_cards_skipped_across_batch_boundary(self, api_resource: APIResource) -> None:
-        existing = [_raw_card(name=f"Existing {uuid.uuid4()}") for _ in range(3)]
+        existing = [make_raw_card(name=f"Existing {uuid.uuid4()}") for _ in range(3)]
         api_resource._load_cards_with_staging(existing, page_size=10)
 
-        new_cards = [_raw_card(name=f"New {uuid.uuid4()}") for _ in range(4)]
+        new_cards = [make_raw_card(name=f"New {uuid.uuid4()}") for _ in range(4)]
         result = api_resource._load_cards_with_staging(existing + new_cards, page_size=3)
         assert result["status"] == "success"
         assert result["cards_loaded"] == 4
         assert result["cards_sent"] == 4
+
+
+# ---------------------------------------------------------------------------
+# Error-path cleanup tests
+# ---------------------------------------------------------------------------
+
+
+class TestStagingTableCleanupOnError:
+    """A mid-batch failure must not leak the temp staging table or poison the pooled connection."""
+
+    @staticmethod
+    def _create_table_then_fail(cursor: psycopg.Cursor, staging_table_name: str, page: tuple) -> tuple:  # noqa: ARG004
+        cursor.execute(f"CREATE TEMPORARY TABLE {staging_table_name} (card_blob jsonb) ON COMMIT DROP")
+        msg = "simulated failure mid-batch"
+        raise psycopg.DataError(msg)
+
+    def test_error_mid_batch_returns_database_error_and_leaks_nothing(
+        self, api_resource: APIResource, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with (
+            patch.object(api_resource, "_copy_batch_to_staging", side_effect=self._create_table_then_fail),
+            caplog.at_level(logging.ERROR, logger="api.api_resource"),
+        ):
+            result = api_resource._load_cards_with_staging([make_raw_card(name="Doomed Card")])
+
+        assert result["status"] == "database_error"
+        assert result["cards_loaded"] == 0
+
+        # The failure must be interpretable: exception type in the message, full traceback in the log.
+        assert result["message"] == "Error loading cards: DataError: simulated failure mid-batch"
+        error_records = [r for r in caplog.records if "Error loading cards with staging table" in r.message]
+        assert error_records, "the failure should be logged"
+        assert all(r.exc_info for r in error_records), "the log record should carry the traceback"
+
+        # The rollback on connection return must have removed the temp table from every session.
+        with api_resource._conn_pool.connection() as conn, conn.cursor() as cursor:
+            cursor.execute("SELECT relname FROM pg_class WHERE relname LIKE 'import_staging_%'")
+            leaked = [r["relname"] for r in cursor.fetchall()]
+        assert leaked == []
+
+    def test_import_succeeds_after_earlier_failure(self, api_resource: APIResource) -> None:
+        """The pool is reusable after a failed import: the next import on the same pool succeeds."""
+        with patch.object(api_resource, "_copy_batch_to_staging", side_effect=self._create_table_then_fail):
+            failed = api_resource._load_cards_with_staging([make_raw_card(name="First Try Fails")])
+        assert failed["status"] == "database_error"
+
+        recovered = api_resource._load_cards_with_staging([make_raw_card(name="Second Try Succeeds")])
+        assert recovered["status"] == "success"
+        assert recovered["cards_loaded"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +214,11 @@ class TestRunImportUnderLockStreaming:
     """_run_import_under_lock must delegate to stream_data_for_key, not _get_cards_to_insert."""
 
     def _make_api(self) -> APIResource:
-        api = APIResource(last_import_time=multiprocessing.Value("d", 0.0, lock=True))
+        # Patch out setup_schema and import_data during construction: __init__ calls both, and an
+        # unpatched import_data with last_import_time=0.0 performs a real full Scryfall import.
+        with patch.object(APIResource, "setup_schema"), patch.object(APIResource, "import_data"):
+            api = APIResource(last_import_time=multiprocessing.Value("d", 0.0, lock=True))
+        api._conn_pool.close()
         api._conn_pool = MagicMock()
         return api
 
