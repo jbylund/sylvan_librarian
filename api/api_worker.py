@@ -58,6 +58,7 @@ class ApiWorker(multiprocessing.Process):
         last_import_time: Synchronized | None = None,
         schema_setup_event: EventType = multiprocessing_utils.DEFAULT_EVENT,
         cache_generation: Synchronized | None = None,
+        engine_reload_guard: LockType | None = None,
     ) -> None:
         """Initialize the API worker process.
 
@@ -70,6 +71,7 @@ class ApiWorker(multiprocessing.Process):
             schema_setup_event (multiprocessing.Event): Event denoting schema setup has been completed.
             debug (bool): Whether to run in debug mode.
             cache_generation (Synchronized | None): Shared counter incremented on cache invalidation.
+            engine_reload_guard (multiprocessing.Lock | None): Cross-worker lock so only one worker reloads the engine store.
         """
         super().__init__()
         self.host = host
@@ -80,6 +82,7 @@ class ApiWorker(multiprocessing.Process):
         self.debug = debug
         self.schema_setup_event = schema_setup_event
         self.cache_generation = cache_generation
+        self.engine_reload_guard = engine_reload_guard
 
     @classmethod
     def get_api(
@@ -88,6 +91,7 @@ class ApiWorker(multiprocessing.Process):
         last_import_time: Synchronized | None,
         schema_setup_event: EventType,
         cache_generation: Synchronized | None = None,
+        engine_reload_guard: LockType | None = None,
     ) -> falcon.App:
         """Create and configure the Falcon API application.
 
@@ -118,6 +122,7 @@ class ApiWorker(multiprocessing.Process):
         api.set_error_serializer(json_error_serializer)  # Use custom JSON error serializer
         sink = APIResource(
             cache_generation=cache_generation,
+            engine_reload_guard=engine_reload_guard,
             import_guard=import_guard,
             last_import_time=last_import_time,
             schema_setup_event=schema_setup_event,
@@ -151,6 +156,7 @@ class ApiWorker(multiprocessing.Process):
 
             app = self.get_api(
                 cache_generation=self.cache_generation,
+                engine_reload_guard=self.engine_reload_guard,
                 import_guard=self.import_guard,
                 last_import_time=self.last_import_time,
                 schema_setup_event=self.schema_setup_event,

@@ -193,6 +193,7 @@ class APIResource:
         last_import_time: Synchronized | None = None,
         schema_setup_event: EventType = multiprocessing_utils.DEFAULT_EVENT,
         cache_generation: Synchronized | None = None,
+        engine_reload_guard: LockType | None = None,
     ) -> None:
         """Initialize an APIResource object, set up connection pool and action map.
 
@@ -243,6 +244,9 @@ class APIResource:
         self._tagger_client = TaggerClient()
         self._engine = _QueryEngine()
         self._engine_reload_lock = threading.Lock()
+        # Cross-worker guard: the full-table fetch in _reload_engine is memory-hungry,
+        # so only one worker process should run it at a time (see _reload_engine).
+        self._engine_reload_guard: LockType = engine_reload_guard or multiprocessing.Lock()
         logger.info("Worker with pid %d has conn pool %s", os.getpid(), self._conn_pool)
         self.setup_schema()
         self.import_data()  # ensures that database is setup
@@ -647,20 +651,43 @@ class APIResource:
         logger.info("Last import was %d seconds ago, %s", time_since_import, retval)
         return retval
 
-    def _reload_engine(self) -> None:
-        """Fetch all cards from the DB and reload the Rust engine's card store."""
+    def _reload_engine(self, *, force: bool = False) -> None:
+        """Fetch all cards from the DB and reload the Rust engine's card store.
+
+        The full-table fetch (fetchall + dict conversion + rkyv serialization) is the
+        most memory-hungry thing a worker does, so it is guarded by a cross-worker
+        lock: only one worker pays that cost at a time. With force=False (cold-start
+        warming), losers of the race return immediately and pick up the winner's
+        archive via the engine's inode-based remap. With force=True (data just
+        changed), callers wait their turn but skip the rebuild if another worker
+        refreshed the store while they were waiting.
+
+        Args:
+            force: If False, skip entirely when another worker holds the lock or the
+                store is already populated. If True, wait for the lock and always
+                reload (the data just changed, so the archive must be rebuilt).
+        """
         if self._engine is None:
             return
-        cols_sql = ", ".join(f"card.{col}" for col in _ENGINE_COLUMNS_FROM_MODULE)
-        try:
-            with self._conn_pool.connection() as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute(f"SELECT {cols_sql} FROM magic.cards AS card")
-                    rows = cursor.fetchall()
-        except psycopg_pool.PoolClosed:
+        if not self._engine_reload_guard.acquire(block=force):
+            logger.info("Engine reload already in progress in another worker, skipping (pid=%d)", os.getpid())
             return
-        self._engine.reload([dict(row) for row in rows])
-        logger.info("Engine reloaded with %d cards (pid=%d)", self._engine.size(), os.getpid())
+        try:
+            if not force and self._engine.size() > 0:
+                # Another worker populated the store while we raced for the lock.
+                return
+            cols_sql = ", ".join(f"card.{col}" for col in _ENGINE_COLUMNS_FROM_MODULE)
+            try:
+                with self._conn_pool.connection() as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute(f"SELECT {cols_sql} FROM magic.cards AS card")
+                        rows = cursor.fetchall()
+            except psycopg_pool.PoolClosed:
+                return
+            self._engine.reload([dict(row) for row in rows])
+            logger.info("Engine reloaded with %d cards (pid=%d)", self._engine.size(), os.getpid())
+        finally:
+            self._engine_reload_guard.release()
 
     def _run_import_under_lock(self) -> None:
         """Run the import flow; caller must hold the import lock."""
@@ -690,7 +717,7 @@ class APIResource:
             )
             self.backfill_prefer_scores()
             self.backfill_cubecobra_scores()
-            self._reload_engine()
+            self._reload_engine(force=True)
             self._clear_caches()
             self._last_import_time.value = time.time()
             self._setup_complete_cache = None
@@ -2690,7 +2717,7 @@ class APIResource:
                 # Clear caches and refresh engine when cards are successfully loaded
                 if cards_loaded > 0:
                     self._clear_caches()
-                    self._reload_engine()
+                    self._reload_engine(force=True)
                 return result
 
         except (psycopg.Error, ValueError, KeyError) as e:

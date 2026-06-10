@@ -439,7 +439,7 @@ class TestContainerIntegration:
             conn.commit()
 
         # Reload the engine so it picks up the direct DB update
-        api_resource._reload_engine()
+        api_resource._reload_engine(force=True)
 
         result = api_resource._search_engine(
             **_search_kwargs("cmc>=0", limit=100, orderby=CardOrdering.CUBECOBRA, direction=SortDirection.ASC)
