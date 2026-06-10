@@ -96,6 +96,8 @@ def run_server(
             if response:
                 logger.info("Exit flag set, terminating workers")
                 break
+        else:
+            logger.info("Some workers died")
     except KeyboardInterrupt:
         graceful_shutdown(signal.SIGINT, None)
 

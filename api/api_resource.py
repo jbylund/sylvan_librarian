@@ -929,7 +929,8 @@ class APIResource:
                 prefer=str(prefer),
                 orderby=str(orderby),
                 direction=str(direction),
-                limit=limit,
+                # limit=None means "no limit"; the engine requires an int, so use a large number
+                limit=limit if limit is not None else 1_000_000,
             )
         return {
             "cards": list(cards),
