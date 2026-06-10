@@ -27,6 +27,7 @@ import cachebox
 import falcon
 import orjson
 import psycopg
+import psycopg_pool
 import requests
 from cachebox import LRUCache, TTLCache
 from cachebox import cached as cachebox_cached
@@ -51,8 +52,6 @@ if TYPE_CHECKING:
     from multiprocessing.sharedctypes import Synchronized
     from multiprocessing.synchronize import Event as EventType
     from multiprocessing.synchronize import RLock as LockType
-
-    import psycopg_pool
 
     from api.parsing.nodes import Query
 
@@ -653,10 +652,13 @@ class APIResource:
         if self._engine is None:
             return
         cols_sql = ", ".join(f"card.{col}" for col in _ENGINE_COLUMNS_FROM_MODULE)
-        with self._conn_pool.connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(f"SELECT {cols_sql} FROM magic.cards AS card")
-                rows = cursor.fetchall()
+        try:
+            with self._conn_pool.connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(f"SELECT {cols_sql} FROM magic.cards AS card")
+                    rows = cursor.fetchall()
+        except psycopg_pool.PoolClosed:
+            return
         self._engine.reload([dict(row) for row in rows])
         logger.info("Engine reloaded with %d cards (pid=%d)", self._engine.size(), os.getpid())
 
@@ -796,7 +798,7 @@ class APIResource:
             ) from err
         return where_clause, params
 
-    def _search(  # noqa: PLR0912,PLR0913,PLR0915
+    def _search(  # noqa: PLR0913
         self,
         *,
         direction: SortDirection = SortDirection.ASC,
@@ -822,13 +824,10 @@ class APIResource:
 
         timer = Timer()
 
-        query_explanation = ""
         parsed_query = None
         try:
             with timer("parse"):
                 parsed_query = parse_scryfall_query(query)
-                if query:
-                    query_explanation = parsed_query.to_human_explanation()
         except ValueError as err:
             logger.info("ValueError caught for query '%s', raising BadRequest", query)
             raise falcon.HTTPBadRequest(
@@ -853,7 +852,6 @@ class APIResource:
             try:
                 result = self._search_engine(
                     parsed_query=parsed_query,
-                    query_explanation=query_explanation,
                     query=query,
                     unique=unique,
                     prefer=prefer,
@@ -869,20 +867,8 @@ class APIResource:
                     search_cache[cache_key] = result
                 return result
 
-        try:
-            with timer("get_where_clause"):
-                where_clause, params = generate_sql_query(parsed_query)
-        except ValueError as err:
-            logger.info("ValueError caught for query '%s', raising BadRequest", query)
-            raise falcon.HTTPBadRequest(
-                title="Invalid Search Query",
-                description=f'Failed to parse query: "{query}"',
-            ) from err
-
         result = self._search_sql(
-            where_clause=where_clause,
-            params=params,
-            query_explanation=query_explanation,
+            parsed_query=parsed_query,
             query=query,
             unique=unique,
             prefer=prefer,
@@ -899,7 +885,6 @@ class APIResource:
         self,
         *,
         parsed_query: Query,
-        query_explanation: str,
         query: str | None,
         unique: UniqueOn,
         prefer: PreferOrder,
@@ -909,6 +894,7 @@ class APIResource:
         timer: Timer,
     ) -> dict[str, Any]:
         logger.info("Searching engine for %r", query)
+        query_explanation = parsed_query.to_human_explanation() if query else ""
         with timer("engine_query"):
             total_cards, cards = self._engine.query(
                 filters=parsed_query,
@@ -932,9 +918,7 @@ class APIResource:
     def _search_sql(  # noqa: PLR0913
         self,
         *,
-        where_clause: str,
-        params: dict[str, Any],
-        query_explanation: str,
+        parsed_query: Query,
         query: str | None,
         unique: UniqueOn,
         prefer: PreferOrder,
@@ -944,6 +928,16 @@ class APIResource:
         timer: Timer,
     ) -> dict[str, Any]:
         logger.info("Searching SQL for %r", query)
+        query_explanation = parsed_query.to_human_explanation() if query else ""
+        try:
+            with timer("get_where_clause"):
+                where_clause, params = generate_sql_query(parsed_query)
+        except ValueError as err:
+            logger.info("ValueError caught for query '%s', raising BadRequest", query)
+            raise falcon.HTTPBadRequest(
+                title="Invalid Search Query",
+                description=f'Failed to parse query: "{query}"',
+            ) from err
         sql_orderby: str = {
             # what's in the query => the db column name
             CardOrdering.CMC: "cmc",
