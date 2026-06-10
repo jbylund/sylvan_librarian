@@ -2452,7 +2452,7 @@ class APIResource:
             writer = csv.writer(copy_filehandle, quoting=csv.QUOTE_ALL)
             writer.writerows([orjson.dumps(card, option=orjson.OPT_SORT_KEYS).decode("utf-8")] for card in page)
 
-        random_threshold = 20 / len(page)  # targets ~10 samples
+        random_threshold = 20 / len(page)  # selects ~20 candidates, capped at 10 by LIMIT
         cursor.execute(
             f"""
             SELECT (jsonb_populate_record(null::magic.cards, card_blob)).*
@@ -2490,7 +2490,7 @@ class APIResource:
             - cards_loaded: rows actually inserted (after ON CONFLICT DO NOTHING)
             - cards_sent: rows attempted (after preprocessing + filtering)
             - sample_cards: up to 10 random cards from the final batch
-            - status: "success", "no_new_cards", "database_error"
+            - status: "success", "no_cards_before_preprocessing", "no_cards_after_preprocessing", "all_cards_already_present", "database_error"
             - message: descriptive message
         """
         self.setup_schema()

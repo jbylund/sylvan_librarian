@@ -82,6 +82,7 @@ def api_resource(postgres_container: PostgresContainer) -> Generator[APIResource
     port = postgres_container.get_exposed_port(5432)
     original = {k: os.environ.get(k) for k in ["PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD"]}
     os.environ.update({"PGHOST": host, "PGPORT": str(port), "PGDATABASE": "testdb", "PGUSER": "testuser", "PGPASSWORD": "testpass"})
+    api = None
     try:
         api = APIResource(
             last_import_time=multiprocessing.Value("d", time.time(), lock=True),
@@ -97,7 +98,7 @@ def api_resource(postgres_container: PostgresContainer) -> Generator[APIResource
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
-        if hasattr(api, "_conn_pool"):
+        if api is not None and hasattr(api, "_conn_pool"):
             api._conn_pool.close()
 
 

@@ -126,16 +126,17 @@ class ScryfallBulkDataFetcher:
             return
 
         for ifile in cache_file_path.parent.iterdir():
-            ifile.unlink()
+            if ifile.is_file():
+                ifile.unlink()
 
         download_uri = self.get_download_uri_for_key(data_key)
         before = time.monotonic()
-        response = self.session.get(download_uri, stream=True, timeout=60)
-        response.raise_for_status()
         cctx = zstd.ZstdCompressor()
-        with cache_file_path.open("wb") as f, cctx.stream_writer(f) as compressor:
-            for chunk in response.iter_content(chunk_size=65536):
-                compressor.write(chunk)
+        with self.session.get(download_uri, stream=True, timeout=60) as response:
+            response.raise_for_status()
+            with cache_file_path.open("wb") as f, cctx.stream_writer(f) as compressor:
+                for chunk in response.iter_content(chunk_size=65536):
+                    compressor.write(chunk)
         logger.info("Downloaded and cached %s in %.3f seconds", cache_file_path, time.monotonic() - before)
 
     def stream_data_for_key(self, data_key: BulkDataKey) -> Iterator[dict]:
@@ -151,8 +152,11 @@ class ScryfallBulkDataFetcher:
         before = time.monotonic()
         card_count = 0
         dctx = zstd.ZstdDecompressor()
-        with cache_file_path.open("rb") as f, dctx.stream_reader(f) as reader:
-            text_reader = io.TextIOWrapper(io.BufferedReader(reader), encoding="utf-8")
+        with (
+            cache_file_path.open("rb") as f,
+            dctx.stream_reader(f) as reader,
+            io.TextIOWrapper(io.BufferedReader(reader), encoding="utf-8") as text_reader,
+        ):
             for raw_line in text_reader:
                 stripped = raw_line.strip().rstrip(",")
                 if not stripped.startswith("{"):

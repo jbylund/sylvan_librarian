@@ -134,6 +134,8 @@ class TestStreamDataForKeyCacheMiss:
         """When no cache file exists, the file is downloaded and written as zstd-compressed cache."""
         raw_json = _scryfall_json([{"id": "dl-1", "name": "Downloaded Card"}])
         mock_response = MagicMock()
+        mock_response.__enter__ = lambda s: s
+        mock_response.__exit__ = MagicMock(return_value=False)
         mock_response.iter_content.return_value = [raw_json]
         fetcher.session.get.return_value = mock_response
 
@@ -167,6 +169,8 @@ class TestStreamDataForKeyCacheMiss:
         raw_json = _scryfall_json([{"id": "new", "name": "New Card"}])
         uri = "https://data.scryfall.io/default-cards/default-cards-new.json"
         mock_response = MagicMock()
+        mock_response.__enter__ = lambda s: s
+        mock_response.__exit__ = MagicMock(return_value=False)
         mock_response.iter_content.return_value = [raw_json]
         fetcher.session.get.return_value = mock_response
 
