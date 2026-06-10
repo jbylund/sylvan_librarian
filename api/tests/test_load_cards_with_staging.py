@@ -11,12 +11,12 @@ from unittest.mock import MagicMock, patch
 import psycopg
 
 from api.api_resource import APIResource
-
-if TYPE_CHECKING:
-    import pytest
 from api.card_processing import preprocess_card
 from api.scryfall_bulk_data_fetcher import BulkDataKey
 from api.tests.helpers import make_raw_card
+
+if TYPE_CHECKING:
+    import pytest
 
 # ---------------------------------------------------------------------------
 # Status-code tests
