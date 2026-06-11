@@ -85,6 +85,36 @@ class TestFilters:
         total, _ = _run(engine, "name:bolt")
         assert total == 10
 
+    def test_name_with_absent_trigram_matches_nothing(self, engine: QueryEngine) -> None:
+        # "bolxq" shares trigrams with "bolt" but contains trigrams no card name has;
+        # the trigram narrowing must yield an empty candidate set (and zero results).
+        total, cards = _run(engine, "name:bolxq")
+        assert total == 0
+        assert cards == []
+
+    def test_set_code_query_is_case_insensitive(self, engine: QueryEngine) -> None:
+        # Set codes are lowercased at import, so the query value is lowercased on
+        # both the engine and SQL paths — set:LEA must behave like set:lea.
+        t_upper, _ = _run(engine, "set:LEA")
+        t_lower, _ = _run(engine, "set:lea")
+        assert t_upper == t_lower == 7
+
+    def test_collector_number_query_is_case_sensitive(self) -> None:
+        # collector_number is stored raw and mixed-case (e.g. The List's "10E-105"),
+        # and the SQL path compares it exactly — the engine must do the same.
+        e = QueryEngine()
+        e.reload(
+            [
+                {"card_name": "List Printing", "collector_number": "10E-105"},
+                {"card_name": "Plain Printing", "collector_number": "105"},
+            ]
+        )
+        total_exact, cards = _run(e, "cn:10E-105")
+        assert total_exact == 1
+        assert cards[0]["name"] == "List Printing"
+        total_wrong_case, _ = _run(e, "cn:10e-105")
+        assert total_wrong_case == 0
+
     def test_name_exact_titlecase_normalized(self, engine: QueryEngine) -> None:
         # name= should be case-insensitive (titlecase normalization applied on both paths)
         t_lower, _ = _run(engine, 'name="lightning bolt"')

@@ -354,11 +354,8 @@ class APIResource:
             logger.info("Request duration: %.1f ms / %s", duration, resp.status)
             record_span(req, "handler", duration)
             if isinstance(res, dict):
-                outer = res.get("outer_timings", {})
-                if "get_where_clause" in outer:
-                    record_span(req, "parse", outer["get_where_clause"].get("_meta", {}).get("duration_ms", 0))
-                if "run_query" in outer:
-                    record_span(req, "db", outer["run_query"].get("_meta", {}).get("duration_ms", 0))
+                for span_name, span_data in res.get("outer_timings", {}).items():
+                    record_span(req, span_name, span_data.get("_meta", {}).get("duration_ms", 0))
 
     def _raise_not_found(self, **_: object) -> None:
         """Raise a Falcon HTTPNotFound error with available routes."""

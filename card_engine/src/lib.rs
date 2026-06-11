@@ -1121,7 +1121,10 @@ fn build_text_filter(attr: &str, op: &str, rhs: &Value) -> Result<FilterExpr, St
     let raw_value = rhs["kwargs"]["value"].as_str().unwrap_or("");
 
     if matches!(attr, "card_set_code" | "card_layout" | "card_border" | "card_watermark" | "collector_number") {
-        let value  = raw_value.to_lowercase();
+        // collector_number is stored raw and mixed-case (e.g. "10E-105"); compare exactly,
+        // matching the SQL path. The other four are lowercased at import, so lowercasing
+        // the query value gives case-insensitive matching with a plain equality.
+        let value = if attr == "collector_number" { raw_value.to_string() } else { raw_value.to_lowercase() };
         let cmp_op = str_op_to_cmp(op)?;
         let lower_fn: fn(&Card) -> Option<&str> = match attr {
             "card_set_code"      => |c| Some(c.card_set_code.as_str() as &str),
@@ -1193,11 +1196,14 @@ fn trigram_candidates(idx: &TrigramIndex, word: &str) -> Option<Vec<u32>> {
     let bytes = word.as_bytes();
     if bytes.len() < 3 { return None; }
 
-    let mut lists: Vec<&Vec<u32>> = bytes.windows(3)
-        .map(|w| [w[0], w[1], w[2]])
-        .filter_map(|tri| idx.get(&tri))
-        .collect();
-    if lists.is_empty() { return Some(Vec::new()); }
+    let mut lists: Vec<&Vec<u32>> = Vec::with_capacity(bytes.len() - 2);
+    for w in bytes.windows(3) {
+        match idx.get(&[w[0], w[1], w[2]]) {
+            Some(list) => lists.push(list),
+            // A trigram absent from the index appears in no card: nothing can match.
+            None => return Some(Vec::new()),
+        }
+    }
     lists.sort_unstable_by_key(|l| l.len());
     lists.dedup_by(|a, b| std::ptr::eq(*a, *b));
 
@@ -1843,4 +1849,52 @@ impl QueryEngine {
 mod card_engine {
     #[pymodule_export]
     use super::QueryEngine;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a TrigramIndex mapping each word's trigrams to the given card ids.
+    fn index_of(words: &[(&str, &[u32])]) -> TrigramIndex {
+        let mut idx: TrigramIndex = HashMap::new();
+        for (word, cards) in words {
+            for w in word.as_bytes().windows(3) {
+                let entry = idx.entry([w[0], w[1], w[2]]).or_default();
+                for &c in *cards {
+                    if !entry.contains(&c) { entry.push(c); }
+                }
+                entry.sort_unstable();
+            }
+        }
+        idx
+    }
+
+    #[test]
+    fn trigram_short_word_cannot_narrow() {
+        let idx = index_of(&[("bolt", &[1, 2])]);
+        assert_eq!(trigram_candidates(&idx, "bo"), None);
+    }
+
+    #[test]
+    fn trigram_all_present_intersects() {
+        // "bol" → {1,2,3}, "olt" → {1,2}: intersection is {1,2}
+        let idx = index_of(&[("bol", &[1, 2, 3]), ("olt", &[1, 2])]);
+        assert_eq!(trigram_candidates(&idx, "bolt"), Some(vec![1, 2]));
+    }
+
+    #[test]
+    fn trigram_missing_means_no_candidates() {
+        // "bol" is indexed but "olx" appears in no card, which proves nothing can
+        // match — the result must be the empty candidate set, not an intersection
+        // of whichever trigrams happen to exist.
+        let idx = index_of(&[("bolt", &[1, 2])]);
+        assert_eq!(trigram_candidates(&idx, "bolx"), Some(Vec::new()));
+    }
+
+    #[test]
+    fn trigram_fully_unindexed_word_is_empty_not_unnarrowed() {
+        let idx = index_of(&[("bolt", &[1, 2])]);
+        assert_eq!(trigram_candidates(&idx, "zzz"), Some(Vec::new()));
+    }
 }

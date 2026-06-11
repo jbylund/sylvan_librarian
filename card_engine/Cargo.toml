@@ -9,6 +9,8 @@ name = "card_engine"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.28.3", features = ["extension-module"] }
+# extension-module is enabled by maturin (see pyproject.toml [tool.maturin]) so that
+# plain `cargo test` can still link against libpython for Rust unit tests.
+pyo3 = { version = "0.28.3" }
 regex = "1"
 serde_json = "1"

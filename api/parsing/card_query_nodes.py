@@ -746,8 +746,10 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         if field_type == FieldType.TEXT:
             # Handle fields that need exact matching instead of pattern matching
             if attr in ("card_set_code", "card_layout", "card_border", "card_watermark", "collector_number"):
-                # For layout, border, and watermark fields, lowercase the search value for case-insensitive matching
-                if attr in ("card_layout", "card_border", "card_watermark") and hasattr(self.rhs, "value"):
+                # set_code/layout/border/watermark are lowercased at import, so lowercasing the
+                # search value gives case-insensitive matching with a plain equality.
+                # collector_number is stored raw and mixed-case (e.g. "10E-105"): compare exactly.
+                if attr in ("card_set_code", "card_layout", "card_border", "card_watermark") and hasattr(self.rhs, "value"):
                     self.rhs.value = self.rhs.value.lower()
 
                 if self.operator == ":":

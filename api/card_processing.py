@@ -197,8 +197,10 @@ def preprocess_card(card: dict[str, Any]) -> list[dict[str, Any]]:  # noqa: PLR0
     card["price_eur"] = maybe_float(prices.get("eur"))
     card["price_tix"] = maybe_float(prices.get("tix"))
 
-    # Extract set code for dedicated column
-    card["card_set_code"] = card.get("set")
+    # Extract set code for dedicated column (lowercased for case-insensitive search;
+    # Scryfall codes are lowercase already, this just makes the invariant explicit)
+    set_code = card.get("set")
+    card["card_set_code"] = set_code.lower() if isinstance(set_code, str) else set_code
 
     # Extract layout and border for dedicated columns (lowercased for case-insensitive search)
     if "layout" in card:
