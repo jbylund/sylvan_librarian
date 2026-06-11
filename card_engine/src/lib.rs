@@ -3,7 +3,7 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 use regex::Regex;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 // ─── Inline string (no heap allocation) ──────────────────────────────────────
 
@@ -152,6 +152,7 @@ struct Card {
     produced_mana: u8,
     card_types: u16,
 
+    #[allow(dead_code)] // primary key; kept for future result payloads (printing dedup now keys on pointer)
     scryfall_id: String,
     oracle_id: Option<String>,
     illustration_id: Option<String>,
@@ -172,6 +173,12 @@ struct Card {
     type_line: String,
     set_name: String,
     released_at: String,
+    released_at_int: Option<u32>,      // yyyymmdd, parsed once at load for prefer=oldest/newest
+
+    // Dense group ids assigned at reload after the (oracle_id, illustration_id) sort;
+    // adjacency-equal to the string keys, so dedup compares integers, not UUIDs.
+    oracle_group: u32,
+    artwork_group: u32,
 
     cmc: Option<u8>,                   // always an integer; max ~16 in practice
     creature_power: Option<i8>,        // can be negative (e.g. Char-Rumbler)
@@ -188,7 +195,7 @@ struct Card {
 
     card_subtypes: Vec<String>,
     card_keywords: HashSet<String>,
-    card_legalities: HashMap<String, String>,
+    card_legalities: u64, // 2 bits per format, positions from the FORMAT_SHIFTS registry
     card_oracle_tags: HashSet<String>,
     card_is_tags: HashSet<String>,
     card_frame_data: HashSet<String>,
@@ -262,7 +269,57 @@ fn jsonb_obj_to_hashset(d: &Bound<PyDict>, key: &str) -> HashSet<String> {
         .unwrap_or_default()
 }
 
-fn jsonb_obj_to_string_map(d: &Bound<PyDict>, key: &str) -> HashMap<String, String> {
+// ─── Format legality bitmap ──────────────────────────────────────────────────
+//
+// Legalities pack into a u64: 2 bits per format, positions handed out append-only
+// by a global registry the first time a format name appears in loaded data, so
+// bit assignments stay stable across reloads and engine instances. A format the
+// card's JSONB omits reads as not_legal. 32 formats fit; Scryfall ships 22.
+
+const LEGALITY_NOT_LEGAL: u64 = 0;
+const LEGALITY_LEGAL: u64 = 1;
+const LEGALITY_RESTRICTED: u64 = 2;
+const LEGALITY_BANNED: u64 = 3;
+const MAX_FORMATS: usize = 32;
+
+static FORMAT_SHIFTS: OnceLock<RwLock<HashMap<String, u8>>> = OnceLock::new();
+
+fn format_shifts() -> &'static RwLock<HashMap<String, u8>> {
+    FORMAT_SHIFTS.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Bit shift for a format already seen in loaded data; None matches nothing.
+fn format_shift(format: &str) -> Option<u8> {
+    format_shifts().read().ok()?.get(format).copied()
+}
+
+/// Bit shift for a format, assigning the next free slot if unseen (reload path).
+fn format_shift_or_assign(format: &str) -> Option<u8> {
+    if let Some(shift) = format_shift(format) {
+        return Some(shift);
+    }
+    let mut shifts = format_shifts().write().ok()?;
+    if let Some(&shift) = shifts.get(format) {
+        return Some(shift); // assigned while we waited for the write lock
+    }
+    if shifts.len() >= MAX_FORMATS {
+        return None;
+    }
+    let shift = (shifts.len() * 2) as u8;
+    shifts.insert(format.to_string(), shift);
+    Some(shift)
+}
+
+fn legality_code(status: &str) -> u64 {
+    match status {
+        "legal"      => LEGALITY_LEGAL,
+        "restricted" => LEGALITY_RESTRICTED,
+        "banned"     => LEGALITY_BANNED,
+        _            => LEGALITY_NOT_LEGAL,
+    }
+}
+
+fn jsonb_obj_to_legality_bits(d: &Bound<PyDict>, key: &str) -> u64 {
     d.get_item(key)
         .ok()
         .flatten()
@@ -270,11 +327,12 @@ fn jsonb_obj_to_string_map(d: &Bound<PyDict>, key: &str) -> HashMap<String, Stri
             v.cast::<PyDict>().ok().map(|m| {
                 m.iter()
                     .filter_map(|(k, v)| {
-                        let key = k.extract::<String>().ok()?;
-                        let val = v.extract::<String>().ok()?;
-                        Some((key, val))
+                        let format = k.extract::<String>().ok()?;
+                        let status = v.extract::<String>().ok()?;
+                        let shift = format_shift_or_assign(&format)?;
+                        Some(legality_code(&status) << shift)
                     })
-                    .collect()
+                    .fold(0u64, |bits, b| bits | b)
             })
         })
         .unwrap_or_default()
@@ -318,6 +376,8 @@ fn mana_cost_from_pydict(d: &Bound<PyDict>, cmc_val: Option<f32>) -> ManaCost {
 }
 
 fn card_from_pydict(d: &Bound<PyDict>) -> Card {
+    let released_at = opt_str(d, "released_at").unwrap_or_default();
+    let released_at_int: Option<u32> = released_at.replace('-', "").parse().ok();
     let card_name = opt_str(d, "card_name").unwrap_or_default();
     let card_name_lower = InlineStr::<61>::from_str(&card_name.to_lowercase());
     let oracle_text = opt_str(d, "oracle_text").unwrap_or_default();
@@ -348,7 +408,10 @@ fn card_from_pydict(d: &Bound<PyDict>) -> Card {
         mana_cost_text: opt_str(d, "mana_cost_text"),
         type_line: opt_str(d, "type_line").unwrap_or_default(),
         set_name: opt_str(d, "set_name").unwrap_or_default(),
-        released_at: opt_str(d, "released_at").unwrap_or_default(),
+        released_at,
+        released_at_int,
+        oracle_group: 0,  // assigned in reload() after the (oracle_id, illustration_id) sort
+        artwork_group: 0,
 
         card_colors: jsonb_color_to_bits(d, "card_colors"),
         card_color_identity: jsonb_color_to_bits(d, "card_color_identity"),
@@ -370,7 +433,7 @@ fn card_from_pydict(d: &Bound<PyDict>) -> Card {
         card_types: card_types_list_to_bits(&str_list(d, "card_types")),
         card_subtypes: str_list(d, "card_subtypes"),
         card_keywords: jsonb_obj_to_hashset(d, "card_keywords"),
-        card_legalities: jsonb_obj_to_string_map(d, "card_legalities"),
+        card_legalities: jsonb_obj_to_legality_bits(d, "card_legalities"),
         card_oracle_tags: jsonb_obj_to_hashset(d, "card_oracle_tags"),
         card_is_tags: jsonb_obj_to_hashset(d, "card_is_tags"),
         card_frame_data: jsonb_obj_to_hashset(d, "card_frame_data"),
@@ -611,8 +674,8 @@ enum FilterExpr {
     },
 
     Legality {
-        format: String,
-        expected: &'static str,
+        shift: Option<u8>, // None: format absent from all loaded data — matches nothing
+        expected: u64,
     },
 
     ManaCostCmp {
@@ -709,8 +772,8 @@ impl FilterExpr {
                 }
             }
 
-            FilterExpr::Legality { format, expected } => {
-                card.card_legalities.get(format.as_str()).map_or(false, |v| v == *expected)
+            FilterExpr::Legality { shift, expected } => {
+                shift.is_some_and(|s| (card.card_legalities >> s) & 0b11 == *expected)
             }
 
             FilterExpr::ManaCostCmp { op, pips, cmc } => {
@@ -991,15 +1054,14 @@ fn build_binary(kw: &Value) -> Result<FilterExpr, String> {
             .as_array()
             .and_then(|a| a.first())
             .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let expected: &'static str = match orig {
-            "format" | "f" | "legal" => "legal",
-            "banned"                 => "banned",
-            "restricted"             => "restricted",
-            _                        => "legal",
+            .unwrap_or("");
+        let expected = match orig {
+            "format" | "f" | "legal" => LEGALITY_LEGAL,
+            "banned"                 => LEGALITY_BANNED,
+            "restricted"             => LEGALITY_RESTRICTED,
+            _                        => LEGALITY_LEGAL,
         };
-        return Ok(FilterExpr::Legality { format, expected });
+        return Ok(FilterExpr::Legality { shift: format_shift(format), expected });
     }
 
     if attr == "card_types" {
@@ -1390,88 +1452,85 @@ fn narrow_candidates(filter: &FilterExpr, indexes: &CardIndexes) -> Option<Vec<u
 
 // ─── Sort / dedup / limit ─────────────────────────────────────────────────────
 
-fn prefer_score(card: &Card, prefer: &str) -> f64 {
+#[derive(Clone, Copy)]
+enum Prefer { Oldest, Newest, UsdLow, UsdHigh, Promo, Default }
+
+fn prefer_from_str(s: &str) -> Prefer {
+    match s {
+        "oldest"   => Prefer::Oldest,
+        "newest"   => Prefer::Newest,
+        "usd_low"  => Prefer::UsdLow,
+        "usd_high" => Prefer::UsdHigh,
+        "promo"    => Prefer::Promo,
+        _          => Prefer::Default,
+    }
+}
+
+fn prefer_score(card: &Card, prefer: Prefer) -> f64 {
     match prefer {
-        "oldest"   => { let d: i64 = card.released_at.replace('-', "").parse().unwrap_or(99999999); -(d as f64) }
-        "newest"   => { let d: i64 = card.released_at.replace('-', "").parse().unwrap_or(0); d as f64 }
-        "usd_low"  => -(card.price_usd.unwrap_or(f32::INFINITY) as f64),
-        "usd_high" => card.price_usd.unwrap_or(0.0) as f64,
-        "promo"    => -(card.edhrec_rank.map(|r| r as f64).unwrap_or(f64::INFINITY)),
-        _          => card.prefer_score.unwrap_or(0.0) as f64,
+        Prefer::Oldest  => -(card.released_at_int.unwrap_or(99_999_999) as f64),
+        Prefer::Newest  => card.released_at_int.unwrap_or(0) as f64,
+        Prefer::UsdLow  => -(card.price_usd.unwrap_or(f32::INFINITY) as f64),
+        Prefer::UsdHigh => card.price_usd.unwrap_or(0.0) as f64,
+        Prefer::Promo   => -(card.edhrec_rank.map(|r| r as f64).unwrap_or(f64::INFINITY)),
+        Prefer::Default => card.prefer_score.unwrap_or(0.0) as f64,
     }
 }
 
-fn partition_key<'a>(card: &'a Card, unique: &str) -> &'a str {
-    match unique {
-        "artwork"  => card.illustration_id.as_deref().unwrap_or(""),
-        "printing" => &card.scryfall_id,
-        _          => card.oracle_id.as_deref().unwrap_or(""),
-    }
-}
+#[derive(Clone, Copy)]
+enum SortCol { Cmc, Power, Toughness, Rarity, PriceUsd, Cubecobra, EdhrecRank }
 
-fn sort_key(card: &Card, sort_col: &str, descending: bool) -> (bool, f64, bool, f64, bool, f64) {
-    let primary: Option<f32> = match sort_col {
-        "cmc"               => card.cmc.map(|v| v as f32),
-        "creature_power"    => card.creature_power.map(|v| v as f32),
-        "creature_toughness"=> card.creature_toughness.map(|v| v as f32),
-        "card_rarity_int"   => card.card_rarity_int.map(|v| v as f32),
-        "price_usd"         => card.price_usd,
-        "cubecobra_score"   => card.cubecobra_score,
-        _                   => card.edhrec_rank.map(|v| v as f32),
-    };
-    let primary_f   = primary.unwrap_or(0.0) as f64;
-    let primary_val = if descending { -primary_f } else { primary_f };
-    let edhrec      = card.edhrec_rank.unwrap_or(0) as f64;
-    let pscore      = card.prefer_score.unwrap_or(0.0) as f64;
-    (primary.is_none(), primary_val, card.edhrec_rank.is_none(), edhrec, card.prefer_score.is_none(), -pscore)
-}
-
-fn orderby_to_col(orderby: &str) -> &'static str {
+fn orderby_to_col(orderby: &str) -> SortCol {
     match orderby {
-        "cmc"       => "cmc",
-        "power"     => "creature_power",
-        "rarity"    => "card_rarity_int",
-        "toughness" => "creature_toughness",
-        "usd"       => "price_usd",
-        "cubecobra" => "cubecobra_score",
-        _           => "edhrec_rank",
+        "cmc"       => SortCol::Cmc,
+        "power"     => SortCol::Power,
+        "rarity"    => SortCol::Rarity,
+        "toughness" => SortCol::Toughness,
+        "usd"       => SortCol::PriceUsd,
+        "cubecobra" => SortCol::Cubecobra,
+        _           => SortCol::EdhrecRank,
     }
 }
 
-/// Strict total order over cards for a given sort column/direction.
-///
-/// `total_cmp` keeps the comparator total even if a NaN reaches a float column, and
-/// the store-pointer tiebreaker (pointer order == store index order, the same tie
-/// order the previous stable sort produced) makes the order strict, so page
-/// boundaries stay stable under unstable selection.
-fn cmp_cards(a: &Card, b: &Card, sort_col: &str, descending: bool) -> std::cmp::Ordering {
-    let ka = sort_key(a, sort_col, descending);
-    let kb = sort_key(b, sort_col, descending);
-    ka.0.cmp(&kb.0)
-        .then(ka.1.total_cmp(&kb.1))
-        .then(ka.2.cmp(&kb.2))
-        .then(ka.3.total_cmp(&kb.3))
-        .then(ka.4.cmp(&kb.4))
-        .then(ka.5.total_cmp(&kb.5))
-        .then((a as *const Card).cmp(&(b as *const Card)))
+/// Map an f32 to a u32 that orders like `f32::total_cmp` (sign-flip trick).
+fn f32_sort_bits(v: f32) -> u32 {
+    let b = v.to_bits();
+    if b & (1 << 31) != 0 { !b } else { b | (1 << 31) }
+}
+
+/// Order-preserving integer sort key, computed once per match instead of inside the
+/// comparator: primary column (direction folded in by negation, missing sorts last),
+/// then edhrec rank ascending (missing last), then prefer score descending (missing
+/// last). Selection then compares plain u128s; full ties fall back to store pointer
+/// order in `select_page` — the same tie order the original stable sort produced.
+fn sort_key_bits(card: &Card, sort_col: SortCol, descending: bool) -> u128 {
+    let primary: Option<f32> = match sort_col {
+        SortCol::Cmc        => card.cmc.map(|v| v as f32),
+        SortCol::Power      => card.creature_power.map(|v| v as f32),
+        SortCol::Toughness  => card.creature_toughness.map(|v| v as f32),
+        SortCol::Rarity     => card.card_rarity_int.map(|v| v as f32),
+        SortCol::PriceUsd   => card.price_usd,
+        SortCol::Cubecobra  => card.cubecobra_score,
+        SortCol::EdhrecRank => card.edhrec_rank.map(|v| v as f32),
+    };
+    let p = primary.map_or(u32::MAX, |v| f32_sort_bits(if descending { -v } else { v }));
+    let e = card.edhrec_rank.unwrap_or(u32::MAX);
+    let s = card.prefer_score.map_or(u32::MAX, |v| f32_sort_bits(-v));
+    ((p as u128) << 64) | ((e as u128) << 32) | (s as u128)
 }
 
 /// Quickselect the page `[offset, offset+limit)` into position and sort only that
 /// segment. The first select bounds the page from above (everything past it stays
 /// unsorted); the second bounds it from below and is skipped in the common
 /// offset == 0 case. O(n + limit·log limit) instead of O(n·log n).
-fn select_page<'a>(
-    mut v: Vec<&'a Card>,
-    sort_col: &str,
-    descending: bool,
-    offset: usize,
-    limit: usize,
-) -> Vec<&'a Card> {
+fn select_page<'a>(mut v: Vec<(u128, &'a Card)>, offset: usize, limit: usize) -> Vec<&'a Card> {
     let end = offset.saturating_add(limit).min(v.len());
     if offset >= end {
         return Vec::new();
     }
-    let cmp = |a: &&Card, b: &&Card| cmp_cards(a, b, sort_col, descending);
+    let cmp = |a: &(u128, &Card), b: &(u128, &Card)| {
+        a.0.cmp(&b.0).then_with(|| std::ptr::from_ref(a.1).cmp(&std::ptr::from_ref(b.1)))
+    };
     if end < v.len() {
         v.select_nth_unstable_by(end, cmp);
     }
@@ -1481,7 +1540,7 @@ fn select_page<'a>(
     v[offset..end].sort_unstable_by(cmp);
     v.truncate(end);
     v.drain(..offset);
-    v
+    v.into_iter().map(|(_, c)| c).collect()
 }
 
 fn run_query_hashmap<'a>(
@@ -1494,22 +1553,38 @@ fn run_query_hashmap<'a>(
     limit: usize,
     offset: usize,
 ) -> (usize, Vec<&'a Card>) {
-    let sort_col  = orderby_to_col(orderby);
+    let sort_col   = orderby_to_col(orderby);
     let descending = direction == "desc";
+    let prefer     = prefer_from_str(prefer);
 
-    let mut partitions: HashMap<&str, (&Card, f64)> = HashMap::new();
+    enum GroupBy { Oracle, Artwork, Printing }
+    let group_by = match unique {
+        "artwork"  => GroupBy::Artwork,
+        "printing" => GroupBy::Printing,
+        _          => GroupBy::Oracle,
+    };
+
+    let mut partitions: HashMap<usize, (&Card, f64)> = HashMap::new();
     for card in store {
         if filter.matches(card) {
-            let key   = partition_key(card, unique);
+            let key = match group_by {
+                GroupBy::Oracle   => card.oracle_group as usize,
+                GroupBy::Artwork  => card.artwork_group as usize,
+                // every printing is its own partition — the pointer is a free unique key
+                GroupBy::Printing => std::ptr::from_ref(card) as usize,
+            };
             let score = prefer_score(card, prefer);
             let entry = partitions.entry(key).or_insert((card, f64::NEG_INFINITY));
             if score > entry.1 { *entry = (card, score); }
         }
     }
 
-    let best: Vec<&Card> = partitions.into_values().map(|(c, _)| c).collect();
+    let best: Vec<(u128, &Card)> = partitions
+        .into_values()
+        .map(|(c, _)| (sort_key_bits(c, sort_col, descending), c))
+        .collect();
     let total = best.len();
-    (total, select_page(best, sort_col, descending, offset, limit))
+    (total, select_page(best, offset, limit))
 }
 
 fn run_query_linear<'a, I, F>(
@@ -1524,20 +1599,21 @@ fn run_query_linear<'a, I, F>(
 ) -> (usize, Vec<&'a Card>)
 where
     I: Iterator<Item = &'a Card>,
-    F: Fn(&'a Card) -> &'a str,
+    F: Fn(&Card) -> u32,
 {
-    let sort_col  = orderby_to_col(orderby);
+    let sort_col   = orderby_to_col(orderby);
     let descending = direction == "desc";
+    let prefer     = prefer_from_str(prefer);
 
-    let mut best: Vec<&Card> = Vec::new();
+    let mut best: Vec<(u128, &Card)> = Vec::new();
     let mut group_best: Option<(&Card, f64)> = None;
-    let mut prev_key: &str = "";
+    let mut prev_key: u32 = u32::MAX; // group ids are dense from 0, so MAX is a safe sentinel
 
     for card in cards {
         if !filter.matches(card) { continue; }
         let key = key_fn(card);
         if key != prev_key {
-            if let Some((c, _)) = group_best.take() { best.push(c); }
+            if let Some((c, _)) = group_best.take() { best.push((sort_key_bits(c, sort_col, descending), c)); }
             prev_key   = key;
             group_best = Some((card, prefer_score(card, prefer)));
         } else {
@@ -1547,10 +1623,10 @@ where
             }
         }
     }
-    if let Some((c, _)) = group_best { best.push(c); }
+    if let Some((c, _)) = group_best { best.push((sort_key_bits(c, sort_col, descending), c)); }
 
     let total = best.len();
-    (total, select_page(best, sort_col, descending, offset, limit))
+    (total, select_page(best, offset, limit))
 }
 
 fn run_query_no_dedup<'a>(
@@ -1561,11 +1637,14 @@ fn run_query_no_dedup<'a>(
     limit: usize,
     offset: usize,
 ) -> (usize, Vec<&'a Card>) {
-    let sort_col  = orderby_to_col(orderby);
+    let sort_col   = orderby_to_col(orderby);
     let descending = direction == "desc";
-    let matched: Vec<&Card> = cards.filter(|c| filter.matches(c)).collect();
+    let matched: Vec<(u128, &Card)> = cards
+        .filter(|c| filter.matches(c))
+        .map(|c| (sort_key_bits(c, sort_col, descending), c))
+        .collect();
     let total = matched.len();
-    (total, select_page(matched, sort_col, descending, offset, limit))
+    (total, select_page(matched, offset, limit))
 }
 
 fn run_query<'a>(
@@ -1591,11 +1670,11 @@ fn run_query<'a>(
     }
 
     match unique {
-        "card" => run_query_linear(cards_iter!(), filter, |c| c.oracle_id.as_deref().unwrap_or(""), prefer, orderby, direction, limit, offset),
+        "card" => run_query_linear(cards_iter!(), filter, |c| c.oracle_group, prefer, orderby, direction, limit, offset),
         // Scryfall assigns each illustration_id to exactly one oracle_id, so cards sharing an
         // illustration_id are always contiguous in the (oracle_id, illustration_id) sort order.
         // The linear dedup path is therefore correct here — no HashMap needed.
-        "artwork"  => run_query_linear(cards_iter!(), filter, |c| c.illustration_id.as_deref().unwrap_or(""), prefer, orderby, direction, limit, offset),
+        "artwork"  => run_query_linear(cards_iter!(), filter, |c| c.artwork_group, prefer, orderby, direction, limit, offset),
         "printing" => run_query_no_dedup(cards_iter!(), filter, orderby, direction, limit, offset),
         _          => run_query_hashmap(store, filter, unique, prefer, orderby, direction, limit, offset),
     }
@@ -1648,6 +1727,24 @@ impl QueryEngine {
                 ia.cmp(ib)
             })
         });
+
+        // Dense group ids: a group is a maximal run of equal keys in the sort above,
+        // exactly the adjacency the linear dedup paths relied on when they compared
+        // the UUID strings directly. cards[0] keeps the 0/0 defaults.
+        let mut oracle_group: u32 = 0;
+        let mut artwork_group: u32 = 0;
+        for i in 1..cards.len() {
+            let (head, tail) = cards.split_at_mut(i);
+            let (prev, cur) = (&head[i - 1], &mut tail[0]);
+            if prev.oracle_id.as_deref().unwrap_or("") != cur.oracle_id.as_deref().unwrap_or("") {
+                oracle_group += 1;
+            }
+            if prev.illustration_id.as_deref().unwrap_or("") != cur.illustration_id.as_deref().unwrap_or("") {
+                artwork_group += 1;
+            }
+            cur.oracle_group  = oracle_group;
+            cur.artwork_group = artwork_group;
+        }
 
         let indexes = CardIndexes {
             name_trigram:   build_trigram_index(&cards, |c| c.card_name_lower.as_str()),
