@@ -10,34 +10,12 @@ import falcon
 import pytest
 
 from api.api_resource import APIResource
-from api.enums import CardOrdering, PreferOrder, SortDirection, UniqueOn
-from api.parsing import parse_scryfall_query
 from api.settings import settings
-from api.utils.timer import Timer
+from api.tests.helpers import search_kwargs
 
 
 def _make_api() -> APIResource:
     return APIResource(last_import_time=multiprocessing.Value("d", time.time(), lock=True))
-
-
-def _search_kwargs(
-    query: str,
-    limit: int = 10,
-    orderby: CardOrdering = CardOrdering.EDHREC,
-    direction: SortDirection = SortDirection.ASC,
-) -> dict:
-    """Build kwargs for _search_sql or _search_engine from a query string."""
-    parsed = parse_scryfall_query(query)
-    return {
-        "parsed_query": parsed,
-        "query": query,
-        "unique": UniqueOn.CARD,
-        "prefer": PreferOrder.DEFAULT,
-        "orderby": orderby,
-        "direction": direction,
-        "limit": limit,
-        "timer": Timer(),
-    }
 
 
 class TestParsingErrorHandling:
@@ -173,18 +151,18 @@ class TestSearchSqlDirect:
 
     def test_total_cards_extracted_from_count_row(self) -> None:
         with patch.object(self.api_resource, "_run_query", return_value=self._mock_run_query([{"name": "Opt"}], total=7)):
-            result = self.api_resource._search_sql(**_search_kwargs("name:opt"))
+            result = self.api_resource._search_sql(**search_kwargs("name:opt"))
         assert result["total_cards"] == 7
 
     def test_cards_stripped_of_count_column(self) -> None:
         with patch.object(self.api_resource, "_run_query", return_value=self._mock_run_query([{"name": "Opt"}], total=1)):
-            result = self.api_resource._search_sql(**_search_kwargs("name:opt"))
+            result = self.api_resource._search_sql(**search_kwargs("name:opt"))
         assert "total_cards_count" not in result["cards"][0]
         assert result["cards"][0]["name"] == "Opt"
 
     def test_empty_result_returns_zero_total(self) -> None:
         with patch.object(self.api_resource, "_run_query", return_value=self._mock_run_query([], total=0)):
-            result = self.api_resource._search_sql(**_search_kwargs("name:opt"))
+            result = self.api_resource._search_sql(**search_kwargs("name:opt"))
         assert result["total_cards"] == 0
         assert result["cards"] == []
 
@@ -203,13 +181,13 @@ class TestSearchEngineDirect:
     def test_total_cards_and_cards_forwarded(self) -> None:
         mock_cards = [{"name": "Lightning Bolt"}, {"name": "Counterspell"}]
         self.api_resource._engine.query.return_value = (2, mock_cards)
-        result = self.api_resource._search_engine(**_search_kwargs("type:instant"))
+        result = self.api_resource._search_engine(**search_kwargs("type:instant"))
         assert result["total_cards"] == 2
         assert result["cards"] == mock_cards
 
     def test_engine_called_with_limit(self) -> None:
         self.api_resource._engine.query.return_value = (0, [])
-        self.api_resource._search_engine(**_search_kwargs("name:opt", limit=5))
+        self.api_resource._search_engine(**search_kwargs("name:opt", limit=5))
         call_kwargs = self.api_resource._engine.query.call_args.kwargs
         assert call_kwargs["limit"] == 5
 
