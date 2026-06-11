@@ -4,6 +4,30 @@ from __future__ import annotations
 
 import uuid
 
+from api.enums import CardOrdering, PreferOrder, SortDirection, UniqueOn
+from api.parsing import parse_scryfall_query
+from api.utils.timer import Timer
+
+
+def search_kwargs(
+    query: str,
+    limit: int = 10,
+    orderby: CardOrdering = CardOrdering.EDHREC,
+    direction: SortDirection = SortDirection.ASC,
+) -> dict:
+    """Build kwargs for _search_sql or _search_engine from a query string."""
+    parsed = parse_scryfall_query(query)
+    return {
+        "parsed_query": parsed,
+        "query": query,
+        "unique": UniqueOn.CARD,
+        "prefer": PreferOrder.DEFAULT,
+        "orderby": orderby,
+        "direction": direction,
+        "limit": limit,
+        "timer": Timer(),
+    }
+
 
 def make_raw_card(card_id: str | None = None, name: str = "Test Card") -> dict:
     """Minimal raw Scryfall card dict that passes preprocess_card and satisfies NOT NULL constraints."""
