@@ -20,8 +20,9 @@ logger = logging.getLogger(__name__)
 CacheKey = tuple[str, tuple[tuple, ...], tuple[tuple, ...]]
 
 # Headers that depend on the request rather than the cached payload: CORSMiddleware varies
-# Access-Control-* on the request's Origin and re-sets them on every response, including hits.
-_UNCACHEABLE_HEADER_PREFIXES: tuple[str, ...] = ("access-control-",)
+# Access-Control-* on the request's Origin and re-sets them on every response, including hits;
+# X-Cache describes this request's cache outcome, so a stored "miss" must never be replayed.
+_UNCACHEABLE_HEADER_PREFIXES: tuple[str, ...] = ("access-control-", "x-cache")
 
 
 def cacheable_headers(headers: Mapping[str, str]) -> dict[str, str]:
@@ -100,6 +101,7 @@ class CachingMiddleware:
             req.context["cached_total_cards"] = cached.total_cards
             logger.info("Cache hit: %s / %s response_id: %d", req.relative_uri, resp.status, id(resp))
             return
+        resp.set_header("X-Cache", "miss")
         logger.info("Cache miss: %s / %s", req.relative_uri, cache_key)
 
     def process_response(

@@ -64,6 +64,7 @@ class TestCachingMiddleware:
             "access-control-allow-methods": "GET, POST, OPTIONS",
             "access-control-allow-headers": "Content-Type",
             "access-control-max-age": "86400",
+            "x-cache": "miss",
         }
 
         with patch("api.middlewares.caching_middleware.settings") as mock_settings:
@@ -140,6 +141,38 @@ class TestCachingMiddleware:
         assert req.context["cache_hit"] is True
         assert req.context["cached_result_count"] == 7
         assert req.context["cached_total_cards"] == 99
+
+    def test_cache_miss_sets_miss_header(self) -> None:
+        """A consulted-but-empty cache should mark the response with X-Cache: miss."""
+        middleware = CachingMiddleware(cache={})
+        req = self._make_req()
+        resp = self._make_resp()
+
+        with patch("api.middlewares.caching_middleware.settings") as mock_settings:
+            mock_settings.enable_cache = True
+            middleware.process_request(req, resp)
+
+        resp.set_header.assert_called_once_with("X-Cache", "miss")
+
+    @pytest.mark.parametrize(
+        argnames=["enable_cache", "path"],
+        argvalues=[
+            (False, "/search"),
+            (True, "/random_search"),
+        ],
+        ids=["cache_disabled", "uncached_path"],
+    )
+    def test_cache_bypass_sets_no_header(self, enable_cache: bool, path: str) -> None:
+        """When the cache is never consulted there is no hit/miss to report."""
+        middleware = CachingMiddleware(cache={})
+        req = self._make_req(path=path)
+        resp = self._make_resp()
+
+        with patch("api.middlewares.caching_middleware.settings") as mock_settings:
+            mock_settings.enable_cache = enable_cache
+            middleware.process_request(req, resp)
+
+        resp.set_header.assert_not_called()
 
     def test_hit_request_is_not_restored(self) -> None:
         """process_response after a hit must not re-render or overwrite the cached entry."""
