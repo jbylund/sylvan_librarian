@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 from typing import cast as typecast
 
 from cachebox import LRUCache
@@ -20,6 +20,22 @@ logger = logging.getLogger(__name__)
 CacheKey = tuple[str, tuple[tuple, ...], tuple[tuple, ...]]
 
 
+class CachedResponse(NamedTuple):
+    """Fully rendered response, detached from the falcon.Response that produced it.
+
+    The body is captured after the compression middleware has run, so it holds the final
+    (possibly compressed) bytes for the Accept-Encoding in the cache key. result_count and
+    total_cards exist solely so QueryLogMiddleware can log them on cache hits, where the
+    media dict is no longer available.
+    """
+
+    status: str
+    headers: dict[str, str]
+    body: bytes | None
+    result_count: int | None
+    total_cards: int | None
+
+
 class CachingMiddleware:
     """Middleware to cache the request and response."""
 
@@ -31,7 +47,7 @@ class CachingMiddleware:
         """
         if cache is None:
             cache = LRUCache(maxsize=10_000)
-        self.cache: MutableMapping[CacheKey, falcon.Response] = cache
+        self.cache: MutableMapping[CacheKey, CachedResponse] = cache
 
     def _cache_key(self: CachingMiddleware, req: falcon.Request) -> CacheKey:
         cached_headers = [
@@ -61,19 +77,18 @@ class CachingMiddleware:
             return
 
         cache_key = self._cache_key(req)
-        cached_value: falcon.Response | None = self.cache.get(cache_key)
-        if cached_value is not None:
+        cached: CachedResponse | None = self.cache.get(cache_key)
+        if cached is not None:
             if TYPE_CHECKING:
-                cached_value = typecast("falcon.Response", cached_value)
+                cached = typecast("CachedResponse", cached)
             resp.complete = True
-            resp.data = cached_value.data
-            if isinstance(cached_value.media, dict):
-                resp.media = dict(cached_value.media)
-                resp.media["cache_hit"] = True
-            else:
-                resp.media = cached_value.media
-            resp._headers.update(cached_value._headers)
-            resp.status = cached_value.status
+            resp.status = cached.status
+            resp.data = cached.body
+            resp._headers.update(cached.headers)
+            resp.set_header("X-Cache", "hit")
+            req.context["cache_hit"] = True
+            req.context["cached_result_count"] = cached.result_count
+            req.context["cached_total_cards"] = cached.total_cards
             logger.info("Cache hit: %s / %s response_id: %d", req.relative_uri, resp.status, id(resp))
             return
         logger.info("Cache miss: %s / %s", req.relative_uri, cache_key)
@@ -99,11 +114,20 @@ class CachingMiddleware:
             return
 
         del resource, req_succeeded
+        if req.context.get("cache_hit"):
+            return
         if resp.status and resp.status.startswith("5"):
             return
         cache_key = self._cache_key(req)
-        cached_val = self.cache.get(cache_key)
-        if cached_val is None:
-            resp.complete = True
-            self.cache[cache_key] = resp
-            logger.info("Cache updated: %s / %s", req.relative_uri, cache_key)
+        if self.cache.get(cache_key) is not None:
+            return
+        media = resp.media
+        is_dict_media = isinstance(media, dict)
+        self.cache[cache_key] = CachedResponse(
+            status=resp.status,
+            headers=dict(resp._headers),
+            body=resp.render_body(),
+            result_count=len(media.get("cards") or []) if is_dict_media else None,
+            total_cards=media.get("total_cards") if is_dict_media else None,
+        )
+        logger.info("Cache updated: %s / %s", req.relative_uri, cache_key)

@@ -65,20 +65,19 @@ class TestQueryLogMiddlewareProcessResponse:
         assert entry["had_error"] is False
 
     def test_cache_hit_nulls_db_timings(self) -> None:
+        """On a hit the response body is rendered bytes — fields come from req.context, not media."""
         mw = _make_middleware()
-        resp = _make_resp(
-            media={
-                "cards": [],
-                "total_cards": 5,
-                "cache_hit": True,
-                "inner_timings": {"_children": {"execute_query": {"_meta": {"duration_ms": 99.0}}}},
-            }
-        )
-        mw.process_response(_make_req(), resp, None, True)
+        req = _make_req()
+        req.context.update({"cache_hit": True, "cached_result_count": 7, "cached_total_cards": 5})
+        resp = _make_resp()
+        resp.media = None
+        mw.process_response(req, resp, None, True)
         entry = mw._queue.get_nowait()
         assert entry["cache_hit"] is True
         assert entry["execute_ms"] is None
         assert entry["fetch_ms"] is None
+        assert entry["result_count"] == 7
+        assert entry["total_cards"] == 5
 
     def test_timing_extraction_from_nested_structure(self) -> None:
         mw = _make_middleware()

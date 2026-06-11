@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from api.middlewares.caching_middleware import CachingMiddleware
+from api.middlewares.caching_middleware import CachedResponse, CachingMiddleware
 
 
 class TestCachingMiddleware:
@@ -18,16 +18,22 @@ class TestCachingMiddleware:
         req.relative_uri = uri
         req.params = {"q": "lightning bolt"}
         req.headers = {}
+        req.context = {}
         return req
 
     def _make_resp(self, status: str = "200 OK") -> MagicMock:
         resp = MagicMock()
         resp.status = status
-        resp._headers = {}
+        resp._headers = {"content-type": "application/json"}
+        resp.media = {"cards": [1, 2, 3], "total_cards": 42}
+        resp.render_body.return_value = b"rendered body"
         return resp
 
-    def test_2xx_response_is_cached(self) -> None:
-        """Successful responses should be stored in the cache."""
+    def _cache_key(self) -> tuple:
+        return ("/search?q=lightning+bolt", (("q", "lightning bolt"),), (("ACCEPT-ENCODING", None),))
+
+    def test_2xx_response_is_cached_as_rendered_bytes(self) -> None:
+        """Successful responses should be stored as a CachedResponse, not the Response object."""
         cache = {}
         middleware = CachingMiddleware(cache=cache)
         req = self._make_req()
@@ -38,14 +44,38 @@ class TestCachingMiddleware:
             middleware.process_response(req, resp, None, True)
 
         assert len(cache) == 1
+        cached = cache[self._cache_key()]
+        assert isinstance(cached, CachedResponse)
+        assert cached.status == "200 OK"
+        assert cached.headers == {"content-type": "application/json"}
+        assert cached.body == b"rendered body"
+        assert cached.result_count == 3
+        assert cached.total_cards == 42
+
+    def test_non_dict_media_cached_without_counts(self) -> None:
+        """Responses without a media dict (e.g. static files) cache with None counts."""
+        cache = {}
+        middleware = CachingMiddleware(cache=cache)
+        req = self._make_req()
+        resp = self._make_resp()
+        resp.media = None
+
+        with patch("api.middlewares.caching_middleware.settings") as mock_settings:
+            mock_settings.enable_cache = True
+            middleware.process_response(req, resp, None, True)
+
+        cached = cache[self._cache_key()]
+        assert cached.body == b"rendered body"
+        assert cached.result_count is None
+        assert cached.total_cards is None
 
     @pytest.mark.parametrize(
-        argnames="status",
+        argnames=["status"],
         argvalues=[
-            "500 Internal Server Error",
-            "502 Bad Gateway",
-            "503 Service Unavailable",
-            "504 Gateway Timeout",
+            ("500 Internal Server Error",),
+            ("502 Bad Gateway",),
+            ("503 Service Unavailable",),
+            ("504 Gateway Timeout",),
         ],
     )
     def test_5xx_status_not_cached(self, status: str) -> None:
@@ -61,46 +91,48 @@ class TestCachingMiddleware:
 
         assert len(cache) == 0
 
-    def test_cache_hit_sets_cache_hit_flag(self) -> None:
-        """A cache hit should inject cache_hit=True into the response media."""
-        cached_resp = MagicMock()
-        cached_resp.status = "200 OK"
-        cached_resp._headers = {}
-        cached_resp.media = {"cards": [], "total_cards": 0}
-        cached_resp.data = None
-
-        cache_key = ("/search?q=lightning+bolt", (("q", "lightning bolt"),), (("ACCEPT-ENCODING", None),))
-        cache = {cache_key: cached_resp}
+    def test_cache_hit_populates_response_from_cached_bytes(self) -> None:
+        """A cache hit replays status, headers, and body, and flags the hit on req.context."""
+        cached = CachedResponse(
+            status="200 OK",
+            headers={"content-type": "application/json", "content-encoding": "br"},
+            body=b"cached body",
+            result_count=7,
+            total_cards=99,
+        )
+        cache = {self._cache_key(): cached}
 
         middleware = CachingMiddleware(cache=cache)
         req = self._make_req()
         resp = self._make_resp()
-        resp.media = None
+        resp._headers = {}
 
         with patch("api.middlewares.caching_middleware.settings") as mock_settings:
             mock_settings.enable_cache = True
             middleware.process_request(req, resp)
 
-        assert resp.media["cache_hit"] is True
+        assert resp.complete is True
+        assert resp.status == "200 OK"
+        assert resp.data == b"cached body"
+        assert resp._headers == {"content-type": "application/json", "content-encoding": "br"}
+        resp.set_header.assert_called_once_with("X-Cache", "hit")
+        assert req.context["cache_hit"] is True
+        assert req.context["cached_result_count"] == 7
+        assert req.context["cached_total_cards"] == 99
 
-    def test_cache_hit_does_not_mutate_cached_media(self) -> None:
-        """A cache hit should copy the media dict, not mutate the stored response."""
-        original_media = {"cards": [], "total_cards": 0}
-        cached_resp = MagicMock()
-        cached_resp.status = "200 OK"
-        cached_resp._headers = {}
-        cached_resp.media = original_media
-        cached_resp.data = None
-
-        cache_key = ("/search?q=lightning+bolt", (("q", "lightning bolt"),), (("ACCEPT-ENCODING", None),))
-        cache = {cache_key: cached_resp}
+    def test_hit_request_is_not_restored(self) -> None:
+        """process_response after a hit must not re-render or overwrite the cached entry."""
+        cached = CachedResponse(status="200 OK", headers={}, body=b"cached body", result_count=0, total_cards=0)
+        cache = {self._cache_key(): cached}
 
         middleware = CachingMiddleware(cache=cache)
         req = self._make_req()
+        req.context["cache_hit"] = True
         resp = self._make_resp()
 
         with patch("api.middlewares.caching_middleware.settings") as mock_settings:
             mock_settings.enable_cache = True
-            middleware.process_request(req, resp)
+            middleware.process_response(req, resp, None, True)
 
-        assert "cache_hit" not in original_media
+        assert cache[self._cache_key()] is cached
+        resp.render_body.assert_not_called()
