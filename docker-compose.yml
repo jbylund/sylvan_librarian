@@ -41,6 +41,7 @@ services:
       resources:
         limits:
           memory: ${POSTGRES_MEM_LIMIT:-3g}
+    memswap_limit: ${POSTGRES_MEM_LIMIT:-3g}
     ulimits:
       core: 0
     volumes:
@@ -98,6 +99,7 @@ services:
       resources:
         limits:
           memory: 1875m
+    memswap_limit: 1875m
     ports:
       - "${API_PORT:-28080}:8080"
     ulimits:
@@ -131,6 +133,7 @@ services:
       resources:
         limits:
           memory: 8m
+    memswap_limit: 8m
     ulimits:
       core: 0
     user: 1000:1000
