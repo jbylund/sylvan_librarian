@@ -666,8 +666,6 @@ class TestAPIResourceCaching(unittest.TestCase):
 
     def test_background_refresh_populates_new_generation(self) -> None:
         """Background thread eventually populates the new generation's cache."""
-        import time  # noqa: PLC0415
-
         fresh_cards = [{"name": "Fresh Card"}]
         stale_cards = [{"name": "Stale Card"}]
         gen = self.api_resource._cache_generation.value

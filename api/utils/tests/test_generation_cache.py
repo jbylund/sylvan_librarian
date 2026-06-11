@@ -9,13 +9,13 @@ import pytest
 from api.utils.generation_cache import GenerationCache
 
 
-@pytest.fixture
-def generation() -> multiprocessing.Value:
+@pytest.fixture(name="generation")
+def generation_fixture() -> multiprocessing.Value:
     return multiprocessing.Value("i", 0, lock=True)
 
 
-@pytest.fixture
-def cache(generation: multiprocessing.Value) -> GenerationCache:
+@pytest.fixture(name="cache")
+def cache_fixture(generation: multiprocessing.Value) -> GenerationCache:
     return GenerationCache(factory=dict, generation=generation)
 
 

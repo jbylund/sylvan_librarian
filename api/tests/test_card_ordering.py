@@ -12,8 +12,8 @@ from api.parsing import generate_sql_query, parse_scryfall_query
 from api.utils.timer import Timer
 
 
-@pytest.fixture
-def api_resource() -> APIResource:
+@pytest.fixture(name="api_resource")
+def api_resource_fixture() -> APIResource:
     api = APIResource(last_import_time=multiprocessing.Value("d", time.time(), lock=True))
     api._import_recent = lambda: True
     return api

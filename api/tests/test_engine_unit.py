@@ -35,8 +35,8 @@ from card_engine import QueryEngine
 _FIXTURE = Path(__file__).parent / "fixtures" / "engine_cards.json"
 
 
-@pytest.fixture(scope="module")
-def engine() -> QueryEngine:
+@pytest.fixture(scope="module", name="engine")
+def engine_fixture() -> QueryEngine:
     cards = json.loads(_FIXTURE.read_text())
     e = QueryEngine()
     e.reload(cards)
@@ -187,6 +187,16 @@ class TestFilters:
         total, cards = _run(engine, "s:lea")
         assert total == 7
         assert all(c["set_code"] == "lea" for c in cards)
+
+    def test_set_colon_operator_handled_by_engine(self, engine: QueryEngine) -> None:
+        # The ":" operator for set/s must resolve inside the engine (str_op_to_cmp(":") == Eq).
+        # If it ever returned Err the engine would throw and the API would fall back to SQL;
+        # this test pins that it returns results without raising.
+        total_colon, cards_colon = _run(engine, "set:lea")
+        total_short, _ = _run(engine, "s:lea")
+        assert total_colon == total_short
+        assert total_colon > 0
+        assert all(c["set_code"] == "lea" for c in cards_colon)
 
     def test_and_filter(self, engine: QueryEngine) -> None:
         # Red instants: only Lightning Bolt

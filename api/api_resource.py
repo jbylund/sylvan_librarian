@@ -2642,6 +2642,7 @@ class APIResource:
 
                 if cards_loaded > 0:
                     self._clear_caches()
+                    self._reload_engine()
 
                 return {
                     "status": "success",
@@ -2650,12 +2651,6 @@ class APIResource:
                     "sample_cards": sample_cards,
                     "message": f"Successfully loaded {cards_loaded} cards",
                 }
-
-                # Clear caches and refresh engine when cards are successfully loaded
-                if cards_loaded > 0:
-                    self._clear_caches()
-                    self._reload_engine()
-                return result
 
         except (psycopg.Error, ValueError, KeyError) as e:
             # No staging-table cleanup is needed (or possible) here: the temp table is session-scoped
