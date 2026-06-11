@@ -1438,6 +1438,52 @@ fn orderby_to_col(orderby: &str) -> &'static str {
     }
 }
 
+/// Strict total order over cards for a given sort column/direction.
+///
+/// `total_cmp` keeps the comparator total even if a NaN reaches a float column, and
+/// the store-pointer tiebreaker (pointer order == store index order, the same tie
+/// order the previous stable sort produced) makes the order strict, so page
+/// boundaries stay stable under unstable selection.
+fn cmp_cards(a: &Card, b: &Card, sort_col: &str, descending: bool) -> std::cmp::Ordering {
+    let ka = sort_key(a, sort_col, descending);
+    let kb = sort_key(b, sort_col, descending);
+    ka.0.cmp(&kb.0)
+        .then(ka.1.total_cmp(&kb.1))
+        .then(ka.2.cmp(&kb.2))
+        .then(ka.3.total_cmp(&kb.3))
+        .then(ka.4.cmp(&kb.4))
+        .then(ka.5.total_cmp(&kb.5))
+        .then((a as *const Card).cmp(&(b as *const Card)))
+}
+
+/// Quickselect the page `[offset, offset+limit)` into position and sort only that
+/// segment. The first select bounds the page from above (everything past it stays
+/// unsorted); the second bounds it from below and is skipped in the common
+/// offset == 0 case. O(n + limit·log limit) instead of O(n·log n).
+fn select_page<'a>(
+    mut v: Vec<&'a Card>,
+    sort_col: &str,
+    descending: bool,
+    offset: usize,
+    limit: usize,
+) -> Vec<&'a Card> {
+    let end = offset.saturating_add(limit).min(v.len());
+    if offset >= end {
+        return Vec::new();
+    }
+    let cmp = |a: &&Card, b: &&Card| cmp_cards(a, b, sort_col, descending);
+    if end < v.len() {
+        v.select_nth_unstable_by(end, cmp);
+    }
+    if offset > 0 {
+        v[..end].select_nth_unstable_by(offset, cmp);
+    }
+    v[offset..end].sort_unstable_by(cmp);
+    v.truncate(end);
+    v.drain(..offset);
+    v
+}
+
 fn run_query_hashmap<'a>(
     store: &'a [Card],
     filter: &FilterExpr,
@@ -1446,6 +1492,7 @@ fn run_query_hashmap<'a>(
     orderby: &str,
     direction: &str,
     limit: usize,
+    offset: usize,
 ) -> (usize, Vec<&'a Card>) {
     let sort_col  = orderby_to_col(orderby);
     let descending = direction == "desc";
@@ -1460,15 +1507,9 @@ fn run_query_hashmap<'a>(
         }
     }
 
-    let mut best: Vec<&Card> = partitions.into_values().map(|(c, _)| c).collect();
+    let best: Vec<&Card> = partitions.into_values().map(|(c, _)| c).collect();
     let total = best.len();
-    best.sort_by(|a, b| {
-        sort_key(a, sort_col, descending)
-            .partial_cmp(&sort_key(b, sort_col, descending))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    best.truncate(limit);
-    (total, best)
+    (total, select_page(best, sort_col, descending, offset, limit))
 }
 
 fn run_query_linear<'a, I, F>(
@@ -1479,6 +1520,7 @@ fn run_query_linear<'a, I, F>(
     orderby: &str,
     direction: &str,
     limit: usize,
+    offset: usize,
 ) -> (usize, Vec<&'a Card>)
 where
     I: Iterator<Item = &'a Card>,
@@ -1508,13 +1550,7 @@ where
     if let Some((c, _)) = group_best { best.push(c); }
 
     let total = best.len();
-    best.sort_by(|a, b| {
-        sort_key(a, sort_col, descending)
-            .partial_cmp(&sort_key(b, sort_col, descending))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    best.truncate(limit);
-    (total, best)
+    (total, select_page(best, sort_col, descending, offset, limit))
 }
 
 fn run_query_no_dedup<'a>(
@@ -1523,18 +1559,13 @@ fn run_query_no_dedup<'a>(
     orderby: &str,
     direction: &str,
     limit: usize,
+    offset: usize,
 ) -> (usize, Vec<&'a Card>) {
     let sort_col  = orderby_to_col(orderby);
     let descending = direction == "desc";
-    let mut matched: Vec<&Card> = cards.filter(|c| filter.matches(c)).collect();
+    let matched: Vec<&Card> = cards.filter(|c| filter.matches(c)).collect();
     let total = matched.len();
-    matched.sort_by(|a, b| {
-        sort_key(a, sort_col, descending)
-            .partial_cmp(&sort_key(b, sort_col, descending))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    matched.truncate(limit);
-    (total, matched)
+    (total, select_page(matched, sort_col, descending, offset, limit))
 }
 
 fn run_query<'a>(
@@ -1545,6 +1576,7 @@ fn run_query<'a>(
     orderby: &str,
     direction: &str,
     limit: usize,
+    offset: usize,
     indexes: &CardIndexes,
 ) -> (usize, Vec<&'a Card>) {
     let candidates = narrow_candidates(filter, indexes);
@@ -1559,13 +1591,13 @@ fn run_query<'a>(
     }
 
     match unique {
-        "card" => run_query_linear(cards_iter!(), filter, |c| c.oracle_id.as_deref().unwrap_or(""), prefer, orderby, direction, limit),
+        "card" => run_query_linear(cards_iter!(), filter, |c| c.oracle_id.as_deref().unwrap_or(""), prefer, orderby, direction, limit, offset),
         // Scryfall assigns each illustration_id to exactly one oracle_id, so cards sharing an
         // illustration_id are always contiguous in the (oracle_id, illustration_id) sort order.
         // The linear dedup path is therefore correct here — no HashMap needed.
-        "artwork"  => run_query_linear(cards_iter!(), filter, |c| c.illustration_id.as_deref().unwrap_or(""), prefer, orderby, direction, limit),
-        "printing" => run_query_no_dedup(cards_iter!(), filter, orderby, direction, limit),
-        _          => run_query_hashmap(store, filter, unique, prefer, orderby, direction, limit),
+        "artwork"  => run_query_linear(cards_iter!(), filter, |c| c.illustration_id.as_deref().unwrap_or(""), prefer, orderby, direction, limit, offset),
+        "printing" => run_query_no_dedup(cards_iter!(), filter, orderby, direction, limit, offset),
+        _          => run_query_hashmap(store, filter, unique, prefer, orderby, direction, limit, offset),
     }
 }
 
@@ -1635,7 +1667,7 @@ impl QueryEngine {
         Ok(())
     }
 
-    #[pyo3(signature = (*, filters, unique="card", prefer="default", orderby="edhrec", direction="asc", limit=100))]
+    #[pyo3(signature = (*, filters, unique="card", prefer="default", orderby="edhrec", direction="asc", limit=100, offset=0))]
     fn query<'py>(
         &self,
         py: Python<'py>,
@@ -1645,6 +1677,7 @@ impl QueryEngine {
         orderby: &str,
         direction: &str,
         limit: usize,
+        offset: usize,
     ) -> PyResult<Bound<'py, PyTuple>> {
         let to_json    = filters.call_method0("to_json")?;
         let json_bytes: Vec<u8> = py
@@ -1661,7 +1694,7 @@ impl QueryEngine {
         let data = self.data.read()
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("data lock: {e}")))?;
         let (total, page) = run_query(
-            &data.cards, &filter_expr, unique, prefer, orderby, direction, limit, &data.indexes,
+            &data.cards, &filter_expr, unique, prefer, orderby, direction, limit, offset, &data.indexes,
         );
 
         let matches: Vec<Bound<PyDict>> = page.iter().map(|c| card_to_pydict(py, c)).collect::<PyResult<Vec<_>>>()?;
@@ -1670,7 +1703,7 @@ impl QueryEngine {
     }
 
     /// Same as query() but forces the HashMap dedup path. Used for benchmarking.
-    #[pyo3(signature = (*, filters, unique="card", prefer="default", orderby="edhrec", direction="asc", limit=100))]
+    #[pyo3(signature = (*, filters, unique="card", prefer="default", orderby="edhrec", direction="asc", limit=100, offset=0))]
     fn query_hashmap<'py>(
         &self,
         py: Python<'py>,
@@ -1680,6 +1713,7 @@ impl QueryEngine {
         orderby: &str,
         direction: &str,
         limit: usize,
+        offset: usize,
     ) -> PyResult<Bound<'py, PyTuple>> {
         let to_json    = filters.call_method0("to_json")?;
         let json_bytes: Vec<u8> = py
@@ -1695,7 +1729,7 @@ impl QueryEngine {
 
         let data = self.data.read()
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("data lock: {e}")))?;
-        let (total, page) = run_query_hashmap(&data.cards, &filter_expr, unique, prefer, orderby, direction, limit);
+        let (total, page) = run_query_hashmap(&data.cards, &filter_expr, unique, prefer, orderby, direction, limit, offset);
         let matches: Vec<Bound<PyDict>> = page.iter().map(|c| card_to_pydict(py, c)).collect::<PyResult<Vec<_>>>()?;
         let matches_list = PyList::new(py, matches)?;
         PyTuple::new(py, [total.into_pyobject(py)?.into_any(), matches_list.into_any()])
