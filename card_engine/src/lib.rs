@@ -659,7 +659,14 @@ impl FilterExpr {
             }
 
             FilterExpr::TextExact { field, op, value } => {
-                field(card).map_or(false, |s| cmp(*op, 0.0, if s == value { 0.0 } else { 1.0 }))
+                field(card).map_or(false, |s| match op {
+                    CmpOp::Eq => s == value,
+                    CmpOp::Ne => s != value,
+                    CmpOp::Lt => s < value.as_str(),
+                    CmpOp::Le => s <= value.as_str(),
+                    CmpOp::Gt => s > value.as_str(),
+                    CmpOp::Ge => s >= value.as_str(),
+                })
             }
 
             FilterExpr::TextRegex { field, regex } => {
@@ -1078,14 +1085,14 @@ fn build_text_filter(attr: &str, op: &str, rhs: &Value) -> Result<FilterExpr, St
     }
 
     let field_fn: fn(&Card) -> Option<&str> = match attr {
-        "card_name"   => |c| Some(c.card_name.as_str()),
-        "oracle_text" => |c| Some(c.oracle_text.as_str()),
-        "flavor_text" => |c| Some(c.flavor_text.as_str()),
-        "card_artist" => |c| c.card_artist.as_deref(),
+        "card_name"   => |c| Some(c.card_name_lower.as_str()),
+        "oracle_text" => |c| Some(c.oracle_text_lower.as_str()),
+        "flavor_text" => |c| Some(c.flavor_text_lower.as_str()),
+        "card_artist" => |c| c.card_artist_lower.as_deref(),
         _ => return Err(format!("unknown text field: {attr}")),
     };
     let cmp_op = str_op_to_cmp(op)?;
-    Ok(FilterExpr::TextExact { field: field_fn, op: cmp_op, value: raw_value.to_string() })
+    Ok(FilterExpr::TextExact { field: field_fn, op: cmp_op, value: raw_value.to_lowercase() })
 }
 
 // ─── Trigram index ────────────────────────────────────────────────────────────

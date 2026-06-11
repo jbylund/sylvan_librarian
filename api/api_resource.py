@@ -797,6 +797,7 @@ class APIResource:
 
         query_explanation = ""
         parsed_query = None
+        query = query or ""
         try:
             with timer("parse"):
                 parsed_query = parse_scryfall_query(query)
