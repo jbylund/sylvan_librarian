@@ -146,25 +146,34 @@ class QueryLogMiddleware:
         if req.path.strip("/") != "search":
             return
 
-        media = resp.media
-        if not isinstance(media, dict):
-            logger.warning("QueryLogMiddleware: unexpected response media type %s for %s", type(media), req.path)
-            return
+        cache_hit = bool(req.context.get("cache_hit"))
+        if cache_hit:
+            # The cached response is rendered bytes; counts were captured at cache-store time.
+            execute_ms = fetch_ms = None
+            result_count = req.context.get("cached_result_count")
+            total_cards = req.context.get("cached_total_cards")
+        else:
+            media = resp.media
+            if not isinstance(media, dict):
+                logger.warning("QueryLogMiddleware: unexpected response media type %s for %s", type(media), req.path)
+                return
+            children = (media.get("inner_timings") or {}).get("_children") or {}
+            execute_ms = children.get("execute_query", {}).get("_meta", {}).get("duration_ms")
+            fetch_ms = children.get("fetch_results", {}).get("_meta", {}).get("duration_ms")
+            result_count = len(media.get("cards") or [])
+            total_cards = media.get("total_cards")
 
         start = req.context.get("_start_time")
         total_ms = (time.monotonic() - start) * 1000 if start is not None else None
 
-        cache_hit = media.get("cache_hit", False)
-        children = (media.get("inner_timings") or {}).get("_children") or {}
-
         entry: dict = {
             "q": req.params.get("q"),
             "cache_hit": cache_hit,
-            "execute_ms": children.get("execute_query", {}).get("_meta", {}).get("duration_ms") if not cache_hit else None,
-            "fetch_ms": children.get("fetch_results", {}).get("_meta", {}).get("duration_ms") if not cache_hit else None,
+            "execute_ms": execute_ms,
+            "fetch_ms": fetch_ms,
             "total_ms": total_ms,
-            "result_count": len(media.get("cards") or []),
-            "total_cards": media.get("total_cards"),
+            "result_count": result_count,
+            "total_cards": total_cards,
             "had_error": not req_succeeded or (resp.status or "").startswith(("4", "5")),
             "orderby": req.params.get("orderby"),
             "unique_by": req.params.get("unique"),
