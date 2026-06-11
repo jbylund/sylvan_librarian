@@ -52,6 +52,27 @@ class TestCachingMiddleware:
         assert cached.result_count == 3
         assert cached.total_cards == 42
 
+    def test_request_dependent_headers_are_not_cached(self) -> None:
+        """CORS headers vary on the request's Origin and must not be replayed from cache."""
+        cache = {}
+        middleware = CachingMiddleware(cache=cache)
+        req = self._make_req()
+        resp = self._make_resp()
+        resp._headers = {
+            "content-type": "application/json",
+            "access-control-allow-origin": "http://localhost:8080",
+            "access-control-allow-methods": "GET, POST, OPTIONS",
+            "access-control-allow-headers": "Content-Type",
+            "access-control-max-age": "86400",
+        }
+
+        with patch("api.middlewares.caching_middleware.settings") as mock_settings:
+            mock_settings.enable_cache = True
+            middleware.process_response(req, resp, None, True)
+
+        cached = cache[self._cache_key()]
+        assert cached.headers == {"content-type": "application/json"}
+
     def test_non_dict_media_cached_without_counts(self) -> None:
         """Responses without a media dict (e.g. static files) cache with None counts."""
         cache = {}

@@ -11,13 +11,22 @@ from cachebox import LRUCache
 from api.settings import settings
 
 if TYPE_CHECKING:
-    from collections.abc import MutableMapping
+    from collections.abc import Mapping, MutableMapping
 
     import falcon
 
 logger = logging.getLogger(__name__)
 
 CacheKey = tuple[str, tuple[tuple, ...], tuple[tuple, ...]]
+
+# Headers that depend on the request rather than the cached payload: CORSMiddleware varies
+# Access-Control-* on the request's Origin and re-sets them on every response, including hits.
+_UNCACHEABLE_HEADER_PREFIXES: tuple[str, ...] = ("access-control-",)
+
+
+def cacheable_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    """Return the subset of headers safe to replay on a cache hit for a different request."""
+    return {k: v for k, v in headers.items() if not k.lower().startswith(_UNCACHEABLE_HEADER_PREFIXES)}
 
 
 class CachedResponse(NamedTuple):
@@ -125,7 +134,7 @@ class CachingMiddleware:
         is_dict_media = isinstance(media, dict)
         self.cache[cache_key] = CachedResponse(
             status=resp.status,
-            headers=dict(resp._headers),
+            headers=cacheable_headers(resp._headers),
             body=resp.render_body(),
             result_count=len(media.get("cards") or []) if is_dict_media else None,
             total_cards=media.get("total_cards") if is_dict_media else None,
