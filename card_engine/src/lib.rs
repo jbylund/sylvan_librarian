@@ -107,15 +107,18 @@ mod alloc_stats {
 
 // ─── Inline string (no heap allocation) ──────────────────────────────────────
 
+// repr(C) guarantees a stable layout ([u8; N] then u8, align 1, no padding)
+// across compiler versions, as the Portable impl below requires.
+#[repr(C)]
 #[derive(Clone, Copy)]
 struct InlineStr<const N: usize> {
     bytes: [u8; N],
     len: u8,
 }
 
-// Safety: InlineStr<N> is plain bytes (Copy), has no padding that could be
-// uninitialized, and carries no internal references — it is safe to treat as
-// a flat, relocatable value in an rkyv archive.
+// Safety: InlineStr<N> is repr(C) with only align-1 fields — a stable, fully
+// initialized, padding-free layout — and carries no internal references, so it
+// is safe to treat as a flat, relocatable value in an rkyv archive.
 unsafe impl<const N: usize> rkyv::Portable for InlineStr<N> {}
 
 impl<const N: usize> Archive for InlineStr<N> {
