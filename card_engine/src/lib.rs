@@ -38,6 +38,7 @@ mod alloc_stats {
 
     pub fn live() -> usize { LIVE.load(Ordering::Relaxed) }
     pub fn allocs() -> usize { ALLOCS.load(Ordering::Relaxed) }
+    pub fn peak() -> usize { PEAK.load(Ordering::Relaxed) }
 
     pub fn reset_peak() {
         RELOAD_LIVE_BEFORE.store(live(), Ordering::Relaxed);
@@ -49,6 +50,7 @@ mod alloc_stats {
         after_indexes: (usize, usize),
         component_bytes: (usize, usize, usize),
         archive: usize,
+        peak: usize, // caller snapshots before diagnostics inflate the high-water mark
     ) {
         RELOAD_LIVE_AFTER_CARDS.store(after_cards.0, Ordering::Relaxed);
         RELOAD_ALLOCS_AFTER_CARDS.store(after_cards.1, Ordering::Relaxed);
@@ -58,7 +60,7 @@ mod alloc_stats {
         RELOAD_INDEXES_RKYV.store(component_bytes.1, Ordering::Relaxed);
         RELOAD_STRINGS_RKYV.store(component_bytes.2, Ordering::Relaxed);
         RELOAD_ARCHIVE.store(archive, Ordering::Relaxed);
-        RELOAD_PEAK.store(PEAK.load(Ordering::Relaxed), Ordering::Relaxed);
+        RELOAD_PEAK.store(peak, Ordering::Relaxed);
     }
 
     pub struct CountingAlloc;
@@ -2446,26 +2448,19 @@ impl QueryEngine {
 
         #[cfg(feature = "alloc-counter")]
         let stats_after_indexes = (alloc_stats::live(), alloc_stats::allocs());
-        #[cfg(feature = "alloc-counter")]
-        let component_bytes = (
-            rkyv::to_bytes::<rkyv::rancor::Error>(&cards).map(|b| b.len()).unwrap_or(0),
-            rkyv::to_bytes::<rkyv::rancor::Error>(&indexes).map(|b| b.len()).unwrap_or(0),
-            rkyv::to_bytes::<rkyv::rancor::Error>(&strings).map(|b| b.len()).unwrap_or(0),
-        );
 
         // Snapshot the registry card_from_pydict just populated so reader
         // processes can adopt the same format→shift assignments.
         let format_shifts_snapshot = format_shifts().read().map(|m| m.clone()).unwrap_or_default();
         let card_data = CardData { cards, strings, indexes, format_shifts: format_shifts_snapshot };
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&card_data)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("rkyv serialize: {e}")))?;
 
-        #[cfg(feature = "alloc-counter")]
-        alloc_stats::record_reload(stats_after_cards, stats_after_indexes, component_bytes, bytes.len());
-
-        // Write atomically: write to a per-PID .tmp, then rename over shm_path.
+        // Write atomically: stream into a per-PID .tmp, then rename over shm_path.
         // Per-PID avoids the race where two workers write to the same .tmp and
         // one's rename consumes the file before the other can rename it.
+        // Streaming the serialization straight into the file means the archive
+        // bytes exist only as file pages — there is no second copy of the
+        // archive as a heap buffer, and no realloc-doubling spike while it
+        // grows (see docs/issues/engine-reload-publish-transient.md).
         let tmp_name = format!(
             "{}.{}.tmp",
             self.shm_path.file_name().unwrap_or_default().to_string_lossy(),
@@ -2473,13 +2468,37 @@ impl QueryEngine {
         );
         let tmp_path = self.shm_path.with_file_name(tmp_name);
         {
-            let mut f = std::fs::File::create(&tmp_path)
+            let f = std::fs::File::create(&tmp_path)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("create tmp: {e}")))?;
-            f.write_all(&archive_header())
+            let mut buf = std::io::BufWriter::with_capacity(1 << 20, f);
+            buf.write_all(&archive_header())
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("write header: {e}")))?;
-            f.write_all(&bytes)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("write tmp: {e}")))?;
+            rkyv::api::high::to_bytes_in::<_, rkyv::rancor::Error>(
+                &card_data,
+                rkyv::ser::writer::IoWriter::new(&mut buf),
+            )
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("rkyv serialize: {e}")))?;
+            buf.flush()
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("flush tmp: {e}")))?;
         }
+
+        #[cfg(feature = "alloc-counter")]
+        {
+            // Snapshot the build peak before the component-size diagnostics
+            // below re-serialize pieces into heap buffers and inflate it.
+            let build_peak = alloc_stats::peak();
+            let archive_len = std::fs::metadata(&tmp_path)
+                .map(|m| m.len() as usize)
+                .unwrap_or(0)
+                .saturating_sub(ARCHIVE_HEADER_LEN);
+            let component_bytes = (
+                rkyv::to_bytes::<rkyv::rancor::Error>(&card_data.cards).map(|b| b.len()).unwrap_or(0),
+                rkyv::to_bytes::<rkyv::rancor::Error>(&card_data.indexes).map(|b| b.len()).unwrap_or(0),
+                rkyv::to_bytes::<rkyv::rancor::Error>(&card_data.strings).map(|b| b.len()).unwrap_or(0),
+            );
+            alloc_stats::record_reload(stats_after_cards, stats_after_indexes, component_bytes, archive_len, build_peak);
+        }
+
         std::fs::rename(&tmp_path, &self.shm_path)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("rename shm: {e}")))?;
 
