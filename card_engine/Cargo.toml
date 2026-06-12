@@ -8,6 +8,11 @@ edition = "2024"
 name = "card_engine"
 crate-type = ["cdylib"]
 
+[features]
+# Counting global allocator + reload memory breakdown, exposed via QueryEngine.mem_stats().
+# Measurement-only; never enable for production builds.
+alloc-counter = []
+
 [dependencies]
 # extension-module is enabled by maturin (see pyproject.toml [tool.maturin]) so that
 # plain `cargo test` can still link against libpython for Rust unit tests.

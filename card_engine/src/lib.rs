@@ -11,6 +11,98 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 
+// ─── Feature-gated counting allocator (memory measurement only) ──────────────
+// Counts live bytes / live allocations of this extension's Rust heap and records
+// a breakdown of reload(): see docs/issues/engine-store-size-reduction.md step 0.
+
+#[cfg(feature = "alloc-counter")]
+mod alloc_stats {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    pub static LIVE: AtomicUsize = AtomicUsize::new(0);
+    pub static PEAK: AtomicUsize = AtomicUsize::new(0);
+    pub static ALLOCS: AtomicUsize = AtomicUsize::new(0); // currently-live allocation count
+
+    // Snapshots recorded by the most recent reload()
+    pub static RELOAD_LIVE_BEFORE: AtomicUsize = AtomicUsize::new(0);
+    pub static RELOAD_LIVE_AFTER_CARDS: AtomicUsize = AtomicUsize::new(0);
+    pub static RELOAD_ALLOCS_AFTER_CARDS: AtomicUsize = AtomicUsize::new(0);
+    pub static RELOAD_LIVE_AFTER_INDEXES: AtomicUsize = AtomicUsize::new(0);
+    pub static RELOAD_ALLOCS_AFTER_INDEXES: AtomicUsize = AtomicUsize::new(0);
+    pub static RELOAD_CARDS_RKYV: AtomicUsize = AtomicUsize::new(0);
+    pub static RELOAD_INDEXES_RKYV: AtomicUsize = AtomicUsize::new(0);
+    pub static RELOAD_ARCHIVE: AtomicUsize = AtomicUsize::new(0);
+    pub static RELOAD_PEAK: AtomicUsize = AtomicUsize::new(0);
+
+    pub fn live() -> usize { LIVE.load(Ordering::Relaxed) }
+    pub fn allocs() -> usize { ALLOCS.load(Ordering::Relaxed) }
+
+    pub fn reset_peak() {
+        RELOAD_LIVE_BEFORE.store(live(), Ordering::Relaxed);
+        PEAK.store(live(), Ordering::Relaxed);
+    }
+
+    pub fn record_reload(
+        after_cards: (usize, usize),
+        after_indexes: (usize, usize),
+        component_bytes: (usize, usize),
+        archive: usize,
+    ) {
+        RELOAD_LIVE_AFTER_CARDS.store(after_cards.0, Ordering::Relaxed);
+        RELOAD_ALLOCS_AFTER_CARDS.store(after_cards.1, Ordering::Relaxed);
+        RELOAD_LIVE_AFTER_INDEXES.store(after_indexes.0, Ordering::Relaxed);
+        RELOAD_ALLOCS_AFTER_INDEXES.store(after_indexes.1, Ordering::Relaxed);
+        RELOAD_CARDS_RKYV.store(component_bytes.0, Ordering::Relaxed);
+        RELOAD_INDEXES_RKYV.store(component_bytes.1, Ordering::Relaxed);
+        RELOAD_ARCHIVE.store(archive, Ordering::Relaxed);
+        RELOAD_PEAK.store(PEAK.load(Ordering::Relaxed), Ordering::Relaxed);
+    }
+
+    pub struct CountingAlloc;
+
+    impl CountingAlloc {
+        fn on_alloc(size: usize) {
+            let live = LIVE.fetch_add(size, Ordering::Relaxed) + size;
+            ALLOCS.fetch_add(1, Ordering::Relaxed);
+            PEAK.fetch_max(live, Ordering::Relaxed);
+        }
+        fn on_dealloc(size: usize) {
+            LIVE.fetch_sub(size, Ordering::Relaxed);
+            ALLOCS.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    unsafe impl GlobalAlloc for CountingAlloc {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let p = unsafe { System.alloc(layout) };
+            if !p.is_null() { Self::on_alloc(layout.size()); }
+            p
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) };
+            Self::on_dealloc(layout.size());
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            let p = unsafe { System.realloc(ptr, layout, new_size) };
+            if !p.is_null() {
+                LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+                let live = LIVE.fetch_add(new_size, Ordering::Relaxed) + new_size;
+                PEAK.fetch_max(live, Ordering::Relaxed);
+            }
+            p
+        }
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            let p = unsafe { System.alloc_zeroed(layout) };
+            if !p.is_null() { Self::on_alloc(layout.size()); }
+            p
+        }
+    }
+
+    #[global_allocator]
+    static COUNTING_ALLOC: CountingAlloc = CountingAlloc;
+}
+
 // ─── Inline string (no heap allocation) ──────────────────────────────────────
 
 #[derive(Clone, Copy)]
@@ -194,10 +286,13 @@ struct Card {
     produced_mana: u8,
     card_types: u16,
 
-    #[allow(dead_code)] // primary key; kept for future result payloads (printing dedup now keys on pointer)
-    scryfall_id: String,
-    oracle_id: Option<String>,
-    illustration_id: Option<String>,
+    // UUIDs packed as u128, 0 = null. Real UUIDs keep their exact bit value (so
+    // future lookup-by-id can match Scryfall's); non-UUID strings from hand-built
+    // test dicts are hashed deterministically — see parse_uuid_or_hash().
+    #[allow(dead_code)] // primary key; kept for future result payloads (printing dedup keys on pointer)
+    scryfall_id: u128,
+    oracle_id: u128,
+    illustration_id: u128,
 
     card_name: String,
     oracle_text: String,
@@ -216,11 +311,6 @@ struct Card {
     set_name: String,
     released_at: String,
     released_at_int: Option<u32>,      // yyyymmdd, parsed once at load for prefer=oldest/newest
-
-    // Dense group ids assigned at reload after the (oracle_id, illustration_id) sort;
-    // adjacency-equal to the string keys, so dedup compares integers, not UUIDs.
-    oracle_group: u32,
-    artwork_group: u32,
 
     cmc: Option<u8>,                   // always an integer; max ~16 in practice
     creature_power: Option<i8>,        // can be negative (e.g. Char-Rumbler)
@@ -255,6 +345,50 @@ type ACard = Archived<Card>;
 
 fn opt_str(d: &Bound<PyDict>, key: &str) -> Option<String> {
     d.get_item(key).ok().flatten().and_then(|v| v.extract::<String>().ok())
+}
+
+/// UUID string → u128. Hyphenated/plain 32-hex-digit UUIDs map to their exact bit
+/// value (so future lookup-by-id matches Scryfall's ids); any other non-empty
+/// string (hand-built test dicts use ids like "o1") is FNV-1a-hashed, preserving
+/// equality semantics. 0 is reserved for null/missing; real values never map to it.
+fn parse_uuid_or_hash(s: &str) -> u128 {
+    if s.is_empty() {
+        return 0;
+    }
+    let mut val: u128 = 0;
+    let mut digits = 0u32;
+    let mut is_uuid = true;
+    for b in s.bytes() {
+        if b == b'-' {
+            continue;
+        }
+        match (b as char).to_digit(16) {
+            Some(dv) if digits < 32 => {
+                val = (val << 4) | dv as u128;
+                digits += 1;
+            }
+            _ => {
+                is_uuid = false;
+                break;
+            }
+        }
+    }
+    if is_uuid && digits == 32 {
+        return if val == 0 { 1 } else { val }; // all-zero UUID must not collide with null
+    }
+    // FNV-1a (128-bit) fallback for non-UUID strings
+    const FNV_OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
+    const FNV_PRIME: u128 = 0x0000000001000000000000000000013b;
+    let mut h = FNV_OFFSET;
+    for b in s.bytes() {
+        h ^= b as u128;
+        h = h.wrapping_mul(FNV_PRIME);
+    }
+    if h == 0 { 1 } else { h }
+}
+
+fn opt_uuid(d: &Bound<PyDict>, key: &str) -> u128 {
+    opt_str(d, key).map(|s| parse_uuid_or_hash(&s)).unwrap_or(0)
 }
 
 // Accepts ISO strings or datetime.date (psycopg returns date columns as datetime.date).
@@ -443,9 +577,9 @@ fn card_from_pydict(d: &Bound<PyDict>) -> Card {
     let card_artist_lower = card_artist.as_ref().map(|s| s.to_lowercase());
 
     Card {
-        scryfall_id: opt_str(d, "scryfall_id").unwrap_or_default(),
-        oracle_id: opt_str(d, "oracle_id"),
-        illustration_id: opt_str(d, "illustration_id"),
+        scryfall_id: opt_uuid(d, "scryfall_id"),
+        oracle_id: opt_uuid(d, "oracle_id"),
+        illustration_id: opt_uuid(d, "illustration_id"),
 
         card_name_lower,
         card_name,
@@ -465,8 +599,6 @@ fn card_from_pydict(d: &Bound<PyDict>) -> Card {
         set_name: opt_str(d, "set_name").unwrap_or_default(),
         released_at,
         released_at_int,
-        oracle_group: 0,  // assigned in reload() after the (oracle_id, illustration_id) sort
-        artwork_group: 0,
 
         card_colors: jsonb_color_to_bits(d, "card_colors"),
         card_color_identity: jsonb_color_to_bits(d, "card_color_identity"),
@@ -1692,14 +1824,14 @@ fn run_query_hashmap<'a>(
         _          => GroupBy::Oracle,
     };
 
-    let mut partitions: HashMap<usize, (&ACard, f64)> = HashMap::new();
+    let mut partitions: HashMap<u128, (&ACard, f64)> = HashMap::new();
     for card in store {
         if filter.matches(card) {
             let key = match group_by {
-                GroupBy::Oracle   => u32::from(card.oracle_group) as usize,
-                GroupBy::Artwork  => u32::from(card.artwork_group) as usize,
+                GroupBy::Oracle   => u128::from(card.oracle_id),
+                GroupBy::Artwork  => u128::from(card.illustration_id),
                 // every printing is its own partition — the pointer is a free unique key
-                GroupBy::Printing => std::ptr::from_ref(card) as usize,
+                GroupBy::Printing => std::ptr::from_ref(card) as usize as u128,
             };
             let score = prefer_score(card, prefer);
             let entry = partitions.entry(key).or_insert((card, f64::NEG_INFINITY));
@@ -1727,7 +1859,7 @@ fn run_query_linear<'a, I, F>(
 ) -> (usize, Vec<&'a ACard>)
 where
     I: Iterator<Item = &'a ACard>,
-    F: Fn(&ACard) -> u32,
+    F: Fn(&ACard) -> u128,
 {
     let sort_col   = orderby_to_col(orderby);
     let descending = direction == "desc";
@@ -1735,14 +1867,14 @@ where
 
     let mut best: Vec<(u128, &ACard)> = Vec::new();
     let mut group_best: Option<(&ACard, f64)> = None;
-    let mut prev_key: u32 = u32::MAX; // group ids are dense from 0, so MAX is a safe sentinel
+    let mut prev_key: Option<u128> = None; // None = before the first match
 
     for card in cards {
         if !filter.matches(card) { continue; }
         let key = key_fn(card);
-        if key != prev_key {
+        if prev_key != Some(key) {
             if let Some((c, _)) = group_best.take() { best.push((sort_key_bits(c, sort_col, descending), c)); }
-            prev_key   = key;
+            prev_key   = Some(key);
             group_best = Some((card, prefer_score(card, prefer)));
         } else {
             let score = prefer_score(card, prefer);
@@ -1798,11 +1930,14 @@ fn run_query<'a>(
     }
 
     match unique {
-        "card" => run_query_linear(cards_iter!(), filter, |c| u32::from(c.oracle_group), prefer, orderby, direction, limit, offset),
+        // The store is sorted by (oracle_id, illustration_id), so equal keys are adjacent
+        // and the linear key-change dedup is exact — u128 equality, same cost as the
+        // dense u32 group ids this replaced.
+        "card" => run_query_linear(cards_iter!(), filter, |c| u128::from(c.oracle_id), prefer, orderby, direction, limit, offset),
         // Scryfall assigns each illustration_id to exactly one oracle_id, so cards sharing an
         // illustration_id are always contiguous in the (oracle_id, illustration_id) sort order.
         // The linear dedup path is therefore correct here — no HashMap needed.
-        "artwork"  => run_query_linear(cards_iter!(), filter, |c| u32::from(c.artwork_group), prefer, orderby, direction, limit, offset),
+        "artwork"  => run_query_linear(cards_iter!(), filter, |c| u128::from(c.illustration_id), prefer, orderby, direction, limit, offset),
         "printing" => run_query_no_dedup(cards_iter!(), filter, orderby, direction, limit, offset),
         _          => run_query_hashmap(store, filter, unique, prefer, orderby, direction, limit, offset),
     }
@@ -1915,6 +2050,9 @@ impl QueryEngine {
             return self.get_mmap().map(|_| ());
         }
 
+        #[cfg(feature = "alloc-counter")]
+        alloc_stats::reset_peak();
+
         let mut cards: Vec<Card> = db_rows
             .iter()
             .filter_map(|item| item.cast::<PyDict>().ok().map(|d| card_from_pydict(&d)))
@@ -1922,43 +2060,19 @@ impl QueryEngine {
         // unique=card/artwork group by oracle_id, so cards without one would all
         // collapse into a single group. The DB enforces NOT NULL; fail loudly here
         // for any other caller (e.g. hand-built test dicts).
-        if let Some((idx, card)) = cards
-            .iter()
-            .enumerate()
-            .find(|(_, c)| c.oracle_id.as_deref().unwrap_or("").is_empty())
-        {
+        if let Some((idx, card)) = cards.iter().enumerate().find(|(_, c)| c.oracle_id == 0) {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "card {idx} ({:?}) is missing oracle_id (required for unique=card dedup)",
                 card.card_name
             )));
         }
-        cards.sort_unstable_by(|a, b| {
-            let oa = a.oracle_id.as_deref().unwrap_or("");
-            let ob = b.oracle_id.as_deref().unwrap_or("");
-            oa.cmp(ob).then_with(|| {
-                let ia = a.illustration_id.as_deref().unwrap_or("");
-                let ib = b.illustration_id.as_deref().unwrap_or("");
-                ia.cmp(ib)
-            })
-        });
+        // Equal keys end up adjacent, which is the only property the linear
+        // key-change dedup paths need — the numeric (vs lexicographic) order is
+        // otherwise irrelevant.
+        cards.sort_unstable_by_key(|c| (c.oracle_id, c.illustration_id));
 
-        // Dense group ids: a group is a maximal run of equal keys in the sort above,
-        // exactly the adjacency the linear dedup paths relied on when they compared
-        // the UUID strings directly. cards[0] keeps the 0/0 defaults.
-        let mut oracle_group: u32 = 0;
-        let mut artwork_group: u32 = 0;
-        for i in 1..cards.len() {
-            let (head, tail) = cards.split_at_mut(i);
-            let (prev, cur) = (&head[i - 1], &mut tail[0]);
-            if prev.oracle_id.as_deref().unwrap_or("") != cur.oracle_id.as_deref().unwrap_or("") {
-                oracle_group += 1;
-            }
-            if prev.illustration_id.as_deref().unwrap_or("") != cur.illustration_id.as_deref().unwrap_or("") {
-                artwork_group += 1;
-            }
-            cur.oracle_group  = oracle_group;
-            cur.artwork_group = artwork_group;
-        }
+        #[cfg(feature = "alloc-counter")]
+        let stats_after_cards = (alloc_stats::live(), alloc_stats::allocs());
 
         let indexes = CardIndexes {
             name_trigram:   build_trigram_index(&cards, |c| c.card_name_lower.as_str()),
@@ -1973,12 +2087,23 @@ impl QueryEngine {
             is_tags:        build_tag_index(&cards, |c| &c.card_is_tags),
         };
 
+        #[cfg(feature = "alloc-counter")]
+        let stats_after_indexes = (alloc_stats::live(), alloc_stats::allocs());
+        #[cfg(feature = "alloc-counter")]
+        let component_bytes = (
+            rkyv::to_bytes::<rkyv::rancor::Error>(&cards).map(|b| b.len()).unwrap_or(0),
+            rkyv::to_bytes::<rkyv::rancor::Error>(&indexes).map(|b| b.len()).unwrap_or(0),
+        );
+
         // Snapshot the registry card_from_pydict just populated so reader
         // processes can adopt the same format→shift assignments.
         let format_shifts_snapshot = format_shifts().read().map(|m| m.clone()).unwrap_or_default();
         let card_data = CardData { cards, indexes, format_shifts: format_shifts_snapshot };
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&card_data)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("rkyv serialize: {e}")))?;
+
+        #[cfg(feature = "alloc-counter")]
+        alloc_stats::record_reload(stats_after_cards, stats_after_indexes, component_bytes, bytes.len());
 
         // Write atomically: write to a per-PID .tmp, then rename over shm_path.
         // Per-PID avoids the race where two workers write to the same .tmp and
@@ -2090,6 +2215,28 @@ impl QueryEngine {
             // Safety: same as query().
             Ok(mmap) => Ok(unsafe { rkyv::access_unchecked::<Archived<CardData>>(&mmap) }.cards.len()),
         }
+    }
+
+    /// Rust-heap allocator stats and reload() memory breakdown.
+    /// Empty dict unless built with --features alloc-counter (measurement-only).
+    fn mem_stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        #[cfg(feature = "alloc-counter")]
+        {
+            use std::sync::atomic::Ordering::Relaxed;
+            d.set_item("live_bytes", alloc_stats::LIVE.load(Relaxed))?;
+            d.set_item("live_allocs", alloc_stats::ALLOCS.load(Relaxed))?;
+            d.set_item("reload_live_before", alloc_stats::RELOAD_LIVE_BEFORE.load(Relaxed))?;
+            d.set_item("reload_live_after_cards", alloc_stats::RELOAD_LIVE_AFTER_CARDS.load(Relaxed))?;
+            d.set_item("reload_allocs_after_cards", alloc_stats::RELOAD_ALLOCS_AFTER_CARDS.load(Relaxed))?;
+            d.set_item("reload_live_after_indexes", alloc_stats::RELOAD_LIVE_AFTER_INDEXES.load(Relaxed))?;
+            d.set_item("reload_allocs_after_indexes", alloc_stats::RELOAD_ALLOCS_AFTER_INDEXES.load(Relaxed))?;
+            d.set_item("reload_peak", alloc_stats::RELOAD_PEAK.load(Relaxed))?;
+            d.set_item("cards_rkyv_bytes", alloc_stats::RELOAD_CARDS_RKYV.load(Relaxed))?;
+            d.set_item("indexes_rkyv_bytes", alloc_stats::RELOAD_INDEXES_RKYV.load(Relaxed))?;
+            d.set_item("archive_bytes", alloc_stats::RELOAD_ARCHIVE.load(Relaxed))?;
+        }
+        Ok(d)
     }
 }
 
