@@ -1643,13 +1643,19 @@ fn build_trigram_index<'a>(cards: &'a [Card], get_text: impl Fn(&'a Card) -> &'a
     idx
 }
 
-fn intersect_sorted(a: &[u32], b: &[u32]) -> Vec<u32> {
+// Generic over the second operand's element type so it can walk archived
+// posting lists (u32_le) in place, without copying them out of the mmap.
+fn intersect_sorted<B: Copy>(a: &[u32], b: &[B]) -> Vec<u32>
+where
+    u32: From<B>,
+{
     let mut out = Vec::new();
     let (mut i, mut j) = (0, 0);
     while i < a.len() && j < b.len() {
-        if a[i] == b[j]      { out.push(a[i]); i += 1; j += 1; }
-        else if a[i] < b[j]  { i += 1; }
-        else                  { j += 1; }
+        let bj = u32::from(b[j]);
+        if a[i] == bj      { out.push(a[i]); i += 1; j += 1; }
+        else if a[i] < bj  { i += 1; }
+        else               { j += 1; }
     }
     out
 }
@@ -1658,21 +1664,27 @@ fn trigram_candidates(idx: &Archived<TrigramIndex>, word: &str) -> Option<Vec<u3
     let bytes = word.as_bytes();
     if bytes.len() < 3 { return None; }
 
-    let mut lists: Vec<Vec<u32>> = Vec::with_capacity(bytes.len() - 2);
+    let mut lists: Vec<&Archived<Vec<u32>>> = Vec::with_capacity(bytes.len() - 2);
     for w in bytes.windows(3) {
         match idx.get(&[w[0], w[1], w[2]]) {
-            Some(list) => lists.push(list.iter().map(|x| u32::from(*x)).collect()),
+            Some(list) => lists.push(list),
             // A trigram absent from the index appears in no card: nothing can match.
             None => return Some(Vec::new()),
         }
     }
     lists.sort_unstable_by_key(|l| l.len());
+    // Repeated trigrams (e.g. "aaaa") resolve to the same archived entry — drop
+    // the pointer-equal duplicates instead of intersecting them again.
+    lists.dedup_by(|a, b| std::ptr::eq(*a, *b));
 
-    let mut result = lists.swap_remove(0);
-    result.sort_unstable();
-    for list in &lists {
+    // Posting lists are built sorted (build_trigram_index and the oracle CSR
+    // both append ids in ascending order), so intersection runs directly over
+    // the archived lists; only the shortest one is materialized as the
+    // working set.
+    let mut result: Vec<u32> = lists[0].iter().map(|x| u32::from(*x)).collect();
+    for list in &lists[1..] {
         if result.is_empty() { break; }
-        result = intersect_sorted(&result, list);
+        result = intersect_sorted(&result, list.as_slice());
     }
     Some(result)
 }
@@ -2198,6 +2210,34 @@ fn card_to_pydict<'py>(py: Python<'py>, card: &ACard, strings: &AStrings) -> PyR
     Ok(d)
 }
 
+// ─── Archive file header ─────────────────────────────────────────────────────
+// A 16-byte header is prepended to the rkyv archive: magic, format version, and
+// size_of::<Archived<Card>>. get_mmap() rejects any file whose header doesn't
+// match this build, so an archive written by an older build (different archived
+// layout) is treated as absent and rebuilt instead of being handed to
+// access_unchecked — which would be undefined behavior. The 16-byte length also
+// keeps the payload 16-aligned (the mmap base is page-aligned), satisfying
+// rkyv's alignment requirement for the archived root.
+
+const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
+/// Bump on any archived-data-model change that size_of::<ACard>() wouldn't
+/// catch (e.g. reordering same-size Card fields, changing an index type).
+const ARCHIVE_FORMAT_VERSION: u32 = 1;
+const ARCHIVE_HEADER_LEN: usize = 16;
+
+fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
+    let mut h = [0u8; ARCHIVE_HEADER_LEN];
+    h[..8].copy_from_slice(&ARCHIVE_MAGIC);
+    h[8..12].copy_from_slice(&ARCHIVE_FORMAT_VERSION.to_le_bytes());
+    h[12..16].copy_from_slice(&(std::mem::size_of::<ACard>() as u32).to_le_bytes());
+    h
+}
+
+/// The rkyv payload of a mapping whose header get_mmap() already validated.
+fn archive_payload(mmap: &Mmap) -> &[u8] {
+    &mmap[ARCHIVE_HEADER_LEN..]
+}
+
 // ─── PyO3 bindings ───────────────────────────────────────────────────────────
 
 struct CachedMmap {
@@ -2230,11 +2270,26 @@ impl QueryEngine {
         // Inode changed (new reload) or first call: open and map the current file.
         let file = std::fs::File::open(&self.shm_path)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("open shm: {e}")))?;
+        // Cache the inode from the opened handle (fstat), not the path stat above:
+        // the file can be replaced between the two, and pairing the old path inode
+        // with the new file's mapping would force a spurious remap on the next call.
+        let inode = file.metadata()
+            .map(|m| m.ino())
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("fstat shm: {e}")))?;
         // Safety: bytes written by rkyv::to_bytes on this platform; file is replaced
         // atomically (rename), never modified in place while mapped.
         let mmap = Arc::new(unsafe { Mmap::map(&file) }
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("mmap: {e}")))?);
-        *guard = Some(CachedMmap { mmap: Arc::clone(&mmap), inode: path_inode });
+        // Reject archives not written by this exact build (stale file from an older
+        // build, or a foreign file at the shared path): handing them to
+        // access_unchecked would be UB. Callers treat the error as "no archive".
+        if mmap.len() < ARCHIVE_HEADER_LEN || mmap[..ARCHIVE_HEADER_LEN] != archive_header() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "archive header mismatch at {} (stale or foreign archive; will be rebuilt)",
+                self.shm_path.display(),
+            )));
+        }
+        *guard = Some(CachedMmap { mmap: Arc::clone(&mmap), inode });
         Ok(mmap)
     }
 }
@@ -2268,9 +2323,12 @@ impl QueryEngine {
     fn reload(&self, db_rows: &Bound<PyList>) -> PyResult<()> {
         let _guard = self.write_lock.lock().unwrap();
 
-        // Record when we started waiting so we can detect whether another worker
-        // wrote the file while we were blocked on the cross-process flock below.
-        let started_at = std::time::SystemTime::now();
+        // Snapshot the archive's identity before contending for the cross-process
+        // lock, so we can detect whether another worker published a new archive
+        // while we were blocked. Publish is rename-only, so a publish always
+        // changes the inode — unlike mtime, which is subject to filesystem
+        // timestamp granularity and clock steps.
+        let inode_before = std::fs::metadata(&self.shm_path).ok().map(|m| m.ino());
 
         // Cross-process exclusive lock: only one worker writes per reload cycle.
         // The lock file is separate so it persists across archive replacements.
@@ -2279,15 +2337,21 @@ impl QueryEngine {
             .write(true).create(true).open(&lock_path)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("open lock: {e}")))?;
         // LOCK_EX blocks until we hold the lock; released automatically on drop.
-        unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
+        loop {
+            if unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+                break;
+            }
+            let err = std::io::Error::last_os_error();
+            if err.kind() != std::io::ErrorKind::Interrupted {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!("flock: {err}")));
+            }
+        }
 
-        // If another worker already wrote the file while we were waiting, skip
-        // the rebuild and just remap our local handle.
-        let already_written = std::fs::metadata(&self.shm_path)
-            .and_then(|m| m.modified())
-            .map(|mtime| mtime > started_at)
-            .unwrap_or(false);
-        if already_written {
+        // If another worker published a new archive while we were waiting (the
+        // inode changed, or a file appeared), skip the rebuild and just remap
+        // our local handle.
+        let inode_after = std::fs::metadata(&self.shm_path).ok().map(|m| m.ino());
+        if inode_after.is_some() && inode_after != inode_before {
             return self.get_mmap().map(|_| ());
         }
 
@@ -2362,6 +2426,8 @@ impl QueryEngine {
         {
             let mut f = std::fs::File::create(&tmp_path)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("create tmp: {e}")))?;
+            f.write_all(&archive_header())
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("write header: {e}")))?;
             f.write_all(&bytes)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("write tmp: {e}")))?;
         }
@@ -2400,10 +2466,11 @@ impl QueryEngine {
         // module (query_hashmap() and size() refer here):
         //
         // - The only writer is reload() in this module: the bytes come from
-        //   rkyv::to_bytes in the same build of this crate that reads them. In
-        //   production the archive lives in container-scoped tmpfs (/dev/shm),
-        //   so it cannot outlive the build that wrote it. (On macOS dev, /tmp
-        //   persists — after changing any archived type, delete the archive.)
+        //   rkyv::to_bytes in the same build of this crate that reads them.
+        //   get_mmap() enforces this with the archive header check (magic,
+        //   format version, size_of::<ACard>), so an archive left behind by an
+        //   older build — e.g. /tmp on macOS dev persisting across rebuilds —
+        //   is rejected and rebuilt rather than mapped.
         // - A torn or truncated archive is never observable: reload() writes to
         //   a per-PID temp file and publishes it with rename(2), which is
         //   atomic. A crashed writer leaves a stale .tmp, never a partial file
@@ -2418,7 +2485,7 @@ impl QueryEngine {
         // evaluation — a 10-100x slowdown per query. It would also be a false
         // guarantee: InlineStr's CheckBytes is deliberately permissive, so
         // validation cannot be the safety boundary; the trusted write path is.
-        let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(&mmap) };
+        let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
 
         // Must run before build_filter so legality shifts resolve in workers
         // that never executed the load path themselves.
@@ -2460,7 +2527,7 @@ impl QueryEngine {
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("bad query JSON: {e}")))?;
         let mmap = self.get_mmap()?;
         // Safety: see the access_unchecked justification in query().
-        let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(&mmap) };
+        let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
 
         // Must run before build_filter; see query().
         sync_format_shifts(&data.format_shifts);
@@ -2476,14 +2543,14 @@ impl QueryEngine {
 
     fn size(&self) -> PyResult<usize> {
         match self.get_mmap() {
-            // Missing/unopenable archive — the only "unreadable" state that can
-            // occur. Returns 0 so Python treats the engine as empty.
+            // Missing, unopenable, or wrong-build (header mismatch) archive.
+            // Returns 0 so Python treats the engine as empty and rebuilds.
             Err(_) => Ok(0),
             // Safety: see the access_unchecked justification in query(). A file
-            // that mapped successfully is always a complete rkyv archive (atomic
-            // rename publish), so checked access here would only re-validate
-            // trusted bytes at ~7 ms per size() call.
-            Ok(mmap) => Ok(unsafe { rkyv::access_unchecked::<Archived<CardData>>(&mmap) }.cards.len()),
+            // that mapped and passed the header check is always a complete rkyv
+            // archive from this build (atomic rename publish), so checked access
+            // here would only re-validate trusted bytes at ~7 ms per size() call.
+            Ok(mmap) => Ok(unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) }.cards.len()),
         }
     }
 

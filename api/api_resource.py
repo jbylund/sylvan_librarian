@@ -656,6 +656,7 @@ class APIResource:
                         cursor.execute(f"SELECT {cols_sql} FROM magic.cards AS card")
                         rows = cursor.fetchall()
             except psycopg_pool.PoolClosed:
+                logger.debug("Connection pool closed during engine reload, skipping (pid=%d)", os.getpid())
                 return
             self._engine.reload([dict(row) for row in rows])
             logger.info("Engine reloaded with %d cards (pid=%d)", self._engine.size(), os.getpid())
