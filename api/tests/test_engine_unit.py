@@ -24,6 +24,7 @@ Card summary (name → printings):
 
 from __future__ import annotations
 
+import datetime
 import json
 from pathlib import Path
 
@@ -105,8 +106,8 @@ class TestFilters:
         e = QueryEngine()
         e.reload(
             [
-                {"card_name": "List Printing", "collector_number": "10E-105"},
-                {"card_name": "Plain Printing", "collector_number": "105"},
+                {"card_name": "List Printing", "oracle_id": "o1", "collector_number": "10E-105"},
+                {"card_name": "Plain Printing", "oracle_id": "o2", "collector_number": "105"},
             ]
         )
         total_exact, cards = _run(e, "cn:10E-105")
@@ -264,6 +265,19 @@ class TestArithmetic:
 
 
 class TestUnique:
+    def test_reload_rejects_cards_missing_oracle_id(self) -> None:
+        # unique=card/artwork group by oracle_id; cards without one would silently
+        # collapse into a single group, so reload must refuse them up front.
+        # (Unreachable from _reload_engine(): the DB column is NOT NULL.)
+        e = QueryEngine()
+        with pytest.raises(ValueError, match=r"No Oracle.*missing oracle_id"):
+            e.reload(
+                [
+                    {"card_name": "Has Oracle", "oracle_id": "o1"},
+                    {"card_name": "No Oracle"},
+                ]
+            )
+
     def test_unique_printing_returns_all(self, engine: QueryEngine) -> None:
         total, _ = _run(engine, unique="printing")
         assert total == 87
@@ -601,6 +615,31 @@ class TestCardProperties:
         total, cards = _run(engine, "watermark:fnm")
         assert total == 1
         assert cards[0]["name"] == "Kitchen Finks"
+
+    def test_year_filter_with_date_objects(self) -> None:
+        # _reload_engine() feeds rows straight from psycopg, which returns date
+        # columns as datetime.date (not str). The engine must extract those, or
+        # released_at silently becomes "" and every date/year filter goes empty.
+        # Card "c" keeps a string date on purpose: JSON-sourced reloads (e.g. the
+        # engine_cards.json fixture) still send strings, so both forms must work.
+        base = {
+            "card_name": "Test Beater",
+            "type_line": "Creature",
+            "creature_power": 9,
+            "creature_power_text": "9",
+        }
+        e = QueryEngine()
+        e.reload(
+            [
+                {**base, "oracle_id": "a", "released_at": datetime.date(2026, 3, 15)},
+                {**base, "oracle_id": "b", "released_at": datetime.date(2024, 1, 1)},
+                {**base, "oracle_id": "c", "released_at": "2026-07-04"},
+            ]
+        )
+        total, _ = _run(e, "power>8 year=2026")
+        assert total == 2
+        total_date, _ = _run(e, "date>=2026-01-01")
+        assert total_date == 2
 
     def test_year_1993(self, engine: QueryEngine) -> None:
         # Alpha/Beta/Unlimited/CED/CEI all released in 1993

@@ -33,6 +33,9 @@ js_files := $(shell find . -type f -name "*.js" | grep -v node_modules)
 requirements_sources := $(shell find requirements -type f -name "*.txt")
 PYTHON_DIRS := $(shell git ls-files "*.py" | cut -f 1 -d/ | sort -u)
 python_sources := $(shell find api client -type f -name "*.py")
+engine_sources := $(shell find card_engine/src -type f -name "*.rs") card_engine/Cargo.toml card_engine/Cargo.lock card_engine/pyproject.toml
+ENGINE_EXT_SUFFIX := $(shell python -c "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX'))")
+ENGINE_SO := card_engine/card_engine/card_engine$(ENGINE_EXT_SUFFIX)
 image_sources := $(python_sources) api/Dockerfile client/Dockerfile $(requirements_sources) $(BASE_COMPOSE)
 
 BUILD_STAMP_DIR := $(GIT_ROOT)/.tmp/build-stamps
@@ -48,6 +51,7 @@ IMAGE_TAG := $(BUILD_HASH)
 	coverage \
 	dockerclean \
 	down \
+	engine \
 	fonts \
 	help \
 	hlep \
@@ -185,13 +189,19 @@ install_deps:
 install_test_deps:
 	python -m uv pip install -r requirements/test.txt -r requirements/base.txt
 
-test tests: install_test_deps
+engine: $(ENGINE_SO) # @doc build the Rust card engine extension if its sources changed
+
+$(ENGINE_SO): $(engine_sources)
+	@maturin --version > /dev/null 2>&1 || python -m uv pip install maturin
+	cd card_engine && PATH="$$HOME/.cargo/bin:$$PATH" maturin develop --release
+
+test tests: install_test_deps engine
 	python -m pytest -vvv --capture=no --durations=10
 
-test-integration:
+test-integration: engine
 	python -m pytest api/tests/test_integration_testcontainers.py -vvv --exitfirst
 
-test-unit:
+test-unit: engine
 	python -m pytest -vvv --exitfirst --ignore=api/tests/test_integration_testcontainers.py
 
 coverage: # @doc generate HTML coverage report

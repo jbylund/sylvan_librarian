@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyTuple};
+use pyo3::types::{PyDate, PyDateAccess, PyDict, PyList, PyTuple};
 use regex::Regex;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -212,6 +212,16 @@ fn opt_str(d: &Bound<PyDict>, key: &str) -> Option<String> {
     d.get_item(key).ok().flatten().and_then(|v| v.extract::<String>().ok())
 }
 
+// Accepts ISO strings or datetime.date (psycopg returns date columns as datetime.date).
+fn opt_date_str(d: &Bound<PyDict>, key: &str) -> Option<String> {
+    let v = d.get_item(key).ok().flatten()?;
+    if let Ok(s) = v.extract::<String>() {
+        return Some(s);
+    }
+    let date = v.cast::<PyDate>().ok()?;
+    Some(format!("{:04}-{:02}-{:02}", date.get_year(), date.get_month(), date.get_day()))
+}
+
 fn opt_f32(d: &Bound<PyDict>, key: &str) -> Option<f32> {
     d.get_item(key).ok().flatten().and_then(|v| {
         v.extract::<f64>().ok().map(|n| n as f32)
@@ -376,7 +386,7 @@ fn mana_cost_from_pydict(d: &Bound<PyDict>, cmc_val: Option<f32>) -> ManaCost {
 }
 
 fn card_from_pydict(d: &Bound<PyDict>) -> Card {
-    let released_at = opt_str(d, "released_at").unwrap_or_default();
+    let released_at = opt_date_str(d, "released_at").unwrap_or_default();
     let released_at_int: Option<u32> = released_at.replace('-', "").parse().ok();
     let card_name = opt_str(d, "card_name").unwrap_or_default();
     let card_name_lower = InlineStr::<61>::from_str(&card_name.to_lowercase());
@@ -1724,6 +1734,19 @@ impl QueryEngine {
             .iter()
             .filter_map(|item| item.cast::<PyDict>().ok().map(|d| card_from_pydict(&d)))
             .collect();
+        // unique=card/artwork group by oracle_id, so cards without one would all
+        // collapse into a single group. The DB enforces NOT NULL; fail loudly here
+        // for any other caller (e.g. hand-built test dicts).
+        if let Some((idx, card)) = cards
+            .iter()
+            .enumerate()
+            .find(|(_, c)| c.oracle_id.as_deref().unwrap_or("").is_empty())
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "card {idx} ({:?}) is missing oracle_id (required for unique=card dedup)",
+                card.card_name
+            )));
+        }
         cards.sort_unstable_by(|a, b| {
             let oa = a.oracle_id.as_deref().unwrap_or("");
             let ob = b.oracle_id.as_deref().unwrap_or("");
