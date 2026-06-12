@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import datetime
 import json
+import tempfile
+import uuid
 from pathlib import Path
 
 import pytest
@@ -36,10 +38,19 @@ from card_engine import QueryEngine
 _FIXTURE = Path(__file__).parent / "fixtures" / "engine_cards.json"
 
 
+def _fresh_engine() -> QueryEngine:
+    """Engine with its own snapshot path.
+
+    The default path is shared machine-wide (that's the point of the shm design),
+    so two test engines holding different card sets would clobber each other.
+    """
+    return QueryEngine(shm_path=str(Path(tempfile.gettempdir()) / f"arcane_tutor_test_{uuid.uuid4().hex}"))
+
+
 @pytest.fixture(scope="module", name="engine")
 def engine_fixture() -> QueryEngine:
     cards = json.loads(_FIXTURE.read_text())
-    e = QueryEngine()
+    e = _fresh_engine()
     e.reload(cards)
     return e
 
@@ -103,7 +114,7 @@ class TestFilters:
     def test_collector_number_query_is_case_sensitive(self) -> None:
         # collector_number is stored raw and mixed-case (e.g. The List's "10E-105"),
         # and the SQL path compares it exactly — the engine must do the same.
-        e = QueryEngine()
+        e = _fresh_engine()
         e.reload(
             [
                 {"card_name": "List Printing", "oracle_id": "o1", "collector_number": "10E-105"},
@@ -269,7 +280,7 @@ class TestUnique:
         # unique=card/artwork group by oracle_id; cards without one would silently
         # collapse into a single group, so reload must refuse them up front.
         # (Unreachable from _reload_engine(): the DB column is NOT NULL.)
-        e = QueryEngine()
+        e = _fresh_engine()
         with pytest.raises(ValueError, match=r"No Oracle.*missing oracle_id"):
             e.reload(
                 [
@@ -628,7 +639,7 @@ class TestCardProperties:
             "creature_power": 9,
             "creature_power_text": "9",
         }
-        e = QueryEngine()
+        e = _fresh_engine()
         e.reload(
             [
                 {**base, "oracle_id": "a", "released_at": datetime.date(2026, 3, 15)},
