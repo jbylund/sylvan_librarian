@@ -135,9 +135,12 @@ impl<const N: usize, D: rkyv::rancor::Fallible + ?Sized> Deserialize<InlineStr<N
     fn deserialize(&self, _: &mut D) -> Result<InlineStr<N>, D::Error> { Ok(*self) }
 }
 
-// Safety: InlineStr<N> contains only a [u8; N] and a u8 len -- both are always
-// valid regardless of their byte contents. No pointers, no enums, no invariants
-// that could be violated by arbitrary bytes. This impl simply trusts the data.
+// Deliberately permissive: this impl trusts the data rather than validating it
+// (a real check would verify len <= N and UTF-8, since as_str() converts
+// unchecked). It exists only to satisfy the derived CheckBytes bounds on the
+// archived containers; validation is never the engine's safety boundary — the
+// archive is trusted by construction (see the access_unchecked justification
+// in QueryEngine::query()), so checked access is not relied on for soundness.
 unsafe impl<const N: usize, C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C> for InlineStr<N> {
     unsafe fn check_bytes(
         _value: *const Self,
@@ -2389,9 +2392,29 @@ impl QueryEngine {
         // get_mmap() remaps automatically if the on-disk inode has changed since
         // the last reload, keeping workers off stale (deleted) mappings.
         let mmap = self.get_mmap()?;
-        // Safety: bytes were written by rkyv::to_bytes on this platform.
-        // The archive is immutable once written; reloads atomically replace the
-        // file, never modifying it in place. The Arc keeps the mapping alive.
+        // Safety: the archive is trusted by construction, so we skip validation.
+        // This is the canonical justification for every access_unchecked in this
+        // module (query_hashmap() and size() refer here):
+        //
+        // - The only writer is reload() in this module: the bytes come from
+        //   rkyv::to_bytes in the same build of this crate that reads them. In
+        //   production the archive lives in container-scoped tmpfs (/dev/shm),
+        //   so it cannot outlive the build that wrote it. (On macOS dev, /tmp
+        //   persists — after changing any archived type, delete the archive.)
+        // - A torn or truncated archive is never observable: reload() writes to
+        //   a per-PID temp file and publishes it with rename(2), which is
+        //   atomic. A crashed writer leaves a stale .tmp, never a partial file
+        //   at shm_path. A missing archive already failed in get_mmap().
+        // - The mapping is immutable: replacement is rename-only, the file is
+        //   never modified in place, and the Arc keeps the old mapping alive
+        //   for in-flight readers across a swap.
+        //
+        // Checked rkyv::access() re-validates the entire archive graph on every
+        // call: measured at ~10 ms per call on a ~200 MB / 96k-card archive
+        // (bench_checked_vs_unchecked_access), vs sub-millisecond query
+        // evaluation — a 10-100x slowdown per query. It would also be a false
+        // guarantee: InlineStr's CheckBytes is deliberately permissive, so
+        // validation cannot be the safety boundary; the trusted write path is.
         let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(&mmap) };
 
         // Must run before build_filter so legality shifts resolve in workers
@@ -2433,7 +2456,7 @@ impl QueryEngine {
         let json_val: Value = serde_json::from_str(json_str)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("bad query JSON: {e}")))?;
         let mmap = self.get_mmap()?;
-        // Safety: same as query().
+        // Safety: see the access_unchecked justification in query().
         let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(&mmap) };
 
         // Must run before build_filter; see query().
@@ -2450,8 +2473,13 @@ impl QueryEngine {
 
     fn size(&self) -> PyResult<usize> {
         match self.get_mmap() {
+            // Missing/unopenable archive — the only "unreadable" state that can
+            // occur. Returns 0 so Python treats the engine as empty.
             Err(_) => Ok(0),
-            // Safety: same as query().
+            // Safety: see the access_unchecked justification in query(). A file
+            // that mapped successfully is always a complete rkyv archive (atomic
+            // rename publish), so checked access here would only re-validate
+            // trusted bytes at ~10 ms per size() call.
             Ok(mmap) => Ok(unsafe { rkyv::access_unchecked::<Archived<CardData>>(&mmap) }.cards.len()),
         }
     }
@@ -2609,5 +2637,118 @@ mod tests {
             .collect();
         assert_eq!(merfolk, vec![1, 5, 9]);
         assert!(archived.get("angel").is_none());
+    }
+
+    /// Measures checked rkyv::access vs access_unchecked on a production-scale
+    /// archive. This is the evidence behind the access_unchecked safety comments
+    /// on query()/size(): checked access re-validates the entire archive graph
+    /// on every call, which is milliseconds per call at ~100k cards — orders of
+    /// magnitude over total query time. Run with:
+    ///   cargo test --release -- --ignored bench_checked_vs_unchecked --nocapture
+    #[test]
+    #[ignore]
+    fn bench_checked_vs_unchecked_access() {
+        const N: usize = 96_000;
+        let words = ["draw", "card", "creature", "destroy", "target", "flying", "counter", "spell", "token", "exile"];
+        let cards: Vec<Card> = (0..N)
+            .map(|i| {
+                let name = format!("Benchmark Card Number {i}");
+                let oracle = format!(
+                    "{}: {} a {} {}, then {} {} cards. This text is representative filler standing in for \
+                     real oracle text so string validation cost is realistic for card {i}.",
+                    words[i % 10], words[(i + 1) % 10], words[(i + 2) % 10],
+                    words[(i + 3) % 10], words[(i + 4) % 10], words[(i + 5) % 10],
+                );
+                let flavor = format!("Flavor text for card {i}, roughly the length of a real flavor quote in the dataset.");
+                Card {
+                    card_name_lower: InlineStr::from_str(&name.to_lowercase()),
+                    card_colors: (i % 32) as u8,
+                    card_color_identity: (i % 32) as u8,
+                    produced_mana: 0,
+                    card_types: TYPE_CREATURE,
+                    scryfall_id: format!("00000000-0000-4000-8000-{i:012}"),
+                    oracle_id: Some(format!("11111111-0000-4000-8000-{:012}", i / 3)),
+                    illustration_id: Some(format!("22222222-0000-4000-8000-{i:012}")),
+                    card_name: name.clone(),
+                    oracle_text: oracle.clone(),
+                    oracle_text_lower: oracle.to_lowercase(),
+                    flavor_text: flavor.clone(),
+                    flavor_text_lower: flavor.to_lowercase(),
+                    card_artist: Some(format!("Artist {}", i % 1000)),
+                    card_artist_lower: Some(format!("artist {}", i % 1000)),
+                    card_set_code: InlineStr::from_str("bench"),
+                    card_layout: "normal".to_string(),
+                    card_border: "black".to_string(),
+                    card_watermark: None,
+                    collector_number: format!("{}", i % 500),
+                    mana_cost_text: Some("{2}{G}{G}".to_string()),
+                    type_line: "Creature — Benchmark".to_string(),
+                    set_name: format!("Benchmark Set {}", i % 300),
+                    released_at: "2024-01-01".to_string(),
+                    released_at_int: Some(20240101),
+                    oracle_group: (i / 3) as u32,
+                    artwork_group: i as u32,
+                    cmc: Some((i % 8) as u8),
+                    creature_power: Some((i % 10) as i8),
+                    creature_toughness: Some((i % 10) as i8),
+                    planeswalker_loyalty: None,
+                    card_rarity_int: Some((i % 4) as u8),
+                    collector_number_int: Some((i % 500) as u16),
+                    edhrec_rank: Some(i as u32),
+                    price_usd: Some(1.0),
+                    price_eur: Some(1.0),
+                    price_tix: Some(0.1),
+                    prefer_score: None,
+                    cubecobra_score: None,
+                    card_subtypes: vec!["Benchmark".to_string(), words[i % 10].to_string()],
+                    card_keywords: HashSet::from([words[i % 10].to_string()]),
+                    card_legalities: 0,
+                    card_oracle_tags: HashSet::from([format!("tag-{}", i % 100)]),
+                    card_is_tags: HashSet::new(),
+                    card_frame_data: HashSet::new(),
+                    mana_cost: ManaCost {
+                        pips: HashMap::from([("G".to_string(), 2u8)]),
+                        devotion: None,
+                        cmc: (i % 8) as f32,
+                    },
+                    creature_power_text: None,
+                    creature_toughness_text: None,
+                }
+            })
+            .collect();
+
+        let indexes = CardIndexes {
+            name_trigram:   build_trigram_index(&cards, |c| c.card_name_lower.as_str()),
+            oracle_trigram: build_trigram_index(&cards, |c| c.oracle_text_lower.as_str()),
+            cmc:            build_numeric_index(&cards, |c| c.cmc.map(|v| v as i16)),
+            power:          build_numeric_index(&cards, |c| c.creature_power.map(|v| v as i16)),
+            toughness:      build_numeric_index(&cards, |c| c.creature_toughness.map(|v| v as i16)),
+            type_bits:      build_type_index(&cards),
+            subtypes:       build_list_index(&cards, |c| &c.card_subtypes),
+            keywords:       build_tag_index(&cards, |c| &c.card_keywords),
+            oracle_tags:    build_tag_index(&cards, |c| &c.card_oracle_tags),
+            is_tags:        build_tag_index(&cards, |c| &c.card_is_tags),
+        };
+        let data = CardData { cards, indexes, format_shifts: HashMap::new() };
+        let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+        println!("archive size: {:.1} MB", bytes.len() as f64 / 1e6);
+
+        const ITERS: u32 = 10;
+        let t = std::time::Instant::now();
+        for _ in 0..ITERS {
+            let a = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("checked access");
+            assert_eq!(a.cards.len(), N);
+        }
+        let checked = t.elapsed() / ITERS;
+
+        let t = std::time::Instant::now();
+        for _ in 0..ITERS {
+            let a = unsafe { rkyv::access_unchecked::<Archived<CardData>>(&bytes) };
+            assert_eq!(a.cards.len(), N);
+        }
+        let unchecked = t.elapsed() / ITERS;
+
+        println!("checked rkyv::access:   {checked:?} per call");
+        println!("access_unchecked:       {unchecked:?} per call");
     }
 }
