@@ -32,6 +32,7 @@ mod alloc_stats {
     pub static RELOAD_ALLOCS_AFTER_INDEXES: AtomicUsize = AtomicUsize::new(0);
     pub static RELOAD_CARDS_RKYV: AtomicUsize = AtomicUsize::new(0);
     pub static RELOAD_INDEXES_RKYV: AtomicUsize = AtomicUsize::new(0);
+    pub static RELOAD_STRINGS_RKYV: AtomicUsize = AtomicUsize::new(0);
     pub static RELOAD_ARCHIVE: AtomicUsize = AtomicUsize::new(0);
     pub static RELOAD_PEAK: AtomicUsize = AtomicUsize::new(0);
 
@@ -46,7 +47,7 @@ mod alloc_stats {
     pub fn record_reload(
         after_cards: (usize, usize),
         after_indexes: (usize, usize),
-        component_bytes: (usize, usize),
+        component_bytes: (usize, usize, usize),
         archive: usize,
     ) {
         RELOAD_LIVE_AFTER_CARDS.store(after_cards.0, Ordering::Relaxed);
@@ -55,6 +56,7 @@ mod alloc_stats {
         RELOAD_ALLOCS_AFTER_INDEXES.store(after_indexes.1, Ordering::Relaxed);
         RELOAD_CARDS_RKYV.store(component_bytes.0, Ordering::Relaxed);
         RELOAD_INDEXES_RKYV.store(component_bytes.1, Ordering::Relaxed);
+        RELOAD_STRINGS_RKYV.store(component_bytes.2, Ordering::Relaxed);
         RELOAD_ARCHIVE.store(archive, Ordering::Relaxed);
         RELOAD_PEAK.store(PEAK.load(Ordering::Relaxed), Ordering::Relaxed);
     }
@@ -294,23 +296,24 @@ struct Card {
     oracle_id: u128,
     illustration_id: u128,
 
-    card_name: String,
-    oracle_text: String,
-    oracle_text_lower: String,
-    flavor_text: String,
-    flavor_text_lower: String,
-    card_artist: Option<String>,
-    card_artist_lower: Option<String>,
+    // Interned string ids into CardData.strings (NONE_STR = absent). Identical
+    // values share one table entry; resolve with str_at()/the strings slice.
+    card_name_id: u32,
+    oracle_text_id: u32,
+    oracle_text_lower_id: u32,
+    flavor_text_id: u32,
+    flavor_text_lower_id: u32,
+    card_artist_id: u32,
+    card_artist_lower_id: u32,
     card_set_code: InlineStr<8>,
-    card_layout: String,
-    card_border: String,
-    card_watermark: Option<String>,
-    collector_number: String,
-    mana_cost_text: Option<String>,
-    type_line: String,
-    set_name: String,
-    released_at: String,
-    released_at_int: Option<u32>,      // yyyymmdd, parsed once at load for prefer=oldest/newest
+    card_layout_id: u32,
+    card_border_id: u32,
+    card_watermark_id: u32,
+    collector_number_id: u32,
+    mana_cost_text_id: u32,
+    type_line_id: u32,
+    set_name_id: u32,
+    released_at_int: Option<u32>,      // yyyymmdd, parsed once at load; date/year filters and prefer use this
 
     cmc: Option<u8>,                   // always an integer; max ~16 in practice
     creature_power: Option<i8>,        // can be negative (e.g. Char-Rumbler)
@@ -334,12 +337,54 @@ struct Card {
 
     mana_cost: ManaCost,
 
-    creature_power_text: Option<String>,
-    creature_toughness_text: Option<String>,
+    creature_power_text_id: u32,
+    creature_toughness_text_id: u32,
 }
 
 // Type alias for the archived (mmap-backed) card type
 type ACard = Archived<Card>;
+// Archived string table (CardData.strings)
+type AStrings = Archived<Vec<String>>;
+
+/// Sentinel id for absent optional strings (a card never has 4 billion distinct strings).
+const NONE_STR: u32 = u32::MAX;
+
+/// Resolve an interned id against the archived string table; None for absent.
+fn str_at(strings: &AStrings, id: u32) -> Option<&str> {
+    if id == NONE_STR { None } else { Some(strings[id as usize].as_str()) }
+}
+
+/// Build-time hash-consing interner; `strings` becomes CardData.strings.
+struct Interner {
+    map: HashMap<String, u32>,
+    strings: Vec<String>,
+}
+
+impl Interner {
+    fn new() -> Self {
+        // Pre-intern "" as id 0: plain (non-optional) fields default to it when missing.
+        let mut it = Interner { map: HashMap::new(), strings: Vec::new() };
+        it.intern(String::new());
+        it
+    }
+
+    fn intern(&mut self, s: String) -> u32 {
+        if let Some(&id) = self.map.get(&s) {
+            return id;
+        }
+        let id = self.strings.len() as u32;
+        self.strings.push(s.clone());
+        self.map.insert(s, id);
+        id
+    }
+
+    fn intern_opt(&mut self, s: Option<String>) -> u32 {
+        match s {
+            Some(v) => self.intern(v),
+            None => NONE_STR,
+        }
+    }
+}
 
 // ─── Loading helpers ─────────────────────────────────────────────────────────
 
@@ -564,17 +609,18 @@ fn mana_cost_from_pydict(d: &Bound<PyDict>, cmc_val: Option<f32>) -> ManaCost {
     ManaCost { pips, devotion, cmc: cmc_val.unwrap_or(0.0) }
 }
 
-fn card_from_pydict(d: &Bound<PyDict>) -> Card {
+fn card_from_pydict(d: &Bound<PyDict>, it: &mut Interner) -> Card {
     let released_at = opt_date_str(d, "released_at").unwrap_or_default();
     let released_at_int: Option<u32> = released_at.replace('-', "").parse().ok();
+    // Raw strings from the dict; interned to ids as the struct is built below.
     let card_name = opt_str(d, "card_name").unwrap_or_default();
     let card_name_lower = InlineStr::<61>::from_str(&card_name.to_lowercase());
     let oracle_text = opt_str(d, "oracle_text").unwrap_or_default();
-    let oracle_text_lower = oracle_text.to_lowercase();
+    let oracle_text_lower_id = it.intern(oracle_text.to_lowercase());
     let flavor_text = opt_str(d, "flavor_text").unwrap_or_default();
-    let flavor_text_lower = flavor_text.to_lowercase();
+    let flavor_text_lower_id = it.intern(flavor_text.to_lowercase());
     let card_artist = opt_str(d, "card_artist");
-    let card_artist_lower = card_artist.as_ref().map(|s| s.to_lowercase());
+    let card_artist_lower_id = it.intern_opt(card_artist.as_ref().map(|s| s.to_lowercase()));
 
     Card {
         scryfall_id: opt_uuid(d, "scryfall_id"),
@@ -582,22 +628,21 @@ fn card_from_pydict(d: &Bound<PyDict>) -> Card {
         illustration_id: opt_uuid(d, "illustration_id"),
 
         card_name_lower,
-        card_name,
-        oracle_text_lower,
-        oracle_text,
-        flavor_text_lower,
-        flavor_text,
-        card_artist_lower,
-        card_artist,
+        card_name_id: it.intern(card_name),
+        oracle_text_lower_id,
+        oracle_text_id: it.intern(oracle_text),
+        flavor_text_lower_id,
+        flavor_text_id: it.intern(flavor_text),
+        card_artist_lower_id,
+        card_artist_id: it.intern_opt(card_artist),
         card_set_code: InlineStr::<8>::from_str(&opt_str(d, "card_set_code").unwrap_or_default()),
-        card_layout: opt_str(d, "card_layout").unwrap_or_default(),
-        card_border: opt_str(d, "card_border").unwrap_or_default(),
-        card_watermark: opt_str(d, "card_watermark"),
-        collector_number: opt_str(d, "collector_number").unwrap_or_default(),
-        mana_cost_text: opt_str(d, "mana_cost_text"),
-        type_line: opt_str(d, "type_line").unwrap_or_default(),
-        set_name: opt_str(d, "set_name").unwrap_or_default(),
-        released_at,
+        card_layout_id: it.intern(opt_str(d, "card_layout").unwrap_or_default()),
+        card_border_id: it.intern(opt_str(d, "card_border").unwrap_or_default()),
+        card_watermark_id: it.intern_opt(opt_str(d, "card_watermark")),
+        collector_number_id: it.intern(opt_str(d, "collector_number").unwrap_or_default()),
+        mana_cost_text_id: it.intern_opt(opt_str(d, "mana_cost_text")),
+        type_line_id: it.intern(opt_str(d, "type_line").unwrap_or_default()),
+        set_name_id: it.intern(opt_str(d, "set_name").unwrap_or_default()),
         released_at_int,
 
         card_colors: jsonb_color_to_bits(d, "card_colors"),
@@ -627,8 +672,8 @@ fn card_from_pydict(d: &Bound<PyDict>) -> Card {
 
         mana_cost: mana_cost_from_pydict(d, opt_f32(d, "cmc")),
 
-        creature_power_text: opt_str(d, "creature_power_text"),
-        creature_toughness_text: opt_str(d, "creature_toughness_text"),
+        creature_power_text_id: it.intern_opt(opt_str(d, "creature_power_text")),
+        creature_toughness_text_id: it.intern_opt(opt_str(d, "creature_toughness_text")),
     }
 }
 
@@ -807,12 +852,12 @@ enum TextSearchField {
     ArtistLower,
 }
 
-fn text_search_field_value<'a>(card: &'a ACard, field: TextSearchField) -> Option<&'a str> {
+fn text_search_field_value<'a>(card: &'a ACard, strings: &'a AStrings, field: TextSearchField) -> Option<&'a str> {
     match field {
         TextSearchField::NameLower       => Some(card.card_name_lower.as_str()),
-        TextSearchField::OracleTextLower => Some(card.oracle_text_lower.as_str()),
-        TextSearchField::FlavorTextLower => Some(card.flavor_text_lower.as_str()),
-        TextSearchField::ArtistLower     => card.card_artist_lower.as_ref().map(|s| s.as_str()),
+        TextSearchField::OracleTextLower => str_at(strings, u32::from(card.oracle_text_lower_id)),
+        TextSearchField::FlavorTextLower => str_at(strings, u32::from(card.flavor_text_lower_id)),
+        TextSearchField::ArtistLower     => str_at(strings, u32::from(card.card_artist_lower_id)),
     }
 }
 
@@ -832,17 +877,17 @@ enum TextField {
     CollectorNumber,
 }
 
-fn text_field_value<'a>(card: &'a ACard, field: TextField) -> Option<&'a str> {
+fn text_field_value<'a>(card: &'a ACard, strings: &'a AStrings, field: TextField) -> Option<&'a str> {
     match field {
         TextField::NameLower       => Some(card.card_name_lower.as_str()),
-        TextField::OracleTextLower => Some(card.oracle_text_lower.as_str()),
-        TextField::FlavorTextLower => Some(card.flavor_text_lower.as_str()),
-        TextField::ArtistLower     => card.card_artist_lower.as_ref().map(|s| s.as_str()),
+        TextField::OracleTextLower => str_at(strings, u32::from(card.oracle_text_lower_id)),
+        TextField::FlavorTextLower => str_at(strings, u32::from(card.flavor_text_lower_id)),
+        TextField::ArtistLower     => str_at(strings, u32::from(card.card_artist_lower_id)),
         TextField::SetCode         => Some(card.card_set_code.as_str()),
-        TextField::Layout          => Some(card.card_layout.as_str()),
-        TextField::Border          => Some(card.card_border.as_str()),
-        TextField::Watermark       => card.card_watermark.as_ref().map(|s| s.as_str()),
-        TextField::CollectorNumber => Some(card.collector_number.as_str()),
+        TextField::Layout          => str_at(strings, u32::from(card.card_layout_id)),
+        TextField::Border          => str_at(strings, u32::from(card.card_border_id)),
+        TextField::Watermark       => str_at(strings, u32::from(card.card_watermark_id)),
+        TextField::CollectorNumber => str_at(strings, u32::from(card.collector_number_id)),
     }
 }
 
@@ -907,7 +952,7 @@ enum FilterExpr {
 
     DateCmp {
         op: CmpOp,
-        value: String,
+        value: u32, // yyyymmdd, partial dates zero-padded (e.g. "2026-07" → 20260700)
     },
 
     YearCmp {
@@ -917,13 +962,13 @@ enum FilterExpr {
 }
 
 impl FilterExpr {
-    fn matches(&self, card: &ACard) -> bool {
+    fn matches(&self, card: &ACard, strings: &AStrings) -> bool {
         match self {
             FilterExpr::True => true,
 
-            FilterExpr::And(children) => children.iter().all(|c| c.matches(card)),
-            FilterExpr::Or(children)  => children.iter().any(|c| c.matches(card)),
-            FilterExpr::Not(inner)    => !inner.matches(card),
+            FilterExpr::And(children) => children.iter().all(|c| c.matches(card, strings)),
+            FilterExpr::Or(children)  => children.iter().any(|c| c.matches(card, strings)),
+            FilterExpr::Not(inner)    => !inner.matches(card, strings),
 
             FilterExpr::ExactName(lower) => card.card_name_lower.as_str() == lower.as_str(),
 
@@ -935,11 +980,11 @@ impl FilterExpr {
             }
 
             FilterExpr::TextContains { field, word } => {
-                text_search_field_value(card, *field).map_or(false, |s| s.contains(word.as_str()))
+                text_search_field_value(card, strings, *field).map_or(false, |s| s.contains(word.as_str()))
             }
 
             FilterExpr::TextExact { field, op, value } => {
-                text_field_value(card, *field).map_or(false, |s| match op {
+                text_field_value(card, strings, *field).map_or(false, |s| match op {
                     CmpOp::Eq => s == value,
                     CmpOp::Ne => s != value,
                     CmpOp::Lt => s < value.as_str(),
@@ -950,7 +995,7 @@ impl FilterExpr {
             }
 
             FilterExpr::TextRegex { field, regex } => {
-                text_field_value(card, *field).map_or(false, |s| regex.is_match(s))
+                text_field_value(card, strings, *field).map_or(false, |s| regex.is_match(s))
             }
 
             FilterExpr::ColorCmp { field, op, mask } => {
@@ -1058,30 +1103,34 @@ impl FilterExpr {
             }
 
             FilterExpr::DateCmp { op, value } => {
-                if card.released_at.is_empty() { return false; }
-                let ord = card.released_at.as_str().cmp(value.as_str());
+                // value is a zero-padded yyyymmdd (see build_binary); zero-padding a
+                // partial date reproduces the old lexicographic-prefix semantics exactly,
+                // since any real day/month (>= 01) compares greater than 00.
+                let Some(date) = card.released_at_int.as_ref().map(|v| u32::from(*v)) else {
+                    return false;
+                };
                 match op {
-                    CmpOp::Eq => ord == std::cmp::Ordering::Equal,
-                    CmpOp::Ne => ord != std::cmp::Ordering::Equal,
-                    CmpOp::Lt => ord == std::cmp::Ordering::Less,
-                    CmpOp::Le => ord != std::cmp::Ordering::Greater,
-                    CmpOp::Gt => ord == std::cmp::Ordering::Greater,
-                    CmpOp::Ge => ord != std::cmp::Ordering::Less,
+                    CmpOp::Eq => date == *value,
+                    CmpOp::Ne => date != *value,
+                    CmpOp::Lt => date < *value,
+                    CmpOp::Le => date <= *value,
+                    CmpOp::Gt => date > *value,
+                    CmpOp::Ge => date >= *value,
                 }
             }
 
             FilterExpr::YearCmp { op, year } => {
-                if card.released_at.is_empty() { return false; }
-                let s = card.released_at.as_str();
-                let start = format!("{year:04}-01-01");
-                let end   = format!("{:04}-01-01", year + 1);
+                let Some(date) = card.released_at_int.as_ref().map(|v| u32::from(*v)) else {
+                    return false;
+                };
+                let card_year = (date / 10_000) as i32;
                 match op {
-                    CmpOp::Eq => s >= start.as_str() && s < end.as_str(),
-                    CmpOp::Gt => s >= end.as_str(),
-                    CmpOp::Lt => s < start.as_str(),
-                    CmpOp::Ge => s >= start.as_str(),
-                    CmpOp::Le => s < end.as_str(),
-                    CmpOp::Ne => s < start.as_str() || s >= end.as_str(),
+                    CmpOp::Eq => card_year == *year,
+                    CmpOp::Ne => card_year != *year,
+                    CmpOp::Gt => card_year > *year,
+                    CmpOp::Lt => card_year < *year,
+                    CmpOp::Ge => card_year >= *year,
+                    CmpOp::Le => card_year <= *year,
                 }
             }
         }
@@ -1232,7 +1281,14 @@ fn build_binary(kw: &Value) -> Result<FilterExpr, String> {
             return Ok(FilterExpr::YearCmp { op: cmp_op, year });
         }
         let cmp_op = str_op_to_cmp(op)?;
-        return Ok(FilterExpr::DateCmp { op: cmp_op, value: val_str.to_string() });
+        // yyyymmdd as integer; zero-pad partial dates so ordering matches the
+        // lexicographic compare on ISO strings this replaced (day 00 < any real day).
+        let digits: String = val_str.chars().filter(|c| c.is_ascii_digit()).collect();
+        if digits.is_empty() || digits.len() > 8 {
+            return Err(format!("bad date: {val_str}"));
+        }
+        let value: u32 = format!("{digits:0<8}").parse().map_err(|_| format!("bad date: {val_str}"))?;
+        return Ok(FilterExpr::DateCmp { op: cmp_op, value });
     }
 
     if attr == "mana_cost_jsonb" {
@@ -1354,7 +1410,7 @@ fn build_text_filter(attr: &str, op: &str, rhs: &Value) -> Result<FilterExpr, St
     let raw_value = rhs["kwargs"]["value"].as_str().unwrap_or("");
 
     if matches!(attr, "card_set_code" | "card_layout" | "card_border" | "card_watermark" | "collector_number") {
-        // collector_number is stored raw and mixed-case (e.g. "10E-105"); compare exactly,
+        // collector_number_id is stored raw and mixed-case (e.g. "10E-105"); compare exactly,
         // matching the SQL path. The other four are lowercased at import, so lowercasing
         // the query value gives case-insensitive matching with a plain equality.
         let value = if attr == "collector_number" { raw_value.to_string() } else { raw_value.to_lowercase() };
@@ -1397,7 +1453,105 @@ fn build_text_filter(attr: &str, op: &str, rhs: &Value) -> Result<FilterExpr, St
 
 type TrigramIndex = HashMap<[u8; 3], Vec<u32>>;
 
-fn build_trigram_index(cards: &[Card], get_text: impl Fn(&Card) -> &str) -> TrigramIndex {
+/// Oracle-text trigram index, deduplicated by distinct text.
+///
+/// Printings massively share oracle text (~96k printings, ~28k distinct texts), so
+/// posting card indices directly would store every posting ~3.4× over. Instead the
+/// posting lists hold *dense text ids* — a private 0..n_texts numbering of the
+/// distinct `oracle_text_lower_id` values — and a CSR (compressed sparse row) table
+/// expands a text id back to the printings that carry it. Logically the CSR is an
+/// array-of-arrays `expansion[text_id] → [card indices]`, flattened into two
+/// allocations so it archives as two contiguous, zero-copy slices.
+#[derive(Archive, Serialize, Deserialize, Default)]
+struct OracleTextIndex {
+    /// trigram → ascending list of dense text ids whose text contains it.
+    trigrams: TrigramIndex,
+    /// Row boundaries: printings of text id `t` live at
+    /// `card_indices[offsets[t] .. offsets[t + 1]]`. Length n_texts + 1.
+    offsets: Vec<u32>,
+    /// All card indices, grouped by text id; every printing appears exactly once
+    /// (its text interned to exactly one id), so expansion can never duplicate.
+    card_indices: Vec<u32>,
+}
+
+fn build_oracle_text_index(cards: &[Card], strings: &[String]) -> OracleTextIndex {
+    // Dense remap: the interner's ids index the *global* string table (oracle texts
+    // mixed with type lines, set names, ...), so the distinct oracle texts are sparse
+    // in that space. Re-number just them, first-seen order, so the CSR table below
+    // has no empty rows and posting ids stay small.
+    let mut dense: HashMap<u32, u32> = HashMap::new();
+    let mut text_id_of_card: Vec<u32> = Vec::with_capacity(cards.len());
+    for c in cards {
+        let next = dense.len() as u32;
+        text_id_of_card.push(*dense.entry(c.oracle_text_lower_id).or_insert(next));
+    }
+    let n_texts = dense.len();
+
+    // Invert the remap (dense id → global id) so each distinct text is visited once.
+    let mut global_of_dense: Vec<u32> = vec![0; n_texts];
+    for (&global, &d) in &dense {
+        global_of_dense[d as usize] = global;
+    }
+
+    // Trigram postings over distinct texts only — the window-sliding loop runs once
+    // per text instead of once per printing. Visiting texts in ascending dense-id
+    // order appends ids in ascending order, giving the sorted posting lists that
+    // intersect_sorted() requires, with no per-list sort.
+    let mut trigrams: TrigramIndex = HashMap::new();
+    for (d, &global) in global_of_dense.iter().enumerate() {
+        let bytes = strings[global as usize].as_bytes();
+        if bytes.len() < 3 {
+            continue;
+        }
+        for w in bytes.windows(3) {
+            let list = trigrams.entry([w[0], w[1], w[2]]).or_default();
+            if list.last() != Some(&(d as u32)) {
+                list.push(d as u32);
+            }
+        }
+    }
+
+    // CSR expansion table via counting sort: count printings per text, prefix-sum
+    // the counts into row offsets, then place each card index in its row. Placement
+    // walks cards in store order, so every row comes out sorted by card index.
+    let mut offsets: Vec<u32> = vec![0; n_texts + 1];
+    for &t in &text_id_of_card {
+        offsets[t as usize + 1] += 1;
+    }
+    for i in 1..offsets.len() {
+        offsets[i] += offsets[i - 1];
+    }
+    let mut cursor: Vec<u32> = offsets.clone();
+    let mut card_indices: Vec<u32> = vec![0; cards.len()];
+    for (card_idx, &t) in text_id_of_card.iter().enumerate() {
+        card_indices[cursor[t as usize] as usize] = card_idx as u32;
+        cursor[t as usize] += 1;
+    }
+
+    OracleTextIndex { trigrams, offsets, card_indices }
+}
+
+/// Expand surviving dense text ids to card indices via the CSR table.
+///
+/// Each row is internally sorted (placement above walks store order), but rows are
+/// not ordered relative to each other (dense ids are first-seen order), so the
+/// concatenation needs one final sort — required both by intersect_sorted() when
+/// And-combining with other candidate sets and by the linear dedup paths, which
+/// assume candidates arrive in store order.
+fn expand_text_ids(idx: &Archived<OracleTextIndex>, text_ids: &[u32]) -> Vec<u32> {
+    let mut out: Vec<u32> = Vec::new();
+    for &t in text_ids {
+        let start = u32::from(idx.offsets[t as usize]) as usize;
+        let end = u32::from(idx.offsets[t as usize + 1]) as usize;
+        out.extend(idx.card_indices[start..end].iter().map(|x| u32::from(*x)));
+    }
+    out.sort_unstable();
+    out
+}
+
+// Named lifetime (not elided/HRTB) so get_text may return text borrowed from the
+// string table rather than from the card itself.
+fn build_trigram_index<'a>(cards: &'a [Card], get_text: impl Fn(&'a Card) -> &'a str) -> TrigramIndex {
     let mut idx: TrigramIndex = HashMap::new();
     for (i, card) in cards.iter().enumerate() {
         let text  = get_text(card);
@@ -1562,7 +1716,7 @@ fn build_list_index(cards: &[Card], get_list: impl Fn(&Card) -> &Vec<String>) ->
 #[derive(Archive, Serialize, Deserialize)]
 struct CardIndexes {
     name_trigram:   TrigramIndex,
-    oracle_trigram: TrigramIndex,
+    oracle_trigram: OracleTextIndex,
     cmc:            NumericIndex,
     power:          NumericIndex,
     toughness:      NumericIndex,
@@ -1577,7 +1731,7 @@ impl Default for CardIndexes {
     fn default() -> Self {
         CardIndexes {
             name_trigram:   HashMap::new(),
-            oracle_trigram: HashMap::new(),
+            oracle_trigram: OracleTextIndex::default(),
             cmc:            Vec::new(),
             power:          Vec::new(),
             toughness:      Vec::new(),
@@ -1593,6 +1747,8 @@ impl Default for CardIndexes {
 #[derive(Archive, Serialize, Deserialize)]
 struct CardData {
     cards:   Vec<Card>,
+    // Hash-consed table for the interned-string fields on Card (see Interner).
+    strings: Vec<String>,
     indexes: CardIndexes,
     // The writer's format→shift assignments. Persisted so reader processes —
     // which never run the load path that feeds FORMAT_SHIFTS — resolve
@@ -1622,8 +1778,14 @@ fn narrow_candidates(filter: &FilterExpr, indexes: &Archived<CardIndexes>) -> Op
             if word.len() >= 3
                 && matches!(field, TextSearchField::NameLower | TextSearchField::OracleTextLower) =>
         {
-            let idx = if *field == TextSearchField::NameLower { &indexes.name_trigram } else { &indexes.oracle_trigram };
-            trigram_candidates(idx, word)
+            match field {
+                TextSearchField::NameLower => trigram_candidates(&indexes.name_trigram, word),
+                // Oracle postings are in dense text-id space (see OracleTextIndex);
+                // intersect there (~3× shorter lists), then expand the survivors to
+                // card indices through the CSR table.
+                _ => trigram_candidates(&indexes.oracle_trigram.trigrams, word)
+                    .map(|text_ids| expand_text_ids(&indexes.oracle_trigram, &text_ids)),
+            }
         }
 
         FilterExpr::NumericCmp { lhs, op, rhs } => match (lhs, rhs) {
@@ -1805,6 +1967,7 @@ fn select_page<'a>(mut v: Vec<(u128, &'a ACard)>, offset: usize, limit: usize) -
 
 fn run_query_hashmap<'a>(
     store: &'a [ACard],
+    strings: &AStrings,
     filter: &FilterExpr,
     unique: &str,
     prefer: &str,
@@ -1826,7 +1989,7 @@ fn run_query_hashmap<'a>(
 
     let mut partitions: HashMap<u128, (&ACard, f64)> = HashMap::new();
     for card in store {
-        if filter.matches(card) {
+        if filter.matches(card, strings) {
             let key = match group_by {
                 GroupBy::Oracle   => u128::from(card.oracle_id),
                 GroupBy::Artwork  => u128::from(card.illustration_id),
@@ -1849,6 +2012,7 @@ fn run_query_hashmap<'a>(
 
 fn run_query_linear<'a, I, F>(
     cards: I,
+    strings: &AStrings,
     filter: &FilterExpr,
     key_fn: F,
     prefer: &str,
@@ -1870,7 +2034,7 @@ where
     let mut prev_key: Option<u128> = None; // None = before the first match
 
     for card in cards {
-        if !filter.matches(card) { continue; }
+        if !filter.matches(card, strings) { continue; }
         let key = key_fn(card);
         if prev_key != Some(key) {
             if let Some((c, _)) = group_best.take() { best.push((sort_key_bits(c, sort_col, descending), c)); }
@@ -1891,6 +2055,7 @@ where
 
 fn run_query_no_dedup<'a>(
     cards: impl Iterator<Item = &'a ACard>,
+    strings: &AStrings,
     filter: &FilterExpr,
     orderby: &str,
     direction: &str,
@@ -1900,7 +2065,7 @@ fn run_query_no_dedup<'a>(
     let sort_col   = orderby_to_col(orderby);
     let descending = direction == "desc";
     let matched: Vec<(u128, &ACard)> = cards
-        .filter(|c| filter.matches(c))
+        .filter(|c| filter.matches(c, strings))
         .map(|c| (sort_key_bits(c, sort_col, descending), c))
         .collect();
     let total = matched.len();
@@ -1909,6 +2074,7 @@ fn run_query_no_dedup<'a>(
 
 fn run_query<'a>(
     store: &'a [ACard],
+    strings: &AStrings,
     filter: &FilterExpr,
     unique: &str,
     prefer: &str,
@@ -1933,27 +2099,27 @@ fn run_query<'a>(
         // The store is sorted by (oracle_id, illustration_id), so equal keys are adjacent
         // and the linear key-change dedup is exact — u128 equality, same cost as the
         // dense u32 group ids this replaced.
-        "card" => run_query_linear(cards_iter!(), filter, |c| u128::from(c.oracle_id), prefer, orderby, direction, limit, offset),
+        "card" => run_query_linear(cards_iter!(), strings, filter, |c| u128::from(c.oracle_id), prefer, orderby, direction, limit, offset),
         // Scryfall assigns each illustration_id to exactly one oracle_id, so cards sharing an
         // illustration_id are always contiguous in the (oracle_id, illustration_id) sort order.
         // The linear dedup path is therefore correct here — no HashMap needed.
-        "artwork"  => run_query_linear(cards_iter!(), filter, |c| u128::from(c.illustration_id), prefer, orderby, direction, limit, offset),
-        "printing" => run_query_no_dedup(cards_iter!(), filter, orderby, direction, limit, offset),
-        _          => run_query_hashmap(store, filter, unique, prefer, orderby, direction, limit, offset),
+        "artwork"  => run_query_linear(cards_iter!(), strings, filter, |c| u128::from(c.illustration_id), prefer, orderby, direction, limit, offset),
+        "printing" => run_query_no_dedup(cards_iter!(), strings, filter, orderby, direction, limit, offset),
+        _          => run_query_hashmap(store, strings, filter, unique, prefer, orderby, direction, limit, offset),
     }
 }
 
-fn card_to_pydict<'py>(py: Python<'py>, card: &ACard) -> PyResult<Bound<'py, PyDict>> {
+fn card_to_pydict<'py>(py: Python<'py>, card: &ACard, strings: &AStrings) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
-    d.set_item("name", card.card_name.as_str())?;
+    d.set_item("name", str_at(strings, u32::from(card.card_name_id)))?;
     d.set_item("set_code", card.card_set_code.as_str())?;
-    d.set_item("collector_number", card.collector_number.as_str())?;
-    d.set_item("power", card.creature_power_text.as_ref().map(|s| s.as_str()))?;
-    d.set_item("toughness", card.creature_toughness_text.as_ref().map(|s| s.as_str()))?;
-    d.set_item("mana_cost", card.mana_cost_text.as_ref().map(|s| s.as_str()))?;
-    d.set_item("oracle_text", card.oracle_text.as_str())?;
-    d.set_item("set_name", card.set_name.as_str())?;
-    d.set_item("type_line", card.type_line.as_str())?;
+    d.set_item("collector_number", str_at(strings, u32::from(card.collector_number_id)))?;
+    d.set_item("power", str_at(strings, u32::from(card.creature_power_text_id)))?;
+    d.set_item("toughness", str_at(strings, u32::from(card.creature_toughness_text_id)))?;
+    d.set_item("mana_cost", str_at(strings, u32::from(card.mana_cost_text_id)))?;
+    d.set_item("oracle_text", str_at(strings, u32::from(card.oracle_text_id)))?;
+    d.set_item("set_name", str_at(strings, u32::from(card.set_name_id)))?;
+    d.set_item("type_line", str_at(strings, u32::from(card.type_line_id)))?;
     Ok(d)
 }
 
@@ -2053,17 +2219,18 @@ impl QueryEngine {
         #[cfg(feature = "alloc-counter")]
         alloc_stats::reset_peak();
 
+        let mut interner = Interner::new();
         let mut cards: Vec<Card> = db_rows
             .iter()
-            .filter_map(|item| item.cast::<PyDict>().ok().map(|d| card_from_pydict(&d)))
+            .filter_map(|item| item.cast::<PyDict>().ok().map(|d| card_from_pydict(&d, &mut interner)))
             .collect();
         // unique=card/artwork group by oracle_id, so cards without one would all
         // collapse into a single group. The DB enforces NOT NULL; fail loudly here
         // for any other caller (e.g. hand-built test dicts).
         if let Some((idx, card)) = cards.iter().enumerate().find(|(_, c)| c.oracle_id == 0) {
+            let name = interner.strings.get(card.card_name_id as usize).map_or("", |s| s.as_str());
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "card {idx} ({:?}) is missing oracle_id (required for unique=card dedup)",
-                card.card_name
+                "card {idx} ({name:?}) is missing oracle_id (required for unique=card dedup)"
             )));
         }
         // Equal keys end up adjacent, which is the only property the linear
@@ -2074,9 +2241,11 @@ impl QueryEngine {
         #[cfg(feature = "alloc-counter")]
         let stats_after_cards = (alloc_stats::live(), alloc_stats::allocs());
 
+        let strings = interner.strings;
+        drop(interner.map);
         let indexes = CardIndexes {
             name_trigram:   build_trigram_index(&cards, |c| c.card_name_lower.as_str()),
-            oracle_trigram: build_trigram_index(&cards, |c| c.oracle_text_lower.as_str()),
+            oracle_trigram: build_oracle_text_index(&cards, &strings),
             cmc:            build_numeric_index(&cards, |c| c.cmc.map(|v| v as i16)),
             power:          build_numeric_index(&cards, |c| c.creature_power.map(|v| v as i16)),
             toughness:      build_numeric_index(&cards, |c| c.creature_toughness.map(|v| v as i16)),
@@ -2093,12 +2262,13 @@ impl QueryEngine {
         let component_bytes = (
             rkyv::to_bytes::<rkyv::rancor::Error>(&cards).map(|b| b.len()).unwrap_or(0),
             rkyv::to_bytes::<rkyv::rancor::Error>(&indexes).map(|b| b.len()).unwrap_or(0),
+            rkyv::to_bytes::<rkyv::rancor::Error>(&strings).map(|b| b.len()).unwrap_or(0),
         );
 
         // Snapshot the registry card_from_pydict just populated so reader
         // processes can adopt the same format→shift assignments.
         let format_shifts_snapshot = format_shifts().read().map(|m| m.clone()).unwrap_or_default();
-        let card_data = CardData { cards, indexes, format_shifts: format_shifts_snapshot };
+        let card_data = CardData { cards, strings, indexes, format_shifts: format_shifts_snapshot };
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&card_data)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("rkyv serialize: {e}")))?;
 
@@ -2163,10 +2333,10 @@ impl QueryEngine {
 
         let store: &[ACard] = &data.cards;
         let (total, page) = run_query(
-            store, &filter_expr, unique, prefer, orderby, direction, limit, offset, &data.indexes,
+            store, &data.strings, &filter_expr, unique, prefer, orderby, direction, limit, offset, &data.indexes,
         );
 
-        let matches: Vec<Bound<PyDict>> = page.iter().map(|c| card_to_pydict(py, c)).collect::<PyResult<Vec<_>>>()?;
+        let matches: Vec<Bound<PyDict>> = page.iter().map(|c| card_to_pydict(py, c, &data.strings)).collect::<PyResult<Vec<_>>>()?;
         let matches_list = PyList::new(py, matches)?;
         PyTuple::new(py, [total.into_pyobject(py)?.into_any(), matches_list.into_any()])
     }
@@ -2203,8 +2373,8 @@ impl QueryEngine {
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("build_filter: {e}")))?;
 
         let store: &[ACard] = &data.cards;
-        let (total, page) = run_query_hashmap(store, &filter_expr, unique, prefer, orderby, direction, limit, offset);
-        let matches: Vec<Bound<PyDict>> = page.iter().map(|c| card_to_pydict(py, c)).collect::<PyResult<Vec<_>>>()?;
+        let (total, page) = run_query_hashmap(store, &data.strings, &filter_expr, unique, prefer, orderby, direction, limit, offset);
+        let matches: Vec<Bound<PyDict>> = page.iter().map(|c| card_to_pydict(py, c, &data.strings)).collect::<PyResult<Vec<_>>>()?;
         let matches_list = PyList::new(py, matches)?;
         PyTuple::new(py, [total.into_pyobject(py)?.into_any(), matches_list.into_any()])
     }
@@ -2234,6 +2404,7 @@ impl QueryEngine {
             d.set_item("reload_peak", alloc_stats::RELOAD_PEAK.load(Relaxed))?;
             d.set_item("cards_rkyv_bytes", alloc_stats::RELOAD_CARDS_RKYV.load(Relaxed))?;
             d.set_item("indexes_rkyv_bytes", alloc_stats::RELOAD_INDEXES_RKYV.load(Relaxed))?;
+            d.set_item("strings_rkyv_bytes", alloc_stats::RELOAD_STRINGS_RKYV.load(Relaxed))?;
             d.set_item("archive_bytes", alloc_stats::RELOAD_ARCHIVE.load(Relaxed))?;
         }
         Ok(d)
