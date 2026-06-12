@@ -45,6 +45,8 @@ from api.utils.generation_cache import GenerationCache
 from api.utils.http_utils import make_user_agent
 from api.utils.timer import Timer
 from api.utils.type_conversions import _get_type_name, make_type_converting_wrapper
+from card_engine import ENGINE_COLUMNS as _ENGINE_COLUMNS_FROM_MODULE
+from card_engine import QueryEngine as _QueryEngine
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -53,6 +55,8 @@ if TYPE_CHECKING:
     from multiprocessing.synchronize import RLock as LockType
 
     import psycopg_pool
+
+    from api.parsing.nodes import Query
 
 
 logger = logging.getLogger(__name__)
@@ -238,6 +242,8 @@ class APIResource:
         self._session.headers.update({"User-Agent": make_user_agent()})
         # Initialize Tagger client for GraphQL API access
         self._tagger_client = TaggerClient()
+        self._engine = _QueryEngine()
+        self._engine_reload_lock = threading.Lock()
         logger.info("Worker with pid %d has conn pool %s", os.getpid(), self._conn_pool)
         self.setup_schema()
         self.import_data()  # ensures that database is setup
@@ -348,11 +354,8 @@ class APIResource:
             logger.info("Request duration: %.1f ms / %s", duration, resp.status)
             record_span(req, "handler", duration)
             if isinstance(res, dict):
-                outer = res.get("outer_timings", {})
-                if "get_where_clause" in outer:
-                    record_span(req, "parse", outer["get_where_clause"].get("_meta", {}).get("duration_ms", 0))
-                if "run_query" in outer:
-                    record_span(req, "db", outer["run_query"].get("_meta", {}).get("duration_ms", 0))
+                for span_name, span_data in res.get("outer_timings", {}).items():
+                    record_span(req, span_name, span_data.get("_meta", {}).get("duration_ms", 0))
 
     def _raise_not_found(self, **_: object) -> None:
         """Raise a Falcon HTTPNotFound error with available routes."""
@@ -616,6 +619,20 @@ class APIResource:
         logger.info("Last import was %d seconds ago, %s", time_since_import, retval)
         return retval
 
+    def _reload_engine(self) -> None:
+        """Fetch all cards from the DB and reload the Rust engine's card store."""
+        if not settings.enable_engine:
+            return
+        if self._engine is None:
+            return
+        cols_sql = ", ".join(f"card.{col}" for col in _ENGINE_COLUMNS_FROM_MODULE)
+        with self._conn_pool.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(f"SELECT {cols_sql} FROM magic.cards AS card")
+                rows = cursor.fetchall()
+        self._engine.reload([dict(row) for row in rows])
+        logger.info("Engine reloaded with %d cards (pid=%d)", self._engine.size(), os.getpid())
+
     def _run_import_under_lock(self) -> None:
         """Run the import flow; caller must hold the import lock."""
         if self._import_recent():
@@ -643,6 +660,8 @@ class APIResource:
             )
             self.backfill_prefer_scores()
             self.backfill_cubecobra_scores()
+            self._reload_engine()
+            self._clear_caches()
             self._last_import_time.value = time.time()
             self._setup_complete_cache = None
             return result["sample_cards"]
@@ -749,7 +768,7 @@ class APIResource:
             ) from err
         return where_clause, params
 
-    def _search(  # noqa: PLR0913,PLR0915
+    def _search(  # noqa: C901,PLR0912,PLR0913,PLR0915
         self,
         *,
         direction: SortDirection = SortDirection.ASC,
@@ -775,23 +794,131 @@ class APIResource:
 
         timer = Timer()
 
-        # Generate explanation for the query
         query_explanation = ""
         parsed_query = None
+        query = query or ""
         try:
-            with timer("get_where_clause"):
+            with timer("parse"):
                 parsed_query = parse_scryfall_query(query)
-                where_clause, params = generate_sql_query(parsed_query)
-                # Generate explanation after successful parsing
-                if query:  # Only generate explanation if there's a query
+                if query:
                     query_explanation = parsed_query.to_human_explanation()
         except ValueError as err:
-            # Handle parsing errors from parse_scryfall_query
             logger.info("ValueError caught for query '%s', raising BadRequest", query)
             raise falcon.HTTPBadRequest(
                 title="Invalid Search Query",
                 description=f'Failed to parse query: "{query}"',
             ) from err
+
+        if not settings.enable_engine:
+            pass  # feature-gated off: SQL serves everything, the store never loads
+        elif self._engine.size() == 0:
+            logger.info("Engine store empty, using SQL path for query=%r", query)
+            if self._engine_reload_lock.acquire(blocking=False):
+
+                def _bg_reload() -> None:
+                    try:
+                        self._reload_engine()
+                    except Exception as e:
+                        logger.error("Background engine reload failed: %s", e, exc_info=True)
+                    finally:
+                        self._engine_reload_lock.release()
+
+                threading.Thread(target=_bg_reload, daemon=True).start()
+        else:
+            try:
+                result = self._search_engine(
+                    parsed_query=parsed_query,
+                    query_explanation=query_explanation,
+                    query=query,
+                    unique=unique,
+                    prefer=prefer,
+                    orderby=orderby,
+                    direction=direction,
+                    limit=limit,
+                    timer=timer,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Engine query failed for %r, falling back to SQL: %s", query, e)
+            else:
+                if settings.enable_cache:
+                    search_cache[cache_key] = result
+                return result
+
+        try:
+            with timer("get_where_clause"):
+                where_clause, params = generate_sql_query(parsed_query)
+        except ValueError as err:
+            logger.info("ValueError caught for query '%s', raising BadRequest", query)
+            raise falcon.HTTPBadRequest(
+                title="Invalid Search Query",
+                description=f'Failed to parse query: "{query}"',
+            ) from err
+
+        result = self._search_sql(
+            where_clause=where_clause,
+            params=params,
+            query_explanation=query_explanation,
+            query=query,
+            unique=unique,
+            prefer=prefer,
+            orderby=orderby,
+            direction=direction,
+            limit=limit,
+            timer=timer,
+        )
+        if settings.enable_cache:
+            search_cache[cache_key] = result
+        return result
+
+    def _search_engine(  # noqa: PLR0913
+        self,
+        *,
+        parsed_query: Query,
+        query_explanation: str,
+        query: str | None,
+        unique: UniqueOn,
+        prefer: PreferOrder,
+        orderby: CardOrdering,
+        direction: SortDirection,
+        limit: int,
+        timer: Timer,
+    ) -> dict[str, Any]:
+        logger.info("Searching engine for %r", query)
+        with timer("engine_query"):
+            total_cards, cards = self._engine.query(
+                filters=parsed_query,
+                unique=str(unique),
+                prefer=str(prefer),
+                orderby=str(orderby),
+                direction=str(direction),
+                limit=limit,
+            )
+        return {
+            "cards": list(cards),
+            "compiled": "(rust engine)",
+            "inner_timings": timer.get_timings(),
+            "outer_timings": timer.get_timings(),
+            "params": {},
+            "query": query,
+            "query_explanation": query_explanation,
+            "total_cards": total_cards,
+        }
+
+    def _search_sql(  # noqa: PLR0913
+        self,
+        *,
+        where_clause: str,
+        params: dict[str, Any],
+        query_explanation: str,
+        query: str | None,
+        unique: UniqueOn,
+        prefer: PreferOrder,
+        orderby: CardOrdering,
+        direction: SortDirection,
+        limit: int,
+        timer: Timer,
+    ) -> dict[str, Any]:
+        logger.info("Searching SQL for %r", query)
         sql_orderby: str = {
             # what's in the query => the db column name
             CardOrdering.CMC: "cmc",
@@ -949,7 +1076,7 @@ class APIResource:
         total_cards = count_row["total_cards_count"]
         for icard in cards:
             icard.pop("total_cards_count")
-        result = {
+        return {
             "cards": cards,
             "compiled": query_sql,
             "params": params,
@@ -959,9 +1086,6 @@ class APIResource:
             "inner_timings": result_bag.pop("timings"),
             "total_cards": total_cards,
         }
-        if settings.enable_cache:
-            search_cache[cache_key] = result
-        return result
 
     def _root(  # noqa: PLR0913
         self,
@@ -2519,6 +2643,7 @@ class APIResource:
 
                 if cards_loaded > 0:
                     self._clear_caches()
+                    self._reload_engine()
 
                 return {
                     "status": "success",

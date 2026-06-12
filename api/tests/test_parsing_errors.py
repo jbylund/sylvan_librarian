@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import multiprocessing
 import time
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import falcon
 import pytest
 
 from api.api_resource import APIResource
+from api.settings import settings
 
 
 class TestParsingErrorHandling:
@@ -140,6 +141,74 @@ class TestSearchValidation:
             self.api_resource._search(query=query)
         assert exc_info.value.title == "Invalid Search Query"
         assert f'Failed to parse query: "{query}"' == exc_info.value.description
+
+
+class TestEngineFeatureGate:
+    """ENABLE_ENGINE gates the engine path: off (default) means the engine is inert."""
+
+    def setup_method(self) -> None:
+        self.api_resource = APIResource(
+            last_import_time=multiprocessing.Value("d", time.time(), lock=True),
+        )
+        self.api_resource._setup_complete = lambda: True
+        self.api_resource._engine = MagicMock()
+        self._saved_enable_engine = settings.enable_engine
+
+    def teardown_method(self) -> None:
+        settings.enable_engine = self._saved_enable_engine
+        if hasattr(self, "api_resource") and self.api_resource:
+            self.api_resource._conn_pool.close()
+
+    def _mock_result(self) -> dict:
+        return {
+            "result": [{"name": "Opt", "total_cards_count": None}, {"total_cards_count": 1}],
+            "timings": {},
+        }
+
+    def test_disabled_routes_to_sql_even_with_populated_store(self) -> None:
+        settings.enable_engine = False
+        self.api_resource._engine.size.return_value = 87
+        with (
+            patch.object(self.api_resource, "_run_query", return_value=self._mock_result()),
+            patch.object(self.api_resource, "_search_engine") as mock_engine,
+        ):
+            result = self.api_resource._search(query="name:opt", limit=10)
+        mock_engine.assert_not_called()
+        assert result["total_cards"] == 1
+
+    def test_disabled_never_touches_the_engine(self) -> None:
+        # The gate must short-circuit before any engine call (size() included),
+        # so a disabled deployment has zero engine involvement.
+        settings.enable_engine = False
+        with patch.object(self.api_resource, "_run_query", return_value=self._mock_result()):
+            self.api_resource._search(query="name:opt", limit=10)
+        self.api_resource._engine.size.assert_not_called()
+        self.api_resource._engine.query.assert_not_called()
+
+    def test_disabled_reload_is_a_noop(self) -> None:
+        settings.enable_engine = False
+        with patch.object(self.api_resource, "_conn_pool") as mock_pool:
+            self.api_resource._reload_engine()
+        mock_pool.connection.assert_not_called()
+        self.api_resource._engine.reload.assert_not_called()
+
+    def test_enabled_routes_to_engine(self) -> None:
+        settings.enable_engine = True
+        self.api_resource._engine.size.return_value = 87
+        sentinel = {"cards": [], "total_cards": 0, "query": "name:opt"}
+        with patch.object(self.api_resource, "_search_engine", return_value=sentinel) as mock_engine:
+            result = self.api_resource._search(query="name:opt", limit=10)
+        mock_engine.assert_called_once()
+        assert result is sentinel
+
+    def test_enabled_reload_fetches_cards(self) -> None:
+        settings.enable_engine = True
+        with patch.object(self.api_resource, "_conn_pool") as mock_pool:
+            mock_cursor = MagicMock()
+            mock_cursor.fetchall.return_value = []
+            mock_pool.connection.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value = mock_cursor
+            self.api_resource._reload_engine()
+        self.api_resource._engine.reload.assert_called_once_with([])
 
 
 if __name__ == "__main__":

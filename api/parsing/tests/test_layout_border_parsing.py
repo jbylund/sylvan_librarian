@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from api.parsing import generate_sql_query, parse_scryfall_query
 from api.parsing.card_query_nodes import CardAttributeNode, CardBinaryOperatorNode
 from api.parsing.nodes import AndNode, Query
 
@@ -120,6 +121,31 @@ class TestLayoutBorderParsing:
         attributes.sort()
         expected_attrs.sort()
         assert attributes == expected_attrs
+
+
+class TestExactMatchValueCasing:
+    """SQL value normalization for the exact-match text fields.
+
+    set_code/layout/border/watermark are lowercased at import, so their query values
+    are lowercased for case-insensitive matching via plain equality. collector_number
+    is stored raw and mixed-case (e.g. The List's "10E-105") and compares exactly.
+    """
+
+    @pytest.mark.parametrize(
+        argnames=["query", "expected_param_value"],
+        argvalues=[
+            ("set:LEA", "lea"),
+            ("set:lea", "lea"),
+            ("layout:NORMAL", "normal"),
+            ("border:Black", "black"),
+            ("watermark:Izzet", "izzet"),
+            ("cn:10E-105", "10E-105"),
+            ("cn:10e-105", "10e-105"),
+        ],
+    )
+    def test_sql_param_value_casing(self, query: str, expected_param_value: str) -> None:
+        _, params = generate_sql_query(parse_scryfall_query(query))
+        assert list(params.values()) == [expected_param_value]
 
 
 if __name__ == "__main__":

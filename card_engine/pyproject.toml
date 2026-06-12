@@ -1,0 +1,17 @@
+[build-system]
+requires = ["maturin>=1.13,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "card_engine"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+dynamic = ["version"]
+
+[tool.maturin]
+# Enabled here rather than in Cargo.toml so `cargo test` can link Rust unit tests
+# against libpython; wheel builds (maturin build / develop) still get the feature.
+features = ["pyo3/extension-module"]
