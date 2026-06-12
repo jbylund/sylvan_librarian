@@ -639,6 +639,7 @@ class APIResource:
                 reload (the data just changed, so the archive must be rebuilt).
         """
         if not settings.enable_engine:
+            logger.debug("Engine reload skipped: feature-gated off (ENABLE_ENGINE)")
             return
         if self._engine is None:
             return

@@ -5,7 +5,9 @@ from __future__ import annotations
 import multiprocessing
 import os
 import pathlib
+import tempfile
 import time
+import uuid
 from typing import TYPE_CHECKING
 
 import psycopg
@@ -15,6 +17,7 @@ from testcontainers.postgres import PostgresContainer
 from api.api_resource import APIResource
 from api.enums import CardOrdering, SortDirection
 from api.tests.helpers import search_kwargs
+from card_engine import QueryEngine
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -400,6 +403,7 @@ class TestContainerIntegration:
 
         assert brainstorm_in_combined, "Brainstorm should be found by combined search"
 
+    @pytest.mark.usefixtures("engine_enabled")
     def test_cubecobra_ordering(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """Test that orderby=cubecobra sorts by cubecobra_score ascending (lower = better)."""
         # Assign distinct cubecobra_score values to three known cards
@@ -416,17 +420,28 @@ class TestContainerIntegration:
                 )
             conn.commit()
 
-        # Reload the engine so it picks up the direct DB update
-        api_resource._reload_engine(force=True)
+        # The default archive path is shared machine-wide, so another process's
+        # store would shadow this test DB's data: swap in a private store for
+        # this test (the api_resource fixture is class-scoped, so restore it).
+        shm_path = pathlib.Path(tempfile.gettempdir()) / f"arcane_tutor_it_{uuid.uuid4().hex}"
+        saved_engine = api_resource._engine
+        api_resource._engine = QueryEngine(shm_path=str(shm_path))
+        try:
+            # Reload the engine so it picks up the direct DB update
+            api_resource._reload_engine(force=True)
 
-        result = api_resource._search_engine(
-            **search_kwargs("cmc>=0", limit=100, orderby=CardOrdering.CUBECOBRA, direction=SortDirection.ASC)
-        )
-        names = [card["name"] for card in result["cards"] if card["name"] in scores]
-        assert names == ["Lightning Bolt", "Black Lotus", "Serra Angel"]
+            result = api_resource._search_engine(
+                **search_kwargs("cmc>=0", limit=100, orderby=CardOrdering.CUBECOBRA, direction=SortDirection.ASC)
+            )
+            names = [card["name"] for card in result["cards"] if card["name"] in scores]
+            assert names == ["Lightning Bolt", "Black Lotus", "Serra Angel"]
 
-        result = api_resource._search_engine(
-            **search_kwargs("cmc>=0", limit=100, orderby=CardOrdering.CUBECOBRA, direction=SortDirection.DESC)
-        )
-        names = [card["name"] for card in result["cards"] if card["name"] in scores]
-        assert names == ["Serra Angel", "Black Lotus", "Lightning Bolt"]
+            result = api_resource._search_engine(
+                **search_kwargs("cmc>=0", limit=100, orderby=CardOrdering.CUBECOBRA, direction=SortDirection.DESC)
+            )
+            names = [card["name"] for card in result["cards"] if card["name"] in scores]
+            assert names == ["Serra Angel", "Black Lotus", "Lightning Bolt"]
+        finally:
+            api_resource._engine = saved_engine
+            shm_path.unlink(missing_ok=True)
+            shm_path.with_suffix(".lock").unlink(missing_ok=True)

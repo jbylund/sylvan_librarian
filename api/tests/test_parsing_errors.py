@@ -52,6 +52,7 @@ class TestParsingErrorHandling:
         assert exc_info.value.description == f'Failed to parse query: "{query}"'
 
 
+@pytest.mark.usefixtures("engine_enabled")
 class TestSearchRouting:
     """_search routes to _search_sql or _search_engine and validates inputs.
 
@@ -63,11 +64,8 @@ class TestSearchRouting:
         self.api_resource = _make_api()
         self.api_resource._setup_complete = lambda: True
         self.api_resource._engine = MagicMock()
-        self._saved_enable_engine = settings.enable_engine
-        settings.enable_engine = True
 
     def teardown_method(self) -> None:
-        settings.enable_engine = self._saved_enable_engine
         if hasattr(self, "api_resource") and self.api_resource:
             self.api_resource._conn_pool.close()
 
