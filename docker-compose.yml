@@ -75,6 +75,7 @@ services:
       - .env
     environment:
       ENABLE_CACHE: ${ENABLE_CACHE:-false}
+      ENABLE_ENGINE: ${ENABLE_ENGINE:-false}
       ENVIRONMENT: ${ENVIRONMENT:-dev}
       HONEYBADGER_API_KEY: ${HONEYBADGER_API_KEY:-}
       HOSTNAME: ${HOSTNAME}

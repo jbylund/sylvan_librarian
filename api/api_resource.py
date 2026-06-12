@@ -621,6 +621,8 @@ class APIResource:
 
     def _reload_engine(self) -> None:
         """Fetch all cards from the DB and reload the Rust engine's card store."""
+        if not settings.enable_engine:
+            return
         if self._engine is None:
             return
         cols_sql = ", ".join(f"card.{col}" for col in _ENGINE_COLUMNS_FROM_MODULE)
@@ -766,7 +768,7 @@ class APIResource:
             ) from err
         return where_clause, params
 
-    def _search(  # noqa: PLR0912,PLR0913,PLR0915
+    def _search(  # noqa: C901,PLR0912,PLR0913,PLR0915
         self,
         *,
         direction: SortDirection = SortDirection.ASC,
@@ -807,7 +809,9 @@ class APIResource:
                 description=f'Failed to parse query: "{query}"',
             ) from err
 
-        if self._engine.size() == 0:
+        if not settings.enable_engine:
+            pass  # feature-gated off: SQL serves everything, the store never loads
+        elif self._engine.size() == 0:
             logger.info("Engine store empty, using SQL path for query=%r", query)
             if self._engine_reload_lock.acquire(blocking=False):
 
