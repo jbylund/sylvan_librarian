@@ -248,16 +248,47 @@ class TestEngineFeatureGate:
         mock_engine.assert_called_once()
         assert result is sentinel
 
-    def test_enabled_reload_fetches_cards(self) -> None:
+    def test_enabled_reload_streams_batches(self) -> None:
         settings.enable_engine = True
         # Empty store, or the populated-store fast path skips the reload.
         self.api_resource._engine.size.return_value = 0
+        self.api_resource._engine.reload_begin.return_value = True
+        batch1, batch2 = [{"card_name": "A"}], [{"card_name": "B"}]
         with patch.object(self.api_resource, "_conn_pool") as mock_pool:
             mock_cursor = MagicMock()
-            mock_cursor.fetchall.return_value = []
+            mock_cursor.fetchmany.side_effect = [batch1, batch2, []]
             mock_pool.connection.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value = mock_cursor
             self.api_resource._reload_engine()
-        self.api_resource._engine.reload.assert_called_once_with([])
+        engine = self.api_resource._engine
+        engine.reload_begin.assert_called_once()
+        assert [c.args[0] for c in engine.add_batch.call_args_list] == [batch1, batch2]
+        engine.reload_commit.assert_called_once()
+        engine.reload_abort.assert_not_called()
+
+    def test_enabled_reload_skips_when_another_worker_published(self) -> None:
+        settings.enable_engine = True
+        self.api_resource._engine.size.return_value = 0
+        self.api_resource._engine.reload_begin.return_value = False
+        with patch.object(self.api_resource, "_conn_pool") as mock_pool:
+            mock_cursor = MagicMock()
+            mock_pool.connection.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value = mock_cursor
+            self.api_resource._reload_engine()
+        self.api_resource._engine.add_batch.assert_not_called()
+        self.api_resource._engine.reload_commit.assert_not_called()
+
+    def test_enabled_reload_aborts_on_failure(self) -> None:
+        settings.enable_engine = True
+        self.api_resource._engine.size.return_value = 0
+        self.api_resource._engine.reload_begin.return_value = True
+        self.api_resource._engine.add_batch.side_effect = RuntimeError("boom")
+        with patch.object(self.api_resource, "_conn_pool") as mock_pool:
+            mock_cursor = MagicMock()
+            mock_cursor.fetchmany.side_effect = [[{"card_name": "A"}], []]
+            mock_pool.connection.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value = mock_cursor
+            with pytest.raises(RuntimeError, match="boom"):
+                self.api_resource._reload_engine()
+        self.api_resource._engine.reload_abort.assert_called_once()
+        self.api_resource._engine.reload_commit.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -2245,10 +2245,22 @@ struct CachedMmap {
     inode: u64,
 }
 
+/// In-progress staged reload: cards accumulated across add_batch() calls plus
+/// the cross-process flock, held from reload_begin() until reload_commit() /
+/// reload_abort() so no other process can interleave a write. Dropping the
+/// staging (commit, abort, or a fresh reload_begin after an abandoned cycle)
+/// closes the lock file, which releases the flock.
+struct Staging {
+    cards: Vec<Card>,
+    interner: Interner,
+    #[allow(dead_code)] // held for its flock; released on drop
+    lock_file: std::fs::File,
+}
+
 #[pyclass]
 struct QueryEngine {
     shm_path: PathBuf,
-    write_lock: Mutex<()>,
+    staging: Mutex<Option<Staging>>,
     cached_mmap: Mutex<Option<CachedMmap>>,
 }
 
@@ -2307,7 +2319,7 @@ impl QueryEngine {
         };
         QueryEngine {
             shm_path: PathBuf::from(shm_path.unwrap_or(default_path)),
-            write_lock: Mutex::new(()),
+            staging: Mutex::new(None),
             cached_mmap: Mutex::new(None),  // populated by first reload()
         }
     }
@@ -2320,8 +2332,15 @@ impl QueryEngine {
         self.get_mmap().map(|_| ())
     }
 
-    fn reload(&self, db_rows: &Bound<PyList>) -> PyResult<()> {
-        let _guard = self.write_lock.lock().unwrap();
+    /// Start a staged reload: acquire the cross-process write lock and reset
+    /// the staging buffer. Returns false (and refreshes the local mapping) if
+    /// another worker published a new archive while we waited for the lock —
+    /// the caller should skip fetching entirely. Any staging abandoned by a
+    /// previous failed cycle is discarded here.
+    fn reload_begin(&self) -> PyResult<bool> {
+        let mut staging = self.staging.lock().unwrap();
+        // Drop an abandoned cycle's buffer and its flock before re-acquiring.
+        *staging = None;
 
         // Snapshot the archive's identity before contending for the cross-process
         // lock, so we can detect whether another worker published a new archive
@@ -2332,6 +2351,7 @@ impl QueryEngine {
 
         // Cross-process exclusive lock: only one worker writes per reload cycle.
         // The lock file is separate so it persists across archive replacements.
+        // Held until reload_commit()/reload_abort() drops the Staging.
         let lock_path = self.shm_path.with_extension("lock");
         let lock_file = std::fs::OpenOptions::new()
             .write(true).create(true).open(&lock_path)
@@ -2352,17 +2372,46 @@ impl QueryEngine {
         // our local handle.
         let inode_after = std::fs::metadata(&self.shm_path).ok().map(|m| m.ino());
         if inode_after.is_some() && inode_after != inode_before {
-            return self.get_mmap().map(|_| ());
+            self.get_mmap().map(|_| ())?;
+            return Ok(false);
         }
 
         #[cfg(feature = "alloc-counter")]
         alloc_stats::reset_peak();
 
-        let mut interner = Interner::new();
-        let mut cards: Vec<Card> = db_rows
-            .iter()
-            .filter_map(|item| item.cast::<PyDict>().ok().map(|d| card_from_pydict(&d, &mut interner)))
-            .collect();
+        *staging = Some(Staging { cards: Vec::new(), interner: Interner::new(), lock_file });
+        Ok(true)
+    }
+
+    /// Append one batch of card dicts to the staging buffer.
+    fn add_batch(&self, db_rows: &Bound<PyList>) -> PyResult<()> {
+        let mut guard = self.staging.lock().unwrap();
+        let staging = guard.as_mut().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("add_batch called without reload_begin")
+        })?;
+        for item in db_rows.iter() {
+            if let Ok(d) = item.cast::<PyDict>() {
+                staging.cards.push(card_from_pydict(&d, &mut staging.interner));
+            }
+        }
+        Ok(())
+    }
+
+    /// Discard an in-progress staged reload, releasing the cross-process lock.
+    fn reload_abort(&self) -> PyResult<()> {
+        self.staging.lock().unwrap().take();
+        Ok(())
+    }
+
+    /// Sort, index, serialize, and atomically publish the staged cards, then
+    /// release the cross-process lock. Queries keep serving the old archive
+    /// until the rename lands.
+    fn reload_commit(&self) -> PyResult<()> {
+        let staging = self.staging.lock().unwrap().take().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("reload_commit called without reload_begin")
+        })?;
+        let Staging { mut cards, interner, lock_file } = staging;
+
         // unique=card/artwork group by oracle_id, so cards without one would all
         // collapse into a single group. The DB enforces NOT NULL; fail loudly here
         // for any other caller (e.g. hand-built test dicts).
@@ -2434,7 +2483,23 @@ impl QueryEngine {
         std::fs::rename(&tmp_path, &self.shm_path)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("rename shm: {e}")))?;
 
+        // The new archive is published; release the cross-process write lock.
+        drop(lock_file);
+
         self.get_mmap().map(|_| ())
+    }
+
+    /// One-shot reload: the staged API as a single call. Kept for tests and
+    /// for callers that already hold the full corpus in memory.
+    fn reload(&self, db_rows: &Bound<PyList>) -> PyResult<()> {
+        if !self.reload_begin()? {
+            return Ok(()); // another worker just published; we picked up theirs
+        }
+        if let Err(e) = self.add_batch(db_rows) {
+            self.reload_abort()?;
+            return Err(e);
+        }
+        self.reload_commit()
     }
 
     #[pyo3(signature = (*, filters, unique="card", prefer="default", orderby="edhrec", direction="asc", limit=100, offset=0))]

@@ -375,6 +375,79 @@ class TestCollectionOperators:
         assert total_sol == 5
 
 
+class TestStagedReload:
+    """reload_begin / add_batch / reload_commit — the streaming reload API.
+
+    _reload_engine feeds these from a server-side cursor so only one batch of
+    row dicts is alive at a time; the one-shot reload() is a wrapper over them.
+    """
+
+    def test_staged_equals_one_shot(self, fresh_engine: Callable[[], QueryEngine]) -> None:
+        cards = json.loads(_FIXTURE.read_text())
+        staged = fresh_engine()
+        assert staged.reload_begin() is True
+        # Split into 3 uneven batches to exercise accumulation across calls
+        staged.add_batch(cards[:10])
+        staged.add_batch(cards[10:50])
+        staged.add_batch(cards[50:])
+        staged.reload_commit()
+
+        one_shot = fresh_engine()
+        one_shot.reload(cards)
+
+        assert staged.size() == one_shot.size() == 87
+        for q in ("t:creature", "name:bolt", "devotion:{R}", "cmc>=4"):
+            t_staged, c_staged = _run(staged, q, orderby="cmc")
+            t_one, c_one = _run(one_shot, q, orderby="cmc")
+            assert t_staged == t_one
+            assert _names(c_staged) == _names(c_one)
+
+    def test_add_batch_without_begin_raises(self, fresh_engine: Callable[[], QueryEngine]) -> None:
+        e = fresh_engine()
+        with pytest.raises(RuntimeError, match="without reload_begin"):
+            e.add_batch([{"card_name": "X", "oracle_id": "o1"}])
+
+    def test_commit_without_begin_raises(self, fresh_engine: Callable[[], QueryEngine]) -> None:
+        e = fresh_engine()
+        with pytest.raises(RuntimeError, match="without reload_begin"):
+            e.reload_commit()
+
+    def test_abort_discards_staging(self, fresh_engine: Callable[[], QueryEngine]) -> None:
+        cards = json.loads(_FIXTURE.read_text())
+        e = fresh_engine()
+        e.reload(cards)
+        # Stage a different (smaller) corpus, then abort: store must be unchanged
+        assert e.reload_begin() is True
+        e.add_batch(cards[:5])
+        e.reload_abort()
+        assert e.size() == 87
+        # And the lock must have been released: a fresh cycle works
+        e.reload(cards[:5])
+        assert e.size() == 5
+
+    def test_begin_resets_abandoned_staging(self, fresh_engine: Callable[[], QueryEngine]) -> None:
+        cards = json.loads(_FIXTURE.read_text())
+        e = fresh_engine()
+        # First cycle abandoned mid-staging (no commit, no abort)
+        assert e.reload_begin() is True
+        e.add_batch(cards[:50])
+        # Second begin discards the abandoned buffer and its lock
+        assert e.reload_begin() is True
+        e.add_batch(cards[:5])
+        e.reload_commit()
+        assert e.size() == 5
+
+    def test_missing_oracle_id_rejected_at_commit(self, fresh_engine: Callable[[], QueryEngine]) -> None:
+        e = fresh_engine()
+        assert e.reload_begin() is True
+        e.add_batch([{"card_name": "No Oracle"}])
+        with pytest.raises(ValueError, match="missing oracle_id"):
+            e.reload_commit()
+        # Commit consumed the staging even on failure; the engine is reusable
+        e.reload([{"card_name": "Ok Card", "oracle_id": "o1"}])
+        assert e.size() == 1
+
+
 class TestUnique:
     def test_reload_rejects_cards_missing_oracle_id(self, fresh_engine: Callable[[], QueryEngine]) -> None:
         # unique=card/artwork group by oracle_id; cards without one would silently
