@@ -91,6 +91,12 @@ fn color_list_to_mask(colors: &[&str]) -> u8 {
 
 // ─── Mana cost helpers ───────────────────────────────────────────────────────
 
+/// Symbols that contribute to devotion, matching calculate_devotion() in SQL
+/// (which counts only WUBRGC characters of the mana cost string).
+fn is_devotion_sym(s: &str) -> bool {
+    s.len() == 1 && "WUBRGC".contains(s)
+}
+
 fn mana_pip_counts(s: &str) -> HashMap<String, u8> {
     let mut pips: HashMap<String, u8> = HashMap::new();
     let upper = s.to_uppercase();
@@ -370,7 +376,8 @@ fn mana_cost_from_pydict(d: &Bound<PyDict>, cmc_val: Option<f32>) -> ManaCost {
         for (sym, &n) in &pips {
             if sym.contains('/') {
                 for part in sym.split('/') {
-                    if part.len() == 1 && "WUBRG".contains(part) {
+                    // WUBRGC: SQL's calculate_devotion counts C too ({C/W} hybrids)
+                    if is_devotion_sym(part) {
                         *d.entry(part.to_string()).or_insert(0) += n;
                     }
                 }
@@ -695,6 +702,7 @@ enum FilterExpr {
     },
 
     Devotion {
+        op: CmpOp,
         pips: HashMap<String, u8>,
     },
 
@@ -711,28 +719,59 @@ enum FilterExpr {
 
 impl FilterExpr {
     fn matches(&self, card: &Card) -> bool {
+        self.tri(card) == Some(true)
+    }
+
+    /// Three-valued evaluation mirroring SQL: None is SQL's NULL ("unknown"),
+    /// produced when a compared field is missing from the card. NOT/AND/OR
+    /// propagate unknown exactly like SQL ternary logic, so -power>2 excludes
+    /// powerless cards (NOT NULL = NULL), matching Scryfall's "attribute
+    /// filters only match cards that have the attribute", while
+    /// -(power>2 and t:creature) still matches instants (NULL AND false =
+    /// false, NOT false = true). Only Some(true) counts as a match.
+    fn tri(&self, card: &Card) -> Option<bool> {
         match self {
-            FilterExpr::True => true,
+            FilterExpr::True => Some(true),
 
-            FilterExpr::And(children) => children.iter().all(|c| c.matches(card)),
-            FilterExpr::Or(children)  => children.iter().any(|c| c.matches(card)),
-            FilterExpr::Not(inner)    => !inner.matches(card),
+            FilterExpr::And(children) => {
+                let mut unknown = false;
+                for c in children {
+                    match c.tri(card) {
+                        Some(false) => return Some(false),
+                        None => unknown = true,
+                        Some(true) => {}
+                    }
+                }
+                if unknown { None } else { Some(true) }
+            }
+            FilterExpr::Or(children) => {
+                let mut unknown = false;
+                for c in children {
+                    match c.tri(card) {
+                        Some(true) => return Some(true),
+                        None => unknown = true,
+                        Some(false) => {}
+                    }
+                }
+                if unknown { None } else { Some(false) }
+            }
+            FilterExpr::Not(inner) => inner.tri(card).map(|b| !b),
 
-            FilterExpr::ExactName(lower) => card.card_name_lower.as_str() == lower.as_str(),
+            FilterExpr::ExactName(lower) => Some(card.card_name_lower.as_str() == lower.as_str()),
 
             FilterExpr::NumericCmp { lhs, op, rhs } => {
                 match (lhs.eval(card), rhs.eval(card)) {
-                    (Some(a), Some(b)) => cmp(*op, a, b),
-                    _ => false,
+                    (Some(a), Some(b)) => Some(cmp(*op, a, b)),
+                    _ => None, // a compared field is missing: SQL NULL
                 }
             }
 
             FilterExpr::TextContains { field, word } => {
-                text_field_value(card, *field).map_or(false, |s| s.contains(word.as_str()))
+                text_field_value(card, *field).map(|s| s.contains(word.as_str()))
             }
 
             FilterExpr::TextExact { field, op, value } => {
-                field(card).map_or(false, |s| match op {
+                field(card).map(|s| match op {
                     CmpOp::Eq => s == value,
                     CmpOp::Ne => s != value,
                     CmpOp::Lt => s < value.as_str(),
@@ -743,53 +782,58 @@ impl FilterExpr {
             }
 
             FilterExpr::TextRegex { field, regex } => {
-                field(card).map_or(false, |s| regex.is_match(s))
+                field(card).map(|s| regex.is_match(s))
             }
 
             FilterExpr::ColorCmp { field, op, mask } => {
                 let bits = card_colors(card, *field);
-                match op {
+                Some(match op {
                     CmpOp::Ge => bits & mask == *mask,
                     CmpOp::Eq => bits == *mask,
                     CmpOp::Le => bits & !mask == 0,
                     CmpOp::Lt => bits & !mask == 0 && bits != *mask,
                     CmpOp::Gt => bits & mask == *mask && bits != *mask,
                     CmpOp::Ne => bits != *mask,
-                }
+                })
             }
 
             FilterExpr::TypeCmp { mask, op } => {
                 let bits = card.card_types;
-                match op {
+                Some(match op {
                     CmpOp::Ge => bits & mask != 0,
                     CmpOp::Eq => bits == *mask,
                     CmpOp::Le => bits & !mask == 0,
                     CmpOp::Lt => bits & !mask == 0 && bits != *mask,
                     CmpOp::Gt => bits & mask != 0 && bits != *mask,
                     CmpOp::Ne => bits != *mask,
-                }
+                })
             }
 
             FilterExpr::CollectionCmp { field, op, value } => {
+                // Set-containment semantics against the single-value query {value},
+                // mirroring the SQL path's jsonb operators (@>, <@, =, <> and the
+                // strict variants). Lt (proper subset of a one-element set) can only
+                // be the empty collection; Ne is not-exactly-equal, NOT "lacks value"
+                // (that's what negation is for).
                 let coll = card_collection(card, *field);
-                match op {
+                Some(match op {
                     CmpOp::Ge => coll.contains(value),
                     CmpOp::Eq => coll.len() == 1 && coll.contains(value),
                     CmpOp::Gt => coll.contains(value) && coll.len() > 1,
                     CmpOp::Le => coll.all_equal(value),
-                    CmpOp::Lt => false,
-                    CmpOp::Ne => !coll.contains(value),
-                }
+                    CmpOp::Lt => coll.len() == 0,
+                    CmpOp::Ne => !(coll.len() == 1 && coll.contains(value)),
+                })
             }
 
             FilterExpr::Legality { shift, expected } => {
-                shift.is_some_and(|s| (card.card_legalities >> s) & 0b11 == *expected)
+                Some(shift.is_some_and(|s| (card.card_legalities >> s) & 0b11 == *expected))
             }
 
             FilterExpr::ManaCostCmp { op, pips, cmc } => {
                 let card_cmc = card.mana_cost.cmc;
                 let card_pips = &card.mana_cost.pips;
-                match op {
+                Some(match op {
                     CmpOp::Ge => {
                         pips.iter().all(|(sym, &n)| card_pips.get(sym).copied().unwrap_or(0) >= n)
                             && card_cmc >= *cmc
@@ -826,40 +870,61 @@ impl FilterExpr {
                             && card_pips.len() == pips.len()
                             && pips.iter().all(|(sym, &n)| card_pips.get(sym).copied().unwrap_or(0) == n))
                     }
-                }
+                })
             }
 
-            FilterExpr::Devotion { pips } => {
+            FilterExpr::Devotion { op, pips } => {
+                // Mirrors the SQL path's JSONB containment on the devotion column
+                // (devotion @> query, <@, =, and the strict/negated variants):
+                // per-color positional arrays contain each other iff the counts
+                // compare, so containment reduces to count comparisons here.
+                // The card-side map can carry non-color keys (generic pips like "1"
+                // come straight from mana_cost_jsonb) that the DB's devotion column
+                // never holds, so only WUBRGC entries participate — query pips are
+                // already color-only (see build_binary).
                 let devotion = card.mana_cost.devotion.as_ref().unwrap_or(&card.mana_cost.pips);
-                pips.iter().all(|(sym, &n)| devotion.get(sym).copied().unwrap_or(0) >= n)
+                let ge = pips.iter().all(|(sym, &n)| devotion.get(sym).copied().unwrap_or(0) >= n);
+                let le = devotion.iter()
+                    .filter(|(sym, _)| is_devotion_sym(sym))
+                    .all(|(sym, &n)| pips.get(sym).copied().unwrap_or(0) >= n);
+                let eq = devotion.keys().filter(|sym| is_devotion_sym(sym)).count() == pips.len()
+                    && pips.iter().all(|(sym, &n)| devotion.get(sym).copied().unwrap_or(0) == n);
+                Some(match op {
+                    CmpOp::Ge => ge,
+                    CmpOp::Eq => eq,
+                    CmpOp::Le => le,
+                    CmpOp::Gt => ge && !eq,
+                    CmpOp::Lt => le && !eq,
+                    CmpOp::Ne => !eq,
+                })
             }
 
             FilterExpr::DateCmp { op, value } => {
-                if card.released_at.is_empty() { return false; }
+                if card.released_at.is_empty() { return None; } // missing date: SQL NULL
                 let ord = card.released_at.as_str().cmp(value.as_str());
-                match op {
+                Some(match op {
                     CmpOp::Eq => ord == std::cmp::Ordering::Equal,
                     CmpOp::Ne => ord != std::cmp::Ordering::Equal,
                     CmpOp::Lt => ord == std::cmp::Ordering::Less,
                     CmpOp::Le => ord != std::cmp::Ordering::Greater,
                     CmpOp::Gt => ord == std::cmp::Ordering::Greater,
                     CmpOp::Ge => ord != std::cmp::Ordering::Less,
-                }
+                })
             }
 
             FilterExpr::YearCmp { op, year } => {
-                if card.released_at.is_empty() { return false; }
+                if card.released_at.is_empty() { return None; } // missing date: SQL NULL
                 let s = &card.released_at;
                 let start = format!("{year:04}-01-01");
                 let end   = format!("{:04}-01-01", year + 1);
-                match op {
+                Some(match op {
                     CmpOp::Eq => s.as_str() >= start.as_str() && s.as_str() < end.as_str(),
                     CmpOp::Gt => s.as_str() >= end.as_str(),
                     CmpOp::Lt => s.as_str() < start.as_str(),
                     CmpOp::Ge => s.as_str() >= start.as_str(),
                     CmpOp::Le => s.as_str() < end.as_str(),
                     CmpOp::Ne => s.as_str() < start.as_str() || s.as_str() >= end.as_str(),
-                }
+                })
             }
         }
     }
@@ -1022,21 +1087,23 @@ fn build_binary(kw: &Value) -> Result<FilterExpr, String> {
 
     if attr == "devotion" {
         let mana_str = rhs_value_str(rhs);
-        // Split hybrid symbols ({R/G} → R:1, G:1) to match calculate_devotion() in SQL.
-        // mana_pip_counts is NOT used here because it keeps hybrids as single keys.
+        // Split hybrid symbols ({R/G} → R:1, G:1) and keep only WUBRGC, matching
+        // calculate_devotion() in SQL (which counts only color characters).
+        // mana_pip_counts is NOT used directly because it keeps hybrids as single keys.
         let mut pips: HashMap<String, u8> = HashMap::new();
         for (sym, n) in mana_pip_counts(mana_str) {
             if sym.contains('/') {
                 for part in sym.split('/') {
-                    if part.len() == 1 && "WUBRG".contains(part) {
+                    if is_devotion_sym(part) {
                         *pips.entry(part.to_string()).or_insert(0) += n;
                     }
                 }
-            } else {
+            } else if is_devotion_sym(&sym) {
                 *pips.entry(sym).or_insert(0) += n;
             }
         }
-        return Ok(FilterExpr::Devotion { pips });
+        let cmp_op = match op { ":" => CmpOp::Ge, _ => str_op_to_cmp(op)? };
+        return Ok(FilterExpr::Devotion { op: cmp_op, pips });
     }
 
     if matches!(attr, "card_colors" | "card_color_identity" | "produced_mana") {

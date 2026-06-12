@@ -93,6 +93,25 @@ class TestFilters:
         assert total == 0
         assert cards == []
 
+    def test_negated_numeric_excludes_cards_missing_field(self, engine: QueryEngine) -> None:
+        # Scryfall semantics: attribute filters only match cards that have the
+        # attribute, even under negation — -power>0 must NOT match an instant.
+        # Mirrors SQL: NOT (power > 0) is NULL for NULL power, excluding the row.
+        total, _ = _run(engine, '-power>0 name="Counterspell"')
+        assert total == 0
+
+    def test_negated_compound_with_missing_field(self, engine: QueryEngine) -> None:
+        # SQL ternary logic: for an instant, power>0 is NULL but t:creature is
+        # false, so (power>0 and t:creature) is false and its negation is TRUE —
+        # the unknown does not poison the whole expression.
+        total, _ = _run(engine, '-(power>0 t:creature) name="Counterspell"')
+        assert total == 6
+
+    def test_negated_numeric_keeps_matching_cards_with_field(self, engine: QueryEngine) -> None:
+        # Serra Angel is 4/4: power>4 is false (not NULL), so -power>4 matches.
+        total, _ = _run(engine, '-power>4 name="Serra Angel"')
+        assert total == 7
+
     def test_set_code_query_is_case_insensitive(self, engine: QueryEngine) -> None:
         # Set codes are lowercased at import, so the query value is lowercased on
         # both the engine and SQL paths — set:LEA must behave like set:lea.
@@ -264,6 +283,72 @@ class TestArithmetic:
         assert total == 22
 
 
+class TestCollectionOperators:
+    """Non-colon operators on type/subtype/keyword fields.
+
+    Both paths use set-containment semantics against the single-value query:
+    = is exact set equality, > is contains-plus-more, <= is subset,
+    < is proper subset (only the empty collection), != is not-exactly-equal.
+    """
+
+    def test_type_gt_contains_plus_more(self, engine: QueryEngine) -> None:
+        # Jace (10) + Nicol Bolas (7) are {Legendary, Planeswalker} ⊋ {Planeswalker};
+        # every fixture creature is exactly {Creature}, so t>creature matches nothing.
+        total_pw, _ = _run(engine, "t>planeswalker")
+        total_creature, _ = _run(engine, "t>creature")
+        assert total_pw == 17
+        assert total_creature == 0
+
+    def test_type_eq_exact(self, engine: QueryEngine) -> None:
+        # All 33 creature printings are exactly {Creature}; both planeswalkers
+        # carry Legendary too, so t=planeswalker matches nothing.
+        total_creature, _ = _run(engine, "t=creature")
+        total_pw, _ = _run(engine, "t=planeswalker")
+        assert total_creature == 33
+        assert total_pw == 0
+
+    def test_type_lt_matches_nothing(self, engine: QueryEngine) -> None:
+        # Proper subset of {Creature} is the empty type set — no card is typeless.
+        total, _ = _run(engine, "t<creature")
+        assert total == 0
+
+    def test_type_ne_not_exactly(self, engine: QueryEngine) -> None:
+        # Everything except the 33 exactly-{Creature} printings.
+        total, _ = _run(engine, "t!=creature")
+        assert total == 54
+
+    def test_keyword_eq_exact(self, engine: QueryEngine) -> None:
+        # Shivan Dragon has exactly {Flying}; Serra Angel has {Flying, Vigilance}.
+        total_shivan, _ = _run(engine, 'keyword=flying name="Shivan Dragon"')
+        total_serra, _ = _run(engine, 'keyword=flying name="Serra Angel"')
+        assert total_shivan == 5
+        assert total_serra == 0
+
+    def test_keyword_gt_contains_plus_more(self, engine: QueryEngine) -> None:
+        total_serra, _ = _run(engine, 'keyword>flying name="Serra Angel"')
+        total_shivan, _ = _run(engine, 'keyword>flying name="Shivan Dragon"')
+        assert total_serra == 7
+        assert total_shivan == 0
+
+    def test_keyword_lt_matches_empty_keywords(self, engine: QueryEngine) -> None:
+        # Proper subset of {Flying} is the empty set: Sol Ring (no keywords)
+        # matches, Shivan Dragon (exactly {Flying}) does not.
+        total_sol, _ = _run(engine, 'keyword<flying name="Sol Ring"')
+        total_shivan, _ = _run(engine, 'keyword<flying name="Shivan Dragon"')
+        assert total_sol == 5
+        assert total_shivan == 0
+
+    def test_keyword_ne_not_exactly(self, engine: QueryEngine) -> None:
+        # != is not-exactly-equal: Serra ({Flying, Vigilance}) and Sol Ring (empty)
+        # match; Shivan (exactly {Flying}) does not.
+        total_shivan, _ = _run(engine, 'keyword!=flying name="Shivan Dragon"')
+        total_serra, _ = _run(engine, 'keyword!=flying name="Serra Angel"')
+        total_sol, _ = _run(engine, 'keyword!=flying name="Sol Ring"')
+        assert total_shivan == 0
+        assert total_serra == 7
+        assert total_sol == 5
+
+
 class TestUnique:
     def test_reload_rejects_cards_missing_oracle_id(self) -> None:
         # unique=card/artwork group by oracle_id; cards without one would silently
@@ -413,6 +498,54 @@ class TestDevotion:
         total_4r, _ = _run(engine, 'devotion:{R}{R}{R}{R} name="Boggart Ram-Gang"')
         assert total_3r == 4
         assert total_4r == 0
+
+    # Non-colon operators mirror the SQL path's JSONB containment on the devotion
+    # column: = is exact, <= is subset (<@), > is containment-but-not-equal, etc.
+
+    def test_devotion_eq_exact_match(self, engine: QueryEngine) -> None:
+        # Lightning Bolt {R} has devotion exactly {R: 1}
+        total, _ = _run(engine, 'devotion={R} name="Lightning Bolt"')
+        assert total == 10
+
+    def test_devotion_eq_rejects_higher_count(self, engine: QueryEngine) -> None:
+        # Shivan Dragon {4}{R}{R} has devotion {R: 2}, not exactly {R: 1}
+        total, _ = _run(engine, 'devotion={R} name="Shivan Dragon"')
+        assert total == 0
+
+    def test_devotion_eq_rejects_extra_colors(self, engine: QueryEngine) -> None:
+        # Boggart Ram-Gang has devotion {R: 3, G: 3}; exactly-{R:3} must not match,
+        # but exactly-{R:3, G:3} must.
+        total_r3, _ = _run(engine, 'devotion={R}{R}{R} name="Boggart Ram-Gang"')
+        total_r3g3, _ = _run(engine, 'devotion={R}{R}{R}{G}{G}{G} name="Boggart Ram-Gang"')
+        assert total_r3 == 0
+        assert total_r3g3 == 4
+
+    def test_devotion_le_subset(self, engine: QueryEngine) -> None:
+        # Shivan Dragon {R: 2} is a subset of {R: 2}; Boggart Ram-Gang {R: 3, G: 3} is not
+        total_shivan, _ = _run(engine, 'devotion<={R}{R} name="Shivan Dragon"')
+        total_boggart, _ = _run(engine, 'devotion<={R}{R} name="Boggart Ram-Gang"')
+        assert total_shivan == 5
+        assert total_boggart == 0
+
+    def test_devotion_le_empty_devotion_matches(self, engine: QueryEngine) -> None:
+        # Sol Ring {1} has empty devotion (generic pips don't count), and the empty
+        # object is a subset of any query — matching SQL's devotion <@ query.
+        total, _ = _run(engine, 'devotion<={R}{R} name="Sol Ring"')
+        assert total == 5
+
+    def test_devotion_gt_strict(self, engine: QueryEngine) -> None:
+        # > means contains-but-not-equal: Boggart {R: 3, G: 3} > {R}; Bolt {R: 1} is not > {R}
+        total_boggart, _ = _run(engine, 'devotion>{R} name="Boggart Ram-Gang"')
+        total_bolt, _ = _run(engine, 'devotion>{R} name="Lightning Bolt"')
+        assert total_boggart == 4
+        assert total_bolt == 0
+
+    def test_devotion_ne(self, engine: QueryEngine) -> None:
+        # != is not-exactly-equal: Bolt {R: 1} is exactly {R: 1}; Shivan {R: 2} is not
+        total_bolt, _ = _run(engine, 'devotion!={R} name="Lightning Bolt"')
+        total_shivan, _ = _run(engine, 'devotion!={R} name="Shivan Dragon"')
+        assert total_bolt == 0
+        assert total_shivan == 5
 
 
 class TestManaCost:

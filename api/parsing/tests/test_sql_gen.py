@@ -1071,6 +1071,16 @@ def test_color_parser_patterns(parse_query, input_query: str, should_parse: bool
         ("-t:elf", "NOT ((%(p_list_WydFbGYnXQ)s <@ card.card_subtypes))"),
         ("llanowar -t:elf", "NOT ((%(p_list_WydFbGYnXQ)s <@ card.card_subtypes))"),
         ("-type:creature", "NOT ((%(p_list_WydDcmVhdHVyZSdd)s <@ card.card_types))"),
+        # < and != on jsonb arrays use order-insensitive set semantics
+        # (proper subset / not-set-equal), mirroring the engine's CollectionCmp
+        (
+            "t<creature",
+            "(card.card_types <@ %(p_list_WydDcmVhdHVyZSdd)s) AND NOT(%(p_list_WydDcmVhdHVyZSdd)s <@ card.card_types)",
+        ),
+        (
+            "t!=creature",
+            "NOT((card.card_types <@ %(p_list_WydDcmVhdHVyZSdd)s) AND (%(p_list_WydDcmVhdHVyZSdd)s <@ card.card_types))",
+        ),
     ],
 )
 def test_negated_type_queries_generate_simple_sql(parse_query, input_query: str, expected_sql_fragment: str) -> None:

@@ -1057,6 +1057,13 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
             return f"({col} <@ {query})"
         if self.operator == ">":
             return f"({query} <@ {col}) AND NOT({col} <@ {query})"
+        # < and != use the same order-insensitive set semantics as = above
+        # (containment both ways), not jsonb literal equality, which is
+        # order-sensitive for arrays.
+        if self.operator == "<":
+            return f"({col} <@ {query}) AND NOT({query} <@ {col})"
+        if self.operator in ("!=", "<>"):
+            return f"NOT(({col} <@ {query}) AND ({query} <@ {col}))"
         msg = f"Unknown operator: {self.operator}"
         raise ValueError(msg)
 

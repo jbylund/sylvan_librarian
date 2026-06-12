@@ -395,7 +395,14 @@ class NotNode(QueryNode):
         return {"operand": _node_to_json(self.operand)}
 
     def to_sql(self: NotNode, context: dict) -> str:
-        """Serialize this NOT node to a SQL expression."""
+        """Serialize this NOT node to a SQL expression.
+
+        Plain NOT keeps SQL's three-valued semantics: a NULL operand (e.g.
+        -power>2 on a card with no power) stays NULL and the row is excluded.
+        This matches Scryfall — filters that require an attribute only ever
+        match cards that have it, even under negation — and the Rust engine
+        mirrors it with tri-state evaluation in FilterExpr.
+        """
         operand_sql = self.operand.to_sql(context)
         return f"NOT ({operand_sql})"
 
