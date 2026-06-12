@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 from api.api_resource import APIResource
 from api.enums import CardOrdering, PreferOrder, SortDirection, UniqueOn
-from api.parsing import generate_sql_query, parse_scryfall_query
+from api.parsing import parse_scryfall_query
 from api.utils.timer import Timer
 
 
@@ -28,7 +28,6 @@ class TestPreferOrder(unittest.TestCase):
     def _search_sql(self, query: str, prefer: PreferOrder) -> dict:
         """Run _search_sql directly, bypassing engine dispatch."""
         parsed_query = parse_scryfall_query(query)
-        where_clause, params = generate_sql_query(parsed_query)
         with (
             patch.object(self.api_resource, "_conn_pool") as mock_pool,
             patch.object(self.api_resource, "_setup_complete", return_value=True),
@@ -40,9 +39,7 @@ class TestPreferOrder(unittest.TestCase):
             mock_pool.connection.return_value.__enter__.return_value = mock_conn
 
             return self.api_resource._search_sql(
-                where_clause=where_clause,
-                params=params,
-                query_explanation="",
+                parsed_query=parsed_query,
                 query=query,
                 unique=UniqueOn.CARD,
                 prefer=prefer,

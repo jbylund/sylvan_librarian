@@ -9,9 +9,19 @@ from typing import TYPE_CHECKING
 import pytest
 
 from api.api_resource import APIResource
+from api.settings import settings
 
 if TYPE_CHECKING:
     from collections.abc import Generator
+
+
+@pytest.fixture(name="engine_enabled")
+def engine_enabled_fixture() -> Generator[None]:
+    """Enable the engine feature gate (ENABLE_ENGINE) for the duration of a test."""
+    saved = settings.enable_engine
+    settings.enable_engine = True
+    yield
+    settings.enable_engine = saved
 
 
 @pytest.fixture(scope="module")

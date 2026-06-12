@@ -26,20 +26,46 @@ from __future__ import annotations
 
 import datetime
 import json
+import tempfile
+import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from api.parsing import parse_scryfall_query
 from card_engine import QueryEngine
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Generator
+
 _FIXTURE = Path(__file__).parent / "fixtures" / "engine_cards.json"
 
 
+@pytest.fixture(scope="module", name="fresh_engine")
+def fresh_engine_fixture() -> Generator[Callable[[], QueryEngine]]:
+    """Factory for engines with their own snapshot path; archives removed at teardown.
+
+    The default path is shared machine-wide (that's the point of the shm design),
+    so two test engines holding different card sets would clobber each other.
+    """
+    paths: list[Path] = []
+
+    def make() -> QueryEngine:
+        shm_path = Path(tempfile.gettempdir()) / f"arcane_tutor_test_{uuid.uuid4().hex}"
+        paths.append(shm_path)
+        return QueryEngine(shm_path=str(shm_path))
+
+    yield make
+    for shm_path in paths:
+        shm_path.unlink(missing_ok=True)
+        shm_path.with_suffix(".lock").unlink(missing_ok=True)
+
+
 @pytest.fixture(scope="module", name="engine")
-def engine_fixture() -> QueryEngine:
+def engine_fixture(fresh_engine: Callable[[], QueryEngine]) -> QueryEngine:
     cards = json.loads(_FIXTURE.read_text())
-    e = QueryEngine()
+    e = fresh_engine()
     e.reload(cards)
     return e
 
@@ -119,10 +145,10 @@ class TestFilters:
         t_lower, _ = _run(engine, "set:lea")
         assert t_upper == t_lower == 7
 
-    def test_collector_number_query_is_case_sensitive(self) -> None:
+    def test_collector_number_query_is_case_sensitive(self, fresh_engine: Callable[[], QueryEngine]) -> None:
         # collector_number is stored raw and mixed-case (e.g. The List's "10E-105"),
         # and the SQL path compares it exactly — the engine must do the same.
-        e = QueryEngine()
+        e = fresh_engine()
         e.reload(
             [
                 {"card_name": "List Printing", "oracle_id": "o1", "collector_number": "10E-105"},
@@ -350,11 +376,11 @@ class TestCollectionOperators:
 
 
 class TestUnique:
-    def test_reload_rejects_cards_missing_oracle_id(self) -> None:
+    def test_reload_rejects_cards_missing_oracle_id(self, fresh_engine: Callable[[], QueryEngine]) -> None:
         # unique=card/artwork group by oracle_id; cards without one would silently
         # collapse into a single group, so reload must refuse them up front.
         # (Unreachable from _reload_engine(): the DB column is NOT NULL.)
-        e = QueryEngine()
+        e = fresh_engine()
         with pytest.raises(ValueError, match=r"No Oracle.*missing oracle_id"):
             e.reload(
                 [
@@ -749,7 +775,7 @@ class TestCardProperties:
         assert total == 1
         assert cards[0]["name"] == "Kitchen Finks"
 
-    def test_year_filter_with_date_objects(self) -> None:
+    def test_year_filter_with_date_objects(self, fresh_engine: Callable[[], QueryEngine]) -> None:
         # _reload_engine() feeds rows straight from psycopg, which returns date
         # columns as datetime.date (not str). The engine must extract those, or
         # released_at silently becomes "" and every date/year filter goes empty.
@@ -761,7 +787,7 @@ class TestCardProperties:
             "creature_power": 9,
             "creature_power_text": "9",
         }
-        e = QueryEngine()
+        e = fresh_engine()
         e.reload(
             [
                 {**base, "oracle_id": "a", "released_at": datetime.date(2026, 3, 15)},

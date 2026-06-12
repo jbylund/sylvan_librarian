@@ -5,7 +5,9 @@ from __future__ import annotations
 import multiprocessing
 import os
 import pathlib
+import tempfile
 import time
+import uuid
 from typing import TYPE_CHECKING
 
 import psycopg
@@ -13,6 +15,9 @@ import pytest
 from testcontainers.postgres import PostgresContainer
 
 from api.api_resource import APIResource
+from api.enums import CardOrdering, SortDirection
+from api.tests.helpers import search_kwargs
+from card_engine import QueryEngine
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -140,10 +145,7 @@ class TestContainerIntegration:
     def test_query_parsing_with_database(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """Test query parsing and execution against real database."""
         # Test a simple search query
-        result = api_resource.search(
-            q="type:creature",
-            limit=10,
-        )
+        result = api_resource._search_sql(**search_kwargs("type:creature", limit=10))
 
         assert isinstance(result, dict)
         assert "cards" in result
@@ -155,10 +157,7 @@ class TestContainerIntegration:
 
     def test_card_search_by_name(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """Test searching for cards by name."""
-        result = api_resource.search(
-            q='name:"Lightning Bolt"',
-            limit=10,
-        )
+        result = api_resource._search_sql(**search_kwargs('name:"Lightning Bolt"', limit=10))
 
         assert isinstance(result, dict)
         assert "cards" in result
@@ -171,10 +170,7 @@ class TestContainerIntegration:
 
     def test_color_search(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """Test searching for cards by color."""
-        result = api_resource.search(
-            q="c:red",
-            limit=10,
-        )
+        result = api_resource._search_sql(**search_kwargs("c:red", limit=10))
 
         assert isinstance(result, dict)
         assert "cards" in result
@@ -186,10 +182,7 @@ class TestContainerIntegration:
 
     def test_cmc_search(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """Test searching for cards by converted mana cost."""
-        result = api_resource.search(
-            q="cmc=0",
-            limit=10,
-        )
+        result = api_resource._search_sql(**search_kwargs("cmc=0", limit=10))
 
         assert isinstance(result, dict)
         assert "cards" in result
@@ -201,10 +194,7 @@ class TestContainerIntegration:
 
     def test_power_toughness_search(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """Test searching for creatures by power and toughness."""
-        result = api_resource.search(
-            q="power=4 toughness=4",
-            limit=10,
-        )
+        result = api_resource._search_sql(**search_kwargs("power=4 toughness=4", limit=10))
 
         assert isinstance(result, dict)
         assert "cards" in result
@@ -227,7 +217,7 @@ class TestContainerIntegration:
         # and not affecting the main application database
 
         # Count cards in test database using a query that matches all cards
-        result = api_resource.search(q="cmc>=0", limit=100)
+        result = api_resource._search_sql(**search_kwargs("cmc>=0", limit=100))
 
         # Should only have our test cards
         cards = result["cards"]
@@ -243,7 +233,7 @@ class TestContainerIntegration:
         assert len(random_result["cards"]) >= 1
         random_card_keys = set(random_result["cards"][0].keys())
 
-        search_result = api_resource.search(q="cmc>=0", limit=1)
+        search_result = api_resource._search_sql(**search_kwargs("cmc>=0", limit=1))
         assert len(search_result["cards"]) >= 1
         search_card_keys = set(search_result["cards"][0].keys())
 
@@ -413,6 +403,7 @@ class TestContainerIntegration:
 
         assert brainstorm_in_combined, "Brainstorm should be found by combined search"
 
+    @pytest.mark.usefixtures("engine_enabled")
     def test_cubecobra_ordering(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """Test that orderby=cubecobra sorts by cubecobra_score ascending (lower = better)."""
         # Assign distinct cubecobra_score values to three known cards
@@ -429,13 +420,28 @@ class TestContainerIntegration:
                 )
             conn.commit()
 
-        # Reload the engine so it picks up the direct DB update
-        api_resource._reload_engine()
+        # The default archive path is shared machine-wide, so another process's
+        # store would shadow this test DB's data: swap in a private store for
+        # this test (the api_resource fixture is class-scoped, so restore it).
+        shm_path = pathlib.Path(tempfile.gettempdir()) / f"arcane_tutor_it_{uuid.uuid4().hex}"
+        saved_engine = api_resource._engine
+        api_resource._engine = QueryEngine(shm_path=str(shm_path))
+        try:
+            # Reload the engine so it picks up the direct DB update
+            api_resource._reload_engine(force=True)
 
-        result = api_resource.search(orderby="cubecobra", direction="asc", limit=100)
-        names = [card["name"] for card in result["cards"] if card["name"] in scores]
-        assert names == ["Lightning Bolt", "Black Lotus", "Serra Angel"]
+            result = api_resource._search_engine(
+                **search_kwargs("cmc>=0", limit=100, orderby=CardOrdering.CUBECOBRA, direction=SortDirection.ASC)
+            )
+            names = [card["name"] for card in result["cards"] if card["name"] in scores]
+            assert names == ["Lightning Bolt", "Black Lotus", "Serra Angel"]
 
-        result = api_resource.search(orderby="cubecobra", direction="desc", limit=100)
-        names = [card["name"] for card in result["cards"] if card["name"] in scores]
-        assert names == ["Serra Angel", "Black Lotus", "Lightning Bolt"]
+            result = api_resource._search_engine(
+                **search_kwargs("cmc>=0", limit=100, orderby=CardOrdering.CUBECOBRA, direction=SortDirection.DESC)
+            )
+            names = [card["name"] for card in result["cards"] if card["name"] in scores]
+            assert names == ["Serra Angel", "Black Lotus", "Lightning Bolt"]
+        finally:
+            api_resource._engine = saved_engine
+            shm_path.unlink(missing_ok=True)
+            shm_path.with_suffix(".lock").unlink(missing_ok=True)
