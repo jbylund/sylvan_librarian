@@ -2413,7 +2413,7 @@ impl QueryEngine {
         //   for in-flight readers across a swap.
         //
         // Checked rkyv::access() re-validates the entire archive graph on every
-        // call: measured at ~10 ms per call on a ~200 MB / 96k-card archive
+        // call: measured at ~7 ms per call on a ~120 MB / 96k-card archive
         // (bench_checked_vs_unchecked_access), vs sub-millisecond query
         // evaluation — a 10-100x slowdown per query. It would also be a false
         // guarantee: InlineStr's CheckBytes is deliberately permissive, so
@@ -2482,7 +2482,7 @@ impl QueryEngine {
             // Safety: see the access_unchecked justification in query(). A file
             // that mapped successfully is always a complete rkyv archive (atomic
             // rename publish), so checked access here would only re-validate
-            // trusted bytes at ~10 ms per size() call.
+            // trusted bytes at ~7 ms per size() call.
             Ok(mmap) => Ok(unsafe { rkyv::access_unchecked::<Archived<CardData>>(&mmap) }.cards.len()),
         }
     }
@@ -2653,76 +2653,77 @@ mod tests {
     fn bench_checked_vs_unchecked_access() {
         const N: usize = 96_000;
         let words = ["draw", "card", "creature", "destroy", "target", "flying", "counter", "spell", "token", "exile"];
-        let cards: Vec<Card> = (0..N)
-            .map(|i| {
-                let name = format!("Benchmark Card Number {i}");
-                let oracle = format!(
-                    "{}: {} a {} {}, then {} {} cards. This text is representative filler standing in for \
-                     real oracle text so string validation cost is realistic for card {i}.",
-                    words[i % 10], words[(i + 1) % 10], words[(i + 2) % 10],
-                    words[(i + 3) % 10], words[(i + 4) % 10], words[(i + 5) % 10],
-                );
-                let flavor = format!("Flavor text for card {i}, roughly the length of a real flavor quote in the dataset.");
-                Card {
-                    card_name_lower: InlineStr::from_str(&name.to_lowercase()),
-                    card_colors: (i % 32) as u8,
-                    card_color_identity: (i % 32) as u8,
-                    produced_mana: 0,
-                    card_types: TYPE_CREATURE,
-                    scryfall_id: format!("00000000-0000-4000-8000-{i:012}"),
-                    oracle_id: Some(format!("11111111-0000-4000-8000-{:012}", i / 3)),
-                    illustration_id: Some(format!("22222222-0000-4000-8000-{i:012}")),
-                    card_name: name.clone(),
-                    oracle_text: oracle.clone(),
-                    oracle_text_lower: oracle.to_lowercase(),
-                    flavor_text: flavor.clone(),
-                    flavor_text_lower: flavor.to_lowercase(),
-                    card_artist: Some(format!("Artist {}", i % 1000)),
-                    card_artist_lower: Some(format!("artist {}", i % 1000)),
-                    card_set_code: InlineStr::from_str("bench"),
-                    card_layout: "normal".to_string(),
-                    card_border: "black".to_string(),
-                    card_watermark: None,
-                    collector_number: format!("{}", i % 500),
-                    mana_cost_text: Some("{2}{G}{G}".to_string()),
-                    type_line: "Creature — Benchmark".to_string(),
-                    set_name: format!("Benchmark Set {}", i % 300),
-                    released_at: "2024-01-01".to_string(),
-                    released_at_int: Some(20240101),
-                    oracle_group: (i / 3) as u32,
-                    artwork_group: i as u32,
-                    cmc: Some((i % 8) as u8),
-                    creature_power: Some((i % 10) as i8),
-                    creature_toughness: Some((i % 10) as i8),
-                    planeswalker_loyalty: None,
-                    card_rarity_int: Some((i % 4) as u8),
-                    collector_number_int: Some((i % 500) as u16),
-                    edhrec_rank: Some(i as u32),
-                    price_usd: Some(1.0),
-                    price_eur: Some(1.0),
-                    price_tix: Some(0.1),
-                    prefer_score: None,
-                    cubecobra_score: None,
-                    card_subtypes: vec!["Benchmark".to_string(), words[i % 10].to_string()],
-                    card_keywords: HashSet::from([words[i % 10].to_string()]),
-                    card_legalities: 0,
-                    card_oracle_tags: HashSet::from([format!("tag-{}", i % 100)]),
-                    card_is_tags: HashSet::new(),
-                    card_frame_data: HashSet::new(),
-                    mana_cost: ManaCost {
-                        pips: HashMap::from([("G".to_string(), 2u8)]),
-                        devotion: None,
-                        cmc: (i % 8) as f32,
-                    },
-                    creature_power_text: None,
-                    creature_toughness_text: None,
-                }
-            })
-            .collect();
+        let mut interner = Interner::new();
+        let mut cards: Vec<Card> = Vec::with_capacity(N);
+        for i in 0..N {
+            let name = format!("Benchmark Card Number {i}");
+            // Oracle text keyed on i/3 so printings share texts ~3x, matching the
+            // real dataset's duplication (and exercising the CSR oracle index).
+            let group = i / 3;
+            let oracle = format!(
+                "{}: {} a {} {}, then {} {} cards. This text is representative filler standing in for \
+                 real oracle text so string validation cost is realistic for card group {group}.",
+                words[group % 10], words[(group + 1) % 10], words[(group + 2) % 10],
+                words[(group + 3) % 10], words[(group + 4) % 10], words[(group + 5) % 10],
+            );
+            let flavor = format!("Flavor text for card {i}, roughly the length of a real flavor quote in the dataset.");
+            cards.push(Card {
+                card_name_lower: InlineStr::from_str(&name.to_lowercase()),
+                card_colors: (i % 32) as u8,
+                card_color_identity: (i % 32) as u8,
+                produced_mana: 0,
+                card_types: TYPE_CREATURE,
+                scryfall_id: (i + 1) as u128,
+                oracle_id: (group + 1) as u128,
+                illustration_id: (i + 1) as u128,
+                card_name_id: interner.intern(name.clone()),
+                oracle_text_id: interner.intern(oracle.clone()),
+                oracle_text_lower_id: interner.intern(oracle.to_lowercase()),
+                flavor_text_id: interner.intern(flavor.clone()),
+                flavor_text_lower_id: interner.intern(flavor.to_lowercase()),
+                card_artist_id: interner.intern(format!("Artist {}", i % 1000)),
+                card_artist_lower_id: interner.intern(format!("artist {}", i % 1000)),
+                card_set_code: InlineStr::from_str("bench"),
+                card_layout_id: interner.intern("normal".to_string()),
+                card_border_id: interner.intern("black".to_string()),
+                card_watermark_id: NONE_STR,
+                collector_number_id: interner.intern(format!("{}", i % 500)),
+                mana_cost_text_id: interner.intern("{2}{G}{G}".to_string()),
+                type_line_id: interner.intern("Creature — Benchmark".to_string()),
+                set_name_id: interner.intern(format!("Benchmark Set {}", i % 300)),
+                released_at_int: Some(20240101),
+                cmc: Some((i % 8) as u8),
+                creature_power: Some((i % 10) as i8),
+                creature_toughness: Some((i % 10) as i8),
+                planeswalker_loyalty: None,
+                card_rarity_int: Some((i % 4) as u8),
+                collector_number_int: Some((i % 500) as u16),
+                edhrec_rank: Some(i as u32),
+                price_usd: Some(1.0),
+                price_eur: Some(1.0),
+                price_tix: Some(0.1),
+                prefer_score: None,
+                cubecobra_score: None,
+                card_subtypes: vec!["Benchmark".to_string(), words[i % 10].to_string()],
+                card_keywords: HashSet::from([words[i % 10].to_string()]),
+                card_legalities: 0,
+                card_oracle_tags: HashSet::from([format!("tag-{}", i % 100)]),
+                card_is_tags: HashSet::new(),
+                card_frame_data: HashSet::new(),
+                mana_cost: ManaCost {
+                    pips: HashMap::from([("G".to_string(), 2u8)]),
+                    devotion: None,
+                    cmc: (i % 8) as f32,
+                },
+                creature_power_text_id: NONE_STR,
+                creature_toughness_text_id: NONE_STR,
+            });
+        }
+        let strings = interner.strings;
 
         let indexes = CardIndexes {
             name_trigram:   build_trigram_index(&cards, |c| c.card_name_lower.as_str()),
-            oracle_trigram: build_trigram_index(&cards, |c| c.oracle_text_lower.as_str()),
+            oracle_trigram: build_oracle_text_index(&cards, &strings),
             cmc:            build_numeric_index(&cards, |c| c.cmc.map(|v| v as i16)),
             power:          build_numeric_index(&cards, |c| c.creature_power.map(|v| v as i16)),
             toughness:      build_numeric_index(&cards, |c| c.creature_toughness.map(|v| v as i16)),
@@ -2732,7 +2733,7 @@ mod tests {
             oracle_tags:    build_tag_index(&cards, |c| &c.card_oracle_tags),
             is_tags:        build_tag_index(&cards, |c| &c.card_is_tags),
         };
-        let data = CardData { cards, indexes, format_shifts: HashMap::new() };
+        let data = CardData { cards, strings, indexes, format_shifts: HashMap::new() };
         let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
         println!("archive size: {:.1} MB", bytes.len() as f64 / 1e6);
 
