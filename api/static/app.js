@@ -606,12 +606,18 @@ class CardSearch {
     // Set max columns based on card count to prevent more columns than cards
     this.updateGridColumns(cards.length);
 
-    // Calculate number of columns in the first row for fetchpriority
-    const firstRowCount = this.calculateFirstRowCount(cards.length);
+    // If the server already rendered cards into the DOM (SSR), skip re-rendering.
+    // This preserves early image loads that the browser started from the HTML, which
+    // dramatically improves LCP — re-rendering would discard those in-flight requests.
+    const hasSSRContent = this.resultsContainer && this.resultsContainer.children.length > 0;
+    if (!hasSSRContent) {
+      // Calculate number of columns in the first row for fetchpriority
+      const firstRowCount = this.calculateFirstRowCount(cards.length);
 
-    this.resultsContainer.innerHTML = cards
-      .map((card, index) => this.createCardHTML(card, index, index < firstRowCount))
-      .join('');
+      this.resultsContainer.innerHTML = cards
+        .map((card, index) => this.createCardHTML(card, index, index < firstRowCount))
+        .join('');
+    }
 
     // Record arrival time; we only push this state when leaving if they stayed > DWELL_MS and it's not already saved (updateURL)
     const url = this.buildCurrentSearchUrl();
@@ -1271,3 +1277,5 @@ window.cardSearchMain = function () {
   window.cardSearch = new CardSearch();
   window.themeManager = new ThemeManager();
 };
+// Auto-initialize when this script runs via defer (DOM is fully parsed at this point).
+window.cardSearchMain();

@@ -213,12 +213,13 @@ def create_card_html(card: dict, index: int) -> str:
 
     # Create image HTML with srcset for responsive images
     # Use 388px as default src (good middle ground for initial load)
+    priority_attr = ' fetchpriority="high"' if index == 0 else ''
     image_html = (
         f'<img class="card-image" '
         f'src="{escape_html(image_388)}" '
         f'srcset="{srcset}" '
         f'sizes="{sizes}" '
-        f'alt="{alt_text}" title="{alt_text}" />'
+        f'alt="{alt_text}" title="{alt_text}"{priority_attr} />'
     )
 
     # Build card components

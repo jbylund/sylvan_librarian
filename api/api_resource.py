@@ -1294,8 +1294,7 @@ class APIResource:
             return
         self._serve_static_file(filename="styles.css", falcon_response=falcon_response)
         falcon_response.content_type = "text/css"
-        # Cache CSS for 1 hour - it changes infrequently
-        set_cache_header(falcon_response, duration=timedelta(hours=1))
+        set_cache_header(falcon_response, duration=timedelta(days=30))
 
     def app_js(self, *, falcon_response: falcon.Response | None = None, **_: object) -> None:
         """Return the app.js file.
@@ -1322,8 +1321,7 @@ class APIResource:
             return
         self._serve_static_file(filename="app.min.js", falcon_response=falcon_response)
         falcon_response.content_type = "application/javascript"
-        # Cache minified JavaScript for 1 hour - it changes infrequently
-        set_cache_header(falcon_response, duration=timedelta(hours=1))
+        set_cache_header(falcon_response, duration=timedelta(days=30))
 
     def _serve_static_file(self, *, filename: str, falcon_response: falcon.Response) -> None:
         """Serve a static file to the Falcon response.
