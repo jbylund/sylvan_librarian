@@ -66,6 +66,11 @@ IMPORT_EXPORT = True
 MIN_IMPORT_INTERVAL = 300
 IMPORT_LOCK_TIMEOUT = 2
 MIN_IMPORT_CARDS = 90_000
+# Rows per batch streamed into the engine during a reload. The reload's memory
+# floor is the Rust-side build (~305 MB), so the batch only needs to be small
+# relative to that: ~2k rows ≈ 18 MB of dicts. Smaller adds round trips for no
+# measurable gain (see docs/issues/engine-incremental-loading.md).
+_ENGINE_RELOAD_BATCH_SIZE = 2_000
 
 CUSTOM_IS_TAGS = [
     "historic",  # artifact, legendary, saga
@@ -623,15 +628,19 @@ class APIResource:
         return retval
 
     def _reload_engine(self, *, force: bool = False) -> None:
-        """Fetch all cards from the DB and reload the Rust engine's card store.
+        """Stream all cards from the DB into the Rust engine's card store in batches.
 
-        The full-table fetch (fetchall + dict conversion + rkyv serialization) is the
-        most memory-hungry thing a worker does, so it is guarded by a cross-worker
-        lock: only one worker pays that cost at a time. With force=False (cold-start
-        warming), losers of the race return immediately and pick up the winner's
-        archive via the engine's inode-based remap. With force=True (data just
-        changed), callers wait their turn but skip the rebuild if another worker
-        refreshed the store while they were waiting.
+        A server-side cursor feeds the engine's staged reload API
+        (reload_begin / add_batch / reload_commit) one batch at a time, so the
+        Python-side transient is one batch of row dicts (~18 MB at 2k rows)
+        instead of the whole corpus (~840 MB) — measurements in
+        docs/issues/engine-incremental-loading.md. The reload is guarded by a
+        cross-worker lock so only one worker pays the build cost at a time.
+        With force=False (cold-start warming), losers of the race return
+        immediately and pick up the winner's archive via the engine's
+        inode-based remap. With force=True (data just changed), callers wait
+        their turn but skip the rebuild if another worker refreshed the store
+        while they were waiting.
 
         Args:
             force: If False, skip entirely when another worker holds the lock or the
@@ -653,13 +662,24 @@ class APIResource:
             cols_sql = ", ".join(f"card.{col}" for col in _ENGINE_COLUMNS_FROM_MODULE)
             try:
                 with self._conn_pool.connection() as conn:
-                    with conn.cursor() as cursor:
+                    # Named cursor => server-side: psycopg buffers one batch, not the full result.
+                    with conn.cursor(name="engine_reload") as cursor:
+                        cursor.itersize = _ENGINE_RELOAD_BATCH_SIZE
                         cursor.execute(f"SELECT {cols_sql} FROM magic.cards AS card")
-                        rows = cursor.fetchall()
+                        if not self._engine.reload_begin():
+                            # Another process published a fresh archive while we
+                            # waited for the engine's write lock; it was remapped.
+                            return
+                        try:
+                            while batch := cursor.fetchmany(_ENGINE_RELOAD_BATCH_SIZE):
+                                self._engine.add_batch(batch)
+                            self._engine.reload_commit()
+                        except BaseException:
+                            self._engine.reload_abort()
+                            raise
             except psycopg_pool.PoolClosed:
                 logger.debug("Connection pool closed during engine reload, skipping (pid=%d)", os.getpid())
                 return
-            self._engine.reload([dict(row) for row in rows])
             logger.info("Engine reloaded with %d cards (pid=%d)", self._engine.size(), os.getpid())
         finally:
             self._engine_reload_guard.release()

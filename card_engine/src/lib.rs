@@ -38,6 +38,7 @@ mod alloc_stats {
 
     pub fn live() -> usize { LIVE.load(Ordering::Relaxed) }
     pub fn allocs() -> usize { ALLOCS.load(Ordering::Relaxed) }
+    pub fn peak() -> usize { PEAK.load(Ordering::Relaxed) }
 
     pub fn reset_peak() {
         RELOAD_LIVE_BEFORE.store(live(), Ordering::Relaxed);
@@ -49,6 +50,7 @@ mod alloc_stats {
         after_indexes: (usize, usize),
         component_bytes: (usize, usize, usize),
         archive: usize,
+        peak: usize, // caller snapshots before diagnostics inflate the high-water mark
     ) {
         RELOAD_LIVE_AFTER_CARDS.store(after_cards.0, Ordering::Relaxed);
         RELOAD_ALLOCS_AFTER_CARDS.store(after_cards.1, Ordering::Relaxed);
@@ -58,7 +60,7 @@ mod alloc_stats {
         RELOAD_INDEXES_RKYV.store(component_bytes.1, Ordering::Relaxed);
         RELOAD_STRINGS_RKYV.store(component_bytes.2, Ordering::Relaxed);
         RELOAD_ARCHIVE.store(archive, Ordering::Relaxed);
-        RELOAD_PEAK.store(PEAK.load(Ordering::Relaxed), Ordering::Relaxed);
+        RELOAD_PEAK.store(peak, Ordering::Relaxed);
     }
 
     pub struct CountingAlloc;
@@ -2245,10 +2247,22 @@ struct CachedMmap {
     inode: u64,
 }
 
+/// In-progress staged reload: cards accumulated across add_batch() calls plus
+/// the cross-process flock, held from reload_begin() until reload_commit() /
+/// reload_abort() so no other process can interleave a write. Dropping the
+/// staging (commit, abort, or a fresh reload_begin after an abandoned cycle)
+/// closes the lock file, which releases the flock.
+struct Staging {
+    cards: Vec<Card>,
+    interner: Interner,
+    #[allow(dead_code)] // held for its flock; released on drop
+    lock_file: std::fs::File,
+}
+
 #[pyclass]
 struct QueryEngine {
     shm_path: PathBuf,
-    write_lock: Mutex<()>,
+    staging: Mutex<Option<Staging>>,
     cached_mmap: Mutex<Option<CachedMmap>>,
 }
 
@@ -2307,7 +2321,7 @@ impl QueryEngine {
         };
         QueryEngine {
             shm_path: PathBuf::from(shm_path.unwrap_or(default_path)),
-            write_lock: Mutex::new(()),
+            staging: Mutex::new(None),
             cached_mmap: Mutex::new(None),  // populated by first reload()
         }
     }
@@ -2320,8 +2334,15 @@ impl QueryEngine {
         self.get_mmap().map(|_| ())
     }
 
-    fn reload(&self, db_rows: &Bound<PyList>) -> PyResult<()> {
-        let _guard = self.write_lock.lock().unwrap();
+    /// Start a staged reload: acquire the cross-process write lock and reset
+    /// the staging buffer. Returns false (and refreshes the local mapping) if
+    /// another worker published a new archive while we waited for the lock —
+    /// the caller should skip fetching entirely. Any staging abandoned by a
+    /// previous failed cycle is discarded here.
+    fn reload_begin(&self) -> PyResult<bool> {
+        let mut staging = self.staging.lock().unwrap();
+        // Drop an abandoned cycle's buffer and its flock before re-acquiring.
+        *staging = None;
 
         // Snapshot the archive's identity before contending for the cross-process
         // lock, so we can detect whether another worker published a new archive
@@ -2332,6 +2353,7 @@ impl QueryEngine {
 
         // Cross-process exclusive lock: only one worker writes per reload cycle.
         // The lock file is separate so it persists across archive replacements.
+        // Held until reload_commit()/reload_abort() drops the Staging.
         let lock_path = self.shm_path.with_extension("lock");
         let lock_file = std::fs::OpenOptions::new()
             .write(true).create(true).open(&lock_path)
@@ -2352,17 +2374,46 @@ impl QueryEngine {
         // our local handle.
         let inode_after = std::fs::metadata(&self.shm_path).ok().map(|m| m.ino());
         if inode_after.is_some() && inode_after != inode_before {
-            return self.get_mmap().map(|_| ());
+            self.get_mmap().map(|_| ())?;
+            return Ok(false);
         }
 
         #[cfg(feature = "alloc-counter")]
         alloc_stats::reset_peak();
 
-        let mut interner = Interner::new();
-        let mut cards: Vec<Card> = db_rows
-            .iter()
-            .filter_map(|item| item.cast::<PyDict>().ok().map(|d| card_from_pydict(&d, &mut interner)))
-            .collect();
+        *staging = Some(Staging { cards: Vec::new(), interner: Interner::new(), lock_file });
+        Ok(true)
+    }
+
+    /// Append one batch of card dicts to the staging buffer.
+    fn add_batch(&self, db_rows: &Bound<PyList>) -> PyResult<()> {
+        let mut guard = self.staging.lock().unwrap();
+        let staging = guard.as_mut().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("add_batch called without reload_begin")
+        })?;
+        for item in db_rows.iter() {
+            if let Ok(d) = item.cast::<PyDict>() {
+                staging.cards.push(card_from_pydict(&d, &mut staging.interner));
+            }
+        }
+        Ok(())
+    }
+
+    /// Discard an in-progress staged reload, releasing the cross-process lock.
+    fn reload_abort(&self) -> PyResult<()> {
+        self.staging.lock().unwrap().take();
+        Ok(())
+    }
+
+    /// Sort, index, serialize, and atomically publish the staged cards, then
+    /// release the cross-process lock. Queries keep serving the old archive
+    /// until the rename lands.
+    fn reload_commit(&self) -> PyResult<()> {
+        let staging = self.staging.lock().unwrap().take().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("reload_commit called without reload_begin")
+        })?;
+        let Staging { mut cards, interner, lock_file } = staging;
+
         // unique=card/artwork group by oracle_id, so cards without one would all
         // collapse into a single group. The DB enforces NOT NULL; fail loudly here
         // for any other caller (e.g. hand-built test dicts).
@@ -2397,26 +2448,19 @@ impl QueryEngine {
 
         #[cfg(feature = "alloc-counter")]
         let stats_after_indexes = (alloc_stats::live(), alloc_stats::allocs());
-        #[cfg(feature = "alloc-counter")]
-        let component_bytes = (
-            rkyv::to_bytes::<rkyv::rancor::Error>(&cards).map(|b| b.len()).unwrap_or(0),
-            rkyv::to_bytes::<rkyv::rancor::Error>(&indexes).map(|b| b.len()).unwrap_or(0),
-            rkyv::to_bytes::<rkyv::rancor::Error>(&strings).map(|b| b.len()).unwrap_or(0),
-        );
 
         // Snapshot the registry card_from_pydict just populated so reader
         // processes can adopt the same format→shift assignments.
         let format_shifts_snapshot = format_shifts().read().map(|m| m.clone()).unwrap_or_default();
         let card_data = CardData { cards, strings, indexes, format_shifts: format_shifts_snapshot };
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&card_data)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("rkyv serialize: {e}")))?;
 
-        #[cfg(feature = "alloc-counter")]
-        alloc_stats::record_reload(stats_after_cards, stats_after_indexes, component_bytes, bytes.len());
-
-        // Write atomically: write to a per-PID .tmp, then rename over shm_path.
+        // Write atomically: stream into a per-PID .tmp, then rename over shm_path.
         // Per-PID avoids the race where two workers write to the same .tmp and
         // one's rename consumes the file before the other can rename it.
+        // Streaming the serialization straight into the file means the archive
+        // bytes exist only as file pages — there is no second copy of the
+        // archive as a heap buffer, and no realloc-doubling spike while it
+        // grows (see docs/issues/engine-reload-publish-transient.md).
         let tmp_name = format!(
             "{}.{}.tmp",
             self.shm_path.file_name().unwrap_or_default().to_string_lossy(),
@@ -2424,17 +2468,57 @@ impl QueryEngine {
         );
         let tmp_path = self.shm_path.with_file_name(tmp_name);
         {
-            let mut f = std::fs::File::create(&tmp_path)
+            let f = std::fs::File::create(&tmp_path)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("create tmp: {e}")))?;
-            f.write_all(&archive_header())
+            let mut buf = std::io::BufWriter::with_capacity(1 << 20, f);
+            buf.write_all(&archive_header())
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("write header: {e}")))?;
-            f.write_all(&bytes)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("write tmp: {e}")))?;
+            rkyv::api::high::to_bytes_in::<_, rkyv::rancor::Error>(
+                &card_data,
+                rkyv::ser::writer::IoWriter::new(&mut buf),
+            )
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("rkyv serialize: {e}")))?;
+            buf.flush()
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("flush tmp: {e}")))?;
         }
+
+        #[cfg(feature = "alloc-counter")]
+        {
+            // Snapshot the build peak before the component-size diagnostics
+            // below re-serialize pieces into heap buffers and inflate it.
+            let build_peak = alloc_stats::peak();
+            let archive_len = std::fs::metadata(&tmp_path)
+                .map(|m| m.len() as usize)
+                .unwrap_or(0)
+                .saturating_sub(ARCHIVE_HEADER_LEN);
+            let component_bytes = (
+                rkyv::to_bytes::<rkyv::rancor::Error>(&card_data.cards).map(|b| b.len()).unwrap_or(0),
+                rkyv::to_bytes::<rkyv::rancor::Error>(&card_data.indexes).map(|b| b.len()).unwrap_or(0),
+                rkyv::to_bytes::<rkyv::rancor::Error>(&card_data.strings).map(|b| b.len()).unwrap_or(0),
+            );
+            alloc_stats::record_reload(stats_after_cards, stats_after_indexes, component_bytes, archive_len, build_peak);
+        }
+
         std::fs::rename(&tmp_path, &self.shm_path)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("rename shm: {e}")))?;
 
+        // The new archive is published; release the cross-process write lock.
+        drop(lock_file);
+
         self.get_mmap().map(|_| ())
+    }
+
+    /// One-shot reload: the staged API as a single call. Kept for tests and
+    /// for callers that already hold the full corpus in memory.
+    fn reload(&self, db_rows: &Bound<PyList>) -> PyResult<()> {
+        if !self.reload_begin()? {
+            return Ok(()); // another worker just published; we picked up theirs
+        }
+        if let Err(e) = self.add_batch(db_rows) {
+            self.reload_abort()?;
+            return Err(e);
+        }
+        self.reload_commit()
     }
 
     #[pyo3(signature = (*, filters, unique="card", prefer="default", orderby="edhrec", direction="asc", limit=100, offset=0))]
