@@ -63,6 +63,7 @@ Arcane Tutor is an open source implementation of Scryfall, a Magic: The Gatherin
 
 - **Arithmetic operations** - Mathematical expressions like `cmc+1<power`
 - **Typeahead search with intelligent completion** - Enhanced UX for query building
+- **In-memory Rust query engine** - Sub-millisecond search for most queries (~76x faster than the SQL path), with PostgreSQL as a transparent fallback
 - **Optimized database schema for low latency queries** - Performance improvements
 - **Larger data fetch capabilities** - No 175 card/page limit like Scryfall
 - **Data synchronization tools** - Tools to sync from upstream Scryfall
@@ -70,8 +71,9 @@ Arcane Tutor is an open source implementation of Scryfall, a Magic: The Gatherin
 
 ### Core Components
 
-1. **Search DSL Parser** - A comprehensive parsing library for Scryfall's query syntax supporting text search, numeric comparisons, color identity, and advanced operators
-1. **Database Query Engine** - Converts parsed queries into optimized PostgreSQL queries with support for complex joins and filtering
+1. **Search DSL Parser** - A hand-rolled recursive-descent parser for Scryfall's query syntax supporting text search, numeric comparisons, color identity, and advanced operators (~49x faster than the previous pyparsing implementation, which is retained for parity testing)
+1. **Rust Query Engine** - An in-process Rust (PyO3) filter engine that evaluates parsed queries against a shared-memory card store (rkyv + mmap), serving most searches without touching the database (~76x faster than the SQL path)
+1. **SQL Query Path** - Converts parsed queries into optimized, parameterized PostgreSQL queries; kept in parallel as the fallback when the engine is cold or errors
 1. **Data Import Tools** - Bulk data loading from Scryfall exports with incremental updates and card tagging integration
 1. **Web Interface** - A responsive HTML/JavaScript application providing search functionality with card display similar to Scryfall
 1. **Card Tagging System** - Extended functionality for importing and managing Scryfall's card tags with hierarchy support
@@ -98,8 +100,8 @@ Based on [comprehensive functionality analysis](docs/technical/scryfall_function
 ### Implementation Status
 
 - **Current API Success Rate**: 100% for supported features (enhanced coverage with flavor text search)
-- **Test Coverage**: 779 total tests including 544 parser tests with comprehensive validation
-- **Performance**: Optimized PostgreSQL with proper indexing including full-text search capabilities
+- **Test Coverage**: 1,821 total tests including 1,302 parser tests with comprehensive validation
+- **Performance**: In-memory Rust query engine (sub-millisecond for most queries) backed by optimized PostgreSQL with proper indexing including full-text search capabilities
 - **Data Quality**: Regular comparison testing against official Scryfall API
 
 ## Code Organization
@@ -110,9 +112,10 @@ arcane_tutor/
 │   ├── db/                      # Database schema and migrations
 │   ├── middlewares/             # HTTP middleware components
 │   ├── parsing/                 # Query parser implementation
-│   │   ├── tests/               # Parser unit tests (544 tests)
+│   │   ├── tests/               # Parser unit tests (1,302 tests)
 │   │   ├── nodes.py             # AST node definitions
-│   │   ├── parsing_f.py         # Main parser with pyparsing
+│   │   ├── hand_parser.py       # Main parser (hand-rolled recursive descent)
+│   │   ├── pyparsing_based.py   # Legacy pyparsing parser (parity testing only)
 │   │   └── card_query_nodes.py  # Card-specific query node types
 │   ├── sql/                     # SQL query templates
 │   ├── tests/                   # Integration and API tests
@@ -120,6 +123,7 @@ arcane_tutor/
 │   ├── api_worker.py            # Multi-process worker implementation
 │   ├── entrypoint.py            # API server entry point and CLI
 │   └── index.html               # Web frontend (single-file app)
+├── card_engine/                 # Rust (PyO3) in-memory query engine
 ├── client/                      # Query runner client for index analysis
 ├── configs/                     # Configuration files
 ├── docs/                        # Project documentation and analysis
@@ -145,6 +149,7 @@ arcane_tutor/
 
 - Python 3.13+ (tested with 3.13)
 - PostgreSQL 17+ (for full functionality)
+- Rust toolchain with maturin (for the in-memory query engine; `make engine` builds it)
 - Docker and Docker Compose (for containerized development)
 - Node.js 26.1.0+ (for HTML formatting tools)
 
@@ -172,14 +177,14 @@ arcane_tutor/
 1. **Validate Installation**
 
    ```bash
-   # Run test suite (should pass all 779 tests)
+   # Run test suite (should pass all 1,821 tests)
    python -m pytest -vvv
 
    # Verify linting
    python -m ruff check
 
    # Test parser functionality including rarity search
-   python -c "from api.parsing import parse_scryfall_query; print(parse_scryfall_query('rarity>uncommon'))"
+   python -c "from api.parsing import parse_search_query; print(parse_search_query('rarity>uncommon'))"
    ```
 
 ### Development Workflows
@@ -201,6 +206,9 @@ make prod-up         # Start PostgreSQL and API services (prod)
 The following environment variables can be configured:
 
 **API Service:**
+- `ENABLE_ENGINE` - Enable/disable the in-memory Rust query engine (enabled in all environments)
+  - When enabled, searches are served from the shared-memory card store with PostgreSQL as fallback
+  - When disabled, all searches go through the SQL path
 - `ENABLE_CACHE` - Enable/disable API response caching (default: `false`)
   - Set to `true`, `1`, or `yes` to enable caching
   - Improves performance for repeated queries
