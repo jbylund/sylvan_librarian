@@ -1,0 +1,62 @@
+parser:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "api/parsing/**"
+
+engine:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "card_engine/**"
+
+frontend:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "api/static/**"
+
+api:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "api/**"
+          - "!api/parsing/**"
+          - "!api/static/**"
+          - "!api/tests/**"
+          - "!api/parsing/tests/**"
+
+database:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "api/db/**"
+
+tests:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "api/tests/**"
+          - "api/parsing/tests/**"
+          - "conftest.py"
+
+docs:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "docs/**"
+          - "*.md"
+          - ".github/ISSUE_TEMPLATE/**"
+          - ".github/PULL_REQUEST_TEMPLATE.md"
+
+ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".github/workflows/**"
+          - "makefile"
+          - "docker-compose.yml"
+          - "envs/**"
+
+dependencies:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "pyproject.toml"
+          - "requirements/**"
+          - "package.json"
+          - "package-lock.json"
+          - "uv.lock"
+          - "card_engine/Cargo.toml"
+          - "card_engine/Cargo.lock"
