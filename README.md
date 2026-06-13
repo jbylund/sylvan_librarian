@@ -16,11 +16,12 @@ See [docs/legal.md](docs/legal/legal.md) for full details.
    1. [Recommended Development Priorities](#recommended-development-priorities)
 1. [Code Organization](#code-organization)
 1. [Developer Quick Start](#developer-quick-start)
-1. [Card Tagging System](#card-tagging-system)
+1. [Card Tagging System](docs/technical/card_tagging.md)
 1. [API Documentation](#api-documentation)
 1. [Development Notes](#development-notes)
 1. [Security](#security)
 1. [Data Sources & Attribution](#data-sources--attribution)
+1. [Contributing](docs/CONTRIBUTING.md)
 
 ## Project Overview
 
@@ -282,45 +283,6 @@ python -m client.query_runner
 - **Database connection**: Use `make dbconn` to connect to local PostgreSQL instance
 - **API comparison**: Run `python scripts/scryfall_comparison_script.py` to compare against official Scryfall API
 
-## Card Tagging System
-
-The API supports importing and managing card tags from Scryfall's tagger system:
-
-### Available Endpoints
-
-- `update_tagged_cards` - Import cards for a specific tag
-- `discover_and_import_all_tags` - Bulk import all available tags and their card associations
-
-### Usage Examples
-
-```bash
-# Import cards for a specific tag
-curl "http://localhost:8080/update_tagged_cards?tag=flying"
-
-# Discover and import all tags (cards only, no hierarchy)
-curl "http://localhost:8080/discover_and_import_all_tags?import_cards=true&import_hierarchy=false"
-
-# Import tag hierarchy only (no card associations)
-curl "http://localhost:8080/discover_and_import_all_tags?import_cards=false&import_hierarchy=true"
-
-# Full import: all tags, cards, and hierarchy relationships
-curl "http://localhost:8080/discover_and_import_all_tags?import_cards=true&import_hierarchy=true"
-```
-
-### Database Schema
-
-The tagging system uses two main database components:
-
-1. **magic.cards.card_tags** (jsonb) - Stores tag associations for each card
-1. **magic.card_tags** table - Stores tag hierarchy with parent-child relationships
-
-### Rate Limiting
-
-The bulk import includes built-in rate limiting:
-
-- 200ms delay between individual tag imports
-- 500ms delay between hierarchy relationship requests
-- Progress logging every 50 tags processed
 
 ## API Documentation
 
@@ -372,35 +334,13 @@ Not approved/endorsed by Wizards of the Coast.
 
 ### Security
 
-Arcane Tutor follows security best practices to protect users and data. A comprehensive security audit has been conducted with all critical vulnerabilities remediated.
-
-**Security Status**: SECURE - All critical and high-priority vulnerabilities fixed
-
-**Key Security Documents:**
-- **[Security Best Practices](docs/security/security_best_practices.md)** - Development security guidelines
-
-**Security Features:**
-- SQL injection prevention with parameterized queries
-- XSS protection with output encoding
-- HTTP security headers (CSP, X-Frame-Options, etc.)
-- CORS restrictions
-- Input validation on all endpoints
-- Secure dependency management (pip-audit, npm audit)
-
-To report a vulnerability, see [SECURITY.md](SECURITY.md).
+All user input reaches the database only via parameterized queries; HTTP responses include CSP, X-Frame-Options, and CORS headers. See [docs/security/security_best_practices.md](docs/security/security_best_practices.md) for development guidelines. To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ### Legal Compliance
 
 For complete information about data sources, intellectual property attribution, and compliance with relevant policies, see [docs/legal.md](docs/legal/legal.md).
 
-**Key Compliance Documents:**
-- **[Legal Compliance Summary](docs/legal/legal_compliance_summary.md)** - Quick status overview (93% complete - excellent standing)
-- **[Legal & Data Sources](docs/legal/legal.md)** - Attribution, IP rights, data sources
-- **[Terms of Service](docs/user/terms_of_service.md)** - User agreement and service terms
-- **[Privacy Policy](docs/user/privacy_policy.md)** - Data collection and privacy practices
-- **[Compliance Review](docs/legal/compliance_review.md)** - Detailed compliance checklist status
-
-**Compliance Status**: 93% Complete (42/45 items) - Excellent standing with all critical items addressed.
+For attribution, IP rights, terms of service, and privacy policy, see [docs/legal/](docs/legal/).
 
 ## How Arcane Tutor Differs from Scryfall
 
@@ -414,3 +354,4 @@ While we use Scryfall's data, Arcane Tutor is a distinct implementation:
 - **Open source**: Transparent, community-driven development
 
 Our goal is to provide an open-source alternative that respects both Wizards of the Coast's intellectual property and Scryfall's valuable contribution to the MTG community.
+
