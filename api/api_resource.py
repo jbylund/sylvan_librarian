@@ -956,8 +956,10 @@ class APIResource:
                 # limit=None means "no limit"; the engine requires an int, so use a large number
                 limit=limit if limit is not None else 1_000_000,
             )
+        with timer("engine_collect"):
+            cards = list(cards)
         return {
-            "cards": list(cards),
+            "cards": cards,
             "compiled": "(rust engine)",
             "inner_timings": timer.get_timings(),
             "outer_timings": timer.get_timings(),
