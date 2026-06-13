@@ -16,11 +16,12 @@ See [docs/legal.md](docs/legal/legal.md) for full details.
    1. [Recommended Development Priorities](#recommended-development-priorities)
 1. [Code Organization](#code-organization)
 1. [Developer Quick Start](#developer-quick-start)
-1. [Card Tagging System](#card-tagging-system)
+1. [Card Tagging System](docs/technical/card_tagging.md)
 1. [API Documentation](#api-documentation)
 1. [Development Notes](#development-notes)
 1. [Security](#security)
 1. [Data Sources & Attribution](#data-sources--attribution)
+1. [Contributing](docs/CONTRIBUTING.md)
 
 ## Project Overview
 
@@ -63,6 +64,7 @@ Arcane Tutor is an open source implementation of Scryfall, a Magic: The Gatherin
 
 - **Arithmetic operations** - Mathematical expressions like `cmc+1<power`
 - **Typeahead search with intelligent completion** - Enhanced UX for query building
+- **In-memory Rust query engine** - Sub-millisecond search for most queries (~76x faster than the SQL path), with PostgreSQL as a transparent fallback
 - **Optimized database schema for low latency queries** - Performance improvements
 - **Larger data fetch capabilities** - No 175 card/page limit like Scryfall
 - **Data synchronization tools** - Tools to sync from upstream Scryfall
@@ -70,8 +72,9 @@ Arcane Tutor is an open source implementation of Scryfall, a Magic: The Gatherin
 
 ### Core Components
 
-1. **Search DSL Parser** - A comprehensive parsing library for Scryfall's query syntax supporting text search, numeric comparisons, color identity, and advanced operators
-1. **Database Query Engine** - Converts parsed queries into optimized PostgreSQL queries with support for complex joins and filtering
+1. **Search DSL Parser** - A hand-rolled recursive-descent parser for Scryfall's query syntax supporting text search, numeric comparisons, color identity, and advanced operators (~49x faster than the previous pyparsing implementation, which is retained for parity testing)
+1. **Rust Query Engine** - An in-process Rust (PyO3) filter engine that evaluates parsed queries against a shared-memory card store (rkyv + mmap), serving most searches without touching the database (~76x faster than the SQL path)
+1. **SQL Query Path** - Converts parsed queries into optimized, parameterized PostgreSQL queries; kept in parallel as the fallback when the engine is cold or errors
 1. **Data Import Tools** - Bulk data loading from Scryfall exports with incremental updates and card tagging integration
 1. **Web Interface** - A responsive HTML/JavaScript application providing search functionality with card display similar to Scryfall
 1. **Card Tagging System** - Extended functionality for importing and managing Scryfall's card tags with hierarchy support
@@ -98,8 +101,8 @@ Based on [comprehensive functionality analysis](docs/technical/scryfall_function
 ### Implementation Status
 
 - **Current API Success Rate**: 100% for supported features (enhanced coverage with flavor text search)
-- **Test Coverage**: 779 total tests including 544 parser tests with comprehensive validation
-- **Performance**: Optimized PostgreSQL with proper indexing including full-text search capabilities
+- **Test Coverage**: 1,821 total tests including 1,302 parser tests with comprehensive validation
+- **Performance**: In-memory Rust query engine (sub-millisecond for most queries) backed by optimized PostgreSQL with proper indexing including full-text search capabilities
 - **Data Quality**: Regular comparison testing against official Scryfall API
 
 ## Code Organization
@@ -110,9 +113,10 @@ arcane_tutor/
 │   ├── db/                      # Database schema and migrations
 │   ├── middlewares/             # HTTP middleware components
 │   ├── parsing/                 # Query parser implementation
-│   │   ├── tests/               # Parser unit tests (544 tests)
+│   │   ├── tests/               # Parser unit tests (1,302 tests)
 │   │   ├── nodes.py             # AST node definitions
-│   │   ├── parsing_f.py         # Main parser with pyparsing
+│   │   ├── hand_parser.py       # Main parser (hand-rolled recursive descent)
+│   │   ├── pyparsing_based.py   # Legacy pyparsing parser (parity testing only)
 │   │   └── card_query_nodes.py  # Card-specific query node types
 │   ├── sql/                     # SQL query templates
 │   ├── tests/                   # Integration and API tests
@@ -120,6 +124,7 @@ arcane_tutor/
 │   ├── api_worker.py            # Multi-process worker implementation
 │   ├── entrypoint.py            # API server entry point and CLI
 │   └── index.html               # Web frontend (single-file app)
+├── card_engine/                 # Rust (PyO3) in-memory query engine
 ├── client/                      # Query runner client for index analysis
 ├── configs/                     # Configuration files
 ├── docs/                        # Project documentation and analysis
@@ -145,6 +150,7 @@ arcane_tutor/
 
 - Python 3.13+ (tested with 3.13)
 - PostgreSQL 17+ (for full functionality)
+- Rust toolchain with maturin (for the in-memory query engine; `make engine` builds it)
 - Docker and Docker Compose (for containerized development)
 - Node.js 26.1.0+ (for HTML formatting tools)
 
@@ -172,14 +178,14 @@ arcane_tutor/
 1. **Validate Installation**
 
    ```bash
-   # Run test suite (should pass all 779 tests)
+   # Run test suite (should pass all 1,821 tests)
    python -m pytest -vvv
 
    # Verify linting
    python -m ruff check
 
    # Test parser functionality including rarity search
-   python -c "from api.parsing import parse_scryfall_query; print(parse_scryfall_query('rarity>uncommon'))"
+   python -c "from api.parsing import parse_search_query; print(parse_search_query('rarity>uncommon'))"
    ```
 
 ### Development Workflows
@@ -201,6 +207,9 @@ make prod-up         # Start PostgreSQL and API services (prod)
 The following environment variables can be configured:
 
 **API Service:**
+- `ENABLE_ENGINE` - Enable/disable the in-memory Rust query engine (enabled in all environments)
+  - When enabled, searches are served from the shared-memory card store with PostgreSQL as fallback
+  - When disabled, all searches go through the SQL path
 - `ENABLE_CACHE` - Enable/disable API response caching (default: `false`)
   - Set to `true`, `1`, or `yes` to enable caching
   - Improves performance for repeated queries
@@ -274,45 +283,6 @@ python -m client.query_runner
 - **Database connection**: Use `make dbconn` to connect to local PostgreSQL instance
 - **API comparison**: Run `python scripts/scryfall_comparison_script.py` to compare against official Scryfall API
 
-## Card Tagging System
-
-The API supports importing and managing card tags from Scryfall's tagger system:
-
-### Available Endpoints
-
-- `update_tagged_cards` - Import cards for a specific tag
-- `discover_and_import_all_tags` - Bulk import all available tags and their card associations
-
-### Usage Examples
-
-```bash
-# Import cards for a specific tag
-curl "http://localhost:8080/update_tagged_cards?tag=flying"
-
-# Discover and import all tags (cards only, no hierarchy)
-curl "http://localhost:8080/discover_and_import_all_tags?import_cards=true&import_hierarchy=false"
-
-# Import tag hierarchy only (no card associations)
-curl "http://localhost:8080/discover_and_import_all_tags?import_cards=false&import_hierarchy=true"
-
-# Full import: all tags, cards, and hierarchy relationships
-curl "http://localhost:8080/discover_and_import_all_tags?import_cards=true&import_hierarchy=true"
-```
-
-### Database Schema
-
-The tagging system uses two main database components:
-
-1. **magic.cards.card_tags** (jsonb) - Stores tag associations for each card
-1. **magic.card_tags** table - Stores tag hierarchy with parent-child relationships
-
-### Rate Limiting
-
-The bulk import includes built-in rate limiting:
-
-- 200ms delay between individual tag imports
-- 500ms delay between hierarchy relationship requests
-- Progress logging every 50 tags processed
 
 ## API Documentation
 
@@ -364,35 +334,13 @@ Not approved/endorsed by Wizards of the Coast.
 
 ### Security
 
-Arcane Tutor follows security best practices to protect users and data. A comprehensive security audit has been conducted with all critical vulnerabilities remediated.
-
-**Security Status**: SECURE - All critical and high-priority vulnerabilities fixed
-
-**Key Security Documents:**
-- **[Security Best Practices](docs/security/security_best_practices.md)** - Development security guidelines
-
-**Security Features:**
-- SQL injection prevention with parameterized queries
-- XSS protection with output encoding
-- HTTP security headers (CSP, X-Frame-Options, etc.)
-- CORS restrictions
-- Input validation on all endpoints
-- Secure dependency management (pip-audit, npm audit)
-
-To report a vulnerability, see [SECURITY.md](SECURITY.md).
+All user input reaches the database only via parameterized queries; HTTP responses include CSP, X-Frame-Options, and CORS headers. See [docs/security/security_best_practices.md](docs/security/security_best_practices.md) for development guidelines. To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ### Legal Compliance
 
 For complete information about data sources, intellectual property attribution, and compliance with relevant policies, see [docs/legal.md](docs/legal/legal.md).
 
-**Key Compliance Documents:**
-- **[Legal Compliance Summary](docs/legal/legal_compliance_summary.md)** - Quick status overview (93% complete - excellent standing)
-- **[Legal & Data Sources](docs/legal/legal.md)** - Attribution, IP rights, data sources
-- **[Terms of Service](docs/user/terms_of_service.md)** - User agreement and service terms
-- **[Privacy Policy](docs/user/privacy_policy.md)** - Data collection and privacy practices
-- **[Compliance Review](docs/legal/compliance_review.md)** - Detailed compliance checklist status
-
-**Compliance Status**: 93% Complete (42/45 items) - Excellent standing with all critical items addressed.
+For attribution, IP rights, terms of service, and privacy policy, see [docs/legal/](docs/legal/).
 
 ## How Arcane Tutor Differs from Scryfall
 
@@ -406,3 +354,4 @@ While we use Scryfall's data, Arcane Tutor is a distinct implementation:
 - **Open source**: Transparent, community-driven development
 
 Our goal is to provide an open-source alternative that respects both Wizards of the Coast's intellectual property and Scryfall's valuable contribution to the MTG community.
+
