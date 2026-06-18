@@ -1,26 +1,41 @@
 ---
-title: "Falcon + Bjoern: Choosing a Python Web Framework"
+title: "47× the Throughput of FastAPI: Why I Use Falcon + Bjoern"
 date: 2026-07-04
 publishDate: 2026-07-04
 tags: ["arcane-tutor", "python", "falcon", "bjoern", "fastapi", "performance"]
 summary: "Why Arcane Tutor uses Falcon and Bjoern instead of the FastAPI + uvicorn default: a preference for explicit, close-to-vanilla Python over framework magic."
 ---
 
-FastAPI is now the most popular Python web framework.
-It passed Flask and Django in the 2025 JetBrains Python Developer Survey at 38% adoption,
-has 88,000 GitHub stars, and sees roughly 474 million PyPI downloads a month.
-Arcane Tutor uses Falcon and Bjoern instead.
+Arcane Tutor uses Falcon and Bjoern instead of FastAPI, the most popular Python web framework by a wide margin — 38% adoption in the 2025 JetBrains Python Developer Survey, 88,000 GitHub stars, roughly 474 million PyPI downloads a month.
+
+Benchmarked with `wrk` against a trivial `/ping` endpoint, 4 workers each, 100 concurrent connections:
+
+| | Falcon + Bjoern | FastAPI + Uvicorn |
+|---|---|---|
+| Req/sec | 479,407 | 10,117 |
+| Avg latency | 194µs | 5.14ms |
+| Timeouts | 78 | 500 |
+
+47× throughput difference on an endpoint that does nothing —
+which reflects the framework overhead, not the application work.
+The gap narrows when requests do real work, but the baseline matters more than it might seem:
+Arcane Tutor caches search results, so a large fraction of requests are cache hits that return immediately.
+The faster the framework processes a hit, the more headroom is left for the requests that actually need the database.
 
 ## The Appeal of FastAPI
 
-FastAPI is built around developer experience.
-Declare your request and response types as Python type hints, and you get
-input validation, serialization, and auto-generated OpenAPI docs for free.
-That's a real productivity win —
-especially for APIs with many endpoints, request bodies, or complex response schemas.
+FastAPI is built around developer experience: declare your types as Python hints and get input validation, serialization, and auto-generated OpenAPI docs for free.
+For APIs with many endpoints or complex response schemas, that is a genuine productivity win.
 
-A lot of developers love this.
-The framework handles the boilerplate so you can focus on the logic.
+```python
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/ping")
+def ping():
+    return {"ok": True}
+```
 
 ## A Different Preference
 
@@ -32,7 +47,7 @@ At a previous job, response validation overhead became a real problem at scale �
 That experience left me preferring to write something closer to plain Python:
 explicit request handling, explicit serialization, no surprises.
 
-Falcon is a minimalist WSGI framework.
+[Falcon](https://github.com/falconry/falcon) is a minimalist WSGI framework.
 It supports middleware, request body handling, and error serialization —
 but none of those come pre-built.
 There are no auto-generated OpenAPI docs, no type hint → validation magic,
@@ -63,7 +78,7 @@ that call is synchronous, and there is no I/O to overlap.
 
 ## Bjoern
 
-Bjoern is a C WSGI server built on libev.
+[Bjoern](https://github.com/jonashaag/bjoern) is a C WSGI server built on libev.
 Its selling point is minimal per-request overhead — it stays out of the way.
 
 I tested several other WSGI server options (gunicorn, waitress, cheroot, meinheld)
@@ -79,28 +94,40 @@ Each worker binds to the same port using `SO_REUSEPORT`,
 and the OS load-balances incoming connections across them:
 
 ```python
+import multiprocessing
+import os
+
+import bjoern
+import falcon
+
+
+class PingResource:
+    def on_get(self, req, resp):
+        resp.media = {"ok": True}
+
+
+def make_app() -> falcon.App:
+    app = falcon.App()
+    app.add_route("/ping", PingResource())
+    return app
+
+
 def worker(port: int) -> None:
     app = make_app()
     bjoern.run(app, host="0.0.0.0", port=port, reuse_port=True)
 
-processes = [Process(target=worker, args=(port,)) for _ in range(num_workers)]
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    num_workers = int(os.environ.get("WORKERS", max(2, os.cpu_count() or 1)))
+    processes = [multiprocessing.Process(target=worker, args=(port,)) for _ in range(num_workers)]
+    for p in processes:
+        p.start()
+    for p in processes:
+        p.join()
 ```
 
-Each worker is an independent OS process with its own memory.
-A worker crash doesn't take down the others.
+Each worker is an independent OS process, so a crash doesn't take down the others.
 
-## How It Compares in Practice
+My preference was for a stack where each layer is a separate decision. Bjoern handles HTTP with minimal per-request overhead; Falcon handles the application layer with explicit routing and a middleware model where I control what runs on every request — no behavior happening implicitly, easy to change when I want something different. FastAPI is a reasonable choice but it brings pydantic and starlette along as part of the package — a coherent ecosystem that pays off when you need validation, serialization, and OpenAPI docs. I needed none of those things, and I preferred not to inherit the rest.
 
-Benchmarked with `wrk` against a trivial `/ping` endpoint, 4 workers each, 100 concurrent connections:
-
-| | Falcon + Bjoern | FastAPI + Uvicorn |
-|---|---|---|
-| Req/sec | 479,407 | 10,117 |
-| Avg latency | 194µs | 5.14ms |
-
-47× throughput difference on an endpoint that does nothing —
-which reflects the framework overhead, not the application work.
-The gap narrows when requests do real work, but the baseline matters for reactive search
-where a query fires on every keystroke.
-
-The benchmark setup is in [benchmarks/web_frameworks/](https://github.com/jbylund/arcane_tutor/tree/main/benchmarks/web_frameworks) if you want to reproduce it.

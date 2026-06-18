@@ -1,7 +1,7 @@
 # Blog Post Plan
 
 Arcane Tutor blog series — covering the full technical evolution of the project.
-Target: 26 posts across several topic areas, written roughly in the order they were built.
+Target: 27 posts across several topic areas, written roughly in the order they were built.
 Publishing cadence: every two weeks starting 2026-06-20.
 
 ---
@@ -158,6 +158,19 @@ Swapping `cachetools` for `cachebox` required only a thin key-hashing compatibil
 The performance gain came essentially for free. A short post on the pattern of reaching for
 Rust-native Python packages as a low-friction performance lever.
 
+**[I5] HTTP compression negotiation: brotli, zstd, and gzip in a Falcon middleware**
+JSON card payloads are large and repetitive — a natural fit for compression. But serving compressed
+responses correctly is more nuanced than calling `gzip.compress()`. This post covers the full
+`CompressionMiddleware` implementation: parsing the `Accept-Encoding` header, selecting a compressor
+by server-side priority (zstd first at priority 10, then brotli at 20, then gzip at 30), and why
+the server deliberately ignores client `q=` weights rather than negotiating on both axes. Two code
+paths inside `process_response`: for buffered responses, compress the rendered body in one shot and
+drop `Content-Length`; for streaming responses, wrap the generator so compression happens on the fly.
+The 200-byte skip threshold (not worth the overhead for tiny responses), the `Vary: Accept-Encoding`
+header (required for correct CDN and proxy caching), and `mtime=0` in gzip to make repeated responses
+byte-identical. Ends with a look at real compression ratios on card search JSON and where the ~0.1ms
+compression cost sits relative to query latency.
+
 **[I3] The evolution of `/random_search`: from `ORDER BY RANDOM()` to in-memory sampling**
 The original random card endpoint ran two expensive queries on every request: a full table scan
 with `DISTINCT ON` to find preferred printings (~30k rows), then `ORDER BY RANDOM() LIMIT n`.
@@ -247,11 +260,12 @@ Dependency notes:
 | 19 | [I2] Cachebox: Rust-backed drop-in for cachetools | Infra | 2027-02-27 |
 | 20 | [R5] String interning for compact in-memory card data | Rust | 2027-03-13 |
 | 21 | [P2] Hand-rolling a recursive descent parser for 49× speedup | Parser | 2027-03-27 |
-| 22 | [R2] Index data structures in the Rust engine | Rust | 2027-04-10 |
-| 23 | [F1] 40× faster card rendering: DOM nodes vs. regex | Frontend | 2027-04-24 |
-| 24 | [R4] Zero-copy deserialization with rkyv and shared memory | Rust | 2027-05-08 |
-| 25 | [R6] Two-pivot pagination: O(n) sort for a single page | Rust | 2027-05-22 |
-| 26 | [R7] Linear scan vs. hash scan for distinct queries | Rust | 2027-06-05 |
+| 22 | [I5] HTTP compression negotiation: brotli, zstd, and gzip | Infra | 2027-04-10 |
+| 23 | [R2] Index data structures in the Rust engine | Rust | 2027-04-24 |
+| 24 | [F1] 40× faster card rendering: DOM nodes vs. regex | Frontend | 2027-05-08 |
+| 25 | [R4] Zero-copy deserialization with rkyv and shared memory | Rust | 2027-05-22 |
+| 26 | [R6] Two-pivot pagination: O(n) sort for a single page | Rust | 2027-06-05 |
+| 27 | [R7] Linear scan vs. hash scan for distinct queries | Rust | 2027-06-19 |
 
 ---
 

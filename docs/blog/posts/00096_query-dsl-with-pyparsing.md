@@ -205,8 +205,6 @@ Parse times under 2ms are not a meaningful fraction of total request latency
 until the database round-trip is already under 10ms —
 and at that point there are bigger things to optimize first.
 
----
-
 ## Implicit AND and Operator Precedence
 
 The query `type:creature power>3` means `type:creature AND power>3`.
@@ -270,10 +268,8 @@ one_token = (
 )
 ```
 
-Ordering matters.
-`string_value_tok` (`[a-zA-Z0-9_]([a-zA-Z0-9_-]*[a-zA-Z0-9_])?`) comes _before_ `mana_tok`
-so `bar` does not get consumed as the mana letter `b` + `ar`.
-AND/OR keywords come before word tokens so they are not swallowed as card-attribute names.
+Token ordering is important: `string_value_tok` (`[a-zA-Z0-9_]([a-zA-Z0-9_-]*[a-zA-Z0-9_])?`) comes before `mana_tok`
+so `bar` is not consumed as the mana letter `b` + `ar`, and AND/OR keywords come before word tokens so they are not swallowed as card-attribute names.
 
 ## Quoted Strings and Apostrophes
 
@@ -295,13 +291,8 @@ The same algorithm runs in two places.
 The JS version fires on every keystroke in the browser before the request goes out.
 The Python version runs in the API on every search request.
 
-They exist for different reasons.
-The JS balancing is about UX:
-a user mid-typing `name:"lig` has not made a mistake, they just have not finished yet.
-Balancing client-side lets the app fire a real search and show live results instead of an error.
-The Python balancing is about correctness for callers who never touch the browser at all —
-direct API users, scripts, and anything that hits `/search` without going through the frontend.
-Those requests skip the JS entirely, so the server has to be equally tolerant of partial input.
+The JS version handles UX — a user mid-typing `name:"lig` has not made a mistake, they just have not finished yet, and balancing client-side lets the app show live results instead of an error.
+The Python version is for callers who hit `/search` directly and never touch the browser: direct API users, scripts, anything that skips the frontend entirely, where the server has to be equally tolerant of partial input.
 
 The practical result is that the algorithm is specified twice, in two languages, and has to stay in sync:
 

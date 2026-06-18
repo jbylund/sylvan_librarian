@@ -14,11 +14,7 @@ In Scryfall syntax, the natural query would be:
 power+toughness>cmc+cmc
 ```
 
-Scryfall does not support this.
-It has a rich query language —
-you can filter by color, format legality, set, artist, flavor text, price —
-and it does allow comparing numeric fields against each other (`power>toughness` is a valid query).
-It does not support arithmetic expressions: `power>toughness+1` or `power+toughness>cmc+cmc`.
+Scryfall has a rich query language — color, format legality, set, artist, flavor text, price — and it does allow comparing numeric fields against each other (`power>toughness` is valid), but arithmetic expressions like `power>toughness+1` or `power+toughness>cmc+cmc` are not supported.
 
 My first thought was to load the Scryfall bulk data into PostgreSQL and write queries by hand.
 The query above becomes this SQL:
@@ -32,7 +28,7 @@ WHERE creature_power + creature_toughness > cmc * 2
 
 This answers the question, but it requires a terminal and hand-writing SQL.
 I wanted something I could use from a browser or my phone.
-So I built Arcane Tutor: a self-hosted, Scryfall-compatible card search engine with extended arithmetic syntax.
+So I built [Arcane Tutor](https://github.com/jbylund/arcane_tutor): a self-hosted, Scryfall-compatible card search engine with extended arithmetic syntax.
 
 Four motivations shaped how it was built.
 
@@ -113,10 +109,3 @@ the hot path was later replaced with an in-process Rust engine for a 76× speedu
 The frontend renders the results as they arrive.
 The application is containerized and runs on a small VPS.
 
-## This Series
-
-This is the first post in a series covering the full technical evolution of Arcane Tutor:
-the query parser, SQL generation, PostgreSQL indexing, frontend optimizations, and the Rust engine that eventually replaced the database for search.
-Each post covers one piece of the system.
-
-The project is open source at [github.com/jbylund/arcane_tutor](https://github.com/jbylund/arcane_tutor).

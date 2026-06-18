@@ -26,3 +26,11 @@ summary: "Two SQL hypotheses about DISTINCT ON key choice: UUID vs text, and whe
 
 ## What shipped
 
+
+## Related
+
+The same deduplication problem — one preferred printing per oracle ID — reappears in the Rust engine,
+where the query planner is gone and the choice is made explicitly in code. See
+[Linear Scan vs. Hash Scan for Distinct Queries](00832_linear-hash-scan-distinct.md) for how the
+engine picks between a linear scan and a hash scan based on result set size.
+
