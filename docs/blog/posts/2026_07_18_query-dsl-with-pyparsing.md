@@ -1,7 +1,7 @@
 ---
 title: "Building a Scryfall-Compatible Query DSL with pyparsing"
-date: 2026-07-11
-publishDate: 2026-07-11
+date: 2026-07-18
+publishDate: 2026-07-18
 tags: ["arcane-tutor", "parser", "pyparsing", "python"]
 summary: "How we used pyparsing to build a Scryfall-compatible query grammar, including the surprising corners: arithmetic detection, implicit AND, and quoted string edge cases."
 ---

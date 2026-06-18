@@ -1,7 +1,7 @@
 ---
 title: "Oracle ID Deduplication: What We Tried, What Worked, What Didn't"
-date: 2027-01-16
-publishDate: 2027-01-16
+date: 2026-12-05
+publishDate: 2026-12-05
 tags: ["arcane-tutor", "postgres", "sql", "performance", "benchmarking"]
 summary: "Two SQL hypotheses about DISTINCT ON key choice: UUID vs text, and whether DISTINCT ON the primary key does any real work. One hypothesis failed; two wins shipped."
 ---

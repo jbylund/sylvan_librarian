@@ -1,8 +1,8 @@
 # Blog Post Plan
 
 Arcane Tutor blog series — covering the full technical evolution of the project.
-Target: 24 posts across several topic areas, written roughly in the order they were built.
-Publishing cadence: every three weeks starting 2026-06-20.
+Target: 26 posts across several topic areas, written roughly in the order they were built.
+Publishing cadence: every two weeks starting 2026-06-20.
 
 ---
 
@@ -115,6 +115,13 @@ Suggesting the most common card types as the user types a `t:` query — without
 Covers the data source (type frequency from bulk data), how the suggestions are ranked, and the
 UX decisions around when to show/hide the list.
 
+**[F6] Fonts and mana symbols**
+Magic cards use a set of symbols — `{W}`, `{U}`, `{T}`, `{2/R}` — that need to render as glyphs
+rather than raw text. Covers the choice of a custom webfont (each symbol as a Unicode character)
+over SVG sprites or images, how font subsetting keeps the payload small, how the font is wired
+into CSS, and the tradeoff between font loading latency and per-symbol image requests. Sets up the
+follow-on post where the JavaScript that replaces the symbol tokens gets a 61× speedup.
+
 **[F5] Mana symbol rendering: regex + Map for 61× speedup**
 Replacing a loop-based string replacement with a regex pattern and a JavaScript `Map` lookup.
 The original code iterated over each known mana symbol and called `.replaceAll()` for each one —
@@ -131,6 +138,14 @@ for no-JS browsers. Walk through the server-side rendering path, what gets lost 
 ---
 
 ### Caching & Infrastructure
+
+**[I4] Falcon + Bjoern: choosing a Python web framework**
+FastAPI + uvicorn is the current industry default for Python APIs, but Arcane Tutor uses Falcon
+with Bjoern (a C WSGI server). Covers what Falcon gives up (no ORM, no templating, no
+auto-generated docs) and what it gains (a small, predictable surface area for a read-heavy API
+with no request bodies). Why async didn't matter here — every request hits the database (or later,
+the Rust engine), so the bottleneck is never I/O concurrency in the Python layer. Bjoern's
+multi-process model and how it compares to uvicorn + gunicorn in practice.
 
 **[I1] Multi-process cache invalidation with a generation counter**
 Ten Bjoern worker processes share a port. A write that clears the cache on one worker leaves the
@@ -155,10 +170,12 @@ the tradeoff between freshness and cost. See [PR #453](https://github.com/jbylun
 
 ### Rust Engine
 
-**[R1] Why we replaced PostgreSQL with an in-process Rust engine**
-Motivation and architecture overview: 76× speedup (14.9ms → 0.20ms), PyO3 FFI design, how the
-SQL path is retained as a live fallback, and the overall system shape. This is the "why" post
-before the deep technical dives. See [changelog](changelog/2026-06-12-rust-query-engine.md).
+**[R1] In-process filtering**
+Why we moved card search out of PostgreSQL: the Python in-memory prototype (never merged), what
+the profiles showed, why Python's function call overhead was the ceiling, and how a Rust extension
+via PyO3 cleared it. Covers PyO3 build/packaging basics, the 76× speedup (14.9ms → 0.20ms), and
+why the SQL path is kept as a live fallback.
+See [changelog](changelog/2026-06-12-rust-query-engine.md).
 
 **[R2] Index data structures in the Rust engine**
 The different index types used to accelerate filtering: trigram sets, sorted arrays, hash maps,
@@ -210,29 +227,31 @@ Dependency notes:
 | # | Post | Area | Publish date |
 |---|------|------|--------------|
 | 1  | [O1] Why build a self-hosted Scryfall? | Overview | 2026-06-20 |
-| 2  | [P1] Building a query DSL with pyparsing | Parser | 2026-07-11 |
-| 3  | [S1] Compiling an AST to parameterized SQL | SQL gen | 2026-08-01 |
-| 4  | [D1] PostgreSQL COPY loading: 10× faster bulk import | Data | 2026-08-22 |
-| 5  | [F4] Progressive enhancement: useful without JavaScript | Frontend | 2026-09-12 |
-| 6  | [S2] PostgreSQL index strategies for mixed-type search | SQL gen | 2026-10-03 |
-| 7  | [F3] Autocomplete for card types | Frontend | 2026-10-24 |
-| 8  | [S4] Encoding card preferences as a scoring function | SQL gen | 2026-11-14 |
-| 9  | [F5] Mana symbol rendering: regex + Map for 61× speedup | Frontend | 2026-12-05 |
-| 10 | [S3] The ILIKE trap: when the planner beats execution | SQL perf | 2026-12-26 |
-| 11 | [S5] Oracle ID deduplication: what we tried, what worked, what didn't | SQL perf | 2027-01-16 |
-| 12 | [F2] Responsive card images and CDN delivery | Frontend | 2027-02-06 |
-| 13 | [I3] The evolution of `/random_search` | Infra | 2027-02-27 |
-| 14 | [I1] Multi-process cache invalidation | Infra | 2027-03-20 |
-| 15 | [R1] Why we replaced PostgreSQL with an in-process Rust engine | Rust | 2027-04-10 |
-| 16 | [R3] Bitmap fields for color identity and cache locality | Rust | 2027-05-01 |
-| 17 | [I2] Cachebox: Rust-backed drop-in for cachetools | Infra | 2027-05-22 |
-| 18 | [R5] String interning for compact in-memory card data | Rust | 2027-06-12 |
-| 19 | [P2] Hand-rolling a recursive descent parser for 49× speedup | Parser | 2027-07-03 |
-| 20 | [R2] Index data structures in the Rust engine | Rust | 2027-07-24 |
-| 21 | [F1] 40× faster card rendering: DOM nodes vs. regex | Frontend | 2027-08-14 |
-| 22 | [R4] Zero-copy deserialization with rkyv and shared memory | Rust | 2027-09-04 |
-| 23 | [R6] Two-pivot pagination: O(n) sort for a single page | Rust | 2027-09-25 |
-| 24 | [R7] Linear scan vs. hash scan for distinct queries | Rust | 2027-10-16 |
+| 2  | [I4] Falcon + Bjoern: choosing a Python web framework | Infra | 2026-07-04 |
+| 3  | [P1] Building a query DSL with pyparsing | Parser | 2026-07-18 |
+| 4  | [S1] Compiling an AST to parameterized SQL | SQL gen | 2026-08-01 |
+| 5  | [D1] PostgreSQL COPY loading: 10× faster bulk import | Data | 2026-08-15 |
+| 6  | [F4] Progressive enhancement: useful without JavaScript | Frontend | 2026-08-29 |
+| 7  | [S2] PostgreSQL index strategies for mixed-type search | SQL gen | 2026-09-12 |
+| 8  | [F3] Autocomplete for card types | Frontend | 2026-09-26 |
+| 9  | [S4] Two levels of ordering: printing prefer score and card relevance | SQL gen | 2026-10-10 |
+| 10 | [F6] Fonts and mana symbols | Frontend | 2026-10-24 |
+| 11 | [F5] Mana symbol rendering: regex + Map for 61× speedup | Frontend | 2026-11-07 |
+| 12 | [S3] The ILIKE trap: when the planner beats execution | SQL perf | 2026-11-21 |
+| 13 | [S5] Oracle ID deduplication: what we tried, what worked, what didn't | SQL perf | 2026-12-05 |
+| 14 | [F2] Responsive card images and CDN delivery | Frontend | 2026-12-19 |
+| 15 | [I3] The evolution of `/random_search` | Infra | 2027-01-02 |
+| 16 | [I1] Multi-process cache invalidation | Infra | 2027-01-16 |
+| 17 | [R1] In-process filtering | Rust | 2027-01-30 |
+| 18 | [R3] Bitmap fields for color identity and cache locality | Rust | 2027-02-13 |
+| 19 | [I2] Cachebox: Rust-backed drop-in for cachetools | Infra | 2027-02-27 |
+| 20 | [R5] String interning for compact in-memory card data | Rust | 2027-03-13 |
+| 21 | [P2] Hand-rolling a recursive descent parser for 49× speedup | Parser | 2027-03-27 |
+| 22 | [R2] Index data structures in the Rust engine | Rust | 2027-04-10 |
+| 23 | [F1] 40× faster card rendering: DOM nodes vs. regex | Frontend | 2027-04-24 |
+| 24 | [R4] Zero-copy deserialization with rkyv and shared memory | Rust | 2027-05-08 |
+| 25 | [R6] Two-pivot pagination: O(n) sort for a single page | Rust | 2027-05-22 |
+| 26 | [R7] Linear scan vs. hash scan for distinct queries | Rust | 2027-06-05 |
 
 ---
 

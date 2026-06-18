@@ -1,7 +1,7 @@
 ---
 title: "Multi-Process Cache Invalidation with a Generation Counter"
-date: 2027-03-20
-publishDate: 2027-03-20
+date: 2027-01-16
+publishDate: 2027-01-16
 tags: ["arcane-tutor", "python", "multiprocessing", "caching"]
 summary: "Ten worker processes share a port. A write that clears the cache on one worker leaves the other nine serving stale results. Fixed with a multiprocessing.Value generation counter."
 ---

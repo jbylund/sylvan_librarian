@@ -1,7 +1,7 @@
 ---
 title: "Two Levels of Ordering: Printing Prefer Score and Card Relevance Ranking"
-date: 2026-11-14
-publishDate: 2026-11-14
+date: 2026-10-10
+publishDate: 2026-10-10
 tags: ["arcane-tutor", "postgres", "sql", "scoring"]
 summary: "Search results need two distinct scoring concerns: which printing of a card to surface, and which cards to rank first. Both are numeric ORDER BY expressions in SQL."
 ---
