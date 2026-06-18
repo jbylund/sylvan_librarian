@@ -1,5 +1,5 @@
 ---
-title: "Zero-Copy Deserialization with rkyv and Shared Memory"
+title: "Shared Memory Collapsed Peak RSS from 1.3GB to 350MB Across Ten Workers"
 date: 2027-05-22
 publishDate: 2027-05-22
 tags: ["arcane-tutor", "rust", "performance", "memory", "rkyv"]

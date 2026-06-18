@@ -1,5 +1,5 @@
 ---
-title: "The Evolution of /random_search: From ORDER BY RANDOM() to In-Memory Sampling"
+title: "Stop Using `ORDER BY RANDOM()`: It Scans the Whole Table"
 date: 2027-01-02
 publishDate: 2027-01-02
 tags: ["arcane-tutor", "postgres", "python", "performance", "caching"]

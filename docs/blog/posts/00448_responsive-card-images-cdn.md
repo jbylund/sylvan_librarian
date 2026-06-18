@@ -1,5 +1,5 @@
 ---
-title: "Responsive Card Images and CDN Delivery"
+title: "Keeping a CDN in Sync with Scryfall Using Set-Based Diffing"
 date: 2026-12-19
 publishDate: 2026-12-19
 tags: ["arcane-tutor", "frontend", "cdn", "images", "javascript"]

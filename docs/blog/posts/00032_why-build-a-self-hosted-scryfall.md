@@ -1,5 +1,5 @@
 ---
-title: "Why Build a Self-Hosted Scryfall?"
+title: "The Query Scryfall Can't Answer: `power+toughness>cmc+cmc`"
 date: 2026-06-20
 publishDate: 2026-06-20
 tags: ["arcane-tutor", "mtg", "scryfall", "postgres", "python"]

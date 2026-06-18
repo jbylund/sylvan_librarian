@@ -1,5 +1,5 @@
 ---
-title: "PostgreSQL Index Strategies for Mixed-Type Card Search"
+title: "22 Indexes on One Table: How Card Search Uses Every Index Type PostgreSQL Has"
 date: 2026-09-12
 publishDate: 2026-09-12
 tags: ["arcane-tutor", "postgres", "sql", "indexing", "performance"]

@@ -1,5 +1,5 @@
 ---
-title: "HTTP Compression Negotiation: brotli, zstd, and gzip in a Falcon Middleware"
+title: "We Ignore Your Accept-Encoding q= Weights and Serve Better Compression Anyway"
 date: 2027-04-10
 publishDate: 2027-04-10
 tags: ["arcane-tutor", "python", "http", "compression", "falcon", "middleware"]

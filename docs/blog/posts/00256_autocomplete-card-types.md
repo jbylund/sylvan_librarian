@@ -1,5 +1,5 @@
 ---
-title: "Autocomplete for Card Types (and Why It's Harder Than It Looks)"
+title: "Autocomplete Without a Round-Trip: Suggestions from a Frozen In-Memory Type List"
 date: 2026-09-26
 publishDate: 2026-09-26
 tags: ["arcane-tutor", "javascript", "frontend", "ux"]

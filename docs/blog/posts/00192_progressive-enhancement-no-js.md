@@ -1,5 +1,5 @@
 ---
-title: "Progressive Enhancement: Useful Without JavaScript"
+title: "The Same URL Serves JSON for JavaScript and HTML for Everything Else"
 date: 2026-08-29
 publishDate: 2026-08-29
 tags: ["arcane-tutor", "javascript", "frontend", "progressive-enhancement"]

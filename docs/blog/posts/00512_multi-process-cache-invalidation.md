@@ -1,5 +1,5 @@
 ---
-title: "Multi-Process Cache Invalidation with a Generation Counter"
+title: "10 Workers, 9 Stale Caches: The Cache Invalidation Bug That Only Appears in Production"
 date: 2027-01-16
 publishDate: 2027-01-16
 tags: ["arcane-tutor", "python", "multiprocessing", "caching"]

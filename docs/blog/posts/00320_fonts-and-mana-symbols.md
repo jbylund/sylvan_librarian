@@ -1,5 +1,5 @@
 ---
-title: "Fonts and Mana Symbols"
+title: "Why Mana Symbols Are a Custom Webfont, Not SVG Sprites"
 date: 2026-10-24
 publishDate: 2026-10-24
 tags: ["arcane-tutor", "frontend", "fonts", "css", "mtg"]

@@ -1,5 +1,5 @@
 ---
-title: "40× Faster Card Rendering: Swapping DOM Nodes for a Regex"
+title: "40× Faster Card Rendering, and a Latent XSS Bug: Swapping DOM Nodes for a Regex"
 date: 2027-05-08
 publishDate: 2027-05-08
 tags: ["arcane-tutor", "javascript", "frontend", "performance"]

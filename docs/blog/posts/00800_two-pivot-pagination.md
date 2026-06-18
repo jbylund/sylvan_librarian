@@ -1,5 +1,5 @@
 ---
-title: "Two-Pivot Pagination: O(n) Sort for a Single Page"
+title: "Paginating 30k Cards Without Sorting All of Them"
 date: 2027-06-05
 publishDate: 2027-06-05
 tags: ["arcane-tutor", "rust", "performance", "pagination"]

@@ -1,5 +1,5 @@
 ---
-title: "Two Levels of Ordering: Printing Prefer Score and Card Relevance Ranking"
+title: "Scryfall Sorts Alphabetically. I Sort by CubeCobra Popularity."
 date: 2026-10-10
 publishDate: 2026-10-10
 tags: ["arcane-tutor", "postgres", "sql", "scoring"]

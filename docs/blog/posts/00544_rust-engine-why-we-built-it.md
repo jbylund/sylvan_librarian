@@ -1,5 +1,5 @@
 ---
-title: "In-Process Filtering"
+title: "Python's Function Call Overhead Was the Ceiling: Why We Moved Search to Rust"
 date: 2027-01-30
 publishDate: 2027-01-30
 tags: ["arcane-tutor", "rust", "python", "performance", "pyo3"]

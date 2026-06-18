@@ -1,5 +1,5 @@
 ---
-title: "Building a Scryfall-Compatible Query DSL with pyparsing"
+title: "Packrat Caching Made My Parser 40% Slower on Simple Queries"
 date: 2026-07-18
 publishDate: 2026-07-18
 tags: ["arcane-tutor", "parser", "pyparsing", "python"]

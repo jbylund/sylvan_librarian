@@ -1,5 +1,5 @@
 ---
-title: "Oracle ID Deduplication: What We Tried, What Worked, What Didn't"
+title: "Oracle ID Dedup: 23% Faster by Changing the Key, 9% Faster by Removing Dead Work"
 date: 2026-12-05
 publishDate: 2026-12-05
 tags: ["arcane-tutor", "postgres", "sql", "performance", "benchmarking"]

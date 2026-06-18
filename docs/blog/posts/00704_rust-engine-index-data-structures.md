@@ -1,5 +1,5 @@
 ---
-title: "Index Data Structures in the Rust Engine"
+title: "In-Process Card Search Without a Query Planner: Trigrams, Sorted Arrays, and Hash Maps"
 date: 2027-04-24
 publishDate: 2027-04-24
 tags: ["arcane-tutor", "rust", "performance", "indexing"]

@@ -1,5 +1,5 @@
 ---
-title: "Linear Scan vs. Hash Scan for Distinct Queries"
+title: "Adaptive Dedup: Linear Scan Wins Small Sets, Hash Wins Large — Here Is the Threshold"
 date: 2027-06-19
 publishDate: 2027-06-19
 tags: ["arcane-tutor", "rust", "performance", "query"]
@@ -16,6 +16,15 @@ summary: "Deduplicating results on a dimension (e.g., one printing per oracle ID
 
 
 ## The threshold heuristic
+
+<!-- TODO: state the actual threshold and add supporting benchmark before publishing.
+  The title promises "Here Is the Threshold" — that number must appear in this section.
+  Needed:
+  - The threshold value (N results) at which hash scan overtakes linear scan
+  - A small table or chart: result set size vs. time for both approaches, showing the crossover
+  - How the threshold was determined (empirically? analytically?)
+  - Whether it's hardcoded or adaptive (and if adaptive, what signal drives it)
+-->
 
 
 ## Composing with scoring
