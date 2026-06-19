@@ -179,6 +179,15 @@ preferred-printing list once per 10 minutes; individual requests then do an in-m
 Covers why `ORDER BY RANDOM()` is so slow, how TTL caching changes the performance profile, and
 the tradeoff between freshness and cost. See [PR #453](https://github.com/jbylund/arcane_tutor/pull/453).
 
+**[I6] Blue/green deploys with Docker Compose and nginx**
+Running two identical stacks (blue and green) behind a single nginx upstream. Deploying means
+bringing up the new stack, waiting for it to pass a health check, atomically swapping the nginx
+upstream with `nginx -s reload` (which drains in-flight requests before closing old connections),
+then tearing down the old stack. No downtime, no external orchestrator. Covers the Docker Compose
+profiles or project-name trick that lets two stacks share a host port range without collision,
+the nginx upstream config and health-check probe, and the shell script that wires it together.
+Ends with the failure modes: what happens if the new stack never becomes healthy, and how to roll back.
+
 ---
 
 ### Rust Engine
@@ -266,6 +275,7 @@ Dependency notes:
 | 25 | [R4] Zero-copy deserialization with rkyv and shared memory | Rust | 2027-05-22 |
 | 26 | [R6] Two-pivot pagination: O(n) sort for a single page | Rust | 2027-06-05 |
 | 27 | [R7] Linear scan vs. hash scan for distinct queries | Rust | 2027-06-19 |
+| 28 | [I6] Blue/green deploys with Docker Compose and nginx | Infra | 2027-07-03 |
 
 ---
 
