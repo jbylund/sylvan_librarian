@@ -16,8 +16,8 @@ power+toughness>cmc+cmc
 
 Scryfall has a rich query language — color, format legality, set, artist, flavor text, price — and it does allow comparing numeric fields against each other (`power>toughness` is valid), but arithmetic expressions like `power>toughness+1` or `power+toughness>cmc+cmc` are not supported.
 
-My first thought was to load the Scryfall bulk data into PostgreSQL and write queries by hand.
-The query above becomes this SQL:
+The obvious answer is SQL.
+Load the bulk data into PostgreSQL and write queries directly:
 
 ```sql
 SELECT card_name
@@ -26,13 +26,14 @@ WHERE creature_power + creature_toughness > cmc * 2
   AND type_line LIKE '%Creature%';
 ```
 
-This answers the question, but it requires a terminal and hand-writing SQL.
-I wanted something I could use from a browser or my phone.
+That works — if you are at a terminal with the data already loaded.
+The objection to building anything more is that this is already sufficient: one query, one answer, no infrastructure required.
+But I wanted something usable from a browser or a phone during a game, without pulling up a laptop and writing SQL.
 So I built [Arcane Tutor](https://github.com/jbylund/arcane_tutor): a self-hosted, Scryfall-compatible card search engine with extended arithmetic syntax.
 
 Four motivations shaped how it was built.
 
-## Arithmetic Search
+## Supporting Arithmetic Queries
 
 Scryfall's query syntax is the de facto standard.
 To keep queries mostly portable between the two tools, I extended it rather than starting from scratch.
@@ -51,7 +52,7 @@ I also added support for the most commonly used Scryfall filters to keep queries
 The query language was originally implemented as a custom DSL: a pyparsing grammar that produces an AST, which is compiled to parameterized SQL.
 Later posts cover the grammar design and a hand-rolled rewrite that improved query parsing time by 49×.
 
-## Reactive Search
+## Results Should Update as You Type
 
 I wanted results as I typed, not after submitting a complete query.
 This fits how people use Scryfall —
@@ -62,7 +63,7 @@ The web interface is a vanilla JS frontend that sends queries on each keystroke;
 the API returns results as JSON.
 A later post covers the progressive enhancement story — the same endpoint serves both JS and no-JS browsers.
 
-## Latency
+## Scryfall Takes Over a Second on Common Queries
 
 Scryfall's response times are in the hundreds of milliseconds to seconds:
 
@@ -80,7 +81,7 @@ The initial implementation used PostgreSQL with specialized indexes, returning r
 The hot path was later replaced with an in-process Rust engine, dropping query latency to single-digit or sub-millisecond.
 Later posts cover the PostgreSQL index strategy and the Rust engine in depth.
 
-## Rankings
+## Alphabetical Order Is Not Relevance
 
 Result ranking breaks into two separate problems.
 
@@ -106,6 +107,4 @@ The vanilla JS frontend sends queries to the Python API on each keystroke.
 The API parses the query string into an AST, executes it against the card data, and returns results as JSON.
 Originally that meant compiling the AST to a parameterized PostgreSQL query;
 the hot path was later replaced with an in-process Rust engine for a 76× speedup.
-The frontend renders the results as they arrive.
-The application is containerized and runs on a small VPS.
-
+`power+toughness>cmc+cmc` works, and `format:modern` returns in 17ms — over 100× faster than Scryfall.
