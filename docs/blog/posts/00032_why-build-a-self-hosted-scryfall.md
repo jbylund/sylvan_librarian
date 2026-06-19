@@ -65,21 +65,18 @@ A later post covers the progressive enhancement story — the same endpoint serv
 
 ## Scryfall Takes Over a Second on Common Queries
 
-Scryfall's response times are in the hundreds of milliseconds to seconds:
+Scryfall's response times are in the hundreds of milliseconds to seconds.
+After replacing the PostgreSQL hot path with an in-process Rust engine — covered in a later post — query times dropped to tens of milliseconds:
 
-| Query | Scryfall |
-|-------|----------|
-| `power>toughness` | 1030ms |
-| `t:creature` | 1100ms |
-| `id:g` | 538ms |
-| `format:modern` | 1850ms |
+| Query | Scryfall | Arcane Tutor | Speedup |
+|-------|----------|--------------|---------|
+| `power>toughness` | 1030ms | 15ms | 69× |
+| `t:creature` | 1100ms | 12ms | 92× |
+| `id:g` | 538ms | 17ms | 32× |
+| `format:modern` | 1850ms | 20ms | 93× |
 
 Reactive search requires low enough latency that results update without perceptible delay.
 But fast responses are useful regardless — a card search tool should feel instant.
-
-The initial implementation used PostgreSQL with specialized indexes, returning results in tens to hundreds of milliseconds.
-The hot path was later replaced with an in-process Rust engine, dropping query latency to single-digit or sub-millisecond.
-Later posts cover the PostgreSQL index strategy and the Rust engine in depth.
 
 ## Alphabetical Order Is Not Relevance
 
@@ -101,10 +98,4 @@ These preferences are encoded as a numeric scoring expression so the best printi
 In the PostgreSQL search path, both were implemented as SQL scoring expressions.
 A later post covers how both layers work together.
 
-## How It's Built
-
-The vanilla JS frontend sends queries to the Python API on each keystroke.
-The API parses the query string into an AST, executes it against the card data, and returns results as JSON.
-Originally that meant compiling the AST to a parameterized PostgreSQL query;
-the hot path was later replaced with an in-process Rust engine for a 76× speedup.
-`power+toughness>cmc+cmc` works, and `format:modern` returns in 17ms — over 100× faster than Scryfall.
+`power+toughness>cmc+cmc` works, and `format:modern` returns in 20ms. The posts that follow cover how each piece was built.

@@ -1,14 +1,12 @@
 ---
-title: "One Query for Results and Count: 2x Faster for Deduplicated Searches"
+title: "One Query, Two Answers: How NOT MATERIALIZED Lets Each Branch Pick Its Own Index"
 date: 2026-08-15
 publishDate: 2026-08-15
 tags: ["arcane-tutor", "sql", "postgres"]
 summary: "A search endpoint needs paginated results and a total count. A single CTE with UNION ALL answers both — and for deduplicated searches it runs in roughly half the time. For non-deduplicated searches it matches two separate queries while using one round trip."
 ---
 
-A search for `format:modern` needs two things from the database: the top 100 cards by popularity and a count for the pagination UI. The obvious implementation sends two queries. A single CTE with `UNION ALL` answers both — and for the deduplicated searches that make up most traffic, it runs in roughly half the time. For non-deduplicated searches it matches two separate queries while using one round trip instead of two.
-
-Most searches deduplicate by `oracle_id` — one printing per unique card — because users care about cards, not every printing of each card. That deduplication is what drives the performance difference.
+A search for `format:modern` needs two things from the database: the top 100 cards by popularity and a count for the pagination UI. The obvious implementation sends two queries. A single CTE with `UNION ALL` answers both — and for the deduplicated searches (`unique=card`, one printing per unique card) that make up most traffic, it runs in roughly half the time. For non-deduplicated searches it matches two separate queries while using one round trip instead of two.
 
 ## The Naive Two-Query Approach
 
@@ -35,7 +33,7 @@ SELECT COUNT(1) FROM (
 ) t;
 ```
 
-Even so, both plans still scan all 73,336 matching rows — one sorting, one hashing:
+The plans:
 
 ```
 -- Results: 75.7ms
@@ -172,10 +170,8 @@ Execution Time: 48.982 ms
 | `format:modern` | 46ms (1ms top-n, 45ms count) | 70ms | 49ms |
 | `power>4` | 11ms (10ms top-n, 1ms count) | 14ms | 9ms |
 
-The split timings reveal an asymmetry worth noting. `format:modern` top-n takes 1ms because 76% of cards are modern-legal — walking the `edhrec_rank` index in order, the planner finds 100 matches after examining only ~235 rows and exits early. `power>4` count takes 1ms for the opposite reason — `idx_cards_creature_power_btree` is a covering index for that query, so the planner counts 6,750 entries without touching the heap at all.
+The split timings surprised me at first. For `format:modern`, the planner walks the `edhrec_rank` index in sorted order and finds a modern-legal card roughly every other row — top-n exits after ~235 rows, 1ms total. But counting all 73,336 matches requires a full index scan with no early exit. For `power>4`, it is reversed: the creature_power index covers the count entirely (6,750 entries, no heap fetch, 1ms), but top-n requires walking deep into the sort index before accumulating 100 high-power creatures. Each query is fast in exactly one direction and slow in the other, and the two-query approach exploits that by letting each query pick the cheap side. `NOT MATERIALIZED` lets the planner do the same within a single statement.
 
-A broad filter is cheap for top-n (high match rate means early exit) and expensive for count (still has to scan all matches). A selective filter is cheap for count (tight index scan, no heap fetch) and expensive for top-n (has to walk deep into the sort index before accumulating enough matches). The two queries in the two-query approach each exploit the cheap side of this tradeoff. `NOT MATERIALIZED` lets the planner do the same within a single statement.
+## Picking the Right Form for Each Search Mode
 
-## Why It Exists
-
-The dedup speedup is the reason. Most searches deduplicate by `oracle_id`, and the CTE cuts those query times roughly in half — 132ms to 77ms for a broad query, 24ms to 12ms for a selective one. The non-dedup path is essentially a wash in both directions; `NOT MATERIALIZED` keeps it competitive with two separate queries without giving up the single round trip.
+The CTE exists for the dedup case: most searches deduplicate by `oracle_id`, and it cuts those query times roughly in half — 132ms to 77ms for a broad query, 24ms to 12ms for a selective one. For non-dedup searches, the top-n and count branches want opposite index strategies — whichever access path is optimal for one is suboptimal for the other. A single materialization decision cannot be optimal for both: materializing all matching rows is right for the count but discards the sort-index early exit for top-n; using the sort index is right for top-n but forces a deep walk for count. Planning the branches independently is the only way to let each use the index it needs, which is what `NOT MATERIALIZED` provides.

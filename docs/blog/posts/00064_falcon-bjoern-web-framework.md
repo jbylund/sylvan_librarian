@@ -6,7 +6,13 @@ tags: ["arcane-tutor", "python", "falcon", "bjoern", "fastapi", "performance"]
 summary: "Why Arcane Tutor uses Falcon and Bjoern instead of the FastAPI + uvicorn default: a preference for explicit, close-to-vanilla Python over framework magic."
 ---
 
-Benchmarked with `wrk`, 4 workers, 100 concurrent connections, 100-card search response.
+## Benchmark Setup
+
+Each server ran in its own Docker container, built from the same base image with only the framework changed.
+[`wrk`](https://github.com/wg/wrk) ran in a second container on the same Docker Compose network, so the measurement captured framework overhead without cross-machine jitter or real network latency.
+The endpoint returned a pre-loaded list of 100 cards — no database query, no business logic.
+Parameters: 4 `wrk` threads, 100 concurrent connections, 30-second run.
+
 Falcon uses [orjson](https://github.com/ijl/orjson); FastAPI uses `response_model=list[Card]` — the idiomatic pattern that triggers Pydantic validation on every outgoing response:
 
 
@@ -51,7 +57,7 @@ def search():
     return cards
 ```
 
-## A Different Preference
+## The Case for Explicit Over Automatic
 
 FastAPI and Pydantic introduce a layer of conventions you have to learn:
 how decorators wire up routes, how response models work, when validation fires and when it doesn't,
@@ -91,7 +97,7 @@ That's enough concurrency for this workload without adding async complexity to t
 Once the hot path moved to the in-process Rust engine, the question became moot —
 that call is synchronous, and there is no I/O to overlap.
 
-## Bjoern
+## Why Bjoern Wins: C, libev, No Python in the Hot Path
 
 [Bjoern](https://github.com/jonashaag/bjoern) is a C WSGI server built on libev.
 Its selling point is minimal per-request overhead — it stays out of the way.

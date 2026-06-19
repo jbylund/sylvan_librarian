@@ -34,12 +34,17 @@ See [PR #33](https://github.com/jbylund/arcane_tutor/pull/33).
 
 ### Parser
 
-**[P1] Building a Query DSL with pyparsing**
-A Scryfall-compatible search syntax is deceptively complex: arithmetic comparisons (`cmc+1<power`),
-regex literals (`o:/^{T}:/`), implicit AND, operator precedence, quoted strings with apostrophes,
-color identity subset semantics. Walk through the pyparsing grammar design choices, the places where
-the grammar got surprising (false arithmetic detection, `Group` wrappers for nested expressions),
-and the arithmetic consolidation that cleaned up three overlapping rules.
+**[P1a] Choosing a Parser for a Query DSL: Regex, ANTLR, Lark, and pyparsing**
+A Scryfall-compatible search syntax requires a context-free grammar: nested parentheses, implicit AND,
+arithmetic comparisons, regex literals. Walk through why regex fails, why ANTLR's toolchain overhead
+was too high for a side project, how Lark's Earley grammar compares to pyparsing's PEG approach,
+and why pyparsing won on iteration speed and zero tooling overhead.
+
+**[P1b] Whitespace as an Operator: Parsing Scryfall's Implicit AND**
+pyparsing handles the grammar; this post covers what had to be built on top. Implicit AND injection
+via a preprocessing tokenizer (hand-rolled, then rewritten in pyparsing), query balancing in two
+languages (JS + Python, kept in sync), the apostrophe bug in the balancer, regex literal support,
+arithmetic comparisons, and packrat caching tradeoffs.
 
 **[P2] Hand-rolling a recursive descent parser for 49× speedup**
 pyparsing's general-purpose backtracking made it the latency ceiling (~3.2k parses/sec). This post
@@ -250,7 +255,7 @@ Ordering rule: post B comes after post A only when B's change directly depends o
 Everything else is interleaved freely to avoid topic clustering.
 
 Dependency notes:
-- P1 → P2
+- P1a → P1b → P2
 - S1 → S1b → S2 → S3 (S4 independent)
 - R1 → all other Rust posts; R3 + R5 must both precede R4
 
@@ -258,33 +263,34 @@ Dependency notes:
 |---|------|------|--------------|
 | 1  | [O1] Why build a self-hosted Scryfall? | Overview | 2026-06-20 |
 | 2  | [I4] Falcon + Bjoern: choosing a Python web framework | Infra | 2026-07-04 |
-| 3  | [P1] Whitespace as an operator: parsing Scryfall's implicit AND | Parser | 2026-07-18 |
-| 4  | [S1] Compiling an AST to parameterized SQL | SQL gen | 2026-08-01 |
-| 5  | [S1b] One query for results and count | SQL gen | 2026-08-15 |
-| 6  | [D1] PostgreSQL COPY loading: 10× faster bulk import | Data | 2026-08-29 |
-| 7  | [F4] Progressive enhancement: useful without JavaScript | Frontend | 2026-09-12 |
-| 8  | [S2] PostgreSQL index strategies for mixed-type search | SQL gen | 2026-09-26 |
-| 9  | [F3] Autocomplete for card types | Frontend | 2026-10-10 |
-| 10 | [S4] Two levels of ordering: printing prefer score and card relevance | SQL gen | 2026-10-24 |
-| 11 | [F6] Fonts and mana symbols | Frontend | 2026-11-07 |
-| 12 | [F5] Mana symbol rendering: regex + Map for 61× speedup | Frontend | 2026-11-21 |
-| 13 | [S3] The ILIKE trap: when the planner beats execution | SQL perf | 2026-12-05 |
-| 14 | [S5] Oracle ID deduplication: what we tried, what worked, what didn't | SQL perf | 2026-12-19 |
-| 15 | [F2] Responsive card images and CDN delivery | Frontend | 2027-01-02 |
-| 16 | [I3] The evolution of `/random_search` | Infra | 2027-01-16 |
-| 17 | [I1] Multi-process cache invalidation | Infra | 2027-01-30 |
-| 18 | [R1] In-process filtering | Rust | 2027-02-13 |
-| 19 | [R3] Bitmap fields for color identity and cache locality | Rust | 2027-02-27 |
-| 20 | [I2] Cachebox: Rust-backed drop-in for cachetools | Infra | 2027-03-13 |
-| 21 | [R5] String interning for compact in-memory card data | Rust | 2027-03-27 |
-| 22 | [P2] Hand-rolling a recursive descent parser for 49× speedup | Parser | 2027-04-10 |
-| 23 | [I5] HTTP compression negotiation: brotli, zstd, and gzip | Infra | 2027-04-24 |
-| 24 | [R2] Index data structures in the Rust engine | Rust | 2027-05-08 |
-| 25 | [F1] 40× faster card rendering: DOM nodes vs. regex | Frontend | 2027-05-22 |
-| 26 | [R4] Zero-copy deserialization with rkyv and shared memory | Rust | 2027-06-05 |
-| 27 | [R6] Two-pivot pagination: O(n) sort for a single page | Rust | 2027-06-19 |
-| 28 | [R7] Linear scan vs. hash scan for distinct queries | Rust | 2027-07-03 |
-| 29 | [I6] Blue/green deploys with Docker Compose and nginx | Infra | 2027-07-17 |
+| 3  | [P1a] Choosing a Parser for a Query DSL: Regex, ANTLR, Lark, and pyparsing | Parser | 2026-07-18 |
+| 4  | [P1b] Whitespace as an Operator: Parsing Scryfall's Implicit AND | Parser | 2026-07-25 |
+| 5  | [S1] Compiling an AST to parameterized SQL | SQL gen | 2026-08-01 |
+| 6  | [S1b] One Query, Two Answers: How NOT MATERIALIZED Lets Each Branch Pick Its Own Index | SQL gen | 2026-08-15 |
+| 7  | [D1] PostgreSQL COPY loading: 10× faster bulk import | Data | 2026-08-29 |
+| 8  | [F4] Progressive enhancement: useful without JavaScript | Frontend | 2026-09-12 |
+| 9  | [S2] PostgreSQL index strategies for mixed-type search | SQL gen | 2026-09-26 |
+| 10 | [F3] Autocomplete for card types | Frontend | 2026-10-10 |
+| 11 | [S4] Two levels of ordering: printing prefer score and card relevance | SQL gen | 2026-10-24 |
+| 12 | [F6] Fonts and mana symbols | Frontend | 2026-11-07 |
+| 13 | [F5] Mana symbol rendering: regex + Map for 61× speedup | Frontend | 2026-11-21 |
+| 14 | [S3] The ILIKE trap: when the planner beats execution | SQL perf | 2026-12-05 |
+| 15 | [S5] Oracle ID deduplication: what we tried, what worked, what didn't | SQL perf | 2026-12-19 |
+| 16 | [F2] Responsive card images and CDN delivery | Frontend | 2027-01-02 |
+| 17 | [I3] The evolution of `/random_search` | Infra | 2027-01-16 |
+| 18 | [I1] Multi-process cache invalidation | Infra | 2027-01-30 |
+| 19 | [R1] In-process filtering | Rust | 2027-02-13 |
+| 20 | [R3] Bitmap fields for color identity and cache locality | Rust | 2027-02-27 |
+| 21 | [I2] Cachebox: Rust-backed drop-in for cachetools | Infra | 2027-03-13 |
+| 22 | [R5] String interning for compact in-memory card data | Rust | 2027-03-27 |
+| 23 | [P2] Hand-rolling a recursive descent parser for 49× speedup | Parser | 2027-04-10 |
+| 24 | [I5] HTTP compression negotiation: brotli, zstd, and gzip | Infra | 2027-04-24 |
+| 25 | [R2] Index data structures in the Rust engine | Rust | 2027-05-08 |
+| 26 | [F1] 40× faster card rendering: DOM nodes vs. regex | Frontend | 2027-05-22 |
+| 27 | [R4] Zero-copy deserialization with rkyv and shared memory | Rust | 2027-06-05 |
+| 28 | [R6] Two-pivot pagination: O(n) sort for a single page | Rust | 2027-06-19 |
+| 29 | [R7] Linear scan vs. hash scan for distinct queries | Rust | 2027-07-03 |
+| 30 | [I6] Blue/green deploys with Docker Compose and nginx | Infra | 2027-07-17 |
 
 ---
 

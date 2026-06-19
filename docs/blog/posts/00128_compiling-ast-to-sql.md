@@ -94,3 +94,5 @@ The context dict is the only path through which user-supplied values reach the d
 This is not input sanitization layered on top of string concatenation. The structure makes injection impossible: a value that enters `StringValueNode.to_sql` is stored as a Python object and comes back as a placeholder. The SQL string and the user string never meet.
 
 The one failure mode would be if a column name or operator were derived from user input. Column names come from `db_info.py`'s field map; operators come from the parser's fixed grammar. Neither is user-controlled.
+
+The injection guarantee does not require discipline at call sites. There is no rule to remember and no validation to add. The structure makes it impossible: a user-supplied value enters `to_sql` as a Python object and leaves as a placeholder name. The SQL string and the user string are never in the same expression.
