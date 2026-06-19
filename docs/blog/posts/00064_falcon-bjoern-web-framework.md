@@ -1,24 +1,23 @@
 ---
-title: "47× the Throughput of FastAPI: Why I Use Falcon + Bjoern"
+title: "13× the Throughput of FastAPI: Why I Use Falcon + Bjoern"
 date: 2026-07-04
 publishDate: 2026-07-04
 tags: ["arcane-tutor", "python", "falcon", "bjoern", "fastapi", "performance"]
 summary: "Why Arcane Tutor uses Falcon and Bjoern instead of the FastAPI + uvicorn default: a preference for explicit, close-to-vanilla Python over framework magic."
 ---
 
-Arcane Tutor uses Falcon and Bjoern instead of FastAPI, the most popular Python web framework by a wide margin — 38% adoption in the 2025 JetBrains Python Developer Survey, 88,000 GitHub stars, roughly 474 million PyPI downloads a month.
+Benchmarked with `wrk`, 4 workers, 100 concurrent connections, 100-card search response.
+Falcon uses [orjson](https://github.com/ijl/orjson); FastAPI uses `response_model=list[Card]` — the idiomatic pattern that triggers Pydantic validation on every outgoing response:
 
-Benchmarked with `wrk` against a trivial `/ping` endpoint, 4 workers each, 100 concurrent connections:
 
-| | Falcon + Bjoern | FastAPI + Uvicorn |
-|---|---|---|
-| Req/sec | 479,407 | 10,117 |
-| Avg latency | 194µs | 5.14ms |
-| Timeouts | 78 | 500 |
+|             | Falcon + Bjoern + orjson | FastAPI + Uvicorn |
+| ----------- | ------------------------ | ----------------- |
+| Req/sec     | 155,758                  | 11,712            |
+| Avg latency | 635µs                    | 8.6ms             |
 
-47× throughput difference on an endpoint that does nothing —
+
+13× difference on an endpoint that does nothing except serialize a pre-loaded result —
 which reflects the framework overhead, not the application work.
-The gap narrows when requests do real work, but the baseline matters more than it might seem:
 Arcane Tutor caches search results, so a large fraction of requests are cache hits that return immediately.
 The faster the framework processes a hit, the more headroom is left for the requests that actually need the database.
 
@@ -29,12 +28,27 @@ For APIs with many endpoints or complex response schemas, that is a genuine prod
 
 ```python
 from fastapi import FastAPI
+from pydantic import BaseModel
+
+
+class Card(BaseModel):
+    name: str
+    set_code: str
+    collector_number: str
+    power: str | None = None
+    toughness: str | None = None
+    mana_cost: str | None = None
+    oracle_text: str | None = None
+    set_name: str
+    type_line: str
+
 
 app = FastAPI()
 
-@app.get("/ping")
-def ping():
-    return {"ok": True}
+
+@app.get("/search", response_model=list[Card])
+def search():
+    return cards
 ```
 
 ## A Different Preference
@@ -43,6 +57,7 @@ FastAPI and Pydantic introduce a layer of conventions you have to learn:
 how decorators wire up routes, how response models work, when validation fires and when it doesn't,
 what happens when you return a dict vs a Pydantic model.
 At a previous job, response validation overhead became a real problem at scale —
+Pydantic was re-validating every outgoing response body on its way out the door, even when the data was already correct, and at a few thousand requests per second that added enough CPU time that it showed up in profiles.
 [fastapi/fastapi#1359](https://github.com/fastapi/fastapi/issues/1359) tells a familiar story.
 That experience left me preferring to write something closer to plain Python:
 explicit request handling, explicit serialization, no surprises.
@@ -99,16 +114,25 @@ import os
 
 import bjoern
 import falcon
+import falcon.media
+import orjson
 
 
-class PingResource:
+class SearchResource:
     def on_get(self, req, resp):
-        resp.media = {"ok": True}
+        resp.media = cached_results
 
 
 def make_app() -> falcon.App:
     app = falcon.App()
-    app.add_route("/ping", PingResource())
+    json_handler = falcon.media.JSONHandler(
+        dumps=orjson.dumps,
+        loads=orjson.loads,
+    )
+    extra_handlers = {"application/json": json_handler}
+    app.req_options.media_handlers.update(extra_handlers)
+    app.resp_options.media_handlers.update(extra_handlers)
+    app.add_route("/search", SearchResource())
     return app
 
 
@@ -129,5 +153,6 @@ if __name__ == "__main__":
 
 Each worker is an independent OS process, so a crash doesn't take down the others.
 
-My preference was for a stack where each layer is a separate decision. Bjoern handles HTTP with minimal per-request overhead; Falcon handles the application layer with explicit routing and a middleware model where I control what runs on every request — no behavior happening implicitly, easy to change when I want something different. FastAPI is a reasonable choice but it brings pydantic and starlette along as part of the package — a coherent ecosystem that pays off when you need validation, serialization, and OpenAPI docs. I needed none of those things, and I preferred not to inherit the rest.
-
+FastAPI's ecosystem is an engineering achievement — validation, serialization, OpenAPI docs, all wired together.
+But like a Mercedes, all that engineering has weight, and you pay for it whether or not you use it.
+I wanted a Lotus: light and fast.
