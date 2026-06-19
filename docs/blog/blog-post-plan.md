@@ -250,7 +250,7 @@ Dependency notes:
 |---|------|------|--------------|
 | 1  | [O1] Why build a self-hosted Scryfall? | Overview | 2026-06-20 |
 | 2  | [I4] Falcon + Bjoern: choosing a Python web framework | Infra | 2026-07-04 |
-| 3  | [P1] Building a query DSL with pyparsing | Parser | 2026-07-18 |
+| 3  | [P1] Whitespace as an operator: parsing Scryfall's implicit AND | Parser | 2026-07-18 |
 | 4  | [S1] Compiling an AST to parameterized SQL | SQL gen | 2026-08-01 |
 | 5  | [D1] PostgreSQL COPY loading: 10× faster bulk import | Data | 2026-08-15 |
 | 6  | [F4] Progressive enhancement: useful without JavaScript | Frontend | 2026-08-29 |

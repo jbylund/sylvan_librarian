@@ -1,5 +1,5 @@
 ---
-title: "Packrat Caching Made My Parser 40% Slower on Simple Queries"
+title: "Whitespace as an Operator: Parsing Scryfall's Implicit AND"
 date: 2026-07-18
 publishDate: 2026-07-18
 tags: ["arcane-tutor", "parser", "pyparsing", "python"]

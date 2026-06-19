@@ -101,11 +101,14 @@ Holding the Falcon app constant and swapping only the server:
 | | Req/sec | Avg latency |
 |---|---|---|
 | Bjoern | 155,758 | 635µs |
+| Granian (ASGI) | 89,081 | 1.12ms |
+| Granian (WSGI mode) | 76,871 | 3.96ms |
 | Uvicorn (WSGI mode) | 47,638 | 2.1ms |
 | Gunicorn (sync workers) | 7,929 | 11.7ms |
 
 Gunicorn's sync workers handle one request per worker at a time — each worker blocks for the full serialization cycle before accepting the next connection, so 4 workers means at most 4 requests in flight.
-Uvicorn is faster because its event loop can interleave connections, but running in WSGI mode adds a compatibility layer.
+Uvicorn and Granian are faster because their event loops can interleave connections, but running in WSGI mode adds a compatibility layer over their native async runtimes.
+Granian in native ASGI mode closes the gap somewhat — the WSGI shim accounts for the difference between its two rows.
 Bjoern uses libev directly in C, with no Python event loop in the hot path.
 
 For a read-heavy API where throughput matters, it is a strong option.

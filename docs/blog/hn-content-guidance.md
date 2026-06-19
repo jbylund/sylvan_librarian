@@ -39,9 +39,10 @@ thinking about...", or with a question.
 Top posts are 500–1,400 words. A 3,500-word post can work if it earns the length by showing many
 independent self-contained examples (each surprising on its own).
 
-Eight of nine general posts had zero headers or just one. Headers appear as navigation aids in
-tightly technical pieces where readers need to orient inside code — not as padding or section
-announcements.
+Eight of nine *general narrative* posts had zero headers or just one. Technical and systems posts
+regularly use more: headers earn their place when they let a reader orient inside dense code or jump
+to a specific section. They do not earn their place as section announcements, topic labels, or
+padding.
 
 All posts follow one of two arcs:
 - **Narrative arc:** problem encountered → investigation → discovery → resolution
