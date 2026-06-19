@@ -54,17 +54,25 @@ throughput improvement (158k parses/sec). See also [changelog: hand-rolled parse
 ### SQL Generation & Data Modeling
 
 **[S1] Compiling an AST to parameterized SQL**
-Each AST node implements a method that returns a SQL fragment plus bound parameters.
-Cover the node hierarchy (`nodes.py`, `card_query_nodes.py`), how different node types
-(text match, numeric comparison, JSONB array membership, regex, arithmetic expressions) each
-emit their own SQL, and how `api_resource.py` wraps them into a full `SELECT` with scoring
-and `LIMIT`. Emphasize that user input never touches the query string — always parameterized.
+Each AST node implements a method that returns a SQL fragment plus bound parameters. Cover the
+node hierarchy (`nodes.py`, `card_query_nodes.py`), how text match, regex, numeric comparison,
+and arithmetic expressions each emit their own SQL, and why user input never touches the query
+string. JSONB operators and the count+results CTE are in S1b and S2 respectively.
+
+**[S1b] One query for results and count**
+A search endpoint needs two things: the top N matching cards and a total count for the pagination
+UI. The naive approach runs two queries. The actual approach: a CTE with `UNION ALL` that
+materializes matching cards once and fans out to a `LIMIT` branch and a `COUNT(1)` branch in a
+single round trip. Covers why the CTE materializes once, how `limit` is added to the same
+parameter dict as the WHERE clause, and the `DISTINCT ON` variant for deduplication queries.
 
 **[S2] PostgreSQL index strategies for mixed-type search**
 The `magic.cards` table has 22 specialized indices. Walk through the index types: trigram GIN for
-full-text substring search, GIN for JSONB arrays (colors, keywords, legalities, mana cost),
-B-tree for numerics (cmc, power, toughness), and a functional index on `lower(card_name)`.
-Explain when each type wins and what query shapes each one serves.
+full-text substring search, GIN for JSONB arrays (colors, keywords, legalities, mana cost) with
+the `@>`/`<@` containment operators that use them, B-tree for numerics (cmc, power, toughness),
+and a functional index on `lower(card_name)`. Includes the color identity bitmask — five colors
+encoded as a 5-bit integer, subset queries rewritten as `= ANY(smallint[])` — and why that beats
+a JSONB containment check here. Explain when each type wins and what query shapes each one serves.
 
 **[S3] The ILIKE trap: when the planner beats execution**
 `ILIKE` on a trigram-indexed column was spending ~40ms in the query planner for a ~3ms execution.
@@ -243,7 +251,7 @@ Everything else is interleaved freely to avoid topic clustering.
 
 Dependency notes:
 - P1 → P2
-- S1 → S2 → S3 (S4 independent)
+- S1 → S1b → S2 → S3 (S4 independent)
 - R1 → all other Rust posts; R3 + R5 must both precede R4
 
 | # | Post | Area | Publish date |
@@ -252,30 +260,31 @@ Dependency notes:
 | 2  | [I4] Falcon + Bjoern: choosing a Python web framework | Infra | 2026-07-04 |
 | 3  | [P1] Whitespace as an operator: parsing Scryfall's implicit AND | Parser | 2026-07-18 |
 | 4  | [S1] Compiling an AST to parameterized SQL | SQL gen | 2026-08-01 |
-| 5  | [D1] PostgreSQL COPY loading: 10× faster bulk import | Data | 2026-08-15 |
-| 6  | [F4] Progressive enhancement: useful without JavaScript | Frontend | 2026-08-29 |
-| 7  | [S2] PostgreSQL index strategies for mixed-type search | SQL gen | 2026-09-12 |
-| 8  | [F3] Autocomplete for card types | Frontend | 2026-09-26 |
-| 9  | [S4] Two levels of ordering: printing prefer score and card relevance | SQL gen | 2026-10-10 |
-| 10 | [F6] Fonts and mana symbols | Frontend | 2026-10-24 |
-| 11 | [F5] Mana symbol rendering: regex + Map for 61× speedup | Frontend | 2026-11-07 |
-| 12 | [S3] The ILIKE trap: when the planner beats execution | SQL perf | 2026-11-21 |
-| 13 | [S5] Oracle ID deduplication: what we tried, what worked, what didn't | SQL perf | 2026-12-05 |
-| 14 | [F2] Responsive card images and CDN delivery | Frontend | 2026-12-19 |
-| 15 | [I3] The evolution of `/random_search` | Infra | 2027-01-02 |
-| 16 | [I1] Multi-process cache invalidation | Infra | 2027-01-16 |
-| 17 | [R1] In-process filtering | Rust | 2027-01-30 |
-| 18 | [R3] Bitmap fields for color identity and cache locality | Rust | 2027-02-13 |
-| 19 | [I2] Cachebox: Rust-backed drop-in for cachetools | Infra | 2027-02-27 |
-| 20 | [R5] String interning for compact in-memory card data | Rust | 2027-03-13 |
-| 21 | [P2] Hand-rolling a recursive descent parser for 49× speedup | Parser | 2027-03-27 |
-| 22 | [I5] HTTP compression negotiation: brotli, zstd, and gzip | Infra | 2027-04-10 |
-| 23 | [R2] Index data structures in the Rust engine | Rust | 2027-04-24 |
-| 24 | [F1] 40× faster card rendering: DOM nodes vs. regex | Frontend | 2027-05-08 |
-| 25 | [R4] Zero-copy deserialization with rkyv and shared memory | Rust | 2027-05-22 |
-| 26 | [R6] Two-pivot pagination: O(n) sort for a single page | Rust | 2027-06-05 |
-| 27 | [R7] Linear scan vs. hash scan for distinct queries | Rust | 2027-06-19 |
-| 28 | [I6] Blue/green deploys with Docker Compose and nginx | Infra | 2027-07-03 |
+| 5  | [S1b] One query for results and count | SQL gen | 2026-08-15 |
+| 6  | [D1] PostgreSQL COPY loading: 10× faster bulk import | Data | 2026-08-29 |
+| 7  | [F4] Progressive enhancement: useful without JavaScript | Frontend | 2026-09-12 |
+| 8  | [S2] PostgreSQL index strategies for mixed-type search | SQL gen | 2026-09-26 |
+| 9  | [F3] Autocomplete for card types | Frontend | 2026-10-10 |
+| 10 | [S4] Two levels of ordering: printing prefer score and card relevance | SQL gen | 2026-10-24 |
+| 11 | [F6] Fonts and mana symbols | Frontend | 2026-11-07 |
+| 12 | [F5] Mana symbol rendering: regex + Map for 61× speedup | Frontend | 2026-11-21 |
+| 13 | [S3] The ILIKE trap: when the planner beats execution | SQL perf | 2026-12-05 |
+| 14 | [S5] Oracle ID deduplication: what we tried, what worked, what didn't | SQL perf | 2026-12-19 |
+| 15 | [F2] Responsive card images and CDN delivery | Frontend | 2027-01-02 |
+| 16 | [I3] The evolution of `/random_search` | Infra | 2027-01-16 |
+| 17 | [I1] Multi-process cache invalidation | Infra | 2027-01-30 |
+| 18 | [R1] In-process filtering | Rust | 2027-02-13 |
+| 19 | [R3] Bitmap fields for color identity and cache locality | Rust | 2027-02-27 |
+| 20 | [I2] Cachebox: Rust-backed drop-in for cachetools | Infra | 2027-03-13 |
+| 21 | [R5] String interning for compact in-memory card data | Rust | 2027-03-27 |
+| 22 | [P2] Hand-rolling a recursive descent parser for 49× speedup | Parser | 2027-04-10 |
+| 23 | [I5] HTTP compression negotiation: brotli, zstd, and gzip | Infra | 2027-04-24 |
+| 24 | [R2] Index data structures in the Rust engine | Rust | 2027-05-08 |
+| 25 | [F1] 40× faster card rendering: DOM nodes vs. regex | Frontend | 2027-05-22 |
+| 26 | [R4] Zero-copy deserialization with rkyv and shared memory | Rust | 2027-06-05 |
+| 27 | [R6] Two-pivot pagination: O(n) sort for a single page | Rust | 2027-06-19 |
+| 28 | [R7] Linear scan vs. hash scan for distinct queries | Rust | 2027-07-03 |
+| 29 | [I6] Blue/green deploys with Docker Compose and nginx | Infra | 2027-07-17 |
 
 ---
 

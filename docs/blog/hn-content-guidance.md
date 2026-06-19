@@ -44,6 +44,19 @@ regularly use more: headers earn their place when they let a reader orient insid
 to a specific section. They do not earn their place as section announcements, topic labels, or
 padding.
 
+### Section title style
+
+Use title case: capitalize nouns, verbs, adjectives, and adverbs; lowercase articles, coordinating
+conjunctions, and prepositions of four letters or fewer (except as the first or last word).
+
+Frame section titles around the problem being solved or the outcome, not the topic name:
+- "Why Async Wasn't Worth It Here" — not "Async"
+- "From Search Term to LIKE Pattern" — not "Text Matching"
+- "Why Injection Is Structurally Impossible" — not "Parameterization"
+
+If removing the verb or the "why/how/what" leaves a bare noun phrase, the title is a topic label.
+Reframe it as a claim or a transformation.
+
 All posts follow one of two arcs:
 - **Narrative arc:** problem encountered → investigation → discovery → resolution
 - **Argument arc:** bold claim → evidence → implications → close
