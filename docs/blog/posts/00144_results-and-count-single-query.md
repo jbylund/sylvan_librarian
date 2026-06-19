@@ -1,18 +1,18 @@
 ---
-title: "Counting Search Results Without a Second Query (and Why It Depends)"
+title: "One Query for Results and Count: 2x Faster for Deduplicated Searches"
 date: 2026-08-15
 publishDate: 2026-08-15
 tags: ["arcane-tutor", "sql", "postgres"]
-summary: "A search endpoint needs paginated results and a total count. A CTE with UNION ALL collapses them into one query. For deduplicated searches it cuts query time roughly in half by running the dedup once instead of twice."
+summary: "A search endpoint needs paginated results and a total count. A single CTE with UNION ALL answers both — and for deduplicated searches it runs in roughly half the time. For non-deduplicated searches it matches two separate queries while using one round trip."
 ---
 
-A search for `format:modern` matches 73,336 printings, representing 21,994 unique cards. The client needs the top 100 by popularity and a count for the pagination UI. That is two questions, and the obvious implementation answers them with two queries.
+A search for `format:modern` needs two things from the database: the top 100 cards by popularity and a count for the pagination UI. The obvious implementation sends two queries. A single CTE with `UNION ALL` answers both — and for the deduplicated searches that make up most traffic, it runs in roughly half the time. For non-deduplicated searches it matches two separate queries while using one round trip instead of two.
 
-Most searches deduplicate by `oracle_id` — one printing per unique card — because users care about cards, not every printing of each card. That deduplication is the key to understanding why a CTE with `UNION ALL` almost always beats two separate queries.
+Most searches deduplicate by `oracle_id` — one printing per unique card — because users care about cards, not every printing of each card. That deduplication is what drives the performance difference.
 
 ## The Naive Two-Query Approach
 
-Both queries need to scan all matching rows and sort by `oracle_id` — the results query to deduplicate with `DISTINCT ON`, the count query to compute `COUNT(DISTINCT oracle_id)`. For `format:modern`, that is sorting 73,336 rows twice:
+Both queries scan all 73,336 matching rows. The results query sorts them by `oracle_id` to deduplicate with `DISTINCT ON`. For the count, the natural form is `COUNT(DISTINCT oracle_id)`, but PostgreSQL always implements that with Sort + Aggregate — the same 7943kB sort, just to count. `GROUP BY oracle_id` expresses the same intent and lets the planner choose HashAggregate instead, which uses 2073kB and avoids the sort entirely.
 
 ```sql
 -- Query 1: results
@@ -35,23 +35,41 @@ SELECT COUNT(1) FROM (
 ) t;
 ```
 
-Both plans share the same expensive core — a Bitmap Heap Scan feeding a sort over 73,336 rows:
+Even so, both plans still scan all 73,336 matching rows — one sorting, one hashing:
 
 ```
 -- Results: 75.7ms
-Sort (Sort Key: oracle_id)  Memory: 7943kB
-  -> Bitmap Heap Scan  rows=73336
-       -> Bitmap Index Scan on idx_cards_legalities
+Limit  (actual time=75.413..75.421 rows=100)
+  Buffers: shared hit=19243
+  ->  Sort  (actual time=75.412..75.415 rows=100)
+        Sort Key: t.sort_value, t.edhrec_rank, t.prefer_score DESC NULLS LAST
+        Sort Method: top-N heapsort  Memory: 36kB
+        ->  Subquery Scan on t  (actual time=67.243..74.060 rows=21994)
+              ->  Unique  (actual time=67.241..72.955 rows=21994)
+                    ->  Sort  (actual time=67.240..69.431 rows=73336)
+                          Sort Key: card.oracle_id, card.prefer_score DESC NULLS LAST
+                          Sort Method: quicksort  Memory: 7943kB
+                          ->  Bitmap Heap Scan on cards  (actual time=8.233..49.713 rows=73336)
+                                Recheck Cond: (card_legalities @> '{"modern": "legal"}')
+                                Rows Removed by Index Recheck: 23197
+                                ->  Bitmap Index Scan on idx_cards_legalities
+Execution Time: 75.727 ms
 
 -- Count: 56.3ms
-HashAggregate (Group Key: oracle_id)  Memory: 2073kB
-  -> Bitmap Heap Scan  rows=73336
-       -> Bitmap Index Scan on idx_cards_legalities
+Aggregate  (actual time=55.914..55.915 rows=1)
+  ->  HashAggregate  (actual time=54.214..55.353 rows=21994)
+        Group Key: card.oracle_id
+        Batches: 1  Memory Usage: 2073kB
+        ->  Bitmap Heap Scan on cards  (actual time=8.131..46.302 rows=73336)
+              Recheck Cond: (card_legalities @> '{"modern": "legal"}')
+              Rows Removed by Index Recheck: 23197
+              ->  Bitmap Index Scan on idx_cards_legalities
+Execution Time: 56.326 ms
 ```
 
-Total: ~132ms across two round trips. One aside: `COUNT(DISTINCT oracle_id)` produces the same result but always uses Sort + Aggregate (60ms); the `GROUP BY` form lets PostgreSQL choose HashAggregate and avoids the sort. The planner does not rewrite one to the other automatically.
+Total: ~132ms across two round trips.
 
-## One Query for Both
+## Deduplicating Once Instead of Twice
 
 A CTE with `UNION ALL` runs the deduplication once and materializes the result:
 
@@ -82,23 +100,26 @@ The `null::integer` cast gives both branches the same column shape so `UNION ALL
 For `format:modern`, the plan:
 
 ```
-CTE distinct_cards
-  -> Sort (oracle_id)  Memory: 7943kB
-       -> Bitmap Heap Scan  rows=73336  (actual: 21994 distinct)
-          Storage: Memory  Maximum Storage: 1919kB   ← materialized once
--> LIMIT branch: top-N sort over 21994 rows, 77ms total
--> COUNT branch: 1.4ms (scan over materialized result)
-Execution Time: 77.1ms
-```
-
-For `power>4` (6,750 raw matches, 2,175 distinct):
-
-```
-CTE distinct_cards
-  -> Sort (oracle_id)  Memory: 657kB
-       -> Bitmap Heap Scan  rows=6750  (actual: 2175 distinct)
-          Storage: Memory  Maximum Storage: 199kB
--> LIMIT branch + COUNT: Execution Time: 11.6ms
+Append  (actual time=75.325..76.784 rows=101)
+  CTE distinct_cards
+    ->  Unique  (actual time=65.785..72.121 rows=21994)
+          ->  Sort  (actual time=65.783..68.420 rows=73336)
+                Sort Key: card.oracle_id, card.prefer_score DESC NULLS LAST
+                Sort Method: quicksort  Memory: 7943kB
+                ->  Bitmap Heap Scan on cards  (actual time=8.016..48.242 rows=73336)
+                      Recheck Cond: (card_legalities @> '{"modern": "legal"}')
+                      Rows Removed by Index Recheck: 23197
+                      ->  Bitmap Index Scan on idx_cards_legalities
+  ->  Limit  (actual time=75.323..75.331 rows=100)
+        ->  Sort  (actual time=75.322..75.325 rows=100)
+              Sort Key: distinct_cards.sort_value, ...
+              Sort Method: top-N heapsort  Memory: 36kB
+              ->  CTE Scan on distinct_cards  (actual time=65.788..73.889 rows=21994)
+                    Storage: Memory  Maximum Storage: 1919kB
+  ->  Aggregate  (actual time=1.438..1.438 rows=1)
+        ->  CTE Scan on distinct_cards  (actual time=0.001..0.930 rows=21994)
+              Storage: Memory  Maximum Storage: 1919kB
+Execution Time: 77.122 ms
 ```
 
 | Query | Raw matches | Unique cards | Two queries | CTE | Winner |
@@ -108,14 +129,14 @@ CTE distinct_cards
 
 The deduplication sort dominates the cost. Running it once instead of twice is the source of the performance improvement.
 
-## What Changes for Non-Deduplicated Searches
+## When NOT MATERIALIZED Closes the Gap
 
 When searching by printing rather than unique card, there is no `DISTINCT ON`. The two branches have different optimal access paths:
 
 - The LIMIT branch wants to walk the `edhrec_rank` B-tree index in order and stop as soon as it has 100 rows.
 - The COUNT branch wants to use a condition index (`creature_power` or `card_legalities`) to count all matches directly.
 
-A default (materialized) CTE forces the planner to choose a single access strategy for the whole CTE, then serve both branches from the result. For `format:modern`, that means materializing all 73,336 matching rows before either branch can run — 70ms, versus 49ms for two separate queries that can each pick their own index.
+A default (materialized) CTE forces the planner to choose a single access strategy for the whole CTE, then serve both branches from the result. For `format:modern`, that means materializing all 73,336 matching rows before either branch can run — 70ms, versus 46ms for two separate queries that can each pick their own index.
 
 The non-dedup path uses `WITH matching_cards AS NOT MATERIALIZED`, which tells PostgreSQL it is free to inline the CTE definition into each branch and plan them independently:
 
@@ -128,21 +149,27 @@ UNION ALL
 (SELECT COUNT(1), null, ... FROM matching_cards)
 ```
 
-With `NOT MATERIALIZED`, the `format:modern` plan uses the `edhrec_rank` index for the LIMIT branch (examines ~235 rows, 1ms) and the GIN legalities index for the COUNT branch (73,336 rows, 44ms) — 46ms total in a single round trip:
+With `NOT MATERIALIZED`, the `format:modern` plan uses the `edhrec_rank` index for the LIMIT branch (examines ~235 rows, 1ms) and the GIN legalities index for the COUNT branch (73,336 rows, 48ms) — 49ms total in a single round trip:
 
 ```
--> LIMIT branch: Index Scan using idx_cards_edhrec_rank_btree
-     Filter: (card_legalities @> '{"modern": "legal"}')
-     Rows Removed by Filter: 128
-     Execution: ~1ms
--> COUNT branch: Bitmap Heap Scan on idx_cards_legalities
-     rows=73336, Execution: ~44ms
-Total Execution Time: 45.6ms
+Append  (actual time=1.037..48.806 rows=101)
+  ->  Limit  (actual time=1.036..1.045 rows=100)
+        ->  Incremental Sort  (actual time=1.035..1.038 rows=100)
+              Presorted Key: card.edhrec_rank
+              ->  Index Scan using idx_cards_edhrec_rank_btree  (actual time=0.605..0.992 rows=107)
+                    Filter: (card_legalities @> '{"modern": "legal"}')
+                    Rows Removed by Filter: 128
+  ->  Aggregate  (actual time=47.745..47.746 rows=1)
+        ->  Bitmap Heap Scan on cards  (actual time=7.791..45.673 rows=73336)
+              Recheck Cond: (card_legalities @> '{"modern": "legal"}')
+              Rows Removed by Index Recheck: 23197
+              ->  Bitmap Index Scan on idx_cards_legalities
+Execution Time: 48.982 ms
 ```
 
 | Query | Two queries | Materialized CTE | NOT MATERIALIZED |
 |---|---|---|---|
-| `format:modern` | 46ms (1ms top-n, 45ms count) | 70ms | 46ms |
+| `format:modern` | 46ms (1ms top-n, 45ms count) | 70ms | 49ms |
 | `power>4` | 11ms (10ms top-n, 1ms count) | 14ms | 9ms |
 
 The split timings reveal an asymmetry worth noting. `format:modern` top-n takes 1ms because 76% of cards are modern-legal — walking the `edhrec_rank` index in order, the planner finds 100 matches after examining only ~235 rows and exits early. `power>4` count takes 1ms for the opposite reason — `idx_cards_creature_power_btree` is a covering index for that query, so the planner counts 6,750 entries without touching the heap at all.
