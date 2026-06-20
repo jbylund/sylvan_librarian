@@ -63,8 +63,9 @@ logger = logging.getLogger(__name__)
 
 FALLBACK_SITE_NAME = "MTG Search"
 
-# Selectors extracted from styles.css and inlined in the HTML <style> block to eliminate
-# render-blocking CSS on first paint. Only includes elements visible before first scroll.
+# Selectors extracted from styles.css and inlined in the HTML <style> block to prevent
+# layout shift on pages with server-side rendered results. Excludes hover/focus states,
+# animations, and modal styles (not visible on initial paint).
 _CRITICAL_SELECTORS = frozenset(
     {
         '[data-theme="light"]',
@@ -88,8 +89,34 @@ _CRITICAL_SELECTORS = frozenset(
         ".order-toggle",
         ".arrow-up",
         ".loading",
+        # Results grid — needed for SSR search result pages
+        ".results-container",
+        ".card-item",
+        ".card-image",
+        ".card-name-mana-row",
+        ".card-name",
+        ".card-mana",
+        ".ms-cost",
+        ".mana-symbol",
+        ".card-type",
+        ".card-text",
+        ".card-set-power-row",
+        ".card-set",
+        ".card-power-toughness",
+        ".results-count",
+        "#statusMessage",
+        # Footer — margin-top:auto positions it; missing this causes it to jump on styles load
+        ".footer",
+        ".footer-legal",  # also matches the comma rule .footer-legal, .footer-attribution, .footer-links
+        ".footer-attribution a",
+        ".footer-links a",
     }
 )
+
+
+def _selector_is_critical(selector: str) -> bool:
+    """Return True if any part of a (possibly comma-separated) selector is critical."""
+    return any(part.strip() in _CRITICAL_SELECTORS for part in selector.split(","))
 
 
 def _build_critical_css() -> str:
@@ -100,14 +127,14 @@ def _build_critical_css() -> str:
     for rule in rules:
         if isinstance(rule, tinycss2.ast.QualifiedRule):
             selector = tinycss2.serialize(rule.prelude).strip()
-            if selector in _CRITICAL_SELECTORS:
+            if _selector_is_critical(selector):
                 parts.append(tinycss2.serialize([rule]))
         elif isinstance(rule, tinycss2.ast.AtRule) and rule.at_keyword == "media" and rule.content is not None:
             inner = tinycss2.parse_rule_list(rule.content, skip_comments=True, skip_whitespace=True)
             critical_inner = [
                 r
                 for r in inner
-                if isinstance(r, tinycss2.ast.QualifiedRule) and tinycss2.serialize(r.prelude).strip() in _CRITICAL_SELECTORS
+                if isinstance(r, tinycss2.ast.QualifiedRule) and _selector_is_critical(tinycss2.serialize(r.prelude).strip())
             ]
             if critical_inner:
                 condition = tinycss2.serialize(rule.prelude).strip()
