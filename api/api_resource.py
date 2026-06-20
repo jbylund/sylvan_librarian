@@ -79,12 +79,13 @@ def hostname_to_site_name(raw_host: str) -> str:
     parts = name.split(".")
     tld = parts[-1].lower()
     name = ".".join(parts[:-1]) if tld in _STRIP_TLDS else name
-    name = name.replace(".", "").replace("-", " ")
-    return name.title() or FALLBACK_SITE_NAME
+    name = name.replace(".", "").replace("-", " ").strip()
+    name = name.title()
+    return name if any(c.isalnum() for c in name) else FALLBACK_SITE_NAME
 
 
 # Query parameters that must not be forwarded to action handlers.
-DISALLOWED_QUERY_ARGS: frozenset[str] = frozenset(["request_host"])
+DISALLOWED_QUERY_ARGS: frozenset[str] = frozenset(["falcon_response", "request_host"])
 
 # pylint: disable=c-extension-no-member
 NOT_FOUND = 404

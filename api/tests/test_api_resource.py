@@ -297,6 +297,21 @@ class TestAPIResourceRequestHandling(unittest.TestCase):
         with pytest.raises(falcon.HTTPNotFound):
             self.api_resource._handle(mock_req, mock_resp)
 
+    def test_disallowed_query_params_do_not_cause_type_error(self) -> None:
+        """Query params named after internal kwargs must be stripped before dispatch."""
+        mock_req = MagicMock()
+        mock_req.path = mock_req.relative_uri = "/"
+        mock_req.params = {"falcon_response": "injected", "request_host": "evil.com"}
+        mock_req.host = "localhost"
+        mock_resp = MagicMock()
+        mock_resp.complete = False
+
+        with patch("api.api_resource.logger"):
+            # Must not raise TypeError or return a 400
+            self.api_resource._handle(mock_req, mock_resp)
+
+        assert mock_resp.text is not None
+
     def test_handle_handles_type_errors(self) -> None:
         """Test _handle handles TypeError exceptions."""
         mock_req = MagicMock()
@@ -937,6 +952,14 @@ _HOSTNAME_TESTCASES = {
     "invalid_chars_returns_fallback": {
         "expected": FALLBACK_SITE_NAME,
         "raw_host": 'evil"><script>.com',
+    },
+    "all_hyphens_returns_fallback": {
+        "expected": FALLBACK_SITE_NAME,
+        "raw_host": "----",
+    },
+    "all_dots_returns_fallback": {
+        "expected": FALLBACK_SITE_NAME,
+        "raw_host": "...",
     },
 }
 
