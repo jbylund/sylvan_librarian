@@ -83,6 +83,9 @@ def hostname_to_site_name(raw_host: str) -> str:
     return name.title() or FALLBACK_SITE_NAME
 
 
+# Query parameters that must not be forwarded to action handlers.
+DISALLOWED_QUERY_ARGS: frozenset[str] = frozenset(["request_host"])
+
 # pylint: disable=c-extension-no-member
 NOT_FOUND = 404
 IMPORT_EXPORT = True
@@ -349,7 +352,8 @@ class APIResource:
         res = None
         before = time.monotonic()
         try:
-            res = action(falcon_response=resp, request_host=req.host, **req.params)
+            params = {k: v for k, v in req.params.items() if k not in DISALLOWED_QUERY_ARGS}
+            res = action(falcon_response=resp, request_host=req.host, **params)
             resp.media = res
         except TypeError as oops:
             logger.error("Error handling request: %s", oops, exc_info=True)
