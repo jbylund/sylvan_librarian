@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 MAX_ORACLE_TEXT_LENGTH = 200
+_EAGER_LOAD_COUNT = 4  # covers a full first row at the widest common grid (4 columns)
 
 
 def escape_html(text: str) -> str:
@@ -210,9 +211,8 @@ def create_card_html(card: dict, index: int) -> str:
 
     # Create image HTML with srcset for responsive images
     # Use 388px as default src (good middle ground for initial load)
-    # First 4 cards cover a full first row at the widest common grid (4 columns); lazy-load the rest.
     priority_attr = ' fetchpriority="high"' if index == 0 else ""
-    lazy_attr = "" if index < 4 else ' loading="lazy"'
+    lazy_attr = "" if index < _EAGER_LOAD_COUNT else ' loading="lazy"'
     image_html = (
         f'<img class="card-image" '
         f'src="{escape_html(image_388)}" '
