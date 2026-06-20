@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-CacheKey = tuple[str, tuple[tuple, ...], tuple[tuple, ...]]
+CacheKey = tuple[str, tuple[tuple, ...], tuple[tuple, ...], str | None]
 
 # Headers that depend on the request rather than the cached payload: CORSMiddleware varies
 # Access-Control-* on the request's Origin and re-sets them on every response, including hits;
@@ -63,10 +63,13 @@ class CachingMiddleware:
         cached_headers = [
             "ACCEPT-ENCODING",
         ]
+        host = req.headers.get("X-PROXY-HOST") or req.headers.get("HOST")
+        host = host.strip().lower() if isinstance(host, str) and host else None
         return (
             req.relative_uri,
             tuple(sorted(req.params.items())),
             tuple(sorted({k: req.headers.get(k) for k in cached_headers}.items())),
+            host,
         )
 
     _UNCACHED_PATHS: frozenset[str] = frozenset({x.strip("/") for x in ["/random_search"]})

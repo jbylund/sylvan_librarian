@@ -75,10 +75,9 @@ def hostname_to_site_name(raw_host: str) -> str:
     hostname = urllib.parse.urlparse(f"http://{raw_host}").hostname or ""
     if not hostname or hostname == "localhost" or _IP_RE.match(hostname) or not _SAFE_HOSTNAME_RE.match(hostname):
         return FALLBACK_SITE_NAME
-    name = hostname.removeprefix("www.")
-    parts = name.split(".")
+    parts = hostname.split(".")[-2:]
     tld = parts[-1].lower()
-    name = ".".join(parts[:-1]) if tld in _STRIP_TLDS else name
+    name = parts[0] if tld in _STRIP_TLDS else ".".join(parts)
     name = name.replace(".", "").replace("-", " ").strip()
     name = name.title()
     return name if any(c.isalnum() for c in name) else FALLBACK_SITE_NAME
@@ -354,7 +353,7 @@ class APIResource:
         before = time.monotonic()
         try:
             params = {k: v for k, v in req.params.items() if k not in DISALLOWED_QUERY_ARGS}
-            res = action(falcon_response=resp, request_host=req.host, **params)
+            res = action(falcon_response=resp, request_host=req.get_header("X-Proxy-Host") or req.host, **params)
             resp.media = res
         except TypeError as oops:
             logger.error("Error handling request: %s", oops, exc_info=True)

@@ -929,6 +929,14 @@ _HOSTNAME_TESTCASES = {
         "expected": "Arcane Tutor",
         "raw_host": "www.arcane-tutor.com",
     },
+    "strips_subdomain_com": {
+        "expected": "Arcane Tutor",
+        "raw_host": "foo.arcane-tutor.com",
+    },
+    "strips_subdomain_non_strip_tld": {
+        "expected": "Tolarian Academy",
+        "raw_host": "foo.tolarian-acade.my",
+    },
     "localhost_returns_fallback": {
         "expected": FALLBACK_SITE_NAME,
         "raw_host": "localhost",
