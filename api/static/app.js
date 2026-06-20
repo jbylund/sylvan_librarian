@@ -193,8 +193,8 @@ class CardSearch {
   }
 
   async init() {
-    // Fetch common card types first
-    await this.fetchCommonCardTypes();
+    // Fetch common card types in background — only needed for autocomplete
+    this.fetchCommonCardTypes();
 
     // On page load, check for query params and restore state
     const params = new URLSearchParams(window.location.search);
