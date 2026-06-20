@@ -29,6 +29,7 @@ import orjson
 import psycopg
 import psycopg_pool
 import requests
+import tinycss2
 from cachebox import LRUCache, TTLCache
 from cachebox import cached as cachebox_cached
 from psycopg import Connection, Cursor
@@ -61,6 +62,69 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 FALLBACK_SITE_NAME = "MTG Search"
+
+# Selectors extracted from styles.css and inlined in the HTML <style> block to eliminate
+# render-blocking CSS on first paint. Only includes elements visible before first scroll.
+_CRITICAL_SELECTORS = frozenset(
+    {
+        '[data-theme="light"]',
+        '[data-theme="dark"]',
+        "*",
+        "html",
+        "body",
+        ".container",
+        ".spacer",
+        ".spacer-30",
+        ".header",
+        ".theme-toggle",
+        ".header h1",
+        ".header p",
+        ".search-container",
+        ".search-box",
+        ".search-input",
+        ".order-controls",
+        ".dropdown-label",
+        ".order-dropdown",
+        ".order-toggle",
+        ".arrow-up",
+        ".loading",
+    }
+)
+
+
+def _build_critical_css() -> str:
+    """Extract and minify critical selectors from styles.css at startup."""
+    styles_path = pathlib.Path(__file__).parent / "static" / "styles.css"
+    rules = tinycss2.parse_stylesheet(styles_path.read_text(), skip_comments=True, skip_whitespace=True)
+    parts: list[str] = []
+    for rule in rules:
+        if isinstance(rule, tinycss2.ast.QualifiedRule):
+            selector = tinycss2.serialize(rule.prelude).strip()
+            if selector in _CRITICAL_SELECTORS:
+                parts.append(tinycss2.serialize([rule]))
+        elif isinstance(rule, tinycss2.ast.AtRule) and rule.at_keyword == "media" and rule.content is not None:
+            inner = tinycss2.parse_rule_list(rule.content, skip_comments=True, skip_whitespace=True)
+            critical_inner = [
+                r
+                for r in inner
+                if isinstance(r, tinycss2.ast.QualifiedRule) and tinycss2.serialize(r.prelude).strip() in _CRITICAL_SELECTORS
+            ]
+            if critical_inner:
+                condition = tinycss2.serialize(rule.prelude).strip()
+                inner_css = tinycss2.serialize(critical_inner)
+                parts.append(f"@media {condition}{{{inner_css}}}")
+    raw = "".join(parts)
+    # Minify: collapse whitespace around punctuation and strip excess spaces
+    raw = re.sub(r"/\*.*?\*/", "", raw, flags=re.DOTALL)
+    raw = re.sub(r"\s+", " ", raw)
+    raw = re.sub(r"\s*([{};:,>])\s*", r"\1", raw)
+    raw = re.sub(r";\}", "}", raw)
+    return raw.strip()
+
+
+_INDEX_HTML_PATH = pathlib.Path(__file__).parent / "static" / "index.html"
+
+
 # TLDs in this set are stripped from the hostname; others are concatenated into the word.
 # e.g. arcane-tutor.com -> "Arcane Tutor"; tolarian-acade.my -> "Tolarian Academy"
 _STRIP_TLDS = frozenset(["app", "biz", "co", "com", "dev", "edu", "gov", "info", "io", "me", "net", "org", "us"])
@@ -190,6 +254,16 @@ def set_cache_header(falcon_response: falcon.Response | None, duration: timedelt
     falcon_response.set_header("Cache-Control", f"public, max-age={seconds}")
 
 
+@cached(cache=LRUCache(maxsize=16))
+def _build_base_html(critical_css: str, site_name: str) -> str:
+    """Read index.html and inject critical CSS and site name. Cached per (critical_css, site_name) pair."""
+    html = _INDEX_HTML_PATH.read_text()
+    html = html.replace("<!-- CRITICAL_CSS -->", critical_css)
+    if site_name != FALLBACK_SITE_NAME:
+        html = html.replace(FALLBACK_SITE_NAME, site_name)
+    return html
+
+
 @cached(cache=LRUCache(maxsize=10_000))
 def get_where_clause(query: str) -> tuple[str, dict]:
     """Generate SQL WHERE clause and parameters from a search query.
@@ -233,6 +307,7 @@ class APIResource:
         Sets up the database connection pool and action mapping for the API.
         """
         self._bulk_data_fetcher = ScryfallBulkDataFetcher()
+        self._critical_css: str = _build_critical_css()
         self._conn_pool: psycopg_pool.ConnectionPool = db_utils.make_pool()
         # Create action map with type-converting wrappers for all public methods
         self.action_map = {}
@@ -1187,14 +1262,8 @@ class APIResource:
             prefer (PreferOrder): Prefer order.
 
         """
-        # Read the HTML file
-        full_filename = pathlib.Path(__file__).parent / "static" / "index.html"
-        with pathlib.Path(full_filename).open() as f:
-            html_content = f.read()
-
         site_name = hostname_to_site_name(request_host)
-        if site_name != FALLBACK_SITE_NAME:
-            html_content = html_content.replace(FALLBACK_SITE_NAME, site_name)
+        html_content = _build_base_html(self._critical_css, site_name)
 
         # Check if we have a search query
         search_query = query or q

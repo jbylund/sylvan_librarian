@@ -85,7 +85,11 @@
         type="text/css"
       />
     </noscript>
-    <link href="/static/styles.css" rel="stylesheet" type="text/css" />
+    <style>
+      <!-- CRITICAL_CSS -->
+    </style>
+    <link href="/static/styles.css" rel="stylesheet" type="text/css" media="print" onload="this.media='all'" />
+    <noscript><link href="/static/styles.css" rel="stylesheet" type="text/css" /></noscript>
     <script src="/static/app.min.js" defer></script>
   </head>
   <body>
