@@ -1035,7 +1035,7 @@ class APIResource:
             # scryfall_id is the PK — every row is already unique, no dedup needed.
             # The CTE has no ORDER BY; only the LIMIT branch sorts.
             query_sql = f"""
-            WITH matching_cards AS (
+            WITH matching_cards AS NOT MATERIALIZED (
                 SELECT
                     {_select_cols}
                     {sql_orderby} AS sort_value
