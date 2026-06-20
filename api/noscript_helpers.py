@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 MAX_ORACLE_TEXT_LENGTH = 200
+_EAGER_LOAD_COUNT = 4  # covers a full first row at the widest common grid (4 columns)
 
 
 def escape_html(text: str) -> str:
@@ -191,12 +192,9 @@ def create_card_html(card: dict, index: int) -> str:
     alt_text = escape_html(card.get("name", "Unknown Card"))
 
     # Build srcset and sizes for responsive images
-    # sizes attribute matches the grid breakpoints:
-    # - < 410px: 1 column (100vw minus padding/gap)
-    # - 410-750px: 2 columns (50vw minus gap/padding)
-    # - 750-1370px: 3 columns (33.33vw minus gap/padding)
-    # - 1370-2500px: 4 columns (25vw minus gap/padding)
-    # - >= 2500px: 5 columns (20vw minus gap/padding)
+    # sizes breakpoints are one below the CSS grid min-width thresholds (< not <=):
+    # - < 410px: 1 column, < 750px: 2 columns, < 1370px: 3 columns, < 2500px: 4 columns, else 5
+    # calc values derived from CSS: body padding 1em (2em total), card padding 0.8em (1.6em total), gap 15px
     srcset = (
         f"{escape_html(image_280)} 280w, "
         f"{escape_html(image_388)} 388w, "
@@ -204,21 +202,23 @@ def create_card_html(card: dict, index: int) -> str:
         f"{escape_html(image_745)} 745w"
     )
     sizes = (
-        "(max-width: 410px) calc(100vw - 60px), "
-        "(max-width: 750px) calc(50vw - 30px), "
-        "(max-width: 1370px) calc(33.33vw - 25px), "
-        "(max-width: 2500px) calc(25vw - 20px), "
-        "calc(20vw - 15px)"
+        "(max-width: 409px) calc(100vw - 3.6em), "
+        "(max-width: 749px) calc(50vw - 2.6em - 7.5px), "
+        "(max-width: 1369px) calc(33.33vw - 2.27em - 10px), "
+        "(max-width: 2499px) calc(25vw - 2.1em - 11.25px), "
+        "calc(20vw - 2em - 12px)"
     )
 
     # Create image HTML with srcset for responsive images
     # Use 388px as default src (good middle ground for initial load)
+    priority_attr = ' fetchpriority="high"' if index == 0 else ""
+    lazy_attr = "" if index < _EAGER_LOAD_COUNT else ' loading="lazy"'
     image_html = (
         f'<img class="card-image" '
         f'src="{escape_html(image_388)}" '
         f'srcset="{srcset}" '
         f'sizes="{sizes}" '
-        f'alt="{alt_text}" title="{alt_text}" />'
+        f'alt="{alt_text}" title="{alt_text}"{priority_attr}{lazy_attr} />'
     )
 
     # Build card components
@@ -264,8 +264,10 @@ def create_card_html(card: dict, index: int) -> str:
     return f"""
              <div class="card-item" data-card-id="{escape_html(card_id)}">
                  {image_html}
-                 {name_html}
-                 {mana_html}
+                 <div class="card-name-mana-row">
+                     {name_html}
+                     {mana_html}
+                 </div>
                  {type_html}
                  {oracle_html}
                  {set_power_html}

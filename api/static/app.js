@@ -193,8 +193,8 @@ class CardSearch {
   }
 
   async init() {
-    // Fetch common card types first
-    await this.fetchCommonCardTypes();
+    // Fetch common card types in background — only needed for autocomplete
+    this.fetchCommonCardTypes();
 
     // On page load, check for query params and restore state
     const params = new URLSearchParams(window.location.search);
@@ -606,12 +606,18 @@ class CardSearch {
     // Set max columns based on card count to prevent more columns than cards
     this.updateGridColumns(cards.length);
 
-    // Calculate number of columns in the first row for fetchpriority
-    const firstRowCount = this.calculateFirstRowCount(cards.length);
+    // If the server already rendered cards into the DOM (SSR), skip re-rendering.
+    // This preserves early image loads that the browser started from the HTML, which
+    // dramatically improves LCP — re-rendering would discard those in-flight requests.
+    const hasSSRContent = this.resultsContainer && this.resultsContainer.children.length > 0;
+    if (!hasSSRContent) {
+      // Calculate number of columns in the first row for fetchpriority
+      const firstRowCount = this.calculateFirstRowCount(cards.length);
 
-    this.resultsContainer.innerHTML = cards
-      .map((card, index) => this.createCardHTML(card, index, index < firstRowCount))
-      .join('');
+      this.resultsContainer.innerHTML = cards
+        .map((card, index) => this.createCardHTML(card, index, index < firstRowCount))
+        .join('');
+    }
 
     // Record arrival time; we only push this state when leaving if they stayed > DWELL_MS and it's not already saved (updateURL)
     const url = this.buildCurrentSearchUrl();
@@ -705,7 +711,7 @@ class CardSearch {
     // - >= 2500px: 5 columns (20vw minus gap/padding)
     const srcset = `${this.escapeHtml(image280)} 280w, ${this.escapeHtml(image388)} 388w, ${this.escapeHtml(image538)} 538w, ${this.escapeHtml(image745)} 745w`;
     const sizes =
-      '(max-width: 410px) calc(100vw - 60px), (max-width: 750px) calc(50vw - 30px), (max-width: 1370px) calc(33.33vw - 25px), (max-width: 2500px) calc(25vw - 20px), calc(20vw - 15px)';
+      '(max-width: 409px) calc(100vw - 3.6em), (max-width: 749px) calc(50vw - 2.6em - 7.5px), (max-width: 1369px) calc(33.33vw - 2.27em - 10px), (max-width: 2499px) calc(25vw - 2.1em - 11.25px), calc(20vw - 2em - 12px)';
 
     // Use 388px as default src (good middle ground for initial load)
     // Add fetchpriority="high" for first row cards to improve LCP
@@ -1271,3 +1277,5 @@ window.cardSearchMain = function () {
   window.cardSearch = new CardSearch();
   window.themeManager = new ThemeManager();
 };
+// Auto-initialize when this script runs via defer (DOM is fully parsed at this point).
+window.cardSearchMain();

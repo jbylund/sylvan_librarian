@@ -6,6 +6,7 @@ import collections
 import copy
 import csv
 import datetime
+import hashlib
 import inspect
 import itertools
 import logging
@@ -29,6 +30,7 @@ import orjson
 import psycopg
 import psycopg_pool
 import requests
+import tinycss2
 from cachebox import LRUCache, TTLCache
 from cachebox import cached as cachebox_cached
 from psycopg import Connection, Cursor
@@ -61,6 +63,107 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 FALLBACK_SITE_NAME = "MTG Search"
+
+# Selectors extracted from styles.css and inlined in the HTML <style> block to prevent
+# layout shift on pages with server-side rendered results. Excludes hover/focus states,
+# animations, and modal styles (not visible on initial paint).
+_CRITICAL_SELECTORS = frozenset(
+    {
+        '[data-theme="light"]',
+        '[data-theme="dark"]',
+        "*",
+        "html",
+        "body",
+        ".container",
+        ".spacer",
+        ".spacer-30",
+        ".header",
+        ".theme-toggle",
+        ".header h1",
+        ".header p",
+        ".search-container",
+        ".search-box",
+        ".search-input",
+        ".order-controls",
+        ".dropdown-label",
+        ".order-dropdown",
+        ".order-toggle",
+        ".arrow-up",
+        ".loading",
+        # Results grid — needed for SSR search result pages
+        ".results-container",
+        ".card-item",
+        ".card-image",
+        ".card-name-mana-row",
+        ".card-name",
+        ".card-mana",
+        ".ms-cost",
+        ".mana-symbol",
+        ".card-type",
+        ".card-text",
+        ".card-set-power-row",
+        ".card-set",
+        ".card-power-toughness",
+        ".results-count",
+        "#statusMessage",
+        # Footer — margin-top:auto positions it; missing this causes it to jump on styles load
+        ".footer",
+        ".footer-legal",  # also matches the comma rule .footer-legal, .footer-attribution, .footer-links
+        ".footer-attribution a",
+        ".footer-links a",
+    }
+)
+
+
+def _selector_is_critical(selector: str) -> bool:
+    """Return True if any part of a (possibly comma-separated) selector is critical."""
+    return any(part.strip() in _CRITICAL_SELECTORS for part in selector.split(","))
+
+
+def _build_critical_css() -> str:
+    """Extract and minify critical selectors from styles.css at startup."""
+    styles_path = pathlib.Path(__file__).parent / "static" / "styles.css"
+    rules = tinycss2.parse_stylesheet(styles_path.read_text(), skip_comments=True, skip_whitespace=True)
+    parts: list[str] = []
+    for rule in rules:
+        if isinstance(rule, tinycss2.ast.QualifiedRule):
+            selector = tinycss2.serialize(rule.prelude).strip()
+            if _selector_is_critical(selector):
+                parts.append(tinycss2.serialize([rule]))
+        elif isinstance(rule, tinycss2.ast.AtRule) and rule.at_keyword == "media" and rule.content is not None:
+            inner = tinycss2.parse_rule_list(rule.content, skip_comments=True, skip_whitespace=True)
+            critical_inner = [
+                r
+                for r in inner
+                if isinstance(r, tinycss2.ast.QualifiedRule) and _selector_is_critical(tinycss2.serialize(r.prelude).strip())
+            ]
+            if critical_inner:
+                condition = tinycss2.serialize(rule.prelude).strip()
+                inner_css = tinycss2.serialize(critical_inner)
+                parts.append(f"@media {condition}{{{inner_css}}}")
+    raw = "".join(parts)
+    # Minify: collapse whitespace around punctuation and strip excess spaces
+    raw = re.sub(r"/\*.*?\*/", "", raw, flags=re.DOTALL)
+    raw = re.sub(r"\s+", " ", raw)
+    raw = re.sub(r"\s*([{};:,>])\s*", r"\1", raw)
+    raw = re.sub(r";\}", "}", raw)
+    return raw.strip()
+
+
+_INDEX_HTML_PATH = pathlib.Path(__file__).parent / "static" / "index.html"
+
+
+def _static_hash(filename: str) -> str | None:
+    try:
+        return hashlib.sha256((pathlib.Path(__file__).parent / "static" / filename).read_bytes()).hexdigest()[:12]
+    except FileNotFoundError:
+        return None
+
+
+_STYLES_CSS_HASH = _static_hash("styles.css")
+_APP_MIN_JS_HASH = _static_hash("app.min.js")
+
+
 # TLDs in this set are stripped from the hostname; others are concatenated into the word.
 # e.g. arcane-tutor.com -> "Arcane Tutor"; tolarian-acade.my -> "Tolarian Academy"
 _STRIP_TLDS = frozenset(["app", "biz", "co", "com", "dev", "edu", "gov", "info", "io", "me", "net", "org", "us"])
@@ -190,6 +293,20 @@ def set_cache_header(falcon_response: falcon.Response | None, duration: timedelt
     falcon_response.set_header("Cache-Control", f"public, max-age={seconds}")
 
 
+@cached(cache=LRUCache(maxsize=16))
+def _build_base_html(critical_css: str, site_name: str) -> str:
+    """Read index.html and inject critical CSS and site name. Cached per (critical_css, site_name) pair."""
+    html = _INDEX_HTML_PATH.read_text()
+    html = html.replace("<!-- CRITICAL_CSS -->", critical_css)
+    if _STYLES_CSS_HASH:
+        html = html.replace("/static/styles.css", f"/static/styles.css?v={_STYLES_CSS_HASH}")
+    if _APP_MIN_JS_HASH:
+        html = html.replace("/static/app.min.js", f"/static/app.min.js?v={_APP_MIN_JS_HASH}")
+    if site_name != FALLBACK_SITE_NAME:
+        html = html.replace(FALLBACK_SITE_NAME, site_name)
+    return html
+
+
 @cached(cache=LRUCache(maxsize=10_000))
 def get_where_clause(query: str) -> tuple[str, dict]:
     """Generate SQL WHERE clause and parameters from a search query.
@@ -233,6 +350,7 @@ class APIResource:
         Sets up the database connection pool and action mapping for the API.
         """
         self._bulk_data_fetcher = ScryfallBulkDataFetcher()
+        self._critical_css: str = _build_critical_css()
         self._conn_pool: psycopg_pool.ConnectionPool = db_utils.make_pool()
         # Create action map with type-converting wrappers for all public methods
         self.action_map = {}
@@ -956,8 +1074,10 @@ class APIResource:
                 # limit=None means "no limit"; the engine requires an int, so use a large number
                 limit=limit if limit is not None else 1_000_000,
             )
+        with timer("engine_collect"):
+            cards = list(cards)
         return {
-            "cards": list(cards),
+            "cards": cards,
             "compiled": "(rust engine)",
             "inner_timings": timer.get_timings(),
             "outer_timings": timer.get_timings(),
@@ -1185,14 +1305,8 @@ class APIResource:
             prefer (PreferOrder): Prefer order.
 
         """
-        # Read the HTML file
-        full_filename = pathlib.Path(__file__).parent / "static" / "index.html"
-        with pathlib.Path(full_filename).open() as f:
-            html_content = f.read()
-
         site_name = hostname_to_site_name(request_host)
-        if site_name != FALLBACK_SITE_NAME:
-            html_content = html_content.replace(FALLBACK_SITE_NAME, site_name)
+        html_content = _build_base_html(self._critical_css, site_name)
 
         # Check if we have a search query
         search_query = query or q
@@ -1292,8 +1406,7 @@ class APIResource:
             return
         self._serve_static_file(filename="styles.css", falcon_response=falcon_response)
         falcon_response.content_type = "text/css"
-        # Cache CSS for 1 hour - it changes infrequently
-        set_cache_header(falcon_response, duration=timedelta(hours=1))
+        set_cache_header(falcon_response, duration=timedelta(days=30))
 
     def app_js(self, *, falcon_response: falcon.Response | None = None, **_: object) -> None:
         """Return the app.js file.
@@ -1320,8 +1433,7 @@ class APIResource:
             return
         self._serve_static_file(filename="app.min.js", falcon_response=falcon_response)
         falcon_response.content_type = "application/javascript"
-        # Cache minified JavaScript for 1 hour - it changes infrequently
-        set_cache_header(falcon_response, duration=timedelta(hours=1))
+        set_cache_header(falcon_response, duration=timedelta(days=30))
 
     def _serve_static_file(self, *, filename: str, falcon_response: falcon.Response) -> None:
         """Serve a static file to the Falcon response.

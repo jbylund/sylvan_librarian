@@ -61,6 +61,8 @@
       href="https://d1hot9ps2xugbc.cloudfront.net/cdn/fonts/beleren/beleren-subset.css"
       rel="stylesheet"
       type="text/css"
+      media="print"
+      onload="this.media='all'"
     />
     <noscript>
       <link
@@ -83,12 +85,12 @@
         type="text/css"
       />
     </noscript>
-    <link href="/static/styles.css" rel="stylesheet" type="text/css" />
-    <script src="/static/app.min.js"></script>
-    <script>
-      <!-- SERVER_SIDE_EMBEDDED_DATA -->
-      window.cardSearchMain && window.cardSearchMain();
-    </script>
+    <style>
+      <!-- CRITICAL_CSS -->
+    </style>
+    <link href="/static/styles.css" rel="stylesheet" type="text/css" media="print" onload="this.media='all'" />
+    <noscript><link href="/static/styles.css" rel="stylesheet" type="text/css" /></noscript>
+    <script src="/static/app.min.js" defer></script>
   </head>
   <body>
     <div class="container">
@@ -198,7 +200,6 @@
     </div>
     <script>
       <!-- SERVER_SIDE_EMBEDDED_DATA -->
-      window.cardSearchMain && window.cardSearchMain();
     </script>
   </body>
 </html>
