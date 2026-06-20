@@ -265,8 +265,10 @@ def create_card_html(card: dict, index: int) -> str:
     return f"""
              <div class="card-item" data-card-id="{escape_html(card_id)}">
                  {image_html}
-                 {name_html}
-                 {mana_html}
+                 <div class="card-name-mana-row">
+                     {name_html}
+                     {mana_html}
+                 </div>
                  {type_html}
                  {oracle_html}
                  {set_power_html}
