@@ -64,6 +64,7 @@ class CachingMiddleware:
             "ACCEPT-ENCODING",
         ]
         host = req.headers.get("X-PROXY-HOST") or req.headers.get("HOST")
+        host = host.strip().lower() if isinstance(host, str) and host else None
         return (
             req.relative_uri,
             tuple(sorted(req.params.items())),
