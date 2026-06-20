@@ -6,6 +6,7 @@ tags: ["arcane-tutor", "sql", "postgres", "python"]
 summary: "Each AST node emits a SQL fragment and bound parameters. How the node hierarchy works, how different field types generate different SQL, and why user input never touches the query string. Covers text/regex/arithmetic; JSONB operators and the count+results CTE are in separate posts."
 ---
 
+<!-- {{< mana >}} shortcodes render as inline mana symbols using the same font inlined from the main site. -->
 `cmc+1<power` finds creatures where power exceeds mana value plus one — Gigantosaurus ({{< mana g >}}{{< mana g >}}{{< mana g >}}{{< mana g >}}{{< mana g >}}, 10/10) and Yargle, Glutton of Urborg ({{< mana 4 >}}{{< mana b >}}, 9/3) both qualify. The parser handles recognizing the arithmetic syntax and building the right AST; what this post is about is the other half: how that AST becomes a runnable SQL WHERE clause.
 
 ## How Parameters Accumulate
@@ -67,7 +68,7 @@ def to_sql(self, context: dict) -> str:
 
 For `cmc+1<power`, the parser produces a nested tree:
 
-```
+```python
 BinaryOperatorNode(
     BinaryOperatorNode(CardAttributeNode(cmc), "+", NumericValueNode(1.0)),
     "<",
@@ -82,17 +83,24 @@ Walking that tree:
 - Inner node → `(card.cmc + %(p_float_MS4w)s)`
 - `CardAttributeNode(creature_power).to_sql(ctx)` → `card.creature_power`
 - Outer node → `((card.cmc + %(p_float_MS4w)s) < card.creature_power)`
+- Final context: `{"p_float_MS4w": 1.0}`
 
 The cross-attribute arithmetic falls out of the recursive structure with no special case.
 
-One subtlety: `NotNode` preserves SQL's three-valued logic by emitting `NOT (...)` rather than an `IS FALSE` check. So `-power>2` on a card with no power attribute yields NULL, not FALSE — and NULL rows are excluded. Cards without a power do not appear in the results even under negation, which matches Scryfall's behavior.
+## NULL Under Negation
+
+Cards without a power attribute — lands, instants, sorceries — are expected to be absent from both `power>2` and `-(power>2)`. SQL's three-valued logic delivers this for free. `creature_power` is NULL for non-creature cards; `NULL > 2` evaluates to NULL, not FALSE; `NOT NULL` is still NULL; and the WHERE clause excludes NULL rows. The null exclusion is symmetric across positive and negative forms with no special case required.
 
 ## Why Injection Is Structurally Impossible
 
-The context dict is the only path through which user-supplied values reach the database. Every `f"..."` string in every `to_sql` method contains only column names, SQL operators, and `%(name)s` placeholders. The values travel in the context dict and are bound by psycopg before the query executes.
+The context dict is the only path through which user-supplied values reach the database. Every `f"..."` string in every `to_sql` method contains only column names, SQL operators, and `%(name)s` placeholders. The values travel in the context dict and are bound by psycopg before the query executes. This is not input sanitization layered on top of string concatenation — the SQL string and the user string never meet.
 
-This is not input sanitization layered on top of string concatenation. The structure makes injection impossible: a value that enters `StringValueNode.to_sql` is stored as a Python object and comes back as a placeholder. The SQL string and the user string never meet.
+The one failure mode would be if a column name or operator were derived from user input. Column names come from `db_info.py`'s [field map](https://github.com/jbylund/arcane_tutor/blob/205dddc5d61d19c428a3e0f29c46d3fcf3898512/api/parsing/db_info.py#L112-L129); operators come from the parser's fixed grammar. Neither is user-controlled:
 
-The one failure mode would be if a column name or operator were derived from user input. Column names come from `db_info.py`'s field map; operators come from the parser's fixed grammar. Neither is user-controlled.
+```python
+FieldInfo(db_column_name="cmc",               search_aliases=["cmc", "mv", "manavalue"]),
+FieldInfo(db_column_name="creature_power",     search_aliases=["power", "pow"]),
+FieldInfo(db_column_name="creature_toughness", search_aliases=["toughness", "tou"]),
+```
 
-The injection guarantee does not require discipline at call sites. There is no rule to remember and no validation to add. The structure makes it impossible: a user-supplied value enters `to_sql` as a Python object and leaves as a placeholder name. The SQL string and the user string are never in the same expression.
+The user types `power`; the parser matches it against `search_aliases` and produces a `CardAttributeNode` wrapping `"creature_power"`. That column name was never in the user's input.

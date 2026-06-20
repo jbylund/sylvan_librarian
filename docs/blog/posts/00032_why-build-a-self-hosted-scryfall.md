@@ -31,42 +31,33 @@ The objection to building anything more is that this is already sufficient: one 
 But I wanted something usable from a browser or a phone during a game, without pulling up a laptop and writing SQL.
 So I built [Arcane Tutor](https://github.com/jbylund/arcane_tutor): a self-hosted, Scryfall-compatible card search engine with extended arithmetic syntax.
 
-Four motivations shaped how it was built.
+Self-hosting has real costs, though modest ones in this case. The hardware cost was marginal — I already run a home server for Plex and Pi-hole, so one more container was nothing. Card data imports automatically on container startup, and since I push code updates frequently, the data stays current without extra effort. The site is fully responsive, which is actually how I access it most often. The one genuine dependency on Scryfall remains: card data still comes from Scryfall's bulk data dumps. Arcane Tutor owns the query layer but not the cards themselves.
 
-## Supporting Arithmetic Queries
+## Arithmetic Across Card Attributes
 
-Scryfall's query syntax is the de facto standard.
-To keep queries mostly portable between the two tools, I extended it rather than starting from scratch.
-The extension I was most interested in was adding arithmetic comparisons over numeric card attributes, for example:
+To keep queries mostly portable between the two tools, Arcane Tutor extends Scryfall's syntax rather than replacing it.
+The extension is arithmetic expressions over numeric card attributes on either side of a comparison:
 
 ```
-power+toughness>cmc+cmc
-cmc+1<power
-toughness>=power
+power+toughness>cmc+cmc    # combined stats beat twice the mana cost
+cmc+1<power                # power exceeds mana value plus one
+toughness-power>=2         # significantly more durable than threatening
 ```
 
-Any numeric field (`power`, `toughness`, `cmc`, `loyalty`) can appear on either side of a comparison, combined with arithmetic.
-The left and right sides are evaluated as expressions, not just field references.
-I also added support for the most commonly used Scryfall filters to keep queries portable.
+Any numeric field — `power`, `toughness`, `cmc`, `loyalty` — can appear anywhere in an expression.
+Both sides are evaluated as full arithmetic expressions, not just field references.
 
-The query language was originally implemented as a custom DSL: a pyparsing grammar that produces an AST, which is compiled to parameterized SQL.
-Later posts cover the grammar design and a hand-rolled rewrite that improved query parsing time by 49×.
+`power+toughness>cmc+cmc` returns creatures like Gigantosaurus (5 mana, 10/10 — 20 total stats against a threshold of 10) and Yargle, Glutton of Urborg (5 mana, 9/3 — 12 against 10).
+These are exactly the cards that are difficult to evaluate by eye: the comparison is between two sums, neither of which appears on the card directly.
+Scryfall can filter on `power` and `toughness` individually, but the arithmetic relationship between them and `cmc` requires something Scryfall does not expose.
 
-## Results Should Update as You Type
+The query language also supports the most commonly used Scryfall filters — type, color identity, format legality, oracle text, mana cost — so Arcane Tutor and Scryfall are interchangeable for standard queries.
 
-I wanted results as I typed, not after submitting a complete query.
-This fits how people use Scryfall —
-they start with a broad search and narrow it with additional filters.
-Reactive search makes that loop faster: the results update as you type.
+## Fast Enough to Search on Every Keystroke
 
-The web interface is a vanilla JS frontend that sends queries on each keystroke;
-the API returns results as JSON.
-A later post covers the progressive enhancement story — the same endpoint serves both JS and no-JS browsers.
-
-## Scryfall Takes Over a Second on Common Queries
-
-Scryfall's response times are in the hundreds of milliseconds to seconds.
-After replacing the PostgreSQL hot path with an in-process Rust engine — covered in a later post — query times dropped to tens of milliseconds:
+Reactive search — results updating as you type rather than on submit — requires latency low enough that the response arrives before the next keystroke.
+The project started with direct PostgreSQL queries — similar latency to Scryfall, workable for one-off lookups but not for per-keystroke updates.
+Replacing that hot path with an in-process Rust engine brought query times down to tens of milliseconds. Both columns are browser network-tab measurements using the same instrument. Arcane Tutor is served as arcane-tutor.com, so both sides include public internet routing — the difference is Scryfall's CDN versus a home server, not LAN versus internet. Hardware: MacBook Pro M5 Max (18 cores, 128 GB). One measurement per query: at speedups of 30×–93×, a single sample is sufficient to establish two orders of magnitude.
 
 | Query | Scryfall | Arcane Tutor | Speedup |
 |-------|----------|--------------|---------|
@@ -75,27 +66,24 @@ After replacing the PostgreSQL hot path with an in-process Rust engine — cover
 | `id:g` | 538ms | 17ms | 32× |
 | `format:modern` | 1850ms | 20ms | 93× |
 
-Reactive search requires low enough latency that results update without perceptible delay.
-But fast responses are useful regardless — a card search tool should feel instant.
+At 15ms, results reach the browser before the next keystroke.
+The frontend sends a request on each input event; the user sees live results without a submit button.
 
-## Alphabetical Order Is Not Relevance
+## Ranking by Relevance, Not Alphabet
 
-Result ranking breaks into two separate problems.
+Two separate problems fall under result ranking.
 
-The first is *which card to rank first* in results.
-Scryfall's default sort is alphabetical, which tells you nothing about relevance.
-A search for `format:modern` returns cards starting with "A" —
-not the most-played cards, not the most useful ones to know about.
-Integrating signals from CubeCobra and EDHREC gives a relevance-based default sort that puts the most-played cards first.
+The first is which card to rank first.
+Scryfall's default sort is alphabetical — `format:modern` returns cards starting with "A," not the most-played cards, not the cards most useful to know about.
+Arcane Tutor integrates popularity signals from CubeCobra and EDHREC to rank by play rate, so the most-played cards appear first.
 
-The second is *which printing of a card to show*.
-For any given card name,
-Scryfall might surface a showcase variant, a black-and-white secret lair, or a foreign-language printing before a clean standard-frame copy.
-I have an opinion about what the right printing looks like:
-standard frame, black border, original artwork, non-foil unless foil-only.
-These preferences are encoded as a numeric scoring expression so the best printing ranks first by default.
+The second is which printing of a card to show.
+A card with 30 printings in Scryfall might surface a showcase variant, a black-and-white secret lair, or a foreign-language copy before a clean standard-frame original.
+Arcane Tutor encodes printing preferences as a numeric score: standard frame, black border, original artwork, non-foil unless foil-only.
+Each criterion contributes a weight; the weights sum to a `prefer_score`; the highest-scoring printing for each unique card ranks first.
 
-In the PostgreSQL search path, both were implemented as SQL scoring expressions.
-A later post covers how both layers work together.
+Printing preference is resolved inside a CTE using `DISTINCT ON` with its own `ORDER BY`; the outer query then ranks the deduplicated cards by play rate. Two ordering steps, but a single SQL statement — no application-level post-processing.
 
-`power+toughness>cmc+cmc` works, and `format:modern` returns in 20ms. The posts that follow cover how each piece was built.
+`power+toughness>cmc+cmc` returns fast enough for live search, with results ranked by play rate rather than name.
+
+![Results for power+toughness>cmc+cmc](power-toughness-query-results.png)

@@ -93,7 +93,7 @@ UNION ALL
 );
 ```
 
-The `null::integer` cast gives both branches the same column shape so `UNION ALL` can combine them. The caller reads the last row for the count and the first 100 rows for results.
+The `null::integer` cast gives both branches the same column shape so `UNION ALL` can combine them — PostgreSQL requires both sides of a union to have the same number of columns with compatible types, and a bare `null` carries no type information the planner can infer across the boundary, so the explicit cast is required. The caller reads the last row for the count and the first 100 rows for results.
 
 For `format:modern`, the plan:
 
@@ -136,7 +136,7 @@ When searching by printing rather than unique card, there is no `DISTINCT ON`. T
 
 A default (materialized) CTE forces the planner to choose a single access strategy for the whole CTE, then serve both branches from the result. For `format:modern`, that means materializing all 73,336 matching rows before either branch can run — 70ms, versus 46ms for two separate queries that can each pick their own index.
 
-The non-dedup path uses `WITH matching_cards AS NOT MATERIALIZED`, which tells PostgreSQL it is free to inline the CTE definition into each branch and plan them independently:
+The non-dedup path uses `WITH matching_cards AS NOT MATERIALIZED`, which tells PostgreSQL it is free to inline the CTE definition into each branch and plan them independently. (`NOT MATERIALIZED` was introduced in PostgreSQL 12 and is a hint, not a guarantee — the planner may still materialize if its cost model estimates the CTE result will be accessed many times. All plans in this post are from PostgreSQL 18. The query plan below confirms it inlined here.)
 
 ```sql
 WITH matching_cards AS NOT MATERIALIZED (
@@ -174,4 +174,4 @@ The split timings surprised me at first. For `format:modern`, the planner walks 
 
 ## Picking the Right Form for Each Search Mode
 
-The CTE exists for the dedup case: most searches deduplicate by `oracle_id`, and it cuts those query times roughly in half — 132ms to 77ms for a broad query, 24ms to 12ms for a selective one. For non-dedup searches, the top-n and count branches want opposite index strategies — whichever access path is optimal for one is suboptimal for the other. A single materialization decision cannot be optimal for both: materializing all matching rows is right for the count but discards the sort-index early exit for top-n; using the sort index is right for top-n but forces a deep walk for count. Planning the branches independently is the only way to let each use the index it needs, which is what `NOT MATERIALIZED` provides.
+Use the materialized CTE for deduplicated searches (`unique=card` and `unique=artwork`) — the `DISTINCT ON` sort dominates cost, and running it once instead of twice is the source of the improvement. Use `NOT MATERIALIZED` for `unique=printing` searches, where the top-n and count branches want opposite index strategies and a single materialization decision cannot be optimal for both.

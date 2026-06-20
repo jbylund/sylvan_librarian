@@ -11,7 +11,7 @@ summary: "Why Arcane Tutor uses Falcon and Bjoern instead of the FastAPI + uvico
 Each server ran in its own Docker container, built from the same base image with only the framework changed.
 [`wrk`](https://github.com/wg/wrk) ran in a second container on the same Docker Compose network, so the measurement captured framework overhead without cross-machine jitter or real network latency.
 The endpoint returned a pre-loaded list of 100 cards — no database query, no business logic.
-Parameters: 4 `wrk` threads, 100 concurrent connections, 30-second run.
+Parameters: 4 `wrk` threads, 100 concurrent connections, 30-second run, on a MacBook Pro M5 Max (18 cores, 128 GB).
 
 Falcon uses [orjson](https://github.com/ijl/orjson); FastAPI uses `response_model=list[Card]` — the idiomatic pattern that triggers Pydantic validation on every outgoing response:
 
@@ -24,6 +24,7 @@ Falcon uses [orjson](https://github.com/ijl/orjson); FastAPI uses `response_mode
 
 13× difference on an endpoint that does nothing except serialize a pre-loaded result —
 which reflects the framework overhead, not the application work.
+On cache-miss requests that do reach the database, query time dominates and the relative gap narrows.
 Arcane Tutor caches search results, so a large fraction of requests are cache hits that return immediately.
 The faster the framework processes a hit, the more headroom is left for the requests that actually need the database.
 
@@ -118,6 +119,13 @@ Granian in native ASGI mode closes the gap somewhat — the WSGI shim accounts f
 Bjoern uses libev directly in C, with no Python event loop in the hot path.
 
 For a read-heavy API where throughput matters, it is a strong option.
+
+Bjoern does require compiling a C extension, and it has no hot-reload support.
+In a Docker Compose setup neither limitation matters much:
+the container rebuilds on deploy anyway, and `--reload` workflows don't survive container restarts regardless of the server.
+The tradeoffs land differently if you are running directly on a developer machine where framework install friction and live-reload matter more.
+
+Bjoern's release cadence is low — the last tagged release was in 2021. For a production HTTP server that is worth knowing. The practical counterpoint is that the protocol surface Bjoern covers (WSGI over HTTP/1.1) is stable enough that an old release is less concerning than it would be for a higher-level library tracking a moving API.
 
 ## The Multi-Process Model
 

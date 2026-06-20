@@ -3,19 +3,18 @@ title: "Whitespace as an Operator: Parsing Scryfall's Implicit AND"
 date: 2026-07-25
 publishDate: 2026-07-25
 tags: ["arcane-tutor", "parser", "pyparsing", "python"]
-summary: "pyparsing handles the grammar — tokens, precedence, recursive structure. This post covers what had to be built on top: implicit AND injection, query balancing in two languages, and the edge cases that required fixes."
+summary: "The Scryfall query language implicitly ANDs adjacent terms — pyparsing does not. This post covers the preprocessing layer built on top: implicit AND injection, query balancing in two languages, and the edge cases that required fixes."
 ---
 
-pyparsing handles the grammar — the tokens, the precedence rules, the recursive structure.
-What it does not handle is everything the Scryfall query language requires on top of that.
-This post covers the parts that had to be built: implicit AND injection, query balancing, and the edge cases that showed up along the way.
+The query `type:creature power>3` means `type:creature AND power>3`. That is not how pyparsing sees it. Adjacent terms with no operator between them are a parse error — the grammar requires an explicit `AND` or `OR`. Closing that gap is the first thing that had to be built on top of the grammar.
 
 ## Implicit AND and Operator Precedence
 
-The query `type:creature power>3` means `type:creature AND power>3`.
-Adjacent terms without an explicit boolean are ANDed together.
-The grammar requires explicit `AND` keywords,
-so the implicit AND has to be injected as a preprocessing step before the grammar sees the string.
+Injection is straightforward between complete terms. The difficulty is
+knowing where not to inject — particularly around `-`, which is both a
+negation prefix (`-type:instant`) and an arithmetic operator
+(`power-toughness`), and inside `field:value` pairs where the colon and
+value are part of one term, not two.
 
 ### The First Attempt: A Hand-Rolled Character Loop
 
@@ -76,12 +75,7 @@ one_token = (
 Token ordering is important: `string_value_tok` (`[a-zA-Z0-9_]([a-zA-Z0-9_-]*[a-zA-Z0-9_])?`) comes before `mana_tok`
 so `bar` is not consumed as the mana letter `b` + `ar`, and AND/OR keywords come before word tokens so they are not swallowed as card-attribute names.
 
-## Quoted Strings and Apostrophes
-
-The grammar supports both `"double-quoted"` and `'single-quoted'` strings.
-The `!` prefix does an exact name search: `!"stormchaser's talent"`.
-
-### Query Balancing
+## Query Balancing
 
 Typeahead searches fire on every keystroke.
 If the user has typed `name:"lig` the query is syntactically broken — the string is not closed.
@@ -163,41 +157,6 @@ result: !"stormchaser's talent""'"   ← corrupted
 The fix: when the top of the stack is a quote character,
 skip every character except the matching closing quote.
 That single `continue` branch, visible in both snippets above, was the fix.
-
-## Making Forward-Slash Delimiters Work
-
-Scryfall's syntax supports regex searches on oracle text (`o:/\bflying\b/`),
-and I added the same to Arcane Tutor in [PR #246](https://github.com/jbylund/arcane_tutor/pull/246).
-The delimiters are forward slashes, which `QuotedString` does not handle by default,
-but passing `"/"` as the quote character works correctly with two non-default options:
-
-```python
-regex_pattern = QuotedString(
-    "/",
-    esc_char="\\",
-    unquote_results=False,
-    convert_whitespace_escapes=False,
-)
-```
-
-`QuotedString` normally strips the delimiters and processes escape sequences.
-`unquote_results=False` keeps the surrounding `/…/` intact in the token,
-and `convert_whitespace_escapes=False` is critical:
-without it, pyparsing would convert `\b` to a literal backspace character
-before the pattern ever reached Python's `re` module.
-The parse action then strips the slashes manually and converts `\/` back to `/`
-(for patterns that themselves contain a forward slash):
-
-```python
-def make_regex_pattern_value(tokens):
-    pattern = tokens[0][1:-1]       # strip leading and trailing /
-    pattern = pattern.replace("\\/", "/")
-    return ("regex", pattern)
-```
-
-Regex values are accepted wherever a text field value can appear —
-oracle text (`o:`), flavor text (`ft:`), card name (`name:`) —
-and are passed straight through to PostgreSQL as `~ pattern` comparisons.
 
 ## Parsing Arithmetic on Both Sides of a Comparison
 

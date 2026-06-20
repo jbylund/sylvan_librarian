@@ -58,7 +58,7 @@ This is fast, debuggable, and has no dependencies.
 
 I did not start here because of unfamiliarity and complexity (real or perceived).
 It felt like a much larger jump to go from zero to something functional with recursive descent than it would be with pyparsing.
-I later wrote a recursive descent parser, but it was easier to prototype with something with a lower barrier to entry.
+I later wrote a recursive descent parser, and it was substantially faster — pyparsing's overhead eventually became the bottleneck, which is what motivated the rewrite. But pyparsing ran in production for a long time while the grammar was still evolving, and the lower barrier to entry was the right tradeoff at that stage.
 
 ### Why ANTLR's Build-Time Toolchain Was Too Much
 
@@ -210,6 +210,8 @@ expr   <<= and_expr + ZeroOrMore(OR + and_expr)
 expr.set_parse_action(lambda t: OrNode(t[0::2]) if len(t) > 1 else t[0])
 ```
 
+Two non-default options on `regex_pattern` are worth naming. `unquote_results=False` keeps the surrounding `/…/` in the token rather than stripping them — the parse action needs to distinguish a regex from a plain string. `convert_whitespace_escapes=False` is the one that catches you if you miss it: pyparsing's default converts `\b` to a literal backspace before your code ever sees the token, which silently corrupts word-boundary patterns.
+
 The grammar lives in the same codebase as everything else.
 Iteration is fast: change a line, run the test, see what breaks.
 The library also handles packrat memoization and provides `infixNotation` as a convenience
@@ -222,8 +224,23 @@ which turned out to be one of the more interesting problems in the project.
 
 ## The Decision
 
-pyparsing won on iteration speed and zero tooling overhead.
-The grammar was readable in Python, the library handled the mechanics I did not want to write myself, and I was satisfied with the performance.
-Parse times under 2ms are not a meaningful fraction of total request latency until the database round-trip is already under 10ms — and at that point there are bigger things to optimize first.
+Lark would have worked for the grammar as written. The 35-line Earley grammar passes the same 121-query corpus, and for a search DSL with short queries the O(n³) parse time is acceptable in practice, if not desirable in principle.
+
+pyparsing's advantage is that the grammar is Python. That sounds like a style preference, but it has a concrete consequence: grammar components can be generated programmatically. The attribute parsers in this project are built with `create_attribute_parser(ParserClass.NUMERIC)` — a function that takes a class enum and returns a parser component wired to the right column names and SQL generation logic:
+
+```python
+def create_attribute_parser(parser_class: ParserClass) -> ParserElement:
+    aliases = {alias for field in PARSER_CLASS_TO_FIELD_INFOS[parser_class]
+               for alias in field.search_aliases}
+    parser = make_regex_pattern(aliases)  # matches "cmc", "power", "toughness", ...
+    parser.set_parse_action(
+        lambda tokens: CardAttributeNode(tokens[0].lower(), parser_class)
+    )
+    return parser
+```
+
+One call produces a parser that matches any alias for that field class and returns a typed AST node. Doing that in a grammar string would require template substitution to generate the alternation and a separate transformer method to produce the node — one complexity replaced with another.
+
+The other consequence is that parse actions sit next to the rules they transform. When a production changes, the transformation changes on the adjacent line. With Lark's tree transformer pattern, the grammar and the transformation live in separate places — workable, but one more indirection to track as the grammar evolves.
 
 The next post covers what pyparsing required in practice: implicit AND injection, query balancing in two languages, and the edge cases that showed up along the way.
