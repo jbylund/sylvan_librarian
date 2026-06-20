@@ -59,6 +59,7 @@ services:
       args:
         GIT_SHA: ${GIT_SHA:-unknown}
         GIT_BRANCH: ${GIT_BRANCH:-unknown}
+    pull_policy: never
     image: arcane_tutor/apiservice:${IMAGE_TAG:-latest}
     shm_size: 3000M
     cap_add:
@@ -115,6 +116,7 @@ services:
     build:
       context: ./
       dockerfile: ./client/Dockerfile
+    pull_policy: never
     image: arcane_tutor/client:${IMAGE_TAG:-latest}
     command:
       - dumb-init
