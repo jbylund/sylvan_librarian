@@ -151,8 +151,17 @@ def _build_critical_css() -> str:
 
 
 _INDEX_HTML_PATH = pathlib.Path(__file__).parent / "static" / "index.html"
-_STYLES_CSS_HASH = hashlib.sha256((pathlib.Path(__file__).parent / "static" / "styles.css").read_bytes()).hexdigest()[:12]
-_APP_MIN_JS_HASH = hashlib.sha256((pathlib.Path(__file__).parent / "static" / "app.min.js").read_bytes()).hexdigest()[:12]
+
+
+def _static_hash(filename: str) -> str | None:
+    try:
+        return hashlib.sha256((pathlib.Path(__file__).parent / "static" / filename).read_bytes()).hexdigest()[:12]
+    except FileNotFoundError:
+        return None
+
+
+_STYLES_CSS_HASH = _static_hash("styles.css")
+_APP_MIN_JS_HASH = _static_hash("app.min.js")
 
 
 # TLDs in this set are stripped from the hostname; others are concatenated into the word.
@@ -289,8 +298,10 @@ def _build_base_html(critical_css: str, site_name: str) -> str:
     """Read index.html and inject critical CSS and site name. Cached per (critical_css, site_name) pair."""
     html = _INDEX_HTML_PATH.read_text()
     html = html.replace("<!-- CRITICAL_CSS -->", critical_css)
-    html = html.replace("/static/styles.css", f"/static/styles.css?v={_STYLES_CSS_HASH}")
-    html = html.replace("/static/app.min.js", f"/static/app.min.js?v={_APP_MIN_JS_HASH}")
+    if _STYLES_CSS_HASH:
+        html = html.replace("/static/styles.css", f"/static/styles.css?v={_STYLES_CSS_HASH}")
+    if _APP_MIN_JS_HASH:
+        html = html.replace("/static/app.min.js", f"/static/app.min.js?v={_APP_MIN_JS_HASH}")
     if site_name != FALLBACK_SITE_NAME:
         html = html.replace(FALLBACK_SITE_NAME, site_name)
     return html
