@@ -29,8 +29,13 @@ class TestCachingMiddleware:
         resp.render_body.return_value = b"rendered body"
         return resp
 
-    def _cache_key(self) -> tuple:
-        return ("/search?q=lightning+bolt", (("q", "lightning bolt"),), (("ACCEPT-ENCODING", None),))
+    def _cache_key(self, host: str | None = None) -> tuple:
+        return (
+            "/search?q=lightning+bolt",
+            (("q", "lightning bolt"),),
+            (("ACCEPT-ENCODING", None),),
+            host,
+        )
 
     def test_2xx_response_is_cached_as_rendered_bytes(self) -> None:
         """Successful responses should be stored as a CachedResponse, not the Response object."""
@@ -173,6 +178,38 @@ class TestCachingMiddleware:
             middleware.process_request(req, resp)
 
         resp.set_header.assert_not_called()
+
+    def test_different_hosts_have_separate_cache_entries(self) -> None:
+        """Responses for the same query on different hostnames must not share a cache entry."""
+        cache = {}
+        middleware = CachingMiddleware(cache=cache)
+
+        for host in ("scryfall.crestcourt.com", "tolarian-acade.my"):
+            req = self._make_req()
+            req.headers = {"X-PROXY-HOST": host}
+            resp = self._make_resp()
+            with patch("api.middlewares.caching_middleware.settings") as mock_settings:
+                mock_settings.enable_cache = True
+                middleware.process_response(req, resp, None, True)
+
+        assert len(cache) == 2
+        assert cache[self._cache_key("scryfall.crestcourt.com")] is not cache[self._cache_key("tolarian-acade.my")]
+
+    def test_direct_access_uses_host_header_as_cache_key(self) -> None:
+        """When accessed directly (no X-Proxy-Host), the Host header discriminates the cache key."""
+        cache = {}
+        middleware = CachingMiddleware(cache=cache)
+
+        for host in ("localhost:9876", "staging.example.com"):
+            req = self._make_req()
+            req.headers = {"HOST": host}
+            resp = self._make_resp()
+            with patch("api.middlewares.caching_middleware.settings") as mock_settings:
+                mock_settings.enable_cache = True
+                middleware.process_response(req, resp, None, True)
+
+        assert len(cache) == 2
+        assert cache[self._cache_key("localhost:9876")] is not cache[self._cache_key("staging.example.com")]
 
     def test_hit_request_is_not_restored(self) -> None:
         """process_response after a hit must not re-render or overwrite the cached entry."""

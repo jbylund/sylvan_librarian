@@ -354,7 +354,7 @@ class APIResource:
         before = time.monotonic()
         try:
             params = {k: v for k, v in req.params.items() if k not in DISALLOWED_QUERY_ARGS}
-            res = action(falcon_response=resp, request_host=req.host, **params)
+            res = action(falcon_response=resp, request_host=req.get_header("X-Proxy-Host") or req.host, **params)
             resp.media = res
         except TypeError as oops:
             logger.error("Error handling request: %s", oops, exc_info=True)
