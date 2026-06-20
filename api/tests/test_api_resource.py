@@ -12,7 +12,7 @@ import falcon
 import pytest
 import requests
 
-from api.api_resource import APIResource
+from api.api_resource import FALLBACK_SITE_NAME, APIResource, hostname_to_site_name
 from api.settings import settings
 
 
@@ -296,6 +296,21 @@ class TestAPIResourceRequestHandling(unittest.TestCase):
 
         with pytest.raises(falcon.HTTPNotFound):
             self.api_resource._handle(mock_req, mock_resp)
+
+    def test_disallowed_query_params_do_not_cause_type_error(self) -> None:
+        """Query params named after internal kwargs must be stripped before dispatch."""
+        mock_req = MagicMock()
+        mock_req.path = mock_req.relative_uri = "/"
+        mock_req.params = {"falcon_response": "injected", "request_host": "evil.com"}
+        mock_req.host = "localhost"
+        mock_resp = MagicMock()
+        mock_resp.complete = False
+
+        with patch("api.api_resource.logger"):
+            # Must not raise TypeError or return a 400
+            self.api_resource._handle(mock_req, mock_resp)
+
+        assert mock_resp.text is not None
 
     def test_handle_handles_type_errors(self) -> None:
         """Test _handle handles TypeError exceptions."""
@@ -895,6 +910,91 @@ class TestAPIResourceTagHierarchy(unittest.TestCase):
                 assert isinstance(result["message"], str)
                 assert isinstance(result["tags_processed"], int)
                 assert result["tags_processed"] == 1
+
+
+_HOSTNAME_TESTCASES = {
+    "tolarian_acade_my": {
+        "expected": "Tolarian Academy",
+        "raw_host": "tolarian-acade.my",
+    },
+    "strips_com_tld": {
+        "expected": "Arcane Tutor",
+        "raw_host": "arcane-tutor.com",
+    },
+    "strips_port": {
+        "expected": "Arcane Tutor",
+        "raw_host": "arcane-tutor.com:443",
+    },
+    "strips_www_prefix": {
+        "expected": "Arcane Tutor",
+        "raw_host": "www.arcane-tutor.com",
+    },
+    "localhost_returns_fallback": {
+        "expected": FALLBACK_SITE_NAME,
+        "raw_host": "localhost",
+    },
+    "localhost_with_port_returns_fallback": {
+        "expected": FALLBACK_SITE_NAME,
+        "raw_host": "localhost:8080",
+    },
+    "ip_address_returns_fallback": {
+        "expected": FALLBACK_SITE_NAME,
+        "raw_host": "192.168.1.1",
+    },
+    "ip_with_port_returns_fallback": {
+        "expected": FALLBACK_SITE_NAME,
+        "raw_host": "192.168.1.1:5000",
+    },
+    "empty_returns_fallback": {
+        "expected": FALLBACK_SITE_NAME,
+        "raw_host": "",
+    },
+    "invalid_chars_returns_fallback": {
+        "expected": FALLBACK_SITE_NAME,
+        "raw_host": 'evil"><script>.com',
+    },
+    "all_hyphens_returns_fallback": {
+        "expected": FALLBACK_SITE_NAME,
+        "raw_host": "----",
+    },
+    "all_dots_returns_fallback": {
+        "expected": FALLBACK_SITE_NAME,
+        "raw_host": "...",
+    },
+}
+
+
+class TestHostnameSiteName:
+    """Tests for hostname_to_site_name()."""
+
+    @pytest.mark.parametrize(
+        argnames=sorted(next(iter(_HOSTNAME_TESTCASES.values()))),
+        argvalues=[[v for k, v in sorted(_HOSTNAME_TESTCASES[name].items())] for name in sorted(_HOSTNAME_TESTCASES)],
+        ids=sorted(_HOSTNAME_TESTCASES),
+    )
+    def test_hostname_to_site_name(self, expected: str, raw_host: str) -> None:
+        assert hostname_to_site_name(raw_host) == expected
+
+
+class TestRootSiteNameInjection(unittest.TestCase):
+    """Tests that _root injects the derived site name into the HTML."""
+
+    def setUp(self) -> None:
+        self.api_resource = APIResource(
+            last_import_time=multiprocessing.Value("d", time.time(), lock=True),
+        )
+        self.api_resource._conn_pool = MagicMock()
+
+    def test_valid_hostname_replaces_fallback_in_html(self) -> None:
+        mock_response = MagicMock()
+        self.api_resource._root(falcon_response=mock_response, request_host="tolarian-acade.my")
+        assert "Tolarian Academy" in mock_response.text
+        assert FALLBACK_SITE_NAME not in mock_response.text
+
+    def test_localhost_keeps_fallback_in_html(self) -> None:
+        mock_response = MagicMock()
+        self.api_resource._root(falcon_response=mock_response, request_host="localhost")
+        assert FALLBACK_SITE_NAME in mock_response.text
 
 
 if __name__ == "__main__":

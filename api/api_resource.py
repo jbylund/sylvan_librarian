@@ -60,6 +60,33 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+FALLBACK_SITE_NAME = "MTG Search"
+# TLDs in this set are stripped from the hostname; others are concatenated into the word.
+# e.g. arcane-tutor.com -> "Arcane Tutor"; tolarian-acade.my -> "Tolarian Academy"
+_STRIP_TLDS = frozenset(["app", "biz", "co", "com", "dev", "edu", "gov", "info", "io", "me", "net", "org", "us"])
+# Allowlist: only valid hostname characters (letters, digits, hyphens, dots) after urlparse extracts the host.
+_SAFE_HOSTNAME_RE = re.compile(r"^[a-z0-9.\-]+$")
+_IP_RE = re.compile(r"^\d+\.\d+\.\d+\.\d+$")
+
+
+def hostname_to_site_name(raw_host: str) -> str:
+    """Derive a display name from a Host header value, falling back to FALLBACK_SITE_NAME."""
+    # urlparse requires a scheme; .hostname strips the port and lowercases.
+    hostname = urllib.parse.urlparse(f"http://{raw_host}").hostname or ""
+    if not hostname or hostname == "localhost" or _IP_RE.match(hostname) or not _SAFE_HOSTNAME_RE.match(hostname):
+        return FALLBACK_SITE_NAME
+    name = hostname.removeprefix("www.")
+    parts = name.split(".")
+    tld = parts[-1].lower()
+    name = ".".join(parts[:-1]) if tld in _STRIP_TLDS else name
+    name = name.replace(".", "").replace("-", " ").strip()
+    name = name.title()
+    return name if any(c.isalnum() for c in name) else FALLBACK_SITE_NAME
+
+
+# Query parameters that must not be forwarded to action handlers.
+DISALLOWED_QUERY_ARGS: frozenset[str] = frozenset(["falcon_response", "request_host"])
+
 # pylint: disable=c-extension-no-member
 NOT_FOUND = 404
 IMPORT_EXPORT = True
@@ -326,7 +353,8 @@ class APIResource:
         res = None
         before = time.monotonic()
         try:
-            res = action(falcon_response=resp, **req.params)
+            params = {k: v for k, v in req.params.items() if k not in DISALLOWED_QUERY_ARGS}
+            res = action(falcon_response=resp, request_host=req.host, **params)
             resp.media = res
         except TypeError as oops:
             logger.error("Error handling request: %s", oops, exc_info=True)
@@ -1135,6 +1163,7 @@ class APIResource:
         self,
         *,
         falcon_response: falcon.Response | None = None,
+        request_host: str = "",
         q: str | None = None,
         query: str | None = None,
         orderby: CardOrdering | None = None,
@@ -1148,6 +1177,7 @@ class APIResource:
         Args:
         ----
             falcon_response (falcon.Response): The Falcon response to write to.
+            request_host (str): Value of the Host header, used to derive the site name.
             q (str): Search query (alternative to query parameter).
             query (str): Search query (alternative to q parameter).
             orderby (CardOrdering): Field to sort by.
@@ -1160,6 +1190,10 @@ class APIResource:
         full_filename = pathlib.Path(__file__).parent / "static" / "index.html"
         with pathlib.Path(full_filename).open() as f:
             html_content = f.read()
+
+        site_name = hostname_to_site_name(request_host)
+        if site_name != FALLBACK_SITE_NAME:
+            html_content = html_content.replace(FALLBACK_SITE_NAME, site_name)
 
         # Check if we have a search query
         search_query = query or q
@@ -1229,7 +1263,7 @@ class APIResource:
         self._serve_static_file(filename="prefer_score_tuner.html", falcon_response=falcon_response)
         falcon_response.content_type = "text/html"
 
-    def favicon_ico(self, *, falcon_response: falcon.Response | None = None) -> None:
+    def favicon_ico(self, *, falcon_response: falcon.Response | None = None, **_: object) -> None:
         """Return the favicon.ico file.
 
         Args:
@@ -1248,7 +1282,7 @@ class APIResource:
         # Cache favicon for 7 days - it rarely changes
         set_cache_header(falcon_response, duration=timedelta(days=7))
 
-    def styles_css(self, *, falcon_response: falcon.Response | None = None) -> None:
+    def styles_css(self, *, falcon_response: falcon.Response | None = None, **_: object) -> None:
         """Return the styles.css file.
 
         Args:
@@ -1262,7 +1296,7 @@ class APIResource:
         # Cache CSS for 1 hour - it changes infrequently
         set_cache_header(falcon_response, duration=timedelta(hours=1))
 
-    def app_js(self, *, falcon_response: falcon.Response | None = None) -> None:
+    def app_js(self, *, falcon_response: falcon.Response | None = None, **_: object) -> None:
         """Return the app.js file.
 
         Args:
@@ -1276,7 +1310,7 @@ class APIResource:
         # Cache JavaScript for 1 hour - it changes infrequently
         set_cache_header(falcon_response, duration=timedelta(hours=1))
 
-    def app_min_js(self, *, falcon_response: falcon.Response | None = None) -> None:
+    def app_min_js(self, *, falcon_response: falcon.Response | None = None, **_: object) -> None:
         """Return the app.min.js file.
 
         Args:
