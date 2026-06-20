@@ -711,7 +711,7 @@ class CardSearch {
     // - >= 2500px: 5 columns (20vw minus gap/padding)
     const srcset = `${this.escapeHtml(image280)} 280w, ${this.escapeHtml(image388)} 388w, ${this.escapeHtml(image538)} 538w, ${this.escapeHtml(image745)} 745w`;
     const sizes =
-      '(max-width: 410px) calc(100vw - 60px), (max-width: 750px) calc(50vw - 30px), (max-width: 1370px) calc(33.33vw - 25px), (max-width: 2500px) calc(25vw - 20px), calc(20vw - 15px)';
+      '(max-width: 409px) calc(100vw - 3.6em), (max-width: 749px) calc(50vw - 2.6em - 7.5px), (max-width: 1369px) calc(33.33vw - 2.27em - 10px), (max-width: 2499px) calc(25vw - 2.1em - 11.25px), calc(20vw - 2em - 12px)';
 
     // Use 388px as default src (good middle ground for initial load)
     // Add fetchpriority="high" for first row cards to improve LCP
