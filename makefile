@@ -56,6 +56,7 @@ IMAGE_TAG := $(BUILD_HASH)
 	help \
 	hlep \
 	images \
+	js-deps \
 	lint \
 	mplantin_font \
 	postgres-config \
@@ -188,6 +189,10 @@ install_deps:
 
 install_test_deps:
 	python -m uv pip install -r requirements/test.txt -r requirements/base.txt
+
+js-deps: # @doc update JavaScript dependencies and apply safe security fixes
+	npm update
+	npm audit fix || true
 
 engine: $(ENGINE_SO) # @doc build the Rust card engine extension if its sources changed
 
