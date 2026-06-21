@@ -43,7 +43,7 @@ MEDIUM_WIDTH = 388  # Medium resolution width in pixels
 SMALL_WIDTH = 280  # Small resolution width in pixels
 
 # WebP quality setting
-WEBP_QUALITY = 85
+WEBP_QUALITY = 75
 
 XLARGE_KEY = "745"
 LARGE_KEY = "538"
