@@ -1,40 +1,6 @@
 const UNIQUE_PRINTING = 'printing';
 const DWELL_MS = 2500; // milliseconds user must stay on results before adding a history entry
 
-// Field aliases from api/parsing/db_info.py — kept in sync manually.
-const KNOWN_QUERY_ALIASES = new Set([
-  'a', 'artist',
-  'banned', 'border',
-  'c', 'cn', 'color', 'color_identity', 'coloridentity', 'colors', 'cmc',
-  'date', 'devotion',
-  'eur',
-  'f', 'flavor', 'format', 'frame', 'ft',
-  'id', 'identity', 'is',
-  'keyword',
-  'layout', 'legal', 'loy', 'loyalty',
-  'm', 'mana', 'manavalue', 'mv',
-  'name', 'number',
-  'o', 'oracle', 'oracle_tags', 'otag',
-  'pow', 'power', 'produces',
-  'r', 'rarity', 'restricted',
-  's', 'set', 'subtype', 'subtypes',
-  't', 'tix', 'tou', 'toughness', 'type', 'types',
-  'usd',
-  'watermark',
-  'year',
-]);
-const NUMERIC_QUERY_ALIASES = new Set([
-  'cn', 'cmc',
-  'eur',
-  'loy', 'loyalty',
-  'manavalue', 'mv',
-  'number',
-  'pow', 'power',
-  'r', 'rarity',
-  'tix', 'tou', 'toughness',
-  'usd',
-]);
-
 // Hoisted so escapeHtml() doesn't allocate a new RegExp or callback on every call.
 const HTML_ESCAPE_RE = /[&<>"]/g;
 const HTML_ESCAPE_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
@@ -500,7 +466,6 @@ class CardSearch {
   }
 
   // Returns an error string if the query is structurally invalid, or null if it looks ok.
-  // Catches ~90% of server-side parse failures without making an HTTP request.
   validateQuery(query) {
     // Strip quoted strings so we don't match content inside them.
     const q = query.replace(/"[^"]*"|'[^']*'/g, '""');
@@ -510,28 +475,9 @@ class CardSearch {
       return `Failed to parse query: "${query}"`;
     }
 
-    // Empty RHS after colon: "t:" at end of string, or "(t:)" where ) follows immediately.
-    // Note: "name:and" and "name: and" are both valid — whitespace after : is not significant.
+    // Any word followed by : with no value: "t:" at end, or "(t:)" where ) follows immediately.
     if (/\b\w+\s*:\s*(?:$|\))/.test(q)) {
       return `Failed to parse query: "${query}"`;
-    }
-
-    // LHS of any comparison operator must be a known alias.
-    // Skip pure numeric literals on the LHS (e.g. "5-cmc>0" is valid).
-    for (const [, lhs] of q.matchAll(/(?:^|[\s(])-?(\w+)\s*(?::|=|!=|<=|>=|<|>)/g)) {
-      if (/^\d/.test(lhs)) continue;
-      if (!KNOWN_QUERY_ALIASES.has(lhs.toLowerCase())) {
-        return `Failed to parse query: "${query}"`;
-      }
-    }
-
-    // Operands of unambiguous arithmetic operators (+, *, /) must be numeric aliases or numbers.
-    // Skips "-" because it is also the negation prefix and appears in hyphenated card names.
-    const isNumeric = s => /^\d+(\.\d+)?$/.test(s) || NUMERIC_QUERY_ALIASES.has(s.toLowerCase());
-    for (const [, left, right] of q.matchAll(/(\w+)\s*[+*/]\s*(\w+)/g)) {
-      if (!isNumeric(left) || !isNumeric(right)) {
-        return `Failed to parse query: "${query}"`;
-      }
     }
 
     return null;
