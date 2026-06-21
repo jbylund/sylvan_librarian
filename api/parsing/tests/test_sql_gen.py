@@ -3,7 +3,7 @@
 import pytest
 
 from api import parsing
-from api.parsing import generate_sql_query
+from api.parsing import QueryContext, generate_sql_query
 from api.parsing.card_query_nodes import _color_dict_to_mask, _proper_subset_masks, _subset_masks, get_legality_comparison_object
 
 
@@ -62,7 +62,7 @@ from api.parsing.card_query_nodes import _color_dict_to_mask, _proper_subset_mas
 )
 def test_full_sql_translation(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
     parsed = parse_query(input_query)
-    context = {}
+    context = QueryContext()
     observed_sql = parsed.to_sql(context)
     assert observed_sql == expected_sql
     assert context == expected_parameters
@@ -132,7 +132,7 @@ def test_full_sql_translation(parse_query, input_query: str, expected_sql: str, 
 )
 def test_full_sql_translation_jsonb_colors(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
     parsed = parse_query(input_query)
-    observed_params = {}
+    observed_params = QueryContext()
     observed_sql = parsed.to_sql(observed_params)
     assert (observed_sql, observed_params) == (
         expected_sql,
@@ -202,7 +202,7 @@ def test_full_sql_translation_jsonb_colors(parse_query, input_query: str, expect
 )
 def test_color_identity_sql_translation(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
     parsed = parse_query(input_query)
-    observed_params = {}
+    observed_params = QueryContext()
     observed_sql = parsed.to_sql(observed_params)
     assert (observed_sql, observed_params) == (
         expected_sql,
@@ -227,7 +227,7 @@ def test_color_identity_sql_translation(parse_query, input_query: str, expected_
 )
 def test_full_sql_translation_jsonb_card_types(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
     parsed = parse_query(input_query)
-    observed_params = {}
+    observed_params = QueryContext()
     observed_sql = parsed.to_sql(observed_params)
     assert (observed_sql, observed_params) == (
         expected_sql,
@@ -262,7 +262,7 @@ def test_full_sql_translation_jsonb_card_types(parse_query, input_query: str, ex
 def test_oracle_text_sql_translation(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
     """Test that oracle text search generates correct SQL with LIKE patterns."""
     parsed = parse_query(input_query)
-    context = {}
+    context = QueryContext()
     observed_sql = parsed.to_sql(context)
     assert observed_sql == expected_sql
     assert context == expected_parameters
@@ -295,7 +295,7 @@ def test_oracle_text_sql_translation(parse_query, input_query: str, expected_sql
 def test_flavor_text_sql_translation(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
     """Test that flavor text search generates correct SQL with LIKE patterns."""
     parsed = parse_query(input_query)
-    context = {}
+    context = QueryContext()
     observed_sql = parsed.to_sql(context)
     assert observed_sql == expected_sql
     assert context == expected_parameters
@@ -365,7 +365,7 @@ def test_flavor_text_sql_translation(parse_query, input_query: str, expected_sql
 def test_keyword_sql_translation(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
     """Test that keyword search generates correct SQL with JSONB operators."""
     parsed = parse_query(input_query)
-    context = {}
+    context = QueryContext()
     observed_sql = parsed.to_sql(context)
     assert observed_sql == expected_sql, f"\nExpected: {expected_sql}\nObserved: {observed_sql}"
     assert context == expected_parameters, f"\nExpected params: {expected_parameters}\nObserved params: {context}"
@@ -415,7 +415,7 @@ def test_keyword_sql_translation(parse_query, input_query: str, expected_sql: st
 def test_oracle_tag_sql_translation(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
     """Test that oracle tag search generates correct SQL with lowercase tags."""
     parsed = parse_query(input_query)
-    context = {}
+    context = QueryContext()
     observed_sql = parsed.to_sql(context)
     assert observed_sql == expected_sql, f"\nExpected: {expected_sql}\nObserved: {observed_sql}"
     assert context == expected_parameters, f"\nExpected params: {expected_parameters}\nObserved params: {context}"
@@ -458,7 +458,7 @@ def test_oracle_tag_sql_translation(parse_query, input_query: str, expected_sql:
 def test_is_tag_sql_translation(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
     """Test that is: tag search generates correct SQL with lowercase tags."""
     parsed = parse_query(input_query)
-    context = {}
+    context = QueryContext()
     observed_sql = parsed.to_sql(context)
     assert observed_sql == expected_sql, f"\nExpected: {expected_sql}\nObserved: {observed_sql}"
     assert context == expected_parameters, f"\nExpected params: {expected_parameters}\nObserved params: {context}"
@@ -522,7 +522,7 @@ def test_is_tag_sql_translation(parse_query, input_query: str, expected_sql: str
 def test_case_insensitive_attributes(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
     """Test that attribute names are case-insensitive."""
     parsed = parse_query(input_query)
-    context = {}
+    context = QueryContext()
     observed_sql = parsed.to_sql(context)
     assert observed_sql == expected_sql, f"\nExpected: {expected_sql}\nObserved: {observed_sql}"
     assert context == expected_parameters, f"\nExpected params: {expected_parameters}\nObserved params: {context}"
@@ -577,7 +577,7 @@ def test_case_insensitive_attributes(parse_query, input_query: str, expected_sql
 def test_set_search_sql_translation(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
     """Test that set searches generate correct SQL."""
     parsed = parse_query(input_query)
-    context = {}
+    context = QueryContext()
     observed_sql = parsed.to_sql(context)
     assert observed_sql == expected_sql, f"\nExpected: {expected_sql}\nObserved: {observed_sql}"
     assert context == expected_parameters, f"\nExpected params: {expected_parameters}\nObserved params: {context}"
@@ -674,7 +674,7 @@ def test_set_search_sql_translation(parse_query, input_query: str, expected_sql:
 def test_rarity_search_sql_translation(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
     """Test that rarity search generates correct SQL with proper ordering."""
     parsed = parse_query(input_query)
-    context = {}
+    context = QueryContext()
     observed_sql = parsed.to_sql(context)
     assert observed_sql == expected_sql, f"\nExpected: {expected_sql}\nObserved: {observed_sql}"
     assert context == expected_parameters, f"\nExpected params: {expected_parameters}\nObserved params: {context}"
@@ -751,7 +751,7 @@ def test_rarity_case_insensitive(parse_query) -> None:
 def test_artist_sql_translation(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
     """Test SQL generation for artist search queries."""
     parsed = parse_query(input_query)
-    context = {}
+    context = QueryContext()
     observed_sql = parsed.to_sql(context)
     assert observed_sql == expected_sql
     assert context == expected_parameters
@@ -853,7 +853,7 @@ def test_artist_sql_translation(parse_query, input_query: str, expected_sql: str
 def test_legality_search_sql_translation(parse_query, input_query: str, expected_parameters: dict) -> None:
     """Test that legality search generates correct SQL with JSONB operators."""
     parsed = parse_query(input_query)
-    context = {}
+    context = QueryContext()
     observed_sql = parsed.to_sql(context)
     # Note: The parameter names will be auto-generated hashes, so we need a more flexible comparison
     assert "card.card_legalities @>" in observed_sql, f"Expected JSONB containment in SQL: {observed_sql}"
@@ -906,7 +906,7 @@ def test_collector_number_sql_translation(
 ) -> None:
     """Test that collector number searches generate correct SQL with exact matching for colon operator."""
     parsed = parse_query(input_query)
-    context = {}
+    context = QueryContext()
     observed_sql = parsed.to_sql(context)
     assert expected_sql_fragment in observed_sql, f"Expected SQL fragment in: {observed_sql}"
     # Check that we have exactly one parameter
@@ -949,7 +949,7 @@ def test_collector_number_numeric_comparison_sql_translation(
 ) -> None:
     """Test that collector number numeric comparisons generate correct SQL using the integer column."""
     parsed = parse_query(input_query)
-    context = {}
+    context = QueryContext()
     observed_sql = parsed.to_sql(context)
     assert expected_sql_fragment in observed_sql, f"Expected SQL fragment in: {observed_sql}"
     # Check that we have exactly one parameter
@@ -1053,7 +1053,7 @@ def test_color_parser_patterns(parse_query, input_query: str, should_parse: bool
         assert parsed is not None
 
         # Should be able to generate SQL
-        context = {}
+        context = QueryContext()
         sql = parsed.to_sql(context)
         assert isinstance(sql, str)
         assert context  # Should have some parameters
@@ -1086,7 +1086,7 @@ def test_color_parser_patterns(parse_query, input_query: str, should_parse: bool
 def test_negated_type_queries_generate_simple_sql(parse_query, input_query: str, expected_sql_fragment: str) -> None:
     """Test that negated type queries generate simple, clean SQL without NULL handling."""
     parsed = parse_query(input_query)
-    observed_params = {}
+    observed_params = QueryContext()
     observed_sql = parsed.to_sql(observed_params)
     assert expected_sql_fragment in observed_sql, f"Expected fragment '{expected_sql_fragment}' not found in SQL: {observed_sql}"
 
@@ -1121,7 +1121,7 @@ def test_negated_type_queries_generate_simple_sql(parse_query, input_query: str,
 def test_frame_sql_translation(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
     """Test that frame search generates correct SQL with exact matching."""
     parsed = parse_query(input_query)
-    observed_params = {}
+    observed_params = QueryContext()
     observed_sql = parsed.to_sql(observed_params)
     assert observed_sql == expected_sql, f"\nExpected: {expected_sql}\nObserved: {observed_sql}"
     assert observed_params == expected_parameters, f"\nExpected params: {expected_parameters}\nObserved params: {observed_params}"
@@ -1130,7 +1130,7 @@ def test_frame_sql_translation(parse_query, input_query: str, expected_sql: str,
 def test_name_titlecasing(parse_query) -> None:
     """Test that name is titlecased."""
     parsed = parse_query(""" name="Urza's Saga" """.strip())
-    observed_params = {}
+    observed_params = QueryContext()
     observed_sql = parsed.to_sql(observed_params)
     assert observed_params == {"p_str_VXJ6YSdzIFNhZ2E": r"Urza's Saga"}
     assert observed_sql == r"(card.card_name = %(p_str_VXJ6YSdzIFNhZ2E)s)"

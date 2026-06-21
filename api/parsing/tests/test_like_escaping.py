@@ -3,6 +3,7 @@
 import pytest
 
 from api.parsing.card_query_nodes import ExactNameNode, _escape_like_pattern
+from api.parsing.nodes import QueryContext
 
 # ---------------------------------------------------------------------------
 # _escape_like_pattern unit tests
@@ -59,7 +60,7 @@ testcases_exact_name = {
 )
 def test_exact_name_node_escapes_special_chars(expected_param: str, input_value: str) -> None:
     """ExactNameNode escapes backslash, % and _ so they never act as LIKE wildcards."""
-    context: dict = {}
+    context: QueryContext = QueryContext()
     node = ExactNameNode(input_value)
     node.to_sql(context)
     assert list(context.values()) == [expected_param]
@@ -92,6 +93,6 @@ testcases_pattern = {
 def test_pattern_matching_escapes_special_chars(parse_query, expected_param: str, query: str) -> None:
     """Pattern-matching queries escape % and _ so they never act as LIKE wildcards."""
     parsed = parse_query(query)
-    context: dict = {}
+    context: QueryContext = QueryContext()
     parsed.to_sql(context)
     assert list(context.values()) == [expected_param]

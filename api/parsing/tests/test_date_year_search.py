@@ -4,7 +4,7 @@ import itertools
 
 import pytest
 
-from api.parsing import AttributeNode, BinaryOperatorNode, StringValueNode
+from api.parsing import AttributeNode, BinaryOperatorNode, QueryContext, StringValueNode
 
 
 @pytest.mark.parametrize(
@@ -61,7 +61,7 @@ def test_date_year_search_parsing(parse_query, searchattr: str, searchoperator: 
 def test_date_year_sql_generation(parse_query, query: str, expected_sql_fragment: str) -> None:
     """Test that date and year searches generate correct SQL."""
     parsed = parse_query(query)
-    context = {}
+    context = QueryContext()
     sql = parsed.to_sql(context)
 
     # Check that the SQL contains the expected fragment
@@ -73,7 +73,7 @@ def test_date_year_sql_generation(parse_query, query: str, expected_sql_fragment
 def test_date_search_full_date(parse_query) -> None:
     """Test date search with full date format."""
     parsed = parse_query("date:2025-02-02")
-    context = {}
+    context = QueryContext()
     sql = parsed.to_sql(context)
 
     assert "card.released_at = " in sql
@@ -84,7 +84,7 @@ def test_date_search_full_date(parse_query) -> None:
 def test_year_search_numeric(parse_query) -> None:
     """Test year search with numeric year."""
     parsed = parse_query("year:2025")
-    context = {}
+    context = QueryContext()
     sql = parsed.to_sql(context)
 
     # Year search should convert to date range: 2025-01-01 <= released_at < 2026-01-01
@@ -106,7 +106,7 @@ def test_year_search_rejects_date_format(parse_query) -> None:
 def test_date_year_combined_query(parse_query) -> None:
     """Test combining date/year searches with other conditions."""
     parsed = parse_query("year:2025 AND cmc=3")
-    context = {}
+    context = QueryContext()
     sql = parsed.to_sql(context)
 
     assert "card.released_at" in sql
