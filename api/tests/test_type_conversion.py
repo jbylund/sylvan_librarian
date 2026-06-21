@@ -112,20 +112,17 @@ class TestTypeConversion:
         with (
             patch("api.api_resource.db_utils.make_pool"),
             patch("api.api_resource.requests.Session"),
-            patch(
-                "api.api_resource.TaggerClient",
-            ),
         ):
             api_resource = APIResource(
                 last_import_time=multiprocessing.Value("d", time.time(), lock=True),
             )
 
-            # Check that discover_and_import_all_tags is wrapped
-            assert "discover_and_import_all_tags" in api_resource.action_map
+            # Check that import_oracle_tags is wrapped
+            assert "import_oracle_tags" in api_resource.action_map
 
             # The wrapped function should be different from the original
-            original_method = api_resource.discover_and_import_all_tags
-            wrapped_method = api_resource.action_map["discover_and_import_all_tags"]
+            original_method = api_resource.import_oracle_tags
+            wrapped_method = api_resource.action_map["import_oracle_tags"]
 
             # They should not be the same function object
             assert wrapped_method is not original_method
@@ -179,39 +176,21 @@ class TestTypeConversion:
         assert wrapped_no_params is no_params_func
         assert wrapped_only_self is only_self_func
 
-    def test_discover_and_import_all_tags_handles_string_boolean_parameters(self) -> None:
-        """Test that discover_and_import_all_tags properly handles string boolean parameters."""
-        with (
-            patch("api.api_resource.db_utils.make_pool"),
-            patch("api.api_resource.requests.Session"),
-            patch(
-                "api.api_resource.TaggerClient",
-            ),
-        ):
-            api_resource = APIResource(
-                last_import_time=multiprocessing.Value("d", time.time(), lock=True),
-            )
+    def test_string_boolean_parameters_are_converted(self) -> None:
+        """Test that make_type_converting_wrapper converts string booleans to bool."""
 
-            # Test directly with the actual method
-            original_method = api_resource.discover_and_import_all_tags
-            make_type_converting_wrapper(original_method)
+        def mock_method(import_cards: bool = True, import_hierarchy: bool = False, **kwargs: Any) -> dict[str, Any]:
+            return {
+                "import_cards": import_cards,
+                "import_hierarchy": import_hierarchy,
+                "import_cards_type": type(import_cards).__name__,
+                "import_hierarchy_type": type(import_hierarchy).__name__,
+            }
 
-            # Mock the method to just return its parameters
-            def mock_method(import_cards: bool = True, import_hierarchy: bool = False, **kwargs: Any) -> dict[str, Any]:
-                return {
-                    "import_cards": import_cards,
-                    "import_hierarchy": import_hierarchy,
-                    "import_cards_type": type(import_cards).__name__,
-                    "import_hierarchy_type": type(import_hierarchy).__name__,
-                }
+        wrapped_mock = make_type_converting_wrapper(mock_method)
+        result = wrapped_mock(import_cards="false", import_hierarchy="true")
 
-            wrapped_mock = make_type_converting_wrapper(mock_method)
-
-            # Call with string parameters
-            result = wrapped_mock(import_cards="false", import_hierarchy="true")
-
-            # Check that boolean conversion worked
-            assert result["import_cards"] is False
-            assert result["import_hierarchy"] is True
-            assert result["import_cards_type"] == "bool"
-            assert result["import_hierarchy_type"] == "bool"
+        assert result["import_cards"] is False
+        assert result["import_hierarchy"] is True
+        assert result["import_cards_type"] == "bool"
+        assert result["import_hierarchy_type"] == "bool"

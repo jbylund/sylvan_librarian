@@ -72,7 +72,7 @@ INSERT INTO magic.cards (
 ) ON CONFLICT (scryfall_id) DO NOTHING;
 
 -- Insert test tags
-INSERT INTO magic.tags (tag) VALUES
+INSERT INTO magic.oracle_tags (tag) VALUES
 ('flying'),
 ('vigilance'),
 ('burn'),

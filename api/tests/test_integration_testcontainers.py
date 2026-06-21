@@ -204,13 +204,6 @@ class TestContainerIntegration:
         assert len(cards) == 1
         assert cards[0]["name"] == "Serra Angel"
 
-    def test_get_all_tags_with_real_db(self: TestContainerIntegration, api_resource: APIResource) -> None:
-        """Test getting all tags from real database."""
-        tags = api_resource._get_all_tags()
-
-        expected_tags = {"flying", "vigilance", "burn", "mana-acceleration"}
-        assert tags == expected_tags
-
     def test_database_operations_isolation(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """Test that database operations are properly isolated."""
         # This test verifies that we're working with the test database
