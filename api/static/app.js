@@ -465,12 +465,36 @@ class CardSearch {
     return query + closing;
   }
 
+  // Returns an error string if the query is structurally invalid, or null if it looks ok.
+  validateQuery(query) {
+    // Strip quoted strings so we don't match content inside them.
+    const q = query.replace(/"[^"]*"|'[^']*'/g, '""');
+
+    // Trailing AND/OR with no right operand: "name:test and", "power>1 or"
+    if (/(?:^|\s)(and|or)\s*$/i.test(q)) {
+      return `Failed to parse query: "${query}"`;
+    }
+
+    // Any word followed by : with no value: "t:" at end, or "(t:)" where ) follows immediately.
+    if (/\b\w+\s*:\s*(?:$|\))/.test(q)) {
+      return `Failed to parse query: "${query}"`;
+    }
+
+    return null;
+  }
+
   async performSearch(query) {
     if (!query.trim()) {
       return;
     }
 
     const normalizedQuery = this._processQuery(query);
+
+    const validationError = this.validateQuery(normalizedQuery);
+    if (validationError) {
+      this.showError(`Failed to search: Invalid Search Query: ${validationError}`);
+      return;
+    }
 
     // Get current order settings
     const order = this.orderDropdown.value;
