@@ -241,7 +241,7 @@ def preprocess_card(card: dict[str, Any]) -> list[dict[str, Any]]:  # noqa: PLR0
     card.setdefault("card_legalities", card.get("legalities", {}))
 
     # Ensure all NOT NULL DEFAULT fields are set to avoid constraint violations
-    for key in ["produced_mana", "card_oracle_tags", "card_is_tags"]:
+    for key in ["produced_mana", "card_oracle_tags", "card_art_tags", "card_is_tags"]:
         card.setdefault(key, {})
 
     return [card]

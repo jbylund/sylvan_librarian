@@ -42,8 +42,10 @@ class BulkDataKey(StrEnum):
     """Key for Scryfall bulk data."""
 
     ALL_CARDS = "all_cards"
+    ART_TAGS = "art_tags"
     DEFAULT_CARDS = "default_cards"
     ORACLE_CARDS = "oracle_cards"
+    ORACLE_TAGS = "oracle_tags"
     RULINGS = "rulings"
     UNIQUE_ARTWORK = "unique_artwork"
 
