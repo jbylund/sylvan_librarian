@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 
-from api.parsing.nodes import Query
+from api.parsing.nodes import Query, QueryContext
 
 
 class TestWatermarkSQLGeneration:
@@ -36,7 +34,7 @@ class TestWatermarkSQLGeneration:
         result = parse_query(query)
         assert isinstance(result, Query)
 
-        context: dict[str, Any] = {}
+        context: QueryContext = QueryContext()
         sql = result.to_sql(context)
 
         # Should generate exact equality with = operator, not ILIKE
@@ -55,7 +53,7 @@ class TestWatermarkSQLGeneration:
         result = parse_query("name:lightning")
         assert isinstance(result, Query)
 
-        context: dict[str, Any] = {}
+        context: QueryContext = QueryContext()
         sql = result.to_sql(context)
 
         # Should generate lower() LIKE pattern matching
@@ -76,7 +74,7 @@ class TestWatermarkSQLGeneration:
         result = parse_query("watermark:azorius watermark:dimir")
         assert isinstance(result, Query)
 
-        context: dict[str, Any] = {}
+        context: QueryContext = QueryContext()
         sql = result.to_sql(context)
 
         # Should have both exact equality conditions with AND
@@ -97,7 +95,7 @@ class TestWatermarkSQLGeneration:
         result = parse_query("watermark:azorius border:black")
         assert isinstance(result, Query)
 
-        context: dict[str, Any] = {}
+        context: QueryContext = QueryContext()
         sql = result.to_sql(context)
 
         # Should have both exact equality conditions with AND
@@ -136,7 +134,7 @@ class TestWatermarkSQLGeneration:
         result = parse_query(query)
         assert isinstance(result, Query)
 
-        context: dict[str, Any] = {}
+        context: QueryContext = QueryContext()
         sql = result.to_sql(context)
 
         # Should generate exact equality with = operator
@@ -154,7 +152,7 @@ class TestWatermarkSQLGeneration:
         result = parse_query("watermark:azorius border:black cmc=3")
         assert isinstance(result, Query)
 
-        context: dict[str, Any] = {}
+        context: QueryContext = QueryContext()
         sql = result.to_sql(context)
 
         # Should have all three conditions with AND

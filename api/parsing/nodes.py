@@ -12,18 +12,19 @@ def _node_to_json(obj: object) -> object:
     return obj.to_json() if isinstance(obj, QueryNode) else obj
 
 
-def param_name(ival: object) -> str:
-    """Generate a unique parameter name for SQL queries.
+class QueryContext(dict[str, object]):
+    """Parameter accumulator for SQL generation.
 
-    Args:
-        ival: The value to generate a parameter name for.
-
-    Returns:
-        A unique parameter name based on the value and its type.
+    Subclasses dict so existing code that reads `.values()`, iterates, or
+    compares with `==` continues to work without change.
     """
-    b64d = b64encode(str(ival).encode()).decode().rstrip("=")
-    val_type = type(ival).__name__
-    return f"p_{val_type}_{b64d}"
+
+    def add(self, value: object) -> str:
+        """Register a bound parameter and return its ``%(name)s`` placeholder."""
+        b64d = b64encode(str(value).encode()).decode().rstrip("=")
+        name = f"p_{type(value).__name__}_{b64d}"
+        self[name] = value
+        return f"%({name})s"
 
 
 # AST Classes
@@ -31,7 +32,7 @@ class QueryNode(ABC):
     """Base class for all query nodes in the abstract syntax tree (AST)."""
 
     @abstractmethod
-    def to_sql(self: QueryNode, context: dict) -> str:
+    def to_sql(self: QueryNode, context: QueryContext) -> str:
         """Convert this node to a SQL WHERE clause string representation."""
 
     @abstractmethod
@@ -74,6 +75,10 @@ class ValueNode(LeafNode):
         """Return a hash based on the class name and value."""
         return hash((self.__class__.__name__, self.value))
 
+    def to_sql(self: ValueNode, context: QueryContext) -> str:
+        """Register this value as a bound parameter and return its placeholder."""
+        return context.add(self.value)
+
     def to_human_explanation(self: ValueNode) -> str:
         """Convert to human-readable explanation."""
         return str(self.value)
@@ -90,12 +95,6 @@ class StringValueNode(ValueNode):
         """Return this node's kwargs dict for Rust engine JSON serialization."""
         return {"value": self.value}
 
-    def to_sql(self: StringValueNode, context: dict) -> str:
-        """Serialize this string value node to a SQL string literal."""
-        _param_name = param_name(self.value)
-        context[_param_name] = self.value
-        return f"%({_param_name})s"
-
 
 class NumericValueNode(ValueNode):
     """Represents a numeric value node in the AST."""
@@ -107,12 +106,6 @@ class NumericValueNode(ValueNode):
     def kwargs(self) -> dict:
         """Return this node's kwargs dict for Rust engine JSON serialization."""
         return {"value": self.value}
-
-    def to_sql(self: NumericValueNode, context: dict) -> str:
-        """Serialize this numeric value node to a SQL number literal."""
-        _param_name = param_name(self.value)
-        context[_param_name] = self.value
-        return f"%({_param_name})s"
 
 
 class ManaValueNode(ValueNode):
@@ -126,12 +119,6 @@ class ManaValueNode(ValueNode):
         """Return this node's kwargs dict for Rust engine JSON serialization."""
         return {"value": self.value}
 
-    def to_sql(self: ManaValueNode, context: dict) -> str:
-        """Serialize this mana value node to a SQL string literal."""
-        _param_name = param_name(self.value)
-        context[_param_name] = self.value
-        return f"%({_param_name})s"
-
 
 class RegexValueNode(ValueNode):
     r"""Represents a regex pattern value node, such as /^{T}:/ or /\spp/."""
@@ -144,12 +131,6 @@ class RegexValueNode(ValueNode):
         """Return this node's kwargs dict for Rust engine JSON serialization."""
         return {"value": self.value}
 
-    def to_sql(self: RegexValueNode, context: dict) -> str:
-        """Serialize this regex value node to a SQL string literal."""
-        _param_name = param_name(self.value)
-        context[_param_name] = self.value
-        return f"%({_param_name})s"
-
 
 class AttributeNode(LeafNode):
     """Represents an attribute of a card, such as 'cmc' or 'power'."""
@@ -158,7 +139,7 @@ class AttributeNode(LeafNode):
         """Initialize an AttributeNode with the attribute name."""
         self.attribute_name = attribute_name.lower()
 
-    def to_sql(self: AttributeNode, context: dict) -> str:
+    def to_sql(self: AttributeNode, context: QueryContext) -> str:
         """Serialize this attribute node to a SQL column reference."""
         del context
         return f"card.{self.attribute_name}"
@@ -225,7 +206,7 @@ class BinaryOperatorNode(QueryNode):
         """Return this node's kwargs dict for Rust engine JSON serialization."""
         return {"lhs": _node_to_json(self.lhs), "op": self.operator, "rhs": _node_to_json(self.rhs)}
 
-    def to_sql(self: BinaryOperatorNode, context: dict) -> str:
+    def to_sql(self: BinaryOperatorNode, context: QueryContext) -> str:
         """Serialize this binary operator node to a SQL expression."""
         sql_operator = self.operator
         if sql_operator == ":":
@@ -286,7 +267,7 @@ class NaryOperatorNode(QueryNode):
         """Return this node's kwargs dict for Rust engine JSON serialization."""
         return {"operands": [_node_to_json(op) for op in self.operands]}
 
-    def to_sql(self: NaryOperatorNode, context: dict) -> str:
+    def to_sql(self: NaryOperatorNode, context: QueryContext) -> str:
         """Serialize this n-ary operator node to a SQL expression."""
         if not self.operands:
             return self._empty_result()
@@ -394,7 +375,7 @@ class NotNode(QueryNode):
         """Return this node's kwargs dict for Rust engine JSON serialization."""
         return {"operand": _node_to_json(self.operand)}
 
-    def to_sql(self: NotNode, context: dict) -> str:
+    def to_sql(self: NotNode, context: QueryContext) -> str:
         """Serialize this NOT node to a SQL expression.
 
         Plain NOT keeps SQL's three-valued semantics: a NULL operand (e.g.
@@ -433,7 +414,7 @@ class TrueNode(LeafNode):
         """Return this node's kwargs dict for Rust engine JSON serialization."""
         return {}
 
-    def to_sql(self: TrueNode, context: dict) -> str:
+    def to_sql(self: TrueNode, context: QueryContext) -> str:
         """Serialize this node to the SQL literal TRUE."""
         del context
         return "TRUE"
@@ -466,7 +447,7 @@ class Query(QueryNode):
         """Delegate to the root node."""
         return self.root.to_json()
 
-    def to_sql(self: Query, context: dict) -> str:
+    def to_sql(self: Query, context: QueryContext) -> str:
         """Serialize this query to a SQL string."""
         return self.root.to_sql(context)
 

@@ -9,6 +9,7 @@ from api.parsing import (
     NotNode,
     NumericValueNode,
     OrNode,
+    QueryContext,
     QueryNode,
     StringValueNode,
 )
@@ -849,14 +850,14 @@ def test_mana_cost_sql_generation() -> None:
     """Test SQL generation for mana cost comparisons."""
     # Test basic equality (colon operator) - use scryfall parser for proper node types
     result1 = parsing.parse_scryfall_query("mana:{1}{G}")
-    context1 = {}
+    context1 = QueryContext()
     sql1 = result1.to_sql(context1)
     assert sql1 == "(%(p_dict_eydHJzogWzFdfQ)s <@ card.mana_cost_jsonb AND card.cmc >= %(p_int_Mg)s)"
     assert mana_cost_str_to_dict("{1}{G}") in context1.values()
     assert calculate_cmc("{1}{G}") in context1.values()
 
     result1 = parsing.parse_scryfall_query("mana={1}{G}")
-    context1 = {}
+    context1 = QueryContext()
     sql1 = result1.to_sql(context1)
     assert sql1 == "(card.mana_cost_jsonb = %(p_dict_eydHJzogWzFdfQ)s AND card.cmc = %(p_int_Mg)s)"
     assert mana_cost_str_to_dict("{1}{G}") in context1.values()
@@ -864,7 +865,7 @@ def test_mana_cost_sql_generation() -> None:
 
     # Test <= operator generates containment + cmc check
     result2 = parsing.parse_scryfall_query("mana<={2}{R}{R}")
-    context2 = {}
+    context2 = QueryContext()
     sql2 = result2.to_sql(context2)
     assert "card.mana_cost_jsonb <@" in sql2
     assert "card.cmc <=" in sql2
@@ -873,7 +874,7 @@ def test_mana_cost_sql_generation() -> None:
 
     # Test < operator includes inequality check
     result3 = parsing.parse_scryfall_query("mana<{1}{G}")
-    context3 = {}
+    context3 = QueryContext()
     sql3 = result3.to_sql(context3)
     assert "card.mana_cost_jsonb <@" in sql3
     assert "card.cmc <=" in sql3
@@ -881,14 +882,14 @@ def test_mana_cost_sql_generation() -> None:
 
     # Test >= operator reverses containment direction
     result4 = parsing.parse_scryfall_query("mana>={W}{U}")
-    context4 = {}
+    context4 = QueryContext()
     sql4 = result4.to_sql(context4)
     assert "<@ card.mana_cost_jsonb" in sql4
     assert "card.cmc >=" in sql4
 
     # Test > operator includes inequality
     result5 = parsing.parse_scryfall_query("mana>{0}")
-    context5 = {}
+    context5 = QueryContext()
     sql5 = result5.to_sql(context5)
     assert "<@ card.mana_cost_jsonb" in sql5
     assert "card.cmc >=" in sql5
@@ -999,21 +1000,21 @@ def test_devotion_sql_generation() -> None:
     """Test SQL generation for devotion comparisons."""
     # Test basic equality (colon operator)
     result1 = parsing.parse_scryfall_query("devotion:{G}")
-    context1 = {}
+    context1 = QueryContext()
     sql1 = result1.to_sql(context1)
     assert "card.devotion" in sql1
     assert "G" in str(context1.values())
 
     # Test >= operator generates containment check
     result2 = parsing.parse_scryfall_query("devotion>={G}")
-    context2 = {}
+    context2 = QueryContext()
     sql2 = result2.to_sql(context2)
     assert "card.devotion" in sql2
     assert ">=" in sql2 or "@>" in sql2
 
     # Test >= operator with multiple colors
     result3 = parsing.parse_scryfall_query("devotion>={G}{R}")
-    context3 = {}
+    context3 = QueryContext()
     sql3 = result3.to_sql(context3)
     assert "card.devotion" in sql3
     assert "G" in str(context3.values())
@@ -1039,7 +1040,7 @@ def test_mana_cost_string_format_comparisons(query: str, description: str) -> No
     assert result is not None, f"Failed to parse {query}"
 
     # Test that SQL generation works (should not raise NotImplementedError)
-    context = {}
+    context = QueryContext()
     sql = result.to_sql(context)
     assert sql is not None, f"Failed to generate SQL for {query}"
     assert "card.mana_cost_jsonb" in sql, f"Should use JSONB containment for {query}"

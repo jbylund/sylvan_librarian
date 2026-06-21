@@ -3,7 +3,7 @@
 import pytest
 
 from api.parsing.card_query_nodes import ExactNameNode
-from api.parsing.nodes import AndNode, NotNode
+from api.parsing.nodes import AndNode, NotNode, QueryContext
 
 
 @pytest.mark.parametrize(
@@ -82,7 +82,7 @@ def test_exact_name_combined_with_other_conditions(parse_query, query: str) -> N
 def test_exact_name_sql_generation(parse_query, query: str, expected_sql: str, expected_parameters: dict) -> None:
     """Test that exact name queries generate the correct SQL."""
     parsed = parse_query(query)
-    context: dict = {}
+    context: QueryContext = QueryContext()
     observed_sql = parsed.to_sql(context)
     assert observed_sql == expected_sql, f"SQL mismatch: {observed_sql!r}"
     assert context == expected_parameters, f"Params mismatch: {context!r}"

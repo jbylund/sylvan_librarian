@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 
-from api.parsing.nodes import Query
+from api.parsing.nodes import Query, QueryContext
 
 
 class TestLayoutBorderSQLGeneration:
@@ -30,7 +28,7 @@ class TestLayoutBorderSQLGeneration:
         result = parse_query(query)
         assert isinstance(result, Query)
 
-        context: dict[str, Any] = {}
+        context: QueryContext = QueryContext()
         sql = result.to_sql(context)
 
         # Should generate exact equality with = operator, not ILIKE
@@ -49,7 +47,7 @@ class TestLayoutBorderSQLGeneration:
         result = parse_query("name:lightning")
         assert isinstance(result, Query)
 
-        context: dict[str, Any] = {}
+        context: QueryContext = QueryContext()
         sql = result.to_sql(context)
 
         # Should generate lower() LIKE pattern matching
@@ -70,7 +68,7 @@ class TestLayoutBorderSQLGeneration:
         result = parse_query("layout:normal border:black")
         assert isinstance(result, Query)
 
-        context: dict[str, Any] = {}
+        context: QueryContext = QueryContext()
         sql = result.to_sql(context)
 
         # Should have both exact equality conditions with AND
@@ -103,7 +101,7 @@ class TestLayoutBorderSQLGeneration:
         result = parse_query(query)
         assert isinstance(result, Query)
 
-        context: dict[str, Any] = {}
+        context: QueryContext = QueryContext()
         sql = result.to_sql(context)
 
         # Should generate exact equality with = operator

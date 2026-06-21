@@ -26,12 +26,12 @@ from api.parsing.nodes import (
     NumericValueNode,
     OrNode,
     Query,
+    QueryContext,
     QueryNode,
     RegexValueNode,
     StringValueNode,
     ValueNode,
     _node_to_json,
-    param_name,
 )
 from api.utils.db_utils import IntArray
 
@@ -133,7 +133,7 @@ class CardAttributeNode(AttributeNode):
         """Return this node's kwargs dict for Rust engine JSON serialization."""
         return {"attribute_name": self.attribute_name, "original_attribute": self.original_attribute}
 
-    def to_sql(self, context: dict) -> str:
+    def to_sql(self, context: QueryContext) -> str:
         """Generate SQL for card attribute node.
 
         Args:
@@ -462,16 +462,15 @@ class ExactNameNode(QueryNode):
         """Return this node's kwargs dict for Rust engine JSON serialization."""
         return {"value": self.value.lower()}
 
-    def to_sql(self, context: dict) -> str:
+    def to_sql(self, context: QueryContext) -> str:
         """Generate SQL for exact name matching (case-insensitive, no wildcards).
 
         LIKE special characters (backslash, %, _) are escaped so the value is matched
         literally rather than as a pattern.
         """
         escaped = _escape_like_pattern(self.value.lower())
-        _param_name = param_name(escaped)
-        context[_param_name] = escaped
-        return f"(lower(card.card_name) LIKE %({_param_name})s)"
+        placeholder = context.add(escaped)
+        return f"(lower(card.card_name) LIKE {placeholder})"
 
     def __repr__(self) -> str:
         """Return a string representation of the ExactNameNode."""
@@ -557,7 +556,7 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
 
         return _node_to_json(self.rhs)
 
-    def to_sql(self, context: dict) -> str:
+    def to_sql(self, context: QueryContext) -> str:
         """Generate SQL for card-specific binary operations.
 
         Args:
@@ -665,7 +664,7 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
 
         return value
 
-    def _handle_card_attribute(self, context: dict) -> str:
+    def _handle_card_attribute(self, context: QueryContext) -> str:
         """Handle card attribute-specific SQL generation."""
         attr = self.lhs.attribute_name
         field_infos = self.lhs.field_infos
@@ -712,7 +711,7 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         msg = f"Unknown field type: {field_type}"
         raise NotImplementedError(msg)
 
-    def _handle_text_comparison(self, context: dict, attr: str) -> str:
+    def _handle_text_comparison(self, context: QueryContext, attr: str) -> str:
         """Handle text comparisons."""
         # artist is titlecased
         # card name is titlecased
@@ -723,7 +722,7 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
             self.rhs.value = self.rhs.value.lower()
         return super().to_sql(context)
 
-    def _handle_rarity_comparison(self, context: dict) -> str:
+    def _handle_rarity_comparison(self, context: QueryContext) -> str:
         # Special handling for rarity - convert text values to numeric
         if isinstance(self.rhs, StringValueNode):
             try:
@@ -736,12 +735,12 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
                 raise ValueError(msg) from e
         return self._handle_numeric_comparison(context)
 
-    def _handle_numeric_comparison(self, context: dict) -> str:
+    def _handle_numeric_comparison(self, context: QueryContext) -> str:
         if self.operator == ":":
             self.operator = "="
         return super().to_sql(context)
 
-    def _handle_colon_operator(self, context: dict, field_type: str, lhs_sql: str, attr: str) -> str:
+    def _handle_colon_operator(self, context: QueryContext, field_type: str, lhs_sql: str, attr: str) -> str:
         """Handle colon operator for different field types."""
         if field_type == FieldType.TEXT:
             # Handle fields that need exact matching instead of pattern matching
@@ -762,7 +761,7 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         msg = f"Unknown field type: {field_type}"
         raise NotImplementedError(msg)
 
-    def _handle_mana_cost_comparison(self, context: dict) -> str:
+    def _handle_mana_cost_comparison(self, context: QueryContext) -> str:
         """Handle mana cost comparisons with approximate matching."""
         # TODO: need to use text or jsonb matching depending on the operator
         mana_cost_str = self.rhs.value
@@ -776,59 +775,50 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
             return self._handle_mana_cost_approximate_comparison(context, mana_cost_str)
         raise AssertionError(self)
 
-    def _handle_mana_cost_approximate_comparison(self, context: dict, mana_cost_str: str) -> str:
+    def _handle_mana_cost_approximate_comparison(self, context: QueryContext, mana_cost_str: str) -> str:
         """Handle approximate mana cost comparisons using containment and CMC."""
-        # Convert the query mana cost to dict for containment checking
         query_mana_dict = mana_cost_str_to_dict(mana_cost_str)
         query_cmc = calculate_cmc(mana_cost_str)
 
-        # Prepare parameters
-        mana_param = param_name(query_mana_dict)
-        cmc_param = param_name(query_cmc)
-        context[mana_param] = query_mana_dict
-        context[cmc_param] = query_cmc
+        mana = context.add(query_mana_dict)
+        cmc = context.add(query_cmc)
 
-        # SQL fragments
         mana_jsonb_sql = "card.mana_cost_jsonb"
         cmc_sql = "card.cmc"
 
         if self.operator == "=":
-            return f"({mana_jsonb_sql} = %({mana_param})s AND {cmc_sql} = %({cmc_param})s)"
+            return f"({mana_jsonb_sql} = {mana} AND {cmc_sql} = {cmc})"
 
         if self.operator == "<=":
             # Card costs <= query if:
             # 1. Card doesn't have more colored pips (card mana <@ query mana)
             # 2. Card doesn't cost more total (card cmc <= query cmc)
-            return f"({mana_jsonb_sql} <@ %({mana_param})s AND {cmc_sql} <= %({cmc_param})s)"
+            return f"({mana_jsonb_sql} <@ {mana} AND {cmc_sql} <= {cmc})"
 
         if self.operator == "<":
             # Card costs < query if:
             # 1. Card doesn't have more colored pips (card mana <@ query mana)
             # 2. Card doesn't cost more total (card cmc <= query cmc)
             # 3. Costs are not identical
-            return (
-                f"({mana_jsonb_sql} <@ %({mana_param})s AND {cmc_sql} <= %({cmc_param})s AND {mana_jsonb_sql} <> %({mana_param})s)"
-            )
+            return f"({mana_jsonb_sql} <@ {mana} AND {cmc_sql} <= {cmc} AND {mana_jsonb_sql} <> {mana})"
 
         if self.operator == ">=":
             # Card costs >= query if:
             # 1. Card has at least the colored pips (card mana @> query mana)
             # 2. Card costs at least as much total (card cmc >= query cmc)
-            return f"(%({mana_param})s <@ {mana_jsonb_sql} AND {cmc_sql} >= %({cmc_param})s)"
+            return f"({mana} <@ {mana_jsonb_sql} AND {cmc_sql} >= {cmc})"
 
         if self.operator == ">":
             # Card costs > query if:
             # 1. Card has at least the colored pips (card mana @> query mana)
             # 2. Card costs at least as much total (card cmc >= query cmc)
             # 3. Costs are not identical
-            return (
-                f"(%({mana_param})s <@ {mana_jsonb_sql} AND {cmc_sql} >= %({cmc_param})s AND {mana_jsonb_sql} <> %({mana_param})s)"
-            )
+            return f"({mana} <@ {mana_jsonb_sql} AND {cmc_sql} >= {cmc} AND {mana_jsonb_sql} <> {mana})"
 
         msg = f"Unsupported mana cost operator: {self.operator}"
         raise ValueError(msg)
 
-    def _handle_date_search(self, context: dict) -> str:
+    def _handle_date_search(self, context: QueryContext) -> str:
         """Handle date search queries.
 
         For 'date:' searches, compares against the full released_at date.
@@ -847,11 +837,10 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
 
         # For date searches, compare against the full date
         # The value should be in YYYY-MM-DD or YYYY format
-        pname = param_name(search_value)
-        context[pname] = search_value
-        return f"(card.released_at {operator} %({pname})s)"
+        placeholder = context.add(search_value)
+        return f"(card.released_at {operator} {placeholder})"
 
-    def _handle_year_search(self, context: dict) -> str:
+    def _handle_year_search(self, context: QueryContext) -> str:
         """Handle year search queries.
 
         For 'year:' searches, converts to date range queries for better index usage.
@@ -891,44 +880,31 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         start_of_next_year = f"{year_value + 1}-01-01"
 
         if operator == "=":
-            p_start_name = param_name(start_of_year)
-            p_end_name = param_name(start_of_next_year)
-            context[p_start_name] = start_of_year
-            context[p_end_name] = start_of_next_year
-            return f"(%({p_start_name})s <= card.released_at AND card.released_at < %({p_end_name})s)"
+            p_start = context.add(start_of_year)
+            p_end = context.add(start_of_next_year)
+            return f"({p_start} <= card.released_at AND card.released_at < {p_end})"
         if operator == ">":
             # year > 2024 means released_at >= 2025-01-01
-            pname = param_name(start_of_next_year)
-            context[pname] = start_of_next_year
-            return f"(card.released_at >= %({pname})s)"
+            return f"(card.released_at >= {context.add(start_of_next_year)})"
         if operator == "<":
             # year < 2024 means released_at < 2024-01-01
-            pname = param_name(start_of_year)
-            context[pname] = start_of_year
-            return f"(card.released_at < %({pname})s)"
+            return f"(card.released_at < {context.add(start_of_year)})"
         if operator == ">=":
             # year >= 2024 means released_at >= 2024-01-01
-            pname = param_name(start_of_year)
-            context[pname] = start_of_year
-            return f"(card.released_at >= %({pname})s)"
+            return f"(card.released_at >= {context.add(start_of_year)})"
         if operator == "<=":
             # year <= 2024 means released_at < 2025-01-01
-            pname = param_name(start_of_next_year)
-            context[pname] = start_of_next_year
-            return f"(card.released_at < %({pname})s)"
+            return f"(card.released_at < {context.add(start_of_next_year)})"
 
         msg = f"Unsupported operator for year search: {operator}"
         raise ValueError(msg)
 
-    def _handle_text_field_pattern_matching(self, context: dict, lhs_sql: str) -> str:
+    def _handle_text_field_pattern_matching(self, context: QueryContext, lhs_sql: str) -> str:
         """Handle pattern matching for regular text fields."""
         # Check if RHS is a regex pattern
         if isinstance(self.rhs, RegexValueNode):
-            regex_pattern = self.rhs.value
-            _param_name = param_name(regex_pattern)
-            context[_param_name] = regex_pattern
             # Use PostgreSQL ~* operator for case-insensitive regex matching
-            return f"({lhs_sql} ~* %({_param_name})s)"
+            return f"({lhs_sql} ~* {context.add(self.rhs.value)})"
 
         if isinstance(self.rhs, StringValueNode | ManaValueNode):
             txt_val = self.rhs.value.strip()
@@ -939,9 +915,7 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
             raise TypeError(msg)
         words = ["", *(_escape_like_pattern(w) for w in txt_val.lower().split()), ""]
         pattern = "%".join(words)
-        _param_name = param_name(pattern)
-        context[_param_name] = pattern
-        return f"(lower({lhs_sql}) LIKE %({_param_name})s)"
+        return f"(lower({lhs_sql}) LIKE {context.add(pattern)})"
 
     """
     col = query
@@ -965,7 +939,7 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
     query ?& col AND not(col ?& query) # as array
     """
 
-    def _handle_jsonb_object(self, context: dict) -> str:  # noqa: PLR0912, PLR0915, C901
+    def _handle_jsonb_object(self, context: QueryContext) -> str:  # noqa: PLR0912, C901
         # Produce the query as a jsonb object
         lhs_sql = self.lhs.to_sql(context)
         attr = self.lhs.attribute_name
@@ -975,67 +949,58 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
             is_color_identity = attr == "card_color_identity"
             if is_color_identity and self.operator in (":", "<="):
                 subsets = IntArray(_subset_masks(_color_dict_to_mask(rhs)))
-                pmask = param_name(subsets)
-                context[pmask] = subsets
-                return f"(magic.color_identity_mask({lhs_sql}) = ANY(%({pmask})s::smallint[]))"
+                pmask = context.add(subsets)
+                return f"(magic.color_identity_mask({lhs_sql}) = ANY({pmask}::smallint[]))"
             if is_color_identity and self.operator == "<":
                 subsets = IntArray(_proper_subset_masks(_color_dict_to_mask(rhs)))
-                pmask = param_name(subsets)
-                context[pmask] = subsets
-                return f"(magic.color_identity_mask({lhs_sql}) = ANY(%({pmask})s::smallint[]))"
-            pname = param_name(rhs)
-            context[pname] = rhs
+                pmask = context.add(subsets)
+                return f"(magic.color_identity_mask({lhs_sql}) = ANY({pmask}::smallint[]))"
+            placeholder = context.add(rhs)
         elif attr == "devotion":
             # Devotion uses mana cost syntax, so we need to convert it to color comparison
             # Extract color codes from mana cost syntax like {G}, {R}{G}, etc.
             query_devotion = calculate_devotion(self.rhs.value.strip())
-            pname = param_name(query_devotion)
-            context[pname] = query_devotion
+            placeholder = context.add(query_devotion)
         elif attr == "card_keywords":
             rhs = get_keywords_comparison_object(self.rhs.value.strip())
-            pname = param_name(rhs)
-            context[pname] = rhs
+            placeholder = context.add(rhs)
         elif attr == "card_frame_data":
             # Frame data handling - treat like keywords (exact string match)
             rhs = get_frame_data_comparison_object(self.rhs.value.strip())
-            pname = param_name(rhs)
-            context[pname] = rhs
+            placeholder = context.add(rhs)
         elif attr == "card_oracle_tags":
             # Oracle tags are stored in lowercase, unlike keywords
             rhs = get_oracle_tags_comparison_object(self.rhs.value.strip())
-            pname = param_name(rhs)
-            context[pname] = rhs
+            placeholder = context.add(rhs)
         elif attr == "card_is_tags":
             # is: tags are stored in lowercase, similar to oracle tags
             rhs = get_is_tags_comparison_object(self.rhs.value.strip())
-            pname = param_name(rhs)
-            context[pname] = rhs
+            placeholder = context.add(rhs)
         elif attr == "card_legalities":
             # Handle legality searches - need original search attribute for status mapping
             original_attr = getattr(self.lhs, "original_attribute", attr)
             rhs = get_legality_comparison_object(self.rhs.value.strip(), original_attr)
-            pname = param_name(rhs)
-            context[pname] = rhs
+            placeholder = context.add(rhs)
         else:
             msg = f"Unknown attribute: {attr}"
             raise ValueError(msg)
 
         if self.operator == "=":
-            return f"({lhs_sql} = %({pname})s)"
+            return f"({lhs_sql} = {placeholder})"
         if self.operator in (">=", ":"):
-            return f"({lhs_sql} @> %({pname})s)"
+            return f"({lhs_sql} @> {placeholder})"
         if self.operator == "<=":
-            return f"({lhs_sql} <@ %({pname})s)"
+            return f"({lhs_sql} <@ {placeholder})"
         if self.operator == ">":
-            return f"({lhs_sql} @> %({pname})s AND {lhs_sql} <> %({pname})s)"
+            return f"({lhs_sql} @> {placeholder} AND {lhs_sql} <> {placeholder})"
         if self.operator == "<":
-            return f"({lhs_sql} <@ %({pname})s AND {lhs_sql} <> %({pname})s)"
+            return f"({lhs_sql} <@ {placeholder} AND {lhs_sql} <> {placeholder})"
         if self.operator in ("!=", "<>"):
-            return f"({lhs_sql} <> %({pname})s)"
+            return f"({lhs_sql} <> {placeholder})"
         msg = f"Unknown operator: {self.operator}"
         raise ValueError(msg)
 
-    def _handle_jsonb_array(self, context: dict) -> str:
+    def _handle_jsonb_array(self, context: QueryContext) -> str:
         # TODO: this should produce the query as an array, not jsonb
         rhs_val = self.rhs.value.strip().title()
         if self.lhs.attribute_name.lower() in ("card_types", "card_subtypes", "type"):
@@ -1045,10 +1010,7 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
                 self.lhs.attribute_name = "card_subtypes"
         col = self.lhs.to_sql(context)
 
-        inners = [rhs_val]
-        pname = param_name(inners)
-        context[pname] = inners
-        query = f"%({pname})s"
+        query = context.add([rhs_val])
         if self.operator == "=":
             return f"({col} <@ {query}) AND ({query} <@ {col})"
         if self.operator in (">=", ":"):
