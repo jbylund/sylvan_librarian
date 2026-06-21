@@ -12,7 +12,7 @@ def _node_to_json(obj: object) -> object:
     return obj.to_json() if isinstance(obj, QueryNode) else obj
 
 
-class QueryContext(dict):
+class QueryContext(dict[str, object]):
     """Parameter accumulator for SQL generation.
 
     Subclasses dict so existing code that reads `.values()`, iterates, or
