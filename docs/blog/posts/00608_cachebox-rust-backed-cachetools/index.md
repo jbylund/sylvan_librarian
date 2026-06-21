@@ -2,7 +2,7 @@
 title: "Swapping cachetools for cachebox Required Only a Thin Key-Hashing Wrapper"
 date: 2027-02-27
 publishDate: 2027-02-27
-tags: ["arcane-tutor", "python", "rust", "performance", "caching"]
+tags: ["python", "rust", "performance", "caching"]
 summary: "Swapping cachetools for cachebox required only a thin key-hashing compatibility wrapper. A short case study in reaching for Rust-native Python packages as a low-friction performance lever."
 ---
 

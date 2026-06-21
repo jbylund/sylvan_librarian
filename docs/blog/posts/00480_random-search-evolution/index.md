@@ -2,7 +2,7 @@
 title: "Stop Using `ORDER BY RANDOM()`: It Scans the Whole Table"
 date: 2027-01-02
 publishDate: 2027-01-02
-tags: ["arcane-tutor", "postgres", "python", "performance", "caching"]
+tags: ["postgres", "python", "performance", "caching"]
 summary: "The random card endpoint went from two expensive queries per request (full scan + ORDER BY RANDOM()) to a TTL-cached in-memory sample. Why ORDER BY RANDOM() is so slow and how TTL caching changes the profile."
 ---
 

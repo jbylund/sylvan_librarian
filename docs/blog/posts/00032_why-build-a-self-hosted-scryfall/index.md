@@ -2,7 +2,7 @@
 title: "The Query Scryfall Can't Answer: `power+toughness>cmc+cmc`"
 date: 2026-06-20
 publishDate: 2026-06-20
-tags: ["arcane-tutor", "mtg", "scryfall", "postgres", "python"]
+tags: ["mtg", "scryfall", "postgres", "python"]
 summary: "Motivation for building Arcane Tutor: owning the query language, and the killer feature Scryfall can't do — arithmetic comparisons across card attributes."
 ---
 
@@ -29,13 +29,13 @@ WHERE creature_power + creature_toughness > cmc * 2
 That works — if you are at a terminal with the data already loaded.
 The objection to building anything more is that this is already sufficient: one query, one answer, no infrastructure required.
 But I wanted something usable from a browser or a phone during a game, without pulling up a laptop and writing SQL.
-So I built [Arcane Tutor](https://github.com/jbylund/arcane_tutor): a self-hosted, Scryfall-compatible card search engine with extended arithmetic syntax.
+So I built [{{< sitename >}}](https://github.com/jbylund/arcane_tutor): a self-hosted, Scryfall-compatible card search engine with extended arithmetic syntax.
 
-Self-hosting has real costs, though modest ones in this case. The hardware cost was marginal — I already run a home server for Plex and Pi-hole, so one more container was nothing. Card data imports automatically on container startup, and since I push code updates frequently, the data stays current without extra effort. The site is fully responsive, which is actually how I access it most often. The one genuine dependency on Scryfall remains: card data still comes from Scryfall's bulk data dumps. Arcane Tutor owns the query layer but not the cards themselves.
+Self-hosting has real costs, though modest ones in this case. The hardware cost was marginal — I already run a home server for Plex and Pi-hole, so one more container was nothing. Card data imports automatically on container startup, and since I push code updates frequently, the data stays current without extra effort. The site is fully responsive, which is actually how I access it most often. The one genuine dependency on Scryfall remains: card data still comes from Scryfall's bulk data dumps. {{< sitename >}} owns the query layer but not the cards themselves.
 
 ## Arithmetic Across Card Attributes
 
-To keep queries mostly portable between the two tools, Arcane Tutor extends Scryfall's syntax rather than replacing it.
+To keep queries mostly portable between the two tools, {{< sitename >}} extends Scryfall's syntax rather than replacing it.
 The extension is arithmetic expressions over numeric card attributes on either side of a comparison:
 
 ```
@@ -51,15 +51,15 @@ Both sides are evaluated as full arithmetic expressions, not just field referenc
 These are exactly the cards that are difficult to evaluate by eye: the comparison is between two sums, neither of which appears on the card directly.
 Scryfall can filter on `power` and `toughness` individually, but the arithmetic relationship between them and `cmc` requires something Scryfall does not expose.
 
-The query language also supports the most commonly used Scryfall filters — type, color identity, format legality, oracle text, mana cost — so Arcane Tutor and Scryfall are interchangeable for standard queries.
+The query language also supports the most commonly used Scryfall filters — type, color identity, format legality, oracle text, mana cost — so {{< sitename >}} and Scryfall are interchangeable for standard queries.
 
 ## Fast Enough to Search on Every Keystroke
 
 Reactive search — results updating as you type rather than on submit — requires latency low enough that the response arrives before the next keystroke.
 The project started with direct PostgreSQL queries — similar latency to Scryfall, workable for one-off lookups but not for per-keystroke updates.
-Replacing that hot path with an in-process Rust engine brought query times down to tens of milliseconds. Both columns are browser network-tab measurements using the same instrument. Arcane Tutor is served as arcane-tutor.com, so both sides include public internet routing — the difference is Scryfall's CDN versus a home server, not LAN versus internet. Hardware: MacBook Pro M5 Max (18 cores, 128 GB). One measurement per query: at speedups of 30×–93×, a single sample is sufficient to establish two orders of magnitude.
+Replacing that hot path with an in-process Rust engine brought query times down to tens of milliseconds. Both columns are browser network-tab measurements using the same instrument. {{< sitename >}} is served as arcane-tutor.com, so both sides include public internet routing — the difference is Scryfall's CDN versus a home server, not LAN versus internet. Hardware: MacBook Pro M5 Max (18 cores, 128 GB). One measurement per query: at speedups of 30×–93×, a single sample is sufficient to establish two orders of magnitude.
 
-| Query | Scryfall | Arcane Tutor | Speedup |
+| Query | Scryfall | {{< sitename >}} | Speedup |
 |-------|----------|--------------|---------|
 | `power>toughness` | 1030ms | 15ms | 69× |
 | `t:creature` | 1100ms | 12ms | 92× |
@@ -75,11 +75,11 @@ Two separate problems fall under result ranking.
 
 The first is which card to rank first.
 Scryfall's default sort is alphabetical — `format:modern` returns cards starting with "A," not the most-played cards, not the cards most useful to know about.
-Arcane Tutor integrates popularity signals from CubeCobra and EDHREC to rank by play rate, so the most-played cards appear first.
+{{< sitename >}} integrates popularity signals from CubeCobra and EDHREC to rank by play rate, so the most-played cards appear first.
 
 The second is which printing of a card to show.
 A card with 30 printings in Scryfall might surface a showcase variant, a black-and-white secret lair, or a foreign-language copy before a clean standard-frame original.
-Arcane Tutor encodes printing preferences as a numeric score: standard frame, black border, original artwork, non-foil unless foil-only.
+{{< sitename >}} encodes printing preferences as a numeric score: standard frame, black border, original artwork, non-foil unless foil-only.
 Each criterion contributes a weight; the weights sum to a `prefer_score`; the highest-scoring printing for each unique card ranks first.
 
 Printing preference is resolved inside a CTE using `DISTINCT ON` with its own `ORDER BY`; the outer query then ranks the deduplicated cards by play rate. Two ordering steps, but a single SQL statement — no application-level post-processing.

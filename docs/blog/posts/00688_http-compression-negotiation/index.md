@@ -2,7 +2,7 @@
 title: "We Ignore Your Accept-Encoding q= Weights and Serve Better Compression Anyway"
 date: 2027-04-10
 publishDate: 2027-04-10
-tags: ["arcane-tutor", "python", "http", "compression", "falcon", "middleware"]
+tags: ["python", "http", "compression", "falcon", "middleware"]
 summary: "Serving compressed responses correctly is more than calling gzip.compress(). Covers Accept-Encoding negotiation, server-side priority (zstd → brotli → gzip), buffered vs. streaming code paths, the 200-byte skip threshold, Vary headers, and gzip determinism with mtime=0."
 ---
 

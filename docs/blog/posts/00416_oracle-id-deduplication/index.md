@@ -2,7 +2,7 @@
 title: "Oracle ID Dedup: 23% Faster by Changing the Key, 9% Faster by Removing Dead Work"
 date: 2026-12-05
 publishDate: 2026-12-05
-tags: ["arcane-tutor", "postgres", "sql", "performance", "benchmarking"]
+tags: ["postgres", "sql", "performance", "benchmarking"]
 summary: "Two SQL hypotheses about DISTINCT ON key choice: UUID vs text, and whether DISTINCT ON the primary key does any real work. One hypothesis failed; two wins shipped."
 ---
 

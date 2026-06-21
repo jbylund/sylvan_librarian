@@ -2,7 +2,7 @@
 title: "Keeping a CDN in Sync with Scryfall Using Set-Based Diffing"
 date: 2026-12-19
 publishDate: 2026-12-19
-tags: ["arcane-tutor", "frontend", "cdn", "images", "javascript"]
+tags: ["frontend", "cdn", "images", "javascript"]
 summary: "Serving card images efficiently with a CDN, responsive srcset, and a sync script that keeps the CDN in step with Scryfall bulk data updates."
 ---
 

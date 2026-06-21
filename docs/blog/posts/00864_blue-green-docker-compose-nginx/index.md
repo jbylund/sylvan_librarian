@@ -2,7 +2,7 @@
 title: "Zero-Downtime Deploys with Blue/Green Docker Compose and nginx"
 date: 2027-07-03
 publishDate: 2027-07-03
-tags: ["arcane-tutor", "infrastructure", "docker", "nginx", "deployment"]
+tags: ["infrastructure", "docker", "nginx", "deployment"]
 summary: "Two identical Docker Compose stacks behind one nginx upstream. Deploy by bringing up the new stack, swapping the upstream on health-check pass, then tearing down the old one — no orchestrator required."
 ---
 

@@ -2,7 +2,7 @@
 title: "In-Process Card Search Without a Query Planner: Trigrams, Sorted Arrays, and Hash Maps"
 date: 2027-04-24
 publishDate: 2027-04-24
-tags: ["arcane-tutor", "rust", "performance", "indexing"]
+tags: ["rust", "performance", "indexing"]
 summary: "The index types used to accelerate filtering in the Rust engine: trigram sets, sorted arrays, hash maps, and how each maps to query operators."
 ---
 

@@ -2,7 +2,7 @@
 title: "13× the Throughput of FastAPI: Why I Use Falcon + Bjoern"
 date: 2026-07-04
 publishDate: 2026-07-04
-tags: ["arcane-tutor", "python", "falcon", "bjoern", "fastapi", "performance"]
+tags: ["python", "falcon", "bjoern", "fastapi", "performance"]
 summary: "Why Arcane Tutor uses Falcon and Bjoern instead of the FastAPI + uvicorn default: a preference for explicit, close-to-vanilla Python over framework magic."
 ---
 
@@ -25,7 +25,7 @@ Falcon uses [orjson](https://github.com/ijl/orjson); FastAPI uses `response_mode
 13× difference on an endpoint that does nothing except serialize a pre-loaded result —
 which reflects the framework overhead, not the application work.
 On cache-miss requests that do reach the database, query time dominates and the relative gap narrows.
-Arcane Tutor caches search results, so a large fraction of requests are cache hits that return immediately.
+{{< sitename >}} caches search results, so a large fraction of requests are cache hits that return immediately.
 The faster the framework processes a hit, the more headroom is left for the requests that actually need the database.
 
 ## The Appeal of FastAPI

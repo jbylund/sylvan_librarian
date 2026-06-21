@@ -2,7 +2,7 @@
 title: "Adaptive Dedup: Linear Scan Wins Small Sets, Hash Wins Large — Here Is the Threshold"
 date: 2027-06-19
 publishDate: 2027-06-19
-tags: ["arcane-tutor", "rust", "performance", "query"]
+tags: ["rust", "performance", "query"]
 summary: "Deduplicating results on a dimension (e.g., one printing per oracle ID): choosing between a linear scan and a hash scan based on result set size, and how distinct queries compose with scoring."
 ---
 

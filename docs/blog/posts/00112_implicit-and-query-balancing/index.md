@@ -2,7 +2,7 @@
 title: "Whitespace as an Operator: Parsing Scryfall's Implicit AND"
 date: 2026-07-25
 publishDate: 2026-07-25
-tags: ["arcane-tutor", "parser", "pyparsing", "python"]
+tags: ["parser", "pyparsing", "python"]
 summary: "The Scryfall query language implicitly ANDs adjacent terms — pyparsing does not. This post covers the preprocessing layer built on top: implicit AND injection, query balancing in two languages, and the edge cases that required fixes."
 ---
 
@@ -161,7 +161,7 @@ That single `continue` branch, visible in both snippets above, was the fix.
 ## Parsing Arithmetic on Both Sides of a Comparison
 
 Scryfall's syntax supports numeric comparisons like `power>3`.
-Arcane Tutor extends this: both sides of a comparison can be arithmetic expressions
+{{< sitename >}} extends this: both sides of a comparison can be arithmetic expressions
 over numeric card attributes and literal numbers:
 
 ```

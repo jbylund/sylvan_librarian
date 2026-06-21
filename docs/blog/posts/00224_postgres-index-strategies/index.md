@@ -2,7 +2,7 @@
 title: "22 Indexes on One Table: How Card Search Uses Every Index Type PostgreSQL Has"
 date: 2026-09-12
 publishDate: 2026-09-12
-tags: ["arcane-tutor", "postgres", "sql", "indexing", "performance"]
+tags: ["postgres", "sql", "indexing", "performance"]
 summary: "The magic.cards table has 22 specialized indexes. A tour of trigram GIN, JSONB GIN, B-tree, and functional indexes — when each wins and what query shapes each serves."
 ---
 

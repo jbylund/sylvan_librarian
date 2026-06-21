@@ -2,7 +2,7 @@
 title: "Scryfall Sorts Alphabetically. I Sort by CubeCobra Popularity."
 date: 2026-10-10
 publishDate: 2026-10-10
-tags: ["arcane-tutor", "postgres", "sql", "scoring"]
+tags: ["postgres", "sql", "scoring"]
 summary: "Search results need two distinct scoring concerns: which printing of a card to surface, and which cards to rank first. Both are numeric ORDER BY expressions in SQL."
 ---
 

@@ -2,7 +2,7 @@
 title: "Choosing a Parser for a Query DSL: Regex, ANTLR, Lark, and pyparsing"
 date: 2026-07-18
 publishDate: 2026-07-18
-tags: ["arcane-tutor", "parser", "pyparsing", "python"]
+tags: ["parser", "pyparsing", "python"]
 summary: "How I evaluated parsing approaches for Scryfall's query language: why regex and ANTLR were ruled out, how Lark compares to pyparsing, and why pyparsing won."
 ---
 
@@ -13,7 +13,7 @@ The query box is the primary interface — there is an advanced search form,
 but it cannot even express everything the query language can.
 You type `t:creature cmc<=3 id:g` and get every green creature costing three or less.
 
-Arcane Tutor aims to be compatible with that syntax.
+{{< sitename >}} aims to be compatible with that syntax.
 A query is a sequence of conditions joined by boolean logic.
 Explicit `AND` and `OR` are supported, and adjacent terms with no operator are implicitly ANDed:
 
@@ -25,7 +25,7 @@ o:/\bflying\b/ t:enchantment    # oracle text matches regex, type is enchantment
 (r:m OR r:r) f:legacy           # mythic or rare, legal in legacy
 ```
 
-Arcane Tutor extends the syntax with arithmetic expressions across numeric fields:
+{{< sitename >}} extends the syntax with arithmetic expressions across numeric fields:
 
 ```
 cmc+power<toughness+cmc         # arithmetic on both sides of the comparison

@@ -2,7 +2,7 @@
 title: "Color Identity in One Byte: Bitwise Subset Checks Across 30k Cards"
 date: 2027-02-13
 publishDate: 2027-02-13
-tags: ["arcane-tutor", "rust", "performance", "bitmaps"]
+tags: ["rust", "performance", "bitmaps"]
 summary: "Storing color identity as a bitmap instead of a string set: bitwise subset/superset checks, cache-line-friendly structs, and before/after benchmarks."
 ---
 

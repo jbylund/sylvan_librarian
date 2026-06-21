@@ -2,7 +2,7 @@
 title: "Why Mana Symbols Are a Custom Webfont, Not SVG Sprites"
 date: 2026-10-24
 publishDate: 2026-10-24
-tags: ["arcane-tutor", "frontend", "fonts", "css", "mtg"]
+tags: ["frontend", "fonts", "css", "mtg"]
 summary: "Rendering Magic's mana symbols as a custom webfont: why a font beats SVG sprites or images, how subsetting keeps the payload small, and the tradeoffs around font loading."
 ---
 

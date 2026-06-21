@@ -2,7 +2,7 @@
 title: "One Query, Two Answers: How NOT MATERIALIZED Lets Each Branch Pick Its Own Index"
 date: 2026-08-15
 publishDate: 2026-08-15
-tags: ["arcane-tutor", "sql", "postgres"]
+tags: ["sql", "postgres"]
 summary: "A search endpoint needs paginated results and a total count. A single CTE with UNION ALL answers both — and for deduplicated searches it runs in roughly half the time. For non-deduplicated searches it matches two separate queries while using one round trip."
 ---
 
