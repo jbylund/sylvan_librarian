@@ -346,6 +346,7 @@ struct Card {
     card_keywords: HashSet<String>,
     card_legalities: u64, // 2 bits per format, positions from the FORMAT_SHIFTS registry
     card_oracle_tags: HashSet<String>,
+    card_art_tags: HashSet<String>,
     card_is_tags: HashSet<String>,
     card_frame_data: HashSet<String>,
 
@@ -682,6 +683,7 @@ fn card_from_pydict(d: &Bound<PyDict>, it: &mut Interner) -> Card {
         card_keywords: jsonb_obj_to_hashset(d, "card_keywords"),
         card_legalities: jsonb_obj_to_legality_bits(d, "card_legalities"),
         card_oracle_tags: jsonb_obj_to_hashset(d, "card_oracle_tags"),
+        card_art_tags: jsonb_obj_to_hashset(d, "card_art_tags"),
         card_is_tags: jsonb_obj_to_hashset(d, "card_is_tags"),
         card_frame_data: jsonb_obj_to_hashset(d, "card_frame_data"),
 
@@ -819,6 +821,7 @@ enum CollField {
     Subtypes,
     Keywords,
     OracleTags,
+    ArtTags,
     IsTags,
     FrameData,
 }
@@ -828,6 +831,7 @@ fn card_collection<'a>(card: &'a ACard, f: CollField) -> CollRef<'a> {
         CollField::Subtypes   => CollRef::List(&card.card_subtypes),
         CollField::Keywords   => CollRef::Set(&card.card_keywords),
         CollField::OracleTags => CollRef::Set(&card.card_oracle_tags),
+        CollField::ArtTags    => CollRef::Set(&card.card_art_tags),
         CollField::IsTags     => CollRef::Set(&card.card_is_tags),
         CollField::FrameData  => CollRef::Set(&card.card_frame_data),
     }
@@ -1449,9 +1453,10 @@ fn build_binary(kw: &Value) -> Result<FilterExpr, String> {
         return Ok(FilterExpr::CollectionCmp { field: CollField::Keywords, op: cmp_op, value });
     }
 
-    if matches!(attr, "card_oracle_tags" | "card_is_tags" | "card_frame_data") {
+    if matches!(attr, "card_oracle_tags" | "card_art_tags" | "card_is_tags" | "card_frame_data") {
         let coll_field = match attr {
             "card_oracle_tags" => CollField::OracleTags,
+            "card_art_tags"    => CollField::ArtTags,
             "card_is_tags"     => CollField::IsTags,
             _                  => CollField::FrameData,
         };
@@ -1813,6 +1818,7 @@ struct CardIndexes {
     subtypes:       TagIndex,
     keywords:       TagIndex,
     oracle_tags:    TagIndex,
+    art_tags:       TagIndex,
     is_tags:        TagIndex,
 }
 
@@ -1828,6 +1834,7 @@ impl Default for CardIndexes {
             subtypes:       HashMap::new(),
             keywords:       HashMap::new(),
             oracle_tags:    HashMap::new(),
+            art_tags:       HashMap::new(),
             is_tags:        HashMap::new(),
         }
     }
@@ -1923,6 +1930,12 @@ fn narrow_candidates(filter: &FilterExpr, indexes: &Archived<CardIndexes>) -> Op
             if matches!(field, CollField::OracleTags) && matches!(op, CmpOp::Ge) =>
         {
             indexes.oracle_tags.get(value.as_str()).map(|v| v.iter().map(|x| u32::from(*x)).collect())
+        }
+
+        FilterExpr::CollectionCmp { field, op, value }
+            if matches!(field, CollField::ArtTags) && matches!(op, CmpOp::Ge) =>
+        {
+            indexes.art_tags.get(value.as_str()).map(|v| v.iter().map(|x| u32::from(*x)).collect())
         }
 
         FilterExpr::CollectionCmp { field, op, value }
@@ -2443,6 +2456,7 @@ impl QueryEngine {
             subtypes:       build_list_index(&cards, |c| &c.card_subtypes),
             keywords:       build_tag_index(&cards, |c| &c.card_keywords),
             oracle_tags:    build_tag_index(&cards, |c| &c.card_oracle_tags),
+            art_tags:       build_tag_index(&cards, |c| &c.card_art_tags),
             is_tags:        build_tag_index(&cards, |c| &c.card_is_tags),
         };
 
@@ -2859,6 +2873,7 @@ mod tests {
                 card_keywords: HashSet::from([words[i % 10].to_string()]),
                 card_legalities: 0,
                 card_oracle_tags: HashSet::from([format!("tag-{}", i % 100)]),
+                card_art_tags: HashSet::new(),
                 card_is_tags: HashSet::new(),
                 card_frame_data: HashSet::new(),
                 mana_cost: ManaCost {
@@ -2882,6 +2897,7 @@ mod tests {
             subtypes:       build_list_index(&cards, |c| &c.card_subtypes),
             keywords:       build_tag_index(&cards, |c| &c.card_keywords),
             oracle_tags:    build_tag_index(&cards, |c| &c.card_oracle_tags),
+            art_tags:       build_tag_index(&cards, |c| &c.card_art_tags),
             is_tags:        build_tag_index(&cards, |c| &c.card_is_tags),
         };
         let data = CardData { cards, strings, indexes, format_shifts: HashMap::new() };

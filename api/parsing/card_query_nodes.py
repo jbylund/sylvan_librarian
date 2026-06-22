@@ -312,6 +312,19 @@ def get_oracle_tags_comparison_object(val: str) -> dict[str, bool]:
     return {normalized_tag: True}
 
 
+def get_art_tags_comparison_object(val: str) -> dict[str, bool]:
+    """Convert art tag string to comparison object for database queries.
+
+    Args:
+        val: Art tag string to normalize.
+
+    Returns:
+        Dictionary mapping normalized art tag to True.
+    """
+    normalized_tag = val.strip().lower()
+    return {normalized_tag: True}
+
+
 def get_is_tags_comparison_object(val: str) -> dict[str, bool]:
     """Convert is: tag string to comparison object for database queries.
 
@@ -543,6 +556,8 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
                 return list(get_frame_data_comparison_object(val).keys())
             if attr == "card_oracle_tags":
                 return list(get_oracle_tags_comparison_object(val).keys())
+            if attr == "card_art_tags":
+                return list(get_art_tags_comparison_object(val).keys())
             if attr == "card_is_tags":
                 return list(get_is_tags_comparison_object(val).keys())
             if attr == "card_legalities":
@@ -971,6 +986,9 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         elif attr == "card_oracle_tags":
             # Oracle tags are stored in lowercase, unlike keywords
             rhs = get_oracle_tags_comparison_object(self.rhs.value.strip())
+            placeholder = context.add(rhs)
+        elif attr == "card_art_tags":
+            rhs = get_art_tags_comparison_object(self.rhs.value.strip())
             placeholder = context.add(rhs)
         elif attr == "card_is_tags":
             # is: tags are stored in lowercase, similar to oracle tags

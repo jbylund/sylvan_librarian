@@ -200,6 +200,12 @@ DB_COLUMNS = [
         parser_class=ParserClass.TEXT,
     ),
     FieldInfo(
+        db_column_name="card_art_tags",
+        field_type=FieldType.JSONB_OBJECT,
+        search_aliases=["art_tags", "art"],
+        parser_class=ParserClass.TEXT,
+    ),
+    FieldInfo(
         db_column_name="card_is_tags",
         field_type=FieldType.JSONB_OBJECT,
         search_aliases=["is"],

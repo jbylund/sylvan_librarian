@@ -1133,6 +1133,16 @@ def test_parse_combined_produces_queries() -> None:
             "oracle_tags:dual-land",
             BinaryOperatorNode(CardAttributeNode("oracle_tags", ParserClass.TEXT), ":", StringValueNode("dual-land")),
         ),
+        # Art tag short alias
+        (
+            "art:wolf",
+            BinaryOperatorNode(CardAttributeNode("art", ParserClass.TEXT), ":", StringValueNode("wolf")),
+        ),
+        # Art tag full alias with hyphenated slug
+        (
+            "art_tags:cycle-abu-dual-land",
+            BinaryOperatorNode(CardAttributeNode("art_tags", ParserClass.TEXT), ":", StringValueNode("cycle-abu-dual-land")),
+        ),
         # Hyphenated term in 'is' attribute
         (
             "is:modal-dfc",
