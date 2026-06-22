@@ -164,6 +164,9 @@ def _build_critical_css() -> str:
 
 
 _INDEX_HTML_PATH = pathlib.Path(__file__).parent / "static" / "index.html"
+_CARD_HTML_PATH = pathlib.Path(__file__).parent / "static" / "card.html"
+
+_CARD_PAGE_RE = re.compile(r"^card/([^/]+)/([^/]+)$")
 
 
 def _static_hash(filename: str) -> str | None:
@@ -175,6 +178,7 @@ def _static_hash(filename: str) -> str | None:
 
 _STYLES_CSS_HASH = _static_hash("styles.css")
 _APP_MIN_JS_HASH = _static_hash("app.min.js")
+_CARD_JS_HASH = _static_hash("card.js")
 
 
 # TLDs in this set are stripped from the hostname; others are concatenated into the word.
@@ -379,6 +383,18 @@ def _build_base_html(critical_css: str, site_name: str) -> str:
     return html
 
 
+@cached(cache=LRUCache(maxsize=4))
+def _build_card_html(critical_css: str) -> str:
+    """Read card.html and inject critical CSS and versioned asset URLs."""
+    html = _CARD_HTML_PATH.read_text()
+    html = html.replace("<!-- CRITICAL_CSS -->", critical_css)
+    if _STYLES_CSS_HASH:
+        html = html.replace("/static/styles.css", f"/static/styles.css?v={_STYLES_CSS_HASH}")
+    if _CARD_JS_HASH:
+        html = html.replace("/static/card.js", f"/static/card.js?v={_CARD_JS_HASH}")
+    return html
+
+
 @cached(cache=LRUCache(maxsize=10_000))
 def get_where_clause(query: str) -> tuple[str, dict]:
     """Generate SQL WHERE clause and parameters from a search query.
@@ -444,6 +460,7 @@ class APIResource:
         # add static file serving actions
         self.action_map["static/app_js"] = self.app_js
         self.action_map["static/app_min_js"] = self.app_min_js
+        self.action_map["static/card_js"] = self.card_js
         self.action_map["static/favicon_ico"] = self.favicon_ico
         self.action_map["static/social-preview_webp"] = self.social_preview_webp
         self.action_map["static/styles_css"] = self.styles_css
@@ -532,14 +549,18 @@ class APIResource:
             id(resp),
         )
         path = path.replace(".", "_")
-        action = self.action_map.get(
-            path,
-            self._raise_not_found,
-        )
+        _card_match = _CARD_PAGE_RE.fullmatch(path)
+        if _card_match:
+            action = self.action_map["card_page"]
+        else:
+            action = self.action_map.get(path, self._raise_not_found)
         res = None
         before = time.monotonic()
         try:
             params = {k: v for k, v in req.params.items() if k not in DISALLOWED_QUERY_ARGS}
+            if _card_match:
+                params["set_code"] = _card_match.group(1)
+                params["collector_number"] = _card_match.group(2)
             res = action(falcon_response=resp, request_host=req.get_header("X-Proxy-Host") or req.host, **params)
             resp.media = res
         except TypeError as oops:
@@ -1540,6 +1561,42 @@ class APIResource:
             return
         self._serve_static_file(filename="robots.txt", falcon_response=falcon_response)
         falcon_response.content_type = "text/plain"
+
+    def card_js(self, *, falcon_response: falcon.Response | None = None, **_: object) -> None:
+        """Return the card.js file.
+
+        Args:
+        ----
+            falcon_response (falcon.Response): The Falcon response to write to.
+        """
+        if falcon_response is None:
+            return
+        self._serve_static_file(filename="card.js", falcon_response=falcon_response)
+        falcon_response.content_type = "application/javascript"
+        set_cache_header(falcon_response, duration=timedelta(hours=1))
+
+    def card_page(
+        self,
+        *,
+        falcon_response: falcon.Response | None = None,
+        set_code: str = "",
+        collector_number: str = "",
+        **_: object,
+    ) -> None:
+        """Serve the per-card page for /card/{set_code}/{collector_number}.
+
+        Args:
+        ----
+            falcon_response (falcon.Response): The Falcon response to write to.
+            set_code (str): The card set code extracted from the URL path.
+            collector_number (str): The collector number extracted from the URL path.
+        """
+        if falcon_response is None:
+            return
+        html = _build_card_html(self._critical_css)
+        falcon_response.text = html
+        falcon_response.content_type = "text/html"
+        set_cache_header(falcon_response, duration=timedelta(hours=1))
 
     def _serve_static_file(self, *, filename: str, falcon_response: falcon.Response) -> None:
         """Serve a static file to the Falcon response.

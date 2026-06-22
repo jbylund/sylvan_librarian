@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#2b8fdf" />
+    <link rel="icon" type="image/x-icon" href="/static/favicon.ico" />
+    <link rel="preconnect" href="https://d1hot9ps2xugbc.cloudfront.net" />
+    <link rel="preconnect" href="https://d1hot9ps2xugbc.cloudfront.net" crossorigin />
+    <link
+      rel="preload"
+      as="font"
+      type="font/woff2"
+      href="https://d1hot9ps2xugbc.cloudfront.net/cdn/fonts/beleren/beleren-subset.woff2"
+      crossorigin
+    />
+    <link
+      href="https://d1hot9ps2xugbc.cloudfront.net/cdn/fonts/mana/mana-subset.css"
+      rel="stylesheet"
+      type="text/css"
+      media="print"
+      onload="this.media = 'all'"
+    />
+    <noscript>
+      <link
+        href="https://d1hot9ps2xugbc.cloudfront.net/cdn/fonts/mana/mana-subset.css"
+        rel="stylesheet"
+        type="text/css"
+      />
+    </noscript>
+    <link
+      href="https://d1hot9ps2xugbc.cloudfront.net/cdn/fonts/beleren/beleren-subset.css"
+      rel="stylesheet"
+      type="text/css"
+      media="print"
+      onload="this.media = 'all'"
+    />
+    <noscript>
+      <link
+        href="https://d1hot9ps2xugbc.cloudfront.net/cdn/fonts/beleren/beleren-subset.css"
+        rel="stylesheet"
+        type="text/css"
+      />
+    </noscript>
+    <link
+      href="https://d1hot9ps2xugbc.cloudfront.net/cdn/fonts/mplantin/mplantin-subset.css"
+      rel="stylesheet"
+      type="text/css"
+      media="print"
+      onload="this.media = 'all'"
+    />
+    <noscript>
+      <link
+        href="https://d1hot9ps2xugbc.cloudfront.net/cdn/fonts/mplantin/mplantin-subset.css"
+        rel="stylesheet"
+        type="text/css"
+      />
+    </noscript>
+    <style>
+      <!-- CRITICAL_CSS -->
+    </style>
+    <link href="/static/styles.css" rel="stylesheet" type="text/css" media="print" onload="this.media = 'all'" />
+    <noscript><link href="/static/styles.css" rel="stylesheet" type="text/css" /></noscript>
+    <title>MTG Search</title>
+    <script src="/static/card.js" defer></script>
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">
+        <button class="theme-toggle" id="themeToggle" aria-label="Toggle theme">
+          <span id="themeIcon">☀️</span>
+        </button>
+        <h1 id="site-title"><a href="/" style="text-decoration:none;color:inherit">MTG Search</a></h1>
+      </div>
+
+      <div class="spacer spacer-30"></div>
+
+      <div id="card-page">
+        <div id="card-loading" class="card-page-loading">Loading...</div>
+        <div id="card-face" class="card-page-face" style="display:none"></div>
+        <div id="other-printings" class="card-page-printings" style="display:none">
+          <h2 class="printings-heading">Other Printings</h2>
+          <div id="printings-list" class="printings-strip"></div>
+        </div>
+      </div>
+
+      <footer class="footer">
+        <p class="footer-legal">
+          Magic: The Gathering™ is a trademark of Wizards of the Coast LLC, a subsidiary of Hasbro, Inc.
+          <br />
+          © Wizards of the Coast LLC. Not approved/endorsed by Wizards of the Coast.
+        </p>
+        <p class="footer-attribution">
+          Card data provided by <a href="https://scryfall.com" target="_blank" rel="noopener">Scryfall</a>. Not
+          affiliated with Scryfall.
+        </p>
+        <p class="footer-links">
+          <a href="https://github.com/jbylund/arcane_tutor" target="_blank" rel="noopener">GitHub</a>
+          ·
+          <a
+            href="https://github.com/jbylund/arcane_tutor/blob/main/docs/user/terms_of_service.md"
+            target="_blank"
+            rel="noopener"
+            >Terms of Service</a
+          >
+          ·
+          <a
+            href="https://github.com/jbylund/arcane_tutor/blob/main/docs/user/privacy_policy.md"
+            target="_blank"
+            rel="noopener"
+            >Privacy Policy</a
+          >
+          ·
+          <a href="https://company.wizards.com/en/legal/fancontentpolicy" target="_blank" rel="noopener"
+            >Wizards Fan Content Policy</a
+          >
+        </p>
+      </footer>
+    </div>
+  </body>
+</html>
