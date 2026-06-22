@@ -18,6 +18,7 @@ ENGINE_COLUMNS: list[str] = [
     "card_layout",
     "card_legalities",
     "card_name",
+    "card_art_tags",
     "card_oracle_tags",
     "card_rarity_int",
     "card_set_code",
