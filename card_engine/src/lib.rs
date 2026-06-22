@@ -2922,4 +2922,32 @@ mod tests {
         println!("checked rkyv::access:   {checked:?} per call");
         println!("access_unchecked:       {unchecked:?} per call");
     }
+
+    // Verify that narrow_candidates returns the correct card ids for an art tag
+    // that is present in the index, and returns None (no narrowing) for an absent tag.
+    #[test]
+    fn narrow_candidates_art_tags() {
+        let mut art_tags: TagIndex = HashMap::new();
+        art_tags.insert("wolf".to_string(), vec![0, 2]);
+        art_tags.insert("dragon".to_string(), vec![1]);
+
+        let indexes = CardIndexes { art_tags, ..Default::default() };
+        let bytes = rkyv::to_bytes::<Error>(&indexes).expect("serialize");
+        let archived = rkyv::access::<Archived<CardIndexes>, Error>(&bytes).expect("access");
+
+        let present = FilterExpr::CollectionCmp {
+            field: CollField::ArtTags,
+            op: CmpOp::Ge,
+            value: "wolf".to_string(),
+        };
+        assert_eq!(narrow_candidates(&present, archived), Some(vec![0, 2]));
+
+        // A tag not in the index cannot narrow; the eval step handles correctness.
+        let absent = FilterExpr::CollectionCmp {
+            field: CollField::ArtTags,
+            op: CmpOp::Ge,
+            value: "zombie".to_string(),
+        };
+        assert_eq!(narrow_candidates(&absent, archived), None);
+    }
 }
