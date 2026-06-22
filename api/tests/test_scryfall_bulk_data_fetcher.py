@@ -257,13 +257,13 @@ class TestScryfallApiSession:
             fetcher.list_bulk_data()
 
     def test_list_bulk_data_ignores_unrecognized_types(self, tmp_path: pathlib.Path) -> None:
-        """Bulk data types Scryfall adds later (e.g. art_tags) are skipped, not a ValueError crash."""
+        """Bulk data types Scryfall adds in the future are skipped, not a ValueError crash."""
         fetcher = _make_fetcher(tmp_path)
         response = MagicMock()
         response.json.return_value = {
             "data": [
                 {"type": "default_cards", "download_uri": _FAKE_URI},
-                {"type": "art_tags", "download_uri": "https://data.scryfall.io/art-tags/whatever.json"},
+                {"type": "future_type", "download_uri": "https://data.scryfall.io/future/whatever.json"},
             ],
         }
         fetcher.session.get.return_value = response

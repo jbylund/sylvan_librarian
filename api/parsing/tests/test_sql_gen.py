@@ -422,6 +422,35 @@ def test_oracle_tag_sql_translation(parse_query, input_query: str, expected_sql:
 
 
 @pytest.mark.parametrize(
+    argnames=["input_query", "expected_sql", "expected_parameters"],
+    argvalues=[
+        (
+            "art:wolf",
+            r"(card.card_art_tags @> %(p_dict_eyd3b2xmJzogVHJ1ZX0)s)",
+            {"p_dict_eyd3b2xmJzogVHJ1ZX0": {"wolf": True}},
+        ),
+        (
+            "art_tags:wolf",
+            r"(card.card_art_tags @> %(p_dict_eyd3b2xmJzogVHJ1ZX0)s)",
+            {"p_dict_eyd3b2xmJzogVHJ1ZX0": {"wolf": True}},
+        ),
+        (
+            "art:cycle-abu-dual-land",
+            r"(card.card_art_tags @> %(p_dict_eydjeWNsZS1hYnUtZHVhbC1sYW5kJzogVHJ1ZX0)s)",
+            {"p_dict_eydjeWNsZS1hYnUtZHVhbC1sYW5kJzogVHJ1ZX0": {"cycle-abu-dual-land": True}},
+        ),
+    ],
+)
+def test_art_tag_sql_translation(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
+    """Test that art tag search generates correct SQL with lowercase tags."""
+    parsed = parse_query(input_query)
+    context = QueryContext()
+    observed_sql = parsed.to_sql(context)
+    assert observed_sql == expected_sql, f"\nExpected: {expected_sql}\nObserved: {observed_sql}"
+    assert context == expected_parameters, f"\nExpected params: {expected_parameters}\nObserved params: {context}"
+
+
+@pytest.mark.parametrize(
     argnames=("input_query", "expected_sql", "expected_parameters"),
     argvalues=[
         # Basic is: tag search (should be lowercase)

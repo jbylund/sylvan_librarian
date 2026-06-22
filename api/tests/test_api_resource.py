@@ -10,7 +10,6 @@ from unittest.mock import MagicMock, patch
 
 import falcon
 import pytest
-import requests
 
 from api.api_resource import FALLBACK_SITE_NAME, APIResource, hostname_to_site_name
 from api.settings import settings
@@ -147,7 +146,6 @@ class TestAPIResourceInitializationNewStyle(TestBaseAPIResourceTest):
         # Check that caches are initialized
         assert hasattr(api_resource, "_query_cache")
         assert hasattr(api_resource, "_session")
-        assert hasattr(api_resource, "_tagger_client")
 
     def test_initialization_with_custom_import_guard(self) -> None:
         """Test APIResource initialization with custom import guard."""
@@ -448,14 +446,6 @@ class TestAPIResourceErrorHandling(unittest.TestCase):
         )
         self.api_resource._conn_pool = self.mock_conn_pool
 
-    def test_update_tagged_cards_validates_tag_parameter(self) -> None:
-        """Test update_tagged_cards validates tag parameter."""
-        with pytest.raises(ValueError, match="Tag parameter is required"):
-            self.api_resource.update_tagged_cards(tag="")
-
-        with pytest.raises(ValueError, match="Tag parameter is required"):
-            self.api_resource.update_tagged_cards(tag=None)
-
     def test_import_card_by_name_validates_card_name_parameter(self) -> None:
         """Test import_card_by_name validates card_name parameter."""
         with pytest.raises(ValueError, match="card_name parameter is required"):
@@ -471,24 +461,6 @@ class TestAPIResourceErrorHandling(unittest.TestCase):
 
         with pytest.raises(ValueError, match="search_query parameter is required"):
             self.api_resource.import_cards_by_search(search_query=None)
-
-    @patch("api.api_resource.requests.Session.get")
-    def test_discover_tags_from_scryfall_handles_request_errors(self, mock_get: Any) -> None:
-        """Test discover_tags_from_scryfall handles request errors."""
-        mock_get.side_effect = requests.RequestException("Network error")
-
-        with pytest.raises(ValueError, match="Failed to fetch tag list from Scryfall"):
-            self.api_resource.discover_tags_from_scryfall()
-
-    def test_discover_tags_from_graphql_handles_parsing_errors(self) -> None:
-        """Test discover_tags_from_graphql handles parsing errors."""
-        # Mock the _tagger_client attribute
-        mock_tagger = MagicMock()
-        mock_tagger.search_tags.side_effect = KeyError("Missing key")
-        self.api_resource._tagger_client = mock_tagger
-
-        with pytest.raises(ValueError, match="Failed to parse GraphQL tag search response"):
-            self.api_resource.discover_tags_from_graphql()
 
 
 class TestAPIResourceCaching(unittest.TestCase):
@@ -698,218 +670,6 @@ class TestAPIResourceCaching(unittest.TestCase):
                 time.sleep(0.01)
 
         assert self.api_resource._preferred_cards_map.get(new_gen) == fresh_cards
-
-
-class TestAPIResourceTagHierarchy(unittest.TestCase):
-    """Test cases for tag hierarchy functionality."""
-
-    def setUp(self) -> None:
-        """Set up test fixtures."""
-        self.api_resource = APIResource(
-            last_import_time=multiprocessing.Value("d", time.time(), lock=True),
-        )
-
-    def test_populate_tag_hierarchy_with_empty_tags(self) -> None:
-        """Test _populate_tag_hierarchy with empty tag list."""
-        # Mock the database operations
-        with patch.object(self.api_resource, "_conn_pool") as mock_pool:
-            mock_conn = MagicMock()
-            mock_cursor = MagicMock()
-            mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
-            mock_pool.connection.return_value.__enter__.return_value = mock_conn
-
-            result = self.api_resource._populate_tag_hierarchy(tags=[])
-
-            assert result["success"] is True
-            assert result["tags_processed"] == 0
-            assert "duration" in result
-            assert "message" in result
-
-    def test_populate_tag_hierarchy_with_single_tag(self) -> None:
-        """Test _populate_tag_hierarchy with single tag."""
-        # Mock the database operations
-        with patch.object(self.api_resource, "_conn_pool") as mock_pool:
-            mock_conn = MagicMock()
-            mock_cursor = MagicMock()
-            mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
-            mock_pool.connection.return_value.__enter__.return_value = mock_conn
-
-            # Mock _get_tag_relationships to return sample relationships
-            with patch.object(self.api_resource, "_get_tag_relationships") as mock_get_relationships:
-                mock_get_relationships.return_value = [
-                    {
-                        "parent": {"slug": "parent-tag", "name": "Parent Tag", "namespace": "test"},
-                        "child": {"slug": "test-tag", "name": "Test Tag", "namespace": "test"},
-                    },
-                ]
-
-                result = self.api_resource._populate_tag_hierarchy(tags=["test-tag"])
-
-                assert result["success"] is True
-                assert result["tags_processed"] == 1
-                assert "duration" in result
-                assert "message" in result
-
-                # Verify database operations were called
-                assert mock_cursor.executemany.call_count >= 2  # At least tags and relationships inserts
-
-    def test_populate_tag_hierarchy_with_multiple_tags(self) -> None:
-        """Test _populate_tag_hierarchy with multiple tags."""
-        # Mock the database operations
-        with patch.object(self.api_resource, "_conn_pool") as mock_pool:
-            mock_conn = MagicMock()
-            mock_cursor = MagicMock()
-            mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
-            mock_pool.connection.return_value.__enter__.return_value = mock_conn
-
-            # Mock _get_tag_relationships to return different relationships for each tag
-            with patch.object(self.api_resource, "_get_tag_relationships") as mock_get_relationships:
-
-                def mock_relationships(tag: str) -> list:
-                    if tag == "tag1":
-                        return [
-                            {
-                                "parent": {"slug": "parent1", "name": "Parent 1", "namespace": "test"},
-                                "child": {"slug": "tag1", "name": "Tag 1", "namespace": "test"},
-                            },
-                        ]
-                    if tag == "tag2":
-                        return [
-                            {
-                                "parent": {"slug": "parent2", "name": "Parent 2", "namespace": "test"},
-                                "child": {"slug": "tag2", "name": "Tag 2", "namespace": "test"},
-                            },
-                        ]
-                    return []
-
-                mock_get_relationships.side_effect = mock_relationships
-
-                result = self.api_resource._populate_tag_hierarchy(tags=["tag1", "tag2"])
-
-                assert result["success"] is True
-                assert result["tags_processed"] == 2
-                assert "duration" in result
-                assert "message" in result
-
-                # Verify _get_tag_relationships was called for each tag
-                assert mock_get_relationships.call_count == 2
-
-    def test_populate_tag_hierarchy_handles_no_relationships(self) -> None:
-        """Test _populate_tag_hierarchy when tags have no relationships."""
-        # Mock the database operations
-        with patch.object(self.api_resource, "_conn_pool") as mock_pool:
-            mock_conn = MagicMock()
-            mock_cursor = MagicMock()
-            mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
-            mock_pool.connection.return_value.__enter__.return_value = mock_conn
-
-            # Mock _get_tag_relationships to return empty relationships
-            with patch.object(self.api_resource, "_get_tag_relationships") as mock_get_relationships:
-                mock_get_relationships.return_value = []
-
-                result = self.api_resource._populate_tag_hierarchy(tags=["orphan-tag"])
-
-                assert result["success"] is True
-                assert result["tags_processed"] == 1
-                assert "duration" in result
-                assert "message" in result
-
-    def test_populate_tag_hierarchy_handles_database_errors(self) -> None:
-        """Test _populate_tag_hierarchy handles database errors gracefully."""
-        # Mock the database operations to raise an exception
-        with patch.object(self.api_resource, "_conn_pool") as mock_pool:
-            mock_conn = MagicMock()
-            mock_cursor = MagicMock()
-            mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
-            mock_pool.connection.return_value.__enter__.return_value = mock_conn
-
-            # Make cursor.executemany raise an exception
-            mock_cursor.executemany.side_effect = Exception("Database error")
-
-            # Mock _get_tag_relationships to return sample relationships
-            with patch.object(self.api_resource, "_get_tag_relationships") as mock_get_relationships:
-                mock_get_relationships.return_value = [
-                    {
-                        "parent": {"slug": "parent-tag", "name": "Parent Tag", "namespace": "test"},
-                        "child": {"slug": "test-tag", "name": "Test Tag", "namespace": "test"},
-                    },
-                ]
-
-                # The method doesn't have explicit error handling, so it will propagate the exception
-                # This test verifies that the method attempts database operations and fails as expected
-                with pytest.raises(Exception, match="Database error"):
-                    self.api_resource._populate_tag_hierarchy(tags=["test-tag"])
-
-    def test_populate_tag_hierarchy_randomizes_tag_order(self) -> None:
-        """Test that _populate_tag_hierarchy randomizes the order of tags."""
-        # Mock the database operations
-        with patch.object(self.api_resource, "_conn_pool") as mock_pool:
-            mock_conn = MagicMock()
-            mock_cursor = MagicMock()
-            mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
-            mock_pool.connection.return_value.__enter__.return_value = mock_conn
-
-            # Mock _get_tag_relationships
-            with patch.object(self.api_resource, "_get_tag_relationships") as mock_get_relationships:
-                mock_get_relationships.return_value = []
-
-                # Mock random.shuffle to verify it's called
-                with patch("random.shuffle") as mock_shuffle:
-                    result = self.api_resource._populate_tag_hierarchy(tags=["tag1", "tag2", "tag3"])
-
-                    # Verify shuffle was called with the tags list
-                    mock_shuffle.assert_called_once()
-                    assert result["success"] is True
-                    assert result["tags_processed"] == 3
-
-    def test_populate_tag_hierarchy_logs_progress(self) -> None:
-        """Test that _populate_tag_hierarchy logs progress information."""
-        # Mock the database operations
-        with patch.object(self.api_resource, "_conn_pool") as mock_pool:
-            mock_conn = MagicMock()
-            mock_cursor = MagicMock()
-            mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
-            mock_pool.connection.return_value.__enter__.return_value = mock_conn
-
-            # Mock _get_tag_relationships
-            with patch.object(self.api_resource, "_get_tag_relationships") as mock_get_relationships:
-                mock_get_relationships.return_value = []
-
-                # Mock logger to capture log calls
-                with patch("api.api_resource.logger") as mock_logger:
-                    result = self.api_resource._populate_tag_hierarchy(tags=["tag1", "tag2"])
-
-                    # Verify logging calls were made
-                    assert mock_logger.info.call_count >= 2  # At least start and progress logs
-                    assert result["success"] is True
-
-    def test_populate_tag_hierarchy_returns_correct_structure(self) -> None:
-        """Test that _populate_tag_hierarchy returns the expected result structure."""
-        # Mock the database operations
-        with patch.object(self.api_resource, "_conn_pool") as mock_pool:
-            mock_conn = MagicMock()
-            mock_cursor = MagicMock()
-            mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
-            mock_pool.connection.return_value.__enter__.return_value = mock_conn
-
-            # Mock _get_tag_relationships
-            with patch.object(self.api_resource, "_get_tag_relationships") as mock_get_relationships:
-                mock_get_relationships.return_value = []
-
-                result = self.api_resource._populate_tag_hierarchy(tags=["test-tag"])
-
-                # Verify result structure
-                assert isinstance(result, dict)
-                assert "success" in result
-                assert "duration" in result
-                assert "message" in result
-                assert "tags_processed" in result
-
-                assert result["success"] is True
-                assert isinstance(result["duration"], int | float)
-                assert isinstance(result["message"], str)
-                assert isinstance(result["tags_processed"], int)
-                assert result["tags_processed"] == 1
 
 
 _HOSTNAME_TESTCASES = {

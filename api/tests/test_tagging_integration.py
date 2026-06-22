@@ -1,151 +1,177 @@
-"""Integration tests for tagging functionality."""
+"""Integration tests for tag import functions."""
 
-import multiprocessing
-import time
-from collections.abc import Generator
 from unittest.mock import MagicMock, patch
 
-import pytest
+from api.scryfall_bulk_data_fetcher import BulkDataKey
+from api.tag_import import _build_uuid_to_slug, import_art_tags, import_oracle_tags
 
-from api.api_resource import APIResource
+ORACLE_TAGS_FIXTURE = [
+    {
+        "id": "uuid-flying",
+        "slug": "flying",
+        "parent_ids": [],
+        "child_ids": ["uuid-evasion"],
+        "taggings": [
+            {"oracle_id": "card-a", "weight": "strong"},
+            {"oracle_id": "card-b", "weight": "median"},
+        ],
+    },
+    {
+        "id": "uuid-evasion",
+        "slug": "evasion",
+        "parent_ids": ["uuid-flying"],
+        "child_ids": [],
+        "taggings": [
+            {"oracle_id": "card-a", "weight": "strong"},
+        ],
+    },
+]
+
+ART_TAGS_FIXTURE = [
+    {
+        "id": "uuid-dragon",
+        "slug": "dragon",
+        "parent_ids": [],
+        "child_ids": [],
+        "taggings": [
+            {"illustration_id": "illus-x", "weight": "very_strong"},
+        ],
+    },
+]
 
 
-@pytest.fixture(scope="class")
-def mock_db_pool() -> Generator[MagicMock]:
-    """Mock database connection pool for the entire test class."""
-    with patch("api.utils.db_utils.make_pool") as mock_make_pool:
-        mock_pool = MagicMock()
-        mock_make_pool.return_value = mock_pool
-        yield mock_pool
+def _make_mock_conn_pool(tagged_in_db: list[dict] | None = None) -> tuple[MagicMock, MagicMock]:
+    """Return a mock conn_pool whose cursor.fetchall() yields the given rows."""
+    cursor = MagicMock()
+    cursor.__enter__ = lambda _: cursor
+    cursor.__exit__ = MagicMock(return_value=False)
+    cursor.fetchall.return_value = tagged_in_db or []
+    cursor.rowcount = 0
+
+    conn = MagicMock()
+    conn.__enter__ = lambda _: conn
+    conn.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value = cursor
+
+    pool = MagicMock()
+    pool.connection.return_value.__enter__ = lambda _: conn
+    pool.connection.return_value.__exit__ = MagicMock(return_value=False)
+    return pool, cursor
 
 
-@pytest.fixture(autouse=True)
-def cleanup_api_resources() -> Generator[None]:
-    """Automatically clean up any APIResource instances created during tests."""
-    created_resources = []
-
-    # Monkey patch APIResource.__init__ to track instances
-    original_init = APIResource.__init__
-
-    def tracking_init(self: APIResource, *args: object, **kwargs: object) -> None:
-        original_init(self, *args, **kwargs)
-        created_resources.append(self)
-
-    APIResource.__init__ = tracking_init
-
-    yield
-
-    # Clean up all created resources
-    for resource in created_resources:
-        if hasattr(resource, "_conn_pool"):
-            resource._conn_pool.close()
-
-    # Restore original __init__
-    APIResource.__init__ = original_init
-
-
-@pytest.mark.usefixtures("mock_db_pool")
-class TestTaggingIntegration:
-    """Integration test cases for tag discovery and import."""
-
-    @patch("requests.Session")
-    def test_discover_tags_from_scryfall_parses_response(self, mock_session_class: MagicMock) -> None:
-        """Test that tag discovery correctly parses Scryfall documentation."""
-        # Mock the session and response
-        mock_session = MagicMock()
-        mock_session_class.return_value = mock_session
-
-        mock_response = MagicMock()
-        mock_response.raise_for_status.return_value = None
-        mock_response.text = """
-        <html>
-            <body>
-                <a href="/search?q=oracletag%3Aflying">Flying cards</a>
-                <a href="/search?q=oracletag%3Atrample">Trample cards</a>
-                <a href="/search?q=oracletag%3Ahaste">Haste cards</a>
-                <a href="/search?q=oracletag%3Avigilance">Vigilance cards</a>
-            </body>
-        </html>
-        """
-        mock_session.get.return_value = mock_response
-
-        api = APIResource(
-            last_import_time=multiprocessing.Value("d", time.time(), lock=True),
-        )
-        tags = api.discover_tags_from_scryfall()
-
-        # Should extract tag names from the URLs
-        expected_tags = ["flying", "haste", "trample", "vigilance"]
-        assert sorted(tags) == sorted(expected_tags)
-
-        # Should have made request to correct URL
-        mock_session.get.assert_called_once_with(
-            "https://scryfall.com/docs/tagger-tags",
-            timeout=30,
-        )
-
-    @patch("api.api_resource.APIResource.discover_tags_from_scryfall")
-    @patch("api.api_resource.APIResource.update_tagged_cards")
-    @patch("api.api_resource.APIResource._get_all_tags")
-    def test_discover_and_import_all_tags_with_mocked_data(
-        self,
-        mock_discover_tags: MagicMock,
-        mock_update_tagged_cards: MagicMock,
-        mock_get_all_tags: MagicMock,
-    ) -> None:
-        """Test bulk import with mocked data to avoid external requests."""
-        tags = [
-            "flying",
-            "trample",
-        ]
-        mock_discover_tags.return_value = tags
-        mock_get_all_tags.return_value = set(tags)
-
-        api = APIResource(
-            last_import_time=multiprocessing.Value("d", time.time(), lock=True),
-        )
-        result = api.discover_and_import_all_tags(
-            import_cards=True,
-            import_hierarchy=False,
-        )
-
-        # Should have discovered tags
-        assert result["success"] is True
-        assert "card_taggings" in result
-        assert "hierarchy" not in result
-
-        # Should have called _get_all_tags to get existing tags
-        mock_get_all_tags.assert_called_once()
-
-        # Should have called update_tagged_cards for each tag
-        assert mock_update_tagged_cards.call_count == 2
-        mock_update_tagged_cards.assert_any_call(tag="flying")
-        mock_update_tagged_cards.assert_any_call(tag="trample")
-
-    def test_action_map_includes_new_endpoints(self) -> None:
-        """Test that new endpoints are available in the action map."""
-        api = APIResource(
-            last_import_time=multiprocessing.Value("d", time.time(), lock=True),
-        )
-
-        # Check that new endpoints are available
-        assert "discover_and_import_all_tags" in api.action_map
-        assert "update_tagged_cards" in api.action_map
-
-        # Endpoints should be callable
-        assert callable(api.action_map["discover_and_import_all_tags"])
-        assert callable(api.action_map["update_tagged_cards"])
-
-    @pytest.mark.skip(reason="Skipping live test for now")
-    def test_get_tag_relationships_live(self) -> None:
-        """Test that get_tag_relationships works with a live tag."""
-        api = APIResource()
-        res = api._get_tag_relationships(tag="cast-trigger")
-        pairs = {(r["parent"]["slug"], r["child"]["slug"]) for r in res}
-        assert pairs == {
-            ("cast-trigger", "cast-trigger-other"),
-            ("cast-trigger", "cast-trigger-self"),
-            ("cast-trigger", "cast-trigger-you"),
-            ("cast-trigger", "mana-gorger"),
-            ("triggered-ability", "cast-trigger"),
+class TestBuildUuidToSlug:
+    def test_basic(self) -> None:
+        assert _build_uuid_to_slug(ORACLE_TAGS_FIXTURE) == {
+            "uuid-flying": "flying",
+            "uuid-evasion": "evasion",
         }
+
+
+class TestImportOracleTags:
+    def test_calls_stream_for_oracle_tags(self) -> None:
+        pool, _ = _make_mock_conn_pool()
+        fetcher = MagicMock()
+        fetcher.stream_data_for_key.return_value = iter(ORACLE_TAGS_FIXTURE)
+
+        import_oracle_tags(pool, fetcher)
+
+        fetcher.stream_data_for_key.assert_called_once_with(BulkDataKey.ORACLE_TAGS)
+
+    def test_returns_summary(self) -> None:
+        pool, _ = _make_mock_conn_pool()
+        fetcher = MagicMock()
+        fetcher.stream_data_for_key.return_value = iter(ORACLE_TAGS_FIXTURE)
+
+        result = import_oracle_tags(pool, fetcher)
+
+        assert result["tags_imported"] == 2
+        assert result["cards_with_tags"] == 2  # card-a and card-b
+        assert "duration_seconds" in result
+
+
+class TestAncestorPropagation:
+    """Ancestor slugs must be added to each card's tag set at import time.
+
+    The SQL filter (card_oracle_tags @> {'dual-land': True}) only matches cards that carry the
+    slug directly.  Without ancestor propagation a card tagged only with 'cycle-abu-dual-land'
+    (a child of 'dual-land') would be invisible to an otag:dual-land query.
+    """
+
+    def test_child_tagged_card_gets_parent_slug(self) -> None:
+        # card-c is only tagged with evasion (child of flying).
+        # After import it must also carry 'flying' so otag:flying finds it.
+        fixture = [
+            {"id": "uuid-flying", "slug": "flying", "parent_ids": [], "child_ids": ["uuid-evasion"], "taggings": []},
+            {
+                "id": "uuid-evasion",
+                "slug": "evasion",
+                "parent_ids": ["uuid-flying"],
+                "child_ids": [],
+                "taggings": [{"oracle_id": "card-c", "weight": "strong"}],
+            },
+        ]
+        pool, _ = _make_mock_conn_pool()
+        fetcher = MagicMock()
+        fetcher.stream_data_for_key.return_value = iter(fixture)
+
+        captured: dict = {}
+
+        def capture(conn, id_column, tag_column, id_to_tags) -> tuple[int, int]:
+            captured["id_to_tags"] = id_to_tags
+            return (0, 0)
+
+        with patch("api.tag_import._sync_card_tags", side_effect=capture), patch("api.tag_import._sync_hierarchy"):
+            import_oracle_tags(pool, fetcher)
+
+        card_tags = captured["id_to_tags"]["card-c"]
+        assert card_tags.get("evasion") is True
+        assert card_tags.get("flying") is True  # ancestor propagated
+
+    def test_direct_tagged_card_unaffected(self) -> None:
+        # card-b is only tagged with the root tag flying (no parent).
+        # It should have exactly flying and nothing else.
+        fixture = [
+            {
+                "id": "uuid-flying",
+                "slug": "flying",
+                "parent_ids": [],
+                "child_ids": [],
+                "taggings": [{"oracle_id": "card-b", "weight": "median"}],
+            },
+        ]
+        pool, _ = _make_mock_conn_pool()
+        fetcher = MagicMock()
+        fetcher.stream_data_for_key.return_value = iter(fixture)
+
+        captured: dict = {}
+
+        def capture(conn, id_column, tag_column, id_to_tags) -> tuple[int, int]:
+            captured["id_to_tags"] = id_to_tags
+            return (0, 0)
+
+        with patch("api.tag_import._sync_card_tags", side_effect=capture), patch("api.tag_import._sync_hierarchy"):
+            import_oracle_tags(pool, fetcher)
+
+        assert captured["id_to_tags"]["card-b"] == {"flying": True}
+
+
+class TestImportArtTags:
+    def test_calls_stream_for_art_tags(self) -> None:
+        pool, _ = _make_mock_conn_pool()
+        fetcher = MagicMock()
+        fetcher.stream_data_for_key.return_value = iter(ART_TAGS_FIXTURE)
+
+        import_art_tags(pool, fetcher)
+
+        fetcher.stream_data_for_key.assert_called_once_with(BulkDataKey.ART_TAGS)
+
+    def test_returns_summary(self) -> None:
+        pool, _ = _make_mock_conn_pool()
+        fetcher = MagicMock()
+        fetcher.stream_data_for_key.return_value = iter(ART_TAGS_FIXTURE)
+
+        result = import_art_tags(pool, fetcher)
+
+        assert result["tags_imported"] == 1
+        assert result["cards_with_tags"] == 1
+        assert "duration_seconds" in result

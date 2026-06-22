@@ -1,79 +1,76 @@
-"""Tests for card tagging functionality."""
-
-import inspect
+"""Tests for tag import module."""
 
 from api.api_resource import APIResource
+from api.tag_import import _build_all_ancestors, _build_uuid_to_slug
 
 
-class TestTagging:
-    """Test cases for card tagging functionality."""
+class TestBuildAllAncestors:
+    def test_no_parents_returns_empty(self) -> None:
+        tags = [{"id": "u1", "slug": "flying", "parent_ids": []}]
+        uuid_to_slug = {"u1": "flying"}
+        result = _build_all_ancestors(tags, uuid_to_slug)
+        assert result["flying"] == frozenset()
 
-    def test_update_tagged_cards_validates_input(self) -> None:
-        """Test that update_tagged_cards validates input parameters."""
-        # Test that the method exists and is callable
-        assert hasattr(APIResource, "update_tagged_cards")
-        assert callable(APIResource.update_tagged_cards)
-
-        # Test that the method signature includes the required tag parameter
-        sig = inspect.signature(APIResource.update_tagged_cards)
-        assert "tag" in sig.parameters
-
-    def test_discover_tags_from_scryfall_function_exists(self) -> None:
-        """Test that discover_tags_from_scryfall method exists and is callable."""
-        assert hasattr(APIResource, "discover_tags_from_scryfall")
-        assert callable(APIResource.discover_tags_from_scryfall)
-
-        # Method should have no required parameters (uses self and **kwargs only)
-        sig = inspect.signature(APIResource.discover_tags_from_scryfall)
-        required_params = [
-            p
-            for p in sig.parameters.values()
-            if p.default == inspect.Parameter.empty and p.name != "self" and p.kind != inspect.Parameter.VAR_KEYWORD
+    def test_single_level_parent(self) -> None:
+        tags = [
+            {"id": "u1", "slug": "evasion", "parent_ids": []},
+            {"id": "u2", "slug": "flying", "parent_ids": ["u1"]},
         ]
-        assert len(required_params) == 0
+        uuid_to_slug = {"u1": "evasion", "u2": "flying"}
+        result = _build_all_ancestors(tags, uuid_to_slug)
+        assert result["flying"] == frozenset({"evasion"})
+        assert result["evasion"] == frozenset()
 
-    def test_discover_tags_from_graphql_function_exists(self) -> None:
-        """Test that discover_tags_from_graphql method exists and is callable."""
-        assert hasattr(APIResource, "discover_tags_from_graphql")
-        assert callable(APIResource.discover_tags_from_graphql)
-
-        # Method should have no required parameters (uses self and **kwargs only)
-        sig = inspect.signature(APIResource.discover_tags_from_graphql)
-        required_params = [
-            p
-            for p in sig.parameters.values()
-            if p.default == inspect.Parameter.empty and p.name != "self" and p.kind != inspect.Parameter.VAR_KEYWORD
+    def test_multi_level_ancestors(self) -> None:
+        # dual-land → land-type → permanent
+        tags = [
+            {"id": "u1", "slug": "permanent", "parent_ids": []},
+            {"id": "u2", "slug": "land-type", "parent_ids": ["u1"]},
+            {"id": "u3", "slug": "dual-land", "parent_ids": ["u2"]},
         ]
-        assert len(required_params) == 0
+        uuid_to_slug = {"u1": "permanent", "u2": "land-type", "u3": "dual-land"}
+        result = _build_all_ancestors(tags, uuid_to_slug)
+        assert result["dual-land"] == frozenset({"land-type", "permanent"})
+        assert result["land-type"] == frozenset({"permanent"})
+        assert result["permanent"] == frozenset()
 
-    def test_get_tag_relationships_function_exists(self) -> None:
-        """Test that _get_tag_relationships method exists and is callable."""
-        assert hasattr(APIResource, "_get_tag_relationships")
-        assert callable(APIResource._get_tag_relationships)
+    def test_cycle_safe(self) -> None:
+        # Circular reference should not infinite loop
+        tags = [
+            {"id": "u1", "slug": "a", "parent_ids": ["u2"]},
+            {"id": "u2", "slug": "b", "parent_ids": ["u1"]},
+        ]
+        uuid_to_slug = {"u1": "a", "u2": "b"}
+        result = _build_all_ancestors(tags, uuid_to_slug)
+        # Both are ancestors of each other; no crash
+        assert "b" in result["a"] or "a" in result["b"]
 
-        # Test that the method signature includes the required tag parameter
-        sig = inspect.signature(APIResource._get_tag_relationships)
-        assert "tag" in sig.parameters
 
-    def test_populate_tag_hierarchy_function_exists(self) -> None:
-        """Test that _populate_tag_hierarchy method exists and is callable."""
-        assert hasattr(APIResource, "_populate_tag_hierarchy")
-        assert callable(APIResource._populate_tag_hierarchy)
+class TestBuildUuidToSlug:
+    def test_maps_id_to_slug(self) -> None:
+        tags = [
+            {"id": "aaa", "slug": "flying"},
+            {"id": "bbb", "slug": "haste"},
+        ]
+        assert _build_uuid_to_slug(tags) == {"aaa": "flying", "bbb": "haste"}
 
-        # Test that the method signature includes the required tags parameter
-        sig = inspect.signature(APIResource._populate_tag_hierarchy)
-        assert "tags" in sig.parameters
+    def test_empty_list(self) -> None:
+        assert _build_uuid_to_slug([]) == {}
 
-    def test_discover_and_import_all_tags_function_exists(self) -> None:
-        """Test that discover_and_import_all_tags method exists and is callable."""
-        assert hasattr(APIResource, "discover_and_import_all_tags")
-        assert callable(APIResource.discover_and_import_all_tags)
 
-        # Method should have optional parameters with defaults
-        sig = inspect.signature(APIResource.discover_and_import_all_tags)
-        assert "import_cards" in sig.parameters
-        assert "import_hierarchy" in sig.parameters
+class TestAPIResourceEndpoints:
+    def test_import_oracle_tags_registered(self) -> None:
+        assert hasattr(APIResource, "import_oracle_tags")
+        assert callable(APIResource.import_oracle_tags)
 
-        # These should have default values
-        assert sig.parameters["import_cards"].default is not inspect.Parameter.empty
-        assert sig.parameters["import_hierarchy"].default is not inspect.Parameter.empty
+    def test_import_art_tags_registered(self) -> None:
+        assert hasattr(APIResource, "import_art_tags")
+        assert callable(APIResource.import_art_tags)
+
+    def test_old_graphql_methods_removed(self) -> None:
+        assert not hasattr(APIResource, "discover_tags_from_scryfall")
+        assert not hasattr(APIResource, "discover_tags_from_graphql")
+        assert not hasattr(APIResource, "_get_tag_relationships")
+        assert not hasattr(APIResource, "_populate_tag_hierarchy")
+        assert not hasattr(APIResource, "discover_and_import_all_tags")
+        assert not hasattr(APIResource, "update_tagged_cards")
