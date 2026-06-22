@@ -117,7 +117,7 @@ CREATE TRIGGER prevent_circular_references
 -- Art tags column on cards, mirroring card_oracle_tags.
 ALTER TABLE magic.cards ADD COLUMN card_art_tags jsonb DEFAULT '{}'::jsonb NOT NULL;
 ALTER TABLE magic.cards ADD CONSTRAINT card_art_tags_must_be_object CHECK (jsonb_typeof(card_art_tags) = 'object');
-CREATE INDEX idx_cards_art_tags_gin ON magic.cards USING gin (card_art_tags);
+CREATE INDEX IF NOT EXISTS idx_cards_art_tags_gin ON magic.cards USING gin (card_art_tags);
 
 -- Indexes needed for the batch UPDATE WHERE oracle_id/illustration_id = ANY(...).
 CREATE INDEX idx_cards_oracle_id ON magic.cards USING btree (oracle_id);
