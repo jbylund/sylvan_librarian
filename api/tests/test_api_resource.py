@@ -5,6 +5,7 @@ import os
 import time
 import unittest
 import uuid
+from collections.abc import Generator
 from contextlib import contextmanager
 from typing import Any, Never
 from unittest.mock import MagicMock, patch
@@ -485,7 +486,7 @@ class TestAPIResourceCaching(unittest.TestCase):
         settings.enable_cache = self.original_cache_setting
 
     @contextmanager
-    def _mock_successful_upsert(self):
+    def _mock_successful_upsert(self) -> Generator[None]:
         """Mock conn pool and bulk_upsert so _upsert_cards completes successfully."""
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
