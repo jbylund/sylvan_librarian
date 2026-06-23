@@ -5,6 +5,7 @@ import os
 import time
 import unittest
 import uuid
+from contextlib import contextmanager
 from typing import Any, Never
 from unittest.mock import MagicMock, patch
 
@@ -483,6 +484,22 @@ class TestAPIResourceCaching(unittest.TestCase):
         """Restore original cache setting."""
         settings.enable_cache = self.original_cache_setting
 
+    @contextmanager
+    def _mock_successful_upsert(self):
+        """Mock conn pool and bulk_upsert so _upsert_cards completes successfully."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        with (
+            patch.object(self.api_resource, "_conn_pool") as mock_pool,
+            patch(
+                "api.api_resource._bulk_upsert",
+                return_value={"inserted": 1, "updated": 0, "unchanged": 0},
+            ),
+        ):
+            mock_pool.connection.return_value.__enter__.return_value = mock_conn
+            yield
+
     def test_query_cache_clears_after_successful_load(self) -> None:
         """Test that query cache clears after successful card loading."""
         # Add some data to the cache
@@ -490,13 +507,7 @@ class TestAPIResourceCaching(unittest.TestCase):
         assert "test_key" in self.api_resource._query_cache
 
         # Mock the database operations to simulate successful load
-        with patch.object(self.api_resource, "_conn_pool") as mock_pool:
-            mock_conn = MagicMock()
-            mock_cursor = MagicMock()
-            mock_cursor.rowcount = 1
-            mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
-            mock_pool.connection.return_value.__enter__.return_value = mock_conn
-
+        with self._mock_successful_upsert():
             # Provide valid card data that will pass preprocessing
             valid_card = create_test_card(
                 card_id="00000000-0000-0000-0000-000000000007",
@@ -504,21 +515,15 @@ class TestAPIResourceCaching(unittest.TestCase):
                 prices={},
             )
 
-            # Call _load_cards_with_staging directly to test cache clearing
-            self.api_resource._load_cards_with_staging([valid_card])
+            # Call _upsert_cards directly to test cache clearing
+            self.api_resource._upsert_cards([valid_card])
 
             # Cache should be cleared after successful load
             assert "test_key" not in self.api_resource._query_cache
 
     def test_search_cache_clears_after_successful_load(self) -> None:
         """Test that search cache clears after successful card loading."""
-        with patch.object(self.api_resource, "_conn_pool") as mock_pool:
-            mock_conn = MagicMock()
-            mock_cursor = MagicMock()
-            mock_cursor.rowcount = 1
-            mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
-            mock_pool.connection.return_value.__enter__.return_value = mock_conn
-
+        with self._mock_successful_upsert():
             valid_card = create_test_card(
                 card_id="00000000-0000-0000-0000-000000000007",
                 keywords=[],
@@ -526,7 +531,7 @@ class TestAPIResourceCaching(unittest.TestCase):
             )
 
             gen_before = self.api_resource._cache_generation.value
-            self.api_resource._load_cards_with_staging([valid_card])
+            self.api_resource._upsert_cards([valid_card])
             # Generation increment is the cross-worker invalidation signal
             assert self.api_resource._cache_generation.value > gen_before
 
@@ -549,13 +554,7 @@ class TestAPIResourceCaching(unittest.TestCase):
 
     def test_preferred_cards_cache_clears_after_load(self) -> None:
         """Test that the preferred-cards cache is invalidated after a successful card load."""
-        with patch.object(self.api_resource, "_conn_pool") as mock_pool:
-            mock_conn = MagicMock()
-            mock_cursor = MagicMock()
-            mock_cursor.rowcount = 1
-            mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
-            mock_pool.connection.return_value.__enter__.return_value = mock_conn
-
+        with self._mock_successful_upsert():
             valid_card = create_test_card(
                 card_id="00000000-0000-0000-0000-000000000009",
                 keywords=[],
@@ -567,7 +566,7 @@ class TestAPIResourceCaching(unittest.TestCase):
             self.api_resource._preferred_cards_map[gen] = [{"name": "sentinel"}]
             assert self.api_resource._preferred_cards_map.get(gen) is not None
 
-            self.api_resource._load_cards_with_staging([valid_card])
+            self.api_resource._upsert_cards([valid_card])
 
             # After load the generation advances; sentinel is unreachable at the new generation
             new_gen = self.api_resource._cache_generation.value
