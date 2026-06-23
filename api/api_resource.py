@@ -63,6 +63,19 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def _rss_mb() -> str:
+    """Return current RSS in MB as a string, or 'unknown' if /proc is unavailable."""
+    try:
+        with pathlib.Path("/proc/self/status").open() as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return f"{int(line.split()[1]) // 1024} MB"
+    except OSError:
+        pass
+    return "unknown"
+
+
 FALLBACK_SITE_NAME = "MTG Search"
 
 # Selectors extracted from styles.css and inlined in the HTML <style> block to prevent
@@ -795,6 +808,7 @@ class APIResource:
             return
         if self._engine is None:
             return
+        logger.info("Engine reload requested (force=%s, pid=%d, rss=%s)", force, os.getpid(), _rss_mb())
         if not self._engine_reload_guard.acquire(block=force):
             logger.info("Engine reload already in progress in another worker, skipping (pid=%d)", os.getpid())
             return
@@ -802,6 +816,7 @@ class APIResource:
             if not force and self._engine.size() > 0:
                 # Another worker populated the store while we raced for the lock.
                 return
+            logger.info("Engine reload starting (force=%s, pid=%d, rss=%s)", force, os.getpid(), _rss_mb())
             cols_sql = ", ".join(f"card.{col}" for col in _ENGINE_COLUMNS_FROM_MODULE)
             try:
                 with self._conn_pool.connection() as conn:
@@ -823,7 +838,7 @@ class APIResource:
             except psycopg_pool.PoolClosed:
                 logger.debug("Connection pool closed during engine reload, skipping (pid=%d)", os.getpid())
                 return
-            logger.info("Engine reloaded with %d cards (pid=%d)", self._engine.size(), os.getpid())
+            logger.info("Engine reloaded with %d cards (pid=%d, rss=%s)", self._engine.size(), os.getpid(), _rss_mb())
         finally:
             self._engine_reload_guard.release()
 
@@ -1515,20 +1530,21 @@ class APIResource:
             # Validate and set statement timeout
             self._set_statement_timeout(cursor, statement_timeout)
             cursor.execute(backfill_sql)
+            updated_count = cursor.rowcount
 
             # Get count of updated cards
             cursor.execute("SELECT COUNT(*) as count FROM magic.cards WHERE prefer_score IS NOT NULL")
             result = cursor.fetchone()
-            count = result["count"] if result else 0
+            total_cards = result["count"] if result else 0
 
             conn.commit()
 
-        logger.info("Prefer score backfill complete: %d cards updated", count)
+        logger.info("Prefer score backfill complete: %d of %d cards updated", updated_count, total_cards)
 
         return {
             "status": "success",
-            "cards_updated": count,
-            "message": f"Successfully backfilled prefer scores for {count} cards",
+            "cards_updated": updated_count,
+            "message": f"Successfully backfilled prefer scores for {updated_count} of {total_cards} cards",
         }
 
     def _fetch_cubecobra_data(self, db_oracle_ids: set[str]) -> dict[str, dict[str, Any]]:
@@ -2290,10 +2306,6 @@ class APIResource:
                     return {"status": status, "cards_loaded": 0, "cards_sent": 0, "sample_cards": [], "message": message}
 
                 cards_loaded = cards_inserted + cards_updated
-                if cards_loaded > 0:
-                    self._clear_caches()
-                    self._reload_engine(force=True)
-
                 return {
                     "status": "success",
                     "cards_inserted": cards_inserted,
