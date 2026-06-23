@@ -63,6 +63,19 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def _rss_mb() -> str:
+    """Return current RSS in MB as a string, or 'unknown' if /proc is unavailable."""
+    try:
+        with pathlib.Path("/proc/self/status").open() as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return f"{int(line.split()[1]) // 1024} MB"
+    except OSError:
+        pass
+    return "unknown"
+
+
 FALLBACK_SITE_NAME = "MTG Search"
 
 # Selectors extracted from styles.css and inlined in the HTML <style> block to prevent
@@ -795,6 +808,7 @@ class APIResource:
             return
         if self._engine is None:
             return
+        logger.info("Engine reload requested (force=%s, pid=%d, rss=%s)", force, os.getpid(), _rss_mb())
         if not self._engine_reload_guard.acquire(block=force):
             logger.info("Engine reload already in progress in another worker, skipping (pid=%d)", os.getpid())
             return
@@ -802,6 +816,7 @@ class APIResource:
             if not force and self._engine.size() > 0:
                 # Another worker populated the store while we raced for the lock.
                 return
+            logger.info("Engine reload starting (force=%s, pid=%d, rss=%s)", force, os.getpid(), _rss_mb())
             cols_sql = ", ".join(f"card.{col}" for col in _ENGINE_COLUMNS_FROM_MODULE)
             try:
                 with self._conn_pool.connection() as conn:
@@ -823,7 +838,7 @@ class APIResource:
             except psycopg_pool.PoolClosed:
                 logger.debug("Connection pool closed during engine reload, skipping (pid=%d)", os.getpid())
                 return
-            logger.info("Engine reloaded with %d cards (pid=%d)", self._engine.size(), os.getpid())
+            logger.info("Engine reloaded with %d cards (pid=%d, rss=%s)", self._engine.size(), os.getpid(), _rss_mb())
         finally:
             self._engine_reload_guard.release()
 
@@ -847,8 +862,10 @@ class APIResource:
             cards_sent = result.get("cards_sent", result["cards_loaded"])
             rate = cards_sent / total_time if total_time > 0 else 0
             logger.info(
-                "Loaded %d cards in %.2f seconds, rate: %.2f cards/s...",
+                "Loaded %d cards (%d new, %d updated) in %.2f seconds, rate: %.2f cards/s...",
                 result["cards_loaded"],
+                result.get("cards_inserted", 0),
+                result.get("cards_updated", 0),
                 total_time,
                 rate,
             )
@@ -1513,20 +1530,21 @@ class APIResource:
             # Validate and set statement timeout
             self._set_statement_timeout(cursor, statement_timeout)
             cursor.execute(backfill_sql)
+            updated_count = cursor.rowcount
 
             # Get count of updated cards
             cursor.execute("SELECT COUNT(*) as count FROM magic.cards WHERE prefer_score IS NOT NULL")
             result = cursor.fetchone()
-            count = result["count"] if result else 0
+            total_cards = result["count"] if result else 0
 
             conn.commit()
 
-        logger.info("Prefer score backfill complete: %d cards updated", count)
+        logger.info("Prefer score backfill complete: %d of %d cards updated", updated_count, total_cards)
 
         return {
             "status": "success",
-            "cards_updated": count,
-            "message": f"Successfully backfilled prefer scores for {count} cards",
+            "cards_updated": updated_count,
+            "message": f"Successfully backfilled prefer scores for {updated_count} of {total_cards} cards",
         }
 
     def _fetch_cubecobra_data(self, db_oracle_ids: set[str]) -> dict[str, dict[str, Any]]:
@@ -2130,14 +2148,19 @@ class APIResource:
         cursor: Cursor,
         staging_table_name: str,
         page: tuple[dict[str, Any], ...],
-    ) -> tuple[int, list[dict[str, Any]]]:
+    ) -> dict[str, Any]:
         """COPY one batch of preprocessed cards through a temp staging table into magic.cards.
 
-        Returns (rows_inserted, sample_cards).
+        Returns {"inserted": int, "updated": int, "sample": list[dict]}.
         """
         # ON COMMIT DROP is a safety net: the table is dropped explicitly below, but if an error
         # aborts the batch the transaction rollback (or any later commit) removes it as well.
-        cursor.execute(f"CREATE TEMPORARY TABLE {staging_table_name} (card_blob jsonb) ON COMMIT DROP")
+        cursor.execute(f"""
+            CREATE TEMPORARY TABLE {staging_table_name} (
+                card_blob  jsonb,
+                scryfall_id uuid GENERATED ALWAYS AS ((card_blob->>'scryfall_id')::uuid) STORED
+            ) ON COMMIT DROP
+        """)
 
         with cursor.copy(
             f"COPY {staging_table_name} (card_blob) FROM STDIN WITH (FORMAT csv, HEADER false)",
@@ -2156,17 +2179,61 @@ class APIResource:
         )
         sample_cards = [dict(r) for r in cursor.fetchall()]
 
+        # Group 1: new cards — scryfall_id not yet in the table.
         cursor.execute(
             f"""
             INSERT INTO magic.cards
             SELECT (jsonb_populate_record(null::magic.cards, card_blob)).*
             FROM {staging_table_name}
-            ON CONFLICT DO NOTHING
+            WHERE NOT EXISTS (
+                SELECT 1 FROM magic.cards c WHERE c.scryfall_id = {staging_table_name}.scryfall_id
+            )
+            ON CONFLICT (scryfall_id) DO NOTHING
             """,
         )
-        rows_inserted = cursor.rowcount
+        new_cards = cursor.rowcount
+
+        # Group 3: changed cards — scryfall_id exists but at least one Scryfall field differs.
+        #
+        # Normalize both the incoming blob and the existing row through jsonb_populate_record
+        # so PostgreSQL type coercions (e.g. real precision) are applied identically to both
+        # sides before comparison.  Using c as the base — rather than null — means backfilled
+        # columns (prefer_score, cubecobra_*, card_is_tags) that are absent from the incoming
+        # blob default to the existing row value on both sides, so they never trigger a spurious
+        # update.  The same merged_blob is used for the INSERT so those backfilled values survive.
+        #
+        # RETURNING merged_blob lets the outer INSERT read from the DELETE output rather than the
+        # table, avoiding the snapshot-concurrency conflict that would occur if the INSERT and
+        # DELETE ran against the same snapshot simultaneously.
+        cursor.execute(
+            f"""
+            WITH stripped_cards AS (
+                SELECT scryfall_id,
+                       card_blob - ARRAY['card_oracle_tags', 'card_art_tags', 'card_is_tags'] AS stripped_blob
+                FROM {staging_table_name}
+            ),
+            candidates AS (
+                SELECT
+                    s.scryfall_id,
+                    to_jsonb(jsonb_populate_record(c, s.stripped_blob)) AS merged_blob
+                FROM stripped_cards s
+                JOIN magic.cards c ON c.scryfall_id = s.scryfall_id
+                WHERE to_jsonb(jsonb_populate_record(c, s.stripped_blob)) IS DISTINCT FROM to_jsonb(c)
+            ),
+            deleted AS (
+                DELETE FROM magic.cards c
+                USING candidates
+                WHERE c.scryfall_id = candidates.scryfall_id
+                RETURNING candidates.merged_blob
+            )
+            INSERT INTO magic.cards
+            SELECT (jsonb_populate_record(null::magic.cards, deleted.merged_blob)).*
+            FROM deleted
+            """,
+        )
+        updated_cards = cursor.rowcount
         cursor.execute(f"DROP TABLE {staging_table_name}")
-        return rows_inserted, sample_cards
+        return {"inserted": new_cards, "updated": updated_cards, "sample": sample_cards}
 
     def _load_cards_with_staging(
         self,
@@ -2176,14 +2243,16 @@ class APIResource:
         """Load cards into the database using a randomly-named staging table.
 
         Accepts any iterable of raw card dicts (as returned by the Scryfall API or
-        stream_data_for_key). Preprocessing and already-imported filtering are applied
-        lazily as cards flow through, so the full dataset is never held in memory.
+        stream_data_for_key). Preprocessing is applied lazily as cards flow through,
+        so the full dataset is never held in memory.
 
         Returns a dict with:
-            - cards_loaded: rows actually inserted (after ON CONFLICT DO NOTHING)
-            - cards_sent: rows attempted (after preprocessing + filtering)
+            - cards_inserted: new cards added
+            - cards_updated: existing cards replaced with changed data
+            - cards_loaded: cards_inserted + cards_updated
+            - cards_sent: rows attempted (after preprocessing)
             - sample_cards: up to 10 random cards from the final batch
-            - status: "success", "no_cards_before_preprocessing", "no_cards_after_preprocessing", "all_cards_already_present", "database_error"
+            - status: "success", "no_cards_before_preprocessing", "no_cards_after_preprocessing", "database_error"
             - message: descriptive message
         """
         self.setup_schema()
@@ -2195,11 +2264,8 @@ class APIResource:
             with self._conn_pool.connection() as conn, conn.cursor() as cursor:
                 self._set_statement_timeout(cursor, 30_000)
 
-                cursor.execute("SELECT scryfall_id FROM magic.cards GROUP BY scryfall_id")
-                already_imported_ids = {r["scryfall_id"] for r in cursor.fetchall()}
-
                 class _CardStream:
-                    """Preprocesses and filters raw cards lazily, tracking stage counts."""
+                    """Preprocesses raw cards lazily, tracking stage counts."""
 
                     def __init__(self) -> None:
                         self.raw = 0
@@ -2210,41 +2276,45 @@ class APIResource:
                             self.raw += 1
                             for processed in preprocess_card(card):
                                 self.preprocessed += 1
-                                if processed["scryfall_id"] not in already_imported_ids:
-                                    yield processed
+                                yield processed
 
                 stream = _CardStream()
-                cards_loaded = cards_sent = 0
+                cards_inserted = cards_updated = cards_sent = 0
                 sample_cards: list[dict[str, Any]] = []
 
                 for page in itertools.batched(stream, page_size):
-                    rows, sample_cards = self._copy_batch_to_staging(cursor, staging_table_name, page)
+                    batch = self._copy_batch_to_staging(cursor, staging_table_name, page)
                     cards_sent += len(page)
-                    cards_loaded += rows
-                    logger.info("%d cards loaded, %d cards sent so far", cards_loaded, cards_sent)
+                    cards_inserted += batch["inserted"]
+                    cards_updated += batch["updated"]
+                    sample_cards = batch["sample"]
+                    logger.info(
+                        "%d inserted, %d updated, %d sent so far",
+                        cards_inserted,
+                        cards_updated,
+                        cards_sent,
+                    )
 
                 conn.commit()
 
                 if cards_sent == 0:
                     if stream.raw == 0:
                         status, message = "no_cards_before_preprocessing", "No cards provided for loading"
-                    elif stream.preprocessed == 0:
-                        status, message = "no_cards_after_preprocessing", "No cards remaining after preprocessing"
                     else:
-                        status, message = "all_cards_already_present", "All cards already present"
+                        status, message = "no_cards_after_preprocessing", "No cards remaining after preprocessing"
                     logger.info("No cards imported: %s (raw=%d preprocessed=%d)", message, stream.raw, stream.preprocessed)
                     return {"status": status, "cards_loaded": 0, "cards_sent": 0, "sample_cards": [], "message": message}
 
-                if cards_loaded > 0:
-                    self._clear_caches()
-                    self._reload_engine(force=True)
-
+                cards_loaded = cards_inserted + cards_updated
+                self._clear_caches()
                 return {
                     "status": "success",
+                    "cards_inserted": cards_inserted,
+                    "cards_updated": cards_updated,
                     "cards_loaded": cards_loaded,
                     "cards_sent": cards_sent,
                     "sample_cards": sample_cards,
-                    "message": f"Successfully loaded {cards_loaded} cards",
+                    "message": f"Successfully loaded {cards_loaded} cards ({cards_inserted} new, {cards_updated} updated)",
                 }
 
         except (psycopg.Error, ValueError, KeyError) as e:

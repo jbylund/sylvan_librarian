@@ -164,10 +164,12 @@ def preprocess_card(card: dict[str, Any]) -> list[dict[str, Any]]:  # noqa: PLR0
         card["creature_power_text"] = card.get("power")
         card["creature_toughness_text"] = card.get("toughness")
     else:
-        # Non-creature face with power/toughness - clean up these fields instead of rejecting
-        # The pop calls set these to None implicitly, and we explicitly reset creature_power/toughness
-        card.pop("creature_power_text", None)
-        card.pop("creature_toughness_text", None)
+        # Explicit None (not pop) so these keys appear as JSON null in the processed blob.
+        # An absent key falls through to the existing DB row's value during upsert merging;
+        # an explicit null overrides it, keeping creature_power_text/creature_toughness_text
+        # in sync with creature_power/creature_toughness for the check constraint.
+        card["creature_power_text"] = None
+        card["creature_toughness_text"] = None
         card["creature_power"] = None
         card["creature_toughness"] = None
 

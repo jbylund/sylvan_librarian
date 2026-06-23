@@ -43,13 +43,13 @@ class TestLoadCardsWithStagingStatus:
         assert result["status"] == "no_cards_after_preprocessing"
         assert result["cards_loaded"] == 0
 
-    def test_already_imported_cards_return_all_cards_already_present(self, api_resource: APIResource) -> None:
-        """Cards already in the DB are skipped; if all are skipped the status is all_cards_already_present."""
+    def test_unchanged_card_on_reimport_loads_zero(self, api_resource: APIResource) -> None:
+        """Re-submitting an identical card produces success with zero loads (unchanged, no write)."""
         card = make_raw_card(name="Already Present Card")
         api_resource._load_cards_with_staging([card])  # first insert
 
         result = api_resource._load_cards_with_staging([card])  # second attempt
-        assert result["status"] == "all_cards_already_present"
+        assert result["status"] == "success"
         assert result["cards_loaded"] == 0
 
     def test_success_result_includes_cards_sent(self, api_resource: APIResource) -> None:
@@ -67,16 +67,14 @@ class TestLoadCardsWithStagingStatus:
 class TestCardStreamCounting:
     """_CardStream tallies stage counts that drive the status string selection."""
 
-    def test_multiple_preprocessed_but_all_already_imported_gives_correct_status(self, api_resource: APIResource) -> None:
-        """Raw > 0 and preprocessed > 0 but all filtered by already_imported_ids → all_cards_already_present."""
+    def test_multiple_preprocessed_but_all_unchanged_loads_zero(self, api_resource: APIResource) -> None:
+        """Raw > 0 and preprocessed > 0 but all unchanged → success with cards_loaded=0."""
         cards = [make_raw_card(name=f"Count Card {i}") for i in range(3)]
         api_resource._load_cards_with_staging(cards)  # seed the DB
 
         result = api_resource._load_cards_with_staging(cards)
-        # Would be no_cards_before_preprocessing if raw==0,
-        # or no_cards_after_preprocessing if preprocessed==0.
-        # Only reaches all_cards_already_present when both counts are > 0.
-        assert result["status"] == "all_cards_already_present"
+        assert result["status"] == "success"
+        assert result["cards_loaded"] == 0
 
     def test_preprocessing_filter_distinguished_from_empty_input(self, api_resource: APIResource) -> None:
         """no_cards_after_preprocessing is distinct from no_cards_before_preprocessing."""
@@ -99,28 +97,30 @@ class TestCopyBatchToStaging:
     def test_inserts_card_and_returns_row_count(self, api_resource: APIResource) -> None:
         (preprocessed,) = preprocess_card(make_raw_card(name="Staging Insert Card"))
         with api_resource._conn_pool.connection() as conn, conn.cursor() as cursor:
-            rows, _ = api_resource._copy_batch_to_staging(cursor, "test_stg_insert", (preprocessed,))
+            batch = api_resource._copy_batch_to_staging(cursor, "test_stg_insert", (preprocessed,))
             conn.commit()
-        assert rows == 1
+        assert batch["inserted"] == 1
+        assert batch["updated"] == 0
 
     def test_returns_sample_cards_as_list_of_dicts(self, api_resource: APIResource) -> None:
         (preprocessed,) = preprocess_card(make_raw_card(name="Staging Sample Card"))
         with api_resource._conn_pool.connection() as conn, conn.cursor() as cursor:
-            _, sample_cards = api_resource._copy_batch_to_staging(cursor, "test_stg_sample", (preprocessed,))
+            batch = api_resource._copy_batch_to_staging(cursor, "test_stg_sample", (preprocessed,))
             conn.commit()
-        for sc in sample_cards:
+        for sc in batch["sample"]:
             assert isinstance(sc, dict)
 
-    def test_on_conflict_does_nothing_returns_zero(self, api_resource: APIResource) -> None:
-        """Re-inserting the same card returns rowcount 0 (ON CONFLICT DO NOTHING)."""
+    def test_unchanged_card_returns_zero_rowcount(self, api_resource: APIResource) -> None:
+        """Re-inserting an unchanged card returns inserted=0, updated=0."""
         (preprocessed,) = preprocess_card(make_raw_card(name="Staging Conflict Card"))
         with api_resource._conn_pool.connection() as conn, conn.cursor() as cursor:
             api_resource._copy_batch_to_staging(cursor, "test_stg_conflict_a", (preprocessed,))
             conn.commit()
         with api_resource._conn_pool.connection() as conn, conn.cursor() as cursor:
-            rows, _ = api_resource._copy_batch_to_staging(cursor, "test_stg_conflict_b", (preprocessed,))
+            batch = api_resource._copy_batch_to_staging(cursor, "test_stg_conflict_b", (preprocessed,))
             conn.commit()
-        assert rows == 0
+        assert batch["inserted"] == 0
+        assert batch["updated"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +145,7 @@ class TestMultiBatchLoad:
         assert result["status"] == "success"
         assert result["cards_loaded"] == 8
 
-    def test_already_imported_cards_skipped_across_batch_boundary(self, api_resource: APIResource) -> None:
+    def test_unchanged_cards_not_loaded_across_batch_boundary(self, api_resource: APIResource) -> None:
         existing = [make_raw_card(name=f"Existing {uuid.uuid4()}") for _ in range(3)]
         api_resource._load_cards_with_staging(existing, page_size=10)
 
@@ -153,7 +153,7 @@ class TestMultiBatchLoad:
         result = api_resource._load_cards_with_staging(existing + new_cards, page_size=3)
         assert result["status"] == "success"
         assert result["cards_loaded"] == 4
-        assert result["cards_sent"] == 4
+        assert result["cards_sent"] == 7  # all cards are sent; existing ones just produce 0 loads
 
 
 # ---------------------------------------------------------------------------
@@ -255,3 +255,56 @@ class TestRunImportUnderLockStreaming:
             api._run_import_under_lock()
         args, _ = mock_staging.call_args
         assert args[0] is sentinel
+
+
+# ---------------------------------------------------------------------------
+# Upsert behavior tests
+# ---------------------------------------------------------------------------
+
+
+class TestUpsertBehavior:
+    """_copy_batch_to_staging correctly partitions into new, unchanged, and changed cards."""
+
+    def test_unchanged_card_skips_write(self, api_resource: APIResource) -> None:
+        """Group 2: re-submitting identical data produces zero loads."""
+        card_id = str(uuid.uuid4())
+        card = make_raw_card(card_id=card_id)
+        api_resource._load_cards_with_staging([card])
+
+        result = api_resource._load_cards_with_staging([card])
+        assert result["cards_inserted"] == 0
+        assert result["cards_updated"] == 0
+
+    def test_changed_card_is_updated(self, api_resource: APIResource) -> None:
+        """Group 3: re-submitting a card with changed data updates the stored row."""
+        card_id = str(uuid.uuid4())
+        api_resource._load_cards_with_staging([make_raw_card(card_id=card_id)])
+
+        result = api_resource._load_cards_with_staging([make_raw_card(card_id=card_id, rarity="rare")])
+        assert result["cards_inserted"] == 0
+        assert result["cards_updated"] == 1
+
+        with api_resource._conn_pool.connection() as conn, conn.cursor() as cursor:
+            cursor.execute("SELECT card_rarity_text FROM magic.cards WHERE scryfall_id = %s", (card_id,))
+            row = cursor.fetchone()
+        assert row["card_rarity_text"] == "rare"
+
+    def test_changed_card_preserves_backfilled_columns(self, api_resource: APIResource) -> None:
+        """Group 3: updating a changed card leaves prefer_score and card_is_tags intact."""
+        card_id = str(uuid.uuid4())
+        api_resource._load_cards_with_staging([make_raw_card(card_id=card_id)])
+
+        with api_resource._conn_pool.connection() as conn, conn.cursor() as cursor:
+            cursor.execute(
+                "UPDATE magic.cards SET prefer_score = 42.0, card_is_tags = '{\"is:instant\": true}'::jsonb WHERE scryfall_id = %s",
+                (card_id,),
+            )
+            conn.commit()
+
+        api_resource._load_cards_with_staging([make_raw_card(card_id=card_id, rarity="rare")])
+
+        with api_resource._conn_pool.connection() as conn, conn.cursor() as cursor:
+            cursor.execute("SELECT prefer_score, card_is_tags FROM magic.cards WHERE scryfall_id = %s", (card_id,))
+            row = cursor.fetchone()
+        assert row["prefer_score"] == 42.0
+        assert row["card_is_tags"] == {"is:instant": True}
