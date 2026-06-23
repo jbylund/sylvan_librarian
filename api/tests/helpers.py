@@ -29,7 +29,7 @@ def search_kwargs(
     }
 
 
-def make_raw_card(card_id: str | None = None, name: str = "Test Card") -> dict:
+def make_raw_card(card_id: str | None = None, name: str = "Test Card", rarity: str = "common") -> dict:
     """Minimal raw Scryfall card dict that passes preprocess_card and satisfies NOT NULL constraints."""
     cid = card_id or str(uuid.uuid4())
     jpg = f"{cid[0]}/{cid[1]}/{cid}.jpg"
@@ -46,7 +46,7 @@ def make_raw_card(card_id: str | None = None, name: str = "Test Card") -> dict:
         "keywords": [],
         "prices": {"usd": "0.10"},
         "set": "tst",
-        "rarity": "common",
+        "rarity": rarity,
         "collector_number": "1",
         "image_uris": {
             "small": f"https://cards.scryfall.io/small/front/{jpg}",
