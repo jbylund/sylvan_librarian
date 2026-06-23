@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 def _insert_card(api: APIResource, raw: dict) -> str:
     """Insert a raw card and return its oracle_id."""
-    api._load_cards_with_staging([raw])
+    api._upsert_cards([raw])
     (processed,) = preprocess_card(raw)
     return processed["oracle_id"]
 

@@ -52,7 +52,6 @@ class TestImportCardsBySearch(unittest.TestCase):
         assert result["search_query"] == "name:NonexistentCard"
         assert "No cards found for search query" in result["message"]
         assert result["cards_loaded"] == 0
-        assert result["sample_cards"] == []
 
     @patch.object(APIResource, "_scryfall_search")
     def test_import_cards_by_search_returns_error_for_scryfall_exceptions(self, mock_search: MagicMock) -> None:
@@ -66,10 +65,9 @@ class TestImportCardsBySearch(unittest.TestCase):
         assert result["search_query"] == "name:TestCard"
         assert "Error fetching cards from Scryfall" in result["message"]
         assert result["cards_loaded"] == 0
-        assert result["sample_cards"] == []
 
     @patch.object(APIResource, "_scryfall_search")
-    @patch.object(APIResource, "_load_cards_with_staging")
+    @patch.object(APIResource, "_upsert_cards")
     def test_import_cards_by_search_returns_success_for_valid_cards(self, mock_load: MagicMock, mock_search: MagicMock) -> None:
         """Test that import_cards_by_search returns success status for valid cards."""
         # Mock Scryfall API to return card data
@@ -78,11 +76,10 @@ class TestImportCardsBySearch(unittest.TestCase):
             {"name": "Counterspell", "cmc": 2},
         ]
 
-        # Mock _load_cards_with_staging to return success
+        # Mock _upsert_cards to return success
         mock_load.return_value = {
             "status": "success",
             "cards_loaded": 2,
-            "sample_cards": [{"name": "Lightning Bolt", "cmc": 1}],
             "message": "Successfully loaded 2 cards",
         }
 
@@ -91,7 +88,6 @@ class TestImportCardsBySearch(unittest.TestCase):
         assert result["status"] == "success"
         assert result["search_query"] == "cmc<=2"
         assert result["cards_loaded"] == 2
-        assert len(result["sample_cards"]) == 1
         assert "Successfully loaded 2 cards" in result["message"]
 
     def test_import_cards_by_search_handles_artist_search_example(self) -> None:
@@ -100,7 +96,7 @@ class TestImportCardsBySearch(unittest.TestCase):
             patch.object(self.api_resource, "_scryfall_search") as mock_search,
             patch.object(
                 self.api_resource,
-                "_load_cards_with_staging",
+                "_upsert_cards",
             ) as mock_load,
         ):
             # Mock Scryfall API to return Sun Titan cards by Todd Lockwood
@@ -117,7 +113,6 @@ class TestImportCardsBySearch(unittest.TestCase):
             mock_load.return_value = {
                 "status": "success",
                 "cards_loaded": 1,
-                "sample_cards": [{"name": "Sun Titan", "artist": "Todd Lockwood"}],
                 "message": "Successfully loaded 1 cards",
             }
 
