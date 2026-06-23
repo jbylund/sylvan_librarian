@@ -2306,6 +2306,7 @@ class APIResource:
                     return {"status": status, "cards_loaded": 0, "cards_sent": 0, "sample_cards": [], "message": message}
 
                 cards_loaded = cards_inserted + cards_updated
+                self._clear_caches()
                 return {
                     "status": "success",
                     "cards_inserted": cards_inserted,

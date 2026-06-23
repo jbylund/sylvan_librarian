@@ -101,8 +101,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1875m
-    memswap_limit: 1875m
+          memory: 2813m
+    memswap_limit: 2813m
     ports:
       - "${API_PORT:-28080}:8080"
     ulimits:
