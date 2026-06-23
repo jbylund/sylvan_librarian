@@ -167,3 +167,12 @@ class TestBackfillPreferScores:
 
         assert row is not None
         assert row["prefer_score"] is not None
+
+    def test_second_run_updates_zero_rows(self, api_resource: APIResource) -> None:
+        """Re-running the backfill on already-scored cards should touch no rows."""
+        _insert_card(api_resource, make_raw_card(name=f"Idempotent Score Card {uuid.uuid4()}"))
+        api_resource.backfill_prefer_scores()
+
+        result = api_resource.backfill_prefer_scores()
+
+        assert result["cards_updated"] == 0
