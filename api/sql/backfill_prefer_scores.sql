@@ -7,7 +7,7 @@ WITH computed_components AS (
         JSONB_BUILD_OBJECT(
             'illustration_count', (
                 SELECT
-                    (23 * LN(1 + COUNT(*)) / LN(40))::real
+                    ROUND((23 * LN(1 + COUNT(*)) / LN(40))::numeric, 4)
                 FROM magic.cards query_target_cards
                 WHERE (
                     query_target_cards.illustration_id = source.illustration_id AND
@@ -112,4 +112,7 @@ SET
     prefer_score = computed_scores.new_score
 FROM computed_scores
 WHERE magic.cards.scryfall_id = computed_scores.scryfall_id
-  AND magic.cards.prefer_score IS DISTINCT FROM computed_scores.new_score;
+  AND (
+      magic.cards.prefer_score_components IS DISTINCT FROM computed_scores.new_components
+      OR magic.cards.prefer_score IS DISTINCT FROM computed_scores.new_score
+  );
