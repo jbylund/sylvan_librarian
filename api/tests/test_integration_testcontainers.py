@@ -130,6 +130,8 @@ class TestContainerIntegration:
             cursor.execute(data_file.read_text())
             conn.commit()
 
+        api._reload_engine(force=True)
+
         # Yield the fully configured APIResource for tests to use
         yield api
 

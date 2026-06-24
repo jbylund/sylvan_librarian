@@ -2053,6 +2053,9 @@ class APIResource:
         # Insert the cards into the database using the consolidated method
         load_result = self._upsert_cards(cards)
 
+        if load_result["status"] == "success":
+            self._reload_engine(force=True)
+
         # Add search_query to the result for consistency
         load_result["search_query"] = search_query
 

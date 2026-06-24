@@ -25,7 +25,7 @@ class Settings:
     def __init__(self) -> None:
         """Initialize settings from environment variables."""
         self._enable_cache = _is_truthy(os.environ.get("ENABLE_CACHE", "false"))
-        self._enable_engine = _is_truthy(os.environ.get("ENABLE_ENGINE", "false"))
+        self._enable_engine = _is_truthy(os.environ.get("ENABLE_ENGINE", "true"))
 
     @property
     def enable_cache(self) -> bool:
@@ -41,10 +41,10 @@ class Settings:
     def enable_engine(self) -> bool:
         """Check if the Rust card filter engine serves searches.
 
-        Disabled (the default) makes the engine fully inert: _search routes
-        every query to SQL and _reload_engine never runs, so no worker pays
-        the full-table fetch or holds the card store in memory. Flip on via
-        ENABLE_ENGINE=true once the reload cost is acceptable for the host.
+        Enabled by default. When disabled, the engine is fully inert: _search
+        routes every query to SQL and _reload_engine never runs. Disable via
+        ENABLE_ENGINE=false for environments where the full-table fetch cost is
+        unacceptable (e.g. low-memory dev machines).
         """
         return self._enable_engine
 
