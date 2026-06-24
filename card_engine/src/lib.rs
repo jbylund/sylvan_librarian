@@ -1850,6 +1850,11 @@ struct CardData {
     // which never run the load path that feeds FORMAT_SHIFTS — resolve
     // legality shifts identically to the worker that built the archive.
     format_shifts: HashMap<String, u8>,
+    // One index per unique oracle_id group: the position in `cards` of that
+    // group's preferred printing (highest prefer_score). Lives in the mmap so
+    // it is shared across all workers at zero per-worker heap cost.
+    // ~31k entries × 4 bytes = ~124 KB in the archive.
+    preferred_indices: Vec<u32>,
 }
 
 /// Adopt the archive's format→shift assignments into this process's registry.
@@ -2237,7 +2242,7 @@ fn card_to_pydict<'py>(py: Python<'py>, card: &ACard, strings: &AStrings) -> PyR
 const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 /// Bump on any archived-data-model change that size_of::<ACard>() wouldn't
 /// catch (e.g. reordering same-size Card fields, changing an index type).
-const ARCHIVE_FORMAT_VERSION: u32 = 1;
+const ARCHIVE_FORMAT_VERSION: u32 = 20260623;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -2441,6 +2446,32 @@ impl QueryEngine {
         // otherwise irrelevant.
         cards.sort_unstable_by_key(|c| (c.oracle_id, c.illustration_id));
 
+        // Single pass: record the preferred printing index for each oracle_id group.
+        // Cards are sorted by (oracle_id, illustration_id) so equal oracle_ids are adjacent.
+        // prefer_score here is the plain f32 on Card (not the archived version).
+        let mut preferred_indices: Vec<u32> = Vec::new();
+        {
+            let mut prev_oracle: Option<u128> = None;
+            let mut group_best: Option<(u32, f32)> = None; // (store index, prefer_score)
+            for (i, card) in cards.iter().enumerate() {
+                if prev_oracle != Some(card.oracle_id) {
+                    if let Some((best_idx, _)) = group_best.take() {
+                        preferred_indices.push(best_idx);
+                    }
+                    prev_oracle = Some(card.oracle_id);
+                    group_best = Some((i as u32, card.prefer_score.unwrap_or(0.0)));
+                } else {
+                    let score = card.prefer_score.unwrap_or(0.0);
+                    if score > group_best.as_ref().map_or(f32::NEG_INFINITY, |g| g.1) {
+                        group_best = Some((i as u32, score));
+                    }
+                }
+            }
+            if let Some((best_idx, _)) = group_best {
+                preferred_indices.push(best_idx);
+            }
+        }
+
         #[cfg(feature = "alloc-counter")]
         let stats_after_cards = (alloc_stats::live(), alloc_stats::allocs());
 
@@ -2466,7 +2497,7 @@ impl QueryEngine {
         // Snapshot the registry card_from_pydict just populated so reader
         // processes can adopt the same format→shift assignments.
         let format_shifts_snapshot = format_shifts().read().map(|m| m.clone()).unwrap_or_default();
-        let card_data = CardData { cards, strings, indexes, format_shifts: format_shifts_snapshot };
+        let card_data = CardData { cards, strings, indexes, format_shifts: format_shifts_snapshot, preferred_indices };
 
         // Write atomically: stream into a per-PID .tmp, then rename over shm_path.
         // Per-PID avoids the race where two workers write to the same .tmp and
@@ -2651,6 +2682,35 @@ impl QueryEngine {
             Ok(mmap) => Ok(unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) }.cards.len()),
         }
     }
+
+    /// Return `n` randomly sampled cards from the preferred-printing index.
+    /// O(n) time, zero per-worker heap overhead — preferred_indices lives in the
+    /// shared mmap so all workers read the same ~124 KB of file pages.
+    #[pyo3(signature = (n))]
+    fn sample_preferred<'py>(&self, py: Python<'py>, n: usize) -> PyResult<Bound<'py, PyList>> {
+        let mmap = self.get_mmap()?;
+        // Safety: see the access_unchecked justification in query().
+        let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
+
+        let pool_len = data.preferred_indices.len();
+        let take = n.min(pool_len);
+
+        use rand::RngExt;
+        let mut rng: rand::rngs::SmallRng = rand::make_rng();
+        let mut chosen = std::collections::HashSet::with_capacity(take);
+        while chosen.len() < take {
+            chosen.insert(rng.random::<u64>() as usize % pool_len);
+        }
+
+        let dicts: Vec<Bound<PyDict>> = chosen.iter()
+            .map(|&pos| {
+                let card_idx = u32::from(data.preferred_indices[pos]) as usize;
+                card_to_pydict(py, &data.cards[card_idx], &data.strings)
+            })
+            .collect::<PyResult<_>>()?;
+        PyList::new(py, dicts)
+    }
+
 
     /// Rust-heap allocator stats and reload() memory breakdown.
     /// Empty dict unless built with --features alloc-counter (measurement-only).

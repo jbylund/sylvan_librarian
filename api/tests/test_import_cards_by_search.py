@@ -70,20 +70,18 @@ class TestImportCardsBySearch(unittest.TestCase):
     @patch.object(APIResource, "_upsert_cards")
     def test_import_cards_by_search_returns_success_for_valid_cards(self, mock_load: MagicMock, mock_search: MagicMock) -> None:
         """Test that import_cards_by_search returns success status for valid cards."""
-        # Mock Scryfall API to return card data
         mock_search.return_value = [
             {"name": "Lightning Bolt", "cmc": 1},
             {"name": "Counterspell", "cmc": 2},
         ]
-
-        # Mock _upsert_cards to return success
         mock_load.return_value = {
             "status": "success",
             "cards_loaded": 2,
             "message": "Successfully loaded 2 cards",
         }
 
-        result = self.api_resource.import_cards_by_search(search_query="cmc<=2")
+        with patch.object(self.api_resource, "_reload_engine"):
+            result = self.api_resource.import_cards_by_search(search_query="cmc<=2")
 
         assert result["status"] == "success"
         assert result["search_query"] == "cmc<=2"
@@ -94,10 +92,8 @@ class TestImportCardsBySearch(unittest.TestCase):
         """Test the example artist search mentioned in the issue."""
         with (
             patch.object(self.api_resource, "_scryfall_search") as mock_search,
-            patch.object(
-                self.api_resource,
-                "_upsert_cards",
-            ) as mock_load,
+            patch.object(self.api_resource, "_upsert_cards") as mock_load,
+            patch.object(self.api_resource, "_reload_engine"),
         ):
             # Mock Scryfall API to return Sun Titan cards by Todd Lockwood
             mock_search.return_value = [
