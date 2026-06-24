@@ -536,19 +536,19 @@ class TestAPIResourceCaching(unittest.TestCase):
             # Generation increment is the cross-worker invalidation signal
             assert self.api_resource._cache_generation.value > gen_before
 
-    def test_random_search_uses_engine_sample_reservoir(self) -> None:
-        """random_search delegates to engine.sample_reservoir() when the engine is loaded."""
+    def test_random_search_uses_engine_sample_preferred(self) -> None:
+        """random_search delegates to engine.sample_preferred() when the engine is loaded."""
         from unittest.mock import MagicMock  # noqa: PLC0415
 
         fake_cards = [{"name": "Lightning Bolt"}, {"name": "Counterspell"}]
         mock_engine = MagicMock()
         mock_engine.size.return_value = 2
-        mock_engine.sample_reservoir.return_value = fake_cards
+        mock_engine.sample_preferred.return_value = fake_cards
 
         with patch.object(self.api_resource, "_engine", mock_engine):
             result = self.api_resource.random_search(num_cards=2)
 
-        mock_engine.sample_reservoir.assert_called_once_with(2)
+        mock_engine.sample_preferred.assert_called_once_with(2)
         assert result["cards"] == fake_cards
         assert result["total_cards"] == 2
 

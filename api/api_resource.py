@@ -2246,5 +2246,5 @@ class APIResource:
         num_cards = min(max(num_cards, 1), 1000)
         if self._engine.size() == 0:
             return {"cards": [], "total_cards": 0}
-        cards = list(self._engine.sample_reservoir(num_cards))
+        cards = list(self._engine.sample_preferred(num_cards))
         return {"cards": cards, "total_cards": len(cards)}

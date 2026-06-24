@@ -1855,6 +1855,11 @@ struct CardData {
     // never have 4B unique cards). Computed once at reload time after the sort
     // so sample_indexed() can skip the counting pass.
     unique_count: u32,
+    // One index per unique oracle_id group: the position in `cards` of that
+    // group's preferred printing (highest prefer_score). Lives in the mmap so
+    // it is shared across all workers at zero per-worker heap cost.
+    // ~31k entries × 4 bytes = ~124 KB in the archive.
+    preferred_indices: Vec<u32>,
 }
 
 /// Adopt the archive's format→shift assignments into this process's registry.
@@ -2446,12 +2451,34 @@ impl QueryEngine {
         // otherwise irrelevant.
         cards.sort_unstable_by_key(|c| (c.oracle_id, c.illustration_id));
 
-        // Count distinct oracle_id groups now that cards are sorted. Stored in
-        // the archive so sample_indexed() can skip its counting pass entirely.
-        let unique_count: u32 = (cards.windows(2)
-            .filter(|w| w[0].oracle_id != w[1].oracle_id)
-            .count()
-            .saturating_add(if cards.is_empty() { 0 } else { 1 })) as u32;
+        // Single pass: count oracle_id groups and record the preferred printing
+        // index for each. Cards are sorted by (oracle_id, illustration_id) so
+        // equal oracle_ids are adjacent. prefer_score here is the plain f32 on
+        // Card (not the archived version), so no From<> conversion needed.
+        let mut unique_count: u32 = 0;
+        let mut preferred_indices: Vec<u32> = Vec::new();
+        {
+            let mut prev_oracle: Option<u128> = None;
+            let mut group_best: Option<(u32, f32)> = None; // (store index, prefer_score)
+            for (i, card) in cards.iter().enumerate() {
+                if prev_oracle != Some(card.oracle_id) {
+                    if let Some((best_idx, _)) = group_best.take() {
+                        preferred_indices.push(best_idx);
+                    }
+                    prev_oracle = Some(card.oracle_id);
+                    unique_count += 1;
+                    group_best = Some((i as u32, card.prefer_score.unwrap_or(0.0)));
+                } else {
+                    let score = card.prefer_score.unwrap_or(0.0);
+                    if score > group_best.as_ref().map_or(f32::NEG_INFINITY, |g| g.1) {
+                        group_best = Some((i as u32, score));
+                    }
+                }
+            }
+            if let Some((best_idx, _)) = group_best {
+                preferred_indices.push(best_idx);
+            }
+        }
 
         #[cfg(feature = "alloc-counter")]
         let stats_after_cards = (alloc_stats::live(), alloc_stats::allocs());
@@ -2478,7 +2505,7 @@ impl QueryEngine {
         // Snapshot the registry card_from_pydict just populated so reader
         // processes can adopt the same format→shift assignments.
         let format_shifts_snapshot = format_shifts().read().map(|m| m.clone()).unwrap_or_default();
-        let card_data = CardData { cards, strings, indexes, format_shifts: format_shifts_snapshot, unique_count };
+        let card_data = CardData { cards, strings, indexes, format_shifts: format_shifts_snapshot, unique_count, preferred_indices };
 
         // Write atomically: stream into a per-PID .tmp, then rename over shm_path.
         // Per-PID avoids the race where two workers write to the same .tmp and
@@ -2662,6 +2689,45 @@ impl QueryEngine {
             // here would only re-validate trusted bytes at ~7 ms per size() call.
             Ok(mmap) => Ok(unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) }.cards.len()),
         }
+    }
+
+    /// Return `n` randomly sampled cards from the preferred-printing index.
+    /// O(n) time, zero per-worker heap overhead — preferred_indices lives in the
+    /// shared mmap so all workers read the same ~124 KB of file pages.
+    #[pyo3(signature = (n))]
+    fn sample_preferred<'py>(&self, py: Python<'py>, n: usize) -> PyResult<Bound<'py, PyList>> {
+        let mmap = self.get_mmap()?;
+        // Safety: see the access_unchecked justification in query().
+        let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
+
+        let pool_len = data.preferred_indices.len();
+        let take = n.min(pool_len);
+
+        // PRNG seed.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos() as u64;
+        let mut rng = nanos
+            .wrapping_add(std::process::id() as u64)
+            .wrapping_add(0x9e3779b97f4a7c15);
+        if rng == 0 { rng = 0xdeadbeef; }
+
+        // Floyd's: pick `take` distinct positions from [0, pool_len).
+        let mut chosen: std::collections::HashSet<usize> = std::collections::HashSet::with_capacity(take);
+        for i in (pool_len - take)..pool_len {
+            rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+            let r = rng as usize % (i + 1);
+            if !chosen.insert(r) { chosen.insert(i); }
+        }
+
+        let dicts: Vec<Bound<PyDict>> = chosen.iter()
+            .map(|&pos| {
+                let card_idx = u32::from(data.preferred_indices[pos]) as usize;
+                card_to_pydict(py, &data.cards[card_idx], &data.strings)
+            })
+            .collect::<PyResult<_>>()?;
+        PyList::new(py, dicts)
     }
 
     /// Return `n` randomly sampled cards via pre-selected group indices (Floyd's algorithm).
