@@ -14,6 +14,7 @@ sample_indexed()      Floyd's index set + targeted single walk.         O(total)
 # pylint: disable=protected-access
 from __future__ import annotations
 
+from collections.abc import Callable
 import multiprocessing
 import random
 import sys
