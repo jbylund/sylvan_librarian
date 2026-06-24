@@ -52,7 +52,7 @@ api = APIResource(last_import_time=multiprocessing.Value("d", time.time(), lock=
 api._import_recent = lambda: True
 api._setup_complete = lambda: True
 api._reload_engine(force=True)
-print(f"Engine loaded: {api._engine.size():,} cards\n", flush=True)
+print(f"Engine loaded: {api._engine.size():,} printings\n", flush=True)
 
 # ─── Bench helper ─────────────────────────────────────────────────────────────
 
