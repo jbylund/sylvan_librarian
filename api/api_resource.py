@@ -1585,7 +1585,7 @@ class APIResource:
 
         backfill_sql = self.read_sql("backfill_prefer_scores")
         with self._conn_pool.connection() as conn, conn.cursor() as cursor:
-            statement_timeout = 60_000
+            statement_timeout = 120_000
             # Validate and set statement timeout
             self._set_statement_timeout(cursor, statement_timeout)
             cursor.execute(backfill_sql)
