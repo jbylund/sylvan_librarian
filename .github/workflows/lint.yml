@@ -5,6 +5,11 @@ on:
     branches:
       - main
   pull_request:
+    paths:
+      - '**/*.py'
+      - 'requirements/**'
+      - 'pyproject.toml'
+      - '.github/workflows/lint.yml'
 
 permissions:
   contents: read
