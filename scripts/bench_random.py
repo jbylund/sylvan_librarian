@@ -14,18 +14,21 @@ sample_indexed()      Floyd's index set + targeted single walk.         O(total)
 # pylint: disable=protected-access
 from __future__ import annotations
 
-from collections.abc import Callable
 import multiprocessing
 import random
 import sys
 import time
 import tracemalloc
+from typing import TYPE_CHECKING
 
 sys.path.insert(0, "/app")
 
 from api.api_resource import APIResource
 from api.enums import CardOrdering, PreferOrder, SortDirection, UniqueOn
 from api.parsing import parse_scryfall_query
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
