@@ -842,7 +842,7 @@ enum CollField {
 
 impl CollField {
     fn is_card_level(self) -> bool {
-        !matches!(self, CollField::ArtTags | CollField::FrameData)
+        !matches!(self, CollField::ArtTags | CollField::FrameData | CollField::IsTags)
     }
 }
 
