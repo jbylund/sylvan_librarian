@@ -972,7 +972,7 @@ class CardSearch {
 
     this.showLoading();
     try {
-      const response = await fetch('/random_search?num_cards=10', {
+      const response = await fetch('/random_search?num_cards=12', {
         method: 'GET',
         headers: { Accept: 'application/json' },
         signal: controller.signal,
