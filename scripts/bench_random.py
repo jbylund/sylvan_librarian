@@ -11,6 +11,7 @@ sample_reservoir()    Single-pass bounded min-heap.                     O(total 
 sample_indexed()      Floyd's index set + targeted single walk.         O(total) time, O(n) mem.
 """
 
+# pylint: disable=protected-access
 from __future__ import annotations
 
 import multiprocessing
