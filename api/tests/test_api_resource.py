@@ -563,7 +563,7 @@ class TestAPIResourceCaching(unittest.TestCase):
             result = self.api_resource.random_search(num_cards=1)
 
         assert result == {"cards": [], "total_cards": 0}
-        mock_engine.sample_reservoir.assert_not_called()
+        mock_engine.sample_preferred.assert_not_called()
 
     def test_cache_clear_method_works(self) -> None:
         """Test that cache.clear() method works for cachebox caches."""

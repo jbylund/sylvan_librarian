@@ -779,6 +779,19 @@ class APIResource:
         logger.info("Last import was %d seconds ago, %s", time_since_import, retval)
         return retval
 
+    def _trigger_background_reload_if_needed(self) -> None:
+        if self._engine.size() == 0 and self._engine_reload_lock.acquire(blocking=False):
+
+            def _bg_reload() -> None:
+                try:
+                    self._reload_engine()
+                except Exception as e:
+                    logger.error("Background engine reload failed: %s", e, exc_info=True)
+                finally:
+                    self._engine_reload_lock.release()
+
+            threading.Thread(target=_bg_reload, daemon=True).start()
+
     def _reload_engine(self, *, force: bool = False) -> None:
         """Stream all cards from the DB into the Rust engine's card store in batches.
 
@@ -1019,17 +1032,7 @@ class APIResource:
             pass  # feature-gated off: SQL serves everything, the store never loads
         elif self._engine.size() == 0:
             logger.info("Engine store empty, using SQL path for query=%r", query)
-            if self._engine_reload_lock.acquire(blocking=False):
-
-                def _bg_reload() -> None:
-                    try:
-                        self._reload_engine()
-                    except Exception as e:
-                        logger.error("Background engine reload failed: %s", e, exc_info=True)
-                    finally:
-                        self._engine_reload_lock.release()
-
-                threading.Thread(target=_bg_reload, daemon=True).start()
+            self._trigger_background_reload_if_needed()
         else:
             try:
                 result = self._search_engine(
@@ -2248,6 +2251,7 @@ class APIResource:
         """
         num_cards = min(max(num_cards, 1), 1000)
         if self._engine.size() == 0:
+            self._trigger_background_reload_if_needed()
             return {"cards": [], "total_cards": 0}
         cards = list(self._engine.sample_preferred(num_cards))
         return {"cards": cards, "total_cards": len(cards)}
