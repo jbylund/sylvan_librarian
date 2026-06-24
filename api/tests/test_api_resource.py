@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 import falcon
 import pytest
 
-from api.api_resource import _WORDS, FALLBACK_SITE_NAME, APIResource, _split_words, hostname_to_site_name
+from api.api_resource import FALLBACK_SITE_NAME, APIResource, _hostname_to_site_name, _split_words, hostname_to_site_name
 from api.settings import settings
 
 
@@ -673,7 +673,9 @@ _SPLIT_WORDS_TESTCASES: dict[str, dict] = {
     },
 }
 
-_SMALL_WORDS: frozenset[str] = frozenset(["apple", "pie", "banana", "cherry", "the", "lion", "oak", "abcde", "fghij", "abc", "de"])
+_SMALL_WORDS: frozenset[str] = frozenset(
+    ["apple", "pie", "banana", "cherry", "the", "lion", "oak", "abcde", "fghij", "abc", "de", "sylvan", "librarian"]
+)
 
 
 class TestSplitWords:
@@ -697,15 +699,16 @@ _HOSTNAME_DICT_TESTCASES: dict[str, dict] = {
 
 
 class TestHostnameSiteNameWithDict:
-    """Tests for hostname_to_site_name() that require a system dictionary."""
+    """Tests for hostname_to_site_name() with a controlled word set patched in."""
 
-    @pytest.mark.skipif(not _WORDS, reason="no system dictionary found")
     @pytest.mark.parametrize(
         argnames=sorted(next(iter(_HOSTNAME_DICT_TESTCASES.values()))),
         argvalues=[[v for k, v in sorted(_HOSTNAME_DICT_TESTCASES[name].items())] for name in sorted(_HOSTNAME_DICT_TESTCASES)],
         ids=sorted(_HOSTNAME_DICT_TESTCASES),
     )
-    def test_hostname_to_site_name_with_dict(self, expected: str, raw_host: str) -> None:
+    def test_hostname_to_site_name_with_dict(self, monkeypatch: pytest.MonkeyPatch, expected: str, raw_host: str) -> None:
+        monkeypatch.setattr("api.api_resource._WORDS", _SMALL_WORDS)
+        _hostname_to_site_name.cache_clear()
         assert hostname_to_site_name(raw_host) == expected
 
 

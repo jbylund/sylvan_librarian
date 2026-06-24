@@ -186,6 +186,7 @@ _IP_RE = re.compile(r"^\d+\.\d+\.\d+\.\d+$")
 
 _MIN_WORD_LEN = 3
 
+
 # TODO: supplement with words from https://api.scryfall.com/catalog/word-bank so MtG-specific
 # terms (e.g. "sylvan", "planeswalker") are recognized even on systems without a full dictionary.
 def _load_word_set() -> frozenset[str]:
@@ -234,11 +235,15 @@ def _split_words(s: str, words: frozenset[str]) -> list[str] | None:
     return list(res) if res is not None else None
 
 
-@lru_cache(maxsize=256)
 def hostname_to_site_name(raw_host: str) -> str:
     """Derive a display name from a Host header value, falling back to FALLBACK_SITE_NAME."""
     # urlparse requires a scheme; .hostname strips the port and lowercases.
     hostname = urllib.parse.urlparse(f"http://{raw_host}").hostname or ""
+    return _hostname_to_site_name(hostname[:64])
+
+
+@lru_cache(maxsize=256)
+def _hostname_to_site_name(hostname: str) -> str:
     if not hostname or hostname == "localhost" or _IP_RE.match(hostname) or not _SAFE_HOSTNAME_RE.match(hostname):
         return FALLBACK_SITE_NAME
     parts = hostname.split(".")[-2:]
