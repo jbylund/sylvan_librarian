@@ -34,7 +34,8 @@ class CardSearch {
     this.currentCardCount = 0; // Track current number of cards displayed for resize handling
 
     // Autocomplete properties
-    this.commonCardTypes = []; // Will store the common card types
+    this.commonCardTypes = [];
+    this.typeMap = new Map(); // first char → alphabetically-sorted bucket
 
     // Initialize cached regex patterns for mana symbol replacement (performance optimization)
     this.initManaSymbolPatterns();
@@ -361,9 +362,37 @@ class CardSearch {
     return normalized;
   }
 
+  buildTypeMap(types) {
+    const map = new Map();
+    for (const type of types) {
+      const tl = type.t.toLowerCase();
+      const letter = tl[0];
+      if (!map.has(letter)) map.set(letter, []);
+      map.get(letter).push({ n: type.n, tl });
+    }
+    for (const bucket of map.values()) {
+      bucket.sort((a, b) => a.tl.localeCompare(b.tl));
+    }
+    return map;
+  }
+
+  findBestMatch(typeMap, prefix) {
+    const p = prefix.toLowerCase();
+    const bucket = typeMap.get(p[0]) ?? [];
+    let bestMatch = null;
+    for (const type of bucket) {
+      if (type.tl.slice(0, p.length) > p) break;
+      if (type.tl.startsWith(p)) {
+        if (!bestMatch || type.n > bestMatch.n) bestMatch = type;
+      }
+    }
+    return bestMatch;
+  }
+
   async fetchCommonCardTypes() {
     // Use the promise that was started at the very top of the page (before CSS parsing)
     this.commonCardTypes = await (window.commonCardTypesPromise || Promise.resolve([]));
+    this.typeMap = this.buildTypeMap(this.commonCardTypes);
     console.debug('Loaded', this.commonCardTypes.length, 'common card types');
   }
 
@@ -380,10 +409,7 @@ class CardSearch {
       return query;
     }
 
-    // Find the most common type that starts with this prefix
-    const bestMatch = this.commonCardTypes
-      .filter(type => type.t.toLowerCase().startsWith(prefix))
-      .sort((a, b) => b.n - a.n)[0]; // Get the most frequent match
+    const bestMatch = this.findBestMatch(this.typeMap, prefix);
 
     if (!bestMatch) {
       return query; // No match found, return original
@@ -393,19 +419,13 @@ class CardSearch {
     const originalPrefix = typeMatch[1];
 
     // Create completion that matches the user's capitalization pattern
-    let completedType = bestMatch.t;
+    let completedType = bestMatch.tl;
     if (originalPrefix.length > 0) {
-      // Preserve the capitalization pattern of the user's input
       if (originalPrefix === originalPrefix.toUpperCase()) {
-        // All caps -> all caps
-        completedType = bestMatch.t.toUpperCase();
-      } else if (originalPrefix === originalPrefix.toLowerCase()) {
-        // All lowercase -> all lowercase
-        completedType = bestMatch.t.toLowerCase();
-      } else {
-        // Mixed case -> take whatever they've typed so far
-        // and append the rest of the completion
-        completedType = originalPrefix + bestMatch.t.slice(originalPrefix.length);
+        completedType = bestMatch.tl.toUpperCase();
+      } else if (originalPrefix !== originalPrefix.toLowerCase()) {
+        // Mixed case -> preserve what they typed, append rest of the completion
+        completedType = originalPrefix + bestMatch.tl.slice(originalPrefix.length);
       }
     }
 
