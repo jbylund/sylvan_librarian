@@ -729,6 +729,12 @@ enum NumField {
     PreferScore,
 }
 
+impl NumField {
+    fn is_card_level(self) -> bool {
+        matches!(self, NumField::Cmc | NumField::Power | NumField::Toughness | NumField::Loyalty | NumField::EdhrEc)
+    }
+}
+
 fn attr_to_num_field(attr: &str) -> Option<NumField> {
     match attr {
         "cmc"                  => Some(NumField::Cmc),
@@ -788,6 +794,14 @@ impl NumExpr {
             }
         }
     }
+
+    fn is_card_level(&self) -> bool {
+        match self {
+            NumExpr::Const(_) => true,
+            NumExpr::Field(f) => f.is_card_level(),
+            NumExpr::Arith(lhs, _, rhs) => lhs.is_card_level() && rhs.is_card_level(),
+        }
+    }
 }
 
 fn cmp(op: CmpOp, a: f64, b: f64) -> bool {
@@ -824,6 +838,12 @@ enum CollField {
     ArtTags,
     IsTags,
     FrameData,
+}
+
+impl CollField {
+    fn is_card_level(self) -> bool {
+        !matches!(self, CollField::ArtTags | CollField::FrameData)
+    }
 }
 
 fn card_collection<'a>(card: &'a ACard, f: CollField) -> CollRef<'a> {
@@ -871,6 +891,12 @@ enum TextSearchField {
     ArtistLower,
 }
 
+impl TextSearchField {
+    fn is_card_level(self) -> bool {
+        matches!(self, TextSearchField::NameLower | TextSearchField::OracleTextLower)
+    }
+}
+
 fn text_search_field_value<'a>(card: &'a ACard, strings: &'a AStrings, field: TextSearchField) -> Option<&'a str> {
     match field {
         TextSearchField::NameLower       => Some(card.card_name_lower.as_str()),
@@ -894,6 +920,12 @@ enum TextField {
     Border,
     Watermark,
     CollectorNumber,
+}
+
+impl TextField {
+    fn is_card_level(self) -> bool {
+        matches!(self, TextField::NameLower | TextField::OracleTextLower)
+    }
 }
 
 fn text_field_value<'a>(card: &'a ACard, strings: &'a AStrings, field: TextField) -> Option<&'a str> {
@@ -1212,6 +1244,26 @@ impl FilterExpr {
                     CmpOp::Le => card_year <= *year,
                 })
             }
+        }
+    }
+
+    /// Returns true if every leaf predicate touches only card-level attributes
+    /// (constant across all printings of the same oracle id). When true for a
+    /// `unique=card, prefer=default` query, the preferred-printing index covers
+    /// the full result set with no dedup needed.
+    fn is_card_level(&self) -> bool {
+        match self {
+            FilterExpr::True | FilterExpr::ExactName(_) => true,
+            FilterExpr::And(c) | FilterExpr::Or(c) => c.iter().all(|x| x.is_card_level()),
+            FilterExpr::Not(inner) => inner.is_card_level(),
+            FilterExpr::NumericCmp { lhs, rhs, .. } => lhs.is_card_level() && rhs.is_card_level(),
+            FilterExpr::TextContains { field, .. } => field.is_card_level(),
+            FilterExpr::TextExact   { field, .. } => field.is_card_level(),
+            FilterExpr::TextRegex   { field, .. } => field.is_card_level(),
+            FilterExpr::ColorCmp { .. } | FilterExpr::TypeCmp { .. } => true,
+            FilterExpr::CollectionCmp { field, .. } => field.is_card_level(),
+            FilterExpr::Legality { .. } | FilterExpr::ManaCostCmp { .. } | FilterExpr::Devotion { .. } => true,
+            FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. } => false,
         }
     }
 }
@@ -2179,8 +2231,9 @@ fn run_query_no_dedup<'a>(
     (total, select_page(matched, offset, limit))
 }
 
-fn run_query<'a>(
+fn run_query<'a, B>(
     store: &'a [ACard],
+    preferred_indices: &[B],
     strings: &AStrings,
     filter: &FilterExpr,
     unique: &str,
@@ -2190,8 +2243,32 @@ fn run_query<'a>(
     limit: usize,
     offset: usize,
     indexes: &Archived<CardIndexes>,
-) -> (usize, Vec<&'a ACard>) {
+) -> (usize, Vec<&'a ACard>)
+where
+    B: Copy,
+    u32: From<B>,
+{
     let candidates = narrow_candidates(filter, indexes);
+
+    // For card-level queries with default prefer, substitute the preferred-printing
+    // index as the candidate set: one entry per oracle id, no dedup needed.
+    // When narrow_candidates already narrowed, intersect so both optimizations compose
+    // (e.g. trigram → 500 printings, intersect preferred → ~165, no dedup).
+    if unique == "card"
+        && !matches!(prefer, "oldest" | "newest" | "usd_low" | "usd_high" | "promo")
+        && filter.is_card_level()
+    {
+        return match candidates {
+            Some(existing) => {
+                let fast = intersect_sorted(&existing, preferred_indices);
+                run_query_no_dedup(fast.into_iter().map(|i| &store[i as usize]), strings, filter, orderby, direction, limit, offset)
+            }
+            None => run_query_no_dedup(
+                preferred_indices.iter().map(|&i| &store[u32::from(i) as usize]),
+                strings, filter, orderby, direction, limit, offset,
+            ),
+        };
+    }
 
     macro_rules! cards_iter {
         () => {
@@ -2624,7 +2701,7 @@ impl QueryEngine {
 
         let store: &[ACard] = &data.cards;
         let (total, page) = run_query(
-            store, &data.strings, &filter_expr, unique, prefer, orderby, direction, limit, offset, &data.indexes,
+            store, &data.preferred_indices[..], &data.strings, &filter_expr, unique, prefer, orderby, direction, limit, offset, &data.indexes,
         );
 
         let matches: Vec<Bound<PyDict>> = page.iter().map(|c| card_to_pydict(py, c, &data.strings)).collect::<PyResult<Vec<_>>>()?;
@@ -2665,6 +2742,61 @@ impl QueryEngine {
 
         let store: &[ACard] = &data.cards;
         let (total, page) = run_query_hashmap(store, &data.strings, &filter_expr, unique, prefer, orderby, direction, limit, offset);
+        let matches: Vec<Bound<PyDict>> = page.iter().map(|c| card_to_pydict(py, c, &data.strings)).collect::<PyResult<Vec<_>>>()?;
+        let matches_list = PyList::new(py, matches)?;
+        PyTuple::new(py, [total.into_pyobject(py)?.into_any(), matches_list.into_any()])
+    }
+
+    /// Same as query() but forces the linear-dedup path over all printings.
+    /// Use alongside query() to measure the benefit of the preferred-index fast path.
+    #[pyo3(signature = (*, filters, unique="card", prefer="default", orderby="edhrec", direction="asc", limit=100, offset=0))]
+    fn query_linear<'py>(
+        &self,
+        py: Python<'py>,
+        filters: &Bound<PyAny>,
+        unique: &str,
+        prefer: &str,
+        orderby: &str,
+        direction: &str,
+        limit: usize,
+        offset: usize,
+    ) -> PyResult<Bound<'py, PyTuple>> {
+        let to_json    = filters.call_method0("to_json")?;
+        let json_bytes: Vec<u8> = py
+            .import("orjson")?
+            .call_method1("dumps", (to_json,))?
+            .extract()?;
+        let json_str = std::str::from_utf8(&json_bytes)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("bad UTF-8 from orjson: {e}")))?;
+        let json_val: Value = serde_json::from_str(json_str)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("bad query JSON: {e}")))?;
+        let mmap = self.get_mmap()?;
+        // Safety: see the access_unchecked justification in query().
+        let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
+
+        // Must run before build_filter; see query().
+        sync_format_shifts(&data.format_shifts);
+        let filter_expr = build_filter(&json_val)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("build_filter: {e}")))?;
+
+        let store: &[ACard] = &data.cards;
+        // Use narrow_candidates so this exactly replicates the pre-optimization run_query
+        // path: any query that had an index hit (trigram, type_bits, cmc, etc.) should
+        // see the same narrowed candidate set here as it did before this PR.
+        let candidates = narrow_candidates(&filter_expr, &data.indexes);
+        macro_rules! cards_iter_linear {
+            () => {
+                match &candidates {
+                    Some(idxs) => Box::new(idxs.iter().map(|&i| &store[i as usize])) as Box<dyn Iterator<Item = &ACard>>,
+                    None       => Box::new(store.iter()),
+                }
+            };
+        }
+        let (total, page) = match unique {
+            "card"    => run_query_linear(cards_iter_linear!(), &data.strings, &filter_expr, |c| u128::from(c.oracle_id),       prefer, orderby, direction, limit, offset),
+            "artwork" => run_query_linear(cards_iter_linear!(), &data.strings, &filter_expr, |c| u128::from(c.illustration_id), prefer, orderby, direction, limit, offset),
+            _         => run_query_no_dedup(cards_iter_linear!(), &data.strings, &filter_expr, orderby, direction, limit, offset),
+        };
         let matches: Vec<Bound<PyDict>> = page.iter().map(|c| card_to_pydict(py, c, &data.strings)).collect::<PyResult<Vec<_>>>()?;
         let matches_list = PyList::new(py, matches)?;
         PyTuple::new(py, [total.into_pyobject(py)?.into_any(), matches_list.into_any()])
