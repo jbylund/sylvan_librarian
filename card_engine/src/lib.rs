@@ -2242,7 +2242,7 @@ fn card_to_pydict<'py>(py: Python<'py>, card: &ACard, strings: &AStrings) -> PyR
 const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 /// Bump on any archived-data-model change that size_of::<ACard>() wouldn't
 /// catch (e.g. reordering same-size Card fields, changing an index type).
-const ARCHIVE_FORMAT_VERSION: u32 = 1;
+const ARCHIVE_FORMAT_VERSION: u32 = 20260623;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -2695,22 +2695,11 @@ impl QueryEngine {
         let pool_len = data.preferred_indices.len();
         let take = n.min(pool_len);
 
-        // PRNG seed.
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos() as u64;
-        let mut rng = nanos
-            .wrapping_add(std::process::id() as u64)
-            .wrapping_add(0x9e3779b97f4a7c15);
-        if rng == 0 { rng = 0xdeadbeef; }
-
-        // Floyd's: pick `take` distinct positions from [0, pool_len).
-        let mut chosen: std::collections::HashSet<usize> = std::collections::HashSet::with_capacity(take);
-        for i in (pool_len - take)..pool_len {
-            rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
-            let r = rng as usize % (i + 1);
-            if !chosen.insert(r) { chosen.insert(i); }
+        use rand::RngExt;
+        let mut rng: rand::rngs::SmallRng = rand::make_rng();
+        let mut chosen = std::collections::HashSet::with_capacity(take);
+        while chosen.len() < take {
+            chosen.insert(rng.random::<u64>() as usize % pool_len);
         }
 
         let dicts: Vec<Bound<PyDict>> = chosen.iter()

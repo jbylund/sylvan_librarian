@@ -559,7 +559,10 @@ class TestAPIResourceCaching(unittest.TestCase):
         mock_engine = MagicMock()
         mock_engine.size.return_value = 0
 
-        with patch.object(self.api_resource, "_engine", mock_engine):
+        with (
+            patch.object(self.api_resource, "_engine", mock_engine),
+            patch.object(self.api_resource, "_trigger_background_reload_if_needed"),
+        ):
             result = self.api_resource.random_search(num_cards=1)
 
         assert result == {"cards": [], "total_cards": 0}
