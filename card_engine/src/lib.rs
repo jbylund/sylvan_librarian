@@ -1850,11 +1850,6 @@ struct CardData {
     // which never run the load path that feeds FORMAT_SHIFTS — resolve
     // legality shifts identically to the worker that built the archive.
     format_shifts: HashMap<String, u8>,
-    // Count of distinct oracle_id groups (unique=card pool size). Stored as u32
-    // (rkyv archives usize as u32_le; u32 is unambiguous and sufficient — we'll
-    // never have 4B unique cards). Computed once at reload time after the sort
-    // so sample_indexed() can skip the counting pass.
-    unique_count: u32,
     // One index per unique oracle_id group: the position in `cards` of that
     // group's preferred printing (highest prefer_score). Lives in the mmap so
     // it is shared across all workers at zero per-worker heap cost.
@@ -2451,11 +2446,9 @@ impl QueryEngine {
         // otherwise irrelevant.
         cards.sort_unstable_by_key(|c| (c.oracle_id, c.illustration_id));
 
-        // Single pass: count oracle_id groups and record the preferred printing
-        // index for each. Cards are sorted by (oracle_id, illustration_id) so
-        // equal oracle_ids are adjacent. prefer_score here is the plain f32 on
-        // Card (not the archived version), so no From<> conversion needed.
-        let mut unique_count: u32 = 0;
+        // Single pass: record the preferred printing index for each oracle_id group.
+        // Cards are sorted by (oracle_id, illustration_id) so equal oracle_ids are adjacent.
+        // prefer_score here is the plain f32 on Card (not the archived version).
         let mut preferred_indices: Vec<u32> = Vec::new();
         {
             let mut prev_oracle: Option<u128> = None;
@@ -2466,7 +2459,6 @@ impl QueryEngine {
                         preferred_indices.push(best_idx);
                     }
                     prev_oracle = Some(card.oracle_id);
-                    unique_count += 1;
                     group_best = Some((i as u32, card.prefer_score.unwrap_or(0.0)));
                 } else {
                     let score = card.prefer_score.unwrap_or(0.0);
@@ -2505,7 +2497,7 @@ impl QueryEngine {
         // Snapshot the registry card_from_pydict just populated so reader
         // processes can adopt the same format→shift assignments.
         let format_shifts_snapshot = format_shifts().read().map(|m| m.clone()).unwrap_or_default();
-        let card_data = CardData { cards, strings, indexes, format_shifts: format_shifts_snapshot, unique_count, preferred_indices };
+        let card_data = CardData { cards, strings, indexes, format_shifts: format_shifts_snapshot, preferred_indices };
 
         // Write atomically: stream into a per-PID .tmp, then rename over shm_path.
         // Per-PID avoids the race where two workers write to the same .tmp and
@@ -2730,165 +2722,6 @@ impl QueryEngine {
         PyList::new(py, dicts)
     }
 
-    /// Return `n` randomly sampled cards via pre-selected group indices (Floyd's algorithm).
-    /// Pass 1: count distinct oracle_ids (pure count, zero allocations).
-    /// Floyd's: pick `n` unique indices from [0, unique_count) in O(n) time/memory.
-    /// Pass 2: walk the store; at each group boundary check a HashSet — only compute
-    ///         prefer_score for the ~n/unique_count fraction of groups that are chosen.
-    /// Final: shuffle the n results and convert to Python dicts.
-    #[pyo3(signature = (n))]
-    fn sample_indexed<'py>(&self, py: Python<'py>, n: usize) -> PyResult<Bound<'py, PyList>> {
-        use std::collections::HashSet;
-
-        let mmap = self.get_mmap()?;
-        // Safety: see the access_unchecked justification in query().
-        let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
-
-        // unique_count was computed at reload time (after the sort), so no counting pass needed.
-        let total_unique = u32::from(data.unique_count) as usize;
-        let take = n.min(total_unique);
-
-        // PRNG seed.
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos() as u64;
-        let mut rng = nanos
-            .wrapping_add(std::process::id() as u64)
-            .wrapping_add(0x9e3779b97f4a7c15);
-        if rng == 0 { rng = 0xdeadbeef; }
-
-        // Floyd's sampling: choose `take` distinct integers from [0, total_unique).
-        // insert() returns false when the value was already present; in that case use i instead.
-        // Produces a uniformly random subset regardless of insertion order.
-        let mut chosen: HashSet<usize> = HashSet::with_capacity(take);
-        for i in (total_unique - take)..total_unique {
-            rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
-            let r = rng as usize % (i + 1);
-            if !chosen.insert(r) { chosen.insert(i); }
-        }
-
-        // Pass 2: walk cards, collecting the preferred printing for each chosen group.
-        let mut results: Vec<&ACard> = Vec::with_capacity(take);
-        let mut group_counter: usize = 0;
-        let mut prev_oracle: Option<u128> = None;
-        let mut group_best: Option<(&ACard, f64)> = None;
-        let mut in_chosen = false;
-
-        for card in data.cards.iter() {
-            let oid = u128::from(card.oracle_id);
-            if prev_oracle != Some(oid) {
-                // Flush previous group.
-                if in_chosen {
-                    if let Some((best, _)) = group_best.take() {
-                        results.push(best);
-                    }
-                }
-                prev_oracle = Some(oid);
-                in_chosen = chosen.contains(&group_counter);
-                group_counter += 1;
-                group_best = if in_chosen {
-                    let score = card.prefer_score.as_ref().map(|v| f32::from(*v)).unwrap_or(0.0) as f64;
-                    Some((card, score))
-                } else {
-                    None
-                };
-            } else if in_chosen {
-                let score = card.prefer_score.as_ref().map(|v| f32::from(*v)).unwrap_or(0.0) as f64;
-                if score > group_best.as_ref().map_or(f64::NEG_INFINITY, |g| g.1) {
-                    group_best = Some((card, score));
-                }
-            }
-        }
-        // Flush last group.
-        if in_chosen {
-            if let Some((best, _)) = group_best {
-                results.push(best);
-            }
-        }
-
-        // Shuffle results so output order is random (groups were visited in sorted order).
-        for i in 0..results.len() {
-            rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
-            let j = i + rng as usize % (results.len() - i);
-            results.swap(i, j);
-        }
-
-        let dicts: Vec<Bound<PyDict>> = results.iter()
-            .map(|c| card_to_pydict(py, c, &data.strings))
-            .collect::<PyResult<_>>()?;
-        PyList::new(py, dicts)
-    }
-
-    /// Return `n` randomly sampled cards using reservoir sampling (bounded min-heap).
-    /// O(total_cards × log n) time, O(n) memory — never accumulates the full unique-card pool.
-    /// Each oracle_id group contributes one candidate with a random u64 key; the heap retains
-    /// the n groups with the largest keys.
-    #[pyo3(signature = (n))]
-    fn sample_reservoir<'py>(&self, py: Python<'py>, n: usize) -> PyResult<Bound<'py, PyList>> {
-        use std::cmp::Reverse;
-        use std::collections::BinaryHeap;
-
-        let mmap = self.get_mmap()?;
-        // Safety: see the access_unchecked justification in query().
-        let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
-
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos() as u64;
-        let mut rng = nanos
-            .wrapping_add(std::process::id() as u64)
-            .wrapping_add(0x9e3779b97f4a7c15);
-        if rng == 0 { rng = 0xdeadbeef; }
-
-        // Min-heap keyed by (random_u64, store_index): peek() is the candidate with the
-        // smallest key, which gets evicted when a better (larger-key) candidate arrives.
-        let mut heap: BinaryHeap<Reverse<(u64, usize)>> = BinaryHeap::with_capacity(n + 1);
-
-        let mut prev_oracle: Option<u128> = None;
-        let mut group_best: Option<(usize, f64)> = None; // (store index, prefer score)
-
-        let push_group = |heap: &mut BinaryHeap<Reverse<(u64, usize)>>, rng: &mut u64, best_idx: usize| {
-            *rng ^= *rng << 13;
-            *rng ^= *rng >> 7;
-            *rng ^= *rng << 17;
-            let r = *rng;
-            if heap.len() < n {
-                heap.push(Reverse((r, best_idx)));
-            } else if let Some(&Reverse((min_r, _))) = heap.peek() {
-                if r > min_r {
-                    heap.pop();
-                    heap.push(Reverse((r, best_idx)));
-                }
-            }
-        };
-
-        for (i, card) in data.cards.iter().enumerate() {
-            let oid = u128::from(card.oracle_id);
-            if prev_oracle != Some(oid) {
-                if let Some((best_idx, _)) = group_best.take() {
-                    push_group(&mut heap, &mut rng, best_idx);
-                }
-                prev_oracle = Some(oid);
-                let score = card.prefer_score.as_ref().map(|v| f32::from(*v)).unwrap_or(0.0) as f64;
-                group_best = Some((i, score));
-            } else {
-                let score = card.prefer_score.as_ref().map(|v| f32::from(*v)).unwrap_or(0.0) as f64;
-                if score > group_best.as_ref().map_or(f64::NEG_INFINITY, |g| g.1) {
-                    group_best = Some((i, score));
-                }
-            }
-        }
-        if let Some((best_idx, _)) = group_best {
-            push_group(&mut heap, &mut rng, best_idx);
-        }
-
-        let dicts: Vec<Bound<PyDict>> = heap.into_iter()
-            .map(|Reverse((_, idx))| card_to_pydict(py, &data.cards[idx], &data.strings))
-            .collect::<PyResult<_>>()?;
-        PyList::new(py, dicts)
-    }
 
     /// Rust-heap allocator stats and reload() memory breakdown.
     /// Empty dict unless built with --features alloc-counter (measurement-only).
