@@ -5,6 +5,12 @@ on:
     branches:
       - main
   pull_request:
+    paths:
+      - '**/*.py'
+      - 'card_engine/**'
+      - 'requirements/**'
+      - 'pyproject.toml'
+      - '.github/workflows/unit-tests.yml'
 
 permissions:
   contents: read
