@@ -9,6 +9,7 @@ engine.query_linear() (always scans all printings with linear dedup), for a mix
 of card-level queries (fast path fires) and printing-level queries (falls back).
 """
 
+# pylint: disable=protected-access
 from __future__ import annotations
 
 import multiprocessing
