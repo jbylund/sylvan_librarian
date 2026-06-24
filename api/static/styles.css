@@ -147,7 +147,7 @@ body {
 }
 
 .header h1 {
-  font-family: 'Beleren', sans-serif;
+  font-family: 'Beleren', 'Beleren Fallback', sans-serif;
   font-size: clamp(2.3rem, 4.2vw, 3.4rem);
   margin-bottom: 0;
   text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
@@ -161,7 +161,7 @@ body {
 }
 
 .header p {
-  font-family: 'MPlantin', Georgia, serif;
+  font-family: 'MPlantin', 'MPlantin Fallback', Georgia, serif;
   font-size: 1.38rem;
   opacity: 0.9;
 }
@@ -377,7 +377,7 @@ body {
   font-size: 1.5rem;
   font-weight: bold;
   color: var(--color-text-primary);
-  font-family: 'Beleren', sans-serif;
+  font-family: 'Beleren', 'Beleren Fallback', sans-serif;
   flex: 1;
   min-width: 0;
   overflow-wrap: break-word;
@@ -408,7 +408,7 @@ body {
   color: var(--color-text-primary);
   margin-bottom: 12px;
   font-style: italic;
-  font-family: 'Beleren', sans-serif;
+  font-family: 'Beleren', 'Beleren Fallback', sans-serif;
   overflow-wrap: break-word;
   word-break: break-word;
 }
@@ -418,7 +418,7 @@ body {
   color: var(--color-text-primary);
   line-height: 1.4;
   margin-bottom: 10px;
-  font-family: 'MPlantin', Georgia, serif;
+  font-family: 'MPlantin', 'MPlantin Fallback', Georgia, serif;
   overflow-wrap: break-word;
   word-break: break-word;
 }
@@ -445,7 +445,7 @@ body {
 .card-power-toughness {
   font-size: 1.04rem;
   color: var(--color-text-primary);
-  font-family: 'Beleren', sans-serif;
+  font-family: 'Beleren', 'Beleren Fallback', sans-serif;
   font-weight: bold;
   text-align: right;
 }
@@ -577,7 +577,7 @@ body {
   font-size: 1.73rem;
   font-weight: bold;
   color: var(--color-text-light);
-  font-family: 'Beleren', sans-serif;
+  font-family: 'Beleren', 'Beleren Fallback', sans-serif;
   flex: 1;
 }
 
@@ -600,7 +600,7 @@ body {
   color: var(--color-text-lightest);
   margin-bottom: 12px;
   font-style: italic;
-  font-family: 'Beleren', sans-serif;
+  font-family: 'Beleren', 'Beleren Fallback', sans-serif;
 }
 
 .modal-card-text {
@@ -609,7 +609,7 @@ body {
   line-height: 1.6;
   margin-bottom: 10px;
   text-align: left;
-  font-family: 'MPlantin', Georgia, serif;
+  font-family: 'MPlantin', 'MPlantin Fallback', Georgia, serif;
 }
 
 .modal-card-set-power-row {
@@ -630,7 +630,7 @@ body {
 .modal-card-power-toughness {
   font-size: 1.27rem;
   color: var(--color-modal-text);
-  font-family: 'Beleren', sans-serif;
+  font-family: 'Beleren', 'Beleren Fallback', sans-serif;
   font-weight: bold;
   text-align: right;
 }
