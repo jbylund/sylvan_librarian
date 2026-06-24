@@ -536,43 +536,34 @@ class TestAPIResourceCaching(unittest.TestCase):
             # Generation increment is the cross-worker invalidation signal
             assert self.api_resource._cache_generation.value > gen_before
 
-    def test_repeated_random_search_calls_search_once(self) -> None:
-        """Test that repeated random_search calls only invoke _search once when the preferred-cards cache is warm."""
+    def test_random_search_uses_engine_sample_reservoir(self) -> None:
+        """random_search delegates to engine.sample_reservoir() when the engine is loaded."""
+        from unittest.mock import MagicMock  # noqa: PLC0415
+
         fake_cards = [{"name": "Lightning Bolt"}, {"name": "Counterspell"}]
-        fake_search_result = {"cards": fake_cards, "total_cards": 2}
+        mock_engine = MagicMock()
+        mock_engine.size.return_value = 2
+        mock_engine.sample_reservoir.return_value = fake_cards
 
-        # Ensure the preferred-cards cache starts empty for this test
-        self.api_resource._preferred_cards_map.clear()
+        with patch.object(self.api_resource, "_engine", mock_engine):
+            result = self.api_resource.random_search(num_cards=2)
 
-        with patch.object(self.api_resource, "_search", return_value=fake_search_result) as mock_search:
-            result1 = self.api_resource.random_search(num_cards=1)
-            result2 = self.api_resource.random_search(num_cards=1)
+        mock_engine.sample_reservoir.assert_called_once_with(2)
+        assert result["cards"] == fake_cards
+        assert result["total_cards"] == 2
 
-        # _search should only have been called once; the second random_search hit the cache
-        assert mock_search.call_count == 1
-        assert len(result1["cards"]) == 1
-        assert len(result2["cards"]) == 1
+    def test_random_search_returns_empty_when_engine_not_loaded(self) -> None:
+        """random_search returns empty result when the engine has no cards."""
+        from unittest.mock import MagicMock  # noqa: PLC0415
 
-    def test_preferred_cards_cache_clears_after_load(self) -> None:
-        """Test that the preferred-cards cache is invalidated after a successful card load."""
-        with self._mock_successful_upsert():
-            valid_card = create_test_card(
-                card_id="00000000-0000-0000-0000-000000000009",
-                keywords=[],
-                prices={},
-            )
+        mock_engine = MagicMock()
+        mock_engine.size.return_value = 0
 
-            # Seed the preferred-cards map at the current generation
-            gen = self.api_resource._cache_generation.value
-            self.api_resource._preferred_cards_map[gen] = [{"name": "sentinel"}]
-            assert self.api_resource._preferred_cards_map.get(gen) is not None
+        with patch.object(self.api_resource, "_engine", mock_engine):
+            result = self.api_resource.random_search(num_cards=1)
 
-            self.api_resource._upsert_cards([valid_card])
-
-            # After load the generation advances; sentinel is unreachable at the new generation
-            new_gen = self.api_resource._cache_generation.value
-            assert new_gen > gen
-            assert self.api_resource._preferred_cards_map.get(new_gen) is None
+        assert result == {"cards": [], "total_cards": 0}
+        mock_engine.sample_reservoir.assert_not_called()
 
     def test_cache_clear_method_works(self) -> None:
         """Test that cache.clear() method works for cachebox caches."""
@@ -587,89 +578,6 @@ class TestAPIResourceCaching(unittest.TestCase):
         gen_before = self.api_resource._cache_generation.value
         self.api_resource._clear_caches()
         assert self.api_resource._cache_generation.value == gen_before + 1
-
-    def test_get_all_preferred_cards_returns_stale_on_generation_miss(self) -> None:
-        """On a cache miss, returns the previous generation's cards immediately."""
-        stale_cards = [{"name": "Stale Card"}]
-        gen = self.api_resource._cache_generation.value
-        self.api_resource._preferred_cards_map[gen] = stale_cards
-
-        # Advance generation so current gen has no data
-        self.api_resource._cache_generation.value += 1
-
-        with patch.object(self.api_resource, "_search"):
-            result = self.api_resource._get_all_preferred_cards()
-
-        assert result == stale_cards
-        # _search is called in the background thread, not the calling thread, so it
-        # may or may not have fired yet — we only assert the return value here.
-
-    def test_get_all_preferred_cards_spawns_background_refresh(self) -> None:
-        """Spawns exactly one background thread to populate the new generation's cache."""
-        import threading  # noqa: PLC0415
-
-        stale_cards = [{"name": "Stale Card"}]
-        gen = self.api_resource._cache_generation.value
-        self.api_resource._preferred_cards_map[gen] = stale_cards
-        self.api_resource._cache_generation.value += 1
-
-        threads_started: list = []
-        real_thread_init = threading.Thread.__init__
-
-        def tracking_init(self_thread: threading.Thread, **kwargs: object) -> None:
-            threads_started.append(kwargs.get("target"))
-            real_thread_init(self_thread, **kwargs)
-
-        with (
-            patch.object(threading.Thread, "__init__", tracking_init),
-            patch.object(threading.Thread, "start", lambda _: None),
-            patch.object(self.api_resource, "_search", return_value={"cards": []}),
-        ):
-            self.api_resource._get_all_preferred_cards()
-
-        assert len(threads_started) == 1
-        assert threads_started[0] == self.api_resource._fetch_and_cache_preferred_cards
-
-    def test_get_all_preferred_cards_blocks_synchronously_at_startup(self) -> None:
-        """With no stale data, blocks until cards are fetched (startup path)."""
-        fresh_cards = [{"name": "Fresh Card"}]
-        self.api_resource._preferred_cards_map.clear()
-
-        with patch.object(self.api_resource, "_search", return_value={"cards": fresh_cards}):
-            result = self.api_resource._get_all_preferred_cards()
-
-        assert result == fresh_cards
-
-    def test_fetch_and_cache_skips_if_lock_held(self) -> None:
-        """_fetch_and_cache_preferred_cards returns without calling _search if the lock is held."""
-        gen = self.api_resource._cache_generation.value
-        self.api_resource._preferred_cards_refresh_lock.acquire()
-        try:
-            with patch.object(self.api_resource, "_search") as mock_search:
-                self.api_resource._fetch_and_cache_preferred_cards(gen)
-            mock_search.assert_not_called()
-        finally:
-            self.api_resource._preferred_cards_refresh_lock.release()
-
-    def test_background_refresh_populates_new_generation(self) -> None:
-        """Background thread eventually populates the new generation's cache."""
-        fresh_cards = [{"name": "Fresh Card"}]
-        stale_cards = [{"name": "Stale Card"}]
-        gen = self.api_resource._cache_generation.value
-        self.api_resource._preferred_cards_map[gen] = stale_cards
-        new_gen = gen + 1
-        self.api_resource._cache_generation.value = new_gen
-
-        with patch.object(self.api_resource, "_search", return_value={"cards": fresh_cards}):
-            self.api_resource._get_all_preferred_cards()
-            # Give the daemon thread time to complete
-            deadline = time.monotonic() + 2.0
-            while time.monotonic() < deadline:
-                if self.api_resource._preferred_cards_map.get(new_gen) is not None:
-                    break
-                time.sleep(0.01)
-
-        assert self.api_resource._preferred_cards_map.get(new_gen) == fresh_cards
 
 
 _HOSTNAME_TESTCASES = {

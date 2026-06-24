@@ -12,7 +12,6 @@ import logging
 import multiprocessing
 import os
 import pathlib
-import random
 import re
 import threading
 import time
@@ -393,8 +392,6 @@ class APIResource:
             generation=self._cache_generation,
         )
         self._search_gen_cache: LRUCache = LRUCache(maxsize=1)  # generation → TTLCache
-        self._preferred_cards_map: LRUCache = LRUCache(maxsize=1)  # generation → list
-        self._preferred_cards_refresh_lock = threading.Lock()
         self._session = requests.Session()
         self._import_guard: LockType = import_guard
         self._last_import_time: Synchronized = last_import_time or multiprocessing.Value("d", 0.0, lock=True)
@@ -2236,38 +2233,6 @@ class APIResource:
         with self._cache_generation.get_lock():
             self._cache_generation.value += 1
 
-    def _fetch_and_cache_preferred_cards(self, gen: int) -> None:
-        if not self._preferred_cards_refresh_lock.acquire(blocking=False):
-            return
-        try:
-            cards = self._search(query="", limit=None)["cards"]
-            self._preferred_cards_map[gen] = cards
-        except Exception:
-            logger.exception("Background preferred cards refresh failed for generation %d", gen)
-        finally:
-            self._preferred_cards_refresh_lock.release()
-
-    def _get_all_preferred_cards(self) -> list[dict[str, Any]]:
-        gen = self._cache_generation.value
-        try:
-            return self._preferred_cards_map[gen]
-        except KeyError:
-            stale = next(iter(self._preferred_cards_map.values()), None)
-            if stale is not None:
-                # Stale-while-revalidate: serve old data instantly, refresh in background.
-                # Best-effort check: skip spawning if a refresh is already in progress so we
-                # don't create a flood of threads that immediately no-op on the inner lock.
-                if not self._preferred_cards_refresh_lock.locked():
-                    threading.Thread(
-                        target=self._fetch_and_cache_preferred_cards,
-                        args=(gen,),
-                        daemon=True,
-                    ).start()
-                return stale
-            # No previous generation (startup): block until cards are loaded
-            self._fetch_and_cache_preferred_cards(gen)
-            return self._preferred_cards_map.get(gen, [])
-
     def random_search(self, *, num_cards: int = 1, **_: object) -> dict[str, Any]:
         """Return one or more random cards in the same envelope shape as search().
 
@@ -2278,8 +2243,8 @@ class APIResource:
             A dict with a "cards" key (list of card dicts) and "total_cards" key,
             matching the shape returned by search().
         """
-        num_cards = min(num_cards, 1000)
-        num_cards = max(num_cards, 1)
-        all_cards = self._get_all_preferred_cards()
-        cards = random.sample(all_cards, min(num_cards, len(all_cards)))
+        num_cards = min(max(num_cards, 1), 1000)
+        if self._engine.size() == 0:
+            return {"cards": [], "total_cards": 0}
+        cards = list(self._engine.sample_reservoir(num_cards))
         return {"cards": cards, "total_cards": len(cards)}
