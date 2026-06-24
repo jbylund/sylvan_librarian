@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 import falcon
 import pytest
 
-from api.api_resource import FALLBACK_SITE_NAME, APIResource, hostname_to_site_name
+from api.api_resource import _WORDS, FALLBACK_SITE_NAME, APIResource, _split_words, hostname_to_site_name
 from api.settings import settings
 
 
@@ -641,6 +641,72 @@ _HOSTNAME_TESTCASES = {
         "raw_host": "...",
     },
 }
+
+
+_SPLIT_WORDS_TESTCASES: dict[str, dict] = {
+    "whole_word": {
+        "s": "apple",
+        "expected": ["apple"],
+    },
+    "two_words": {
+        "s": "applepie",
+        "expected": ["apple", "pie"],
+    },
+    "three_words": {
+        "s": "applebananacherry",
+        "expected": ["apple", "banana", "cherry"],
+    },
+    "no_split_possible": {
+        "s": "xyzqwerty",
+        "expected": None,
+    },
+    "split_prefers_middle": {
+        # "the" (len 3) at position 0 and "oak" (len 3) at end; "lion" in the middle is found first
+        "s": "thelionoak",
+        "expected": ["the", "lion", "oak"],
+    },
+    "prefers_fewest_words": {
+        # Two valid splits: ["abcde", "fghij"] (k=5, center) and ["abc", "de", "fghij"] (k=3).
+        # Middle-out tries k=5 first and commits to the 2-word split.
+        "s": "abcdefghij",
+        "expected": ["abcde", "fghij"],
+    },
+}
+
+_SMALL_WORDS: frozenset[str] = frozenset(["apple", "pie", "banana", "cherry", "the", "lion", "oak", "abcde", "fghij", "abc", "de"])
+
+
+class TestSplitWords:
+    """Tests for _split_words() using a controlled word set."""
+
+    @pytest.mark.parametrize(
+        argnames=sorted(next(iter(_SPLIT_WORDS_TESTCASES.values()))),
+        argvalues=[[v for k, v in sorted(_SPLIT_WORDS_TESTCASES[name].items())] for name in sorted(_SPLIT_WORDS_TESTCASES)],
+        ids=sorted(_SPLIT_WORDS_TESTCASES),
+    )
+    def test_split_words(self, expected: list[str] | None, s: str) -> None:
+        assert _split_words(s, _SMALL_WORDS) == expected
+
+
+_HOSTNAME_DICT_TESTCASES: dict[str, dict] = {
+    "no_dash_splits_into_words": {
+        "expected": "Sylvan Librarian",
+        "raw_host": "sylvanlibrarian.com",
+    },
+}
+
+
+class TestHostnameSiteNameWithDict:
+    """Tests for hostname_to_site_name() that require a system dictionary."""
+
+    @pytest.mark.skipif(not _WORDS, reason="no system dictionary found")
+    @pytest.mark.parametrize(
+        argnames=sorted(next(iter(_HOSTNAME_DICT_TESTCASES.values()))),
+        argvalues=[[v for k, v in sorted(_HOSTNAME_DICT_TESTCASES[name].items())] for name in sorted(_HOSTNAME_DICT_TESTCASES)],
+        ids=sorted(_HOSTNAME_DICT_TESTCASES),
+    )
+    def test_hostname_to_site_name_with_dict(self, expected: str, raw_host: str) -> None:
+        assert hostname_to_site_name(raw_host) == expected
 
 
 class TestHostnameSiteName:

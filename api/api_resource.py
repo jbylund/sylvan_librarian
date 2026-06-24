@@ -17,7 +17,7 @@ import threading
 import time
 import urllib.parse
 from datetime import timedelta
-from functools import wraps
+from functools import lru_cache, wraps
 from typing import TYPE_CHECKING, Any
 from typing import cast as typecast
 
@@ -184,6 +184,46 @@ _SAFE_HOSTNAME_RE = re.compile(r"^[a-z0-9.\-]+$")
 _IP_RE = re.compile(r"^\d+\.\d+\.\d+\.\d+$")
 
 
+_MIN_WORD_LEN = 3
+
+# TODO: supplement with words from https://api.scryfall.com/catalog/word-bank so MtG-specific
+# terms (e.g. "sylvan", "planeswalker") are recognized even on systems without a full dictionary.
+def _load_word_set() -> frozenset[str]:
+    for path in ("/usr/share/dict/american-english", "/usr/share/dict/words"):
+        try:
+            with pathlib.Path(path).open() as f:
+                return frozenset(w.lower() for w in f.read().splitlines() if w.isalpha() and len(w) >= _MIN_WORD_LEN)
+        except OSError:
+            continue
+    return frozenset()
+
+
+_WORDS: frozenset[str] = _load_word_set()
+
+
+def _split_words(s: str, words: frozenset[str]) -> list[str] | None:
+    """Split s into dictionary words by searching split points from the middle outward.
+
+    Returns a list of words on success, or None if the string cannot be fully partitioned.
+    """
+    if s in words:
+        return [s]
+    n = len(s)
+    mid = n // 2
+    for k in sorted(range(1, n), key=lambda k: abs(k - mid)):
+        left, right = s[:k], s[k:]
+        if left in words:
+            rest = _split_words(right, words)
+            if rest is not None:
+                return [left, *rest]
+        if right in words:
+            rest = _split_words(left, words)
+            if rest is not None:
+                return [*rest, right]
+    return None
+
+
+@lru_cache(maxsize=256)
 def hostname_to_site_name(raw_host: str) -> str:
     """Derive a display name from a Host header value, falling back to FALLBACK_SITE_NAME."""
     # urlparse requires a scheme; .hostname strips the port and lowercases.
@@ -194,6 +234,10 @@ def hostname_to_site_name(raw_host: str) -> str:
     tld = parts[-1].lower()
     name = parts[0] if tld in _STRIP_TLDS else ".".join(parts)
     name = name.replace(".", "").replace("-", " ").strip()
+    if " " not in name and _WORDS:
+        split = _split_words(name, _WORDS)
+        if split is not None:
+            name = " ".join(split)
     name = name.title()
     return name if any(c.isalnum() for c in name) else FALLBACK_SITE_NAME
 
