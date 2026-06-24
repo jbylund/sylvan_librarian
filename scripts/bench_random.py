@@ -69,7 +69,7 @@ print(f"Prebuilt list: {len(prebuilt):,} unique cards, ~{list_bytes / 1024 / 102
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 
-def _time_fn(fn: callable, warmup: int, window: float) -> float:
+def _time_fn(fn: Callable[[], object], warmup: int, window: float) -> float:
     """Return average µs per call after warmup."""
     for _ in range(warmup):
         fn()
