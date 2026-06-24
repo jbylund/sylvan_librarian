@@ -1,13 +1,8 @@
 use std::collections::HashMap;
 use regex::Regex;
 use serde_json::Value;
-use super::{
-    ACard, AStrings, str_at,
-    is_devotion_sym, mana_pip_counts, mana_cmc,
-    color_list_to_mask, card_type_str_to_bit,
-    LEGALITY_LEGAL, LEGALITY_BANNED, LEGALITY_RESTRICTED,
-    format_shift,
-};
+use super::{ACard, AStrings, str_at, is_devotion_sym, mana_pip_counts, mana_cmc, color_list_to_mask, card_type_str_to_bit};
+use super::legality::{LEGALITY_LEGAL, LEGALITY_BANNED, LEGALITY_RESTRICTED, format_shift};
 
 // ─── Comparison / arithmetic operators ───────────────────────────────────────
 
