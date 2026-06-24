@@ -206,21 +206,32 @@ def _split_words(s: str, words: frozenset[str]) -> list[str] | None:
 
     Returns a list of words on success, or None if the string cannot be fully partitioned.
     """
-    if s in words:
-        return [s]
-    n = len(s)
-    mid = n // 2
-    for k in sorted(range(1, n), key=lambda k: abs(k - mid)):
-        left, right = s[:k], s[k:]
-        if left in words:
-            rest = _split_words(right, words)
-            if rest is not None:
-                return [left, *rest]
-        if right in words:
-            rest = _split_words(left, words)
-            if rest is not None:
-                return [*rest, right]
-    return None
+    # Only attempt dictionary splitting for purely alphabetic strings.
+    if not s.isalpha():
+        return None
+
+    @lru_cache(maxsize=4096)
+    def _split(sub: str) -> tuple[str, ...] | None:
+        if sub in words:
+            return (sub,)
+        n = len(sub)
+        if n < _MIN_WORD_LEN:
+            return None
+        mid = n // 2
+        for k in sorted(range(1, n), key=lambda k: abs(k - mid)):
+            left, right = sub[:k], sub[k:]
+            if left in words:
+                rest = _split(right)
+                if rest is not None:
+                    return (left, *rest)
+            if right in words:
+                rest = _split(left)
+                if rest is not None:
+                    return (*rest, right)
+        return None
+
+    res = _split(s)
+    return list(res) if res is not None else None
 
 
 @lru_cache(maxsize=256)
