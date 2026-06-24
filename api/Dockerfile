@@ -33,7 +33,8 @@ RUN apt-get update -qqq && apt-get install -qqq -y \
     libev-dev \
     libpq-dev \
     libpython3-dev \
-    python3 > /dev/null
+    python3 \
+    wamerican > /dev/null
 
 RUN python3 -V
 RUN ln -s $(python3 -c "import sys; print(sys.executable)") /usr/local/bin/python
