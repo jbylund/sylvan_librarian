@@ -44,6 +44,42 @@ pub struct GenerationalSharedCache {
     default_ttl_ns: Option<u64>,
 }
 
+// ── Init helper ───────────────────────────────────────────────────────────────
+
+/// Write CoordHeader + PageHeaders into a (possibly zeroed) mmap. Called under the flock
+/// in open() and also by invalidate() (which uses the spinlock instead). Having this as a
+/// free function lets both call sites avoid duplicating the layout arithmetic.
+fn write_init_headers(
+    mmap: &mut MmapMut,
+    n_pages: usize,
+    maxsize: usize,
+    gen_maxsize: usize,
+    slot_count_per_page: usize,
+    arena_per_page: usize,
+    filter_bucket_count: usize,
+    page_region_start: usize,
+    page_size: usize,
+) {
+    let c = unsafe { &mut *(mmap.as_mut_ptr() as *mut CoordHeader) };
+    c.magic = MAGIC;
+    c.version = VERSION;
+    c.n_pages = n_pages as u32;
+    c.maxsize = maxsize as u32;
+    c.gen_maxsize = gen_maxsize as u32;
+    c.counter = 0;
+    c.slot_count_per_page = slot_count_per_page as u32;
+    c.arena_per_page = arena_per_page as u32;
+    c.filter_bucket_count = filter_bucket_count as u32;
+    for i in 0..n_pages {
+        let ph_offset = page_region_start + i * page_size;
+        let ph = unsafe { &mut *(mmap.as_mut_ptr().add(ph_offset) as *mut PageHeader) };
+        ph.arena_head = 0;
+        ph.entry_count = 0;
+        ph.is_sealed = if i == 0 { 0 } else { 1 };
+        ph.generation = 0;
+    }
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn now_ns() -> u64 {
@@ -149,38 +185,6 @@ impl GenerationalSharedCache {
         })
     }
 
-    // ── Init ──────────────────────────────────────────────────────────────
-
-    fn init_headers(
-        &mut self,
-        n_pages: usize,
-        maxsize: usize,
-        gen_maxsize: usize,
-        slot_count_per_page: usize,
-        arena_per_page: usize,
-        filter_bucket_count: usize,
-    ) {
-        {
-            let c = self.coord_mut();
-            c.magic = MAGIC;
-            c.version = VERSION;
-            c.n_pages = n_pages as u32;
-            c.maxsize = maxsize as u32;
-            c.gen_maxsize = gen_maxsize as u32;
-            c.counter = 0;
-            c.slot_count_per_page = slot_count_per_page as u32;
-            c.arena_per_page = arena_per_page as u32;
-            c.filter_bucket_count = filter_bucket_count as u32;
-        }
-        for i in 0..n_pages {
-            let ph = self.page_header_mut(i);
-            ph.arena_head = 0;
-            ph.entry_count = 0;
-            ph.is_sealed = if i == 0 { 0 } else { 1 };
-            ph.generation = 0;
-        }
-    }
-
     // ── Arena allocation ──────────────────────────────────────────────────
 
     fn alloc_arena(
@@ -190,7 +194,8 @@ impl GenerationalSharedCache {
         key_len: usize,
     ) -> Option<(u32, u32)> {
         let value_padded = (value_len + ARENA_ALIGN - 1) & !(ARENA_ALIGN - 1);
-        let total = value_padded + key_len;
+        let key_padded   = (key_len   + ARENA_ALIGN - 1) & !(ARENA_ALIGN - 1);
+        let total = value_padded + key_padded;
         let arena_capacity = self.page_size - self.arena_start_in_page;
         if self.page_header(page_idx).arena_head as usize + total > arena_capacity {
             return None;
@@ -374,9 +379,13 @@ impl GenerationalSharedCache {
             ph.entry_count = 0;
         }
 
-        // 4. Re-insert survivors into the (now-blank) retiring page.
+        // 4. Re-insert survivors into the (now-blank) retiring page. If a survivor doesn't
+        //    fit (arena full), remove it from the filter so it doesn't become a permanent
+        //    false positive.
         for s in survivors {
-            self.do_insert(retiring_idx, s.hash, &s.key_bytes, &s.value_bytes, s.expiry_ns, s.value_hash, s.body_len);
+            if !self.do_insert(retiring_idx, s.hash, &s.key_bytes, &s.value_bytes, s.expiry_ns, s.value_hash, s.body_len) {
+                self.filter().delete(s.hash);
+            }
         }
 
         // 5. Unseal retiring page — it becomes the new active page.
@@ -407,9 +416,24 @@ impl GenerationalSharedCache {
         let ps = page_size(slot_count_per_page, arena_per_page);
         let asip = arena_start_in_page(slot_count_per_page);
 
-        let mmap = open_mmap(path, fsize)?;
+        // The compat check and reinit run inside open_mmap while the flock is still held.
+        // This serializes concurrent workers at startup: the first one to acquire the lock
+        // initializes the file; subsequent workers see a valid header and skip reinit.
+        let mmap = open_mmap(path, fsize, |mmap| {
+            let c = unsafe { &*(mmap.as_ptr() as *const CoordHeader) };
+            let compatible = c.magic == MAGIC
+                && c.version == VERSION
+                && c.n_pages == n_pages as u32
+                && c.maxsize == maxsize as u32
+                && c.slot_count_per_page == slot_count_per_page as u32
+                && c.arena_per_page == arena_per_page as u32;
+            if !compatible {
+                unsafe { std::ptr::write_bytes(mmap.as_mut_ptr(), 0, fsize); }
+                write_init_headers(mmap, n_pages, maxsize, gen_maxsize, slot_count_per_page, arena_per_page, filter_bucket_count, prs, ps);
+            }
+        })?;
 
-        let mut cache = GenerationalSharedCache {
+        Ok(GenerationalSharedCache {
             mmap,
             n_pages,
             gen_maxsize,
@@ -419,33 +443,7 @@ impl GenerationalSharedCache {
             page_size: ps,
             arena_start_in_page: asip,
             default_ttl_ns: default_ttl_secs.map(|s| (s * 1e9) as u64),
-        };
-
-        // Check compatibility; wipe and reinit if mismatched.
-        let compatible = {
-            let c = cache.coord();
-            c.magic == MAGIC
-                && c.version == VERSION
-                && c.n_pages == n_pages as u32
-                && c.maxsize == maxsize as u32
-                && c.slot_count_per_page == slot_count_per_page as u32
-                && c.arena_per_page == arena_per_page as u32
-        };
-        if !compatible {
-            unsafe {
-                std::ptr::write_bytes(cache.mmap.as_mut_ptr(), 0, fsize);
-            }
-            cache.init_headers(
-                n_pages,
-                maxsize,
-                gen_maxsize,
-                slot_count_per_page,
-                arena_per_page,
-                filter_bucket_count,
-            );
-        }
-
-        Ok(cache)
+        })
     }
 
     /// Call `f` with a direct slice into the mmap arena — zero extra allocation.
@@ -587,8 +585,9 @@ impl GenerationalSharedCache {
             self.commit_rotation(survivors);
         }
         let active_idx = self.active_idx();
-        self.do_insert(active_idx, hash, key, &value_bytes, expiry, content_vh, new_body_len);
-        self.filter().insert(hash);
+        if self.do_insert(active_idx, hash, key, &value_bytes, expiry, content_vh, new_body_len) {
+            self.filter().insert(hash);
+        }
         unlock(&self.mmap);
     }
 

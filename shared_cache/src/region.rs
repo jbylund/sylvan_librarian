@@ -137,14 +137,23 @@ pub fn normalize_hash(h: u64) -> u64 {
 
 // ── File open ─────────────────────────────────────────────────────────────────
 
-pub fn open_mmap(path: &str, file_size: usize) -> std::io::Result<MmapMut> {
+/// Open (or create) the mmap file, extend it if needed, and call `under_lock` while the
+/// exclusive flock is still held. This lets the caller do a compatibility check + reinit
+/// atomically so multiple workers starting simultaneously don't race each other to zero
+/// and re-initialize the file.
+pub fn open_mmap(
+    path: &str,
+    file_size: usize,
+    under_lock: impl FnOnce(&mut MmapMut),
+) -> std::io::Result<MmapMut> {
     let file = OpenOptions::new().read(true).write(true).create(true).open(path)?;
     let fd = file.as_raw_fd();
     unsafe { libc::flock(fd, libc::LOCK_EX) };
     if file.metadata()?.len() < file_size as u64 {
         file.set_len(file_size as u64)?;
     }
-    let mmap = unsafe { MmapMut::map_mut(&file)? };
+    let mut mmap = unsafe { MmapMut::map_mut(&file)? };
+    under_lock(&mut mmap);
     unsafe { libc::flock(fd, libc::LOCK_UN) };
     Ok(mmap)
 }

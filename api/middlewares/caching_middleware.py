@@ -72,6 +72,10 @@ class CachingMiddleware:
 
     def invalidate(self: CachingMiddleware) -> None:
         """Clear all cached entries, delegating to the inner cache's own method."""
+        # TODO: wire this into _clear_caches() in APIResource so bulk imports flush the
+        # HTTP response cache. Currently _clear_caches() only bumps cache_generation
+        # (which invalidates the query/engine caches), so stale HTTP responses can be
+        # served until natural eviction.
         if hasattr(self.cache, "invalidate"):
             self.cache.invalidate()
         elif hasattr(self.cache, "clear"):
@@ -154,6 +158,11 @@ class CachingMiddleware:
         if resp.status and resp.status.startswith("5"):
             return
         cache_key = req.context.get("cache_key") or self._cache_key(req)
+        # __contains__ on SharedCache checks only the cuckoo filter (~0.006% FPR), so a false
+        # positive here causes a response to never be cached for that key. A full probe via
+        # .get() would eliminate false positives at the cost of a lock + slot scan per miss.
+        # The same body-hash fast-path used in set() could be applied here to cheaply confirm
+        # before skipping, but the FPR is low enough that the simpler check is worth it.
         if cache_key in self.cache:
             return
         media = resp.media
