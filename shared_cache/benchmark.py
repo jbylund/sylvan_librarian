@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ruff: noqa: T201, ANN001, ANN201, ANN202, D103
+# ruff: noqa: T201, D103
 """Latency benchmark: SharedCache vs in-process caches + key serialization shootout.
 
 Build first:
