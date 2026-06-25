@@ -5,8 +5,9 @@ use rkyv::Archived;
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::region::{
-    arena_start, hdr_ptr, hdr_ptr_mut, open_region, slot_ptr, slot_ptr_mut, try_lock,
-    unlock, RegionHeader, RawSlot, EMPTY, HEADER_SIZE, SLOT_SIZE, TOMBSTONE,
+    arena_start, bump_generation, hdr_ptr, hdr_ptr_mut, open_region, read_generation,
+    slot_ptr, slot_ptr_mut, try_lock, unlock, RegionHeader, RawSlot, EMPTY, HEADER_SIZE,
+    SLOT_SIZE, TOMBSTONE,
 };
 use crate::region::normalize_hash;
 use crate::types::CachedResponse;
@@ -100,17 +101,53 @@ impl SharedCache {
         unlock(&self.mmap);
     }
 
-    /// Look up `key` and return its archived value bytes if present and unexpired.
-    /// The caller deserializes with `rkyv::access_unchecked`.
-    pub fn get(&mut self, key: &[u8]) -> Option<Vec<u8>> {
+    /// Find `key`, release the lock, then call `f` with a slice directly into the
+    /// mmap arena — no intermediate Vec.  After `f` returns, the generation counter
+    /// is checked; if a concurrent `generation_reset` occurred the result is
+    /// discarded and `None` is returned.
+    pub fn get_with<F, R>(&mut self, key: &[u8], f: F) -> Option<R>
+    where
+        F: FnOnce(&[u8]) -> R,
+    {
         let hash = normalize_hash(xxh3_64(key));
 
         if !try_lock(&self.mmap) {
             return None;
         }
-        let result = self.do_get(key, hash);
+        let slot = self.do_get(key, hash);
+        // Read generation under the lock so we have a consistent snapshot.
+        // bump_generation uses Release; unlock uses Release — both will be visible.
+        let gen_before = self.hdr().generation;
         unlock(&self.mmap);
-        result
+
+        let (offset, len) = slot?;
+        let v_start = self.arena_start + offset as usize;
+
+        // Copy from the mmap arena directly — lock is NOT held here.
+        // Multiple processes/threads can run this concurrently.
+        let result = f(&self.mmap[v_start..v_start + len as usize]);
+
+        // read_generation issues an Acquire fence before its load, ensuring the
+        // mmap reads above are not reordered past the generation check below.
+        if read_generation(&self.mmap) != gen_before {
+            // A generation_reset raced with our read — data may be stale or zeroed.
+            return None;
+        }
+
+        Some(result)
+    }
+
+    /// Lock-only probe: acquire the spinlock, check whether `key` is present,
+    /// update LRU seq, then release.  No arena copy.  Used to isolate the
+    /// lock-critical-section cost in benchmarks.
+    pub fn probe_only(&mut self, key: &[u8]) -> bool {
+        let hash = normalize_hash(xxh3_64(key));
+        if !try_lock(&self.mmap) {
+            return false;
+        }
+        let found = self.do_get(key, hash).is_some();
+        unlock(&self.mmap);
+        found
     }
 
     /// Force-expire all entries by resetting the generation counter and wiping
@@ -128,7 +165,10 @@ impl SharedCache {
 
     // ── Internal: get ────────────────────────────────────────────────────────
 
-    fn do_get(&mut self, key: &[u8], hash: u64) -> Option<Vec<u8>> {
+    /// Probe the slot table under the lock.  On hit, updates LRU seq and returns
+    /// `(arena_offset, arena_len)`.  The caller copies from the arena after
+    /// releasing the lock.
+    fn do_get(&mut self, key: &[u8], hash: u64) -> Option<(u32, u32)> {
         let slot_count = self.hdr().slot_count;
         let now = now_ns();
         let start = (hash % slot_count as u64) as u32;
@@ -142,15 +182,14 @@ impl SharedCache {
                     let slot = self.slot(idx);
                     let not_expired = slot.expiry_ns == u64::MAX || now < slot.expiry_ns;
                     if not_expired && self.key_matches(slot, key) {
-                        let v_start = self.arena_start + slot.arena_offset as usize;
-                        let v_end = v_start + slot.arena_len as usize;
-                        let bytes = self.mmap[v_start..v_end].to_vec();
+                        let offset = slot.arena_offset;
+                        let len = slot.arena_len;
 
                         let seq = self.hdr().seq + 1;
                         self.hdr_mut().seq = seq;
                         self.slot_mut(idx).last_used = seq;
 
-                        return Some(bytes);
+                        return Some((offset, len));
                     }
                 }
                 _ => {}
@@ -323,6 +362,9 @@ impl SharedCache {
     /// Wipe the slot table and reset the arena bump pointer.
     /// All existing entries become unreachable. Called when the arena is full.
     fn generation_reset(&mut self) {
+        // Increment before zeroing so concurrent readers detect the reset and
+        // discard any data they copied from the about-to-be-cleared arena.
+        bump_generation(&self.mmap);
         let slot_count = self.hdr().slot_count;
         unsafe {
             std::ptr::write_bytes(

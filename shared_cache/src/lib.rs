@@ -11,7 +11,7 @@ use cache::{access_response, SharedCache as Inner};
 #[pyclass(get_all)]
 pub struct CachedResponse {
     pub status: String,
-    pub headers: Vec<(String, String)>,
+    pub headers: Py<pyo3::types::PyList>,
     pub body: Option<Py<pyo3::types::PyBytes>>,
     pub result_count: Option<i64>,
     pub total_cards: Option<i64>,
@@ -94,7 +94,7 @@ impl SharedCache {
     /// Return the cached `CachedResponse` for `key`, or `None` on miss / expiry.
     fn get(&mut self, py: Python, key: &Bound<PyAny>) -> PyResult<Option<CachedResponse>> {
         let key_bytes = py_key_bytes(py, key, self.key_fn.as_ref())?;
-        Ok(self.inner.get(&key_bytes).as_deref().map(|b| build_response(py, b)))
+        Ok(self.inner.get_with(&key_bytes, |bytes| build_response(py, bytes)))
     }
 
     fn __setitem__(
@@ -108,7 +108,7 @@ impl SharedCache {
 
     fn __getitem__(&mut self, py: Python, key: &Bound<PyAny>) -> PyResult<CachedResponse> {
         let key_bytes = py_key_bytes(py, key, self.key_fn.as_ref())?;
-        match self.inner.get(&key_bytes).as_deref().map(|b| build_response(py, b)) {
+        match self.inner.get_with(&key_bytes, |bytes| build_response(py, bytes)) {
             Some(r) => Ok(r),
             None => Err(pyo3::exceptions::PyKeyError::new_err(
                 "key not in shared cache",
@@ -127,24 +127,29 @@ impl SharedCache {
 
     // ── Benchmarking probes ───────────────────────────────────────────────
 
-    /// Accepts already-serialized key bytes; returns raw rkyv bytes or None.
-    /// Skips key serialization and Python object construction so callers can
-    /// measure the pure cache cost (lock + hash + probe + memcpy) in isolation.
+    /// Lock + probe + release + mmap→PyBytes copy, no intermediate Vec.
+    /// Measures the combined cost of the (now short) critical section plus the
+    /// arena copy outside the lock.
     fn _get_raw<'py>(
         &mut self,
         py: Python<'py>,
         key_bytes: &[u8],
     ) -> PyResult<Option<pyo3::Bound<'py, pyo3::types::PyBytes>>> {
-        Ok(self
-            .inner
-            .get(key_bytes)
-            .map(|b| pyo3::types::PyBytes::new(py, &b)))
+        Ok(self.inner.get_with(key_bytes, |bytes| {
+            pyo3::types::PyBytes::new(py, bytes).unbind()
+        }).map(|b| b.into_bound(py)))
+    }
+
+    /// Lock + probe + release only — no arena copy.  Isolates the spinlock
+    /// critical-section cost in benchmarks.
+    fn _probe_only(&mut self, key_bytes: &[u8]) -> bool {
+        self.inner.probe_only(key_bytes)
     }
 
     /// Like `_get_raw` but also builds the Python CachedResponse from the bytes,
     /// letting callers isolate the deserialization cost from the lock+probe cost.
     fn _get_raw_decoded(&mut self, py: Python, key_bytes: &[u8]) -> Option<CachedResponse> {
-        self.inner.get(key_bytes).as_deref().map(|b| build_response(py, b))
+        self.inner.get_with(key_bytes, |bytes| build_response(py, bytes))
     }
 }
 
@@ -182,14 +187,13 @@ fn extract_response(
 
 fn build_response(py: Python, bytes: &[u8]) -> CachedResponse {
     let ar = access_response(bytes);
-    // rkyv 0.8 archives (String, String) as ArchivedTuple2 with .0 / .1 fields.
-    let headers: Vec<(String, String)> = ar
-        .headers
-        .iter()
-        .map(|t| (t.0.to_string(), t.1.to_string()))
-        .collect();
-    // Create PyBytes directly from the rkyv slice — one copy (blob → Python bytes)
-    // instead of two (blob → Rust Vec → Python bytes via PyO3's Vec<u8> conversion).
+    // Build Python list of 2-tuples directly from the rkyv archive — no intermediate
+    // Rust String allocations. Each archived &str is handed straight to PyString::new.
+    // With Py<PyList> stored in the pyclass, .headers attribute access is a refcount bump.
+    let headers: Py<pyo3::types::PyList> = pyo3::types::PyList::new(
+        py,
+        ar.headers.iter().map(|t| (t.0.as_str(), t.1.as_str())),
+    ).unwrap().unbind();
     let body: Option<Py<pyo3::types::PyBytes>> = ar
         .body
         .as_ref()

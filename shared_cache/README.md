@@ -18,10 +18,15 @@ Each slot stores `key_hash`, `expiry_ns`, `last_used` (LRU sequence), and offset
 arena. Values are serialized with [rkyv](https://rkyv.org/) — zero-copy on the read side
 within the locked critical section.
 
-A single `AtomicU32` spinlock at byte 0 serializes all get/set operations. Reads copy
-the rkyv bytes out of the arena before releasing the lock, then deserialize outside it.
-The response body is copied directly into a Python `bytes` object in `build_response`,
-so `.body` access on a cache hit is a reference-count increment — no extra copy.
+A single `AtomicU32` spinlock at byte 0 gates all mutations. On a get, the lock is held
+only for the slot probe and LRU seq update (~60 ns); the arena copy happens **outside**
+the lock, so concurrent reads from multiple processes overlap almost entirely. A
+`generation` counter (incremented on `generation_reset`) lets readers detect a concurrent
+flush and discard stale data rather than return garbage.
+
+The response body is copied directly from the mmap arena into a Python `bytes` object —
+no intermediate Rust `Vec`. `.body` attribute access on the returned object is a
+reference-count increment with no additional copy.
 
 **Eviction** samples 8 random slots and tombstones the one with the smallest `last_used`
 (approximate LRU, same approach as Redis). Tombstones preserve probe chain integrity for
@@ -79,38 +84,39 @@ Measured on Apple M-series with a real 5,025-byte gzip-compressed response body
 
 | Backend | get_hit | get_miss | set |
 |---|---|---|---|
-| `dict` | 35 ns | 32 ns | 62 ns |
-| `cachebox.LRUCache` | 46 ns | 44 ns | 77 ns |
-| `SharedCache` (orjson) | 541 ns | 154 ns | 946 ns |
-| `SharedCache` (pickle) | 1,159 ns | 731 ns | 1,671 ns |
+| `dict` | 35 ns | 34 ns | 61 ns |
+| `cachebox.LRUCache` | 57 ns | 43 ns | 72 ns |
+| `SharedCache` (orjson) | 455 ns | 153 ns | 956 ns |
+| `SharedCache` (pickle) | 1,072 ns | 725 ns | 1,652 ns |
 
 In-process caches return a reference to an existing Python object (zero copies). SharedCache
 must copy the response body out of shared memory and reconstruct Python objects on each read —
 that's the source of the gap. The payoff is that every worker process shares the same 10k-entry
 pool rather than maintaining its own.
 
-### Where the 541 ns goes
+### Where the 490 ns goes (middleware path)
 
 ```
-A  orjson key serialize        91 ns   16%   tuple → bytes (before lock)
-B  lock + probe + memcpy      255 ns   46%   spinlock, slot scan, copy 5 KB from mmap to Rust
-C  rkyv parse + Python objs   213 ns   38%   deserialize + build CachedResponse (after lock)
-   ─────────────────────────────────────────────────────────────
-D  full get                   559 ns  100%
-
-   .body attribute access      ~2 ns    0%   refcount bump on pre-built PyBytes — effectively free
+A  orjson key serialize           88 ns   18%   tuple → bytes (before lock)
+B  lock + probe + release         59 ns   12%   spinlock CAS, slot scan, LRU update, unlock
+C  mmap→PyBytes (body)            97 ns   20%   5 KB copied directly from arena to Python memory
+D  rkyv + Python object build    193 ns   39%   headers PyList + status str + PyO3 object
+E  full get()                    450 ns   92%
+   .body + .headers access        40 ns    8%   refcount bumps — effectively free
+   ──────────────────────────────────────────────────────────
+F  middleware path                490 ns  100%
 ```
 
-Phase B scales with response size (it is a memcpy of the rkyv blob). Phase C is dominated
-by the body copy into Python memory and string allocations for status/headers; it is roughly
-linear in body size. The spinlock itself is ~5% of Phase B; key serialization and xxhash
-happen before lock acquisition and do not contribute to the critical section.
+The spinlock is held for only Phase B (~60 ns); the arena copy runs concurrently across all
+worker processes. `.body` and `.headers` are pre-built Python objects in the pyclass — attribute
+access is a refcount increment with no copy, so the middleware's `resp.data = cached.body` and
+`resp._headers.update(cached.headers)` cost nothing extra.
 
 ## Tradeoffs
 
 | | dict / LRUCache | SharedCache |
 |---|---|---|
-| get_hit latency | ~35–50 ns | ~540 ns |
+| get_hit latency | ~35–57 ns | ~490 ns (middleware path) |
 | Memory per process | `maxsize × value_size` | shared; 1× regardless of workers |
 | Cross-process hits | ✗ | ✓ |
 | Process crash safety | n/a | lock timeout prevents hang |

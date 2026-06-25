@@ -183,31 +183,25 @@ def bench_breakdown(cache_path: str) -> None:
     N = 20_000
 
     phase_a = measure(lambda: orjson.dumps(key), N)
-    phase_b = measure(lambda: c._get_raw(key_bytes), N)
-    phase_c = measure(lambda: c._get_raw_decoded(key_bytes), N)
-    phase_d = measure(lambda: c.get(key), N)
-    phase_e = measure(lambda: c.get(key).body, N)  # includes .body attribute access (the copy we eliminated)
+    phase_b = measure(lambda: c._probe_only(key_bytes), N)   # lock + probe + release only
+    phase_c = measure(lambda: c._get_raw(key_bytes), N)      # + mmap→PyBytes copy outside lock
+    phase_d = measure(lambda: c._get_raw_decoded(key_bytes), N)  # + rkyv + Python objects
+    phase_e = measure(lambda: c.get(key), N)                 # full pipeline (A+D combined)
+    phase_f = measure(lambda: (r := c.get(key), r.body, r.headers), N)  # + attribute access
 
     print(f"  {'Phase':50}  {'ns':>7}  {'%':>5}")
     print("  " + "-" * 65)
-    print(f"  {'A: orjson.dumps(key)':<50}  {phase_a:>7.3f}  {phase_a/phase_e*100:>4.0f}%")
-    print(f"  {'B: lock + xxhash + probe + memcpy (_get_raw)':<50}  {phase_b:>7.3f}  {phase_b/phase_e*100:>4.0f}%")
-    print(f"  {'C: B + rkyv + Python object construction (_get_raw_decoded)':<50}  {phase_c:>7.3f}  {phase_c/phase_e*100:>4.0f}%")
-    print(f"  {'D: full pipeline without .body access':<50}  {phase_d:>7.3f}  {phase_d/phase_e*100:>4.0f}%")
-    print(f"  {'E: D + .body access (middleware path)':<50}  {phase_e:>7.3f}  100%")
+    print(f"  {'A: orjson.dumps(key)':<50}  {phase_a:>7.1f}  {phase_a/phase_f*100:>4.0f}%")
+    print(f"  {'B: lock + probe + release (_probe_only)':<50}  {phase_b:>7.1f}  {phase_b/phase_f*100:>4.0f}%")
+    print(f"  {'C: B + mmap→PyBytes outside lock (_get_raw)':<50}  {phase_c:>7.1f}  {phase_c/phase_f*100:>4.0f}%")
+    print(f"  {'D: C + rkyv + Python objects (_get_raw_decoded)':<50}  {phase_d:>7.1f}  {phase_d/phase_f*100:>4.0f}%")
+    print(f"  {'E: full pipeline / get(key)':<50}  {phase_e:>7.1f}  {phase_e/phase_f*100:>4.0f}%")
+    print(f"  {'F: E + .body + .headers access (middleware path)':<50}  {phase_f:>7.1f}  100%")
     print()
-
-    lock_estimate = phase_b * 0.05   # CAS + store ≈ 5% of phase B on ARM64 M-series
-    memcpy_estimate = phase_b - lock_estimate - 5  # subtract hash (~5 ns) and lock
-    deserialize = phase_c - phase_b
-
-    print(f"  Rough sub-breakdown of phase B ({phase_b:.1f} ns):")
-    print(f"    spinlock CAS + release:  ~{lock_estimate:.1f} ns  (estimated)")
-    print(f"    xxhash3 + slot probe:    ~5 ns  (estimated)")
-    print(f"    mmap memcpy ({len(BODY):,} bytes):  ~{memcpy_estimate:.3f} ns")
-    print()
-    print(f"  Python object construction (C - B): {deserialize:.3f} ns")
-    print(f"  .body access cost (E - D): {phase_e - phase_d:.3f} ns")
+    print(f"  Lock critical section (B):          {phase_b:.1f} ns")
+    print(f"  mmap→PyBytes copy (C - B):          {phase_c - phase_b:.1f} ns  ({len(BODY):,} bytes)")
+    print(f"  rkyv + object construction (D - C): {phase_d - phase_c:.1f} ns")
+    print(f"  .body + .headers access (F - E):    {phase_f - phase_e:.1f} ns")
     c.invalidate()
 
 

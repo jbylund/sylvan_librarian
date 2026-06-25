@@ -1,6 +1,6 @@
 use std::fs::OpenOptions;
 use std::os::unix::io::AsRawFd;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering, fence};
 use std::time::{Duration, Instant};
 
 use memmap2::MmapMut;
@@ -31,7 +31,8 @@ pub struct RegionHeader {
     pub entry_count: u32,  // live entries in current generation
     pub tombstone_count: u32,
     pub maxsize: u32,      // evict when entry_count reaches this
-    _pad1: [u32; 2],
+    pub generation: u32,   // incremented on every generation_reset(); readers use this to detect concurrent resets
+    _pad1: u32,
     pub seq: u64,          // monotonic counter; written to last_used on every access
     _pad2: u64,
 }
@@ -126,6 +127,29 @@ pub fn slot_ptr(mmap: &MmapMut, idx: u32) -> *const RawSlot {
 pub fn slot_ptr_mut(mmap: &mut MmapMut, idx: u32) -> *mut RawSlot {
     let offset = HEADER_SIZE + idx as usize * SLOT_SIZE;
     unsafe { mmap.as_mut_ptr().add(offset) as *mut RawSlot }
+}
+
+// ── Generation counter ───────────────────────────────────────────────────────
+
+/// Atomically read the generation counter.  Use Acquire ordering so that all
+/// arena reads that precede this call in program order are not reordered after it.
+pub fn read_generation(mmap: &MmapMut) -> u32 {
+    let ptr = unsafe {
+        let hdr = mmap.as_ptr() as *const RegionHeader;
+        std::ptr::addr_of!((*hdr).generation) as *const AtomicU32
+    };
+    // Acquire fence before the load ensures prior mmap reads happen-before this.
+    fence(Ordering::Acquire);
+    unsafe { (*ptr).load(Ordering::Relaxed) }
+}
+
+/// Increment the generation counter (called under the spinlock inside generation_reset).
+pub fn bump_generation(mmap: &MmapMut) {
+    let ptr = unsafe {
+        let hdr = mmap.as_ptr() as *const RegionHeader;
+        std::ptr::addr_of!((*hdr).generation) as *const AtomicU32
+    };
+    unsafe { (*ptr).fetch_add(1, Ordering::Release) };
 }
 
 // ── Spinlock ─────────────────────────────────────────────────────────────────
