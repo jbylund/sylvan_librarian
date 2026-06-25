@@ -1557,6 +1557,10 @@ class APIResource:
             ) from None
         set_cache_header(falcon_response, duration=timedelta(hours=1))
         counts: dict[str, int] = self._engine.common_card_types()
+        # tribal is the old name for kindred
+        kindred_count = counts.get("Kindred", 0)
+        if kindred_count:
+            counts["Tribal"] = kindred_count
         return sorted(
             [{"t": t, "n": n} for t, n in counts.items()],
             key=lambda x: x["t"],

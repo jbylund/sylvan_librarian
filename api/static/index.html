@@ -11,15 +11,22 @@
           function fetchWithRetry() {
             return fetch('/get_common_card_types')
               .then(function (response) {
-                if (!response.ok) throw new Error('HTTP ' + response.status);
+                if (response.status === 503) {
+                  var delay = 30000 + Math.random() * 10000;
+                  console.warn('Common card types not ready, retrying in ' + Math.round(delay / 1000) + 's');
+                  return new Promise(function (resolve) {
+                    setTimeout(resolve, delay);
+                  }).then(fetchWithRetry);
+                }
+                if (!response.ok) {
+                  console.error('Failed to fetch common card types: HTTP ' + response.status);
+                  return [];
+                }
                 return response.json();
               })
               .catch(function (error) {
-                var delay = 30000 + Math.random() * 10000;
-                console.warn('Failed to fetch common card types, retrying in ' + Math.round(delay / 1000) + 's', error);
-                return new Promise(function (resolve) {
-                  setTimeout(resolve, delay);
-                }).then(fetchWithRetry);
+                console.error('Failed to fetch common card types:', error);
+                return [];
               });
           }
           window.commonCardTypesPromise = fetchWithRetry();

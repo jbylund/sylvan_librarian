@@ -568,6 +568,50 @@ class TestAPIResourceCaching(unittest.TestCase):
         assert result == {"cards": [], "total_cards": 0}
         mock_engine.sample_preferred.assert_not_called()
 
+    def test_get_common_card_types_raises_503_when_engine_empty(self) -> None:
+        """get_common_card_types raises HTTPServiceUnavailable when engine.size() == 0.
+
+        This is the mechanism that prevents an empty 200 from being stored by
+        CachingMiddleware (which skips 5xx responses).
+        """
+        from unittest.mock import MagicMock  # noqa: PLC0415
+
+        mock_engine = MagicMock()
+        mock_engine.size.return_value = 0
+
+        with patch.object(self.api_resource, "_engine", mock_engine):
+            with pytest.raises(falcon.HTTPServiceUnavailable):
+                self.api_resource.get_common_card_types()
+
+        mock_engine.common_card_types.assert_not_called()
+
+    def test_get_common_card_types_returns_sorted_list_when_engine_loaded(self) -> None:
+        """get_common_card_types returns [{t, n}] sorted by type name when engine is ready.
+
+        Kindred is aliased as Tribal in the response, so both keys appear.
+        """
+        from unittest.mock import MagicMock  # noqa: PLC0415
+
+        mock_engine = MagicMock()
+        mock_engine.size.return_value = 4
+        mock_engine.common_card_types.return_value = {
+            "Creature": 5,
+            "Artifact": 2,
+            "Instant": 3,
+            "Kindred": 4,
+        }
+
+        with patch.object(self.api_resource, "_engine", mock_engine):
+            result = self.api_resource.get_common_card_types()
+
+        assert result == [
+            {"t": "Artifact", "n": 2},
+            {"t": "Creature", "n": 5},
+            {"t": "Instant", "n": 3},
+            {"t": "Kindred", "n": 4},
+            {"t": "Tribal", "n": 4},
+        ]
+
     def test_cache_clear_method_works(self) -> None:
         """Test that cache.clear() method works for cachebox caches."""
         # Test query cache clearing
