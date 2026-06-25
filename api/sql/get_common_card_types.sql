@@ -23,18 +23,17 @@ card_types_and_subtypes AS (
         subtype_name
     FROM card_subtypes
 ),
-with_min_count AS (
+counted AS (
     SELECT
         type_name,
         count(1) as num_occurrences
     FROM card_types_and_subtypes
     GROUP BY type_name
-    HAVING count(1) >= 5
 )
 SELECT
     type_name AS t,
     num_occurrences AS n
 FROM
-    with_min_count
+    counted
 ORDER BY
     type_name

@@ -1549,11 +1549,22 @@ class APIResource:
         falcon_response: falcon.Response | None = None,
         **_: object,
     ) -> list[dict[str, Any]]:
-        """Get the common card types from the database."""
+        """Get the common card types from the engine."""
+        if self._engine.size() == 0:
+            raise falcon.HTTPServiceUnavailable(
+                title="Service Unavailable",
+                description="Engine is not loaded, please try again later.",
+            ) from None
         set_cache_header(falcon_response, duration=timedelta(hours=1))
-        return self._run_query(
-            query=self.read_sql("get_common_card_types"),
-        )["result"]
+        counts: dict[str, int] = self._engine.common_card_types()
+        # tribal is the old name for kindred
+        kindred_count = counts.get("Kindred", 0)
+        if kindred_count:
+            counts["Tribal"] = kindred_count
+        return sorted(
+            [{"t": t, "n": n} for t, n in counts.items()],
+            key=lambda x: x["t"],
+        )
 
     def get_common_keywords(self, **_: object) -> list[dict[str, Any]]:
         """Get the common keywords from the database."""
