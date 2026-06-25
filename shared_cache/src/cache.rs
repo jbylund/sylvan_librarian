@@ -115,22 +115,27 @@ impl SharedCache {
             return None;
         }
         let slot = self.do_get(key, hash);
-        // Read generation under the lock so we have a consistent snapshot.
-        // bump_generation uses Release; unlock uses Release — both will be visible.
+        // Snapshot generation under the lock so we see a consistent value.
         let gen_before = self.hdr().generation;
         unlock(&self.mmap);
 
         let (offset, len) = slot?;
         let v_start = self.arena_start + offset as usize;
 
-        // Copy from the mmap arena directly — lock is NOT held here.
-        // Multiple processes/threads can run this concurrently.
+        // f runs without the lock. A concurrent generation_reset can race here:
+        // it may zero the slot table and begin overwriting arena bytes while f is
+        // reading them. In that case f receives partially-stale data, but the
+        // generation check below detects the mismatch and returns None — the
+        // caller gets a false miss and re-queries on the next request.
+        //
+        // Preventing this with a reader-count pin would cost ~35 ns on every hit
+        // (atomic writes to a MAP_SHARED page are expensive across processes), and
+        // generation_reset only fires once every ~10k inserts. Not worth it.
         let result = f(&self.mmap[v_start..v_start + len as usize]);
 
-        // read_generation issues an Acquire fence before its load, ensuring the
-        // mmap reads above are not reordered past the generation check below.
+        // read_generation issues an Acquire fence so the mmap reads above are
+        // not reordered past this check.
         if read_generation(&self.mmap) != gen_before {
-            // A generation_reset raced with our read — data may be stale or zeroed.
             return None;
         }
 
@@ -362,8 +367,8 @@ impl SharedCache {
     /// Wipe the slot table and reset the arena bump pointer.
     /// All existing entries become unreachable. Called when the arena is full.
     fn generation_reset(&mut self) {
-        // Increment before zeroing so concurrent readers detect the reset and
-        // discard any data they copied from the about-to-be-cleared arena.
+        // Increment before zeroing so concurrent get_with readers detect the reset
+        // via read_generation and discard their results rather than return garbage.
         bump_generation(&self.mmap);
         let slot_count = self.hdr().slot_count;
         unsafe {

@@ -125,7 +125,7 @@ impl SharedCache {
         self.inner.invalidate();
     }
 
-    // ── Benchmarking probes ───────────────────────────────────────────────
+    // ── Benchmarking probes ───────────────────────────────────────────────────
 
     /// Lock + probe + release + mmap→PyBytes copy, no intermediate Vec.
     /// Measures the combined cost of the (now short) critical section plus the

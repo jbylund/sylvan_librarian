@@ -22,7 +22,10 @@ A single `AtomicU32` spinlock at byte 0 gates all mutations. On a get, the lock 
 only for the slot probe and LRU seq update (~60 ns); the arena copy happens **outside**
 the lock, so concurrent reads from multiple processes overlap almost entirely. A
 `generation` counter (incremented on `generation_reset`) lets readers detect a concurrent
-flush and discard stale data rather than return garbage.
+flush and discard stale data rather than return garbage. In the rare case `generation_reset`
+races with an in-flight copy, the reader gets a false miss and re-queries — the cost of
+preventing this with a reader-count pin (~35 ns/hit on MAP_SHARED pages) exceeds the
+benefit given how rarely `generation_reset` fires.
 
 The response body is copied directly from the mmap arena into a Python `bytes` object —
 no intermediate Rust `Vec`. `.body` attribute access on the returned object is a
@@ -86,25 +89,25 @@ Measured on Apple M-series with a real 5,025-byte gzip-compressed response body
 |---|---|---|---|
 | `dict` | 35 ns | 34 ns | 61 ns |
 | `cachebox.LRUCache` | 57 ns | 43 ns | 72 ns |
-| `SharedCache` (orjson) | 455 ns | 153 ns | 956 ns |
+| `SharedCache` (orjson) | 452 ns | 153 ns | 956 ns |
 | `SharedCache` (pickle) | 1,072 ns | 725 ns | 1,652 ns |
 
 In-process caches return a reference to an existing Python object (zero copies). SharedCache
-must copy the response body out of shared memory and reconstruct Python objects on each read —
-that's the source of the gap. The payoff is that every worker process shares the same 10k-entry
-pool rather than maintaining its own.
+reconstructs Python objects from rkyv-serialized shared memory on each read — that's the
+source of the gap. The payoff is that every worker process shares the same 10k-entry pool
+rather than maintaining its own.
 
 ### Where the 490 ns goes (middleware path)
 
 ```
-A  orjson key serialize           88 ns   18%   tuple → bytes (before lock)
+A  orjson key serialize           85 ns   17%   tuple → bytes (before lock)
 B  lock + probe + release         59 ns   12%   spinlock CAS, slot scan, LRU update, unlock
-C  mmap→PyBytes (body)            97 ns   20%   5 KB copied directly from arena to Python memory
-D  rkyv + Python object build    193 ns   39%   headers PyList + status str + PyO3 object
-E  full get()                    450 ns   92%
-   .body + .headers access        40 ns    8%   refcount bumps — effectively free
+C  mmap→PyBytes (body)            91 ns   19%   5 KB copied directly from arena to Python bytes
+D  rkyv + Python object build    196 ns   40%   headers PyList + status str + PyO3 object
+E  full get()                    452 ns   92%
+   .body + .headers access        37 ns    8%   refcount bumps — effectively free
    ──────────────────────────────────────────────────────────
-F  middleware path                490 ns  100%
+F  middleware path                489 ns  100%
 ```
 
 The spinlock is held for only Phase B (~60 ns); the arena copy runs concurrently across all

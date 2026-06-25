@@ -167,9 +167,11 @@ def bench_breakdown(cache_path: str) -> None:
     """Decompose SharedCache get_hit into its constituent phases.
 
     Phase A  orjson key serialization          → orjson.dumps(key)
-    Phase B  lock + xxhash + probe + memcpy    → _get_raw(key_bytes)
-    Phase C  rkyv deserialize + Python objects → _get_raw_decoded(key_bytes)
-    Phase D  full pipeline                     → get(key) with orjson key_fn
+    Phase B  lock + probe + pin + release      → _probe_only(key_bytes)
+    Phase C  B + mmap→PyBytes copy             → _get_raw(key_bytes)
+    Phase D  C + rkyv + Python objects         → _get_raw_decoded(key_bytes)
+    Phase E  full pipeline                     → get(key) with orjson key_fn
+    Phase F  E + .body + .headers access       → middleware path
     """
     print("\n=== get_hit latency breakdown (SharedCache / orjson) ===\n")
 
