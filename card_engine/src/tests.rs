@@ -1,8 +1,9 @@
 use super::{
     build_list_index, build_numeric_index, build_oracle_text_index, build_tag_index,
-    build_trigram_index, build_type_index, narrow_candidates, trigram_candidates,
-    Card, CardData, CardIndexes, CollField, CmpOp, FilterExpr, Interner, ManaCost,
-    InlineStr, TagIndex, TrigramIndex, NONE_STR, TYPE_CREATURE,
+    build_trigram_index, build_type_index, count_common_types, narrow_candidates,
+    trigram_candidates, Card, CardData, CardIndexes, CollField, CmpOp, FilterExpr, Interner,
+    ManaCost, InlineStr, TagIndex, TrigramIndex, NONE_STR,
+    TYPE_ARTIFACT, TYPE_CREATURE, TYPE_INSTANT, TYPE_LEGENDARY, TYPE_PLANESWALKER,
 };
 use rkyv::{rancor::Error, Archived};
 use std::collections::{HashMap, HashSet};
@@ -275,4 +276,100 @@ fn narrow_candidates_art_tags() {
         value: "zombie".to_string(),
     };
     assert_eq!(narrow_candidates(&absent, archived), None);
+}
+
+/// Minimal card for tests that only care about card_types and card_subtypes.
+/// All interned-string IDs are NONE_STR; count_common_types never reads them.
+fn stub_card(card_types: u16, card_subtypes: Vec<String>) -> Card {
+    Card {
+        card_name_lower: InlineStr::from_str(""),
+        card_colors: 0,
+        card_color_identity: 0,
+        produced_mana: 0,
+        card_types,
+        scryfall_id: 0,
+        oracle_id: 0,
+        illustration_id: 0,
+        card_name_id: NONE_STR,
+        oracle_text_id: NONE_STR,
+        oracle_text_lower_id: NONE_STR,
+        flavor_text_id: NONE_STR,
+        flavor_text_lower_id: NONE_STR,
+        card_artist_id: NONE_STR,
+        card_artist_lower_id: NONE_STR,
+        card_set_code: InlineStr::from_str(""),
+        card_layout_id: NONE_STR,
+        card_border_id: NONE_STR,
+        card_watermark_id: NONE_STR,
+        collector_number_id: NONE_STR,
+        mana_cost_text_id: NONE_STR,
+        type_line_id: NONE_STR,
+        set_name_id: NONE_STR,
+        released_at_int: None,
+        cmc: None,
+        creature_power: None,
+        creature_toughness: None,
+        planeswalker_loyalty: None,
+        card_rarity_int: None,
+        collector_number_int: None,
+        edhrec_rank: None,
+        price_usd: None,
+        price_eur: None,
+        price_tix: None,
+        prefer_score: None,
+        cubecobra_score: None,
+        card_subtypes,
+        card_keywords: HashSet::new(),
+        card_legalities: 0,
+        card_oracle_tags: HashSet::new(),
+        card_art_tags: HashSet::new(),
+        card_is_tags: HashSet::new(),
+        card_frame_data: HashSet::new(),
+        mana_cost: ManaCost { pips: HashMap::new(), devotion: None, cmc: 0.0 },
+        creature_power_text_id: NONE_STR,
+        creature_toughness_text_id: NONE_STR,
+    }
+}
+
+#[test]
+fn count_common_types_sums_preferred_only() {
+    // card 0: Legendary Planeswalker, subtype "Jace"   — preferred
+    // card 1: Instant, no subtypes                     — not preferred (skipped)
+    // card 2: Artifact + Creature, subtype "Merfolk"   — preferred
+    // card 3: Creature, subtypes ["Warrior", "Merfolk"] — preferred
+    let cards = vec![
+        stub_card(TYPE_LEGENDARY | TYPE_PLANESWALKER, vec!["Jace".to_string()]),
+        stub_card(TYPE_INSTANT,                        vec![]),
+        stub_card(TYPE_ARTIFACT | TYPE_CREATURE,       vec!["Merfolk".to_string()]),
+        stub_card(TYPE_CREATURE,                       vec!["Warrior".to_string(), "Merfolk".to_string()]),
+    ];
+    let data = CardData {
+        cards,
+        strings: vec![],
+        indexes: CardIndexes::default(),
+        format_shifts: HashMap::new(),
+        preferred_indices: vec![0, 2, 3], // card 1 (Instant) excluded
+    };
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let counts = count_common_types(archived);
+
+    // Type bits decoded correctly from the bitmask.
+    assert_eq!(counts.get("Legendary"),    Some(&1));
+    assert_eq!(counts.get("Planeswalker"), Some(&1));
+    assert_eq!(counts.get("Artifact"),     Some(&1));
+    assert_eq!(counts.get("Creature"),     Some(&2)); // cards 2 and 3
+
+    // Card 1 (Instant) is not in preferred_indices — must be absent.
+    assert_eq!(counts.get("Instant"), None);
+
+    // Subtypes borrowed from archive strings; "Merfolk" appears in two preferred cards.
+    assert_eq!(counts.get("Merfolk"),  Some(&2));
+    assert_eq!(counts.get("Warrior"),  Some(&1));
+    assert_eq!(counts.get("Jace"),     Some(&1));
+
+    // Types with zero count are never emitted.
+    assert_eq!(counts.get("Land"),   None);
+    assert_eq!(counts.get("Sorcery"), None);
 }

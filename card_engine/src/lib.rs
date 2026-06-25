@@ -1243,6 +1243,47 @@ struct Staging {
     lock_file: std::fs::File,
 }
 
+// Names ordered by bit position matching the TYPE_* constants (bit 0 = index 0, …).
+const TYPE_BIT_NAMES: [&str; 14] = [
+    "Artifact", "Basic", "Battle", "Conspiracy", "Creature", "Enchantment",
+    "Instant", "Kindred", "Land", "Legendary", "Planeswalker", "Snow", "Sorcery", "World",
+];
+
+/// Count type and subtype occurrences across preferred printings (one per oracle card).
+/// Accumulates by integer key in the hot loop — bit position for types, &str borrowed
+/// from the archive for subtypes — then converts to owned strings once at the end.
+pub(crate) fn count_common_types(data: &Archived<CardData>) -> HashMap<String, u32> {
+    let mut type_counts = [0u32; 14];
+    let mut subtype_counts: HashMap<&str, u32> = HashMap::new();
+
+    let store: &[ACard] = &data.cards;
+    for &idx in data.preferred_indices.iter() {
+        let card = &store[u32::from(idx) as usize];
+
+        let mut bits = u16::from(card.card_types);
+        while bits != 0 {
+            let pos = bits.trailing_zeros() as usize;
+            type_counts[pos] += 1;
+            bits &= bits - 1;
+        }
+
+        for subtype in card.card_subtypes.iter() {
+            *subtype_counts.entry(subtype.as_str()).or_insert(0) += 1;
+        }
+    }
+
+    let mut result: HashMap<String, u32> = HashMap::new();
+    for (i, &count) in type_counts.iter().enumerate() {
+        if count > 0 {
+            result.insert(TYPE_BIT_NAMES[i].to_string(), count);
+        }
+    }
+    for (name, count) in subtype_counts {
+        result.insert(name.to_string(), count);
+    }
+    result
+}
+
 #[pyclass]
 struct QueryEngine {
     shm_path: PathBuf,
@@ -1732,6 +1773,21 @@ impl QueryEngine {
         PyList::new(py, dicts)
     }
 
+
+    /// Count type and subtype occurrences across preferred printings.
+    /// Returns {type_name: count} covering both supertypes/types (decoded from
+    /// the card_types bitmask) and subtypes (from card_subtypes strings).
+    fn common_card_types<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let mmap = self.get_mmap()?;
+        // Safety: see the access_unchecked justification in query().
+        let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
+        let counts = count_common_types(data);
+        let d = PyDict::new(py);
+        for (name, count) in &counts {
+            d.set_item(name, count)?;
+        }
+        Ok(d)
+    }
 
     /// Rust-heap allocator stats and reload() memory breakdown.
     /// Empty dict unless built with --features alloc-counter (measurement-only).
