@@ -1,0 +1,209 @@
+mod cache;
+mod region;
+mod types;
+
+use pyo3::prelude::*;
+
+use cache::{access_response, SharedCache as Inner};
+
+/// Returned by `SharedCache.get()`. Attribute layout matches the Python
+/// `CachedResponse` NamedTuple so the existing middleware code needs no changes.
+#[pyclass(get_all)]
+pub struct CachedResponse {
+    pub status: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Option<Vec<u8>>,
+    pub result_count: Option<i64>,
+    pub total_cards: Option<i64>,
+}
+
+#[pymethods]
+impl CachedResponse {
+    fn __repr__(&self) -> String {
+        let rc = self
+            .result_count
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "None".to_string());
+        format!(
+            "CachedResponse(status={:?}, body_len={}, result_count={})",
+            self.status,
+            self.body.as_ref().map(|b| b.len()).unwrap_or(0),
+            rc,
+        )
+    }
+}
+
+/// Cross-process LRU cache backed by a memory-mapped file.
+///
+/// All worker processes that open the same `path` share a single cache.
+/// Values are stored as rkyv-serialized `CachedResponse` structs so reads
+/// are zero-copy within the locked critical section.
+///
+/// Usage::
+///
+///     import orjson
+///     cache = SharedCache(path="/tmp/arcane.cache", maxsize=10_000,
+///                         default_ttl=300.0, key_fn=orjson.dumps)
+///     cache[key] = response      # stores a CachedResponse (or any object with those attrs)
+///     cached = cache.get(key)    # returns CachedResponse | None
+///     cached = cache[key]        # raises KeyError on miss
+///     cache.invalidate()         # flush all entries
+#[pyclass]
+pub struct SharedCache {
+    inner: Inner,
+    /// Optional key serializer. `None` falls back to `pickle.dumps(key, 2)`.
+    /// Any callable that accepts one argument and returns `bytes` works:
+    /// `orjson.dumps`, `marshal.dumps`, `msgpack.packb`, etc.
+    key_fn: Option<Py<PyAny>>,
+}
+
+#[pymethods]
+impl SharedCache {
+    #[new]
+    #[pyo3(signature = (path, maxsize=10_000, default_ttl=None, arena_mb=None, key_fn=None))]
+    fn new(
+        path: &str,
+        maxsize: u32,
+        default_ttl: Option<f64>,
+        arena_mb: Option<u32>,
+        key_fn: Option<Py<PyAny>>,
+    ) -> PyResult<Self> {
+        let arena_bytes = arena_mb.map(|mb| mb * 1024 * 1024);
+        let inner = Inner::open(path, maxsize, default_ttl, arena_bytes)
+            .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))?;
+        Ok(Self { inner, key_fn })
+    }
+
+    /// Store a response. `value` must have `.status`, `.headers`, `.body`,
+    /// `.result_count`, and `.total_cards` attributes (compatible with the
+    /// existing `CachedResponse` NamedTuple).
+    fn set(
+        &mut self,
+        py: Python,
+        key: &Bound<PyAny>,
+        value: &Bound<PyAny>,
+        ttl: Option<f64>,
+    ) -> PyResult<()> {
+        let key_bytes = py_key_bytes(py, key, self.key_fn.as_ref())?;
+        let (status, headers, body, result_count, total_cards) = extract_response(value)?;
+        self.inner
+            .set(&key_bytes, &status, headers, body, result_count, total_cards, ttl);
+        Ok(())
+    }
+
+    /// Return the cached `CachedResponse` for `key`, or `None` on miss / expiry.
+    fn get(&mut self, py: Python, key: &Bound<PyAny>) -> PyResult<Option<CachedResponse>> {
+        let key_bytes = py_key_bytes(py, key, self.key_fn.as_ref())?;
+        Ok(self.inner.get(&key_bytes).as_deref().map(build_response))
+    }
+
+    fn __setitem__(
+        &mut self,
+        py: Python,
+        key: &Bound<PyAny>,
+        value: &Bound<PyAny>,
+    ) -> PyResult<()> {
+        self.set(py, key, value, None)
+    }
+
+    fn __getitem__(&mut self, py: Python, key: &Bound<PyAny>) -> PyResult<CachedResponse> {
+        let key_bytes = py_key_bytes(py, key, self.key_fn.as_ref())?;
+        match self.inner.get(&key_bytes).as_deref().map(build_response) {
+            Some(r) => Ok(r),
+            None => Err(pyo3::exceptions::PyKeyError::new_err(
+                "key not in shared cache",
+            )),
+        }
+    }
+
+    fn __len__(&self) -> usize {
+        self.inner.entry_count() as usize
+    }
+
+    /// Wipe all entries by resetting the arena and slot table.
+    fn invalidate(&mut self) {
+        self.inner.invalidate();
+    }
+
+    // ── Benchmarking probes ───────────────────────────────────────────────
+
+    /// Accepts already-serialized key bytes; returns raw rkyv bytes or None.
+    /// Skips key serialization and Python object construction so callers can
+    /// measure the pure cache cost (lock + hash + probe + memcpy) in isolation.
+    fn _get_raw<'py>(
+        &mut self,
+        py: Python<'py>,
+        key_bytes: &[u8],
+    ) -> PyResult<Option<pyo3::Bound<'py, pyo3::types::PyBytes>>> {
+        Ok(self
+            .inner
+            .get(key_bytes)
+            .map(|b| pyo3::types::PyBytes::new(py, &b)))
+    }
+
+    /// Like `_get_raw` but also builds the Python CachedResponse from the bytes,
+    /// letting callers isolate the deserialization cost from the lock+probe cost.
+    fn _get_raw_decoded(&mut self, key_bytes: &[u8]) -> Option<CachedResponse> {
+        self.inner.get(key_bytes).as_deref().map(build_response)
+    }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Serialize a Python cache key to bytes.
+/// If `key_fn` is provided it is called as `key_fn(key)` and must return `bytes`.
+/// Otherwise falls back to `pickle.dumps(key, 2)`.
+fn py_key_bytes(py: Python, key: &Bound<PyAny>, key_fn: Option<&Py<PyAny>>) -> PyResult<Vec<u8>> {
+    match key_fn {
+        Some(f) => f.call1(py, (key,))?.extract(py),
+        None => py
+            .import("pickle")?
+            .call_method1("dumps", (key, 2i32))?
+            .extract(),
+    }
+}
+
+fn extract_response(
+    value: &Bound<PyAny>,
+) -> PyResult<(
+    String,
+    Vec<(String, String)>,
+    Option<Vec<u8>>,
+    Option<i64>,
+    Option<i64>,
+)> {
+    let status: String = value.getattr("status")?.extract()?;
+    let headers: Vec<(String, String)> = value.getattr("headers")?.extract()?;
+    let body: Option<Vec<u8>> = value.getattr("body")?.extract()?;
+    let result_count: Option<i64> = value.getattr("result_count")?.extract()?;
+    let total_cards: Option<i64> = value.getattr("total_cards")?.extract()?;
+    Ok((status, headers, body, result_count, total_cards))
+}
+
+fn build_response(bytes: &[u8]) -> CachedResponse {
+    let ar = access_response(bytes);
+    // rkyv 0.8 archives (String, String) as ArchivedTuple2 with .0 / .1 fields.
+    let headers: Vec<(String, String)> = ar
+        .headers
+        .iter()
+        .map(|t| (t.0.to_string(), t.1.to_string()))
+        .collect();
+    let body: Option<Vec<u8>> = ar.body.as_ref().map(|b| b.as_slice().to_vec());
+    // rkyv 0.8 archives i64 as i64_le (endian-portable); convert via From.
+    let result_count: Option<i64> = ar.result_count.as_ref().map(|v| i64::from(*v));
+    let total_cards: Option<i64> = ar.total_cards.as_ref().map(|v| i64::from(*v));
+    CachedResponse {
+        status: ar.status.to_string(),
+        headers,
+        body,
+        result_count,
+        total_cards,
+    }
+}
+
+#[pymodule]
+fn shared_cache(m: &Bound<PyModule>) -> PyResult<()> {
+    m.add_class::<SharedCache>()?;
+    m.add_class::<CachedResponse>()?;
+    Ok(())
+}
