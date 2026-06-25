@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import orjson
 import pytest
 
 from api.middlewares.caching_middleware import CachedResponse, CachingMiddleware
@@ -29,12 +30,14 @@ class TestCachingMiddleware:
         resp.render_body.return_value = b"rendered body"
         return resp
 
-    def _cache_key(self, host: str | None = None) -> tuple:
-        return (
-            "/search?q=lightning+bolt",
-            (("q", "lightning bolt"),),
-            (("ACCEPT-ENCODING", None),),
-            host,
+    def _cache_key(self, host: str | None = None) -> bytes:
+        return orjson.dumps(
+            (
+                "/search?q=lightning+bolt",
+                (("q", "lightning bolt"),),
+                (("ACCEPT-ENCODING", None),),
+                host,
+            )
         )
 
     def test_2xx_response_is_cached_as_rendered_bytes(self) -> None:
@@ -52,7 +55,7 @@ class TestCachingMiddleware:
         cached = cache[self._cache_key()]
         assert isinstance(cached, CachedResponse)
         assert cached.status == "200 OK"
-        assert cached.headers == {"content-type": "application/json"}
+        assert cached.headers == [("content-type", "application/json")]
         assert cached.body == b"rendered body"
         assert cached.result_count == 3
         assert cached.total_cards == 42
@@ -77,7 +80,7 @@ class TestCachingMiddleware:
             middleware.process_response(req, resp, None, True)
 
         cached = cache[self._cache_key()]
-        assert cached.headers == {"content-type": "application/json"}
+        assert cached.headers == [("content-type", "application/json")]
 
     def test_non_dict_media_cached_without_counts(self) -> None:
         """Responses without a media dict (e.g. static files) cache with None counts."""
@@ -122,7 +125,7 @@ class TestCachingMiddleware:
         """A cache hit replays status, headers, and body, and flags the hit on req.context."""
         cached = CachedResponse(
             status="200 OK",
-            headers={"content-type": "application/json", "content-encoding": "br"},
+            headers=[("content-type", "application/json"), ("content-encoding", "br")],
             body=b"cached body",
             result_count=7,
             total_cards=99,

@@ -17,6 +17,10 @@ COPY ./card_engine /card_engine
 WORKDIR /card_engine
 RUN maturin build --release --out /wheels
 
+COPY ./shared_cache /shared_cache
+WORKDIR /shared_cache
+RUN maturin build --release --out /wheels
+
 # Stage 2: application image
 FROM ubuntu:26.04
 

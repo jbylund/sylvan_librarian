@@ -108,12 +108,23 @@ class ApiWorker(multiprocessing.Process):
             SecurityHeadersMiddleware,
             TimingMiddleware,
         )
+        from api.settings import settings
+
+        shared_cache = None
+        if settings.enable_cache:
+            try:
+                from shared_cache import SharedCache
+
+                shared_cache = SharedCache(path=settings.shared_cache_path, maxsize=10_000, n_pages=3)
+                logger.info("SharedCache opened at %s pid=%d", settings.shared_cache_path, os.getpid())
+            except (ImportError, OSError):
+                logger.warning("SharedCache unavailable, falling back to per-process LRUCache", exc_info=True)
 
         api = falcon.App(
             middleware=[
                 TimingMiddleware(),
                 QueryLogMiddleware(),  # process_response fires before TimingMiddleware's
-                CachingMiddleware(),
+                CachingMiddleware(cache=shared_cache),
                 CompressionMiddleware(),
                 SecurityHeadersMiddleware(),  # Add security headers to all responses
                 CORSMiddleware(),  # Handle CORS requests
