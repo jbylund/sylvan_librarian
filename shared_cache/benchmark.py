@@ -60,6 +60,10 @@ def make_key(i: int) -> tuple:
 KEYS = [make_key(i) for i in range(500)]
 MISS_KEY = make_key(999_999)
 
+# Pre-serialized bytes keys — SharedCache accepts bytes directly.
+KEYS_BYTES = [orjson.dumps(k) for k in KEYS]
+MISS_KEY_BYTES = orjson.dumps(MISS_KEY)
+
 
 # ── Timing helper ────────────────────────────────────────────────────────────
 
@@ -112,11 +116,9 @@ def bench_caches(cache_path: str) -> None:
     print(f"  Body size: {len(BODY):,} bytes   Keys: {len(KEYS)}\n")
 
     backends = [
-        ("dict",                    _dict_bench),
-        ("cachebox.LRUCache",       _cachebox_bench),
-        ("SharedCache (pickle)",    lambda: _shared_bench(cache_path, key_fn=None)),
-        ("SharedCache (orjson)",    lambda: _shared_bench(cache_path, key_fn=orjson.dumps)),
-        ("SharedCache (marshal)",   lambda: _shared_bench(cache_path, key_fn=marshal.dumps)),
+        ("dict",              _dict_bench),
+        ("cachebox.LRUCache", _cachebox_bench),
+        ("SharedCache",       lambda: _shared_bench(cache_path)),
     ]
 
     for name, setup_fn in backends:
@@ -124,7 +126,7 @@ def bench_caches(cache_path: str) -> None:
         row(name, set=set_time, get_hit=get_hit, get_miss=get_miss)
 
     print()
-    print("  Note: SharedCache times include pickle key serialization (~450–500 ns).")
+    print("  Note: SharedCache times use pre-serialized bytes keys (orjson ~85 ns, caller's cost).")
     print("  Advantage: one cache shared across all worker processes.")
 
 
@@ -150,13 +152,13 @@ def _cachebox_bench():
     return get_hit, get_miss, set_time
 
 
-def _shared_bench(path: str, key_fn=None):
-    c = SharedCache(path=path, maxsize=len(KEYS) * 2, default_ttl=None, key_fn=key_fn)
-    for k in KEYS:
-        c[k] = RESPONSE
-    get_hit  = measure(lambda: c.get(KEYS[0]), 10_000)
-    get_miss = measure(lambda: c.get(MISS_KEY), 10_000)
-    set_time = measure(lambda: c.__setitem__(KEYS[0], RESPONSE), 10_000)
+def _shared_bench(path: str):
+    c = SharedCache(path=path, maxsize=len(KEYS) * 2, default_ttl=None)
+    for kb in KEYS_BYTES:
+        c[kb] = RESPONSE
+    get_hit  = measure(lambda: c.get(KEYS_BYTES[0]), 10_000)
+    get_miss = measure(lambda: c.get(MISS_KEY_BYTES), 10_000)
+    set_time = measure(lambda: c.__setitem__(KEYS_BYTES[0], RESPONSE), 10_000)
     c.invalidate()
     return get_hit, get_miss, set_time
 
@@ -175,31 +177,34 @@ def bench_breakdown(cache_path: str) -> None:
     """
     print("\n=== get_hit latency breakdown (SharedCache / orjson) ===\n")
 
-    c = SharedCache(path=cache_path, maxsize=len(KEYS) * 2, default_ttl=None,
-                    key_fn=orjson.dumps)
-    for k in KEYS:
-        c[k] = RESPONSE
+    c = SharedCache(path=cache_path, maxsize=len(KEYS) * 2, default_ttl=None)
+    for kb in KEYS_BYTES:
+        c[kb] = RESPONSE
 
     key = KEYS[0]
-    key_bytes = orjson.dumps(key)
+    key_bytes = KEYS_BYTES[0]
+    miss_bytes = MISS_KEY_BYTES
     N = 20_000
 
-    phase_a = measure(lambda: orjson.dumps(key), N)
-    phase_b = measure(lambda: c._probe_only(key_bytes), N)   # lock + probe + release only
-    phase_c = measure(lambda: c._get_raw(key_bytes), N)      # + mmap→PyBytes copy outside lock
-    phase_d = measure(lambda: c._get_raw_decoded(key_bytes), N)  # + rkyv + Python objects
-    phase_e = measure(lambda: c.get(key), N)                 # full pipeline (A+D combined)
-    phase_f = measure(lambda: (r := c.get(key), r.body, r.headers), N)  # + attribute access
+    phase_a  = measure(lambda: orjson.dumps(key), N)              # caller's key serialization cost
+    phase_b  = measure(lambda: c._probe_only(key_bytes), N)       # lock + probe + release only
+    phase_c  = measure(lambda: c._get_raw(key_bytes), N)          # + mmap→PyBytes copy outside lock
+    phase_d  = measure(lambda: c._get_raw_decoded(key_bytes), N)  # + rkyv + Python objects
+    phase_e  = measure(lambda: c.get(key_bytes), N)               # full get() (bytes key)
+    phase_f  = measure(lambda: (r := c.get(key_bytes), r.body, r.headers), N)  # + attribute access
+    phase_miss = measure(lambda: c.get(miss_bytes), N)            # miss path (filter short-circuit)
 
     print(f"  {'Phase':50}  {'ns':>7}  {'%':>5}")
     print("  " + "-" * 65)
-    print(f"  {'A: orjson.dumps(key)':<50}  {phase_a:>7.1f}  {phase_a/phase_f*100:>4.0f}%")
+    print(f"  {'A: orjson.dumps(key)  [caller cost, not in E/F]':<50}  {phase_a:>7.1f}")
     print(f"  {'B: lock + probe + release (_probe_only)':<50}  {phase_b:>7.1f}  {phase_b/phase_f*100:>4.0f}%")
     print(f"  {'C: B + mmap→PyBytes outside lock (_get_raw)':<50}  {phase_c:>7.1f}  {phase_c/phase_f*100:>4.0f}%")
     print(f"  {'D: C + rkyv + Python objects (_get_raw_decoded)':<50}  {phase_d:>7.1f}  {phase_d/phase_f*100:>4.0f}%")
-    print(f"  {'E: full pipeline / get(key)':<50}  {phase_e:>7.1f}  {phase_e/phase_f*100:>4.0f}%")
-    print(f"  {'F: E + .body + .headers access (middleware path)':<50}  {phase_f:>7.1f}  100%")
+    print(f"  {'E: full get(key_bytes)':<50}  {phase_e:>7.1f}  {phase_e/phase_f*100:>4.0f}%")
+    print(f"  {'F: E + .body + .headers (middleware path)':<50}  {phase_f:>7.1f}  100%")
+    print(f"  {'miss: get(miss_key_bytes)  [filter short-circuit]':<50}  {phase_miss:>7.1f}")
     print()
+    print(f"  Caller key serialize (A):           {phase_a:.1f} ns  (orjson; paid once per request)")
     print(f"  Lock critical section (B):          {phase_b:.1f} ns")
     print(f"  mmap→PyBytes copy (C - B):          {phase_c - phase_b:.1f} ns  ({len(BODY):,} bytes)")
     print(f"  rkyv + object construction (D - C): {phase_d - phase_c:.1f} ns")

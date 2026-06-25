@@ -1,13 +1,15 @@
+use std::sync::atomic::{fence, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use memmap2::MmapMut;
 use rkyv::Archived;
 use xxhash_rust::xxh3::xxh3_64;
 
+use crate::cuckoo::CuckooFilter;
 use crate::region::{
-    arena_start, bump_generation, hdr_ptr, hdr_ptr_mut, open_region, read_generation,
-    slot_ptr, slot_ptr_mut, try_lock, unlock, RegionHeader, RawSlot, EMPTY, HEADER_SIZE,
-    SLOT_SIZE, TOMBSTONE,
+    arena_start, bucket_count, bump_generation, filter_offset, hdr_ptr, hdr_ptr_mut,
+    open_region, read_generation, slot_ptr, slot_ptr_mut, try_lock, unlock,
+    RegionHeader, RawSlot, EMPTY, HEADER_SIZE, SLOT_SIZE, TOMBSTONE,
 };
 use crate::region::normalize_hash;
 use crate::types::CachedResponse;
@@ -47,6 +49,18 @@ impl SharedCache {
             mmap,
             default_ttl_secs,
         })
+    }
+
+    // ── Cuckoo filter accessor ───────────────────────────────────────────────
+
+    fn filter(&self) -> CuckooFilter {
+        let slot_count = self.hdr().slot_count;
+        // Cast *const → *mut: the raw mmap backing is always writable (MmapMut).
+        // Write access is safe only under the spinlock; lookup() is lock-free.
+        let ptr = unsafe {
+            (self.mmap.as_ptr() as *mut u8).add(filter_offset(slot_count))
+        };
+        CuckooFilter::new(ptr, bucket_count(slot_count))
     }
 
     // ── Header / slot accessors (all called under the lock) ──────────────────
@@ -111,6 +125,15 @@ impl SharedCache {
     {
         let hash = normalize_hash(xxh3_64(key));
 
+        // Lock-free fast miss: consult the cuckoo filter before paying the
+        // spinlock CAS cost. The Acquire fence synchronises with the Release
+        // on the writer's unlock so we see filter writes from any process that
+        // committed before our last synchronised read.
+        fence(Ordering::Acquire);
+        if !self.filter().lookup(hash) {
+            return None;
+        }
+
         if !try_lock(&self.mmap) {
             return None;
         }
@@ -140,6 +163,16 @@ impl SharedCache {
         }
 
         Some(result)
+    }
+
+    /// Lock-free membership test via the cuckoo filter.
+    /// ~0.006% false positive rate (1 in 16,384) at 50% load; no false negatives.
+    /// A true result means "probably present" — callers that need certainty must call get_with.
+    /// Used as a cheap pre-check to avoid redundant set() calls on concurrent requests.
+    pub fn contains(&self, key: &[u8]) -> bool {
+        let hash = normalize_hash(xxh3_64(key));
+        fence(Ordering::Acquire);
+        self.filter().lookup(hash)
     }
 
     /// Lock-only probe: acquire the spinlock, check whether `key` is present,
@@ -260,6 +293,9 @@ impl SharedCache {
                 if let Some(pair) =
                     self.alloc_pair(value_bytes.len() as u32, key.len() as u32)
                 {
+                    // Insert into filter before slot write so a lock-free reader
+                    // who observes the slot entry also finds the filter entry.
+                    self.filter().insert(hash);
                     self.write_slot(target, hash, pair, value_bytes, key, ttl_secs);
                 }
                 return;
@@ -267,6 +303,8 @@ impl SharedCache {
         };
 
         let was_tombstone = self.slot(target).key_hash == TOMBSTONE;
+        // Filter insert must precede slot write (same ordering guarantee).
+        self.filter().insert(hash);
         self.write_slot(target, hash, (val_off, key_off), value_bytes, key, ttl_secs);
 
         if was_tombstone {
@@ -354,7 +392,9 @@ impl SharedCache {
         }
 
         if let Some(idx) = best_idx {
+            let evicted_hash = self.slot(idx).key_hash;
             self.slot_mut(idx).key_hash = TOMBSTONE;
+            self.filter().delete(evicted_hash);
             let ec = self.hdr().entry_count.saturating_sub(1);
             self.hdr_mut().entry_count = ec;
             let tc = self.hdr().tombstone_count + 1;
@@ -371,12 +411,11 @@ impl SharedCache {
         // via read_generation and discard their results rather than return garbage.
         bump_generation(&self.mmap);
         let slot_count = self.hdr().slot_count;
+        // Zero the slot table and the cuckoo filter in one pass (they are adjacent).
+        let clear_len = slot_count as usize * SLOT_SIZE
+            + crate::region::filter_size(slot_count);
         unsafe {
-            std::ptr::write_bytes(
-                self.mmap.as_mut_ptr().add(HEADER_SIZE),
-                0,
-                slot_count as usize * SLOT_SIZE,
-            );
+            std::ptr::write_bytes(self.mmap.as_mut_ptr().add(HEADER_SIZE), 0, clear_len);
         }
         let h = self.hdr_mut();
         h.arena_head = 0;

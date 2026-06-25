@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use memmap2::MmapMut;
 
 pub const MAGIC: u32 = 0x5343_4143; // "SCAC"
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 3;
 pub const HEADER_SIZE: usize = 64;
 pub const SLOT_SIZE: usize = 64;
 
@@ -62,8 +62,26 @@ pub fn normalize_hash(h: u64) -> u64 {
     }
 }
 
-pub fn arena_start(slot_count: u32) -> usize {
+/// Number of buckets in the cuckoo filter (must be a power of two).
+/// slot_count/4 buckets × 4 slots/bucket = slot_count total slots = 2×maxsize,
+/// keeping load at ≤50% at capacity. FPR ≈ 0.006% (1 in 16,384) with 16-bit fps.
+pub fn bucket_count(slot_count: u32) -> u32 {
+    (slot_count / 4).max(16)
+}
+
+/// Byte offset of the cuckoo filter region in the mmap.
+pub fn filter_offset(slot_count: u32) -> usize {
     HEADER_SIZE + slot_count as usize * SLOT_SIZE
+}
+
+/// Byte size of the cuckoo filter region.
+pub fn filter_size(slot_count: u32) -> usize {
+    bucket_count(slot_count) as usize * crate::cuckoo::BUCKET_BYTES
+}
+
+/// Byte offset where the arena begins (after header + slot table + cuckoo filter).
+pub fn arena_start(slot_count: u32) -> usize {
+    filter_offset(slot_count) + filter_size(slot_count)
 }
 
 pub fn file_size(slot_count: u32, arena_size: u32) -> usize {
