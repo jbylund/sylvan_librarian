@@ -7,7 +7,7 @@ on:
   pull_request:
     paths:
       - '**/*.py'
-      - 'card_engine/**'
+      - '**/*.rs'
       - 'requirements/**'
       - 'pyproject.toml'
       - '.github/workflows/unit-tests.yml'
@@ -51,22 +51,37 @@ jobs:
           path: /tmp/card-engine-wheel
           key: card-engine-${{ runner.os }}-${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('card_engine/**') }}
 
+      - name: Cache shared_cache wheel
+        id: sc-cache
+        uses: actions/cache@v5
+        with:
+          path: /tmp/shared-cache-wheel
+          key: shared-cache-${{ runner.os }}-${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('shared_cache/**') }}
+
       - name: Install Rust toolchain
-        if: steps.ce-cache.outputs.cache-hit != 'true'
+        if: steps.ce-cache.outputs.cache-hit != 'true' || steps.sc-cache.outputs.cache-hit != 'true'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Cargo registry and build artifacts
-        if: steps.ce-cache.outputs.cache-hit != 'true'
+        if: steps.ce-cache.outputs.cache-hit != 'true' || steps.sc-cache.outputs.cache-hit != 'true'
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: card_engine
+          workspaces: |
+            card_engine
+            shared_cache
 
       - name: Build card_engine wheel
         if: steps.ce-cache.outputs.cache-hit != 'true'
         run: pip wheel ./card_engine -w /tmp/card-engine-wheel
 
-      - name: Install card_engine extension
-        run: pip install /tmp/card-engine-wheel/card_engine*.whl
+      - name: Build shared_cache wheel
+        if: steps.sc-cache.outputs.cache-hit != 'true'
+        run: pip wheel ./shared_cache -w /tmp/shared-cache-wheel
+
+      - name: Install Rust extensions
+        run: |
+          pip install /tmp/card-engine-wheel/card_engine*.whl
+          pip install /tmp/shared-cache-wheel/shared_cache*.whl
 
       - name: Run tests
         run: |
