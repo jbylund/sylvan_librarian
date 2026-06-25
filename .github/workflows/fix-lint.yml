@@ -16,16 +16,10 @@ jobs:
       github.event.comment.user.login == 'jbylund'
     runs-on: ubuntu-latest
     steps:
-      - name: Get PR branch
-        id: pr
-        run: echo "ref=$(gh pr view ${{ github.event.issue.number }} --json headRefName -q .headRefName)" >> $GITHUB_OUTPUT
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Checkout PR branch
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.pr.outputs.ref }}
+          ref: refs/pull/${{ github.event.issue.number }}/head
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python 3.13
@@ -45,4 +39,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git diff --exit-code && echo "No changes to commit" || (git add -u && git commit -m "style: auto-fix ruff" && git push)
+          branch=$(gh pr view ${{ github.event.issue.number }} --repo ${{ github.repository }} --json headRefName -q .headRefName)
+          git diff --exit-code && echo "No changes to commit" || (git add -u && git commit -m "style: auto-fix ruff" && git push origin HEAD:"$branch")
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
