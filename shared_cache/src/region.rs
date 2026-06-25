@@ -1,10 +1,10 @@
 use std::fs::OpenOptions;
 use std::os::unix::io::AsRawFd;
-use std::sync::atomic::{AtomicU32, AtomicU8, Ordering, fence};
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 use memmap2::MmapMut;
 
-pub const MAGIC: u32 = 0x4743_4143 + 1; // bump to force re-init when slot layout changes
+pub const MAGIC: u32 = 0x4743_4143 + 2; // bump to force re-init when slot layout changes
 pub const VERSION: u32 = 1;
 pub const SLOT_SIZE: usize = 64;
 pub const PAGE_HEADER_SIZE: usize = 64;
@@ -88,8 +88,7 @@ pub fn compute_filter_bucket_count(maxsize: usize) -> usize {
 pub fn read_page_generation(base: *const u8) -> u32 {
     // generation is at offset 12 within PageHeader
     let ptr = unsafe { base.add(12) as *const AtomicU32 };
-    fence(Ordering::Acquire);
-    unsafe { (*ptr).load(Ordering::Relaxed) }
+    unsafe { (*ptr).load(Ordering::Acquire) }
 }
 
 /// Increment the page generation counter (Release).

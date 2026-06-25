@@ -272,30 +272,56 @@ impl GenerationalSharedCache {
                 return false; // table full
             }
         }
-        let Some((val_off, key_off)) = self.alloc_arena(page_idx, value_bytes.len(), key.len()) else {
-            return false; // arena full
+        let value_padded = (value_bytes.len() + ARENA_ALIGN - 1) & !(ARENA_ALIGN - 1);
+
+        // For existing slots: reuse the arena allocation if the new value fits, otherwise
+        // allocate only value bytes (key is unchanged). For new slots: allocate both.
+        let (val_off, val_capacity, new_key_off) = if let Some(eidx) = existing_idx {
+            let old_offset   = unsafe { (*self.slot_ptr(page_idx, eidx)).arena_offset };
+            let old_capacity = unsafe { (*self.slot_ptr(page_idx, eidx)).arena_capacity };
+            if value_bytes.len() <= old_capacity as usize {
+                (old_offset, old_capacity, None)
+            } else {
+                let old_head = self.page_header(page_idx).arena_head;
+                if old_head as usize + value_padded > self.page_size - self.arena_start_in_page {
+                    return false; // arena full
+                }
+                self.page_header_mut(page_idx).arena_head = old_head + value_padded as u32;
+                (old_head, value_padded as u32, None)
+            }
+        } else {
+            let Some((val_off, key_off)) = self.alloc_arena(page_idx, value_bytes.len(), key.len()) else {
+                return false; // arena full
+            };
+            (val_off, value_padded as u32, Some(key_off))
         };
+
         unsafe {
             let ab = self.arena_base_mut(page_idx);
             std::ptr::copy_nonoverlapping(value_bytes.as_ptr(), ab.add(val_off as usize), value_bytes.len());
-            std::ptr::copy_nonoverlapping(key.as_ptr(), ab.add(key_off as usize), key.len());
+            if let Some(key_off) = new_key_off {
+                std::ptr::copy_nonoverlapping(key.as_ptr(), ab.add(key_off as usize), key.len());
+            }
         }
         let is_new = existing_idx.is_none();
         let slot_idx = existing_idx.unwrap_or(idx);
         let slot = self.slot_ptr_mut(page_idx, slot_idx);
         unsafe {
-            (*slot).expiry_ns    = expiry_ns;
-            (*slot).value_hash   = value_hash;
-            (*slot).body_len     = body_len;
-            (*slot).arena_offset = val_off;
-            (*slot).arena_len    = value_bytes.len() as u32;
-            (*slot).key_offset   = key_off;
-            (*slot).key_len      = key.len() as u32;
-            (*slot).visited      = 0;
+            (*slot).expiry_ns      = expiry_ns;
+            (*slot).value_hash     = value_hash;
+            (*slot).body_len       = body_len;
+            (*slot).arena_offset   = val_off;
+            (*slot).arena_len      = value_bytes.len() as u32;
+            (*slot).arena_capacity = val_capacity;
+            if let Some(key_off) = new_key_off {
+                (*slot).key_offset = key_off;
+                (*slot).key_len    = key.len() as u32;
+            }
+            (*slot).visited        = 0;
             // Write key_hash last — readers skip EMPTY slots, so writing hash
             // last makes the entry visible only once fully written.
             std::sync::atomic::compiler_fence(Ordering::Release);
-            (*slot).key_hash     = hash;
+            (*slot).key_hash       = hash;
         }
         if is_new {
             self.page_header_mut(page_idx).entry_count += 1;
@@ -462,18 +488,24 @@ impl GenerationalSharedCache {
             return None;
         }
 
-        // Probe active page under lock; snapshot (abs, len) then release before calling f.
+        // Probe active page under lock; snapshot (abs, len, gen) then release before calling f.
         if !try_lock(&self.mmap) {
             return None;
         }
         let active_idx = self.active_idx();
-        let active_abs_len = self.do_probe(active_idx, hash, key).map(|(off, len, _)| {
-            (self.page_offset(active_idx) + self.arena_start_in_page + off as usize, len as usize)
+        let active_abs_len_gen = self.do_probe(active_idx, hash, key).map(|(off, len, _)| {
+            let abs = self.page_offset(active_idx) + self.arena_start_in_page + off as usize;
+            let page_gen = self.page_generation(active_idx);
+            (abs, len as usize, page_gen)
         });
         unlock(&self.mmap);
 
-        if let Some((abs, len)) = active_abs_len {
-            return Some(f(&self.mmap[abs..abs + len]));
+        if let Some((abs, len, gen_before)) = active_abs_len_gen {
+            let result = f(&self.mmap[abs..abs + len]);
+            if self.page_generation(active_idx) != gen_before {
+                return None;
+            }
+            return Some(result);
         }
 
         // Probe sealed pages lock-free, newest first.
@@ -594,16 +626,7 @@ impl GenerationalSharedCache {
     /// Remove all copies of `key` from every page and the shared filter.
     /// Returns true if at least one copy was found and tombstoned.
     ///
-    /// Two-phase to minimize lock duration:
-    ///   Phase 1 (locked):     active page probe + tombstone + entry_count + filter delete.
-    ///   Phase 2 (lock-free):  sealed page tombstones via atomic u64 write.
-    ///
-    /// Sealed pages are written lock-free because:
-    ///   - `key_hash` is an aligned u64 — one store instruction, no tearing.
-    ///   - Sealed pages never receive inserts, so entry_count doesn't need adjusting.
-    ///   - A generation check guards against writing to a page recycled by concurrent rotation.
-    ///
-    /// Filter delete only happens in phase 1 (if found in active). If the key lives only
+    /// Filter delete only happens if the key is found in the active page. If the key lives only
     /// in a sealed page the filter fingerprint is left in place — future gets probe and
     /// return None correctly; the fingerprint is cleared on the next rotation.
     pub fn pop(&mut self, key: &[u8]) -> bool {
@@ -613,32 +636,23 @@ impl GenerationalSharedCache {
             return false;
         }
 
-        // Phase 1: locked — active page only.
         if !try_lock(&self.mmap) { return false; }
         let active_idx = self.active_idx();
         let mut found = false;
-        if let Some((_, _, slot_idx)) = self.do_probe(active_idx, hash, key) {
-            unsafe { (*self.slot_ptr_mut(active_idx, slot_idx)).key_hash = TOMBSTONE; }
-            let ph = self.page_header_mut(active_idx);
-            ph.entry_count = ph.entry_count.saturating_sub(1);
-            self.filter().delete(hash);
-            found = true;
-        }
-        unlock(&self.mmap);
 
-        // Phase 2: lock-free — sealed pages, newest first.
-        for i in 1..self.n_pages {
-            let page_idx = (active_idx + self.n_pages - i) % self.n_pages;
-            let gen_before = self.page_generation(page_idx);
+        for page_idx in 0..self.n_pages {
             if let Some((_, _, slot_idx)) = self.do_probe(page_idx, hash, key) {
-                // Check generation hasn't changed between probe and write.
-                // If it has, rotation zeroed this page already — skip.
-                if self.page_generation(page_idx) == gen_before {
-                    unsafe { (*self.slot_ptr_mut(page_idx, slot_idx)).key_hash = TOMBSTONE; }
-                    found = true;
+                unsafe { (*self.slot_ptr_mut(page_idx, slot_idx)).key_hash = TOMBSTONE; }
+                if page_idx == active_idx {
+                    self.page_header_mut(active_idx).entry_count =
+                        self.page_header(active_idx).entry_count.saturating_sub(1);
+                    self.filter().delete(hash);
                 }
+                found = true;
             }
         }
+
+        unlock(&self.mmap);
         found
     }
 
@@ -674,7 +688,25 @@ impl GenerationalSharedCache {
     pub fn contains(&self, key: &[u8]) -> bool {
         let hash = normalize_hash(xxh3_64(key));
         fence(Ordering::Acquire);
-        self.filter().lookup(hash)
+        if !self.filter().lookup(hash) {
+            return false;
+        }
+        // Full slot probe — no arena copy, no deserialization. Correctly returns false
+        // for filter false positives and tombstoned entries (e.g. after pop()).
+        if !try_lock(&self.mmap) { return false; }
+        let active_idx = self.active_idx();
+        let in_active = self.do_probe(active_idx, hash, key).is_some();
+        unlock(&self.mmap);
+        if in_active { return true; }
+        // Sealed pages lock-free. A generation change during probe causes a key mismatch
+        // at worst — no arena access means no UB risk.
+        for i in 1..self.n_pages {
+            let page_idx = (active_idx + self.n_pages - i) % self.n_pages;
+            if self.do_probe(page_idx, hash, key).is_some() {
+                return true;
+            }
+        }
+        false
     }
 
     /// Benchmarking helper: filter check + lock + active-page probe + unlock. No arena copy.

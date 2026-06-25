@@ -17,13 +17,14 @@ pub struct CachedResponse {
 pub struct RawSlot {
     pub key_hash: u64,     // EMPTY / TOMBSTONE / normalized xxh3 hash
     pub expiry_ns: u64,    // Unix epoch nanoseconds; u64::MAX = never expires
-    pub value_hash: u64,   // xxh3(status || body) — fast-path dedup in set()
-    pub arena_offset: u32, // byte offset of rkyv value bytes within the arena
-    pub arena_len: u32,    // length of rkyv value bytes
-    pub key_offset: u32,   // byte offset of raw key bytes within the arena
-    pub key_len: u32,      // length of raw key bytes
-    pub body_len: u32,  // raw body byte length — length check before sampled hash
-    pub visited: u8, _pad: [u8; 19],
+    pub value_hash: u64,      // sampled_body_hash(body) — skips re-serialization in set() when body is unchanged
+    pub arena_offset: u32,    // byte offset of rkyv value bytes within the arena
+    pub arena_len: u32,       // length of rkyv value bytes
+    pub key_offset: u32,      // byte offset of raw key bytes within the arena
+    pub key_len: u32,         // length of raw key bytes
+    pub body_len: u32,        // raw body byte length — length check before sampled hash
+    pub arena_capacity: u32,  // padded allocation size; in-place reuse when new value fits
+    pub visited: u8, _pad: [u8; 15],
 }
 
 const _: () = assert!(std::mem::size_of::<RawSlot>() == 64);

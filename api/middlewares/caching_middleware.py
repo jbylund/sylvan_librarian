@@ -72,10 +72,10 @@ class CachingMiddleware:
 
     def invalidate(self: CachingMiddleware) -> None:
         """Clear all cached entries, delegating to the inner cache's own method."""
-        # TODO: wire this into _clear_caches() in APIResource so bulk imports flush the
-        # HTTP response cache. Currently _clear_caches() only bumps cache_generation
-        # (which invalidates the query/engine caches), so stale HTTP responses can be
-        # served until natural eviction.
+        # Not yet wired into APIResource._clear_caches() — bulk imports do not currently
+        # flush the HTTP response cache. Stale responses are served until natural eviction.
+        # Wiring this up requires passing the middleware instance into APIResource at
+        # construction time (or exposing it through the app). Tracked for a follow-up PR.
         if hasattr(self.cache, "invalidate"):
             self.cache.invalidate()
         elif hasattr(self.cache, "clear"):
