@@ -20,6 +20,8 @@ within the locked critical section.
 
 A single `AtomicU32` spinlock at byte 0 serializes all get/set operations. Reads copy
 the rkyv bytes out of the arena before releasing the lock, then deserialize outside it.
+The response body is copied directly into a Python `bytes` object in `build_response`,
+so `.body` access on a cache hit is a reference-count increment — no extra copy.
 
 **Eviction** samples 8 random slots and tombstones the one with the smallest `last_used`
 (approximate LRU, same approach as Redis). Tombstones preserve probe chain integrity for
@@ -70,42 +72,45 @@ Pass `key_fn=orjson.dumps` for best performance (see benchmarks below).
 
 ## Performance
 
-Measured on Apple M-series with a realistic 5 KB gzip-compressed response body
-(~20 KB raw JSON, 58 cards) and 500 warm keys. All SharedCache numbers use `key_fn=orjson.dumps`.
+Measured on Apple M-series with a real 5,025-byte gzip-compressed response body
+(`/search?q=elf`, 500 warm keys). All SharedCache numbers use `key_fn=orjson.dumps`.
 
 ### Backend comparison
 
 | Backend | get_hit | get_miss | set |
 |---|---|---|---|
-| `dict` | 0.03 µs | 0.03 µs | — |
-| `cachebox.LRUCache` | 0.05 µs | 0.04 µs | — |
-| `SharedCache` | 0.54 µs | 0.16 µs | 0.93 µs |
+| `dict` | 35 ns | 32 ns | 62 ns |
+| `cachebox.LRUCache` | 46 ns | 44 ns | 77 ns |
+| `SharedCache` (orjson) | 541 ns | 154 ns | 946 ns |
+| `SharedCache` (pickle) | 1,159 ns | 731 ns | 1,671 ns |
 
 In-process caches return a reference to an existing Python object (zero copies). SharedCache
 must copy the response body out of shared memory and reconstruct Python objects on each read —
 that's the source of the gap. The payoff is that every worker process shares the same 10k-entry
 pool rather than maintaining its own.
 
-### Where the 0.54 µs goes
+### Where the 541 ns goes
 
 ```
-A  orjson key serialize + xxhash   0.08 µs   14%   tuple → bytes, then hash (both before lock)
-B  lock + probe + memcpy           0.20 µs   36%   spinlock acquire, slot scan, copy 5 KB from mmap
-C  rkyv parse + Python objects     0.24 µs   45%   deserialize + build CachedResponse (after lock)
-   ─────────────────────────────────────────────
-D  full get                        0.54 µs  100%
+A  orjson key serialize        91 ns   16%   tuple → bytes (before lock)
+B  lock + probe + memcpy      255 ns   46%   spinlock, slot scan, copy 5 KB from mmap to Rust
+C  rkyv parse + Python objs   213 ns   38%   deserialize + build CachedResponse (after lock)
+   ─────────────────────────────────────────────────────────────
+D  full get                   559 ns  100%
+
+   .body attribute access      ~2 ns    0%   refcount bump on pre-built PyBytes — effectively free
 ```
 
 Phase B scales with response size (it is a memcpy of the rkyv blob). Phase C is dominated
-by Python object construction and is roughly constant regardless of body size.
-The spinlock itself is ~1% of total time; xxhash and key serialization happen before lock
-acquisition and do not contribute to the critical section.
+by the body copy into Python memory and string allocations for status/headers; it is roughly
+linear in body size. The spinlock itself is ~5% of Phase B; key serialization and xxhash
+happen before lock acquisition and do not contribute to the critical section.
 
 ## Tradeoffs
 
 | | dict / LRUCache | SharedCache |
 |---|---|---|
-| get_hit latency | ~0.03–0.05 µs | ~0.5 µs |
+| get_hit latency | ~35–50 ns | ~540 ns |
 | Memory per process | `maxsize × value_size` | shared; 1× regardless of workers |
 | Cross-process hits | ✗ | ✓ |
 | Process crash safety | n/a | lock timeout prevents hang |

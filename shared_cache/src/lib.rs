@@ -12,14 +12,14 @@ use cache::{access_response, SharedCache as Inner};
 pub struct CachedResponse {
     pub status: String,
     pub headers: Vec<(String, String)>,
-    pub body: Option<Vec<u8>>,
+    pub body: Option<Py<pyo3::types::PyBytes>>,
     pub result_count: Option<i64>,
     pub total_cards: Option<i64>,
 }
 
 #[pymethods]
 impl CachedResponse {
-    fn __repr__(&self) -> String {
+    fn __repr__(&self, py: Python) -> String {
         let rc = self
             .result_count
             .map(|v| v.to_string())
@@ -27,7 +27,7 @@ impl CachedResponse {
         format!(
             "CachedResponse(status={:?}, body_len={}, result_count={})",
             self.status,
-            self.body.as_ref().map(|b| b.len()).unwrap_or(0),
+            self.body.as_ref().map(|b| b.bind(py).as_bytes().len()).unwrap_or(0),
             rc,
         )
     }
@@ -94,7 +94,7 @@ impl SharedCache {
     /// Return the cached `CachedResponse` for `key`, or `None` on miss / expiry.
     fn get(&mut self, py: Python, key: &Bound<PyAny>) -> PyResult<Option<CachedResponse>> {
         let key_bytes = py_key_bytes(py, key, self.key_fn.as_ref())?;
-        Ok(self.inner.get(&key_bytes).as_deref().map(build_response))
+        Ok(self.inner.get(&key_bytes).as_deref().map(|b| build_response(py, b)))
     }
 
     fn __setitem__(
@@ -108,7 +108,7 @@ impl SharedCache {
 
     fn __getitem__(&mut self, py: Python, key: &Bound<PyAny>) -> PyResult<CachedResponse> {
         let key_bytes = py_key_bytes(py, key, self.key_fn.as_ref())?;
-        match self.inner.get(&key_bytes).as_deref().map(build_response) {
+        match self.inner.get(&key_bytes).as_deref().map(|b| build_response(py, b)) {
             Some(r) => Ok(r),
             None => Err(pyo3::exceptions::PyKeyError::new_err(
                 "key not in shared cache",
@@ -143,8 +143,8 @@ impl SharedCache {
 
     /// Like `_get_raw` but also builds the Python CachedResponse from the bytes,
     /// letting callers isolate the deserialization cost from the lock+probe cost.
-    fn _get_raw_decoded(&mut self, key_bytes: &[u8]) -> Option<CachedResponse> {
-        self.inner.get(key_bytes).as_deref().map(build_response)
+    fn _get_raw_decoded(&mut self, py: Python, key_bytes: &[u8]) -> Option<CachedResponse> {
+        self.inner.get(key_bytes).as_deref().map(|b| build_response(py, b))
     }
 }
 
@@ -180,7 +180,7 @@ fn extract_response(
     Ok((status, headers, body, result_count, total_cards))
 }
 
-fn build_response(bytes: &[u8]) -> CachedResponse {
+fn build_response(py: Python, bytes: &[u8]) -> CachedResponse {
     let ar = access_response(bytes);
     // rkyv 0.8 archives (String, String) as ArchivedTuple2 with .0 / .1 fields.
     let headers: Vec<(String, String)> = ar
@@ -188,7 +188,12 @@ fn build_response(bytes: &[u8]) -> CachedResponse {
         .iter()
         .map(|t| (t.0.to_string(), t.1.to_string()))
         .collect();
-    let body: Option<Vec<u8>> = ar.body.as_ref().map(|b| b.as_slice().to_vec());
+    // Create PyBytes directly from the rkyv slice — one copy (blob → Python bytes)
+    // instead of two (blob → Rust Vec → Python bytes via PyO3's Vec<u8> conversion).
+    let body: Option<Py<pyo3::types::PyBytes>> = ar
+        .body
+        .as_ref()
+        .map(|b| pyo3::types::PyBytes::new(py, b.as_slice()).unbind());
     // rkyv 0.8 archives i64 as i64_le (endian-portable); convert via From.
     let result_count: Option<i64> = ar.result_count.as_ref().map(|v| i64::from(*v));
     let total_cards: Option<i64> = ar.total_cards.as_ref().map(|v| i64::from(*v));

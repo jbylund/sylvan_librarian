@@ -31,11 +31,8 @@ CachedResponse = namedtuple(
     ["status", "headers", "body", "result_count", "total_cards"],
 )
 
-BODY = (
-    b'{"cards":['
-    + b'{"name":"Lightning Bolt","cmc":1,"type_line":"Instant"},' * 20
-    + b'],"total_cards":75321}'
-)  # ~1.7 KiB — representative compressed response body
+_BODY_PATH = os.path.join(os.path.dirname(__file__), "elf_response.gz")
+BODY = open(_BODY_PATH, "rb").read()  # real gzip response: /search?q=elf (5025 bytes)
 
 RESPONSE = CachedResponse(
     status="200 OK",
@@ -46,7 +43,7 @@ RESPONSE = CachedResponse(
         ("x-response-time", "12ms"),
     ],
     body=BODY,
-    result_count=20,
+    result_count=75,
     total_cards=75321,
 )
 
@@ -67,18 +64,18 @@ MISS_KEY = make_key(999_999)
 # ── Timing helper ────────────────────────────────────────────────────────────
 
 def measure(fn, n: int) -> float:
-    """Return average time per call in microseconds."""
+    """Return average time per call in nanoseconds."""
     # Warmup
     for _ in range(max(n // 10, 100)):
         fn()
     t = time.perf_counter()
     for _ in range(n):
         fn()
-    return (time.perf_counter() - t) / n * 1e6
+    return (time.perf_counter() - t) / n * 1e9
 
 
 def row(label: str, **timings: float) -> None:
-    cols = "  ".join(f"{k}: {v:7.2f} µs" for k, v in timings.items())
+    cols = "  ".join(f"{k}: {v:7.2f} ns" for k, v in timings.items())
     print(f"  {label:<28} {cols}")
 
 
@@ -98,7 +95,7 @@ def bench_serializers() -> None:
         ("str().encode()",  lambda k: str(k).encode()),
     ]
 
-    print(f"  {'Serializer':<22}  {'µs/call':>8}  {'bytes':>6}  roundtrip ok?")
+    print(f"  {'Serializer':<22}  {'ns/call':>8}  {'bytes':>6}  roundtrip ok?")
     print("  " + "-" * 55)
     for name, fn in serializers:
         blob = fn(key)
@@ -127,7 +124,7 @@ def bench_caches(cache_path: str) -> None:
         row(name, set=set_time, get_hit=get_hit, get_miss=get_miss)
 
     print()
-    print("  Note: SharedCache times include pickle key serialization (~1–3 µs).")
+    print("  Note: SharedCache times include pickle key serialization (~450–500 ns).")
     print("  Advantage: one cache shared across all worker processes.")
 
 
@@ -189,27 +186,28 @@ def bench_breakdown(cache_path: str) -> None:
     phase_b = measure(lambda: c._get_raw(key_bytes), N)
     phase_c = measure(lambda: c._get_raw_decoded(key_bytes), N)
     phase_d = measure(lambda: c.get(key), N)
+    phase_e = measure(lambda: c.get(key).body, N)  # includes .body attribute access (the copy we eliminated)
 
-    print(f"  {'Phase':50}  {'µs':>7}  {'%':>5}")
+    print(f"  {'Phase':50}  {'ns':>7}  {'%':>5}")
     print("  " + "-" * 65)
-    print(f"  {'A: orjson.dumps(key)':<50}  {phase_a:>7.3f}  {phase_a/phase_d*100:>4.0f}%")
-    print(f"  {'B: lock + xxhash + probe + memcpy (_get_raw)':<50}  {phase_b:>7.3f}  {phase_b/phase_d*100:>4.0f}%")
-    print(f"  {'C: B + rkyv + Python object construction (_get_raw_decoded)':<50}  {phase_c:>7.3f}  {phase_c/phase_d*100:>4.0f}%")
-    print(f"  {'D: full pipeline (A+C combined)':<50}  {phase_d:>7.3f}  100%")
+    print(f"  {'A: orjson.dumps(key)':<50}  {phase_a:>7.3f}  {phase_a/phase_e*100:>4.0f}%")
+    print(f"  {'B: lock + xxhash + probe + memcpy (_get_raw)':<50}  {phase_b:>7.3f}  {phase_b/phase_e*100:>4.0f}%")
+    print(f"  {'C: B + rkyv + Python object construction (_get_raw_decoded)':<50}  {phase_c:>7.3f}  {phase_c/phase_e*100:>4.0f}%")
+    print(f"  {'D: full pipeline without .body access':<50}  {phase_d:>7.3f}  {phase_d/phase_e*100:>4.0f}%")
+    print(f"  {'E: D + .body access (middleware path)':<50}  {phase_e:>7.3f}  100%")
     print()
 
     lock_estimate = phase_b * 0.05   # CAS + store ≈ 5% of phase B on ARM64 M-series
-    memcpy_estimate = phase_b - lock_estimate - 0.005  # subtract hash (~5 ns) and lock
+    memcpy_estimate = phase_b - lock_estimate - 5  # subtract hash (~5 ns) and lock
     deserialize = phase_c - phase_b
-    key_ser = phase_a
 
-    print(f"  Rough sub-breakdown of phase B ({phase_b:.3f} µs):")
-    print(f"    spinlock CAS + release:  ~{lock_estimate:.3f} µs  (estimated)")
-    print(f"    xxhash3 + slot probe:    ~0.010 µs  (estimated)")
-    print(f"    mmap memcpy ({len(BODY):,} bytes):  ~{memcpy_estimate:.3f} µs")
+    print(f"  Rough sub-breakdown of phase B ({phase_b:.1f} ns):")
+    print(f"    spinlock CAS + release:  ~{lock_estimate:.1f} ns  (estimated)")
+    print(f"    xxhash3 + slot probe:    ~5 ns  (estimated)")
+    print(f"    mmap memcpy ({len(BODY):,} bytes):  ~{memcpy_estimate:.3f} ns")
     print()
-    print(f"  Python object construction (C - B): {deserialize:.3f} µs")
-    print(f"  → That is the dominant cost, not the lock.")
+    print(f"  Python object construction (C - B): {deserialize:.3f} ns")
+    print(f"  .body access cost (E - D): {phase_e - phase_d:.3f} ns")
     c.invalidate()
 
 
