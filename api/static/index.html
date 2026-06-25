@@ -8,15 +8,21 @@
       // Start fetching as early as possible - before any other resources block execution
       (function () {
         if (!window.commonCardTypesPromise) {
-          window.commonCardTypesPromise = fetch('/get_common_card_types')
-            .then(response => {
-              if (!response.ok) throw new Error('Failed to fetch common card types');
-              return response.json();
-            })
-            .catch(error => {
-              console.error('Error fetching common card types:', error);
-              return [];
-            });
+          function fetchWithRetry() {
+            return fetch('/get_common_card_types')
+              .then(function (response) {
+                if (!response.ok) throw new Error('HTTP ' + response.status);
+                return response.json();
+              })
+              .catch(function (error) {
+                var delay = 30000 + Math.random() * 10000;
+                console.warn('Failed to fetch common card types, retrying in ' + Math.round(delay / 1000) + 's', error);
+                return new Promise(function (resolve) {
+                  setTimeout(resolve, delay);
+                }).then(fetchWithRetry);
+              });
+          }
+          window.commonCardTypesPromise = fetchWithRetry();
         }
       })();
     </script>

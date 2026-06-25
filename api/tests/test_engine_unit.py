@@ -966,3 +966,50 @@ class TestTags:
     def test_otag_no_match(self, engine: QueryEngine) -> None:
         total, _ = _run(engine, "otag:ramp")
         assert total == 0
+
+
+class TestCommonCardTypes:
+    """Tests for engine.common_card_types().
+
+    Counts types and subtypes across preferred printings only (one per oracle card).
+    The fixture has 13 oracle cards; expected counts reflect the preferred printing
+    of each group, not all 87 printings.
+    """
+
+    def test_returns_dict(self, engine: QueryEngine) -> None:
+        result = engine.common_card_types()
+        assert isinstance(result, dict)
+
+    def test_type_counts(self, engine: QueryEngine) -> None:
+        result = engine.common_card_types()
+        # 13 oracle groups: 2 artifacts, 5 creatures, 3 instants, 2 legendary
+        # planeswalkers, 1 sorcery. Jace and Nicol Bolas are both Legendary+Planeswalker.
+        assert result["Artifact"] == 2
+        assert result["Creature"] == 5
+        assert result["Instant"] == 3
+        assert result["Legendary"] == 2
+        assert result["Planeswalker"] == 2
+        assert result["Sorcery"] == 1
+
+    def test_subtype_counts(self, engine: QueryEngine) -> None:
+        result = engine.common_card_types()
+        # One preferred printing per oracle group; each group has a unique subtype.
+        assert result["Angel"] == 1
+        assert result["Dragon"] == 1
+        assert result["Goblin"] == 1
+        assert result["Lhurgoyf"] == 1
+        assert result["Ouphe"] == 1
+        assert result["Warrior"] == 1
+
+    def test_absent_types_not_present(self, engine: QueryEngine) -> None:
+        result = engine.common_card_types()
+        # No lands, snow, or basic cards in the fixture.
+        assert "Land" not in result
+        assert "Basic" not in result
+        assert "Snow" not in result
+        assert "Battle" not in result
+
+    def test_empty_engine_size_is_zero(self, fresh_engine: Callable[[], QueryEngine]) -> None:
+        e = fresh_engine()
+        # get_common_card_types checks size() == 0 and raises HTTPServiceUnavailable.
+        assert e.size() == 0
