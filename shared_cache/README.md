@@ -1,62 +1,69 @@
 # shared_cache
 
-A cross-process LRU cache backed by a memory-mapped file. Multiple worker processes
-that open the same path share a single cache: a response cached by worker 1 is a hit
-for worker 2 without any IPC round-trip.
+A cross-process generational cache backed by a memory-mapped file. Multiple worker processes
+that open the same path share a single cache: a response cached by worker 1 is a hit for
+worker 2 without any IPC round-trip.
 
 ## How it works
 
-The mmap file is divided into four regions:
+### File layout
 
 ```
-[0..64]              RegionHeader    — spinlock + magic/version/counts/seq
-[64..64+N×64]        Slot table      — open-addressing hash table (N = next_power_of_two(maxsize × 2))
-[64+N×64..]          Cuckoo filter   — 16-bit fingerprints, 4 slots/bucket, N/4 buckets
-[filter_end..]       Arena           — bump allocator for rkyv value bytes + raw key bytes
+[0..64]               CoordHeader    — spinlock, magic/version, ring buffer counter, filter params
+[64..64+filter_bytes] Cuckoo filter  — 16-bit fingerprints, 4 slots/bucket, shared across pages
+[filter_end..]        N pages        — each page: PageHeader + slot table + arena
 ```
 
-Each slot stores `key_hash`, `expiry_ns`, `last_used` (LRU sequence), and offsets into the
-arena. Values are serialized with [rkyv](https://rkyv.org/) — zero-copy on the read side
-within the locked critical section.
+Each page contains a fixed-size open-addressing hash table and a bump-allocator arena for
+rkyv-serialized value bytes and raw key bytes.
 
-A single `AtomicU32` spinlock at byte 0 gates all mutations. On a get, the lock is held
-only for the slot probe and LRU seq update (~60 ns); the arena copy happens **outside**
-the lock, so concurrent reads from multiple processes overlap almost entirely. A
-`generation` counter (incremented on `generation_reset`) lets readers detect a concurrent
-flush and discard stale data rather than return garbage. In the rare case `generation_reset`
-races with an in-flight copy, the reader gets a false miss and re-queries — the cost of
-preventing this with a reader-count pin (~35 ns/hit on MAP_SHARED pages) exceeds the
-benefit given how rarely `generation_reset` fires.
+### Generational eviction (SIEVE-style)
 
-A **cuckoo filter** (16-bit fingerprints, 4 slots/bucket, `bucket_count = slot_count/4`)
-sits between the slot table and the arena. `get()` and `__contains__` check the filter
-lock-free before attempting the spinlock: true misses skip the lock entirely. At ≤50%
-load (at capacity, `maxsize` entries fill half the filter slots), FPR ≈ 0.006% — roughly
-1 in 16,384 lookups returns a false positive and pays the full lock cost unnecessarily.
-Filter inserts happen before slot writes (both under the lock), so the filter never
-produces false negatives. Filter memory: 64 KB for 10k entries.
+N pages form a ring buffer. The current active page accepts writes; the remaining N-1 pages are
+sealed (read-only). When the active page fills, rotation occurs:
 
-The response body is copied directly from the mmap arena into a Python `bytes` object —
-no intermediate Rust `Vec`. `.body` attribute access on the returned object is a
-reference-count increment with no additional copy.
+1. **Lock-free phase**: scan the oldest sealed page for entries with their `visited` bit set
+   (accessed at least once since they were sealed). Surviving entries are collected into a list.
+2. **O(1) locked phase**: seal the active page, reinitialize the oldest sealed page from the
+   survivor list, advance the ring buffer counter. This is the only step that requires the lock.
 
-**Eviction** samples 8 random slots and tombstones the one with the smallest `last_used`
-(approximate LRU, same approach as Redis). Tombstones preserve probe chain integrity for
-linear probing.
+Entries that are never accessed while sealed are dropped on rotation — no explicit eviction needed.
+Hot entries survive indefinitely by cycling through the ring.
 
-**Arena reset**: when the bump allocator overflows, the slot table is zeroed and the arena
-pointer reset to 0. All entries are lost — this is a full cache flush, not a compaction.
-Arena size defaults to `maxsize × 8 KiB`. Arcane Tutor's gzip-compressed JSON responses
-are ~5 KB each after rkyv serialization, so the default comfortably fits 10,000 entries.
-Override with `arena_mb` if you measure a different typical response size.
+### Locking model
+
+- **Active page**: spinlock required for reads and writes.
+- **Sealed pages**: lock-free reads. The `visited` bit is an atomic byte store. A per-page
+  generation counter detects concurrent rotation; readers that observe a generation change
+  treat the result as a miss rather than returning stale data.
+- **Filter**: lock-free reads; spinlock for inserts.
+
+### set() fast path
+
+To avoid rkyv serialization when the value hasn't changed, `set()` runs a tiered check before
+serializing:
+
+1. **Filter miss** → new key, skip all checks.
+2. **Length mismatch** → content changed, skip hash checks.
+3. **Sampled hash mismatch** → content almost certainly changed. For bodies ≤ 64 bytes this is
+   a full hash; for larger bodies it hashes the first 64 + last 64 bytes (~128 bytes total).
+4. **All match** → return early, rkyv skipped.
+
+If any step finds a mismatch the key is inserted/updated with the new value (overwriting the
+existing slot with fresh arena bytes; the old bytes are reclaimed at rotation time).
+
+### Cuckoo filter
+
+16-bit fingerprints, 4 slots/bucket, `bucket_count = next_pow2(maxsize × 4) / 4`.
+`get()` and `__contains__` check the filter lock-free before acquiring the spinlock: true misses
+skip the lock entirely. At ≤ 50% load the false-positive rate is ≈ 0.006%.
 
 ## Build
 
 ```bash
-cd shared_cache
-source ../.venv/bin/activate
-PATH="$HOME/.cargo/bin:$PATH" maturin develop   # debug (fast build)
-PATH="$HOME/.cargo/bin:$PATH" maturin develop --release  # release (fast runtime)
+source .venv/bin/activate
+PATH="$HOME/.cargo/bin:$PATH" maturin develop          # debug (fast build)
+PATH="$HOME/.cargo/bin:$PATH" maturin develop --release # release (fast runtime)
 ```
 
 ## Usage
@@ -67,97 +74,75 @@ from shared_cache import SharedCache
 cache = SharedCache(
     path="/tmp/arcane.cache",
     maxsize=10_000,
-    default_ttl=300.0,   # seconds; None = never expire
-    arena_mb=None,       # override arena size (default: maxsize × 8 KiB)
+    default_ttl=300.0,  # seconds; None = never expire
+    n_pages=2,          # number of generations (default 2)
+    arena_mb=None,      # override per-page arena size
 )
 
-# Keys must be bytes. Serialize once and reuse for both get and set — on a
-# cache miss this avoids a redundant serialization on the subsequent set call.
-key_bytes = orjson.dumps(key)
+key_bytes = orjson.dumps(key)  # serialize once, reuse for get and set
 
-# Store — value must have status/headers/body/result_count/total_cards attributes.
-# Compatible with the existing CachedResponse NamedTuple.
-cache[key_bytes] = response
-
-# Retrieve — returns a CachedResponse-like object or None
-cached = cache.get(key_bytes)   # None on miss or expiry
-cached = cache[key_bytes]       # raises KeyError on miss
-
-# Introspection
-len(cache)         # approximate live entry count
-cache.invalidate() # flush all entries immediately
+cached = cache.get(key_bytes)  # None on miss or expiry
+cache[key_bytes] = response    # value must have status/headers/body/result_count/total_cards
+len(cache)                     # approximate live entry count
+cache.invalidate()             # flush all entries immediately
 ```
 
 ## Performance
 
 Measured on Apple M-series with a real 5,025-byte gzip-compressed response body
 (`/search?q=elf`, 500 warm keys). SharedCache numbers use pre-serialized `bytes` keys
-(orjson key serialization is the caller's cost, paid once per request).
+(orjson key serialization is ~85 ns, paid once per request by the caller).
 
 ### Backend comparison
 
-| Backend | get_hit | get_miss | set |
+| Backend | set | get_hit | get_miss |
 |---|---|---|---|
-| `dict` | 34 ns | 33 ns | 66 ns |
-| `cachebox.LRUCache` | 50 ns | 44 ns | 73 ns |
-| `SharedCache` | 391 ns | **31 ns** | 800 ns |
+| `dict` | 64 ns | 36 ns | 36 ns |
+| `cachebox.LRUCache` | 74 ns | 51 ns | 39 ns |
+| `SharedCache` | 541 ns | 306 ns | **31 ns** |
 
-Miss latency is now on par with in-process caches — the cuckoo filter returns false
-for unknown keys without acquiring the spinlock. Hit latency is higher because SharedCache
-reconstructs Python objects from rkyv-serialized shared memory on each read (vs. a
-refcount bump for in-process caches). The payoff is that every worker process shares the
-same 10k-entry pool rather than maintaining its own.
+Miss latency is on par with in-process caches — the cuckoo filter returns false for unknown keys
+without acquiring the spinlock. Hit latency is higher because SharedCache reconstructs Python
+objects from rkyv-serialized shared memory on each read. The payoff is that every worker process
+shares the same pool rather than maintaining its own.
 
-Add ~85 ns (orjson key serialization, paid once per request) for the full per-request cost.
+### set() paths
 
-### Where the ~400 ns goes (middleware path, bytes key)
+| Path | Cost | When |
+|---|---|---|
+| Fast (same content) | ~536 ns | Filter hit + length match + sampled hash match |
+| Slow (new/changed content) | ~1155 ns | Any check fails → rkyv serialize + insert |
+
+### Where the ~364 ns get_hit goes (middleware path)
 
 ```
-A  orjson key serialize [caller]  77 ns   —    paid once per request, not inside get()
-B  lock + probe + release         59 ns   15%  spinlock CAS, slot scan, LRU update, unlock
-C  mmap→PyBytes (body)            77 ns   19%  5 KB copied directly from arena to Python bytes
-D  rkyv + Python object build    248 ns   62%  headers PyList + status str + PyO3 object
-E  full get(key_bytes)           387 ns   96%
-   .body + .headers access        16 ns    4%  refcount bumps — effectively free
-   ──────────────────────────────────────────────────────────
-F  middleware path                403 ns  100%
+A  orjson key serialize [caller]  85 ns   —    paid once per request
+B  lock + probe + release         44 ns   12%  spinlock CAS, slot scan, unlock
+C  mmap→PyBytes (body)            94 ns   26%  5 KB copied from arena to Python bytes
+D  rkyv + Python object build    204 ns   56%  headers PyList + status str + PyO3 object
+E  full get(key_bytes)           341 ns   94%
+F  middleware path                364 ns  100%  + .body/.headers attribute access
 
-   miss path (cuckoo filter)      31 ns   —    lock skipped entirely on true miss
+   miss path (cuckoo filter)      35 ns   —    lock skipped entirely on true miss
 ```
 
-The spinlock is held for only Phase B (~60 ns); the arena copy runs concurrently across all
-worker processes. `.body` and `.headers` are pre-built Python objects in the pyclass — attribute
-access is a refcount increment with no copy, so the middleware's `resp.data = cached.body` and
-`resp._headers.update(cached.headers)` cost nothing extra.
+The spinlock is held only during Phase B; the arena copy and Python object construction run
+concurrently with other workers.
 
 ## Tradeoffs
 
 | | dict / LRUCache | SharedCache |
 |---|---|---|
-| get_hit latency | ~34–50 ns | ~403 ns (middleware path, bytes key) |
+| get_hit latency | ~36–51 ns | ~364 ns (middleware path) |
 | Memory per process | `maxsize × value_size` | shared; 1× regardless of workers |
 | Cross-process hits | ✗ | ✓ |
-| Process crash safety | n/a | lock timeout prevents hang |
+| Eviction | exact LRU | SIEVE-style (visited bit per slot) |
 | Persistence | none | survives worker restart (file persists) |
 
-Break-even: SharedCache wins on total memory once you have more than ~2 workers, since each
-additional worker adds zero memory cost for cached entries.
-
-## Drop-in for CachingMiddleware
-
-```python
-# In entrypoint.py, before spawning workers:
-import orjson
-from shared_cache import SharedCache
-from api.middlewares.caching_middleware import CachingMiddleware
-
-shared = SharedCache(path="/tmp/arcane.cache", maxsize=10_000,
-                     default_ttl=300.0)
-# Pass the same instance (or re-open the same path) in each worker process.
-app = create_app(cache=shared)
-```
+SharedCache wins on total memory once you have more than ~2 workers.
 
 ## See also
 
-- [demo.py](demo.py) — runnable usage example
+- [sketch.py](sketch.py) — Python model of the generational cache design
 - [benchmark.py](benchmark.py) — latency comparison vs in-process caches
+- [demo.py](demo.py) — runnable usage example

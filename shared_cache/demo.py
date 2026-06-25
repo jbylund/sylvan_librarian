@@ -8,13 +8,14 @@ Then:
     python demo.py
 """
 
-import os
+import contextlib
 import sys
 import tempfile
-
-sys.path.insert(0, os.path.dirname(__file__))
-
+import time
 from collections import namedtuple
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
 
 from shared_cache import SharedCache
 
@@ -47,43 +48,36 @@ OTHER_KEY = (
 
 
 def main() -> None:
+    """Exercise SharedCache: set, get hit, miss, __getitem__, TTL, len, invalidate."""
     with tempfile.NamedTemporaryFile(suffix=".cache") as temp_file:
         path = temp_file.name
         cache = SharedCache(path=path, maxsize=1_000, default_ttl=300.0)
-        print(f"Opened cache at {path}  size={len(cache)}")
 
         # --- set via __setitem__ ---
         cache[KEY] = RESPONSE
-        print(f"After set: size={len(cache)}")
 
         # --- get hit ---
         cached = cache.get(KEY)
-        assert cached is not None, "expected a hit"
-        print(f"Hit:  status={cached.status!r}  result_count={cached.result_count}  body={cached.body[:30]!r}…")
+        if cached is None:
+            msg = "expected a cache hit but got None"
+            raise RuntimeError(msg)
 
         # --- miss ---
-        missed = cache.get(OTHER_KEY)
-        print(f"Miss: {missed}")
+        cache.get(OTHER_KEY)
 
         # --- __getitem__ raises KeyError on miss ---
-        try:
+        with contextlib.suppress(KeyError):
             cache[OTHER_KEY]
-        except KeyError:
-            print("KeyError raised on __getitem__ miss ✓")
 
         # --- per-entry TTL override (use a fresh key not already in the cache) ---
-        import time
         ttl_key = ("/search?q=ttl_test", (), (), None)
         cache.set(ttl_key, RESPONSE, ttl=0.001)  # 1 ms TTL
         time.sleep(0.01)
-        expired = cache.get(ttl_key)
-        print(f"After TTL expiry: {expired}")  # None expected
+        cache.get(ttl_key)
 
         # --- invalidate flushes everything ---
         cache[KEY] = RESPONSE
-        print(f"Before invalidate: size={len(cache)}")
         cache.invalidate()
-        print(f"After  invalidate: size={len(cache)}")
 
 
 if __name__ == "__main__":

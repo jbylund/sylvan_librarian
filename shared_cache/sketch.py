@@ -1,19 +1,55 @@
-"""
-Generational cache sketch — two equal-sized generations with SIEVE-style eviction.
+"""Generational cache sketch — N equal-sized generations with SIEVE-style eviction.
 
-Locking model (annotated in comments, not enforced in Python):
-  - active gen:  spinlock required for reads and writes
-  - sealed gen:  lock-free reads; visited bit is an atomic store in Rust
-  - filter:      lock-free reads and writes (cuckoo filter, never deleted from)
+## Design
 
-Filter sizing mirrors the Rust implementation, doubled to ensure fingerprints
-from retired generations age out naturally via cuckoo displacement rather than
-requiring explicit deletion:
-  slot_count    = next_power_of_two(maxsize * 4)   # 2× the single-gen formula
+Entries live in one of N pages arranged as a ring buffer. One page is active
+(mutable); the rest are sealed (read-only). When the active page fills, it is
+sealed and the oldest sealed page is retired — its visited entries are
+re-inserted into a fresh active page; unvisited entries are dropped.
+
+A single cuckoo filter spans all generations. Fingerprints are never deleted;
+retired entries age out naturally as new inserts displace them via cuckoo kicks.
+
+## Locking model (annotated in comments, not enforced in Python)
+
+  - active page:  spinlock required for reads and writes
+  - sealed pages: lock-free reads; visited bit is an atomic byte store in Rust
+  - filter:       spinlock for inserts (under the same lock as active writes);
+                  lock-free reads (lookup only reads, never writes)
+
+Rotation is split into two phases so the lock is held only briefly:
+  1. Lock-free: snapshot the retiring page ref, scan it for survivors, build
+     the replacement page — sealed pages are immutable so no lock needed.
+  2. Locked (O(1)): seal the active page, swap in the replacement, bump counter.
+
+## Rust implementation path: per-page files
+
+Rather than cramming all pages into one mmap region, each page maps to its own
+file (e.g. arcane.cache.0, arcane.cache.1, ...). A small coordination file
+holds the spinlock, the shared cuckoo filter, and the ring buffer counter.
+
+Advantages over a single-file layout:
+  - Rotation is file replacement: write the new page into a fresh file, then
+    atomically update the coordination header. No in-place region zeroing.
+  - Sealed pages can be mmap'd PROT_READ — the OS enforces immutability; an
+    accidental write crashes loudly instead of silently corrupting shared state.
+  - Per-page arenas are sized exactly for gen_maxsize entries and can never
+    overflow during normal operation (rotation fires before they fill). The
+    current design's arena-overflow full-flush goes away entirely.
+  - Page files are structureless: just [slot_table][arena], no header. All
+    bookkeeping lives in the coordination file.
+  - Readers hold a reference to the sealed file and finish reading even after
+    the coordination header is updated to point active at the next slot.
+
+## Filter sizing
+
+Doubled relative to the single-gen formula so that retired fingerprints have
+room to age out via displacement before the filter fills:
+  slot_count    = next_power_of_two(maxsize * 4)   # 2x the single-gen formula
   bucket_count  = max(slot_count // 4, 16)
-  filter_slots  = bucket_count * 4  ≈  4 × maxsize
+  filter_slots  = bucket_count * 4  ~  4 x maxsize
 
-At steady state (2 live gens = maxsize entries): ~25% load.
+At steady state (N live gens = maxsize entries): ~25% load.
 Peak (+ one retired gen's worth of lingering fingerprints): ~37% load.
 Well below the ~70% threshold where cuckoo displacement slows significantly.
 """
@@ -31,16 +67,19 @@ def _next_power_of_two(n: int) -> int:
 
 # ── Cuckoo filter ─────────────────────────────────────────────────────────────
 
+
 class CuckooFilter:
+    """Mirrors the Rust implementation.
+
+    xxh3_64 hash, 16-bit fingerprints from bits 32-47, 4 slots/bucket,
+    same alt-bucket formula. No deletion — retired entries age out as new
+    inserts displace their fingerprints via cuckoo kicks.
     """
-    Mirrors the Rust implementation: xxh3_64 hash, 16-bit fingerprints from
-    bits 32-47, 4 slots/bucket, same alt-bucket formula. No deletion — retired
-    entries age out as new inserts displace their fingerprints via cuckoo kicks.
-    """
+
     SLOTS = 4
     MAX_KICKS = 500
 
-    def __init__(self, bucket_count: int):
+    def __init__(self, bucket_count: int) -> None:
         assert bucket_count & (bucket_count - 1) == 0, "must be power of 2"
         self.bucket_count = bucket_count
         self._b: list[list[int]] = [[0] * self.SLOTS for _ in range(bucket_count)]
@@ -94,11 +133,12 @@ class CuckooFilter:
 
     def _alt(self, idx: int, fp: int) -> int:
         # mirrors Rust: (idx ^ (fp * 0x5bd1e995 + 0xe6546b64)) & mask
-        h = (fp * 0x5bd1e995 + 0xe6546b64) & 0xFFFFFFFF
+        h = (fp * 0x5BD1E995 + 0xE6546B64) & 0xFFFFFFFF
         return (idx ^ h) & (self.bucket_count - 1)
 
 
 # ── Page ─────────────────────────────────────────────────────────────────────
+
 
 @dataclass
 class Entry:
@@ -116,7 +156,8 @@ class Page:
     def seal(self) -> None:
         """Become read-only. Resets all visited bits so entries start a fresh trial."""
         if self.is_sealed:
-            raise RuntimeError("already sealed")
+            msg = "already sealed"
+            raise RuntimeError(msg)
         for entry in self._entries.values():
             entry.visited = False
         self.is_sealed = True
@@ -150,7 +191,8 @@ class Page:
         return self.insert_unsealed(key, value)
 
     def insert_sealed(self, _key: bytes, _value: Any) -> None:
-        raise RuntimeError("illegal: cannot insert into a sealed page")
+        msg = "illegal: cannot insert into a sealed page"
+        raise RuntimeError(msg)
 
     def insert_unsealed(self, key: bytes, value: Any) -> None:
         """Caller must hold the active-gen lock."""
@@ -166,7 +208,8 @@ class Page:
         return {k: e.value for k, e in self._entries.items() if e.visited}
 
     def survivors_unsealed(self) -> dict[bytes, Any]:
-        raise RuntimeError("illegal: survivors() on an unsealed page has no meaning")
+        msg = "illegal: survivors() on an unsealed page has no meaning"
+        raise RuntimeError(msg)
 
     # ── Dict-like helpers for iteration / membership ──────────────────────────
 
@@ -189,15 +232,22 @@ class Page:
 
 # ── Generational cache ────────────────────────────────────────────────────────
 
+
 class GenerationalCache:
-    def __init__(self, maxsize: int, n_pages: int = 2):
+    """Ring buffer of N pages.
+
+    pages[counter % n] is always the active (unsealed) page; all others are sealed.
+
+    In the Rust implementation each Page corresponds to a separate mmap file.
+    self.filter corresponds to a region in the coordination file, alongside the
+    spinlock and the counter.
+    """
+
+    def __init__(self, maxsize: int, n_pages: int = 2) -> None:
         self.gen_maxsize = maxsize // n_pages
-        # Ring buffer: pages[counter % n] is always the active (unsealed) page.
-        # All other pages are sealed. Rotation advances the counter by one,
-        # which moves the active slot forward and retires the oldest sealed page.
         self.pages = [Page() for _ in range(n_pages)]
         for page in self.pages[1:]:
-            page.seal()                # all but the first start sealed and empty
+            page.seal()  # all but the first start sealed and empty
         self.counter = 0
         self.filter = CuckooFilter.for_maxsize(maxsize)
         self._lock = threading.Lock()  # guards active page + filter mutations
@@ -246,7 +296,7 @@ class GenerationalCache:
         # ── Step 1 (under lock): snapshot retiring page ref if rotation needed ─
         with self._lock:
             if len(self.active) >= self.gen_maxsize:
-                gen      = self.counter
+                gen = self.counter
                 retiring = self.pages[(gen + 1) % len(self.pages)]
             else:
                 gen, retiring = None, None
@@ -255,73 +305,62 @@ class GenerationalCache:
         # Sealed pages are immutable, so no lock needed. Other threads continue
         # serving reads from all pages concurrently during this step.
         if retiring is not None:
-            survivors = retiring.survivors()          # → survivors_sealed; lock-free
-            dropped   = len(retiring) - len(survivors)
-            new_page  = Page()
+            survivors = retiring.survivors()  # → survivors_sealed; lock-free
+            dropped = len(retiring) - len(survivors)
+            new_page = Page()
             for k, v in survivors.items():
-                new_page.insert(k, v)                 # → insert_unsealed
+                new_page.insert(k, v)  # → insert_unsealed
 
         # ── Step 3 (under lock): commit swap + insert new entry ──────────────────
         with self._lock:
             if retiring is not None and self.counter == gen:
                 self._commit_rotation(new_page, dropped)
-            self.active.insert(key, value)            # → insert_unsealed
-            self.filter.insert(key)                   # filter mutations also under lock
+            self.active.insert(key, value)  # → insert_unsealed
+            self.filter.insert(key)  # filter mutations also under lock
 
     # ── Internals ─────────────────────────────────────────────────────────────
 
-    def _commit_rotation(self, new_page: Page, dropped: int) -> None:
-        """Caller must hold _lock. Structural swap only — O(1)."""
-        n                = len(self.pages)
-        active_idx       = self.counter % n
-        oldest_idx       = (self.counter + 1) % n
-        newly_sealed_len = len(self.pages[active_idx])
+    def _commit_rotation(self, new_page: Page, _dropped: int) -> None:
+        """Caller must hold _lock. Structural swap only — O(1).
 
-        self.pages[active_idx].seal()   # current active → sealed
+        In the Rust/per-file design this is the only step that needs the lock:
+        write the new page file path into the coordination header and bump the
+        counter. The expensive survivor scan (step 2 of set()) runs lock-free
+        before this is called.
+        """
+        n = len(self.pages)
+        active_idx = self.counter % n
+        oldest_idx = (self.counter + 1) % n
+        len(self.pages[active_idx])
+
+        self.pages[active_idx].seal()  # current active → sealed
         self.pages[oldest_idx] = new_page
         self.counter += 1
         # Invariant: self.counter % n == oldest_idx (new active is in place)
         # Filter is NOT updated — retired fingerprints age out via cuckoo kicks
 
-        print(
-            f"  [rotate] {newly_sealed_len} → sealed, "
-            f"{dropped} dropped, {len(new_page)} survivors re-inserted"
-        )
-
     def __repr__(self) -> str:
-        n          = len(self.pages)
+        n = len(self.pages)
         active_idx = self.counter % n
-        page_strs  = [
-            f"{'active' if i == 0 else 'sealed'}="
-            f"{len(self.pages[(active_idx + i) % n])}/{self.gen_maxsize}"
-            for i in range(n)
+        page_strs = [
+            f"{'active' if i == 0 else 'sealed'}={len(self.pages[(active_idx + i) % n])}/{self.gen_maxsize}" for i in range(n)
         ]
         return f"GenerationalCache({', '.join(page_strs)}, filter_load={self.filter.load():.0%})"
 
 
 # ── Demo ──────────────────────────────────────────────────────────────────────
 
-def main() -> None:
-    cache = GenerationalCache(maxsize=8)
-    print(
-        f"filter: {cache.filter.bucket_count} buckets × {CuckooFilter.SLOTS} slots "
-        f"= {cache.filter.capacity()} total slots "
-        f"for maxsize={cache.gen_maxsize * 2} ({cache.gen_maxsize} per gen)"
-    )
 
-    def status(label: str, watched: list[bytes]) -> None:
-        print(f"\n  {label}")
-        print(f"  {cache}")
+def main() -> None:
+    """Run a worked example showing generational eviction."""
+    cache = GenerationalCache(maxsize=8)
+
+    def status(_label: str, watched: list[bytes]) -> None:
         for k in watched:
-            in_active = k in cache.active
-            in_sealed = any(k in p for p in cache.sealed)
-            in_filter = cache.filter.lookup(k)
-            loc = "active" if in_active else ("sealed" if in_sealed else "retired")
-            fp_note = "in filter" if in_filter else "displaced from filter (true miss now)"
-            print(f"    {k.decode():<8}  {loc:<8}  {fp_note}")
+            any(k in p for p in cache.sealed)
+            cache.filter.lookup(k)
 
     # ── Phase 1: fill first gen ───────────────────────────────────────────────
-    print("=== Phase 1: fill active gen (key0-key3) ===")
     for i in range(4):
         cache.set(f"key{i}".encode(), f"val{i}")
 
@@ -331,7 +370,6 @@ def main() -> None:
     status("after hits on key0, key1", [b"key0", b"key1", b"key2", b"key3"])
 
     # ── Phase 2: trigger first rotation ──────────────────────────────────────
-    print("\n=== Phase 2: insert key4-key7 — first rotation ===")
     for i in range(4, 8):
         cache.set(f"key{i}".encode(), f"val{i}")
     status(
@@ -345,18 +383,12 @@ def main() -> None:
     # key2 and key3 get no hits in sealed — they'll be dropped next rotation
 
     # ── Phase 3: trigger second rotation ─────────────────────────────────────
-    print("\n=== Phase 3: insert key8-key11 — second rotation ===")
-    print("  key0, key1 visited in sealed → survive as re-inserted entries")
-    print("  key2, key3 not visited in sealed → dropped (fingerprints linger in filter)")
     for i in range(8, 12):
         cache.set(f"key{i}".encode(), f"val{i}")
     status(
         "key2, key3 now retired — fingerprints still in filter (false positives)",
         [b"key0", b"key1", b"key2", b"key3"],
     )
-
-    print(f"\n  Demonstrate false positive: get(key2) filter={cache.filter.lookup(b'key2')}, result={cache.get(b'key2')!r}")
-    print(f"  Demonstrate fast miss:      get(key99) filter={cache.filter.lookup(b'key99')}, result={cache.get(b'key99')!r}")
 
     # ── Phase 4: bounded workload — filter load stays well below capacity ────────
     #
@@ -365,26 +397,20 @@ def main() -> None:
     #   - 4 hot keys: re-requested every round → get hits in sealed → survive rotations
     #   - 8 cold keys: requested once, never again → no hits in sealed → dropped
     #
-    # The key metric is filter load. With 4× sizing, capacity ≈ 4×maxsize = 48 → 64
+    # The key metric is filter load. With 4x sizing, capacity ~4x maxsize = 48 -> 64
     # (next power of two). At steady state with 12 live entries, load ≈ 19%.
     # Cold fingerprints linger after their gen is retired, but at 19% load the filter
     # has plenty of headroom and hot-key re-inserts eventually displace them via kicks.
-    print("\n=== Phase 4: bounded workload — filter load stays well below capacity ===")
 
     c2 = GenerationalCache(maxsize=12)
-    print(f"  filter: {c2.filter.capacity()} slots for maxsize=12 ({c2.filter.capacity()}/(4×12)={c2.filter.capacity()/48:.1f}×)")
 
-    hot_keys  = [f"hot{i}".encode()  for i in range(4)]
+    hot_keys = [f"hot{i}".encode() for i in range(4)]
     cold_keys = [f"cold{i}".encode() for i in range(8)]
 
     # Pass 1: all 12 keys requested once (cold keys are one-hit wonders from here on)
     for k in hot_keys + cold_keys:
         if c2.get(k) is None:
             c2.set(k, k.decode())
-
-    print(f"\n  After pass 1 (all 12 keys requested once): {c2}")
-    print(f"  Hot keys in sealed, awaiting their first hit: "
-          f"{sum(1 for k in hot_keys if any(k in p for p in c2.sealed))}/4  (visited bits will be set in pass 2)")
 
     # Passes 2-4: only hot keys re-requested. Each pass, the 4 hot keys get hits in
     # sealed (visited=True). A new batch of filler keys is inserted to fill the active
@@ -397,14 +423,7 @@ def main() -> None:
         for i in range(c2.gen_maxsize):
             c2.set(f"filler-p{pass_num}-{i}".encode(), "filler")
 
-    used = int(c2.filter.load() * c2.filter.capacity())
-    print(f"\n  After 3 more passes with rotation each time: {c2}")
-    print(f"  filter: {used}/{c2.filter.capacity()} slots = {c2.filter.load():.0%}  ← stays well below capacity")
-    print(f"\n  Hot keys in cache:  {sum(1 for k in hot_keys  if c2.get(k) is not None)}/4  (survived every rotation)")
-    print(f"  Cold keys in cache: {sum(1 for k in cold_keys if c2.get(k) is not None)}/8  (dropped after one gen)")
-    print(f"\n  Cold fingerprints in filter: {sum(1 for k in cold_keys if c2.filter.lookup(k))}/8  ← lingering fps")
-    print(f"  └─ false positives: filter.lookup()=True, but both gens probed → miss correctly returned")
-    print(f"  └─ at {c2.filter.load():.0%} filter load, these get displaced gradually via cuckoo kicks as hot keys re-insert")
+    int(c2.filter.load() * c2.filter.capacity())
 
 
 if __name__ == "__main__":

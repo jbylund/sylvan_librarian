@@ -1,182 +1,118 @@
 use std::fs::OpenOptions;
 use std::os::unix::io::AsRawFd;
-use std::sync::atomic::{AtomicU32, Ordering, fence};
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering, fence};
 use std::time::{Duration, Instant};
-
 use memmap2::MmapMut;
 
-pub const MAGIC: u32 = 0x5343_4143; // "SCAC"
-pub const VERSION: u32 = 3;
-pub const HEADER_SIZE: usize = 64;
+pub const MAGIC: u32 = 0x4743_4143 + 1; // bump to force re-init when slot layout changes
+pub const VERSION: u32 = 1;
 pub const SLOT_SIZE: usize = 64;
-
-/// 0 in key_hash field: slot is empty.
+pub const PAGE_HEADER_SIZE: usize = 64;
+pub const COORD_HEADER_SIZE: usize = 64;
+pub const ARENA_ALIGN: usize = 16;
 pub const EMPTY: u64 = 0;
-/// u64::MAX in key_hash field: slot is a tombstone (evicted, probe chains intact).
 pub const TOMBSTONE: u64 = u64::MAX;
-
 const LOCK_TIMEOUT: Duration = Duration::from_millis(1);
 
-/// First 64 bytes of the mmap. Must be exactly 64 bytes — asserted below.
+/// First 64 bytes of the mmap — coordination header shared across all pages.
 #[repr(C)]
-pub struct RegionHeader {
-    /// Spinlock: 0 = free, 1 = held. Cast to AtomicU32 for CAS operations.
-    pub lock: u32,
-    _pad0: u32,
-    pub magic: u32,
-    pub version: u32,
-    pub slot_count: u32,
-    pub arena_size: u32,
-    pub arena_head: u32,   // bump pointer (bytes from arena base)
-    pub entry_count: u32,  // live entries in current generation
-    pub tombstone_count: u32,
-    pub maxsize: u32,      // evict when entry_count reaches this
-    pub generation: u32,   // incremented on every generation_reset(); readers use this to detect concurrent resets
-    _pad1: u32,
-    pub seq: u64,          // monotonic counter; written to last_used on every access
-    _pad2: u64,
+pub struct CoordHeader {
+    pub lock: u32,                  //  0: spinlock
+    _pad0: u32,                     //  4
+    pub magic: u32,                 //  8
+    pub version: u32,               // 12
+    pub n_pages: u32,               // 16
+    pub maxsize: u32,               // 20
+    pub gen_maxsize: u32,           // 24
+    pub counter: u32,               // 28: active_idx = counter % n_pages
+    pub slot_count_per_page: u32,   // 32
+    pub arena_per_page: u32,        // 36
+    pub filter_bucket_count: u32,   // 40
+    _pad1: u32,                     // 44
+    _pad2: u64,                     // 48
+    _pad3: u64,                     // 56
 }
+const _: () = assert!(std::mem::size_of::<CoordHeader>() == 64);
 
-/// One 64-byte slot in the open-addressing hash table.
+/// 64-byte header at the start of each page region.
 #[repr(C)]
-pub struct RawSlot {
-    pub key_hash: u64,     // EMPTY / TOMBSTONE / normalized xxh3 hash
-    pub expiry_ns: u64,    // Unix epoch nanoseconds; u64::MAX = never expires
-    pub last_used: u64,    // seq value at last access (for sampled LRU eviction)
-    pub arena_offset: u32, // byte offset of rkyv value bytes within the arena
-    pub arena_len: u32,    // length of rkyv value bytes
-    pub key_offset: u32,   // byte offset of raw key bytes within the arena
-    pub key_len: u32,      // length of raw key bytes
-    _pad: [u8; 24],
+pub struct PageHeader {
+    pub arena_head: u32,    //  0: bump pointer (bytes from arena base within this page)
+    pub entry_count: u32,   //  4
+    pub is_sealed: u32,     //  8: 0=active, 1=sealed
+    pub generation: u32,    // 12: bumped before reuse; readers detect stale data
+    _pad: [u8; 48],         // 16..64
+}
+const _: () = assert!(std::mem::size_of::<PageHeader>() == 64);
+
+// ── Layout arithmetic ─────────────────────────────────────────────────────────
+
+pub fn filter_offset() -> usize { COORD_HEADER_SIZE }
+
+pub fn filter_bytes(bucket_count: usize) -> usize {
+    bucket_count * crate::cuckoo::BUCKET_BYTES
 }
 
-const _: () = assert!(std::mem::size_of::<RegionHeader>() == HEADER_SIZE);
-const _: () = assert!(std::mem::size_of::<RawSlot>() == SLOT_SIZE);
-
-/// Normalize a hash so it never collides with the EMPTY or TOMBSTONE sentinels.
-pub fn normalize_hash(h: u64) -> u64 {
-    match h {
-        0 => 1,
-        u64::MAX => u64::MAX - 1,
-        h => h,
-    }
+pub fn page_region_start(bucket_count: usize) -> usize {
+    filter_offset() + filter_bytes(bucket_count)
 }
 
-/// Number of buckets in the cuckoo filter (must be a power of two).
-/// slot_count/4 buckets × 4 slots/bucket = slot_count total slots = 2×maxsize,
-/// keeping load at ≤50% at capacity. FPR ≈ 0.006% (1 in 16,384) with 16-bit fps.
-pub fn bucket_count(slot_count: u32) -> u32 {
-    (slot_count / 4).max(16)
+pub fn page_size(slot_count_per_page: usize, arena_per_page: usize) -> usize {
+    PAGE_HEADER_SIZE + slot_count_per_page * SLOT_SIZE + arena_per_page
 }
 
-/// Byte offset of the cuckoo filter region in the mmap.
-pub fn filter_offset(slot_count: u32) -> usize {
-    HEADER_SIZE + slot_count as usize * SLOT_SIZE
+pub fn arena_start_in_page(slot_count_per_page: usize) -> usize {
+    PAGE_HEADER_SIZE + slot_count_per_page * SLOT_SIZE
 }
 
-/// Byte size of the cuckoo filter region.
-pub fn filter_size(slot_count: u32) -> usize {
-    bucket_count(slot_count) as usize * crate::cuckoo::BUCKET_BYTES
+pub fn total_file_size(
+    bucket_count: usize,
+    n_pages: usize,
+    slot_count_per_page: usize,
+    arena_per_page: usize,
+) -> usize {
+    page_region_start(bucket_count) + n_pages * page_size(slot_count_per_page, arena_per_page)
 }
 
-/// Byte offset where the arena begins (after header + slot table + cuckoo filter).
-pub fn arena_start(slot_count: u32) -> usize {
-    filter_offset(slot_count) + filter_size(slot_count)
+pub fn compute_slot_count(gen_maxsize: usize) -> usize {
+    (gen_maxsize * 2).next_power_of_two()
 }
 
-pub fn file_size(slot_count: u32, arena_size: u32) -> usize {
-    arena_start(slot_count) + arena_size as usize
+pub fn compute_filter_bucket_count(maxsize: usize) -> usize {
+    ((maxsize * 4).next_power_of_two() / 4).max(16)
 }
 
-/// Open (or create + initialize) the shared memory file.
-/// Uses an exclusive flock during initialization so concurrent openers don't race.
-pub fn open_region(path: &str, slot_count: u32, arena_size: u32) -> std::io::Result<MmapMut> {
-    let file = OpenOptions::new().read(true).write(true).create(true).open(path)?;
-    let fd = file.as_raw_fd();
+// ── Atomic helpers ─────────────────────────────────────────────────────────────
 
-    unsafe { libc::flock(fd, libc::LOCK_EX) };
-
-    let size = file_size(slot_count, arena_size);
-    if file.metadata()?.len() < size as u64 {
-        file.set_len(size as u64)?;
-    }
-
-    let mut mmap = unsafe { MmapMut::map_mut(&file)? };
-
-    let existing_magic = unsafe { (*hdr_ptr(&mmap)).magic };
-    let compatible = existing_magic == MAGIC && unsafe {
-        let h = &*hdr_ptr(&mmap);
-        h.version == VERSION && h.slot_count == slot_count && h.arena_size == arena_size
-    };
-
-    if !compatible {
-        // Fresh init (or incompatible existing file — wipe and restart).
-        unsafe {
-            std::ptr::write_bytes(mmap.as_mut_ptr(), 0, size);
-            let h = &mut *hdr_ptr_mut(&mut mmap);
-            h.magic = MAGIC;
-            h.version = VERSION;
-            h.slot_count = slot_count;
-            h.arena_size = arena_size;
-            h.maxsize = slot_count / 2;
-        }
-    }
-
-    unsafe { libc::flock(fd, libc::LOCK_UN) };
-
-    Ok(mmap)
-}
-
-// ── Raw pointer accessors ────────────────────────────────────────────────────
-
-pub fn hdr_ptr(mmap: &MmapMut) -> *const RegionHeader {
-    mmap.as_ptr() as *const RegionHeader
-}
-
-pub fn hdr_ptr_mut(mmap: &mut MmapMut) -> *mut RegionHeader {
-    mmap.as_mut_ptr() as *mut RegionHeader
-}
-
-pub fn slot_ptr(mmap: &MmapMut, idx: u32) -> *const RawSlot {
-    let offset = HEADER_SIZE + idx as usize * SLOT_SIZE;
-    unsafe { mmap.as_ptr().add(offset) as *const RawSlot }
-}
-
-pub fn slot_ptr_mut(mmap: &mut MmapMut, idx: u32) -> *mut RawSlot {
-    let offset = HEADER_SIZE + idx as usize * SLOT_SIZE;
-    unsafe { mmap.as_mut_ptr().add(offset) as *mut RawSlot }
-}
-
-// ── Generation counter ───────────────────────────────────────────────────────
-
-/// Atomically read the generation counter.  Use Acquire ordering so that all
-/// arena reads that precede this call in program order are not reordered after it.
-pub fn read_generation(mmap: &MmapMut) -> u32 {
-    let ptr = unsafe {
-        let hdr = mmap.as_ptr() as *const RegionHeader;
-        std::ptr::addr_of!((*hdr).generation) as *const AtomicU32
-    };
-    // Acquire fence before the load ensures prior mmap reads happen-before this.
+/// Atomic read of the page's generation counter (Acquire).
+pub fn read_page_generation(base: *const u8) -> u32 {
+    // generation is at offset 12 within PageHeader
+    let ptr = unsafe { base.add(12) as *const AtomicU32 };
     fence(Ordering::Acquire);
     unsafe { (*ptr).load(Ordering::Relaxed) }
 }
 
-/// Increment the generation counter (called under the spinlock inside generation_reset).
-pub fn bump_generation(mmap: &MmapMut) {
-    let ptr = unsafe {
-        let hdr = mmap.as_ptr() as *const RegionHeader;
-        std::ptr::addr_of!((*hdr).generation) as *const AtomicU32
-    };
+/// Increment the page generation counter (Release).
+pub fn bump_page_generation(base: *mut u8) {
+    let ptr = unsafe { base.add(12) as *const AtomicU32 };
     unsafe { (*ptr).fetch_add(1, Ordering::Release) };
 }
 
-// ── Spinlock ─────────────────────────────────────────────────────────────────
+/// Set visited=1 on a slot (offset 40 within RawSlot). Relaxed — advisory only.
+pub fn set_visited(slot: *const u8) {
+    let ptr = unsafe { slot.add(40) as *const AtomicU8 };
+    unsafe { (*ptr).store(1, Ordering::Relaxed) };
+}
 
-/// Try to acquire the spinlock. Returns false on timeout (1 ms), preventing
-/// a hung worker from permanently blocking the cache.
+/// Set visited=0 on a slot. Used when sealing a page for fresh trial.
+pub fn clear_visited(slot: *const u8) {
+    let ptr = unsafe { slot.add(40) as *const AtomicU8 };
+    unsafe { (*ptr).store(0, Ordering::Relaxed) };
+}
+
+// ── Spinlock ──────────────────────────────────────────────────────────────────
+
 pub fn try_lock(mmap: &MmapMut) -> bool {
-    // Safety: lock is the first u32 of RegionHeader at offset 0 of the mmap,
-    // which is page-aligned. AtomicU32 has the same layout as u32.
     let lock = unsafe { &*(mmap.as_ptr() as *const AtomicU32) };
     let deadline = Instant::now() + LOCK_TIMEOUT;
     loop {
@@ -193,4 +129,22 @@ pub fn try_lock(mmap: &MmapMut) -> bool {
 pub fn unlock(mmap: &MmapMut) {
     let lock = unsafe { &*(mmap.as_ptr() as *const AtomicU32) };
     lock.store(0, Ordering::Release);
+}
+
+pub fn normalize_hash(h: u64) -> u64 {
+    match h { 0 => 1, u64::MAX => u64::MAX - 1, h => h }
+}
+
+// ── File open ─────────────────────────────────────────────────────────────────
+
+pub fn open_mmap(path: &str, file_size: usize) -> std::io::Result<MmapMut> {
+    let file = OpenOptions::new().read(true).write(true).create(true).open(path)?;
+    let fd = file.as_raw_fd();
+    unsafe { libc::flock(fd, libc::LOCK_EX) };
+    if file.metadata()?.len() < file_size as u64 {
+        file.set_len(file_size as u64)?;
+    }
+    let mmap = unsafe { MmapMut::map_mut(&file)? };
+    unsafe { libc::flock(fd, libc::LOCK_UN) };
+    Ok(mmap)
 }
