@@ -436,6 +436,15 @@ class TestAPIResourceStaticFileServing(unittest.TestCase):
             # This is expected if the file doesn't exist
             pass
 
+    def test_robots_txt_serves_static_file(self) -> None:
+        """Test robots_txt serves the robots.txt file."""
+        mock_response = MagicMock()
+
+        self.api_resource.robots_txt(falcon_response=mock_response)
+
+        assert mock_response.text == "User-agent: *\nDisallow: \nCrawl-delay: 5\n"
+        assert mock_response.content_type == "text/plain"
+
 
 class TestAPIResourceErrorHandling(unittest.TestCase):
     """Test error handling in APIResource methods."""

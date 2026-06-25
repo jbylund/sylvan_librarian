@@ -1511,6 +1511,13 @@ class APIResource:
         falcon_response.content_type = "application/javascript"
         set_cache_header(falcon_response, duration=timedelta(days=30))
 
+    def robots_txt(self, *, falcon_response: falcon.Response | None = None, **_: object) -> None:
+        """Return the robots.txt file."""
+        if falcon_response is None:
+            return
+        self._serve_static_file(filename="robots.txt", falcon_response=falcon_response)
+        falcon_response.content_type = "text/plain"
+
     def _serve_static_file(self, *, filename: str, falcon_response: falcon.Response) -> None:
         """Serve a static file to the Falcon response.
 
