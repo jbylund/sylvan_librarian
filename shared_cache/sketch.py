@@ -1,3 +1,4 @@
+# ruff: noqa: INP001, ANN201, ANN204, ANN401, D101, D102, D105, D107, S101
 """Generational cache sketch — N equal-sized generations with SIEVE-style eviction.
 
 ## Design
