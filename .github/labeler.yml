@@ -8,7 +8,7 @@ shared_cache:
       - any-glob-to-any-file:
           - "shared_cache/**"
 
-"card engine":
+card_engine:
   - changed-files:
       - any-glob-to-any-file:
           - "card_engine/**"
@@ -17,11 +17,6 @@ parser:
   - changed-files:
       - any-glob-to-any-file:
           - "api/parsing/**"
-
-engine:
-  - changed-files:
-      - any-glob-to-any-file:
-          - "card_engine/**"
 
 frontend:
   - changed-files:
