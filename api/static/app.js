@@ -71,8 +71,8 @@ class CardSearch {
     this.currentCardCount = 0; // Track current number of cards displayed for resize handling
 
     // Autocomplete properties — Maps from first letter to sorted subarray
-    this.typeMap = new Map();
-    this.keywordMap = new Map();
+    this.typeMap = new CatalogMap({});
+    this.keywordMap = new CatalogMap({});
 
     // Initialize cached regex patterns for mana symbol replacement (performance optimization)
     this.initManaSymbolPatterns();
