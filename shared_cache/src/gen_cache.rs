@@ -506,6 +506,7 @@ impl GenerationalSharedCache {
         let arena_per_page = arena_mb
             .map(|mb| mb * 1024 * 1024 / n_pages)
             .unwrap_or(gen_maxsize * 8192);
+        let arena_per_page = (arena_per_page + ARENA_ALIGN - 1) & !(ARENA_ALIGN - 1);
         let fsize = total_file_size(filter_bucket_count, n_pages, slot_count_per_page, arena_per_page);
         let prs = page_region_start(filter_bucket_count);
         let ps = page_size(slot_count_per_page, arena_per_page);
