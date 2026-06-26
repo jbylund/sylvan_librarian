@@ -389,6 +389,8 @@ class TestAPIResourceStaticFileServing(unittest.TestCase):
         assert mock_response.text is not None
         assert len(mock_response.text) > 0
         assert mock_response.content_type == "text/html"
+        assert 'autocapitalize="off"' in mock_response.text
+        assert 'autocorrect="off"' in mock_response.text
         # Verify it sets cache control header
         mock_response.set_header.assert_called_with("Cache-Control", "public, max-age=3600")
         assert '<meta property="og:image" content="/static/social-preview.webp" />' in mock_response.text
