@@ -224,7 +224,7 @@ impl GenerationalSharedCache {
         let mut idx = (hash as u32) % slot_count;
         loop {
             let slot = unsafe { &*self.slot_ptr(page_idx, idx) };
-            match slot.key_hash {
+            match read_key_hash(self.slot_ptr(page_idx, idx) as *const u8) {
                 EMPTY => return None,
                 h if h == hash => {
                     let expires = slot.expiry_ns;
