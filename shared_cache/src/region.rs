@@ -185,10 +185,13 @@ pub fn open_mmap(
         .read(true)
         .write(true)
         .create(true)
-        .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)?;
     let fd = file.as_raw_fd();
+    // Restrict permissions unconditionally — .mode() only applies at creation.
+    if unsafe { libc::fchmod(fd, 0o600) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
     // Retry on EINTR; any other error means we cannot safely serialize workers.
     loop {
         let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
