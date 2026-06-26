@@ -94,10 +94,10 @@ pub fn read_page_generation(base: *const u8) -> u32 {
     unsafe { (*ptr).load(Ordering::Acquire) }
 }
 
-/// Increment the page generation counter (Release).
+/// Increment the page generation counter (AcqRel).
 pub fn bump_page_generation(base: *mut u8) {
     let ptr = unsafe { base.add(GENERATION_OFFSET) as *const AtomicU32 };
-    unsafe { (*ptr).fetch_add(1, Ordering::Release) };
+    unsafe { (*ptr).fetch_add(1, Ordering::AcqRel) };
 }
 
 /// Atomic Relaxed read of a slot's visited field. Pairs with set_visited()'s Relaxed store.
