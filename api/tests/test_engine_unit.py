@@ -1016,7 +1016,6 @@ class TestCommonCardTypes:
 
 
 class TestCommonCardKeywords:
-
     """Tests for engine.common_card_keywords().
 
     Counts keyword occurrences across preferred printings only (one per oracle card).
