@@ -364,6 +364,12 @@ impl GenerationalSharedCache {
     // ── Rotation ──────────────────────────────────────────────────────────
 
     fn scan_survivors(&self, page_idx: usize) -> Vec<SurvivorEntry> {
+        // If another worker is mid-rotation (odd generation), abort immediately.
+        // commit_rotation's gen_snapshot check would discard these survivors anyway,
+        // but aborting early avoids reading from a page being concurrently zeroed.
+        let gen_before = self.page_generation(page_idx);
+        if gen_before & 1 != 0 { return Vec::new(); }
+
         let slot_count = self.slot_count_per_page;
         let mut survivors = Vec::new();
         let arena = self.arena_base(page_idx);
@@ -407,6 +413,9 @@ impl GenerationalSharedCache {
                 value_bytes,
             });
         }
+        // If the page was rotated while we scanned, the data is stale.
+        // commit_rotation's gen_snapshot check would discard these anyway.
+        if self.page_generation(page_idx) != gen_before { return Vec::new(); }
         survivors
     }
 
@@ -494,8 +503,10 @@ impl GenerationalSharedCache {
                 && c.version == VERSION
                 && c.n_pages == n_pages as u32
                 && c.maxsize == maxsize as u32
+                && c.gen_maxsize == gen_maxsize as u32
                 && c.slot_count_per_page == slot_count_per_page as u32
-                && c.arena_per_page == arena_per_page as u32;
+                && c.arena_per_page == arena_per_page as u32
+                && c.filter_bucket_count == filter_bucket_count as u32;
             if !compatible {
                 unsafe { std::ptr::write_bytes(mmap.as_mut_ptr(), 0, fsize); }
                 write_init_headers(mmap, n_pages, maxsize, gen_maxsize, slot_count_per_page, arena_per_page, filter_bucket_count, prs, ps);
@@ -608,9 +619,13 @@ impl GenerationalSharedCache {
 
         for i in 1..self.n_pages {
             let page_idx = (active_idx + self.n_pages - i) % self.n_pages;
+            let gen_before = self.page_generation(page_idx);
+            if gen_before & 1 != 0 { continue; } // page being zeroed by rotation — skip
             if let Some((_, _, si)) = self.do_probe(page_idx, hash, key) {
                 let s = unsafe { &*self.slot_ptr(page_idx, si) };
-                return s.body_len == new_body_len && content_vh == s.value_hash;
+                let matches = s.body_len == new_body_len && content_vh == s.value_hash;
+                if self.page_generation(page_idx) != gen_before { return false; }
+                return matches;
             }
         }
         false
@@ -745,11 +760,12 @@ impl GenerationalSharedCache {
         let in_active = self.do_probe(active_idx, hash, key).is_some();
         unlock(&self.mmap);
         if in_active { return true; }
-        // Sealed pages lock-free. A generation change during probe causes a key mismatch
-        // at worst — no arena access means no UB risk.
         for i in 1..self.n_pages {
             let page_idx = (active_idx + self.n_pages - i) % self.n_pages;
+            let gen_before = self.page_generation(page_idx);
+            if gen_before & 1 != 0 { continue; } // page being zeroed by rotation — skip
             if self.do_probe(page_idx, hash, key).is_some() {
+                if self.page_generation(page_idx) != gen_before { continue; }
                 return true;
             }
         }

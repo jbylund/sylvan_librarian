@@ -1,4 +1,5 @@
 use std::fs::OpenOptions;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
@@ -167,9 +168,22 @@ pub fn open_mmap(
     file_size: usize,
     under_lock: impl FnOnce(&mut MmapMut),
 ) -> std::io::Result<MmapMut> {
-    let file = OpenOptions::new().read(true).write(true).create(true).open(path)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
     let fd = file.as_raw_fd();
-    unsafe { libc::flock(fd, libc::LOCK_EX) };
+    // Retry on EINTR; any other error means we cannot safely serialize workers.
+    loop {
+        let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
+        if ret == 0 { break; }
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::EINTR) {
+            return Err(err);
+        }
+    }
     if file.metadata()?.len() < file_size as u64 {
         file.set_len(file_size as u64)?;
     }
