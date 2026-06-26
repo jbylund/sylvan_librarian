@@ -526,10 +526,18 @@ impl GenerationalSharedCache {
     }
 
     /// Call `f` with a direct slice into the mmap arena — zero extra allocation.
-    /// The lock is released before `f` runs; the slice is valid because:
-    ///   - Active page: in-place updates are bracketed by seqlock increments on value_seq;
-    ///     if value_seq changes while `f` runs, the result is discarded as a cache miss.
-    ///   - Sealed pages: immutable until rotation; generation check after `f` detects a concurrent swap.
+    ///
+    /// The lock is released before `f` runs. In theory, another worker can modify the
+    /// underlying bytes concurrently (active page: in-place update under seqlock; sealed
+    /// page: rotation or invalidate zeroing). This is an intentional trade-off: copying
+    /// bytes under the lock would eliminate the zero-copy benefit. In practice:
+    ///   - The window is extremely narrow — rotation bumps the generation to odd before
+    ///     zeroing, and in-place updates bracket writes with value_seq increments.
+    ///   - rkyv's relative pointers are bounded within the archive slice (mmap-backed,
+    ///     always valid memory), so transiently torn bytes produce garbage field values
+    ///     rather than invalid pointer dereferences.
+    ///   - The generation/value_seq checks after `f` returns detect any concurrent
+    ///     modification and discard the result. Worst case: one extra database query.
     pub fn get_with<F, T>(&mut self, key: &[u8], f: F) -> Option<T>
     where
         F: FnOnce(&[u8]) -> T,
