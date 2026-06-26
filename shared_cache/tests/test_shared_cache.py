@@ -228,7 +228,8 @@ class TestCrossProcess:
         ]:
             p = multiprocessing.Process(target=fn, args=args)
             p.start()
-            p.join()
+            p.join(timeout=5)
+            assert p.exitcode == 0
 
         p = multiprocessing.Process(target=_read_from_cache, args=(path, KEY, q))
         p.start()
