@@ -100,6 +100,12 @@ pub fn bump_page_generation(base: *mut u8) {
     unsafe { (*ptr).fetch_add(1, Ordering::Release) };
 }
 
+/// Atomic Relaxed read of a slot's visited field. Pairs with set_visited()'s Relaxed store.
+pub fn read_visited(slot: *const u8) -> u8 {
+    let ptr = unsafe { slot.add(VISITED_OFFSET) as *const AtomicU8 };
+    unsafe { (*ptr).load(Ordering::Relaxed) }
+}
+
 /// Set visited=1 on a slot. Relaxed — advisory only.
 pub fn set_visited(slot: *const u8) {
     let ptr = unsafe { slot.add(VISITED_OFFSET) as *const AtomicU8 };
@@ -124,6 +130,13 @@ pub fn inc_value_seq(slot: *mut u8) {
 pub fn read_key_hash(slot: *const u8) -> u64 {
     let ptr = slot as *const AtomicU64;
     unsafe { (*ptr).load(Ordering::Acquire) }
+}
+
+/// Atomic Release write of a slot's key_hash field (offset 0 in RawSlot).
+/// Pairs with read_key_hash()'s Acquire load in lock-free read paths.
+pub fn write_key_hash(slot: *mut u8, hash: u64) {
+    let ptr = slot as *mut AtomicU64;
+    unsafe { (*ptr).store(hash, Ordering::Release) };
 }
 
 /// Atomic read of value_seq for the post-f seqlock check in get_with.

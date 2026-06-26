@@ -22,7 +22,7 @@ pub struct RawSlot {
     pub arena_len: u32,       // length of rkyv value bytes
     pub key_offset: u32,      // byte offset of raw key bytes within the arena
     pub key_len: u32,         // length of raw key bytes
-    pub body_len: u32,        // raw body byte length — length check before sampled hash
+    pub body_len: u32,        // raw body byte length; u32::MAX sentinel means body=None
     pub arena_capacity: u32,  // padded allocation size; in-place reuse when new value fits
     pub visited: u8,
     _pad0: [u8; 3],

@@ -352,8 +352,8 @@ impl GenerationalSharedCache {
             (*slot).visited        = 0;
             // Write key_hash last — readers skip EMPTY slots, so writing hash
             // last makes the entry visible only once fully written.
-            std::sync::atomic::compiler_fence(Ordering::Release);
-            (*slot).key_hash       = hash;
+            // Release store pairs with read_key_hash()'s Acquire load in lock-free paths.
+            write_key_hash(slot as *mut u8, hash);
         }
         if is_new {
             self.page_header_mut(page_idx).entry_count += 1;
@@ -375,18 +375,17 @@ impl GenerationalSharedCache {
         let arena = self.arena_base(page_idx);
         let now = now_ns();
         for i in 0..slot_count {
-            // Acquire load: pairs with the Release compiler_fence in do_insert (key_hash
-            // written last) and with pop()'s plain write under the spinlock. Using an
-            // atomic load here prevents a data race with pop() writing TOMBSTONE while
-            // scan_survivors runs without the lock.
+            // Acquire load: pairs with write_key_hash()'s Release store in do_insert
+            // (key_hash written last) and in pop(). Using an atomic load here prevents
+            // a data race with pop() writing TOMBSTONE while scan_survivors runs without the lock.
             let key_hash = read_key_hash(self.slot_ptr(page_idx, i as u32) as *const u8);
             if key_hash == EMPTY || key_hash == TOMBSTONE {
                 continue;
             }
-            let slot = unsafe { &*self.slot_ptr(page_idx, i as u32) };
-            if slot.visited == 0 {
+            if read_visited(self.slot_ptr(page_idx, i as u32) as *const u8) == 0 {
                 continue;
             }
+            let slot = unsafe { &*self.slot_ptr(page_idx, i as u32) };
             if slot.expiry_ns != u64::MAX && slot.expiry_ns <= now {
                 continue;
             }
@@ -599,7 +598,7 @@ impl GenerationalSharedCache {
     /// Call this from the binding layer before extracting expensive fields (headers, counts).
     pub fn fast_check(&mut self, key: &[u8], body: Option<&[u8]>) -> bool {
         let hash = normalize_hash(xxh3_64(key));
-        let new_body_len = body.map_or(0, |b| b.len() as u32);
+        let new_body_len = body.map_or(u32::MAX, |b| b.len() as u32);
         let content_vh = sampled_body_hash(body);
 
         fence(Ordering::Acquire);
@@ -642,7 +641,7 @@ impl GenerationalSharedCache {
         ttl_secs: Option<f64>,
     ) {
         let hash = normalize_hash(xxh3_64(key));
-        let new_body_len = body.map_or(0, |b| b.len() as u32);
+        let new_body_len = body.map_or(u32::MAX, |b| b.len() as u32);
         let content_vh = sampled_body_hash(body);
 
         let body_owned = body.map(|b| b.to_vec());
@@ -701,7 +700,7 @@ impl GenerationalSharedCache {
 
         for page_idx in 0..self.n_pages {
             if let Some((_, _, slot_idx)) = self.do_probe(page_idx, hash, key) {
-                unsafe { (*self.slot_ptr_mut(page_idx, slot_idx)).key_hash = TOMBSTONE; }
+                write_key_hash(self.slot_ptr_mut(page_idx, slot_idx) as *mut u8, TOMBSTONE);
                 if page_idx == active_idx {
                     self.page_header_mut(active_idx).entry_count =
                         self.page_header(active_idx).entry_count.saturating_sub(1);
