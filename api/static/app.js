@@ -6,6 +6,43 @@ const HTML_ESCAPE_RE = /[&<>"]/g;
 const HTML_ESCAPE_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
 const htmlEscapeChar = c => HTML_ESCAPE_MAP[c];
 
+class CatalogMap {
+  constructor(mapping) {
+    this._map = new Map();
+    for (const [v, n] of Object.entries(mapping)) {
+      const letter = v[0].toLowerCase();
+      if (!this._map.has(letter)) this._map.set(letter, []);
+      this._map.get(letter).push({ v, n });
+    }
+    for (const bucket of this._map.values()) {
+      bucket.sort((a, b) => a.v.localeCompare(b.v));
+    }
+  }
+
+  get bool() {
+    return this._map.size > 0;
+  }
+
+  get size() {
+    let n = 0;
+    for (const bucket of this._map.values()) {
+      n += bucket.length;
+    }
+    return n;
+  }
+
+  getBestMatch(prefix) {
+    const bucket = this._map.get(prefix[0]) ?? [];
+    let best = null;
+    for (const entry of bucket) {
+      const lower = entry.v.toLowerCase();
+      if (lower.slice(0, prefix.length) > prefix) break;
+      if (lower.startsWith(prefix) && (!best || entry.n > best.n)) best = entry;
+    }
+    return best?.v ?? null;
+  }
+}
+
 class CardSearch {
   constructor() {
     this.searchForm = document.querySelector('.search-container');
@@ -33,9 +70,9 @@ class CardSearch {
     this.isAscending = true; // Track order direction
     this.currentCardCount = 0; // Track current number of cards displayed for resize handling
 
-    // Autocomplete properties
-    this.commonCardTypes = []; // Will store the common card types
-    this.commonKeywords = []; // Will store the common keywords
+    // Autocomplete properties — Maps from first letter to sorted subarray
+    this.typeMap = new Map();
+    this.keywordMap = new Map();
 
     // Initialize cached regex patterns for mana symbol replacement (performance optimization)
     this.initManaSymbolPatterns();
@@ -367,9 +404,9 @@ class CardSearch {
     const data = await (window.commonCardTypesPromise || Promise.resolve({ types: {}, keywords: {} }));
     const types = data?.types || {};
     const keywords = data?.keywords || {};
-    this.commonCardTypes = Object.entries(types).map(([t, n]) => ({ t, n }));
-    this.commonKeywords = Object.entries(keywords).map(([k, n]) => ({ k, n }));
-    console.debug('Loaded', this.commonCardTypes.length, 'common card types,', this.commonKeywords.length, 'keywords');
+    this.typeMap = new CatalogMap(types);
+    this.keywordMap = new CatalogMap(keywords);
+    console.debug('Loaded', this.typeMap.size, 'common card types,', this.keywordMap.size, 'keywords');
   }
 
   autoCompleteQuery(query) {
@@ -382,24 +419,20 @@ class CardSearch {
     const originalPrefix = catalogMatch[2];
     const prefix = originalPrefix.toLowerCase();
     const isKeywordSelector = selector === 'kw' || selector === 'keyword';
-    const entries = isKeywordSelector ? this.commonKeywords : this.commonCardTypes;
-    const entryKey = isKeywordSelector ? 'k' : 't';
-
-    const bestMatch = entries
-      .filter(entry => entry[entryKey].toLowerCase().startsWith(prefix))
-      .sort((a, b) => b.n - a.n)[0];
+    const catalog = isKeywordSelector ? this.keywordMap : this.typeMap;
+    const bestMatch = catalog.getBestMatch(prefix);
 
     if (!bestMatch) {
       return query;
     }
 
-    let completion = bestMatch[entryKey];
+    let completion;
     if (originalPrefix === originalPrefix.toUpperCase()) {
-      completion = bestMatch[entryKey].toUpperCase();
+      completion = bestMatch.toUpperCase();
     } else if (originalPrefix === originalPrefix.toLowerCase()) {
-      completion = bestMatch[entryKey].toLowerCase();
+      completion = bestMatch.toLowerCase();
     } else {
-      completion = originalPrefix + bestMatch[entryKey].slice(originalPrefix.length);
+      completion = originalPrefix + bestMatch.slice(originalPrefix.length);
     }
 
     return query.replace(/(?:^|\s)(?:kw|keyword|t|type):[a-zA-Z]+$/i, match => {
