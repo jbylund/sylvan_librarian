@@ -1562,9 +1562,7 @@ class APIResource:
         if kindred_count:
             type_counts["Tribal"] = kindred_count
         keyword_counts: dict[str, int] = self._engine.common_card_keywords()
-        keyword_catalog: collections.Counter[str] = collections.Counter()
-        for keyword, count in keyword_counts.items():
-            keyword_catalog[keyword.lower()] += count
+        keyword_catalog = {keyword.lower(): count for keyword, count in keyword_counts.items()}
         return {
             "types": dict(sorted(type_counts.items())),
             "keywords": dict(sorted(keyword_catalog.items())),
