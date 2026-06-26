@@ -1011,5 +1011,28 @@ class TestCommonCardTypes:
 
     def test_empty_engine_size_is_zero(self, fresh_engine: Callable[[], QueryEngine]) -> None:
         e = fresh_engine()
-        # get_common_card_types checks size() == 0 and raises HTTPServiceUnavailable.
+        # get_catalog checks size() == 0 and raises HTTPServiceUnavailable.
         assert e.size() == 0
+
+
+class TestCommonCardKeywords:
+    """Tests for engine.common_card_keywords().
+
+    Counts keyword occurrences across preferred printings only (one per oracle card).
+    The fixture cards include keywords: Flying, Haste, Persist, Vigilance, Wither.
+    """
+
+    def test_returns_dict(self, engine: QueryEngine) -> None:
+        result = engine.common_card_keywords()
+        assert isinstance(result, dict)
+
+    def test_known_keywords_present(self, engine: QueryEngine) -> None:
+        result = engine.common_card_keywords()
+        # The fixture includes cards with Flying, Haste, Persist, Vigilance, Wither keywords.
+        known = {"Flying", "Haste", "Persist", "Vigilance", "Wither"}
+        assert known & result.keys(), "Expected at least one known keyword in the result"
+
+    def test_counts_are_positive(self, engine: QueryEngine) -> None:
+        result = engine.common_card_keywords()
+        for keyword, count in result.items():
+            assert count > 0, f"Keyword {keyword!r} has non-positive count {count}"

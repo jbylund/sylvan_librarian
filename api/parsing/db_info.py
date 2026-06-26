@@ -88,7 +88,7 @@ DB_COLUMNS = [
     FieldInfo(
         db_column_name="card_keywords",
         field_type=FieldType.JSONB_OBJECT,
-        search_aliases=["keyword"],
+        search_aliases=["keyword", "kw"],
         parser_class=ParserClass.TEXT,
     ),
     FieldInfo(

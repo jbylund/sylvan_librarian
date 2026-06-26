@@ -1284,6 +1284,21 @@ pub(crate) fn count_common_types(data: &Archived<CardData>) -> HashMap<String, u
     result
 }
 
+/// Count keyword occurrences across preferred printings (one per oracle card).
+pub(crate) fn count_common_keywords(data: &Archived<CardData>) -> HashMap<String, u32> {
+    let mut keyword_counts: HashMap<&str, u32> = HashMap::new();
+
+    let store: &[ACard] = &data.cards;
+    for &idx in data.preferred_indices.iter() {
+        let card = &store[u32::from(idx) as usize];
+        for keyword in card.card_keywords.iter() {
+            *keyword_counts.entry(keyword.as_str()).or_insert(0) += 1;
+        }
+    }
+
+    keyword_counts.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
+}
+
 #[pyclass]
 struct QueryEngine {
     shm_path: PathBuf,
@@ -1782,6 +1797,20 @@ impl QueryEngine {
         // Safety: see the access_unchecked justification in query().
         let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
         let counts = count_common_types(data);
+        let d = PyDict::new(py);
+        for (name, count) in &counts {
+            d.set_item(name, count)?;
+        }
+        Ok(d)
+    }
+
+    /// Count keyword occurrences across preferred printings.
+    /// Returns {keyword_name: count} for all keywords present on preferred cards.
+    fn common_card_keywords<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let mmap = self.get_mmap()?;
+        // Safety: see the access_unchecked justification in query().
+        let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
+        let counts = count_common_keywords(data);
         let d = PyDict::new(py);
         for (name, count) in &counts {
             d.set_item(name, count)?;
