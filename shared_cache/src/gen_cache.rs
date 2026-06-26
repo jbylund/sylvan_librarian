@@ -276,10 +276,12 @@ impl GenerationalSharedCache {
 
         // For existing slots: reuse the arena allocation if the new value fits, otherwise
         // allocate only value bytes (key is unchanged). For new slots: allocate both.
+        let mut is_inplace_reuse = false;
         let (val_off, val_capacity, new_key_off) = if let Some(eidx) = existing_idx {
             let old_offset   = unsafe { (*self.slot_ptr(page_idx, eidx)).arena_offset };
             let old_capacity = unsafe { (*self.slot_ptr(page_idx, eidx)).arena_capacity };
             if value_bytes.len() <= old_capacity as usize {
+                is_inplace_reuse = true;
                 (old_offset, old_capacity, None)
             } else {
                 let old_head = self.page_header(page_idx).arena_head;
@@ -296,6 +298,8 @@ impl GenerationalSharedCache {
             (val_off, value_padded as u32, Some(key_off))
         };
 
+        // Seqlock: bracket in-place overwrites so get_with can detect a concurrent update.
+        if is_inplace_reuse { inc_value_seq(self.slot_ptr_mut(page_idx, idx) as *mut u8); }
         unsafe {
             let ab = self.arena_base_mut(page_idx);
             std::ptr::copy_nonoverlapping(value_bytes.as_ptr(), ab.add(val_off as usize), value_bytes.len());
@@ -303,6 +307,7 @@ impl GenerationalSharedCache {
                 std::ptr::copy_nonoverlapping(key.as_ptr(), ab.add(key_off as usize), key.len());
             }
         }
+        if is_inplace_reuse { inc_value_seq(self.slot_ptr_mut(page_idx, idx) as *mut u8); }
         let is_new = existing_idx.is_none();
         let slot_idx = existing_idx.unwrap_or(idx);
         let slot = self.slot_ptr_mut(page_idx, slot_idx);
@@ -474,7 +479,8 @@ impl GenerationalSharedCache {
 
     /// Call `f` with a direct slice into the mmap arena — zero extra allocation.
     /// The lock is released before `f` runs; the slice is valid because:
-    ///   - Active page: writers always append to new arena offsets; live entries are never overwritten.
+    ///   - Active page: in-place updates are bracketed by seqlock increments on value_seq;
+    ///     if value_seq changes while `f` runs, the result is discarded as a cache miss.
     ///   - Sealed pages: immutable until rotation; generation check after `f` detects a concurrent swap.
     pub fn get_with<F, T>(&mut self, key: &[u8], f: F) -> Option<T>
     where
@@ -493,16 +499,20 @@ impl GenerationalSharedCache {
             return None;
         }
         let active_idx = self.active_idx();
-        let active_abs_len_gen = self.do_probe(active_idx, hash, key).map(|(off, len, _)| {
+        let active_snap = self.do_probe(active_idx, hash, key).map(|(off, len, slot_idx)| {
             let abs = self.page_offset(active_idx) + self.arena_start_in_page + off as usize;
             let page_gen = self.page_generation(active_idx);
-            (abs, len as usize, page_gen)
+            let seq = read_value_seq(self.slot_ptr(active_idx, slot_idx) as *const u8);
+            (abs, len as usize, page_gen, slot_idx, seq)
         });
         unlock(&self.mmap);
 
-        if let Some((abs, len, gen_before)) = active_abs_len_gen {
+        if let Some((abs, len, gen_before, slot_idx, seq_before)) = active_snap {
             let result = f(&self.mmap[abs..abs + len]);
             if self.page_generation(active_idx) != gen_before {
+                return None;
+            }
+            if read_value_seq(self.slot_ptr(active_idx, slot_idx) as *const u8) != seq_before {
                 return None;
             }
             return Some(result);

@@ -31,8 +31,10 @@ impl CuckooFilter {
     }
 
     /// Returns true if the key with this hash is probably in the cache.
-    /// No false negatives; ~0.006% FPR (1 in 16,384) at 50% load.
-    /// Safe to call without the lock (lock-free read path).
+    /// ~0.006% FPR (1 in 16,384) at 50% load. No false negatives unless delete()
+    /// has been called and two live keys share the same 16-bit fingerprint and
+    /// overlapping bucket pairs — in that case the affected key self-heals on the
+    /// next set(). Safe to call without the lock (lock-free read path).
     pub fn lookup(&self, hash: u64) -> bool {
         let fp = fingerprint(hash);
         let b1 = self.idx(hash);

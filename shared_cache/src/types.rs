@@ -24,7 +24,10 @@ pub struct RawSlot {
     pub key_len: u32,         // length of raw key bytes
     pub body_len: u32,        // raw body byte length — length check before sampled hash
     pub arena_capacity: u32,  // padded allocation size; in-place reuse when new value fits
-    pub visited: u8, _pad: [u8; 15],
+    pub visited: u8,
+    _pad0: [u8; 3],
+    pub value_seq: u32,  // seqlock: odd = write in progress, even = stable
+    _pad1: [u8; 8],
 }
 
 const _: () = assert!(std::mem::size_of::<RawSlot>() == 64);

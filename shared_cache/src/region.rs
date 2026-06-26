@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 use memmap2::MmapMut;
 
-pub const MAGIC: u32 = 0x4743_4143 + 2; // bump to force re-init when slot layout changes
+pub const MAGIC: u32 = 0x4743_4143 + 3; // bump to force re-init when slot layout changes
 pub const VERSION: u32 = 1;
 pub const SLOT_SIZE: usize = 64;
 pub const PAGE_HEADER_SIZE: usize = 64;
@@ -12,6 +12,9 @@ pub const COORD_HEADER_SIZE: usize = 64;
 pub const ARENA_ALIGN: usize = 16;
 pub const EMPTY: u64 = 0;
 pub const TOMBSTONE: u64 = u64::MAX;
+const GENERATION_OFFSET: usize = 12; // byte offset of `generation` within PageHeader
+const VISITED_OFFSET: usize = 48;   // byte offset of `visited` within RawSlot
+const VALUE_SEQ_OFFSET: usize = 52; // byte offset of `value_seq` within RawSlot
 const LOCK_TIMEOUT: Duration = Duration::from_millis(1);
 
 /// First 64 bytes of the mmap — coordination header shared across all pages.
@@ -86,27 +89,39 @@ pub fn compute_filter_bucket_count(maxsize: usize) -> usize {
 
 /// Atomic read of the page's generation counter (Acquire).
 pub fn read_page_generation(base: *const u8) -> u32 {
-    // generation is at offset 12 within PageHeader
-    let ptr = unsafe { base.add(12) as *const AtomicU32 };
+    let ptr = unsafe { base.add(GENERATION_OFFSET) as *const AtomicU32 };
     unsafe { (*ptr).load(Ordering::Acquire) }
 }
 
 /// Increment the page generation counter (Release).
 pub fn bump_page_generation(base: *mut u8) {
-    let ptr = unsafe { base.add(12) as *const AtomicU32 };
+    let ptr = unsafe { base.add(GENERATION_OFFSET) as *const AtomicU32 };
     unsafe { (*ptr).fetch_add(1, Ordering::Release) };
 }
 
-/// Set visited=1 on a slot (offset 40 within RawSlot). Relaxed — advisory only.
+/// Set visited=1 on a slot. Relaxed — advisory only.
 pub fn set_visited(slot: *const u8) {
-    let ptr = unsafe { slot.add(40) as *const AtomicU8 };
+    let ptr = unsafe { slot.add(VISITED_OFFSET) as *const AtomicU8 };
     unsafe { (*ptr).store(1, Ordering::Relaxed) };
 }
 
 /// Set visited=0 on a slot. Used when sealing a page for fresh trial.
 pub fn clear_visited(slot: *const u8) {
-    let ptr = unsafe { slot.add(40) as *const AtomicU8 };
+    let ptr = unsafe { slot.add(VISITED_OFFSET) as *const AtomicU8 };
     unsafe { (*ptr).store(0, Ordering::Relaxed) };
+}
+
+/// Increment value_seq by 1. Called twice per in-place arena update: once before writing
+/// (leaving seq odd = in progress) and once after (leaving seq even = stable).
+pub fn inc_value_seq(slot: *mut u8) {
+    let ptr = unsafe { slot.add(VALUE_SEQ_OFFSET) as *const AtomicU32 };
+    unsafe { (*ptr).fetch_add(1, Ordering::AcqRel) };
+}
+
+/// Atomic read of value_seq for the post-f seqlock check in get_with.
+pub fn read_value_seq(slot: *const u8) -> u32 {
+    let ptr = unsafe { slot.add(VALUE_SEQ_OFFSET) as *const AtomicU32 };
+    unsafe { (*ptr).load(Ordering::Acquire) }
 }
 
 // ── Spinlock ──────────────────────────────────────────────────────────────────
