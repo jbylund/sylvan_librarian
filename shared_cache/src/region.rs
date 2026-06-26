@@ -172,6 +172,7 @@ pub fn open_mmap(
         .read(true)
         .write(true)
         .create(true)
+        .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)?;
     let fd = file.as_raw_fd();
