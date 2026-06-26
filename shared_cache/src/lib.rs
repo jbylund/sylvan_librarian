@@ -90,10 +90,7 @@ impl SharedCache {
     }
 
     fn __getitem__(&mut self, py: Python, key: &[u8]) -> PyResult<CachedResponsePy> {
-        match self.inner.get(key).map(|b| build_response(py, &b)) {
-            Some(v) => v,
-            None => Err(pyo3::exceptions::PyKeyError::new_err("cache miss")),
-        }
+        self.get(py, key)?.ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("cache miss"))
     }
 
     fn __len__(&self) -> usize {
@@ -117,7 +114,7 @@ impl SharedCache {
     }
 
     fn _get_raw_decoded(&mut self, py: Python, key: &[u8]) -> PyResult<Option<CachedResponsePy>> {
-        self.inner.get_with(key, |b| build_response(py, b)).transpose()
+        self.get(py, key)
     }
 
     /// Benchmarking helper: filter check + active-page probe under lock, no arena copy.

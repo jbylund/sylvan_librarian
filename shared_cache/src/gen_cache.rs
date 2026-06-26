@@ -546,17 +546,20 @@ impl GenerationalSharedCache {
 
     /// Call `f` with a direct slice into the mmap arena — zero extra allocation.
     ///
-    /// The lock is released before `f` runs. In theory, another worker can modify the
-    /// underlying bytes concurrently (active page: in-place update under seqlock; sealed
-    /// page: rotation or invalidate zeroing). This is an intentional trade-off: copying
-    /// bytes under the lock would eliminate the zero-copy benefit. In practice:
-    ///   - The window is extremely narrow — rotation bumps the generation to odd before
-    ///     zeroing, and in-place updates bracket writes with value_seq increments.
-    ///   - Callers must assume the bytes may be concurrently modified while `f` runs.
-    ///     `f` should avoid unchecked/unsafe in-place decoding; prefer copying the bytes
-    ///     (e.g. `to_vec()`) or validating before interpreting them.
-    ///   - The generation/value_seq checks after `f` returns detect concurrent modification
-    ///     and discard the result (worst case: one extra database query).
+    /// The lock is released before `f` runs. Another process can modify the underlying
+    /// bytes concurrently (active page: in-place update bracketed by value_seq increments;
+    /// sealed page: rotation zeroing bracketed by odd generation bumps). This is a
+    /// deliberate trade-off: copying bytes under the lock eliminates the zero-copy benefit.
+    ///
+    /// This means `f` observes a data race in Rust's memory model — technically UB.
+    /// The practical safety argument:
+    ///   - The race window is extremely narrow.
+    ///   - rkyv stores relative pointers (offset from the pointer's own address). A torn
+    ///     read of an offset resolves somewhere within the mmap region, not arbitrary memory.
+    ///   - The generation/value_seq checks after `f` returns detect any concurrent write
+    ///     and discard the result. Worst case: one extra database query.
+    ///
+    /// Callers that cannot tolerate this trade-off should copy the bytes inside `f` (e.g. `bytes.to_vec()`) before decoding.
     pub fn get_with<F, T>(&mut self, key: &[u8], f: F) -> Option<T>
     where
         F: FnOnce(&[u8]) -> T,
@@ -614,10 +617,6 @@ impl GenerationalSharedCache {
         }
 
         None // filter false positive
-    }
-
-    pub fn get(&mut self, key: &[u8]) -> Option<Vec<u8>> {
-        self.get_with(key, |bytes| bytes.to_vec())
     }
 
     /// Returns `true` if `key` is already cached with identical content — caller can skip `set()`.
