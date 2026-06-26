@@ -19,20 +19,20 @@ pub struct CachedResponsePy {
     pub total_cards: Option<i64>,
 }
 
-fn build_response(py: Python, bytes: &[u8]) -> CachedResponsePy {
+fn build_response(py: Python, bytes: &[u8]) -> PyResult<CachedResponsePy> {
     let ar = access_response(bytes);
     let headers_list = PyList::new(
         py,
         ar.headers.iter().map(|t| (t.0.as_str(), t.1.as_str())),
-    ).unwrap().unbind();
+    )?.unbind();
     let body = ar.body.as_ref().map(|b| PyBytes::new(py, b.as_slice()).into());
-    CachedResponsePy {
+    Ok(CachedResponsePy {
         status: ar.status.as_str().to_owned(),
         headers: headers_list,
         body,
         result_count: ar.result_count.as_ref().map(|x| i64::from(*x)),
         total_cards: ar.total_cards.as_ref().map(|x| i64::from(*x)),
-    }
+    })
 }
 
 // ── Python-visible cache type ─────────────────────────────────────────────────
@@ -82,7 +82,7 @@ impl SharedCache {
     }
 
     fn get(&mut self, py: Python, key: &[u8]) -> PyResult<Option<CachedResponsePy>> {
-        Ok(self.inner.get_with(key, |b| build_response(py, b)))
+        self.inner.get_with(key, |b| build_response(py, b)).transpose()
     }
 
     fn __setitem__(&mut self, key: &[u8], value: &Bound<PyAny>) -> PyResult<()> {
@@ -91,7 +91,7 @@ impl SharedCache {
 
     fn __getitem__(&mut self, py: Python, key: &[u8]) -> PyResult<CachedResponsePy> {
         match self.inner.get(key).map(|b| build_response(py, &b)) {
-            Some(v) => Ok(v),
+            Some(v) => v,
             None => Err(pyo3::exceptions::PyKeyError::new_err("cache miss")),
         }
     }
@@ -117,7 +117,7 @@ impl SharedCache {
     }
 
     fn _get_raw_decoded(&mut self, py: Python, key: &[u8]) -> PyResult<Option<CachedResponsePy>> {
-        Ok(self.inner.get_with(key, |b| build_response(py, b)))
+        self.inner.get_with(key, |b| build_response(py, b)).transpose()
     }
 
     /// Benchmarking helper: filter check + active-page probe under lock, no arena copy.

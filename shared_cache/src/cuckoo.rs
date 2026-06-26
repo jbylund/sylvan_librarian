@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU16, Ordering};
+
 /// Cuckoo filter embedded in the mmap arena.
 ///
 /// Layout: `bucket_count` contiguous buckets, each `BUCKET_BYTES` wide
@@ -9,6 +11,11 @@
 /// All methods take `&self` and write through the raw `*mut u8` pointer.
 /// Callers must hold the spinlock before calling any mutating method
 /// (insert / delete).
+///
+/// Slot accesses use AtomicU16 (Relaxed) so that lock-free `lookup()` callers
+/// don't race with spinlock-held `insert()`/`delete()` writes. The ordering
+/// contract is provided by the Acquire fence in callers (lock-free) and the
+/// spinlock's own Acquire/Release (writers).
 pub const SLOTS: usize = 4;          // fingerprints per bucket
 pub const FP_SIZE: usize = 2;        // bytes per fingerprint (u16)
 pub const BUCKET_BYTES: usize = SLOTS * FP_SIZE;
@@ -52,7 +59,7 @@ impl CuckooFilter {
         // Try primary then alternate bucket.
         for _ in 0..2 {
             if let Some(s) = self.empty_slot(b) {
-                unsafe { *self.slot_ptr(b, s) = fp };
+                unsafe { (*self.slot_ptr(b, s)).store(fp, Ordering::Relaxed) };
                 return;
             }
             b = self.alt(b, fp);
@@ -64,12 +71,12 @@ impl CuckooFilter {
         for k in 0..MAX_KICKS {
             let s = k % SLOTS;
             let p = self.slot_ptr(b, s);
-            let kicked = unsafe { *p };
-            unsafe { *p = fp };
+            let kicked = unsafe { (*p).load(Ordering::Relaxed) };
+            unsafe { (*p).store(fp, Ordering::Relaxed) };
             fp = kicked;
             b = self.alt(b, fp);
             if let Some(s) = self.empty_slot(b) {
-                unsafe { *self.slot_ptr(b, s) = fp };
+                unsafe { (*self.slot_ptr(b, s)).store(fp, Ordering::Relaxed) };
                 return;
             }
         }
@@ -85,8 +92,8 @@ impl CuckooFilter {
         for &b in &[b1, b2] {
             for s in 0..SLOTS {
                 let p = self.slot_ptr(b, s);
-                if unsafe { *p } == fp {
-                    unsafe { *p = 0 };
+                if unsafe { (*p).load(Ordering::Relaxed) } == fp {
+                    unsafe { (*p).store(0, Ordering::Relaxed) };
                     return;
                 }
             }
@@ -107,20 +114,20 @@ impl CuckooFilter {
     }
 
     /// Pointer to slot `slot` within `bucket`. All offsets are multiples of 2
-    /// (filter base is 64-byte aligned; each bucket is 8 bytes), so the u16
+    /// (filter base is 64-byte aligned; each bucket is 8 bytes), so the AtomicU16
     /// dereference is always correctly aligned.
-    fn slot_ptr(&self, bucket: u32, slot: usize) -> *mut u16 {
+    fn slot_ptr(&self, bucket: u32, slot: usize) -> *const AtomicU16 {
         unsafe {
-            self.data.add(bucket as usize * BUCKET_BYTES + slot * FP_SIZE) as *mut u16
+            self.data.add(bucket as usize * BUCKET_BYTES + slot * FP_SIZE) as *const AtomicU16
         }
     }
 
     fn bucket_has(&self, bucket: u32, fp: u16) -> bool {
-        (0..SLOTS).any(|s| unsafe { *self.slot_ptr(bucket, s) == fp })
+        (0..SLOTS).any(|s| unsafe { (*self.slot_ptr(bucket, s)).load(Ordering::Relaxed) == fp })
     }
 
     fn empty_slot(&self, bucket: u32) -> Option<usize> {
-        (0..SLOTS).find(|&s| unsafe { *self.slot_ptr(bucket, s) == 0 })
+        (0..SLOTS).find(|&s| unsafe { (*self.slot_ptr(bucket, s)).load(Ordering::Relaxed) == 0 })
     }
 }
 
