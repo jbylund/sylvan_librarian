@@ -34,8 +34,11 @@ CachedResponse = namedtuple(
 )
 
 _BODY_PATH = Path(__file__).parent / "elf_response.gz"
-with _BODY_PATH.open("rb") as _f:
-    BODY = _f.read()  # real gzip response: /search?q=elf (5025 bytes)
+try:
+    BODY = _BODY_PATH.read_bytes()  # real gzip response: /search?q=elf (5025 bytes)
+except FileNotFoundError:
+    # Fallback when the sample file isn't available (e.g. fresh clones / CI).
+    BODY = b"x" * 5025
 
 RESPONSE = CachedResponse(
     status="200 OK",
