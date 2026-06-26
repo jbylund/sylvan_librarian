@@ -391,6 +391,9 @@ class TestAPIResourceStaticFileServing(unittest.TestCase):
         assert mock_response.content_type == "text/html"
         # Verify it sets cache control header
         mock_response.set_header.assert_called_with("Cache-Control", "public, max-age=3600")
+        assert '<meta property="og:image" content="/static/social-preview.webp" />' in mock_response.text
+        assert '<meta property="og:image:width" content="1200" />' in mock_response.text
+        assert '<meta property="og:image:height" content="630" />' in mock_response.text
 
     def test_index_html_with_query_embeds_search_results(self) -> None:
         """Test _root embeds search results when query parameter is provided."""
@@ -436,6 +439,20 @@ class TestAPIResourceStaticFileServing(unittest.TestCase):
         except FileNotFoundError:
             # This is expected if the file doesn't exist
             pass
+
+    def test_social_preview_webp_serves_binary_content(self) -> None:
+        """Test social_preview_webp serves binary content correctly."""
+        mock_response = MagicMock()
+        mock_response.headers = {}
+
+        assert self.api_resource.action_map["static/social-preview_webp"] == self.api_resource.social_preview_webp
+        self.api_resource.social_preview_webp(falcon_response=mock_response)
+
+        expected_contents = (pathlib.Path(__file__).parent.parent / "static" / "social-preview.webp").read_bytes()
+        assert mock_response.data == expected_contents
+        assert mock_response.content_type == "image/webp"
+        assert mock_response.headers["content-length"] == len(expected_contents)
+        mock_response.set_header.assert_called_with("Cache-Control", "public, max-age=2592000")
 
     def test_robots_txt_serves_static_file(self) -> None:
         """Test robots_txt serves the robots.txt file."""
