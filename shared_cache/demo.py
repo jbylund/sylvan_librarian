@@ -9,6 +9,7 @@ Then:
 """
 
 import contextlib
+import json
 import sys
 import tempfile
 import time
@@ -32,19 +33,24 @@ RESPONSE = CachedResponse(
     total_cards=75321,
 )
 
-KEY = (
+
+def make_key(parts) -> bytes:
+    return json.dumps(parts, separators=(",", ":")).encode()
+
+
+KEY = make_key((
     "/search?q=lightning+bolt",
     (("q", "lightning bolt"),),
     (("ACCEPT-ENCODING", "gzip"),),
     "arcanetutor.com",
-)
+))
 
-OTHER_KEY = (
+OTHER_KEY = make_key((
     "/search?q=counterspell",
     (("q", "counterspell"),),
     (("ACCEPT-ENCODING", "gzip"),),
     "arcanetutor.com",
-)
+))
 
 
 def main() -> None:
@@ -70,7 +76,7 @@ def main() -> None:
             cache[OTHER_KEY]
 
         # --- per-entry TTL override (use a fresh key not already in the cache) ---
-        ttl_key = ("/search?q=ttl_test", (), (), None)
+        ttl_key = make_key(("/search?q=ttl_test", (), (), None))
         cache.set(ttl_key, RESPONSE, ttl=0.001)  # 1 ms TTL
         time.sleep(0.01)
         cache.get(ttl_key)
