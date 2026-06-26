@@ -257,10 +257,12 @@ impl GenerationalSharedCache {
         let mut idx = (hash as u32) % slot_count;
         let start_idx = idx;
         let mut existing_idx: Option<u32> = None;
+        let mut tombstone_idx: Option<u32> = None;
         loop {
             let slot = unsafe { &*self.slot_ptr(page_idx, idx) };
             match slot.key_hash {
                 EMPTY => break,
+                TOMBSTONE => { if tombstone_idx.is_none() { tombstone_idx = Some(idx); } }
                 h if h == hash && self.key_matches(page_idx, slot, key) => {
                     existing_idx = Some(idx);
                     break;
@@ -269,13 +271,18 @@ impl GenerationalSharedCache {
             }
             idx = (idx + 1) % slot_count;
             if idx == start_idx {
-                return false; // table full
+                if tombstone_idx.is_none() {
+                    return false; // table full
+                }
+                break; // table full of tombstones+occupied; reuse tombstone below
             }
         }
         let value_padded = (value_bytes.len() + ARENA_ALIGN - 1) & !(ARENA_ALIGN - 1);
 
         // For existing slots: reuse the arena allocation if the new value fits, otherwise
-        // allocate only value bytes (key is unchanged). For new slots: allocate both.
+        // allocate only value bytes (key is unchanged). For tombstone reuse: reuse the value
+        // arena if it fits (slot is invisible to readers so no seqlock needed), allocate only
+        // key bytes from the bump allocator. For new slots: allocate both.
         let mut is_inplace_reuse = false;
         let (val_off, val_capacity, new_key_off) = if let Some(eidx) = existing_idx {
             let old_offset   = unsafe { (*self.slot_ptr(page_idx, eidx)).arena_offset };
@@ -290,6 +297,26 @@ impl GenerationalSharedCache {
                 }
                 self.page_header_mut(page_idx).arena_head = old_head + value_padded as u32;
                 (old_head, value_padded as u32, None)
+            }
+        } else if let Some(tidx) = tombstone_idx {
+            let old_offset   = unsafe { (*self.slot_ptr(page_idx, tidx)).arena_offset };
+            let old_capacity = unsafe { (*self.slot_ptr(page_idx, tidx)).arena_capacity };
+            if value_bytes.len() <= old_capacity as usize {
+                // Value fits in former tenant's allocation; only allocate key bytes.
+                // No seqlock needed: slot is invisible (key_hash = TOMBSTONE) until we
+                // write key_hash last, so no concurrent reader can reach this arena region.
+                let key_padded = (key.len() + ARENA_ALIGN - 1) & !(ARENA_ALIGN - 1);
+                let old_head = self.page_header(page_idx).arena_head;
+                if old_head as usize + key_padded > self.page_size - self.arena_start_in_page {
+                    return false; // arena full for key bytes
+                }
+                self.page_header_mut(page_idx).arena_head = old_head + key_padded as u32;
+                (old_offset, old_capacity, Some(old_head))
+            } else {
+                let Some((val_off, key_off)) = self.alloc_arena(page_idx, value_bytes.len(), key.len()) else {
+                    return false; // arena full
+                };
+                (val_off, value_padded as u32, Some(key_off))
             }
         } else {
             let Some((val_off, key_off)) = self.alloc_arena(page_idx, value_bytes.len(), key.len()) else {
@@ -309,7 +336,7 @@ impl GenerationalSharedCache {
         }
         if is_inplace_reuse { inc_value_seq(self.slot_ptr_mut(page_idx, idx) as *mut u8); }
         let is_new = existing_idx.is_none();
-        let slot_idx = existing_idx.unwrap_or(idx);
+        let slot_idx = existing_idx.or(tombstone_idx).unwrap_or(idx);
         let slot = self.slot_ptr_mut(page_idx, slot_idx);
         unsafe {
             (*slot).expiry_ns      = expiry_ns;
