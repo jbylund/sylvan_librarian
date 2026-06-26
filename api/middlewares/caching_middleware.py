@@ -158,11 +158,9 @@ class CachingMiddleware:
         if resp.status and resp.status.startswith("5"):
             return
         cache_key = req.context.get("cache_key") or self._cache_key(req)
-        # __contains__ on SharedCache checks only the cuckoo filter (~0.006% FPR), so a false
-        # positive here causes a response to never be cached for that key. A full probe via
-        # .get() would eliminate false positives at the cost of a lock + slot scan per miss.
-        # The same body-hash fast-path used in set() could be applied here to cheaply confirm
-        # before skipping, but the FPR is low enough that the simpler check is worth it.
+        # __contains__ on SharedCache does a full slot probe (filter check + lock + active-page
+        # probe + lock-free sealed-page probes) — no false positives. On lock timeout it returns
+        # False, which causes a redundant set() that also silently drops under contention.
         if cache_key in self.cache:
             return
         media = resp.media

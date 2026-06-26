@@ -117,7 +117,7 @@ class ApiWorker(multiprocessing.Process):
 
                 shared_cache = SharedCache(path=settings.shared_cache_path, maxsize=10_000, n_pages=3)
                 logger.info("SharedCache opened at %s pid=%d", settings.shared_cache_path, os.getpid())
-            except (ImportError, OSError):
+            except (ImportError, OSError, TypeError):
                 logger.warning("SharedCache unavailable, falling back to per-process LRUCache", exc_info=True)
 
         api = falcon.App(
