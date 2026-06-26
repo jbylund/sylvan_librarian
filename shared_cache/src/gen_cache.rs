@@ -552,11 +552,11 @@ impl GenerationalSharedCache {
     /// bytes under the lock would eliminate the zero-copy benefit. In practice:
     ///   - The window is extremely narrow — rotation bumps the generation to odd before
     ///     zeroing, and in-place updates bracket writes with value_seq increments.
-    ///   - rkyv's relative pointers are bounded within the archive slice (mmap-backed,
-    ///     always valid memory), so transiently torn bytes produce garbage field values
-    ///     rather than invalid pointer dereferences.
-    ///   - The generation/value_seq checks after `f` returns detect any concurrent
-    ///     modification and discard the result. Worst case: one extra database query.
+    ///   - Callers must assume the bytes may be concurrently modified while `f` runs.
+    ///     `f` should avoid unchecked/unsafe in-place decoding; prefer copying the bytes
+    ///     (e.g. `to_vec()`) or validating before interpreting them.
+    ///   - The generation/value_seq checks after `f` returns detect concurrent modification
+    ///     and discard the result (worst case: one extra database query).
     pub fn get_with<F, T>(&mut self, key: &[u8], f: F) -> Option<T>
     where
         F: FnOnce(&[u8]) -> T,
