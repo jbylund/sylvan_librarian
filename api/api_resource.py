@@ -444,6 +444,7 @@ class APIResource:
         self.action_map["static/app_js"] = self.app_js
         self.action_map["static/app_min_js"] = self.app_min_js
         self.action_map["static/favicon_ico"] = self.favicon_ico
+        self.action_map["static/social-preview_webp"] = self.social_preview_webp
         self.action_map["static/styles_css"] = self.styles_css
 
         self._cache_generation: Synchronized = cache_generation or multiprocessing.Value("i", 0)
@@ -1470,6 +1471,18 @@ class APIResource:
         falcon_response.headers["content-length"] = content_length
         # Cache favicon for 7 days - it rarely changes
         set_cache_header(falcon_response, duration=timedelta(days=7))
+
+    def social_preview_webp(self, *, falcon_response: falcon.Response | None = None, **_: object) -> None:
+        """Return the social preview image."""
+        if falcon_response is None:
+            return
+        full_filename = pathlib.Path(__file__).parent / "static" / "social-preview.webp"
+        with pathlib.Path(full_filename).open(mode="rb") as f:
+            falcon_response.data = contents = f.read()
+        falcon_response.content_type = "image/webp"
+        content_length = len(contents)
+        falcon_response.headers["content-length"] = content_length
+        set_cache_header(falcon_response, duration=timedelta(days=30))
 
     def styles_css(self, *, falcon_response: falcon.Response | None = None, **_: object) -> None:
         """Return the styles.css file.
