@@ -364,57 +364,75 @@ impl GenerationalSharedCache {
     // ── Rotation ──────────────────────────────────────────────────────────
 
     fn scan_survivors(&self, page_idx: usize) -> Vec<SurvivorEntry> {
-        // If another worker is mid-rotation (odd generation), abort immediately.
-        // commit_rotation's gen_snapshot check would discard these survivors anyway,
-        // but aborting early avoids reading from a page being concurrently zeroed.
-        let gen_before = self.page_generation(page_idx);
-        if gen_before & 1 != 0 { return Vec::new(); }
+        // Abort immediately if another worker is mid-rotation on this page (odd generation).
+        if self.page_generation(page_idx) & 1 != 0 { return Vec::new(); }
+
+        // Per-chunk seqlock: scan CHUNK slots, check generation before and after.
+        // If the generation changed (pop() tombstoned a slot in this chunk), retry up to
+        // MAX_RETRIES times. On retry the tombstoned slot reads as TOMBSTONE and is skipped
+        // correctly. After MAX_RETRIES failures the chunk is skipped entirely — we lose at
+        // most CHUNK survivors rather than the whole page.
+        const CHUNK: usize = 64;
+        const MAX_RETRIES: usize = 3;
 
         let slot_count = self.slot_count_per_page;
         let mut survivors = Vec::new();
         let arena = self.arena_base(page_idx);
         let now = now_ns();
-        for i in 0..slot_count {
-            // Acquire load: pairs with write_key_hash()'s Release store in do_insert
-            // (key_hash written last) and in pop(). Using an atomic load here prevents
-            // a data race with pop() writing TOMBSTONE while scan_survivors runs without the lock.
-            let key_hash = read_key_hash(self.slot_ptr(page_idx, i as u32) as *const u8);
-            if key_hash == EMPTY || key_hash == TOMBSTONE {
-                continue;
+
+        let mut i = 0;
+        while i < slot_count {
+            let chunk_end = (i + CHUNK).min(slot_count);
+
+            for _attempt in 0..MAX_RETRIES {
+                let page_gen = self.page_generation(page_idx);
+                if page_gen & 1 != 0 { break; } // mid-rotation: skip chunk
+
+                let mut chunk_survivors = Vec::new();
+                for j in i..chunk_end {
+                    // Acquire load pairs with write_key_hash()'s Release store in do_insert
+                    // and pop().
+                    let key_hash = read_key_hash(self.slot_ptr(page_idx, j as u32) as *const u8);
+                    if key_hash == EMPTY || key_hash == TOMBSTONE { continue; }
+                    if read_visited(self.slot_ptr(page_idx, j as u32) as *const u8) == 0 { continue; }
+                    let slot = unsafe { &*self.slot_ptr(page_idx, j as u32) };
+                    if slot.expiry_ns != u64::MAX && slot.expiry_ns <= now { continue; }
+                    let key_bytes = unsafe {
+                        std::slice::from_raw_parts(
+                            arena.add(slot.key_offset as usize),
+                            slot.key_len as usize,
+                        )
+                        .to_vec()
+                    };
+                    let value_bytes = unsafe {
+                        std::slice::from_raw_parts(
+                            arena.add(slot.arena_offset as usize),
+                            slot.arena_len as usize,
+                        )
+                        .to_vec()
+                    };
+                    chunk_survivors.push(SurvivorEntry {
+                        hash: key_hash,
+                        expiry_ns: slot.expiry_ns,
+                        value_hash: slot.value_hash,
+                        body_len: slot.body_len,
+                        key_bytes,
+                        value_bytes,
+                    });
+                }
+
+                if self.page_generation(page_idx) == page_gen {
+                    // Stable read: commit this chunk's survivors.
+                    survivors.extend(chunk_survivors);
+                    break;
+                }
+                // Generation changed mid-chunk (pop() raced us); retry.
             }
-            if read_visited(self.slot_ptr(page_idx, i as u32) as *const u8) == 0 {
-                continue;
-            }
-            let slot = unsafe { &*self.slot_ptr(page_idx, i as u32) };
-            if slot.expiry_ns != u64::MAX && slot.expiry_ns <= now {
-                continue;
-            }
-            let key_bytes = unsafe {
-                std::slice::from_raw_parts(
-                    arena.add(slot.key_offset as usize),
-                    slot.key_len as usize,
-                )
-                .to_vec()
-            };
-            let value_bytes = unsafe {
-                std::slice::from_raw_parts(
-                    arena.add(slot.arena_offset as usize),
-                    slot.arena_len as usize,
-                )
-                .to_vec()
-            };
-            survivors.push(SurvivorEntry {
-                hash: key_hash,
-                expiry_ns: slot.expiry_ns,
-                value_hash: slot.value_hash,
-                body_len: slot.body_len,
-                key_bytes,
-                value_bytes,
-            });
+            // If all retries exhausted without a stable read, chunk is silently skipped.
+
+            i = chunk_end;
         }
-        // If the page was rotated while we scanned, the data is stale.
-        // commit_rotation's gen_snapshot check would discard these anyway.
-        if self.page_generation(page_idx) != gen_before { return Vec::new(); }
+
         survivors
     }
 
@@ -717,8 +735,16 @@ impl GenerationalSharedCache {
                     self.page_header_mut(active_idx).entry_count =
                         self.page_header(active_idx).entry_count.saturating_sub(1);
                     self.filter().delete(hash);
+                    write_key_hash(slot, TOMBSTONE);
+                } else {
+                    // Sealed page: bracket the TOMBSTONE write with generation bumps so
+                    // scan_survivors()'s per-chunk seqlock detects the change and retries
+                    // only the affected chunk rather than discarding the entire page.
+                    let page_base = unsafe { self.mmap.as_mut_ptr().add(self.page_offset(page_idx)) };
+                    bump_page_generation(page_base); // even → odd (write in progress)
+                    write_key_hash(slot, TOMBSTONE);
+                    bump_page_generation(page_base); // odd → even (stable)
                 }
-                write_key_hash(slot, TOMBSTONE);
                 found = true;
             }
         }
