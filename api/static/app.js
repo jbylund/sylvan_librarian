@@ -373,82 +373,38 @@ class CardSearch {
   }
 
   autoCompleteQuery(query) {
-    // Look for keyword queries like "kw:fly" or "keyword:fly"
-    const kwMatch = query.match(/(?:^|\s)(?:kw|keyword):([a-zA-Z]*)$/i);
-    if (kwMatch) {
-      const prefix = kwMatch[1].toLowerCase();
-      if (prefix.length >= 2) {
-        const bestMatch = this.commonKeywords
-          .filter(kw => kw.k.toLowerCase().startsWith(prefix))
-          .sort((a, b) => b.n - a.n)[0];
-
-        if (bestMatch) {
-          const originalPrefix = kwMatch[1];
-          let completedKw = bestMatch.k;
-          if (originalPrefix.length > 0) {
-            if (originalPrefix === originalPrefix.toUpperCase()) {
-              completedKw = bestMatch.k.toUpperCase();
-            } else if (originalPrefix === originalPrefix.toLowerCase()) {
-              completedKw = bestMatch.k.toLowerCase();
-            } else {
-              completedKw = originalPrefix + bestMatch.k.slice(originalPrefix.length);
-            }
-          }
-          return query.replace(/(?:^|\s)(?:kw|keyword):[a-zA-Z]*$/i, match => {
-            return match.replace(/[a-zA-Z]+$/, completedKw);
-          });
-        }
-      }
+    const catalogMatch = query.match(/(?:^|\s)(kw|keyword|t|type):([a-zA-Z]{2,})$/i);
+    if (!catalogMatch) {
       return query;
     }
 
-    // Look for type queries like "t:hydr" or "type:hydr"
-    const typeMatch = query.match(/(?:^|\s)(?:t|type):([a-zA-Z]*)$/i);
-    if (!typeMatch) {
-      return query; // No type query found, return original
-    }
+    const selector = catalogMatch[1].toLowerCase();
+    const originalPrefix = catalogMatch[2];
+    const prefix = originalPrefix.toLowerCase();
+    const isKeywordSelector = selector === 'kw' || selector === 'keyword';
+    const entries = isKeywordSelector ? this.commonKeywords : this.commonCardTypes;
+    const entryKey = isKeywordSelector ? 'k' : 't';
 
-    const prefix = typeMatch[1].toLowerCase();
-    if (prefix.length < 2) {
-      // Only autocomplete if at least 2 characters
-      return query;
-    }
-
-    // Find the most common type that starts with this prefix
-    const bestMatch = this.commonCardTypes
-      .filter(type => type.t.toLowerCase().startsWith(prefix))
-      .sort((a, b) => b.n - a.n)[0]; // Get the most frequent match
+    const bestMatch = entries
+      .filter(entry => entry[entryKey].toLowerCase().startsWith(prefix))
+      .sort((a, b) => b.n - a.n)[0];
 
     if (!bestMatch) {
-      return query; // No match found, return original
+      return query;
     }
 
-    // Get the original prefix to preserve capitalization
-    const originalPrefix = typeMatch[1];
-
-    // Create completion that matches the user's capitalization pattern
-    let completedType = bestMatch.t;
-    if (originalPrefix.length > 0) {
-      // Preserve the capitalization pattern of the user's input
-      if (originalPrefix === originalPrefix.toUpperCase()) {
-        // All caps -> all caps
-        completedType = bestMatch.t.toUpperCase();
-      } else if (originalPrefix === originalPrefix.toLowerCase()) {
-        // All lowercase -> all lowercase
-        completedType = bestMatch.t.toLowerCase();
-      } else {
-        // Mixed case -> take whatever they've typed so far
-        // and append the rest of the completion
-        completedType = originalPrefix + bestMatch.t.slice(originalPrefix.length);
-      }
+    let completion = bestMatch[entryKey];
+    if (originalPrefix === originalPrefix.toUpperCase()) {
+      completion = bestMatch[entryKey].toUpperCase();
+    } else if (originalPrefix === originalPrefix.toLowerCase()) {
+      completion = bestMatch[entryKey].toLowerCase();
+    } else {
+      completion = originalPrefix + bestMatch[entryKey].slice(originalPrefix.length);
     }
 
-    // Auto-complete the query
-    const completedQuery = query.replace(/(?:^|\s)(?:t|type):[a-zA-Z]*$/i, match => {
-      return match.replace(/[a-zA-Z]+$/, completedType);
+    return query.replace(/(?:^|\s)(?:kw|keyword|t|type):[a-zA-Z]+$/i, match => {
+      return match.replace(/[a-zA-Z]+$/, completion);
     });
-
-    return completedQuery;
   }
 
   balanceQuery(query) {
