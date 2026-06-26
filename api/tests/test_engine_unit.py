@@ -1011,7 +1011,7 @@ class TestCommonCardTypes:
 
     def test_empty_engine_size_is_zero(self, fresh_engine: Callable[[], QueryEngine]) -> None:
         e = fresh_engine()
-        # get_common_card_types checks size() == 0 and raises HTTPServiceUnavailable.
+        # get_catalog checks size() == 0 and raises HTTPServiceUnavailable.
         assert e.size() == 0
 
 

@@ -1544,12 +1544,12 @@ class APIResource:
         """
         return db_utils.get_migrations()
 
-    def get_common_card_types(
+    def get_catalog(
         self,
         falcon_response: falcon.Response | None = None,
         **_: object,
-    ) -> dict[str, list[dict[str, Any]]]:
-        """Get the common card types and keywords from the engine."""
+    ) -> dict[str, dict[str, int]]:
+        """Get type and keyword frequency catalogs from the engine."""
         if self._engine.size() == 0:
             raise falcon.HTTPServiceUnavailable(
                 title="Service Unavailable",
@@ -1561,16 +1561,14 @@ class APIResource:
         kindred_count = type_counts.get("Kindred", 0)
         if kindred_count:
             type_counts["Tribal"] = kindred_count
-        types = sorted(
-            [{"t": t, "n": n} for t, n in type_counts.items()],
-            key=lambda x: x["t"],
-        )
         keyword_counts: dict[str, int] = self._engine.common_card_keywords()
-        keywords = sorted(
-            [{"k": k, "n": n} for k, n in keyword_counts.items()],
-            key=lambda x: x["k"],
-        )
-        return {"types": types, "keywords": keywords}
+        keyword_catalog: collections.Counter[str] = collections.Counter()
+        for keyword, count in keyword_counts.items():
+            keyword_catalog[keyword.lower()] += count
+        return {
+            "types": dict(sorted(type_counts.items())),
+            "keywords": dict(sorted(keyword_catalog.items())),
+        }
 
     def get_common_keywords(self, **_: object) -> list[dict[str, Any]]:
         """Get the common keywords from the database."""

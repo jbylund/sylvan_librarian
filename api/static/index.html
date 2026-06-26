@@ -9,7 +9,7 @@
       (function () {
         if (!window.commonCardTypesPromise) {
           function fetchWithRetry() {
-            return fetch('/get_common_card_types')
+            return fetch('/get_catalog')
               .then(function (response) {
                 if (response.status === 503) {
                   var delay = 30000 + Math.random() * 10000;
@@ -20,13 +20,13 @@
                 }
                 if (!response.ok) {
                   console.error('Failed to fetch common card types and keywords: HTTP ' + response.status);
-                  return { types: [], keywords: [] };
+                  return { types: {}, keywords: {} };
                 }
                 return response.json();
               })
               .catch(function (error) {
                 console.error('Failed to fetch common card types and keywords:', error);
-                return { types: [], keywords: [] };
+                return { types: {}, keywords: {} };
               });
           }
           window.commonCardTypesPromise = fetchWithRetry();

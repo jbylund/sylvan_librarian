@@ -364,9 +364,16 @@ class CardSearch {
 
   async fetchCommonCardTypes() {
     // Use the promise that was started at the very top of the page (before CSS parsing)
-    const data = await (window.commonCardTypesPromise || Promise.resolve({ types: [], keywords: [] }));
-    this.commonCardTypes = Array.isArray(data) ? data : data.types || [];
-    this.commonKeywords = Array.isArray(data) ? [] : data.keywords || [];
+    const data = await (window.commonCardTypesPromise || Promise.resolve({ types: {}, keywords: {} }));
+    if (Array.isArray(data)) {
+      this.commonCardTypes = data;
+      this.commonKeywords = [];
+    } else {
+      const types = data?.types || {};
+      const keywords = data?.keywords || {};
+      this.commonCardTypes = Array.isArray(types) ? types : Object.entries(types).map(([t, n]) => ({ t, n }));
+      this.commonKeywords = Array.isArray(keywords) ? keywords : Object.entries(keywords).map(([k, n]) => ({ k, n }));
+    }
     console.debug('Loaded', this.commonCardTypes.length, 'common card types,', this.commonKeywords.length, 'keywords');
   }
 
