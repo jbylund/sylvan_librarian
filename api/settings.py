@@ -26,6 +26,7 @@ class Settings:
         """Initialize settings from environment variables."""
         self._enable_cache = _is_truthy(os.environ.get("ENABLE_CACHE", "false"))
         self._enable_engine = _is_truthy(os.environ.get("ENABLE_ENGINE", "true"))
+        self._shared_cache_path: str = os.environ.get("SHARED_CACHE_PATH", "/tmp/arcane.cache")  # noqa: S108
 
     @property
     def enable_cache(self) -> bool:
@@ -52,6 +53,11 @@ class Settings:
     def enable_engine(self, value: bool) -> None:
         """Set engine enabled state."""
         self._enable_engine = value
+
+    @property
+    def shared_cache_path(self) -> str:
+        """Filesystem path for the shared mmap cache file."""
+        return self._shared_cache_path
 
 
 # Global settings instance

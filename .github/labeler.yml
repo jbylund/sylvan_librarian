@@ -1,12 +1,22 @@
+rust:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "**/*.rs"
+
+shared_cache:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "shared_cache/**"
+
+card_engine:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "card_engine/**"
+
 parser:
   - changed-files:
       - any-glob-to-any-file:
           - "api/parsing/**"
-
-engine:
-  - changed-files:
-      - any-glob-to-any-file:
-          - "card_engine/**"
 
 frontend:
   - changed-files:
@@ -56,3 +66,5 @@ dependencies:
           - "uv.lock"
           - "card_engine/Cargo.toml"
           - "card_engine/Cargo.lock"
+          - "shared_cache/Cargo.toml"
+          - "shared_cache/Cargo.lock"
