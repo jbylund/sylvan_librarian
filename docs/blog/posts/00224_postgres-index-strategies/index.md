@@ -41,8 +41,7 @@ return f"(magic.color_identity_mask({lhs_sql}) = ANY(%({pmask})s::smallint[]))"
 ## B-tree for numerics
 
 
-## Functional indexes: lower(column)
-
-
 ## How to choose
+
+<!-- Functional indexes on lower(column) are covered in [The ILIKE Trap](../00384_ilike-trap-postgres-planner/index.md) — they were introduced specifically to fix case-insensitive search planner overhead, so the story belongs there. -->
 

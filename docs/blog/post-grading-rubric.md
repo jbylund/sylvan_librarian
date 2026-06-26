@@ -20,6 +20,8 @@ Numbers, query plans, benchmarks, code snippets that show real implementation. R
 - **Mid (11–16):** Some claims have evidence, others are asserted. Code examples exist but are toy-sized or decontextualized.
 - **Low (0–10):** Vague assertions throughout. "Tests showed improvement." No reproducible detail.
 
+**On PR links and code permalinks:** These are the strongest form of evidence for "we actually did this." A PR link proves the change is real, reviewable, and happened at a specific point in history. A commit-anchored code permalink (e.g. `blob/<sha>/path/file.py#L42-L51`) proves the code exists at the exact version discussed — a floating link to `main` will drift. Use both wherever a post describes a specific change: link the PR for the narrative ("we switched from X to Y") and link the code for the mechanism ("here is the implementation"). Inline links in prose are preferable to a references section — they stay attached to the claim.
+
 ### Clarity and Structure — 20 pts
 
 Logical section order, clear problem statement, each section earns its place.
