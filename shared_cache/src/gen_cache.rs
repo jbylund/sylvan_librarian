@@ -708,12 +708,17 @@ impl GenerationalSharedCache {
 
         for page_idx in 0..self.n_pages {
             if let Some((_, _, slot_idx)) = self.do_probe(page_idx, hash, key) {
-                write_key_hash(self.slot_ptr_mut(page_idx, slot_idx) as *mut u8, TOMBSTONE);
+                let slot = self.slot_ptr_mut(page_idx, slot_idx) as *mut u8;
                 if page_idx == active_idx {
+                    // Invalidate any get_with() reader that snapshotted this slot before we
+                    // tombstone it; without this bump the post-f value_seq check would pass
+                    // and the caller would receive a value for a key that was just deleted.
+                    inc_value_seq(slot);
                     self.page_header_mut(active_idx).entry_count =
                         self.page_header(active_idx).entry_count.saturating_sub(1);
                     self.filter().delete(hash);
                 }
+                write_key_hash(slot, TOMBSTONE);
                 found = true;
             }
         }
