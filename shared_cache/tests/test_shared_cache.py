@@ -208,11 +208,17 @@ class TestCrossProcess:
         p = multiprocessing.Process(target=_write_to_cache, args=(path, KEY, SAMPLE))
         p.start()
         p.join(timeout=5)
+        if p.is_alive():
+            p.terminate()
+            p.join(timeout=5)
         assert p.exitcode == 0
 
         p = multiprocessing.Process(target=_read_from_cache, args=(path, KEY, q))
         p.start()
         p.join(timeout=5)
+        if p.is_alive():
+            p.terminate()
+            p.join(timeout=5)
         assert p.exitcode == 0
 
         result = q.get(timeout=5)
