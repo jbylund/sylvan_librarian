@@ -1564,8 +1564,8 @@ class APIResource:
         keyword_counts: dict[str, int] = self._engine.common_card_keywords()
         keyword_catalog = {keyword.lower(): count for keyword, count in keyword_counts.items()}
         return {
-            "types": dict(sorted(type_counts.items())),
-            "keywords": dict(sorted(keyword_catalog.items())),
+            "types": type_counts,
+            "keywords": keyword_catalog,
         }
 
     def get_common_keywords(self, **_: object) -> list[dict[str, Any]]:
