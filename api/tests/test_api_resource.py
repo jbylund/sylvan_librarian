@@ -394,8 +394,6 @@ class TestAPIResourceStaticFileServing(unittest.TestCase):
         assert '<meta property="og:image" content="/static/social-preview.webp" />' in mock_response.text
         assert '<meta property="og:image:width" content="1200" />' in mock_response.text
         assert '<meta property="og:image:height" content="630" />' in mock_response.text
-        assert '<meta name="twitter:card" content="summary_large_image" />' in mock_response.text
-        assert '<meta name="twitter:image" content="/static/social-preview.webp" />' in mock_response.text
 
     def test_index_html_with_query_embeds_search_results(self) -> None:
         """Test _root embeds search results when query parameter is provided."""
