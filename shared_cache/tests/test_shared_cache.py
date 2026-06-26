@@ -3,6 +3,7 @@
 Build the wheel first:
     cd shared_cache && maturin develop
 """
+
 from __future__ import annotations
 
 import multiprocessing
@@ -31,22 +32,23 @@ KEY = b"/search?q=lightning+bolt"
 OTHER_KEY = b"/search?q=counterspell"
 
 
-def _make_cache(path, maxsize=1000, n_pages=2, default_ttl=None):
+def _make_cache(path, maxsize=1000, n_pages=2, default_ttl=None) -> SharedCache:
     return SharedCache(path=str(path), maxsize=maxsize, n_pages=n_pages, default_ttl=default_ttl)
 
 
 # Module-level helpers required by cross-process tests (must be picklable).
 
-def _write_to_cache(path, key, response):
+
+def _write_to_cache(path, key, response) -> None:
     SharedCache(path=path, maxsize=1000, n_pages=2)[key] = response
 
 
-def _read_from_cache(path, key, queue):
+def _read_from_cache(path, key, queue) -> None:
     result = SharedCache(path=path, maxsize=1000, n_pages=2).get(key)
     queue.put(None if result is None else (result.body, result.result_count))
 
 
-def _invalidate_cache(path):
+def _invalidate_cache(path) -> None:
     SharedCache(path=path, maxsize=1000, n_pages=2).invalidate()
 
 
@@ -265,17 +267,17 @@ class TestRotation:
         cache[hot_key] = SAMPLE._replace(body=b"hot-data", result_count=999)
         cache[fk(0)] = SAMPLE
         cache[fk(1)] = SAMPLE
-        cache[fk(2)] = SAMPLE            # triggers rotation 1
+        cache[fk(2)] = SAMPLE  # triggers rotation 1
 
         assert cache.get(hot_key) is not None  # sets visited bit
 
         cache[fk(3)] = SAMPLE
         cache[fk(4)] = SAMPLE
-        cache[fk(5)] = SAMPLE            # triggers rotation 2
+        cache[fk(5)] = SAMPLE  # triggers rotation 2
 
         cache[fk(6)] = SAMPLE
         cache[fk(7)] = SAMPLE
-        cache[fk(8)] = SAMPLE            # triggers rotation 3; hot survives
+        cache[fk(8)] = SAMPLE  # triggers rotation 3; hot survives
 
         result = cache.get(hot_key)
         assert result is not None
