@@ -1477,11 +1477,11 @@ class APIResource:
         if falcon_response is None:
             return
         full_filename = pathlib.Path(__file__).parent / "static" / "social-preview.webp"
-        with pathlib.Path(full_filename).open(mode="rb") as f:
-            falcon_response.data = contents = f.read()
+        with full_filename.open(mode="rb") as f:
+            contents = f.read()
+        falcon_response.data = contents
         falcon_response.content_type = "image/webp"
-        content_length = len(contents)
-        falcon_response.headers["content-length"] = content_length
+        falcon_response.headers["content-length"] = len(contents)
         set_cache_header(falcon_response, duration=timedelta(days=30))
 
     def styles_css(self, *, falcon_response: falcon.Response | None = None, **_: object) -> None:
