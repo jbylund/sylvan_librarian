@@ -149,12 +149,27 @@ pub fn read_value_seq(slot: *const u8) -> u32 {
 
 pub fn try_lock(mmap: &MmapMut) -> bool {
     let lock = unsafe { &*(mmap.as_ptr() as *const AtomicU32) };
+    let my_pid = std::process::id(); // u32; PID 0 is unused on POSIX, safe as unlocked sentinel
     let deadline = Instant::now() + LOCK_TIMEOUT;
     loop {
-        if lock.compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+        if lock.compare_exchange(0, my_pid, Ordering::Acquire, Ordering::Relaxed).is_ok() {
             return true;
         }
         if Instant::now() >= deadline {
+            // Timed out. Check whether the owner process is still alive before giving up.
+            // This prevents a crashed worker from permanently wedging the cache.
+            let owner = lock.load(Ordering::Relaxed);
+            if owner != 0 && owner != my_pid {
+                let dead = unsafe { libc::kill(owner as libc::pid_t, 0) } == -1
+                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+                if dead {
+                    // Owner is gone; steal the lock. If the CAS fails another worker got
+                    // here first — return false and let the caller retry next time.
+                    if lock.compare_exchange(owner, my_pid, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+                        return true;
+                    }
+                }
+            }
             return false;
         }
         std::hint::spin_loop();
