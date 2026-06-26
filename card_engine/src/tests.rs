@@ -1,9 +1,9 @@
 use super::{
     build_list_index, build_numeric_index, build_oracle_text_index, build_tag_index,
-    build_trigram_index, build_type_index, count_common_types, narrow_candidates,
-    trigram_candidates, Card, CardData, CardIndexes, CollField, CmpOp, FilterExpr, Interner,
-    ManaCost, InlineStr, TagIndex, TrigramIndex, NONE_STR,
-    TYPE_ARTIFACT, TYPE_CREATURE, TYPE_INSTANT, TYPE_LEGENDARY, TYPE_PLANESWALKER,
+    build_trigram_index, build_type_index, count_common_keywords, count_common_types,
+    narrow_candidates, trigram_candidates, Card, CardData, CardIndexes, CollField, CmpOp,
+    FilterExpr, InlineStr, Interner, ManaCost, TagIndex, TrigramIndex, NONE_STR, TYPE_ARTIFACT,
+    TYPE_CREATURE, TYPE_INSTANT, TYPE_LEGENDARY, TYPE_PLANESWALKER,
 };
 use rkyv::{rancor::Error, Archived};
 use std::collections::{HashMap, HashSet};
@@ -372,4 +372,54 @@ fn count_common_types_sums_preferred_only() {
     // Types with zero count are never emitted.
     assert_eq!(counts.get("Land"),   None);
     assert_eq!(counts.get("Sorcery"), None);
+}
+
+#[test]
+fn count_common_keywords_sums_preferred_only() {
+    // card 0: Flying + Haste  — preferred
+    // card 1: Trample         — not preferred (skipped)
+    // card 2: Flying          — preferred
+    // card 3: Vigilance       — preferred
+    let mut kw_flying_haste = HashSet::new();
+    kw_flying_haste.insert("Flying".to_string());
+    kw_flying_haste.insert("Haste".to_string());
+
+    let mut kw_trample = HashSet::new();
+    kw_trample.insert("Trample".to_string());
+
+    let mut kw_flying = HashSet::new();
+    kw_flying.insert("Flying".to_string());
+
+    let mut kw_vigilance = HashSet::new();
+    kw_vigilance.insert("Vigilance".to_string());
+
+    let mut card0 = stub_card(TYPE_CREATURE, vec![]);
+    card0.card_keywords = kw_flying_haste;
+    let mut card1 = stub_card(TYPE_INSTANT, vec![]);
+    card1.card_keywords = kw_trample;
+    let mut card2 = stub_card(TYPE_CREATURE, vec![]);
+    card2.card_keywords = kw_flying;
+    let mut card3 = stub_card(TYPE_ARTIFACT, vec![]);
+    card3.card_keywords = kw_vigilance;
+
+    let data = CardData {
+        cards: vec![card0, card1, card2, card3],
+        strings: vec![],
+        indexes: CardIndexes::default(),
+        format_shifts: HashMap::new(),
+        preferred_indices: vec![0, 2, 3], // card 1 (Instant) excluded
+    };
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let counts = count_common_keywords(archived);
+
+    // Flying appears on cards 0 and 2 (both preferred).
+    assert_eq!(counts.get("Flying"), Some(&2));
+    // Haste only on card 0 (preferred).
+    assert_eq!(counts.get("Haste"), Some(&1));
+    // Vigilance only on card 3 (preferred).
+    assert_eq!(counts.get("Vigilance"), Some(&1));
+    // Trample on card 1 — not preferred, must be absent.
+    assert_eq!(counts.get("Trample"), None);
 }

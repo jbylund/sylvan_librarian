@@ -35,6 +35,7 @@ class CardSearch {
 
     // Autocomplete properties
     this.commonCardTypes = []; // Will store the common card types
+    this.commonKeywords = []; // Will store the common keywords
 
     // Initialize cached regex patterns for mana symbol replacement (performance optimization)
     this.initManaSymbolPatterns();
@@ -363,11 +364,42 @@ class CardSearch {
 
   async fetchCommonCardTypes() {
     // Use the promise that was started at the very top of the page (before CSS parsing)
-    this.commonCardTypes = await (window.commonCardTypesPromise || Promise.resolve([]));
-    console.debug('Loaded', this.commonCardTypes.length, 'common card types');
+    const data = await (window.commonCardTypesPromise || Promise.resolve({ types: [], keywords: [] }));
+    this.commonCardTypes = Array.isArray(data) ? data : data.types || [];
+    this.commonKeywords = Array.isArray(data) ? [] : data.keywords || [];
+    console.debug('Loaded', this.commonCardTypes.length, 'common card types,', this.commonKeywords.length, 'keywords');
   }
 
   autoCompleteQuery(query) {
+    // Look for keyword queries like "kw:fly" or "keyword:fly"
+    const kwMatch = query.match(/(?:^|\s)(?:kw|keyword):([a-zA-Z]*)$/i);
+    if (kwMatch) {
+      const prefix = kwMatch[1].toLowerCase();
+      if (prefix.length >= 2) {
+        const bestMatch = this.commonKeywords
+          .filter(kw => kw.k.toLowerCase().startsWith(prefix))
+          .sort((a, b) => b.n - a.n)[0];
+
+        if (bestMatch) {
+          const originalPrefix = kwMatch[1];
+          let completedKw = bestMatch.k;
+          if (originalPrefix.length > 0) {
+            if (originalPrefix === originalPrefix.toUpperCase()) {
+              completedKw = bestMatch.k.toUpperCase();
+            } else if (originalPrefix === originalPrefix.toLowerCase()) {
+              completedKw = bestMatch.k.toLowerCase();
+            } else {
+              completedKw = originalPrefix + bestMatch.k.slice(originalPrefix.length);
+            }
+          }
+          return query.replace(/(?:^|\s)(?:kw|keyword):[a-zA-Z]*$/i, match => {
+            return match.replace(/[a-zA-Z]+$/, completedKw);
+          });
+        }
+      }
+      return query;
+    }
+
     // Look for type queries like "t:hydr" or "type:hydr"
     const typeMatch = query.match(/(?:^|\s)(?:t|type):([a-zA-Z]*)$/i);
     if (!typeMatch) {

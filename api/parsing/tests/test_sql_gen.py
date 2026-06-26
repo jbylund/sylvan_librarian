@@ -360,6 +360,22 @@ def test_flavor_text_sql_translation(parse_query, input_query: str, expected_sql
             r"(card.card_keywords <> %(p_dict_eydGbHlpbmcnOiBUcnVlfQ)s)",
             {"p_dict_eydGbHlpbmcnOiBUcnVlfQ": {"Flying": True}},
         ),
+        # kw: shorthand for keyword:
+        (
+            "kw:flying",
+            r"(card.card_keywords @> %(p_dict_eydGbHlpbmcnOiBUcnVlfQ)s)",
+            {"p_dict_eydGbHlpbmcnOiBUcnVlfQ": {"Flying": True}},
+        ),
+        (
+            "kw:trample",
+            r"(card.card_keywords @> %(p_dict_eydUcmFtcGxlJzogVHJ1ZX0)s)",
+            {"p_dict_eydUcmFtcGxlJzogVHJ1ZX0": {"Trample": True}},
+        ),
+        (
+            "kw=haste",
+            r"(card.card_keywords = %(p_dict_eydIYXN0ZSc6IFRydWV9)s)",
+            {"p_dict_eydIYXN0ZSc6IFRydWV9": {"Haste": True}},
+        ),
     ],
 )
 def test_keyword_sql_translation(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:

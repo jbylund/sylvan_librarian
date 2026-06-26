@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <!-- Start fetching common card types immediately (as early as possible in head) -->
+    <!-- Start fetching common card types and keywords immediately (as early as possible in head) -->
     <script>
       // Start fetching as early as possible - before any other resources block execution
       (function () {
@@ -19,14 +19,14 @@
                   }).then(fetchWithRetry);
                 }
                 if (!response.ok) {
-                  console.error('Failed to fetch common card types: HTTP ' + response.status);
-                  return [];
+                  console.error('Failed to fetch common card types and keywords: HTTP ' + response.status);
+                  return { types: [], keywords: [] };
                 }
                 return response.json();
               })
               .catch(function (error) {
-                console.error('Failed to fetch common card types:', error);
-                return [];
+                console.error('Failed to fetch common card types and keywords:', error);
+                return { types: [], keywords: [] };
               });
           }
           window.commonCardTypesPromise = fetchWithRetry();
