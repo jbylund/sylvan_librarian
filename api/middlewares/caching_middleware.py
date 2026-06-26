@@ -157,7 +157,9 @@ class CachingMiddleware:
             return
         if resp.status and resp.status.startswith("5"):
             return
-        cache_key = req.context.get("cache_key") or self._cache_key(req)
+        cache_key = req.context.get("cache_key")
+        if cache_key is None:
+            cache_key = self._cache_key(req)
         # __contains__ on SharedCache does a full slot probe (filter check + lock + active-page
         # probe + lock-free sealed-page probes) — no false positives. On lock timeout it returns
         # False, which causes a redundant set() that also silently drops under contention.
