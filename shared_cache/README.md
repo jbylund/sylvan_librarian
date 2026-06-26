@@ -97,9 +97,9 @@ Measured on Apple M-series with a real 5,025-byte gzip-compressed response body
 
 | Backend | set | get_hit | get_miss |
 |---|---|---|---|
-| `dict` | 64 ns | 36 ns | 36 ns |
-| `cachebox.LRUCache` | 74 ns | 51 ns | 39 ns |
-| `SharedCache` | 541 ns | 306 ns | **31 ns** |
+| `dict` | 64 ns | 35 ns | 34 ns |
+| `cachebox.LRUCache` | 70 ns | 52 ns | 50 ns |
+| `SharedCache` | 551 ns | 332 ns | **31 ns** |
 
 Miss latency is on par with in-process caches — the cuckoo filter returns false for unknown keys
 without acquiring the spinlock. Hit latency is higher because SharedCache reconstructs Python
@@ -110,24 +110,8 @@ shares the same pool rather than maintaining its own.
 
 | Path | Cost | When |
 |---|---|---|
-| Fast (same content) | ~536 ns | Filter hit + length match + sampled hash match |
-| Slow (new/changed content) | ~1155 ns | Any check fails → rkyv serialize + insert |
-
-### Where the ~364 ns get_hit goes (middleware path)
-
-```
-A  orjson key serialize [caller]  85 ns   —    paid once per request
-B  lock + probe + release         44 ns   12%  spinlock CAS, slot scan, unlock
-C  mmap→PyBytes (body)            94 ns   26%  5 KB copied from arena to Python bytes
-D  rkyv + Python object build    204 ns   56%  headers PyList + status str + PyO3 object
-E  full get(key_bytes)           341 ns   94%
-F  middleware path                364 ns  100%  + .body/.headers attribute access
-
-   miss path (cuckoo filter)      35 ns   —    lock skipped entirely on true miss
-```
-
-The spinlock is held only during Phase B; the arena copy and Python object construction run
-concurrently with other workers.
+| Fast (same content) | ~549 ns | Filter hit + length match + sampled hash match |
+| Slow (new/changed content) | ~1729 ns | Any check fails → rkyv serialize + insert |
 
 ## Tradeoffs
 

@@ -369,10 +369,15 @@ impl GenerationalSharedCache {
         let arena = self.arena_base(page_idx);
         let now = now_ns();
         for i in 0..slot_count {
-            let slot = unsafe { &*self.slot_ptr(page_idx, i as u32) };
-            if slot.key_hash == EMPTY || slot.key_hash == TOMBSTONE {
+            // Acquire load: pairs with the Release compiler_fence in do_insert (key_hash
+            // written last) and with pop()'s plain write under the spinlock. Using an
+            // atomic load here prevents a data race with pop() writing TOMBSTONE while
+            // scan_survivors runs without the lock.
+            let key_hash = read_key_hash(self.slot_ptr(page_idx, i as u32) as *const u8);
+            if key_hash == EMPTY || key_hash == TOMBSTONE {
                 continue;
             }
+            let slot = unsafe { &*self.slot_ptr(page_idx, i as u32) };
             if slot.visited == 0 {
                 continue;
             }
@@ -394,7 +399,7 @@ impl GenerationalSharedCache {
                 .to_vec()
             };
             survivors.push(SurvivorEntry {
-                hash: slot.key_hash,
+                hash: key_hash,
                 expiry_ns: slot.expiry_ns,
                 value_hash: slot.value_hash,
                 body_len: slot.body_len,
@@ -409,7 +414,8 @@ impl GenerationalSharedCache {
         let active_idx = self.active_idx();
         let retiring_idx = (active_idx + 1) % self.n_pages;
 
-        // 1. Bump retiring page generation — signals stale reads to concurrent readers.
+        // 1. Odd bump: signals write-in-progress to lock-free readers (seqlock protocol).
+        //    Readers that see an odd generation skip this page entirely.
         bump_page_generation(unsafe {
             self.mmap.as_mut_ptr().add(self.page_offset(retiring_idx))
         });
@@ -446,10 +452,15 @@ impl GenerationalSharedCache {
             }
         }
 
-        // 5. Unseal retiring page — it becomes the new active page.
+        // 5. Even bump: page data is stable; lock-free readers may probe it again.
+        bump_page_generation(unsafe {
+            self.mmap.as_mut_ptr().add(self.page_offset(retiring_idx))
+        });
+
+        // 6. Unseal retiring page — it becomes the new active page.
         self.page_header_mut(retiring_idx).is_sealed = 0;
 
-        // 6. Advance ring buffer counter.
+        // 7. Advance ring buffer counter.
         self.coord_mut().counter = self.coord().counter.wrapping_add(1);
     }
 
@@ -549,11 +560,14 @@ impl GenerationalSharedCache {
         for i in 1..self.n_pages {
             let page_idx = (active_idx + self.n_pages - i) % self.n_pages;
             let gen_before = self.page_generation(page_idx);
+            // Seqlock: odd generation means commit_rotation() is actively zeroing this page.
+            // Skip rather than read bytes mid-zero; treat as a miss for this page.
+            if gen_before & 1 != 0 { continue; }
             if let Some((off, len, slot_idx)) = self.do_probe(page_idx, hash, key) {
                 set_visited(self.slot_ptr(page_idx, slot_idx) as *const u8);
                 let abs = self.page_offset(page_idx) + self.arena_start_in_page + off as usize;
                 let result = f(&self.mmap[abs..abs + len as usize]);
-                // Discard result if rotation swapped out this page while f ran.
+                // Discard if generation changed while f ran (rotation started or completed).
                 let gen_after = self.page_generation(page_idx);
                 if gen_after != gen_before {
                     return None;
@@ -702,6 +716,8 @@ impl GenerationalSharedCache {
         }
         // Zero each page's data and reset headers.
         for i in 0..self.n_pages {
+            // Odd bump: signals write-in-progress (seqlock protocol).
+            bump_page_generation(unsafe { self.mmap.as_mut_ptr().add(self.page_offset(i)) });
             let data_start = self.page_offset(i) + PAGE_HEADER_SIZE;
             let data_len = self.slot_count_per_page * SLOT_SIZE
                 + (self.page_size - self.arena_start_in_page);
@@ -712,7 +728,8 @@ impl GenerationalSharedCache {
             ph.arena_head = 0;
             ph.entry_count = 0;
             ph.is_sealed = if i == 0 { 0 } else { 1 };
-            ph.generation = ph.generation.wrapping_add(1);
+            // Even bump: page is stable (zeroed and reset); generation always lands on even.
+            bump_page_generation(unsafe { self.mmap.as_mut_ptr().add(self.page_offset(i)) });
         }
         self.coord_mut().counter = 0;
         unlock(&self.mmap);

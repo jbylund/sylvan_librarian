@@ -1,6 +1,6 @@
 use std::fs::OpenOptions;
 use std::os::unix::io::AsRawFd;
-use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 use memmap2::MmapMut;
 
@@ -116,6 +116,13 @@ pub fn clear_visited(slot: *const u8) {
 pub fn inc_value_seq(slot: *mut u8) {
     let ptr = unsafe { slot.add(VALUE_SEQ_OFFSET) as *const AtomicU32 };
     unsafe { (*ptr).fetch_add(1, Ordering::AcqRel) };
+}
+
+/// Atomic Acquire read of a slot's key_hash field (offset 0 in RawSlot).
+/// Used in lock-free paths that race with pop() writing TOMBSTONE under the spinlock.
+pub fn read_key_hash(slot: *const u8) -> u64 {
+    let ptr = slot as *const AtomicU64;
+    unsafe { (*ptr).load(Ordering::Acquire) }
 }
 
 /// Atomic read of value_seq for the post-f seqlock check in get_with.
