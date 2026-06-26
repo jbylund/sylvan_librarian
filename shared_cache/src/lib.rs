@@ -65,10 +65,16 @@ impl SharedCache {
         value: &Bound<PyAny>,
         ttl: Option<f64>,
     ) -> PyResult<()> {
+        // Extract body zero-copy first — fast_check only needs the bytes, not ownership.
+        let body_obj = value.getattr("body")?;
+        let body_bytes: Option<Bound<PyBytes>> = body_obj.extract()?;
+        let body: Option<&[u8]> = body_bytes.as_ref().map(|b| b.as_bytes());
+        // Skip rkyv + headers extraction entirely when content is unchanged.
+        if self.inner.fast_check(key, body) {
+            return Ok(());
+        }
         let status: String = value.getattr("status")?.extract()?;
-        let headers_obj = value.getattr("headers")?;
-        let headers: Vec<(String, String)> = headers_obj.extract()?;
-        let body: Option<Vec<u8>> = value.getattr("body")?.extract()?;
+        let headers: Vec<(String, String)> = value.getattr("headers")?.extract()?;
         let result_count: Option<i64> = value.getattr("result_count")?.extract()?;
         let total_cards: Option<i64> = value.getattr("total_cards")?.extract()?;
         self.inner.set(key, &status, headers, body, result_count, total_cards, ttl);

@@ -97,9 +97,9 @@ Measured on Apple M-series with a real 5,025-byte gzip-compressed response body
 
 | Backend | set | get_hit | get_miss |
 |---|---|---|---|
-| `dict` | 64 ns | 35 ns | 34 ns |
-| `cachebox.LRUCache` | 70 ns | 52 ns | 50 ns |
-| `SharedCache` | 551 ns | 332 ns | **31 ns** |
+| `dict` | 63 ns | 36 ns | 33 ns |
+| `cachebox.LRUCache` | 69 ns | 45 ns | 38 ns |
+| `SharedCache` | 103 ns | 351 ns | **31 ns** |
 
 Miss latency is on par with in-process caches — the cuckoo filter returns false for unknown keys
 without acquiring the spinlock. Hit latency is higher because SharedCache reconstructs Python
@@ -110,8 +110,9 @@ shares the same pool rather than maintaining its own.
 
 | Path | Cost | When |
 |---|---|---|
-| Fast (same content) | ~549 ns | Filter hit + length match + sampled hash match |
-| Slow (new/changed content) | ~1729 ns | Any check fails → rkyv serialize + insert |
+| Same value | ~109 ns | Content hash matches → skip rkyv, headers, counts entirely |
+| Changed value, fits in slot | ~1637 ns | Content differs, new body ≤ old capacity → rkyv + in-place overwrite |
+| Larger value or new key | ~1887 ns | New body > old capacity, or first insertion → rkyv + arena alloc + copy |
 
 ## Tradeoffs
 

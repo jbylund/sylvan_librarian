@@ -583,62 +583,55 @@ impl GenerationalSharedCache {
         self.get_with(key, |bytes| bytes.to_vec())
     }
 
+    /// Returns `true` if `key` is already cached with identical content — caller can skip `set()`.
+    /// Checks filter (lock-free) → active page under lock → sealed pages lock-free.
+    /// Call this from the binding layer before extracting expensive fields (headers, counts).
+    pub fn fast_check(&mut self, key: &[u8], body: Option<&[u8]>) -> bool {
+        let hash = normalize_hash(xxh3_64(key));
+        let new_body_len = body.map_or(0, |b| b.len() as u32);
+        let content_vh = sampled_body_hash(body);
+
+        fence(Ordering::Acquire);
+        if !self.filter().lookup(hash) { return false; }
+
+        if !try_lock(&self.mmap) { return false; }
+        let active_idx = self.active_idx();
+        let active_snap = self.do_probe(active_idx, hash, key).map(|(_, _, si)| {
+            let s = unsafe { &*self.slot_ptr(active_idx, si) };
+            (s.body_len, s.value_hash)
+        });
+        unlock(&self.mmap);
+
+        if let Some((stored_len, stored_vh)) = active_snap {
+            return stored_len == new_body_len && content_vh == stored_vh;
+        }
+
+        for i in 1..self.n_pages {
+            let page_idx = (active_idx + self.n_pages - i) % self.n_pages;
+            if let Some((_, _, si)) = self.do_probe(page_idx, hash, key) {
+                let s = unsafe { &*self.slot_ptr(page_idx, si) };
+                return s.body_len == new_body_len && content_vh == s.value_hash;
+            }
+        }
+        false
+    }
+
     pub fn set(
         &mut self,
         key: &[u8],
         status: &str,
         headers: Vec<(String, String)>,
-        body: Option<Vec<u8>>,
+        body: Option<&[u8]>,
         result_count: Option<i64>,
         total_cards: Option<i64>,
         ttl_secs: Option<f64>,
     ) {
         let hash = normalize_hash(xxh3_64(key));
-        let new_body_len = body.as_ref().map_or(0, |b| b.len() as u32);
-        // Compute once here — body is moved into CachedResponse below.
-        let content_vh = sampled_body_hash(body.as_deref());
+        let new_body_len = body.map_or(0, |b| b.len() as u32);
+        let content_vh = sampled_body_hash(body);
 
-        // Tiered fast path — each step is strictly cheaper than the last and
-        // short-circuits only when the value is provably unchanged.
-        //
-        // Step 1: filter miss → definitely a new key, skip everything.
-        // Step 2: length mismatch → content definitely changed.
-        // Step 3: sampled hash mismatch → content almost certainly changed.
-        //         For bodies ≤ 64 bytes this is the full hash; for larger bodies
-        //         it hashes the first 64 + last 64 bytes (~128 bytes total).
-        // All steps pass → skip rkyv serialization.
-        fence(Ordering::Acquire);
-        'fast: {
-            if !self.filter().lookup(hash) { break 'fast; }
-
-            // Probe active page under lock; snapshot (body_len, value_hash) then release.
-            if !try_lock(&self.mmap) { break 'fast; }
-            let active_idx = self.active_idx();
-            let active_snap = self.do_probe(active_idx, hash, key).map(|(_, _, si)| {
-                let s = unsafe { &*self.slot_ptr(active_idx, si) };
-                (s.body_len, s.value_hash)
-            });
-            unlock(&self.mmap);
-
-            if let Some((stored_len, stored_vh)) = active_snap {
-                if stored_len != new_body_len { break 'fast; }
-                if content_vh != stored_vh { break 'fast; }
-                return; // same content in active page
-            }
-
-            // Probe sealed pages lock-free, newest first.
-            for i in 1..self.n_pages {
-                let page_idx = (active_idx + self.n_pages - i) % self.n_pages;
-                if let Some((_, _, si)) = self.do_probe(page_idx, hash, key) {
-                    let s = unsafe { &*self.slot_ptr(page_idx, si) };
-                    if s.body_len != new_body_len { break 'fast; }
-                    if content_vh != s.value_hash { break 'fast; }
-                    return; // same content in sealed page
-                }
-            }
-        }
-
-        let cr = CachedResponse { status: status.to_owned(), headers, body, result_count, total_cards };
+        let body_owned = body.map(|b| b.to_vec());
+        let cr = CachedResponse { status: status.to_owned(), headers, body: body_owned, result_count, total_cards };
         let Ok(value_bytes) = rkyv::to_bytes::<rkyv::rancor::Error>(&cr) else { return; };
         let expiry = expiry_ns_for(ttl_secs, self.default_ttl_ns);
 
