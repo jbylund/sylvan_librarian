@@ -34,23 +34,28 @@ RESPONSE = CachedResponse(
 )
 
 
-def make_key(parts) -> bytes:
+def make_key(parts: object) -> bytes:
+    """Serialize a cache key tuple to bytes, mirroring CachingMiddleware._cache_key."""
     return json.dumps(parts, separators=(",", ":")).encode()
 
 
-KEY = make_key((
-    "/search?q=lightning+bolt",
-    (("q", "lightning bolt"),),
-    (("ACCEPT-ENCODING", "gzip"),),
-    "arcanetutor.com",
-))
+KEY = make_key(
+    (
+        "/search?q=lightning+bolt",
+        (("q", "lightning bolt"),),
+        (("ACCEPT-ENCODING", "gzip"),),
+        "arcanetutor.com",
+    )
+)
 
-OTHER_KEY = make_key((
-    "/search?q=counterspell",
-    (("q", "counterspell"),),
-    (("ACCEPT-ENCODING", "gzip"),),
-    "arcanetutor.com",
-))
+OTHER_KEY = make_key(
+    (
+        "/search?q=counterspell",
+        (("q", "counterspell"),),
+        (("ACCEPT-ENCODING", "gzip"),),
+        "arcanetutor.com",
+    )
+)
 
 
 def main() -> None:
