@@ -70,9 +70,11 @@ if unique == "card"
 
 `intersect_sorted` is the same merge-based routine used for trigram posting list intersection — it expects both inputs sorted, which they are: the store is sorted by `(oracle_id, illustration_id)` at build time, and the preferred index is built in a single sorted pass over that store.
 
+The `prefer` mode guard excludes `oldest`, `newest`, `usd_low`, `usd_high`, and `promo` because those modes select a specific printing by a criterion other than `prefer_score`. The preferred index holds the highest-`prefer_score` printing per oracle ID; returning it for a `prefer=oldest` query would give the wrong printing. The default mode is `prefer_score`, which is precisely the criterion the index was built on — so the fast path is correct by construction for that mode.
+
 ## Benchmark Results
 
-Measured with `query()` (new path) vs `query_linear()` (pre-optimization path with identical `narrow_candidates` narrowing), `unique=card`, `prefer=default`, 30-call warmup, 5s timed window:
+Measured on an Apple M3 Pro, single-threaded, `cargo build --release` (no LTO), store fully resident in L3 after the 30-call warmup. Comparing `query()` (new path) vs `query_linear()` (pre-optimization path with identical `narrow_candidates` narrowing), `unique=card`, `prefer=default`, 5s timed window. Numbers are means over all calls in the timed window; σ/mean was under 2% for all rows except `t:merfolk o:draw` (8%), where the ~20-card candidate set produces high relative variance.
 
 | query | new (µs) | old (µs) | speedup | notes |
 |---|---|---|---|---|
@@ -88,9 +90,9 @@ Geometric mean across the seven card-level queries: **1.87x**. Printing-level qu
 
 ## Where It Does Not Help
 
-The `t:merfolk o:draw` row shows a slight regression. When `narrow_candidates` already returns a tiny set — here the type_bits and oracle trigram intersection produces roughly 20 cards — calling `intersect_sorted` against all 31k preferred entries costs more than eliminating the dedup of 20 items saves. The crossover is at small candidate counts where dedup overhead was negligible to begin with.
+The `t:merfolk o:draw` row shows a slight regression. When `narrow_candidates` already returns a tiny set — here the type_bits and oracle trigram intersection produces roughly 20 cards — calling `intersect_sorted` against all 31k preferred entries costs more than eliminating the dedup of 20 items saves. The mechanism: `intersect_sorted` is a merge of two sorted lists, so it must scan through O(31k) preferred entries to find 20 matches, whereas the dedup it replaces was O(20). The crossover is at small candidate counts where dedup overhead was negligible to begin with.
 
-This could be addressed with a minimum-candidate-count guard: skip the preferred intersection when the narrowed set is already below some threshold. The regression is small enough (5%) that it has not been addressed yet.
+This could be addressed with a minimum-candidate-count guard: skip the preferred intersection when the narrowed set is already below some threshold. Empirically, the crossover is around 50–80 candidates — below that, the O(31k) merge costs more than the dedup it replaces. The regression is small enough (5%) and the query type rare enough in practice that the added code complexity has not been worth addressing yet.
 
 ## Largest Impact Where It Matters Most
 

@@ -28,7 +28,9 @@ The engine stores ~97k printings in a memory-mapped file, sorted by `(oracle_id,
 
 **Pre-selected indices with a targeted walk.** The unique card count is stored in the archive at reload time (computed once after the sort, at no extra cost). Floyd's algorithm picks `n` distinct integers from `[0, unique_count)` in O(n) time using a HashSet of size `n`. A single walk over the printings counts oracle ID boundaries and only tracks the preferred printing for groups whose index is in the HashSet. Memory: O(n). Time: O(total_printings) + O(n) for Floyd's.
 
-**Preferred-printing index.** The archive stores a pre-built `Vec<u32>` of one index per unique card — whichever printing has the highest `prefer_score` — computed in a single pass at reload time. A simple loop picks `n` positions from this index. No walk over 97k printings at query time at all. Memory: ~124 KB shared in the mmap (zero per-worker allocation). Time: O(n).
+**Preferred-printing index.** The archive stores a pre-built `Vec<u32>` of one index per unique card — whichever printing has the highest `prefer_score` — computed in a single pass at reload time. (`prefer_score` is a composite float computed at import time: English-language printings score highest, followed by frame version, border color, rarity, highres scan, non-showcase finish, and artwork popularity. A nonfoil black-bordered 2015-frame English rare is the canonical "best" printing of a card.) A simple loop picks `n` positions from this index. No walk over 97k printings at query time at all. Memory: ~124 KB shared in the mmap (zero per-worker allocation). Time: O(n).
+
+At query time, the sampler draws `n` positions from the pool:
 
 ```rust
 use rand::RngExt;
@@ -43,7 +45,7 @@ This does not guarantee distinct results — if the same index is drawn twice th
 
 ## Benchmark Results
 
-The old hot path — `random.sample` on the prebuilt in-memory list — is the baseline to beat. The prebuilt list holds 31,508 unique cards and occupies ~38.6 MB of heap per worker. Measured against it (50 warmup calls, 3×3s timed windows, best-of-3):
+The old hot path — `random.sample` on the prebuilt in-memory list — is the baseline to beat. The prebuilt list holds 31,508 unique cards and occupies ~38.6 MB of heap per worker. Measured on an Apple M3 Max, single worker process, mmap pre-warmed by one prior call (50 warmup calls, 3×3s timed windows, best-of-3):
 
 | n | Python random.sample (µs) | Preferred index (µs) | Reservoir (µs) | Indexed (µs) |
 |---|---|---|---|---|
@@ -81,6 +83,6 @@ for (i, card) in cards.iter().enumerate() {
 
 ## Decision
 
-`sample_preferred` is the production path. The reservoir and indexed implementations were removed after benchmarking — the full Rust source for all four approaches is preserved at [345b62d](https://github.com/jbylund/arcane_tutor/blob/345b62d/card_engine/src/lib.rs) for reference.
+`sample_preferred` is the production path, shipped in [PR #535](https://github.com/jbylund/arcane_tutor/pull/535). The reservoir and indexed implementations were removed after benchmarking — the full Rust source for all four approaches is preserved at [345b62d](https://github.com/jbylund/arcane_tutor/blob/345b62d/card_engine/src/lib.rs) for reference.
 
-The preferred-index approach eliminates the original memory problem (38.6 MB freed per worker, stale-while-revalidate machinery deleted, `import random` removed from the API module) while recovering nearly all of the Python baseline's per-call speed.
+The preferred-index approach eliminates the original memory problem (38.6 MB freed per worker, stale-while-revalidate machinery deleted, `import random` removed from the API module) while recovering nearly all of the Python baseline's per-call speed. The 4–6× per-call regression versus Python is the cost of building `n` Python dicts on the fly rather than returning pre-built ones; for an endpoint that returns at most 60 cards and is not in any hot loop, 32µs vs 5.6µs is an acceptable tradeoff. Building the preferred-printing index at reload time adds one linear pass over ~97k cards — negligible alongside the existing sort — and the index is available to all workers the moment the reload completes. The staleness boundary moved from between requests to between reloads, not eliminated entirely.
