@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 290" width="680" height="290">
+  <style>
+    .label { font: 13px/1 system-ui, sans-serif; dominant-baseline: middle; }
+    .value { font: 12px/1 system-ui, sans-serif; dominant-baseline: middle; font-variant-numeric: tabular-nums; }
+    .title { font: 13px/1 system-ui, sans-serif; }
+    .bar-winner { fill: #0ea5e9; }
+    .bar-other  { fill: #3b82f6; opacity: 0.65; }
+    .grid { stroke: #6b7280; stroke-opacity: 0.25; stroke-width: 1; }
+    @media (prefers-color-scheme: light) {
+      .label, .value, .title { fill: #374151; }
+      .bar-other  { opacity: 0.55; }
+    }
+    @media (prefers-color-scheme: dark) {
+      .label, .value, .title { fill: #d1d5db; }
+    }
+  </style>
+  <text x="155" y="18" class="title">Requests/sec — Falcon app, no database (wrk, 4t/100c, 30s)</text>
+  <line x1="265.0" y1="48" x2="265.0" y2="270" class="grid"/>
+  <line x1="375.0" y1="48" x2="375.0" y2="270" class="grid"/>
+  <line x1="485.0" y1="48" x2="485.0" y2="270" class="grid"/>
+  <line x1="595.0" y1="48" x2="595.0" y2="270" class="grid"/>
+  <rect x="155" y="56.4" width="440.0" height="27.5" rx="2" class="bar-winner"/>
+  <text x="147" y="70.2" text-anchor="end" class="label">Bjoern</text>
+  <text x="601.0" y="70.2" class="value">155,758</text>
+  <rect x="155" y="100.8" width="251.6" height="27.5" rx="2" class="bar-other"/>
+  <text x="147" y="114.6" text-anchor="end" class="label">Granian (ASGI)</text>
+  <text x="412.6" y="114.6" class="value">89,081</text>
+  <rect x="155" y="145.2" width="217.2" height="27.5" rx="2" class="bar-other"/>
+  <text x="147" y="159.0" text-anchor="end" class="label">Granian (WSGI)</text>
+  <text x="378.2" y="159.0" class="value">76,871</text>
+  <rect x="155" y="189.6" width="134.6" height="27.5" rx="2" class="bar-other"/>
+  <text x="147" y="203.4" text-anchor="end" class="label">Uvicorn (WSGI)</text>
+  <text x="295.6" y="203.4" class="value">47,638</text>
+  <rect x="155" y="234.0" width="22.4" height="27.5" rx="2" class="bar-other"/>
+  <text x="147" y="247.8" text-anchor="end" class="label">Gunicorn</text>
+  <text x="183.4" y="247.8" class="value">7,929</text>
+</svg>

@@ -263,8 +263,8 @@ Dependency notes:
 |---|------|------|--------------|
 | 1  | [O1] Why build a self-hosted Scryfall? | Overview | 2026-06-20 |
 | 2  | [I4] Falcon + Bjoern: choosing a Python web framework | Infra | 2026-06-27 |
-| 3  | [P1a] Choosing a Parser for a Query DSL: Regex, ANTLR, Lark, and pyparsing | Parser | 2026-07-18 |
-| 4  | [P1b] Whitespace as an Operator: Parsing Scryfall's Implicit AND | Parser | 2026-07-25 |
+| 3  | [P1a] Choosing a Parser for a Query DSL: Regex, ANTLR, Lark, and pyparsing | Parser | 2026-07-03 |
+| 4  | [P1b] Whitespace as an Operator: Parsing Scryfall's Implicit AND | Parser | 2026-07-11 |
 | 5  | [S1] Compiling an AST to parameterized SQL | SQL gen | 2026-08-01 |
 | 6  | [S1b] One Query, Two Answers: How NOT MATERIALIZED Lets Each Branch Pick Its Own Index | SQL gen | 2026-08-15 |
 | 7  | [D1] PostgreSQL COPY loading: 10× faster bulk import | Data | 2026-08-29 |
