@@ -118,6 +118,8 @@ Name at least one dead end or failed hypothesis. Dead ends build trust.
 
 **Close:** One sentence. Slightly final. No summary.
 
+**Formatting:** Use semantic line breaks throughout prose — each sentence on its own line. Single newlines do not render as line breaks in markdown, so the published output is unchanged, but the source is easier to diff and review. Do not apply semantic line breaks inside code blocks, frontmatter, or table cells.
+
 ## Step 7: Run Three Independent Graders
 
 Spawn three separate agents, each with a fresh context. Give each one:
