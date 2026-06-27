@@ -1,7 +1,7 @@
 ---
 title: "13× the Throughput of FastAPI: Why I Use Falcon + Bjoern"
-date: 2026-07-04
-publishDate: 2026-07-04
+date: 2026-06-27
+publishDate: 2026-06-27
 tags: ["python", "falcon", "bjoern", "fastapi", "performance"]
 summary: "Why Arcane Tutor uses Falcon and Bjoern instead of the FastAPI + uvicorn default: a preference for explicit, close-to-vanilla Python over framework magic."
 ---
