@@ -6,38 +6,56 @@ const HTML_ESCAPE_RE = /[&<>"]/g;
 const HTML_ESCAPE_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
 const htmlEscapeChar = c => HTML_ESCAPE_MAP[c];
 
+
 class CatalogMap {
   constructor(mapping) {
-    this._map = new Map();
-    for (const [v, n] of Object.entries(mapping)) {
-      const letter = v[0].toLowerCase();
-      if (!this._map.has(letter)) this._map.set(letter, []);
-      this._map.get(letter).push({ v, n });
+    this._words = Object.entries(mapping)
+      .map(([v, n]) => ({ v, n, lower: v.toLowerCase() }))
+      .sort((a, b) => a.lower.localeCompare(b.lower));
+
+    // Sparse lookup tables: prefix string → best word for depths 1–3.
+    // Built frequency-first so first-write-wins gives the highest-n word.
+    this._d1 = {};
+    this._d2 = {};
+    this._d3 = {};
+    const byFreq = [...this._words].sort((a, b) => b.n - a.n);
+    for (const w of byFreq) {
+      const l = w.lower;
+      if (l.length >= 1 && !(l[0] in this._d1))                        this._d1[l[0]]            = w.v;
+      if (l.length >= 2 && !(l[0] + l[1] in this._d2))                 this._d2[l[0] + l[1]]     = w.v;
+      if (l.length >= 3 && !(l[0] + l[1] + l[2] in this._d3))          this._d3[l[0] + l[1] + l[2]] = w.v;
     }
-    for (const bucket of this._map.values()) {
-      bucket.sort((a, b) => a.v.localeCompare(b.v));
+  }
+
+  _lowerBound(prefix) {
+    let lo = 0, hi = this._words.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (this._words[mid].lower < prefix) lo = mid + 1;
+      else hi = mid;
     }
+    return lo;
   }
 
   get bool() {
-    return this._map.size > 0;
+    return this._words.length > 0;
   }
 
   get size() {
-    let n = 0;
-    for (const bucket of this._map.values()) {
-      n += bucket.length;
-    }
-    return n;
+    return this._words.length;
   }
 
   getBestMatch(prefix) {
-    const bucket = this._map.get(prefix[0]) ?? [];
+    if (!prefix) return null;
+    if (prefix.length === 1) return this._d1[prefix] ?? null;
+    if (prefix.length === 2) return this._d2[prefix] ?? null;
+    if (prefix.length === 3) return this._d3[prefix] ?? null;
+
+    const pos = this._lowerBound(prefix);
     let best = null;
-    for (const entry of bucket) {
-      const lower = entry.v.toLowerCase();
-      if (lower.slice(0, prefix.length) > prefix) break;
-      if (lower.startsWith(prefix) && (!best || entry.n > best.n)) best = entry;
+    for (let i = pos; i < this._words.length; i++) {
+      if (!this._words[i].lower.startsWith(prefix)) break;
+      if (!best || this._words[i].n > best.n) best = this._words[i];
     }
     return best?.v ?? null;
   }
