@@ -1,7 +1,7 @@
 ---
 title: "Whitespace as an Operator: Parsing Scryfall's Implicit AND"
-date: 2026-07-25
-publishDate: 2026-07-25
+date: 2026-07-11
+publishDate: 2026-07-11
 tags: ["parser", "pyparsing", "python"]
 summary: "The Scryfall query language implicitly ANDs adjacent terms — pyparsing does not. This post covers the preprocessing layer built on top: implicit AND injection, query balancing in two languages, and the edge cases that required fixes."
 ---

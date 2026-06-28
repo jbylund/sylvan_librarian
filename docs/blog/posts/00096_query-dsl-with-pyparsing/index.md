@@ -1,7 +1,7 @@
 ---
 title: "Choosing a Parser for a Query DSL: Regex, ANTLR, Lark, and pyparsing"
-date: 2026-07-18
-publishDate: 2026-07-18
+date: 2026-07-03
+publishDate: 2026-07-03
 tags: ["parser", "pyparsing", "python"]
 summary: "How I evaluated parsing approaches for Scryfall's query language: why regex and ANTLR were ruled out, how Lark compares to pyparsing, and why pyparsing won."
 ---

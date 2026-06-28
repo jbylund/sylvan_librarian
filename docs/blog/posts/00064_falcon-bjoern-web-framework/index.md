@@ -1,7 +1,7 @@
 ---
 title: "13× the Throughput of FastAPI: Why I Use Falcon + Bjoern"
-date: 2026-07-04
-publishDate: 2026-07-04
+date: 2026-06-27
+publishDate: 2026-06-27
 tags: ["python", "falcon", "bjoern", "fastapi", "performance"]
 summary: "Why Arcane Tutor uses Falcon and Bjoern instead of the FastAPI + uvicorn default: a preference for explicit, close-to-vanilla Python over framework magic."
 ---
@@ -112,6 +112,8 @@ Holding the Falcon app constant and swapping only the server:
 | Granian (WSGI mode) | 76,871 | 3.96ms |
 | Uvicorn (WSGI mode) | 47,638 | 2.1ms |
 | Gunicorn (sync workers) | 7,929 | 11.7ms |
+
+![Requests per second by server](server-throughput.svg)
 
 Gunicorn's sync workers handle one request per worker at a time — each worker blocks for the full serialization cycle before accepting the next connection, so 4 workers means at most 4 requests in flight.
 Uvicorn and Granian are faster because their event loops can interleave connections, but running in WSGI mode adds a compatibility layer over their native async runtimes.
