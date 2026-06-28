@@ -439,6 +439,7 @@ class CardSearch {
     const isKeywordSelector = selector === 'kw' || selector === 'keyword';
     const catalog = isKeywordSelector ? this.keywordMap : this.typeMap;
     const bestMatch = catalog.getBestMatch(prefix);
+    console.debug(`autocomplete: "${prefix}" → "${bestMatch}"`);
 
     if (!bestMatch) {
       return query;
