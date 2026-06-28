@@ -1,0 +1,42 @@
+name: Check CI Path Sync
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/unit-tests.yml'
+      - '.github/workflows/unit-tests-skip.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify unit-tests paths match unit-tests-skip paths-ignore
+        run: |
+          python3 - <<'EOF'
+          import yaml, sys
+
+          with open(".github/workflows/unit-tests.yml") as f:
+              tests = yaml.safe_load(f)
+          with open(".github/workflows/unit-tests-skip.yml") as f:
+              skip = yaml.safe_load(f)
+
+          # PyYAML parses the 'on:' key as boolean True
+          paths = sorted(tests[True]["pull_request"]["paths"])
+          paths_ignore = sorted(skip[True]["pull_request"]["paths-ignore"])
+
+          if paths != paths_ignore:
+              only_in_paths = sorted(set(paths) - set(paths_ignore))
+              only_in_ignore = sorted(set(paths_ignore) - set(paths))
+              if only_in_paths:
+                  print(f"Only in unit-tests.yml paths: {only_in_paths}")
+              if only_in_ignore:
+                  print(f"Only in unit-tests-skip.yml paths-ignore: {only_in_ignore}")
+              sys.exit(1)
+
+          print(f"OK: {len(paths)} paths match")
+          EOF
