@@ -1,0 +1,21 @@
+name: Unit Tests
+
+on:
+  pull_request:
+    paths-ignore:
+      - '**/*.py'
+      - '**/*.rs'
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - 'requirements/**'
+      - '**/pyproject.toml'
+      - '.github/workflows/unit-tests.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "No code changes, skipping tests"
