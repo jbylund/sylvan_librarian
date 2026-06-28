@@ -99,7 +99,7 @@ For those queries, the linear-vs-hash comparison is no longer relevant.
 
 ## Related
 
-All three dedup paths produce the same output shape — a `Vec<(u128 sort_key, &ACard)>` — so the two-pivot quickselect in [Paginating 30k Cards Without Sorting All of Them](00800_two-pivot-pagination.md) operates on sort keys without knowing which path produced them.
+All three dedup paths produce the same output shape — a `Vec<(u128 sort_key, &ACard)>` — so the two-pivot quickselect in [Paginating 30k Cards Without Sorting All of Them](../00800_two-pivot-pagination/) operates on sort keys without knowing which path produced them.
 
-The same deduplication problem at the SQL layer — `DISTINCT ON` key choice, hashagg vs. sort, and a no-op primary-key dedup — is covered in [Oracle ID Dedup: 23% Faster by Changing the Key](00416_oracle-id-deduplication.md).
-The preferred-printing index that eliminates dedup for the most common query pattern is in [The /random Index Pays Off Twice](00928_preferred-index-card-search.md).
+The same deduplication problem at the SQL layer — `DISTINCT ON` key choice, hashagg vs. sort, and a no-op primary-key dedup — is covered in [Oracle ID Dedup: 23% Faster by Changing the Key](../00416_oracle-id-deduplication/).
+The preferred-printing index that eliminates dedup for the most common query pattern is in [The /random Index Pays Off Twice](../00928_preferred-index-card-search/).
