@@ -25,8 +25,9 @@ jobs:
           with open(".github/workflows/unit-tests-skip.yml") as f:
               skip = yaml.safe_load(f)
 
-          paths = sorted(tests["on"]["pull_request"]["paths"])
-          paths_ignore = sorted(skip["on"]["pull_request"]["paths-ignore"])
+          # PyYAML parses the 'on:' key as boolean True
+          paths = sorted(tests[True]["pull_request"]["paths"])
+          paths_ignore = sorted(skip[True]["pull_request"]["paths-ignore"])
 
           if paths != paths_ignore:
               only_in_paths = sorted(set(paths) - set(paths_ignore))
