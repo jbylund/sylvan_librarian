@@ -165,7 +165,7 @@ Two things change.
 First, the full sort on `scryfall_id` disappears — no dedup, no 300,000-row sort just to keep all 300,000 rows.
 Second, the `ORDER BY` moves to the `LIMIT` branch, which tells PostgreSQL it only needs the top 100 values.
 The planner can satisfy that with a top-N heapsort — O(n log k) for k=100 — instead of a full quicksort — O(n log n).
-The CTE is also `NOT MATERIALIZED` (`NOT MATERIALIZED` was introduced in PostgreSQL 12 as an explicit hint; by default, CTEs referenced more than once are materialized) so the count branch can use its own index strategy independently, as described in [One Query, Two Answers](00144_results-and-count-single-query.md).
+The CTE is also `NOT MATERIALIZED` (`NOT MATERIALIZED` was introduced in PostgreSQL 12 as an explicit hint; by default, CTEs referenced more than once are materialized) so the count branch can use its own index strategy independently, as described in [One Query, Two Answers](../00144_results-and-count-single-query/).
 
 Benchmark results:
 

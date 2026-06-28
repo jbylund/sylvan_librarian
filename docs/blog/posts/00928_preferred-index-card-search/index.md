@@ -8,7 +8,7 @@ summary: "The preferred-printing index built for /random already stored one entr
 
 ## A Pre-Built Index Looking for a Second Job
 
-The [previous post](00896_random-card-sampling.md) described the preferred-printing index: a `Vec<u32>` stored in the shared mmap at reload time, holding one store index per unique oracle ID — whichever printing has the highest `prefer_score`.
+The [previous post](../00896_random-card-sampling/) described the preferred-printing index: a `Vec<u32>` stored in the shared mmap at reload time, holding one store index per unique oracle ID — whichever printing has the highest `prefer_score`.
 It was built to power the `/random` endpoint without scanning all 97k printings on every request.
 
 Once it existed, the same index had an obvious second use.
@@ -121,6 +121,6 @@ The optimization is most effective exactly where it is most needed.
 
 ## Related
 
-The preferred-printing index itself is described in [Four Algorithms for a Random Card Endpoint](00896_random-card-sampling.md).
-The index structures that `narrow_candidates` uses — trigrams, sorted arrays, hash maps — are covered in [In-Process Card Search Without a Query Planner](00704_rust-engine-index-data-structures.md).
-The linear-scan dedup strategy that this optimization replaces (for qualifying queries) is in [Adaptive Dedup: Linear Scan Wins Small Sets, Hash Wins Large](00832_linear-hash-scan-distinct.md).
+The preferred-printing index itself is described in [Four Algorithms for a Random Card Endpoint](../00896_random-card-sampling/).
+The index structures that `narrow_candidates` uses — trigrams, sorted arrays, hash maps — are covered in [In-Process Card Search Without a Query Planner](../00704_rust-engine-index-data-structures/).
+The linear-scan dedup strategy that this optimization replaces (for qualifying queries) is in [Adaptive Dedup: Linear Scan Wins Small Sets, Hash Wins Large](../00832_linear-hash-scan-distinct/).
