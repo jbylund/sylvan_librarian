@@ -12,7 +12,7 @@
             return fetch('/get_catalog')
               .then(function (response) {
                 if (response.status === 503) {
-                  var delay = 30000 + Math.random() * 10000;
+                  var delay = 10000 + Math.random() * 5000;
                   console.warn('Common card types not ready, retrying in ' + Math.round(delay / 1000) + 's');
                   return new Promise(function (resolve) {
                     setTimeout(resolve, delay);
