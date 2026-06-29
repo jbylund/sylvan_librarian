@@ -446,6 +446,13 @@ def set_cache_header(falcon_response: falcon.Response | None, duration: timedelt
     falcon_response.set_header("Cache-Control", f"public, max-age={seconds}")
 
 
+def set_no_store_header(falcon_response: falcon.Response | None) -> None:
+    """Set Cache-Control: no-store on a Falcon response to prevent CDN and browser caching."""
+    if falcon_response is None:
+        return
+    falcon_response.set_header("Cache-Control", "no-store")
+
+
 @cached(cache=LRUCache(maxsize=16))
 def _build_base_html(critical_css: str, site_name: str) -> str:
     """Read index.html and inject critical CSS and site name. Cached per (critical_css, site_name) pair."""
@@ -839,7 +846,7 @@ class APIResource:
 
         return copy.deepcopy(result)
 
-    def get_pid(self, **_: object) -> int:
+    def get_pid(self, *, falcon_response: falcon.Response | None = None, **_: object) -> int:
         """Just return the pid of the process which served this request.
 
         Returns:
@@ -847,9 +854,10 @@ class APIResource:
             int: The process ID.
 
         """
+        set_no_store_header(falcon_response)
         return os.getpid()
 
-    def db_ready(self, **_: object) -> bool:
+    def db_ready(self, *, falcon_response: falcon.Response | None = None, **_: object) -> bool:
         """Return true if the db is ready.
 
         Returns:
@@ -857,6 +865,7 @@ class APIResource:
             bool: True if the database is ready, False otherwise.
 
         """
+        set_no_store_header(falcon_response)
         records = self._run_query(
             query="SELECT relname FROM pg_stat_user_tables",
         )["result"]
@@ -2552,16 +2561,18 @@ class APIResource:
         with self._cache_generation.get_lock():
             self._cache_generation.value += 1
 
-    def random_search(self, *, num_cards: int = 1, **_: object) -> dict[str, Any]:
+    def random_search(self, *, falcon_response: falcon.Response | None = None, num_cards: int = 1, **_: object) -> dict[str, Any]:
         """Return one or more random cards in the same envelope shape as search().
 
         Args:
+            falcon_response: The Falcon response object.
             num_cards: The number of random cards to return (default is 1).
 
         Returns:
             A dict with a "cards" key (list of card dicts) and "total_cards" key,
             matching the shape returned by search().
         """
+        set_no_store_header(falcon_response)
         num_cards = min(max(num_cards, 1), 1000)
         if self._engine.size() == 0:
             self._trigger_background_reload_if_needed()
