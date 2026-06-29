@@ -76,11 +76,17 @@ def get_field_type(attr: str) -> str:
 # Rarity ordering for comparison operations
 RARITY_TO_NUMBER = {
     "common": 0,
+    "c": 0,
     "uncommon": 1,
+    "u": 1,
     "rare": 2,
+    "r": 2,
     "mythic": 3,
+    "m": 3,
     "special": 4,
+    "s": 4,
     "bonus": 5,
+    "b": 5,
 }
 
 

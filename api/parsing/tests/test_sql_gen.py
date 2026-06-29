@@ -662,7 +662,7 @@ def test_set_search_sql_translation(parse_query, input_query: str, expected_sql:
             "(card.card_rarity_int = %(p_int_NQ)s)",
             {"p_int_NQ": 5},
         ),
-        # Short alias tests
+        # Short alias tests (r:common, r:mythic use full names)
         (
             "r:common",
             "(card.card_rarity_int = %(p_int_MA)s)",
@@ -672,6 +672,67 @@ def test_set_search_sql_translation(parse_query, input_query: str, expected_sql:
             "r:mythic",
             "(card.card_rarity_int = %(p_int_Mw)s)",
             {"p_int_Mw": 3},
+        ),
+        # Short form rarity values (single-letter abbreviations)
+        (
+            "r:c",
+            "(card.card_rarity_int = %(p_int_MA)s)",
+            {"p_int_MA": 0},
+        ),
+        (
+            "rarity:c",
+            "(card.card_rarity_int = %(p_int_MA)s)",
+            {"p_int_MA": 0},
+        ),
+        (
+            "r:u",
+            "(card.card_rarity_int = %(p_int_MQ)s)",
+            {"p_int_MQ": 1},
+        ),
+        (
+            "rarity:u",
+            "(card.card_rarity_int = %(p_int_MQ)s)",
+            {"p_int_MQ": 1},
+        ),
+        (
+            "r:r",
+            "(card.card_rarity_int = %(p_int_Mg)s)",
+            {"p_int_Mg": 2},
+        ),
+        (
+            "rarity:r",
+            "(card.card_rarity_int = %(p_int_Mg)s)",
+            {"p_int_Mg": 2},
+        ),
+        (
+            "r:m",
+            "(card.card_rarity_int = %(p_int_Mw)s)",
+            {"p_int_Mw": 3},
+        ),
+        (
+            "rarity:m",
+            "(card.card_rarity_int = %(p_int_Mw)s)",
+            {"p_int_Mw": 3},
+        ),
+        (
+            "r:s",
+            "(card.card_rarity_int = %(p_int_NA)s)",
+            {"p_int_NA": 4},
+        ),
+        (
+            "rarity:s",
+            "(card.card_rarity_int = %(p_int_NA)s)",
+            {"p_int_NA": 4},
+        ),
+        (
+            "r:b",
+            "(card.card_rarity_int = %(p_int_NQ)s)",
+            {"p_int_NQ": 5},
+        ),
+        (
+            "rarity:b",
+            "(card.card_rarity_int = %(p_int_NQ)s)",
+            {"p_int_NQ": 5},
         ),
         # Comparison operators - greater than
         (
