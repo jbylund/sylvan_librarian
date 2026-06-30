@@ -6,7 +6,6 @@ const HTML_ESCAPE_RE = /[&<>"]/g;
 const HTML_ESCAPE_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
 const htmlEscapeChar = c => HTML_ESCAPE_MAP[c];
 
-
 class CatalogMap {
   constructor(mapping) {
     this._words = Object.entries(mapping)
@@ -21,14 +20,15 @@ class CatalogMap {
     const byFreq = [...this._words].sort((a, b) => b.n - a.n);
     for (const w of byFreq) {
       const l = w.lower;
-      if (l.length >= 1 && !(l[0] in this._d1))                        this._d1[l[0]]            = w.v;
-      if (l.length >= 2 && !(l[0] + l[1] in this._d2))                 this._d2[l[0] + l[1]]     = w.v;
-      if (l.length >= 3 && !(l[0] + l[1] + l[2] in this._d3))          this._d3[l[0] + l[1] + l[2]] = w.v;
+      if (l.length >= 1 && !(l[0] in this._d1)) this._d1[l[0]] = w.v;
+      if (l.length >= 2 && !(l[0] + l[1] in this._d2)) this._d2[l[0] + l[1]] = w.v;
+      if (l.length >= 3 && !(l[0] + l[1] + l[2] in this._d3)) this._d3[l[0] + l[1] + l[2]] = w.v;
     }
   }
 
   _lowerBound(prefix) {
-    let lo = 0, hi = this._words.length;
+    let lo = 0,
+      hi = this._words.length;
     while (lo < hi) {
       const mid = (lo + hi) >>> 1;
       if (this._words[mid].lower < prefix) lo = mid + 1;
@@ -848,7 +848,7 @@ class CardSearch {
       if (card.set_code && card.collector_number) {
         // Build manapool.com referral URL
         // Set codes and collector numbers from our database are safe for URLs
-        const manapoolUrl = `https://manapool.com/card/${card.set_code.toLowerCase()}/${card.collector_number}?ref=arcane-tutor`;
+        const manapoolUrl = `https://manapool.com/card/${card.set_code.toLowerCase()}/${card.collector_number}?ref=sylvan-librarian`;
         imageHtml = `<div class="modal-image-wrapper"><a href="${manapoolUrl}" target="_blank" rel="noopener noreferrer" class="modal-image-link">${imgTag}</a></div>`;
       } else {
         imageHtml = `<div class="modal-image-wrapper">${imgTag}</div>`;

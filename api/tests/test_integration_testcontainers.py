@@ -416,7 +416,7 @@ class TestContainerIntegration:
         # The default archive path is shared machine-wide, so another process's
         # store would shadow this test DB's data: swap in a private store for
         # this test (the api_resource fixture is class-scoped, so restore it).
-        shm_path = pathlib.Path(tempfile.gettempdir()) / f"arcane_tutor_it_{uuid.uuid4().hex}"
+        shm_path = pathlib.Path(tempfile.gettempdir()) / f"sylvan_librarian_it_{uuid.uuid4().hex}"
         saved_engine = api_resource._engine
         api_resource._engine = QueryEngine(shm_path=str(shm_path))
         try:

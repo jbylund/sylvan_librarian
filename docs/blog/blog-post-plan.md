@@ -1,6 +1,6 @@
 # Blog Post Plan
 
-Arcane Tutor blog series — covering the full technical evolution of the project.
+Sylvan Librarian blog series — covering the full technical evolution of the project.
 Target: 27 posts across several topic areas, written roughly in the order they were built.
 Publishing cadence: every two weeks starting 2026-06-20.
 
@@ -12,7 +12,7 @@ Publishing cadence: every two weeks starting 2026-06-20.
 
 **[O1] Why build a self-hosted Scryfall?**
 Scryfall is the gold standard for Magic: The Gathering card search, but it doesn't let you extend
-the query language. This post covers the motivation for Arcane Tutor: what you gain from owning
+the query language. This post covers the motivation for Sylvan Librarian: what you gain from owning
 the stack (custom query operators, no API rate limits, a platform to experiment on), and the one
 killer feature that motivated the whole project — arithmetic comparisons across card attributes.
 Queries like `cmc+1<power` or `toughness>power` are impossible in Scryfall but naturally expressible
@@ -28,7 +28,7 @@ The initial data loading path inserted rows one by one. Switching to PostgreSQL'
 dropped import time from ~60s to ~6.5s. Covers why `COPY` is so much faster (binary protocol,
 no per-row parse/plan overhead, batched WAL writes), how to structure Python to stream data into
 `COPY`, and the tradeoffs around error handling when a single bad row aborts the whole batch.
-See [PR #33](https://github.com/jbylund/arcane_tutor/pull/33).
+See [PR #33](https://github.com/jbylund/sylvan_librarian/pull/33).
 
 ---
 
@@ -95,7 +95,7 @@ order using `EXPLAIN (ANALYZE, BUFFERS)` for wall-clock times. Results: UUID key
 than text key for `unique=card`; hashagg was not faster than `DISTINCT ON` (failed hypothesis);
 dropping the no-op `DISTINCT ON (scryfall_id)` for `unique=printing` and pushing ORDER BY into
 the LIMIT branch let PostgreSQL use a top-N heapsort instead of a full sort (~9% gain).
-See [PR #480](https://github.com/jbylund/arcane_tutor/pull/480).
+See [PR #480](https://github.com/jbylund/sylvan_librarian/pull/480).
 
 **[S4] Two levels of ordering: printing prefer score and card relevance ranking**
 Search results need two distinct scoring concerns. The *printing prefer score* (printing-level)
@@ -115,7 +115,7 @@ signal. (Draws from the preference-score changelogs and PR #448.)
 `createCardHTML` called `escapeHtml` ~14 times per card. The old implementation created a new
 DOM element on every call — 1,400 throwaway elements per 100-card render. A single-pass regex
 replacement reduced call cost from ~1,927 ns to ~48 ns (~40×), and fixed a latent bug where the
-DOM path didn't escape double quotes inside attribute values. See [PR #486](https://github.com/jbylund/arcane_tutor/pull/486).
+DOM path didn't escape double quotes inside attribute values. See [PR #486](https://github.com/jbylund/sylvan_librarian/pull/486).
 
 **[F2] Responsive card images and CDN delivery**
 Serving card images efficiently: CloudFront distribution, responsive `<img srcset>` for different
@@ -141,7 +141,7 @@ The original code iterated over each known mana symbol and called `.replaceAll()
 O(symbols × string length) per card. A single regex `/\{[^}]{1,5}\}/g` finds all symbol tokens
 in one pass; `Map.get()` does a single O(1) lookup per token. Covers how to benchmark string
 transformations accurately in JS, the gotcha of regex flags and stateful `.lastIndex`, and when
-this pattern generalizes. See [PR #271](https://github.com/jbylund/arcane_tutor/pull/271).
+this pattern generalizes. See [PR #271](https://github.com/jbylund/sylvan_librarian/pull/271).
 
 **[F4] Progressive enhancement: useful without JavaScript**
 The search endpoint returns cards via JSON for JS clients, but also serves a usable HTML response
@@ -153,7 +153,7 @@ for no-JS browsers. Walk through the server-side rendering path, what gets lost 
 ### Caching & Infrastructure
 
 **[I4] Falcon + Bjoern: choosing a Python web framework**
-FastAPI + uvicorn is the current industry default for Python APIs, but Arcane Tutor uses Falcon
+FastAPI + uvicorn is the current industry default for Python APIs, but Sylvan Librarian uses Falcon
 with Bjoern (a C WSGI server). Covers what Falcon gives up (no ORM, no templating, no
 auto-generated docs) and what it gains (a small, predictable surface area for a read-heavy API
 with no request bodies). Why async didn't matter here — every request hits the database (or later,
@@ -190,7 +190,7 @@ with `DISTINCT ON` to find preferred printings (~30k rows), then `ORDER BY RANDO
 O(N) per call, uncached. The fix: a TTL-cached `_get_all_preferred_cards()` that materializes the
 preferred-printing list once per 10 minutes; individual requests then do an in-memory sample.
 Covers why `ORDER BY RANDOM()` is so slow, how TTL caching changes the performance profile, and
-the tradeoff between freshness and cost. See [PR #453](https://github.com/jbylund/arcane_tutor/pull/453).
+the tradeoff between freshness and cost. See [PR #453](https://github.com/jbylund/sylvan_librarian/pull/453).
 
 **[I6] Blue/green deploys with Docker Compose and nginx**
 Running two identical stacks (blue and green) behind a single nginx upstream. Deploying means
@@ -221,20 +221,20 @@ index size, build time, and query latency.
 Storing color identity as a bitmap instead of a string set: bitwise subset/superset checks replace
 set operations, the struct fits in a cache line, and SIMD-friendly layouts become possible. Covers
 when bitmaps are a good fit and what the before/after benchmarks looked like.
-See [PR #469](https://github.com/jbylund/arcane_tutor/pull/469).
+See [PR #469](https://github.com/jbylund/sylvan_librarian/pull/469).
 
 **[R4] Zero-copy deserialization with rkyv and shared memory**
 Multiple workers used to each maintain their own copy of ~800MB–1GB of card data. The fix:
 serialize the card store to a file with `rkyv`, `mmap` the file in each worker (one OS page cache
 copy, copy-on-write per process). Covers `repr(C)` structs, the `mmap`/`mprotect` safety
 invariants, and the streaming reload pipeline that cut peak memory from ~1.3GB to ~350MB.
-See PRs [#502](https://github.com/jbylund/arcane_tutor/pull/502) and [#505](https://github.com/jbylund/arcane_tutor/pull/505).
+See PRs [#502](https://github.com/jbylund/sylvan_librarian/pull/502) and [#505](https://github.com/jbylund/sylvan_librarian/pull/505).
 
 **[R5] String interning for compact in-memory card representations**
 Card text, type lines, set codes, and artist names repeat heavily across 30k+ cards. String
 interning replaces each unique string with a u32 ID, reducing per-card memory and improving
 cache behavior when filtering by string fields. Covers the intern table design and how it
-interacts with rkyv serialization. See [PR #41bbcc8](https://github.com/jbylund/arcane_tutor/pull/490).
+interacts with rkyv serialization. See [PR #41bbcc8](https://github.com/jbylund/sylvan_librarian/pull/490).
 
 **[R6] Two-pivot pagination: O(n) sort for a single page**
 Instead of sorting all matching cards and paginating, two pivots identify the score boundary of

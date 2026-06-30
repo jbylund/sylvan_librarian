@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-This document provides a detailed review of the legal compliance checklist for Arcane Tutor, tracking our efforts to ensure proper differentiation from Scryfall while maintaining compliance with Wizards of the Coast's policies.
+This document provides a detailed review of the legal compliance checklist for Sylvan Librarian, tracking our efforts to ensure proper differentiation from Scryfall while maintaining compliance with Wizards of the Coast's policies.
 
 **Overall Compliance Status**: **Good Progress** - Critical items addressed, several areas require future work.
 
@@ -87,7 +87,7 @@ This document provides a detailed review of the legal compliance checklist for A
 | Draft Privacy Policy | ✅ **COMPLETE** | Formal privacy policy created at [docs/privacy_policy.md](../user/privacy_policy.md) |
 | Proper trademark usage for MTG | ✅ **COMPLETE** | Using "Magic: The Gathering™" with proper attribution. See [legal.md](legal.md#magic-the-gathering) |
 | Attribution acknowledging Wizards as IP owner | ✅ **COMPLETE** | Added to [README.md](../README.md), [legal.md](../legal/legal.md), and UI footer |
-| Not infringing "Scryfall" trademark | ✅ **COMPLETE** | Clear differentiation with "Arcane Tutor" name and attribution. See [legal.md](legal.md#scryfall) |
+| Not infringing "Scryfall" trademark | ✅ **COMPLETE** | Clear differentiation with "Sylvan Librarian" name and attribution. See [legal.md](legal.md#scryfall) |
 | Consider reaching out to Scryfall | ⏳ **OPTIONAL** | Optional future action |
 
 ### Recommendations:
@@ -262,7 +262,7 @@ This document provides a detailed review of the legal compliance checklist for A
 
 ## Conclusion
 
-Arcane Tutor has achieved excellent legal compliance and differentiation from Scryfall.
+Sylvan Librarian has achieved excellent legal compliance and differentiation from Scryfall.
 The technical implementation is fully compliant with original code and algorithms.
 Critical attribution and legal notices have been added to all user-facing surfaces.
 

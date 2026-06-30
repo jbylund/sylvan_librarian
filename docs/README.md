@@ -5,7 +5,7 @@ This directory contains all project documentation organized by topic.
 ## 📂 Directory Structure
 
 ### [user/](user/) - User-Facing Documentation
-Documentation for end users of Arcane Tutor.
+Documentation for end users of Sylvan Librarian.
 
 - **[about.md](user/about.md)** - Project mission, philosophy, and how we differ from Scryfall
 - **[help.md](user/help.md)** - User guide with search syntax, tutorials, and examples
@@ -77,4 +77,4 @@ When adding new documentation:
 ---
 
 **Last Updated**: October 19, 2025  
-**Maintained by**: Arcane Tutor Team
+**Maintained by**: Sylvan Librarian Team

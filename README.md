@@ -1,4 +1,4 @@
-# Arcane Tutor
+# Sylvan Librarian
 
 ![Web Interface](screenshot.webp)
 
@@ -25,11 +25,11 @@ See [docs/legal.md](docs/legal/legal.md) for full details.
 
 ## Project Overview
 
-Arcane Tutor is an open source implementation of Scryfall, a Magic: The Gathering card search engine.
+Sylvan Librarian is an open source implementation of Scryfall, a Magic: The Gathering card search engine.
 
-### Arcane Tutor vs Official Scryfall
+### Sylvan Librarian vs Official Scryfall
 
-| Feature                    | Syntax                                        | Scryfall | Arcane Tutor | Description                                               |
+| Feature                    | Syntax                                        | Scryfall | Sylvan Librarian | Description                                               |
 |----------------------------|-----------------------------------------------|----------|-------------|-----------------------------------------------------------|
 | **Basic Search**           | `name:`, `oracle:`                            | ✔        | ✔           | Full substring search with pattern matching               |
 | **Type Search**            | `type:`, `t:`                                 | ✔        | ✔           | Exact matching with intelligent autocomplete              |
@@ -60,7 +60,7 @@ Arcane Tutor is an open source implementation of Scryfall, a Magic: The Gatherin
 | **Arithmetic Expressions** | `cmc+1<power`, `power-toughness=0`            | ✘        | ✔           | Advanced mathematical expressions                         |
 
 
-### Arcane Tutor Unique Features
+### Sylvan Librarian Unique Features
 
 - **Arithmetic operations** - Mathematical expressions like `cmc+1<power`
 - **Typeahead search with intelligent completion** - Enhanced UX for query building
@@ -108,7 +108,7 @@ Based on [comprehensive functionality analysis](docs/technical/scryfall_function
 ## Code Organization
 
 ```
-arcane_tutor/
+sylvan_librarian/
 ├── api/                         # Python API service (main application)
 │   ├── db/                      # Database schema and migrations
 │   ├── middlewares/             # HTTP middleware components
@@ -159,8 +159,8 @@ arcane_tutor/
 1. **Clone and Install Dependencies**
 
    ```bash
-   git clone git@github.com:jbylund/arcane_tutor.git
-   cd arcane_tutor
+   git clone git@github.com:jbylund/sylvan_librarian.git
+   cd sylvan_librarian
 
    # Install core dependencies
    python -m pip install --upgrade pip
@@ -319,11 +319,11 @@ For detailed technical analysis, see [functionality analysis documentation](docs
 
 ### Card Data
 
-Arcane Tutor uses card data from [Scryfall's official bulk data API](https://api.scryfall.com/bulk-data).
+Sylvan Librarian uses card data from [Scryfall's official bulk data API](https://api.scryfall.com/bulk-data).
 We are grateful to Scryfall for maintaining comprehensive, high-quality Magic: The Gathering card information and making it available to the community.
 
 **Data Attribution**: Card data provided by [Scryfall](https://scryfall.com).
-Arcane Tutor is an independent implementation and is not affiliated with, endorsed by, or sponsored by Scryfall.
+Sylvan Librarian is an independent implementation and is not affiliated with, endorsed by, or sponsored by Scryfall.
 
 ### Intellectual Property
 
@@ -342,9 +342,9 @@ For complete information about data sources, intellectual property attribution, 
 
 For attribution, IP rights, terms of service, and privacy policy, see [docs/legal/](docs/legal/).
 
-## How Arcane Tutor Differs from Scryfall
+## How Sylvan Librarian Differs from Scryfall
 
-While we use Scryfall's data, Arcane Tutor is a distinct implementation:
+While we use Scryfall's data, Sylvan Librarian is a distinct implementation:
 
 - **Original codebase**: All code written from scratch (no copied code from Scryfall)
 - **Different database schema**: Custom PostgreSQL schema optimized for our use cases

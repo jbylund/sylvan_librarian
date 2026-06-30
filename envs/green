@@ -2,3 +2,5 @@ API_PORT=18081
 APP_ENV=green
 ENABLE_CACHE=true
 ENVIRONMENT=prod
+ENABLE_ENGINE=true
+SHARED_CACHE_PATH=/tmp/arcane_green.cache

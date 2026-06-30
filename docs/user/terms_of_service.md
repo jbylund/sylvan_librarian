@@ -4,13 +4,13 @@
 
 ## 1. Introduction
 
-Welcome to Arcane Tutor.
-These Terms of Service ("Terms") govern your use of the Arcane Tutor website and services (collectively, the "Service").
+Welcome to Sylvan Librarian.
+These Terms of Service ("Terms") govern your use of the Sylvan Librarian website and services (collectively, the "Service").
 By accessing or using the Service, you agree to be bound by these Terms.
 
-## 2. About Arcane Tutor
+## 2. About Sylvan Librarian
 
-Arcane Tutor is a free, open-source Magic: The Gathering card search engine.
+Sylvan Librarian is a free, open-source Magic: The Gathering card search engine.
 This Service is:
 
 - **Not a commercial service**: We do not sell any products or services
@@ -33,7 +33,7 @@ We acknowledge Scryfall as the provider of this data and comply with their API T
 
 ### 3.3 Service Code
 
-The Arcane Tutor source code is open source and available on [GitHub](https://github.com/jbylund/arcane_tutor) under the ISC License.
+The Sylvan Librarian source code is open source and available on [GitHub](https://github.com/jbylund/sylvan_librarian) under the ISC License.
 
 ## 4. Acceptable Use
 
@@ -44,7 +44,7 @@ You may not:
 - Disrupt or interfere with the Service's operation
 - Use the Service to violate any applicable laws or regulations
 - Use automated tools to excessively scrape or download data (please use our API responsibly)
-- Misrepresent your affiliation with Arcane Tutor, Wizards of the Coast, or Scryfall
+- Misrepresent your affiliation with Sylvan Librarian, Wizards of the Coast, or Scryfall
 
 ## 5. No User Accounts
 
@@ -90,7 +90,7 @@ We are not responsible for:
 
 As an open-source project, the Service is developed and maintained by community contributors.
 The source code is available for review, modification, and distribution under the ISC License.
-Contributions are welcome via our [GitHub repository](https://github.com/jbylund/arcane_tutor).
+Contributions are welcome via our [GitHub repository](https://github.com/jbylund/sylvan_librarian).
 
 ## 11. Changes to Terms
 
@@ -116,13 +116,13 @@ If any provision of these Terms is found to be invalid or unenforceable, the rem
 
 ## 15. Entire Agreement
 
-These Terms, together with our [Privacy Policy](../user/privacy_policy.md) and [Legal Compliance Documentation](../legal/legal.md), constitute the entire agreement between you and Arcane Tutor regarding the Service.
+These Terms, together with our [Privacy Policy](../user/privacy_policy.md) and [Legal Compliance Documentation](../legal/legal.md), constitute the entire agreement between you and Sylvan Librarian regarding the Service.
 
 ## 16. Contact
 
 For questions about these Terms or the Service, please:
 
-- Open an issue on our [GitHub repository](https://github.com/jbylund/arcane_tutor/issues)
+- Open an issue on our [GitHub repository](https://github.com/jbylund/sylvan_librarian/issues)
 - Review our [Legal Compliance Documentation](../legal/legal.md)
 
 ## 17. Acknowledgments

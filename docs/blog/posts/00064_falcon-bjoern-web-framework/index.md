@@ -3,8 +3,13 @@ title: "13× the Throughput of FastAPI: Why I Use Falcon + Bjoern"
 date: 2026-06-27
 publishDate: 2026-06-27
 tags: ["python", "falcon", "bjoern", "fastapi", "performance"]
-summary: "Why Arcane Tutor uses Falcon and Bjoern instead of the FastAPI + uvicorn default: a preference for explicit, close-to-vanilla Python over framework magic."
+summary: "Why Sylvan Librarian uses Falcon and Bjoern instead of the FastAPI + uvicorn default: a preference for explicit, close-to-vanilla Python over framework magic."
 ---
+
+{{< sitename >}} caches search results, so most requests return without touching the database.
+When a response is already computed, the framework serializing it is all that stands between the request and the answer.
+On that path — pure serialization, no query, no business logic — Falcon + Bjoern handles 13× the throughput of FastAPI + uvicorn.
+For a read-heavy API where cache hits dominate, the framework is not an irrelevant detail.
 
 ## Benchmark Setup
 

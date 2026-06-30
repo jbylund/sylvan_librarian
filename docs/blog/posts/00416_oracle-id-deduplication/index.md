@@ -25,7 +25,7 @@ The easy mistake is to build a benchmark weighted toward narrow queries.
 A search for `name:lightning bolt` returns a handful of rows; deduplication is essentially free regardless of what key you use.
 The cost only shows up when the match set is large.
 
-The [benchmark harness](https://github.com/jbylund/arcane_tutor/blob/5da09ce581c2295a09927e8bb419fc495ef9bafe/client/query_runner.py) generates a seeded corpus of 200 query/orderby/unique triples, weighted 60% toward large-result queries: `format:modern`, `format:legacy`, `format:commander`, three-color `id:xxx` filters.
+The [benchmark harness](https://github.com/jbylund/sylvan_librarian/blob/5da09ce581c2295a09927e8bb419fc495ef9bafe/client/query_runner.py) generates a seeded corpus of 200 query/orderby/unique triples, weighted 60% toward large-result queries: `format:modern`, `format:legacy`, `format:commander`, three-color `id:xxx` filters.
 `format:modern` alone matches 73,336 rows.
 Seeding the RNG makes the corpus deterministic — the same seed produces the same 200 queries every time, so results from different runs are directly comparable.
 The 200 triples collapse to 163 distinct query strings after deduplication (several triples share the same query text but differ in orderby or unique mode, so the per-approach tables below reflect 163 distinct queries rather than 200).
@@ -78,7 +78,7 @@ Total execution time across the corpus dropped 23.1%.
 The gain is concentrated in the large-result queries — `border:black` went from 92ms to 51ms (44% faster), `format:modern` from 87ms to 55ms (37% faster), `usd<5` from 77ms to 44ms (43% faster).
 For narrow queries, both are under 2ms and the difference is noise.
 
-The [change in the source](https://github.com/jbylund/arcane_tutor/blob/5da09ce581c2295a09927e8bb419fc495ef9bafe/api/api_resource.py#L1204-L1209) is three characters: `"card_name"` → `"oracle_id"`.
+The [change in the source](https://github.com/jbylund/sylvan_librarian/blob/5da09ce581c2295a09927e8bb419fc495ef9bafe/api/api_resource.py#L1204-L1209) is three characters: `"card_name"` → `"oracle_id"`.
 
 One question this raises: is `DISTINCT ON (oracle_id)` logically equivalent to `DISTINCT ON (card_name)`?
 Oracle ID identifies the canonical card text as defined by Scryfall — all printings of the same card across all sets share one oracle ID, and a reprinted card with errata'd text gets a new oracle ID for the errata'd version.
@@ -178,11 +178,11 @@ Total execution time dropped 9.3%.
 The gain is smaller than for the key-type change because `unique=printing` queries are inherently faster — there is no deduplication work at all — and because top-N heapsort only beats full sort when the result set is large relative to the page size.
 For `format:modern`, the saving is more visible: 59.5ms → 48.8ms (18% faster).
 
-The [two branches](https://github.com/jbylund/arcane_tutor/blob/5da09ce581c2295a09927e8bb419fc495ef9bafe/api/api_resource.py#L1258-L1330) in the source make the difference explicit: `unique=printing` uses `matching_cards AS NOT MATERIALIZED` with no `ORDER BY` in the CTE; all other modes use `distinct_cards` with `DISTINCT ON` and an `ORDER BY` keyed by the dedup column.
+The [two branches](https://github.com/jbylund/sylvan_librarian/blob/5da09ce581c2295a09927e8bb419fc495ef9bafe/api/api_resource.py#L1258-L1330) in the source make the difference explicit: `unique=printing` uses `matching_cards AS NOT MATERIALIZED` with no `ORDER BY` in the CTE; all other modes use `distinct_cards` with `DISTINCT ON` and an `ORDER BY` keyed by the dedup column.
 
 ## What Shipped
 
-PR [#480](https://github.com/jbylund/arcane_tutor/pull/480) shipped two of the three hypotheses:
+PR [#480](https://github.com/jbylund/sylvan_librarian/pull/480) shipped two of the three hypotheses:
 
 - `DISTINCT ON (card_name)` → `DISTINCT ON (oracle_id)` for `unique=card`: **23% faster across the corpus**
 - `unique=printing` path rewritten without `DISTINCT ON`, `ORDER BY` deferred to `LIMIT` branch: **9% faster across the corpus**

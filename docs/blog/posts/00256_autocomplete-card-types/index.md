@@ -14,7 +14,7 @@ There was a parallel problem: the catalog needed to arrive in the browser before
 
 ## The Data Does Not Come from the Database
 
-The first design ran a CTE over `magic.cards` to unnest `card_types` and `card_subtypes` JSONB arrays and count occurrences:
+The first design ran a CTE over `magic.cards` to unnest `card_types` and `card_subtypes` JSONB arrays and count occurrences ([`get_common_card_types.sql`](https://github.com/jbylund/sylvan_librarian/blob/637c98052ba2c5ea41bef6f5f4db453585897765/api/sql/get_common_card_types.sql)):
 
 ```sql
 WITH card_types AS (
@@ -38,8 +38,9 @@ SELECT type_name, num_occurrences FROM counted ORDER BY type_name
 ```
 
 That query ran once per server start, cached for an hour.
-It was correct but redundant: the Rust engine already holds every card in a memory-mapped archive.
-When [PR #545](https://github.com/jbylund/arcane_tutor/pull/545) landed, the SQL query was replaced with a walk over `preferred_indices` — the engine's deduplicated list of one preferred printing per oracle card:
+It was the right approach at the time — the Rust engine did not exist yet.
+Once the engine landed, it became possible to replace the SQL with a walk over `preferred_indices` directly from the mmap archive.
+[PR #545](https://github.com/jbylund/sylvan_librarian/pull/545) made that switch: — the engine's deduplicated list of one preferred printing per oracle card:
 
 ```rust
 pub(crate) fn count_common_types(data: &Archived<CardData>) -> HashMap<String, u32> {
@@ -66,7 +67,7 @@ pub(crate) fn count_common_types(data: &Archived<CardData>) -> HashMap<String, u
 }
 ```
 
-([`lib.rs`, lines 1255–1285](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/card_engine/src/lib.rs#L1255-L1285))
+([`lib.rs`, lines 1255–1285](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/card_engine/src/lib.rs#L1255-L1285))
 
 The 14 card supertypes and types — Artifact, Creature, Enchantment, and so on — are encoded as a bitmask.
 The hot loop uses `trailing_zeros` plus `bits &= bits - 1` to extract each set bit without branching.
@@ -89,8 +90,8 @@ The catalog fetch starts in the first `<script>` block in `<head>` — before th
         return fetch('/get_catalog')
           .then(function (response) {
             if (response.status === 503) {
-              // Engine not ready yet — retry in 30–40 seconds
-              var delay = 30000 + Math.random() * 10000;
+              // Engine not ready yet — retry in 10–15 seconds
+              var delay = 10000 + Math.random() * 5000;
               return new Promise(function (resolve) {
                 setTimeout(resolve, delay);
               }).then(fetchWithRetry);
@@ -106,7 +107,7 @@ The catalog fetch starts in the first `<script>` block in `<head>` — before th
 </script>
 ```
 
-([`index.html`, lines 8–34](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/static/index.html#L8-L34))
+([`index.html`, lines 8–34](https://github.com/jbylund/sylvan_librarian/blob/d5239ab8dbabc01b2d93be8d13f4c816724cd267/api/static/index.html#L8-L34))
 
 The promise is stored on `window` so the app class can await it later without re-fetching.
 By the time the user types their first character, the catalog has usually resolved.
@@ -119,46 +120,28 @@ The fix was to make an unloaded engine return 503, which `CachingMiddleware` exp
 
 ## Why the Lookup Is Fast Per Prefix Letter
 
-When `fetchCommonCardTypes()` resolves, it builds a `CatalogMap` from the JSON payload:
+When `fetchCommonCardTypes()` resolves, it builds a `CatalogMap` from the JSON payload.
+The structure went through two iterations.
 
-```javascript
-class CatalogMap {
-  constructor(mapping) {
-    this._map = new Map();
-    for (const [v, n] of Object.entries(mapping)) {
-      const letter = v[0].toLowerCase();
-      if (!this._map.has(letter)) this._map.set(letter, []);
-      this._map.get(letter).push({ v, n });
-    }
-    for (const bucket of this._map.values()) {
-      bucket.sort((a, b) => a.v.localeCompare(b.v));
-    }
-  }
+The first version ([`app.js`, lines 9–44](https://github.com/jbylund/sylvan_librarian/blob/1ad70788c8239adedba5207cf7bf4c661ddefcfe/api/static/app.js#L9-L44)) grouped entries into 26 first-letter buckets, sorted each bucket alphabetically, and scanned on each `getBestMatch` call, breaking early once the candidate's prefix exceeded the query.
+Bucket access is O(1); the scan is O(k) where k is the number of entries sharing the first letter.
+For a 381-entry catalog the typical `"c"` bucket holds around 90 entries and the scan terminates after a handful of matches.
 
-  getBestMatch(prefix) {
-    const bucket = this._map.get(prefix[0]) ?? [];
-    let best = null;
-    for (const entry of bucket) {
-      const lower = entry.v.toLowerCase();
-      if (lower.slice(0, prefix.length) > prefix) break;  // early termination
-      if (lower.startsWith(prefix) && (!best || entry.n > best.n)) best = entry;
-    }
-    return best?.v ?? null;
-  }
-}
-```
+The second version ([`app.js`, lines 10–62](https://github.com/jbylund/sylvan_librarian/blob/d5239ab8dbabc01b2d93be8d13f4c816724cd267/api/static/app.js#L10-L62)) is a sparse depth-3 prefix trie backed by a flat sorted array.
+At construction time, all entries are sorted alphabetically into `_words`, then iterated in frequency-descending order to fill three plain-object lookup tables: `_d1` (one-char prefix → best word), `_d2` (two-char), `_d3` (three-char).
+First-write-wins gives the highest-count word at each node without any comparison.
+`getBestMatch` returns directly from the table for prefix lengths 1–3; for longer prefixes it binary-searches `_words` to find the first candidate and scans forward.
 
-([`app.js`, lines 9–43](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/static/app.js#L9-L43))
+A benchmark loop in Node 26 on an Apple M5 Max (500,000 iterations, 381-entry catalog, JIT warmed) shows the two implementations at:
 
-The map is keyed by first letter.
-A lookup for `"cr"` goes directly to the `"c"` bucket — around 90 entries out of 600+ — and scans alphabetically until the candidate's prefix exceeds the query.
-Bucket access is O(1); the scan is O(k) where k is the number of entries sharing the prefix, which in practice terminates after a handful of entries.
-The result is the highest-frequency match within the scanned window.
+| Prefix length | Bucket scan | Sparse trie |
+|---|---|---|
+| 2 chars (`t:cr`) | ~44 ns | ~9 ns |
+| 3 chars (`t:cre`) | ~41 ns | ~6 ns |
+| 6+ chars | ~41 ns | ~40 ns |
 
-The previous implementation did `entries.filter(...).sort(...)` on each keystroke: a fresh allocation, a full scan of all 600+ entries, and a sort, on every keydown.
-A `performance.now()` loop in Node 26 on an Apple M5 Max (10,000 iterations, catalog of ~630 entries, JIT warmed) shows the old path at ~2 µs per call; `getBestMatch` on the same catalog is ~0.4 µs — a 5× difference.
-Neither number matters for user experience — the network dominates — but the allocation pressure on every keystroke was unnecessary and the pattern does not scale if the catalog grows.
-The `CatalogMap` pays its build cost once at catalog load.
+Neither number is user-perceptible at 381 entries — both implementations are effectively instant.
+The trie is faster and the code complexity is acceptable.
 
 ## Where Autocomplete Fires
 
@@ -180,7 +163,7 @@ autoCompleteQuery(query) {
 }
 ```
 
-([`app.js`, lines 412–441](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/static/app.js#L412-L441))
+([`app.js`, lines 430–460](https://github.com/jbylund/sylvan_librarian/blob/d5239ab8dbabc01b2d93be8d13f4c816724cd267/api/static/app.js#L430-L460))
 
 The regex requires at least two letters after the colon.
 A single letter like `t:c` would match Creature, Clue, Combat, Conspiracy, and dozens of other types — the highest-frequency result would almost always be Creature, which is rarely what a user means when they have typed only one letter.
@@ -188,7 +171,7 @@ At two characters, `t:cr`, the match set narrows enough that `getBestMatch("cr")
 The query sent to the server becomes `t:Creature` rather than `t:cr`.
 
 The same structure extends naturally to keywords.
-[PR #553](https://github.com/jbylund/arcane_tutor/pull/553) added `count_common_keywords` to the engine (same pattern as `count_common_types`), included the counts in `/get_catalog`, and wired `kw:`/`keyword:` into the same `autoCompleteQuery` branch.
+[PR #553](https://github.com/jbylund/sylvan_librarian/pull/553) added `count_common_keywords` to the engine (same pattern as `count_common_types`), included the counts in `/get_catalog`, and wired `kw:`/`keyword:` into the same `autoCompleteQuery` branch.
 `kw:fl` autocompletes to `kw:flying`; `kw:tr` to `kw:trample`.
 The design did not need to change — only the catalog needed a second map.
 

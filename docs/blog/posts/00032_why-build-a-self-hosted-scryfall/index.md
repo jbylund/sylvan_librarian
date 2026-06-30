@@ -3,7 +3,7 @@ title: "The Query Scryfall Can't Answer: `power+toughness>cmc+cmc`"
 date: 2026-06-20
 publishDate: 2026-06-20
 tags: ["mtg", "scryfall", "postgres", "python"]
-summary: "Motivation for building Arcane Tutor: owning the query language, and the killer feature Scryfall can't do — arithmetic comparisons across card attributes."
+summary: "Motivation for building Sylvan Librarian: owning the query language, and the killer feature Scryfall can't do — arithmetic comparisons across card attributes."
 ---
 
 I was playing Magic and wanted to find creatures where the combined power and toughness is greater than twice the mana cost —
@@ -29,7 +29,7 @@ WHERE creature_power + creature_toughness > cmc * 2
 That works — if you are at a terminal with the data already loaded.
 The objection to building anything more is that this is already sufficient: one query, one answer, no infrastructure required.
 But I wanted something usable from a browser or a phone during a game, without pulling up a laptop and writing SQL.
-So I built [{{< sitename >}}](https://github.com/jbylund/arcane_tutor): a self-hosted, Scryfall-compatible card search engine with extended arithmetic syntax.
+So I built [{{< sitename >}}](https://github.com/jbylund/sylvan_librarian): a self-hosted, Scryfall-compatible card search engine with extended arithmetic syntax.
 
 Self-hosting has real costs, though modest ones in this case. The hardware cost was marginal — I already run a home server for Plex and Pi-hole, so one more container was nothing. Card data imports automatically on container startup, and since I push code updates frequently, the data stays current without extra effort. The site is fully responsive, which is actually how I access it most often. The one genuine dependency on Scryfall remains: card data still comes from Scryfall's bulk data dumps. {{< sitename >}} owns the query layer but not the cards themselves.
 
@@ -57,7 +57,7 @@ The query language also supports the most commonly used Scryfall filters — typ
 
 Reactive search — results updating as you type rather than on submit — requires latency low enough that the response arrives before the next keystroke.
 The project started with direct PostgreSQL queries — similar latency to Scryfall, workable for one-off lookups but not for per-keystroke updates.
-Replacing that hot path with an in-process Rust engine brought query times down to tens of milliseconds. Both columns are browser network-tab measurements using the same instrument. {{< sitename >}} is served as arcane-tutor.com, so both sides include public internet routing — the difference is Scryfall's CDN versus a home server, not LAN versus internet. Hardware: MacBook Pro M5 Max (18 cores, 128 GB). One measurement per query: at speedups of 30×–93×, a single sample is sufficient to establish two orders of magnitude.
+Replacing that hot path with an in-process Rust engine brought query times down to tens of milliseconds. Both columns are browser network-tab measurements using the same instrument. {{< sitename >}} is served as sylvan-librarian.com, so both sides include public internet routing — the difference is Scryfall's CDN versus a home server, not LAN versus internet. Hardware: MacBook Pro M5 Max (18 cores, 128 GB). One measurement per query: at speedups of 30×–93×, a single sample is sufficient to establish two orders of magnitude.
 
 | Query | Scryfall | {{< sitename >}} | Speedup |
 |-------|----------|--------------|---------|

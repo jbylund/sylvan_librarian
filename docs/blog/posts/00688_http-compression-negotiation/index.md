@@ -3,7 +3,7 @@ title: "We Ignore Your Accept-Encoding q= Weights and Serve Better Compression A
 date: 2027-04-24
 publishDate: 2027-04-24
 tags: ["python", "http", "compression", "falcon", "middleware"]
-summary: "Serving compressed HTTP responses correctly is more nuanced than calling gzip.compress(). This post walks through the CompressionMiddleware in Arcane Tutor: Accept-Encoding negotiation, server-side algorithm priority, two distinct code paths for buffered versus streaming responses, the 200-byte skip threshold, Vary headers, and gzip mtime=0 for byte-identical repeated responses."
+summary: "Serving compressed HTTP responses correctly is more nuanced than calling gzip.compress(). This post walks through the CompressionMiddleware in Sylvan Librarian: Accept-Encoding negotiation, server-side algorithm priority, two distinct code paths for buffered versus streaming responses, the 200-byte skip threshold, Vary headers, and gzip mtime=0 for byte-identical repeated responses."
 ---
 
 The first time I measured a search response, the raw JSON was 76 KB for a 100-card result set.
@@ -47,7 +47,7 @@ The `q=` system was designed for language negotiation (`Accept-Language: en;q=1.
 For compression, what actually matters is the intersection of "what the client supports" and "what gives the best tradeoff on this payload."
 
 The initial implementation of `_get_compressor` respected client `q=` weights.
-The [cleanup commit](https://github.com/jbylund/arcane_tutor/commit/210fa16) stripped that out entirely.
+The [cleanup commit](https://github.com/jbylund/sylvan_librarian/commit/210fa16) stripped that out entirely.
 The current code parses Accept-Encoding only to build a candidate list — it does not read `q=` values at all:
 
 ```python
@@ -63,7 +63,7 @@ for accept_encoding_item in accept_encoding_header.split(","):
 compressor = min(compressor_candidates, key=lambda v: v.priority) if compressor_candidates else None
 ```
 
-([Full source](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/middlewares/compression/compression_mod.py#L54-L81))
+([Full source](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/middlewares/compression/compression_mod.py#L54-L81))
 
 The `priority` attribute on each compressor sets the server order: zstd=10, brotli=20, gzip=30.
 Lower wins.
@@ -115,7 +115,7 @@ class StreamingBuffer(BytesIO):
         return ret
 ```
 
-([Source](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/middlewares/compression/compressors/util.py#L12-L24))
+([Source](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/middlewares/compression/compressors/util.py#L12-L24))
 
 The zstd and gzip streaming paths both use `StreamingBuffer` as a sink for the compressor, drain it after each input chunk, and yield whatever came out.
 Brotli's streaming compressor has its own incremental API (`compressor.process()` / `compressor.finish()`) that does not need the buffer workaround.
@@ -132,7 +132,7 @@ if data is None or len(data) < MIN_SIZE:
     return
 ```
 
-([Source](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/middlewares/compression/compression_mod.py#L15))
+([Source](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/middlewares/compression/compression_mod.py#L15))
 
 A 200-byte JSON error response (`{"title": "Not Found", "status": 404}`) would compress to maybe 120 bytes — a saving of 80 bytes at a cost of 0.01 ms of CPU and a round-trip of Content-Encoding headers.
 The CDN and the browser both pay a decompression cost on the other end.
@@ -193,7 +193,7 @@ middleware=[
 
 In Falcon, `process_response` methods run in reverse registration order: CORSMiddleware runs first on the way out, then SecurityHeaders, then CompressionMiddleware, then CachingMiddleware.
 This means the cache stores the already-compressed bytes for each distinct Accept-Encoding value.
-A cache hit bypasses CompressionMiddleware entirely — `resp.complete = True` [causes the compression step to early-return](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/middlewares/compression/compression_mod.py#L99-L101) — so the CPU cost of compression is paid at most once per unique (URL, Accept-Encoding) pair.
+A cache hit bypasses CompressionMiddleware entirely — `resp.complete = True` [causes the compression step to early-return](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/middlewares/compression/compression_mod.py#L99-L101) — so the CPU cost of compression is paid at most once per unique (URL, Accept-Encoding) pair.
 
 The practical result: for cached responses, compression cost is zero.
 For uncached responses, zstd costs about 0.01 ms at quality 4 — that 0.01 ms reflects a warm Python process on an M5 Max at low concurrency, and the compression middleware logs timing for every non-cached response if it ever becomes the constraint.

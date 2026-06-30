@@ -22,4 +22,4 @@ What happens instead? Include any error messages or unexpected output.
 
 **Environment**
 - Browser / client (if UI bug):
-- arcane-tutor URL or branch (if not production):
+- sylvan-librarian URL or branch (if not production):

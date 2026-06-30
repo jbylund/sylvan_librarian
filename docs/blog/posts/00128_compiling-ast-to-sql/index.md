@@ -11,7 +11,7 @@ summary: "Each AST node emits a SQL fragment and bound parameters. How the node 
 
 ## How Parameters Accumulate
 
-The entire compilation is three lines ([sql_generation.py](https://github.com/jbylund/arcane_tutor/blob/1209803e65e82fab5b1e038fe2d5bafb55dc7d9a/api/parsing/sql_generation.py#L13-L16)):
+The entire compilation is three lines ([sql_generation.py](https://github.com/jbylund/sylvan_librarian/blob/1209803e65e82fab5b1e038fe2d5bafb55dc7d9a/api/parsing/sql_generation.py#L13-L16)):
 
 ```python
 def generate_sql_query(parsed_query: Query) -> tuple[str, QueryContext]:
@@ -19,7 +19,7 @@ def generate_sql_query(parsed_query: Query) -> tuple[str, QueryContext]:
     return parsed_query.to_sql(context), context
 ```
 
-Every `to_sql(context)` method takes that context and returns a SQL fragment. `QueryContext` is a thin subclass of `dict` with one extra method — `add` — that does three things at once: computes a parameter name, stores the value, and returns the `%(name)s` placeholder ([nodes.py](https://github.com/jbylund/arcane_tutor/blob/1209803e65e82fab5b1e038fe2d5bafb55dc7d9a/api/parsing/nodes.py#L15-L27)):
+Every `to_sql(context)` method takes that context and returns a SQL fragment. `QueryContext` is a thin subclass of `dict` with one extra method — `add` — that does three things at once: computes a parameter name, stores the value, and returns the `%(name)s` placeholder ([nodes.py](https://github.com/jbylund/sylvan_librarian/blob/1209803e65e82fab5b1e038fe2d5bafb55dc7d9a/api/parsing/nodes.py#L15-L27)):
 
 ```python
 class QueryContext(dict[str, object]):
@@ -42,7 +42,7 @@ The name scheme — base64 of the value, prefixed by Python type — means ident
 
 ## From Search Term to LIKE Pattern
 
-`o:flying` should find cards with "flying" anywhere in their oracle text. The colon operator on a text column maps to a LIKE pattern, not equality ([card_query_nodes.py](https://github.com/jbylund/arcane_tutor/blob/1209803e65e82fab5b1e038fe2d5bafb55dc7d9a/api/parsing/card_query_nodes.py#L902-L918)):
+`o:flying` should find cards with "flying" anywhere in their oracle text. The colon operator on a text column maps to a LIKE pattern, not equality ([card_query_nodes.py](https://github.com/jbylund/sylvan_librarian/blob/1209803e65e82fab5b1e038fe2d5bafb55dc7d9a/api/parsing/card_query_nodes.py#L902-L918)):
 
 ```python
 words = ["", *(_escape_like_pattern(w) for w in txt_val.lower().split()), ""]
@@ -65,7 +65,7 @@ PostgreSQL's `~*` operator does case-insensitive regex matching. The pattern goe
 
 ## Arithmetic Across Columns
 
-`BinaryOperatorNode.to_sql` is fully recursive — it compiles left, compiles right, then assembles ([nodes.py](https://github.com/jbylund/arcane_tutor/blob/1209803e65e82fab5b1e038fe2d5bafb55dc7d9a/api/parsing/nodes.py#L209-L214)):
+`BinaryOperatorNode.to_sql` is fully recursive — it compiles left, compiles right, then assembles ([nodes.py](https://github.com/jbylund/sylvan_librarian/blob/1209803e65e82fab5b1e038fe2d5bafb55dc7d9a/api/parsing/nodes.py#L209-L214)):
 
 ```python
 def to_sql(self: BinaryOperatorNode, context: QueryContext) -> str:
@@ -104,7 +104,7 @@ Cards without a power attribute — lands, instants, sorceries — are expected 
 
 The context is the only path through which user-supplied values reach the database. Every `f"..."` string in every `to_sql` method contains only column names, SQL operators, and `%(name)s` placeholders. The values travel in the context and are bound by psycopg before the query executes. This is not input sanitization layered on top of string concatenation — the SQL string and the user string never meet.
 
-The one failure mode would be if a column name or operator were derived from user input. Column names come from `db_info.py`'s [field map](https://github.com/jbylund/arcane_tutor/blob/1209803e65e82fab5b1e038fe2d5bafb55dc7d9a/api/parsing/db_info.py#L112-L130); operators come from the parser's fixed grammar. Neither is user-controlled:
+The one failure mode would be if a column name or operator were derived from user input. Column names come from `db_info.py`'s [field map](https://github.com/jbylund/sylvan_librarian/blob/1209803e65e82fab5b1e038fe2d5bafb55dc7d9a/api/parsing/db_info.py#L112-L130); operators come from the parser's fixed grammar. Neither is user-controlled:
 
 ```python
 FieldInfo(db_column_name="cmc",               search_aliases=["cmc", "mv", "manavalue"]),

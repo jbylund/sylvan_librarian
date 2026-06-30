@@ -68,7 +68,7 @@ The project demonstrates:
 **Impact**: Cosmetic enhancement only  
 **Legal Impact**: None - text-only header is fully compliant  
 
-**Current State**: Using text-only header "Arcane Tutor"  
+**Current State**: Using text-only header "Sylvan Librarian"  
 **Desired State**: Custom visual logo distinct from Scryfall
 
 ---
@@ -177,7 +177,7 @@ The single remaining item (custom logo) is a cosmetic enhancement that can be ad
 
 **Prepared by**: GitHub Copilot  
 **For**: @jbylund  
-**Repository**: jbylund/arcane_tutor  
+**Repository**: jbylund/sylvan_librarian  
 **Branch**: copilot/ensure-legal-compliance
 
 ---
@@ -186,14 +186,14 @@ The single remaining item (custom logo) is a cosmetic enhancement that can be ad
 
 To create the new GitHub issue for the custom logo:
 
-1. Go to: https://github.com/jbylund/arcane_tutor/issues/new
-1. Title: "Design and Implement Custom Logo for Arcane Tutor"
+1. Go to: https://github.com/jbylund/sylvan_librarian/issues/new
+1. Title: "Design and Implement Custom Logo for Sylvan Librarian"
 1. Labels: `enhancement`, `design`, `low-priority`, optionally `good-first-issue`
 1. Body: Copy content from `docs/issue_template_custom_logo.md`
 
 Or use GitHub CLI:
 ```bash
-gh issue create --title "Design and Implement Custom Logo for Arcane Tutor" \
+gh issue create --title "Design and Implement Custom Logo for Sylvan Librarian" \
   --body-file docs/issue_template_custom_logo.md \
   --label enhancement,design,low-priority
 ```

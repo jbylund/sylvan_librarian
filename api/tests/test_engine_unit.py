@@ -52,7 +52,7 @@ def fresh_engine_fixture() -> Generator[Callable[[], QueryEngine]]:
     paths: list[Path] = []
 
     def make() -> QueryEngine:
-        shm_path = Path(tempfile.gettempdir()) / f"arcane_tutor_test_{uuid.uuid4().hex}"
+        shm_path = Path(tempfile.gettempdir()) / f"sylvan_librarian_test_{uuid.uuid4().hex}"
         paths.append(shm_path)
         return QueryEngine(shm_path=str(shm_path))
 

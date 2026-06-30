@@ -1,8 +1,8 @@
-# Issue: Design and Implement Custom Logo for Arcane Tutor
+# Issue: Design and Implement Custom Logo for Sylvan Librarian
 
 ## Overview
 
-This issue tracks the design and implementation of a custom logo for Arcane Tutor.
+This issue tracks the design and implementation of a custom logo for Sylvan Librarian.
 This is the final remaining item from the legal compliance checklist and represents a cosmetic enhancement that will further differentiate the project from Scryfall.
 
 **Priority**: Low (cosmetic enhancement)  
@@ -14,7 +14,7 @@ This is the final remaining item from the legal compliance checklist and represe
 
 ## Background
 
-Arcane Tutor currently uses a text-only header displaying "Arcane Tutor" in the web interface.
+Sylvan Librarian currently uses a text-only header displaying "Sylvan Librarian" in the web interface.
 While this is legally compliant and clearly differentiates from Scryfall, a custom logo would enhance the project's visual identity and branding.
 
 **Related Documentation**:
@@ -237,8 +237,8 @@ A logo is considered complete when:
 ## Questions for Discussion
 
 1. Which design approach should we use (community contest, direct design, professional)?
-1. What design concept best represents "Arcane Tutor"?
-1. Should the logo include text ("Arcane Tutor") or be icon-only?
+1. What design concept best represents "Sylvan Librarian"?
+1. Should the logo include text ("Sylvan Librarian") or be icon-only?
 1. What file formats do we need beyond SVG and PNG?
 
 ---

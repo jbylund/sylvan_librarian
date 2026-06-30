@@ -6,7 +6,7 @@ tags: ["postgres", "performance", "python"]
 summary: "Switching from row-by-row inserts to PostgreSQL's COPY protocol meaningfully cut import time. Why COPY is fast, how to stream data into it from Python, and two approaches to expanding a JSON blob into a typed row."
 ---
 
-Arcane Tutor imports card data from Scryfall's bulk export on every container startup. The initial implementation inserted rows one at a time — a loop, one `INSERT` per card, ~30k iterations ([source](https://github.com/jbylund/arcane_tutor/blob/02b969938aedbe0c436750239d20bcc5669ef131/api/api_resource.py#L462-L483)). Switching to PostgreSQL's `COPY` protocol brought the import time down significantly ([PR #33](https://github.com/jbylund/arcane_tutor/pull/33)).
+Arcane Tutor imports card data from Scryfall's bulk export on every container startup. The initial implementation inserted rows one at a time — a loop, one `INSERT` per card, ~30k iterations ([source](https://github.com/jbylund/sylvan_librarian/blob/02b969938aedbe0c436750239d20bcc5669ef131/api/api_resource.py#L462-L483)). Switching to PostgreSQL's `COPY` protocol brought the import time down significantly ([PR #33](https://github.com/jbylund/sylvan_librarian/pull/33)).
 
 ## The Problem with Row-by-Row Inserts
 
@@ -47,7 +47,7 @@ CREATE TEMPORARY TABLE import_staging (card_blob jsonb) ON COMMIT DROP
 
 The `ON COMMIT DROP` is a safety net: if an error aborts the transaction before the explicit `DROP TABLE`, PostgreSQL cleans up the staging table automatically. Without it, a failed batch would leave the staging table around and the next batch would hit a naming conflict.
 
-## Expanding the Blob: Explicit vs. `jsonb_populate_record` ([PR #531](https://github.com/jbylund/arcane_tutor/pull/531))
+## Expanding the Blob: Explicit vs. `jsonb_populate_record` ([PR #531](https://github.com/jbylund/sylvan_librarian/pull/531))
 
 The first version of Phase 2 listed every column explicitly:
 
@@ -121,7 +121,7 @@ The COPY stream takes a fixed ~0.8s regardless of whether any rows actually chan
 | COPY + explicit column INSERT | ~0.8s | ~2.3s | 3.1s |
 | COPY + `jsonb_populate_record` | ~0.8s | ~7.4s | 8.2s |
 
-A later iteration ([PR #532](https://github.com/jbylund/arcane_tutor/pull/532)) dropped the staging table entirely, replacing both COPY phases with a single statement: `jsonb_array_elements` to expand the JSON array, a LEFT JOIN on the target table to make existing row values available, and per-column `CASE WHEN obj ? 'col'` expressions to compute each proposed value before the conflict clause sees it. That lets `ON CONFLICT DO UPDATE SET col = EXCLUDED.col WHERE row IS DISTINCT FROM EXCLUDED` work correctly — `EXCLUDED` already carries the right value for each column, whether the key was present in the input or not. The implementation lives in [`api/db/bulk_upsert.py`](https://github.com/jbylund/arcane_tutor/blob/0a84536fb62646cf746f03a812e7add656ba0428/api/db/bulk_upsert.py); the SQL core is at [lines 191–200](https://github.com/jbylund/arcane_tutor/blob/0a84536fb62646cf746f03a812e7add656ba0428/api/db/bulk_upsert.py#L191-L200) and the per-column CASE resolution at [lines 77–93](https://github.com/jbylund/arcane_tutor/blob/0a84536fb62646cf746f03a812e7add656ba0428/api/db/bulk_upsert.py#L77-L93).
+A later iteration ([PR #532](https://github.com/jbylund/sylvan_librarian/pull/532)) dropped the staging table entirely, replacing both COPY phases with a single statement: `jsonb_array_elements` to expand the JSON array, a LEFT JOIN on the target table to make existing row values available, and per-column `CASE WHEN obj ? 'col'` expressions to compute each proposed value before the conflict clause sees it. That lets `ON CONFLICT DO UPDATE SET col = EXCLUDED.col WHERE row IS DISTINCT FROM EXCLUDED` work correctly — `EXCLUDED` already carries the right value for each column, whether the key was present in the input or not. The implementation lives in [`api/db/bulk_upsert.py`](https://github.com/jbylund/sylvan_librarian/blob/0a84536fb62646cf746f03a812e7add656ba0428/api/db/bulk_upsert.py); the SQL core is at [lines 191–200](https://github.com/jbylund/sylvan_librarian/blob/0a84536fb62646cf746f03a812e7add656ba0428/api/db/bulk_upsert.py#L191-L200) and the per-column CASE resolution at [lines 77–93](https://github.com/jbylund/sylvan_librarian/blob/0a84536fb62646cf746f03a812e7add656ba0428/api/db/bulk_upsert.py#L77-L93).
 
 The three scenarios below show what each approach actually does under different workloads:
 

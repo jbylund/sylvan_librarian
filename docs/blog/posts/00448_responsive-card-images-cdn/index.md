@@ -24,7 +24,7 @@ buildImageUrl(image_location_uuid, size, face_index = 0) {
 
 That worked fine at first.
 But it meant every image request left the application's control: Scryfall's rate limits applied, the cache invalidation was opaque, and the URL shape was coupled to Scryfall's internal UUID structure.
-When [PR #264](https://github.com/jbylund/arcane_tutor/pull/264) switched to a self-hosted CloudFront distribution, that whole function collapsed to three lines:
+When [PR #264](https://github.com/jbylund/sylvan_librarian/pull/264) switched to a self-hosted CloudFront distribution, that whole function collapsed to three lines:
 
 ```javascript
 buildImageUrl(card, size) {
@@ -40,10 +40,10 @@ The CloudFront distribution caches at the edge; the backend never proxies image 
 
 A CDN is only as useful as what is behind it.
 If a request reaches CloudFront and the image is not in S3, the CDN passes the miss through and returns a 404.
-The sync script [`scripts/copy_images_to_s3.py`](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/scripts/copy_images_to_s3.py) pre-warms the bucket: it downloads PNG images from Scryfall, converts them to WebP at four widths using `cwebp` at quality 75 with `-sharp_yuv` for sharpness preservation during downscaling, and uploads them to S3 before anyone requests them.
+The sync script [`scripts/copy_images_to_s3.py`](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/scripts/copy_images_to_s3.py) pre-warms the bucket: it downloads PNG images from Scryfall, converts them to WebP at four widths using `cwebp` at quality 75 with `-sharp_yuv` for sharpness preservation during downscaling, and uploads them to S3 before anyone requests them.
 A typical Scryfall PNG runs 130–250 KB at full resolution; the 280px WebP thumbnail comes out to roughly 12–25 KB, and the 745px WebP is around 60–110 KB — a 2–4× file size reduction at every size before CloudFront even adds edge caching.
 
-The initial version of the script ([PR #254](https://github.com/jbylund/arcane_tutor/pull/254)) had a straightforward loop:
+The initial version of the script ([PR #254](https://github.com/jbylund/sylvan_librarian/pull/254)) had a straightforward loop:
 
 ```python
 for card in db_cards:
@@ -56,7 +56,7 @@ for card in db_cards:
 `s3_cards` was a `set[tuple[str, str, str]]`.
 Membership testing was O(1), which is fine, but the structure was ad-hoc: raw tuples with no validation and no shared key generation between the DB side and the S3 side.
 
-[PR #438](https://github.com/jbylund/arcane_tutor/pull/438) replaced the tuple approach with a `CardImage` class that implements `__hash__` and `__eq__`.
+[PR #438](https://github.com/jbylund/sylvan_librarian/pull/438) replaced the tuple approach with a `CardImage` class that implements `__hash__` and `__eq__`.
 The missing-image detection became Python set subtraction:
 
 ```python
@@ -84,7 +84,7 @@ img/{set_code}/{collector_number}/{size}.webp
 
 Double-faced cards — think Delver of Secrets // Insectile Aberration — have two images.
 Without a face level in the key, the back face silently overwrote the front face on upload.
-[PR #409](https://github.com/jbylund/arcane_tutor/pull/409) added the missing dimension:
+[PR #409](https://github.com/jbylund/sylvan_librarian/pull/409) added the missing dimension:
 
 ```
 img/{set_code}/{collector_number}/{face}/{size}.webp
@@ -128,7 +128,7 @@ On a HiDPI screen at 2× device pixel ratio, the effective slot width doubles: a
 It never downloads the 745px version on a standard desktop unless the card is shown full-width.
 
 This is all native browser behavior.
-Deleting the `IntersectionObserver` implementation — 70 lines of JavaScript — and replacing it with `srcset`/`sizes` was [PR #393](https://github.com/jbylund/arcane_tutor/pull/393).
+Deleting the `IntersectionObserver` implementation — 70 lines of JavaScript — and replacing it with `srcset`/`sizes` was [PR #393](https://github.com/jbylund/sylvan_librarian/pull/393).
 
 ## Lazy Loading Without JavaScript
 

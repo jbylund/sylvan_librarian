@@ -44,7 +44,7 @@ const imageHtml = `<img src="${this.escapeHtml(image388)}" srcset="${srcset}" �
 Up to 14 calls per card.
 For a 100-card result page: 1,400 `document.createElement('div')` calls — elements created, used for one string transformation, and immediately abandoned.
 
-The [full createCardHTML function](https://github.com/jbylund/arcane_tutor/blob/63df43fb1a59e13616f4a770f5c65d3dd246bc58/api/static/app.js#L720-L796) shows all the call sites.
+The [full createCardHTML function](https://github.com/jbylund/sylvan_librarian/blob/63df43fb1a59e13616f4a770f5c65d3dd246bc58/api/static/app.js#L720-L796) shows all the call sites.
 
 ## The Latent Double-Quote Bug
 
@@ -69,7 +69,7 @@ altText += this.escapeHtml(truncatedText);  // " passes through unchanged
 
 The DOM approach passed it through without encoding it.
 The regex approach encodes `"` as `&quot;`, which is correct in both text content and attribute values.
-[PR #486](https://github.com/jbylund/arcane_tutor/pull/486) fixed it alongside the performance change.
+[PR #486](https://github.com/jbylund/sylvan_librarian/pull/486) fixed it alongside the performance change.
 
 ## Three Constants Replace the Whole Pattern
 
@@ -89,11 +89,11 @@ escapeHtml(text) {
 The `g` flag is load-bearing — without it, `replace` stops after the first match.
 Single quotes are intentionally absent from the map: all attributes in this codebase use double quotes, and single quotes are safe in HTML text content.
 
-The [current implementation](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/static/app.js#L1081-L1088).
+The [current implementation](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/static/app.js#L1081-L1088).
 
 ## Benchmarks: 2,005 ns → 50 ns Per Call
 
-The benchmark at [`scripts/bench_escape_html.js`](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/scripts/bench_escape_html.js) runs both implementations over 14 representative card strings — names with apostrophes, oracle text with angle brackets, mana symbol notation, image URLs, and a long 40-word oracle text.
+The benchmark at [`scripts/bench_escape_html.js`](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/scripts/bench_escape_html.js) runs both implementations over 14 representative card strings — names with apostrophes, oracle text with angle brackets, mana symbol notation, image URLs, and a long 40-word oracle text.
 The DOM implementation uses jsdom v26.1.0's `document.createElement`, which is the same DOM API the browser exposes.
 The benchmark verifies both implementations produce identical output for all strings before timing either.
 

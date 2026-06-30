@@ -10,7 +10,7 @@ SHELL:=/bin/bash
 
 mkfile_path := $(abspath $(lastword $(MAKEFILE_LIST)))
 mkfile_dir := $(shell dirname $(mkfile_path) )
-PROJECTNAME := arcane_tutor
+PROJECTNAME := sylvan_librarian
 
 GIT_ROOT := $(shell git rev-parse --show-toplevel)
 GIT_SHA := $(shell git rev-parse HEAD 2>/dev/null || echo "unknown")

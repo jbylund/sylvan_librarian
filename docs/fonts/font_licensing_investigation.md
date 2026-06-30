@@ -8,7 +8,7 @@
 
 ## Overview
 
-This document investigates the licensing situation for all fonts used in Arcane Tutor to ensure compliance with legal requirements and intellectual property rights.
+This document investigates the licensing situation for all fonts used in Sylvan Librarian to ensure compliance with legal requirements and intellectual property rights.
 
 ---
 

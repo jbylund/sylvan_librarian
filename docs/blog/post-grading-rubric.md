@@ -85,7 +85,7 @@ Post 00112 shows the cost of scope creep: excellent individual sections on impli
 
 **00032** — add one paragraph explaining *why* the Rust engine achieves the speedup (the performance table has methodology but no mechanism); anchor the ranking/prefer_score section with at least one named weight or connect it to the arithmetic thesis.
 
-**00064** — add a short framing paragraph before the benchmark table connecting framework throughput to the application's caching architecture; ground the conclusion beyond the Lotus/Mercedes metaphor with one concrete sentence naming the actual tradeoffs.
+**00064** — the post opens with benchmark setup (wrk parameters, container configuration) before the reader has a reason to care; add a one-paragraph opener that states the claim and why it matters for a cache-heavy search engine, then let the methodology follow as evidence. Also ground the conclusion beyond the Lotus/Mercedes metaphor with one concrete sentence naming the actual tradeoffs.
 
 **00096** — describe the 121-query corpus (query types, hardest cases) so "all 121 pass" is a falsifiable claim rather than an assertion; add a rough timing comparison between Lark and pyparsing, or name one scenario where Lark would be the better choice.
 

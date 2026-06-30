@@ -14,7 +14,7 @@ The `/random_search` endpoint had a `TODO` comment in the code from the day it w
 
 That comment was a sign the implementation was always going to scan the table.
 
-The original endpoint ([PR #354](https://github.com/jbylund/arcane_tutor/pull/354)) ran a full-table scan on every request.
+The original endpoint ([PR #354](https://github.com/jbylund/sylvan_librarian/pull/354)) ran a full-table scan on every request.
 `ORDER BY RANDOM()` is not a random sampler — it is a sort.
 PostgreSQL assigns a random float to every row, then sorts the entire result set.
 There is no shortcut.
@@ -28,7 +28,7 @@ PostgreSQL can seek to a position in the index, read a few leaf pages, and stop.
 With `RANDOM()`, the sort key is different on every execution — there is no index structure that can hold it, because the values do not exist until the query runs.
 The planner's only option is a sequential scan.
 
-Here is what the pre-PR #453 `random_search` actually ran on each request ([source, commit 7c2718a](https://github.com/jbylund/arcane_tutor/blob/7c2718a75c445eb3b263d0cc1c21f6a14c4f7470/api/api_resource.py#L2497)):
+Here is what the pre-PR #453 `random_search` actually ran on each request ([source, commit 7c2718a](https://github.com/jbylund/sylvan_librarian/blob/7c2718a75c445eb3b263d0cc1c21f6a14c4f7470/api/api_resource.py#L2497)):
 
 ```sql
 WITH cte1 AS (
@@ -58,7 +58,7 @@ The second CTE (`cte2`) called `RANDOM()` twice: once as a filter (`WHERE RANDOM
 The fallback loop retried at a 100% sample rate when the 1% filter came up empty.
 Uncached, O(N) in the number of printings, on every request.
 
-The initial implementation before that ([PR #354](https://github.com/jbylund/arcane_tutor/pull/354)) was even more ad hoc — it generated a random UUID and used `scryfall_id >= random_uuid` to seek to a random position in the primary-key B-tree, hoping to find something nearby.
+The initial implementation before that ([PR #354](https://github.com/jbylund/sylvan_librarian/pull/354)) was even more ad hoc — it generated a random UUID and used `scryfall_id >= random_uuid` to seek to a random position in the primary-key B-tree, hoping to find something nearby.
 It worked but was biased toward lower UUIDs and did not deduplicate card names.
 
 ## The Dead End That Confirmed the Problem
@@ -72,7 +72,7 @@ The `ORDER BY RANDOM()` inside the CTE would still be there.
 
 ## The Fix: Cache the Materialized List
 
-[PR #453](https://github.com/jbylund/arcane_tutor/pull/453) replaced the per-request query with a TTL-cached method:
+[PR #453](https://github.com/jbylund/sylvan_librarian/pull/453) replaced the per-request query with a TTL-cached method:
 
 ```python
 @cached(cache=TTLCache(maxsize=1, ttl=600))
@@ -88,7 +88,7 @@ def random_search(self, *, num_cards: int = 1, **_: object) -> dict[str, Any]:
     return {"cards": cards, "total_cards": len(cards)}
 ```
 
-([source](https://github.com/jbylund/arcane_tutor/blob/ae4e01046ed978c4e5cabe1c9fc439b0057c45fa/api/api_resource.py#L2486-L2508))
+([source](https://github.com/jbylund/sylvan_librarian/blob/ae4e01046ed978c4e5cabe1c9fc439b0057c45fa/api/api_resource.py#L2486-L2508))
 
 The cold path is the same cost as before — one full-table query.
 On this hardware (~97k rows, local Docker Compose, M3 Pro) the cold call took roughly 200 ms wall-clock, measured as a single timed call wrapping the full query round-trip.

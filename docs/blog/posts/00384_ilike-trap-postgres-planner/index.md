@@ -111,7 +111,7 @@ CREATE INDEX IF NOT EXISTS idx_cards_flavor_text_lower_trgm
     WHERE flavor_text IS NOT NULL;
 ```
 
-([`api/db/2026-05-20-02-lower-trgm-indexes.sql`](https://github.com/jbylund/arcane_tutor/blob/0b20fce016afe07ca03d28bb3233f7f496cd28ba/api/db/2026-05-20-02-lower-trgm-indexes.sql))
+([`api/db/2026-05-20-02-lower-trgm-indexes.sql`](https://github.com/jbylund/sylvan_librarian/blob/0b20fce016afe07ca03d28bb3233f7f496cd28ba/api/db/2026-05-20-02-lower-trgm-indexes.sql))
 
 **Part 2: Lowercase the pattern at query-build time, emit `lower(col) LIKE pattern`.**
 
@@ -121,7 +121,7 @@ pattern = "%".join(words)
 return f"(lower({lhs_sql}) LIKE {context.add(pattern)})"
 ```
 
-([`card_query_nodes.py`](https://github.com/jbylund/arcane_tutor/blob/0b20fce016afe07ca03d28bb3233f7f496cd28ba/api/parsing/card_query_nodes.py#L931-L933))
+([`card_query_nodes.py`](https://github.com/jbylund/sylvan_librarian/blob/0b20fce016afe07ca03d28bb3233f7f496cd28ba/api/parsing/card_query_nodes.py#L931-L933))
 
 Now `oracle:counter` generates `lower(oracle_text) LIKE '%counter%'`.
 The pattern is already lowercase, so the LIKE estimator does not need to enumerate case variants.
@@ -135,7 +135,7 @@ With `lower(col) LIKE pattern` in the query, they would never be used anyway —
 
 Switching to `LIKE` also surfaced a latent bug: `%` and `_` in user input were live SQL wildcards under ILIKE.
 `name:"50%"` generated `ILIKE '%50%%'` — the trailing `%` matched any suffix rather than the literal character, a bug that had existed since the first text search was added.
-The fix required a `_escape_like_pattern` helper ([line 459](https://github.com/jbylund/arcane_tutor/blob/0b20fce016afe07ca03d28bb3233f7f496cd28ba/api/parsing/card_query_nodes.py#L459-L461)):
+The fix required a `_escape_like_pattern` helper ([line 459](https://github.com/jbylund/sylvan_librarian/blob/0b20fce016afe07ca03d28bb3233f7f496cd28ba/api/parsing/card_query_nodes.py#L459-L461)):
 
 ```python
 def _escape_like_pattern(value: str) -> str:
@@ -161,7 +161,7 @@ Execution was unchanged.
 
 This fix does not help regex searches (`oracle:/counter/`).
 The `~*` operator uses a different selectivity estimator that works against precomputed regex statistics, not a per-character case-variant enumeration, so it does not carry the same per-condition planning cost.
-The regex path was left on `~*` and was not changed in [PR #470](https://github.com/jbylund/arcane_tutor/pull/470), which covers only the `LIKE`-path text fields.
+The regex path was left on `~*` and was not changed in [PR #470](https://github.com/jbylund/sylvan_librarian/pull/470), which covers only the `LIKE`-path text fields.
 
 One caveat worth naming: the `lower()` functional index only benefits queries that emit `lower(col) LIKE`.
 Any query still using `ILIKE` against the old column expression gets a sequential scan — there is no index to fall back to.

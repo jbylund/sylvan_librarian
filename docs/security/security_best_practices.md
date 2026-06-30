@@ -1,6 +1,6 @@
-# Security Best Practices for Arcane Tutor
+# Security Best Practices for Sylvan Librarian
 
-This document outlines security best practices for developing and maintaining the Arcane Tutor application.
+This document outlines security best practices for developing and maintaining the Sylvan Librarian application.
 
 ## Table of Contents
 

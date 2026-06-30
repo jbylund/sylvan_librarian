@@ -1,5 +1,5 @@
 {
-  "name": "arcane_tutor",
+  "name": "sylvan_librarian",
   "version": "1.0.0",
   "description": "An open source Magic: The Gathering card search engine. Unofficial Fan Content permitted under the Wizards of the Coast Fan Content Policy. Not approved/endorsed by Wizards. Card data from Scryfall.",
   "main": "index.js",
@@ -14,7 +14,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/jbylund/arcane_tutor.git"
+    "url": "git+https://github.com/jbylund/sylvan_librarian.git"
   },
   "keywords": [
     "magic-the-gathering",
@@ -29,9 +29,9 @@
     "node": ">=26.1.0"
   },
   "bugs": {
-    "url": "https://github.com/jbylund/arcane_tutor/issues"
+    "url": "https://github.com/jbylund/sylvan_librarian/issues"
   },
-  "homepage": "https://github.com/jbylund/arcane_tutor#readme",
+  "homepage": "https://github.com/jbylund/sylvan_librarian#readme",
   "devDependencies": {
     "cssnano": "^8.0.1",
     "jest": "^30.3.0",

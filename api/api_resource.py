@@ -177,7 +177,7 @@ _APP_MIN_JS_HASH = _static_hash("app.min.js")
 
 
 # TLDs in this set are stripped from the hostname; others are concatenated into the word.
-# e.g. arcane-tutor.com -> "Arcane Tutor"; tolarian-acade.my -> "Tolarian Academy"
+# e.g. sylvan-librarian.com -> "Sylvan Librarian"; tolarian-acade.my -> "Tolarian Academy"
 _STRIP_TLDS = frozenset(["app", "biz", "co", "com", "dev", "edu", "gov", "info", "io", "me", "net", "org", "us"])
 # Allowlist: only valid hostname characters (letters, digits, hyphens, dots) after urlparse extracts the host.
 _SAFE_HOSTNAME_RE = re.compile(r"^[a-z0-9.\-]+$")
