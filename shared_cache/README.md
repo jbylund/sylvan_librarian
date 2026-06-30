@@ -72,7 +72,7 @@ PATH="$HOME/.cargo/bin:$PATH" maturin develop --release # release (fast runtime)
 from shared_cache import SharedCache
 
 cache = SharedCache(
-    path="/tmp/arcane.cache",
+    path="/tmp/sylvan.cache",
     maxsize=10_000,
     default_ttl=300.0,  # seconds; None = never expire
     n_pages=2,          # number of generations (default 2)

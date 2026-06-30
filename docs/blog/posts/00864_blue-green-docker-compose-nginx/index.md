@@ -39,7 +39,7 @@ ENVIRONMENT=prod
 ```
 
 Blue binds to `18080`, green binds to `18081`.
-Each stack gets its own Docker project name (`arcane_blue`, `arcane_green`), its own bridge network, and its own volume namespace — so `pgdata` in blue is `arcane_blue_pgdata`, never shared with green.
+Each stack gets its own Docker project name (`sylvan_blue`, `sylvan_green`), its own bridge network, and its own volume namespace — so `pgdata` in blue is `sylvan_blue_pgdata`, never shared with green.
 One stack can be torn down while the other serves traffic.
 
 The data directory is also per-environment:
@@ -64,7 +64,7 @@ No TCP resets, no connection errors.
 The upstream configuration on the host points to whichever stack is currently active:
 
 ```nginx
-upstream arcane_api {
+upstream sylvan_api {
     server 127.0.0.1:18080;   # blue — active
     # server 127.0.0.1:18081;  # green
 }
@@ -74,8 +74,8 @@ To promote green, write a new config file with the ports swapped and call `nginx
 
 ```bash
 ACTIVE_PORT=18081  # green's port
-sed "s/18080/${ACTIVE_PORT}/" /etc/nginx/conf.d/arcane.conf.tmpl \
-    > /etc/nginx/conf.d/arcane.conf
+sed "s/18080/${ACTIVE_PORT}/" /etc/nginx/conf.d/sylvan.conf.tmpl \
+    > /etc/nginx/conf.d/sylvan.conf
 nginx -s reload
 ```
 
@@ -97,14 +97,14 @@ brings both stacks up sequentially. The full target, anchored to the current com
 rolling-deploy: deps-blue deps-green
 	@echo "=== Deploying blue ==="
 	cd $(GIT_ROOT) && docker compose \
-	  --project-name arcane_blue \
+	  --project-name sylvan_blue \
 	  --env-file .env \
 	  --env-file envs/blue \
 	  --file $(BASE_COMPOSE) \
 	  up --remove-orphans --detach --wait
 	@echo "=== Blue healthy. Deploying green ==="
 	cd $(GIT_ROOT) && docker compose \
-	  --project-name arcane_green \
+	  --project-name sylvan_green \
 	  --env-file .env \
 	  --env-file envs/green \
 	  --file $(BASE_COMPOSE) \

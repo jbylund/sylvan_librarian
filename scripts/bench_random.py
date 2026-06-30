@@ -4,7 +4,7 @@ Plus Python random.sample on a prebuilt list (the old approach's hot path).
 
 Run inside the API container so card_engine is available:
 
-    docker exec arcane_blue-apiservice-1 python3 /app/scripts/bench_random.py
+    docker exec sylvan_blue-apiservice-1 python3 /app/scripts/bench_random.py
 
 random.sample(list)   Old hot path: O(n) on prebuilt ~30k-dict list.   O(unique_cards) mem (always resident).
 sample_reservoir()    Single-pass bounded min-heap.                     O(total x log n) time, O(n) mem.

@@ -210,8 +210,8 @@ The application implements the following security headers via `SecurityHeadersMi
 ```python
 # Good: Production CORS
 allowed_origins = [
-    "https://arcanetutor.com",
-    "https://www.arcanetutor.com"
+    "https://sylvan-librarian.com",
+    "https://www.sylvan-librarian.com"
 ]
 ```
 

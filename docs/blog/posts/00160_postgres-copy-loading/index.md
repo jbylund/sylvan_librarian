@@ -6,7 +6,7 @@ tags: ["postgres", "performance", "python"]
 summary: "Switching from row-by-row inserts to PostgreSQL's COPY protocol meaningfully cut import time. Why COPY is fast, how to stream data into it from Python, and two approaches to expanding a JSON blob into a typed row."
 ---
 
-Arcane Tutor imports card data from Scryfall's bulk export on every container startup. The initial implementation inserted rows one at a time — a loop, one `INSERT` per card, ~30k iterations ([source](https://github.com/jbylund/sylvan_librarian/blob/02b969938aedbe0c436750239d20bcc5669ef131/api/api_resource.py#L462-L483)). Switching to PostgreSQL's `COPY` protocol brought the import time down significantly ([PR #33](https://github.com/jbylund/sylvan_librarian/pull/33)).
+Sylvan Librarian imports card data from Scryfall's bulk export on every container startup. The initial implementation inserted rows one at a time — a loop, one `INSERT` per card, ~30k iterations ([source](https://github.com/jbylund/sylvan_librarian/blob/02b969938aedbe0c436750239d20bcc5669ef131/api/api_resource.py#L462-L483)). Switching to PostgreSQL's `COPY` protocol brought the import time down significantly ([PR #33](https://github.com/jbylund/sylvan_librarian/pull/33)).
 
 ## The Problem with Row-by-Row Inserts
 
