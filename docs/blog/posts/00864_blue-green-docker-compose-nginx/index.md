@@ -8,7 +8,7 @@ summary: "Two identical Docker Compose stacks behind one nginx upstream. Deploy 
 
 ## The Problem with In-Place Restarts
 
-The first deploy strategy for Arcane Tutor was the obvious one: `docker compose down` followed by `docker compose up`.
+The first deploy strategy for Sylvan Librarian was the obvious one: `docker compose down` followed by `docker compose up`.
 The gap between the two commands meant the service was unreachable, but that was not the main problem.
 The real issue was what came after: the API process that starts fresh has to warm its LRU cache before latency returns to baseline.
 On a cold start, cache-miss requests each hit PostgreSQL — P95 latency measured on the production instance by issuing sequential uncached searches immediately after restart stays around 200–400 ms for the first minute or two until the cache fills, compared to under 5 ms for a warm-cache hit.
@@ -39,7 +39,7 @@ ENVIRONMENT=prod
 ```
 
 Blue binds to `18080`, green binds to `18081`.
-Each stack gets its own Docker project name (`arcane_blue`, `arcane_green`), its own bridge network, and its own volume namespace — so `pgdata` in blue is `arcane_blue_pgdata`, never shared with green.
+Each stack gets its own Docker project name (`sylvan_blue`, `sylvan_green`), its own bridge network, and its own volume namespace — so `pgdata` in blue is `sylvan_blue_pgdata`, never shared with green.
 One stack can be torn down while the other serves traffic.
 
 The data directory is also per-environment:
@@ -64,7 +64,7 @@ No TCP resets, no connection errors.
 The upstream configuration on the host points to whichever stack is currently active:
 
 ```nginx
-upstream arcane_api {
+upstream sylvan_api {
     server 127.0.0.1:18080;   # blue — active
     # server 127.0.0.1:18081;  # green
 }
@@ -74,8 +74,8 @@ To promote green, write a new config file with the ports swapped and call `nginx
 
 ```bash
 ACTIVE_PORT=18081  # green's port
-sed "s/18080/${ACTIVE_PORT}/" /etc/nginx/conf.d/arcane.conf.tmpl \
-    > /etc/nginx/conf.d/arcane.conf
+sed "s/18080/${ACTIVE_PORT}/" /etc/nginx/conf.d/sylvan.conf.tmpl \
+    > /etc/nginx/conf.d/sylvan.conf
 nginx -s reload
 ```
 
@@ -89,22 +89,22 @@ There is no window where the upstream is unreachable.
 
 ## The Deploy Script
 
-`make rolling-deploy` (added in [PR #455](https://github.com/jbylund/arcane_tutor/pull/455))
+`make rolling-deploy` (added in [PR #455](https://github.com/jbylund/sylvan_librarian/pull/455))
 brings both stacks up sequentially. The full target, anchored to the current commit:
 
 ```makefile
-# https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/makefile#L114-L119
+# https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/makefile#L114-L119
 rolling-deploy: deps-blue deps-green
 	@echo "=== Deploying blue ==="
 	cd $(GIT_ROOT) && docker compose \
-	  --project-name arcane_blue \
+	  --project-name sylvan_blue \
 	  --env-file .env \
 	  --env-file envs/blue \
 	  --file $(BASE_COMPOSE) \
 	  up --remove-orphans --detach --wait
 	@echo "=== Blue healthy. Deploying green ==="
 	cd $(GIT_ROOT) && docker compose \
-	  --project-name arcane_green \
+	  --project-name sylvan_green \
 	  --env-file .env \
 	  --env-file envs/green \
 	  --file $(BASE_COMPOSE) \
@@ -114,7 +114,7 @@ rolling-deploy: deps-blue deps-green
 
 The `--wait` flag blocks until every service in the stack passes its health check (or the retries are exhausted).
 The API health check probes `localhost:8080/get_pid`, which only succeeds after the process has fully started and is accepting connections
-([docker-compose.yml, lines 89–100](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/docker-compose.yml#L89-L100)):
+([docker-compose.yml, lines 89–100](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/docker-compose.yml#L89-L100)):
 
 ```yaml
 healthcheck:

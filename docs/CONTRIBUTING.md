@@ -1,6 +1,6 @@
-# Contributing to Arcane Tutor
+# Contributing to Sylvan Librarian
 
-Thanks for your interest in contributing! Arcane Tutor is a community-driven,
+Thanks for your interest in contributing! Sylvan Librarian is a community-driven,
 open-source Magic: The Gathering card search engine.
 
 ## Getting Started
@@ -16,7 +16,7 @@ make lint      # ruff + prettier
 
 ## Reporting Issues
 
-Open an issue using one of the [issue templates](https://github.com/jbylund/arcane_tutor/issues/new/choose).
+Open an issue using one of the [issue templates](https://github.com/jbylund/sylvan_librarian/issues/new/choose).
 For search bugs, please include the exact query you ran and what you expected —
 a link to the equivalent [Scryfall](https://scryfall.com) search is especially helpful,
 since Scryfall syntax compatibility is a core goal.

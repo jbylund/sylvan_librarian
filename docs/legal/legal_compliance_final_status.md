@@ -9,7 +9,7 @@
 ## Executive Summary
 
 This document provides the final status of all items from the original Legal Compliance Checklist.
-Arcane Tutor has achieved excellent legal compliance with all critical requirements met.
+Sylvan Librarian has achieved excellent legal compliance with all critical requirements met.
 The project demonstrates clear differentiation from Scryfall, proper attribution to all intellectual property owners, and full compliance with relevant policies.
 
 **Key Achievement**: All critical legal compliance items are complete.
@@ -40,7 +40,7 @@ The single remaining item (custom logo) is purely cosmetic and does not affect l
 |------|--------|----------|-------|
 | ✅ Distinct color scheme | **COMPLETE** | [compliance_review.md](../legal/compliance_review.md) | Blue gradient theme (#2b8fdf, #3da8f5) - distinct from Scryfall's purple |
 | ✅ Different layout structure | **COMPLETE** | api/index.html | Custom grid layout, different search controls |
-| ❌ Original logo and branding | **TODO** | - | Currently using text-only header "Arcane Tutor" |
+| ❌ Original logo and branding | **TODO** | - | Currently using text-only header "Sylvan Librarian" |
 | ✅ Unique card display format | **COMPLETE** | api/index.html | Custom card grid and modal display |
 | ✅ Original iconography | **COMPLETE** | api/index.html | Custom theme toggle, minimal icons |
 | ✅ Different typography | **COMPLETE** | [legal.md](legal.md#font-assets) | Custom fonts (Beleren, MPlantin) with proper documentation |
@@ -88,7 +88,7 @@ The single remaining item (custom logo) is purely cosmetic and does not affect l
 | ✅ Draft Privacy Policy | **COMPLETE** | [privacy_policy.md](../user/privacy_policy.md) | Comprehensive privacy policy |
 | ✅ Proper trademark usage for MTG | **COMPLETE** | [legal.md](legal.md#magic-the-gathering) | Using "Magic: The Gathering™" with proper attribution |
 | ✅ Attribution acknowledging Wizards as IP owner | **COMPLETE** | [README.md](../README.md), [legal.md](../legal/legal.md), UI footer | Present in all locations |
-| ✅ Not infringing "Scryfall" trademark | **COMPLETE** | [legal.md](legal.md#scryfall) | Clear differentiation with "Arcane Tutor" name |
+| ✅ Not infringing "Scryfall" trademark | **COMPLETE** | [legal.md](legal.md#scryfall) | Clear differentiation with "Sylvan Librarian" name |
 | ⏳ Consider reaching out to Scryfall | **OPTIONAL** | - | Optional future action for community relations |
 
 **Category Status**: ✅ Complete (all required items done, 1 optional item)
@@ -185,7 +185,7 @@ The single remaining item (custom logo) is purely cosmetic and does not affect l
 1. **Policy Compliance**: Full compliance with WotC Fan Content Policy
 1. **Formal Documentation**: Complete legal documentation suite (TOS, Privacy Policy)
 1. **Transparent Operation**: Open-source with public code review
-1. **No Trademark Confusion**: "Arcane Tutor" name clearly distinct
+1. **No Trademark Confusion**: "Sylvan Librarian" name clearly distinct
 
 ### Risk Assessment: **VERY LOW** ✅
 
@@ -201,7 +201,7 @@ The single outstanding item (custom logo) is purely cosmetic and does not affect
 **Status**: ❌ TODO  
 **Priority**: Low (cosmetic enhancement)  
 **Impact**: Not required for legal compliance  
-**Current State**: Text-only header displaying "Arcane Tutor"  
+**Current State**: Text-only header displaying "Sylvan Librarian"  
 
 **Recommendations**:
 - Design a custom logo when resources permit
@@ -246,7 +246,7 @@ The text-only header is legally compliant and clearly differentiates from Scryfa
 
 ## Conclusion
 
-Arcane Tutor has achieved **excellent legal compliance standing** with **93% completion (42 of 45 items)**.
+Sylvan Librarian has achieved **excellent legal compliance standing** with **93% completion (42 of 45 items)**.
 All critical legal and compliance requirements are met, demonstrating:
 
 - ✅ Complete technical differentiation from Scryfall
@@ -276,7 +276,7 @@ All critical legal and compliance requirements are met, demonstrating:
 
 - [Wizards Fan Content Policy](https://company.wizards.com/en/legal/fancontentpolicy)
 - [Scryfall API Documentation](https://scryfall.com/docs/api)
-- [Project GitHub Repository](https://github.com/jbylund/arcane_tutor)
+- [Project GitHub Repository](https://github.com/jbylund/sylvan_librarian)
 
 ---
 

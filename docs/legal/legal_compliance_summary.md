@@ -2,11 +2,11 @@
 
 **Status**: ✅ **Excellent Compliance (93% Complete)**
 
-This document provides a quick summary of Arcane Tutor's legal compliance status and remaining work items.
+This document provides a quick summary of Sylvan Librarian's legal compliance status and remaining work items.
 
 ## Executive Summary
 
-Arcane Tutor has successfully addressed all critical legal compliance requirements for operating as an open-source Magic: The Gathering card search engine.
+Sylvan Librarian has successfully addressed all critical legal compliance requirements for operating as an open-source Magic: The Gathering card search engine.
 The project demonstrates clear differentiation from Scryfall while properly attributing all intellectual property.
 
 **Overall Compliance**: 93% (42 of 45 items complete)
@@ -149,12 +149,12 @@ The single outstanding item (custom logo) is purely cosmetic and does not affect
 ### External Policies
 - [Wizards Fan Content Policy](https://company.wizards.com/en/legal/fancontentpolicy)
 - [Scryfall API Documentation](https://scryfall.com/docs/api)
-- [Project GitHub Repository](https://github.com/jbylund/arcane_tutor)
+- [Project GitHub Repository](https://github.com/jbylund/sylvan_librarian)
 
 ## Contact
 
 For legal compliance questions:
-- Open an issue on [GitHub](https://github.com/jbylund/arcane_tutor/issues)
+- Open an issue on [GitHub](https://github.com/jbylund/sylvan_librarian/issues)
 - Contact repository owner
 - Review [legal.md](../legal/legal.md) for details
 
@@ -164,5 +164,5 @@ For legal compliance questions:
 **Next Review**: January 2026  
 **Compliance Status**: ✅ Excellent (93% Complete)
 
-**Conclusion**: Arcane Tutor is in excellent legal compliance standing with all critical requirements met.
+**Conclusion**: Sylvan Librarian is in excellent legal compliance standing with all critical requirements met.
 The project can proceed with normal development priorities while optionally addressing the custom logo enhancement when resources permit.

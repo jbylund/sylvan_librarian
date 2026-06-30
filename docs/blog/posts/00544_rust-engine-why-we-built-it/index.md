@@ -43,9 +43,9 @@ We needed to do the filtering in a language where a tight loop over a struct fie
 
 ## What a Rust Extension Gives You
 
-The extension lives in [`card_engine/src/lib.rs`](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/card_engine/src/lib.rs)
+The extension lives in [`card_engine/src/lib.rs`](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/card_engine/src/lib.rs)
 and is exposed to Python via [PyO3](https://pyo3.rs).
-The `QueryEngine` Python class wraps a Rust struct that holds the full card corpus in an rkyv-serialized archive on shared memory (`/dev/shm/arcane_tutor_cards`).
+The `QueryEngine` Python class wraps a Rust struct that holds the full card corpus in an rkyv-serialized archive on shared memory (`/dev/shm/sylvan_librarian_cards`).
 [rkyv](https://rkyv.org/) encodes Rust structs in a layout that can be read directly from a memory-mapped file without any parsing or allocation — every worker maps the same bytes read-only, and queries read card fields in place.
 Zero deserialization per query.
 
@@ -72,7 +72,7 @@ A query for `t:creature` is `(card.card_types & TYPE_CREATURE) != 0`: a single `
 Color identity works the same way: `c:g` (cards whose color identity is a subset of green) is `(card.card_color_identity & !GREEN_BIT) == 0`.
 
 The filtering is not just a loop over 96,000 cards.
-Before the loop runs, [`narrow_candidates()`](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/card_engine/src/lib.rs#L817) uses prebuilt indexes to restrict the candidate set:
+Before the loop runs, [`narrow_candidates()`](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/card_engine/src/lib.rs#L817) uses prebuilt indexes to restrict the candidate set:
 
 | Index | Structure | Covers |
 |---|---|---|
@@ -92,7 +92,7 @@ SQL takes 3.6 ms — 190× slower.
 The Python AST has to cross the FFI boundary once per request; here is how that crossing works without pulling 96,000 cards back into Python.
 
 The Python parser is unchanged.
-Every AST node already implemented `to_sql()` to emit SQL fragments; we added a parallel [`to_json()`](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/parsing/nodes.py#L42) method that serializes the node tree to a dict.
+Every AST node already implemented `to_sql()` to emit SQL fragments; we added a parallel [`to_json()`](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/parsing/nodes.py#L42) method that serializes the node tree to a dict.
 The Rust `query()` method calls `filters.to_json()` across the FFI boundary (one Python call), serializes to bytes with `orjson`, deserializes in Rust with `serde_json`, then evaluates the filter tree entirely in Rust:
 
 ```rust
@@ -146,7 +146,7 @@ The engine either answers the request or it does not; SQL always answers.
 
 The engine holds 96,000 cards in memory.
 If the card count doubles, memory use doubles.
-More importantly, the engine is per-worker: before the shared-memory redesign ([PR #502](https://github.com/jbylund/arcane_tutor/pull/502)), each of ten Bjoern workers held its own copy, consuming 800 MB–1 GB of RSS that PostgreSQL would have used for free.
+More importantly, the engine is per-worker: before the shared-memory redesign ([PR #502](https://github.com/jbylund/sylvan_librarian/pull/502)), each of ten Bjoern workers held its own copy, consuming 800 MB–1 GB of RSS that PostgreSQL would have used for free.
 The mmap approach in #502 collapsed this to one OS-page-cache copy shared across all workers — but that tradeoff belongs in a separate post.
 
 The speedup also does not hold for queries that are genuinely database-bound in a way the engine cannot replicate: full-text search across very long oracle text with complex tiebreaking, for instance.
@@ -156,4 +156,4 @@ The 76× geometric mean is real, but it is a property of this corpus and this wo
 A much larger corpus would narrow the index advantage for selective queries and widen the gap for full-scan queries.
 We do not have data past 96,000 cards.
 
-The result is a search path that answers in under 1 ms on a cold cache — where PostgreSQL's measured floor was 52 ms — falls back silently on any failure, and with the shared-memory redesign in [PR #502](https://github.com/jbylund/arcane_tutor/pull/502) uses no more RSS than the SQL path did.
+The result is a search path that answers in under 1 ms on a cold cache — where PostgreSQL's measured floor was 52 ms — falls back silently on any failure, and with the shared-memory redesign in [PR #502](https://github.com/jbylund/sylvan_librarian/pull/502) uses no more RSS than the SQL path did.

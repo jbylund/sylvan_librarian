@@ -113,7 +113,7 @@ The 2015-frame, English, nonfoil, full-color printing of Lightning Bolt wins eve
 Once you have one row per card, you still need to sort those rows.
 Alphabetical is the worst possible default for a search engine — it tells you nothing about which cards are worth your attention.
 
-Arcane Tutor uses EDHREC rank as the default sort signal, with CubeCobra as an alternative.
+Sylvan Librarian uses EDHREC rank as the default sort signal, with CubeCobra as an alternative.
 EDHREC rank is a single integer — lower is more popular — already present in the Scryfall bulk data.
 No additional ingestion needed.
 It orders a `format:modern` query so that Lightning Bolt, Thoughtseize, and Snapcaster Mage appear before fringe cards with similar type lines.
@@ -196,4 +196,4 @@ When they are wrong, the user can change the sort dropdown — and because the t
 
 ---
 
-[Prefer score SQL](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/sql/backfill_prefer_scores.sql) · [CubeCobra score SQL](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/sql/backfill_cubecobra_scores.sql) · [Search query assembly](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/api_resource.py#L1290-L1323) · [PR #235](https://github.com/jbylund/arcane_tutor/pull/235) · [PR #243](https://github.com/jbylund/arcane_tutor/pull/243) · [PR #448](https://github.com/jbylund/arcane_tutor/pull/448)
+[Prefer score SQL](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/sql/backfill_prefer_scores.sql) · [CubeCobra score SQL](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/sql/backfill_cubecobra_scores.sql) · [Search query assembly](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/api_resource.py#L1290-L1323) · [PR #235](https://github.com/jbylund/sylvan_librarian/pull/235) · [PR #243](https://github.com/jbylund/sylvan_librarian/pull/243) · [PR #448](https://github.com/jbylund/sylvan_librarian/pull/448)

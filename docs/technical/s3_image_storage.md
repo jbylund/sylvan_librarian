@@ -2,7 +2,7 @@
 
 ## Overview
 
-Arcane Tutor stores card images in Amazon S3 with a CloudFront distribution in front of it for fast global delivery. Images are processed from Scryfall's PNG format into optimized WebP format at multiple resolutions.
+Sylvan Librarian stores card images in Amazon S3 with a CloudFront distribution in front of it for fast global delivery. Images are processed from Scryfall's PNG format into optimized WebP format at multiple resolutions.
 
 ## Architecture
 

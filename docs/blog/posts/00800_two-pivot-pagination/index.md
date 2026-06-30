@@ -26,7 +26,7 @@ best.truncate(limit);
 For 30,000 matching cards and a page of 100, that is O(30,000 × log 30,000) ≈ 450,000 comparisons to produce 100 results.
 The information you actually need is the boundary score that separates your 100 results from the other 29,900.
 Everything past that boundary can stay unsorted.
-The final version of PR [#490](https://github.com/jbylund/arcane_tutor/pull/490) replaced the full sort with a two-pivot selection.
+The final version of PR [#490](https://github.com/jbylund/sylvan_librarian/pull/490) replaced the full sort with a two-pivot selection.
 
 ## One Integer Per Card
 
@@ -58,7 +58,7 @@ fn sort_key_bits(card: &ACard, sort_col: SortCol, descending: bool) -> u128 {
 
 With that in place, comparing two cards is one `u128::cmp` — a single 128-bit integer comparison that covers all three levels of precedence.
 
-([Full implementation](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/card_engine/src/lib.rs#L966-L990))
+([Full implementation](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/card_engine/src/lib.rs#L966-L990))
 
 ## Finding the Page Boundary With Two Quickselects
 
@@ -88,7 +88,7 @@ fn select_page<'a>(mut v: Vec<(u128, &'a ACard)>, offset: usize, limit: usize) -
 }
 ```
 
-([Full implementation](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/card_engine/src/lib.rs#L996-L1014))
+([Full implementation](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/card_engine/src/lib.rs#L996-L1014))
 
 The total work is O(n) for the selection passes plus O(limit × log limit) for sorting the final segment — versus O(n × log n) for a full sort.
 For page one of a broad query with 30,000 matches and limit 100, that is roughly 30,000 expected comparisons in the selection pass, plus 700 to sort the page, versus 450,000 for a full sort.
@@ -118,7 +118,7 @@ The pointer tiebreaker keeps them in a stable order rather than scrambling them 
 
 The selection optimization applies after filtering.
 For broad queries like `format:legacy` — which match roughly 31,000 cards — the engine still scans all ~97,000 printings to determine which ones pass the filter.
-PR [#540](https://github.com/jbylund/arcane_tutor/pull/540) addressed that separately, using a prebuilt preferred-printing index to cut the scan to ~31,000 entries for the common `unique=card` case.
+PR [#540](https://github.com/jbylund/sylvan_librarian/pull/540) addressed that separately, using a prebuilt preferred-printing index to cut the scan to ~31,000 entries for the common `unique=card` case.
 
 The selection also does not help when the candidate set is already small.
 A query like `t:merfolk o:draw` narrows to roughly 20 cards via index intersection before the filter loop runs; at that scale, sorting 20 elements takes the same ~1 µs as a quickselect over 20 elements.

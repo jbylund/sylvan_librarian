@@ -12,7 +12,7 @@ The old cards were gone.
 And then a search request landed on worker 3 and returned the old results anyway — because worker 3's cache had not been touched.
 
 That is the bug.
-Arcane Tutor runs ten Bjoern worker processes sharing a port via `SO_REUSEPORT` (covered in [the Falcon + Bjoern post](../00064_falcon-bjoern-web-framework/)).
+Sylvan Librarian runs ten Bjoern worker processes sharing a port via `SO_REUSEPORT` (covered in [the Falcon + Bjoern post](../00064_falcon-bjoern-web-framework/)).
 Each is an independent OS process with its own heap.
 When worker 0 handled the import and called `_clear_caches()`, it cleared its own `LRUCache`.
 The other nine still held stale results.
@@ -64,7 +64,7 @@ They notice on the next request.
 ## What the Workers Check on Every Request
 
 A bare `multiprocessing.Value` counter is not a cache.
-The mechanism that connects the counter to the actual cached data is [`GenerationCache`](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/utils/generation_cache.py):
+The mechanism that connects the counter to the actual cached data is [`GenerationCache`](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/utils/generation_cache.py):
 
 ```python
 class GenerationCache:
@@ -88,7 +88,7 @@ On every `__getitem__`, `__setitem__`, or `__contains__`, it reads the shared co
 If the key is missing (the generation advanced), it calls `factory()` to construct a fresh inner cache and installs it.
 The LRU immediately evicts the previous generation's cache, freeing its memory.
 
-The full implementation is [68 lines including docstrings and type annotations](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/utils/generation_cache.py).
+The full implementation is [68 lines including docstrings and type annotations](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/utils/generation_cache.py).
 
 The `_query_cache` in `APIResource` — previously a plain `LRUCache(maxsize=1000)` — became:
 
@@ -146,9 +146,9 @@ The old decorator-based caches were module-level objects, which meant they persi
 Tests that asserted "after a cache clear, the result is fresh" were verifying the clear-and-check behavior within a single process, and that always worked.
 
 The new code required tests that exercise the cross-process behavior in isolation — creating a `multiprocessing.Value`, confirming that advancing it drops the right cache without touching anything else.
-The [unit tests for `GenerationCache`](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/utils/tests/test_generation_cache.py) cover generation advance, factory-called-once-per-generation, and LRU eviction of the old inner cache — all verifiable without spawning subprocesses, because the counter is just an integer.
+The [unit tests for `GenerationCache`](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/utils/tests/test_generation_cache.py) cover generation advance, factory-called-once-per-generation, and LRU eviction of the old inner cache — all verifiable without spawning subprocesses, because the counter is just an integer.
 
-The fix is in [PR #483](https://github.com/jbylund/arcane_tutor/pull/483).
+The fix is in [PR #483](https://github.com/jbylund/sylvan_librarian/pull/483).
 The staleness bug existed from the day the second worker was added.
 Every test run used one worker, so nothing surfaced it.
 

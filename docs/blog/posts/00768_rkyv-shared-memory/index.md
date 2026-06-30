@@ -17,7 +17,7 @@ At ten workers, that is up to ~2 GB for data that was logically identical across
 Before the fix, a reload looked like this: one worker fetched all 96,139 rows into Python, duplicated them into a list of dicts, called `engine.reload(dicts)`, and the Rust side built its `Vec<Card>`, index structures, and serialized the whole thing into a heap `AlignedVec` before writing it out.
 The other workers never saw the result — each held its own `QueryEngine` in its own address space, populated independently.
 
-The fix is in two parts, shipped as PRs [#502](https://github.com/jbylund/arcane_tutor/pull/502) and [#505](https://github.com/jbylund/arcane_tutor/pull/505).
+The fix is in two parts, shipped as PRs [#502](https://github.com/jbylund/sylvan_librarian/pull/502) and [#505](https://github.com/jbylund/sylvan_librarian/pull/505).
 The measured result, on a blue DB with 96,139 cards, macOS arm64, 2026-06-12:
 
 | Metric | Before | After | Δ |
@@ -77,11 +77,11 @@ struct Card {
 
 The indexes — trigram `HashMap`s, sorted `Vec<(i16, u32)>` for numeric fields, tag lists — derive `Archive` the same way and go into the same archive alongside the cards.
 Everything ships in one flat file.
-See the [full struct](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/card_engine/src/lib.rs#L147-L208) for the real layout.
+See the [full struct](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/card_engine/src/lib.rs#L147-L208) for the real layout.
 
 ## Writing and Reading the Archive Safely
 
-The write path builds the card store, serializes it into a per-process `.tmp` file with a 16-byte header (magic bytes, format version, `size_of::<Archived<Card>>()`), and atomically renames it into place at `/dev/shm/arcane_tutor_cards`.
+The write path builds the card store, serializes it into a per-process `.tmp` file with a 16-byte header (magic bytes, format version, `size_of::<Archived<Card>>()`), and atomically renames it into place at `/dev/shm/sylvan_librarian_cards`.
 `rename(2)` is atomic — readers never see a partial write.
 A crashed writer leaves a stale `.tmp`, not a corrupted archive at the shared path.
 
@@ -116,7 +116,7 @@ Each worker caches its current mapping by inode.
 One `stat(2)` per query checks whether the inode changed; remapping happens only on a change.
 Since publish is rename-only, a publish always changes the inode — there is no timestamp-granularity race.
 The inode after open comes from `fstat` on the already-opened file handle, not the earlier path stat, to close the window where the file could be replaced between the two calls.
-The full implementation is at [`lib.rs`](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/card_engine/src/lib.rs#L1313-L1348).
+The full implementation is at [`lib.rs`](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/card_engine/src/lib.rs#L1313-L1348).
 
 ## repr(C) for Fixed-Size String Fields
 
@@ -143,7 +143,7 @@ The archived form is identical to the live form: `InlineStr<61>` in the archive 
 We did not benchmark the inline-string change in isolation — the 346 MB peak measurement captures all the layout changes together.
 The cache-locality benefit is structural rather than independently quantified.
 `InlineStr<61>` covers every card name in the Scryfall dataset; set codes use `InlineStr<8>`.
-The full implementation is at [`card_engine/src/inline_str.rs`](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/card_engine/src/inline_str.rs).
+The full implementation is at [`card_engine/src/inline_str.rs`](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/card_engine/src/inline_str.rs).
 
 ## The Reload Spike: Two Independent Sources
 
@@ -180,7 +180,7 @@ One batch of row dicts (~18 MB at 2,000 rows) is alive at a time instead of the 
 On the Rust side, `reload_commit()` replaced `to_bytes` + `write_all` with `rkyv::api::high::to_bytes_in` writing through a 1 MB `BufWriter` directly into the `.tmp` file.
 The full `Vec<Card>` and indexes still have to be in memory during serialization — rkyv needs the complete object graph to compute relative offsets — but the archive bytes go directly to disk as file pages rather than staging first in a heap `AlignedVec`.
 That eliminates the ~89 MB heap buffer and the realloc-doubling spike; the archive never exists as a heap copy at all.
-See [`reload_commit` in `lib.rs`](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/card_engine/src/lib.rs#L1524-L1550) and the Python streaming path at [`_reload_engine` in `api_resource.py`](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/api_resource.py#L856-L913).
+See [`reload_commit` in `lib.rs`](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/card_engine/src/lib.rs#L1524-L1550) and the Python streaming path at [`_reload_engine` in `api_resource.py`](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/api_resource.py#L856-L913).
 
 The staging API (`reload_begin` / `add_batch` / `reload_commit` / `reload_abort`) holds a cross-process `flock` from `begin` to `commit` or `abort`, so two workers cannot interleave staging.
 A worker that calls `reload_begin` and dies releases the flock when the lock file descriptor drops — no manual cleanup needed.

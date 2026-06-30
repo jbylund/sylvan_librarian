@@ -49,9 +49,9 @@ the value `r` happened to be followed by `-o`, which looked like arithmetic subt
 The fix was a `prev_is_comparison` guard:
 if the token before the `-` was a comparison operator,
 the `-` is the start of a negated operand, not infix subtraction.
-([#430](https://github.com/jbylund/arcane_tutor/pull/430))
+([#430](https://github.com/jbylund/sylvan_librarian/pull/430))
 
-### Rewriting the Tokenizer with pyparsing ([#433](https://github.com/jbylund/arcane_tutor/pull/433))
+### Rewriting the Tokenizer with pyparsing ([#433](https://github.com/jbylund/sylvan_librarian/pull/433))
 
 The char loop grew fragile.
 Hyphenated values (`otag:dual-land`, `is:modal-dfc`) needed special handling,
@@ -142,7 +142,7 @@ def balance_partial_query(query: str) -> str:
     return query
 ```
 
-### The Apostrophe Bug ([#477](https://github.com/jbylund/arcane_tutor/pull/477))
+### The Apostrophe Bug ([#477](https://github.com/jbylund/sylvan_librarian/pull/477))
 
 The original versions of both functions did not track whether they were inside a quoted string.
 Given `!"stormchaser's talent"`:
@@ -203,7 +203,7 @@ The same `BinaryOperatorNode` type represents both arithmetic sub-expressions
 and the top-level comparison — the SQL generation code walks the tree recursively
 and emits the right SQL fragment at each level.
 
-## Performance: Packrat Caching ([#66](https://github.com/jbylund/arcane_tutor/pull/66))
+## Performance: Packrat Caching ([#66](https://github.com/jbylund/sylvan_librarian/pull/66))
 
 pyparsing is a backtracking PEG parser.
 For a grammar with significant alternation — seven different condition types tried in order,

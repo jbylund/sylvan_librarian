@@ -1,216 +1,242 @@
-# Arcane Tutor - User Help Guide
+# Sylvan Librarian — Search Syntax
 
-## Quick Start
+Enter any combination of filters below. Filters are AND-combined by default; see [Query Operators](#query-operators) for OR, negation, and grouping.
 
-Arcane Tutor is a powerful Magic: The Gathering card search engine.
-This guide will help you find exactly the cards you're looking for.
+## Table of Contents
 
-## Basic Searches
+1. [Searchable Card Dimensions](#searchable-card-dimensions)
+   - [Card Name](#card-name)
+   - [Color](#color)
+   - [Card Type](#card-type)
+   - [Mana Value](#mana-value)
+   - [Power and Toughness](#power-and-toughness)
+   - [Oracle Text](#oracle-text)
+   - [Format Legality](#format-legality)
+   - [Keywords](#keywords)
+   - [Rarity](#rarity)
+   - [Set](#set)
+   - [Price](#price)
+   - [Loyalty](#loyalty)
+   - [Mana Production](#mana-production)
+2. [Query Operators](#query-operators)
+3. [Arithmetic Expressions](#arithmetic-expressions)
+4. [Sorting and Display](#sorting-and-display)
 
-### Search by Card Name
+---
 
-Simply type the card name in the search box:
+## Searchable Card Dimensions
+
+### Card Name
+
+Plain text searches card names. Partial matches work.
+
 ```
 Lightning Bolt
-```
-
-For partial matches, just type part of the name:
-```
 bolt
 ```
 
-### Search by Type
+### Color
 
-Use `type:` or `t:` to find cards by their type:
+Use `c:` or `color:` to filter by color. Use `id:` or `identity:` for color identity (includes mana symbols in oracle text).
+
+Color letters: `W` (white), `U` (blue), `B` (black), `R` (red), `G` (green).
+
 ```
-type:Dragon
-t:Planeswalker
+c:red          cards that are red
+c:UR           cards that are blue and red
+c:WUG          cards that are white, blue, and green
+id:WU          cards with a white/blue identity
+```
+
+### Card Type
+
+Use `t:` or `type:`. Partial words work. Stack multiple `t:` filters to require all types.
+
+```
+t:Dragon
 t:instant
+t:legendary t:creature
 ```
 
-### Search by Color
+### Mana Value
 
-Use `color:` or `c:` to find cards by color:
-```
-c:red
-c:UR       (blue and red)
-c:WUG      (white, blue, and green)
-```
+Use `cmc` with a comparison operator (`=`, `<`, `>`, `<=`, `>=`, `!=`).
 
-Use `id:` or `identity:` for color identity (includes mana symbols in text):
 ```
-id:WU      (white/blue identity)
+cmc=3
+cmc<=2
+cmc>=5
 ```
 
-## Advanced Searches
+### Power and Toughness
 
-### Numeric Comparisons
+Use `power` / `pow` and `toughness` / `tou`. Values can be compared to each other.
 
-Search by mana cost, power, toughness, or loyalty using comparison operators:
 ```
-cmc=3                    (converted mana cost exactly 3)
-cmc<=2                   (2 or less mana)
-power>=5                 (power 5 or greater)
-toughness<3              (toughness less than 3)
-loyalty>4                (loyalty greater than 4)
+power>=5
+toughness<3
+pow>tou
 ```
 
-### Text Searches
+### Oracle Text
 
-Search within oracle text (rules text) or flavor text:
+Use `o:` or `oracle:` to search rules text. Quote phrases with spaces or punctuation. Use `flavor:` or `ft:` for flavor text.
+
 ```
-oracle:flying
-o:"draw a card"          (exact phrase)
+o:flying
+o:"draw a card"
+o:"enters the battlefield"
 flavor:brother
-```
-
-### Rarity and Sets
-
-Filter by rarity or specific sets:
-```
-rarity:mythic
-r>=rare                  (rare or mythic)
-set:MH2                  (Modern Horizons 2)
-```
-
-### Price Searches
-
-Find cards within your budget:
-```
-usd<5                    (less than $5)
-usd>=10                  (at least $10)
-eur<2                    (less than €2)
-```
-
-## Combining Searches
-
-Use `AND`, `OR`, and `NOT` to combine searches:
-```
-type:Dragon AND color:red
-c:R OR c:G
-type:instant NOT color:blue
-```
-
-Use parentheses for complex queries:
-```
-(type:instant OR type:sorcery) AND cmc<=2
-```
-
-## Common Search Patterns
-
-### Budget Commander Creatures
-```
-type:legendary type:creature usd<5 identity:WU
-```
-
-### Efficient Removal Spells
-```
-(type:instant OR type:sorcery) oracle:destroy oracle:creature cmc<=3
-```
-
-### Card Draw in Blue
-```
-color:blue oracle:"draw" (type:instant OR type:sorcery)
-```
-
-### Mana Dorks (Mana Producing Creatures)
-```
-type:creature produces:any cmc<=2
-```
-
-### High Power Creatures
-```
-type:creature power>=8 cmc<=6
-```
-
-## Special Features
-
-### Regular Expressions
-
-Use `/pattern/` for regex searches:
-```
-name:/^Lightning/        (names starting with "Lightning")
-```
-
-### Arithmetic Expressions
-
-Arcane Tutor supports math in queries (unique feature!):
-```
-cmc+1<power              (undercosted creatures)
-power-toughness=0        (square creatures)
-power+toughness>10       (total stats greater than 10)
 ```
 
 ### Format Legality
 
-Search by format legality:
+Use `format:` or `f:` for cards legal in a format. Use `banned:` for banned cards, `legal:` as an alias for `format:`.
+
+Supported formats: `standard`, `pioneer`, `modern`, `legacy`, `vintage`, `pauper`, `commander`, and more.
+
 ```
 format:modern
-legal:commander
-banned:standard
+f:commander
+legal:standard
+banned:legacy
 ```
 
 ### Keywords
 
-Search for specific keyword abilities:
+Use `keyword:` or `k:` to search for keyword abilities.
+
 ```
 keyword:flying
 keyword:vigilance
 k:trample
 ```
 
-## Tips for Better Searches
+### Rarity
 
-1. **Use quotes** for exact phrases: `oracle:"draw three cards"`
-1. **Combine filters** to narrow results: `type:creature c:red cmc<=3 power>=2`
-1. **Use negation** to exclude cards: `type:creature NOT color:black`
-1. **Try shortcuts**: Use `t:` instead of `type:`, `c:` instead of `color:`
-1. **Experiment with operators**: `>=`, `<=`, `!=` all work for numeric searches
-
-## Sorting Results
-
-Use the dropdown menus to sort your results:
-- **Order By**: Choose what to sort by (EDHREC, CMC, Power, Rarity, Price)
-- **Direction**: Toggle ascending/descending with the arrow button
-- **Unique Mode**: Choose between unique cards, artwork, or printings
-- **Prefer**: Select which printing to show (oldest, newest, cheapest, etc.)
-
-## Need More Help?
-
-- **Full Syntax Reference**: See [docs/scryfall_syntax_analysis.md](../technical/scryfall_syntax_analysis.md) for complete technical documentation
-- **Functionality Analysis**: Check [docs/scryfall_functionality_analysis.md](../technical/scryfall_functionality_analysis.md) for detailed feature list
-- **About Arcane Tutor**: Learn about the project at [about.md](../user/about.md)
-- **Legal & Compliance**: Review our [legal.md](../legal/legal.md) for data sources and attribution
-- **GitHub Issues**: Report problems or request features at [github.com/jbylund/arcane_tutor](https://github.com/jbylund/arcane_tutor/issues)
-
-## Examples to Try
+Use `r:` or `rarity:`. Comparison operators work — rarity order is common < uncommon < rare < mythic.
 
 ```
-# Find cheap red creatures for aggro decks
-type:creature c:red cmc<=3 power>=2 usd<1
+r:mythic
+r:common
+r>=rare
+```
 
-# Find expensive blue counterspells
-type:instant color:blue oracle:counter oracle:spell usd>5
+### Set
 
-# Find legendary creatures for commander under $10
-type:legendary type:creature usd<10
+Use `set:` with the set code.
 
-# Find artifacts that cost 2 or less
-type:artifact cmc<=2
+```
+set:MH2
+set:DMU
+```
 
-# Find cards with "enters the battlefield" triggers
-oracle:"enters the battlefield" type:creature
+### Price
 
-# Find planeswalkers in your colors
-type:planeswalker id:WUG
+Use `usd` or `eur` with a comparison operator.
 
-# Find cards for mana fixing
-produces:any type:land
+```
+usd<5
+usd>=10
+eur<2
+```
 
-# Find big creatures that are undercosted
-type:creature cmc<=6 power>=8
+### Loyalty
+
+Use `loyalty` or `loy` with a comparison operator.
+
+```
+t:planeswalker loyalty>4
+loy=3
+```
+
+### Mana Production
+
+Use `produces:` with color letters or `any`.
+
+```
+produces:any
+produces:wu
+t:land produces:any
 ```
 
 ---
 
-**About**: Learn more about [Arcane Tutor](../user/about.md), our [legal compliance](../legal/legal.md), and [data sources](legal.md#data-sources).
+## Query Operators
+
+### AND / OR
+
+All filters are implicitly AND. Use `OR` to require only one of several terms:
+
+```
+type:Dragon AND color:red
+c:R OR c:G
+```
+
+### Negation
+
+Prefix a keyword with `-` to exclude matches. `NOT` works as an alternative:
+
+```
+t:instant -c:blue
+type:creature NOT color:black
+```
+
+### Grouping
+
+Use parentheses to control how AND and OR interact:
+
+```
+(t:instant OR t:sorcery) cmc<=2
+type:legendary (t:goblin OR t:elf)
+```
+
+### Exact Name
+
+Prefix a name with `!` to match only that card:
+
+```
+!Fire
+!"Lightning Bolt"
+```
+
+### Regular Expressions
+
+Use `/pattern/` with `name:`, `type:`, or `oracle:`. Standard regex syntax applies.
+
+```
+name:/^Lightning/
+o:/(flying|trample)/
+```
+
+---
+
+## Arithmetic Expressions
+
+Sylvan Librarian extends standard Scryfall syntax with arithmetic in numeric comparisons. Fields (`cmc`, `power`, `toughness`, `loyalty`) can be combined with `+`, `-`, `*`, `/` before comparing.
+
+```
+cmc+1<power          undercosted creatures
+power-toughness=0    square creatures
+power+toughness>10   high combined stats
+```
+
+---
+
+## Sorting and Display
+
+### Sort Order
+
+Use the **Order By** dropdown to sort results by EDHREC rank, CMC, power, rarity, or price. Toggle ascending/descending with the **Direction** button.
+
+### Grouping Results
+
+Cards often have multiple printings. Use **Unique** to control what counts as one result:
+
+- **Cards** (default) — one result per unique card, deduplicating across all printings
+- **Art** — one result per unique illustration
+- **Prints** — every printing shown separately
+
+### Preferred Printing
+
+When results are grouped by card or art, the **Prefer** setting controls which printing is surfaced: oldest, newest, cheapest (USD), most expensive (USD), and similar options for EUR.

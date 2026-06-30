@@ -44,7 +44,7 @@ KEY = make_key(
         "/search?q=lightning+bolt",
         (("q", "lightning bolt"),),
         (("ACCEPT-ENCODING", "gzip"),),
-        "arcanetutor.com",
+        "sylvan-librarian.com",
     )
 )
 
@@ -53,7 +53,7 @@ OTHER_KEY = make_key(
         "/search?q=counterspell",
         (("q", "counterspell"),),
         (("ACCEPT-ENCODING", "gzip"),),
-        "arcanetutor.com",
+        "sylvan-librarian.com",
     )
 )
 

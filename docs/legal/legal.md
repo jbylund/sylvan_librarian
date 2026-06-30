@@ -2,7 +2,7 @@
 
 ## Overview
 
-Arcane Tutor is an open-source Magic: The Gathering card search engine that respects intellectual property rights and complies with relevant policies and guidelines.
+Sylvan Librarian is an open-source Magic: The Gathering card search engine that respects intellectual property rights and complies with relevant policies and guidelines.
 
 **Related Documentation:**
 - **[legal_compliance_summary.md](../legal/legal_compliance_summary.md)** - Quick overview and recommendations
@@ -15,7 +15,7 @@ Arcane Tutor is an open-source Magic: The Gathering card search engine that resp
 
 ### Primary Data Source
 
-Arcane Tutor uses card data from **Scryfall's official bulk data API** (https://api.scryfall.com/bulk-data), which provides comprehensive Magic: The Gathering card information.
+Sylvan Librarian uses card data from **Scryfall's official bulk data API** (https://api.scryfall.com/bulk-data), which provides comprehensive Magic: The Gathering card information.
 
 - **Data Provider**: Scryfall (https://scryfall.com)
 - **API Documentation**: https://scryfall.com/docs/api
@@ -47,7 +47,7 @@ Magic: The Gathering is a trademark of Wizards of the Coast LLC, a subsidiary of
 
 **All card data, names, artwork, and game content are:**
 - © Wizards of the Coast LLC
-- Portions of Arcane Tutor are unofficial Fan Content permitted under the Wizards of the Coast Fan Content Policy
+- Portions of Sylvan Librarian are unofficial Fan Content permitted under the Wizards of the Coast Fan Content Policy
 - Not approved/endorsed by Wizards of the Coast
 - Portions of the materials used are property of Wizards of the Coast. © Wizards of the Coast LLC.
 
@@ -58,7 +58,7 @@ We acknowledge and thank Scryfall (https://scryfall.com) for:
 - Maintaining high-quality card information
 - Supporting the Magic: The Gathering community
 
-Arcane Tutor is an **independent implementation** and is **not affiliated with, endorsed by, or sponsored by Scryfall**.
+Sylvan Librarian is an **independent implementation** and is **not affiliated with, endorsed by, or sponsored by Scryfall**.
 
 ## Compliance with Policies
 
@@ -80,7 +80,7 @@ We comply with Scryfall's API Terms of Service:
 
 ## Differentiation from Scryfall
 
-Arcane Tutor is intentionally designed to be different from Scryfall:
+Sylvan Librarian is intentionally designed to be different from Scryfall:
 
 ### Technical Differences
 - **Original codebase**: All code is written from scratch
@@ -95,7 +95,7 @@ Arcane Tutor is intentionally designed to be different from Scryfall:
 - **Original iconography**: Custom theme toggle and UI elements
 
 ### Naming and Branding
-- **Project name**: "Arcane Tutor" - a unique name that doesn't claim to be Scryfall
+- **Project name**: "Sylvan Librarian" - a unique name that doesn't claim to be Scryfall
 - **No trademark confusion**: We do not claim to be Scryfall or use their branding
 - **Clear attribution**: We acknowledge Scryfall as a data source
 
@@ -117,13 +117,13 @@ We use the trademark "Magic: The Gathering™" in accordance with Wizards of the
 
 ### "Scryfall"
 We acknowledge "Scryfall" as a trademark/brand:
-- Our project name "Arcane Tutor" is unique and doesn't cause confusion
+- Our project name "Sylvan Librarian" is unique and doesn't cause confusion
 - We are not affiliated with or endorsed by Scryfall
 - We do not claim to be Scryfall or use their exact branding
 
 ## User Privacy
 
-Currently, Arcane Tutor:
+Currently, Sylvan Librarian:
 - Does not collect personal information
 - Does not use cookies for tracking
 - Uses localStorage only for theme preference
@@ -133,7 +133,7 @@ A formal Privacy Policy will be added as the project evolves.
 
 ## Terms of Service
 
-Users of Arcane Tutor should understand:
+Users of Sylvan Librarian should understand:
 - This is provided "as-is" without warranty
 - Card data accuracy depends on upstream sources (Scryfall)
 - This is a community project not endorsed by Wizards of the Coast
@@ -144,7 +144,7 @@ A formal Terms of Service will be added as the project evolves.
 ## Contact and Takedown Policy
 
 If you believe this project infringes on your intellectual property rights:
-- Please open an issue on GitHub: https://github.com/jbylund/arcane_tutor/issues
+- Please open an issue on GitHub: https://github.com/jbylund/sylvan_librarian/issues
 - Or contact the repository owner directly
 - We will respond promptly to any legitimate concerns
 

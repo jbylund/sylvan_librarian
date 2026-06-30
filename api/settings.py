@@ -26,7 +26,7 @@ class Settings:
         """Initialize settings from environment variables."""
         self._enable_cache = _is_truthy(os.environ.get("ENABLE_CACHE", "false"))
         self._enable_engine = _is_truthy(os.environ.get("ENABLE_ENGINE", "true"))
-        self._shared_cache_path: str = os.environ.get("SHARED_CACHE_PATH", "/tmp/arcane.cache")  # noqa: S108
+        self._shared_cache_path: str = os.environ.get("SHARED_CACHE_PATH", "/tmp/sylvan.cache")  # noqa: S108
 
     @property
     def enable_cache(self) -> bool:

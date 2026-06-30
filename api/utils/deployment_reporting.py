@@ -47,7 +47,7 @@ def report_deployment() -> None:
 
     deployment_env = os.getenv("ENVIRONMENT", "unknown")
     hostname = os.getenv("HOSTNAME", socket.gethostname())
-    repository = os.getenv("REPOSITORY_URL", "https://github.com/jbylund/arcane_tutor")
+    repository = os.getenv("REPOSITORY_URL", "https://github.com/jbylund/sylvan_librarian")
 
     # Format environment as {deployment_env}-{hostname}
     environment = f"{deployment_env}-{hostname}"

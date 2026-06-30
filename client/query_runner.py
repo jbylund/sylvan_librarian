@@ -500,7 +500,7 @@ def print_statistics(results: list[dict]) -> None:
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments, falling back to environment variables then module defaults."""
-    parser = argparse.ArgumentParser(description="Run search queries against the Arcane Tutor API.")
+    parser = argparse.ArgumentParser(description="Run search queries against the Sylvan Librarian API.")
     parser.add_argument(
         "--api-url",
         default=os.environ.get("API_URL", DEFAULT_API_URL),

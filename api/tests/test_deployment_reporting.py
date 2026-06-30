@@ -85,7 +85,7 @@ class TestDeploymentReporting:
         assert payload["api_key"] == "test_api_key"
         assert payload["deploy"]["environment"] == expected_environment
         assert payload["deploy"]["revision"] == "abc123def456"
-        assert payload["deploy"]["repository"] == "https://github.com/jbylund/arcane_tutor"
+        assert payload["deploy"]["repository"] == "https://github.com/jbylund/sylvan_librarian"
 
         # Check log messages
         assert "Reporting deployment to Honeybadger" in caplog.text

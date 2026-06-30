@@ -6,7 +6,7 @@ tags: ["rust", "performance", "memory"]
 summary: "The Rust card store held 96k printings, each owning its own heap-allocated strings — even though 'Forest' appears 130 times with the same set name and 'Shock' has the same oracle text across every printing. Replacing each unique string with a u32 ID cut the archived card data from 107 MB to 47 MB and the build-time heap from 205 MB to 145 MB."
 ---
 
-After the first version of the card store landed ([PR #490](https://github.com/jbylund/arcane_tutor/pull/490)),
+After the first version of the card store landed ([PR #490](https://github.com/jbylund/sylvan_librarian/pull/490)),
 96,139 cards produced ~29 MB of actual string payload — but a 205 MB transient heap and a
 107 MB archived card section.
 That 3–7× gap needed an explanation.
@@ -99,7 +99,7 @@ impl Interner {
 ```
 
 The full implementation is at
-[`card_engine/src/lib.rs`](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/card_engine/src/lib.rs#L224-L253).
+[`card_engine/src/lib.rs`](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/card_engine/src/lib.rs#L224-L253).
 
 The `Card` struct becomes:
 

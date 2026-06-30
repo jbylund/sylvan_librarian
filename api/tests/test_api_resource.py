@@ -673,20 +673,20 @@ _HOSTNAME_TESTCASES = {
         "raw_host": "tolarian-acade.my",
     },
     "strips_com_tld": {
-        "expected": "Arcane Tutor",
-        "raw_host": "arcane-tutor.com",
+        "expected": "Sylvan Librarian",
+        "raw_host": "sylvan-librarian.com",
     },
     "strips_port": {
-        "expected": "Arcane Tutor",
-        "raw_host": "arcane-tutor.com:443",
+        "expected": "Sylvan Librarian",
+        "raw_host": "sylvan-librarian.com:443",
     },
     "strips_www_prefix": {
-        "expected": "Arcane Tutor",
-        "raw_host": "www.arcane-tutor.com",
+        "expected": "Sylvan Librarian",
+        "raw_host": "www.sylvan-librarian.com",
     },
     "strips_subdomain_com": {
-        "expected": "Arcane Tutor",
-        "raw_host": "foo.arcane-tutor.com",
+        "expected": "Sylvan Librarian",
+        "raw_host": "foo.sylvan-librarian.com",
     },
     "strips_subdomain_non_strip_tld": {
         "expected": "Tolarian Academy",

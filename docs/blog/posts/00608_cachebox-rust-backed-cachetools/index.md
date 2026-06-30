@@ -8,14 +8,14 @@ summary: "Swapping cachetools for cachebox (a Rust-backed Python cache) required
 
 The GitHub issue said "let's investigate switching" and linked to a library I had not heard of.
 [Cachebox](https://github.com/awolverp/cachebox) describes itself as the fastest memoizing and caching Python library written in Rust.
-Arcane Tutor was already using [cachetools](https://cachetools.readthedocs.io/) for its LRU and TTL caches — the APIs looked nearly identical.
+Sylvan Librarian was already using [cachetools](https://cachetools.readthedocs.io/) for its LRU and TTL caches — the APIs looked nearly identical.
 I assumed there would be a catch.
 
 There mostly wasn't.
 
 ## Why the Caches Matter
 
-Arcane Tutor has three hot cache sites:
+Sylvan Librarian has three hot cache sites:
 
 1. `get_where_clause` — parses a search query into a SQL WHERE clause. Up to 10,000 entries in an
    LRU cache; this is the most-hit function in the request path.
@@ -66,7 +66,7 @@ The main surface difference:
 `(*args, **kwargs) → hashable`. `cachebox.cached` accepts `key_maker=` with signature
 `(args: tuple, kwds: dict) → hashable`.
 
-Arcane Tutor has a thin wrapper around both decorators called `cached` (it adds a `settings.enable_cache` runtime flag so caching can be toggled without restarting).
+Sylvan Librarian has a thin wrapper around both decorators called `cached` (it adds a `settings.enable_cache` runtime flag so caching can be toggled without restarting).
 The wrapper needed one line changed:
 
 ```python
@@ -93,9 +93,9 @@ One more edge case: cachebox requires `ttl > 0`.
 The codebase had one place where a disabled cache was expressed as `TTLCache(maxsize=1, ttl=0)`.
 That became `LRUCache(maxsize=1)` — a 1-slot LRU effectively evicts on every insert, which is the right behavior for "cache disabled."
 
-The full diff is in [PR #383](https://github.com/jbylund/arcane_tutor/pull/383).
+The full diff is in [PR #383](https://github.com/jbylund/sylvan_librarian/pull/383).
 Seven files changed, five of them import updates.
-The [`cached` wrapper](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/api_resource.py#L330-L350) is the only place that touches cachebox directly — every call site goes through the same decorator interface it always did.
+The [`cached` wrapper](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/api_resource.py#L330-L350) is the only place that touches cachebox directly — every call site goes through the same decorator interface it always did.
 
 ## A Path Not Taken
 
@@ -116,7 +116,7 @@ The cachebox 6.0.0 release pinned the public interface; earlier versions had bre
 If you depend on cachetools features outside `LRUCache`, `TTLCache`, and `cached` — `LFUCache`, `RRCache`, custom eviction callbacks — check the cachebox docs before switching.
 
 Cachebox also does not document per-call thread-safety guarantees the way cachetools does.
-This was not a concern for Arcane Tutor: Bjoern runs multiple worker processes, and each worker holds its own cache instance — no sharing across processes, so no concurrent-access question.
+This was not a concern for Sylvan Librarian: Bjoern runs multiple worker processes, and each worker holds its own cache instance — no sharing across processes, so no concurrent-access question.
 If your deployment model uses threads sharing a cache object, test the behavior rather than assuming cachetools' guarantees transfer.
 
 The catches were bounded: two hours of migration work for a 6× gain on the highest-traffic function in the request path.

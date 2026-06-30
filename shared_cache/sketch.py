@@ -26,7 +26,7 @@ Rotation is split into two phases so the lock is held only briefly:
 ## Rust implementation path: per-page files
 
 Rather than cramming all pages into one mmap region, each page maps to its own
-file (e.g. arcane.cache.0, arcane.cache.1, ...). A small coordination file
+file (e.g. sylvan.cache.0, sylvan.cache.1, ...). A small coordination file
 holds the spinlock, the shared cuckoo filter, and the ring buffer counter.
 
 Advantages over a single-file layout:

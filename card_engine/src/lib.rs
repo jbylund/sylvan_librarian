@@ -1355,9 +1355,9 @@ impl QueryEngine {
     fn new(shm_path: Option<&str>) -> Self {
         // Use /dev/shm on Linux (shared memory), fall back to /tmp on macOS.
         let default_path = if cfg!(target_os = "linux") {
-            "/dev/shm/arcane_tutor_cards"
+            "/dev/shm/sylvan_librarian_cards"
         } else {
-            "/tmp/arcane_tutor_cards"
+            "/tmp/sylvan_librarian_cards"
         };
         QueryEngine {
             shm_path: PathBuf::from(shm_path.unwrap_or(default_path)),

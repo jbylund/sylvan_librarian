@@ -57,7 +57,7 @@ We need 64 symbols.
 ## Subsetting to 64 Glyphs
 
 `pyftsubset` from the [fonttools](https://github.com/fonttools/fonttools) library strips any glyph not in the requested set.
-The subsetting script ([`scripts/subset_mana_font.py`](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/scripts/subset_mana_font.py)) downloads the font from GitHub, runs `pyftsubset` with the PUA Unicode ranges for the 64 symbols the app actually uses, and writes both WOFF2 and WOFF outputs.
+The subsetting script ([`scripts/subset_mana_font.py`](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/scripts/subset_mana_font.py)) downloads the font from GitHub, runs `pyftsubset` with the PUA Unicode ranges for the 64 symbols the app actually uses, and writes both WOFF2 and WOFF outputs.
 The core invocation is:
 
 ```bash
@@ -108,7 +108,7 @@ Hybrid mana symbols use both `::before` and `::after` to layer two half-glyphs, 
 
 That two-glyph layering is the part that initially broke.
 The first attempt used a different font (the npm `mana-font` package) and hybrid symbols rendered as two non-overlapping icons side-by-side rather than a single split-pip.
-After reverting ([14ff527](https://github.com/jbylund/arcane_tutor/commit/14ff527)), the fix was switching to andrewgioia/mana directly, whose CSS positions the two pseudo-elements with `absolute` offsets inside the circle.
+After reverting ([14ff527](https://github.com/jbylund/sylvan_librarian/commit/14ff527)), the fix was switching to andrewgioia/mana directly, whose CSS positions the two pseudo-elements with `absolute` offsets inside the circle.
 The test page `api/static/mana-symbols-test.html` exists because of that debugging session — a grid showing all 64 symbols in both emoji and font-rendered form, so it is obvious at a glance when something is off.
 
 ## Non-Blocking Load for All Three Fonts
@@ -166,7 +166,7 @@ The fix is synthetic fallback `@font-face` declarations with tuned metrics:
 ```
 
 The `size-adjust`, `ascent-override`, and `descent-override` values were computed from the actual font metrics using fonttools.
-The repo includes [`api/static/font-fallback-tuner.html`](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/static/font-fallback-tuner.html), a local debug page that renders the same text in both the real font and a candidate fallback side-by-side, with sliders for each metric override.
+The repo includes [`api/static/font-fallback-tuner.html`](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/static/font-fallback-tuner.html), a local debug page that renders the same text in both the real font and a candidate fallback side-by-side, with sliders for each metric override.
 You tune `size-adjust` until the line heights match, then `ascent-override` and `descent-override` until descenders align, then commit the values.
 Arial Bold, scaled and adjusted to match Beleren's cap height and descender depth, occupies nearly the same number of pixels as Beleren Bold.
 When the real font arrives, the reflow is small enough to be invisible.

@@ -60,7 +60,7 @@ def make_key(i: int) -> tuple:
         f"/search?q=card_{i}",
         (("q", f"card_{i}"),),
         (("ACCEPT-ENCODING", "gzip"),),
-        "arcanetutor.com",
+        "sylvan-librarian.com",
     )
 
 

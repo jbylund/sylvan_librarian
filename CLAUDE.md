@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Arcane Tutor is an open-source Scryfall-compatible Magic: The Gathering card search engine. It parses a Scryfall-like query DSL, converts queries to optimized PostgreSQL, and serves results via a Falcon REST API with a vanilla JS frontend. It extends Scryfall syntax with arithmetic expressions (e.g., `cmc+1<power`).
+Sylvan Librarian is an open-source Scryfall-compatible Magic: The Gathering card search engine. It parses a Scryfall-like query DSL, converts queries to optimized PostgreSQL, and serves results via a Falcon REST API with a vanilla JS frontend. It extends Scryfall syntax with arithmetic expressions (e.g., `cmc+1<power`).
 
 ## Commands
 
@@ -38,8 +38,10 @@ python -m ruff format .
 # Start services (dev mode)
 make dev-up
 
-# Connect to local database
-make dbconn   # PostgreSQL at 127.0.0.1:25432, db=magic, user=foouser, password=foopassword
+# Connect to local database (execs into the postgres container — no external port exposed)
+make dbconn-blue  # blue environment
+make dbconn-green # green environment
+# also: dbconn-dev, dbconn-prod
 ```
 
 ## Architecture
@@ -90,3 +92,17 @@ Browser → GET /search?q=<query>
 - **Python:** `ruff` (line length 132, Google docstring convention, target Python 3.13). Config in `pyproject.toml`.
 - **HTML/JS:** `prettier` (config in `.prettierrc`).
 - Tests relax many ruff rules (see `per-file-ignores` in `pyproject.toml`).
+
+## Blog Posts
+
+Blog posts live in `docs/blog/posts/<slug>/index.md`. Writing guidance:
+
+- **Rubric:** `docs/blog/post-grading-rubric.md` — 100-point rubric covering technical accuracy,
+  concrete evidence, clarity, narrative cohesion, honest tradeoffs, and writing quality. Read before
+  writing or reviewing a post.
+- **HN guidance:** `docs/blog/hn-content-guidance.md` and `docs/blog/hn-title-guidance.md` — what
+  makes a post land on Hacker News vs. get ignored.
+- **Post plan:** `docs/blog/blog-post-plan.md` — planned and in-progress posts.
+
+Blog posts are not subject to the 100-line length convention in the global markdown rules. Length
+should match the story: long enough to explain the mechanism and show evidence, no longer.

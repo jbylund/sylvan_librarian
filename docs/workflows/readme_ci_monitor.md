@@ -46,7 +46,7 @@ The automated CI monitor has detected failing checks on the main branch.
 **Failed Checks:**
 
 - **Lint** (workflow)
-  - [View details](https://github.com/jbylund/arcane_tutor/actions/runs/17803973764)
+  - [View details](https://github.com/jbylund/sylvan_librarian/actions/runs/17803973764)
 
 **What to do:**
 1. Review the failing checks above

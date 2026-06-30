@@ -52,7 +52,7 @@ gh pr view <number>
 ```bash
 # Get the current HEAD sha for anchoring links
 git rev-parse HEAD
-# Link form: https://github.com/jbylund/arcane_tutor/blob/<sha>/path/to/file.py#L42-L51
+# Link form: https://github.com/jbylund/sylvan_librarian/blob/<sha>/path/to/file.py#L42-L51
 ```
 
 Use anchored SHAs, not links to `main` — floating links drift.
@@ -102,7 +102,9 @@ summary: "..."
 
 The summary is one or two sentences: the claim and the mechanism.
 
-**Opening sentence:** Start at the moment of discovery. No preamble, no "in this post I will."
+**Opening sentence:** Start at the moment of discovery or with the claim. No preamble, no "in this
+post I will," and no benchmark or methodology setup — that belongs in the body, after the reader
+knows why they should care.
 
 **Show before explain:** Code snippet, benchmark table, or query plan before the prose that explains it.
 

@@ -40,7 +40,8 @@ class FanoutCatalogMap {
   }
 
   _lowerBound(prefix, start, end) {
-    let lo = start, hi = end;
+    let lo = start,
+      hi = end;
     while (lo < hi) {
       const mid = (lo + hi) >>> 1;
       if (this._words[mid].lower < prefix) lo = mid + 1;

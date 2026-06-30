@@ -24,7 +24,7 @@ The `magic.cards` table has these columns, at a high level:
 Each column class lands in a different index type.
 Trigram GIN for text substring, GIN for JSONB containment, B-tree for range queries on numerics, hash for exact-match-only text fields, and functional indexes for query shapes that no structural index can serve.
 
-The [schema](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/db/2025-09-29-great-reset.sql#L252-L279) defines 28 indexes in the base migration.
+The [schema](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/db/2025-09-29-great-reset.sql#L252-L279) defines 28 indexes in the base migration.
 Three later migrations add ten more and drop four.
 The result is a table with every index type PostgreSQL offers.
 Not by design — each query class had a different problem, and no single index type could solve more than one of them.
@@ -62,9 +62,9 @@ Measured against a fully loaded 30,000-card dataset on PostgreSQL 17 using `EXPL
 
 That query was spending 110ms planning and 3ms executing.
 Switching the indexes to `lower(column)` and lowercasing the search pattern at query-build time let the planner use the cheaper `LIKE` estimator while preserving case-insensitive matching.
-The change is in [PR #470](https://github.com/jbylund/arcane_tutor/pull/470) and the [migration](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/db/2026-05-20-02-lower-trgm-indexes.sql).
+The change is in [PR #470](https://github.com/jbylund/sylvan_librarian/pull/470) and the [migration](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/db/2026-05-20-02-lower-trgm-indexes.sql).
 
-The query side emits ([card_query_nodes.py](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/parsing/card_query_nodes.py#L917-L933)):
+The query side emits ([card_query_nodes.py](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/parsing/card_query_nodes.py#L917-L933)):
 
 ```python
 words = ["", *(_escape_like_pattern(w) for w in txt_val.lower().split()), ""]
@@ -85,7 +85,7 @@ Card types, keywords, and legalities are stored as JSONB.
 The query `t:creature` asks whether the card's type array includes "Creature"; `format:modern` asks whether `card_legalities` includes `{"modern": "legal"}`.
 Both use PostgreSQL's `@>` containment operator, which GIN indexes natively support.
 
-The [indexes](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/db/2025-09-29-great-reset.sql#L257-L278):
+The [indexes](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/db/2025-09-29-great-reset.sql#L257-L278):
 
 ```sql
 CREATE INDEX idx_cards_legalities    ON magic.cards USING gin (card_legalities);
@@ -93,7 +93,7 @@ CREATE INDEX idx_cards_cardtypes_gin ON magic.cards USING gin (card_types);
 CREATE INDEX idx_cards_colors_gin    ON magic.cards USING gin (card_colors);
 ```
 
-The SQL each query emits ([card_query_nodes.py](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/parsing/card_query_nodes.py#L1006-L1018)):
+The SQL each query emits ([card_query_nodes.py](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/parsing/card_query_nodes.py#L1006-L1018)):
 
 ```python
 if self.operator in (">=", ":"):
@@ -121,14 +121,14 @@ A Nicol Bolas (UBRG) does not.
 Color identity is stored as a JSONB object: `{"U": true, "G": true}` for Simic Guildmage.
 The natural SQL for "card's identity is a subset of {U, G}" is `card_color_identity <@ '{"U": true, "G": true}'`.
 But `<@` is not indexable by GIN.
-Before [PR #469](https://github.com/jbylund/arcane_tutor/pull/469), every `id:`, `id<=`, or `id<` query ran a full sequential scan — roughly 30,000 rows every time.
+Before [PR #469](https://github.com/jbylund/sylvan_librarian/pull/469), every `id:`, `id<=`, or `id<` query ran a full sequential scan — roughly 30,000 rows every time.
 
 The fix uses a different query shape: precompute all valid bitmask values at query build time and issue an `= ANY(array)` lookup against an expression index.
 
 Five colors map to a 5-bit integer: W=16, U=8, B=4, R=2, G=1.
 Blue-green has mask `8+1=9`.
 All subsets of 9 are masks `v` where `v & ~9 == 0`: the set `{0, 1, 8, 9}` — colorless, green-only, blue-only, blue-green.
-A new SQL function encodes any card's color identity as that integer, and an expression index is built on it ([2026-05-19-01-color-identity-mask.sql](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/db/2026-05-19-01-color-identity-mask.sql)):
+A new SQL function encodes any card's color identity as that integer, and an expression index is built on it ([2026-05-19-01-color-identity-mask.sql](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/db/2026-05-19-01-color-identity-mask.sql)):
 
 ```sql
 CREATE OR REPLACE FUNCTION magic.color_identity_mask(jsonb)
@@ -146,7 +146,7 @@ CREATE INDEX idx_cards_color_identity_mask
     ON magic.cards (magic.color_identity_mask(card_color_identity));
 ```
 
-At query time, Python precomputes all 32 possible masks (there are only 2^5) and filters to the valid subset ([card_query_nodes.py](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/parsing/card_query_nodes.py#L963-L968)):
+At query time, Python precomputes all 32 possible masks (there are only 2^5) and filters to the valid subset ([card_query_nodes.py](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/parsing/card_query_nodes.py#L963-L968)):
 
 ```python
 def _subset_masks(query_mask: int) -> list[int]:

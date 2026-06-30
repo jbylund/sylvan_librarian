@@ -69,7 +69,7 @@ One scan, and the callback does a single `Map.get()` for each match.
 If the symbol is not in the map, it comes back `undefined` and the original text is returned unchanged — graceful degradation for unknown future symbols.
 
 The implementation lives in
-[`api/static/app.js`](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/static/app.js#L1108-L1126).
+[`api/static/app.js`](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/static/app.js#L1108-L1126).
 
 ## Why Map and Not a Plain Object
 
@@ -108,10 +108,10 @@ The simple pattern wins on legibility: `/\{[^}]{1,5}\}/g` is 12 characters; the 
 
 *(Benchmark: Node.js 22, M2 Pro, 10,000 iterations × 14 test cases covering simple, hybrid,
 phyrexian, and special symbols. The test is reproducible:
-[`api/tests/test_mana_symbol_performance_comparison.js`](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/tests/test_mana_symbol_performance_comparison.js).
+[`api/tests/test_mana_symbol_performance_comparison.js`](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/tests/test_mana_symbol_performance_comparison.js).
 The PR documentation reported 61× on its test machine; running the same benchmark on M2 Pro shows
 47×. The discrepancy is machine-level variation in JS engine JIT behavior, not a regression.)*
 
-See [PR #271](https://github.com/jbylund/arcane_tutor/pull/271) for the full diff.
+See [PR #271](https://github.com/jbylund/sylvan_librarian/pull/271) for the full diff.
 
 The profiler was right.

@@ -27,15 +27,15 @@ The server receives that request, runs the search, renders the results server-si
 and returns a complete HTML page with cards already in it.
 
 The server-side rendering happens in
-[`noscript_helpers.py`](https://github.com/jbylund/arcane_tutor/blob/22d06df7106284160125518c098881409ebe15bc/api/noscript_helpers.py#L171)
-([PR #319](https://github.com/jbylund/arcane_tutor/pull/319)).
+[`noscript_helpers.py`](https://github.com/jbylund/sylvan_librarian/blob/22d06df7106284160125518c098881409ebe15bc/api/noscript_helpers.py#L171)
+([PR #319](https://github.com/jbylund/sylvan_librarian/pull/319)).
 It generates the same card HTML that the JavaScript renderer produces:
 responsive `<img>` tags with a four-size `srcset`,
 mana symbols converted to CSS icon spans,
 oracle text truncated at 200 characters.
 The truncation is mana-symbol-aware —
 a naive cut at 200 characters could land inside a token like `{W/U}`, producing broken HTML.
-The [fix](https://github.com/jbylund/arcane_tutor/blob/22d06df7106284160125518c098881409ebe15bc/api/noscript_helpers.py#L240)
+The [fix](https://github.com/jbylund/sylvan_librarian/blob/22d06df7106284160125518c098881409ebe15bc/api/noscript_helpers.py#L240)
 counts open and close braces and backs up to before the last `{` if they are unbalanced:
 
 ```python
@@ -64,7 +64,7 @@ That is a wasted round trip:
 the server already ran the same search to build the page the browser just loaded.
 
 To avoid it, the server embeds the search results as JSON directly in a `<script>` block
-([PR #288](https://github.com/jbylund/arcane_tutor/pull/288)).
+([PR #288](https://github.com/jbylund/sylvan_librarian/pull/288)).
 On a warm cache, a `/search` request returns in 30–50ms and transfers 1–36 KB compressed depending on result count
 (measured with `curl` from a MacBook Pro M5 Max over the public internet to the production server,
 median of runs 2–3 to exclude cold-cache effects).
@@ -89,7 +89,7 @@ if (window.EMBEDDED_SEARCH_RESULTS) {
 ```
 
 There is a second optimization layered on top.
-[`displayResults()`](https://github.com/jbylund/arcane_tutor/blob/22d06df7106284160125518c098881409ebe15bc/api/static/app.js#L624)
+[`displayResults()`](https://github.com/jbylund/sylvan_librarian/blob/22d06df7106284160125518c098881409ebe15bc/api/static/app.js#L624)
 checks whether the server has already rendered cards into the DOM:
 
 ```javascript
@@ -108,7 +108,7 @@ and delay the largest contentful paint.
 
 Once the page is loaded, the JavaScript search path takes over for subsequent queries.
 Every `input` event calls
-[`handleSearch()`](https://github.com/jbylund/arcane_tutor/blob/22d06df7106284160125518c098881409ebe15bc/api/static/app.js#L365),
+[`handleSearch()`](https://github.com/jbylund/sylvan_librarian/blob/22d06df7106284160125518c098881409ebe15bc/api/static/app.js#L365),
 which manages debounce and in-flight request cancellation:
 
 ```javascript
@@ -157,7 +157,7 @@ mana symbols as `<span>` elements with the same CSS classes,
 oracle text at the same 200-character limit.
 
 Keeping them in sync is a real maintenance burden.
-[PR #520](https://github.com/jbylund/arcane_tutor/pull/520) has a concrete example of drift:
+[PR #520](https://github.com/jbylund/sylvan_librarian/pull/520) has a concrete example of drift:
 `noscript_helpers.py` was not rendering the card name and mana cost on the same line that `createCardHTML()` was.
 The discrepancy was caught during a latency audit — not through any dedicated parity check.
 When the image breakpoints were tuned, the `sizes` attribute had to be updated in two places.

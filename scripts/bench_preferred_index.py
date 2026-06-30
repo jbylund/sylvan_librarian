@@ -2,7 +2,7 @@
 
 Run inside the API container:
 
-    docker exec arcane_blue-apiservice-1 python3 /app/scripts/bench_preferred_index.py
+    docker exec sylvan_blue-apiservice-1 python3 /app/scripts/bench_preferred_index.py
 
 Compares engine.query() (uses preferred-printing index when applicable) against
 engine.query_linear() (always scans all printings with linear dedup), for a mix

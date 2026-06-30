@@ -30,7 +30,8 @@ C and C++ on an almost daily basis for about 30 years."
 "This is a story of how building HTML-first doubled a company's users literally overnight."
 
 What they do NOT do: open with history of the problem, with a definition, with "recently I've been
-thinking about...", or with a question.
+thinking about...", with a question, or with benchmark/methodology setup. Methodology belongs in the
+body — a reader who does not yet know why they should care will not read past it.
 
 ---
 

@@ -10,7 +10,7 @@
 
 ## Overview
 
-Arcane Tutor has achieved excellent legal compliance standing with all critical requirements met.
+Sylvan Librarian has achieved excellent legal compliance standing with all critical requirements met.
 This directory contains comprehensive documentation of our legal compliance status, data sources, and intellectual property attribution.
 
 ---
@@ -157,7 +157,7 @@ This directory contains comprehensive documentation of our legal compliance stat
 1. **Policy Compliance**: WotC Fan Content Policy
 1. **Formal Documentation**: TOS, Privacy Policy
 1. **Transparent Operation**: Open source
-1. **No Trademark Confusion**: "Arcane Tutor" distinct
+1. **No Trademark Confusion**: "Sylvan Librarian" distinct
 
 ### Risk Assessment: **VERY LOW** ✅
 
@@ -217,14 +217,14 @@ The project can safely proceed with normal development.
 
 - [Wizards Fan Content Policy](https://company.wizards.com/en/legal/fancontentpolicy)
 - [Scryfall API Documentation](https://scryfall.com/docs/api)
-- [Project GitHub Repository](https://github.com/jbylund/arcane_tutor)
+- [Project GitHub Repository](https://github.com/jbylund/sylvan_librarian)
 
 ---
 
 ## Contact
 
 For legal compliance questions:
-- Open an issue on [GitHub](https://github.com/jbylund/arcane_tutor/issues)
+- Open an issue on [GitHub](https://github.com/jbylund/sylvan_librarian/issues)
 - Contact repository owner
 - Review documentation in this directory
 

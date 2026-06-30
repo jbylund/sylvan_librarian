@@ -10,7 +10,7 @@ SHELL:=/bin/bash
 
 mkfile_path := $(abspath $(lastword $(MAKEFILE_LIST)))
 mkfile_dir := $(shell dirname $(mkfile_path) )
-PROJECTNAME := arcane_tutor
+PROJECTNAME := sylvan_librarian
 
 GIT_ROOT := $(shell git rev-parse --show-toplevel)
 GIT_SHA := $(shell git rev-parse HEAD 2>/dev/null || echo "unknown")
@@ -97,25 +97,25 @@ env.json: # @doc create env.json from template only if it does not exist (never 
 
 # Usage: make dev-up, make prod-up, make dev-up-detach, make prod-down, etc.
 %-up: deps-%
-	cd $(GIT_ROOT) && docker compose --project-name arcane_$* --env-file .env --env-file envs/$* --file $(BASE_COMPOSE) up --remove-orphans --abort-on-container-exit
+	cd $(GIT_ROOT) && docker compose --project-name sylvan_$* --env-file .env --env-file envs/$* --file $(BASE_COMPOSE) up --remove-orphans --abort-on-container-exit
 
 %-up-detach: deps-%
-	cd $(GIT_ROOT) && docker compose --project-name arcane_$* --env-file .env --env-file envs/$* --file $(BASE_COMPOSE) up --remove-orphans --detach
+	cd $(GIT_ROOT) && docker compose --project-name sylvan_$* --env-file .env --env-file envs/$* --file $(BASE_COMPOSE) up --remove-orphans --detach
 
 %-down:
-	cd $(GIT_ROOT) && docker compose --project-name arcane_$* --env-file .env --env-file envs/$* --file $(BASE_COMPOSE) down --remove-orphans
+	cd $(GIT_ROOT) && docker compose --project-name sylvan_$* --env-file .env --env-file envs/$* --file $(BASE_COMPOSE) down --remove-orphans
 
 status: # @doc show container status for all environments
 	@$(foreach env,$(ENVS), \
 	  python -c "import shutil; w=shutil.get_terminal_size().columns; print(' $(env) '.center(w, '='))" && \
-	  cd $(GIT_ROOT) && docker compose --project-name arcane_$(env) --env-file .env --env-file envs/$(env) --file $(BASE_COMPOSE) ps --all ; \
+	  cd $(GIT_ROOT) && docker compose --project-name sylvan_$(env) --env-file .env --env-file envs/$(env) --file $(BASE_COMPOSE) ps --all ; \
 	)
 
 rolling-deploy: deps-blue deps-green # @doc rolling blue/green deploy — update blue (wait for healthy), then green
 	@echo "=== Deploying blue ==="
-	cd $(GIT_ROOT) && docker compose --project-name arcane_blue --env-file .env --env-file envs/blue --file $(BASE_COMPOSE) up --remove-orphans --detach --wait
+	cd $(GIT_ROOT) && docker compose --project-name sylvan_blue --env-file .env --env-file envs/blue --file $(BASE_COMPOSE) up --remove-orphans --detach --wait
 	@echo "=== Blue healthy. Deploying green ==="
-	cd $(GIT_ROOT) && docker compose --project-name arcane_green --env-file .env --env-file envs/green --file $(BASE_COMPOSE) up --remove-orphans --detach --wait
+	cd $(GIT_ROOT) && docker compose --project-name sylvan_green --env-file .env --env-file envs/green --file $(BASE_COMPOSE) up --remove-orphans --detach --wait
 	@echo "=== Rolling deploy complete ==="
 
 down: $(addsuffix -down,$(ENVS))
@@ -174,12 +174,12 @@ dockerclean:
 dbconn-%:
 	test -f ~/.psqlrc || touch ~/.psqlrc
 	test -f ~/.psql_history || touch ~/.psql_history
-	cd $(GIT_ROOT) && docker compose --project-name arcane_$* --env-file .env --env-file envs/$* --file $(BASE_COMPOSE) \
+	cd $(GIT_ROOT) && docker compose --project-name sylvan_$* --env-file .env --env-file envs/$* --file $(BASE_COMPOSE) \
 	  exec -e PSQLRC=/var/lib/postgresql/.psqlrc -e PSQL_HISTORY=/var/lib/postgresql/.psql_history \
 	  postgres psql -U $(XPGUSER) -d $(XPGDATABASE) --host=localhost
 
 reset-%:
-	docker compose --project-name arcane_$* --env-file .env --env-file envs/$* --file $(BASE_COMPOSE) down --volumes --remove-orphans
+	docker compose --project-name sylvan_$* --env-file .env --env-file envs/$* --file $(BASE_COMPOSE) down --volumes --remove-orphans
 	rm -rvf data/api/$* data/postgres/$*
 
 reset: $(addprefix reset-,$(ENVS))

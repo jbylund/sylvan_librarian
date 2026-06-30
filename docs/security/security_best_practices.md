@@ -1,6 +1,6 @@
-# Security Best Practices for Arcane Tutor
+# Security Best Practices for Sylvan Librarian
 
-This document outlines security best practices for developing and maintaining the Arcane Tutor application.
+This document outlines security best practices for developing and maintaining the Sylvan Librarian application.
 
 ## Table of Contents
 
@@ -210,8 +210,8 @@ The application implements the following security headers via `SecurityHeadersMi
 ```python
 # Good: Production CORS
 allowed_origins = [
-    "https://arcanetutor.com",
-    "https://www.arcanetutor.com"
+    "https://sylvan-librarian.com",
+    "https://www.sylvan-librarian.com"
 ]
 ```
 

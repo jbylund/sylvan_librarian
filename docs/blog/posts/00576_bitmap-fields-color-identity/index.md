@@ -24,7 +24,7 @@ The card's identity must be a subset of the query.
 In PostgreSQL's GIN implementation, the `<@` direction — where the indexed value is smaller than the query — cannot be served by a GIN index.
 Every `id:` query landed on a sequential scan of 97k rows.
 
-The [PR #469](https://github.com/jbylund/arcane_tutor/pull/469) description captured the problem plainly: "`<@` in this direction (card's identity must be contained *by* the query) cannot be served by a GIN index, so every such query fell back to a full sequential scan."
+The [PR #469](https://github.com/jbylund/sylvan_librarian/pull/469) description captured the problem plainly: "`<@` in this direction (card's identity must be contained *by* the query) cannot be served by a GIN index, so every such query fell back to a full sequential scan."
 
 EXPLAIN ANALYZE confirmed it.
 Counting every card playable in a Gruul Commander deck — all 39,344 of them — took 280ms and touched every row in the table:
@@ -78,7 +78,7 @@ $$;
 ```
 
 A B-tree expression index on `magic.color_identity_mask(card_color_identity)` then lets the planner do point lookups against the precomputed integer.
-Full migration: [`api/db/2026-05-19-01-color-identity-mask.sql`](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/db/2026-05-19-01-color-identity-mask.sql).
+Full migration: [`api/db/2026-05-19-01-color-identity-mask.sql`](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/db/2026-05-19-01-color-identity-mask.sql).
 
 ## Why Not `<= 3`
 
@@ -110,7 +110,7 @@ magic.color_identity_mask(card.card_color_identity) = ANY(%(mask_array)s::smalli
 
 The B-tree index can serve multiple equality point lookups.
 At most 32 values are in the array (the five-color case), and a B-tree scan over a smallint index covers that in microseconds.
-A proper-subset check (`id<gruul`) uses the same approach but excludes the query mask itself — [`_proper_subset_masks`](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/parsing/card_query_nodes.py#L205-L206).
+A proper-subset check (`id<gruul`) uses the same approach but excludes the query mask itself — [`_proper_subset_masks`](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/api/parsing/card_query_nodes.py#L205-L206).
 
 The `=`, `>=`, and `>` operators are unchanged.
 Those go in the superset direction that GIN can serve, so routing them through the bitmap path would be a regression.
@@ -118,10 +118,10 @@ Those go in the superset direction that GIN can serve, so routing them through t
 ## The Rust Engine Takes It Further
 
 The PostgreSQL fix converts seq scan to index scan.
-The Rust in-process engine — introduced in [PR #490](https://github.com/jbylund/arcane_tutor/pull/490) — skips the database entirely and evaluates queries against card data held in Rust memory.
+The Rust in-process engine — introduced in [PR #490](https://github.com/jbylund/sylvan_librarian/pull/490) — skips the database entirely and evaluates queries against card data held in Rust memory.
 There, the bitmap encoding is baked directly into the card struct.
 
-Three fields in `Card` are each stored as a [`u8`](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/card_engine/src/lib.rs#L151-L153):
+Three fields in `Card` are each stored as a [`u8`](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/card_engine/src/lib.rs#L151-L153):
 
 ```rust
 card_colors: u8,
@@ -129,7 +129,7 @@ card_color_identity: u8,
 produced_mana: u8,
 ```
 
-At load time, [`jsonb_color_to_bits`](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/card_engine/src/lib.rs#L346-L358) converts the JSONB dict to the `u8` once.
+At load time, [`jsonb_color_to_bits`](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/card_engine/src/lib.rs#L346-L358) converts the JSONB dict to the `u8` once.
 Every subsequent query reads the pre-encoded byte with no allocation and no pointer indirection.
 
 The filter implementation is then three to five instructions per card:
@@ -150,12 +150,12 @@ FilterExpr::ColorCmp { field, op, mask } => {
 
 No branch on the size of a set, no hash lookup, no string comparison.
 `bits & !mask == 0` is one AND and one comparison.
-The [full `ColorCmp` match arm](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/card_engine/src/filter.rs#L400-L410) is nine lines.
+The [full `ColorCmp` match arm](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/card_engine/src/filter.rs#L400-L410) is nine lines.
 
 ## Cache Locality
 
 A `u8` is one byte.
-The three color fields together — `card_colors`, `card_color_identity`, `produced_mana` — are three bytes sitting immediately after [`card_name_lower` (61 bytes of inline string)](https://github.com/jbylund/arcane_tutor/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/card_engine/src/lib.rs#L150) in the struct.
+The three color fields together — `card_colors`, `card_color_identity`, `produced_mana` — are three bytes sitting immediately after [`card_name_lower` (61 bytes of inline string)](https://github.com/jbylund/sylvan_librarian/blob/f3e11f809493ab330a9aa67a4acb8a13dbdcf090/card_engine/src/lib.rs#L150) in the struct.
 The 61-byte bound covers every card name in the Scryfall dataset with no heap allocation.
 The struct comment makes the layout intent explicit: "Hot fields first — fits in the first two cache lines for fast filter short-circuiting."
 

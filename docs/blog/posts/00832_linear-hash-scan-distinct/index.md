@@ -19,7 +19,7 @@ Deduplication has to happen somewhere, and the choice of how to do it is the sub
 At build time, `reload_commit` sorts the entire card store:
 
 ```rust
-// https://github.com/jbylund/arcane_tutor/blob/f3e11f8/card_engine/src/lib.rs#L1469
+// https://github.com/jbylund/sylvan_librarian/blob/f3e11f8/card_engine/src/lib.rs#L1469
 cards.sort_unstable_by_key(|c| (c.oracle_id, c.illustration_id));
 ```
 
@@ -32,7 +32,7 @@ The linear scan walks the sorted store and tracks the group boundary:
 
 ```rust
 // Simplified — full implementation at:
-// https://github.com/jbylund/arcane_tutor/blob/f3e11f8/card_engine/src/lib.rs#L1061-L1102
+// https://github.com/jbylund/sylvan_librarian/blob/f3e11f8/card_engine/src/lib.rs#L1061-L1102
 
 let mut prev_key: Option<u128> = None;
 let mut group_best: Option<(&ACard, f64)> = None;
@@ -65,8 +65,8 @@ The store holds roughly 97,000 cards.
 `sort_unstable_by_key` on 97k elements with a `(u128, u128)` key completes in single-digit milliseconds on a modern machine — fast enough that it contributes nothing notable to `reload_commit` time, which is dominated by rkyv serialization and the mmap rename.
 The sort runs once at startup and once per bulk import; queries never pay it.
 
-The key-comparison type evolved once: when the engine first shipped in [PR #490](https://github.com/jbylund/arcane_tutor/pull/490), the linear scan used a `u32` dense group ID (`oracle_group`) computed in a single post-sort pass, with `u32::MAX` as a sentinel.
-When [PR #502](https://github.com/jbylund/arcane_tutor/pull/502) switched to rkyv and a shared mmap, the dense IDs were dropped in favor of the `oracle_id: u128` that was already in the struct.
+The key-comparison type evolved once: when the engine first shipped in [PR #490](https://github.com/jbylund/sylvan_librarian/pull/490), the linear scan used a `u32` dense group ID (`oracle_group`) computed in a single post-sort pass, with `u32::MAX` as a sentinel.
+When [PR #502](https://github.com/jbylund/sylvan_librarian/pull/502) switched to rkyv and a shared mmap, the dense IDs were dropped in favor of the `oracle_id: u128` that was already in the struct.
 The current code comments: "u128 equality, same cost as the dense u32 group ids this replaced."
 The sort invariant did not change.
 
@@ -91,7 +91,7 @@ The linear scan is correct here for the same reason, and relies on the same exte
 ## What the Numbers Show (and What Was Not Measured)
 
 The `query_hashmap()` method exists on `QueryEngine` specifically to force the hash map path for benchmarking, but no direct linear-vs-hash comparison has been run and stored in the repo.
-What is available from [PR #540](https://github.com/jbylund/arcane_tutor/pull/540), which benchmarks the linear path directly via `query_linear()`, is the cost of scanning 97k printings with linear dedup: `format:legacy` takes 1,252 µs, `format:modern` takes 1,101 µs (30-call warmup, 5s timed window, M-series chip).
+What is available from [PR #540](https://github.com/jbylund/sylvan_librarian/pull/540), which benchmarks the linear path directly via `query_linear()`, is the cost of scanning 97k printings with linear dedup: `format:legacy` takes 1,252 µs, `format:modern` takes 1,101 µs (30-call warmup, 5s timed window, M-series chip).
 The hash map path would add HashMap allocation and probe overhead on top of the same scan — the cost depends on the load factor and hash function, but allocation for ~31k entries is not free.
 
 The preferred-printing index (PR #540) cuts these numbers to 330 µs and 388 µs respectively by eliminating dedup entirely for card-level filters with default prefer.

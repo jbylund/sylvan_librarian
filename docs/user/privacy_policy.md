@@ -4,7 +4,7 @@
 
 ## 1. Introduction
 
-Arcane Tutor is committed to protecting your privacy.
+Sylvan Librarian is committed to protecting your privacy.
 This Privacy Policy explains how we handle information when you use our Magic: The Gathering card search engine.
 
 **Related Documentation:**
@@ -104,7 +104,7 @@ The Service contains links to external sites:
 
 - [Scryfall](https://scryfall.com) - Card data provider
 - [Wizards of the Coast](https://company.wizards.com) - Magic: The Gathering owner
-- [GitHub](https://github.com/jbylund/arcane_tutor) - Source code repository
+- [GitHub](https://github.com/jbylund/sylvan_librarian) - Source code repository
 
 These sites have their own privacy policies.
 We are not responsible for their practices.
@@ -175,7 +175,7 @@ Continued use of the Service after changes constitutes acceptance of the updated
 
 ## 11. Open Source Transparency
 
-As an open-source project, our code is publicly available on [GitHub](https://github.com/jbylund/arcane_tutor).
+As an open-source project, our code is publicly available on [GitHub](https://github.com/jbylund/sylvan_librarian).
 You can:
 
 - Review how the Service processes information
@@ -187,7 +187,7 @@ You can:
 
 For questions about this Privacy Policy or our privacy practices:
 
-- Open an issue on [GitHub](https://github.com/jbylund/arcane_tutor/issues)
+- Open an issue on [GitHub](https://github.com/jbylund/sylvan_librarian/issues)
 - Review our [Terms of Service](../user/terms_of_service.md)
 - Review our [Legal Compliance Documentation](../legal/legal.md)
 

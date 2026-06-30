@@ -115,8 +115,8 @@ At query time, the loop picks `n` positions from `[0, preferred_indices.len())`,
 
 ## Decision
 
-`sample_preferred` is the production path, shipped in [PR #535](https://github.com/jbylund/arcane_tutor/pull/535).
-The reservoir and indexed implementations were removed after benchmarking — the full Rust source for all four approaches is preserved at [345b62d](https://github.com/jbylund/arcane_tutor/blob/345b62d/card_engine/src/lib.rs) for reference.
+`sample_preferred` is the production path, shipped in [PR #535](https://github.com/jbylund/sylvan_librarian/pull/535).
+The reservoir and indexed implementations were removed after benchmarking — the full Rust source for all four approaches is preserved at [345b62d](https://github.com/jbylund/sylvan_librarian/blob/345b62d/card_engine/src/lib.rs) for reference.
 
 The preferred-index approach eliminates the original memory problem (38.6 MB freed per worker, stale-while-revalidate machinery deleted, `import random` removed from the API module) while recovering nearly all of the Python baseline's per-call speed.
 The 4–6× per-call regression versus Python is the cost of building `n` Python dicts on the fly rather than returning pre-built ones; for an endpoint that returns at most 60 cards and is not in any hot loop, 32µs vs 5.6µs is an acceptable tradeoff.
