@@ -27,8 +27,8 @@ HOSTNAME := $(shell hostname)
 
 S3_BUCKET=biblioplex
 
-html_files := $(shell find . -type f -name "*.html")
-js_files := $(shell find . -type f -name "*.js" | grep -v node_modules)
+html_files := $(shell git ls-files "*.html")
+js_files := $(shell git ls-files "*.js")
 
 requirements_sources := $(shell find requirements -type f -name "*.txt")
 PYTHON_DIRS := $(shell git ls-files "*.py" | cut -f 1 -d/ | sort -u)

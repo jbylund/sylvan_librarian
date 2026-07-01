@@ -1,3 +1,5 @@
+use pyo3::create_exception;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDate, PyDateAccess, PyDict, PyList, PyTuple};
 use rkyv::{Archive, Archived, Deserialize, Serialize};
@@ -9,6 +11,16 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::fs::MetadataExt;
+
+// Raised for malformed query input (bad filter JSON, unbuildable filter expression). Subclasses
+// ValueError so existing `except ValueError` call sites keep working; new call sites can catch
+// this specifically to distinguish "the query was bad" from unrelated ValueErrors.
+create_exception!(card_engine, QueryError, PyValueError, "Raised when a query cannot be parsed or built.");
+
+// Subclass of QueryError (not a sibling) so `except QueryError` already catches it; callers that
+// need to distinguish "requested a field that doesn't exist" from other query errors can catch
+// this specifically instead.
+create_exception!(card_engine, UnknownFieldError, QueryError, "Raised when `fields` names an unknown field.");
 
 // ─── Feature-gated counting allocator (memory measurement only) ──────────────
 // Counts live bytes / live allocations of this extension's Rust heap and records
@@ -156,7 +168,6 @@ struct Card {
     // UUIDs packed as u128, 0 = null. Real UUIDs keep their exact bit value (so
     // future lookup-by-id can match Scryfall's); non-UUID strings from hand-built
     // test dicts are hashed deterministically — see parse_uuid_or_hash().
-    #[allow(dead_code)] // primary key; kept for future result payloads (printing dedup keys on pointer)
     scryfall_id: u128,
     oracle_id: u128,
     illustration_id: u128,
@@ -300,6 +311,19 @@ fn parse_uuid_or_hash(s: &str) -> u128 {
 
 fn opt_uuid(d: &Bound<PyDict>, key: &str) -> u128 {
     opt_str(d, key).map(|s| parse_uuid_or_hash(&s)).unwrap_or(0)
+}
+
+/// Inverse of `parse_uuid_or_hash` for genuine UUIDs: rebuilds a `Uuid` from the exact bit value
+/// (converted to Python's `uuid.UUID` via pyo3's `uuid` feature). 0 is the null sentinel. Only
+/// meaningful for real UUID input — non-UUID strings went through the FNV-1a fallback in
+/// `parse_uuid_or_hash` and can't be recovered from their hash, which matters only for
+/// hand-built test ids, never real card data.
+fn uuid_from_u128(v: u128) -> Option<uuid::Uuid> {
+    if v == 0 {
+        None
+    } else {
+        Some(uuid::Uuid::from_u128(v))
+    }
 }
 
 // Accepts ISO strings or datetime.date (psycopg returns date columns as datetime.date).
@@ -1182,17 +1206,77 @@ where
     }
 }
 
-fn card_to_pydict<'py>(py: Python<'py>, card: &ACard, strings: &AStrings) -> PyResult<Bound<'py, PyDict>> {
+// ─── Result field selection ───────────────────────────────────────────────────
+// The vocabulary of fields a query result row can carry. `fields=None` resolves to
+// DEFAULT_FIELDS (the 9 fields every caller got before field selection existed); an explicit
+// `fields` list is validated and deduped against this same table by resolve_fields(). There is
+// no separate hardcoded path for "the old fields" vs. "the new fields" — everything is an entry
+// in FIELD_TABLE.
+type FieldExtractor = for<'a> fn(Python<'a>, &'a ACard, &'a AStrings) -> PyResult<Bound<'a, PyAny>>;
+
+const FIELD_TABLE: &[(&str, FieldExtractor)] = &[
+    ("name", |py, c, s| Ok(str_at(s, u32::from(c.card_name_id)).into_pyobject(py)?.into_any())),
+    ("set_code", |py, c, _s| Ok(c.card_set_code.as_str().into_pyobject(py)?.into_any())),
+    ("collector_number", |py, c, s| Ok(str_at(s, u32::from(c.collector_number_id)).into_pyobject(py)?.into_any())),
+    ("power", |py, c, s| Ok(str_at(s, u32::from(c.creature_power_text_id)).into_pyobject(py)?.into_any())),
+    ("toughness", |py, c, s| Ok(str_at(s, u32::from(c.creature_toughness_text_id)).into_pyobject(py)?.into_any())),
+    ("mana_cost", |py, c, s| Ok(str_at(s, u32::from(c.mana_cost_text_id)).into_pyobject(py)?.into_any())),
+    ("oracle_text", |py, c, s| Ok(str_at(s, u32::from(c.oracle_text_id)).into_pyobject(py)?.into_any())),
+    ("set_name", |py, c, s| Ok(str_at(s, u32::from(c.set_name_id)).into_pyobject(py)?.into_any())),
+    ("type_line", |py, c, s| Ok(str_at(s, u32::from(c.type_line_id)).into_pyobject(py)?.into_any())),
+    ("illustration_id", |py, c, _s| Ok(uuid_from_u128(u128::from(c.illustration_id)).into_pyobject(py)?.into_any())),
+    ("scryfall_id", |py, c, _s| Ok(uuid_from_u128(u128::from(c.scryfall_id)).into_pyobject(py)?.into_any())),
+    // card_subtypes is a Vec, so insertion order is already deterministic; the rest are
+    // HashSets and get sorted for deterministic output.
+    ("card_subtypes", |py, c, _s| {
+        let items: Vec<&str> = c.card_subtypes.iter().map(|v| v.as_str()).collect();
+        Ok(items.into_pyobject(py)?.into_any())
+    }),
+    ("card_keywords", |py, c, _s| Ok(sorted_strs(c.card_keywords.iter().map(|v| v.as_str())).into_pyobject(py)?.into_any())),
+    ("card_oracle_tags", |py, c, _s| Ok(sorted_strs(c.card_oracle_tags.iter().map(|v| v.as_str())).into_pyobject(py)?.into_any())),
+    ("card_art_tags", |py, c, _s| Ok(sorted_strs(c.card_art_tags.iter().map(|v| v.as_str())).into_pyobject(py)?.into_any())),
+    ("card_is_tags", |py, c, _s| Ok(sorted_strs(c.card_is_tags.iter().map(|v| v.as_str())).into_pyobject(py)?.into_any())),
+    ("card_frame_data", |py, c, _s| Ok(sorted_strs(c.card_frame_data.iter().map(|v| v.as_str())).into_pyobject(py)?.into_any())),
+];
+
+/// Collects a `HashSet<&str>` iterator into a sorted `Vec<&str>` for deterministic field output.
+fn sorted_strs<'a>(iter: impl Iterator<Item = &'a str>) -> Vec<&'a str> {
+    let mut v: Vec<&str> = iter.collect();
+    v.sort_unstable();
+    v
+}
+
+const DEFAULT_FIELDS: &[&str] =
+    &["name", "set_code", "collector_number", "power", "toughness", "mana_cost", "oracle_text", "set_name", "type_line"];
+
+/// Resolves a caller-requested field list into FIELD_TABLE entries, deduping repeats (a name
+/// requested twice is only fetched/emitted once) and rejecting anything outside the vocabulary.
+/// `None` resolves to DEFAULT_FIELDS. Called once per query, before the per-row loop, so the
+/// per-row cost is a flat list of closure calls rather than a name comparison per field per card.
+fn resolve_fields(fields: Option<Vec<String>>) -> PyResult<Vec<(&'static str, FieldExtractor)>> {
+    let requested: Vec<&str> = match &fields {
+        Some(v) => v.iter().map(String::as_str).collect(),
+        None => DEFAULT_FIELDS.to_vec(),
+    };
+    let mut seen = HashSet::with_capacity(requested.len());
+    let mut resolved = Vec::with_capacity(requested.len());
+    for name in requested {
+        if !seen.insert(name) {
+            continue;
+        }
+        match FIELD_TABLE.iter().find(|(n, _)| *n == name) {
+            Some(entry) => resolved.push(*entry),
+            None => return Err(UnknownFieldError::new_err(format!("unknown field: {name:?}"))),
+        }
+    }
+    Ok(resolved)
+}
+
+fn card_to_pydict<'py>(py: Python<'py>, card: &ACard, strings: &AStrings, fields: &[(&'static str, FieldExtractor)]) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
-    d.set_item("name", str_at(strings, u32::from(card.card_name_id)))?;
-    d.set_item("set_code", card.card_set_code.as_str())?;
-    d.set_item("collector_number", str_at(strings, u32::from(card.collector_number_id)))?;
-    d.set_item("power", str_at(strings, u32::from(card.creature_power_text_id)))?;
-    d.set_item("toughness", str_at(strings, u32::from(card.creature_toughness_text_id)))?;
-    d.set_item("mana_cost", str_at(strings, u32::from(card.mana_cost_text_id)))?;
-    d.set_item("oracle_text", str_at(strings, u32::from(card.oracle_text_id)))?;
-    d.set_item("set_name", str_at(strings, u32::from(card.set_name_id)))?;
-    d.set_item("type_line", str_at(strings, u32::from(card.type_line_id)))?;
+    for (name, extractor) in fields {
+        d.set_item(*name, extractor(py, card, strings)?)?;
+    }
     Ok(d)
 }
 
@@ -1588,7 +1672,7 @@ impl QueryEngine {
         self.reload_commit()
     }
 
-    #[pyo3(signature = (*, filters, unique="card", prefer="default", orderby="edhrec", direction="asc", limit=100, offset=0))]
+    #[pyo3(signature = (*, filters, unique="card", prefer="default", orderby="edhrec", direction="asc", limit=100, offset=0, fields=None))]
     fn query<'py>(
         &self,
         py: Python<'py>,
@@ -1599,16 +1683,18 @@ impl QueryEngine {
         direction: &str,
         limit: usize,
         offset: usize,
+        fields: Option<Vec<String>>,
     ) -> PyResult<Bound<'py, PyTuple>> {
+        let resolved_fields = resolve_fields(fields)?;
         let to_json    = filters.call_method0("to_json")?;
         let json_bytes: Vec<u8> = py
             .import("orjson")?
             .call_method1("dumps", (to_json,))?
             .extract()?;
         let json_str = std::str::from_utf8(&json_bytes)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("bad UTF-8 from orjson: {e}")))?;
+            .map_err(|e| QueryError::new_err(format!("bad UTF-8 from orjson: {e}")))?;
         let json_val: Value = serde_json::from_str(json_str)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("bad query JSON: {e}")))?;
+            .map_err(|e| QueryError::new_err(format!("bad query JSON: {e}")))?;
         // get_mmap() remaps automatically if the on-disk inode has changed since
         // the last reload, keeping workers off stale (deleted) mappings.
         let mmap = self.get_mmap()?;
@@ -1642,20 +1728,21 @@ impl QueryEngine {
         // that never executed the load path themselves.
         sync_format_shifts(&data.format_shifts);
         let filter_expr = build_filter(&json_val)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("build_filter: {e}")))?;
+            .map_err(|e| QueryError::new_err(format!("build_filter: {e}")))?;
 
         let store: &[ACard] = &data.cards;
         let (total, page) = run_query(
             store, &data.preferred_indices[..], &data.strings, &filter_expr, unique, prefer, orderby, direction, limit, offset, &data.indexes,
         );
 
-        let matches: Vec<Bound<PyDict>> = page.iter().map(|c| card_to_pydict(py, c, &data.strings)).collect::<PyResult<Vec<_>>>()?;
+        let matches: Vec<Bound<PyDict>> =
+            page.iter().map(|c| card_to_pydict(py, c, &data.strings, &resolved_fields)).collect::<PyResult<Vec<_>>>()?;
         let matches_list = PyList::new(py, matches)?;
         PyTuple::new(py, [total.into_pyobject(py)?.into_any(), matches_list.into_any()])
     }
 
     /// Same as query() but forces the HashMap dedup path. Used for benchmarking.
-    #[pyo3(signature = (*, filters, unique="card", prefer="default", orderby="edhrec", direction="asc", limit=100, offset=0))]
+    #[pyo3(signature = (*, filters, unique="card", prefer="default", orderby="edhrec", direction="asc", limit=100, offset=0, fields=None))]
     fn query_hashmap<'py>(
         &self,
         py: Python<'py>,
@@ -1666,7 +1753,9 @@ impl QueryEngine {
         direction: &str,
         limit: usize,
         offset: usize,
+        fields: Option<Vec<String>>,
     ) -> PyResult<Bound<'py, PyTuple>> {
+        let resolved_fields = resolve_fields(fields)?;
         let to_json    = filters.call_method0("to_json")?;
         let json_bytes: Vec<u8> = py
             .import("orjson")?
@@ -1687,14 +1776,15 @@ impl QueryEngine {
 
         let store: &[ACard] = &data.cards;
         let (total, page) = run_query_hashmap(store, &data.strings, &filter_expr, unique, prefer, orderby, direction, limit, offset);
-        let matches: Vec<Bound<PyDict>> = page.iter().map(|c| card_to_pydict(py, c, &data.strings)).collect::<PyResult<Vec<_>>>()?;
+        let matches: Vec<Bound<PyDict>> =
+            page.iter().map(|c| card_to_pydict(py, c, &data.strings, &resolved_fields)).collect::<PyResult<Vec<_>>>()?;
         let matches_list = PyList::new(py, matches)?;
         PyTuple::new(py, [total.into_pyobject(py)?.into_any(), matches_list.into_any()])
     }
 
     /// Same as query() but forces the linear-dedup path over all printings.
     /// Use alongside query() to measure the benefit of the preferred-index fast path.
-    #[pyo3(signature = (*, filters, unique="card", prefer="default", orderby="edhrec", direction="asc", limit=100, offset=0))]
+    #[pyo3(signature = (*, filters, unique="card", prefer="default", orderby="edhrec", direction="asc", limit=100, offset=0, fields=None))]
     fn query_linear<'py>(
         &self,
         py: Python<'py>,
@@ -1705,7 +1795,9 @@ impl QueryEngine {
         direction: &str,
         limit: usize,
         offset: usize,
+        fields: Option<Vec<String>>,
     ) -> PyResult<Bound<'py, PyTuple>> {
+        let resolved_fields = resolve_fields(fields)?;
         let to_json    = filters.call_method0("to_json")?;
         let json_bytes: Vec<u8> = py
             .import("orjson")?
@@ -1742,7 +1834,8 @@ impl QueryEngine {
             "artwork" => run_query_linear(cards_iter_linear!(), &data.strings, &filter_expr, |c| u128::from(c.illustration_id), prefer, orderby, direction, limit, offset),
             _         => run_query_no_dedup(cards_iter_linear!(), &data.strings, &filter_expr, orderby, direction, limit, offset),
         };
-        let matches: Vec<Bound<PyDict>> = page.iter().map(|c| card_to_pydict(py, c, &data.strings)).collect::<PyResult<Vec<_>>>()?;
+        let matches: Vec<Bound<PyDict>> =
+            page.iter().map(|c| card_to_pydict(py, c, &data.strings, &resolved_fields)).collect::<PyResult<Vec<_>>>()?;
         let matches_list = PyList::new(py, matches)?;
         PyTuple::new(py, [total.into_pyobject(py)?.into_any(), matches_list.into_any()])
     }
@@ -1763,8 +1856,9 @@ impl QueryEngine {
     /// Return `n` randomly sampled cards from the preferred-printing index.
     /// O(n) time, zero per-worker heap overhead — preferred_indices lives in the
     /// shared mmap so all workers read the same ~124 KB of file pages.
-    #[pyo3(signature = (n))]
-    fn sample_preferred<'py>(&self, py: Python<'py>, n: usize) -> PyResult<Bound<'py, PyList>> {
+    #[pyo3(signature = (n, fields=None))]
+    fn sample_preferred<'py>(&self, py: Python<'py>, n: usize, fields: Option<Vec<String>>) -> PyResult<Bound<'py, PyList>> {
+        let resolved_fields = resolve_fields(fields)?;
         let mmap = self.get_mmap()?;
         // Safety: see the access_unchecked justification in query().
         let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
@@ -1782,7 +1876,7 @@ impl QueryEngine {
         let dicts: Vec<Bound<PyDict>> = chosen.iter()
             .map(|&pos| {
                 let card_idx = u32::from(data.preferred_indices[pos]) as usize;
-                card_to_pydict(py, &data.cards[card_idx], &data.strings)
+                card_to_pydict(py, &data.cards[card_idx], &data.strings, &resolved_fields)
             })
             .collect::<PyResult<_>>()?;
         PyList::new(py, dicts)
@@ -1844,8 +1938,16 @@ impl QueryEngine {
 
 #[pymodule]
 mod card_engine {
+    use pyo3::prelude::*;
+
     #[pymodule_export]
     use super::QueryEngine;
+
+    #[pymodule_init]
+    fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
+        m.add("QueryError", m.py().get_type::<super::QueryError>())?;
+        m.add("UnknownFieldError", m.py().get_type::<super::UnknownFieldError>())
+    }
 }
 
 #[cfg(test)]
