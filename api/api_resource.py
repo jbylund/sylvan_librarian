@@ -166,8 +166,6 @@ def _build_critical_css() -> str:
 _INDEX_HTML_PATH = pathlib.Path(__file__).parent / "static" / "index.html"
 _CARD_HTML_PATH = pathlib.Path(__file__).parent / "static" / "card.html"
 
-_CARD_PAGE_RE = re.compile(r"^card/([^/]+)/([^/]+)$")
-
 
 def _static_hash(filename: str) -> str | None:
     try:
@@ -1348,10 +1346,7 @@ class APIResource:
             dict.fromkeys([RESULT_FIELD_COLUMNS[name] for name in resolved_fields] + ["edhrec_rank", "prefer_score"]),
         )
         _select_cols = "".join(f"\n                    {col}," for col in _cte_columns)
-        _result_cols = ",\n                    ".join(
-            RESULT_FIELD_COLUMNS[name] if RESULT_FIELD_COLUMNS[name] == name else f"{RESULT_FIELD_COLUMNS[name]} AS {name}"
-            for name in resolved_fields
-        )
+        _result_cols = ",\n                    ".join(f"{RESULT_FIELD_COLUMNS[name]} AS {name}" for name in resolved_fields)
         _order_by = f"""sort_value {sql_direction} NULLS LAST,
                     edhrec_rank ASC NULLS LAST,
                     prefer_score DESC NULLS LAST"""
@@ -1661,6 +1656,7 @@ class APIResource:
             set_code (str): The card set code extracted from the URL path.
             collector_number (str): The collector number extracted from the URL path.
         """
+        del set_code, collector_number
         if falcon_response is None:
             return
         html = _build_card_html(self._critical_css)
