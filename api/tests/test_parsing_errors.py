@@ -190,6 +190,65 @@ class TestSearchEngineDirect:
         assert call_kwargs["limit"] == 5
 
 
+class TestResultFieldSelection:
+    """`fields=` validation on `_search`, independent of which backend serves the request."""
+
+    def setup_method(self) -> None:
+        self.api_resource = _make_api()
+        self.api_resource._setup_complete = lambda: True
+
+    def teardown_method(self) -> None:
+        if hasattr(self, "api_resource") and self.api_resource:
+            self.api_resource._conn_pool.close()
+
+    def test_unknown_field_raises_bad_request(self) -> None:
+        with pytest.raises(falcon.HTTPBadRequest) as exc_info:
+            self.api_resource._search(query="", fields=["not_a_real_field"])
+        assert exc_info.value.title == "Invalid Fields"
+
+    def test_empty_fields_list_raises_bad_request(self) -> None:
+        with pytest.raises(falcon.HTTPBadRequest) as exc_info:
+            self.api_resource._search(query="", fields=[])
+        assert exc_info.value.title == "Invalid Fields"
+
+    def test_duplicate_fields_are_deduped_in_order(self) -> None:
+        resolved = self.api_resource._resolve_result_fields(["price_usd", "name", "price_usd"])
+        assert resolved == ["price_usd", "name"]
+
+    def test_none_resolves_to_default_fields(self) -> None:
+        from api.api_resource import DEFAULT_RESULT_FIELDS  # noqa: PLC0415
+
+        assert self.api_resource._resolve_result_fields(None) == list(DEFAULT_RESULT_FIELDS)
+
+
+@pytest.mark.usefixtures("engine_enabled")
+class TestResultFieldRouting:
+    """The fields resolved by _search are threaded to whichever backend serves the request."""
+
+    def setup_method(self) -> None:
+        self.api_resource = _make_api()
+        self.api_resource._setup_complete = lambda: True
+        self.api_resource._engine = MagicMock()
+
+    def teardown_method(self) -> None:
+        if hasattr(self, "api_resource") and self.api_resource:
+            self.api_resource._conn_pool.close()
+
+    def test_fields_passed_to_sql_path(self) -> None:
+        self.api_resource._engine.size.return_value = 0
+        sentinel = {"cards": [], "total_cards": 0, "query": ""}
+        with patch.object(self.api_resource, "_search_sql", return_value=sentinel) as mock_sql:
+            self.api_resource._search(query="", fields=["name", "illustration_id"])
+        assert mock_sql.call_args.kwargs["fields"] == ["name", "illustration_id"]
+
+    def test_fields_passed_to_engine_path(self) -> None:
+        self.api_resource._engine.size.return_value = 87
+        sentinel = {"cards": [], "total_cards": 0, "query": ""}
+        with patch.object(self.api_resource, "_search_engine", return_value=sentinel) as mock_engine:
+            self.api_resource._search(query="", fields=["name", "price_usd"])
+        assert mock_engine.call_args.kwargs["fields"] == ["name", "price_usd"]
+
+
 class TestEngineFeatureGate:
     """ENABLE_ENGINE gates the engine path: off (default) means the engine is inert."""
 

@@ -12,6 +12,7 @@ from typing import Any, Never
 from unittest.mock import MagicMock, patch
 
 import falcon
+import falcon.testing
 import pytest
 
 from api.api_resource import FALLBACK_SITE_NAME, APIResource, _hostname_to_site_name, _split_words, hostname_to_site_name
@@ -169,6 +170,35 @@ class TestAPIResourceInitializationNewStyle(TestBaseAPIResourceTest):
 
         for method in public_methods:
             assert method in api_resource.action_map
+
+
+class TestRequestDispatch(TestBaseAPIResourceTest):
+    """_handle() routes both flat "static/x" action keys and positional path segments.
+
+    Regression coverage for a dispatch rewrite that split every path on "/" to derive
+    (action_word, *action_args): it broke the "static/x" actions (registered under a single
+    slash-containing key, not action_word "static") and crashed on unmatched routes with extra
+    segments (_raise_not_found only accepted **kwargs, not positional args).
+    """
+
+    def _dispatch(self, path: str) -> falcon.Response:
+        req = falcon.Request(falcon.testing.create_environ(path=path))
+        resp = falcon.Response()
+        self.api_resource._handle(req, resp)
+        return resp
+
+    def test_flat_static_route_is_matched_by_full_path(self) -> None:
+        resp = self._dispatch("/static/favicon.ico")
+        assert resp.status == falcon.HTTP_200
+
+    def test_positional_path_segments_reach_the_action(self) -> None:
+        resp = self._dispatch("/card/eoc/104")
+        assert resp.status == falcon.HTTP_200
+        assert resp.content_type == "text/html"
+
+    def test_unmatched_route_with_extra_segments_raises_not_found(self) -> None:
+        with pytest.raises(falcon.HTTPNotFound):
+            self._dispatch("/nonexistent/thing/other")
 
 
 class TestAPIResourceCoreMethods(unittest.TestCase):

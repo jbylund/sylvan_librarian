@@ -206,6 +206,32 @@ class TestContainerIntegration:
         assert len(cards) == 1
         assert cards[0]["name"] == "Serra Angel"
 
+    def test_search_sql_default_fields(self: TestContainerIntegration, api_resource: APIResource) -> None:
+        """Omitting fields= keeps the historical 9-key shape."""
+        result = api_resource._search_sql(**search_kwargs("name:bolt", limit=10))
+        assert result["cards"][0].keys() == {
+            "name",
+            "set_code",
+            "collector_number",
+            "power",
+            "toughness",
+            "mana_cost",
+            "oracle_text",
+            "set_name",
+            "type_line",
+        }
+
+    def test_search_sql_with_custom_fields(self: TestContainerIntegration, api_resource: APIResource) -> None:
+        """fields= selects exactly the requested columns, including the newly-added ones."""
+        result = api_resource._search_sql(
+            **search_kwargs("name:bolt", limit=10),
+            fields=["name", "illustration_id", "price_usd", "prefer_score"],
+        )
+        cards = result["cards"]
+        assert len(cards) == 1
+        assert cards[0].keys() == {"name", "illustration_id", "price_usd", "prefer_score"}
+        assert cards[0]["name"] == "Lightning Bolt"
+
     def test_database_operations_isolation(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """Test that database operations are properly isolated."""
         # This test verifies that we're working with the test database

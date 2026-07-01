@@ -672,7 +672,7 @@ body {
 }
 
 .card-page-printings {
-  max-width: 900px;
+  max-width: 90%;
   margin: 2rem auto 0;
 }
 
@@ -683,15 +683,13 @@ body {
 }
 
 .printings-strip {
-  display: flex;
-  flex-direction: row;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
   gap: 0.5rem;
-  overflow-x: auto;
-  padding-bottom: 0.5rem;
 }
 
 .printing-thumb {
-  flex-shrink: 0;
+  position: relative;
   display: block;
   border-radius: 6px;
   overflow: hidden;
@@ -705,9 +703,21 @@ body {
 
 .printing-thumb img {
   display: block;
-  width: 80px;
+  width: 100%;
   height: auto;
   border-radius: 6px;
+}
+
+.printing-thumb-count {
+  position: absolute;
+  bottom: 4px;
+  right: 4px;
+  background: rgba(0, 0, 0, 0.75);
+  color: #fff;
+  font-size: 0.7rem;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 4px;
 }
 
 .card-page-link {

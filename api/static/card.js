@@ -94,7 +94,15 @@ function formatOracleText(text) {
 
 function renderCardFace(card) {
   const imageLarge = buildImageUrl(card, '745');
-  const imageHtml = `<div class="modal-image-wrapper"><img class="modal-image" src="${escapeHtml(imageLarge)}" width="745" height="1040" alt="${escapeHtml(card.name || '')}" /></div>`;
+  const imgTag = `<img class="modal-image" src="${escapeHtml(imageLarge)}" width="745" height="1040" alt="${escapeHtml(card.name || '')}" />`;
+  let imageHtml;
+  if (card.set_code && card.collector_number) {
+    // Build manapool.com referral URL — set codes and collector numbers from our database are safe for URLs
+    const manapoolUrl = `https://manapool.com/card/${card.set_code.toLowerCase()}/${card.collector_number}?ref=sylvan-librarian`;
+    imageHtml = `<div class="modal-image-wrapper"><a href="${manapoolUrl}" target="_blank" rel="noopener noreferrer" class="modal-image-link">${imgTag}</a></div>`;
+  } else {
+    imageHtml = `<div class="modal-image-wrapper">${imgTag}</div>`;
+  }
 
   const hasPT = card.power != null && card.toughness != null;
 
@@ -107,22 +115,53 @@ function renderCardFace(card) {
       </div>
       ${card.type_line ? `<div class="modal-card-type">${escapeHtml(card.type_line)}</div>` : ''}
       ${card.oracle_text ? `<div class="modal-card-text">${formatOracleText(card.oracle_text)}</div>` : ''}
-      ${card.set_name || hasPT ? `
+      ${
+        card.set_name || hasPT
+          ? `
       <div class="modal-card-set-power-row">
         ${card.set_name ? `<div class="modal-card-set">${escapeHtml(card.set_name)}</div>` : '<div class="modal-card-set"></div>'}
         ${hasPT ? `<div class="modal-card-power-toughness">${escapeHtml(card.power)} / ${escapeHtml(card.toughness)}</div>` : ''}
-      </div>` : ''}
+      </div>`
+          : ''
+      }
     </div>
   `;
 }
 
-function renderPrintingsStrip(cards) {
-  return cards
-    .map(card => {
+function formatUsd(value) {
+  return value == null ? '' : ` ($${Number(value).toFixed(2)})`;
+}
+
+// Printings that share the same illustration_id are collapsed into a single thumbnail — the one
+// with the highest prefer_score represents the group, badged with how many others it stands in
+// for. Groups are then sorted by that max prefer_score, highest first.
+function groupPrintingsByArt(cards) {
+  const groups = new Map();
+  for (const card of cards) {
+    const key = card.illustration_id || `${card.set_code}/${card.collector_number}`;
+    const group = groups.get(key);
+    if (!group) {
+      groups.set(key, { representative: card, count: 1 });
+    } else {
+      group.count += 1;
+      if ((card.prefer_score ?? -Infinity) > (group.representative.prefer_score ?? -Infinity)) {
+        group.representative = card;
+      }
+    }
+  }
+  return [...groups.values()].sort(
+    (a, b) => (b.representative.prefer_score ?? -Infinity) - (a.representative.prefer_score ?? -Infinity)
+  );
+}
+
+function renderPrintingsStrip(groups) {
+  return groups
+    .map(({ representative: card, count }) => {
       const thumb = buildImageUrl(card, '280');
       const url = `/card/${card.set_code}/${card.collector_number}`;
-      const label = escapeHtml(card.set_name || card.set_code || '');
-      return `<a href="${escapeHtml(url)}" class="printing-thumb" title="${label}"><img src="${escapeHtml(thumb)}" alt="${label}" loading="lazy" /></a>`;
+      const label = escapeHtml(`${card.set_name || card.set_code || ''}${formatUsd(card.price_usd)}`);
+      const badge = count > 1 ? `<span class="printing-thumb-count">+${count - 1}</span>` : '';
+      return `<a href="${escapeHtml(url)}" class="printing-thumb" title="${label}"><img src="${escapeHtml(thumb)}" alt="${label}" loading="lazy" />${badge}</a>`;
     })
     .join('');
 }
@@ -158,13 +197,15 @@ async function main() {
   document.getElementById('card-loading').style.display = 'none';
 
   try {
-    const resp = await fetch(`/search?q=${encodeURIComponent(`!"${card.name}"`)}&unique=printing`);
-    const data = await resp.json();
-    const others = (data.cards || []).filter(
-      p => !(p.set_code === setCode && p.collector_number === collectorNumber),
+    const printingFields = 'set_code,collector_number,set_name,illustration_id,price_usd,prefer_score';
+    const resp = await fetch(
+      `/search?q=${encodeURIComponent(`!"${card.name}"`)}&unique=printing&fields=${printingFields}`
     );
+    const data = await resp.json();
+    const others = (data.cards || []).filter(p => !(p.set_code === setCode && p.collector_number === collectorNumber));
     if (others.length > 0) {
-      document.getElementById('printings-list').innerHTML = renderPrintingsStrip(others);
+      const groups = groupPrintingsByArt(others);
+      document.getElementById('printings-list').innerHTML = renderPrintingsStrip(groups);
       document.getElementById('other-printings').style.display = '';
     }
   } catch (_) {

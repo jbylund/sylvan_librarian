@@ -7,6 +7,8 @@ import time
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from api.api_resource import APIResource
 from api.utils.type_conversions import make_type_converting_wrapper
 
@@ -175,6 +177,31 @@ class TestTypeConversion:
 
         assert wrapped_no_params is no_params_func
         assert wrapped_only_self is only_self_func
+
+    def test_positional_args_are_mapped_to_parameter_names(self) -> None:
+        """Path segments (e.g. /card/{set_code}/{collector_number}) arrive as positional args."""
+
+        def card(set_code: str = "", collector_number: str = "", *, falcon_response: Any = None) -> dict[str, Any]:
+            return {"set_code": set_code, "collector_number": collector_number, "falcon_response": falcon_response}
+
+        wrapped = make_type_converting_wrapper(card)
+        result = wrapped("eoc", "104", falcon_response="resp")
+        assert result == {"set_code": "eoc", "collector_number": "104", "falcon_response": "resp"}
+
+    def test_positional_args_are_type_converted(self) -> None:
+        def paged(page: int = 0, *, falcon_response: Any = None) -> int:
+            return page
+
+        wrapped = make_type_converting_wrapper(paged)
+        assert wrapped("3", falcon_response=None) == 3
+
+    def test_too_many_positional_args_raises_type_error(self) -> None:
+        def card(set_code: str = "") -> str:
+            return set_code
+
+        wrapped = make_type_converting_wrapper(card)
+        with pytest.raises(TypeError, match="takes 1 positional arguments but 2 were given"):
+            wrapped("eoc", "104")
 
     def test_string_boolean_parameters_are_converted(self) -> None:
         """Test that make_type_converting_wrapper converts string booleans to bool."""
