@@ -57,6 +57,7 @@ dependencies = [
  "regex",
  "rkyv",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -266,6 +267,7 @@ dependencies = [
  "pyo3-build-config",
  "pyo3-ffi",
  "pyo3-macros",
+ "uuid",
 ]
 
 [[package]]

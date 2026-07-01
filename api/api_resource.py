@@ -49,9 +49,10 @@ from api.utils.timer import Timer
 from api.utils.type_conversions import _get_type_name, make_type_converting_wrapper
 from card_engine import ENGINE_COLUMNS as _ENGINE_COLUMNS_FROM_MODULE
 from card_engine import QueryEngine as _QueryEngine
+from card_engine import QueryError as _QueryError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator
+    from collections.abc import Iterable, Iterator, Sequence
     from multiprocessing.sharedctypes import Synchronized
     from multiprocessing.synchronize import Event as EventType
     from multiprocessing.synchronize import RLock as LockType
@@ -1138,19 +1139,28 @@ class APIResource:
         direction: SortDirection,
         limit: int,
         timer: Timer,
+        fields: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         logger.info("Searching engine for %r", query)
         query_explanation = parsed_query.to_human_explanation() if query else ""
-        with timer("engine_query"):
-            total_cards, cards = self._engine.query(
-                filters=parsed_query,
-                unique=str(unique),
-                prefer=str(prefer),
-                orderby=str(orderby),
-                direction=str(direction),
-                # limit=None means "no limit"; the engine requires an int, so use a large number
-                limit=limit if limit is not None else 1_000_000,
-            )
+        try:
+            with timer("engine_query"):
+                total_cards, cards = self._engine.query(
+                    filters=parsed_query,
+                    unique=str(unique),
+                    prefer=str(prefer),
+                    orderby=str(orderby),
+                    direction=str(direction),
+                    # limit=None means "no limit"; the engine requires an int, so use a large number
+                    limit=limit if limit is not None else 1_000_000,
+                    fields=fields,
+                )
+        except _QueryError as err:
+            logger.info("QueryError caught for query '%s', raising BadRequest", query)
+            raise falcon.HTTPBadRequest(
+                title="Invalid Search Query",
+                description=f'Failed to parse query: "{query}"',
+            ) from err
         with timer("engine_collect"):
             cards = list(cards)
         return {
