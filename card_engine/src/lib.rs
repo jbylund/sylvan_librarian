@@ -1226,6 +1226,8 @@ const FIELD_TABLE: &[(&str, FieldExtractor)] = &[
     ("type_line", |py, c, s| Ok(str_at(s, u32::from(c.type_line_id)).into_pyobject(py)?.into_any())),
     ("illustration_id", |py, c, _s| Ok(uuid_from_u128(u128::from(c.illustration_id)).into_pyobject(py)?.into_any())),
     ("scryfall_id", |py, c, _s| Ok(uuid_from_u128(u128::from(c.scryfall_id)).into_pyobject(py)?.into_any())),
+    ("price_usd", |py, c, _s| Ok(c.price_usd.as_ref().map(|v| f32::from(*v)).into_pyobject(py)?.into_any())),
+    ("prefer_score", |py, c, _s| Ok(c.prefer_score.as_ref().map(|v| f32::from(*v)).into_pyobject(py)?.into_any())),
     // card_subtypes is a Vec, so insertion order is already deterministic; the rest are
     // HashSets and get sorted for deterministic output.
     ("card_subtypes", |py, c, _s| {

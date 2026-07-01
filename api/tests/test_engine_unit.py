@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from api.parsing import parse_scryfall_query
-from card_engine import QueryEngine
+from card_engine import QueryEngine, UnknownFieldError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
@@ -79,6 +79,7 @@ def _run(
     orderby: str = "edhrec",
     direction: str = "asc",
     limit: int = 200,
+    fields: list[str] | None = None,
 ) -> tuple[int, list[dict]]:
     """Parse q, run engine.query(), return (total, cards). q='' matches all."""
     filters = parse_scryfall_query(q)
@@ -89,6 +90,7 @@ def _run(
         orderby=orderby,
         direction=direction,
         limit=limit,
+        fields=fields,
     )
     return total, list(cards)
 
@@ -1036,3 +1038,57 @@ class TestCommonCardKeywords:
         result = engine.common_card_keywords()
         for keyword, count in result.items():
             assert count > 0, f"Keyword {keyword!r} has non-positive count {count}"
+
+
+class TestFieldSelection:
+    """fields= selects which keys come back per card; None keeps the historical 9."""
+
+    def test_default_fields_omit_illustration_and_price(self, engine: QueryEngine) -> None:
+        _, cards = _run(engine, 'name="Lightning Bolt"', unique="printing", limit=1)
+        assert cards[0].keys() == {
+            "name",
+            "set_code",
+            "collector_number",
+            "power",
+            "toughness",
+            "mana_cost",
+            "oracle_text",
+            "set_name",
+            "type_line",
+        }
+
+    def test_requested_fields_returned_exactly(self, engine: QueryEngine) -> None:
+        _, cards = _run(
+            engine,
+            'name="Lightning Bolt"',
+            unique="printing",
+            limit=1,
+            fields=["name", "illustration_id", "price_usd", "prefer_score"],
+        )
+        assert cards[0].keys() == {"name", "illustration_id", "price_usd", "prefer_score"}
+
+    def test_illustration_id_groups_shared_art(self, engine: QueryEngine) -> None:
+        # Lightning Bolt has 10 printings across 6 distinct illustration_ids.
+        _, cards = _run(
+            engine,
+            'name="Lightning Bolt"',
+            unique="printing",
+            fields=["set_code", "illustration_id"],
+        )
+        assert len({c["illustration_id"] for c in cards}) == 6
+
+    def test_price_usd_matches_prefer_ordering(self, engine: QueryEngine) -> None:
+        # Cheapest Lightning Bolt is m11 at $1.47 (see TestPrefer.test_prefer_usd_low...).
+        _, cards = _run(
+            engine,
+            'name="Lightning Bolt"',
+            unique="card",
+            prefer="usd_low",
+            fields=["set_code", "price_usd"],
+        )
+        assert cards[0]["set_code"] == "m11"
+        assert cards[0]["price_usd"] == pytest.approx(1.47)
+
+    def test_unknown_field_raises(self, engine: QueryEngine) -> None:
+        with pytest.raises(UnknownFieldError):
+            _run(engine, unique="printing", fields=["not_a_real_field"])

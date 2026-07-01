@@ -12,8 +12,10 @@ from typing import Any, Never
 from unittest.mock import MagicMock, patch
 
 import falcon
+import falcon.testing
 import pytest
 
+import api.api_resource as api_resource_module
 from api.api_resource import FALLBACK_SITE_NAME, APIResource, _hostname_to_site_name, _split_words, hostname_to_site_name
 from api.settings import settings
 
@@ -169,6 +171,73 @@ class TestAPIResourceInitializationNewStyle(TestBaseAPIResourceTest):
 
         for method in public_methods:
             assert method in api_resource.action_map
+
+
+class TestRequestDispatch(TestBaseAPIResourceTest):
+    """_handle() routes both flat "static/x" action keys and positional path segments.
+
+    Regression coverage for a dispatch rewrite that split every path on "/" to derive
+    (action_word, *action_args): it broke the "static/x" actions (registered under a single
+    slash-containing key, not action_word "static"), crashed on unmatched routes with extra
+    segments (_raise_not_found only accepted **kwargs, not positional args), and — the one fixed
+    here — returned 400 instead of 404 for any *matched* route hit with more trailing segments
+    than its handler accepts (e.g. /get_pid/extra), since the mismatch surfaced as a TypeError
+    inside the handler rather than being recognized as "no route matches this" beforehand.
+    """
+
+    def _dispatch(self, path: str) -> falcon.Response:
+        req = falcon.Request(falcon.testing.create_environ(path=path))
+        resp = falcon.Response()
+        self.api_resource._handle(req, resp)
+        return resp
+
+    def test_flat_static_route_is_matched_by_full_path(self) -> None:
+        resp = self._dispatch("/static/favicon.ico")
+        assert resp.status == falcon.HTTP_200
+
+    def test_positional_path_segments_reach_the_action(self) -> None:
+        resp = self._dispatch("/card/eoc/104")
+        assert resp.status == falcon.HTTP_200
+        assert resp.content_type == "text/html"
+
+    def test_unmatched_route_with_extra_segments_raises_not_found(self) -> None:
+        with pytest.raises(falcon.HTTPNotFound):
+            self._dispatch("/nonexistent/thing/other")
+
+    def test_known_zero_arg_route_with_extra_segment_raises_not_found(self) -> None:
+        # Regression: a matched action_word that can't absorb a trailing segment (get_pid takes
+        # no positional args) used to reach the handler anyway, raising a TypeError that _handle
+        # converted to 400 — the extra segment means the path doesn't identify anything, so this
+        # should 404 like any other unmatched path.
+        with pytest.raises(falcon.HTTPNotFound):
+            self._dispatch("/get_pid/extra")
+
+    def test_positional_route_with_too_many_segments_raises_not_found(self) -> None:
+        # card() accepts exactly 2 positional args (set_code, collector_number); a 3rd segment
+        # should 404 rather than reach the handler.
+        with pytest.raises(falcon.HTTPNotFound):
+            self._dispatch("/card/eoc/104/extra")
+
+    def test_positional_capacity_computed_at_init_not_per_request(self) -> None:
+        assert self.api_resource._action_positional_capacity["get_pid"] == 0
+        assert self.api_resource._action_positional_capacity["card"] == 2
+
+    def test_not_found_routes_precomputed_not_rebuilt_per_request(self) -> None:
+        # _not_found_routes is built once in __init__ (see _build_routes_listing) from the fixed
+        # action_map contents, not recomputed on every 404 — inspect.signature() per route isn't
+        # free, and the listing can't change without action_map changing.
+        listing_before = self.api_resource._not_found_routes
+        with pytest.raises(falcon.HTTPNotFound) as exc_info:
+            self.api_resource._raise_not_found()
+        assert exc_info.value.description["routes"] is listing_before
+        assert "get_pid" in listing_before
+        assert "card" in listing_before
+
+    def test_no_inspect_signature_calls_on_successful_request(self) -> None:
+        with patch("api.api_resource.inspect.signature") as mock_signature:
+            resp = self._dispatch("/card/a25/141")
+        assert resp.status == falcon.HTTP_200
+        mock_signature.assert_not_called()
 
 
 class TestAPIResourceCoreMethods(unittest.TestCase):
@@ -389,13 +458,18 @@ class TestAPIResourceStaticFileServing(unittest.TestCase):
         assert mock_response.text is not None
         assert len(mock_response.text) > 0
         assert mock_response.content_type == "text/html"
-        assert 'autocapitalize="off"' in mock_response.text
-        assert 'autocorrect="off"' in mock_response.text
+        # HTML is minified before serving (see _minify_html), which may drop attribute quotes and
+        # reorder attributes — check for the substantive content rather than exact tag formatting.
+        assert "autocapitalize" in mock_response.text
+        assert "autocorrect" in mock_response.text
         # Verify it sets cache control header
         mock_response.set_header.assert_called_with("Cache-Control", "public, max-age=3600")
-        assert '<meta property="og:image" content="/static/social-preview.webp" />' in mock_response.text
-        assert '<meta property="og:image:width" content="1200" />' in mock_response.text
-        assert '<meta property="og:image:height" content="630" />' in mock_response.text
+        assert "og:image" in mock_response.text
+        assert "/static/social-preview.webp" in mock_response.text
+        assert "og:image:width" in mock_response.text
+        assert "1200" in mock_response.text
+        assert "og:image:height" in mock_response.text
+        assert "630" in mock_response.text
 
     def test_index_html_with_query_embeds_search_results(self) -> None:
         """Test _root embeds search results when query parameter is provided."""
@@ -465,6 +539,53 @@ class TestAPIResourceStaticFileServing(unittest.TestCase):
 
         assert mock_response.text == expected_contents
         assert mock_response.content_type == "text/plain"
+
+
+class TestHtmlMinification(unittest.TestCase):
+    """_minify_html reduces page weight.
+
+    Must not corrupt the per-request placeholders that _build_base_html's cached output still
+    needs substituted afterward (SERVER_SIDE_RESULTS, SERVER_SIDE_EMBEDDED_DATA).
+    """
+
+    def setUp(self) -> None:
+        self.mock_conn_pool = MagicMock()
+        self.api_resource = APIResource(
+            last_import_time=multiprocessing.Value("d", time.time(), lock=True),
+        )
+        self.api_resource._conn_pool = self.mock_conn_pool
+
+    def test_minifies_whitespace_by_default(self) -> None:
+        # minify_html also drops the redundant closing </p> (valid HTML5 tag-omission), hence
+        # "<div><p>x</div>" rather than a literal whitespace-only collapse.
+        assert api_resource_module._minify_html("<div>   <p>x</p>   </div>") == "<div><p>x</div>"
+
+    def test_disabled_flag_returns_input_unchanged(self) -> None:
+        original = api_resource_module._MINIFY_HTML_ENABLED
+        api_resource_module._MINIFY_HTML_ENABLED = False
+        try:
+            html = "<div>   <p>x</p>   </div>"
+            assert api_resource_module._minify_html(html) == html
+        finally:
+            api_resource_module._MINIFY_HTML_ENABLED = original
+
+    def test_server_side_placeholders_survive_minification(self) -> None:
+        mock_response = MagicMock()
+        self.api_resource._root(falcon_response=mock_response)
+        assert "<!-- SERVER_SIDE_RESULTS -->" in mock_response.text
+        assert "<!-- SERVER_SIDE_EMBEDDED_DATA -->" in mock_response.text
+
+    def test_search_results_still_embed_after_minification(self) -> None:
+        mock_response = MagicMock()
+        mock_search_results = {
+            "cards": [{"name": "Elvish Mystic", "set_code": "m14", "collector_number": "1"}],
+            "total_cards": 1,
+            "query": "elf",
+        }
+        with patch.object(self.api_resource, "_search", return_value=mock_search_results):
+            self.api_resource._root(falcon_response=mock_response, q="elf")
+        assert "window.EMBEDDED_SEARCH_RESULTS = {" in mock_response.text
+        assert "Elvish Mystic" in mock_response.text
 
 
 class TestAPIResourceErrorHandling(unittest.TestCase):

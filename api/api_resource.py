@@ -23,6 +23,7 @@ from typing import cast as typecast
 
 import cachebox
 import falcon
+import minify_html
 import orjson
 import psycopg
 import psycopg_pool
@@ -52,7 +53,7 @@ from card_engine import QueryEngine as _QueryEngine
 from card_engine import QueryError as _QueryError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Sequence
+    from collections.abc import Callable, Iterable, Iterator, Sequence
     from multiprocessing.sharedctypes import Synchronized
     from multiprocessing.synchronize import Event as EventType
     from multiprocessing.synchronize import RLock as LockType
@@ -135,7 +136,7 @@ def _selector_is_critical(selector: str) -> bool:
 
 def _build_critical_css() -> str:
     """Extract and minify critical selectors from styles.css at startup."""
-    styles_path = pathlib.Path(__file__).parent / "static" / "styles.css"
+    styles_path = _STATIC_DIR / "styles.css"
     rules = tinycss2.parse_stylesheet(styles_path.read_text(), skip_comments=True, skip_whitespace=True)
     parts: list[str] = []
     for rule in rules:
@@ -163,18 +164,62 @@ def _build_critical_css() -> str:
     return raw.strip()
 
 
-_INDEX_HTML_PATH = pathlib.Path(__file__).parent / "static" / "index.html"
+_STATIC_DIR = pathlib.Path(__file__).parent / "static"
+_INDEX_HTML_PATH = _STATIC_DIR / "index.html"
+_CARD_HTML_PATH = _STATIC_DIR / "card.html"
+_FRAGMENTS_DIR = _STATIC_DIR / "fragments"
 
 
 def _static_hash(filename: str) -> str | None:
     try:
-        return hashlib.sha256((pathlib.Path(__file__).parent / "static" / filename).read_bytes()).hexdigest()[:12]
+        return hashlib.sha256((_STATIC_DIR / filename).read_bytes()).hexdigest()[:12]
     except FileNotFoundError:
         return None
 
 
 _STYLES_CSS_HASH = _static_hash("styles.css")
 _APP_MIN_JS_HASH = _static_hash("app.min.js")
+_CARD_JS_HASH = _static_hash("card.js")
+
+# Markup identical across index.html and card.html — read once at import time and spliced into
+# each template's own placeholder comment (<!-- FAVICON --> etc.) by _build_base_html /
+# _build_card_html. Fragments live in fragments/ rather than static/ directly since they are not
+# complete documents and are never served on their own (only files with an action_map entry are
+# reachable over HTTP).
+_FAVICON_HTML = (_FRAGMENTS_DIR / "favicon.html").read_text()
+_PRECONNECTS_HTML = (_FRAGMENTS_DIR / "preconnects.html").read_text()
+_FONTS_HTML = (_FRAGMENTS_DIR / "fonts.html").read_text()
+_CSS_HTML = (_FRAGMENTS_DIR / "css.html").read_text()
+_FOOTER_HTML = (_FRAGMENTS_DIR / "footer.html").read_text()
+
+
+def _inject_shared_fragments(html: str) -> str:
+    """Splice the shared head/footer fragments into their placeholder comments.
+
+    Must run before the CRITICAL_CSS/asset-hash substitutions below: the CSS fragment carries its
+    own inner <!-- CRITICAL_CSS --> placeholder, which only exists in `html` after this replace.
+    """
+    html = html.replace("<!-- FAVICON -->", _FAVICON_HTML)
+    html = html.replace("<!-- PRECONNECTS -->", _PRECONNECTS_HTML)
+    html = html.replace("<!-- FONTS -->", _FONTS_HTML)
+    html = html.replace("<!-- CSS -->", _CSS_HTML)
+    return html.replace("<!-- FOOTER -->", _FOOTER_HTML)
+
+
+# Flip to False to disable HTML minification (e.g. while debugging a minifier-induced issue).
+_MINIFY_HTML_ENABLED = True
+
+
+def _minify_html(html: str) -> str:
+    """Minify HTML to shave a bit more off the page weight on top of gzip/brotli/zstd compression.
+
+    keep_comments=True is required: `_build_base_html`'s cached output still carries per-request
+    placeholders (SERVER_SIDE_RESULTS, SERVER_SIDE_EMBEDDED_DATA) substituted by `search()` after
+    this function returns, and those are plain HTML comments that must survive intact.
+    """
+    if not _MINIFY_HTML_ENABLED:
+        return html
+    return minify_html.minify(html, minify_js=True, minify_css=True, keep_comments=True)
 
 
 # TLDs in this set are stripped from the hostname; others are concatenated into the word.
@@ -273,6 +318,41 @@ MIN_IMPORT_CARDS = 90_000
 # measurable gain (see docs/issues/engine-incremental-loading.md).
 _ENGINE_RELOAD_BATCH_SIZE = 2_000
 
+# Public field name -> magic.cards column. The `fields=` vocabulary for /search. This is
+# deliberately a subset of FIELD_TABLE in card_engine/src/lib.rs, not a mirror of it — not
+# everything the engine can extract needs to be a public API field. Every key here must still
+# have a same-named entry in FIELD_TABLE with matching semantics, so a `fields=` request for one
+# of these names gets identically-shaped results regardless of which path serves it; FIELD_TABLE
+# is free to have entries with no counterpart here.
+RESULT_FIELD_COLUMNS: dict[str, str] = {
+    "name": "card_name",
+    "set_code": "card_set_code",
+    "collector_number": "collector_number",
+    "power": "creature_power_text",
+    "toughness": "creature_toughness_text",
+    "mana_cost": "mana_cost_text",
+    "oracle_text": "oracle_text",
+    "set_name": "set_name",
+    "type_line": "type_line",
+    "illustration_id": "illustration_id",
+    "scryfall_id": "scryfall_id",
+    "price_usd": "price_usd",
+    "prefer_score": "prefer_score",
+}
+# `fields=None` resolves to these 9 — the fixed set every caller got before field selection
+# existed. Order/membership must match DEFAULT_FIELDS in card_engine/src/lib.rs.
+DEFAULT_RESULT_FIELDS: tuple[str, ...] = (
+    "name",
+    "set_code",
+    "collector_number",
+    "power",
+    "toughness",
+    "mana_cost",
+    "oracle_text",
+    "set_name",
+    "type_line",
+)
+
 CUSTOM_IS_TAGS = [
     "historic",  # artifact, legendary, saga
     "pathway",  # land and name contains pathway
@@ -369,6 +449,7 @@ def set_cache_header(falcon_response: falcon.Response | None, duration: timedelt
 def _build_base_html(critical_css: str, site_name: str) -> str:
     """Read index.html and inject critical CSS and site name. Cached per (critical_css, site_name) pair."""
     html = _INDEX_HTML_PATH.read_text()
+    html = _inject_shared_fragments(html)
     html = html.replace("<!-- CRITICAL_CSS -->", critical_css)
     if _STYLES_CSS_HASH:
         html = html.replace("/static/styles.css", f"/static/styles.css?v={_STYLES_CSS_HASH}")
@@ -376,7 +457,20 @@ def _build_base_html(critical_css: str, site_name: str) -> str:
         html = html.replace("/static/app.min.js", f"/static/app.min.js?v={_APP_MIN_JS_HASH}")
     if site_name != FALLBACK_SITE_NAME:
         html = html.replace(FALLBACK_SITE_NAME, site_name)
-    return html
+    return _minify_html(html)
+
+
+@cached(cache=LRUCache(maxsize=4))
+def _build_card_html(critical_css: str) -> str:
+    """Read card.html and inject critical CSS and versioned asset URLs."""
+    html = _CARD_HTML_PATH.read_text()
+    html = _inject_shared_fragments(html)
+    html = html.replace("<!-- CRITICAL_CSS -->", critical_css)
+    if _STYLES_CSS_HASH:
+        html = html.replace("/static/styles.css", f"/static/styles.css?v={_STYLES_CSS_HASH}")
+    if _CARD_JS_HASH:
+        html = html.replace("/static/card.js", f"/static/card.js?v={_CARD_JS_HASH}")
+    return _minify_html(html)
 
 
 @cached(cache=LRUCache(maxsize=10_000))
@@ -405,6 +499,72 @@ def rewrap(query: str) -> str:
     return " ".join(query.strip().split())
 
 
+def _max_positional_args(func: Any) -> float:  # noqa: ANN401
+    """Return how many positional args `func` accepts; inf if it takes *args.
+
+    Computed once per registered action at APIResource.__init__ time (not per-request):
+    inspect.signature() follows a make_type_converting_wrapper wrapper's __wrapped__ link
+    (set by functools.update_wrapper), so this sees the real underlying handler's signature.
+    """
+    try:
+        params = inspect.signature(func).parameters.values()
+    except (TypeError, ValueError):
+        return 0.0
+    if any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params):
+        return float("inf")
+    return float(sum(1 for p in params if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)))
+
+
+def _build_routes_listing(action_map: dict[str, Callable]) -> dict[str, dict[str, Any]]:
+    """Build the {route: {doc, args, kwargs}} listing served in 404 responses.
+
+    Depends only on `action_map`'s contents, which are fixed once APIResource.__init__ finishes —
+    computed once there rather than on every 404 (inspect.signature() per route isn't free).
+    """
+    routes = {}
+    for endpoint_name, wrapped_func in action_map.items():
+        # Get the original function from the wrapper
+        original_func = wrapped_func.__wrapped__ if hasattr(wrapped_func, "__wrapped__") else wrapped_func
+
+        # Get function signature
+        sig = inspect.signature(original_func)
+
+        # Extract docstring
+        doc = original_func.__doc__ or ""
+
+        # Parse arguments
+        args = []
+        kwargs = {}
+
+        for param_name, param in sig.parameters.items():
+            if param_name.startswith("_"):
+                continue
+            if param_name in ("self", "falcon_response"):
+                continue
+
+            param_info = {
+                "name": param_name,
+                "type": _get_type_name(param.annotation),
+            }
+
+            if param.default != inspect.Parameter.empty:
+                # It's a keyword argument with default
+                kwargs[param_name] = {
+                    "type": _get_type_name(param.annotation),
+                    "default": param.default,
+                }
+            else:
+                # It's a positional argument
+                args.append(param_info)
+
+        routes[endpoint_name] = {
+            "doc": doc,
+            "args": args,
+            "kwargs": kwargs,
+        }
+    return routes
+
+
 class APIResource:
     """Class implementing request handling for our simple API."""
 
@@ -424,15 +584,21 @@ class APIResource:
         self._bulk_data_fetcher = ScryfallBulkDataFetcher()
         self._critical_css: str = _build_critical_css()
         self._conn_pool: psycopg_pool.ConnectionPool = db_utils.make_pool()
-        # Create action map with type-converting wrappers for all public methods
+        # Create action map with type-converting wrappers for all public methods. Alongside it,
+        # _action_positional_capacity records how many positional path-segment args (beyond the
+        # action word) each action accepts, computed once here rather than per-request in
+        # _handle — see _max_positional_args.
         self.action_map = {}
+        self._action_positional_capacity: dict[str, float] = {}
         for method_name in dir(self):
             if method_name.startswith("_"):
                 continue
             method = getattr(self, method_name)
             if callable(method):
                 self.action_map[method_name] = make_type_converting_wrapper(method)
+                self._action_positional_capacity[method_name] = _max_positional_args(method)
         self.action_map["_root"] = make_type_converting_wrapper(self._root)
+        self._action_positional_capacity["_root"] = _max_positional_args(self._root)
 
         def redirect_to_root(**_: object) -> None:
             msg = "/"
@@ -440,13 +606,19 @@ class APIResource:
 
         self.action_map["index"] = redirect_to_root
         self.action_map["index_html"] = redirect_to_root
+        self._action_positional_capacity["index"] = _max_positional_args(redirect_to_root)
+        self._action_positional_capacity["index_html"] = _max_positional_args(redirect_to_root)
 
         # add static file serving actions
         self.action_map["static/app_js"] = self.app_js
         self.action_map["static/app_min_js"] = self.app_min_js
+        self.action_map["static/card_js"] = self.card_js
         self.action_map["static/favicon_ico"] = self.favicon_ico
         self.action_map["static/social-preview_webp"] = self.social_preview_webp
         self.action_map["static/styles_css"] = self.styles_css
+
+        # Static once action_map is fully populated — see _build_routes_listing.
+        self._not_found_routes = _build_routes_listing(self.action_map)
 
         self._cache_generation: Synchronized = cache_generation or multiprocessing.Value("i", 0)
         self._query_cache: GenerationCache = GenerationCache(
@@ -531,16 +703,25 @@ class APIResource:
             path,
             id(resp),
         )
+
         path = path.replace(".", "_")
-        action = self.action_map.get(
-            path,
-            self._raise_not_found,
-        )
+        if path in self.action_map:
+            # Flat routes like "static/favicon_ico" register their full slash-containing path as
+            # the action_map key — check that exact match before treating "/" as an arg separator.
+            action = self.action_map[path]
+            action_args: list[str] = []
+        else:
+            action_word, *action_args = path.split("/")
+            action = self.action_map.get(action_word, self._raise_not_found)
+            # A matched action that can't absorb this many trailing segments (e.g. /robots.txt/x)
+            # means the path doesn't identify anything — 404, not a 400 from a TypeError inside it.
+            if len(action_args) > self._action_positional_capacity.get(action_word, 0):
+                action, action_args = self._raise_not_found, []
         res = None
         before = time.monotonic()
         try:
             params = {k: v for k, v in req.params.items() if k not in DISALLOWED_QUERY_ARGS}
-            res = action(falcon_response=resp, request_host=req.get_header("X-Proxy-Host") or req.host, **params)
+            res = action(*action_args, falcon_response=resp, request_host=req.get_header("X-Proxy-Host") or req.host, **params)
             resp.media = res
         except TypeError as oops:
             logger.error("Error handling request: %s", oops, exc_info=True)
@@ -579,55 +760,12 @@ class APIResource:
                 for span_name, span_data in res.get("outer_timings", {}).items():
                     record_span(req, span_name, span_data.get("_meta", {}).get("duration_ms", 0))
 
-    def _raise_not_found(self, **_: object) -> None:
+    def _raise_not_found(self, *_args: object, **_: object) -> None:
         """Raise a Falcon HTTPNotFound error with available routes."""
-        routes = {}
-
-        for endpoint_name, wrapped_func in self.action_map.items():
-            # Get the original function from the wrapper
-            original_func = wrapped_func.__wrapped__ if hasattr(wrapped_func, "__wrapped__") else wrapped_func
-
-            # Get function signature
-            sig = inspect.signature(original_func)
-
-            # Extract docstring
-            doc = original_func.__doc__ or ""
-
-            # Parse arguments
-            args = []
-            kwargs = {}
-
-            for param_name, param in sig.parameters.items():
-                if param_name.startswith("_"):
-                    continue
-                if param_name in ("self", "falcon_response"):
-                    continue
-
-                param_info = {
-                    "name": param_name,
-                    "type": _get_type_name(param.annotation),
-                }
-
-                if param.default != inspect.Parameter.empty:
-                    # It's a keyword argument with default
-                    kwargs[param_name] = {
-                        "type": _get_type_name(param.annotation),
-                        "default": param.default,
-                    }
-                else:
-                    # It's a positional argument
-                    args.append(param_info)
-
-            routes[endpoint_name] = {
-                "doc": doc,
-                "args": args,
-                "kwargs": kwargs,
-            }
-
         raise falcon.HTTPNotFound(
             title="Not Found",
             description={
-                "routes": routes,
+                "routes": self._not_found_routes,
             },
         )
 
@@ -804,6 +942,12 @@ class APIResource:
         if self._setup_complete_cache is not None:
             result, expires_at, cached_import_time = self._setup_complete_cache
             if now < expires_at and current_import_time == cached_import_time:
+                logger.debug(
+                    "_setup_complete cache hit: result=%s, expires in %.0fs, pid %d",
+                    result,
+                    expires_at - now,
+                    os.getpid(),
+                )
                 return result
         try:
             with self._conn_pool.connection() as conn:
@@ -811,10 +955,24 @@ class APIResource:
                 with conn.cursor() as cursor:
                     cursor.execute("SELECT COUNT(1) AS num_cards FROM magic.cards")
                     cards_found = cursor.fetchall()[0]["num_cards"]
-                    logger.info("Found %d cards in pid %d", cards_found, os.getpid())
                     result = cards_found > MIN_IMPORT_CARDS
+                    if result:
+                        logger.info("Found %d cards in pid %d", cards_found, os.getpid())
+                    else:
+                        logger.warning(
+                            "Setup not complete: found %d cards, need more than %d (pid %d)",
+                            cards_found,
+                            MIN_IMPORT_CARDS,
+                            os.getpid(),
+                        )
         except Exception as oops:
-            logger.error("Error checking if setup is complete: %s", oops, exc_info=True)
+            logger.error(
+                "Error checking if setup is complete (pid %d): %s: %s",
+                os.getpid(),
+                type(oops).__name__,
+                oops,
+                exc_info=True,
+            )
             result = False
         self._setup_complete_cache = (result, now + self._SETUP_COMPLETE_TTL, current_import_time)
         return result
@@ -822,6 +980,7 @@ class APIResource:
     def _require_setup_complete(self) -> None:
         """Require that setup is complete or raise a ServiceUnavailable error."""
         if not self._setup_complete():
+            logger.warning("Rejecting request in pid %d: setup is not complete", os.getpid())
             raise falcon.HTTPServiceUnavailable(
                 title="Service Unavailable",
                 description="Setup is not complete, please try again later.",
@@ -985,12 +1144,36 @@ class APIResource:
         finally:
             import_lock.release()
 
+    def _resolve_result_fields(self, fields: Sequence[str] | None) -> list[str]:
+        """Validate a `fields=` request against RESULT_FIELD_COLUMNS, deduping repeats.
+
+        `None` resolves to DEFAULT_RESULT_FIELDS, mirroring `resolve_fields()` in
+        card_engine/src/lib.rs so the SQL and engine paths agree on what "the usual fields" means.
+        An explicit empty list is rejected rather than silently producing a fieldless SELECT.
+        """
+        if fields is None:
+            return list(DEFAULT_RESULT_FIELDS)
+        resolved = list(dict.fromkeys(fields))
+        if not resolved:
+            raise falcon.HTTPBadRequest(
+                title="Invalid Fields",
+                description="fields must include at least one field name.",
+            )
+        for name in resolved:
+            if name not in RESULT_FIELD_COLUMNS:
+                raise falcon.HTTPBadRequest(
+                    title="Invalid Fields",
+                    description=f"Unknown field: {name!r}",
+                )
+        return resolved
+
     def search(  # noqa: PLR0913
         self,
         *,
         falcon_response: falcon.Response | None = None,
         # search parameters
         direction: SortDirection = SortDirection.ASC,
+        fields: Sequence[str] | None = None,
         limit: int = 100,
         orderby: CardOrdering = CardOrdering.EDHREC,
         prefer: PreferOrder = PreferOrder.DEFAULT,
@@ -1005,6 +1188,9 @@ class APIResource:
             q: Query string (alternative to query parameter).
             query: Query string (alternative to q parameter).
             direction: Sort direction ('asc' or 'desc').
+            fields: Which fields to return per card (comma-separated in the query string). Defaults
+                to the usual 9 (name, set_code, collector_number, power, toughness, mana_cost,
+                oracle_text, set_name, type_line). See RESULT_FIELD_COLUMNS for the full vocabulary.
             limit: Maximum number of results to return.
             orderby: Field to sort by.
             unique: Unique on field.
@@ -1018,6 +1204,7 @@ class APIResource:
             query=query or q,
             orderby=orderby,
             direction=direction,
+            fields=fields,
             limit=limit,
             unique=unique,
             prefer=prefer,
@@ -1056,6 +1243,7 @@ class APIResource:
         self,
         *,
         direction: SortDirection = SortDirection.ASC,
+        fields: Sequence[str] | None = None,
         limit: int = 100,
         orderby: CardOrdering = CardOrdering.EDHREC,
         prefer: PreferOrder = PreferOrder.DEFAULT,
@@ -1064,9 +1252,13 @@ class APIResource:
     ) -> dict[str, Any]:
         self._require_setup_complete()
         limit = self._validate_limit(limit)
+        # Resolved once here (rather than inside _search_sql/_search_engine) so an unknown field
+        # name always raises HTTPBadRequest instead of being swallowed by the engine's blanket
+        # except-and-fall-back-to-SQL below.
+        resolved_fields = self._resolve_result_fields(fields)
 
         if settings.enable_cache:
-            cache_key = (direction, limit, orderby, prefer, query, unique)
+            cache_key = (direction, limit, orderby, prefer, query, unique, tuple(resolved_fields))
             gen = self._cache_generation.value
             try:
                 search_cache = self._search_gen_cache[gen]
@@ -1106,6 +1298,7 @@ class APIResource:
                     direction=direction,
                     limit=limit,
                     timer=timer,
+                    fields=resolved_fields,
                 )
             except Exception as e:  # noqa: BLE001
                 logger.warning("Engine query failed for %r, falling back to SQL: %s", query, e, exc_info=True)
@@ -1123,6 +1316,7 @@ class APIResource:
             direction=direction,
             limit=limit,
             timer=timer,
+            fields=resolved_fields,
         )
         if settings.enable_cache:
             search_cache[cache_key] = result
@@ -1185,8 +1379,10 @@ class APIResource:
         direction: SortDirection,
         limit: int,
         timer: Timer,
+        fields: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         logger.info("Searching SQL for %r", query)
+        resolved_fields = self._resolve_result_fields(fields)
         query_explanation = parsed_query.to_human_explanation() if query else ""
         try:
             with timer("get_where_clause"):
@@ -1230,41 +1426,17 @@ class APIResource:
             prefer,
             ("edhrec_rank", "ASC"),
         )
-        _select_cols = """
-                    card_name,
-                    card_set_code,
-                    collector_number,
-                    creature_power_text,
-                    creature_toughness_text,
-                    edhrec_rank,
-                    mana_cost_text,
-                    oracle_text,
-                    set_name,
-                    type_line,
-                    prefer_score,"""
-        _result_cols = """
-                    card_name AS name,
-                    card_set_code AS set_code,
-                    collector_number,
-                    creature_power_text AS power,
-                    creature_toughness_text AS toughness,
-                    mana_cost_text AS mana_cost,
-                    oracle_text,
-                    set_name,
-                    type_line"""
+        # edhrec_rank and prefer_score are always pulled into the CTE for the ORDER BY tiebreak
+        # below, whether or not the caller asked for them as output fields.
+        _cte_columns = list(
+            dict.fromkeys([RESULT_FIELD_COLUMNS[name] for name in resolved_fields] + ["edhrec_rank", "prefer_score"]),
+        )
+        _select_cols = "".join(f"\n                    {col}," for col in _cte_columns)
+        _result_cols = ",\n                    ".join(f"{RESULT_FIELD_COLUMNS[name]} AS {name}" for name in resolved_fields)
         _order_by = f"""sort_value {sql_direction} NULLS LAST,
                     edhrec_rank ASC NULLS LAST,
                     prefer_score DESC NULLS LAST"""
-        _count_nulls = """
-                    null AS name,
-                    null AS set_code,
-                    null AS collector_number,
-                    null AS power,
-                    null AS toughness,
-                    null AS mana_cost,
-                    null AS oracle_text,
-                    null AS set_name,
-                    null AS type_line"""
+        _count_nulls = ",\n                    ".join(f"null AS {name}" for name in resolved_fields)
         if unique == UniqueOn.PRINTING:
             # scryfall_id is the PK — every row is already unique, no dedup needed.
             # The CTE has no ORDER BY; only the LIMIT branch sorts.
@@ -1472,7 +1644,7 @@ class APIResource:
         """
         if falcon_response is None:
             return
-        full_filename = pathlib.Path(__file__).parent / "static" / "favicon.ico"
+        full_filename = _STATIC_DIR / "favicon.ico"
         with pathlib.Path(full_filename).open(mode="rb") as f:
             falcon_response.data = contents = f.read()
         falcon_response.content_type = "image/vnd.microsoft.icon"
@@ -1486,7 +1658,7 @@ class APIResource:
         """Return the social preview image."""
         if falcon_response is None:
             return
-        full_filename = pathlib.Path(__file__).parent / "static" / "social-preview.webp"
+        full_filename = _STATIC_DIR / "social-preview.webp"
         with full_filename.open(mode="rb") as f:
             contents = f.read()
         falcon_response.data = contents
@@ -1541,6 +1713,43 @@ class APIResource:
         self._serve_static_file(filename="robots.txt", falcon_response=falcon_response)
         falcon_response.content_type = "text/plain"
 
+    def card_js(self, *, falcon_response: falcon.Response | None = None, **_: object) -> None:
+        """Return the card.js file.
+
+        Args:
+        ----
+            falcon_response (falcon.Response): The Falcon response to write to.
+        """
+        if falcon_response is None:
+            return
+        self._serve_static_file(filename="card.js", falcon_response=falcon_response)
+        falcon_response.content_type = "application/javascript"
+        set_cache_header(falcon_response, duration=timedelta(hours=1))
+
+    def card(
+        self,
+        set_code: str = "",
+        collector_number: str = "",
+        *,
+        falcon_response: falcon.Response | None = None,
+        **_: object,
+    ) -> None:
+        """Serve the per-card page for /card/{set_code}/{collector_number}.
+
+        Args:
+        ----
+            falcon_response (falcon.Response): The Falcon response to write to.
+            set_code (str): The card set code extracted from the URL path.
+            collector_number (str): The collector number extracted from the URL path.
+        """
+        del set_code, collector_number
+        if falcon_response is None:
+            return
+        html = _build_card_html(self._critical_css)
+        falcon_response.text = html
+        falcon_response.content_type = "text/html"
+        set_cache_header(falcon_response, duration=timedelta(hours=1))
+
     def _serve_static_file(self, *, filename: str, falcon_response: falcon.Response) -> None:
         """Serve a static file to the Falcon response.
 
@@ -1550,7 +1759,7 @@ class APIResource:
             falcon_response (falcon.Response): The Falcon response to write to.
 
         """
-        full_filename = pathlib.Path(__file__).parent / "static" / filename
+        full_filename = _STATIC_DIR / filename
         try:
             with pathlib.Path(full_filename).open() as f:
                 falcon_response.text = f.read()

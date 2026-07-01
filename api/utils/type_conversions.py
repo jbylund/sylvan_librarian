@@ -20,6 +20,11 @@ def convert_to_bool(x: str) -> bool:
     return x.lower() in ("true", "1", "yes", "on", "t")
 
 
+def convert_to_str_list(x: str) -> list[str]:
+    """Convert a comma-separated query string value into a list of strings."""
+    return [part.strip() for part in x.split(",") if part.strip()]
+
+
 def _convert_string_to_type(str_value: str | None, param_type: Any) -> Any:  # noqa: ANN401
     """Convert a string value to the specified type.
 
@@ -44,6 +49,7 @@ def _convert_string_to_type(str_value: str | None, param_type: Any) -> Any:  # n
         "float": float,
         "int": int,
         "str": identity,
+        "Sequence[str]": convert_to_str_list,
     }
     if isinstance(param_type, str):
         pass
@@ -110,8 +116,22 @@ def make_type_converting_wrapper(func: callable) -> callable:
 
         return converted_kwargs
 
-    def wrapper(**raw_kwargs: Any) -> Any:  # noqa: ANN401
+    # Positional-or-keyword parameter names, in declaration order — used to map path-segment
+    # positional args (e.g. /card/{set_code}/{collector_number}) onto their parameter names so
+    # they go through the same string-to-type conversion as query-string keyword args.
+    positional_names = [
+        name
+        for name, p in sig.parameters.items()
+        if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+
+    def wrapper(*args: Any, **raw_kwargs: Any) -> Any:  # noqa: ANN401
         """Wrapper function that converts arguments and calls the original function."""
+        if len(args) > len(positional_names):
+            msg = f"{func.__qualname__}() takes {len(positional_names)} positional arguments but {len(args)} were given"
+            raise TypeError(msg)
+        raw_kwargs = {**dict(zip(positional_names, args, strict=False)), **raw_kwargs}
+
         # Filter out string parameters that need conversion
         str_params = {k: v for k, v in raw_kwargs.items() if isinstance(v, str)}
         non_str_params = {k: v for k, v in raw_kwargs.items() if not isinstance(v, str)}

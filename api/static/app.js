@@ -346,9 +346,12 @@ class CardSearch {
     // Add event delegation for card clicks
     this.resultsContainer.addEventListener('click', e => {
       const cardItem = e.target.closest('.card-item');
-      if (cardItem) {
-        this.handleCardClick(cardItem);
-      }
+      if (!cardItem) return;
+      // Modifier clicks (ctrl/cmd) on the card-page link open the card page in a new tab.
+      // Middle-click fires auxclick, not click, so it also passes through naturally.
+      if ((e.ctrlKey || e.metaKey) && e.target.closest('.card-page-link')) return;
+      e.preventDefault();
+      this.handleCardClick(cardItem);
     });
 
     // Add click handler for header to clear search
@@ -784,7 +787,11 @@ class CardSearch {
     // Add loading="lazy" for non-first-row images to improve initial load
     const fetchPriorityAttr = isFirstRow ? ' fetchpriority="high"' : '';
     const loadingAttr = isFirstRow ? '' : ' loading="lazy"';
-    const imageHtml = `<img class="card-image" src="${this.escapeHtml(image388)}" srcset="${srcset}" sizes="${sizes}" alt="${altText}" title="${altText}"${fetchPriorityAttr}${loadingAttr} />`;
+    const imgTag = `<img class="card-image" src="${this.escapeHtml(image388)}" srcset="${srcset}" sizes="${sizes}" alt="${altText}" title="${altText}"${fetchPriorityAttr}${loadingAttr} />`;
+    const imageHtml =
+      card.set_code && card.collector_number
+        ? `<a href="/card/${card.set_code}/${card.collector_number}" class="card-page-link">${imgTag}</a>`
+        : imgTag;
 
     return `
        <div class="card-item" data-card-id="${this.escapeHtml(cardId)}">

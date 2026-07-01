@@ -3,6 +3,7 @@ brotli
 cachebox>=6.0.0
 falcon
 honeybadger
+minify-html
 orjson
 psycopg[binary,pool]
 pyparsing
