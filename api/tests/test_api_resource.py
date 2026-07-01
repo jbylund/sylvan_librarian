@@ -178,8 +178,11 @@ class TestRequestDispatch(TestBaseAPIResourceTest):
 
     Regression coverage for a dispatch rewrite that split every path on "/" to derive
     (action_word, *action_args): it broke the "static/x" actions (registered under a single
-    slash-containing key, not action_word "static") and crashed on unmatched routes with extra
-    segments (_raise_not_found only accepted **kwargs, not positional args).
+    slash-containing key, not action_word "static"), crashed on unmatched routes with extra
+    segments (_raise_not_found only accepted **kwargs, not positional args), and — the one fixed
+    here — returned 400 instead of 404 for any *matched* route hit with more trailing segments
+    than its handler accepts (e.g. /get_pid/extra), since the mismatch surfaced as a TypeError
+    inside the handler rather than being recognized as "no route matches this" beforehand.
     """
 
     def _dispatch(self, path: str) -> falcon.Response:
@@ -200,6 +203,41 @@ class TestRequestDispatch(TestBaseAPIResourceTest):
     def test_unmatched_route_with_extra_segments_raises_not_found(self) -> None:
         with pytest.raises(falcon.HTTPNotFound):
             self._dispatch("/nonexistent/thing/other")
+
+    def test_known_zero_arg_route_with_extra_segment_raises_not_found(self) -> None:
+        # Regression: a matched action_word that can't absorb a trailing segment (get_pid takes
+        # no positional args) used to reach the handler anyway, raising a TypeError that _handle
+        # converted to 400 — the extra segment means the path doesn't identify anything, so this
+        # should 404 like any other unmatched path.
+        with pytest.raises(falcon.HTTPNotFound):
+            self._dispatch("/get_pid/extra")
+
+    def test_positional_route_with_too_many_segments_raises_not_found(self) -> None:
+        # card() accepts exactly 2 positional args (set_code, collector_number); a 3rd segment
+        # should 404 rather than reach the handler.
+        with pytest.raises(falcon.HTTPNotFound):
+            self._dispatch("/card/eoc/104/extra")
+
+    def test_positional_capacity_computed_at_init_not_per_request(self) -> None:
+        assert self.api_resource._action_positional_capacity["get_pid"] == 0
+        assert self.api_resource._action_positional_capacity["card"] == 2
+
+    def test_not_found_routes_precomputed_not_rebuilt_per_request(self) -> None:
+        # _not_found_routes is built once in __init__ (see _build_routes_listing) from the fixed
+        # action_map contents, not recomputed on every 404 — inspect.signature() per route isn't
+        # free, and the listing can't change without action_map changing.
+        listing_before = self.api_resource._not_found_routes
+        with pytest.raises(falcon.HTTPNotFound) as exc_info:
+            self.api_resource._raise_not_found()
+        assert exc_info.value.description["routes"] is listing_before
+        assert "get_pid" in listing_before
+        assert "card" in listing_before
+
+    def test_no_inspect_signature_calls_on_successful_request(self) -> None:
+        with patch("api.api_resource.inspect.signature") as mock_signature:
+            resp = self._dispatch("/card/a25/141")
+        assert resp.status == falcon.HTTP_200
+        mock_signature.assert_not_called()
 
 
 class TestAPIResourceCoreMethods(unittest.TestCase):

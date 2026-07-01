@@ -172,7 +172,8 @@ async function main() {
     document.getElementById('card-loading').textContent = 'Invalid card URL.';
     return;
   }
-  const [, setCode, collectorNumber] = parts;
+  const [, rawSetCode, collectorNumber] = parts;
+  const setCode = rawSetCode.toLowerCase();
 
   let card;
   try {

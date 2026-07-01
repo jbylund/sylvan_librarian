@@ -53,7 +53,7 @@ from card_engine import QueryEngine as _QueryEngine
 from card_engine import QueryError as _QueryError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Sequence
+    from collections.abc import Callable, Iterable, Iterator, Sequence
     from multiprocessing.sharedctypes import Synchronized
     from multiprocessing.synchronize import Event as EventType
     from multiprocessing.synchronize import RLock as LockType
@@ -318,9 +318,12 @@ MIN_IMPORT_CARDS = 90_000
 # measurable gain (see docs/issues/engine-incremental-loading.md).
 _ENGINE_RELOAD_BATCH_SIZE = 2_000
 
-# Public field name -> magic.cards column. Shared vocabulary for `fields=` on /search across the
-# SQL and engine paths — must stay in sync with FIELD_TABLE in card_engine/src/lib.rs so a request
-# gets identically-shaped results regardless of which path serves it.
+# Public field name -> magic.cards column. The `fields=` vocabulary for /search. This is
+# deliberately a subset of FIELD_TABLE in card_engine/src/lib.rs, not a mirror of it — not
+# everything the engine can extract needs to be a public API field. Every key here must still
+# have a same-named entry in FIELD_TABLE with matching semantics, so a `fields=` request for one
+# of these names gets identically-shaped results regardless of which path serves it; FIELD_TABLE
+# is free to have entries with no counterpart here.
 RESULT_FIELD_COLUMNS: dict[str, str] = {
     "name": "card_name",
     "set_code": "card_set_code",
@@ -496,6 +499,72 @@ def rewrap(query: str) -> str:
     return " ".join(query.strip().split())
 
 
+def _max_positional_args(func: Any) -> float:  # noqa: ANN401
+    """Return how many positional args `func` accepts; inf if it takes *args.
+
+    Computed once per registered action at APIResource.__init__ time (not per-request):
+    inspect.signature() follows a make_type_converting_wrapper wrapper's __wrapped__ link
+    (set by functools.update_wrapper), so this sees the real underlying handler's signature.
+    """
+    try:
+        params = inspect.signature(func).parameters.values()
+    except (TypeError, ValueError):
+        return 0.0
+    if any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params):
+        return float("inf")
+    return float(sum(1 for p in params if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)))
+
+
+def _build_routes_listing(action_map: dict[str, Callable]) -> dict[str, dict[str, Any]]:
+    """Build the {route: {doc, args, kwargs}} listing served in 404 responses.
+
+    Depends only on `action_map`'s contents, which are fixed once APIResource.__init__ finishes —
+    computed once there rather than on every 404 (inspect.signature() per route isn't free).
+    """
+    routes = {}
+    for endpoint_name, wrapped_func in action_map.items():
+        # Get the original function from the wrapper
+        original_func = wrapped_func.__wrapped__ if hasattr(wrapped_func, "__wrapped__") else wrapped_func
+
+        # Get function signature
+        sig = inspect.signature(original_func)
+
+        # Extract docstring
+        doc = original_func.__doc__ or ""
+
+        # Parse arguments
+        args = []
+        kwargs = {}
+
+        for param_name, param in sig.parameters.items():
+            if param_name.startswith("_"):
+                continue
+            if param_name in ("self", "falcon_response"):
+                continue
+
+            param_info = {
+                "name": param_name,
+                "type": _get_type_name(param.annotation),
+            }
+
+            if param.default != inspect.Parameter.empty:
+                # It's a keyword argument with default
+                kwargs[param_name] = {
+                    "type": _get_type_name(param.annotation),
+                    "default": param.default,
+                }
+            else:
+                # It's a positional argument
+                args.append(param_info)
+
+        routes[endpoint_name] = {
+            "doc": doc,
+            "args": args,
+            "kwargs": kwargs,
+        }
+    return routes
+
+
 class APIResource:
     """Class implementing request handling for our simple API."""
 
@@ -515,15 +584,21 @@ class APIResource:
         self._bulk_data_fetcher = ScryfallBulkDataFetcher()
         self._critical_css: str = _build_critical_css()
         self._conn_pool: psycopg_pool.ConnectionPool = db_utils.make_pool()
-        # Create action map with type-converting wrappers for all public methods
+        # Create action map with type-converting wrappers for all public methods. Alongside it,
+        # _action_positional_capacity records how many positional path-segment args (beyond the
+        # action word) each action accepts, computed once here rather than per-request in
+        # _handle — see _max_positional_args.
         self.action_map = {}
+        self._action_positional_capacity: dict[str, float] = {}
         for method_name in dir(self):
             if method_name.startswith("_"):
                 continue
             method = getattr(self, method_name)
             if callable(method):
                 self.action_map[method_name] = make_type_converting_wrapper(method)
+                self._action_positional_capacity[method_name] = _max_positional_args(method)
         self.action_map["_root"] = make_type_converting_wrapper(self._root)
+        self._action_positional_capacity["_root"] = _max_positional_args(self._root)
 
         def redirect_to_root(**_: object) -> None:
             msg = "/"
@@ -531,6 +606,8 @@ class APIResource:
 
         self.action_map["index"] = redirect_to_root
         self.action_map["index_html"] = redirect_to_root
+        self._action_positional_capacity["index"] = _max_positional_args(redirect_to_root)
+        self._action_positional_capacity["index_html"] = _max_positional_args(redirect_to_root)
 
         # add static file serving actions
         self.action_map["static/app_js"] = self.app_js
@@ -539,6 +616,9 @@ class APIResource:
         self.action_map["static/favicon_ico"] = self.favicon_ico
         self.action_map["static/social-preview_webp"] = self.social_preview_webp
         self.action_map["static/styles_css"] = self.styles_css
+
+        # Static once action_map is fully populated — see _build_routes_listing.
+        self._not_found_routes = _build_routes_listing(self.action_map)
 
         self._cache_generation: Synchronized = cache_generation or multiprocessing.Value("i", 0)
         self._query_cache: GenerationCache = GenerationCache(
@@ -633,6 +713,10 @@ class APIResource:
         else:
             action_word, *action_args = path.split("/")
             action = self.action_map.get(action_word, self._raise_not_found)
+            # A matched action that can't absorb this many trailing segments (e.g. /robots.txt/x)
+            # means the path doesn't identify anything — 404, not a 400 from a TypeError inside it.
+            if len(action_args) > self._action_positional_capacity.get(action_word, 0):
+                action, action_args = self._raise_not_found, []
         res = None
         before = time.monotonic()
         try:
@@ -678,53 +762,10 @@ class APIResource:
 
     def _raise_not_found(self, *_args: object, **_: object) -> None:
         """Raise a Falcon HTTPNotFound error with available routes."""
-        routes = {}
-
-        for endpoint_name, wrapped_func in self.action_map.items():
-            # Get the original function from the wrapper
-            original_func = wrapped_func.__wrapped__ if hasattr(wrapped_func, "__wrapped__") else wrapped_func
-
-            # Get function signature
-            sig = inspect.signature(original_func)
-
-            # Extract docstring
-            doc = original_func.__doc__ or ""
-
-            # Parse arguments
-            args = []
-            kwargs = {}
-
-            for param_name, param in sig.parameters.items():
-                if param_name.startswith("_"):
-                    continue
-                if param_name in ("self", "falcon_response"):
-                    continue
-
-                param_info = {
-                    "name": param_name,
-                    "type": _get_type_name(param.annotation),
-                }
-
-                if param.default != inspect.Parameter.empty:
-                    # It's a keyword argument with default
-                    kwargs[param_name] = {
-                        "type": _get_type_name(param.annotation),
-                        "default": param.default,
-                    }
-                else:
-                    # It's a positional argument
-                    args.append(param_info)
-
-            routes[endpoint_name] = {
-                "doc": doc,
-                "args": args,
-                "kwargs": kwargs,
-            }
-
         raise falcon.HTTPNotFound(
             title="Not Found",
             description={
-                "routes": routes,
+                "routes": self._not_found_routes,
             },
         )
 
