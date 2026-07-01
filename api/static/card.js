@@ -132,6 +132,14 @@ function formatUsd(value) {
   return value == null ? '' : ` ($${Number(value).toFixed(2)})`;
 }
 
+// Escapes \ and " for embedding in a double-quoted exact-name query literal (e.g. !"...").
+// The query grammar (api/parsing/hand_parser.py) treats \ as an escape char inside quoted
+// strings, so a name containing a literal " — e.g. Kongming, "Sleeping Dragon" — would otherwise
+// terminate the string early and get parsed as several unrelated AND clauses.
+function escapeExactName(name) {
+  return name.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
 // Printings that share the same illustration_id are collapsed into a single thumbnail — the one
 // with the highest prefer_score represents the group, badged with how many others it stands in
 // for. Groups are then sorted by that max prefer_score, highest first.
@@ -200,7 +208,7 @@ async function main() {
   try {
     const printingFields = 'set_code,collector_number,set_name,illustration_id,price_usd,prefer_score';
     const resp = await fetch(
-      `/search?q=${encodeURIComponent(`!"${card.name}"`)}&unique=printing&fields=${printingFields}`
+      `/search?q=${encodeURIComponent(`!"${escapeExactName(card.name)}"`)}&unique=printing&fields=${printingFields}`
     );
     const data = await resp.json();
     const others = (data.cards || []).filter(p => !(p.set_code === setCode && p.collector_number === collectorNumber));
