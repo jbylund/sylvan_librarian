@@ -23,6 +23,7 @@ from typing import cast as typecast
 
 import cachebox
 import falcon
+import minify_html
 import orjson
 import psycopg
 import psycopg_pool
@@ -135,7 +136,7 @@ def _selector_is_critical(selector: str) -> bool:
 
 def _build_critical_css() -> str:
     """Extract and minify critical selectors from styles.css at startup."""
-    styles_path = pathlib.Path(__file__).parent / "static" / "styles.css"
+    styles_path = _STATIC_DIR / "styles.css"
     rules = tinycss2.parse_stylesheet(styles_path.read_text(), skip_comments=True, skip_whitespace=True)
     parts: list[str] = []
     for rule in rules:
@@ -163,13 +164,15 @@ def _build_critical_css() -> str:
     return raw.strip()
 
 
-_INDEX_HTML_PATH = pathlib.Path(__file__).parent / "static" / "index.html"
-_CARD_HTML_PATH = pathlib.Path(__file__).parent / "static" / "card.html"
+_STATIC_DIR = pathlib.Path(__file__).parent / "static"
+_INDEX_HTML_PATH = _STATIC_DIR / "index.html"
+_CARD_HTML_PATH = _STATIC_DIR / "card.html"
+_FRAGMENTS_DIR = _STATIC_DIR / "fragments"
 
 
 def _static_hash(filename: str) -> str | None:
     try:
-        return hashlib.sha256((pathlib.Path(__file__).parent / "static" / filename).read_bytes()).hexdigest()[:12]
+        return hashlib.sha256((_STATIC_DIR / filename).read_bytes()).hexdigest()[:12]
     except FileNotFoundError:
         return None
 
@@ -177,6 +180,46 @@ def _static_hash(filename: str) -> str | None:
 _STYLES_CSS_HASH = _static_hash("styles.css")
 _APP_MIN_JS_HASH = _static_hash("app.min.js")
 _CARD_JS_HASH = _static_hash("card.js")
+
+# Markup identical across index.html and card.html — read once at import time and spliced into
+# each template's own placeholder comment (<!-- FAVICON --> etc.) by _build_base_html /
+# _build_card_html. Fragments live in fragments/ rather than static/ directly since they are not
+# complete documents and are never served on their own (only files with an action_map entry are
+# reachable over HTTP).
+_FAVICON_HTML = (_FRAGMENTS_DIR / "favicon.html").read_text()
+_PRECONNECTS_HTML = (_FRAGMENTS_DIR / "preconnects.html").read_text()
+_FONTS_HTML = (_FRAGMENTS_DIR / "fonts.html").read_text()
+_CSS_HTML = (_FRAGMENTS_DIR / "css.html").read_text()
+_FOOTER_HTML = (_FRAGMENTS_DIR / "footer.html").read_text()
+
+
+def _inject_shared_fragments(html: str) -> str:
+    """Splice the shared head/footer fragments into their placeholder comments.
+
+    Must run before the CRITICAL_CSS/asset-hash substitutions below: the CSS fragment carries its
+    own inner <!-- CRITICAL_CSS --> placeholder, which only exists in `html` after this replace.
+    """
+    html = html.replace("<!-- FAVICON -->", _FAVICON_HTML)
+    html = html.replace("<!-- PRECONNECTS -->", _PRECONNECTS_HTML)
+    html = html.replace("<!-- FONTS -->", _FONTS_HTML)
+    html = html.replace("<!-- CSS -->", _CSS_HTML)
+    return html.replace("<!-- FOOTER -->", _FOOTER_HTML)
+
+
+# Flip to False to disable HTML minification (e.g. while debugging a minifier-induced issue).
+_MINIFY_HTML_ENABLED = True
+
+
+def _minify_html(html: str) -> str:
+    """Minify HTML to shave a bit more off the page weight on top of gzip/brotli/zstd compression.
+
+    keep_comments=True is required: `_build_base_html`'s cached output still carries per-request
+    placeholders (SERVER_SIDE_RESULTS, SERVER_SIDE_EMBEDDED_DATA) substituted by `search()` after
+    this function returns, and those are plain HTML comments that must survive intact.
+    """
+    if not _MINIFY_HTML_ENABLED:
+        return html
+    return minify_html.minify(html, minify_js=True, minify_css=True, keep_comments=True)
 
 
 # TLDs in this set are stripped from the hostname; others are concatenated into the word.
@@ -403,6 +446,7 @@ def set_cache_header(falcon_response: falcon.Response | None, duration: timedelt
 def _build_base_html(critical_css: str, site_name: str) -> str:
     """Read index.html and inject critical CSS and site name. Cached per (critical_css, site_name) pair."""
     html = _INDEX_HTML_PATH.read_text()
+    html = _inject_shared_fragments(html)
     html = html.replace("<!-- CRITICAL_CSS -->", critical_css)
     if _STYLES_CSS_HASH:
         html = html.replace("/static/styles.css", f"/static/styles.css?v={_STYLES_CSS_HASH}")
@@ -410,19 +454,20 @@ def _build_base_html(critical_css: str, site_name: str) -> str:
         html = html.replace("/static/app.min.js", f"/static/app.min.js?v={_APP_MIN_JS_HASH}")
     if site_name != FALLBACK_SITE_NAME:
         html = html.replace(FALLBACK_SITE_NAME, site_name)
-    return html
+    return _minify_html(html)
 
 
 @cached(cache=LRUCache(maxsize=4))
 def _build_card_html(critical_css: str) -> str:
     """Read card.html and inject critical CSS and versioned asset URLs."""
     html = _CARD_HTML_PATH.read_text()
+    html = _inject_shared_fragments(html)
     html = html.replace("<!-- CRITICAL_CSS -->", critical_css)
     if _STYLES_CSS_HASH:
         html = html.replace("/static/styles.css", f"/static/styles.css?v={_STYLES_CSS_HASH}")
     if _CARD_JS_HASH:
         html = html.replace("/static/card.js", f"/static/card.js?v={_CARD_JS_HASH}")
-    return html
+    return _minify_html(html)
 
 
 @cached(cache=LRUCache(maxsize=10_000))
@@ -1558,7 +1603,7 @@ class APIResource:
         """
         if falcon_response is None:
             return
-        full_filename = pathlib.Path(__file__).parent / "static" / "favicon.ico"
+        full_filename = _STATIC_DIR / "favicon.ico"
         with pathlib.Path(full_filename).open(mode="rb") as f:
             falcon_response.data = contents = f.read()
         falcon_response.content_type = "image/vnd.microsoft.icon"
@@ -1572,7 +1617,7 @@ class APIResource:
         """Return the social preview image."""
         if falcon_response is None:
             return
-        full_filename = pathlib.Path(__file__).parent / "static" / "social-preview.webp"
+        full_filename = _STATIC_DIR / "social-preview.webp"
         with full_filename.open(mode="rb") as f:
             contents = f.read()
         falcon_response.data = contents
@@ -1673,7 +1718,7 @@ class APIResource:
             falcon_response (falcon.Response): The Falcon response to write to.
 
         """
-        full_filename = pathlib.Path(__file__).parent / "static" / filename
+        full_filename = _STATIC_DIR / filename
         try:
             with pathlib.Path(full_filename).open() as f:
                 falcon_response.text = f.read()

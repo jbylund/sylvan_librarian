@@ -15,6 +15,7 @@ import falcon
 import falcon.testing
 import pytest
 
+import api.api_resource as api_resource_module
 from api.api_resource import FALLBACK_SITE_NAME, APIResource, _hostname_to_site_name, _split_words, hostname_to_site_name
 from api.settings import settings
 
@@ -419,13 +420,18 @@ class TestAPIResourceStaticFileServing(unittest.TestCase):
         assert mock_response.text is not None
         assert len(mock_response.text) > 0
         assert mock_response.content_type == "text/html"
-        assert 'autocapitalize="off"' in mock_response.text
-        assert 'autocorrect="off"' in mock_response.text
+        # HTML is minified before serving (see _minify_html), which may drop attribute quotes and
+        # reorder attributes — check for the substantive content rather than exact tag formatting.
+        assert "autocapitalize" in mock_response.text
+        assert "autocorrect" in mock_response.text
         # Verify it sets cache control header
         mock_response.set_header.assert_called_with("Cache-Control", "public, max-age=3600")
-        assert '<meta property="og:image" content="/static/social-preview.webp" />' in mock_response.text
-        assert '<meta property="og:image:width" content="1200" />' in mock_response.text
-        assert '<meta property="og:image:height" content="630" />' in mock_response.text
+        assert "og:image" in mock_response.text
+        assert "/static/social-preview.webp" in mock_response.text
+        assert "og:image:width" in mock_response.text
+        assert "1200" in mock_response.text
+        assert "og:image:height" in mock_response.text
+        assert "630" in mock_response.text
 
     def test_index_html_with_query_embeds_search_results(self) -> None:
         """Test _root embeds search results when query parameter is provided."""
@@ -495,6 +501,53 @@ class TestAPIResourceStaticFileServing(unittest.TestCase):
 
         assert mock_response.text == expected_contents
         assert mock_response.content_type == "text/plain"
+
+
+class TestHtmlMinification(unittest.TestCase):
+    """_minify_html reduces page weight.
+
+    Must not corrupt the per-request placeholders that _build_base_html's cached output still
+    needs substituted afterward (SERVER_SIDE_RESULTS, SERVER_SIDE_EMBEDDED_DATA).
+    """
+
+    def setUp(self) -> None:
+        self.mock_conn_pool = MagicMock()
+        self.api_resource = APIResource(
+            last_import_time=multiprocessing.Value("d", time.time(), lock=True),
+        )
+        self.api_resource._conn_pool = self.mock_conn_pool
+
+    def test_minifies_whitespace_by_default(self) -> None:
+        # minify_html also drops the redundant closing </p> (valid HTML5 tag-omission), hence
+        # "<div><p>x</div>" rather than a literal whitespace-only collapse.
+        assert api_resource_module._minify_html("<div>   <p>x</p>   </div>") == "<div><p>x</div>"
+
+    def test_disabled_flag_returns_input_unchanged(self) -> None:
+        original = api_resource_module._MINIFY_HTML_ENABLED
+        api_resource_module._MINIFY_HTML_ENABLED = False
+        try:
+            html = "<div>   <p>x</p>   </div>"
+            assert api_resource_module._minify_html(html) == html
+        finally:
+            api_resource_module._MINIFY_HTML_ENABLED = original
+
+    def test_server_side_placeholders_survive_minification(self) -> None:
+        mock_response = MagicMock()
+        self.api_resource._root(falcon_response=mock_response)
+        assert "<!-- SERVER_SIDE_RESULTS -->" in mock_response.text
+        assert "<!-- SERVER_SIDE_EMBEDDED_DATA -->" in mock_response.text
+
+    def test_search_results_still_embed_after_minification(self) -> None:
+        mock_response = MagicMock()
+        mock_search_results = {
+            "cards": [{"name": "Elvish Mystic", "set_code": "m14", "collector_number": "1"}],
+            "total_cards": 1,
+            "query": "elf",
+        }
+        with patch.object(self.api_resource, "_search", return_value=mock_search_results):
+            self.api_resource._root(falcon_response=mock_response, q="elf")
+        assert "window.EMBEDDED_SEARCH_RESULTS = {" in mock_response.text
+        assert "Elvish Mystic" in mock_response.text
 
 
 class TestAPIResourceErrorHandling(unittest.TestCase):
