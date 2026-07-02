@@ -16,6 +16,7 @@ import re
 import threading
 import time
 import urllib.parse
+import uuid
 from datetime import timedelta
 from functools import lru_cache, wraps
 from typing import TYPE_CHECKING, Any
@@ -1850,7 +1851,7 @@ class APIResource:
             "message": f"Successfully backfilled prefer scores for {updated_count} of {total_cards} cards",
         }
 
-    def _fetch_cubecobra_data(self, db_oracle_ids: set[str]) -> dict[str, dict[str, Any]]:
+    def _fetch_cubecobra_data(self, db_oracle_ids: set[uuid.UUID]) -> dict[uuid.UUID, dict[str, Any]]:
         """Paginate the CubeCobra top-cards API and return data keyed by oracle_id.
 
         Returns:
@@ -1874,9 +1875,16 @@ class APIResource:
                 logger.info("Empty page %d - done paginating CubeCobra", page)
                 break
 
-            results: dict[str, dict[str, Any]] = {}
+            results: dict[uuid.UUID, dict[str, Any]] = {}
             for card in cards:
-                oracle_id = card.get("oracle_id")
+                oracle_id_str = card.get("oracle_id")
+                if not oracle_id_str:
+                    continue
+                try:
+                    oracle_id = uuid.UUID(oracle_id_str)
+                except ValueError:
+                    logger.warning("CubeCobra returned malformed oracle_id %r on page %d", oracle_id_str, page)
+                    continue
                 if oracle_id in db_oracle_ids:
                     results[oracle_id] = {
                         "elo": card.get("elo"),
@@ -1888,7 +1896,7 @@ class APIResource:
             page += 1
             yield results
 
-    def _insert_cubecobra_data(self, cubecobra_data: dict[str, dict[str, Any]]) -> int:
+    def _insert_cubecobra_data(self, cubecobra_data: dict[uuid.UUID, dict[str, Any]]) -> int:
         """Write CubeCobra data into magic.cards, matching on oracle_id.
 
         Args:
