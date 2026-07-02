@@ -91,6 +91,7 @@ _CRITICAL_SELECTORS = frozenset(
         ".container",
         ".spacer",
         ".spacer-30",
+        ".spacer-20",
         ".header",
         ".theme-toggle",
         ".header h1",

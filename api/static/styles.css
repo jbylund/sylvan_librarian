@@ -110,6 +110,10 @@ body {
   height: 30px;
 }
 
+.spacer-20 {
+  height: 20px;
+}
+
 .header {
   text-align: center;
   color: var(--color-text-inverted);
@@ -642,6 +646,7 @@ body {
   border-radius: 10px;
   text-align: center;
   margin-top: 0;
+  text-wrap: balance;
 }
 
 .no-results {
@@ -650,6 +655,7 @@ body {
   font-size: 1.38rem;
   margin-top: 0;
   opacity: 0.8;
+  text-wrap: balance;
 }
 
 /* Card page */
@@ -737,18 +743,14 @@ body {
   text-align: center;
   margin-bottom: 0;
   font-size: 1.27rem;
+  text-wrap: balance;
 }
 
-.query-explanation {
-  color: var(--color-text-secondary);
-  text-align: center;
-  margin: 0.5rem auto;
-  font-size: 1rem;
-  font-style: italic;
-  padding: 0.5rem 1rem;
-  background-color: rgba(255, 255, 255, 0.05);
+.raw-query {
+  font-family: monospace;
+  background-color: rgba(255, 255, 255, 0.08);
+  padding: 0.1rem 0.4rem;
   border-radius: 4px;
-  max-width: 90%;
 }
 
 #statusMessage {

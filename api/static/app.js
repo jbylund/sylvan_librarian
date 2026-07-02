@@ -1,5 +1,6 @@
 const UNIQUE_PRINTING = 'printing';
 const DWELL_MS = 2500; // milliseconds user must stay on results before adding a history entry
+const MAX_EXPLANATION_LENGTH = 140; // truncate very long query explanations (e.g. giant OR chains)
 
 // Hoisted so escapeHtml() doesn't allocate a new RegExp or callback on every call.
 const HTML_ESCAPE_RE = /[&<>"]/g;
@@ -68,7 +69,6 @@ class CardSearch {
     this.resultsContainer = document.getElementById('results');
     this.loadingIndicator = document.getElementById('loading');
     this.statusMessage = document.getElementById('statusMessage');
-    this.queryExplanation = document.getElementById('queryExplanation');
     this.orderDropdown = document.getElementById('orderDropdown');
     this.uniqueDropdown = document.getElementById('uniqueDropdown');
     this.preferDropdown = document.getElementById('preferDropdown');
@@ -562,7 +562,7 @@ class CardSearch {
     this.currentRequestUrl = url;
     this.lastCompletedUrl = null; // cleared until this search successfully completes
 
-    this.showLoading();
+    this.showLoading(normalizedQuery);
 
     try {
       // Clear any previous resource timing entries for this URL
@@ -649,12 +649,9 @@ class CardSearch {
     const queryExplanation = data.query_explanation || '';
 
     if (cards.length === 0) {
-      this.showNoResults();
+      this.showResults(totalCards, query, queryExplanation, elapsed);
       return;
     }
-
-    // Display query explanation if available
-    this.showQueryExplanation(queryExplanation);
 
     // Clear previous card data and store new cards
     this.cardsData.clear();
@@ -667,7 +664,7 @@ class CardSearch {
     console.debug('Total cards stored in cardsData:', this.cardsData.size);
     console.debug('CardsData keys:', Array.from(this.cardsData.keys()));
 
-    this.showResultsCount(totalCards, query, elapsed);
+    this.showResults(totalCards, query, queryExplanation, elapsed);
 
     // Store card count for resize handling
     this.currentCardCount = cards.length;
@@ -964,11 +961,14 @@ class CardSearch {
     }
   };
 
-  showLoading() {
+  showLoading(query) {
     console.debug('Showing loading');
     // Do not toggle card/result visibility; only update the status container
     if (this.statusMessage) {
-      this.statusMessage.innerHTML = '<div class="results-count">Loading…</div>';
+      const inner = query
+        ? `Searching <code class="raw-query">${this.escapeHtml(query)}</code>…`
+        : 'Loading…';
+      this.statusMessage.innerHTML = `<div class="results-count">${inner}</div>`;
     }
     this.clearResultsContainer();
   }
@@ -981,27 +981,38 @@ class CardSearch {
     this.clearResultsContainer();
   }
 
-  showNoResults() {
-    console.log('Showing no results');
-    if (this.statusMessage) {
-      this.statusMessage.innerHTML = '<div class="no-results">No cards found matching your search.</div>';
-    }
-    this.clearResultsContainer();
-  }
-
   clearResultsContainer() {
     this.resultsContainer.innerHTML = '';
   }
 
-  showResultsCount(count, query, elapsed) {
-    console.log(`Showing results: count: ${count}, query: ${query}, elapsed: ${elapsed}`);
+  // Truncates an overly long query explanation (e.g. a giant OR chain) at a word boundary,
+  // Scryfall-style, rather than letting the status line wrap across many lines.
+  truncateExplanation(explanation) {
+    if (explanation.length <= MAX_EXPLANATION_LENGTH) {
+      return explanation;
+    }
+    const cut = explanation.slice(0, MAX_EXPLANATION_LENGTH);
+    const lastSpace = cut.lastIndexOf(' ');
+    return `${cut.slice(0, lastSpace > 0 ? lastSpace : MAX_EXPLANATION_LENGTH)}…`;
+  }
+
+  // Renders the single status line for a completed search: result count merged with the
+  // server's human-readable explanation of the parsed query (falls back to echoing the raw
+  // query text when no explanation is available, e.g. an empty/trivial query).
+  showResults(count, query, explanation, elapsed) {
+    console.log(`Showing results: count: ${count}, query: ${query}, explanation: ${explanation}, elapsed: ${elapsed}`);
     const formattedCount = count.toLocaleString();
     const uniqueValue = this.uniqueDropdown.value;
     const itemType = uniqueValue + (count !== 1 ? 's' : '');
 
     let msg;
     if (query) {
-      msg = `Found ${formattedCount} ${itemType} matching "${query}"`;
+      const truncatedExplanation = explanation ? this.truncateExplanation(explanation) : explanation;
+      if (truncatedExplanation) {
+        msg = count === 0 ? `No ${itemType} found where ${truncatedExplanation}` : `${formattedCount} ${itemType} where ${truncatedExplanation}`;
+      } else {
+        msg = count === 0 ? `No ${itemType} found matching "${query}"` : `Found ${formattedCount} ${itemType} matching "${query}"`;
+      }
       if (typeof elapsed === 'number') {
         msg += ` (completed in ${elapsed}ms)`;
       }
@@ -1009,7 +1020,8 @@ class CardSearch {
       msg = `Showing a random selection of ${formattedCount} ${itemType}`;
     }
     if (this.statusMessage) {
-      this.statusMessage.innerHTML = `<div class="results-count">${this.escapeHtml(msg)}</div>`;
+      const cssClass = count === 0 ? 'no-results' : 'results-count';
+      this.statusMessage.innerHTML = `<div class="${cssClass}">${this.escapeHtml(msg)}</div>`;
     }
   }
 
@@ -1045,21 +1057,6 @@ class CardSearch {
     }
   }
 
-  showQueryExplanation(explanation) {
-    if (!this.queryExplanation) {
-      return;
-    }
-
-    if (explanation && explanation.trim()) {
-      // Display the explanation
-      this.queryExplanation.textContent = explanation;
-      this.queryExplanation.style.display = 'block';
-    } else {
-      // Hide the explanation if empty
-      this.queryExplanation.style.display = 'none';
-    }
-  }
-
   clearResults() {
     // Disconnect observer to clean up
     if (this.imageObserver) {
@@ -1068,10 +1065,6 @@ class CardSearch {
     this.resultsContainer.innerHTML = '';
     this.currentCardCount = 0; // Reset card count
     this.clearMessages();
-    // Clear query explanation
-    if (this.queryExplanation) {
-      this.queryExplanation.style.display = 'none';
-    }
   }
 
   clearSearch() {
