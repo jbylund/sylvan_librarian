@@ -99,7 +99,7 @@ function renderCardFace(card) {
   if (card.set_code && card.collector_number) {
     // Build manapool.com referral URL — set codes and collector numbers from our database are safe for URLs
     const manapoolUrl = `https://manapool.com/card/${card.set_code.toLowerCase()}/${card.collector_number}?ref=sylvan-librarian`;
-    imageHtml = `<div class="modal-image-wrapper"><a href="${manapoolUrl}" target="_blank" rel="noopener noreferrer" class="modal-image-link">${imgTag}</a></div>`;
+    imageHtml = `<div class="modal-image-wrapper"><a href="${manapoolUrl}" target="_blank" rel="noopener" class="modal-image-link">${imgTag}</a></div>`;
   } else {
     imageHtml = `<div class="modal-image-wrapper">${imgTag}</div>`;
   }

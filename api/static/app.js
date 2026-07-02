@@ -67,7 +67,6 @@ class CardSearch {
     this.searchForm = document.querySelector('.search-container');
     this.searchInput = document.getElementById('searchInput');
     this.resultsContainer = document.getElementById('results');
-    this.loadingIndicator = document.getElementById('loading');
     this.statusMessage = document.getElementById('statusMessage');
     this.orderDropdown = document.getElementById('orderDropdown');
     this.uniqueDropdown = document.getElementById('uniqueDropdown');
@@ -853,7 +852,7 @@ class CardSearch {
         // Build manapool.com referral URL
         // Set codes and collector numbers from our database are safe for URLs
         const manapoolUrl = `https://manapool.com/card/${card.set_code.toLowerCase()}/${card.collector_number}?ref=sylvan-librarian`;
-        imageHtml = `<div class="modal-image-wrapper"><a href="${manapoolUrl}" target="_blank" rel="noopener noreferrer" class="modal-image-link">${imgTag}</a></div>`;
+        imageHtml = `<div class="modal-image-wrapper"><a href="${manapoolUrl}" target="_blank" rel="noopener" class="modal-image-link">${imgTag}</a></div>`;
       } else {
         imageHtml = `<div class="modal-image-wrapper">${imgTag}</div>`;
       }

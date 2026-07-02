@@ -99,12 +99,12 @@ _CRITICAL_SELECTORS = frozenset(
         ".search-container",
         ".search-box",
         ".search-input",
+        ".help-icon",
         ".order-controls",
         ".dropdown-label",
         ".order-dropdown",
         ".order-toggle",
         ".arrow-up",
-        ".loading",
         # Results grid — needed for SSR search result pages
         ".results-container",
         ".card-item",
