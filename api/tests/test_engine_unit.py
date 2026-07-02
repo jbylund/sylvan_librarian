@@ -875,6 +875,46 @@ class TestCardProperties:
         total_date, _ = _run(e, "date>=2026-01-01")
         assert total_date == 2
 
+    def test_uuid_objects_accepted_for_oracle_scryfall_illustration(self, fresh_engine: Callable[[], QueryEngine]) -> None:
+        # psycopg returns uuid.UUID objects (not str) for UUID columns once the
+        # UUIDToStringLoader shim is removed. The engine must accept both forms:
+        # UUID objects from DB rows and strings from JSON-sourced test fixtures.
+        oid_a = uuid.uuid4()
+        oid_b = uuid.uuid4()
+        sid_a = uuid.uuid4()
+        sid_b = uuid.uuid4()
+        iid_shared = uuid.uuid4()
+        cards = [
+            {
+                "card_name": "UUID Card A",
+                "type_line": "Instant",
+                "oracle_id": oid_a,
+                "scryfall_id": sid_a,
+                "illustration_id": iid_shared,
+            },
+            {
+                "card_name": "UUID Card B",
+                "type_line": "Instant",
+                "oracle_id": oid_b,
+                "scryfall_id": sid_b,
+                "illustration_id": iid_shared,
+            },
+        ]
+        e = fresh_engine()
+        e.reload(cards)
+        # Both cards are in the store
+        total, results = _run(e, "", unique="printing", fields=["name", "scryfall_id", "illustration_id"])
+        assert total == 2
+        names = {c["name"] for c in results}
+        assert names == {"UUID Card A", "UUID Card B"}
+        # scryfall_id and illustration_id are returned as uuid.UUID objects
+        for c in results:
+            assert isinstance(c["scryfall_id"], uuid.UUID)
+            assert isinstance(c["illustration_id"], uuid.UUID)
+        # unique=artwork groups by illustration_id; both cards share one illustration_id
+        total_art, _ = _run(e, "", unique="artwork")
+        assert total_art == 1
+
     def test_year_1993(self, engine: QueryEngine) -> None:
         # Alpha/Beta/Unlimited/CED/CEI all released in 1993
         total, _ = _run(engine, "year=1993")

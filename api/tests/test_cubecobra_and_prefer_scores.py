@@ -17,11 +17,11 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
-def _insert_card(api: APIResource, raw: dict) -> str:
-    """Insert a raw card and return its oracle_id."""
+def _insert_card(api: APIResource, raw: dict) -> uuid.UUID:
+    """Insert a raw card and return its oracle_id as a UUID."""
     api._upsert_cards([raw])
     (processed,) = preprocess_card(raw)
-    return processed["oracle_id"]
+    return uuid.UUID(processed["oracle_id"])
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +51,7 @@ class TestInsertCubecobraData:
         assert row["cubecobra_pick_count"] == 100
 
     def test_unknown_oracle_id_updates_zero_rows(self, api_resource: APIResource) -> None:
-        unknown = str(uuid.uuid4())
+        unknown = uuid.uuid4()
         rows_updated = api_resource._insert_cubecobra_data({unknown: {"elo": 999.0, "cube_count": 1, "pick_count": 1}})
         assert rows_updated == 0
 
@@ -83,8 +83,8 @@ class TestFetchCubecobraData:
         return resp
 
     def test_yields_matching_cards_and_stops_on_empty_page(self, api_resource: APIResource) -> None:
-        oracle_id = str(uuid.uuid4())
-        page1 = [{"oracle_id": oracle_id, "elo": 1500, "cubeCount": 30, "pickCount": 60}]
+        oracle_id = uuid.uuid4()
+        page1 = [{"oracle_id": str(oracle_id), "elo": 1500, "cubeCount": 30, "pickCount": 60}]
 
         with patch.object(api_resource, "_session") as mock_session, patch("api.api_resource.time.sleep"):
             mock_session.get.side_effect = [
@@ -98,11 +98,11 @@ class TestFetchCubecobraData:
         assert pages[0][oracle_id] == {"elo": 1500, "cube_count": 30, "pick_count": 60}
 
     def test_filters_out_oracle_ids_not_in_db(self, api_resource: APIResource) -> None:
-        known = str(uuid.uuid4())
-        unknown = str(uuid.uuid4())
+        known = uuid.uuid4()
+        unknown = uuid.uuid4()
         page1 = [
-            {"oracle_id": known, "elo": 1000, "cubeCount": 5, "pickCount": 10},
-            {"oracle_id": unknown, "elo": 800, "cubeCount": 2, "pickCount": 4},
+            {"oracle_id": str(known), "elo": 1000, "cubeCount": 5, "pickCount": 10},
+            {"oracle_id": str(unknown), "elo": 800, "cubeCount": 2, "pickCount": 4},
         ]
 
         with patch.object(api_resource, "_session") as mock_session, patch("api.api_resource.time.sleep"):
@@ -113,11 +113,11 @@ class TestFetchCubecobraData:
         assert unknown not in pages[0]
 
     def test_paginates_until_empty_page(self, api_resource: APIResource) -> None:
-        oids = [str(uuid.uuid4()) for _ in range(3)]
+        oids = [uuid.uuid4() for _ in range(3)]
         pages_data = [
-            [{"oracle_id": oids[0], "elo": 1, "cubeCount": 1, "pickCount": 1}],
-            [{"oracle_id": oids[1], "elo": 2, "cubeCount": 2, "pickCount": 2}],
-            [{"oracle_id": oids[2], "elo": 3, "cubeCount": 3, "pickCount": 3}],
+            [{"oracle_id": str(oids[0]), "elo": 1, "cubeCount": 1, "pickCount": 1}],
+            [{"oracle_id": str(oids[1]), "elo": 2, "cubeCount": 2, "pickCount": 2}],
+            [{"oracle_id": str(oids[2]), "elo": 3, "cubeCount": 3, "pickCount": 3}],
             [],  # terminator
         ]
 
