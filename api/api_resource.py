@@ -702,9 +702,6 @@ class APIResource:
 
         path = req.path.strip("/") or "_root"
 
-        if path in ("db_ready", "pid"):
-            return
-
         logger.info(
             "Handling request for %s / |%s| / response id: %d",
             req.relative_uri,
@@ -856,21 +853,6 @@ class APIResource:
         """
         set_no_store_header(falcon_response)
         return os.getpid()
-
-    def db_ready(self, *, falcon_response: falcon.Response | None = None, **_: object) -> bool:
-        """Return true if the db is ready.
-
-        Returns:
-        -------
-            bool: True if the database is ready, False otherwise.
-
-        """
-        set_no_store_header(falcon_response)
-        records = self._run_query(
-            query="SELECT relname FROM pg_stat_user_tables",
-        )["result"]
-        existing_tables = {r["relname"] for r in records}
-        return "migrations" in existing_tables
 
     def setup_schema(self, *_: object, **__: object) -> None:
         """Set up the database schema and apply migrations as needed."""

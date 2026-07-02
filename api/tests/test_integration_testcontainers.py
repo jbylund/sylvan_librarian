@@ -139,11 +139,6 @@ class TestContainerIntegration:
         if hasattr(api, "_conn_pool"):
             api._conn_pool.close()
 
-    def test_database_ready(self: TestContainerIntegration, api_resource: APIResource) -> None:
-        """Test that database is ready and migrations table exists."""
-        result = api_resource.db_ready()
-        assert result is True
-
     def test_query_parsing_with_database(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """Test query parsing and execution against real database."""
         # Test a simple search query

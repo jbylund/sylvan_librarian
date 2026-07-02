@@ -144,7 +144,6 @@ class TestAPIResourceInitializationNewStyle(TestBaseAPIResourceTest):
 
         # Check that action map is populated
         assert "get_pid" in api_resource.action_map
-        assert "db_ready" in api_resource.action_map
         assert "search" in api_resource.action_map
         assert "index" in api_resource.action_map
 
@@ -256,26 +255,6 @@ class TestAPIResourceCoreMethods(unittest.TestCase):
         result = self.api_resource.get_pid()
         assert isinstance(result, int)
         assert result == os.getpid()
-
-    @patch.object(APIResource, "_run_query")
-    def test_db_ready_returns_true_when_migrations_table_exists(self, mock_run_query: Any) -> None:
-        """Test db_ready returns True when migrations table exists."""
-        mock_run_query.return_value = {
-            "result": [{"relname": "migrations"}, {"relname": "other_table"}],
-        }
-
-        result = self.api_resource.db_ready()
-        assert result is True
-
-    @patch.object(APIResource, "_run_query")
-    def test_db_ready_returns_false_when_migrations_table_missing(self, mock_run_query: Any) -> None:
-        """Test db_ready returns False when migrations table is missing."""
-        mock_run_query.return_value = {
-            "result": [{"relname": "other_table"}],
-        }
-
-        result = self.api_resource.db_ready()
-        assert result is False
 
     def test_read_sql_reads_file_content(self) -> None:
         """Test read_sql reads and returns SQL file content."""
