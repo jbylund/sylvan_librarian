@@ -162,25 +162,31 @@ class TestCachingMiddleware:
 
         resp.set_header.assert_called_once_with("X-Cache", "miss")
 
-    @pytest.mark.parametrize(
-        argnames=["enable_cache", "path"],
-        argvalues=[
-            (False, "/search"),
-            (True, "/random_search"),
-        ],
-        ids=["cache_disabled", "uncached_path"],
-    )
-    def test_cache_bypass_sets_no_header(self, enable_cache: bool, path: str) -> None:
-        """When the cache is never consulted there is no hit/miss to report."""
+    def test_cache_bypass_when_disabled_sets_no_header(self) -> None:
+        """When the cache is disabled entirely there is no hit/miss to report."""
         middleware = CachingMiddleware(cache={})
-        req = self._make_req(path=path)
+        req = self._make_req()
         resp = self._make_resp()
 
         with patch("api.middlewares.caching_middleware.settings") as mock_settings:
-            mock_settings.enable_cache = enable_cache
+            mock_settings.enable_cache = False
             middleware.process_request(req, resp)
 
         resp.set_header.assert_not_called()
+
+    def test_no_store_response_not_cached(self) -> None:
+        """Responses with Cache-Control: no-store must not be stored in the LRU cache."""
+        cache = {}
+        middleware = CachingMiddleware(cache=cache)
+        req = self._make_req()
+        resp = self._make_resp()
+        resp.get_header.return_value = "no-store"
+
+        with patch("api.middlewares.caching_middleware.settings") as mock_settings:
+            mock_settings.enable_cache = True
+            middleware.process_response(req, resp, None, True)
+
+        assert len(cache) == 0
 
     def test_different_hosts_have_separate_cache_entries(self) -> None:
         """Responses for the same query on different hostnames must not share a cache entry."""

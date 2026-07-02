@@ -96,11 +96,6 @@ class CachingMiddleware:
             )
         )
 
-    _UNCACHED_PATHS: frozenset[str] = frozenset({x.strip("/") for x in ["/random_search"]})
-
-    def _is_uncached(self: CachingMiddleware, req: falcon.Request) -> bool:
-        return req.path.strip("/") in self._UNCACHED_PATHS
-
     def process_request(self: CachingMiddleware, req: falcon.Request, resp: falcon.Response) -> None:
         """Process incoming request and check for cached response.
 
@@ -109,8 +104,6 @@ class CachingMiddleware:
             resp: The response object to populate if cache hit.
         """
         if not settings.enable_cache:
-            return
-        if self._is_uncached(req):
             return
 
         cache_key = self._cache_key(req)
@@ -149,13 +142,13 @@ class CachingMiddleware:
         """
         if not settings.enable_cache:
             return
-        if self._is_uncached(req):
-            return
 
         del resource, req_succeeded
         if req.context.get("cache_hit"):
             return
         if resp.status and resp.status.startswith("5"):
+            return
+        if "no-store" in (resp.get_header("Cache-Control") or ""):
             return
         cache_key = req.context.get("cache_key")
         if cache_key is None:
