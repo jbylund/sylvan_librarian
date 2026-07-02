@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 import requests
 
 from scripts.copy_images_to_s3 import (
+    CardProcessorPool,
     download_image,
     fetch_cards_from_db,
     get_args,
@@ -139,3 +140,21 @@ def test_get_s3_cards_uses_s3_compatible_overrides() -> None:
         region_name="us-east-1",
     )
     mock_resource.Bucket.assert_called_once_with("biblioplex")
+
+
+def test_init_worker_uses_s3_compatible_overrides() -> None:
+    """Test worker initialization passes custom S3-compatible kwargs to boto3."""
+    with patch("scripts.copy_images_to_s3.boto3.client") as mock_client_factory:
+        CardProcessorPool.init_worker(
+            {
+                "endpoint_url": "https://s3.us-east-1.wasabisys.com",
+                "region_name": "us-east-1",
+            }
+        )
+
+    mock_client_factory.assert_called_once_with(
+        "s3",
+        endpoint_url="https://s3.us-east-1.wasabisys.com",
+        region_name="us-east-1",
+    )
+    assert CardProcessorPool.s3_client is mock_client_factory.return_value

@@ -288,7 +288,12 @@ def upload_to_s3(
 
 
 def get_s3_client_kwargs(args: Args) -> dict[str, str]:
-    """Build optional boto3 client/resource keyword arguments."""
+    """Build optional boto3 client/resource keyword arguments.
+
+    Returns a dict containing only explicitly configured boto3 overrides:
+    `endpoint_url` when targeting a custom S3-compatible API endpoint, and
+    `region_name` when a specific region override is requested.
+    """
     s3_kwargs = {}
     if args.endpoint_url:
         s3_kwargs["endpoint_url"] = args.endpoint_url
