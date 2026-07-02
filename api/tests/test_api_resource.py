@@ -929,5 +929,26 @@ class TestRootSiteNameInjection(unittest.TestCase):
         assert FALLBACK_SITE_NAME in mock_response.text
 
 
+class TestCardSiteNameInjection(unittest.TestCase):
+    """Tests that card() injects the derived site name into card page HTML."""
+
+    def setUp(self) -> None:
+        self.api_resource = APIResource(
+            last_import_time=multiprocessing.Value("d", time.time(), lock=True),
+        )
+        self.api_resource._conn_pool = MagicMock()
+
+    def test_valid_hostname_replaces_fallback_in_card_html(self) -> None:
+        mock_response = MagicMock()
+        self.api_resource.card(falcon_response=mock_response, request_host="tolarian-acade.my")
+        assert "Tolarian Academy" in mock_response.text
+        assert FALLBACK_SITE_NAME not in mock_response.text
+
+    def test_localhost_keeps_fallback_in_card_html(self) -> None:
+        mock_response = MagicMock()
+        self.api_resource.card(falcon_response=mock_response, request_host="localhost")
+        assert FALLBACK_SITE_NAME in mock_response.text
+
+
 if __name__ == "__main__":
     unittest.main()

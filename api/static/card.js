@@ -198,7 +198,8 @@ async function main() {
     return;
   }
 
-  document.title = `${card.name} - MTG Search`;
+  const siteName = document.getElementById('site-title')?.textContent?.trim() || document.title || 'MTG Search';
+  document.title = `${card.name} - ${siteName}`;
 
   const cardFace = document.getElementById('card-face');
   cardFace.innerHTML = renderCardFace(card);
