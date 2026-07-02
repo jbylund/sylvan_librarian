@@ -430,7 +430,7 @@ class CardSearch {
   }
 
   autoCompleteQuery(query) {
-    const catalogMatch = query.match(/(?:^|\s)(kw|keyword|t|type):([a-zA-Z]{2,})$/i);
+    const catalogMatch = query.match(/(?:^|\s)-?(kw|keyword|t|type):([a-zA-Z]{2,})$/i);
     if (!catalogMatch) {
       return query;
     }
@@ -456,7 +456,7 @@ class CardSearch {
       completion = originalPrefix + bestMatch.slice(originalPrefix.length);
     }
 
-    return query.replace(/(?:^|\s)(?:kw|keyword|t|type):[a-zA-Z]+$/i, match => {
+    return query.replace(/(?:^|\s)-?(?:kw|keyword|t|type):[a-zA-Z]+$/i, match => {
       return match.replace(/[a-zA-Z]+$/, completion);
     });
   }
