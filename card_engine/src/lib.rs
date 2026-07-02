@@ -310,7 +310,17 @@ fn parse_uuid_or_hash(s: &str) -> u128 {
 }
 
 fn opt_uuid(d: &Bound<PyDict>, key: &str) -> u128 {
-    opt_str(d, key).map(|s| parse_uuid_or_hash(&s)).unwrap_or(0)
+    let Some(v) = d.get_item(key).ok().flatten() else { return 0 };
+    // psycopg returns uuid.UUID objects natively; try that first.
+    if let Ok(u) = v.extract::<uuid::Uuid>() {
+        let bits = u.as_u128();
+        return if bits == 0 { 1 } else { bits }; // 0 is the null sentinel
+    }
+    // Fall back to string for hand-built test dicts and any other string form.
+    if let Ok(s) = v.extract::<String>() {
+        return parse_uuid_or_hash(&s);
+    }
+    0
 }
 
 /// Inverse of `parse_uuid_or_hash` for genuine UUIDs: rebuilds a `Uuid` from the exact bit value
