@@ -293,18 +293,18 @@ body {
 
 .help-icon {
   position: absolute;
-  right: 16px;
+  right: 14px;
   top: 50%;
   transform: translateY(-50%);
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  height: 20px;
+  width: 24px;
+  height: 24px;
   border-radius: 50%;
   border: 1px solid var(--color-text-secondary);
   color: var(--color-text-secondary);
-  font-size: 0.8rem;
+  font-size: 0.85rem;
   font-weight: bold;
   text-decoration: none;
   line-height: 1;
