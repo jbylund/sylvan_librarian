@@ -294,7 +294,7 @@ def get_s3_client_kwargs(args: Args) -> dict[str, Any]:
         args: Parsed command-line arguments for the image copy script
 
     Returns:
-        Dict containing only explicitly configured boto3 overrides:
+        dict containing only explicitly configured boto3 overrides:
             - endpoint_url when targeting a custom S3-compatible API endpoint
             - region_name when a specific region override is requested
     """
