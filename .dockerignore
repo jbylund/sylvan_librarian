@@ -1,0 +1,43 @@
+.git/
+.github/
+
+# python
+.venv/
+venv/
+**/__pycache__/
+*venv*
+.pytest_cache/
+.ruff_cache/
+.coverage
+
+# rust build output (nested under card_engine/, shared_cache/, etc.)
+**/target/
+
+# node
+node_modules/
+
+# large/local data not needed in image builds
+data/
+ignored/
+gatherer_data/
+gatherer_import/
+
+# editor/tooling cruft
+.vscode/
+.cursor/
+.cursorignore
+.tmp/
+prof/
+
+# docs & misc project files not needed at build time
+docs/
+benchmarks/
+client/benchmark_results.csv
+NOTES.md
+README.md
+screenshot.webp
+
+# secrets - never send these to the daemon
+.env
+env.json
+github.pat
