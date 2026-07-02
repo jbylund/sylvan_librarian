@@ -1883,6 +1883,7 @@ class APIResource:
                 try:
                     oracle_id = uuid.UUID(oracle_id_str)
                 except ValueError:
+                    logger.warning("CubeCobra returned malformed oracle_id %r on page %d", oracle_id_str, page)
                     continue
                 if oracle_id in db_oracle_ids:
                     results[oracle_id] = {
