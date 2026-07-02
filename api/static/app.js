@@ -67,7 +67,6 @@ class CardSearch {
     this.searchForm = document.querySelector('.search-container');
     this.searchInput = document.getElementById('searchInput');
     this.resultsContainer = document.getElementById('results');
-    this.loadingIndicator = document.getElementById('loading');
     this.statusMessage = document.getElementById('statusMessage');
     this.orderDropdown = document.getElementById('orderDropdown');
     this.uniqueDropdown = document.getElementById('uniqueDropdown');
