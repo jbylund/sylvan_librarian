@@ -314,7 +314,9 @@ fn opt_uuid(d: &Bound<PyDict>, key: &str) -> u128 {
     // psycopg returns uuid.UUID objects natively; try that first.
     if let Ok(u) = v.extract::<uuid::Uuid>() {
         let bits = u.as_u128();
-        return if bits == 0 { 1 } else { bits }; // 0 is the null sentinel
+        // 0 is reserved as the null sentinel; the all-zeros UUID is remapped to 1
+        // (matching parse_uuid_or_hash's behaviour for genuine UUIDs).
+        return if bits == 0 { 1 } else { bits };
     }
     // Fall back to string for hand-built test dicts and any other string form.
     if let Ok(s) = v.extract::<String>() {
