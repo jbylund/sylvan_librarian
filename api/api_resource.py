@@ -468,9 +468,9 @@ def _build_base_html(critical_css: str, site_name: str) -> str:
     return _minify_html(html)
 
 
-@cached(cache=LRUCache(maxsize=16))
-def _build_card_html(critical_css: str, site_name: str) -> str:
-    """Read card.html and inject critical CSS, site name, and versioned asset URLs."""
+@cached(cache=LRUCache(maxsize=4))
+def _build_card_html(critical_css: str) -> str:
+    """Read card.html and inject critical CSS and versioned asset URLs."""
     html = _CARD_HTML_PATH.read_text()
     html = _inject_shared_fragments(html)
     html = html.replace("<!-- CRITICAL_CSS -->", critical_css)
@@ -478,8 +478,6 @@ def _build_card_html(critical_css: str, site_name: str) -> str:
         html = html.replace("/static/styles.css", f"/static/styles.css?v={_STYLES_CSS_HASH}")
     if _CARD_JS_HASH:
         html = html.replace("/static/card.js", f"/static/card.js?v={_CARD_JS_HASH}")
-    if site_name != FALLBACK_SITE_NAME:
-        html = html.replace(FALLBACK_SITE_NAME, site_name)
     return _minify_html(html)
 
 
@@ -1742,7 +1740,9 @@ class APIResource:
         if falcon_response is None:
             return
         site_name = hostname_to_site_name(request_host)
-        html = _build_card_html(self._critical_css, site_name)
+        html = _build_card_html(self._critical_css)
+        if site_name != FALLBACK_SITE_NAME:
+            html = html.replace(FALLBACK_SITE_NAME, site_name)
         falcon_response.text = html
         falcon_response.content_type = "text/html"
         set_cache_header(falcon_response, duration=timedelta(hours=1))
