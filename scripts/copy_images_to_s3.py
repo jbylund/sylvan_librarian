@@ -287,7 +287,7 @@ def upload_to_s3(
         return False
 
 
-def get_s3_client_kwargs(args: Args) -> dict[str, str]:
+def get_s3_client_kwargs(args: Args) -> dict[str, Any]:
     """Build optional boto3 client/resource keyword arguments.
 
     Returns a dict containing only explicitly configured boto3 overrides:
@@ -381,7 +381,7 @@ class CardProcessorPool:
     s3_client = None
 
     @classmethod
-    def init_worker(cls, s3_client_kwargs: dict[str, str]) -> None:
+    def init_worker(cls, s3_client_kwargs: dict[str, Any]) -> None:
         """Initialize worker process with S3 client.
 
         This runs once per worker process when the pool is created.
