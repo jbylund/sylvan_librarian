@@ -1,0 +1,18 @@
+name: Rust Tests
+
+on:
+  pull_request:
+    paths-ignore:
+      - '**/*.rs'
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - '.github/workflows/rust-tests.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  rust-test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "No Rust changes, skipping tests"
