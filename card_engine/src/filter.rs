@@ -198,16 +198,11 @@ fn coll_contains_vocab(
     ids: &rkyv::vec::ArchivedVec<rkyv::primitive::ArchivedU32>,
     vocab: &rkyv::vec::ArchivedVec<rkyv::string::ArchivedString>,
     value: &str,
-    sorted: bool,
 ) -> bool {
     let Some(id) = vocab_id(vocab, value) else {
         return false;
     };
-    if sorted {
-        ids.iter().any(|v| u32::from(*v) == id)
-    } else {
-        ids.iter().any(|v| u32::from(*v) == id)
-    }
+    ids.iter().any(|v| u32::from(*v) == id)
 }
 
 fn coll_all_equal_vocab(
@@ -216,7 +211,7 @@ fn coll_all_equal_vocab(
     value: &str,
 ) -> bool {
     let Some(id) = vocab_id(vocab, value) else {
-        return ids.len() == 0;
+        return ids.is_empty();
     };
     ids.iter().all(|v| u32::from(*v) == id)
 }
@@ -477,7 +472,6 @@ impl FilterExpr {
                             &card.card_subtypes,
                             &collection_vocabs.subtypes,
                             value,
-                            false,
                         ),
                         card.card_subtypes.len(),
                         coll_all_equal_vocab(
@@ -491,7 +485,6 @@ impl FilterExpr {
                             &card.card_keywords,
                             &collection_vocabs.keywords,
                             value,
-                            true,
                         ),
                         card.card_keywords.len(),
                         coll_all_equal_vocab(
@@ -505,7 +498,6 @@ impl FilterExpr {
                             &card.card_oracle_tags,
                             &collection_vocabs.oracle_tags,
                             value,
-                            true,
                         ),
                         card.card_oracle_tags.len(),
                         coll_all_equal_vocab(
@@ -519,7 +511,6 @@ impl FilterExpr {
                             &card.card_is_tags,
                             &collection_vocabs.is_tags,
                             value,
-                            true,
                         ),
                         card.card_is_tags.len(),
                         coll_all_equal_vocab(&card.card_is_tags, &collection_vocabs.is_tags, value),
@@ -529,7 +520,6 @@ impl FilterExpr {
                             &card.card_frame_data,
                             &collection_vocabs.frame_data,
                             value,
-                            true,
                         ),
                         card.card_frame_data.len(),
                         coll_all_equal_vocab(
