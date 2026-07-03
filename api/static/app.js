@@ -461,8 +461,11 @@ class CardSearch {
     });
   }
 
-  balanceQuery(query) {
-    // Balance quotes and parentheses for typeahead searches using a stack
+  // Scans the query with a bracket/quote stack and returns the closing suffix
+  // needed to balance it, or null when a closing paren with no matching opener
+  // makes it unbalance-able (the JS counterpart of balance_partial_query's
+  // ValueError in api/parsing/parsing_f.py).
+  balanceSuffix(query) {
     const charToMirror = {
       '(': ')',
       "'": "'", // single quote is own mirror
@@ -494,6 +497,8 @@ class CardSearch {
 
       if (stack.length > 0 && stack[stack.length - 1] === mirroredChar) {
         stack.pop();
+      } else if (char === ')') {
+        return null; // closing paren with no opener — no suffix can fix this
       } else {
         stack.push(char);
       }
@@ -502,15 +507,25 @@ class CardSearch {
     // Build the closing characters from the stack in reverse order
     let closing = '';
     while (stack.length > 0) {
-      const char = stack.pop();
-      closing += charToMirror[char];
+      closing += charToMirror[stack.pop()];
     }
+    return closing;
+  }
 
-    return query + closing;
+  // Balance quotes and parentheses for typeahead searches; unbalance-able
+  // queries are returned unchanged so validateQuery reports them.
+  balanceQuery(query) {
+    const suffix = this.balanceSuffix(query);
+    return suffix === null ? query : query + suffix;
   }
 
   // Returns an error string if the query is structurally invalid, or null if it looks ok.
   validateQuery(query) {
+    // A closing paren with no matching opener can't be balanced away.
+    if (this.balanceSuffix(query) === null) {
+      return `Failed to parse query: "${query}"`;
+    }
+
     // Strip quoted strings so we don't match content inside them.
     const q = query.replace(/"[^"]*"|'[^']*'/g, '""');
 
