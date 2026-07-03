@@ -1739,8 +1739,10 @@ impl QueryEngine {
         // Equal oracle ids end up adjacent (making each card's printings one
         // contiguous range), and within a card printings order by descending
         // default prefer_score so the default-prefer walk takes the first
-        // matching printing. Score ties fall back to illustration order,
-        // reproducing the old "first max in store order" preferred choice.
+        // matching printing. Score ties fall back to illustration order, then
+        // scryfall_id, making the chosen printing fully deterministic (exact
+        // ties on the prefer metric are common — reprint sheets share scores —
+        // and an unstable sort would otherwise pick arbitrarily among them).
         rows.sort_unstable_by(|a, b| {
             a.oracle_id
                 .cmp(&b.oracle_id)
@@ -1750,6 +1752,7 @@ impl QueryEngine {
                     sb.total_cmp(&sa)
                 })
                 .then_with(|| a.illustration_id.cmp(&b.illustration_id))
+                .then_with(|| a.scryfall_id.cmp(&b.scryfall_id))
         });
 
         // Group rows into OracleCards + Printings + CSR offsets. Card-level
