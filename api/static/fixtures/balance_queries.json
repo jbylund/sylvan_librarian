@@ -1,0 +1,19 @@
+[
+  { "input": "", "suffix": "" },
+  { "input": "simple", "suffix": "" },
+  { "input": "(hello)", "suffix": "" },
+  { "input": "\"quoted (text)\"", "suffix": "" },
+  { "input": "(hello", "suffix": ")" },
+  { "input": "((hello", "suffix": "))" },
+  { "input": "(a (b", "suffix": "))" },
+  { "input": "\"hello", "suffix": "\"" },
+  { "input": "'hello", "suffix": "'" },
+  { "input": "(oracle:\"test", "suffix": "\")" },
+  { "input": "\"a)\"", "suffix": "" },
+  { "input": "\"a)", "suffix": "\"" },
+  { "input": "'say \"hel", "suffix": "'" },
+  { "input": "\"test' ", "suffix": "\"" },
+  { "input": ")", "suffix": null },
+  { "input": "hello)", "suffix": null },
+  { "input": ")(", "suffix": null }
+]
