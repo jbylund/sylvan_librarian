@@ -3,6 +3,16 @@ rust:
       - any-glob-to-any-file:
           - "**/*.rs"
 
+python:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "**/*.py"
+
+javascript:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "**/*.js"
+
 shared_cache:
   - changed-files:
       - any-glob-to-any-file:
