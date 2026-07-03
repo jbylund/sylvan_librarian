@@ -78,6 +78,10 @@ def _rss_mb() -> str:
 
 FALLBACK_SITE_NAME = "MTG Search"
 
+# Placeholder written into index.html/card.html wherever the site name belongs, so the substitution
+# below can't accidentally match unrelated copy that happens to contain "MTG Search".
+_SITE_NAME_PLACEHOLDER = "%%%SITENAME%%%"
+
 # Selectors extracted from styles.css and inlined in the HTML <style> block to prevent
 # layout shift on pages with server-side rendered results. Excludes hover/focus states,
 # animations, and modal styles (not visible on initial paint).
@@ -463,9 +467,7 @@ def _build_base_html(critical_css: str, site_name: str) -> str:
         html = html.replace("/static/styles.css", f"/static/styles.css?v={_STYLES_CSS_HASH}")
     if _APP_MIN_JS_HASH:
         html = html.replace("/static/app.min.js", f"/static/app.min.js?v={_APP_MIN_JS_HASH}")
-    if site_name != FALLBACK_SITE_NAME:
-        html = html.replace(FALLBACK_SITE_NAME, site_name)
-    return _minify_html(html)
+    return _minify_html(html.replace(_SITE_NAME_PLACEHOLDER, site_name))
 
 
 @cached(cache=LRUCache(maxsize=4))
@@ -1723,6 +1725,7 @@ class APIResource:
         set_code: str = "",
         collector_number: str = "",
         *,
+        request_host: str = "",
         falcon_response: falcon.Response | None = None,
         **_: object,
     ) -> None:
@@ -1733,12 +1736,14 @@ class APIResource:
             falcon_response (falcon.Response): The Falcon response to write to.
             set_code (str): The card set code extracted from the URL path.
             collector_number (str): The collector number extracted from the URL path.
+            request_host (str): Host header value used to derive the site name shown in page chrome/title.
         """
         del set_code, collector_number
         if falcon_response is None:
             return
+        site_name = hostname_to_site_name(request_host)
         html = _build_card_html(self._critical_css)
-        falcon_response.text = html
+        falcon_response.text = html.replace(_SITE_NAME_PLACEHOLDER, site_name)
         falcon_response.content_type = "text/html"
         set_cache_header(falcon_response, duration=timedelta(hours=1))
 

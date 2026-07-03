@@ -1,5 +1,6 @@
 const HTML_ESCAPE_RE = /[&<>"]/g;
 const HTML_ESCAPE_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
+const INITIAL_PAGE_TITLE = document.title;
 
 function escapeHtml(str) {
   if (str == null) return '';
@@ -198,7 +199,8 @@ async function main() {
     return;
   }
 
-  document.title = `${card.name} - MTG Search`;
+  const siteName = document.getElementById('site-title')?.textContent?.trim() || INITIAL_PAGE_TITLE;
+  document.title = `${card.name} - ${siteName}`;
 
   const cardFace = document.getElementById('card-face');
   cardFace.innerHTML = renderCardFace(card);
