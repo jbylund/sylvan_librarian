@@ -269,3 +269,137 @@ describe('autoCompleteQuery with typeMap', () => {
     expect(result).toBe('c:r t:dragon');
   });
 });
+
+describe('CardSearch convertManaSymbols', () => {
+  const manaSpan = css => `<span class="mana-symbol ${css}"></span>`;
+  const modalManaSpan = css => `<span class="modal-mana-symbol ${css}"></span>`;
+
+  it('converts basic mana symbols', () => {
+    expect(search.convertManaSymbols('{W}{U}{B}')).toBe(
+      manaSpan('ms ms-w ms-cost') + manaSpan('ms ms-u ms-cost') + manaSpan('ms ms-b ms-cost')
+    );
+  });
+
+  it('converts colorless mana', () => {
+    expect(search.convertManaSymbols('{C}')).toBe(manaSpan('ms ms-c ms-cost'));
+  });
+
+  it('converts two-color hybrid mana', () => {
+    expect(search.convertManaSymbols('{W/U}')).toBe(manaSpan('ms ms-wu ms-cost'));
+  });
+
+  it('converts 2-hybrid mana', () => {
+    expect(search.convertManaSymbols('{2/W}')).toBe(manaSpan('ms ms-2w ms-cost'));
+  });
+
+  it('converts phyrexian mana', () => {
+    expect(search.convertManaSymbols('{W/P}')).toBe(manaSpan('ms ms-wp ms-cost'));
+  });
+
+  it('converts three-color phyrexian mana', () => {
+    expect(search.convertManaSymbols('{W/U/P}')).toBe(manaSpan('ms ms-wup ms-cost'));
+  });
+
+  it('converts single-digit numerics', () => {
+    expect(search.convertManaSymbols('{1}{2}{3}')).toBe(
+      manaSpan('ms ms-1 ms-cost') + manaSpan('ms ms-2 ms-cost') + manaSpan('ms ms-3 ms-cost')
+    );
+  });
+
+  it('converts double-digit numerics', () => {
+    expect(search.convertManaSymbols('{10}{11}{16}')).toBe(
+      manaSpan('ms ms-10 ms-cost') + manaSpan('ms ms-11 ms-cost') + manaSpan('ms ms-16 ms-cost')
+    );
+  });
+
+  it('converts variable mana symbols', () => {
+    expect(search.convertManaSymbols('{X}')).toBe(manaSpan('ms ms-x ms-cost'));
+  });
+
+  it('converts tap and untap symbols', () => {
+    expect(search.convertManaSymbols('{T}{Q}')).toBe(manaSpan('ms ms-tap') + manaSpan('ms ms-untap'));
+  });
+
+  it('converts energy and snow symbols', () => {
+    expect(search.convertManaSymbols('{E}{S}')).toBe(manaSpan('ms ms-energy') + manaSpan('ms ms-s ms-cost'));
+  });
+
+  it('preserves unknown symbols', () => {
+    expect(search.convertManaSymbols('{UNKNOWN}')).toBe('{UNKNOWN}');
+  });
+
+  it('uses modal symbol class for modal rendering', () => {
+    expect(search.convertManaSymbols('{R}', true)).toBe(modalManaSpan('ms ms-r ms-cost'));
+  });
+
+  it('handles repeated symbols', () => {
+    expect(search.convertManaSymbols('{W}{W}{W}')).toBe(
+      manaSpan('ms ms-w ms-cost') + manaSpan('ms ms-w ms-cost') + manaSpan('ms ms-w ms-cost')
+    );
+  });
+
+  it('returns empty string for empty input', () => {
+    expect(search.convertManaSymbols('')).toBe('');
+  });
+});
+
+describe('CardSearch convertManaSymbolsToText', () => {
+  it('converts mana symbols to emoji', () => {
+    expect(search.convertManaSymbolsToText('{W}{U}{B}{R}{G}')).toBe('☀️💧💀🔥🌳');
+  });
+
+  it('converts tap and untap symbols to arrows', () => {
+    expect(search.convertManaSymbolsToText('{T}{Q}')).toBe('↻↺');
+  });
+
+  it('converts numerics to circled numbers', () => {
+    expect(search.convertManaSymbolsToText('{1}{2}{3}')).toBe('①②③');
+  });
+
+  it('passes through unknown symbols', () => {
+    expect(search.convertManaSymbolsToText('{UNKNOWN}')).toBe('{UNKNOWN}');
+  });
+
+  it('returns empty string for empty input', () => {
+    expect(search.convertManaSymbolsToText('')).toBe('');
+  });
+});
+
+describe('CardSearch balanceQuery', () => {
+  it.each([
+    ['(hello', '(hello)'],
+    ['"hello', '"hello"'],
+    ["'hello", "'hello'"],
+    ['(hello)', '(hello)'],
+    ['((hello', '((hello))'],
+    ['(a (b', '(a (b))'],
+    ['("hello', '("hello")'],
+    ['', ''],
+    ['(oracle:"test', '(oracle:"test")'],
+    ['hello)', 'hello)('],
+    ['"test\' ', '"test\' "'],
+  ])('balances %p to %p', (query, expected) => {
+    expect(search.balanceQuery(query)).toBe(expected);
+  });
+});
+
+describe('CardSearch getColumnsFromViewportWidth', () => {
+  it.each([
+    [400, 1],
+    [500, 2],
+    [800, 3],
+    [1400, 4],
+    [2600, 5],
+    [409, 1],
+    [410, 2],
+    [749, 2],
+    [750, 3],
+    [1369, 3],
+    [1370, 4],
+    [2499, 4],
+    [2500, 5],
+  ])('returns %p columns at width %p', (width, expectedColumns) => {
+    window.innerWidth = width;
+    expect(search.getColumnsFromViewportWidth()).toBe(expectedColumns);
+  });
+});
