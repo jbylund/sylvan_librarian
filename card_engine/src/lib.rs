@@ -204,13 +204,19 @@ struct Card {
     prefer_score: Option<f32>,
     cubecobra_score: Option<f32>,
 
-    card_subtypes: Vec<String>,
-    card_keywords: HashSet<String>,
+    // Collection elements interned as u16 ids into CardData.coll_vocab (separate
+    // from the u32-id strings table: the combined collection vocabulary is ~16k
+    // distinct values vs 65,536 addressable, while strings holds >65k entries —
+    // see docs/issues/engine-collection-vocab-interning.md). card_subtypes
+    // preserves the printed order; the set-like collections are sorted by id and
+    // deduped at load.
+    card_subtypes: Vec<u16>,
+    card_keywords: Vec<u16>,
     card_legalities: u64, // 2 bits per format, positions from the FORMAT_SHIFTS registry
-    card_oracle_tags: HashSet<String>,
-    card_art_tags: HashSet<String>,
-    card_is_tags: HashSet<String>,
-    card_frame_data: HashSet<String>,
+    card_oracle_tags: Vec<u16>,
+    card_art_tags: Vec<u16>,
+    card_is_tags: Vec<u16>,
+    card_frame_data: Vec<u16>,
 
     mana_cost: ManaCost,
 
@@ -260,6 +266,35 @@ impl Interner {
             Some(v) => self.intern(v),
             None => NONE_STR,
         }
+    }
+}
+
+/// Build-time interner for collection elements (subtypes, keywords, tags, frame
+/// data); `strings` becomes CardData.coll_vocab. Ids are u16 — the combined
+/// vocabulary is ~16k distinct values, so 65,536 leaves ~4× headroom; interning
+/// fails loudly rather than silently truncating if that is ever exceeded.
+struct VocabInterner {
+    map: HashMap<String, u16>,
+    strings: Vec<String>,
+}
+
+impl VocabInterner {
+    fn new() -> Self {
+        VocabInterner { map: HashMap::new(), strings: Vec::new() }
+    }
+
+    fn intern(&mut self, s: String) -> PyResult<u16> {
+        if let Some(&id) = self.map.get(&s) {
+            return Ok(id);
+        }
+        let id = u16::try_from(self.strings.len()).map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err(
+                "collection vocabulary exceeded u16::MAX distinct values; widen Card's collection ids to u32",
+            )
+        })?;
+        self.strings.push(s.clone());
+        self.map.insert(s, id);
+        Ok(id)
     }
 }
 
@@ -393,16 +428,33 @@ fn jsonb_color_to_bits(d: &Bound<PyDict>, key: &str) -> u8 {
     color_list_to_mask(&colors.iter().map(|s| s.as_str()).collect::<Vec<_>>())
 }
 
-fn jsonb_obj_to_hashset(d: &Bound<PyDict>, key: &str) -> HashSet<String> {
-    d.get_item(key)
+/// Interned vocab ids of a JSON list of strings, preserving element order
+/// (card_subtypes keeps the printed subtype order).
+fn str_list_to_ids(d: &Bound<PyDict>, key: &str, vocab: &mut VocabInterner) -> PyResult<Vec<u16>> {
+    str_list(d, key).into_iter().map(|s| vocab.intern(s)).collect()
+}
+
+/// Interned vocab ids of a JSONB object's keys, sorted and deduped — the set-like
+/// collections (keywords, tags, frame data) as sorted `Vec<u16>`.
+fn jsonb_obj_to_ids(d: &Bound<PyDict>, key: &str, vocab: &mut VocabInterner) -> PyResult<Vec<u16>> {
+    let mut ids: Vec<u16> = d
+        .get_item(key)
         .ok()
         .flatten()
         .and_then(|v| {
-            v.cast::<PyDict>()
-                .ok()
-                .map(|m| m.keys().iter().filter_map(|k| k.extract::<String>().ok()).collect())
+            v.cast::<PyDict>().ok().map(|m| {
+                m.keys()
+                    .iter()
+                    .filter_map(|k| k.extract::<String>().ok())
+                    .map(|s| vocab.intern(s))
+                    .collect::<PyResult<Vec<u16>>>()
+            })
         })
-        .unwrap_or_default()
+        .transpose()?
+        .unwrap_or_default();
+    ids.sort_unstable();
+    ids.dedup();
+    Ok(ids)
 }
 
 // ─── Format legality bitmap ──────────────────────────────────────────────────
@@ -448,7 +500,7 @@ fn mana_cost_from_pydict(d: &Bound<PyDict>, cmc_val: Option<f32>) -> ManaCost {
     ManaCost { pips, devotion, cmc: cmc_val.unwrap_or(0.0) }
 }
 
-fn card_from_pydict(d: &Bound<PyDict>, it: &mut Interner) -> Card {
+fn card_from_pydict(d: &Bound<PyDict>, it: &mut Interner, vocab: &mut VocabInterner) -> PyResult<Card> {
     let released_at = opt_date_str(d, "released_at").unwrap_or_default();
     let released_at_int: Option<u32> = released_at.replace('-', "").parse().ok();
     // Raw strings from the dict; interned to ids as the struct is built below.
@@ -461,7 +513,7 @@ fn card_from_pydict(d: &Bound<PyDict>, it: &mut Interner) -> Card {
     let card_artist = opt_str(d, "card_artist");
     let card_artist_lower_id = it.intern_opt(card_artist.as_ref().map(|s| s.to_lowercase()));
 
-    Card {
+    Ok(Card {
         scryfall_id: opt_uuid(d, "scryfall_id"),
         oracle_id: opt_uuid(d, "oracle_id"),
         illustration_id: opt_uuid(d, "illustration_id"),
@@ -502,19 +554,19 @@ fn card_from_pydict(d: &Bound<PyDict>, it: &mut Interner) -> Card {
         cubecobra_score: opt_f32(d, "cubecobra_score"),
 
         card_types: card_types_list_to_bits(&str_list(d, "card_types")),
-        card_subtypes: str_list(d, "card_subtypes"),
-        card_keywords: jsonb_obj_to_hashset(d, "card_keywords"),
+        card_subtypes: str_list_to_ids(d, "card_subtypes", vocab)?,
+        card_keywords: jsonb_obj_to_ids(d, "card_keywords", vocab)?,
         card_legalities: jsonb_obj_to_legality_bits(d, "card_legalities"),
-        card_oracle_tags: jsonb_obj_to_hashset(d, "card_oracle_tags"),
-        card_art_tags: jsonb_obj_to_hashset(d, "card_art_tags"),
-        card_is_tags: jsonb_obj_to_hashset(d, "card_is_tags"),
-        card_frame_data: jsonb_obj_to_hashset(d, "card_frame_data"),
+        card_oracle_tags: jsonb_obj_to_ids(d, "card_oracle_tags", vocab)?,
+        card_art_tags: jsonb_obj_to_ids(d, "card_art_tags", vocab)?,
+        card_is_tags: jsonb_obj_to_ids(d, "card_is_tags", vocab)?,
+        card_frame_data: jsonb_obj_to_ids(d, "card_frame_data", vocab)?,
 
         mana_cost: mana_cost_from_pydict(d, opt_f32(d, "cmc")),
 
         creature_power_text_id: it.intern_opt(opt_str(d, "creature_power_text")),
         creature_toughness_text_id: it.intern_opt(opt_str(d, "creature_toughness_text")),
-    }
+    })
 }
 
 // ─── Filter expression & builder ─────────────────────────────────────────────
@@ -757,14 +809,20 @@ fn numeric_candidates(idx: &Archived<NumericIndex>, op: CmpOp, val: f64) -> Opti
 
 type TagIndex = HashMap<String, Vec<u32>>;
 
-fn build_tag_index(cards: &[Card], get_tags: impl Fn(&Card) -> &HashSet<String>) -> TagIndex {
-    let mut idx: TagIndex = HashMap::new();
+/// Build a tag/list index from interned collection ids. Accumulates postings by
+/// vocab id in the hot loop (integer keys, no per-element string hashing), then
+/// resolves each id to its owned String key once at the end.
+fn build_tag_index(cards: &[Card], vocab: &[String], get_ids: impl Fn(&Card) -> &Vec<u16>) -> TagIndex {
+    let mut by_id: HashMap<u16, Vec<u32>> = HashMap::new();
     for (i, card) in cards.iter().enumerate() {
-        for tag in get_tags(card) {
-            idx.entry(tag.clone()).or_default().push(i as u32);
+        for &id in get_ids(card) {
+            by_id.entry(id).or_default().push(i as u32);
         }
     }
-    idx
+    by_id
+        .into_iter()
+        .map(|(id, postings)| (vocab[id as usize].clone(), postings))
+        .collect()
 }
 
 // ─── Type bit index ───────────────────────────────────────────────────────────
@@ -784,16 +842,6 @@ fn build_type_index(cards: &[Card]) -> TypeIndex {
         }
     }
     idx // lists are sorted: cards iterated in ascending index order
-}
-
-fn build_list_index(cards: &[Card], get_list: impl Fn(&Card) -> &Vec<String>) -> TagIndex {
-    let mut idx: TagIndex = HashMap::new();
-    for (i, card) in cards.iter().enumerate() {
-        for item in get_list(card) {
-            idx.entry(item.clone()).or_default().push(i as u32);
-        }
-    }
-    idx
 }
 
 // ─── Combined indexes ────────────────────────────────────────────────────────
@@ -836,6 +884,9 @@ struct CardData {
     cards:   Vec<Card>,
     // Hash-consed table for the interned-string fields on Card (see Interner).
     strings: Vec<String>,
+    // Vocab table for Card's collection fields, indexed by their u16 ids
+    // (see VocabInterner). ~16k entries / ~200 KB.
+    coll_vocab: Vec<String>,
     indexes: CardIndexes,
     // The writer's format→shift assignments. Persisted so reader processes —
     // which never run the load path that feeds FORMAT_SHIFTS — resolve
@@ -1052,6 +1103,7 @@ fn select_page<'a>(mut v: Vec<(u128, &'a ACard)>, offset: usize, limit: usize) -
 fn run_query_hashmap<'a>(
     store: &'a [ACard],
     strings: &AStrings,
+    vocab: &AStrings,
     filter: &FilterExpr,
     unique: &str,
     prefer: &str,
@@ -1073,7 +1125,7 @@ fn run_query_hashmap<'a>(
 
     let mut partitions: HashMap<u128, (&ACard, f64)> = HashMap::new();
     for card in store {
-        if filter.matches(card, strings) {
+        if filter.matches(card, strings, vocab) {
             let key = match group_by {
                 GroupBy::Oracle   => u128::from(card.oracle_id),
                 GroupBy::Artwork  => u128::from(card.illustration_id),
@@ -1097,6 +1149,7 @@ fn run_query_hashmap<'a>(
 fn run_query_linear<'a, I, F>(
     cards: I,
     strings: &AStrings,
+    vocab: &AStrings,
     filter: &FilterExpr,
     key_fn: F,
     prefer: &str,
@@ -1118,7 +1171,7 @@ where
     let mut prev_key: Option<u128> = None; // None = before the first match
 
     for card in cards {
-        if !filter.matches(card, strings) { continue; }
+        if !filter.matches(card, strings, vocab) { continue; }
         let key = key_fn(card);
         if prev_key != Some(key) {
             if let Some((c, _)) = group_best.take() { best.push((sort_key_bits(c, sort_col, descending), c)); }
@@ -1140,6 +1193,7 @@ where
 fn run_query_no_dedup<'a>(
     cards: impl Iterator<Item = &'a ACard>,
     strings: &AStrings,
+    vocab: &AStrings,
     filter: &FilterExpr,
     orderby: &str,
     direction: &str,
@@ -1149,7 +1203,7 @@ fn run_query_no_dedup<'a>(
     let sort_col   = orderby_to_col(orderby);
     let descending = direction == "desc";
     let matched: Vec<(u128, &ACard)> = cards
-        .filter(|c| filter.matches(c, strings))
+        .filter(|c| filter.matches(c, strings, vocab))
         .map(|c| (sort_key_bits(c, sort_col, descending), c))
         .collect();
     let total = matched.len();
@@ -1160,6 +1214,7 @@ fn run_query<'a, B>(
     store: &'a [ACard],
     preferred_indices: &[B],
     strings: &AStrings,
+    vocab: &AStrings,
     filter: &FilterExpr,
     unique: &str,
     prefer: &str,
@@ -1186,11 +1241,11 @@ where
         return match candidates {
             Some(existing) => {
                 let fast = intersect_sorted(&existing, preferred_indices);
-                run_query_no_dedup(fast.into_iter().map(|i| &store[i as usize]), strings, filter, orderby, direction, limit, offset)
+                run_query_no_dedup(fast.into_iter().map(|i| &store[i as usize]), strings, vocab, filter, orderby, direction, limit, offset)
             }
             None => run_query_no_dedup(
                 preferred_indices.iter().map(|&i| &store[u32::from(i) as usize]),
-                strings, filter, orderby, direction, limit, offset,
+                strings, vocab, filter, orderby, direction, limit, offset,
             ),
         };
     }
@@ -1208,13 +1263,13 @@ where
         // The store is sorted by (oracle_id, illustration_id), so equal keys are adjacent
         // and the linear key-change dedup is exact — u128 equality, same cost as the
         // dense u32 group ids this replaced.
-        "card" => run_query_linear(cards_iter!(), strings, filter, |c| u128::from(c.oracle_id), prefer, orderby, direction, limit, offset),
+        "card" => run_query_linear(cards_iter!(), strings, vocab, filter, |c| u128::from(c.oracle_id), prefer, orderby, direction, limit, offset),
         // Scryfall assigns each illustration_id to exactly one oracle_id, so cards sharing an
         // illustration_id are always contiguous in the (oracle_id, illustration_id) sort order.
         // The linear dedup path is therefore correct here — no HashMap needed.
-        "artwork"  => run_query_linear(cards_iter!(), strings, filter, |c| u128::from(c.illustration_id), prefer, orderby, direction, limit, offset),
-        "printing" => run_query_no_dedup(cards_iter!(), strings, filter, orderby, direction, limit, offset),
-        _          => run_query_hashmap(store, strings, filter, unique, prefer, orderby, direction, limit, offset),
+        "artwork"  => run_query_linear(cards_iter!(), strings, vocab, filter, |c| u128::from(c.illustration_id), prefer, orderby, direction, limit, offset),
+        "printing" => run_query_no_dedup(cards_iter!(), strings, vocab, filter, orderby, direction, limit, offset),
+        _          => run_query_hashmap(store, strings, vocab, filter, unique, prefer, orderby, direction, limit, offset),
     }
 }
 
@@ -1224,38 +1279,46 @@ where
 // `fields` list is validated and deduped against this same table by resolve_fields(). There is
 // no separate hardcoded path for "the old fields" vs. "the new fields" — everything is an entry
 // in FIELD_TABLE.
-type FieldExtractor = for<'a> fn(Python<'a>, &'a ACard, &'a AStrings) -> PyResult<Bound<'a, PyAny>>;
+type FieldExtractor = for<'a> fn(Python<'a>, &'a ACard, &'a AStrings, &'a AStrings) -> PyResult<Bound<'a, PyAny>>;
 
 const FIELD_TABLE: &[(&str, FieldExtractor)] = &[
-    ("name", |py, c, s| Ok(str_at(s, u32::from(c.card_name_id)).into_pyobject(py)?.into_any())),
-    ("set_code", |py, c, _s| Ok(c.card_set_code.as_str().into_pyobject(py)?.into_any())),
-    ("collector_number", |py, c, s| Ok(str_at(s, u32::from(c.collector_number_id)).into_pyobject(py)?.into_any())),
-    ("power", |py, c, s| Ok(str_at(s, u32::from(c.creature_power_text_id)).into_pyobject(py)?.into_any())),
-    ("toughness", |py, c, s| Ok(str_at(s, u32::from(c.creature_toughness_text_id)).into_pyobject(py)?.into_any())),
-    ("mana_cost", |py, c, s| Ok(str_at(s, u32::from(c.mana_cost_text_id)).into_pyobject(py)?.into_any())),
-    ("oracle_text", |py, c, s| Ok(str_at(s, u32::from(c.oracle_text_id)).into_pyobject(py)?.into_any())),
-    ("set_name", |py, c, s| Ok(str_at(s, u32::from(c.set_name_id)).into_pyobject(py)?.into_any())),
-    ("type_line", |py, c, s| Ok(str_at(s, u32::from(c.type_line_id)).into_pyobject(py)?.into_any())),
-    ("illustration_id", |py, c, _s| Ok(uuid_from_u128(u128::from(c.illustration_id)).into_pyobject(py)?.into_any())),
-    ("scryfall_id", |py, c, _s| Ok(uuid_from_u128(u128::from(c.scryfall_id)).into_pyobject(py)?.into_any())),
-    ("price_usd", |py, c, _s| Ok(c.price_usd.as_ref().map(|v| f32::from(*v)).into_pyobject(py)?.into_any())),
-    ("prefer_score", |py, c, _s| Ok(c.prefer_score.as_ref().map(|v| f32::from(*v)).into_pyobject(py)?.into_any())),
-    // card_subtypes is a Vec, so insertion order is already deterministic; the rest are
-    // HashSets and get sorted for deterministic output.
-    ("card_subtypes", |py, c, _s| {
-        let items: Vec<&str> = c.card_subtypes.iter().map(|v| v.as_str()).collect();
+    ("name", |py, c, s, _v| Ok(str_at(s, u32::from(c.card_name_id)).into_pyobject(py)?.into_any())),
+    ("set_code", |py, c, _s, _v| Ok(c.card_set_code.as_str().into_pyobject(py)?.into_any())),
+    ("collector_number", |py, c, s, _v| Ok(str_at(s, u32::from(c.collector_number_id)).into_pyobject(py)?.into_any())),
+    ("power", |py, c, s, _v| Ok(str_at(s, u32::from(c.creature_power_text_id)).into_pyobject(py)?.into_any())),
+    ("toughness", |py, c, s, _v| Ok(str_at(s, u32::from(c.creature_toughness_text_id)).into_pyobject(py)?.into_any())),
+    ("mana_cost", |py, c, s, _v| Ok(str_at(s, u32::from(c.mana_cost_text_id)).into_pyobject(py)?.into_any())),
+    ("oracle_text", |py, c, s, _v| Ok(str_at(s, u32::from(c.oracle_text_id)).into_pyobject(py)?.into_any())),
+    ("set_name", |py, c, s, _v| Ok(str_at(s, u32::from(c.set_name_id)).into_pyobject(py)?.into_any())),
+    ("type_line", |py, c, s, _v| Ok(str_at(s, u32::from(c.type_line_id)).into_pyobject(py)?.into_any())),
+    ("illustration_id", |py, c, _s, _v| Ok(uuid_from_u128(u128::from(c.illustration_id)).into_pyobject(py)?.into_any())),
+    ("scryfall_id", |py, c, _s, _v| Ok(uuid_from_u128(u128::from(c.scryfall_id)).into_pyobject(py)?.into_any())),
+    ("price_usd", |py, c, _s, _v| Ok(c.price_usd.as_ref().map(|v| f32::from(*v)).into_pyobject(py)?.into_any())),
+    ("prefer_score", |py, c, _s, _v| Ok(c.prefer_score.as_ref().map(|v| f32::from(*v)).into_pyobject(py)?.into_any())),
+    // card_subtypes preserves the printed order; the set-like collections are stored
+    // sorted by vocab id (first-seen order), so they get re-sorted lexicographically
+    // for deterministic output.
+    ("card_subtypes", |py, c, _s, v| {
+        let items: Vec<&str> = c.card_subtypes.iter().map(|id| coll_str(v, u16::from(*id))).collect();
         Ok(items.into_pyobject(py)?.into_any())
     }),
-    ("card_keywords", |py, c, _s| Ok(sorted_strs(c.card_keywords.iter().map(|v| v.as_str())).into_pyobject(py)?.into_any())),
-    ("card_oracle_tags", |py, c, _s| Ok(sorted_strs(c.card_oracle_tags.iter().map(|v| v.as_str())).into_pyobject(py)?.into_any())),
-    ("card_art_tags", |py, c, _s| Ok(sorted_strs(c.card_art_tags.iter().map(|v| v.as_str())).into_pyobject(py)?.into_any())),
-    ("card_is_tags", |py, c, _s| Ok(sorted_strs(c.card_is_tags.iter().map(|v| v.as_str())).into_pyobject(py)?.into_any())),
-    ("card_frame_data", |py, c, _s| Ok(sorted_strs(c.card_frame_data.iter().map(|v| v.as_str())).into_pyobject(py)?.into_any())),
+    ("card_keywords", |py, c, _s, v| Ok(sorted_strs(v, &c.card_keywords).into_pyobject(py)?.into_any())),
+    ("card_oracle_tags", |py, c, _s, v| Ok(sorted_strs(v, &c.card_oracle_tags).into_pyobject(py)?.into_any())),
+    ("card_art_tags", |py, c, _s, v| Ok(sorted_strs(v, &c.card_art_tags).into_pyobject(py)?.into_any())),
+    ("card_is_tags", |py, c, _s, v| Ok(sorted_strs(v, &c.card_is_tags).into_pyobject(py)?.into_any())),
+    ("card_frame_data", |py, c, _s, v| Ok(sorted_strs(v, &c.card_frame_data).into_pyobject(py)?.into_any())),
 ];
 
-/// Collects a `HashSet<&str>` iterator into a sorted `Vec<&str>` for deterministic field output.
-fn sorted_strs<'a>(iter: impl Iterator<Item = &'a str>) -> Vec<&'a str> {
-    let mut v: Vec<&str> = iter.collect();
+/// Resolve one interned collection-element id against the archived vocab table.
+/// Every id is a real entry (there is no absent sentinel for collection elements).
+pub(crate) fn coll_str(vocab: &AStrings, id: u16) -> &str {
+    vocab[id as usize].as_str()
+}
+
+/// Resolves interned collection ids to a lexicographically sorted `Vec<&str>` for
+/// deterministic field output.
+fn sorted_strs<'a>(vocab: &'a AStrings, ids: &Archived<Vec<u16>>) -> Vec<&'a str> {
+    let mut v: Vec<&str> = ids.iter().map(|id| coll_str(vocab, u16::from(*id))).collect();
     v.sort_unstable();
     v
 }
@@ -1286,10 +1349,16 @@ fn resolve_fields(fields: Option<Vec<String>>) -> PyResult<Vec<(&'static str, Fi
     Ok(resolved)
 }
 
-fn card_to_pydict<'py>(py: Python<'py>, card: &ACard, strings: &AStrings, fields: &[(&'static str, FieldExtractor)]) -> PyResult<Bound<'py, PyDict>> {
+fn card_to_pydict<'py>(
+    py: Python<'py>,
+    card: &ACard,
+    strings: &AStrings,
+    vocab: &AStrings,
+    fields: &[(&'static str, FieldExtractor)],
+) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     for (name, extractor) in fields {
-        d.set_item(*name, extractor(py, card, strings)?)?;
+        d.set_item(*name, extractor(py, card, strings, vocab)?)?;
     }
     Ok(d)
 }
@@ -1306,7 +1375,7 @@ fn card_to_pydict<'py>(py: Python<'py>, card: &ACard, strings: &AStrings, fields
 const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 /// Bump on any archived-data-model change that size_of::<ACard>() wouldn't
 /// catch (e.g. reordering same-size Card fields, changing an index type).
-const ARCHIVE_FORMAT_VERSION: u32 = 20260623;
+const ARCHIVE_FORMAT_VERSION: u32 = 20260703;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -1337,6 +1406,7 @@ struct CachedMmap {
 struct Staging {
     cards: Vec<Card>,
     interner: Interner,
+    vocab: VocabInterner,
     #[allow(dead_code)] // held for its flock; released on drop
     lock_file: std::fs::File,
 }
@@ -1348,11 +1418,11 @@ const TYPE_BIT_NAMES: [&str; 14] = [
 ];
 
 /// Count type and subtype occurrences across preferred printings (one per oracle card).
-/// Accumulates by integer key in the hot loop — bit position for types, &str borrowed
-/// from the archive for subtypes — then converts to owned strings once at the end.
+/// Accumulates by integer key in the hot loop — bit position for types, interned vocab
+/// id for subtypes — then converts to owned strings once at the end.
 pub(crate) fn count_common_types(data: &Archived<CardData>) -> HashMap<String, u32> {
     let mut type_counts = [0u32; 14];
-    let mut subtype_counts: HashMap<&str, u32> = HashMap::new();
+    let mut subtype_counts: HashMap<u16, u32> = HashMap::new();
 
     let store: &[ACard] = &data.cards;
     for &idx in data.preferred_indices.iter() {
@@ -1365,8 +1435,8 @@ pub(crate) fn count_common_types(data: &Archived<CardData>) -> HashMap<String, u
             bits &= bits - 1;
         }
 
-        for subtype in card.card_subtypes.iter() {
-            *subtype_counts.entry(subtype.as_str()).or_insert(0) += 1;
+        for id in card.card_subtypes.iter() {
+            *subtype_counts.entry(u16::from(*id)).or_insert(0) += 1;
         }
     }
 
@@ -1376,25 +1446,28 @@ pub(crate) fn count_common_types(data: &Archived<CardData>) -> HashMap<String, u
             result.insert(TYPE_BIT_NAMES[i].to_string(), count);
         }
     }
-    for (name, count) in subtype_counts {
-        result.insert(name.to_string(), count);
+    for (id, count) in subtype_counts {
+        result.insert(coll_str(&data.coll_vocab, id).to_string(), count);
     }
     result
 }
 
 /// Count keyword occurrences across preferred printings (one per oracle card).
 pub(crate) fn count_common_keywords(data: &Archived<CardData>) -> HashMap<String, u32> {
-    let mut keyword_counts: HashMap<&str, u32> = HashMap::new();
+    let mut keyword_counts: HashMap<u16, u32> = HashMap::new();
 
     let store: &[ACard] = &data.cards;
     for &idx in data.preferred_indices.iter() {
         let card = &store[u32::from(idx) as usize];
-        for keyword in card.card_keywords.iter() {
-            *keyword_counts.entry(keyword.as_str()).or_insert(0) += 1;
+        for id in card.card_keywords.iter() {
+            *keyword_counts.entry(u16::from(*id)).or_insert(0) += 1;
         }
     }
 
-    keyword_counts.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
+    keyword_counts
+        .into_iter()
+        .map(|(id, v)| (coll_str(&data.coll_vocab, id).to_string(), v))
+        .collect()
 }
 
 #[pyclass]
@@ -1519,7 +1592,7 @@ impl QueryEngine {
         #[cfg(feature = "alloc-counter")]
         alloc_stats::reset_peak();
 
-        *staging = Some(Staging { cards: Vec::new(), interner: Interner::new(), lock_file });
+        *staging = Some(Staging { cards: Vec::new(), interner: Interner::new(), vocab: VocabInterner::new(), lock_file });
         Ok(true)
     }
 
@@ -1531,7 +1604,7 @@ impl QueryEngine {
         })?;
         for item in db_rows.iter() {
             if let Ok(d) = item.cast::<PyDict>() {
-                staging.cards.push(card_from_pydict(&d, &mut staging.interner));
+                staging.cards.push(card_from_pydict(&d, &mut staging.interner, &mut staging.vocab)?);
             }
         }
         Ok(())
@@ -1550,7 +1623,7 @@ impl QueryEngine {
         let staging = self.staging.lock().unwrap().take().ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err("reload_commit called without reload_begin")
         })?;
-        let Staging { mut cards, interner, lock_file } = staging;
+        let Staging { mut cards, interner, vocab, lock_file } = staging;
 
         // unique=card/artwork group by oracle_id, so cards without one would all
         // collapse into a single group. The DB enforces NOT NULL; fail loudly here
@@ -1597,6 +1670,8 @@ impl QueryEngine {
 
         let strings = interner.strings;
         drop(interner.map);
+        let coll_vocab = vocab.strings;
+        drop(vocab.map);
         let indexes = CardIndexes {
             name_trigram:   build_trigram_index(&cards, |c| c.card_name_lower.as_str()),
             oracle_trigram: build_oracle_text_index(&cards, &strings),
@@ -1604,11 +1679,11 @@ impl QueryEngine {
             power:          build_numeric_index(&cards, |c| c.creature_power.map(|v| v as i16)),
             toughness:      build_numeric_index(&cards, |c| c.creature_toughness.map(|v| v as i16)),
             type_bits:      build_type_index(&cards),
-            subtypes:       build_list_index(&cards, |c| &c.card_subtypes),
-            keywords:       build_tag_index(&cards, |c| &c.card_keywords),
-            oracle_tags:    build_tag_index(&cards, |c| &c.card_oracle_tags),
-            art_tags:       build_tag_index(&cards, |c| &c.card_art_tags),
-            is_tags:        build_tag_index(&cards, |c| &c.card_is_tags),
+            subtypes:       build_tag_index(&cards, &coll_vocab, |c| &c.card_subtypes),
+            keywords:       build_tag_index(&cards, &coll_vocab, |c| &c.card_keywords),
+            oracle_tags:    build_tag_index(&cards, &coll_vocab, |c| &c.card_oracle_tags),
+            art_tags:       build_tag_index(&cards, &coll_vocab, |c| &c.card_art_tags),
+            is_tags:        build_tag_index(&cards, &coll_vocab, |c| &c.card_is_tags),
         };
 
         #[cfg(feature = "alloc-counter")]
@@ -1617,7 +1692,7 @@ impl QueryEngine {
         // Snapshot the registry card_from_pydict just populated so reader
         // processes can adopt the same format→shift assignments.
         let format_shifts_snapshot = format_shifts().read().map(|m| m.clone()).unwrap_or_default();
-        let card_data = CardData { cards, strings, indexes, format_shifts: format_shifts_snapshot, preferred_indices };
+        let card_data = CardData { cards, strings, coll_vocab, indexes, format_shifts: format_shifts_snapshot, preferred_indices };
 
         // Write atomically: stream into a per-PID .tmp, then rename over shm_path.
         // Per-PID avoids the race where two workers write to the same .tmp and
@@ -1746,11 +1821,11 @@ impl QueryEngine {
 
         let store: &[ACard] = &data.cards;
         let (total, page) = run_query(
-            store, &data.preferred_indices[..], &data.strings, &filter_expr, unique, prefer, orderby, direction, limit, offset, &data.indexes,
+            store, &data.preferred_indices[..], &data.strings, &data.coll_vocab, &filter_expr, unique, prefer, orderby, direction, limit, offset, &data.indexes,
         );
 
         let matches: Vec<Bound<PyDict>> =
-            page.iter().map(|c| card_to_pydict(py, c, &data.strings, &resolved_fields)).collect::<PyResult<Vec<_>>>()?;
+            page.iter().map(|c| card_to_pydict(py, c, &data.strings, &data.coll_vocab, &resolved_fields)).collect::<PyResult<Vec<_>>>()?;
         let matches_list = PyList::new(py, matches)?;
         PyTuple::new(py, [total.into_pyobject(py)?.into_any(), matches_list.into_any()])
     }
@@ -1789,9 +1864,9 @@ impl QueryEngine {
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("build_filter: {e}")))?;
 
         let store: &[ACard] = &data.cards;
-        let (total, page) = run_query_hashmap(store, &data.strings, &filter_expr, unique, prefer, orderby, direction, limit, offset);
+        let (total, page) = run_query_hashmap(store, &data.strings, &data.coll_vocab, &filter_expr, unique, prefer, orderby, direction, limit, offset);
         let matches: Vec<Bound<PyDict>> =
-            page.iter().map(|c| card_to_pydict(py, c, &data.strings, &resolved_fields)).collect::<PyResult<Vec<_>>>()?;
+            page.iter().map(|c| card_to_pydict(py, c, &data.strings, &data.coll_vocab, &resolved_fields)).collect::<PyResult<Vec<_>>>()?;
         let matches_list = PyList::new(py, matches)?;
         PyTuple::new(py, [total.into_pyobject(py)?.into_any(), matches_list.into_any()])
     }
@@ -1844,12 +1919,12 @@ impl QueryEngine {
             };
         }
         let (total, page) = match unique {
-            "card"    => run_query_linear(cards_iter_linear!(), &data.strings, &filter_expr, |c| u128::from(c.oracle_id),       prefer, orderby, direction, limit, offset),
-            "artwork" => run_query_linear(cards_iter_linear!(), &data.strings, &filter_expr, |c| u128::from(c.illustration_id), prefer, orderby, direction, limit, offset),
-            _         => run_query_no_dedup(cards_iter_linear!(), &data.strings, &filter_expr, orderby, direction, limit, offset),
+            "card"    => run_query_linear(cards_iter_linear!(), &data.strings, &data.coll_vocab, &filter_expr, |c| u128::from(c.oracle_id),       prefer, orderby, direction, limit, offset),
+            "artwork" => run_query_linear(cards_iter_linear!(), &data.strings, &data.coll_vocab, &filter_expr, |c| u128::from(c.illustration_id), prefer, orderby, direction, limit, offset),
+            _         => run_query_no_dedup(cards_iter_linear!(), &data.strings, &data.coll_vocab, &filter_expr, orderby, direction, limit, offset),
         };
         let matches: Vec<Bound<PyDict>> =
-            page.iter().map(|c| card_to_pydict(py, c, &data.strings, &resolved_fields)).collect::<PyResult<Vec<_>>>()?;
+            page.iter().map(|c| card_to_pydict(py, c, &data.strings, &data.coll_vocab, &resolved_fields)).collect::<PyResult<Vec<_>>>()?;
         let matches_list = PyList::new(py, matches)?;
         PyTuple::new(py, [total.into_pyobject(py)?.into_any(), matches_list.into_any()])
     }
@@ -1890,7 +1965,7 @@ impl QueryEngine {
         let dicts: Vec<Bound<PyDict>> = chosen.iter()
             .map(|&pos| {
                 let card_idx = u32::from(data.preferred_indices[pos]) as usize;
-                card_to_pydict(py, &data.cards[card_idx], &data.strings, &resolved_fields)
+                card_to_pydict(py, &data.cards[card_idx], &data.strings, &data.coll_vocab, &resolved_fields)
             })
             .collect::<PyResult<_>>()?;
         PyList::new(py, dicts)

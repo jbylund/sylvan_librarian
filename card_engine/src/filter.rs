@@ -160,40 +160,16 @@ impl CollField {
     }
 }
 
-fn card_collection<'a>(card: &'a ACard, f: CollField) -> CollRef<'a> {
+/// Collections are interned vocab ids (see VocabInterner); resolving an element
+/// for comparison is an index into the archived coll_vocab table.
+fn card_collection<'a>(card: &'a ACard, f: CollField) -> &'a rkyv::vec::ArchivedVec<rkyv::rend::u16_le> {
     match f {
-        CollField::Subtypes   => CollRef::List(&card.card_subtypes),
-        CollField::Keywords   => CollRef::Set(&card.card_keywords),
-        CollField::OracleTags => CollRef::Set(&card.card_oracle_tags),
-        CollField::ArtTags    => CollRef::Set(&card.card_art_tags),
-        CollField::IsTags     => CollRef::Set(&card.card_is_tags),
-        CollField::FrameData  => CollRef::Set(&card.card_frame_data),
-    }
-}
-
-enum CollRef<'a> {
-    List(&'a rkyv::vec::ArchivedVec<rkyv::string::ArchivedString>),
-    Set(&'a rkyv::collections::swiss_table::ArchivedHashSet<rkyv::string::ArchivedString>),
-}
-
-impl CollRef<'_> {
-    fn contains(&self, v: &str) -> bool {
-        match self {
-            CollRef::List(l) => l.iter().any(|s| s.as_str() == v),
-            CollRef::Set(s)  => s.contains(v),
-        }
-    }
-    fn len(&self) -> usize {
-        match self {
-            CollRef::List(l) => l.len(),
-            CollRef::Set(s)  => s.len(),
-        }
-    }
-    fn all_equal(&self, v: &str) -> bool {
-        match self {
-            CollRef::List(l) => l.iter().all(|s| s.as_str() == v),
-            CollRef::Set(s)  => s.iter().all(|s| s.as_str() == v),
-        }
+        CollField::Subtypes   => &card.card_subtypes,
+        CollField::Keywords   => &card.card_keywords,
+        CollField::OracleTags => &card.card_oracle_tags,
+        CollField::ArtTags    => &card.card_art_tags,
+        CollField::IsTags     => &card.card_is_tags,
+        CollField::FrameData  => &card.card_frame_data,
     }
 }
 
@@ -330,8 +306,8 @@ pub(crate) enum FilterExpr {
 }
 
 impl FilterExpr {
-    pub(crate) fn matches(&self, card: &ACard, strings: &AStrings) -> bool {
-        self.tri(card, strings) == Some(true)
+    pub(crate) fn matches(&self, card: &ACard, strings: &AStrings, vocab: &AStrings) -> bool {
+        self.tri(card, strings, vocab) == Some(true)
     }
 
     /// Three-valued evaluation mirroring SQL: None is SQL's NULL ("unknown"),
@@ -341,14 +317,14 @@ impl FilterExpr {
     /// filters only match cards that have the attribute", while
     /// -(power>2 and t:creature) still matches instants (NULL AND false =
     /// false, NOT false = true). Only Some(true) counts as a match.
-    fn tri(&self, card: &ACard, strings: &AStrings) -> Option<bool> {
+    fn tri(&self, card: &ACard, strings: &AStrings, vocab: &AStrings) -> Option<bool> {
         match self {
             FilterExpr::True => Some(true),
 
             FilterExpr::And(children) => {
                 let mut unknown = false;
                 for c in children {
-                    match c.tri(card, strings) {
+                    match c.tri(card, strings, vocab) {
                         Some(false) => return Some(false),
                         None => unknown = true,
                         Some(true) => {}
@@ -359,7 +335,7 @@ impl FilterExpr {
             FilterExpr::Or(children) => {
                 let mut unknown = false;
                 for c in children {
-                    match c.tri(card, strings) {
+                    match c.tri(card, strings, vocab) {
                         Some(true) => return Some(true),
                         None => unknown = true,
                         Some(false) => {}
@@ -367,7 +343,7 @@ impl FilterExpr {
                 }
                 if unknown { None } else { Some(false) }
             }
-            FilterExpr::Not(inner) => inner.tri(card, strings).map(|b| !b),
+            FilterExpr::Not(inner) => inner.tri(card, strings, vocab).map(|b| !b),
 
             FilterExpr::ExactName(lower) => Some(card.card_name_lower.as_str() == lower.as_str()),
 
@@ -428,13 +404,15 @@ impl FilterExpr {
                 // be the empty collection; Ne is not-exactly-equal, NOT "lacks value"
                 // (that's what negation is for).
                 let coll = card_collection(card, *field);
+                let elem = |id: &rkyv::rend::u16_le| vocab[u16::from(*id) as usize].as_str();
+                let contains = || coll.iter().any(|id| elem(id) == value.as_str());
                 Some(match op {
-                    CmpOp::Ge => coll.contains(value),
-                    CmpOp::Eq => coll.len() == 1 && coll.contains(value),
-                    CmpOp::Gt => coll.contains(value) && coll.len() > 1,
-                    CmpOp::Le => coll.all_equal(value),
+                    CmpOp::Ge => contains(),
+                    CmpOp::Eq => coll.len() == 1 && contains(),
+                    CmpOp::Gt => contains() && coll.len() > 1,
+                    CmpOp::Le => coll.iter().all(|id| elem(id) == value.as_str()),
                     CmpOp::Lt => coll.len() == 0,
-                    CmpOp::Ne => !(coll.len() == 1 && coll.contains(value)),
+                    CmpOp::Ne => !(coll.len() == 1 && contains()),
                 })
             }
 

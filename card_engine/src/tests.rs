@@ -1,12 +1,21 @@
 use super::{
-    build_list_index, build_numeric_index, build_oracle_text_index, build_tag_index,
-    build_trigram_index, build_type_index, count_common_keywords, count_common_types,
-    narrow_candidates, trigram_candidates, Card, CardData, CardIndexes, CollField, CmpOp,
-    FilterExpr, InlineStr, Interner, ManaCost, TagIndex, TrigramIndex, NONE_STR, TYPE_ARTIFACT,
+    build_numeric_index, build_oracle_text_index, build_tag_index, build_trigram_index,
+    build_type_index, count_common_keywords, count_common_types, narrow_candidates,
+    trigram_candidates, Card, CardData, CardIndexes, CollField, CmpOp, FilterExpr, InlineStr,
+    Interner, ManaCost, TagIndex, TrigramIndex, VocabInterner, NONE_STR, TYPE_ARTIFACT,
     TYPE_CREATURE, TYPE_INSTANT, TYPE_LEGENDARY, TYPE_PLANESWALKER,
 };
 use rkyv::{rancor::Error, Archived};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+
+/// Intern a list of collection elements as sorted, deduped vocab ids (the load-time
+/// shape of the set-like collections).
+fn vocab_ids(vocab: &mut VocabInterner, items: &[&str]) -> Vec<u16> {
+    let mut ids: Vec<u16> = items.iter().map(|s| vocab.intern(s.to_string()).unwrap()).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
 
 /// Build a TrigramIndex mapping each word's trigrams to the given card ids.
 fn index_of(words: &[(&str, &[u32])]) -> TrigramIndex {
@@ -88,24 +97,6 @@ fn test_trigram_index_archive_and_lookup() {
     assert!(archived.get(&[b'z', b'z', b'z']).is_none());
 }
 
-// Verify that HashSet<String> supports contains() via &str (Borrow-based lookup).
-// This is used for card_keywords, card_oracle_tags, card_is_tags, card_frame_data.
-#[test]
-fn test_hashset_string_str_lookup() {
-    let mut set: HashSet<String> = HashSet::new();
-    set.insert("Flying".to_string());
-    set.insert("Vigilance".to_string());
-    set.insert("Trample".to_string());
-
-    let bytes = rkyv::to_bytes::<Error>(&set).expect("serialize hashset");
-    let archived = rkyv::access::<rkyv::Archived<HashSet<String>>, Error>(&bytes)
-        .expect("access hashset");
-
-    assert!(archived.contains("Flying"));
-    assert!(archived.contains("Trample"));
-    assert!(!archived.contains("Deathtouch"));
-}
-
 // Verify that HashMap<String, Vec<u32>> (the tag index value type) supports
 // get() via &str, which is needed for narrow_candidates tag lookups.
 #[test]
@@ -140,6 +131,7 @@ fn bench_checked_vs_unchecked_access() {
     const N: usize = 96_000;
     let words = ["draw", "card", "creature", "destroy", "target", "flying", "counter", "spell", "token", "exile"];
     let mut interner = Interner::new();
+    let mut vocab = VocabInterner::new();
     let mut cards: Vec<Card> = Vec::with_capacity(N);
     for i in 0..N {
         let name = format!("Benchmark Card Number {i}");
@@ -190,13 +182,16 @@ fn bench_checked_vs_unchecked_access() {
             price_tix: Some(0.1),
             prefer_score: None,
             cubecobra_score: None,
-            card_subtypes: vec!["Benchmark".to_string(), words[i % 10].to_string()],
-            card_keywords: HashSet::from([words[i % 10].to_string()]),
+            card_subtypes: vec![
+                vocab.intern("Benchmark".to_string()).unwrap(),
+                vocab.intern(words[i % 10].to_string()).unwrap(),
+            ],
+            card_keywords: vocab_ids(&mut vocab, &[words[i % 10]]),
             card_legalities: 0,
-            card_oracle_tags: HashSet::from([format!("tag-{}", i % 100)]),
-            card_art_tags: HashSet::new(),
-            card_is_tags: HashSet::new(),
-            card_frame_data: HashSet::new(),
+            card_oracle_tags: vocab_ids(&mut vocab, &[&format!("tag-{}", i % 100)]),
+            card_art_tags: Vec::new(),
+            card_is_tags: Vec::new(),
+            card_frame_data: Vec::new(),
             mana_cost: ManaCost {
                 pips: HashMap::from([("G".to_string(), 2u8)]),
                 devotion: None,
@@ -215,15 +210,16 @@ fn bench_checked_vs_unchecked_access() {
         power:          build_numeric_index(&cards, |c| c.creature_power.map(|v| v as i16)),
         toughness:      build_numeric_index(&cards, |c| c.creature_toughness.map(|v| v as i16)),
         type_bits:      build_type_index(&cards),
-        subtypes:       build_list_index(&cards, |c| &c.card_subtypes),
-        keywords:       build_tag_index(&cards, |c| &c.card_keywords),
-        oracle_tags:    build_tag_index(&cards, |c| &c.card_oracle_tags),
-        art_tags:       build_tag_index(&cards, |c| &c.card_art_tags),
-        is_tags:        build_tag_index(&cards, |c| &c.card_is_tags),
+        subtypes:       build_tag_index(&cards, &vocab.strings, |c| &c.card_subtypes),
+        keywords:       build_tag_index(&cards, &vocab.strings, |c| &c.card_keywords),
+        oracle_tags:    build_tag_index(&cards, &vocab.strings, |c| &c.card_oracle_tags),
+        art_tags:       build_tag_index(&cards, &vocab.strings, |c| &c.card_art_tags),
+        is_tags:        build_tag_index(&cards, &vocab.strings, |c| &c.card_is_tags),
     };
     let data = CardData {
         cards,
         strings,
+        coll_vocab: vocab.strings,
         indexes,
         format_shifts: HashMap::new(),
         preferred_indices: Vec::new(),
@@ -280,7 +276,9 @@ fn narrow_candidates_art_tags() {
 
 /// Minimal card for tests that only care about card_types and card_subtypes.
 /// All interned-string IDs are NONE_STR; count_common_types never reads them.
-fn stub_card(card_types: u16, card_subtypes: Vec<String>) -> Card {
+/// Subtypes are interned into `vocab`, which must become the CardData's coll_vocab.
+fn stub_card(card_types: u16, subtypes: &[&str], vocab: &mut VocabInterner) -> Card {
+    let card_subtypes = subtypes.iter().map(|s| vocab.intern(s.to_string()).unwrap()).collect();
     Card {
         card_name_lower: InlineStr::from_str(""),
         card_colors: 0,
@@ -319,12 +317,12 @@ fn stub_card(card_types: u16, card_subtypes: Vec<String>) -> Card {
         prefer_score: None,
         cubecobra_score: None,
         card_subtypes,
-        card_keywords: HashSet::new(),
+        card_keywords: Vec::new(),
         card_legalities: 0,
-        card_oracle_tags: HashSet::new(),
-        card_art_tags: HashSet::new(),
-        card_is_tags: HashSet::new(),
-        card_frame_data: HashSet::new(),
+        card_oracle_tags: Vec::new(),
+        card_art_tags: Vec::new(),
+        card_is_tags: Vec::new(),
+        card_frame_data: Vec::new(),
         mana_cost: ManaCost { pips: HashMap::new(), devotion: None, cmc: 0.0 },
         creature_power_text_id: NONE_STR,
         creature_toughness_text_id: NONE_STR,
@@ -337,15 +335,17 @@ fn count_common_types_sums_preferred_only() {
     // card 1: Instant, no subtypes                     — not preferred (skipped)
     // card 2: Artifact + Creature, subtype "Merfolk"   — preferred
     // card 3: Creature, subtypes ["Warrior", "Merfolk"] — preferred
+    let mut vocab = VocabInterner::new();
     let cards = vec![
-        stub_card(TYPE_LEGENDARY | TYPE_PLANESWALKER, vec!["Jace".to_string()]),
-        stub_card(TYPE_INSTANT,                        vec![]),
-        stub_card(TYPE_ARTIFACT | TYPE_CREATURE,       vec!["Merfolk".to_string()]),
-        stub_card(TYPE_CREATURE,                       vec!["Warrior".to_string(), "Merfolk".to_string()]),
+        stub_card(TYPE_LEGENDARY | TYPE_PLANESWALKER, &["Jace"], &mut vocab),
+        stub_card(TYPE_INSTANT,                        &[], &mut vocab),
+        stub_card(TYPE_ARTIFACT | TYPE_CREATURE,       &["Merfolk"], &mut vocab),
+        stub_card(TYPE_CREATURE,                       &["Warrior", "Merfolk"], &mut vocab),
     ];
     let data = CardData {
         cards,
         strings: vec![],
+        coll_vocab: vocab.strings,
         indexes: CardIndexes::default(),
         format_shifts: HashMap::new(),
         preferred_indices: vec![0, 2, 3], // card 1 (Instant) excluded
@@ -380,31 +380,20 @@ fn count_common_keywords_sums_preferred_only() {
     // card 1: Trample         — not preferred (skipped)
     // card 2: Flying          — preferred
     // card 3: Vigilance       — preferred
-    let mut kw_flying_haste = HashSet::new();
-    kw_flying_haste.insert("Flying".to_string());
-    kw_flying_haste.insert("Haste".to_string());
-
-    let mut kw_trample = HashSet::new();
-    kw_trample.insert("Trample".to_string());
-
-    let mut kw_flying = HashSet::new();
-    kw_flying.insert("Flying".to_string());
-
-    let mut kw_vigilance = HashSet::new();
-    kw_vigilance.insert("Vigilance".to_string());
-
-    let mut card0 = stub_card(TYPE_CREATURE, vec![]);
-    card0.card_keywords = kw_flying_haste;
-    let mut card1 = stub_card(TYPE_INSTANT, vec![]);
-    card1.card_keywords = kw_trample;
-    let mut card2 = stub_card(TYPE_CREATURE, vec![]);
-    card2.card_keywords = kw_flying;
-    let mut card3 = stub_card(TYPE_ARTIFACT, vec![]);
-    card3.card_keywords = kw_vigilance;
+    let mut vocab = VocabInterner::new();
+    let mut card0 = stub_card(TYPE_CREATURE, &[], &mut vocab);
+    card0.card_keywords = vocab_ids(&mut vocab, &["Flying", "Haste"]);
+    let mut card1 = stub_card(TYPE_INSTANT, &[], &mut vocab);
+    card1.card_keywords = vocab_ids(&mut vocab, &["Trample"]);
+    let mut card2 = stub_card(TYPE_CREATURE, &[], &mut vocab);
+    card2.card_keywords = vocab_ids(&mut vocab, &["Flying"]);
+    let mut card3 = stub_card(TYPE_ARTIFACT, &[], &mut vocab);
+    card3.card_keywords = vocab_ids(&mut vocab, &["Vigilance"]);
 
     let data = CardData {
         cards: vec![card0, card1, card2, card3],
         strings: vec![],
+        coll_vocab: vocab.strings,
         indexes: CardIndexes::default(),
         format_shifts: HashMap::new(),
         preferred_indices: vec![0, 2, 3], // card 1 (Instant) excluded
