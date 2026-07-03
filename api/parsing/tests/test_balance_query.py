@@ -12,8 +12,12 @@ from api.parsing import balance_partial_query
         '(name:"lightning',
     ],
 )
-def test_balance_query_integration_with_parsing(parse_query, original_query: str) -> None:
-    """Test that balanced queries can be successfully parsed."""
+def test_balanced_queries_still_parse(parse_query, original_query: str) -> None:
+    """Representative balanced partial queries should remain parseable.
+
+    Shared fixture parity coverage lives in test_balance_parity.py. This test keeps a small
+    end-to-end integration check that the balanced output still feeds the parser successfully.
+    """
     balanced_query = balance_partial_query(original_query)
 
     # Original should fail (at least for quote cases)
