@@ -1,8 +1,11 @@
-use std::collections::HashMap;
+use super::legality::{LEGALITY_BANNED, LEGALITY_LEGAL, LEGALITY_RESTRICTED, format_shift};
+use super::{
+    ACard, ACollectionVocabs, AStrings, card_type_str_to_bit, color_list_to_mask, is_devotion_sym,
+    mana_cmc, mana_pip_counts, str_at,
+};
 use regex::Regex;
 use serde_json::Value;
-use super::{ACard, AStrings, str_at, is_devotion_sym, mana_pip_counts, mana_cmc, color_list_to_mask, card_type_str_to_bit};
-use super::legality::{LEGALITY_LEGAL, LEGALITY_BANNED, LEGALITY_RESTRICTED, format_shift};
+use std::collections::HashMap;
 
 // ─── Comparison / arithmetic operators ───────────────────────────────────────
 
@@ -43,40 +46,56 @@ pub(crate) enum NumField {
 
 impl NumField {
     pub(crate) fn is_card_level(self) -> bool {
-        matches!(self, NumField::Cmc | NumField::Power | NumField::Toughness | NumField::Loyalty | NumField::EdhrEc)
+        matches!(
+            self,
+            NumField::Cmc
+                | NumField::Power
+                | NumField::Toughness
+                | NumField::Loyalty
+                | NumField::EdhrEc
+        )
     }
 }
 
 fn attr_to_num_field(attr: &str) -> Option<NumField> {
     match attr {
-        "cmc"                  => Some(NumField::Cmc),
-        "creature_power"       => Some(NumField::Power),
-        "creature_toughness"   => Some(NumField::Toughness),
+        "cmc" => Some(NumField::Cmc),
+        "creature_power" => Some(NumField::Power),
+        "creature_toughness" => Some(NumField::Toughness),
         "planeswalker_loyalty" => Some(NumField::Loyalty),
-        "card_rarity_int"      => Some(NumField::RarityInt),
+        "card_rarity_int" => Some(NumField::RarityInt),
         "collector_number_int" => Some(NumField::CollectorNumberInt),
-        "edhrec_rank"          => Some(NumField::EdhrEc),
-        "price_usd"            => Some(NumField::PriceUsd),
-        "price_eur"            => Some(NumField::PriceEur),
-        "price_tix"            => Some(NumField::PriceTix),
-        "prefer_score"         => Some(NumField::PreferScore),
+        "edhrec_rank" => Some(NumField::EdhrEc),
+        "price_usd" => Some(NumField::PriceUsd),
+        "price_eur" => Some(NumField::PriceEur),
+        "price_tix" => Some(NumField::PriceTix),
+        "prefer_score" => Some(NumField::PreferScore),
         _ => None,
     }
 }
 
 fn card_num(card: &ACard, f: NumField) -> Option<f32> {
     match f {
-        NumField::Cmc                => card.cmc.as_ref().map(|v| u8::from(*v) as f32),
-        NumField::Power              => card.creature_power.as_ref().map(|v| i8::from(*v) as f32),
-        NumField::Toughness          => card.creature_toughness.as_ref().map(|v| i8::from(*v) as f32),
-        NumField::Loyalty            => card.planeswalker_loyalty.as_ref().map(|v| u8::from(*v) as f32),
-        NumField::RarityInt          => card.card_rarity_int.as_ref().map(|v| u8::from(*v) as f32),
-        NumField::CollectorNumberInt => card.collector_number_int.as_ref().map(|v| u16::from(*v) as f32),
-        NumField::EdhrEc             => card.edhrec_rank.as_ref().map(|v| u32::from(*v) as f32),
-        NumField::PriceUsd           => card.price_usd.as_ref().map(|v| f32::from(*v)),
-        NumField::PriceEur           => card.price_eur.as_ref().map(|v| f32::from(*v)),
-        NumField::PriceTix           => card.price_tix.as_ref().map(|v| f32::from(*v)),
-        NumField::PreferScore        => card.prefer_score.as_ref().map(|v| f32::from(*v)),
+        NumField::Cmc => card.cmc.as_ref().map(|v| u8::from(*v) as f32),
+        NumField::Power => card.creature_power.as_ref().map(|v| i8::from(*v) as f32),
+        NumField::Toughness => card
+            .creature_toughness
+            .as_ref()
+            .map(|v| i8::from(*v) as f32),
+        NumField::Loyalty => card
+            .planeswalker_loyalty
+            .as_ref()
+            .map(|v| u8::from(*v) as f32),
+        NumField::RarityInt => card.card_rarity_int.as_ref().map(|v| u8::from(*v) as f32),
+        NumField::CollectorNumberInt => card
+            .collector_number_int
+            .as_ref()
+            .map(|v| u16::from(*v) as f32),
+        NumField::EdhrEc => card.edhrec_rank.as_ref().map(|v| u32::from(*v) as f32),
+        NumField::PriceUsd => card.price_usd.as_ref().map(|v| f32::from(*v)),
+        NumField::PriceEur => card.price_eur.as_ref().map(|v| f32::from(*v)),
+        NumField::PriceTix => card.price_tix.as_ref().map(|v| f32::from(*v)),
+        NumField::PreferScore => card.prefer_score.as_ref().map(|v| f32::from(*v)),
     }
 }
 
@@ -99,7 +118,9 @@ impl NumExpr {
                     ArithOp::Sub => l - r,
                     ArithOp::Mul => l * r,
                     ArithOp::Div => {
-                        if r == 0.0 { return None; }
+                        if r == 0.0 {
+                            return None;
+                        }
                         l / r
                     }
                 })
@@ -138,9 +159,9 @@ pub(crate) enum ColorField {
 
 fn card_colors(card: &ACard, f: ColorField) -> u8 {
     match f {
-        ColorField::Colors        => u8::from(card.card_colors),
+        ColorField::Colors => u8::from(card.card_colors),
         ColorField::ColorIdentity => u8::from(card.card_color_identity),
-        ColorField::ProducedMana  => u8::from(card.produced_mana),
+        ColorField::ProducedMana => u8::from(card.produced_mana),
     }
 }
 
@@ -156,45 +177,48 @@ pub(crate) enum CollField {
 
 impl CollField {
     pub(crate) fn is_card_level(self) -> bool {
-        !matches!(self, CollField::ArtTags | CollField::FrameData | CollField::IsTags)
+        !matches!(
+            self,
+            CollField::ArtTags | CollField::FrameData | CollField::IsTags
+        )
     }
 }
 
-fn card_collection<'a>(card: &'a ACard, f: CollField) -> CollRef<'a> {
-    match f {
-        CollField::Subtypes   => CollRef::List(&card.card_subtypes),
-        CollField::Keywords   => CollRef::Set(&card.card_keywords),
-        CollField::OracleTags => CollRef::Set(&card.card_oracle_tags),
-        CollField::ArtTags    => CollRef::Set(&card.card_art_tags),
-        CollField::IsTags     => CollRef::Set(&card.card_is_tags),
-        CollField::FrameData  => CollRef::Set(&card.card_frame_data),
+fn vocab_id(
+    vocab: &rkyv::vec::ArchivedVec<rkyv::string::ArchivedString>,
+    value: &str,
+) -> Option<u32> {
+    vocab
+        .iter()
+        .position(|s| s.as_str() == value)
+        .map(|i| i as u32)
+}
+
+fn coll_contains_vocab(
+    ids: &rkyv::vec::ArchivedVec<rkyv::primitive::ArchivedU32>,
+    vocab: &rkyv::vec::ArchivedVec<rkyv::string::ArchivedString>,
+    value: &str,
+    sorted: bool,
+) -> bool {
+    let Some(id) = vocab_id(vocab, value) else {
+        return false;
+    };
+    if sorted {
+        ids.iter().any(|v| u32::from(*v) == id)
+    } else {
+        ids.iter().any(|v| u32::from(*v) == id)
     }
 }
 
-enum CollRef<'a> {
-    List(&'a rkyv::vec::ArchivedVec<rkyv::string::ArchivedString>),
-    Set(&'a rkyv::collections::swiss_table::ArchivedHashSet<rkyv::string::ArchivedString>),
-}
-
-impl CollRef<'_> {
-    fn contains(&self, v: &str) -> bool {
-        match self {
-            CollRef::List(l) => l.iter().any(|s| s.as_str() == v),
-            CollRef::Set(s)  => s.contains(v),
-        }
-    }
-    fn len(&self) -> usize {
-        match self {
-            CollRef::List(l) => l.len(),
-            CollRef::Set(s)  => s.len(),
-        }
-    }
-    fn all_equal(&self, v: &str) -> bool {
-        match self {
-            CollRef::List(l) => l.iter().all(|s| s.as_str() == v),
-            CollRef::Set(s)  => s.iter().all(|s| s.as_str() == v),
-        }
-    }
+fn coll_all_equal_vocab(
+    ids: &rkyv::vec::ArchivedVec<rkyv::primitive::ArchivedU32>,
+    vocab: &rkyv::vec::ArchivedVec<rkyv::string::ArchivedString>,
+    value: &str,
+) -> bool {
+    let Some(id) = vocab_id(vocab, value) else {
+        return ids.len() == 0;
+    };
+    ids.iter().all(|v| u32::from(*v) == id)
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -207,16 +231,23 @@ pub(crate) enum TextSearchField {
 
 impl TextSearchField {
     pub(crate) fn is_card_level(self) -> bool {
-        matches!(self, TextSearchField::NameLower | TextSearchField::OracleTextLower)
+        matches!(
+            self,
+            TextSearchField::NameLower | TextSearchField::OracleTextLower
+        )
     }
 }
 
-fn text_search_field_value<'a>(card: &'a ACard, strings: &'a AStrings, field: TextSearchField) -> Option<&'a str> {
+fn text_search_field_value<'a>(
+    card: &'a ACard,
+    strings: &'a AStrings,
+    field: TextSearchField,
+) -> Option<&'a str> {
     match field {
-        TextSearchField::NameLower       => Some(card.card_name_lower.as_str()),
+        TextSearchField::NameLower => Some(card.card_name_lower.as_str()),
         TextSearchField::OracleTextLower => str_at(strings, u32::from(card.oracle_text_lower_id)),
         TextSearchField::FlavorTextLower => str_at(strings, u32::from(card.flavor_text_lower_id)),
-        TextSearchField::ArtistLower     => str_at(strings, u32::from(card.card_artist_lower_id)),
+        TextSearchField::ArtistLower => str_at(strings, u32::from(card.card_artist_lower_id)),
     }
 }
 
@@ -242,16 +273,20 @@ impl TextField {
     }
 }
 
-fn text_field_value<'a>(card: &'a ACard, strings: &'a AStrings, field: TextField) -> Option<&'a str> {
+fn text_field_value<'a>(
+    card: &'a ACard,
+    strings: &'a AStrings,
+    field: TextField,
+) -> Option<&'a str> {
     match field {
-        TextField::NameLower       => Some(card.card_name_lower.as_str()),
+        TextField::NameLower => Some(card.card_name_lower.as_str()),
         TextField::OracleTextLower => str_at(strings, u32::from(card.oracle_text_lower_id)),
         TextField::FlavorTextLower => str_at(strings, u32::from(card.flavor_text_lower_id)),
-        TextField::ArtistLower     => str_at(strings, u32::from(card.card_artist_lower_id)),
-        TextField::SetCode         => Some(card.card_set_code.as_str()),
-        TextField::Layout          => str_at(strings, u32::from(card.card_layout_id)),
-        TextField::Border          => str_at(strings, u32::from(card.card_border_id)),
-        TextField::Watermark       => str_at(strings, u32::from(card.card_watermark_id)),
+        TextField::ArtistLower => str_at(strings, u32::from(card.card_artist_lower_id)),
+        TextField::SetCode => Some(card.card_set_code.as_str()),
+        TextField::Layout => str_at(strings, u32::from(card.card_layout_id)),
+        TextField::Border => str_at(strings, u32::from(card.card_border_id)),
+        TextField::Watermark => str_at(strings, u32::from(card.card_watermark_id)),
         TextField::CollectorNumber => str_at(strings, u32::from(card.collector_number_id)),
     }
 }
@@ -330,8 +365,13 @@ pub(crate) enum FilterExpr {
 }
 
 impl FilterExpr {
-    pub(crate) fn matches(&self, card: &ACard, strings: &AStrings) -> bool {
-        self.tri(card, strings) == Some(true)
+    pub(crate) fn matches(
+        &self,
+        card: &ACard,
+        strings: &AStrings,
+        collection_vocabs: &ACollectionVocabs,
+    ) -> bool {
+        self.tri(card, strings, collection_vocabs) == Some(true)
     }
 
     /// Three-valued evaluation mirroring SQL: None is SQL's NULL ("unknown"),
@@ -341,14 +381,19 @@ impl FilterExpr {
     /// filters only match cards that have the attribute", while
     /// -(power>2 and t:creature) still matches instants (NULL AND false =
     /// false, NOT false = true). Only Some(true) counts as a match.
-    fn tri(&self, card: &ACard, strings: &AStrings) -> Option<bool> {
+    fn tri(
+        &self,
+        card: &ACard,
+        strings: &AStrings,
+        collection_vocabs: &ACollectionVocabs,
+    ) -> Option<bool> {
         match self {
             FilterExpr::True => Some(true),
 
             FilterExpr::And(children) => {
                 let mut unknown = false;
                 for c in children {
-                    match c.tri(card, strings) {
+                    match c.tri(card, strings, collection_vocabs) {
                         Some(false) => return Some(false),
                         None => unknown = true,
                         Some(true) => {}
@@ -359,7 +404,7 @@ impl FilterExpr {
             FilterExpr::Or(children) => {
                 let mut unknown = false;
                 for c in children {
-                    match c.tri(card, strings) {
+                    match c.tri(card, strings, collection_vocabs) {
                         Some(true) => return Some(true),
                         None => unknown = true,
                         Some(false) => {}
@@ -367,7 +412,7 @@ impl FilterExpr {
                 }
                 if unknown { None } else { Some(false) }
             }
-            FilterExpr::Not(inner) => inner.tri(card, strings).map(|b| !b),
+            FilterExpr::Not(inner) => inner.tri(card, strings, collection_vocabs).map(|b| !b),
 
             FilterExpr::ExactName(lower) => Some(card.card_name_lower.as_str() == lower.as_str()),
 
@@ -382,16 +427,15 @@ impl FilterExpr {
                 text_search_field_value(card, strings, *field).map(|s| s.contains(word.as_str()))
             }
 
-            FilterExpr::TextExact { field, op, value } => {
-                text_field_value(card, strings, *field).map(|s| match op {
+            FilterExpr::TextExact { field, op, value } => text_field_value(card, strings, *field)
+                .map(|s| match op {
                     CmpOp::Eq => s == value,
                     CmpOp::Ne => s != value,
                     CmpOp::Lt => s < value.as_str(),
                     CmpOp::Le => s <= value.as_str(),
                     CmpOp::Gt => s > value.as_str(),
                     CmpOp::Ge => s >= value.as_str(),
-                })
-            }
+                }),
 
             FilterExpr::TextRegex { field, regex } => {
                 text_field_value(card, strings, *field).map(|s| regex.is_match(s))
@@ -427,20 +471,94 @@ impl FilterExpr {
                 // strict variants). Lt (proper subset of a one-element set) can only
                 // be the empty collection; Ne is not-exactly-equal, NOT "lacks value"
                 // (that's what negation is for).
-                let coll = card_collection(card, *field);
+                let (contains, len, all_equal) = match field {
+                    CollField::Subtypes => (
+                        coll_contains_vocab(
+                            &card.card_subtypes,
+                            &collection_vocabs.subtypes,
+                            value,
+                            false,
+                        ),
+                        card.card_subtypes.len(),
+                        coll_all_equal_vocab(
+                            &card.card_subtypes,
+                            &collection_vocabs.subtypes,
+                            value,
+                        ),
+                    ),
+                    CollField::Keywords => (
+                        coll_contains_vocab(
+                            &card.card_keywords,
+                            &collection_vocabs.keywords,
+                            value,
+                            true,
+                        ),
+                        card.card_keywords.len(),
+                        coll_all_equal_vocab(
+                            &card.card_keywords,
+                            &collection_vocabs.keywords,
+                            value,
+                        ),
+                    ),
+                    CollField::OracleTags => (
+                        coll_contains_vocab(
+                            &card.card_oracle_tags,
+                            &collection_vocabs.oracle_tags,
+                            value,
+                            true,
+                        ),
+                        card.card_oracle_tags.len(),
+                        coll_all_equal_vocab(
+                            &card.card_oracle_tags,
+                            &collection_vocabs.oracle_tags,
+                            value,
+                        ),
+                    ),
+                    CollField::IsTags => (
+                        coll_contains_vocab(
+                            &card.card_is_tags,
+                            &collection_vocabs.is_tags,
+                            value,
+                            true,
+                        ),
+                        card.card_is_tags.len(),
+                        coll_all_equal_vocab(&card.card_is_tags, &collection_vocabs.is_tags, value),
+                    ),
+                    CollField::FrameData => (
+                        coll_contains_vocab(
+                            &card.card_frame_data,
+                            &collection_vocabs.frame_data,
+                            value,
+                            true,
+                        ),
+                        card.card_frame_data.len(),
+                        coll_all_equal_vocab(
+                            &card.card_frame_data,
+                            &collection_vocabs.frame_data,
+                            value,
+                        ),
+                    ),
+                    CollField::ArtTags => (
+                        card.card_art_tags.contains(value.as_str()),
+                        card.card_art_tags.len(),
+                        card.card_art_tags
+                            .iter()
+                            .all(|s| s.as_str() == value.as_str()),
+                    ),
+                };
                 Some(match op {
-                    CmpOp::Ge => coll.contains(value),
-                    CmpOp::Eq => coll.len() == 1 && coll.contains(value),
-                    CmpOp::Gt => coll.contains(value) && coll.len() > 1,
-                    CmpOp::Le => coll.all_equal(value),
-                    CmpOp::Lt => coll.len() == 0,
-                    CmpOp::Ne => !(coll.len() == 1 && coll.contains(value)),
+                    CmpOp::Ge => contains,
+                    CmpOp::Eq => len == 1 && contains,
+                    CmpOp::Gt => contains && len > 1,
+                    CmpOp::Le => all_equal,
+                    CmpOp::Lt => len == 0,
+                    CmpOp::Ne => !(len == 1 && contains),
                 })
             }
 
-            FilterExpr::Legality { shift, expected } => {
-                Some(shift.is_some_and(|s| (u64::from(card.card_legalities) >> s) & 0b11 == *expected))
-            }
+            FilterExpr::Legality { shift, expected } => Some(
+                shift.is_some_and(|s| (u64::from(card.card_legalities) >> s) & 0b11 == *expected),
+            ),
 
             FilterExpr::ManaCostCmp { op, pips, cmc } => {
                 let card_cmc = f32::from(card.mana_cost.cmc);
@@ -448,7 +566,11 @@ impl FilterExpr {
                 Some(match op {
                     CmpOp::Ge => {
                         pips.iter().all(|(sym, &n)| {
-                            card_pips.get(sym.as_str()).map(|v| u8::from(*v)).unwrap_or(0) >= n
+                            card_pips
+                                .get(sym.as_str())
+                                .map(|v| u8::from(*v))
+                                .unwrap_or(0)
+                                >= n
                         }) && card_cmc >= *cmc
                     }
                     CmpOp::Le => {
@@ -460,17 +582,29 @@ impl FilterExpr {
                         card_cmc == *cmc
                             && card_pips.len() == pips.len()
                             && pips.iter().all(|(sym, &n)| {
-                                card_pips.get(sym.as_str()).map(|v| u8::from(*v)).unwrap_or(0) == n
+                                card_pips
+                                    .get(sym.as_str())
+                                    .map(|v| u8::from(*v))
+                                    .unwrap_or(0)
+                                    == n
                             })
                     }
                     CmpOp::Gt => {
                         let contains = pips.iter().all(|(sym, &n)| {
-                            card_pips.get(sym.as_str()).map(|v| u8::from(*v)).unwrap_or(0) >= n
+                            card_pips
+                                .get(sym.as_str())
+                                .map(|v| u8::from(*v))
+                                .unwrap_or(0)
+                                >= n
                         }) && card_cmc >= *cmc;
                         let exact = card_cmc == *cmc
                             && card_pips.len() == pips.len()
                             && pips.iter().all(|(sym, &n)| {
-                                card_pips.get(sym.as_str()).map(|v| u8::from(*v)).unwrap_or(0) == n
+                                card_pips
+                                    .get(sym.as_str())
+                                    .map(|v| u8::from(*v))
+                                    .unwrap_or(0)
+                                    == n
                             });
                         contains && !exact
                     }
@@ -481,7 +615,11 @@ impl FilterExpr {
                         let exact = card_cmc == *cmc
                             && card_pips.len() == pips.len()
                             && pips.iter().all(|(sym, &n)| {
-                                card_pips.get(sym.as_str()).map(|v| u8::from(*v)).unwrap_or(0) == n
+                                card_pips
+                                    .get(sym.as_str())
+                                    .map(|v| u8::from(*v))
+                                    .unwrap_or(0)
+                                    == n
                             });
                         subset && !exact
                     }
@@ -489,7 +627,11 @@ impl FilterExpr {
                         !(card_cmc == *cmc
                             && card_pips.len() == pips.len()
                             && pips.iter().all(|(sym, &n)| {
-                                card_pips.get(sym.as_str()).map(|v| u8::from(*v)).unwrap_or(0) == n
+                                card_pips
+                                    .get(sym.as_str())
+                                    .map(|v| u8::from(*v))
+                                    .unwrap_or(0)
+                                    == n
                             }))
                     }
                 })
@@ -510,14 +652,27 @@ impl FilterExpr {
                     &card.mana_cost.pips
                 };
                 let ge = pips.iter().all(|(sym, &n)| {
-                    devotion.get(sym.as_str()).map(|v| u8::from(*v)).unwrap_or(0) >= n
+                    devotion
+                        .get(sym.as_str())
+                        .map(|v| u8::from(*v))
+                        .unwrap_or(0)
+                        >= n
                 });
-                let le = devotion.iter()
+                let le = devotion
+                    .iter()
                     .filter(|(sym, _)| is_devotion_sym(sym.as_str()))
                     .all(|(sym, n)| pips.get(sym.as_str()).copied().unwrap_or(0) >= u8::from(*n));
-                let eq = devotion.keys().filter(|sym| is_devotion_sym(sym.as_str())).count() == pips.len()
+                let eq = devotion
+                    .keys()
+                    .filter(|sym| is_devotion_sym(sym.as_str()))
+                    .count()
+                    == pips.len()
                     && pips.iter().all(|(sym, &n)| {
-                        devotion.get(sym.as_str()).map(|v| u8::from(*v)).unwrap_or(0) == n
+                        devotion
+                            .get(sym.as_str())
+                            .map(|v| u8::from(*v))
+                            .unwrap_or(0)
+                            == n
                     });
                 Some(match op {
                     CmpOp::Ge => ge,
@@ -574,11 +729,13 @@ impl FilterExpr {
             FilterExpr::Not(inner) => inner.is_card_level(),
             FilterExpr::NumericCmp { lhs, rhs, .. } => lhs.is_card_level() && rhs.is_card_level(),
             FilterExpr::TextContains { field, .. } => field.is_card_level(),
-            FilterExpr::TextExact   { field, .. } => field.is_card_level(),
-            FilterExpr::TextRegex   { field, .. } => field.is_card_level(),
+            FilterExpr::TextExact { field, .. } => field.is_card_level(),
+            FilterExpr::TextRegex { field, .. } => field.is_card_level(),
             FilterExpr::ColorCmp { .. } | FilterExpr::TypeCmp { .. } => true,
             FilterExpr::CollectionCmp { field, .. } => field.is_card_level(),
-            FilterExpr::Legality { .. } | FilterExpr::ManaCostCmp { .. } | FilterExpr::Devotion { .. } => true,
+            FilterExpr::Legality { .. }
+            | FilterExpr::ManaCostCmp { .. }
+            | FilterExpr::Devotion { .. } => true,
             FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. } => false,
         }
     }
@@ -589,11 +746,11 @@ impl FilterExpr {
 fn str_op_to_cmp(s: &str) -> Result<CmpOp, String> {
     match s {
         "=" | ":" => Ok(CmpOp::Eq),
-        "!="      => Ok(CmpOp::Ne),
-        "<"       => Ok(CmpOp::Lt),
-        "<="      => Ok(CmpOp::Le),
-        ">"       => Ok(CmpOp::Gt),
-        ">="      => Ok(CmpOp::Ge),
+        "!=" => Ok(CmpOp::Ne),
+        "<" => Ok(CmpOp::Lt),
+        "<=" => Ok(CmpOp::Le),
+        ">" => Ok(CmpOp::Gt),
+        ">=" => Ok(CmpOp::Ge),
         _ => Err(format!("unknown operator: {s}")),
     }
 }
@@ -601,24 +758,24 @@ fn str_op_to_cmp(s: &str) -> Result<CmpOp, String> {
 fn op_to_collection_cmp(op: &str) -> CmpOp {
     match op {
         ":" | ">=" => CmpOp::Ge,
-        "="        => CmpOp::Eq,
-        ">"        => CmpOp::Gt,
-        "<="       => CmpOp::Le,
-        "<"        => CmpOp::Lt,
-        "!="       => CmpOp::Ne,
-        _          => CmpOp::Ge,
+        "=" => CmpOp::Eq,
+        ">" => CmpOp::Gt,
+        "<=" => CmpOp::Le,
+        "<" => CmpOp::Lt,
+        "!=" => CmpOp::Ne,
+        _ => CmpOp::Ge,
     }
 }
 
 fn op_to_color_cmp(op: &str) -> CmpOp {
     match op {
         ":" | ">=" => CmpOp::Ge,
-        "="        => CmpOp::Eq,
-        "<="       => CmpOp::Le,
-        "<"        => CmpOp::Lt,
-        ">"        => CmpOp::Gt,
-        "!="       => CmpOp::Ne,
-        _          => CmpOp::Ge,
+        "=" => CmpOp::Eq,
+        "<=" => CmpOp::Le,
+        "<" => CmpOp::Lt,
+        ">" => CmpOp::Gt,
+        "!=" => CmpOp::Ne,
+        _ => CmpOp::Ge,
     }
 }
 
@@ -627,7 +784,9 @@ fn build_num_expr(v: &Value) -> Result<NumExpr, String> {
     let kw = &v["kwargs"];
     match node_type {
         "NumericValueNode" => {
-            let val = kw["value"].as_f64().ok_or("NumericValueNode missing value")?;
+            let val = kw["value"]
+                .as_f64()
+                .ok_or("NumericValueNode missing value")?;
             Ok(NumExpr::Const(val))
         }
         "CardAttributeNode" => {
@@ -702,28 +861,38 @@ fn build_binary(kw: &Value) -> Result<FilterExpr, String> {
     let rhs = &kw["rhs"];
 
     let lhs_type = lhs["node_type"].as_str().unwrap_or("");
-    let lhs_kw   = &lhs["kwargs"];
+    let lhs_kw = &lhs["kwargs"];
 
     if lhs_type != "CardAttributeNode" {
         let lhs_expr = build_num_expr(lhs)?;
         let rhs_expr = build_num_expr(rhs)?;
-        let cmp_op   = str_op_to_cmp(op)?;
-        return Ok(FilterExpr::NumericCmp { lhs: lhs_expr, op: cmp_op, rhs: rhs_expr });
+        let cmp_op = str_op_to_cmp(op)?;
+        return Ok(FilterExpr::NumericCmp {
+            lhs: lhs_expr,
+            op: cmp_op,
+            rhs: rhs_expr,
+        });
     }
 
     let attr = lhs_kw["attribute_name"].as_str().unwrap_or("");
     let orig = lhs_kw["original_attribute"].as_str().unwrap_or("");
 
     if let Some(num_field) = attr_to_num_field(attr) {
-        let cmp_op   = str_op_to_cmp(op)?;
+        let cmp_op = str_op_to_cmp(op)?;
         let rhs_expr = build_num_expr(rhs)?;
-        return Ok(FilterExpr::NumericCmp { lhs: NumExpr::Field(num_field), op: cmp_op, rhs: rhs_expr });
+        return Ok(FilterExpr::NumericCmp {
+            lhs: NumExpr::Field(num_field),
+            op: cmp_op,
+            rhs: rhs_expr,
+        });
     }
 
     if attr == "released_at" {
         let val_str = rhs_value_str(rhs);
         if orig == "year" {
-            let year: i32 = val_str.parse().map_err(|_| format!("bad year: {val_str}"))?;
+            let year: i32 = val_str
+                .parse()
+                .map_err(|_| format!("bad year: {val_str}"))?;
             let cmp_op = str_op_to_cmp(op)?;
             return Ok(FilterExpr::YearCmp { op: cmp_op, year });
         }
@@ -734,16 +903,25 @@ fn build_binary(kw: &Value) -> Result<FilterExpr, String> {
         if digits.is_empty() || digits.len() > 8 {
             return Err(format!("bad date: {val_str}"));
         }
-        let value: u32 = format!("{digits:0<8}").parse().map_err(|_| format!("bad date: {val_str}"))?;
+        let value: u32 = format!("{digits:0<8}")
+            .parse()
+            .map_err(|_| format!("bad date: {val_str}"))?;
         return Ok(FilterExpr::DateCmp { op: cmp_op, value });
     }
 
     if attr == "mana_cost_jsonb" {
         let mana_str = rhs_value_str(rhs);
         let pips = mana_pip_counts(mana_str);
-        let cmc  = mana_cmc(mana_str);
-        let cmp_op = match op { ":" => CmpOp::Ge, _ => str_op_to_cmp(op)? };
-        return Ok(FilterExpr::ManaCostCmp { op: cmp_op, pips, cmc });
+        let cmc = mana_cmc(mana_str);
+        let cmp_op = match op {
+            ":" => CmpOp::Ge,
+            _ => str_op_to_cmp(op)?,
+        };
+        return Ok(FilterExpr::ManaCostCmp {
+            op: cmp_op,
+            pips,
+            cmc,
+        });
     }
 
     if attr == "devotion" {
@@ -763,15 +941,21 @@ fn build_binary(kw: &Value) -> Result<FilterExpr, String> {
                 *pips.entry(sym).or_insert(0) += n;
             }
         }
-        let cmp_op = match op { ":" => CmpOp::Ge, _ => str_op_to_cmp(op)? };
+        let cmp_op = match op {
+            ":" => CmpOp::Ge,
+            _ => str_op_to_cmp(op)?,
+        };
         return Ok(FilterExpr::Devotion { op: cmp_op, pips });
     }
 
-    if matches!(attr, "card_colors" | "card_color_identity" | "produced_mana") {
+    if matches!(
+        attr,
+        "card_colors" | "card_color_identity" | "produced_mana"
+    ) {
         let color_field = match attr {
-            "card_colors"          => ColorField::Colors,
-            "card_color_identity"  => ColorField::ColorIdentity,
-            _                      => ColorField::ProducedMana,
+            "card_colors" => ColorField::Colors,
+            "card_color_identity" => ColorField::ColorIdentity,
+            _ => ColorField::ProducedMana,
         };
         let color_strs: Vec<&str> = rhs
             .as_array()
@@ -784,7 +968,11 @@ fn build_binary(kw: &Value) -> Result<FilterExpr, String> {
         } else {
             op_to_color_cmp(op)
         };
-        return Ok(FilterExpr::ColorCmp { field: color_field, op: cmp_op, mask });
+        return Ok(FilterExpr::ColorCmp {
+            field: color_field,
+            op: cmp_op,
+            mask,
+        });
     }
 
     if attr == "card_legalities" {
@@ -795,42 +983,82 @@ fn build_binary(kw: &Value) -> Result<FilterExpr, String> {
             .unwrap_or("");
         let expected = match orig {
             "format" | "f" | "legal" => LEGALITY_LEGAL,
-            "banned"                 => LEGALITY_BANNED,
-            "restricted"             => LEGALITY_RESTRICTED,
-            _                        => LEGALITY_LEGAL,
+            "banned" => LEGALITY_BANNED,
+            "restricted" => LEGALITY_RESTRICTED,
+            _ => LEGALITY_LEGAL,
         };
-        return Ok(FilterExpr::Legality { shift: format_shift(format), expected });
+        return Ok(FilterExpr::Legality {
+            shift: format_shift(format),
+            expected,
+        });
     }
 
     if attr == "card_types" {
         let mask: u16 = rhs
             .as_array()
-            .map(|a| a.iter().fold(0u16, |acc, v| acc | card_type_str_to_bit(v.as_str().unwrap_or(""))))
+            .map(|a| {
+                a.iter().fold(0u16, |acc, v| {
+                    acc | card_type_str_to_bit(v.as_str().unwrap_or(""))
+                })
+            })
             .unwrap_or(0);
-        return Ok(FilterExpr::TypeCmp { mask, op: op_to_collection_cmp(op) });
+        return Ok(FilterExpr::TypeCmp {
+            mask,
+            op: op_to_collection_cmp(op),
+        });
     }
 
     if attr == "card_subtypes" {
-        let value = rhs.as_array().and_then(|a| a.first()).and_then(|v| v.as_str()).unwrap_or("").to_string();
-        return Ok(FilterExpr::CollectionCmp { field: CollField::Subtypes, op: op_to_collection_cmp(op), value });
+        let value = rhs
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        return Ok(FilterExpr::CollectionCmp {
+            field: CollField::Subtypes,
+            op: op_to_collection_cmp(op),
+            value,
+        });
     }
 
     if attr == "card_keywords" {
-        let value  = rhs.as_array().and_then(|a| a.first()).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let value = rhs
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let cmp_op = op_to_collection_cmp(op);
-        return Ok(FilterExpr::CollectionCmp { field: CollField::Keywords, op: cmp_op, value });
+        return Ok(FilterExpr::CollectionCmp {
+            field: CollField::Keywords,
+            op: cmp_op,
+            value,
+        });
     }
 
-    if matches!(attr, "card_oracle_tags" | "card_art_tags" | "card_is_tags" | "card_frame_data") {
+    if matches!(
+        attr,
+        "card_oracle_tags" | "card_art_tags" | "card_is_tags" | "card_frame_data"
+    ) {
         let coll_field = match attr {
             "card_oracle_tags" => CollField::OracleTags,
-            "card_art_tags"    => CollField::ArtTags,
-            "card_is_tags"     => CollField::IsTags,
-            _                  => CollField::FrameData,
+            "card_art_tags" => CollField::ArtTags,
+            "card_is_tags" => CollField::IsTags,
+            _ => CollField::FrameData,
         };
-        let value  = rhs.as_array().and_then(|a| a.first()).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let value = rhs
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let cmp_op = op_to_collection_cmp(op);
-        return Ok(FilterExpr::CollectionCmp { field: coll_field, op: cmp_op, value });
+        return Ok(FilterExpr::CollectionCmp {
+            field: coll_field,
+            op: cmp_op,
+            value,
+        });
     }
 
     build_text_filter(attr, op, rhs)
@@ -844,11 +1072,11 @@ fn build_text_filter(attr: &str, op: &str, rhs: &Value) -> Result<FilterExpr, St
     let rhs_node_type = rhs["node_type"].as_str().unwrap_or("");
 
     if rhs_node_type == "RegexValueNode" {
-        let pattern  = rhs["kwargs"]["value"].as_str().unwrap_or("");
+        let pattern = rhs["kwargs"]["value"].as_str().unwrap_or("");
         let re = Regex::new(&format!("(?i){pattern}"))
             .map_err(|e| format!("invalid regex '{pattern}': {e}"))?;
         let field = match attr {
-            "card_name"   => TextField::NameLower,
+            "card_name" => TextField::NameLower,
             "oracle_text" => TextField::OracleTextLower,
             "flavor_text" => TextField::FlavorTextLower,
             "card_artist" => TextField::ArtistLower,
@@ -859,42 +1087,60 @@ fn build_text_filter(attr: &str, op: &str, rhs: &Value) -> Result<FilterExpr, St
 
     let raw_value = rhs["kwargs"]["value"].as_str().unwrap_or("");
 
-    if matches!(attr, "card_set_code" | "card_layout" | "card_border" | "card_watermark" | "collector_number") {
+    if matches!(
+        attr,
+        "card_set_code" | "card_layout" | "card_border" | "card_watermark" | "collector_number"
+    ) {
         // collector_number_id is stored raw and mixed-case (e.g. "10E-105"); compare exactly,
         // matching the SQL path. The other four are lowercased at import, so lowercasing
         // the query value gives case-insensitive matching with a plain equality.
-        let value = if attr == "collector_number" { raw_value.to_string() } else { raw_value.to_lowercase() };
+        let value = if attr == "collector_number" {
+            raw_value.to_string()
+        } else {
+            raw_value.to_lowercase()
+        };
         let cmp_op = str_op_to_cmp(op)?;
         let field = match attr {
-            "card_set_code"    => TextField::SetCode,
-            "card_layout"      => TextField::Layout,
-            "card_border"      => TextField::Border,
-            "card_watermark"   => TextField::Watermark,
+            "card_set_code" => TextField::SetCode,
+            "card_layout" => TextField::Layout,
+            "card_border" => TextField::Border,
+            "card_watermark" => TextField::Watermark,
             "collector_number" => TextField::CollectorNumber,
-            _                  => unreachable!(),
+            _ => unreachable!(),
         };
-        return Ok(FilterExpr::TextExact { field, op: cmp_op, value });
+        return Ok(FilterExpr::TextExact {
+            field,
+            op: cmp_op,
+            value,
+        });
     }
 
     let lower_word = raw_value.to_lowercase();
     if op == ":" {
         let tsf = match attr {
-            "card_name"   => TextSearchField::NameLower,
+            "card_name" => TextSearchField::NameLower,
             "oracle_text" => TextSearchField::OracleTextLower,
             "flavor_text" => TextSearchField::FlavorTextLower,
             "card_artist" => TextSearchField::ArtistLower,
             _ => return Err(format!("text substring not supported on {attr}")),
         };
-        return Ok(FilterExpr::TextContains { field: tsf, word: lower_word });
+        return Ok(FilterExpr::TextContains {
+            field: tsf,
+            word: lower_word,
+        });
     }
 
     let field = match attr {
-        "card_name"   => TextField::NameLower,
+        "card_name" => TextField::NameLower,
         "oracle_text" => TextField::OracleTextLower,
         "flavor_text" => TextField::FlavorTextLower,
         "card_artist" => TextField::ArtistLower,
         _ => return Err(format!("unknown text field: {attr}")),
     };
     let cmp_op = str_op_to_cmp(op)?;
-    Ok(FilterExpr::TextExact { field, op: cmp_op, value: raw_value.to_lowercase() })
+    Ok(FilterExpr::TextExact {
+        field,
+        op: cmp_op,
+        value: raw_value.to_lowercase(),
+    })
 }
