@@ -39,6 +39,15 @@ jobs:
           python -m pip install --upgrade pip uv
           uv pip install --system --break-system-packages -r requirements/base.txt -r requirements/test.txt -r requirements/webserver.txt
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+          cache: 'npm'
+
+      - name: Install npm dependencies (jest, prettier)
+        run: npm ci
+
       - name: Cache card_engine wheel
         id: ce-cache
         uses: actions/cache@v5

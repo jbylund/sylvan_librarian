@@ -33,6 +33,7 @@ make test              # full test suite (~1,900 tests); integration tests need 
 make test-unit         # unit tests only, no Docker (runs in seconds)
 make test-integration  # testcontainers-based integration tests (real PostgreSQL)
 python -m pytest -vvv -k "test_name"          # single test by name
+npx jest               # JS tests (jest + jsdom; frontend code in api/static/)
 make lint              # ruff (Python) + prettier (HTML/JS)
 make coverage          # HTML coverage report
 make dev-up            # start dev services via Docker Compose
