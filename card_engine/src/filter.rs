@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use regex::Regex;
 use serde_json::Value;
-use super::{ACard, AStrings, str_at, is_devotion_sym, mana_pip_counts, mana_cmc, color_list_to_mask, card_type_str_to_bit};
+use super::{AOracleCard, APrinting, AStrings, str_at, is_devotion_sym, mana_pip_counts, mana_cmc, color_list_to_mask, card_type_str_to_bit};
 use super::legality::{LEGALITY_LEGAL, LEGALITY_BANNED, LEGALITY_RESTRICTED, format_shift};
 
 // ─── Comparison / arithmetic operators ───────────────────────────────────────
@@ -24,6 +24,25 @@ pub(crate) enum ArithOp {
     Div,
 }
 
+// ─── Four-valued evaluation result ────────────────────────────────────────────
+
+/// Evaluation result of a filter node. True/False/Null follow SQL ternary logic
+/// (Null = a compared attribute is missing); PrintingDep is produced only during
+/// the card-level pass (printing = None) when a predicate depends on
+/// printing-level fields, and tells the query driver to re-evaluate per printing.
+/// With a printing supplied, PrintingDep can never occur.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Tri {
+    True,
+    False,
+    Null,
+    PrintingDep,
+}
+
+fn tri_bool(b: bool) -> Tri {
+    if b { Tri::True } else { Tri::False }
+}
+
 // ─── Numeric expressions ──────────────────────────────────────────────────────
 
 #[derive(Clone, Copy)]
@@ -39,12 +58,6 @@ pub(crate) enum NumField {
     PriceEur,
     PriceTix,
     PreferScore,
-}
-
-impl NumField {
-    pub(crate) fn is_card_level(self) -> bool {
-        matches!(self, NumField::Cmc | NumField::Power | NumField::Toughness | NumField::Loyalty | NumField::EdhrEc)
-    }
 }
 
 fn attr_to_num_field(attr: &str) -> Option<NumField> {
@@ -64,19 +77,31 @@ fn attr_to_num_field(attr: &str) -> Option<NumField> {
     }
 }
 
-fn card_num(card: &ACard, f: NumField) -> Option<f32> {
+/// Numeric operand during evaluation. PDep occurs only in the card-level pass
+/// (printing = None) for printing-level fields.
+#[derive(Clone, Copy)]
+enum NumVal {
+    Known(f64),
+    Null,
+    PDep,
+}
+
+fn field_num(card: &AOracleCard, printing: Option<&APrinting>, f: NumField) -> NumVal {
+    fn known(v: Option<f32>) -> NumVal {
+        v.map_or(NumVal::Null, |x| NumVal::Known(x as f64))
+    }
     match f {
-        NumField::Cmc                => card.cmc.as_ref().map(|v| u8::from(*v) as f32),
-        NumField::Power              => card.creature_power.as_ref().map(|v| i8::from(*v) as f32),
-        NumField::Toughness          => card.creature_toughness.as_ref().map(|v| i8::from(*v) as f32),
-        NumField::Loyalty            => card.planeswalker_loyalty.as_ref().map(|v| u8::from(*v) as f32),
-        NumField::RarityInt          => card.card_rarity_int.as_ref().map(|v| u8::from(*v) as f32),
-        NumField::CollectorNumberInt => card.collector_number_int.as_ref().map(|v| u16::from(*v) as f32),
-        NumField::EdhrEc             => card.edhrec_rank.as_ref().map(|v| u32::from(*v) as f32),
-        NumField::PriceUsd           => card.price_usd.as_ref().map(|v| f32::from(*v)),
-        NumField::PriceEur           => card.price_eur.as_ref().map(|v| f32::from(*v)),
-        NumField::PriceTix           => card.price_tix.as_ref().map(|v| f32::from(*v)),
-        NumField::PreferScore        => card.prefer_score.as_ref().map(|v| f32::from(*v)),
+        NumField::Cmc                => known(card.cmc.as_ref().map(|v| u8::from(*v) as f32)),
+        NumField::Power              => known(card.creature_power.as_ref().map(|v| i8::from(*v) as f32)),
+        NumField::Toughness          => known(card.creature_toughness.as_ref().map(|v| i8::from(*v) as f32)),
+        NumField::Loyalty            => known(card.planeswalker_loyalty.as_ref().map(|v| u8::from(*v) as f32)),
+        NumField::EdhrEc             => known(card.edhrec_rank.as_ref().map(|v| u32::from(*v) as f32)),
+        NumField::RarityInt          => printing.map_or(NumVal::PDep, |p| known(p.card_rarity_int.as_ref().map(|v| u8::from(*v) as f32))),
+        NumField::CollectorNumberInt => printing.map_or(NumVal::PDep, |p| known(p.collector_number_int.as_ref().map(|v| u16::from(*v) as f32))),
+        NumField::PriceUsd           => printing.map_or(NumVal::PDep, |p| known(p.price_usd.as_ref().map(|v| f32::from(*v)))),
+        NumField::PriceEur           => printing.map_or(NumVal::PDep, |p| known(p.price_eur.as_ref().map(|v| f32::from(*v)))),
+        NumField::PriceTix           => printing.map_or(NumVal::PDep, |p| known(p.price_tix.as_ref().map(|v| f32::from(*v)))),
+        NumField::PreferScore        => printing.map_or(NumVal::PDep, |p| known(p.prefer_score.as_ref().map(|v| f32::from(*v)))),
     }
 }
 
@@ -87,31 +112,26 @@ pub(crate) enum NumExpr {
 }
 
 impl NumExpr {
-    pub(crate) fn eval(&self, card: &ACard) -> Option<f64> {
+    fn eval(&self, card: &AOracleCard, printing: Option<&APrinting>) -> NumVal {
         match self {
-            NumExpr::Const(v) => Some(*v),
-            NumExpr::Field(f) => card_num(card, *f).map(|v| v as f64),
+            NumExpr::Const(v) => NumVal::Known(*v),
+            NumExpr::Field(f) => field_num(card, printing, *f),
             NumExpr::Arith(lhs, op, rhs) => {
-                let l = lhs.eval(card)?;
-                let r = rhs.eval(card)?;
-                Some(match op {
-                    ArithOp::Add => l + r,
-                    ArithOp::Sub => l - r,
-                    ArithOp::Mul => l * r,
-                    ArithOp::Div => {
-                        if r == 0.0 { return None; }
-                        l / r
-                    }
-                })
+                // Null dominates PDep: Null op anything is Null for every
+                // printing, so the card-level result is already exact.
+                match (lhs.eval(card, printing), rhs.eval(card, printing)) {
+                    (NumVal::Null, _) | (_, NumVal::Null) => NumVal::Null,
+                    (NumVal::PDep, _) | (_, NumVal::PDep) => NumVal::PDep,
+                    (NumVal::Known(l), NumVal::Known(r)) => match op {
+                        ArithOp::Add => NumVal::Known(l + r),
+                        ArithOp::Sub => NumVal::Known(l - r),
+                        ArithOp::Mul => NumVal::Known(l * r),
+                        ArithOp::Div => {
+                            if r == 0.0 { NumVal::Null } else { NumVal::Known(l / r) }
+                        }
+                    },
+                }
             }
-        }
-    }
-
-    pub(crate) fn is_card_level(&self) -> bool {
-        match self {
-            NumExpr::Const(_) => true,
-            NumExpr::Field(f) => f.is_card_level(),
-            NumExpr::Arith(lhs, _, rhs) => lhs.is_card_level() && rhs.is_card_level(),
         }
     }
 }
@@ -136,7 +156,7 @@ pub(crate) enum ColorField {
     ProducedMana,
 }
 
-fn card_colors(card: &ACard, f: ColorField) -> u8 {
+fn card_colors(card: &AOracleCard, f: ColorField) -> u8 {
     match f {
         ColorField::Colors        => u8::from(card.card_colors),
         ColorField::ColorIdentity => u8::from(card.card_color_identity),
@@ -154,22 +174,21 @@ pub(crate) enum CollField {
     FrameData,
 }
 
-impl CollField {
-    pub(crate) fn is_card_level(self) -> bool {
-        !matches!(self, CollField::ArtTags | CollField::FrameData | CollField::IsTags)
-    }
-}
-
-/// Collections are interned vocab ids (see VocabInterner); resolving an element
-/// for comparison is an index into the archived coll_vocab table.
-fn card_collection<'a>(card: &'a ACard, f: CollField) -> &'a rkyv::vec::ArchivedVec<rkyv::rend::u16_le> {
+/// Collections are interned vocab ids (see VocabInterner). Card-level
+/// collections come from the OracleCard; printing-level ones (art/is tags,
+/// frame data) come from the printing — None during the card pass.
+fn collection<'a>(
+    card: &'a AOracleCard,
+    printing: Option<&'a APrinting>,
+    f: CollField,
+) -> Option<&'a rkyv::vec::ArchivedVec<rkyv::rend::u16_le>> {
     match f {
-        CollField::Subtypes   => &card.card_subtypes,
-        CollField::Keywords   => &card.card_keywords,
-        CollField::OracleTags => &card.card_oracle_tags,
-        CollField::ArtTags    => &card.card_art_tags,
-        CollField::IsTags     => &card.card_is_tags,
-        CollField::FrameData  => &card.card_frame_data,
+        CollField::Subtypes   => Some(&card.card_subtypes),
+        CollField::Keywords   => Some(&card.card_keywords),
+        CollField::OracleTags => Some(&card.card_oracle_tags),
+        CollField::ArtTags    => printing.map(|p| &p.card_art_tags),
+        CollField::IsTags     => printing.map(|p| &p.card_is_tags),
+        CollField::FrameData  => printing.map(|p| &p.card_frame_data),
     }
 }
 
@@ -181,18 +200,28 @@ pub(crate) enum TextSearchField {
     ArtistLower,
 }
 
-impl TextSearchField {
-    pub(crate) fn is_card_level(self) -> bool {
-        matches!(self, TextSearchField::NameLower | TextSearchField::OracleTextLower)
-    }
+/// Text operand during evaluation; PDep only in the card-level pass.
+enum StrVal<'a> {
+    Known(&'a str),
+    Null,
+    PDep,
 }
 
-fn text_search_field_value<'a>(card: &'a ACard, strings: &'a AStrings, field: TextSearchField) -> Option<&'a str> {
+fn opt_sv(v: Option<&str>) -> StrVal<'_> {
+    v.map_or(StrVal::Null, StrVal::Known)
+}
+
+fn text_search_field_value<'a>(
+    card: &'a AOracleCard,
+    printing: Option<&'a APrinting>,
+    strings: &'a AStrings,
+    field: TextSearchField,
+) -> StrVal<'a> {
     match field {
-        TextSearchField::NameLower       => Some(card.card_name_lower.as_str()),
-        TextSearchField::OracleTextLower => str_at(strings, u32::from(card.oracle_text_lower_id)),
-        TextSearchField::FlavorTextLower => str_at(strings, u32::from(card.flavor_text_lower_id)),
-        TextSearchField::ArtistLower     => str_at(strings, u32::from(card.card_artist_lower_id)),
+        TextSearchField::NameLower       => StrVal::Known(card.card_name_lower.as_str()),
+        TextSearchField::OracleTextLower => opt_sv(str_at(strings, u32::from(card.oracle_text_lower_id))),
+        TextSearchField::FlavorTextLower => printing.map_or(StrVal::PDep, |p| opt_sv(str_at(strings, u32::from(p.flavor_text_lower_id)))),
+        TextSearchField::ArtistLower     => printing.map_or(StrVal::PDep, |p| opt_sv(str_at(strings, u32::from(p.card_artist_lower_id)))),
     }
 }
 
@@ -212,23 +241,22 @@ pub(crate) enum TextField {
     CollectorNumber,
 }
 
-impl TextField {
-    fn is_card_level(self) -> bool {
-        matches!(self, TextField::NameLower | TextField::OracleTextLower)
-    }
-}
-
-fn text_field_value<'a>(card: &'a ACard, strings: &'a AStrings, field: TextField) -> Option<&'a str> {
+fn text_field_value<'a>(
+    card: &'a AOracleCard,
+    printing: Option<&'a APrinting>,
+    strings: &'a AStrings,
+    field: TextField,
+) -> StrVal<'a> {
     match field {
-        TextField::NameLower       => Some(card.card_name_lower.as_str()),
-        TextField::OracleTextLower => str_at(strings, u32::from(card.oracle_text_lower_id)),
-        TextField::FlavorTextLower => str_at(strings, u32::from(card.flavor_text_lower_id)),
-        TextField::ArtistLower     => str_at(strings, u32::from(card.card_artist_lower_id)),
-        TextField::SetCode         => Some(card.card_set_code.as_str()),
-        TextField::Layout          => str_at(strings, u32::from(card.card_layout_id)),
-        TextField::Border          => str_at(strings, u32::from(card.card_border_id)),
-        TextField::Watermark       => str_at(strings, u32::from(card.card_watermark_id)),
-        TextField::CollectorNumber => str_at(strings, u32::from(card.collector_number_id)),
+        TextField::NameLower       => StrVal::Known(card.card_name_lower.as_str()),
+        TextField::OracleTextLower => opt_sv(str_at(strings, u32::from(card.oracle_text_lower_id))),
+        TextField::Layout          => opt_sv(str_at(strings, u32::from(card.card_layout_id))),
+        TextField::FlavorTextLower => printing.map_or(StrVal::PDep, |p| opt_sv(str_at(strings, u32::from(p.flavor_text_lower_id)))),
+        TextField::ArtistLower     => printing.map_or(StrVal::PDep, |p| opt_sv(str_at(strings, u32::from(p.card_artist_lower_id)))),
+        TextField::SetCode         => printing.map_or(StrVal::PDep, |p| StrVal::Known(p.card_set_code.as_str())),
+        TextField::Border          => printing.map_or(StrVal::PDep, |p| opt_sv(str_at(strings, u32::from(p.card_border_id)))),
+        TextField::Watermark       => printing.map_or(StrVal::PDep, |p| opt_sv(str_at(strings, u32::from(p.card_watermark_id)))),
+        TextField::CollectorNumber => printing.map_or(StrVal::PDep, |p| opt_sv(str_at(strings, u32::from(p.collector_number_id)))),
     }
 }
 
@@ -335,76 +363,193 @@ impl FilterExpr {
         }
     }
 
-    pub(crate) fn matches(&self, card: &ACard, strings: &AStrings) -> bool {
-        self.tri(card, strings) == Some(true)
+    /// True iff the filter matches this (card, printing) pair. With a printing
+    /// supplied, evaluation is exact — PrintingDep cannot occur.
+    pub(crate) fn matches(&self, card: &AOracleCard, printing: &APrinting, strings: &AStrings) -> bool {
+        self.tri(card, Some(printing), strings) == Tri::True
     }
 
-    /// Three-valued evaluation mirroring SQL: None is SQL's NULL ("unknown"),
-    /// produced when a compared field is missing from the card. NOT/AND/OR
-    /// propagate unknown exactly like SQL ternary logic, so -power>2 excludes
-    /// powerless cards (NOT NULL = NULL), matching Scryfall's "attribute
-    /// filters only match cards that have the attribute", while
-    /// -(power>2 and t:creature) still matches instants (NULL AND false =
-    /// false, NOT false = true). Only Some(true) counts as a match.
-    fn tri(&self, card: &ACard, strings: &AStrings) -> Option<bool> {
-        match self {
-            FilterExpr::True => Some(true),
+    /// Card-level pass: evaluate with no printing. True means every printing of
+    /// the card matches; False/Null mean none can; PrintingDep means the result
+    /// depends on printing-level fields and the driver must evaluate per printing.
+    pub(crate) fn eval_card(&self, card: &AOracleCard, strings: &AStrings) -> Tri {
+        self.tri(card, None, strings)
+    }
 
+    /// Card pass with one-level residual extraction. For a top-level And/Or,
+    /// children are classified individually: decided children are dropped (a
+    /// False/Null child settles an And, a True child settles an Or — and at the
+    /// top level only True counts as a match, so an And with a Null child can
+    /// never match and collapses to False), and only the PrintingDep children
+    /// go into `residual` for the per-printing walk. This is what makes
+    /// broad-card × narrow-printing conjunctions cheap: `t:creature set:lea`
+    /// proves the type check once per card and walks printings evaluating only
+    /// the set check. `residual` is a caller-owned buffer reused across cards;
+    /// `residual_is_or` says how residual_matches() must combine it.
+    ///
+    /// Returns True (every printing matches), False (none can), or PrintingDep
+    /// (evaluate the residual per printing). Never returns Null: at the top
+    /// level Null cannot become a match, so it collapses to False.
+    pub(crate) fn card_pass<'f>(
+        &'f self,
+        card: &AOracleCard,
+        strings: &AStrings,
+        residual: &mut Vec<&'f FilterExpr>,
+        residual_is_or: &mut bool,
+    ) -> Tri {
+        residual.clear();
+        *residual_is_or = false;
+        match self {
             FilterExpr::And(children) => {
-                let mut unknown = false;
                 for c in children {
-                    match c.tri(card, strings) {
-                        Some(false) => return Some(false),
-                        None => unknown = true,
-                        Some(true) => {}
+                    match c.tri(card, None, strings) {
+                        // And(Null, x) is Null or False for every printing —
+                        // never True — so the card cannot match.
+                        Tri::False | Tri::Null => return Tri::False,
+                        Tri::True => {}
+                        Tri::PrintingDep => residual.push(c),
                     }
                 }
-                if unknown { None } else { Some(true) }
+                if residual.is_empty() { Tri::True } else { Tri::PrintingDep }
             }
             FilterExpr::Or(children) => {
-                let mut unknown = false;
+                *residual_is_or = true;
                 for c in children {
-                    match c.tri(card, strings) {
-                        Some(true) => return Some(true),
-                        None => unknown = true,
-                        Some(false) => {}
+                    match c.tri(card, None, strings) {
+                        Tri::True => {
+                            residual.clear();
+                            return Tri::True;
+                        }
+                        // Or(Null, x) is True iff x is True: Null children
+                        // cannot contribute a match and drop out.
+                        Tri::False | Tri::Null => {}
+                        Tri::PrintingDep => residual.push(c),
                     }
                 }
-                if unknown { None } else { Some(false) }
+                if residual.is_empty() { Tri::False } else { Tri::PrintingDep }
             }
-            FilterExpr::Not(inner) => inner.tri(card, strings).map(|b| !b),
+            other => match other.tri(card, None, strings) {
+                Tri::PrintingDep => {
+                    residual.push(self);
+                    Tri::PrintingDep
+                }
+                Tri::True => Tri::True,
+                Tri::False | Tri::Null => Tri::False,
+            },
+        }
+    }
 
-            FilterExpr::ExactName(lower) => Some(card.card_name_lower.as_str() == lower.as_str()),
+    /// Evaluate a card_pass() residual against one printing. Only True counts
+    /// as a match at the top level, so And-residuals need every child True and
+    /// Or-residuals need any child True.
+    pub(crate) fn residual_matches(
+        card: &AOracleCard,
+        printing: &APrinting,
+        strings: &AStrings,
+        residual: &[&FilterExpr],
+        residual_is_or: bool,
+    ) -> bool {
+        if residual_is_or {
+            residual.iter().any(|c| c.tri(card, Some(printing), strings) == Tri::True)
+        } else {
+            residual.iter().all(|c| c.tri(card, Some(printing), strings) == Tri::True)
+        }
+    }
+
+    /// Four-valued evaluation. True/False/Null mirror SQL ternary logic: Null is
+    /// SQL's NULL ("unknown"), produced when a compared field is missing from the
+    /// card, and NOT/AND/OR propagate it exactly like SQL — so -power>2 excludes
+    /// powerless cards (NOT NULL = NULL) while -(power>2 and t:creature) still
+    /// matches instants (NULL AND false = false, NOT false = true). Only True
+    /// counts as a match.
+    ///
+    /// PrintingDep is the card-pass "depends on the printing" value: it behaves
+    /// like an unknown that per-printing evaluation can still resolve either way,
+    /// so it survives NOT and is only absorbed by a dominant exact value (AND
+    /// with a False, OR with a True). Null stays senior to PrintingDep in AND/OR
+    /// only via those dominance rules — when both occur the result is
+    /// conservatively PrintingDep and the per-printing pass settles it.
+    fn tri(&self, card: &AOracleCard, printing: Option<&APrinting>, strings: &AStrings) -> Tri {
+        match self {
+            FilterExpr::True => Tri::True,
+
+            FilterExpr::And(children) => {
+                let mut null = false;
+                let mut pdep = false;
+                for c in children {
+                    match c.tri(card, printing, strings) {
+                        Tri::False => return Tri::False,
+                        Tri::Null => null = true,
+                        Tri::PrintingDep => pdep = true,
+                        Tri::True => {}
+                    }
+                }
+                if pdep { Tri::PrintingDep } else if null { Tri::Null } else { Tri::True }
+            }
+            FilterExpr::Or(children) => {
+                let mut null = false;
+                let mut pdep = false;
+                for c in children {
+                    match c.tri(card, printing, strings) {
+                        Tri::True => return Tri::True,
+                        Tri::Null => null = true,
+                        Tri::PrintingDep => pdep = true,
+                        Tri::False => {}
+                    }
+                }
+                if pdep { Tri::PrintingDep } else if null { Tri::Null } else { Tri::False }
+            }
+            FilterExpr::Not(inner) => match inner.tri(card, printing, strings) {
+                Tri::True => Tri::False,
+                Tri::False => Tri::True,
+                Tri::Null => Tri::Null,
+                Tri::PrintingDep => Tri::PrintingDep,
+            },
+
+            FilterExpr::ExactName(lower) => tri_bool(card.card_name_lower.as_str() == lower.as_str()),
 
             FilterExpr::NumericCmp { lhs, op, rhs } => {
-                match (lhs.eval(card), rhs.eval(card)) {
-                    (Some(a), Some(b)) => Some(cmp(*op, a, b)),
-                    _ => None, // a compared field is missing: SQL NULL
+                match (lhs.eval(card, printing), rhs.eval(card, printing)) {
+                    (NumVal::Null, _) | (_, NumVal::Null) => Tri::Null, // missing field: SQL NULL
+                    (NumVal::PDep, _) | (_, NumVal::PDep) => Tri::PrintingDep,
+                    (NumVal::Known(a), NumVal::Known(b)) => tri_bool(cmp(*op, a, b)),
                 }
             }
 
             FilterExpr::TextContains { field, word } => {
-                text_search_field_value(card, strings, *field).map(|s| s.contains(word.as_str()))
+                match text_search_field_value(card, printing, strings, *field) {
+                    StrVal::Known(s) => tri_bool(s.contains(word.as_str())),
+                    StrVal::Null => Tri::Null,
+                    StrVal::PDep => Tri::PrintingDep,
+                }
             }
 
             FilterExpr::TextExact { field, op, value } => {
-                text_field_value(card, strings, *field).map(|s| match op {
-                    CmpOp::Eq => s == value,
-                    CmpOp::Ne => s != value,
-                    CmpOp::Lt => s < value.as_str(),
-                    CmpOp::Le => s <= value.as_str(),
-                    CmpOp::Gt => s > value.as_str(),
-                    CmpOp::Ge => s >= value.as_str(),
-                })
+                match text_field_value(card, printing, strings, *field) {
+                    StrVal::Known(s) => tri_bool(match op {
+                        CmpOp::Eq => s == value,
+                        CmpOp::Ne => s != value,
+                        CmpOp::Lt => s < value.as_str(),
+                        CmpOp::Le => s <= value.as_str(),
+                        CmpOp::Gt => s > value.as_str(),
+                        CmpOp::Ge => s >= value.as_str(),
+                    }),
+                    StrVal::Null => Tri::Null,
+                    StrVal::PDep => Tri::PrintingDep,
+                }
             }
 
             FilterExpr::TextRegex { field, regex } => {
-                text_field_value(card, strings, *field).map(|s| regex.is_match(s))
+                match text_field_value(card, printing, strings, *field) {
+                    StrVal::Known(s) => tri_bool(regex.is_match(s)),
+                    StrVal::Null => Tri::Null,
+                    StrVal::PDep => Tri::PrintingDep,
+                }
             }
 
             FilterExpr::ColorCmp { field, op, mask } => {
                 let bits = card_colors(card, *field);
-                Some(match op {
+                tri_bool(match op {
                     CmpOp::Ge => bits & mask == *mask,
                     CmpOp::Eq => bits == *mask,
                     CmpOp::Le => bits & !mask == 0,
@@ -416,7 +561,7 @@ impl FilterExpr {
 
             FilterExpr::TypeCmp { mask, op } => {
                 let bits = u16::from(card.card_types);
-                Some(match op {
+                tri_bool(match op {
                     CmpOp::Ge => bits & mask != 0,
                     CmpOp::Eq => bits == *mask,
                     CmpOp::Le => bits & !mask == 0,
@@ -435,7 +580,9 @@ impl FilterExpr {
                 //
                 // Ids only: bind_collection_ids() resolved the value up front, and
                 // vocab ids are unique per string, so id equality is string equality.
-                let coll = card_collection(card, *field);
+                let Some(coll) = collection(card, printing, *field) else {
+                    return Tri::PrintingDep; // printing-level collection during the card pass
+                };
                 let contains = || match (*value_id, *field) {
                     (None, _) => false,
                     // card_subtypes keeps the printed order, so it is not id-sorted.
@@ -447,7 +594,7 @@ impl FilterExpr {
                     None => coll.is_empty(),
                     Some(id) => coll.iter().all(|x| u16::from(*x) == id),
                 };
-                Some(match op {
+                tri_bool(match op {
                     CmpOp::Ge => contains(),
                     CmpOp::Eq => coll.len() == 1 && contains(),
                     CmpOp::Gt => contains() && coll.len() > 1,
@@ -458,13 +605,25 @@ impl FilterExpr {
             }
 
             FilterExpr::Legality { shift, expected } => {
-                Some(shift.is_some_and(|s| (u64::from(card.card_legalities) >> s) & 0b11 == *expected))
+                let Some(shift) = shift else { return Tri::False }; // format absent from all data
+                // The card-level word is exact unless this card's printings carry
+                // divergent legalities (non-tournament printings: 30A, Collectors'
+                // Edition, gold border) — then defer to each printing's own word.
+                let word = if card.legality_divergent {
+                    match printing {
+                        Some(p) => u64::from(p.card_legalities),
+                        None => return Tri::PrintingDep,
+                    }
+                } else {
+                    u64::from(card.card_legalities)
+                };
+                tri_bool((word >> shift) & 0b11 == *expected)
             }
 
             FilterExpr::ManaCostCmp { op, pips, cmc } => {
                 let card_cmc = f32::from(card.mana_cost.cmc);
                 let card_pips = &card.mana_cost.pips;
-                Some(match op {
+                tri_bool(match op {
                     CmpOp::Ge => {
                         pips.iter().all(|(sym, &n)| {
                             card_pips.get(sym.as_str()).map(|v| u8::from(*v)).unwrap_or(0) >= n
@@ -538,7 +697,7 @@ impl FilterExpr {
                     && pips.iter().all(|(sym, &n)| {
                         devotion.get(sym.as_str()).map(|v| u8::from(*v)).unwrap_or(0) == n
                     });
-                Some(match op {
+                tri_bool(match op {
                     CmpOp::Ge => ge,
                     CmpOp::Eq => eq,
                     CmpOp::Le => le,
@@ -552,10 +711,11 @@ impl FilterExpr {
                 // value is a zero-padded yyyymmdd (see build_binary); zero-padding a
                 // partial date reproduces the old lexicographic-prefix semantics exactly,
                 // since any real day/month (>= 01) compares greater than 00.
-                let Some(date) = card.released_at_int.as_ref().map(|v| u32::from(*v)) else {
-                    return None; // missing date: SQL NULL
+                let Some(p) = printing else { return Tri::PrintingDep };
+                let Some(date) = p.released_at_int.as_ref().map(|v| u32::from(*v)) else {
+                    return Tri::Null; // missing date: SQL NULL
                 };
-                Some(match op {
+                tri_bool(match op {
                     CmpOp::Eq => date == *value,
                     CmpOp::Ne => date != *value,
                     CmpOp::Lt => date < *value,
@@ -566,11 +726,12 @@ impl FilterExpr {
             }
 
             FilterExpr::YearCmp { op, year } => {
-                let Some(date) = card.released_at_int.as_ref().map(|v| u32::from(*v)) else {
-                    return None; // missing date: SQL NULL
+                let Some(p) = printing else { return Tri::PrintingDep };
+                let Some(date) = p.released_at_int.as_ref().map(|v| u32::from(*v)) else {
+                    return Tri::Null; // missing date: SQL NULL
                 };
                 let card_year = (date / 10_000) as i32;
-                Some(match op {
+                tri_bool(match op {
                     CmpOp::Eq => card_year == *year,
                     CmpOp::Ne => card_year != *year,
                     CmpOp::Gt => card_year > *year,
@@ -579,26 +740,6 @@ impl FilterExpr {
                     CmpOp::Le => card_year <= *year,
                 })
             }
-        }
-    }
-
-    /// Returns true if every leaf predicate touches only card-level attributes
-    /// (constant across all printings of the same oracle id). When true for a
-    /// `unique=card, prefer=default` query, the preferred-printing index covers
-    /// the full result set with no dedup needed.
-    pub(crate) fn is_card_level(&self) -> bool {
-        match self {
-            FilterExpr::True | FilterExpr::ExactName(_) => true,
-            FilterExpr::And(c) | FilterExpr::Or(c) => c.iter().all(|x| x.is_card_level()),
-            FilterExpr::Not(inner) => inner.is_card_level(),
-            FilterExpr::NumericCmp { lhs, rhs, .. } => lhs.is_card_level() && rhs.is_card_level(),
-            FilterExpr::TextContains { field, .. } => field.is_card_level(),
-            FilterExpr::TextExact   { field, .. } => field.is_card_level(),
-            FilterExpr::TextRegex   { field, .. } => field.is_card_level(),
-            FilterExpr::ColorCmp { .. } | FilterExpr::TypeCmp { .. } => true,
-            FilterExpr::CollectionCmp { field, .. } => field.is_card_level(),
-            FilterExpr::Legality { .. } | FilterExpr::ManaCostCmp { .. } | FilterExpr::Devotion { .. } => true,
-            FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. } => false,
         }
     }
 }

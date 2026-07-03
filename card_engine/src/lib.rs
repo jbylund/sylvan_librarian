@@ -147,9 +147,18 @@ pub(crate) fn mana_cmc(s: &str) -> f32 {
     cmc
 }
 
-// ─── Card struct ─────────────────────────────────────────────────────────────
+// ─── Card / printing structs ─────────────────────────────────────────────────
+// The store is two-level: ~31.5k OracleCards, each owning a contiguous range of
+// the ~97k Printings (CardData.offsets is the CSR boundary table). Fields that
+// are constant across all printings of an oracle id live on OracleCard, stored
+// once; per-printing fields live on Printing. Verified against the tagged DB
+// (2026-07-03): every hoisted field is printing-constant except card_legalities
+// (genuinely per-printing for non-tournament sets like 30A / Collectors'
+// Edition / gold-border — see the legality_divergent flag) and 3 oracle ids
+// with layout-dependent face-name assembly (first printing's value wins).
+// Design: docs/issues/engine-card-printing-split.md / issue #603.
 
-#[derive(Archive, Serialize, Deserialize)]
+#[derive(Archive, Serialize, Deserialize, Clone)]
 struct ManaCost {
     pips: HashMap<String, u8>,              // faithful to mana_cost_jsonb; used for mana= queries
     devotion: Option<HashMap<String, u8>>,  // Some only when hybrids are present; used for devotion queries
@@ -157,23 +166,103 @@ struct ManaCost {
 }
 
 #[derive(Archive, Serialize, Deserialize)]
-struct Card {
-    // Hot fields first — fits in the first two cache lines for fast filter short-circuiting.
+struct OracleCard {
+    // Hot fields first — fits in the first cache lines for fast filter short-circuiting.
     card_name_lower: InlineStr<61>, // 61 bytes covers every card name in the Scryfall dataset
     card_colors: u8,
     card_color_identity: u8,
     produced_mana: u8,
     card_types: u16,
+    // True for the ~556 oracle ids whose printings carry different legality
+    // words (non-tournament printings: 30A, Collectors' Edition, gold border).
+    // When set, legality filters defer to each Printing's card_legalities; when
+    // clear (~98.2% of cards), the card-level word below is exact.
+    legality_divergent: bool,
 
+    // 0 = null; see parse_uuid_or_hash().
+    oracle_id: u128,
+
+    // Interned string ids into CardData.strings (NONE_STR = absent). Identical
+    // values share one table entry; resolve with str_at()/the strings slice.
+    card_name_id: u32,
+    oracle_text_id: u32,
+    oracle_text_lower_id: u32,
+    card_layout_id: u32,
+    mana_cost_text_id: u32,
+    type_line_id: u32,
+
+    cmc: Option<u8>,                  // always an integer; max ~16 in practice
+    creature_power: Option<i8>,       // can be negative (e.g. Char-Rumbler)
+    creature_toughness: Option<i8>,
+    planeswalker_loyalty: Option<u8>, // always 1-12
+    edhrec_rank: Option<u32>,         // up to ~30k unique cards
+    cubecobra_score: Option<f32>,
+
+    // Collection elements interned as u16 ids into CardData.coll_vocab (see
+    // VocabInterner). card_subtypes preserves the printed order; the set-like
+    // collections are sorted by id and deduped at load.
+    card_subtypes: Vec<u16>,
+    card_keywords: Vec<u16>,
+    card_oracle_tags: Vec<u16>,
+    // 2 bits per format, positions from the FORMAT_SHIFTS registry. The word
+    // shared by this card's printings; exact unless legality_divergent.
+    card_legalities: u64,
+
+    mana_cost: ManaCost,
+
+    creature_power_text_id: u32,
+    creature_toughness_text_id: u32,
+}
+
+#[derive(Archive, Serialize, Deserialize)]
+struct Printing {
     // UUIDs packed as u128, 0 = null. Real UUIDs keep their exact bit value (so
     // future lookup-by-id can match Scryfall's); non-UUID strings from hand-built
     // test dicts are hashed deterministically — see parse_uuid_or_hash().
     scryfall_id: u128,
+    illustration_id: u128,
+
+    flavor_text_id: u32,
+    flavor_text_lower_id: u32,
+    card_artist_id: u32,
+    card_artist_lower_id: u32,
+    card_set_code: InlineStr<8>,
+    card_border_id: u32,
+    card_watermark_id: u32,
+    collector_number_id: u32,
+    set_name_id: u32,
+    released_at_int: Option<u32>,      // yyyymmdd, parsed once at load; date/year filters and prefer use this
+
+    card_rarity_int: Option<u8>,       // 0-5
+    collector_number_int: Option<u16>, // some sets exceed i8::MAX
+    price_usd: Option<f32>,
+    price_eur: Option<f32>,
+    price_tix: Option<f32>,
+    prefer_score: Option<f32>,
+
+    // This printing's exact legality word; only consulted when the owning
+    // card's legality_divergent flag is set.
+    card_legalities: u64,
+
+    card_art_tags: Vec<u16>,
+    card_is_tags: Vec<u16>,
+    card_frame_data: Vec<u16>,
+}
+
+/// Parse-time row: one DB row (= one printing) with every field, before the
+/// commit pass groups rows by oracle_id and splits them into OracleCard +
+/// Printing. Never archived.
+struct CardRow {
+    card_name_lower: InlineStr<61>,
+    card_colors: u8,
+    card_color_identity: u8,
+    produced_mana: u8,
+    card_types: u16,
+
+    scryfall_id: u128,
     oracle_id: u128,
     illustration_id: u128,
 
-    // Interned string ids into CardData.strings (NONE_STR = absent). Identical
-    // values share one table entry; resolve with str_at()/the strings slice.
     card_name_id: u32,
     oracle_text_id: u32,
     oracle_text_lower_id: u32,
@@ -189,30 +278,24 @@ struct Card {
     mana_cost_text_id: u32,
     type_line_id: u32,
     set_name_id: u32,
-    released_at_int: Option<u32>,      // yyyymmdd, parsed once at load; date/year filters and prefer use this
+    released_at_int: Option<u32>,
 
-    cmc: Option<u8>,                   // always an integer; max ~16 in practice
-    creature_power: Option<i8>,        // can be negative (e.g. Char-Rumbler)
+    cmc: Option<u8>,
+    creature_power: Option<i8>,
     creature_toughness: Option<i8>,
-    planeswalker_loyalty: Option<u8>,  // always 1-12
-    card_rarity_int: Option<u8>,       // 0-5
-    collector_number_int: Option<u16>, // some sets exceed i8::MAX
-    edhrec_rank: Option<u32>,          // up to ~30k unique cards
+    planeswalker_loyalty: Option<u8>,
+    card_rarity_int: Option<u8>,
+    collector_number_int: Option<u16>,
+    edhrec_rank: Option<u32>,
     price_usd: Option<f32>,
     price_eur: Option<f32>,
     price_tix: Option<f32>,
     prefer_score: Option<f32>,
     cubecobra_score: Option<f32>,
 
-    // Collection elements interned as u16 ids into CardData.coll_vocab (separate
-    // from the u32-id strings table: the combined collection vocabulary is ~16k
-    // distinct values vs 65,536 addressable, while strings holds >65k entries —
-    // see docs/issues/engine-collection-vocab-interning.md). card_subtypes
-    // preserves the printed order; the set-like collections are sorted by id and
-    // deduped at load.
     card_subtypes: Vec<u16>,
     card_keywords: Vec<u16>,
-    card_legalities: u64, // 2 bits per format, positions from the FORMAT_SHIFTS registry
+    card_legalities: u64,
     card_oracle_tags: Vec<u16>,
     card_art_tags: Vec<u16>,
     card_is_tags: Vec<u16>,
@@ -224,10 +307,13 @@ struct Card {
     creature_toughness_text_id: u32,
 }
 
-// Type alias for the archived (mmap-backed) card type
-pub(crate) type ACard = Archived<Card>;
+// Type aliases for the archived (mmap-backed) store types
+pub(crate) type AOracleCard = Archived<OracleCard>;
+pub(crate) type APrinting = Archived<Printing>;
 // Archived string table (CardData.strings)
 pub(crate) type AStrings = Archived<Vec<String>>;
+// Archived CSR boundary table (CardData.offsets)
+pub(crate) type AOffsets = Archived<Vec<u32>>;
 
 /// Sentinel id for absent optional strings (a card never has 4 billion distinct strings).
 const NONE_STR: u32 = u32::MAX;
@@ -500,7 +586,7 @@ fn mana_cost_from_pydict(d: &Bound<PyDict>, cmc_val: Option<f32>) -> ManaCost {
     ManaCost { pips, devotion, cmc: cmc_val.unwrap_or(0.0) }
 }
 
-fn card_from_pydict(d: &Bound<PyDict>, it: &mut Interner, vocab: &mut VocabInterner) -> PyResult<Card> {
+fn card_from_pydict(d: &Bound<PyDict>, it: &mut Interner, vocab: &mut VocabInterner) -> PyResult<CardRow> {
     let released_at = opt_date_str(d, "released_at").unwrap_or_default();
     let released_at_int: Option<u32> = released_at.replace('-', "").parse().ok();
     // Raw strings from the dict; interned to ids as the struct is built below.
@@ -513,7 +599,7 @@ fn card_from_pydict(d: &Bound<PyDict>, it: &mut Interner, vocab: &mut VocabInter
     let card_artist = opt_str(d, "card_artist");
     let card_artist_lower_id = it.intern_opt(card_artist.as_ref().map(|s| s.to_lowercase()));
 
-    Ok(Card {
+    Ok(CardRow {
         scryfall_id: opt_uuid(d, "scryfall_id"),
         oracle_id: opt_uuid(d, "oracle_id"),
         illustration_id: opt_uuid(d, "illustration_id"),
@@ -580,26 +666,26 @@ type TrigramIndex = HashMap<[u8; 3], Vec<u32>>;
 
 /// Oracle-text trigram index, deduplicated by distinct text.
 ///
-/// Printings massively share oracle text (~96k printings, ~28k distinct texts), so
-/// posting card indices directly would store every posting ~3.4× over. Instead the
-/// posting lists hold *dense text ids* — a private 0..n_texts numbering of the
-/// distinct `oracle_text_lower_id` values — and a CSR (compressed sparse row) table
-/// expands a text id back to the printings that carry it. Logically the CSR is an
+/// Distinct oracle cards still share text (~31.5k cards, ~28k distinct texts —
+/// identical text under different oracle ids), so the posting lists hold *dense
+/// text ids* — a private 0..n_texts numbering of the distinct
+/// `oracle_text_lower_id` values — and a CSR (compressed sparse row) table
+/// expands a text id back to the cards that carry it. Logically the CSR is an
 /// array-of-arrays `expansion[text_id] → [card indices]`, flattened into two
 /// allocations so it archives as two contiguous, zero-copy slices.
 #[derive(Archive, Serialize, Deserialize, Default)]
 struct OracleTextIndex {
     /// trigram → ascending list of dense text ids whose text contains it.
     trigrams: TrigramIndex,
-    /// Row boundaries: printings of text id `t` live at
+    /// Row boundaries: cards of text id `t` live at
     /// `card_indices[offsets[t] .. offsets[t + 1]]`. Length n_texts + 1.
     offsets: Vec<u32>,
-    /// All card indices, grouped by text id; every printing appears exactly once
+    /// All card indices, grouped by text id; every card appears exactly once
     /// (its text interned to exactly one id), so expansion can never duplicate.
     card_indices: Vec<u32>,
 }
 
-fn build_oracle_text_index(cards: &[Card], strings: &[String]) -> OracleTextIndex {
+fn build_oracle_text_index(cards: &[OracleCard], strings: &[String]) -> OracleTextIndex {
     // Dense remap: the interner's ids index the *global* string table (oracle texts
     // mixed with type lines, set names, ...), so the distinct oracle texts are sparse
     // in that space. Re-number just them, first-seen order, so the CSR table below
@@ -636,7 +722,7 @@ fn build_oracle_text_index(cards: &[Card], strings: &[String]) -> OracleTextInde
         }
     }
 
-    // CSR expansion table via counting sort: count printings per text, prefix-sum
+    // CSR expansion table via counting sort: count cards per text, prefix-sum
     // the counts into row offsets, then place each card index in its row. Placement
     // walks cards in store order, so every row comes out sorted by card index.
     let mut offsets: Vec<u32> = vec![0; n_texts + 1];
@@ -661,8 +747,8 @@ fn build_oracle_text_index(cards: &[Card], strings: &[String]) -> OracleTextInde
 /// Each row is internally sorted (placement above walks store order), but rows are
 /// not ordered relative to each other (dense ids are first-seen order), so the
 /// concatenation needs one final sort — required both by intersect_sorted() when
-/// And-combining with other candidate sets and by the linear dedup paths, which
-/// assume candidates arrive in store order.
+/// And-combining with other candidate sets and by the query driver, which
+/// assumes candidates arrive in store order.
 fn expand_text_ids(idx: &Archived<OracleTextIndex>, text_ids: &[u32]) -> Vec<u32> {
     let mut out: Vec<u32> = Vec::new();
     for &t in text_ids {
@@ -676,9 +762,9 @@ fn expand_text_ids(idx: &Archived<OracleTextIndex>, text_ids: &[u32]) -> Vec<u32
 
 // Named lifetime (not elided/HRTB) so get_text may return text borrowed from the
 // string table rather than from the card itself.
-fn build_trigram_index<'a>(cards: &'a [Card], get_text: impl Fn(&'a Card) -> &'a str) -> TrigramIndex {
+fn build_trigram_index<'a, T>(rows: &'a [T], get_text: impl Fn(&'a T) -> &'a str) -> TrigramIndex {
     let mut idx: TrigramIndex = HashMap::new();
-    for (i, card) in cards.iter().enumerate() {
+    for (i, card) in rows.iter().enumerate() {
         let text  = get_text(card);
         let bytes = text.as_bytes();
         if bytes.len() < 3 { continue; }
@@ -761,7 +847,7 @@ fn union_sorted(a: Vec<u32>, b: Vec<u32>) -> Vec<u32> {
 
 type NumericIndex = Vec<(i16, u32)>;
 
-fn build_numeric_index(cards: &[Card], get_val: impl Fn(&Card) -> Option<i16>) -> NumericIndex {
+fn build_numeric_index(cards: &[OracleCard], get_val: impl Fn(&OracleCard) -> Option<i16>) -> NumericIndex {
     let mut idx: NumericIndex = cards
         .iter()
         .enumerate()
@@ -804,18 +890,20 @@ fn numeric_candidates(idx: &Archived<NumericIndex>, op: CmpOp, val: f64) -> Opti
 }
 
 // ─── Tag index ───────────────────────────────────────────────────────────────
-// tag name -> sorted list of card indices that have that tag.
-// Lists are naturally sorted because cards are iterated in index order.
+// tag name -> sorted list of store indices that have that tag. Card-level
+// collections (subtypes/keywords/oracle_tags) post card ids; printing-level ones
+// (art_tags/is_tags) post printing ids — see the space notes on CardIndexes.
+// Lists are naturally sorted because rows are iterated in index order.
 
 type TagIndex = HashMap<String, Vec<u32>>;
 
 /// Build a tag/list index from interned collection ids. Accumulates postings by
 /// vocab id in the hot loop (integer keys, no per-element string hashing), then
 /// resolves each id to its owned String key once at the end.
-fn build_tag_index(cards: &[Card], vocab: &[String], get_ids: impl Fn(&Card) -> &Vec<u16>) -> TagIndex {
+fn build_tag_index<T>(rows: &[T], vocab: &[String], get_ids: impl Fn(&T) -> &Vec<u16>) -> TagIndex {
     let mut by_id: HashMap<u16, Vec<u32>> = HashMap::new();
-    for (i, card) in cards.iter().enumerate() {
-        for &id in get_ids(card) {
+    for (i, row) in rows.iter().enumerate() {
+        for &id in get_ids(row) {
             by_id.entry(id).or_default().push(i as u32);
         }
     }
@@ -831,7 +919,7 @@ fn build_tag_index(cards: &[Card], vocab: &[String], get_ids: impl Fn(&Card) -> 
 
 type TypeIndex = [Vec<u32>; 14];
 
-fn build_type_index(cards: &[Card]) -> TypeIndex {
+fn build_type_index(cards: &[OracleCard]) -> TypeIndex {
     let mut idx: TypeIndex = Default::default();
     for (i, card) in cards.iter().enumerate() {
         let mut bits = card.card_types;
@@ -846,19 +934,22 @@ fn build_type_index(cards: &[Card]) -> TypeIndex {
 
 // ─── Combined indexes ────────────────────────────────────────────────────────
 
+// Postings live in two id spaces: card-level indexes post OracleCard indices
+// (~31.5k), printing-level indexes post Printing indices (~97k). Candidates
+// carry their space (see Candidates) and convert at combine points.
 #[derive(Archive, Serialize, Deserialize)]
 struct CardIndexes {
-    name_trigram:   TrigramIndex,
-    oracle_trigram: OracleTextIndex,
-    cmc:            NumericIndex,
-    power:          NumericIndex,
-    toughness:      NumericIndex,
-    type_bits:      TypeIndex,
-    subtypes:       TagIndex,
-    keywords:       TagIndex,
-    oracle_tags:    TagIndex,
-    art_tags:       TagIndex,
-    is_tags:        TagIndex,
+    name_trigram:   TrigramIndex,    // card space
+    oracle_trigram: OracleTextIndex, // card space (via dense text ids)
+    cmc:            NumericIndex,    // card space
+    power:          NumericIndex,    // card space
+    toughness:      NumericIndex,    // card space
+    type_bits:      TypeIndex,       // card space
+    subtypes:       TagIndex,        // card space
+    keywords:       TagIndex,        // card space
+    oracle_tags:    TagIndex,        // card space
+    art_tags:       TagIndex,        // printing space
+    is_tags:        TagIndex,        // printing space
 }
 
 impl Default for CardIndexes {
@@ -881,10 +972,17 @@ impl Default for CardIndexes {
 
 #[derive(Archive, Serialize, Deserialize)]
 struct CardData {
-    cards:   Vec<Card>,
-    // Hash-consed table for the interned-string fields on Card (see Interner).
+    // ~31.5k oracle cards; printings of card i are
+    // printings[offsets[i]..offsets[i+1]], sorted by descending default
+    // prefer_score within the range (ties by illustration_id), so the
+    // default-prefer walk can stop at the first matching printing.
+    cards:     Vec<OracleCard>,
+    printings: Vec<Printing>,
+    // CSR boundary table, length cards.len() + 1.
+    offsets:   Vec<u32>,
+    // Hash-consed table for the interned-string fields (see Interner).
     strings: Vec<String>,
-    // Vocab table for Card's collection fields, indexed by their u16 ids
+    // Vocab table for the collection fields, indexed by their u16 ids
     // (see VocabInterner). ~16k entries / ~200 KB.
     coll_vocab: Vec<String>,
     // Permutation of 0..coll_vocab.len() sorted by string, so query values
@@ -895,44 +993,71 @@ struct CardData {
     // which never run the load path that feeds FORMAT_SHIFTS — resolve
     // legality shifts identically to the worker that built the archive.
     format_shifts: HashMap<String, u8>,
-    // One index per unique oracle_id group: the position in `cards` of that
-    // group's preferred printing (highest prefer_score). Lives in the mmap so
-    // it is shared across all workers at zero per-worker heap cost.
-    // ~31k entries × 4 bytes = ~124 KB in the archive.
-    preferred_indices: Vec<u32>,
 }
 
 // ─── Candidate narrowing ─────────────────────────────────────────────────────
 
-fn narrow_candidates(filter: &FilterExpr, indexes: &Archived<CardIndexes>) -> Option<Vec<u32>> {
+/// A narrowed candidate set, tagged with the id space its members live in.
+/// Narrowing is advisory (the driver re-verifies), so converting between spaces
+/// can only loosen or tighten candidates, never change results.
+enum Candidates {
+    Cards(Vec<u32>),
+    Printings(Vec<u32>),
+}
+
+/// Map a sorted printing-id list up to its sorted card-id list. Printings are
+/// grouped contiguously by card, so the mapped list arrives sorted with adjacent
+/// duplicates — dedup is a single linear pass.
+fn cards_of_printings(offsets: &AOffsets, printing_ids: &[u32]) -> Vec<u32> {
+    let mut out: Vec<u32> = Vec::with_capacity(printing_ids.len());
+    for &p in printing_ids {
+        let card = offsets.partition_point(|o| u32::from(*o) <= p) as u32 - 1;
+        if out.last() != Some(&card) {
+            out.push(card);
+        }
+    }
+    out
+}
+
+impl Candidates {
+    /// Project into card space (identity for card-space sets).
+    fn into_cards(self, offsets: &AOffsets) -> Vec<u32> {
+        match self {
+            Candidates::Cards(v) => v,
+            Candidates::Printings(v) => cards_of_printings(offsets, &v),
+        }
+    }
+}
+
+fn narrow_candidates(filter: &FilterExpr, indexes: &Archived<CardIndexes>, offsets: &AOffsets) -> Option<Candidates> {
     match filter {
         FilterExpr::TextContains { field, word }
             if word.len() >= 3
                 && matches!(field, TextSearchField::NameLower | TextSearchField::OracleTextLower) =>
         {
             match field {
-                TextSearchField::NameLower => trigram_candidates(&indexes.name_trigram, word),
+                TextSearchField::NameLower => trigram_candidates(&indexes.name_trigram, word).map(Candidates::Cards),
                 // Oracle postings are in dense text-id space (see OracleTextIndex);
-                // intersect there (~3× shorter lists), then expand the survivors to
-                // card indices through the CSR table.
+                // intersect there, then expand the survivors to card indices
+                // through the CSR table.
                 _ => trigram_candidates(&indexes.oracle_trigram.trigrams, word)
-                    .map(|text_ids| expand_text_ids(&indexes.oracle_trigram, &text_ids)),
+                    .map(|text_ids| Candidates::Cards(expand_text_ids(&indexes.oracle_trigram, &text_ids))),
             }
         }
 
         FilterExpr::NumericCmp { lhs, op, rhs } => match (lhs, rhs) {
             (NumExpr::Field(NumField::Cmc), NumExpr::Const(v)) =>
-                numeric_candidates(&indexes.cmc, *op, *v),
+                numeric_candidates(&indexes.cmc, *op, *v).map(Candidates::Cards),
             (NumExpr::Const(v), NumExpr::Field(NumField::Cmc)) =>
-                numeric_candidates(&indexes.cmc, flip_op(*op), *v),
+                numeric_candidates(&indexes.cmc, flip_op(*op), *v).map(Candidates::Cards),
             (NumExpr::Field(NumField::Power), NumExpr::Const(v)) =>
-                numeric_candidates(&indexes.power, *op, *v),
+                numeric_candidates(&indexes.power, *op, *v).map(Candidates::Cards),
             (NumExpr::Const(v), NumExpr::Field(NumField::Power)) =>
-                numeric_candidates(&indexes.power, flip_op(*op), *v),
+                numeric_candidates(&indexes.power, flip_op(*op), *v).map(Candidates::Cards),
             (NumExpr::Field(NumField::Toughness), NumExpr::Const(v)) =>
-                numeric_candidates(&indexes.toughness, *op, *v),
+                numeric_candidates(&indexes.toughness, *op, *v).map(Candidates::Cards),
             (NumExpr::Const(v), NumExpr::Field(NumField::Toughness)) =>
-                numeric_candidates(&indexes.toughness, flip_op(*op), *v),
+                numeric_candidates(&indexes.toughness, flip_op(*op), *v).map(Candidates::Cards),
             _ => None,
         },
 
@@ -947,70 +1072,89 @@ fn narrow_candidates(filter: &FilterExpr, indexes: &Archived<CardIndexes>) -> Op
                     result = union_sorted(result, bit_list);
                 }
             }
-            Some(result)
+            Some(Candidates::Cards(result))
         }
 
-        FilterExpr::CollectionCmp { field, op, value, .. }
-            if matches!(field, CollField::Subtypes) && matches!(op, CmpOp::Ge) =>
-        {
-            indexes.subtypes.get(value.as_str()).map(|v| v.iter().map(|x| u32::from(*x)).collect())
-        }
-
-        FilterExpr::CollectionCmp { field, op, value, .. }
-            if matches!(field, CollField::Keywords) && matches!(op, CmpOp::Ge) =>
-        {
-            indexes.keywords.get(value.as_str()).map(|v| v.iter().map(|x| u32::from(*x)).collect())
-        }
-
-        FilterExpr::CollectionCmp { field, op, value, .. }
-            if matches!(field, CollField::OracleTags) && matches!(op, CmpOp::Ge) =>
-        {
-            indexes.oracle_tags.get(value.as_str()).map(|v| v.iter().map(|x| u32::from(*x)).collect())
-        }
-
-        FilterExpr::CollectionCmp { field, op, value, .. }
-            if matches!(field, CollField::ArtTags) && matches!(op, CmpOp::Ge) =>
-        {
-            indexes.art_tags.get(value.as_str()).map(|v| v.iter().map(|x| u32::from(*x)).collect())
-        }
-
-        FilterExpr::CollectionCmp { field, op, value, .. }
-            if matches!(field, CollField::IsTags) && matches!(op, CmpOp::Ge) =>
-        {
-            indexes.is_tags.get(value.as_str()).map(|v| v.iter().map(|x| u32::from(*x)).collect())
+        FilterExpr::CollectionCmp { field, op, value, .. } if matches!(op, CmpOp::Ge) => {
+            let (idx, space): (_, fn(Vec<u32>) -> Candidates) = match field {
+                CollField::Subtypes   => (&indexes.subtypes,    Candidates::Cards as fn(_) -> _),
+                CollField::Keywords   => (&indexes.keywords,    Candidates::Cards),
+                CollField::OracleTags => (&indexes.oracle_tags, Candidates::Cards),
+                CollField::ArtTags    => (&indexes.art_tags,    Candidates::Printings),
+                CollField::IsTags     => (&indexes.is_tags,     Candidates::Printings),
+                CollField::FrameData  => return None, // no index (low-selectivity values dominate)
+            };
+            idx.get(value.as_str()).map(|v| space(v.iter().map(|x| u32::from(*x)).collect()))
         }
 
         FilterExpr::And(children) => {
-            let mut sets: Vec<Vec<u32>> = children
-                .iter()
-                .filter_map(|c| narrow_candidates(c, indexes))
-                .collect();
-            if sets.is_empty() { return None; }
-            sets.sort_unstable_by_key(|s| s.len());
-            let mut result = sets.swap_remove(0);
-            for set in sets {
-                if result.is_empty() { break; }
-                result = intersect_sorted(&result, &set);
+            // Combine within each id space first (card lists are ~3× shorter),
+            // then cross the boundary once by projecting the printing product up.
+            // Projection loses which printings matched — the driver's per-printing
+            // verification restores exactness.
+            let mut card_sets: Vec<Vec<u32>> = Vec::new();
+            let mut printing_sets: Vec<Vec<u32>> = Vec::new();
+            for c in children {
+                match narrow_candidates(c, indexes, offsets) {
+                    Some(Candidates::Cards(v)) => card_sets.push(v),
+                    Some(Candidates::Printings(v)) => printing_sets.push(v),
+                    None => {}
+                }
             }
-            Some(result)
+            let intersect_all = |mut sets: Vec<Vec<u32>>| -> Option<Vec<u32>> {
+                if sets.is_empty() { return None; }
+                sets.sort_unstable_by_key(|s| s.len());
+                let mut result = sets.swap_remove(0);
+                for set in sets {
+                    if result.is_empty() { break; }
+                    result = intersect_sorted(&result, &set);
+                }
+                Some(result)
+            };
+            let cards = intersect_all(card_sets);
+            let printings = intersect_all(printing_sets);
+            match (cards, printings) {
+                (None, None) => None,
+                (Some(c), None) => Some(Candidates::Cards(c)),
+                (None, Some(p)) => Some(Candidates::Printings(p)),
+                (Some(c), Some(p)) => {
+                    let p_cards = cards_of_printings(offsets, &p);
+                    Some(Candidates::Cards(intersect_sorted(&c, &p_cards)))
+                }
+            }
         }
 
         FilterExpr::Or(children) => {
-            let mut union: Vec<u32> = Vec::new();
+            // Every child must narrow or the union is unbounded. Mixed spaces
+            // union in card space (projection up is loosening-only, and the
+            // driver re-verifies).
+            let mut sets: Vec<Candidates> = Vec::with_capacity(children.len());
             for child in children {
-                match narrow_candidates(child, indexes) {
-                    None             => return None,
-                    Some(candidates) => union = union_sorted(union, candidates),
+                match narrow_candidates(child, indexes, offsets) {
+                    None => return None,
+                    Some(c) => sets.push(c),
                 }
             }
-            Some(union)
+            if sets.iter().all(|s| matches!(s, Candidates::Printings(_))) {
+                let mut union: Vec<u32> = Vec::new();
+                for s in sets {
+                    if let Candidates::Printings(v) = s { union = union_sorted(union, v); }
+                }
+                Some(Candidates::Printings(union))
+            } else {
+                let mut union: Vec<u32> = Vec::new();
+                for s in sets {
+                    union = union_sorted(union, s.into_cards(offsets));
+                }
+                Some(Candidates::Cards(union))
+            }
         }
 
         _ => None,
     }
 }
 
-// ─── Sort / dedup / limit ─────────────────────────────────────────────────────
+// ─── Sort / select / limit ────────────────────────────────────────────────────
 
 #[derive(Clone, Copy)]
 enum Prefer { Oldest, Newest, UsdLow, UsdHigh, Promo, Default }
@@ -1026,14 +1170,19 @@ fn prefer_from_str(s: &str) -> Prefer {
     }
 }
 
-fn prefer_score(card: &ACard, prefer: Prefer) -> f64 {
+/// Prefer score for one printing of a card; higher wins, and selection uses a
+/// strict > so the first-in-store-order printing wins ties (matching the tie
+/// behavior of the dedup paths this replaced).
+fn prefer_score(card: &AOracleCard, p: &APrinting, prefer: Prefer) -> f64 {
     match prefer {
-        Prefer::Oldest  => -(card.released_at_int.as_ref().map(|v| u32::from(*v)).unwrap_or(99_999_999) as f64),
-        Prefer::Newest  => card.released_at_int.as_ref().map(|v| u32::from(*v)).unwrap_or(0) as f64,
-        Prefer::UsdLow  => -(card.price_usd.as_ref().map(|v| f32::from(*v)).unwrap_or(f32::INFINITY) as f64),
-        Prefer::UsdHigh => card.price_usd.as_ref().map(|v| f32::from(*v)).unwrap_or(0.0) as f64,
+        Prefer::Oldest  => -(p.released_at_int.as_ref().map(|v| u32::from(*v)).unwrap_or(99_999_999) as f64),
+        Prefer::Newest  => p.released_at_int.as_ref().map(|v| u32::from(*v)).unwrap_or(0) as f64,
+        Prefer::UsdLow  => -(p.price_usd.as_ref().map(|v| f32::from(*v)).unwrap_or(f32::INFINITY) as f64),
+        Prefer::UsdHigh => p.price_usd.as_ref().map(|v| f32::from(*v)).unwrap_or(0.0) as f64,
+        // Card-level (edhrec is oracle-scoped): every printing ties, so the
+        // first printing in store order is chosen — same as before the split.
         Prefer::Promo   => -(card.edhrec_rank.as_ref().map(|r| u32::from(*r) as f64).unwrap_or(f64::INFINITY)),
-        Prefer::Default => card.prefer_score.as_ref().map(|v| f32::from(*v)).unwrap_or(0.0) as f64,
+        Prefer::Default => p.prefer_score.as_ref().map(|v| f32::from(*v)).unwrap_or(0.0) as f64,
     }
 }
 
@@ -1061,36 +1210,41 @@ fn f32_sort_bits(v: f32) -> u32 {
 /// Order-preserving integer sort key, computed once per match instead of inside the
 /// comparator: primary column (direction folded in by negation, missing sorts last),
 /// then edhrec rank ascending (missing last), then prefer score descending (missing
-/// last). Selection then compares plain u128s; full ties fall back to store pointer
-/// order in `select_page` — the same tie order the original stable sort produced.
-fn sort_key_bits(card: &ACard, sort_col: SortCol, descending: bool) -> u128 {
+/// last). Card-level columns read the OracleCard; printing-level columns (rarity,
+/// usd) read the chosen printing, matching the pre-split semantics where the
+/// group's representative printing supplied them. Full ties fall back to printing
+/// store order in `select_page`.
+fn sort_key_bits(card: &AOracleCard, p: &APrinting, sort_col: SortCol, descending: bool) -> u128 {
     let primary: Option<f32> = match sort_col {
         SortCol::Cmc        => card.cmc.as_ref().map(|v| u8::from(*v) as f32),
         SortCol::Power      => card.creature_power.as_ref().map(|v| i8::from(*v) as f32),
         SortCol::Toughness  => card.creature_toughness.as_ref().map(|v| i8::from(*v) as f32),
-        SortCol::Rarity     => card.card_rarity_int.as_ref().map(|v| u8::from(*v) as f32),
-        SortCol::PriceUsd   => card.price_usd.as_ref().map(|v| f32::from(*v)),
+        SortCol::Rarity     => p.card_rarity_int.as_ref().map(|v| u8::from(*v) as f32),
+        SortCol::PriceUsd   => p.price_usd.as_ref().map(|v| f32::from(*v)),
         SortCol::Cubecobra  => card.cubecobra_score.as_ref().map(|v| f32::from(*v)),
         SortCol::EdhrecRank => card.edhrec_rank.as_ref().map(|v| u32::from(*v) as f32),
     };
-    let p = primary.map_or(u32::MAX, |v| f32_sort_bits(if descending { -v } else { v }));
+    let pk = primary.map_or(u32::MAX, |v| f32_sort_bits(if descending { -v } else { v }));
     let e = card.edhrec_rank.as_ref().map(|v| u32::from(*v)).unwrap_or(u32::MAX);
-    let s = card.prefer_score.as_ref().map_or(u32::MAX, |v| f32_sort_bits(-f32::from(*v)));
-    ((p as u128) << 64) | ((e as u128) << 32) | (s as u128)
+    let sc = p.prefer_score.as_ref().map_or(u32::MAX, |v| f32_sort_bits(-f32::from(*v)));
+    ((pk as u128) << 64) | ((e as u128) << 32) | (sc as u128)
 }
+
+/// One query match: (sort key, card index, printing index). Ties on the sort key
+/// break by printing index — printing store order, the same tie order the
+/// pre-split pointer comparison produced.
+type Match = (u128, u32, u32);
 
 /// Quickselect the page `[offset, offset+limit)` into position and sort only that
 /// segment. The first select bounds the page from above (everything past it stays
 /// unsorted); the second bounds it from below and is skipped in the common
 /// offset == 0 case. O(n + limit·log limit) instead of O(n·log n).
-fn select_page<'a>(mut v: Vec<(u128, &'a ACard)>, offset: usize, limit: usize) -> Vec<&'a ACard> {
+fn select_page(mut v: Vec<Match>, offset: usize, limit: usize) -> Vec<(u32, u32)> {
     let end = offset.saturating_add(limit).min(v.len());
     if offset >= end {
         return Vec::new();
     }
-    let cmp = |a: &(u128, &ACard), b: &(u128, &ACard)| {
-        a.0.cmp(&b.0).then_with(|| std::ptr::from_ref(a.1).cmp(&std::ptr::from_ref(b.1)))
-    };
+    let cmp = |a: &Match, b: &Match| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2));
     if end < v.len() {
         v.select_nth_unstable_by(end, cmp);
     }
@@ -1100,11 +1254,20 @@ fn select_page<'a>(mut v: Vec<(u128, &'a ACard)>, offset: usize, limit: usize) -
     v[offset..end].sort_unstable_by(cmp);
     v.truncate(end);
     v.drain(..offset);
-    v.into_iter().map(|(_, c)| c).collect()
+    v.into_iter().map(|(_, c, p)| (c, p)).collect()
 }
 
-fn run_query_hashmap<'a>(
-    store: &'a [ACard],
+// ─── Query driver ─────────────────────────────────────────────────────────────
+// One structural walk replaces the pre-split linear/hashmap dedup paths and the
+// preferred-printing fast path: grouping is the store's shape, not something to
+// reconstruct per query. Per candidate card the filter is evaluated once at card
+// level; only when it depends on printing-level fields (Tri::PrintingDep) are the
+// card's printings evaluated individually.
+
+fn run_query<'a>(
+    cards: &'a [AOracleCard],
+    printings: &'a [APrinting],
+    offsets: &AOffsets,
     strings: &AStrings,
     filter: &FilterExpr,
     unique: &str,
@@ -1112,164 +1275,116 @@ fn run_query_hashmap<'a>(
     orderby: &str,
     direction: &str,
     limit: usize,
-    offset: usize,
-) -> (usize, Vec<&'a ACard>) {
+    page_offset: usize,
+    indexes: &Archived<CardIndexes>,
+) -> (usize, Vec<(&'a AOracleCard, &'a APrinting)>) {
     let sort_col   = orderby_to_col(orderby);
     let descending = direction == "desc";
     let prefer     = prefer_from_str(prefer);
 
-    enum GroupBy { Oracle, Artwork, Printing }
-    let group_by = match unique {
-        "artwork"  => GroupBy::Artwork,
-        "printing" => GroupBy::Printing,
-        _          => GroupBy::Oracle,
+    enum Mode { Card, Artwork, Printing }
+    let mode = match unique {
+        "artwork"  => Mode::Artwork,
+        "printing" => Mode::Printing,
+        _          => Mode::Card,
     };
 
-    let mut partitions: HashMap<u128, (&ACard, f64)> = HashMap::new();
-    for card in store {
-        if filter.matches(card, strings) {
-            let key = match group_by {
-                GroupBy::Oracle   => u128::from(card.oracle_id),
-                GroupBy::Artwork  => u128::from(card.illustration_id),
-                // every printing is its own partition — the pointer is a free unique key
-                GroupBy::Printing => std::ptr::from_ref(card) as usize as u128,
-            };
-            let score = prefer_score(card, prefer);
-            let entry = partitions.entry(key).or_insert((card, f64::NEG_INFINITY));
-            if score > entry.1 { *entry = (card, score); }
+    // Candidates in either space project to card ids for the walk; the walk's
+    // per-printing verification restores exactness for printing-space losses.
+    let candidate_cards: Option<Vec<u32>> =
+        narrow_candidates(filter, indexes, offsets).map(|c| c.into_cards(offsets));
+    let card_ids: Box<dyn Iterator<Item = u32>> = match &candidate_cards {
+        Some(v) => Box::new(v.iter().copied()),
+        None    => Box::new(0..cards.len() as u32),
+    };
+
+    let mut best: Vec<Match> = Vec::new();
+    let mut groups: Vec<(u128, u32, f64)> = Vec::new(); // artwork-mode scratch, reused per card
+    // card_pass residual: the top-level children still printing-dependent for
+    // the current card (reused buffer; see FilterExpr::card_pass).
+    let mut residual: Vec<&FilterExpr> = Vec::new();
+    let mut residual_is_or = false;
+    for cid in card_ids {
+        let card = &cards[cid as usize];
+        let all_match = match filter.card_pass(card, strings, &mut residual, &mut residual_is_or) {
+            Tri::False | Tri::Null => continue,
+            Tri::True => true,          // every printing matches: skip per-printing checks
+            Tri::PrintingDep => false,  // verify each printing against the residual below
+        };
+        let start = u32::from(offsets[cid as usize]) as usize;
+        let end   = u32::from(offsets[cid as usize + 1]) as usize;
+
+        match mode {
+            Mode::Card => {
+                // Printings are stored in descending default-prefer order, so
+                // for the default prefer the first matching printing IS the
+                // chosen one — O(1) when the card pass already said True.
+                let chosen: Option<u32> = if matches!(prefer, Prefer::Default) {
+                    let mut found: Option<u32> = None;
+                    for pid in start..end {
+                        if all_match || FilterExpr::residual_matches(card, &printings[pid], strings, &residual, residual_is_or) {
+                            found = Some(pid as u32);
+                            break;
+                        }
+                    }
+                    found
+                } else {
+                    let mut chosen: Option<(u32, f64)> = None;
+                    for pid in start..end {
+                        let p = &printings[pid];
+                        if !all_match && !FilterExpr::residual_matches(card, p, strings, &residual, residual_is_or) { continue; }
+                        let score = prefer_score(card, p, prefer);
+                        if chosen.is_none_or(|(_, s)| score > s) {
+                            chosen = Some((pid as u32, score));
+                        }
+                    }
+                    chosen.map(|(pid, _)| pid)
+                };
+                if let Some(pid) = chosen {
+                    best.push((sort_key_bits(card, &printings[pid as usize], sort_col, descending), cid, pid));
+                }
+            }
+            Mode::Printing => {
+                for pid in start..end {
+                    let p = &printings[pid];
+                    if !all_match && !FilterExpr::residual_matches(card, p, strings, &residual, residual_is_or) { continue; }
+                    best.push((sort_key_bits(card, p, sort_col, descending), cid, pid as u32));
+                }
+            }
+            Mode::Artwork => {
+                // Within-range order is prefer-score-desc (not illustration),
+                // so group by illustration with a small per-card scan — ranges
+                // are tiny (median 2 printings). `groups` is reused across
+                // cards to avoid per-card allocation.
+                groups.clear();
+                for pid in start..end {
+                    let p = &printings[pid];
+                    if !all_match && !FilterExpr::residual_matches(card, p, strings, &residual, residual_is_or) { continue; }
+                    let ill = u128::from(p.illustration_id);
+                    let score = prefer_score(card, p, prefer);
+                    match groups.iter_mut().find(|g: &&mut (u128, u32, f64)| g.0 == ill) {
+                        Some(g) => {
+                            if score > g.2 {
+                                g.1 = pid as u32;
+                                g.2 = score;
+                            }
+                        }
+                        None => groups.push((ill, pid as u32, score)),
+                    }
+                }
+                for &(_, bp, _) in groups.iter() {
+                    best.push((sort_key_bits(card, &printings[bp as usize], sort_col, descending), cid, bp));
+                }
+            }
         }
     }
 
-    let best: Vec<(u128, &ACard)> = partitions
-        .into_values()
-        .map(|(c, _)| (sort_key_bits(c, sort_col, descending), c))
-        .collect();
     let total = best.len();
-    (total, select_page(best, offset, limit))
-}
-
-fn run_query_linear<'a, I, F>(
-    cards: I,
-    strings: &AStrings,
-    filter: &FilterExpr,
-    key_fn: F,
-    prefer: &str,
-    orderby: &str,
-    direction: &str,
-    limit: usize,
-    offset: usize,
-) -> (usize, Vec<&'a ACard>)
-where
-    I: Iterator<Item = &'a ACard>,
-    F: Fn(&ACard) -> u128,
-{
-    let sort_col   = orderby_to_col(orderby);
-    let descending = direction == "desc";
-    let prefer     = prefer_from_str(prefer);
-
-    let mut best: Vec<(u128, &ACard)> = Vec::new();
-    let mut group_best: Option<(&ACard, f64)> = None;
-    let mut prev_key: Option<u128> = None; // None = before the first match
-
-    for card in cards {
-        if !filter.matches(card, strings) { continue; }
-        let key = key_fn(card);
-        if prev_key != Some(key) {
-            if let Some((c, _)) = group_best.take() { best.push((sort_key_bits(c, sort_col, descending), c)); }
-            prev_key   = Some(key);
-            group_best = Some((card, prefer_score(card, prefer)));
-        } else {
-            let score = prefer_score(card, prefer);
-            if score > group_best.as_ref().map_or(f64::NEG_INFINITY, |g| g.1) {
-                group_best = Some((card, score));
-            }
-        }
-    }
-    if let Some((c, _)) = group_best { best.push((sort_key_bits(c, sort_col, descending), c)); }
-
-    let total = best.len();
-    (total, select_page(best, offset, limit))
-}
-
-fn run_query_no_dedup<'a>(
-    cards: impl Iterator<Item = &'a ACard>,
-    strings: &AStrings,
-    filter: &FilterExpr,
-    orderby: &str,
-    direction: &str,
-    limit: usize,
-    offset: usize,
-) -> (usize, Vec<&'a ACard>) {
-    let sort_col   = orderby_to_col(orderby);
-    let descending = direction == "desc";
-    let matched: Vec<(u128, &ACard)> = cards
-        .filter(|c| filter.matches(c, strings))
-        .map(|c| (sort_key_bits(c, sort_col, descending), c))
+    let page = select_page(best, page_offset, limit)
+        .into_iter()
+        .map(|(cid, pid)| (&cards[cid as usize], &printings[pid as usize]))
         .collect();
-    let total = matched.len();
-    (total, select_page(matched, offset, limit))
-}
-
-fn run_query<'a, B>(
-    store: &'a [ACard],
-    preferred_indices: &[B],
-    strings: &AStrings,
-    filter: &FilterExpr,
-    unique: &str,
-    prefer: &str,
-    orderby: &str,
-    direction: &str,
-    limit: usize,
-    offset: usize,
-    indexes: &Archived<CardIndexes>,
-) -> (usize, Vec<&'a ACard>)
-where
-    B: Copy,
-    u32: From<B>,
-{
-    let candidates = narrow_candidates(filter, indexes);
-
-    // For card-level queries with default prefer, substitute the preferred-printing
-    // index as the candidate set: one entry per oracle id, no dedup needed.
-    // When narrow_candidates already narrowed, intersect so both optimizations compose
-    // (e.g. trigram → 500 printings, intersect preferred → ~165, no dedup).
-    if unique == "card"
-        && !matches!(prefer, "oldest" | "newest" | "usd_low" | "usd_high" | "promo")
-        && filter.is_card_level()
-    {
-        return match candidates {
-            Some(existing) => {
-                let fast = intersect_sorted(&existing, preferred_indices);
-                run_query_no_dedup(fast.into_iter().map(|i| &store[i as usize]), strings, filter, orderby, direction, limit, offset)
-            }
-            None => run_query_no_dedup(
-                preferred_indices.iter().map(|&i| &store[u32::from(i) as usize]),
-                strings, filter, orderby, direction, limit, offset,
-            ),
-        };
-    }
-
-    macro_rules! cards_iter {
-        () => {
-            match &candidates {
-                Some(idxs) => Box::new(idxs.iter().map(|&i| &store[i as usize])) as Box<dyn Iterator<Item = &ACard>>,
-                None       => Box::new(store.iter()),
-            }
-        };
-    }
-
-    match unique {
-        // The store is sorted by (oracle_id, illustration_id), so equal keys are adjacent
-        // and the linear key-change dedup is exact — u128 equality, same cost as the
-        // dense u32 group ids this replaced.
-        "card" => run_query_linear(cards_iter!(), strings, filter, |c| u128::from(c.oracle_id), prefer, orderby, direction, limit, offset),
-        // Scryfall assigns each illustration_id to exactly one oracle_id, so cards sharing an
-        // illustration_id are always contiguous in the (oracle_id, illustration_id) sort order.
-        // The linear dedup path is therefore correct here — no HashMap needed.
-        "artwork"  => run_query_linear(cards_iter!(), strings, filter, |c| u128::from(c.illustration_id), prefer, orderby, direction, limit, offset),
-        "printing" => run_query_no_dedup(cards_iter!(), strings, filter, orderby, direction, limit, offset),
-        _          => run_query_hashmap(store, strings, filter, unique, prefer, orderby, direction, limit, offset),
-    }
+    (total, page)
 }
 
 // ─── Result field selection ───────────────────────────────────────────────────
@@ -1278,34 +1393,35 @@ where
 // `fields` list is validated and deduped against this same table by resolve_fields(). There is
 // no separate hardcoded path for "the old fields" vs. "the new fields" — everything is an entry
 // in FIELD_TABLE.
-type FieldExtractor = for<'a> fn(Python<'a>, &'a ACard, &'a AStrings, &'a AStrings) -> PyResult<Bound<'a, PyAny>>;
+type FieldExtractor =
+    for<'a> fn(Python<'a>, &'a AOracleCard, &'a APrinting, &'a AStrings, &'a AStrings) -> PyResult<Bound<'a, PyAny>>;
 
 const FIELD_TABLE: &[(&str, FieldExtractor)] = &[
-    ("name", |py, c, s, _v| Ok(str_at(s, u32::from(c.card_name_id)).into_pyobject(py)?.into_any())),
-    ("set_code", |py, c, _s, _v| Ok(c.card_set_code.as_str().into_pyobject(py)?.into_any())),
-    ("collector_number", |py, c, s, _v| Ok(str_at(s, u32::from(c.collector_number_id)).into_pyobject(py)?.into_any())),
-    ("power", |py, c, s, _v| Ok(str_at(s, u32::from(c.creature_power_text_id)).into_pyobject(py)?.into_any())),
-    ("toughness", |py, c, s, _v| Ok(str_at(s, u32::from(c.creature_toughness_text_id)).into_pyobject(py)?.into_any())),
-    ("mana_cost", |py, c, s, _v| Ok(str_at(s, u32::from(c.mana_cost_text_id)).into_pyobject(py)?.into_any())),
-    ("oracle_text", |py, c, s, _v| Ok(str_at(s, u32::from(c.oracle_text_id)).into_pyobject(py)?.into_any())),
-    ("set_name", |py, c, s, _v| Ok(str_at(s, u32::from(c.set_name_id)).into_pyobject(py)?.into_any())),
-    ("type_line", |py, c, s, _v| Ok(str_at(s, u32::from(c.type_line_id)).into_pyobject(py)?.into_any())),
-    ("illustration_id", |py, c, _s, _v| Ok(uuid_from_u128(u128::from(c.illustration_id)).into_pyobject(py)?.into_any())),
-    ("scryfall_id", |py, c, _s, _v| Ok(uuid_from_u128(u128::from(c.scryfall_id)).into_pyobject(py)?.into_any())),
-    ("price_usd", |py, c, _s, _v| Ok(c.price_usd.as_ref().map(|v| f32::from(*v)).into_pyobject(py)?.into_any())),
-    ("prefer_score", |py, c, _s, _v| Ok(c.prefer_score.as_ref().map(|v| f32::from(*v)).into_pyobject(py)?.into_any())),
+    ("name", |py, c, _p, s, _v| Ok(str_at(s, u32::from(c.card_name_id)).into_pyobject(py)?.into_any())),
+    ("set_code", |py, _c, p, _s, _v| Ok(p.card_set_code.as_str().into_pyobject(py)?.into_any())),
+    ("collector_number", |py, _c, p, s, _v| Ok(str_at(s, u32::from(p.collector_number_id)).into_pyobject(py)?.into_any())),
+    ("power", |py, c, _p, s, _v| Ok(str_at(s, u32::from(c.creature_power_text_id)).into_pyobject(py)?.into_any())),
+    ("toughness", |py, c, _p, s, _v| Ok(str_at(s, u32::from(c.creature_toughness_text_id)).into_pyobject(py)?.into_any())),
+    ("mana_cost", |py, c, _p, s, _v| Ok(str_at(s, u32::from(c.mana_cost_text_id)).into_pyobject(py)?.into_any())),
+    ("oracle_text", |py, c, _p, s, _v| Ok(str_at(s, u32::from(c.oracle_text_id)).into_pyobject(py)?.into_any())),
+    ("set_name", |py, _c, p, s, _v| Ok(str_at(s, u32::from(p.set_name_id)).into_pyobject(py)?.into_any())),
+    ("type_line", |py, c, _p, s, _v| Ok(str_at(s, u32::from(c.type_line_id)).into_pyobject(py)?.into_any())),
+    ("illustration_id", |py, _c, p, _s, _v| Ok(uuid_from_u128(u128::from(p.illustration_id)).into_pyobject(py)?.into_any())),
+    ("scryfall_id", |py, _c, p, _s, _v| Ok(uuid_from_u128(u128::from(p.scryfall_id)).into_pyobject(py)?.into_any())),
+    ("price_usd", |py, _c, p, _s, _v| Ok(p.price_usd.as_ref().map(|v| f32::from(*v)).into_pyobject(py)?.into_any())),
+    ("prefer_score", |py, _c, p, _s, _v| Ok(p.prefer_score.as_ref().map(|v| f32::from(*v)).into_pyobject(py)?.into_any())),
     // card_subtypes preserves the printed order; the set-like collections are stored
     // sorted by vocab id (first-seen order), so they get re-sorted lexicographically
     // for deterministic output.
-    ("card_subtypes", |py, c, _s, v| {
+    ("card_subtypes", |py, c, _p, _s, v| {
         let items: Vec<&str> = c.card_subtypes.iter().map(|id| coll_str(v, u16::from(*id))).collect();
         Ok(items.into_pyobject(py)?.into_any())
     }),
-    ("card_keywords", |py, c, _s, v| Ok(sorted_strs(v, &c.card_keywords).into_pyobject(py)?.into_any())),
-    ("card_oracle_tags", |py, c, _s, v| Ok(sorted_strs(v, &c.card_oracle_tags).into_pyobject(py)?.into_any())),
-    ("card_art_tags", |py, c, _s, v| Ok(sorted_strs(v, &c.card_art_tags).into_pyobject(py)?.into_any())),
-    ("card_is_tags", |py, c, _s, v| Ok(sorted_strs(v, &c.card_is_tags).into_pyobject(py)?.into_any())),
-    ("card_frame_data", |py, c, _s, v| Ok(sorted_strs(v, &c.card_frame_data).into_pyobject(py)?.into_any())),
+    ("card_keywords", |py, c, _p, _s, v| Ok(sorted_strs(v, &c.card_keywords).into_pyobject(py)?.into_any())),
+    ("card_oracle_tags", |py, c, _p, _s, v| Ok(sorted_strs(v, &c.card_oracle_tags).into_pyobject(py)?.into_any())),
+    ("card_art_tags", |py, _c, p, _s, v| Ok(sorted_strs(v, &p.card_art_tags).into_pyobject(py)?.into_any())),
+    ("card_is_tags", |py, _c, p, _s, v| Ok(sorted_strs(v, &p.card_is_tags).into_pyobject(py)?.into_any())),
+    ("card_frame_data", |py, _c, p, _s, v| Ok(sorted_strs(v, &p.card_frame_data).into_pyobject(py)?.into_any())),
 ];
 
 /// Resolve one interned collection-element id against the archived vocab table.
@@ -1350,21 +1466,22 @@ fn resolve_fields(fields: Option<Vec<String>>) -> PyResult<Vec<(&'static str, Fi
 
 fn card_to_pydict<'py>(
     py: Python<'py>,
-    card: &ACard,
+    card: &AOracleCard,
+    printing: &APrinting,
     strings: &AStrings,
     vocab: &AStrings,
     fields: &[(&'static str, FieldExtractor)],
 ) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     for (name, extractor) in fields {
-        d.set_item(*name, extractor(py, card, strings, vocab)?)?;
+        d.set_item(*name, extractor(py, card, printing, strings, vocab)?)?;
     }
     Ok(d)
 }
 
 // ─── Archive file header ─────────────────────────────────────────────────────
 // A 16-byte header is prepended to the rkyv archive: magic, format version, and
-// size_of::<Archived<Card>>. get_mmap() rejects any file whose header doesn't
+// size_of::<AOracleCard> / size_of::<APrinting>. get_mmap() rejects any file whose header doesn't
 // match this build, so an archive written by an older build (different archived
 // layout) is treated as absent and rebuilt instead of being handed to
 // access_unchecked — which would be undefined behavior. The 16-byte length also
@@ -1372,16 +1489,17 @@ fn card_to_pydict<'py>(
 // rkyv's alignment requirement for the archived root.
 
 const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
-/// Bump on any archived-data-model change that size_of::<ACard>() wouldn't
-/// catch (e.g. reordering same-size Card fields, changing an index type).
-const ARCHIVE_FORMAT_VERSION: u32 = 20260704;
+/// Bump on any archived-data-model change the struct sizes below wouldn't
+/// catch (e.g. reordering same-size fields, changing an index type).
+const ARCHIVE_FORMAT_VERSION: u32 = 20260705;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
     let mut h = [0u8; ARCHIVE_HEADER_LEN];
     h[..8].copy_from_slice(&ARCHIVE_MAGIC);
     h[8..12].copy_from_slice(&ARCHIVE_FORMAT_VERSION.to_le_bytes());
-    h[12..16].copy_from_slice(&(std::mem::size_of::<ACard>() as u32).to_le_bytes());
+    h[12..14].copy_from_slice(&(std::mem::size_of::<AOracleCard>() as u16).to_le_bytes());
+    h[14..16].copy_from_slice(&(std::mem::size_of::<APrinting>() as u16).to_le_bytes());
     h
 }
 
@@ -1403,7 +1521,7 @@ struct CachedMmap {
 /// staging (commit, abort, or a fresh reload_begin after an abandoned cycle)
 /// closes the lock file, which releases the flock.
 struct Staging {
-    cards: Vec<Card>,
+    rows: Vec<CardRow>,
     interner: Interner,
     vocab: VocabInterner,
     #[allow(dead_code)] // held for its flock; released on drop
@@ -1416,17 +1534,15 @@ const TYPE_BIT_NAMES: [&str; 14] = [
     "Instant", "Kindred", "Land", "Legendary", "Planeswalker", "Snow", "Sorcery", "World",
 ];
 
-/// Count type and subtype occurrences across preferred printings (one per oracle card).
+/// Count type and subtype occurrences across oracle cards (one per oracle id —
+/// what "preferred printings" approximated before the card/printing split).
 /// Accumulates by integer key in the hot loop — bit position for types, interned vocab
 /// id for subtypes — then converts to owned strings once at the end.
 pub(crate) fn count_common_types(data: &Archived<CardData>) -> HashMap<String, u32> {
     let mut type_counts = [0u32; 14];
     let mut subtype_counts: HashMap<u16, u32> = HashMap::new();
 
-    let store: &[ACard] = &data.cards;
-    for &idx in data.preferred_indices.iter() {
-        let card = &store[u32::from(idx) as usize];
-
+    for card in data.cards.iter() {
         let mut bits = u16::from(card.card_types);
         while bits != 0 {
             let pos = bits.trailing_zeros() as usize;
@@ -1451,13 +1567,11 @@ pub(crate) fn count_common_types(data: &Archived<CardData>) -> HashMap<String, u
     result
 }
 
-/// Count keyword occurrences across preferred printings (one per oracle card).
+/// Count keyword occurrences across oracle cards (one per oracle id).
 pub(crate) fn count_common_keywords(data: &Archived<CardData>) -> HashMap<String, u32> {
     let mut keyword_counts: HashMap<u16, u32> = HashMap::new();
 
-    let store: &[ACard] = &data.cards;
-    for &idx in data.preferred_indices.iter() {
-        let card = &store[u32::from(idx) as usize];
+    for card in data.cards.iter() {
         for id in card.card_keywords.iter() {
             *keyword_counts.entry(u16::from(*id)).or_insert(0) += 1;
         }
@@ -1591,7 +1705,7 @@ impl QueryEngine {
         #[cfg(feature = "alloc-counter")]
         alloc_stats::reset_peak();
 
-        *staging = Some(Staging { cards: Vec::new(), interner: Interner::new(), vocab: VocabInterner::new(), lock_file });
+        *staging = Some(Staging { rows: Vec::new(), interner: Interner::new(), vocab: VocabInterner::new(), lock_file });
         Ok(true)
     }
 
@@ -1603,7 +1717,7 @@ impl QueryEngine {
         })?;
         for item in db_rows.iter() {
             if let Ok(d) = item.cast::<PyDict>() {
-                staging.cards.push(card_from_pydict(&d, &mut staging.interner, &mut staging.vocab)?);
+                staging.rows.push(card_from_pydict(&d, &mut staging.interner, &mut staging.vocab)?);
             }
         }
         Ok(())
@@ -1622,47 +1736,106 @@ impl QueryEngine {
         let staging = self.staging.lock().unwrap().take().ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err("reload_commit called without reload_begin")
         })?;
-        let Staging { mut cards, interner, vocab, lock_file } = staging;
+        let Staging { mut rows, interner, vocab, lock_file } = staging;
 
-        // unique=card/artwork group by oracle_id, so cards without one would all
-        // collapse into a single group. The DB enforces NOT NULL; fail loudly here
+        // The store groups printings by oracle_id, so rows without one would all
+        // collapse into a single card. The DB enforces NOT NULL; fail loudly here
         // for any other caller (e.g. hand-built test dicts).
-        if let Some((idx, card)) = cards.iter().enumerate().find(|(_, c)| c.oracle_id == 0) {
-            let name = interner.strings.get(card.card_name_id as usize).map_or("", |s| s.as_str());
+        if let Some((idx, row)) = rows.iter().enumerate().find(|(_, r)| r.oracle_id == 0) {
+            let name = interner.strings.get(row.card_name_id as usize).map_or("", |s| s.as_str());
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "card {idx} ({name:?}) is missing oracle_id (required for unique=card dedup)"
+                "card {idx} ({name:?}) is missing oracle_id (required for card grouping)"
             )));
         }
-        // Equal keys end up adjacent, which is the only property the linear
-        // key-change dedup paths need — the numeric (vs lexicographic) order is
-        // otherwise irrelevant.
-        cards.sort_unstable_by_key(|c| (c.oracle_id, c.illustration_id));
+        // Equal oracle ids end up adjacent (making each card's printings one
+        // contiguous range), and within a card printings order by descending
+        // default prefer_score so the default-prefer walk takes the first
+        // matching printing. Score ties fall back to illustration order, then
+        // scryfall_id, making the chosen printing fully deterministic (exact
+        // ties on the prefer metric are common — reprint sheets share scores —
+        // and an unstable sort would otherwise pick arbitrarily among them).
+        rows.sort_unstable_by(|a, b| {
+            a.oracle_id
+                .cmp(&b.oracle_id)
+                .then_with(|| {
+                    let sa = a.prefer_score.unwrap_or(0.0);
+                    let sb = b.prefer_score.unwrap_or(0.0);
+                    sb.total_cmp(&sa)
+                })
+                .then_with(|| a.illustration_id.cmp(&b.illustration_id))
+                .then_with(|| a.scryfall_id.cmp(&b.scryfall_id))
+        });
 
-        // Single pass: record the preferred printing index for each oracle_id group.
-        // Cards are sorted by (oracle_id, illustration_id) so equal oracle_ids are adjacent.
-        // prefer_score here is the plain f32 on Card (not the archived version).
-        let mut preferred_indices: Vec<u32> = Vec::new();
-        {
-            let mut prev_oracle: Option<u128> = None;
-            let mut group_best: Option<(u32, f32)> = None; // (store index, prefer_score)
-            for (i, card) in cards.iter().enumerate() {
-                if prev_oracle != Some(card.oracle_id) {
-                    if let Some((best_idx, _)) = group_best.take() {
-                        preferred_indices.push(best_idx);
-                    }
-                    prev_oracle = Some(card.oracle_id);
-                    group_best = Some((i as u32, card.prefer_score.unwrap_or(0.0)));
-                } else {
-                    let score = card.prefer_score.unwrap_or(0.0);
-                    if score > group_best.as_ref().map_or(f32::NEG_INFINITY, |g| g.1) {
-                        group_best = Some((i as u32, score));
-                    }
-                }
+        // Group rows into OracleCards + Printings + CSR offsets. Card-level
+        // fields come from the group's first row (verified printing-constant on
+        // the real corpus; the 3 divergent-name omen cards take the first
+        // printing's value). Legality is the exception: a group whose rows
+        // disagree gets legality_divergent set, deferring legality filters to
+        // each printing's own word.
+        let mut cards: Vec<OracleCard> = Vec::new();
+        let mut printings: Vec<Printing> = Vec::with_capacity(rows.len());
+        let mut offsets: Vec<u32> = Vec::new();
+        for mut row in rows {
+            let is_new = cards.last().is_none_or(|c| c.oracle_id != row.oracle_id);
+            if is_new {
+                offsets.push(printings.len() as u32);
+                cards.push(OracleCard {
+                    card_name_lower: row.card_name_lower,
+                    card_colors: row.card_colors,
+                    card_color_identity: row.card_color_identity,
+                    produced_mana: row.produced_mana,
+                    card_types: row.card_types,
+                    legality_divergent: false,
+                    oracle_id: row.oracle_id,
+                    card_name_id: row.card_name_id,
+                    oracle_text_id: row.oracle_text_id,
+                    oracle_text_lower_id: row.oracle_text_lower_id,
+                    card_layout_id: row.card_layout_id,
+                    mana_cost_text_id: row.mana_cost_text_id,
+                    type_line_id: row.type_line_id,
+                    cmc: row.cmc,
+                    creature_power: row.creature_power,
+                    creature_toughness: row.creature_toughness,
+                    planeswalker_loyalty: row.planeswalker_loyalty,
+                    edhrec_rank: row.edhrec_rank,
+                    cubecobra_score: row.cubecobra_score,
+                    card_subtypes: std::mem::take(&mut row.card_subtypes),
+                    card_keywords: std::mem::take(&mut row.card_keywords),
+                    card_oracle_tags: std::mem::take(&mut row.card_oracle_tags),
+                    card_legalities: row.card_legalities,
+                    mana_cost: row.mana_cost.clone(),
+                    creature_power_text_id: row.creature_power_text_id,
+                    creature_toughness_text_id: row.creature_toughness_text_id,
+                });
+            } else if row.card_legalities != cards.last().map(|c| c.card_legalities).unwrap_or(0) {
+                cards.last_mut().unwrap().legality_divergent = true;
             }
-            if let Some((best_idx, _)) = group_best {
-                preferred_indices.push(best_idx);
-            }
+            printings.push(Printing {
+                scryfall_id: row.scryfall_id,
+                illustration_id: row.illustration_id,
+                flavor_text_id: row.flavor_text_id,
+                flavor_text_lower_id: row.flavor_text_lower_id,
+                card_artist_id: row.card_artist_id,
+                card_artist_lower_id: row.card_artist_lower_id,
+                card_set_code: row.card_set_code,
+                card_border_id: row.card_border_id,
+                card_watermark_id: row.card_watermark_id,
+                collector_number_id: row.collector_number_id,
+                set_name_id: row.set_name_id,
+                released_at_int: row.released_at_int,
+                card_rarity_int: row.card_rarity_int,
+                collector_number_int: row.collector_number_int,
+                price_usd: row.price_usd,
+                price_eur: row.price_eur,
+                price_tix: row.price_tix,
+                prefer_score: row.prefer_score,
+                card_legalities: row.card_legalities,
+                card_art_tags: row.card_art_tags,
+                card_is_tags: row.card_is_tags,
+                card_frame_data: row.card_frame_data,
+            });
         }
+        offsets.push(printings.len() as u32);
 
         #[cfg(feature = "alloc-counter")]
         let stats_after_cards = (alloc_stats::live(), alloc_stats::allocs());
@@ -1685,8 +1858,8 @@ impl QueryEngine {
             subtypes:       build_tag_index(&cards, &coll_vocab, |c| &c.card_subtypes),
             keywords:       build_tag_index(&cards, &coll_vocab, |c| &c.card_keywords),
             oracle_tags:    build_tag_index(&cards, &coll_vocab, |c| &c.card_oracle_tags),
-            art_tags:       build_tag_index(&cards, &coll_vocab, |c| &c.card_art_tags),
-            is_tags:        build_tag_index(&cards, &coll_vocab, |c| &c.card_is_tags),
+            art_tags:       build_tag_index(&printings, &coll_vocab, |p| &p.card_art_tags),
+            is_tags:        build_tag_index(&printings, &coll_vocab, |p| &p.card_is_tags),
         };
 
         #[cfg(feature = "alloc-counter")]
@@ -1695,7 +1868,7 @@ impl QueryEngine {
         // Snapshot the registry card_from_pydict just populated so reader
         // processes can adopt the same format→shift assignments.
         let format_shifts_snapshot = format_shifts().read().map(|m| m.clone()).unwrap_or_default();
-        let card_data = CardData { cards, strings, coll_vocab, coll_vocab_sorted, indexes, format_shifts: format_shifts_snapshot, preferred_indices };
+        let card_data = CardData { cards, printings, offsets, strings, coll_vocab, coll_vocab_sorted, indexes, format_shifts: format_shifts_snapshot };
 
         // Write atomically: stream into a per-PID .tmp, then rename over shm_path.
         // Per-PID avoids the race where two workers write to the same .tmp and
@@ -1735,7 +1908,8 @@ impl QueryEngine {
                 .unwrap_or(0)
                 .saturating_sub(ARCHIVE_HEADER_LEN);
             let component_bytes = (
-                rkyv::to_bytes::<rkyv::rancor::Error>(&card_data.cards).map(|b| b.len()).unwrap_or(0),
+                rkyv::to_bytes::<rkyv::rancor::Error>(&card_data.cards).map(|b| b.len()).unwrap_or(0)
+                    + rkyv::to_bytes::<rkyv::rancor::Error>(&card_data.printings).map(|b| b.len()).unwrap_or(0),
                 rkyv::to_bytes::<rkyv::rancor::Error>(&card_data.indexes).map(|b| b.len()).unwrap_or(0),
                 rkyv::to_bytes::<rkyv::rancor::Error>(&card_data.strings).map(|b| b.len()).unwrap_or(0),
             );
@@ -1823,114 +1997,15 @@ impl QueryEngine {
             .map_err(|e| QueryError::new_err(format!("build_filter: {e}")))?;
         filter_expr.bind_collection_ids(&data.coll_vocab, &data.coll_vocab_sorted);
 
-        let store: &[ACard] = &data.cards;
         let (total, page) = run_query(
-            store, &data.preferred_indices[..], &data.strings, &filter_expr, unique, prefer, orderby, direction, limit, offset, &data.indexes,
+            &data.cards, &data.printings, &data.offsets, &data.strings, &filter_expr,
+            unique, prefer, orderby, direction, limit, offset, &data.indexes,
         );
 
-        let matches: Vec<Bound<PyDict>> =
-            page.iter().map(|c| card_to_pydict(py, c, &data.strings, &data.coll_vocab, &resolved_fields)).collect::<PyResult<Vec<_>>>()?;
-        let matches_list = PyList::new(py, matches)?;
-        PyTuple::new(py, [total.into_pyobject(py)?.into_any(), matches_list.into_any()])
-    }
-
-    /// Same as query() but forces the HashMap dedup path. Used for benchmarking.
-    #[pyo3(signature = (*, filters, unique="card", prefer="default", orderby="edhrec", direction="asc", limit=100, offset=0, fields=None))]
-    fn query_hashmap<'py>(
-        &self,
-        py: Python<'py>,
-        filters: &Bound<PyAny>,
-        unique: &str,
-        prefer: &str,
-        orderby: &str,
-        direction: &str,
-        limit: usize,
-        offset: usize,
-        fields: Option<Vec<String>>,
-    ) -> PyResult<Bound<'py, PyTuple>> {
-        let resolved_fields = resolve_fields(fields)?;
-        let to_json    = filters.call_method0("to_json")?;
-        let json_bytes: Vec<u8> = py
-            .import("orjson")?
-            .call_method1("dumps", (to_json,))?
-            .extract()?;
-        let json_str = std::str::from_utf8(&json_bytes)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("bad UTF-8 from orjson: {e}")))?;
-        let json_val: Value = serde_json::from_str(json_str)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("bad query JSON: {e}")))?;
-        let mmap = self.get_mmap()?;
-        // Safety: see the access_unchecked justification in query().
-        let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
-
-        // Must run before build_filter; see query().
-        sync_format_shifts(&data.format_shifts);
-        let mut filter_expr = build_filter(&json_val)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("build_filter: {e}")))?;
-        filter_expr.bind_collection_ids(&data.coll_vocab, &data.coll_vocab_sorted);
-
-        let store: &[ACard] = &data.cards;
-        let (total, page) = run_query_hashmap(store, &data.strings, &filter_expr, unique, prefer, orderby, direction, limit, offset);
-        let matches: Vec<Bound<PyDict>> =
-            page.iter().map(|c| card_to_pydict(py, c, &data.strings, &data.coll_vocab, &resolved_fields)).collect::<PyResult<Vec<_>>>()?;
-        let matches_list = PyList::new(py, matches)?;
-        PyTuple::new(py, [total.into_pyobject(py)?.into_any(), matches_list.into_any()])
-    }
-
-    /// Same as query() but forces the linear-dedup path over all printings.
-    /// Use alongside query() to measure the benefit of the preferred-index fast path.
-    #[pyo3(signature = (*, filters, unique="card", prefer="default", orderby="edhrec", direction="asc", limit=100, offset=0, fields=None))]
-    fn query_linear<'py>(
-        &self,
-        py: Python<'py>,
-        filters: &Bound<PyAny>,
-        unique: &str,
-        prefer: &str,
-        orderby: &str,
-        direction: &str,
-        limit: usize,
-        offset: usize,
-        fields: Option<Vec<String>>,
-    ) -> PyResult<Bound<'py, PyTuple>> {
-        let resolved_fields = resolve_fields(fields)?;
-        let to_json    = filters.call_method0("to_json")?;
-        let json_bytes: Vec<u8> = py
-            .import("orjson")?
-            .call_method1("dumps", (to_json,))?
-            .extract()?;
-        let json_str = std::str::from_utf8(&json_bytes)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("bad UTF-8 from orjson: {e}")))?;
-        let json_val: Value = serde_json::from_str(json_str)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("bad query JSON: {e}")))?;
-        let mmap = self.get_mmap()?;
-        // Safety: see the access_unchecked justification in query().
-        let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
-
-        // Must run before build_filter; see query().
-        sync_format_shifts(&data.format_shifts);
-        let mut filter_expr = build_filter(&json_val)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("build_filter: {e}")))?;
-        filter_expr.bind_collection_ids(&data.coll_vocab, &data.coll_vocab_sorted);
-
-        let store: &[ACard] = &data.cards;
-        // Use narrow_candidates so this exactly replicates the pre-optimization run_query
-        // path: any query that had an index hit (trigram, type_bits, cmc, etc.) should
-        // see the same narrowed candidate set here as it did before this PR.
-        let candidates = narrow_candidates(&filter_expr, &data.indexes);
-        macro_rules! cards_iter_linear {
-            () => {
-                match &candidates {
-                    Some(idxs) => Box::new(idxs.iter().map(|&i| &store[i as usize])) as Box<dyn Iterator<Item = &ACard>>,
-                    None       => Box::new(store.iter()),
-                }
-            };
-        }
-        let (total, page) = match unique {
-            "card"    => run_query_linear(cards_iter_linear!(), &data.strings, &filter_expr, |c| u128::from(c.oracle_id),       prefer, orderby, direction, limit, offset),
-            "artwork" => run_query_linear(cards_iter_linear!(), &data.strings, &filter_expr, |c| u128::from(c.illustration_id), prefer, orderby, direction, limit, offset),
-            _         => run_query_no_dedup(cards_iter_linear!(), &data.strings, &filter_expr, orderby, direction, limit, offset),
-        };
-        let matches: Vec<Bound<PyDict>> =
-            page.iter().map(|c| card_to_pydict(py, c, &data.strings, &data.coll_vocab, &resolved_fields)).collect::<PyResult<Vec<_>>>()?;
+        let matches: Vec<Bound<PyDict>> = page
+            .iter()
+            .map(|(c, p)| card_to_pydict(py, c, p, &data.strings, &data.coll_vocab, &resolved_fields))
+            .collect::<PyResult<Vec<_>>>()?;
         let matches_list = PyList::new(py, matches)?;
         PyTuple::new(py, [total.into_pyobject(py)?.into_any(), matches_list.into_any()])
     }
@@ -1944,13 +2019,15 @@ impl QueryEngine {
             // that mapped and passed the header check is always a complete rkyv
             // archive from this build (atomic rename publish), so checked access
             // here would only re-validate trusted bytes at ~7 ms per size() call.
-            Ok(mmap) => Ok(unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) }.cards.len()),
+            // Printing count (the pre-split row count), so the Python side's
+            // size checks and log lines keep their meaning.
+            Ok(mmap) => Ok(unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) }.printings.len()),
         }
     }
 
-    /// Return `n` randomly sampled cards from the preferred-printing index.
-    /// O(n) time, zero per-worker heap overhead — preferred_indices lives in the
-    /// shared mmap so all workers read the same ~124 KB of file pages.
+    /// Return `n` randomly sampled oracle cards, each shown as its
+    /// default-preferred printing — the first in the card's range, since
+    /// printings are stored in descending default-prefer order.
     #[pyo3(signature = (n, fields=None))]
     fn sample_preferred<'py>(&self, py: Python<'py>, n: usize, fields: Option<Vec<String>>) -> PyResult<Bound<'py, PyList>> {
         let resolved_fields = resolve_fields(fields)?;
@@ -1958,7 +2035,7 @@ impl QueryEngine {
         // Safety: see the access_unchecked justification in query().
         let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
 
-        let pool_len = data.preferred_indices.len();
+        let pool_len = data.cards.len();
         let take = n.min(pool_len);
 
         use rand::RngExt;
@@ -1969,16 +2046,17 @@ impl QueryEngine {
         }
 
         let dicts: Vec<Bound<PyDict>> = chosen.iter()
-            .map(|&pos| {
-                let card_idx = u32::from(data.preferred_indices[pos]) as usize;
-                card_to_pydict(py, &data.cards[card_idx], &data.strings, &data.coll_vocab, &resolved_fields)
+            .map(|&cid| {
+                let card = &data.cards[cid];
+                let preferred = u32::from(data.offsets[cid]) as usize;
+                card_to_pydict(py, card, &data.printings[preferred], &data.strings, &data.coll_vocab, &resolved_fields)
             })
             .collect::<PyResult<_>>()?;
         PyList::new(py, dicts)
     }
 
 
-    /// Count type and subtype occurrences across preferred printings.
+    /// Count type and subtype occurrences across oracle cards.
     /// Returns {type_name: count} covering both supertypes/types (decoded from
     /// the card_types bitmask) and subtypes (from card_subtypes strings).
     fn common_card_types<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
@@ -1993,7 +2071,7 @@ impl QueryEngine {
         Ok(d)
     }
 
-    /// Count keyword occurrences across preferred printings.
+    /// Count keyword occurrences across oracle cards.
     /// Returns {keyword_name: count} for all keywords present on preferred cards.
     fn common_card_keywords<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let mmap = self.get_mmap()?;
