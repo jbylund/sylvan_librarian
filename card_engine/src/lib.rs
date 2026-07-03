@@ -887,6 +887,9 @@ struct CardData {
     // Vocab table for Card's collection fields, indexed by their u16 ids
     // (see VocabInterner). ~16k entries / ~200 KB.
     coll_vocab: Vec<String>,
+    // Permutation of 0..coll_vocab.len() sorted by string, so query values
+    // resolve to vocab ids by binary search (FilterExpr::bind_collection_ids).
+    coll_vocab_sorted: Vec<u16>,
     indexes: CardIndexes,
     // The writer's format→shift assignments. Persisted so reader processes —
     // which never run the load path that feeds FORMAT_SHIFTS — resolve
@@ -947,31 +950,31 @@ fn narrow_candidates(filter: &FilterExpr, indexes: &Archived<CardIndexes>) -> Op
             Some(result)
         }
 
-        FilterExpr::CollectionCmp { field, op, value }
+        FilterExpr::CollectionCmp { field, op, value, .. }
             if matches!(field, CollField::Subtypes) && matches!(op, CmpOp::Ge) =>
         {
             indexes.subtypes.get(value.as_str()).map(|v| v.iter().map(|x| u32::from(*x)).collect())
         }
 
-        FilterExpr::CollectionCmp { field, op, value }
+        FilterExpr::CollectionCmp { field, op, value, .. }
             if matches!(field, CollField::Keywords) && matches!(op, CmpOp::Ge) =>
         {
             indexes.keywords.get(value.as_str()).map(|v| v.iter().map(|x| u32::from(*x)).collect())
         }
 
-        FilterExpr::CollectionCmp { field, op, value }
+        FilterExpr::CollectionCmp { field, op, value, .. }
             if matches!(field, CollField::OracleTags) && matches!(op, CmpOp::Ge) =>
         {
             indexes.oracle_tags.get(value.as_str()).map(|v| v.iter().map(|x| u32::from(*x)).collect())
         }
 
-        FilterExpr::CollectionCmp { field, op, value }
+        FilterExpr::CollectionCmp { field, op, value, .. }
             if matches!(field, CollField::ArtTags) && matches!(op, CmpOp::Ge) =>
         {
             indexes.art_tags.get(value.as_str()).map(|v| v.iter().map(|x| u32::from(*x)).collect())
         }
 
-        FilterExpr::CollectionCmp { field, op, value }
+        FilterExpr::CollectionCmp { field, op, value, .. }
             if matches!(field, CollField::IsTags) && matches!(op, CmpOp::Ge) =>
         {
             indexes.is_tags.get(value.as_str()).map(|v| v.iter().map(|x| u32::from(*x)).collect())
@@ -1103,7 +1106,6 @@ fn select_page<'a>(mut v: Vec<(u128, &'a ACard)>, offset: usize, limit: usize) -
 fn run_query_hashmap<'a>(
     store: &'a [ACard],
     strings: &AStrings,
-    vocab: &AStrings,
     filter: &FilterExpr,
     unique: &str,
     prefer: &str,
@@ -1125,7 +1127,7 @@ fn run_query_hashmap<'a>(
 
     let mut partitions: HashMap<u128, (&ACard, f64)> = HashMap::new();
     for card in store {
-        if filter.matches(card, strings, vocab) {
+        if filter.matches(card, strings) {
             let key = match group_by {
                 GroupBy::Oracle   => u128::from(card.oracle_id),
                 GroupBy::Artwork  => u128::from(card.illustration_id),
@@ -1149,7 +1151,6 @@ fn run_query_hashmap<'a>(
 fn run_query_linear<'a, I, F>(
     cards: I,
     strings: &AStrings,
-    vocab: &AStrings,
     filter: &FilterExpr,
     key_fn: F,
     prefer: &str,
@@ -1171,7 +1172,7 @@ where
     let mut prev_key: Option<u128> = None; // None = before the first match
 
     for card in cards {
-        if !filter.matches(card, strings, vocab) { continue; }
+        if !filter.matches(card, strings) { continue; }
         let key = key_fn(card);
         if prev_key != Some(key) {
             if let Some((c, _)) = group_best.take() { best.push((sort_key_bits(c, sort_col, descending), c)); }
@@ -1193,7 +1194,6 @@ where
 fn run_query_no_dedup<'a>(
     cards: impl Iterator<Item = &'a ACard>,
     strings: &AStrings,
-    vocab: &AStrings,
     filter: &FilterExpr,
     orderby: &str,
     direction: &str,
@@ -1203,7 +1203,7 @@ fn run_query_no_dedup<'a>(
     let sort_col   = orderby_to_col(orderby);
     let descending = direction == "desc";
     let matched: Vec<(u128, &ACard)> = cards
-        .filter(|c| filter.matches(c, strings, vocab))
+        .filter(|c| filter.matches(c, strings))
         .map(|c| (sort_key_bits(c, sort_col, descending), c))
         .collect();
     let total = matched.len();
@@ -1214,7 +1214,6 @@ fn run_query<'a, B>(
     store: &'a [ACard],
     preferred_indices: &[B],
     strings: &AStrings,
-    vocab: &AStrings,
     filter: &FilterExpr,
     unique: &str,
     prefer: &str,
@@ -1241,11 +1240,11 @@ where
         return match candidates {
             Some(existing) => {
                 let fast = intersect_sorted(&existing, preferred_indices);
-                run_query_no_dedup(fast.into_iter().map(|i| &store[i as usize]), strings, vocab, filter, orderby, direction, limit, offset)
+                run_query_no_dedup(fast.into_iter().map(|i| &store[i as usize]), strings, filter, orderby, direction, limit, offset)
             }
             None => run_query_no_dedup(
                 preferred_indices.iter().map(|&i| &store[u32::from(i) as usize]),
-                strings, vocab, filter, orderby, direction, limit, offset,
+                strings, filter, orderby, direction, limit, offset,
             ),
         };
     }
@@ -1263,13 +1262,13 @@ where
         // The store is sorted by (oracle_id, illustration_id), so equal keys are adjacent
         // and the linear key-change dedup is exact — u128 equality, same cost as the
         // dense u32 group ids this replaced.
-        "card" => run_query_linear(cards_iter!(), strings, vocab, filter, |c| u128::from(c.oracle_id), prefer, orderby, direction, limit, offset),
+        "card" => run_query_linear(cards_iter!(), strings, filter, |c| u128::from(c.oracle_id), prefer, orderby, direction, limit, offset),
         // Scryfall assigns each illustration_id to exactly one oracle_id, so cards sharing an
         // illustration_id are always contiguous in the (oracle_id, illustration_id) sort order.
         // The linear dedup path is therefore correct here — no HashMap needed.
-        "artwork"  => run_query_linear(cards_iter!(), strings, vocab, filter, |c| u128::from(c.illustration_id), prefer, orderby, direction, limit, offset),
-        "printing" => run_query_no_dedup(cards_iter!(), strings, vocab, filter, orderby, direction, limit, offset),
-        _          => run_query_hashmap(store, strings, vocab, filter, unique, prefer, orderby, direction, limit, offset),
+        "artwork"  => run_query_linear(cards_iter!(), strings, filter, |c| u128::from(c.illustration_id), prefer, orderby, direction, limit, offset),
+        "printing" => run_query_no_dedup(cards_iter!(), strings, filter, orderby, direction, limit, offset),
+        _          => run_query_hashmap(store, strings, filter, unique, prefer, orderby, direction, limit, offset),
     }
 }
 
@@ -1375,7 +1374,7 @@ fn card_to_pydict<'py>(
 const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 /// Bump on any archived-data-model change that size_of::<ACard>() wouldn't
 /// catch (e.g. reordering same-size Card fields, changing an index type).
-const ARCHIVE_FORMAT_VERSION: u32 = 20260703;
+const ARCHIVE_FORMAT_VERSION: u32 = 20260704;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -1672,6 +1671,10 @@ impl QueryEngine {
         drop(interner.map);
         let coll_vocab = vocab.strings;
         drop(vocab.map);
+        // String-sorted permutation of the vocab ids; VocabInterner caps the
+        // vocab at u16::MAX entries so the cast can't truncate.
+        let mut coll_vocab_sorted: Vec<u16> = (0..coll_vocab.len() as u16).collect();
+        coll_vocab_sorted.sort_unstable_by(|&a, &b| coll_vocab[a as usize].cmp(&coll_vocab[b as usize]));
         let indexes = CardIndexes {
             name_trigram:   build_trigram_index(&cards, |c| c.card_name_lower.as_str()),
             oracle_trigram: build_oracle_text_index(&cards, &strings),
@@ -1692,7 +1695,7 @@ impl QueryEngine {
         // Snapshot the registry card_from_pydict just populated so reader
         // processes can adopt the same format→shift assignments.
         let format_shifts_snapshot = format_shifts().read().map(|m| m.clone()).unwrap_or_default();
-        let card_data = CardData { cards, strings, coll_vocab, indexes, format_shifts: format_shifts_snapshot, preferred_indices };
+        let card_data = CardData { cards, strings, coll_vocab, coll_vocab_sorted, indexes, format_shifts: format_shifts_snapshot, preferred_indices };
 
         // Write atomically: stream into a per-PID .tmp, then rename over shm_path.
         // Per-PID avoids the race where two workers write to the same .tmp and
@@ -1816,12 +1819,13 @@ impl QueryEngine {
         // Must run before build_filter so legality shifts resolve in workers
         // that never executed the load path themselves.
         sync_format_shifts(&data.format_shifts);
-        let filter_expr = build_filter(&json_val)
+        let mut filter_expr = build_filter(&json_val)
             .map_err(|e| QueryError::new_err(format!("build_filter: {e}")))?;
+        filter_expr.bind_collection_ids(&data.coll_vocab, &data.coll_vocab_sorted);
 
         let store: &[ACard] = &data.cards;
         let (total, page) = run_query(
-            store, &data.preferred_indices[..], &data.strings, &data.coll_vocab, &filter_expr, unique, prefer, orderby, direction, limit, offset, &data.indexes,
+            store, &data.preferred_indices[..], &data.strings, &filter_expr, unique, prefer, orderby, direction, limit, offset, &data.indexes,
         );
 
         let matches: Vec<Bound<PyDict>> =
@@ -1860,11 +1864,12 @@ impl QueryEngine {
 
         // Must run before build_filter; see query().
         sync_format_shifts(&data.format_shifts);
-        let filter_expr = build_filter(&json_val)
+        let mut filter_expr = build_filter(&json_val)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("build_filter: {e}")))?;
+        filter_expr.bind_collection_ids(&data.coll_vocab, &data.coll_vocab_sorted);
 
         let store: &[ACard] = &data.cards;
-        let (total, page) = run_query_hashmap(store, &data.strings, &data.coll_vocab, &filter_expr, unique, prefer, orderby, direction, limit, offset);
+        let (total, page) = run_query_hashmap(store, &data.strings, &filter_expr, unique, prefer, orderby, direction, limit, offset);
         let matches: Vec<Bound<PyDict>> =
             page.iter().map(|c| card_to_pydict(py, c, &data.strings, &data.coll_vocab, &resolved_fields)).collect::<PyResult<Vec<_>>>()?;
         let matches_list = PyList::new(py, matches)?;
@@ -1902,8 +1907,9 @@ impl QueryEngine {
 
         // Must run before build_filter; see query().
         sync_format_shifts(&data.format_shifts);
-        let filter_expr = build_filter(&json_val)
+        let mut filter_expr = build_filter(&json_val)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("build_filter: {e}")))?;
+        filter_expr.bind_collection_ids(&data.coll_vocab, &data.coll_vocab_sorted);
 
         let store: &[ACard] = &data.cards;
         // Use narrow_candidates so this exactly replicates the pre-optimization run_query
@@ -1919,9 +1925,9 @@ impl QueryEngine {
             };
         }
         let (total, page) = match unique {
-            "card"    => run_query_linear(cards_iter_linear!(), &data.strings, &data.coll_vocab, &filter_expr, |c| u128::from(c.oracle_id),       prefer, orderby, direction, limit, offset),
-            "artwork" => run_query_linear(cards_iter_linear!(), &data.strings, &data.coll_vocab, &filter_expr, |c| u128::from(c.illustration_id), prefer, orderby, direction, limit, offset),
-            _         => run_query_no_dedup(cards_iter_linear!(), &data.strings, &data.coll_vocab, &filter_expr, orderby, direction, limit, offset),
+            "card"    => run_query_linear(cards_iter_linear!(), &data.strings, &filter_expr, |c| u128::from(c.oracle_id),       prefer, orderby, direction, limit, offset),
+            "artwork" => run_query_linear(cards_iter_linear!(), &data.strings, &filter_expr, |c| u128::from(c.illustration_id), prefer, orderby, direction, limit, offset),
+            _         => run_query_no_dedup(cards_iter_linear!(), &data.strings, &filter_expr, orderby, direction, limit, offset),
         };
         let matches: Vec<Bound<PyDict>> =
             page.iter().map(|c| card_to_pydict(py, c, &data.strings, &data.coll_vocab, &resolved_fields)).collect::<PyResult<Vec<_>>>()?;

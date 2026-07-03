@@ -17,6 +17,13 @@ fn vocab_ids(vocab: &mut VocabInterner, items: &[&str]) -> Vec<u16> {
     ids
 }
 
+/// String-sorted permutation of the vocab ids, as reload_commit builds it.
+fn sorted_vocab_ids(vocab: &[String]) -> Vec<u16> {
+    let mut ids: Vec<u16> = (0..vocab.len() as u16).collect();
+    ids.sort_unstable_by(|&a, &b| vocab[a as usize].cmp(&vocab[b as usize]));
+    ids
+}
+
 /// Build a TrigramIndex mapping each word's trigrams to the given card ids.
 fn index_of(words: &[(&str, &[u32])]) -> TrigramIndex {
     let mut idx: TrigramIndex = HashMap::new();
@@ -219,6 +226,7 @@ fn bench_checked_vs_unchecked_access() {
     let data = CardData {
         cards,
         strings,
+        coll_vocab_sorted: sorted_vocab_ids(&vocab.strings),
         coll_vocab: vocab.strings,
         indexes,
         format_shifts: HashMap::new(),
@@ -262,6 +270,7 @@ fn narrow_candidates_art_tags() {
         field: CollField::ArtTags,
         op: CmpOp::Ge,
         value: "wolf".to_string(),
+        value_id: None,
     };
     assert_eq!(narrow_candidates(&present, archived), Some(vec![0, 2]));
 
@@ -270,6 +279,7 @@ fn narrow_candidates_art_tags() {
         field: CollField::ArtTags,
         op: CmpOp::Ge,
         value: "zombie".to_string(),
+        value_id: None,
     };
     assert_eq!(narrow_candidates(&absent, archived), None);
 }
@@ -345,6 +355,7 @@ fn count_common_types_sums_preferred_only() {
     let data = CardData {
         cards,
         strings: vec![],
+        coll_vocab_sorted: sorted_vocab_ids(&vocab.strings),
         coll_vocab: vocab.strings,
         indexes: CardIndexes::default(),
         format_shifts: HashMap::new(),
@@ -393,6 +404,7 @@ fn count_common_keywords_sums_preferred_only() {
     let data = CardData {
         cards: vec![card0, card1, card2, card3],
         strings: vec![],
+        coll_vocab_sorted: sorted_vocab_ids(&vocab.strings),
         coll_vocab: vocab.strings,
         indexes: CardIndexes::default(),
         format_shifts: HashMap::new(),
@@ -411,4 +423,49 @@ fn count_common_keywords_sums_preferred_only() {
     assert_eq!(counts.get("Vigilance"), Some(&1));
     // Trample on card 1 — not preferred, must be absent.
     assert_eq!(counts.get("Trample"), None);
+}
+
+#[test]
+fn collection_cmp_binds_vocab_ids_and_matches() {
+    // First-seen intern order ("Trample" before "Flying") differs from the
+    // alphabetical order the sorted permutation provides, so this exercises
+    // the binary-search resolution rather than a trivial identity mapping.
+    let mut vocab = VocabInterner::new();
+    let mut card0 = stub_card(TYPE_CREATURE, &[], &mut vocab);
+    card0.card_keywords = vocab_ids(&mut vocab, &["Trample", "Flying"]);
+    let mut card1 = stub_card(TYPE_CREATURE, &[], &mut vocab);
+    card1.card_keywords = vocab_ids(&mut vocab, &["Haste"]);
+    let card2 = stub_card(TYPE_CREATURE, &[], &mut vocab); // no keywords
+
+    let data = CardData {
+        cards: vec![card0, card1, card2],
+        strings: vec![],
+        coll_vocab_sorted: sorted_vocab_ids(&vocab.strings),
+        coll_vocab: vocab.strings,
+        indexes: CardIndexes::default(),
+        format_shifts: HashMap::new(),
+        preferred_indices: vec![],
+    };
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let run = |value: &str, op: CmpOp| -> Vec<bool> {
+        let mut f = FilterExpr::CollectionCmp {
+            field: CollField::Keywords,
+            op,
+            value: value.to_string(),
+            value_id: None,
+        };
+        f.bind_collection_ids(&archived.coll_vocab, &archived.coll_vocab_sorted);
+        archived.cards.iter().map(|c| f.matches(c, &archived.strings)).collect()
+    };
+
+    assert_eq!(run("Flying", CmpOp::Ge),  vec![true, false, false]);
+    assert_eq!(run("Haste", CmpOp::Ge),   vec![false, true, false]);
+    assert_eq!(run("Haste", CmpOp::Eq),   vec![false, true, false]); // exactly {Haste}
+    assert_eq!(run("Flying", CmpOp::Eq),  vec![false, false, false]); // card0 has two keywords
+    assert_eq!(run("Flying", CmpOp::Ne),  vec![true, true, true]);
+    // A value absent from the vocab matches no element: Ge nothing, Le only empty.
+    assert_eq!(run("Deathtouch", CmpOp::Ge), vec![false, false, false]);
+    assert_eq!(run("Deathtouch", CmpOp::Le), vec![false, false, true]);
 }

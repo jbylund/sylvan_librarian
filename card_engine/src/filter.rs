@@ -276,6 +276,12 @@ pub(crate) enum FilterExpr {
         field: CollField,
         op: CmpOp,
         value: String,
+        /// `value` resolved to its vocab id by bind_collection_ids(), which the
+        /// query entry points call once per query before matching; None means
+        /// absent from the vocab (matches no element). Matching compares ids
+        /// only — never strings — so an unbound filter behaves as if the value
+        /// were unknown.
+        value_id: Option<u16>,
     },
 
     Legality {
@@ -306,8 +312,31 @@ pub(crate) enum FilterExpr {
 }
 
 impl FilterExpr {
-    pub(crate) fn matches(&self, card: &ACard, strings: &AStrings, vocab: &AStrings) -> bool {
-        self.tri(card, strings, vocab) == Some(true)
+    /// Resolve every CollectionCmp value to its vocab id (via the string-sorted
+    /// permutation of the vocab table — ~14 string compares per collection term).
+    /// Called once per query so matching never touches strings; a value absent
+    /// from the vocab resolves to None and can match no element.
+    pub(crate) fn bind_collection_ids(&mut self, vocab: &AStrings, sorted_ids: &rkyv::Archived<Vec<u16>>) {
+        match self {
+            FilterExpr::And(children) | FilterExpr::Or(children) => {
+                for c in children {
+                    c.bind_collection_ids(vocab, sorted_ids);
+                }
+            }
+            FilterExpr::Not(inner) => inner.bind_collection_ids(vocab, sorted_ids),
+            FilterExpr::CollectionCmp { value, value_id, .. } => {
+                let i = sorted_ids.partition_point(|id| vocab[u16::from(*id) as usize].as_str() < value.as_str());
+                *value_id = sorted_ids
+                    .get(i)
+                    .map(|id| u16::from(*id))
+                    .filter(|&id| vocab[id as usize].as_str() == value.as_str());
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn matches(&self, card: &ACard, strings: &AStrings) -> bool {
+        self.tri(card, strings) == Some(true)
     }
 
     /// Three-valued evaluation mirroring SQL: None is SQL's NULL ("unknown"),
@@ -317,14 +346,14 @@ impl FilterExpr {
     /// filters only match cards that have the attribute", while
     /// -(power>2 and t:creature) still matches instants (NULL AND false =
     /// false, NOT false = true). Only Some(true) counts as a match.
-    fn tri(&self, card: &ACard, strings: &AStrings, vocab: &AStrings) -> Option<bool> {
+    fn tri(&self, card: &ACard, strings: &AStrings) -> Option<bool> {
         match self {
             FilterExpr::True => Some(true),
 
             FilterExpr::And(children) => {
                 let mut unknown = false;
                 for c in children {
-                    match c.tri(card, strings, vocab) {
+                    match c.tri(card, strings) {
                         Some(false) => return Some(false),
                         None => unknown = true,
                         Some(true) => {}
@@ -335,7 +364,7 @@ impl FilterExpr {
             FilterExpr::Or(children) => {
                 let mut unknown = false;
                 for c in children {
-                    match c.tri(card, strings, vocab) {
+                    match c.tri(card, strings) {
                         Some(true) => return Some(true),
                         None => unknown = true,
                         Some(false) => {}
@@ -343,7 +372,7 @@ impl FilterExpr {
                 }
                 if unknown { None } else { Some(false) }
             }
-            FilterExpr::Not(inner) => inner.tri(card, strings, vocab).map(|b| !b),
+            FilterExpr::Not(inner) => inner.tri(card, strings).map(|b| !b),
 
             FilterExpr::ExactName(lower) => Some(card.card_name_lower.as_str() == lower.as_str()),
 
@@ -397,21 +426,33 @@ impl FilterExpr {
                 })
             }
 
-            FilterExpr::CollectionCmp { field, op, value } => {
+            FilterExpr::CollectionCmp { field, op, value_id, .. } => {
                 // Set-containment semantics against the single-value query {value},
                 // mirroring the SQL path's jsonb operators (@>, <@, =, <> and the
                 // strict variants). Lt (proper subset of a one-element set) can only
                 // be the empty collection; Ne is not-exactly-equal, NOT "lacks value"
                 // (that's what negation is for).
+                //
+                // Ids only: bind_collection_ids() resolved the value up front, and
+                // vocab ids are unique per string, so id equality is string equality.
                 let coll = card_collection(card, *field);
-                let elem = |id: &rkyv::rend::u16_le| vocab[u16::from(*id) as usize].as_str();
-                let contains = || coll.iter().any(|id| elem(id) == value.as_str());
+                let contains = || match (*value_id, *field) {
+                    (None, _) => false,
+                    // card_subtypes keeps the printed order, so it is not id-sorted.
+                    (Some(id), CollField::Subtypes) => coll.iter().any(|x| u16::from(*x) == id),
+                    // The set-like collections are sorted by id at load.
+                    (Some(id), _) => coll.binary_search(&id.into()).is_ok(),
+                };
+                let all_equal = || match *value_id {
+                    None => coll.is_empty(),
+                    Some(id) => coll.iter().all(|x| u16::from(*x) == id),
+                };
                 Some(match op {
                     CmpOp::Ge => contains(),
                     CmpOp::Eq => coll.len() == 1 && contains(),
                     CmpOp::Gt => contains() && coll.len() > 1,
-                    CmpOp::Le => coll.iter().all(|id| elem(id) == value.as_str()),
-                    CmpOp::Lt => coll.len() == 0,
+                    CmpOp::Le => all_equal(),
+                    CmpOp::Lt => coll.is_empty(),
                     CmpOp::Ne => !(coll.len() == 1 && contains()),
                 })
             }
@@ -790,13 +831,13 @@ fn build_binary(kw: &Value) -> Result<FilterExpr, String> {
 
     if attr == "card_subtypes" {
         let value = rhs.as_array().and_then(|a| a.first()).and_then(|v| v.as_str()).unwrap_or("").to_string();
-        return Ok(FilterExpr::CollectionCmp { field: CollField::Subtypes, op: op_to_collection_cmp(op), value });
+        return Ok(FilterExpr::CollectionCmp { field: CollField::Subtypes, op: op_to_collection_cmp(op), value, value_id: None });
     }
 
     if attr == "card_keywords" {
         let value  = rhs.as_array().and_then(|a| a.first()).and_then(|v| v.as_str()).unwrap_or("").to_string();
         let cmp_op = op_to_collection_cmp(op);
-        return Ok(FilterExpr::CollectionCmp { field: CollField::Keywords, op: cmp_op, value });
+        return Ok(FilterExpr::CollectionCmp { field: CollField::Keywords, op: cmp_op, value, value_id: None });
     }
 
     if matches!(attr, "card_oracle_tags" | "card_art_tags" | "card_is_tags" | "card_frame_data") {
@@ -808,7 +849,7 @@ fn build_binary(kw: &Value) -> Result<FilterExpr, String> {
         };
         let value  = rhs.as_array().and_then(|a| a.first()).and_then(|v| v.as_str()).unwrap_or("").to_string();
         let cmp_op = op_to_collection_cmp(op);
-        return Ok(FilterExpr::CollectionCmp { field: coll_field, op: cmp_op, value });
+        return Ok(FilterExpr::CollectionCmp { field: coll_field, op: cmp_op, value, value_id: None });
     }
 
     build_text_filter(attr, op, rhs)
