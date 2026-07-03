@@ -1,0 +1,79 @@
+name: "Copilot Setup Steps"
+
+# Pre-installs dependencies for the Copilot coding agent's ephemeral environment.
+# The job MUST be named `copilot-setup-steps` or Copilot will not pick it up.
+# Runs on changes to itself (and via manual dispatch) so it can be validated in a PR.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/copilot-setup-steps.yml'
+  pull_request:
+    paths:
+      - '.github/workflows/copilot-setup-steps.yml'
+
+jobs:
+  copilot-setup-steps:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        id: setup-python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install libev (needed to compile bjoern, the WSGI server)
+        run: |
+          sudo apt-get update -qqq
+          sudo apt-get install -qqq -y libev-dev
+
+      - name: Install uv and Python dependencies
+        run: |
+          python -m pip install --upgrade pip uv
+          uv pip install --system --break-system-packages -r requirements/base.txt -r requirements/test.txt -r requirements/webserver.txt
+
+      - name: Cache card_engine wheel
+        id: ce-cache
+        uses: actions/cache@v5
+        with:
+          path: /tmp/card-engine-wheel
+          key: card-engine-${{ runner.os }}-${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('card_engine/**') }}
+
+      - name: Cache shared_cache wheel
+        id: sc-cache
+        uses: actions/cache@v5
+        with:
+          path: /tmp/shared-cache-wheel
+          key: shared-cache-${{ runner.os }}-${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('shared_cache/**') }}
+
+      - name: Install Rust toolchain
+        if: steps.ce-cache.outputs.cache-hit != 'true' || steps.sc-cache.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build artifacts
+        if: steps.ce-cache.outputs.cache-hit != 'true' || steps.sc-cache.outputs.cache-hit != 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            card_engine
+            shared_cache
+
+      - name: Build card_engine wheel
+        if: steps.ce-cache.outputs.cache-hit != 'true'
+        run: pip wheel ./card_engine -w /tmp/card-engine-wheel
+
+      - name: Build shared_cache wheel
+        if: steps.sc-cache.outputs.cache-hit != 'true'
+        run: pip wheel ./shared_cache -w /tmp/shared-cache-wheel
+
+      - name: Install Rust extensions
+        run: |
+          pip install /tmp/card-engine-wheel/card_engine*.whl
+          pip install /tmp/shared-cache-wheel/shared_cache*.whl
