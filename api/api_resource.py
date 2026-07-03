@@ -1589,11 +1589,11 @@ class APIResource:
                     results_html,
                 )
 
-                # Inject the results count with proper display style
+                # Inject the results count into the status message container
                 if results_count_html:
                     html_content = html_content.replace(
-                        '<div id="resultsCount" class="results-count" style="display: none"><!-- SERVER_SIDE_RESULTS_COUNT --></div>',
-                        f'<div id="resultsCount" class="results-count" style="display: block">{results_count_html}</div>',
+                        "<!-- SERVER_SIDE_RESULTS_COUNT -->",
+                        f'<div class="results-count">{results_count_html}</div>',
                     )
 
                 # Convert search results to JSON and embed for JavaScript enhancement
