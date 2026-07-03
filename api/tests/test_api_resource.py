@@ -477,6 +477,30 @@ class TestAPIResourceStaticFileServing(unittest.TestCase):
         # Verify it sets appropriate cache control header (shorter for search results)
         mock_response.set_header.assert_called_with("Cache-Control", "public, max-age=90")
 
+    def test_index_html_with_query_embeds_results_count_in_status_message(self) -> None:
+        """Test _root injects the results count into the #statusMessage container.
+
+        Regression test: the injection code used to target a stale `id="resultsCount"` div that
+        no longer exists in the template (which uses `id="statusMessage"`), so the count never
+        rendered for no-JS clients.
+        """
+        mock_response = MagicMock()
+
+        mock_search_results = {
+            "cards": [{"name": "Elvish Mystic", "set_code": "m14", "collector_number": "1"}],
+            "total_cards": 1,
+            "query": "elf",
+        }
+
+        with patch.object(self.api_resource, "_search", return_value=mock_search_results):
+            self.api_resource._root(falcon_response=mock_response, q="elf")
+
+        # HTML is minified before serving, which drops attribute quotes and unescapes quotes that
+        # are safe in text content (see test_index_html_serves_static_file).
+        assert "id=statusMessage" in mock_response.text
+        assert "<!-- SERVER_SIDE_RESULTS_COUNT -->" not in mock_response.text
+        assert 'Found 1 card matching "elf"' in mock_response.text
+
     def test_favicon_ico_serves_binary_content(self) -> None:
         """Test favicon_ico serves binary content correctly."""
         mock_response = MagicMock()
