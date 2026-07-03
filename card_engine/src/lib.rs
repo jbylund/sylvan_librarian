@@ -1320,9 +1320,14 @@ fn run_query<'a>(
                 // for the default prefer the first matching printing IS the
                 // chosen one — O(1) when the card pass already said True.
                 let chosen: Option<u32> = if matches!(prefer, Prefer::Default) {
-                    (start..end)
-                        .find(|&pid| all_match || FilterExpr::residual_matches(card, &printings[pid], strings, &residual, residual_is_or))
-                        .map(|pid| pid as u32)
+                    let mut found: Option<u32> = None;
+                    for pid in start..end {
+                        if all_match || FilterExpr::residual_matches(card, &printings[pid], strings, &residual, residual_is_or) {
+                            found = Some(pid as u32);
+                            break;
+                        }
+                    }
+                    found
                 } else {
                     let mut chosen: Option<(u32, f64)> = None;
                     for pid in start..end {
