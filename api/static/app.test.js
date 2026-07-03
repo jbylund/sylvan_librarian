@@ -380,8 +380,16 @@ describe('CardSearch balanceQuery', () => {
     expect(search.balanceQuery(query)).toBe(expected);
   });
 
-  it('appends the mirrored opener after an unmatched closing parenthesis', () => {
-    expect(search.balanceQuery('hello)')).toBe('hello)(');
+  it('returns the query unchanged when a closing paren has no matching opener', () => {
+    // Matches balance_partial_query in api/parsing/parsing_f.py, which treats
+    // a stray closer as unbalance-able rather than fabricating an opener.
+    expect(search.balanceQuery('hello)')).toBe('hello)');
+    expect(search.balanceQuery(')(')).toBe(')(');
+  });
+
+  it('ignores closing parens inside quoted strings', () => {
+    expect(search.balanceQuery('"a)"')).toBe('"a)"');
+    expect(search.balanceQuery('"a)')).toBe('"a)"');
   });
 
   it('balances alternating quote characters by closing only the active opener', () => {
@@ -393,6 +401,12 @@ describe('CardSearch balanceQuery', () => {
 describe('CardSearch validateQuery', () => {
   it('rejects queries with an unmatched closing parenthesis', () => {
     expect(search.validateQuery('hello)(')).toBe('Failed to parse query: "hello)("');
+    expect(search.validateQuery('hello)')).toBe('Failed to parse query: "hello)"');
+  });
+
+  it('accepts balanced queries', () => {
+    expect(search.validateQuery('(name:test)')).toBeNull();
+    expect(search.validateQuery('oracle:"draw a card"')).toBeNull();
   });
 });
 
