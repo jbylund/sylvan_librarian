@@ -386,7 +386,24 @@ describe('CardSearch balanceQuery', () => {
 
   it('balances alternating quote characters by closing only the active opener', () => {
     expect(search.balanceQuery('"test\' ')).toBe('"test\' "');
-    expect(search.balanceQuery("'test\" ")).toBe("'test\" '");
+    expect(search.balanceQuery('\'test" ')).toBe("'test\" '");
+  });
+});
+
+describe('CardSearch validateQuery', () => {
+  it('rejects queries with an unmatched closing parenthesis', () => {
+    expect(search.validateQuery('hello)(')).toBe('Failed to parse query: "hello)("');
+  });
+});
+
+describe('CardSearch performSearch', () => {
+  it('shows an error and skips the http request for unbalance-able queries', async () => {
+    global.fetch.mockClear();
+
+    await search.performSearch('hello)');
+
+    expect(search.showError).toHaveBeenCalledWith(expect.stringContaining('Invalid Search Query'));
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 });
 

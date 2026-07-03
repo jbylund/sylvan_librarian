@@ -514,6 +514,19 @@ class CardSearch {
     // Strip quoted strings so we don't match content inside them.
     const q = query.replace(/"[^"]*"|'[^']*'/g, '""');
 
+    // Reject queries where a closing parenthesis appears before a matching opener.
+    let parenDepth = 0;
+    for (let i = 0; i < q.length; i++) {
+      if (q[i] === '(') {
+        parenDepth += 1;
+      } else if (q[i] === ')') {
+        parenDepth -= 1;
+        if (parenDepth < 0) {
+          return `Failed to parse query: "${query}"`;
+        }
+      }
+    }
+
     // Trailing AND/OR with no right operand: "name:test and", "power>1 or"
     if (/(?:^|\s)(and|or)\s*$/i.test(q)) {
       return `Failed to parse query: "${query}"`;
