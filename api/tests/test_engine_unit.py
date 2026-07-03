@@ -911,9 +911,12 @@ class TestCardProperties:
         for c in results:
             assert isinstance(c["scryfall_id"], uuid.UUID)
             assert isinstance(c["illustration_id"], uuid.UUID)
-        # unique=artwork groups by illustration_id; both cards share one illustration_id
+        # unique=artwork groups by illustration_id *within an oracle card*. Scryfall
+        # assigns each illustration_id to exactly one oracle_id, so two different
+        # oracle cards sharing one (as this synthetic fixture does) is impossible in
+        # real data; the store groups them per card and reports two artwork groups.
         total_art, _ = _run(e, "", unique="artwork")
-        assert total_art == 1
+        assert total_art == 2
 
     def test_year_1993(self, engine: QueryEngine) -> None:
         # Alpha/Beta/Unlimited/CED/CEI all released in 1993

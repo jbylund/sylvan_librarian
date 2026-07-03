@@ -1,12 +1,20 @@
 use super::{
     build_numeric_index, build_oracle_text_index, build_tag_index, build_trigram_index,
-    build_type_index, count_common_keywords, count_common_types, narrow_candidates,
-    trigram_candidates, Card, CardData, CardIndexes, CollField, CmpOp, FilterExpr, InlineStr,
-    Interner, ManaCost, TagIndex, TrigramIndex, VocabInterner, NONE_STR, TYPE_ARTIFACT,
-    TYPE_CREATURE, TYPE_INSTANT, TYPE_LEGENDARY, TYPE_PLANESWALKER,
+    build_type_index, cards_of_printings, count_common_keywords, count_common_types,
+    narrow_candidates, run_query, trigram_candidates, CardData, CardIndexes, Candidates,
+    CollField, CmpOp, FilterExpr, InlineStr, Interner, ManaCost, OracleCard, Printing, TagIndex,
+    Tri, TrigramIndex, VocabInterner, NONE_STR, TYPE_ARTIFACT, TYPE_CREATURE, TYPE_INSTANT,
+    TYPE_LEGENDARY, TYPE_PLANESWALKER,
 };
 use rkyv::{rancor::Error, Archived};
 use std::collections::HashMap;
+
+/// String-sorted permutation of the vocab ids, as reload_commit builds it.
+fn sorted_vocab_ids(vocab: &[String]) -> Vec<u16> {
+    let mut ids: Vec<u16> = (0..vocab.len() as u16).collect();
+    ids.sort_unstable_by(|&a, &b| vocab[a as usize].cmp(&vocab[b as usize]));
+    ids
+}
 
 /// Intern a list of collection elements as sorted, deduped vocab ids (the load-time
 /// shape of the set-like collections).
@@ -14,13 +22,6 @@ fn vocab_ids(vocab: &mut VocabInterner, items: &[&str]) -> Vec<u16> {
     let mut ids: Vec<u16> = items.iter().map(|s| vocab.intern(s.to_string()).unwrap()).collect();
     ids.sort_unstable();
     ids.dedup();
-    ids
-}
-
-/// String-sorted permutation of the vocab ids, as reload_commit builds it.
-fn sorted_vocab_ids(vocab: &[String]) -> Vec<u16> {
-    let mut ids: Vec<u16> = (0..vocab.len() as u16).collect();
-    ids.sort_unstable_by(|&a, &b| vocab[a as usize].cmp(&vocab[b as usize]));
     ids
 }
 
@@ -126,88 +127,418 @@ fn test_tag_index_str_lookup() {
     assert!(archived.get("angel").is_none());
 }
 
+// ─── Two-level store fixtures ─────────────────────────────────────────────────
+
+/// Minimal oracle card; interned-string IDs are NONE_STR.
+fn stub_card(oracle_id: u128, card_types: u16, subtypes: &[&str], vocab: &mut VocabInterner) -> OracleCard {
+    OracleCard {
+        card_name_lower: InlineStr::from_str(""),
+        card_colors: 0,
+        card_color_identity: 0,
+        produced_mana: 0,
+        card_types,
+        legality_divergent: false,
+        oracle_id,
+        card_name_id: NONE_STR,
+        oracle_text_id: NONE_STR,
+        oracle_text_lower_id: NONE_STR,
+        card_layout_id: NONE_STR,
+        mana_cost_text_id: NONE_STR,
+        type_line_id: NONE_STR,
+        cmc: None,
+        creature_power: None,
+        creature_toughness: None,
+        planeswalker_loyalty: None,
+        edhrec_rank: None,
+        cubecobra_score: None,
+        card_subtypes: subtypes.iter().map(|s| vocab.intern(s.to_string()).unwrap()).collect(),
+        card_keywords: Vec::new(),
+        card_oracle_tags: Vec::new(),
+        card_legalities: 0,
+        mana_cost: ManaCost { pips: HashMap::new(), devotion: None, cmc: 0.0 },
+        creature_power_text_id: NONE_STR,
+        creature_toughness_text_id: NONE_STR,
+    }
+}
+
+/// Minimal printing.
+fn stub_printing(scryfall_id: u128, illustration_id: u128, prefer_score: Option<f32>) -> Printing {
+    Printing {
+        scryfall_id,
+        illustration_id,
+        flavor_text_id: NONE_STR,
+        flavor_text_lower_id: NONE_STR,
+        card_artist_id: NONE_STR,
+        card_artist_lower_id: NONE_STR,
+        card_set_code: InlineStr::from_str(""),
+        card_border_id: NONE_STR,
+        card_watermark_id: NONE_STR,
+        collector_number_id: NONE_STR,
+        set_name_id: NONE_STR,
+        released_at_int: None,
+        card_rarity_int: None,
+        collector_number_int: None,
+        price_usd: None,
+        price_eur: None,
+        price_tix: None,
+        prefer_score,
+        card_legalities: 0,
+        card_art_tags: Vec::new(),
+        card_is_tags: Vec::new(),
+        card_frame_data: Vec::new(),
+    }
+}
+
+/// Assemble a CardData where card i owns `printing_counts[i]` printings, in the
+/// store's within-bucket invariant order: descending default prefer_score (the
+/// first printing of each range is the default-preferred one). Printings get
+/// sequential scryfall/illustration ids starting at 1, and released_at values
+/// that make the LAST printing of each range the oldest.
+fn store_of(cards: Vec<OracleCard>, printing_counts: &[usize], vocab: VocabInterner) -> CardData {
+    assert_eq!(cards.len(), printing_counts.len());
+    let mut printings = Vec::new();
+    let mut offsets = vec![0u32];
+    let mut next_id = 1u128;
+    for &n in printing_counts {
+        for k in 0..n {
+            let mut p = stub_printing(next_id, next_id, Some((n - k) as f32));
+            p.released_at_int = Some(20200101 - (k as u32) * 10_000);
+            printings.push(p);
+            next_id += 1;
+        }
+        offsets.push(printings.len() as u32);
+    }
+    // Real type index so TypeCmp narrowing sees the cards (an empty Default
+    // index would narrow every type query to zero candidates).
+    let indexes = CardIndexes { type_bits: build_type_index(&cards), ..Default::default() };
+    CardData {
+        cards,
+        printings,
+        offsets,
+        strings: vec![],
+        coll_vocab_sorted: sorted_vocab_ids(&vocab.strings),
+        coll_vocab: vocab.strings,
+        indexes,
+        format_shifts: HashMap::new(),
+    }
+}
+
+// Verify that narrow_candidates returns printing-space candidates for art tags
+// and card-space candidates for keywords, and None (no narrowing) for absent tags.
+#[test]
+fn narrow_candidates_spaces() {
+    let mut art_tags: TagIndex = HashMap::new();
+    art_tags.insert("wolf".to_string(), vec![0, 2]);
+    let mut keywords: TagIndex = HashMap::new();
+    keywords.insert("Flying".to_string(), vec![1]);
+
+    let indexes = CardIndexes { art_tags, keywords, ..Default::default() };
+    let bytes = rkyv::to_bytes::<Error>(&indexes).expect("serialize");
+    let archived = rkyv::access::<Archived<CardIndexes>, Error>(&bytes).expect("access");
+    // offsets for 2 cards with 2 printings each: printings 0-1 → card 0, 2-3 → card 1
+    let offsets_bytes = rkyv::to_bytes::<Error>(&vec![0u32, 2, 4]).expect("serialize offsets");
+    let offsets = rkyv::access::<Archived<Vec<u32>>, Error>(&offsets_bytes).expect("access offsets");
+
+    let coll = |field, value: &str| FilterExpr::CollectionCmp {
+        field,
+        op: CmpOp::Ge,
+        value: value.to_string(),
+        value_id: None,
+    };
+
+    match narrow_candidates(&coll(CollField::ArtTags, "wolf"), archived, offsets) {
+        Some(Candidates::Printings(v)) => assert_eq!(v, vec![0, 2]),
+        _ => panic!("art tag must narrow in printing space"),
+    }
+    match narrow_candidates(&coll(CollField::Keywords, "Flying"), archived, offsets) {
+        Some(Candidates::Cards(v)) => assert_eq!(v, vec![1]),
+        _ => panic!("keyword must narrow in card space"),
+    }
+    // A tag not in the index cannot narrow; the eval step handles correctness.
+    assert!(narrow_candidates(&coll(CollField::ArtTags, "zombie"), archived, offsets).is_none());
+
+    // And of mixed spaces projects the printing product up and intersects in
+    // card space: art printings {0,2} → cards {0,1}, ∩ keyword cards {1} = {1}.
+    let and = FilterExpr::And(vec![coll(CollField::ArtTags, "wolf"), coll(CollField::Keywords, "Flying")]);
+    match narrow_candidates(&and, archived, offsets) {
+        Some(Candidates::Cards(v)) => assert_eq!(v, vec![1]),
+        _ => panic!("mixed And must produce card-space candidates"),
+    }
+}
+
+#[test]
+fn cards_of_printings_maps_and_dedups() {
+    let offsets_bytes = rkyv::to_bytes::<Error>(&vec![0u32, 3, 4, 7]).expect("serialize");
+    let offsets = rkyv::access::<Archived<Vec<u32>>, Error>(&offsets_bytes).expect("access");
+    // printings 0-2 → card 0, 3 → card 1, 4-6 → card 2
+    assert_eq!(cards_of_printings(offsets, &[0, 1, 2, 3, 5, 6]), vec![0, 1, 2]);
+    assert_eq!(cards_of_printings(offsets, &[1]), vec![0]);
+    assert_eq!(cards_of_printings(offsets, &[]), Vec::<u32>::new());
+}
+
+#[test]
+fn count_common_types_counts_every_card_once() {
+    // card 0: Legendary Planeswalker, subtype "Jace"
+    // card 1: Instant, no subtypes
+    // card 2: Artifact + Creature, subtype "Merfolk"
+    // card 3: Creature, subtypes ["Warrior", "Merfolk"]
+    let mut vocab = VocabInterner::new();
+    let cards = vec![
+        stub_card(1, TYPE_LEGENDARY | TYPE_PLANESWALKER, &["Jace"], &mut vocab),
+        stub_card(2, TYPE_INSTANT,                        &[], &mut vocab),
+        stub_card(3, TYPE_ARTIFACT | TYPE_CREATURE,       &["Merfolk"], &mut vocab),
+        stub_card(4, TYPE_CREATURE,                       &["Warrior", "Merfolk"], &mut vocab),
+    ];
+    // Multiple printings per card must not inflate the counts.
+    let data = store_of(cards, &[3, 1, 2, 1], vocab);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let counts = count_common_types(archived);
+
+    assert_eq!(counts.get("Legendary"),    Some(&1));
+    assert_eq!(counts.get("Planeswalker"), Some(&1));
+    assert_eq!(counts.get("Artifact"),     Some(&1));
+    assert_eq!(counts.get("Creature"),     Some(&2)); // cards 2 and 3
+    assert_eq!(counts.get("Instant"),      Some(&1));
+    assert_eq!(counts.get("Merfolk"),  Some(&2));
+    assert_eq!(counts.get("Warrior"),  Some(&1));
+    assert_eq!(counts.get("Jace"),     Some(&1));
+    assert_eq!(counts.get("Land"),   None);
+    assert_eq!(counts.get("Sorcery"), None);
+}
+
+#[test]
+fn count_common_keywords_counts_every_card_once() {
+    let mut vocab = VocabInterner::new();
+    let mut card0 = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
+    card0.card_keywords = vocab_ids(&mut vocab, &["Flying", "Haste"]);
+    let mut card1 = stub_card(2, TYPE_INSTANT, &[], &mut vocab);
+    card1.card_keywords = vocab_ids(&mut vocab, &["Trample"]);
+    let mut card2 = stub_card(3, TYPE_CREATURE, &[], &mut vocab);
+    card2.card_keywords = vocab_ids(&mut vocab, &["Flying"]);
+
+    let data = store_of(vec![card0, card1, card2], &[2, 1, 4], vocab);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let counts = count_common_keywords(archived);
+    assert_eq!(counts.get("Flying"),  Some(&2));
+    assert_eq!(counts.get("Haste"),   Some(&1));
+    assert_eq!(counts.get("Trample"), Some(&1));
+}
+
+#[test]
+fn collection_cmp_binds_vocab_ids_and_matches() {
+    // First-seen intern order ("Trample" before "Flying") differs from the
+    // alphabetical order the sorted permutation provides, so this exercises
+    // the binary-search resolution rather than a trivial identity mapping.
+    let mut vocab = VocabInterner::new();
+    let mut card0 = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
+    card0.card_keywords = vocab_ids(&mut vocab, &["Trample", "Flying"]);
+    let mut card1 = stub_card(2, TYPE_CREATURE, &[], &mut vocab);
+    card1.card_keywords = vocab_ids(&mut vocab, &["Haste"]);
+    let card2 = stub_card(3, TYPE_CREATURE, &[], &mut vocab); // no keywords
+
+    let data = store_of(vec![card0, card1, card2], &[1, 1, 1], vocab);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    // Keywords are card-level, so the card pass alone must fully decide.
+    let run = |value: &str, op: CmpOp| -> Vec<bool> {
+        let mut f = FilterExpr::CollectionCmp {
+            field: CollField::Keywords,
+            op,
+            value: value.to_string(),
+            value_id: None,
+        };
+        f.bind_collection_ids(&archived.coll_vocab, &archived.coll_vocab_sorted);
+        archived.cards.iter().map(|c| f.eval_card(c, &archived.strings) == Tri::True).collect()
+    };
+
+    assert_eq!(run("Flying", CmpOp::Ge),  vec![true, false, false]);
+    assert_eq!(run("Haste", CmpOp::Ge),   vec![false, true, false]);
+    assert_eq!(run("Haste", CmpOp::Eq),   vec![false, true, false]); // exactly {Haste}
+    assert_eq!(run("Flying", CmpOp::Eq),  vec![false, false, false]); // card0 has two keywords
+    assert_eq!(run("Flying", CmpOp::Ne),  vec![true, true, true]);
+    // A value absent from the vocab matches no element: Ge nothing, Le only empty.
+    assert_eq!(run("Deathtouch", CmpOp::Ge), vec![false, false, false]);
+    assert_eq!(run("Deathtouch", CmpOp::Le), vec![false, false, true]);
+}
+
+#[test]
+fn printing_level_predicates_are_printing_dep_in_card_pass() {
+    let mut vocab = VocabInterner::new();
+    let card0 = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
+    let wolf_ids = vocab_ids(&mut vocab, &["wolf"]);
+    let mut data = store_of(vec![card0], &[2], vocab);
+    data.printings[1].card_art_tags = wolf_ids;
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let mut f = FilterExpr::CollectionCmp {
+        field: CollField::ArtTags,
+        op: CmpOp::Ge,
+        value: "wolf".to_string(),
+        value_id: None,
+    };
+    f.bind_collection_ids(&archived.coll_vocab, &archived.coll_vocab_sorted);
+
+    let card = &archived.cards[0];
+    // Card pass can't decide an art-tag predicate...
+    assert!(f.eval_card(card, &archived.strings) == Tri::PrintingDep);
+    // ...but per-printing evaluation is exact.
+    assert!(!f.matches(card, &archived.printings[0], &archived.strings));
+    assert!(f.matches(card, &archived.printings[1], &archived.strings));
+
+    // Negation keeps printing-dependence (NOT PrintingDep = PrintingDep).
+    let g = FilterExpr::Not(Box::new(f));
+    assert!(g.eval_card(card, &archived.strings) == Tri::PrintingDep);
+    assert!(g.matches(card, &archived.printings[0], &archived.strings));
+    assert!(!g.matches(card, &archived.printings[1], &archived.strings));
+}
+
+#[test]
+fn divergent_legality_defers_to_printings() {
+    let mut vocab = VocabInterner::new();
+    let mut card0 = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
+    card0.card_legalities = 0b01; // legal at shift 0
+    let mut card1 = stub_card(2, TYPE_CREATURE, &[], &mut vocab);
+    card1.card_legalities = 0b01;
+    card1.legality_divergent = true;
+    let mut data = store_of(vec![card0, card1], &[1, 2], vocab);
+    data.printings[1].card_legalities = 0b01; // tournament printing: legal
+    data.printings[2].card_legalities = 0b00; // 30A-style printing: not legal
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let f = FilterExpr::Legality { shift: Some(0), expected: 0b01 };
+
+    // Non-divergent card: exact at card level.
+    assert!(f.eval_card(&archived.cards[0], &archived.strings) == Tri::True);
+    // Divergent card: card pass defers, printings decide individually.
+    assert!(f.eval_card(&archived.cards[1], &archived.strings) == Tri::PrintingDep);
+    assert!(f.matches(&archived.cards[1], &archived.printings[1], &archived.strings));
+    assert!(!f.matches(&archived.cards[1], &archived.printings[2], &archived.strings));
+}
+
+#[test]
+fn run_query_walk_dedups_and_prefers() {
+    // card 0: Creature with 3 printings, card 1: Instant with 1, card 2: Creature with 2.
+    // store_of orders each bucket by descending prefer score, so the first
+    // printing of each range is the default-preferred one and the last is the
+    // oldest by released_at.
+    let mut vocab = VocabInterner::new();
+    let cards = vec![
+        stub_card(1, TYPE_CREATURE, &[], &mut vocab),
+        stub_card(2, TYPE_INSTANT, &[], &mut vocab),
+        stub_card(3, TYPE_CREATURE, &[], &mut vocab),
+    ];
+    let data = store_of(cards, &[3, 1, 2], vocab);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let creatures = FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
+    let run = |unique: &str, prefer: &str| {
+        run_query(
+            &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+            &creatures, unique, prefer, "edhrec", "asc", 100, 0, &archived.indexes,
+        )
+    };
+
+    // unique=card, default prefer: one result per matching card; the walk's
+    // early exit takes the first printing of each range (ids 1 and 5).
+    let (total, page) = run("card", "default");
+    assert_eq!(total, 2);
+    let chosen: Vec<u128> = page.iter().map(|(_, p)| u128::from(p.scryfall_id)).collect();
+    assert!(chosen.contains(&1) && chosen.contains(&5));
+
+    // unique=printing: every matching printing (3 + 2 creatures).
+    let (total, _) = run("printing", "default");
+    assert_eq!(total, 5);
+
+    // unique=artwork: every printing has a distinct illustration here, so all 5 groups.
+    let (total, _) = run("artwork", "default");
+    assert_eq!(total, 5);
+
+    // prefer=oldest scans each range and picks the smallest released_at —
+    // the LAST printing of each range in store_of's construction (ids 3 and 6).
+    let (total, page) = run("card", "oldest");
+    assert_eq!(total, 2);
+    let chosen: Vec<u128> = page.iter().map(|(_, p)| u128::from(p.scryfall_id)).collect();
+    assert!(chosen.contains(&3) && chosen.contains(&6));
+}
+
+#[test]
+fn run_query_artwork_groups_shared_illustrations() {
+    // One card, 4 printings; printings 0 and 2 share an illustration.
+    let mut vocab = VocabInterner::new();
+    let cards = vec![stub_card(1, TYPE_CREATURE, &[], &mut vocab)];
+    let mut data = store_of(cards, &[4], vocab);
+    // ids from store_of: scryfall/illustration 1,2,3,4. Make printing 2 share
+    // printing 0's illustration (non-contiguous under prefer-desc order).
+    data.printings[2].illustration_id = 1;
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let all = FilterExpr::True;
+    let (total, page) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &all, "artwork", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+    );
+    assert_eq!(total, 3); // illustrations {1, 2, 4}
+    // Group {printings 0, 2}: printing 0 has the higher prefer score (desc order)
+    // and must be the group's representative.
+    let chosen: Vec<u128> = page.iter().map(|(_, p)| u128::from(p.scryfall_id)).collect();
+    assert!(chosen.contains(&1) && !chosen.contains(&3));
+}
+
 /// Measures checked rkyv::access vs access_unchecked on a production-scale
 /// archive. This is the evidence behind the access_unchecked safety comments
 /// on query()/size(): checked access re-validates the entire archive graph
-/// on every call, which is milliseconds per call at ~100k cards — orders of
-/// magnitude over total query time. Run with:
+/// on every call, which is milliseconds per call at ~100k printings — orders
+/// of magnitude over total query time. Run with:
 ///   cargo test --release -- --ignored bench_checked_vs_unchecked --nocapture
 #[test]
 #[ignore]
 fn bench_checked_vs_unchecked_access() {
-    const N: usize = 96_000;
+    const N_CARDS: usize = 31_500;
+    const PRINTINGS_PER_CARD: usize = 3;
     let words = ["draw", "card", "creature", "destroy", "target", "flying", "counter", "spell", "token", "exile"];
     let mut interner = Interner::new();
     let mut vocab = VocabInterner::new();
-    let mut cards: Vec<Card> = Vec::with_capacity(N);
-    for i in 0..N {
+    let mut cards: Vec<OracleCard> = Vec::with_capacity(N_CARDS);
+    let mut printings: Vec<Printing> = Vec::with_capacity(N_CARDS * PRINTINGS_PER_CARD);
+    let mut offsets: Vec<u32> = Vec::with_capacity(N_CARDS + 1);
+    for i in 0..N_CARDS {
         let name = format!("Benchmark Card Number {i}");
-        // Oracle text keyed on i/3 so printings share texts ~3x, matching the
-        // real dataset's duplication (and exercising the CSR oracle index).
-        let group = i / 3;
         let oracle = format!(
             "{}: {} a {} {}, then {} {} cards. This text is representative filler standing in for \
-             real oracle text so string validation cost is realistic for card group {group}.",
-            words[group % 10], words[(group + 1) % 10], words[(group + 2) % 10],
-            words[(group + 3) % 10], words[(group + 4) % 10], words[(group + 5) % 10],
+             real oracle text so string validation cost is realistic for card group {i}.",
+            words[i % 10], words[(i + 1) % 10], words[(i + 2) % 10],
+            words[(i + 3) % 10], words[(i + 4) % 10], words[(i + 5) % 10],
         );
-        let flavor = format!("Flavor text for card {i}, roughly the length of a real flavor quote in the dataset.");
-        cards.push(Card {
-            card_name_lower: InlineStr::from_str(&name.to_lowercase()),
-            card_colors: (i % 32) as u8,
-            card_color_identity: (i % 32) as u8,
-            produced_mana: 0,
-            card_types: TYPE_CREATURE,
-            scryfall_id: (i + 1) as u128,
-            oracle_id: (group + 1) as u128,
-            illustration_id: (i + 1) as u128,
-            card_name_id: interner.intern(name.clone()),
-            oracle_text_id: interner.intern(oracle.clone()),
-            oracle_text_lower_id: interner.intern(oracle.to_lowercase()),
-            flavor_text_id: interner.intern(flavor.clone()),
-            flavor_text_lower_id: interner.intern(flavor.to_lowercase()),
-            card_artist_id: interner.intern(format!("Artist {}", i % 1000)),
-            card_artist_lower_id: interner.intern(format!("artist {}", i % 1000)),
-            card_set_code: InlineStr::from_str("bench"),
-            card_layout_id: interner.intern("normal".to_string()),
-            card_border_id: interner.intern("black".to_string()),
-            card_watermark_id: NONE_STR,
-            collector_number_id: interner.intern(format!("{}", i % 500)),
-            mana_cost_text_id: interner.intern("{2}{G}{G}".to_string()),
-            type_line_id: interner.intern("Creature — Benchmark".to_string()),
-            set_name_id: interner.intern(format!("Benchmark Set {}", i % 300)),
-            released_at_int: Some(20240101),
-            cmc: Some((i % 8) as u8),
-            creature_power: Some((i % 10) as i8),
-            creature_toughness: Some((i % 10) as i8),
-            planeswalker_loyalty: None,
-            card_rarity_int: Some((i % 4) as u8),
-            collector_number_int: Some((i % 500) as u16),
-            edhrec_rank: Some(i as u32),
-            price_usd: Some(1.0),
-            price_eur: Some(1.0),
-            price_tix: Some(0.1),
-            prefer_score: None,
-            cubecobra_score: None,
-            card_subtypes: vec![
-                vocab.intern("Benchmark".to_string()).unwrap(),
-                vocab.intern(words[i % 10].to_string()).unwrap(),
-            ],
-            card_keywords: vocab_ids(&mut vocab, &[words[i % 10]]),
-            card_legalities: 0,
-            card_oracle_tags: vocab_ids(&mut vocab, &[&format!("tag-{}", i % 100)]),
-            card_art_tags: Vec::new(),
-            card_is_tags: Vec::new(),
-            card_frame_data: Vec::new(),
-            mana_cost: ManaCost {
-                pips: HashMap::from([("G".to_string(), 2u8)]),
-                devotion: None,
-                cmc: (i % 8) as f32,
-            },
-            creature_power_text_id: NONE_STR,
-            creature_toughness_text_id: NONE_STR,
-        });
+        let mut card = stub_card((i + 1) as u128, TYPE_CREATURE, &["Benchmark", words[i % 10]], &mut vocab);
+        card.card_name_lower = InlineStr::from_str(&name.to_lowercase());
+        card.card_name_id = interner.intern(name.clone());
+        card.oracle_text_id = interner.intern(oracle.clone());
+        card.oracle_text_lower_id = interner.intern(oracle.to_lowercase());
+        card.card_keywords = vocab_ids(&mut vocab, &[words[i % 10]]);
+        card.cmc = Some((i % 8) as u8);
+        offsets.push(printings.len() as u32);
+        for k in 0..PRINTINGS_PER_CARD {
+            let flavor = format!("Flavor text for printing {i}-{k}, roughly the length of a real flavor quote.");
+            let pid = (i * PRINTINGS_PER_CARD + k + 1) as u128;
+            let mut p = stub_printing(pid, pid, Some((PRINTINGS_PER_CARD - k) as f32));
+            p.flavor_text_id = interner.intern(flavor.clone());
+            p.flavor_text_lower_id = interner.intern(flavor.to_lowercase());
+            p.card_artist_id = interner.intern(format!("Artist {}", i % 1000));
+            p.set_name_id = interner.intern(format!("Benchmark Set {}", i % 300));
+            printings.push(p);
+        }
+        cards.push(card);
     }
+    offsets.push(printings.len() as u32);
     let strings = interner.strings;
 
     let indexes = CardIndexes {
@@ -220,17 +551,18 @@ fn bench_checked_vs_unchecked_access() {
         subtypes:       build_tag_index(&cards, &vocab.strings, |c| &c.card_subtypes),
         keywords:       build_tag_index(&cards, &vocab.strings, |c| &c.card_keywords),
         oracle_tags:    build_tag_index(&cards, &vocab.strings, |c| &c.card_oracle_tags),
-        art_tags:       build_tag_index(&cards, &vocab.strings, |c| &c.card_art_tags),
-        is_tags:        build_tag_index(&cards, &vocab.strings, |c| &c.card_is_tags),
+        art_tags:       build_tag_index(&printings, &vocab.strings, |p| &p.card_art_tags),
+        is_tags:        build_tag_index(&printings, &vocab.strings, |p| &p.card_is_tags),
     };
     let data = CardData {
         cards,
+        printings,
+        offsets,
         strings,
         coll_vocab_sorted: sorted_vocab_ids(&vocab.strings),
         coll_vocab: vocab.strings,
         indexes,
         format_shifts: HashMap::new(),
-        preferred_indices: Vec::new(),
     };
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     println!("archive size: {:.1} MB", bytes.len() as f64 / 1e6);
@@ -239,233 +571,17 @@ fn bench_checked_vs_unchecked_access() {
     let t = std::time::Instant::now();
     for _ in 0..ITERS {
         let a = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("checked access");
-        assert_eq!(a.cards.len(), N);
+        assert_eq!(a.printings.len(), N_CARDS * PRINTINGS_PER_CARD);
     }
     let checked = t.elapsed() / ITERS;
 
     let t = std::time::Instant::now();
     for _ in 0..ITERS {
         let a = unsafe { rkyv::access_unchecked::<Archived<CardData>>(&bytes) };
-        assert_eq!(a.cards.len(), N);
+        assert_eq!(a.printings.len(), N_CARDS * PRINTINGS_PER_CARD);
     }
     let unchecked = t.elapsed() / ITERS;
 
     println!("checked rkyv::access:   {checked:?} per call");
     println!("access_unchecked:       {unchecked:?} per call");
-}
-
-// Verify that narrow_candidates returns the correct card ids for an art tag
-// that is present in the index, and returns None (no narrowing) for an absent tag.
-#[test]
-fn narrow_candidates_art_tags() {
-    let mut art_tags: TagIndex = HashMap::new();
-    art_tags.insert("wolf".to_string(), vec![0, 2]);
-    art_tags.insert("dragon".to_string(), vec![1]);
-
-    let indexes = CardIndexes { art_tags, ..Default::default() };
-    let bytes = rkyv::to_bytes::<Error>(&indexes).expect("serialize");
-    let archived = rkyv::access::<Archived<CardIndexes>, Error>(&bytes).expect("access");
-
-    let present = FilterExpr::CollectionCmp {
-        field: CollField::ArtTags,
-        op: CmpOp::Ge,
-        value: "wolf".to_string(),
-        value_id: None,
-    };
-    assert_eq!(narrow_candidates(&present, archived), Some(vec![0, 2]));
-
-    // A tag not in the index cannot narrow; the eval step handles correctness.
-    let absent = FilterExpr::CollectionCmp {
-        field: CollField::ArtTags,
-        op: CmpOp::Ge,
-        value: "zombie".to_string(),
-        value_id: None,
-    };
-    assert_eq!(narrow_candidates(&absent, archived), None);
-}
-
-/// Minimal card for tests that only care about card_types and card_subtypes.
-/// All interned-string IDs are NONE_STR; count_common_types never reads them.
-/// Subtypes are interned into `vocab`, which must become the CardData's coll_vocab.
-fn stub_card(card_types: u16, subtypes: &[&str], vocab: &mut VocabInterner) -> Card {
-    let card_subtypes = subtypes.iter().map(|s| vocab.intern(s.to_string()).unwrap()).collect();
-    Card {
-        card_name_lower: InlineStr::from_str(""),
-        card_colors: 0,
-        card_color_identity: 0,
-        produced_mana: 0,
-        card_types,
-        scryfall_id: 0,
-        oracle_id: 0,
-        illustration_id: 0,
-        card_name_id: NONE_STR,
-        oracle_text_id: NONE_STR,
-        oracle_text_lower_id: NONE_STR,
-        flavor_text_id: NONE_STR,
-        flavor_text_lower_id: NONE_STR,
-        card_artist_id: NONE_STR,
-        card_artist_lower_id: NONE_STR,
-        card_set_code: InlineStr::from_str(""),
-        card_layout_id: NONE_STR,
-        card_border_id: NONE_STR,
-        card_watermark_id: NONE_STR,
-        collector_number_id: NONE_STR,
-        mana_cost_text_id: NONE_STR,
-        type_line_id: NONE_STR,
-        set_name_id: NONE_STR,
-        released_at_int: None,
-        cmc: None,
-        creature_power: None,
-        creature_toughness: None,
-        planeswalker_loyalty: None,
-        card_rarity_int: None,
-        collector_number_int: None,
-        edhrec_rank: None,
-        price_usd: None,
-        price_eur: None,
-        price_tix: None,
-        prefer_score: None,
-        cubecobra_score: None,
-        card_subtypes,
-        card_keywords: Vec::new(),
-        card_legalities: 0,
-        card_oracle_tags: Vec::new(),
-        card_art_tags: Vec::new(),
-        card_is_tags: Vec::new(),
-        card_frame_data: Vec::new(),
-        mana_cost: ManaCost { pips: HashMap::new(), devotion: None, cmc: 0.0 },
-        creature_power_text_id: NONE_STR,
-        creature_toughness_text_id: NONE_STR,
-    }
-}
-
-#[test]
-fn count_common_types_sums_preferred_only() {
-    // card 0: Legendary Planeswalker, subtype "Jace"   — preferred
-    // card 1: Instant, no subtypes                     — not preferred (skipped)
-    // card 2: Artifact + Creature, subtype "Merfolk"   — preferred
-    // card 3: Creature, subtypes ["Warrior", "Merfolk"] — preferred
-    let mut vocab = VocabInterner::new();
-    let cards = vec![
-        stub_card(TYPE_LEGENDARY | TYPE_PLANESWALKER, &["Jace"], &mut vocab),
-        stub_card(TYPE_INSTANT,                        &[], &mut vocab),
-        stub_card(TYPE_ARTIFACT | TYPE_CREATURE,       &["Merfolk"], &mut vocab),
-        stub_card(TYPE_CREATURE,                       &["Warrior", "Merfolk"], &mut vocab),
-    ];
-    let data = CardData {
-        cards,
-        strings: vec![],
-        coll_vocab_sorted: sorted_vocab_ids(&vocab.strings),
-        coll_vocab: vocab.strings,
-        indexes: CardIndexes::default(),
-        format_shifts: HashMap::new(),
-        preferred_indices: vec![0, 2, 3], // card 1 (Instant) excluded
-    };
-    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
-    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
-
-    let counts = count_common_types(archived);
-
-    // Type bits decoded correctly from the bitmask.
-    assert_eq!(counts.get("Legendary"),    Some(&1));
-    assert_eq!(counts.get("Planeswalker"), Some(&1));
-    assert_eq!(counts.get("Artifact"),     Some(&1));
-    assert_eq!(counts.get("Creature"),     Some(&2)); // cards 2 and 3
-
-    // Card 1 (Instant) is not in preferred_indices — must be absent.
-    assert_eq!(counts.get("Instant"), None);
-
-    // Subtypes borrowed from archive strings; "Merfolk" appears in two preferred cards.
-    assert_eq!(counts.get("Merfolk"),  Some(&2));
-    assert_eq!(counts.get("Warrior"),  Some(&1));
-    assert_eq!(counts.get("Jace"),     Some(&1));
-
-    // Types with zero count are never emitted.
-    assert_eq!(counts.get("Land"),   None);
-    assert_eq!(counts.get("Sorcery"), None);
-}
-
-#[test]
-fn count_common_keywords_sums_preferred_only() {
-    // card 0: Flying + Haste  — preferred
-    // card 1: Trample         — not preferred (skipped)
-    // card 2: Flying          — preferred
-    // card 3: Vigilance       — preferred
-    let mut vocab = VocabInterner::new();
-    let mut card0 = stub_card(TYPE_CREATURE, &[], &mut vocab);
-    card0.card_keywords = vocab_ids(&mut vocab, &["Flying", "Haste"]);
-    let mut card1 = stub_card(TYPE_INSTANT, &[], &mut vocab);
-    card1.card_keywords = vocab_ids(&mut vocab, &["Trample"]);
-    let mut card2 = stub_card(TYPE_CREATURE, &[], &mut vocab);
-    card2.card_keywords = vocab_ids(&mut vocab, &["Flying"]);
-    let mut card3 = stub_card(TYPE_ARTIFACT, &[], &mut vocab);
-    card3.card_keywords = vocab_ids(&mut vocab, &["Vigilance"]);
-
-    let data = CardData {
-        cards: vec![card0, card1, card2, card3],
-        strings: vec![],
-        coll_vocab_sorted: sorted_vocab_ids(&vocab.strings),
-        coll_vocab: vocab.strings,
-        indexes: CardIndexes::default(),
-        format_shifts: HashMap::new(),
-        preferred_indices: vec![0, 2, 3], // card 1 (Instant) excluded
-    };
-    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
-    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
-
-    let counts = count_common_keywords(archived);
-
-    // Flying appears on cards 0 and 2 (both preferred).
-    assert_eq!(counts.get("Flying"), Some(&2));
-    // Haste only on card 0 (preferred).
-    assert_eq!(counts.get("Haste"), Some(&1));
-    // Vigilance only on card 3 (preferred).
-    assert_eq!(counts.get("Vigilance"), Some(&1));
-    // Trample on card 1 — not preferred, must be absent.
-    assert_eq!(counts.get("Trample"), None);
-}
-
-#[test]
-fn collection_cmp_binds_vocab_ids_and_matches() {
-    // First-seen intern order ("Trample" before "Flying") differs from the
-    // alphabetical order the sorted permutation provides, so this exercises
-    // the binary-search resolution rather than a trivial identity mapping.
-    let mut vocab = VocabInterner::new();
-    let mut card0 = stub_card(TYPE_CREATURE, &[], &mut vocab);
-    card0.card_keywords = vocab_ids(&mut vocab, &["Trample", "Flying"]);
-    let mut card1 = stub_card(TYPE_CREATURE, &[], &mut vocab);
-    card1.card_keywords = vocab_ids(&mut vocab, &["Haste"]);
-    let card2 = stub_card(TYPE_CREATURE, &[], &mut vocab); // no keywords
-
-    let data = CardData {
-        cards: vec![card0, card1, card2],
-        strings: vec![],
-        coll_vocab_sorted: sorted_vocab_ids(&vocab.strings),
-        coll_vocab: vocab.strings,
-        indexes: CardIndexes::default(),
-        format_shifts: HashMap::new(),
-        preferred_indices: vec![],
-    };
-    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
-    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
-
-    let run = |value: &str, op: CmpOp| -> Vec<bool> {
-        let mut f = FilterExpr::CollectionCmp {
-            field: CollField::Keywords,
-            op,
-            value: value.to_string(),
-            value_id: None,
-        };
-        f.bind_collection_ids(&archived.coll_vocab, &archived.coll_vocab_sorted);
-        archived.cards.iter().map(|c| f.matches(c, &archived.strings)).collect()
-    };
-
-    assert_eq!(run("Flying", CmpOp::Ge),  vec![true, false, false]);
-    assert_eq!(run("Haste", CmpOp::Ge),   vec![false, true, false]);
-    assert_eq!(run("Haste", CmpOp::Eq),   vec![false, true, false]); // exactly {Haste}
-    assert_eq!(run("Flying", CmpOp::Eq),  vec![false, false, false]); // card0 has two keywords
-    assert_eq!(run("Flying", CmpOp::Ne),  vec![true, true, true]);
-    // A value absent from the vocab matches no element: Ge nothing, Le only empty.
-    assert_eq!(run("Deathtouch", CmpOp::Ge), vec![false, false, false]);
-    assert_eq!(run("Deathtouch", CmpOp::Le), vec![false, false, true]);
 }
