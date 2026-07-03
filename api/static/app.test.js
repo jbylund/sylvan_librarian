@@ -376,10 +376,17 @@ describe('CardSearch balanceQuery', () => {
     ['("hello', '("hello")'],
     ['', ''],
     ['(oracle:"test', '(oracle:"test")'],
-    ['hello)', 'hello)('],
-    ['"test\' ', '"test\' "'],
   ])('balances %p to %p', (query, expected) => {
     expect(search.balanceQuery(query)).toBe(expected);
+  });
+
+  it('appends the mirrored opener after an unmatched closing parenthesis', () => {
+    expect(search.balanceQuery('hello)')).toBe('hello)(');
+  });
+
+  it('balances alternating quote characters by closing only the active opener', () => {
+    expect(search.balanceQuery('"test\' ')).toBe('"test\' "');
+    expect(search.balanceQuery("'test\" ")).toBe("'test\" '");
   });
 });
 
@@ -398,7 +405,7 @@ describe('CardSearch getColumnsFromViewportWidth', () => {
     [1370, 4],
     [2499, 4],
     [2500, 5],
-  ])('returns %p columns at width %p', (width, expectedColumns) => {
+  ])('at width %p returns %p columns', (width, expectedColumns) => {
     window.innerWidth = width;
     expect(search.getColumnsFromViewportWidth()).toBe(expectedColumns);
   });
