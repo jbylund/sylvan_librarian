@@ -47,6 +47,7 @@ const { CardSearch, CatalogMap } = Function(appCode + '; return {CardSearch, Cat
 // ---------------------------------------------------------------------------
 
 const LIVE_CARD_TYPES = require('./fixtures/common_card_types.json');
+const BALANCE_QUERIES = require('./fixtures/balance_queries.json');
 
 // Derived fixture: new catalog format expected by the /get_catalog endpoint
 const LIVE_TYPES_MAP = Object.fromEntries(LIVE_CARD_TYPES.map(({ t, n }) => [t, n]));
@@ -366,35 +367,9 @@ describe('CardSearch convertManaSymbolsToText', () => {
 });
 
 describe('CardSearch balanceQuery', () => {
-  it.each([
-    ['(hello', '(hello)'],
-    ['"hello', '"hello"'],
-    ["'hello", "'hello'"],
-    ['(hello)', '(hello)'],
-    ['((hello', '((hello))'],
-    ['(a (b', '(a (b))'],
-    ['("hello', '("hello")'],
-    ['', ''],
-    ['(oracle:"test', '(oracle:"test")'],
-  ])('balances %p to %p', (query, expected) => {
-    expect(search.balanceQuery(query)).toBe(expected);
-  });
-
-  it('returns the query unchanged when a closing paren has no matching opener', () => {
-    // Matches balance_partial_query in api/parsing/parsing_f.py, which treats
-    // a stray closer as unbalance-able rather than fabricating an opener.
-    expect(search.balanceQuery('hello)')).toBe('hello)');
-    expect(search.balanceQuery(')(')).toBe(')(');
-  });
-
-  it('ignores closing parens inside quoted strings', () => {
-    expect(search.balanceQuery('"a)"')).toBe('"a)"');
-    expect(search.balanceQuery('"a)')).toBe('"a)"');
-  });
-
-  it('balances alternating quote characters by closing only the active opener', () => {
-    expect(search.balanceQuery('"test\' ')).toBe('"test\' "');
-    expect(search.balanceQuery('\'test" ')).toBe("'test\" '");
+  it.each(BALANCE_QUERIES)('matches parity fixture for $input', ({ input, suffix }) => {
+    expect(search.balanceSuffix(input)).toBe(suffix);
+    expect(search.balanceQuery(input)).toBe(suffix === null ? input : input + suffix);
   });
 });
 

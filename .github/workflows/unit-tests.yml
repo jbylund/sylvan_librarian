@@ -12,6 +12,7 @@ on:
       - '**/Cargo.lock'
       - 'requirements/**'
       - '**/pyproject.toml'
+      - 'api/static/fixtures/**'
       - '.github/workflows/unit-tests.yml'
 
 permissions:
