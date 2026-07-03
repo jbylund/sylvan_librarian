@@ -78,6 +78,10 @@ def _rss_mb() -> str:
 
 FALLBACK_SITE_NAME = "MTG Search"
 
+# Placeholder written into index.html/card.html wherever the site name belongs, so the substitution
+# below can't accidentally match unrelated copy that happens to contain "MTG Search".
+_SITE_NAME_PLACEHOLDER = "%%%SITENAME%%%"
+
 # Selectors extracted from styles.css and inlined in the HTML <style> block to prevent
 # layout shift on pages with server-side rendered results. Excludes hover/focus states,
 # animations, and modal styles (not visible on initial paint).
@@ -463,9 +467,7 @@ def _build_base_html(critical_css: str, site_name: str) -> str:
         html = html.replace("/static/styles.css", f"/static/styles.css?v={_STYLES_CSS_HASH}")
     if _APP_MIN_JS_HASH:
         html = html.replace("/static/app.min.js", f"/static/app.min.js?v={_APP_MIN_JS_HASH}")
-    if site_name != FALLBACK_SITE_NAME:
-        html = html.replace(FALLBACK_SITE_NAME, site_name)
-    return _minify_html(html)
+    return _minify_html(html.replace(_SITE_NAME_PLACEHOLDER, site_name))
 
 
 @cached(cache=LRUCache(maxsize=4))
@@ -1741,9 +1743,7 @@ class APIResource:
             return
         site_name = hostname_to_site_name(request_host)
         html = _build_card_html(self._critical_css)
-        if site_name != FALLBACK_SITE_NAME:
-            html = html.replace(FALLBACK_SITE_NAME, site_name)
-        falcon_response.text = html
+        falcon_response.text = html.replace(_SITE_NAME_PLACEHOLDER, site_name)
         falcon_response.content_type = "text/html"
         set_cache_header(falcon_response, duration=timedelta(hours=1))
 

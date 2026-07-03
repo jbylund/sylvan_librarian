@@ -964,9 +964,7 @@ class CardSearch {
     console.debug('Showing loading');
     // Do not toggle card/result visibility; only update the status container
     if (this.statusMessage) {
-      const inner = query
-        ? `Searching <code class="raw-query">${this.escapeHtml(query)}</code>…`
-        : 'Loading…';
+      const inner = query ? `Searching <code class="raw-query">${this.escapeHtml(query)}</code>…` : 'Loading…';
       this.statusMessage.innerHTML = `<div class="results-count">${inner}</div>`;
     }
     this.clearResultsContainer();
@@ -1008,9 +1006,15 @@ class CardSearch {
     if (query) {
       const truncatedExplanation = explanation ? this.truncateExplanation(explanation) : explanation;
       if (truncatedExplanation) {
-        msg = count === 0 ? `No ${itemType} found where ${truncatedExplanation}` : `${formattedCount} ${itemType} where ${truncatedExplanation}`;
+        msg =
+          count === 0
+            ? `No ${itemType} found where ${truncatedExplanation}`
+            : `${formattedCount} ${itemType} where ${truncatedExplanation}`;
       } else {
-        msg = count === 0 ? `No ${itemType} found matching "${query}"` : `Found ${formattedCount} ${itemType} matching "${query}"`;
+        msg =
+          count === 0
+            ? `No ${itemType} found matching "${query}"`
+            : `Found ${formattedCount} ${itemType} matching "${query}"`;
       }
       if (typeof elapsed === 'number') {
         msg += ` (completed in ${elapsed}ms)`;
