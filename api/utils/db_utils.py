@@ -19,15 +19,6 @@ logger = logging.getLogger(__name__)
 CONFLICT = 409
 
 
-class UUIDToStringLoader(psycopg.adapt.Loader):
-    """Loader that converts UUID data from PostgreSQL to strings."""
-
-    def load(self, data: memoryview) -> str:
-        """Convert UUID bytes to string representation."""
-        # UUID data comes as bytes, convert to string
-        return data.tobytes().decode("utf-8")
-
-
 def get_pg_creds() -> dict[str, str]:
     """Get postgres credentials from the environment."""
     mapping = {
@@ -89,9 +80,6 @@ def get_testcontainers_creds() -> dict[str, str]:
 def configure_connection(conn: psycopg.Connection) -> None:
     """Configure a connection to use dict_row as the row factory."""
     conn.row_factory = psycopg.rows.dict_row
-    # Register UUID loader to convert UUID data to strings
-    # UUID type OID in PostgreSQL is 2950
-    psycopg.adapters.register_loader(2950, UUIDToStringLoader)
 
 
 def make_pool() -> psycopg_pool.ConnectionPool:
