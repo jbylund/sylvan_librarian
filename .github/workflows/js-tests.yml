@@ -7,6 +7,7 @@ on:
   pull_request:
     paths:
       - '**/*.js'
+      - 'api/static/fixtures/**'
       - 'package.json'
       - 'package-lock.json'
       - '.github/workflows/js-tests.yml'
