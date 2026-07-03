@@ -1300,12 +1300,16 @@ fn run_query<'a>(
 
     let mut best: Vec<Match> = Vec::new();
     let mut groups: Vec<(u128, u32, f64)> = Vec::new(); // artwork-mode scratch, reused per card
+    // card_pass residual: the top-level children still printing-dependent for
+    // the current card (reused buffer; see FilterExpr::card_pass).
+    let mut residual: Vec<&FilterExpr> = Vec::new();
+    let mut residual_is_or = false;
     for cid in card_ids {
         let card = &cards[cid as usize];
-        let all_match = match filter.eval_card(card, strings) {
+        let all_match = match filter.card_pass(card, strings, &mut residual, &mut residual_is_or) {
             Tri::False | Tri::Null => continue,
             Tri::True => true,          // every printing matches: skip per-printing checks
-            Tri::PrintingDep => false,  // verify each printing below
+            Tri::PrintingDep => false,  // verify each printing against the residual below
         };
         let start = u32::from(offsets[cid as usize]) as usize;
         let end   = u32::from(offsets[cid as usize + 1]) as usize;
@@ -1316,12 +1320,14 @@ fn run_query<'a>(
                 // for the default prefer the first matching printing IS the
                 // chosen one — O(1) when the card pass already said True.
                 let chosen: Option<u32> = if matches!(prefer, Prefer::Default) {
-                    (start..end).find(|&pid| all_match || filter.matches(card, &printings[pid], strings)).map(|pid| pid as u32)
+                    (start..end)
+                        .find(|&pid| all_match || FilterExpr::residual_matches(card, &printings[pid], strings, &residual, residual_is_or))
+                        .map(|pid| pid as u32)
                 } else {
                     let mut chosen: Option<(u32, f64)> = None;
                     for pid in start..end {
                         let p = &printings[pid];
-                        if !all_match && !filter.matches(card, p, strings) { continue; }
+                        if !all_match && !FilterExpr::residual_matches(card, p, strings, &residual, residual_is_or) { continue; }
                         let score = prefer_score(card, p, prefer);
                         if chosen.is_none_or(|(_, s)| score > s) {
                             chosen = Some((pid as u32, score));
@@ -1336,7 +1342,7 @@ fn run_query<'a>(
             Mode::Printing => {
                 for pid in start..end {
                     let p = &printings[pid];
-                    if !all_match && !filter.matches(card, p, strings) { continue; }
+                    if !all_match && !FilterExpr::residual_matches(card, p, strings, &residual, residual_is_or) { continue; }
                     best.push((sort_key_bits(card, p, sort_col, descending), cid, pid as u32));
                 }
             }
@@ -1348,7 +1354,7 @@ fn run_query<'a>(
                 groups.clear();
                 for pid in start..end {
                     let p = &printings[pid];
-                    if !all_match && !filter.matches(card, p, strings) { continue; }
+                    if !all_match && !FilterExpr::residual_matches(card, p, strings, &residual, residual_is_or) { continue; }
                     let ill = u128::from(p.illustration_id);
                     let score = prefer_score(card, p, prefer);
                     match groups.iter_mut().find(|g: &&mut (u128, u32, f64)| g.0 == ill) {

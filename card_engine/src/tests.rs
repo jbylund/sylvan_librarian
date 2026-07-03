@@ -585,3 +585,60 @@ fn bench_checked_vs_unchecked_access() {
     println!("checked rkyv::access:   {checked:?} per call");
     println!("access_unchecked:       {unchecked:?} per call");
 }
+
+#[test]
+fn card_pass_extracts_residual_and_matches() {
+    // card 0 is a Creature whose second printing is art:wolf; card 1 is an Instant.
+    let mut vocab = VocabInterner::new();
+    let cards = vec![
+        stub_card(1, TYPE_CREATURE, &[], &mut vocab),
+        stub_card(2, TYPE_INSTANT, &[], &mut vocab),
+    ];
+    let wolf_ids = vocab_ids(&mut vocab, &["wolf"]);
+    let mut data = store_of(cards, &[2, 1], vocab);
+    data.printings[1].card_art_tags = wolf_ids;
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let mut wolf = FilterExpr::CollectionCmp {
+        field: CollField::ArtTags,
+        op: CmpOp::Ge,
+        value: "wolf".to_string(),
+        value_id: None,
+    };
+    wolf.bind_collection_ids(&archived.coll_vocab, &archived.coll_vocab_sorted);
+    let creature = || FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
+
+    // And[t:creature, art:wolf]: the type check is proven at card level and
+    // hoisted out; only the art check stays in the residual.
+    let and = FilterExpr::And(vec![creature(), wolf]);
+    let mut residual: Vec<&FilterExpr> = Vec::new();
+    let mut is_or = false;
+
+    // Creature card: PrintingDep with a one-element residual (the art term).
+    let t = and.card_pass(&archived.cards[0], &archived.strings, &mut residual, &mut is_or);
+    assert!(t == Tri::PrintingDep && residual.len() == 1 && !is_or);
+    assert!(!FilterExpr::residual_matches(&archived.cards[0], &archived.printings[0], &archived.strings, &residual, is_or));
+    assert!(FilterExpr::residual_matches(&archived.cards[0], &archived.printings[1], &archived.strings, &residual, is_or));
+
+    // Instant card: the type child is False at card level — whole And settles
+    // to False without touching printings.
+    let t = and.card_pass(&archived.cards[1], &archived.strings, &mut residual, &mut is_or);
+    assert!(t == Tri::False);
+
+    // Or[t:creature, art:wolf]: True for the creature card at card level (no
+    // residual needed); PrintingDep with an Or-residual for the instant.
+    let mut wolf2 = FilterExpr::CollectionCmp {
+        field: CollField::ArtTags,
+        op: CmpOp::Ge,
+        value: "wolf".to_string(),
+        value_id: None,
+    };
+    wolf2.bind_collection_ids(&archived.coll_vocab, &archived.coll_vocab_sorted);
+    let or = FilterExpr::Or(vec![creature(), wolf2]);
+    let t = or.card_pass(&archived.cards[0], &archived.strings, &mut residual, &mut is_or);
+    assert!(t == Tri::True && residual.is_empty());
+    let t = or.card_pass(&archived.cards[1], &archived.strings, &mut residual, &mut is_or);
+    assert!(t == Tri::PrintingDep && residual.len() == 1 && is_or);
+    assert!(!FilterExpr::residual_matches(&archived.cards[1], &archived.printings[2], &archived.strings, &residual, is_or));
+}

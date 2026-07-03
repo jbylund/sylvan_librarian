@@ -376,6 +376,86 @@ impl FilterExpr {
         self.tri(card, None, strings)
     }
 
+    /// Card pass with one-level residual extraction. For a top-level And/Or,
+    /// children are classified individually: decided children are dropped (a
+    /// False/Null child settles an And, a True child settles an Or — and at the
+    /// top level only True counts as a match, so an And with a Null child can
+    /// never match and collapses to False), and only the PrintingDep children
+    /// go into `residual` for the per-printing walk. This is what makes
+    /// broad-card × narrow-printing conjunctions cheap: `t:creature set:lea`
+    /// proves the type check once per card and walks printings evaluating only
+    /// the set check. `residual` is a caller-owned buffer reused across cards;
+    /// `residual_is_or` says how residual_matches() must combine it.
+    ///
+    /// Returns True (every printing matches), False (none can), or PrintingDep
+    /// (evaluate the residual per printing). Never returns Null: at the top
+    /// level Null cannot become a match, so it collapses to False.
+    pub(crate) fn card_pass<'f>(
+        &'f self,
+        card: &AOracleCard,
+        strings: &AStrings,
+        residual: &mut Vec<&'f FilterExpr>,
+        residual_is_or: &mut bool,
+    ) -> Tri {
+        residual.clear();
+        *residual_is_or = false;
+        match self {
+            FilterExpr::And(children) => {
+                for c in children {
+                    match c.tri(card, None, strings) {
+                        // And(Null, x) is Null or False for every printing —
+                        // never True — so the card cannot match.
+                        Tri::False | Tri::Null => return Tri::False,
+                        Tri::True => {}
+                        Tri::PrintingDep => residual.push(c),
+                    }
+                }
+                if residual.is_empty() { Tri::True } else { Tri::PrintingDep }
+            }
+            FilterExpr::Or(children) => {
+                *residual_is_or = true;
+                for c in children {
+                    match c.tri(card, None, strings) {
+                        Tri::True => {
+                            residual.clear();
+                            return Tri::True;
+                        }
+                        // Or(Null, x) is True iff x is True: Null children
+                        // cannot contribute a match and drop out.
+                        Tri::False | Tri::Null => {}
+                        Tri::PrintingDep => residual.push(c),
+                    }
+                }
+                if residual.is_empty() { Tri::False } else { Tri::PrintingDep }
+            }
+            other => match other.tri(card, None, strings) {
+                Tri::PrintingDep => {
+                    residual.push(self);
+                    Tri::PrintingDep
+                }
+                Tri::True => Tri::True,
+                Tri::False | Tri::Null => Tri::False,
+            },
+        }
+    }
+
+    /// Evaluate a card_pass() residual against one printing. Only True counts
+    /// as a match at the top level, so And-residuals need every child True and
+    /// Or-residuals need any child True.
+    pub(crate) fn residual_matches(
+        card: &AOracleCard,
+        printing: &APrinting,
+        strings: &AStrings,
+        residual: &[&FilterExpr],
+        residual_is_or: bool,
+    ) -> bool {
+        if residual_is_or {
+            residual.iter().any(|c| c.tri(card, Some(printing), strings) == Tri::True)
+        } else {
+            residual.iter().all(|c| c.tri(card, Some(printing), strings) == Tri::True)
+        }
+    }
+
     /// Four-valued evaluation. True/False/Null mirror SQL ternary logic: Null is
     /// SQL's NULL ("unknown"), produced when a compared field is missing from the
     /// card, and NOT/AND/OR propagate it exactly like SQL — so -power>2 excludes
