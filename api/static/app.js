@@ -777,9 +777,14 @@ class CardSearch {
       // and the cutoff matches Python string slicing in noscript_helpers.
       const oracleTextWithSymbols = this.convertManaSymbolsToText(card.oracle_text);
       const maxLength = 300;
-      const codePoints = Array.from(oracleTextWithSymbols);
-      const truncatedText =
-        codePoints.length > maxLength ? codePoints.slice(0, maxLength).join('') + '...' : oracleTextWithSymbols;
+      let truncatedText = oracleTextWithSymbols;
+      // Code-point count is always <= UTF-16 length, so short strings can skip the array
+      if (oracleTextWithSymbols.length > maxLength) {
+        const codePoints = Array.from(oracleTextWithSymbols);
+        if (codePoints.length > maxLength) {
+          truncatedText = codePoints.slice(0, maxLength).join('') + '...';
+        }
+      }
       altText += this.escapeHtml(truncatedText);
     }
 
@@ -802,7 +807,7 @@ class CardSearch {
     const imgTag = `<img class="card-image" src="${this.escapeHtml(image388)}" srcset="${srcset}" sizes="${sizes}" alt="${altText}" title="${altText}"${fetchPriorityAttr}${loadingAttr} />`;
     const imageHtml =
       card.set_code && card.collector_number
-        ? `<a href="/card/${card.set_code}/${card.collector_number}" class="card-page-link">${imgTag}</a>`
+        ? `<a href="/card/${this.escapeHtml(card.set_code)}/${this.escapeHtml(card.collector_number)}" class="card-page-link">${imgTag}</a>`
         : imgTag;
 
     // Truncate oracle text without cutting a mana symbol in half — matches Python create_card_html

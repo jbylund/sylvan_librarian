@@ -335,7 +335,8 @@ def create_card_html(card: dict, index: int) -> str:
 
     # Link the image to the card detail page — matches JS createCardHTML
     if card.get("set_code") and card.get("collector_number"):
-        image_html = f'<a href="/card/{card["set_code"]}/{card["collector_number"]}" class="card-page-link">{img_tag}</a>'
+        card_page_path = f"/card/{escape_html(card['set_code'])}/{escape_html(card['collector_number'])}"
+        image_html = f'<a href="{card_page_path}" class="card-page-link">{img_tag}</a>'
     else:
         image_html = img_tag
 
