@@ -966,25 +966,41 @@ fn expand_artist_ids(idx: &Archived<ArtistIndex>, artist_ids: &[u16]) -> Vec<u32
     out
 }
 
-// ─── Released-at index ────────────────────────────────────────────────────────
-// Sorted (yyyymmdd, printing idx); binary-searched ranges answer date/year
-// filters in printing space. Printings without a date are absent (they can
-// never satisfy a date comparison — SQL NULL semantics).
+// ─── Sorted-u32 range indexes (released_at, price) ───────────────────────────
+// Sorted (value, printing idx); binary-searched ranges answer range filters in
+// printing space. Printings without the value are absent (they can never
+// satisfy a comparison — SQL NULL semantics). Dates store yyyymmdd directly;
+// prices store f32_sort_bits(price), which orders like the float.
 
 type DateIndex = Vec<(u32, u32)>;
 
-fn build_date_index(printings: &[Printing]) -> DateIndex {
+fn build_range_index(printings: &[Printing], get: impl Fn(&Printing) -> Option<u32>) -> DateIndex {
     let mut idx: DateIndex = printings
         .iter()
         .enumerate()
-        .filter_map(|(i, p)| p.released_at_int.map(|d| (d, i as u32)))
+        .filter_map(|(i, p)| get(p).map(|v| (v, i as u32)))
         .collect();
     idx.sort_unstable();
     idx
 }
 
-/// Sorted printing ids with released_at in [lo, hi). Callers translate ops into
-/// half-open ranges; Ne is not selective and never narrows.
+/// Sorted printing ids satisfying `price op value`, via the f32_sort_bits
+/// index. Query values are f64 while prices are f32, so bounds are widened by
+/// one position where rounding could otherwise exclude a real match —
+/// narrowing must stay a superset; the walk verifies exactly.
+fn price_candidates(idx: &Archived<DateIndex>, op: CmpOp, value: f64) -> Option<Vec<u32>> {
+    let b = f32_sort_bits(value as f32);
+    let (lo, hi) = match op {
+        CmpOp::Ne => return None,
+        CmpOp::Eq => (b, b.saturating_add(1)),
+        CmpOp::Lt | CmpOp::Le => (0, b.saturating_add(1)),
+        CmpOp::Gt | CmpOp::Ge => (b, u32::MAX),
+    };
+    Some(date_range_candidates(idx, lo, hi))
+}
+
+/// Sorted printing ids with an indexed value in [lo, hi). Callers translate ops
+/// into half-open ranges; Ne is not selective and never narrows.
 fn date_range_candidates(idx: &Archived<DateIndex>, lo: u32, hi: u32) -> Vec<u32> {
     let s = idx.partition_point(|p| u32::from(p.0) < lo);
     let e = idx.partition_point(|p| u32::from(p.0) < hi);
@@ -1033,6 +1049,7 @@ struct CardIndexes {
     artists:        ArtistIndex,     // printing space (CSR by artist vocab id)
     set_codes:      TagIndex,        // printing space
     released_at:    DateIndex,       // printing space
+    price_usd:      DateIndex,       // printing space (f32_sort_bits of the price)
 }
 
 impl Default for CardIndexes {
@@ -1052,6 +1069,7 @@ impl Default for CardIndexes {
             artists:        ArtistIndex::default(),
             set_codes:      HashMap::new(),
             released_at:    Vec::new(),
+            price_usd:      Vec::new(),
         }
     }
 }
@@ -1148,6 +1166,10 @@ fn narrow_candidates(filter: &FilterExpr, indexes: &Archived<CardIndexes>, offse
                 numeric_candidates(&indexes.toughness, *op, *v).map(Candidates::Cards),
             (NumExpr::Const(v), NumExpr::Field(NumField::Toughness)) =>
                 numeric_candidates(&indexes.toughness, flip_op(*op), *v).map(Candidates::Cards),
+            (NumExpr::Field(NumField::PriceUsd), NumExpr::Const(v)) =>
+                price_candidates(&indexes.price_usd, *op, *v).map(Candidates::Printings),
+            (NumExpr::Const(v), NumExpr::Field(NumField::PriceUsd)) =>
+                price_candidates(&indexes.price_usd, flip_op(*op), *v).map(Candidates::Printings),
             _ => None,
         },
 
@@ -1624,7 +1646,7 @@ fn card_to_pydict<'py>(
 const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 /// Bump on any archived-data-model change the struct sizes below wouldn't
 /// catch (e.g. reordering same-size fields, changing an index type).
-const ARCHIVE_FORMAT_VERSION: u32 = 20260706;
+const ARCHIVE_FORMAT_VERSION: u32 = 20260707;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -2006,7 +2028,8 @@ impl QueryEngine {
                 }
                 idx
             },
-            released_at:    build_date_index(&printings),
+            released_at:    build_range_index(&printings, |p| p.released_at_int),
+            price_usd:      build_range_index(&printings, |p| p.price_usd.map(f32_sort_bits)),
         };
 
         #[cfg(feature = "alloc-counter")]

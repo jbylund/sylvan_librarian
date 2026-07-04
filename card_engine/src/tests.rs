@@ -1,7 +1,7 @@
 use super::{
     build_numeric_index, build_oracle_text_index, build_tag_index, build_trigram_index,
     build_type_index, cards_of_printings, count_common_keywords, count_common_types,
-    build_artist_index, build_date_index, narrow_candidates, run_query, trigram_candidates,
+    build_artist_index, build_range_index, narrow_candidates, run_query, trigram_candidates,
     ArtistIndex, CardData, CardIndexes, Candidates,
     CollField, CmpOp, FilterExpr, InlineStr, Interner, ManaCost, OracleCard, Printing, TagIndex,
     Tri, TrigramIndex, VocabInterner, ARTIST_NONE, NONE_STR, TYPE_ARTIFACT, TYPE_CREATURE, TYPE_INSTANT,
@@ -556,6 +556,7 @@ fn bench_checked_vs_unchecked_access() {
         artists:        ArtistIndex::default(),
         set_codes:      HashMap::new(),
         released_at:    Vec::new(),
+        price_usd:      Vec::new(),
     };
     let data = CardData {
         cards,
@@ -716,7 +717,7 @@ fn set_code_and_date_narrowing() {
         set_codes.entry(p.card_set_code.as_str().to_string()).or_default().push(i as u32);
     }
     data.indexes.set_codes = set_codes;
-    data.indexes.released_at = build_date_index(&data.printings);
+    data.indexes.released_at = build_range_index(&data.printings, |p| p.released_at_int);
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
@@ -752,4 +753,54 @@ fn set_code_and_date_narrowing() {
     }
     // Ne is not selective and must not narrow.
     assert!(narrow_candidates(&FilterExpr::DateCmp { op: CmpOp::Ne, value: 19930805 }, &archived.indexes, &archived.offsets).is_none());
+}
+
+#[test]
+fn price_narrowing_is_a_superset_under_f32_rounding() {
+    let mut vocab = VocabInterner::new();
+    let cards = vec![stub_card(1, TYPE_CREATURE, &[], &mut vocab)];
+    let mut data = store_of(cards, &[4], vocab);
+    data.printings[0].price_usd = Some(0.05);
+    data.printings[1].price_usd = Some(0.1); // sits at the query boundary
+    data.printings[2].price_usd = Some(60.0);
+    data.printings[3].price_usd = None; // priceless printings never satisfy price filters
+    data.indexes.price_usd = build_range_index(&data.printings, |p| p.price_usd.map(super::f32_sort_bits));
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let cheap = FilterExpr::NumericCmp {
+        lhs: super::NumExpr::Field(super::NumField::PriceUsd),
+        op: CmpOp::Lt,
+        rhs: super::NumExpr::Const(0.10),
+    };
+    // 0.10f64 is not representable as f32; the widened bound may include the
+    // boundary printing as a candidate, but must never lose printing 0.
+    match narrow_candidates(&cheap, &archived.indexes, &archived.offsets) {
+        Some(Candidates::Printings(v)) => {
+            assert!(v.contains(&0));
+            assert!(!v.contains(&2) && !v.contains(&3));
+        }
+        _ => panic!("usd must narrow in printing space"),
+    }
+    // ...and the walk's exact evaluation rejects the boundary printing.
+    let card = &archived.cards[0];
+    assert!(cheap.matches(card, &archived.printings[0], &archived.strings));
+    assert!(!cheap.matches(card, &archived.printings[1], &archived.strings));
+
+    let pricey = FilterExpr::NumericCmp {
+        lhs: super::NumExpr::Const(50.0),
+        op: CmpOp::Lt,
+        rhs: super::NumExpr::Field(super::NumField::PriceUsd),
+    };
+    match narrow_candidates(&pricey, &archived.indexes, &archived.offsets) {
+        Some(Candidates::Printings(v)) => assert_eq!(v, vec![2]),
+        _ => panic!("flipped usd comparison must narrow"),
+    }
+    // Ne is not selective.
+    let ne = FilterExpr::NumericCmp {
+        lhs: super::NumExpr::Field(super::NumField::PriceUsd),
+        op: CmpOp::Ne,
+        rhs: super::NumExpr::Const(1.0),
+    };
+    assert!(narrow_candidates(&ne, &archived.indexes, &archived.offsets).is_none());
 }
