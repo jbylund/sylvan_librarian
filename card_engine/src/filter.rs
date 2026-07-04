@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use regex::Regex;
 use serde_json::Value;
-use super::{AOracleCard, APrinting, AStrings, str_at, is_devotion_sym, mana_pip_counts, mana_cmc, color_list_to_mask, card_type_str_to_bit};
+use super::{AOracleCard, APrinting, AStrings, str_at, is_devotion_sym, mana_pip_counts, mana_cmc, color_list_to_mask, card_type_str_to_bit, ARTIST_NONE};
 use super::legality::{LEGALITY_LEGAL, LEGALITY_BANNED, LEGALITY_RESTRICTED, format_shift};
 
 // ─── Comparison / arithmetic operators ───────────────────────────────────────
@@ -221,7 +221,8 @@ fn text_search_field_value<'a>(
         TextSearchField::NameLower       => StrVal::Known(card.card_name_lower.as_str()),
         TextSearchField::OracleTextLower => opt_sv(str_at(strings, u32::from(card.oracle_text_lower_id))),
         TextSearchField::FlavorTextLower => printing.map_or(StrVal::PDep, |p| opt_sv(str_at(strings, u32::from(p.flavor_text_lower_id)))),
-        TextSearchField::ArtistLower     => printing.map_or(StrVal::PDep, |p| opt_sv(str_at(strings, u32::from(p.card_artist_lower_id)))),
+        // Rewritten to ArtistMatch by bind(); printings carry no artist strings.
+        TextSearchField::ArtistLower     => StrVal::Null,
     }
 }
 
@@ -252,7 +253,8 @@ fn text_field_value<'a>(
         TextField::OracleTextLower => opt_sv(str_at(strings, u32::from(card.oracle_text_lower_id))),
         TextField::Layout          => opt_sv(str_at(strings, u32::from(card.card_layout_id))),
         TextField::FlavorTextLower => printing.map_or(StrVal::PDep, |p| opt_sv(str_at(strings, u32::from(p.flavor_text_lower_id)))),
-        TextField::ArtistLower     => printing.map_or(StrVal::PDep, |p| opt_sv(str_at(strings, u32::from(p.card_artist_lower_id)))),
+        // Rewritten to ArtistMatch by bind(); printings carry no artist strings.
+        TextField::ArtistLower     => StrVal::Null,
         TextField::SetCode         => printing.map_or(StrVal::PDep, |p| StrVal::Known(p.card_set_code.as_str())),
         TextField::Border          => printing.map_or(StrVal::PDep, |p| opt_sv(str_at(strings, u32::from(p.card_border_id)))),
         TextField::Watermark       => printing.map_or(StrVal::PDep, |p| opt_sv(str_at(strings, u32::from(p.card_watermark_id)))),
@@ -278,6 +280,13 @@ pub(crate) enum FilterExpr {
     TextContains {
         field: TextSearchField,
         word: String,
+    },
+    /// An artist predicate (contains/exact/regex) after bind() resolved it
+    /// against the ~2.2k-entry artist vocab: sorted vocab ids whose artist
+    /// string satisfies the original predicate. Matching is an integer binary
+    /// search per printing instead of a string comparison.
+    ArtistMatch {
+        ids: Vec<u16>,
     },
     TextExact {
         field: TextField,
@@ -339,19 +348,36 @@ pub(crate) enum FilterExpr {
     },
 }
 
+/// Vocab ids (ascending) whose artist string satisfies `pred`.
+fn artist_match_ids(artist_vocab: &AStrings, pred: impl Fn(&str) -> bool) -> Vec<u16> {
+    artist_vocab
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| pred(s.as_str()))
+        .map(|(i, _)| i as u16)
+        .collect()
+}
+
 impl FilterExpr {
-    /// Resolve every CollectionCmp value to its vocab id (via the string-sorted
-    /// permutation of the vocab table — ~14 string compares per collection term).
-    /// Called once per query so matching never touches strings; a value absent
-    /// from the vocab resolves to None and can match no element.
-    pub(crate) fn bind_collection_ids(&mut self, vocab: &AStrings, sorted_ids: &rkyv::Archived<Vec<u16>>) {
+    /// Per-query binding against the store's vocab tables, called once before
+    /// matching. Two rewrites happen here:
+    ///
+    /// - CollectionCmp values resolve to their vocab id (binary search over the
+    ///   string-sorted permutation — ~14 string compares per term); a value
+    ///   absent from the vocab resolves to None and can match no element.
+    /// - Artist predicates (contains/exact/regex on ArtistLower) evaluate once
+    ///   against the ~2.2k distinct artist strings and become ArtistMatch nodes
+    ///   holding the sorted ids that satisfied them — per-printing matching is
+    ///   then an integer membership test, and narrow_candidates can expand the
+    ///   ids through the artist CSR index.
+    pub(crate) fn bind(&mut self, vocab: &AStrings, sorted_ids: &rkyv::Archived<Vec<u16>>, artist_vocab: &AStrings) {
         match self {
             FilterExpr::And(children) | FilterExpr::Or(children) => {
                 for c in children {
-                    c.bind_collection_ids(vocab, sorted_ids);
+                    c.bind(vocab, sorted_ids, artist_vocab);
                 }
             }
-            FilterExpr::Not(inner) => inner.bind_collection_ids(vocab, sorted_ids),
+            FilterExpr::Not(inner) => inner.bind(vocab, sorted_ids, artist_vocab),
             FilterExpr::CollectionCmp { value, value_id, .. } => {
                 let i = sorted_ids.partition_point(|id| vocab[u16::from(*id) as usize].as_str() < value.as_str());
                 *value_id = sorted_ids
@@ -359,19 +385,44 @@ impl FilterExpr {
                     .map(|id| u16::from(*id))
                     .filter(|&id| vocab[id as usize].as_str() == value.as_str());
             }
+            FilterExpr::TextContains { field: TextSearchField::ArtistLower, word } => {
+                let ids = artist_match_ids(artist_vocab, |s| s.contains(word.as_str()));
+                *self = FilterExpr::ArtistMatch { ids };
+            }
+            FilterExpr::TextExact { field: TextField::ArtistLower, op, value } => {
+                let (op, value) = (*op, std::mem::take(value));
+                let ids = artist_match_ids(artist_vocab, |s| match op {
+                    CmpOp::Eq => s == value,
+                    CmpOp::Ne => s != value,
+                    CmpOp::Lt => s < value.as_str(),
+                    CmpOp::Le => s <= value.as_str(),
+                    CmpOp::Gt => s > value.as_str(),
+                    CmpOp::Ge => s >= value.as_str(),
+                });
+                *self = FilterExpr::ArtistMatch { ids };
+            }
+            FilterExpr::TextRegex { field: TextField::ArtistLower, regex } => {
+                let ids = artist_match_ids(artist_vocab, |s| regex.is_match(s));
+                *self = FilterExpr::ArtistMatch { ids };
+            }
             _ => {}
         }
     }
 
     /// True iff the filter matches this (card, printing) pair. With a printing
-    /// supplied, evaluation is exact — PrintingDep cannot occur.
+    /// supplied, evaluation is exact — PrintingDep cannot occur. The query
+    /// driver goes through card_pass()/residual_matches() instead; this is the
+    /// unfactored single-pair form, kept for tests.
+    #[cfg(test)]
     pub(crate) fn matches(&self, card: &AOracleCard, printing: &APrinting, strings: &AStrings) -> bool {
         self.tri(card, Some(printing), strings) == Tri::True
     }
 
     /// Card-level pass: evaluate with no printing. True means every printing of
     /// the card matches; False/Null mean none can; PrintingDep means the result
-    /// depends on printing-level fields and the driver must evaluate per printing.
+    /// depends on printing-level fields. The query driver uses card_pass()
+    /// (which adds residual extraction); this is the plain form, kept for tests.
+    #[cfg(test)]
     pub(crate) fn eval_card(&self, card: &AOracleCard, strings: &AStrings) -> Tri {
         self.tri(card, None, strings)
     }
@@ -521,6 +572,16 @@ impl FilterExpr {
                     StrVal::Known(s) => tri_bool(s.contains(word.as_str())),
                     StrVal::Null => Tri::Null,
                     StrVal::PDep => Tri::PrintingDep,
+                }
+            }
+
+            FilterExpr::ArtistMatch { ids } => {
+                let Some(p) = printing else { return Tri::PrintingDep };
+                let vid = u16::from(p.card_artist_vid);
+                if vid == ARTIST_NONE {
+                    Tri::Null // no artist: SQL NULL, like the missing-string case before
+                } else {
+                    tri_bool(ids.binary_search(&vid).is_ok())
                 }
             }
 
