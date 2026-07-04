@@ -772,13 +772,19 @@ class CardSearch {
     }
     altText += '\n\n';
     if (card.oracle_text) {
-      // Convert mana symbols in oracle text to Unicode for alt text first, then truncate
+      // Convert mana symbols in oracle text to Unicode for alt text first, then truncate.
+      // Truncate on code points (not UTF-16 units) so an emoji can't be split in half
+      // and the cutoff matches Python string slicing in noscript_helpers.
       const oracleTextWithSymbols = this.convertManaSymbolsToText(card.oracle_text);
       const maxLength = 300;
-      const truncatedText =
-        oracleTextWithSymbols.length > maxLength
-          ? oracleTextWithSymbols.substring(0, maxLength) + '...'
-          : oracleTextWithSymbols;
+      let truncatedText = oracleTextWithSymbols;
+      // Code-point count is always <= UTF-16 length, so short strings can skip the array
+      if (oracleTextWithSymbols.length > maxLength) {
+        const codePoints = Array.from(oracleTextWithSymbols);
+        if (codePoints.length > maxLength) {
+          truncatedText = codePoints.slice(0, maxLength).join('') + '...';
+        }
+      }
       altText += this.escapeHtml(truncatedText);
     }
 
@@ -801,8 +807,23 @@ class CardSearch {
     const imgTag = `<img class="card-image" src="${this.escapeHtml(image388)}" srcset="${srcset}" sizes="${sizes}" alt="${altText}" title="${altText}"${fetchPriorityAttr}${loadingAttr} />`;
     const imageHtml =
       card.set_code && card.collector_number
-        ? `<a href="/card/${card.set_code}/${card.collector_number}" class="card-page-link">${imgTag}</a>`
+        ? `<a href="/card/${this.escapeHtml(card.set_code)}/${this.escapeHtml(card.collector_number)}" class="card-page-link">${imgTag}</a>`
         : imgTag;
+
+    // Truncate oracle text without cutting a mana symbol in half — matches Python create_card_html
+    let oracleHtml = '';
+    if (card.oracle_text) {
+      if (card.oracle_text.length > 200) {
+        let truncated = card.oracle_text.substring(0, 200);
+        // If we're in the middle of a mana symbol (unclosed brace), back up to before it
+        if ((truncated.match(/\{/g) || []).length > (truncated.match(/\}/g) || []).length) {
+          truncated = truncated.substring(0, truncated.lastIndexOf('{'));
+        }
+        oracleHtml = `<div class="card-text">${this.formatOracleText(truncated, false)}...</div>`;
+      } else {
+        oracleHtml = `<div class="card-text">${this.formatOracleText(card.oracle_text, false)}</div>`;
+      }
+    }
 
     return `
        <div class="card-item" data-card-id="${this.escapeHtml(cardId)}">
@@ -812,7 +833,7 @@ class CardSearch {
                ${card.mana_cost ? `<div class="card-mana">${this.convertManaSymbols(card.mana_cost, false)}</div>` : ''}
            </div>
            ${card.type_line ? `<div class="card-type">${this.escapeHtml(card.type_line)}</div>` : ''}
-           ${card.oracle_text ? `<div class="card-text">${this.formatOracleText(card.oracle_text.substring(0, 200), false)}${card.oracle_text.length > 200 ? '...' : ''}</div>` : ''}
+           ${oracleHtml}
            ${(() => {
              const hasPowerToughness =
                card.power !== null &&
