@@ -410,14 +410,19 @@ impl FilterExpr {
     }
 
     /// True iff the filter matches this (card, printing) pair. With a printing
-    /// supplied, evaluation is exact — PrintingDep cannot occur.
+    /// supplied, evaluation is exact — PrintingDep cannot occur. The query
+    /// driver goes through card_pass()/residual_matches() instead; this is the
+    /// unfactored single-pair form, kept for tests.
+    #[cfg(test)]
     pub(crate) fn matches(&self, card: &AOracleCard, printing: &APrinting, strings: &AStrings) -> bool {
         self.tri(card, Some(printing), strings) == Tri::True
     }
 
     /// Card-level pass: evaluate with no printing. True means every printing of
     /// the card matches; False/Null mean none can; PrintingDep means the result
-    /// depends on printing-level fields and the driver must evaluate per printing.
+    /// depends on printing-level fields. The query driver uses card_pass()
+    /// (which adds residual extraction); this is the plain form, kept for tests.
+    #[cfg(test)]
     pub(crate) fn eval_card(&self, card: &AOracleCard, strings: &AStrings) -> Tri {
         self.tri(card, None, strings)
     }
