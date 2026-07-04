@@ -27,6 +27,7 @@ class EngineField(enum.StrEnum):
     TYPE_LINE = enum.auto()
     ILLUSTRATION_ID = enum.auto()
     SCRYFALL_ID = enum.auto()
+    IMAGE_CLUSTER_ID = enum.auto()
     CARD_SUBTYPES = enum.auto()
     CARD_KEYWORDS = enum.auto()
     CARD_ORACLE_TAGS = enum.auto()
@@ -61,6 +62,7 @@ ENGINE_COLUMNS: list[str] = [
     "cmc",
     "collector_number",
     "collector_number_int",
+    "image_cluster_id",
     "creature_power",
     "creature_toughness",
     "edhrec_rank",

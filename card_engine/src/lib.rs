@@ -238,6 +238,7 @@ struct Printing {
 
     card_rarity_int: Option<u8>,       // 0-5
     collector_number_int: Option<u16>, // some sets exceed i8::MAX
+    image_cluster_id: Option<u16>,     // placeholder codebook cluster; display-only
     price_usd: Option<f32>,
     price_eur: Option<f32>,
     price_tix: Option<f32>,
@@ -288,6 +289,7 @@ struct CardRow {
     planeswalker_loyalty: Option<u8>,
     card_rarity_int: Option<u8>,
     collector_number_int: Option<u16>,
+    image_cluster_id: Option<u16>,
     edhrec_rank: Option<u32>,
     price_usd: Option<f32>,
     price_eur: Option<f32>,
@@ -638,6 +640,7 @@ fn card_from_pydict(d: &Bound<PyDict>, it: &mut Interner, vocab: &mut VocabInter
         planeswalker_loyalty: opt_u8(d, "planeswalker_loyalty"),
         card_rarity_int: opt_u8(d, "card_rarity_int"),
         collector_number_int: opt_u16(d, "collector_number_int"),
+        image_cluster_id: opt_u16(d, "image_cluster_id"),
         edhrec_rank: opt_u32(d, "edhrec_rank"),
         price_usd: opt_f32(d, "price_usd"),
         price_eur: opt_f32(d, "price_eur"),
@@ -1564,6 +1567,7 @@ const FIELD_TABLE: &[(&str, FieldExtractor)] = &[
     ("illustration_id", |py, _c, p, _s, _v| Ok(uuid_from_u128(u128::from(p.illustration_id)).into_pyobject(py)?.into_any())),
     ("scryfall_id", |py, _c, p, _s, _v| Ok(uuid_from_u128(u128::from(p.scryfall_id)).into_pyobject(py)?.into_any())),
     ("price_usd", |py, _c, p, _s, _v| Ok(p.price_usd.as_ref().map(|v| f32::from(*v)).into_pyobject(py)?.into_any())),
+    ("image_cluster_id", |py, _c, p, _s, _v| Ok(p.image_cluster_id.as_ref().map(|v| u16::from(*v)).into_pyobject(py)?.into_any())),
     ("prefer_score", |py, _c, p, _s, _v| Ok(p.prefer_score.as_ref().map(|v| f32::from(*v)).into_pyobject(py)?.into_any())),
     // card_subtypes preserves the printed order; the set-like collections are stored
     // sorted by vocab id (first-seen order), so they get re-sorted lexicographically
@@ -1593,8 +1597,18 @@ fn sorted_strs<'a>(vocab: &'a AStrings, ids: &Archived<Vec<u16>>) -> Vec<&'a str
     v
 }
 
-const DEFAULT_FIELDS: &[&str] =
-    &["name", "set_code", "collector_number", "power", "toughness", "mana_cost", "oracle_text", "set_name", "type_line"];
+const DEFAULT_FIELDS: &[&str] = &[
+    "name",
+    "set_code",
+    "collector_number",
+    "power",
+    "toughness",
+    "mana_cost",
+    "oracle_text",
+    "set_name",
+    "type_line",
+    "image_cluster_id",
+];
 
 /// Resolves a caller-requested field list into FIELD_TABLE entries, deduping repeats (a name
 /// requested twice is only fetched/emitted once) and rejecting anything outside the vocabulary.
@@ -1980,6 +1994,7 @@ impl QueryEngine {
                 released_at_int: row.released_at_int,
                 card_rarity_int: row.card_rarity_int,
                 collector_number_int: row.collector_number_int,
+                image_cluster_id: row.image_cluster_id,
                 price_usd: row.price_usd,
                 price_eur: row.price_eur,
                 price_tix: row.price_tix,

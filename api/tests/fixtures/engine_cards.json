@@ -2606,6 +2606,7 @@
     "cmc": 1,
     "collector_number": "149",
     "collector_number_int": 149,
+    "image_cluster_id": 27,
     "creature_power": null,
     "creature_toughness": null,
     "edhrec_rank": 155,

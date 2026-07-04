@@ -178,6 +178,7 @@ fn stub_printing(scryfall_id: u128, illustration_id: u128, prefer_score: Option<
         released_at_int: None,
         card_rarity_int: None,
         collector_number_int: None,
+        image_cluster_id: None,
         price_usd: None,
         price_eur: None,
         price_tix: None,

@@ -750,6 +750,31 @@ class CardSearch {
     return `https://d1hot9ps2xugbc.cloudfront.net/img/${card.set_code}/${card.collector_number}/${face}/${size}.webp`;
   }
 
+  // CSS class of the blurred placeholder shown behind the card image while it loads.
+  // Classes are defined in static/placeholders-v1.css. Assigned printings carry an
+  // image_cluster_id; unassigned ones fall back to a coarse bucket derived from type line
+  // and mana cost (ph-fb-* aliases). Matches placeholder_class in noscript_helpers.py.
+  placeholderClass(card) {
+    if (card.image_cluster_id !== null && card.image_cluster_id !== undefined) {
+      return `ph-${card.image_cluster_id}`;
+    }
+    const typeLine = card.type_line || '';
+    if (typeLine.includes('Land')) {
+      return 'ph-fb-land';
+    }
+    if (typeLine.includes('Artifact')) {
+      return 'ph-fb-artifact';
+    }
+    const colors = new Set((card.mana_cost || '').match(/[WUBRG]/g) || []);
+    if (colors.size >= 2) {
+      return 'ph-fb-gold';
+    }
+    if (colors.size === 1) {
+      return `ph-fb-${[...colors][0].toLowerCase()}`;
+    }
+    return 'ph-fb-artifact';
+  }
+
   createCardHTML(card, index, isFirstRow = false) {
     const cardId = index.toString();
 
@@ -804,7 +829,7 @@ class CardSearch {
     // Add loading="lazy" for non-first-row images to improve initial load
     const fetchPriorityAttr = isFirstRow ? ' fetchpriority="high"' : '';
     const loadingAttr = isFirstRow ? '' : ' loading="lazy"';
-    const imgTag = `<img class="card-image" src="${this.escapeHtml(image388)}" srcset="${srcset}" sizes="${sizes}" alt="${altText}" title="${altText}"${fetchPriorityAttr}${loadingAttr} />`;
+    const imgTag = `<img class="card-image ${this.placeholderClass(card)}" src="${this.escapeHtml(image388)}" srcset="${srcset}" sizes="${sizes}" alt="${altText}" title="${altText}"${fetchPriorityAttr}${loadingAttr} />`;
     const imageHtml =
       card.set_code && card.collector_number
         ? `<a href="/card/${this.escapeHtml(card.set_code)}/${this.escapeHtml(card.collector_number)}" class="card-page-link">${imgTag}</a>`
@@ -883,7 +908,7 @@ class CardSearch {
     // Build image element
     let imageHtml = '';
     if (imageLarge) {
-      const imgTag = `<img class="modal-image" src="${this.escapeHtml(imageLarge)}" width="745" height="1040" alt="${this.escapeHtml(card.name || 'Card Image')}" />`;
+      const imgTag = `<img class="modal-image ${this.placeholderClass(card)}" src="${this.escapeHtml(imageLarge)}" width="745" height="1040" alt="${this.escapeHtml(card.name || 'Card Image')}" />`;
       if (card.set_code && card.collector_number) {
         // Build manapool.com referral URL
         // Set codes and collector numbers from our database are safe for URLs

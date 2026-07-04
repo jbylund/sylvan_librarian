@@ -105,6 +105,63 @@ CASES = [
         },
     },
     {
+        # image_cluster_id set -> primary ph-<id> placeholder class, not a ph-fb-* fallback
+        "id": "assigned-placeholder-cluster",
+        "index": 4,
+        "card": {
+            "name": "Swords to Plowshares",
+            "mana_cost": "{W}",
+            "type_line": "Instant",
+            "oracle_text": "Exile target creature. Its controller gains life equal to its power.",
+            "set_name": "Limited Edition Alpha",
+            "set_code": "lea",
+            "collector_number": "38",
+            "image_cluster_id": 3,
+        },
+    },
+    {
+        # cluster id 0 is a valid assignment — guards against falsy-zero checks (ph-0, not ph-fb-*)
+        "id": "placeholder-cluster-zero",
+        "index": 8,
+        "card": {
+            "name": "Healing Salve",
+            "mana_cost": "{W}",
+            "type_line": "Instant",
+            "oracle_text": "Choose one —\n• Target player gains 3 life.\n• Prevent the next 3 damage.",
+            "set_name": "Limited Edition Alpha",
+            "set_code": "lea",
+            "collector_number": "19",
+            "image_cluster_id": 0,
+        },
+    },
+    {
+        # no cluster id + Land type line -> ph-fb-land fallback (type checks precede mana cost)
+        "id": "placeholder-fallback-land",
+        "index": 9,
+        "card": {
+            "name": "Command Tower",
+            "type_line": "Land",
+            "oracle_text": "{T}: Add one mana of any color in your commander's color identity.",
+            "set_name": "Commander 2011",
+            "set_code": "cmd",
+            "collector_number": "269",
+        },
+    },
+    {
+        # no cluster id + two mana colors -> ph-fb-gold fallback
+        "id": "placeholder-fallback-gold",
+        "index": 10,
+        "card": {
+            "name": "Lightning Helix",
+            "mana_cost": "{R}{W}",
+            "type_line": "Instant",
+            "oracle_text": "Lightning Helix deals 3 damage to any target and you gain 3 life.",
+            "set_name": "Ravnica: City of Guilds",
+            "set_code": "rav",
+            "collector_number": "213",
+        },
+    },
+    {
         "id": "escaping-quotes-and-hybrid-mana",
         "index": 7,
         "card": {
