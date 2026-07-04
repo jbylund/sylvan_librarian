@@ -48,6 +48,7 @@ const { CardSearch, CatalogMap } = Function(appCode + '; return {CardSearch, Cat
 
 const LIVE_CARD_TYPES = require('./fixtures/common_card_types.json');
 const BALANCE_QUERIES = require('./fixtures/balance_queries.json');
+const CARD_HTML_CASES = require('./fixtures/card_html_cases.json');
 
 // Derived fixture: new catalog format expected by the /get_catalog endpoint
 const LIVE_TYPES_MAP = Object.fromEntries(LIVE_CARD_TYPES.map(({ t, n }) => [t, n]));
@@ -370,6 +371,24 @@ describe('CardSearch balanceQuery', () => {
   it.each(BALANCE_QUERIES)('matches parity fixture for $input', ({ input, suffix }) => {
     expect(search.balanceSuffix(input)).toBe(suffix);
     expect(search.balanceQuery(input)).toBe(suffix === null ? input : input + suffix);
+  });
+});
+
+describe('CardSearch createCardHTML no-JS parity', () => {
+  // Keep in sync with normalize_card_html in api/tests/test_noscript_parity.py.
+  // Strips the loading-hint attributes (fetchpriority/loading logic intentionally
+  // differs between the JS and no-JS paths) and inter-tag whitespace (template
+  // indentation differs).
+  function normalizeCardHtml(html) {
+    return html
+      .replaceAll(' fetchpriority="high"', '')
+      .replaceAll(' loading="lazy"', '')
+      .replace(/>\s+</g, '><')
+      .trim();
+  }
+
+  it.each(CARD_HTML_CASES)('matches parity fixture for $id', ({ card, index, html }) => {
+    expect(normalizeCardHtml(search.createCardHTML(card, index, false))).toBe(html);
   });
 });
 

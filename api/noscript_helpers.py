@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 MAX_ORACLE_TEXT_LENGTH = 200
+MAX_ALT_TEXT_LENGTH = 300  # oracle text truncation length in image alt/title text
 _EAGER_LOAD_COUNT = 4  # covers a full first row at the widest common grid (4 columns)
 
 
@@ -19,7 +20,9 @@ def escape_html(text: str) -> str:
     -------
         HTML-escaped text
     """
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;").replace("'", "&#39;")
+    # Matches the JS escapeHtml character set. Single quotes don't need escaping:
+    # all attributes use double quotes and single quotes are safe in HTML text content.
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
 def convert_mana_symbols(text: str, is_modal: bool = False) -> str:
@@ -126,6 +129,92 @@ def convert_mana_symbols(text: str, is_modal: bool = False) -> str:
     return re.sub(r"\{[^}]{1,5}\}", replace_symbol, text)
 
 
+# Unicode text representations of mana symbols — matches JavaScript manaTextMap
+_MANA_TEXT_MAP = {
+    "{W}": "☀️",
+    "{U}": "💧",
+    "{B}": "💀",
+    "{R}": "🔥",
+    "{G}": "🌳",
+    "{C}": "◇",
+    "{T}": "↻",
+    "{Q}": "↺",
+    "{E}": "⚡",
+    "{P}": "Φ",
+    "{S}": "❄",
+    "{X}": "X",
+    "{Y}": "Y",
+    "{Z}": "Z",
+    "{0}": "⓪",
+    "{1}": "①",
+    "{2}": "②",
+    "{3}": "③",
+    "{4}": "④",
+    "{5}": "⑤",
+    "{6}": "⑥",
+    "{7}": "⑦",
+    "{8}": "⑧",
+    "{9}": "⑨",
+    "{10}": "⑩",
+    "{11}": "⑪",
+    "{12}": "⑫",
+    "{13}": "⑬",
+    "{14}": "⑭",
+    "{15}": "⑮",
+    "{16}": "⑯",
+    "{CHAOS}": "🌀",
+    "{PW}": "PW",
+    "{∞}": "♾︎",
+    "{W/U}": "(☀️/💧)",
+    "{U/B}": "(💧/💀)",
+    "{B/R}": "(💀/🔥)",
+    "{R/G}": "(🔥/🌳)",
+    "{G/W}": "(🌳/☀️)",
+    "{W/B}": "(☀️/💀)",
+    "{U/R}": "(💧/🔥)",
+    "{B/G}": "(💀/🌳)",
+    "{R/W}": "(🔥/☀️)",
+    "{G/U}": "(🌳/💧)",
+    "{2/W}": "(②/☀️)",
+    "{2/U}": "(②/💧)",
+    "{2/B}": "(②/💀)",
+    "{2/R}": "(②/🔥)",
+    "{2/G}": "(②/🌳)",
+    "{W/P}": "(☀️/Φ)",
+    "{U/P}": "(💧/Φ)",
+    "{B/P}": "(💀/Φ)",
+    "{R/P}": "(🔥/Φ)",
+    "{G/P}": "(🌳/Φ)",
+    "{W/U/P}": "(☀️/💧/Φ)",
+    "{W/B/P}": "(☀️/💀/Φ)",
+    "{U/B/P}": "(💧/💀/Φ)",
+    "{U/R/P}": "(💧/🔥/Φ)",
+    "{B/R/P}": "(💀/🔥/Φ)",
+    "{B/G/P}": "(💀/🌳/Φ)",
+    "{R/W/P}": "(🔥/☀️/Φ)",
+    "{R/G/P}": "(🔥/🌳/Φ)",
+    "{G/W/P}": "(🌳/☀️/Φ)",
+    "{G/U/P}": "(🌳/💧/Φ)",
+}
+
+
+def convert_mana_symbols_to_text(text: str) -> str:
+    """Convert mana symbols to Unicode text (for alt text) — matches JS convertManaSymbolsToText.
+
+    Args:
+    ----
+        text: Text containing mana symbols like {W}, {U}, etc.
+
+    Returns:
+    -------
+        Text with mana symbols replaced by Unicode representations
+    """
+    if not text:
+        return ""
+
+    return re.sub(r"\{[^}]{1,5}\}", lambda match: _MANA_TEXT_MAP.get(match.group(0), match.group(0)), text)
+
+
 def format_oracle_text(oracle_text: str, is_modal: bool = False) -> str:
     """Format oracle text with mana symbols and line breaks.
 
@@ -140,8 +229,6 @@ def format_oracle_text(oracle_text: str, is_modal: bool = False) -> str:
     """
     if not oracle_text:
         return ""
-
-    oracle_text = oracle_text.strip()
 
     # Convert mana symbols first
     formatted = convert_mana_symbols(oracle_text, is_modal)
@@ -168,6 +255,32 @@ def build_image_url(card: dict, size: str) -> str:
     return f"https://d1hot9ps2xugbc.cloudfront.net/img/{set_code}/{collector_number}/{face}/{size}.webp"
 
 
+def _build_alt_text(card: dict) -> str:
+    """Build descriptive image alt text with card name, mana cost, and oracle text.
+
+    Matches the alt text built in JS createCardHTML.
+
+    Args:
+    ----
+        card: Card dictionary with name, mana_cost, and oracle_text
+
+    Returns:
+    -------
+        HTML-escaped alt text
+    """
+    alt_text = escape_html(card.get("name") or "Unknown Card")
+    if card.get("mana_cost"):
+        mana_text_representation = convert_mana_symbols_to_text(card["mana_cost"])
+        alt_text += f" / {escape_html(mana_text_representation)}"
+    alt_text += "\n\n"
+    if card.get("oracle_text"):
+        oracle_text_with_symbols = convert_mana_symbols_to_text(card["oracle_text"])
+        if len(oracle_text_with_symbols) > MAX_ALT_TEXT_LENGTH:
+            oracle_text_with_symbols = oracle_text_with_symbols[:MAX_ALT_TEXT_LENGTH] + "..."
+        alt_text += escape_html(oracle_text_with_symbols)
+    return alt_text
+
+
 def create_card_html(card: dict, index: int) -> str:
     """Generate HTML for a single card (server-side rendering).
 
@@ -188,8 +301,7 @@ def create_card_html(card: dict, index: int) -> str:
     image_538 = build_image_url(card, "538")
     image_745 = build_image_url(card, "745")
 
-    # Create alt text
-    alt_text = escape_html(card.get("name", "Unknown Card"))
+    alt_text = _build_alt_text(card)
 
     # Build srcset and sizes for responsive images
     # sizes breakpoints are one below the CSS grid min-width thresholds (< not <=):
@@ -213,7 +325,7 @@ def create_card_html(card: dict, index: int) -> str:
     # Use 388px as default src (good middle ground for initial load)
     priority_attr = ' fetchpriority="high"' if index == 0 else ""
     lazy_attr = "" if index < _EAGER_LOAD_COUNT else ' loading="lazy"'
-    image_html = (
+    img_tag = (
         f'<img class="card-image" '
         f'src="{escape_html(image_388)}" '
         f'srcset="{srcset}" '
@@ -221,8 +333,14 @@ def create_card_html(card: dict, index: int) -> str:
         f'alt="{alt_text}" title="{alt_text}"{priority_attr}{lazy_attr} />'
     )
 
+    # Link the image to the card detail page — matches JS createCardHTML
+    if card.get("set_code") and card.get("collector_number"):
+        image_html = f'<a href="/card/{card["set_code"]}/{card["collector_number"]}" class="card-page-link">{img_tag}</a>'
+    else:
+        image_html = img_tag
+
     # Build card components
-    name_html = f'<div class="card-name">{escape_html(card.get("name", "Unknown Card"))}</div>'
+    name_html = f'<div class="card-name">{escape_html(card.get("name") or "Unknown Card")}</div>'
 
     mana_html = ""
     if card.get("mana_cost"):
