@@ -1,7 +1,8 @@
 use super::{
     build_numeric_index, build_oracle_text_index, build_tag_index, build_trigram_index,
     build_type_index, cards_of_printings, count_common_keywords, count_common_types,
-    build_artist_index, build_range_index, narrow_candidates, run_query, trigram_candidates,
+    build_artist_index, build_range_index, date_range_candidates, narrow_candidates,
+    range_too_broad_to_narrow, run_query, trigram_candidates, DateIndex, NARROW_FLOOR,
     ArtistIndex, CardData, CardIndexes, Candidates,
     CollField, CmpOp, FilterExpr, InlineStr, Interner, ManaCost, OracleCard, Printing, TagIndex,
     Tri, TrigramIndex, VocabInterner, ARTIST_NONE, NONE_STR, TYPE_ARTIFACT, TYPE_CREATURE, TYPE_INSTANT,
@@ -753,6 +754,26 @@ fn set_code_and_date_narrowing() {
     }
     // Ne is not selective and must not narrow.
     assert!(narrow_candidates(&FilterExpr::DateCmp { op: CmpOp::Ne, value: 19930805 }, &archived.indexes, &archived.offsets).is_none());
+}
+
+#[test]
+fn broad_ranges_decline_to_narrow() {
+    // Fraction rule: past MAX_NARROW_FRACTION of the index, gathering candidates
+    // costs more than the scan it replaces.
+    assert!(!range_too_broad_to_narrow(2_500, 10_000)); // exactly 25%: narrows
+    assert!(range_too_broad_to_narrow(2_501, 10_000)); // past it: scan
+    // Absolute floor: small candidate counts always narrow, even when they
+    // cover the whole index (tiny stores, tests, partial imports).
+    assert!(!range_too_broad_to_narrow(NARROW_FLOOR, 10));
+    assert!(range_too_broad_to_narrow(NARROW_FLOOR + 1, 10));
+
+    // End-to-end through the archived index: a broad slice returns None (fall
+    // back to the scan), a selective slice still narrows.
+    let idx: DateIndex = (0..8_000u32).map(|v| (v, v)).collect();
+    let bytes = rkyv::to_bytes::<Error>(&idx).expect("serialize");
+    let archived = rkyv::access::<Archived<DateIndex>, Error>(&bytes).expect("access");
+    assert!(date_range_candidates(archived, 0, u32::MAX).is_none());
+    assert_eq!(date_range_candidates(archived, 100, 200).map(|v| v.len()), Some(100));
 }
 
 #[test]

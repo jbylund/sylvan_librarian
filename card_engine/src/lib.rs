@@ -876,6 +876,10 @@ fn flip_op(op: CmpOp) -> CmpOp {
 
 /// Return sorted card indices satisfying `field op val` using the numeric index.
 /// Returns None for Ne (not selective) and Some(empty) when no cards can match.
+/// Card-space narrowing needs no selectivity guard (unlike MAX_NARROW_FRACTION
+/// for the printing-space indexes): candidates are bounded by the ~3× smaller
+/// card count, so even a slice covering the whole index measures at worst
+/// break-even against the per-printing scan it would replace.
 fn numeric_candidates(idx: &Archived<NumericIndex>, op: CmpOp, val: f64) -> Option<Vec<u32>> {
     let (start, end) = match op {
         CmpOp::Ne => return None,
@@ -974,6 +978,25 @@ fn expand_artist_ids(idx: &Archived<ArtistIndex>, artist_ids: &[u16]) -> Vec<u32
 
 type DateIndex = Vec<(u32, u32)>;
 
+// Printing-space range narrowing is a pessimization when the matched slice
+// covers too much of the index: gathering + sorting the candidate ids and
+// evaluating them by random access costs ~2× per element what the sequential
+// full scan pays, and unlike the card-space indexes the candidate set doesn't
+// shrink the eval domain. Measured break-even is around a third of the store;
+// past the fraction below the indexes decline to narrow and the query falls
+// back to the scan. Narrowing is advisory (eval verifies every candidate), so
+// this is purely a speed dial, not a correctness concern.
+const MAX_NARROW_FRACTION: f64 = 0.25;
+
+/// Below this many matched ids narrowing always wins regardless of fraction —
+/// gathering a handful of ids is microseconds. Also keeps tiny stores (tests,
+/// partial imports) narrowing, where any match trips the fraction.
+const NARROW_FLOOR: usize = 1_000;
+
+fn range_too_broad_to_narrow(matched: usize, index_len: usize) -> bool {
+    matched > NARROW_FLOOR && matched as f64 > index_len as f64 * MAX_NARROW_FRACTION
+}
+
 fn build_range_index(printings: &[Printing], get: impl Fn(&Printing) -> Option<u32>) -> DateIndex {
     let mut idx: DateIndex = printings
         .iter()
@@ -996,17 +1019,21 @@ fn price_candidates(idx: &Archived<DateIndex>, op: CmpOp, value: f64) -> Option<
         CmpOp::Lt | CmpOp::Le => (0, b.saturating_add(1)),
         CmpOp::Gt | CmpOp::Ge => (b, u32::MAX),
     };
-    Some(date_range_candidates(idx, lo, hi))
+    date_range_candidates(idx, lo, hi)
 }
 
-/// Sorted printing ids with an indexed value in [lo, hi). Callers translate ops
-/// into half-open ranges; Ne is not selective and never narrows.
-fn date_range_candidates(idx: &Archived<DateIndex>, lo: u32, hi: u32) -> Vec<u32> {
+/// Sorted printing ids with an indexed value in [lo, hi), or None for ranges
+/// too broad to be worth narrowing (see MAX_NARROW_FRACTION). Callers translate
+/// ops into half-open ranges; Ne is not selective and never narrows.
+fn date_range_candidates(idx: &Archived<DateIndex>, lo: u32, hi: u32) -> Option<Vec<u32>> {
     let s = idx.partition_point(|p| u32::from(p.0) < lo);
     let e = idx.partition_point(|p| u32::from(p.0) < hi);
+    if range_too_broad_to_narrow(e - s, idx.len()) {
+        return None;
+    }
     let mut result: Vec<u32> = idx[s..e].iter().map(|p| u32::from(p.1)).collect();
     result.sort_unstable();
-    result
+    Some(result)
 }
 
 // ─── Type bit index ───────────────────────────────────────────────────────────
@@ -1223,7 +1250,7 @@ fn narrow_candidates(filter: &FilterExpr, indexes: &Archived<CardIndexes>, offse
                 CmpOp::Gt => (value.saturating_add(1), u32::MAX),
                 CmpOp::Ge => (*value, u32::MAX),
             };
-            Some(Candidates::Printings(date_range_candidates(&indexes.released_at, lo, hi)))
+            date_range_candidates(&indexes.released_at, lo, hi).map(Candidates::Printings)
         }
 
         FilterExpr::YearCmp { op, year } => {
@@ -1239,7 +1266,7 @@ fn narrow_candidates(filter: &FilterExpr, indexes: &Archived<CardIndexes>, offse
                 CmpOp::Gt => ((y + 1) * 10_000, u32::MAX),
                 CmpOp::Ge => (y * 10_000, u32::MAX),
             };
-            Some(Candidates::Printings(date_range_candidates(&indexes.released_at, lo, hi)))
+            date_range_candidates(&indexes.released_at, lo, hi).map(Candidates::Printings)
         }
 
         FilterExpr::And(children) => {
