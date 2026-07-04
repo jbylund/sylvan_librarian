@@ -224,8 +224,11 @@ struct Printing {
 
     flavor_text_id: u32,
     flavor_text_lower_id: u32,
-    card_artist_id: u32,
-    card_artist_lower_id: u32,
+    // Interned id into CardData.artist_vocab (~2.2k distinct lowercase artist
+    // names); ARTIST_NONE = absent. Artist predicates resolve their match set
+    // against the vocab once per query (FilterExpr::ArtistMatch), so no artist
+    // strings live on the printing.
+    card_artist_vid: u16,
     card_set_code: InlineStr<8>,
     card_border_id: u32,
     card_watermark_id: u32,
@@ -268,8 +271,7 @@ struct CardRow {
     oracle_text_lower_id: u32,
     flavor_text_id: u32,
     flavor_text_lower_id: u32,
-    card_artist_id: u32,
-    card_artist_lower_id: u32,
+    card_artist_vid: u16,
     card_set_code: InlineStr<8>,
     card_layout_id: u32,
     card_border_id: u32,
@@ -317,6 +319,9 @@ pub(crate) type AOffsets = Archived<Vec<u32>>;
 
 /// Sentinel id for absent optional strings (a card never has 4 billion distinct strings).
 const NONE_STR: u32 = u32::MAX;
+
+/// Sentinel for a printing with no artist (see Printing.card_artist_vid).
+pub(crate) const ARTIST_NONE: u16 = u16::MAX;
 
 /// Resolve an interned id against the archived string table; None for absent.
 pub(crate) fn str_at(strings: &AStrings, id: u32) -> Option<&str> {
@@ -586,7 +591,7 @@ fn mana_cost_from_pydict(d: &Bound<PyDict>, cmc_val: Option<f32>) -> ManaCost {
     ManaCost { pips, devotion, cmc: cmc_val.unwrap_or(0.0) }
 }
 
-fn card_from_pydict(d: &Bound<PyDict>, it: &mut Interner, vocab: &mut VocabInterner) -> PyResult<CardRow> {
+fn card_from_pydict(d: &Bound<PyDict>, it: &mut Interner, vocab: &mut VocabInterner, artists: &mut VocabInterner) -> PyResult<CardRow> {
     let released_at = opt_date_str(d, "released_at").unwrap_or_default();
     let released_at_int: Option<u32> = released_at.replace('-', "").parse().ok();
     // Raw strings from the dict; interned to ids as the struct is built below.
@@ -596,8 +601,10 @@ fn card_from_pydict(d: &Bound<PyDict>, it: &mut Interner, vocab: &mut VocabInter
     let oracle_text_lower_id = it.intern(oracle_text.to_lowercase());
     let flavor_text = opt_str(d, "flavor_text").unwrap_or_default();
     let flavor_text_lower_id = it.intern(flavor_text.to_lowercase());
-    let card_artist = opt_str(d, "card_artist");
-    let card_artist_lower_id = it.intern_opt(card_artist.as_ref().map(|s| s.to_lowercase()));
+    let card_artist_vid = match opt_str(d, "card_artist") {
+        Some(a) => artists.intern(a.to_lowercase())?,
+        None => ARTIST_NONE,
+    };
 
     Ok(CardRow {
         scryfall_id: opt_uuid(d, "scryfall_id"),
@@ -610,8 +617,7 @@ fn card_from_pydict(d: &Bound<PyDict>, it: &mut Interner, vocab: &mut VocabInter
         oracle_text_id: it.intern(oracle_text),
         flavor_text_lower_id,
         flavor_text_id: it.intern(flavor_text),
-        card_artist_lower_id,
-        card_artist_id: it.intern_opt(card_artist),
+        card_artist_vid,
         card_set_code: InlineStr::<8>::from_str(&opt_str(d, "card_set_code").unwrap_or_default()),
         card_layout_id: it.intern(opt_str(d, "card_layout").unwrap_or_default()),
         card_border_id: it.intern(opt_str(d, "card_border").unwrap_or_default()),
@@ -913,6 +919,80 @@ fn build_tag_index<T>(rows: &[T], vocab: &[String], get_ids: impl Fn(&T) -> &Vec
         .collect()
 }
 
+// ─── Artist index ─────────────────────────────────────────────────────────────
+// CSR from artist vocab id → printing ids (each row sorted; placement walks
+// store order). Artist predicates resolve their matching vocab ids once per
+// query (bind), then expand the surviving rows here to narrow in printing space.
+
+#[derive(Archive, Serialize, Deserialize, Default)]
+struct ArtistIndex {
+    /// Row boundaries: printings of artist id `a` live at
+    /// `printings[offsets[a] .. offsets[a + 1]]`. Length n_artists + 1.
+    offsets: Vec<u32>,
+    printings: Vec<u32>,
+}
+
+fn build_artist_index(printings: &[Printing], n_artists: usize) -> ArtistIndex {
+    let mut offsets = vec![0u32; n_artists + 1];
+    for p in printings {
+        if p.card_artist_vid != ARTIST_NONE {
+            offsets[p.card_artist_vid as usize + 1] += 1;
+        }
+    }
+    for i in 1..offsets.len() {
+        offsets[i] += offsets[i - 1];
+    }
+    let mut cursor = offsets.clone();
+    let mut out = vec![0u32; offsets[n_artists] as usize];
+    for (i, p) in printings.iter().enumerate() {
+        if p.card_artist_vid != ARTIST_NONE {
+            let a = p.card_artist_vid as usize;
+            out[cursor[a] as usize] = i as u32;
+            cursor[a] += 1;
+        }
+    }
+    ArtistIndex { offsets, printings: out }
+}
+
+/// Expand matching artist vocab ids to sorted printing ids via the CSR table.
+fn expand_artist_ids(idx: &Archived<ArtistIndex>, artist_ids: &[u16]) -> Vec<u32> {
+    let mut out: Vec<u32> = Vec::new();
+    for &a in artist_ids {
+        let start = u32::from(idx.offsets[a as usize]) as usize;
+        let end = u32::from(idx.offsets[a as usize + 1]) as usize;
+        out.extend(idx.printings[start..end].iter().map(|x| u32::from(*x)));
+    }
+    out.sort_unstable();
+    out
+}
+
+// ─── Released-at index ────────────────────────────────────────────────────────
+// Sorted (yyyymmdd, printing idx); binary-searched ranges answer date/year
+// filters in printing space. Printings without a date are absent (they can
+// never satisfy a date comparison — SQL NULL semantics).
+
+type DateIndex = Vec<(u32, u32)>;
+
+fn build_date_index(printings: &[Printing]) -> DateIndex {
+    let mut idx: DateIndex = printings
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| p.released_at_int.map(|d| (d, i as u32)))
+        .collect();
+    idx.sort_unstable();
+    idx
+}
+
+/// Sorted printing ids with released_at in [lo, hi). Callers translate ops into
+/// half-open ranges; Ne is not selective and never narrows.
+fn date_range_candidates(idx: &Archived<DateIndex>, lo: u32, hi: u32) -> Vec<u32> {
+    let s = idx.partition_point(|p| u32::from(p.0) < lo);
+    let e = idx.partition_point(|p| u32::from(p.0) < hi);
+    let mut result: Vec<u32> = idx[s..e].iter().map(|p| u32::from(p.1)).collect();
+    result.sort_unstable();
+    result
+}
+
 // ─── Type bit index ───────────────────────────────────────────────────────────
 // One sorted Vec<u32> per type bit (14 bits, matching the TYPE_* constants).
 // Bit position N corresponds to TYPE_* = 1 << N.
@@ -950,6 +1030,9 @@ struct CardIndexes {
     oracle_tags:    TagIndex,        // card space
     art_tags:       TagIndex,        // printing space
     is_tags:        TagIndex,        // printing space
+    artists:        ArtistIndex,     // printing space (CSR by artist vocab id)
+    set_codes:      TagIndex,        // printing space
+    released_at:    DateIndex,       // printing space
 }
 
 impl Default for CardIndexes {
@@ -966,6 +1049,9 @@ impl Default for CardIndexes {
             oracle_tags:    HashMap::new(),
             art_tags:       HashMap::new(),
             is_tags:        HashMap::new(),
+            artists:        ArtistIndex::default(),
+            set_codes:      HashMap::new(),
+            released_at:    Vec::new(),
         }
     }
 }
@@ -986,8 +1072,12 @@ struct CardData {
     // (see VocabInterner). ~16k entries / ~200 KB.
     coll_vocab: Vec<String>,
     // Permutation of 0..coll_vocab.len() sorted by string, so query values
-    // resolve to vocab ids by binary search (FilterExpr::bind_collection_ids).
+    // resolve to vocab ids by binary search (FilterExpr::bind).
     coll_vocab_sorted: Vec<u16>,
+    // Distinct lowercase artist names, indexed by Printing.card_artist_vid.
+    // Artist predicates (contains/exact/regex) evaluate against these ~2.2k
+    // strings once per query instead of per printing.
+    artist_vocab: Vec<String>,
     indexes: CardIndexes,
     // The writer's format→shift assignments. Persisted so reader processes —
     // which never run the load path that feeds FORMAT_SHIFTS — resolve
@@ -1085,6 +1175,49 @@ fn narrow_candidates(filter: &FilterExpr, indexes: &Archived<CardIndexes>, offse
                 CollField::FrameData  => return None, // no index (low-selectivity values dominate)
             };
             idx.get(value.as_str()).map(|v| space(v.iter().map(|x| u32::from(*x)).collect()))
+        }
+
+        FilterExpr::ArtistMatch { ids } => {
+            // ids resolved at bind time; empty means no artist satisfies the
+            // predicate, which proves the empty candidate set.
+            Some(Candidates::Printings(expand_artist_ids(&indexes.artists, ids)))
+        }
+
+        FilterExpr::TextExact { field: TextField::SetCode, op: CmpOp::Eq, value } => {
+            // A set code absent from the index appears on no printing: narrowing
+            // to the empty set is exact, matching the tag-index convention would
+            // be None, but unlike tags the index covers every non-empty code.
+            Some(Candidates::Printings(
+                indexes.set_codes.get(value.as_str()).map_or_else(Vec::new, |v| v.iter().map(|x| u32::from(*x)).collect()),
+            ))
+        }
+
+        FilterExpr::DateCmp { op, value } => {
+            let (lo, hi) = match op {
+                CmpOp::Ne => return None,
+                CmpOp::Eq => (*value, value.saturating_add(1)),
+                CmpOp::Lt => (0, *value),
+                CmpOp::Le => (0, value.saturating_add(1)),
+                CmpOp::Gt => (value.saturating_add(1), u32::MAX),
+                CmpOp::Ge => (*value, u32::MAX),
+            };
+            Some(Candidates::Printings(date_range_candidates(&indexes.released_at, lo, hi)))
+        }
+
+        FilterExpr::YearCmp { op, year } => {
+            if *year < 0 || *year > 9999 {
+                return None;
+            }
+            let y = *year as u32;
+            let (lo, hi) = match op {
+                CmpOp::Ne => return None,
+                CmpOp::Eq => (y * 10_000, (y + 1) * 10_000),
+                CmpOp::Lt => (0, y * 10_000),
+                CmpOp::Le => (0, (y + 1) * 10_000),
+                CmpOp::Gt => ((y + 1) * 10_000, u32::MAX),
+                CmpOp::Ge => (y * 10_000, u32::MAX),
+            };
+            Some(Candidates::Printings(date_range_candidates(&indexes.released_at, lo, hi)))
         }
 
         FilterExpr::And(children) => {
@@ -1491,7 +1624,7 @@ fn card_to_pydict<'py>(
 const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 /// Bump on any archived-data-model change the struct sizes below wouldn't
 /// catch (e.g. reordering same-size fields, changing an index type).
-const ARCHIVE_FORMAT_VERSION: u32 = 20260705;
+const ARCHIVE_FORMAT_VERSION: u32 = 20260706;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -1524,6 +1657,7 @@ struct Staging {
     rows: Vec<CardRow>,
     interner: Interner,
     vocab: VocabInterner,
+    artists: VocabInterner,
     #[allow(dead_code)] // held for its flock; released on drop
     lock_file: std::fs::File,
 }
@@ -1705,7 +1839,7 @@ impl QueryEngine {
         #[cfg(feature = "alloc-counter")]
         alloc_stats::reset_peak();
 
-        *staging = Some(Staging { rows: Vec::new(), interner: Interner::new(), vocab: VocabInterner::new(), lock_file });
+        *staging = Some(Staging { rows: Vec::new(), interner: Interner::new(), vocab: VocabInterner::new(), artists: VocabInterner::new(), lock_file });
         Ok(true)
     }
 
@@ -1717,7 +1851,7 @@ impl QueryEngine {
         })?;
         for item in db_rows.iter() {
             if let Ok(d) = item.cast::<PyDict>() {
-                staging.rows.push(card_from_pydict(&d, &mut staging.interner, &mut staging.vocab)?);
+                staging.rows.push(card_from_pydict(&d, &mut staging.interner, &mut staging.vocab, &mut staging.artists)?);
             }
         }
         Ok(())
@@ -1736,7 +1870,7 @@ impl QueryEngine {
         let staging = self.staging.lock().unwrap().take().ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err("reload_commit called without reload_begin")
         })?;
-        let Staging { mut rows, interner, vocab, lock_file } = staging;
+        let Staging { mut rows, interner, vocab, artists, lock_file } = staging;
 
         // The store groups printings by oracle_id, so rows without one would all
         // collapse into a single card. The DB enforces NOT NULL; fail loudly here
@@ -1815,8 +1949,7 @@ impl QueryEngine {
                 illustration_id: row.illustration_id,
                 flavor_text_id: row.flavor_text_id,
                 flavor_text_lower_id: row.flavor_text_lower_id,
-                card_artist_id: row.card_artist_id,
-                card_artist_lower_id: row.card_artist_lower_id,
+                card_artist_vid: row.card_artist_vid,
                 card_set_code: row.card_set_code,
                 card_border_id: row.card_border_id,
                 card_watermark_id: row.card_watermark_id,
@@ -1844,6 +1977,8 @@ impl QueryEngine {
         drop(interner.map);
         let coll_vocab = vocab.strings;
         drop(vocab.map);
+        let artist_vocab = artists.strings;
+        drop(artists.map);
         // String-sorted permutation of the vocab ids; VocabInterner caps the
         // vocab at u16::MAX entries so the cast can't truncate.
         let mut coll_vocab_sorted: Vec<u16> = (0..coll_vocab.len() as u16).collect();
@@ -1860,6 +1995,18 @@ impl QueryEngine {
             oracle_tags:    build_tag_index(&cards, &coll_vocab, |c| &c.card_oracle_tags),
             art_tags:       build_tag_index(&printings, &coll_vocab, |p| &p.card_art_tags),
             is_tags:        build_tag_index(&printings, &coll_vocab, |p| &p.card_is_tags),
+            artists:        build_artist_index(&printings, artist_vocab.len()),
+            set_codes:      {
+                let mut idx: TagIndex = HashMap::new();
+                for (i, p) in printings.iter().enumerate() {
+                    let code = p.card_set_code.as_str();
+                    if !code.is_empty() {
+                        idx.entry(code.to_string()).or_default().push(i as u32);
+                    }
+                }
+                idx
+            },
+            released_at:    build_date_index(&printings),
         };
 
         #[cfg(feature = "alloc-counter")]
@@ -1868,7 +2015,7 @@ impl QueryEngine {
         // Snapshot the registry card_from_pydict just populated so reader
         // processes can adopt the same format→shift assignments.
         let format_shifts_snapshot = format_shifts().read().map(|m| m.clone()).unwrap_or_default();
-        let card_data = CardData { cards, printings, offsets, strings, coll_vocab, coll_vocab_sorted, indexes, format_shifts: format_shifts_snapshot };
+        let card_data = CardData { cards, printings, offsets, strings, coll_vocab, coll_vocab_sorted, artist_vocab, indexes, format_shifts: format_shifts_snapshot };
 
         // Write atomically: stream into a per-PID .tmp, then rename over shm_path.
         // Per-PID avoids the race where two workers write to the same .tmp and
@@ -1995,7 +2142,7 @@ impl QueryEngine {
         sync_format_shifts(&data.format_shifts);
         let mut filter_expr = build_filter(&json_val)
             .map_err(|e| QueryError::new_err(format!("build_filter: {e}")))?;
-        filter_expr.bind_collection_ids(&data.coll_vocab, &data.coll_vocab_sorted);
+        filter_expr.bind(&data.coll_vocab, &data.coll_vocab_sorted, &data.artist_vocab);
 
         let (total, page) = run_query(
             &data.cards, &data.printings, &data.offsets, &data.strings, &filter_expr,

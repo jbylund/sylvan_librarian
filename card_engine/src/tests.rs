@@ -1,9 +1,10 @@
 use super::{
     build_numeric_index, build_oracle_text_index, build_tag_index, build_trigram_index,
     build_type_index, cards_of_printings, count_common_keywords, count_common_types,
-    narrow_candidates, run_query, trigram_candidates, CardData, CardIndexes, Candidates,
+    build_artist_index, build_date_index, narrow_candidates, run_query, trigram_candidates,
+    ArtistIndex, CardData, CardIndexes, Candidates,
     CollField, CmpOp, FilterExpr, InlineStr, Interner, ManaCost, OracleCard, Printing, TagIndex,
-    Tri, TrigramIndex, VocabInterner, NONE_STR, TYPE_ARTIFACT, TYPE_CREATURE, TYPE_INSTANT,
+    Tri, TrigramIndex, VocabInterner, ARTIST_NONE, NONE_STR, TYPE_ARTIFACT, TYPE_CREATURE, TYPE_INSTANT,
     TYPE_LEGENDARY, TYPE_PLANESWALKER,
 };
 use rkyv::{rancor::Error, Archived};
@@ -168,8 +169,7 @@ fn stub_printing(scryfall_id: u128, illustration_id: u128, prefer_score: Option<
         illustration_id,
         flavor_text_id: NONE_STR,
         flavor_text_lower_id: NONE_STR,
-        card_artist_id: NONE_STR,
-        card_artist_lower_id: NONE_STR,
+        card_artist_vid: ARTIST_NONE,
         card_set_code: InlineStr::from_str(""),
         card_border_id: NONE_STR,
         card_watermark_id: NONE_STR,
@@ -218,6 +218,7 @@ fn store_of(cards: Vec<OracleCard>, printing_counts: &[usize], vocab: VocabInter
         strings: vec![],
         coll_vocab_sorted: sorted_vocab_ids(&vocab.strings),
         coll_vocab: vocab.strings,
+        artist_vocab: vec![],
         indexes,
         format_shifts: HashMap::new(),
     }
@@ -352,7 +353,7 @@ fn collection_cmp_binds_vocab_ids_and_matches() {
             value: value.to_string(),
             value_id: None,
         };
-        f.bind_collection_ids(&archived.coll_vocab, &archived.coll_vocab_sorted);
+        f.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab);
         archived.cards.iter().map(|c| f.eval_card(c, &archived.strings) == Tri::True).collect()
     };
 
@@ -382,7 +383,7 @@ fn printing_level_predicates_are_printing_dep_in_card_pass() {
         value: "wolf".to_string(),
         value_id: None,
     };
-    f.bind_collection_ids(&archived.coll_vocab, &archived.coll_vocab_sorted);
+    f.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab);
 
     let card = &archived.cards[0];
     // Card pass can't decide an art-tag predicate...
@@ -532,7 +533,6 @@ fn bench_checked_vs_unchecked_access() {
             let mut p = stub_printing(pid, pid, Some((PRINTINGS_PER_CARD - k) as f32));
             p.flavor_text_id = interner.intern(flavor.clone());
             p.flavor_text_lower_id = interner.intern(flavor.to_lowercase());
-            p.card_artist_id = interner.intern(format!("Artist {}", i % 1000));
             p.set_name_id = interner.intern(format!("Benchmark Set {}", i % 300));
             printings.push(p);
         }
@@ -553,6 +553,9 @@ fn bench_checked_vs_unchecked_access() {
         oracle_tags:    build_tag_index(&cards, &vocab.strings, |c| &c.card_oracle_tags),
         art_tags:       build_tag_index(&printings, &vocab.strings, |p| &p.card_art_tags),
         is_tags:        build_tag_index(&printings, &vocab.strings, |p| &p.card_is_tags),
+        artists:        ArtistIndex::default(),
+        set_codes:      HashMap::new(),
+        released_at:    Vec::new(),
     };
     let data = CardData {
         cards,
@@ -561,6 +564,7 @@ fn bench_checked_vs_unchecked_access() {
         strings,
         coll_vocab_sorted: sorted_vocab_ids(&vocab.strings),
         coll_vocab: vocab.strings,
+        artist_vocab: vec![],
         indexes,
         format_shifts: HashMap::new(),
     };
@@ -606,7 +610,7 @@ fn card_pass_extracts_residual_and_matches() {
         value: "wolf".to_string(),
         value_id: None,
     };
-    wolf.bind_collection_ids(&archived.coll_vocab, &archived.coll_vocab_sorted);
+    wolf.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab);
     let creature = || FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
 
     // And[t:creature, art:wolf]: the type check is proven at card level and
@@ -634,11 +638,118 @@ fn card_pass_extracts_residual_and_matches() {
         value: "wolf".to_string(),
         value_id: None,
     };
-    wolf2.bind_collection_ids(&archived.coll_vocab, &archived.coll_vocab_sorted);
+    wolf2.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab);
     let or = FilterExpr::Or(vec![creature(), wolf2]);
     let t = or.card_pass(&archived.cards[0], &archived.strings, &mut residual, &mut is_or);
     assert!(t == Tri::True && residual.is_empty());
     let t = or.card_pass(&archived.cards[1], &archived.strings, &mut residual, &mut is_or);
     assert!(t == Tri::PrintingDep && residual.len() == 1 && is_or);
     assert!(!FilterExpr::residual_matches(&archived.cards[1], &archived.printings[2], &archived.strings, &residual, is_or));
+}
+
+#[test]
+fn artist_predicates_bind_to_vocab_ids_and_narrow() {
+    // Two artists; printings 0,2 by "rebecca guay", printing 1 by "john avon",
+    // printing 3 has no artist.
+    let mut vocab = VocabInterner::new();
+    let cards = vec![stub_card(1, TYPE_CREATURE, &[], &mut vocab), stub_card(2, TYPE_CREATURE, &[], &mut vocab)];
+    let mut data = store_of(cards, &[2, 2], vocab);
+    let mut artists = VocabInterner::new();
+    let rebecca = artists.intern("rebecca guay".to_string()).unwrap();
+    let avon = artists.intern("john avon".to_string()).unwrap();
+    data.printings[0].card_artist_vid = rebecca;
+    data.printings[1].card_artist_vid = avon;
+    data.printings[2].card_artist_vid = rebecca;
+    data.artist_vocab = artists.strings;
+    data.indexes.artists = build_artist_index(&data.printings, data.artist_vocab.len());
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let mut f = FilterExpr::TextContains {
+        field: super::TextSearchField::ArtistLower,
+        word: "rebecca".to_string(),
+    };
+    f.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab);
+    // bind rewrites the contains into an id-set match
+    let FilterExpr::ArtistMatch { ref ids } = f else { panic!("expected ArtistMatch after bind") };
+    assert_eq!(ids, &vec![rebecca]);
+
+    // per-printing evaluation: integer membership; missing artist is Null (no match)
+    let card = &archived.cards[0];
+    assert!(f.matches(card, &archived.printings[0], &archived.strings));
+    assert!(!f.matches(card, &archived.printings[1], &archived.strings));
+    assert!(!f.matches(card, &archived.printings[3], &archived.strings));
+    assert!(f.eval_card(card, &archived.strings) == Tri::PrintingDep);
+
+    // narrowing expands the CSR rows to sorted printing ids
+    match narrow_candidates(&f, &archived.indexes, &archived.offsets) {
+        Some(Candidates::Printings(v)) => assert_eq!(v, vec![0, 2]),
+        _ => panic!("artist predicate must narrow in printing space"),
+    }
+
+    // an artist matching nothing narrows to the exact empty set
+    let mut g = FilterExpr::TextContains {
+        field: super::TextSearchField::ArtistLower,
+        word: "zzz".to_string(),
+    };
+    g.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab);
+    match narrow_candidates(&g, &archived.indexes, &archived.offsets) {
+        Some(Candidates::Printings(v)) => assert!(v.is_empty()),
+        _ => panic!("empty artist match must narrow to the empty set"),
+    }
+}
+
+#[test]
+fn set_code_and_date_narrowing() {
+    let mut vocab = VocabInterner::new();
+    let cards = vec![stub_card(1, TYPE_CREATURE, &[], &mut vocab), stub_card(2, TYPE_CREATURE, &[], &mut vocab)];
+    let mut data = store_of(cards, &[2, 1], vocab);
+    data.printings[0].card_set_code = InlineStr::from_str("lea");
+    data.printings[1].card_set_code = InlineStr::from_str("fdn");
+    data.printings[2].card_set_code = InlineStr::from_str("lea");
+    data.printings[0].released_at_int = Some(19930805);
+    data.printings[1].released_at_int = Some(20241115);
+    data.printings[2].released_at_int = None; // dateless printings never satisfy date filters
+    // set_codes / released_at built the way reload_commit builds them
+    let mut set_codes: TagIndex = HashMap::new();
+    for (i, p) in data.printings.iter().enumerate() {
+        set_codes.entry(p.card_set_code.as_str().to_string()).or_default().push(i as u32);
+    }
+    data.indexes.set_codes = set_codes;
+    data.indexes.released_at = build_date_index(&data.printings);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let lea = FilterExpr::TextExact {
+        field: super::TextField::SetCode,
+        op: CmpOp::Eq,
+        value: "lea".to_string(),
+    };
+    match narrow_candidates(&lea, &archived.indexes, &archived.offsets) {
+        Some(Candidates::Printings(v)) => assert_eq!(v, vec![0, 2]),
+        _ => panic!("set code must narrow in printing space"),
+    }
+    // Unknown set code: exact empty narrowing (the index covers every code).
+    let none = FilterExpr::TextExact {
+        field: super::TextField::SetCode,
+        op: CmpOp::Eq,
+        value: "zzz".to_string(),
+    };
+    match narrow_candidates(&none, &archived.indexes, &archived.offsets) {
+        Some(Candidates::Printings(v)) => assert!(v.is_empty()),
+        _ => panic!("unknown set code must narrow to the empty set"),
+    }
+
+    let year1993 = FilterExpr::YearCmp { op: CmpOp::Eq, year: 1993 };
+    match narrow_candidates(&year1993, &archived.indexes, &archived.offsets) {
+        Some(Candidates::Printings(v)) => assert_eq!(v, vec![0]),
+        _ => panic!("year must narrow in printing space"),
+    }
+    let date_ge = FilterExpr::DateCmp { op: CmpOp::Ge, value: 20240101 };
+    match narrow_candidates(&date_ge, &archived.indexes, &archived.offsets) {
+        Some(Candidates::Printings(v)) => assert_eq!(v, vec![1]),
+        _ => panic!("date must narrow in printing space"),
+    }
+    // Ne is not selective and must not narrow.
+    assert!(narrow_candidates(&FilterExpr::DateCmp { op: CmpOp::Ne, value: 19930805 }, &archived.indexes, &archived.offsets).is_none());
 }
