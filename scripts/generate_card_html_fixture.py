@@ -105,6 +105,62 @@ CASES = [
         },
     },
     {
+        # image_placeholder set -> ph-<bucket> class + tint colors as CSS custom properties
+        "id": "measured-placeholder-gradient",
+        "index": 4,
+        "card": {
+            "name": "Breeding Pool",
+            "type_line": "Land — Forest Island",
+            "oracle_text": "({T}: Add {G} or {U}.)\nAs Breeding Pool enters the battlefield, you may pay 2 life.",
+            "set_name": "Ravnica Remastered",
+            "set_code": "rvr",
+            "collector_number": "275",
+            "image_placeholder": "m15-land 5a7a52 5a6f8a 3d5a55",
+        },
+    },
+    {
+        # no measured value + Land type line -> ph-fb-land fallback (type checks precede mana cost)
+        "id": "placeholder-fallback-land",
+        "index": 8,
+        "card": {
+            "name": "Command Tower",
+            "type_line": "Land",
+            "oracle_text": "{T}: Add one mana of any color in your commander's color identity.",
+            "set_name": "Commander 2011",
+            "set_code": "cmd",
+            "collector_number": "269",
+        },
+    },
+    {
+        # no measured value + two mana colors -> ph-fb-gold fallback
+        "id": "placeholder-fallback-gold",
+        "index": 9,
+        "card": {
+            "name": "Lightning Helix",
+            "mana_cost": "{R}{W}",
+            "type_line": "Instant",
+            "oracle_text": "Lightning Helix deals 3 damage to any target and you gain 3 life.",
+            "set_name": "Ravnica: City of Guilds",
+            "set_code": "rav",
+            "collector_number": "213",
+        },
+    },
+    {
+        # malformed stored value must not reach the style attribute -> falls back
+        "id": "placeholder-malformed-value-falls-back",
+        "index": 10,
+        "card": {
+            "name": "Giant Growth",
+            "mana_cost": "{G}",
+            "type_line": "Instant",
+            "oracle_text": "Target creature gets +3/+3 until end of turn.",
+            "set_name": "Limited Edition Alpha",
+            "set_code": "lea",
+            "collector_number": "205",
+            "image_placeholder": 'm15-g "onmouseover=alert(1) x y',
+        },
+    },
+    {
         "id": "escaping-quotes-and-hybrid-mana",
         "index": 7,
         "card": {

@@ -234,6 +234,7 @@ struct Printing {
     card_watermark_id: u32,
     collector_number_id: u32,
     set_name_id: u32,
+    image_placeholder_id: u32,         // "<bucket> <hex> <hex> <hex>" or NONE_STR; display-only
     released_at_int: Option<u32>,      // yyyymmdd, parsed once at load; date/year filters and prefer use this
 
     card_rarity_int: Option<u8>,       // 0-5
@@ -280,6 +281,7 @@ struct CardRow {
     mana_cost_text_id: u32,
     type_line_id: u32,
     set_name_id: u32,
+    image_placeholder_id: u32,
     released_at_int: Option<u32>,
 
     cmc: Option<u8>,
@@ -626,6 +628,7 @@ fn card_from_pydict(d: &Bound<PyDict>, it: &mut Interner, vocab: &mut VocabInter
         mana_cost_text_id: it.intern_opt(opt_str(d, "mana_cost_text")),
         type_line_id: it.intern(opt_str(d, "type_line").unwrap_or_default()),
         set_name_id: it.intern(opt_str(d, "set_name").unwrap_or_default()),
+        image_placeholder_id: it.intern_opt(opt_str(d, "image_placeholder")),
         released_at_int,
 
         card_colors: jsonb_color_to_bits(d, "card_colors"),
@@ -1564,6 +1567,7 @@ const FIELD_TABLE: &[(&str, FieldExtractor)] = &[
     ("illustration_id", |py, _c, p, _s, _v| Ok(uuid_from_u128(u128::from(p.illustration_id)).into_pyobject(py)?.into_any())),
     ("scryfall_id", |py, _c, p, _s, _v| Ok(uuid_from_u128(u128::from(p.scryfall_id)).into_pyobject(py)?.into_any())),
     ("price_usd", |py, _c, p, _s, _v| Ok(p.price_usd.as_ref().map(|v| f32::from(*v)).into_pyobject(py)?.into_any())),
+    ("image_placeholder", |py, _c, p, s, _v| Ok(str_at(s, u32::from(p.image_placeholder_id)).into_pyobject(py)?.into_any())),
     ("prefer_score", |py, _c, p, _s, _v| Ok(p.prefer_score.as_ref().map(|v| f32::from(*v)).into_pyobject(py)?.into_any())),
     // card_subtypes preserves the printed order; the set-like collections are stored
     // sorted by vocab id (first-seen order), so they get re-sorted lexicographically
@@ -1593,8 +1597,18 @@ fn sorted_strs<'a>(vocab: &'a AStrings, ids: &Archived<Vec<u16>>) -> Vec<&'a str
     v
 }
 
-const DEFAULT_FIELDS: &[&str] =
-    &["name", "set_code", "collector_number", "power", "toughness", "mana_cost", "oracle_text", "set_name", "type_line"];
+const DEFAULT_FIELDS: &[&str] = &[
+    "name",
+    "set_code",
+    "collector_number",
+    "power",
+    "toughness",
+    "mana_cost",
+    "oracle_text",
+    "set_name",
+    "type_line",
+    "image_placeholder",
+];
 
 /// Resolves a caller-requested field list into FIELD_TABLE entries, deduping repeats (a name
 /// requested twice is only fetched/emitted once) and rejecting anything outside the vocabulary.
@@ -1980,6 +1994,7 @@ impl QueryEngine {
                 released_at_int: row.released_at_int,
                 card_rarity_int: row.card_rarity_int,
                 collector_number_int: row.collector_number_int,
+                image_placeholder_id: row.image_placeholder_id,
                 price_usd: row.price_usd,
                 price_eur: row.price_eur,
                 price_tix: row.price_tix,

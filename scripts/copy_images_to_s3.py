@@ -12,6 +12,7 @@ This script:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import datetime
 import json
 import logging
@@ -23,7 +24,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import boto3
 import psycopg
@@ -31,6 +32,9 @@ import requests
 from botocore.exceptions import ClientError
 
 from api.utils.db_utils import configure_connection, get_pg_creds
+
+if TYPE_CHECKING:
+    from scripts.placeholder_measurement import PlaceholderTemplates
 
 logger = logging.getLogger(__name__)
 
@@ -60,13 +64,22 @@ DEFAULT_FACE = "1"
 class CardImage:
     """A card image."""
 
-    def __init__(self, set_code: str, collector_number: str, face_idx: str, size: str, png_url: str | None = None) -> None:
-        """Initialize a card image."""
+    def __init__(  # noqa: PLR0913 - identity fields plus two optional payloads
+        self,
+        set_code: str,
+        collector_number: str,
+        face_idx: str,
+        size: str,
+        png_url: str | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> None:
+        """Initialize a card image; meta carries placeholder-bucket fields (frame, border...)."""
         self.set_code = set_code
         self.collector_number = collector_number
         self.face_idx = face_idx
         self.size = size
         self.png_url = png_url
+        self.meta = meta
         if size not in [SMALL_KEY, MEDIUM_KEY, LARGE_KEY, XLARGE_KEY, ORIGINAL_KEY]:
             msg = f"Invalid size: {size}"
             raise ValueError(msg)
@@ -151,7 +164,12 @@ def fetch_cards_from_db(
                 card_set_code,
                 collector_number,
                 raw_card_blob->'image_uris'->>'png' as png_url,
-                coalesce((raw_card_blob->>'face_idx')::int, 1) as face_idx
+                coalesce((raw_card_blob->>'face_idx')::int, 1) as face_idx,
+                raw_card_blob->>'frame' as frame,
+                raw_card_blob->>'border_color' as border_color,
+                coalesce((raw_card_blob->>'full_art')::bool, false) as full_art,
+                raw_card_blob->'colors' as colors,
+                type_line
             FROM
                 magic.cards
             WHERE
@@ -169,6 +187,29 @@ def fetch_cards_from_db(
 
     logger.info("Fetched %d cards from database", len(cards))
     return cards
+
+
+_MEASURER_UNSET = object()
+_placeholder_measurer: Any = _MEASURER_UNSET
+
+
+def get_placeholder_measurer() -> PlaceholderTemplates | None:
+    """Load the placeholder templates lazily, once per process (workers each load their own).
+
+    Returns None (with a one-time warning) when the optional deps from
+    requirements/placeholders.txt (numpy, pillow) are not installed, so image
+    copying still works without them — placeholder measurement is just skipped.
+    """
+    global _placeholder_measurer  # noqa: PLW0603 - per-process cache
+    if _placeholder_measurer is _MEASURER_UNSET:
+        try:
+            from scripts.placeholder_measurement import PlaceholderTemplates  # noqa: PLC0415 - optional dep
+
+            _placeholder_measurer = PlaceholderTemplates()
+        except ImportError as exc:
+            logger.warning("Placeholder measurement disabled (missing optional deps): %s", exc)
+            _placeholder_measurer = None
+    return _placeholder_measurer
 
 
 def download_image(url: str, output_path: Path) -> bool:
@@ -302,23 +343,29 @@ def process_card(
         dry_run: If True, skip actual downloads and uploads
 
     Returns:
-        Dict with success status for each size (280, 388, 538, 745)
+        Dict with card identity, per-size success status ("sizes"), and the measured
+        placeholder value ("image_placeholder", None when not measured)
     """
     set_code = card["card_set_code"]
     collector_number = card["collector_number"]
     png_url = card["png_url"]
+    out: dict[str, Any] = {
+        "card_set_code": set_code,
+        "collector_number": collector_number,
+        "sizes": {SMALL_KEY: False, MEDIUM_KEY: False, LARGE_KEY: False, XLARGE_KEY: False},
+        "image_placeholder": None,
+    }
 
     if not set_code or not collector_number or not png_url:
         logger.warning("Skipping card with missing data: %s", card)
-        return {SMALL_KEY: False, MEDIUM_KEY: False, LARGE_KEY: False, XLARGE_KEY: False}
+        return out
 
     logger.info("Processing %s/%s", set_code, collector_number)
 
     if dry_run:
         logger.info("[DRY RUN] Would process %s/%s", set_code, collector_number)
-        return {SMALL_KEY: True, MEDIUM_KEY: True, LARGE_KEY: True, XLARGE_KEY: True}
-
-    results = {SMALL_KEY: False, MEDIUM_KEY: False, LARGE_KEY: False, XLARGE_KEY: False}
+        out["sizes"] = {SMALL_KEY: True, MEDIUM_KEY: True, LARGE_KEY: True, XLARGE_KEY: True}
+        return out
 
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
@@ -327,7 +374,7 @@ def process_card(
         png_path = temp_path / "original.png"
 
         if not download_image(png_url, png_path):
-            return results
+            return out
 
         sizes = {
             SMALL_KEY: SMALL_WIDTH,
@@ -343,16 +390,26 @@ def process_card(
             if not convert_to_webp(png_path, webp_path, width):
                 continue
 
+            # The 280px thumbnail is what the placeholder templates were built from —
+            # measure the tint colors while the decoded pixels are already in hand.
+            if size_name == SMALL_KEY:
+                measurer = get_placeholder_measurer()
+                if measurer is not None:
+                    try:
+                        out["image_placeholder"] = measurer.measure_file(webp_path, card.get("meta") or {})
+                    except Exception:
+                        logger.exception("Placeholder measurement failed for %s/%s", set_code, collector_number)
+
             # Face-aware key structure: img/{set_code}/{collector_number}/{face}/{size}.webp
             s3_key = f"img/{set_code}/{collector_number}/{DEFAULT_FACE}/{size_name}.webp"
 
             if upload_to_s3(s3_client, webp_path, bucket, s3_key):
-                results[size_name] = True
+                out["sizes"][size_name] = True
 
-    success_count = sum(results.values())
+    success_count = sum(out["sizes"].values())
     logger.info("Completed %s/%s: %d/4 sizes uploaded", set_code, collector_number, success_count)
 
-    return results
+    return out
 
 
 class CardProcessorPool:
@@ -384,7 +441,7 @@ class CardProcessorPool:
             job_task: Dict of job task
 
         Returns:
-            Dict with success status for each size (280, 388, 538, 745)
+            Dict with card identity, per-size success status, and placeholder value
         """
         bucket = job_task.pop("bucket")
         dry_run = job_task.pop("dry_run")
@@ -412,6 +469,7 @@ class Args:
     dry_run: bool = False
     verbose: bool = False
     workers: int = 8
+    assign_only: bool = False
 
 
 def get_args() -> Args:
@@ -471,6 +529,11 @@ def get_args() -> Args:
         default=8,
         help="Number of parallel worker processes (default: 8)",
     )
+    parser.add_argument(
+        "--assign-only",
+        action="store_true",
+        help="Skip image processing; backfill image_placeholder for rows missing it, from the 280px webps already in S3",
+    )
     return Args(**vars(parser.parse_args()))
 
 
@@ -508,6 +571,7 @@ def get_db_cards(args: Args) -> set[tuple[str, str, str, str]]:
 
     sizes = [SMALL_KEY, MEDIUM_KEY, LARGE_KEY, XLARGE_KEY]
     logger.info("Found %d cards in database, should create %d images", len(db_cards), len(db_cards) * len(sizes))
+    meta_keys = ("frame", "border_color", "full_art", "colors", "type_line")
     return {
         CardImage(
             set_code=card["card_set_code"],
@@ -515,6 +579,7 @@ def get_db_cards(args: Args) -> set[tuple[str, str, str, str]]:
             face_idx=str(card["face_idx"]),
             png_url=card["png_url"],
             size=size,
+            meta={key: card.get(key) for key in meta_keys},
         )
         for card in db_cards
         for size in sizes
@@ -571,6 +636,97 @@ def get_s3_cards(args: Args) -> set[CardImage]:
     return s3_cards
 
 
+def update_placeholder_values(values: dict[tuple[str, str], str]) -> None:
+    """Write measured placeholder values to magic.cards.
+
+    Args:
+        values: Mapping of (card_set_code, collector_number) -> placeholder value string
+    """
+    if not values:
+        return
+    conn = get_database_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.executemany(
+                "UPDATE magic.cards SET image_placeholder = %s WHERE card_set_code = %s AND collector_number = %s",
+                [(value, set_code, cn) for (set_code, cn), value in values.items()],
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    logger.info("Updated image_placeholder for %d cards", len(values))
+
+
+def assign_existing_images(args: Args) -> None:
+    """Backfill image_placeholder from the 280px webps already in S3.
+
+    Fetches rows missing a value, downloads just their 280px thumbnail (~20KB each),
+    measures against the templates, and batch-updates the database.
+    """
+    measurer = get_placeholder_measurer()
+    if measurer is None:
+        logger.error("Cannot backfill without the placeholder deps (pip install -r requirements/placeholders.txt)")
+        sys.exit(1)
+
+    conn = get_database_connection()
+    with conn.cursor() as cursor:
+        conditions, params = ["image_placeholder IS NULL"], []
+        if args.set_code:
+            conditions.append("card_set_code = %s")
+            params.append(args.set_code)
+        cursor.execute(
+            f"""
+            SELECT DISTINCT ON (card_set_code, collector_number)
+                card_set_code,
+                collector_number,
+                raw_card_blob->>'frame' as frame,
+                raw_card_blob->>'border_color' as border_color,
+                coalesce((raw_card_blob->>'full_art')::bool, false) as full_art,
+                raw_card_blob->'colors' as colors,
+                type_line
+            FROM magic.cards
+            WHERE {" AND ".join(conditions)}
+            LIMIT {json.dumps(args.limit)}
+            """,
+            params,
+        )
+        rows = cursor.fetchall()
+    conn.close()
+    logger.info("Found %d cards missing image_placeholder", len(rows))
+
+    s3_client = boto3.client("s3")
+
+    def fetch_and_measure(row: dict[str, Any]) -> tuple[tuple[str, str], str] | None:
+        key = f"img/{row['card_set_code']}/{row['collector_number']}/{DEFAULT_FACE}/{SMALL_KEY}.webp"
+        try:
+            body = s3_client.get_object(Bucket=args.bucket, Key=key)["Body"].read()
+        except ClientError:
+            logger.debug("No 280px image in S3 for %s", key)
+            return None
+        try:
+            value = measurer.measure_bytes(body, row)
+        except Exception:
+            logger.exception("Placeholder measurement failed for %s", key)
+            return None
+        if value is None:
+            return None
+        return (row["card_set_code"], row["collector_number"]), value
+
+    values: dict[tuple[str, str], str] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
+        for idx, result in enumerate(pool.map(fetch_and_measure, rows), 1):
+            if result is not None:
+                key, value = result
+                values[key] = value
+            if idx % 1000 == 0 or idx == len(rows):
+                logger.info("Measured %d / %d cards", len(values), idx)
+
+    if args.dry_run:
+        logger.info("[DRY RUN] Would update image_placeholder for %d cards", len(values))
+        return
+    update_placeholder_values(values)
+
+
 def main() -> None:
     """Main entry point for the script."""
     args = get_args()
@@ -579,8 +735,13 @@ def main() -> None:
     if args.dry_run:
         logger.info("Running in DRY RUN mode - no actual downloads or uploads")
 
-    check_cwebp()
     configure_env()
+
+    if args.assign_only:
+        assign_existing_images(args)
+        return
+
+    check_cwebp()
 
     db_cards = get_db_cards(args)
     s3_cards = get_s3_cards(args)
@@ -605,6 +766,7 @@ def main() -> None:
             "collector_number": collector_number,
             "dry_run": args.dry_run,
             "face_idx": face_idx,
+            "meta": cards[0].meta,
             "png_url": cards[0].png_url,
             "sizes": missing_sizes,
         }
@@ -615,6 +777,7 @@ def main() -> None:
     logger.info("Processing cards using %d worker processes", args.workers)
 
     successful_cards = failed_cards = 0
+    placeholder_values: dict[tuple[str, str], str] = {}
     start_time = time.monotonic()
 
     pool = multiprocessing.Pool(processes=args.workers, initializer=CardProcessorPool.init_worker)
@@ -639,7 +802,9 @@ def main() -> None:
                     estimated_remaining_duration,
                 )
 
-            if all(results.values()):
+            if results["image_placeholder"] is not None:
+                placeholder_values[(results["card_set_code"], results["collector_number"])] = results["image_placeholder"]
+            if all(results["sizes"].values()):
                 successful_cards += 1
             else:
                 failed_cards += 1
@@ -654,6 +819,9 @@ def main() -> None:
         failed_cards,
         len(cards_with_missing_images),
     )
+
+    if not args.dry_run:
+        update_placeholder_values(placeholder_values)
 
 
 if __name__ == "__main__":

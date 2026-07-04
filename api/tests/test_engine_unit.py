@@ -1084,7 +1084,7 @@ class TestCommonCardKeywords:
 
 
 class TestFieldSelection:
-    """fields= selects which keys come back per card; None keeps the historical 9."""
+    """fields= selects which keys come back per card; None keeps the historical 9 + image_placeholder."""
 
     def test_default_fields_omit_illustration_and_price(self, engine: QueryEngine) -> None:
         _, cards = _run(engine, 'name="Lightning Bolt"', unique="printing", limit=1)
@@ -1098,7 +1098,15 @@ class TestFieldSelection:
             "oracle_text",
             "set_name",
             "type_line",
+            "image_placeholder",
         }
+
+    def test_image_placeholder_round_trips(self, engine: QueryEngine) -> None:
+        """The m11 printing carries a placeholder value in the fixture; others are None."""
+        _, cards = _run(engine, 'name="Lightning Bolt"', unique="printing", limit=100)
+        by_set = {card["set_code"]: card["image_placeholder"] for card in cards}
+        assert by_set["m11"] == "modern-r 8a3b2f 6a4a3f 334455"
+        assert by_set["lea"] is None
 
     def test_requested_fields_returned_exactly(self, engine: QueryEngine) -> None:
         _, cards = _run(

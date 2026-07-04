@@ -750,6 +750,34 @@ class CardSearch {
     return `https://d1hot9ps2xugbc.cloudfront.net/img/${card.set_code}/${card.collector_number}/${face}/${size}.webp`;
   }
 
+  // CSS class and inline style of the placeholder shown behind the card image while it
+  // loads. Measured printings carry an image_placeholder value naming a frame-template
+  // bucket plus three tint colors (classes/templates in static/placeholders-v1.css);
+  // the colors ride as CSS custom properties. Unmeasured printings fall back to a
+  // coarse ph-fb-* class derived from type line and mana cost, whose bucket-default
+  // colors are baked into the stylesheet. Matches placeholder_parts in noscript_helpers.py.
+  placeholderParts(card) {
+    const match = /^([a-z0-9-]+) ([0-9a-f]{6}) ([0-9a-f]{6}) ([0-9a-f]{6})$/.exec(card.image_placeholder || '');
+    if (match) {
+      return { cls: `ph-${match[1]}`, style: `--frame-l:#${match[2]};--frame-r:#${match[3]};--art:#${match[4]}` };
+    }
+    const typeLine = card.type_line || '';
+    if (typeLine.includes('Land')) {
+      return { cls: 'ph-fb-land', style: '' };
+    }
+    if (typeLine.includes('Artifact')) {
+      return { cls: 'ph-fb-artifact', style: '' };
+    }
+    const colors = new Set((card.mana_cost || '').match(/[WUBRG]/g) || []);
+    if (colors.size > 1) {
+      return { cls: 'ph-fb-gold', style: '' };
+    }
+    if (colors.size === 1) {
+      return { cls: `ph-fb-${[...colors][0].toLowerCase()}`, style: '' };
+    }
+    return { cls: 'ph-fb-artifact', style: '' };
+  }
+
   createCardHTML(card, index, isFirstRow = false) {
     const cardId = index.toString();
 
@@ -804,7 +832,9 @@ class CardSearch {
     // Add loading="lazy" for non-first-row images to improve initial load
     const fetchPriorityAttr = isFirstRow ? ' fetchpriority="high"' : '';
     const loadingAttr = isFirstRow ? '' : ' loading="lazy"';
-    const imgTag = `<img class="card-image" src="${this.escapeHtml(image388)}" srcset="${srcset}" sizes="${sizes}" alt="${altText}" title="${altText}"${fetchPriorityAttr}${loadingAttr} />`;
+    const ph = this.placeholderParts(card);
+    const phStyleAttr = ph.style ? ` style="${ph.style}"` : '';
+    const imgTag = `<img class="card-image ${ph.cls}"${phStyleAttr} src="${this.escapeHtml(image388)}" srcset="${srcset}" sizes="${sizes}" alt="${altText}" title="${altText}"${fetchPriorityAttr}${loadingAttr} />`;
     const imageHtml =
       card.set_code && card.collector_number
         ? `<a href="/card/${this.escapeHtml(card.set_code)}/${this.escapeHtml(card.collector_number)}" class="card-page-link">${imgTag}</a>`
@@ -883,7 +913,9 @@ class CardSearch {
     // Build image element
     let imageHtml = '';
     if (imageLarge) {
-      const imgTag = `<img class="modal-image" src="${this.escapeHtml(imageLarge)}" width="745" height="1040" alt="${this.escapeHtml(card.name || 'Card Image')}" />`;
+      const ph = this.placeholderParts(card);
+      const phStyleAttr = ph.style ? ` style="${ph.style}"` : '';
+      const imgTag = `<img class="modal-image ${ph.cls}"${phStyleAttr} src="${this.escapeHtml(imageLarge)}" width="745" height="1040" alt="${this.escapeHtml(card.name || 'Card Image')}" />`;
       if (card.set_code && card.collector_number) {
         // Build manapool.com referral URL
         // Set codes and collector numbers from our database are safe for URLs

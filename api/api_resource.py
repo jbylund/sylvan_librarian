@@ -184,6 +184,7 @@ def _static_hash(filename: str) -> str | None:
 
 
 _STYLES_CSS_HASH = _static_hash("styles.css")
+_PLACEHOLDERS_CSS_HASH = _static_hash("placeholders-v1.css")
 _APP_MIN_JS_HASH = _static_hash("app.min.js")
 _CARD_JS_HASH = _static_hash("card.js")
 
@@ -344,9 +345,11 @@ RESULT_FIELD_COLUMNS: dict[str, str] = {
     "scryfall_id": "scryfall_id",
     "price_usd": "price_usd",
     "prefer_score": "prefer_score",
+    "image_placeholder": "image_placeholder",
 }
-# `fields=None` resolves to these 9 — the fixed set every caller got before field selection
-# existed. Order/membership must match DEFAULT_FIELDS in card_engine/src/lib.rs.
+# `fields=None` resolves to these — the fixed set of 9 every caller got before field selection
+# existed, plus image_placeholder (display-only card image placeholder, needed by both
+# renderers). Order/membership must match DEFAULT_FIELDS in card_engine/src/lib.rs.
 DEFAULT_RESULT_FIELDS: tuple[str, ...] = (
     "name",
     "set_code",
@@ -357,6 +360,7 @@ DEFAULT_RESULT_FIELDS: tuple[str, ...] = (
     "oracle_text",
     "set_name",
     "type_line",
+    "image_placeholder",
 )
 
 CUSTOM_IS_TAGS = [
@@ -466,6 +470,8 @@ def _build_base_html(critical_css: str, site_name: str) -> str:
     html = html.replace("<!-- CRITICAL_CSS -->", critical_css)
     if _STYLES_CSS_HASH:
         html = html.replace("/static/styles.css", f"/static/styles.css?v={_STYLES_CSS_HASH}")
+    if _PLACEHOLDERS_CSS_HASH:
+        html = html.replace("/static/placeholders-v1.css", f"/static/placeholders-v1.css?v={_PLACEHOLDERS_CSS_HASH}")
     if _APP_MIN_JS_HASH:
         html = html.replace("/static/app.min.js", f"/static/app.min.js?v={_APP_MIN_JS_HASH}")
     return _minify_html(html.replace(_SITE_NAME_PLACEHOLDER, site_name))
@@ -479,6 +485,8 @@ def _build_card_html(critical_css: str) -> str:
     html = html.replace("<!-- CRITICAL_CSS -->", critical_css)
     if _STYLES_CSS_HASH:
         html = html.replace("/static/styles.css", f"/static/styles.css?v={_STYLES_CSS_HASH}")
+    if _PLACEHOLDERS_CSS_HASH:
+        html = html.replace("/static/placeholders-v1.css", f"/static/placeholders-v1.css?v={_PLACEHOLDERS_CSS_HASH}")
     if _CARD_JS_HASH:
         html = html.replace("/static/card.js", f"/static/card.js?v={_CARD_JS_HASH}")
     return _minify_html(html)
@@ -627,6 +635,7 @@ class APIResource:
         self.action_map["static/favicon_ico"] = self.favicon_ico
         self.action_map["static/social-preview_webp"] = self.social_preview_webp
         self.action_map["static/styles_css"] = self.styles_css
+        self.action_map["static/placeholders-v1_css"] = self.placeholders_v1_css
 
         # Static once action_map is fully populated — see _build_routes_listing.
         self._not_found_routes = _build_routes_listing(self.action_map)
@@ -1671,6 +1680,19 @@ class APIResource:
         if falcon_response is None:
             return
         self._serve_static_file(filename="styles.css", falcon_response=falcon_response)
+        falcon_response.content_type = "text/css"
+        set_cache_header(falcon_response, duration=timedelta(days=30))
+
+    def placeholders_v1_css(self, *, falcon_response: falcon.Response | None = None, **_: object) -> None:
+        """Return the placeholders-v1.css file (card image placeholder templates as data URIs).
+
+        Args:
+        ----
+            falcon_response (falcon.Response): The Falcon response to write to.
+        """
+        if falcon_response is None:
+            return
+        self._serve_static_file(filename="placeholders-v1.css", falcon_response=falcon_response)
         falcon_response.content_type = "text/css"
         set_cache_header(falcon_response, duration=timedelta(days=30))
 
