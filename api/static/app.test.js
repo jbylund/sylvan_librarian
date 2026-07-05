@@ -39,7 +39,9 @@ Object.defineProperty(global, 'performance', {
 
 const appCode = fs.readFileSync(path.resolve(__dirname, 'app.js'), 'utf8');
 // eslint-disable-next-line no-new-func
-const { CardSearch, CatalogMap } = Function(appCode + '; return {CardSearch, CatalogMap};')();
+const { CardSearch, CatalogMap, columnsToRows } = Function(
+  appCode + '; return {CardSearch, CatalogMap, columnsToRows};'
+)();
 
 // ---------------------------------------------------------------------------
 // Live fixture: fetched from https://sylvan-librarian.com/get_common_card_types
@@ -269,6 +271,32 @@ describe('autoCompleteQuery with typeMap', () => {
   it('works inside a compound query', () => {
     const result = search.autoCompleteQuery('c:r t:drag');
     expect(result).toBe('c:r t:dragon');
+  });
+});
+
+describe('columnsToRows', () => {
+  test('inverts a columnar payload into an array of card objects', () => {
+    const columnar = {
+      name: ['Elvish Mystic', 'Counterspell'],
+      power: ['1', null],
+      toughness: ['1', null],
+    };
+    expect(columnsToRows(columnar)).toEqual([
+      { name: 'Elvish Mystic', power: '1', toughness: '1' },
+      { name: 'Counterspell', power: null, toughness: null },
+    ]);
+  });
+
+  test('passes row-shaped payloads through untouched', () => {
+    const rows = [{ name: 'Elvish Mystic' }];
+    expect(columnsToRows(rows)).toBe(rows);
+  });
+
+  test('handles empty and missing payloads', () => {
+    expect(columnsToRows(undefined)).toEqual([]);
+    expect(columnsToRows(null)).toEqual([]);
+    expect(columnsToRows([])).toEqual([]);
+    expect(columnsToRows({})).toEqual([]);
   });
 });
 

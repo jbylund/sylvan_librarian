@@ -17,6 +17,7 @@ import pytest
 
 import api.api_resource as api_resource_module
 from api.api_resource import FALLBACK_SITE_NAME, APIResource, _hostname_to_site_name, _split_words, hostname_to_site_name
+from api.enums import ResponseShape
 from api.settings import settings
 
 
@@ -401,6 +402,89 @@ class TestAPIResourceRequestHandling(unittest.TestCase):
 
                 # Should call error monitoring
                 mock_error_handler.assert_called_once()
+
+
+class TestSearchResponseShape(TestBaseAPIResourceTest):
+    """Test the shape parameter that selects row-wise vs columnar cards payloads."""
+
+    @pytest.fixture(autouse=True)
+    def setup_search_results(self) -> None:
+        """Provide a canned row-shaped search result envelope."""
+        self.search_results = {
+            "cards": [
+                {"name": "Elvish Mystic", "power": "1", "toughness": "1"},
+                {"name": "Counterspell", "power": None, "toughness": None},
+            ],
+            "total_cards": 2,
+            "query": "test",
+        }
+
+    def test_search_defaults_to_row_shape(self) -> None:
+        """Without a shape parameter, cards stay a list of card objects."""
+        with patch.object(self.api_resource, "_search", return_value=self.search_results):
+            result = self.api_resource.search(falcon_response=MagicMock(), q="test")
+        assert result["cards"] == self.search_results["cards"]
+
+    def test_search_columnar_shape_inverts_cards(self) -> None:
+        """shape=columnar returns one list per field, keyed by field name."""
+        with patch.object(self.api_resource, "_search", return_value=self.search_results):
+            result = self.api_resource.search(falcon_response=MagicMock(), q="test", shape=ResponseShape.COLUMNAR)
+        assert result["cards"] == {
+            "name": ["Elvish Mystic", "Counterspell"],
+            "power": ["1", None],
+            "toughness": ["1", None],
+        }
+        # Envelope fields pass through untouched
+        assert result["total_cards"] == 2
+        assert result["query"] == "test"
+
+    def test_search_columnar_does_not_mutate_cached_results(self) -> None:
+        """_search returns cached dicts, so columnarizing must not modify them in place."""
+        with patch.object(self.api_resource, "_search", return_value=self.search_results):
+            self.api_resource.search(falcon_response=MagicMock(), q="test", shape=ResponseShape.COLUMNAR)
+        assert isinstance(self.search_results["cards"], list)
+        assert self.search_results["cards"][0] == {"name": "Elvish Mystic", "power": "1", "toughness": "1"}
+
+    def test_handle_converts_shape_query_param(self) -> None:
+        """The string 'columnar' from the query string is converted to the enum."""
+        mock_req = MagicMock()
+        mock_req.uri = mock_req.path = mock_req.relative_uri = "/search"
+        mock_req.params = {"q": "test", "shape": "columnar"}
+        mock_req.get_header.return_value = None
+        mock_req.host = "example.com"
+        mock_resp = MagicMock()
+        mock_resp.complete = False
+
+        with patch.object(self.api_resource, "_search", return_value=self.search_results):
+            self.api_resource._handle(mock_req, mock_resp)
+        assert mock_resp.media["cards"] == {
+            "name": ["Elvish Mystic", "Counterspell"],
+            "power": ["1", None],
+            "toughness": ["1", None],
+        }
+
+    def test_random_search_columnar_shape(self) -> None:
+        """random_search supports the same shape parameter."""
+        mock_engine = MagicMock()
+        mock_engine.size.return_value = 100
+        mock_engine.sample_preferred.return_value = iter(self.search_results["cards"])
+        with patch.object(self.api_resource, "_engine", mock_engine):
+            result = self.api_resource.random_search(
+                falcon_response=MagicMock(),
+                num_cards=2,
+                shape=ResponseShape.COLUMNAR,
+            )
+        assert result["cards"]["name"] == ["Elvish Mystic", "Counterspell"]
+        assert result["total_cards"] == 2
+
+    def test_columnarize_cards_empty_list(self) -> None:
+        """An empty result set columnarizes to an empty object."""
+        assert api_resource_module._columnarize_cards([]) == {}
+
+    def test_columnarize_cards_preserves_field_order(self) -> None:
+        """Field order follows the first card's key order."""
+        cards = [{"b": 1, "a": 2}, {"b": 3, "a": 4}]
+        assert list(api_resource_module._columnarize_cards(cards)) == ["b", "a"]
 
 
 class TestAPIResourceStaticFileServing(unittest.TestCase):

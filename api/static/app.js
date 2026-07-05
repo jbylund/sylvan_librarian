@@ -7,6 +7,17 @@ const HTML_ESCAPE_RE = /[&<>"]/g;
 const HTML_ESCAPE_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
 const htmlEscapeChar = c => HTML_ESCAPE_MAP[c];
 
+// Invert a columnar cards payload ({field: [values, ...]}) back into an array of
+// card objects. Row-shaped payloads (already arrays) pass through untouched, so
+// consumers are indifferent to which shape the server sent (e.g. a stale cached
+// row-shaped response, or the embedded no-JS payload).
+function columnsToRows(cards) {
+  if (!cards || Array.isArray(cards)) return cards || [];
+  const keys = Object.keys(cards);
+  const count = keys.length ? cards[keys[0]].length : 0;
+  return Array.from({ length: count }, (_, i) => Object.fromEntries(keys.map(k => [k, cards[k][i]])));
+}
+
 class CatalogMap {
   constructor(mapping) {
     this._words = Object.entries(mapping)
@@ -562,7 +573,7 @@ class CardSearch {
     const orderDirection = this.isAscending ? 'asc' : 'desc';
 
     // Generate the URL for this request
-    const url = `/search?q=${encodeURIComponent(normalizedQuery)}&orderby=${order}&direction=${orderDirection}&unique=${unique}&prefer=${prefer}`;
+    const url = `/search?q=${encodeURIComponent(normalizedQuery)}&orderby=${order}&direction=${orderDirection}&unique=${unique}&prefer=${prefer}&shape=columnar`;
 
     // Same URL already in-flight (and not already aborted) — let it finish
     if (this.currentRequestUrl === url && !this.currentController.signal.aborted) return;
@@ -658,7 +669,7 @@ class CardSearch {
   }
 
   displayResults(data, query, elapsed) {
-    const cards = data.cards || [];
+    const cards = columnsToRows(data.cards);
     const totalCards = data.total_cards || cards.length;
     const queryExplanation = data.query_explanation || '';
 
@@ -1072,7 +1083,7 @@ class CardSearch {
 
     this.showLoading();
     try {
-      const response = await fetch('/random_search?num_cards=12', {
+      const response = await fetch('/random_search?num_cards=12&shape=columnar', {
         method: 'GET',
         headers: { Accept: 'application/json' },
         signal: controller.signal,

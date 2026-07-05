@@ -34,6 +34,13 @@ class CardOrdering(enum.StrEnum):
     USD = enum.auto()
 
 
+class ResponseShape(enum.StrEnum):
+    """Enum for the shape of the cards list in search responses."""
+
+    ROWS = enum.auto()  # list of card objects (default)
+    COLUMNAR = enum.auto()  # object mapping each field to a list of per-card values
+
+
 class SortDirection(enum.StrEnum):
     """Enum for the direction of the sort."""
 
