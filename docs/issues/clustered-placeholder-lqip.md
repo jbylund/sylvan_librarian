@@ -123,22 +123,33 @@ The art window can hold a webp data-URI thumb instead of a flat color — one CS
 no architecture change. DCT/blurhash rejected: at 4×3 terms a plain pixel grid is
 perceptually identical (measured, `art_fidelity_sheet2.png`) and needs no decoder in
 either renderer; parity + no-JS + paint-before-JS all favor pre-encoded URIs. Prefix
-`data:image/webp;base64,` is constant → prepended client-side, not stored. Size curve
-is flat to 16×12 (container overhead dominates), knee after:
+`data:image/webp;base64,` is constant → prepended client-side, not stored.
 
-| tier | value chars | /search raw (100 cards, columnar) | gzipped |
-|---|---|---|---|
-| baseline (shape=columnar, PR #612) | — | 23.6KB | 1.88KB |
-| flat art | ~24 | +11.5% | **+79% (+15B/card)** |
-| flat art, 50% backfilled | — | +6.9% | +41% (+8B/card — null runs compress ~free) |
-| art 16×12 | ~173 | +69.9% | **+671% (+126B/card)** |
+Measured with real stored values from the refreshed pipeline, as the marginal cost of
+the `placeholder` column in a 100-card columnar response of **distinct random cards**
+(baseline 25.2KB raw / 8.1KB gz — for scale, oracle_text is 4.6KB / 57% of that gz,
+name 1.0KB):
 
-(Row-shaped numbers are ~10% milder relatively; absolute per-card costs identical —
-the values are incompressible entropy, and columnar ships each key once so field
-naming is free.) The gzipped baseline is tiny; thumbs would make /search a ~15KB
-endpoint whose payload is mostly placeholder data shown for ~200ms. **Ship flat art in defaults; expose thumbs via
-`fields=` if a flash test (mockup + delay slider, not built) ever justifies them.**
-Engine string table: flat ≈ +2.5MB @100k printings; 16×12 ≈ +18MB.
+| tier | value chars | raw | gzip | vs diverse baseline |
+|---|---|---|---|---|
+| defaults (null column) | 0 | +0.5KB | **+22B** | +0.3% |
+| flat art | ~24 | +2.7KB | **+1.6KB (+16B/card)** | +20% |
+| art 4×3 | ~102 | +10.5KB | +4.3KB (+43B/card) | +53% |
+| art 8×6 | ~124 | +12.7KB | +6.4KB (+64B/card) | +79% |
+| art 16×12 | ~173 | +17.6KB | **+10.6KB (+106B/card)** | +131% |
+
+**The relative multiplier depends on result diversity** — absolute per-card costs are
+invariant (the values are incompressible entropy; thumbs are distinct per printing
+even when card text repeats), but the baseline isn't: a printing-heavy response
+(10 cards × 10 printings) gzips to just 1.7KB, and there 16×12 is **7.1×** the
+baseline vs **2.3×** for distinct-card results. An earlier version of this table
+quoted +671% for 16×12 — that was the printing-heavy end, not the general case.
+Printings-style responses are a real traffic class (a card's printings view, name
+searches), so both ends count. **Ship flat art in defaults (+20%/+93% by diversity);
+thumbs via `fields=`** — 16×12 at 2.3× on diverse results is less absurd than the old
+number suggested, so a flash test (mockup + delay slider, not built) deciding 4×3
+(+53%, rivals oracle_text) is more live than before. Engine string table: flat ≈
++2.5MB @100k printings; 16×12 ≈ +18MB.
 
 ## Adversarial findings (each drove a design change; keep for regression review)
 
