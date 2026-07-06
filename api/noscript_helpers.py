@@ -2,11 +2,42 @@
 
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
 
 MAX_ORACLE_TEXT_LENGTH = 200
 MAX_ALT_TEXT_LENGTH = 300  # oracle text truncation length in image alt/title text
 _EAGER_LOAD_COUNT = 4  # covers a full first row at the widest common grid (4 columns)
+
+CARD_GRID_SIZES_SPEC = json.loads((Path(__file__).parent / "static" / "card_grid_sizes.json").read_text(encoding="utf-8"))
+
+
+def build_card_image_sizes(spec: dict) -> str:
+    """Build the card <img sizes> attribute from the shared spec (see card_grid_sizes.json).
+
+    One clause per (density tier, layout breakpoint) pair; density tiers scale the slot
+    width down so high-DPR screens fetch a smaller candidate (the fidelity budget).
+    Must stay in lockstep with buildCardImageSizes in app.js.
+
+    Args:
+    ----
+        spec: Parsed card_grid_sizes.json (layout and density tables)
+
+    Returns:
+    -------
+        The sizes attribute value (comma-joined clauses, first match wins)
+    """
+    clauses = []
+    for density_condition, multiplier in spec["density"]:
+        for layout_condition, formula in spec["layout"]:
+            value = f"calc({formula})" if multiplier is None else f"calc(({formula}) * {multiplier})"
+            condition = " and ".join(part for part in (density_condition, layout_condition) if part)
+            clauses.append(f"{condition} {value}" if condition else value)
+    return ", ".join(clauses)
+
+
+CARD_IMAGE_SIZES = build_card_image_sizes(CARD_GRID_SIZES_SPEC)
 
 
 def escape_html(text: str) -> str:
@@ -303,23 +334,15 @@ def create_card_html(card: dict, index: int) -> str:
 
     alt_text = _build_alt_text(card)
 
-    # Build srcset and sizes for responsive images
-    # sizes breakpoints are one below the CSS grid min-width thresholds (< not <=):
-    # - < 410px: 1 column, < 750px: 2 columns, < 1370px: 3 columns, < 2500px: 4 columns, else 5
-    # calc values derived from CSS: body padding 1em (2em total), card padding 0.8em (1.6em total), gap 15px
+    # Build srcset and sizes for responsive images.
+    # sizes is generated from api/static/card_grid_sizes.json (layout x density tiers).
     srcset = (
         f"{escape_html(image_280)} 280w, "
         f"{escape_html(image_388)} 388w, "
         f"{escape_html(image_538)} 538w, "
         f"{escape_html(image_745)} 745w"
     )
-    sizes = (
-        "(max-width: 409px) calc(100vw - 3.6em), "
-        "(max-width: 749px) calc(50vw - 2.6em - 7.5px), "
-        "(max-width: 1369px) calc(33.33vw - 2.27em - 10px), "
-        "(max-width: 2499px) calc(25vw - 2.1em - 11.25px), "
-        "calc(20vw - 2em - 12px)"
-    )
+    sizes = CARD_IMAGE_SIZES
 
     # Create image HTML with srcset for responsive images
     # Use 388px as default src (good middle ground for initial load)

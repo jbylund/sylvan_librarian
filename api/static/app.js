@@ -2,6 +2,44 @@ const UNIQUE_PRINTING = 'printing';
 const DWELL_MS = 2500; // milliseconds user must stay on results before adding a history entry
 const MAX_EXPLANATION_LENGTH = 140; // truncate very long query explanations (e.g. giant OR chains)
 
+// Mirrors api/static/card_grid_sizes.json (the source of truth — app.test.js asserts
+// this copy matches it byte-for-byte; browsers can't require() JSON so it's inlined).
+// layout = [media condition, grid slot-width formula] per breakpoint; density =
+// [media condition, multiplier] tiers that scale the declared slot width down on
+// high-DPR screens so grid thumbnails fetch a smaller srcset candidate (fidelity
+// budget, effective-DPR cap ~1.5 — the modal stays the full-fidelity surface).
+const CARD_GRID_SIZES_SPEC = {
+  layout: [
+    ['(max-width: 409px)', '100vw - 3.6em'],
+    ['(max-width: 749px)', '50vw - 2.6em - 7.5px'],
+    ['(max-width: 1369px)', '33.33vw - 2.27em - 10px'],
+    ['(max-width: 2499px)', '25vw - 2.1em - 11.25px'],
+    [null, '20vw - 2em - 12px'],
+  ],
+  density: [
+    ['(min-resolution: 2.9dppx)', '0.5'],
+    ['(min-resolution: 1.9dppx)', '0.75'],
+    [null, null],
+  ],
+};
+
+// One clause per (density tier, layout breakpoint); first match wins, so density
+// tiers run densest-first and each table ends with a null-condition default.
+// Must stay in lockstep with build_card_image_sizes in noscript_helpers.py.
+function buildCardImageSizes(spec) {
+  const clauses = [];
+  for (const [densityCondition, multiplier] of spec.density) {
+    for (const [layoutCondition, formula] of spec.layout) {
+      const value = multiplier === null ? `calc(${formula})` : `calc((${formula}) * ${multiplier})`;
+      const condition = [densityCondition, layoutCondition].filter(Boolean).join(' and ');
+      clauses.push(condition ? `${condition} ${value}` : value);
+    }
+  }
+  return clauses.join(', ');
+}
+
+const CARD_IMAGE_SIZES = buildCardImageSizes(CARD_GRID_SIZES_SPEC);
+
 // Hoisted so escapeHtml() doesn't allocate a new RegExp or callback on every call.
 const HTML_ESCAPE_RE = /[&<>"]/g;
 const HTML_ESCAPE_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
@@ -799,16 +837,10 @@ class CardSearch {
       altText += this.escapeHtml(truncatedText);
     }
 
-    // Build srcset and sizes for responsive images
-    // sizes attribute matches the grid breakpoints:
-    // - < 410px: 1 column (100vw minus padding/gap)
-    // - 410-750px: 2 columns (50vw minus gap/padding)
-    // - 750-1370px: 3 columns (33.33vw minus gap/padding)
-    // - 1370-2500px: 4 columns (25vw minus gap/padding)
-    // - >= 2500px: 5 columns (20vw minus gap/padding)
+    // Build srcset and sizes for responsive images.
+    // sizes is generated from CARD_GRID_SIZES_SPEC (see card_grid_sizes.json).
     const srcset = `${this.escapeHtml(image280)} 280w, ${this.escapeHtml(image388)} 388w, ${this.escapeHtml(image538)} 538w, ${this.escapeHtml(image745)} 745w`;
-    const sizes =
-      '(max-width: 409px) calc(100vw - 3.6em), (max-width: 749px) calc(50vw - 2.6em - 7.5px), (max-width: 1369px) calc(33.33vw - 2.27em - 10px), (max-width: 2499px) calc(25vw - 2.1em - 11.25px), calc(20vw - 2em - 12px)';
+    const sizes = CARD_IMAGE_SIZES;
 
     // Use 388px as default src (good middle ground for initial load)
     // Add fetchpriority="high" for first row cards to improve LCP

@@ -39,8 +39,9 @@ Object.defineProperty(global, 'performance', {
 
 const appCode = fs.readFileSync(path.resolve(__dirname, 'app.js'), 'utf8');
 // eslint-disable-next-line no-new-func
-const { CardSearch, CatalogMap, columnsToRows } = Function(
-  appCode + '; return {CardSearch, CatalogMap, columnsToRows};'
+const { CardSearch, CatalogMap, columnsToRows, CARD_GRID_SIZES_SPEC, CARD_IMAGE_SIZES, buildCardImageSizes } = Function(
+  appCode +
+    '; return {CardSearch, CatalogMap, columnsToRows, CARD_GRID_SIZES_SPEC, CARD_IMAGE_SIZES, buildCardImageSizes};'
 )();
 
 // ---------------------------------------------------------------------------
@@ -417,6 +418,27 @@ describe('CardSearch createCardHTML no-JS parity', () => {
 
   it.each(CARD_HTML_CASES)('matches parity fixture for $id', ({ card, index, html }) => {
     expect(normalizeCardHtml(search.createCardHTML(card, index, false))).toBe(html);
+  });
+});
+
+describe('card grid sizes spec', () => {
+  // card_grid_sizes.json is the source of truth; browsers can't require() JSON so
+  // app.js inlines a copy. These tests are what keep the copy honest.
+  const GRID_SIZES_JSON = require('./card_grid_sizes.json');
+
+  it('app.js embedded spec matches card_grid_sizes.json', () => {
+    expect(CARD_GRID_SIZES_SPEC).toEqual({ layout: GRID_SIZES_JSON.layout, density: GRID_SIZES_JSON.density });
+  });
+
+  it('generated sizes string matches one built from the JSON file', () => {
+    expect(CARD_IMAGE_SIZES).toBe(buildCardImageSizes(GRID_SIZES_JSON));
+  });
+
+  it('emits the full density x layout cross product', () => {
+    const clauses = CARD_IMAGE_SIZES.split(', ');
+    expect(clauses).toHaveLength(GRID_SIZES_JSON.density.length * GRID_SIZES_JSON.layout.length);
+    // last clause is the bare default: no media condition, no budget multiplier
+    expect(clauses[clauses.length - 1]).toBe('calc(20vw - 2em - 12px)');
   });
 });
 
