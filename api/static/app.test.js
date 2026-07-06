@@ -39,9 +39,19 @@ Object.defineProperty(global, 'performance', {
 
 const appCode = fs.readFileSync(path.resolve(__dirname, 'app.js'), 'utf8');
 // eslint-disable-next-line no-new-func
-const { CardSearch, CatalogMap, columnsToRows, CARD_GRID_SIZES_SPEC, CARD_IMAGE_SIZES, buildCardImageSizes } = Function(
+const {
+  CardSearch,
+  CatalogMap,
+  columnsToRows,
+  CARD_GRID_SIZES_SPEC,
+  CARD_IMAGE_SIZES,
+  buildCardImageSizes,
+  CARD_IMAGE_LADDER,
+  GRID_SRC_DEFAULT,
+  CARD_IMAGE_FULL,
+} = Function(
   appCode +
-    '; return {CardSearch, CatalogMap, columnsToRows, CARD_GRID_SIZES_SPEC, CARD_IMAGE_SIZES, buildCardImageSizes};'
+    '; return {CardSearch, CatalogMap, columnsToRows, CARD_GRID_SIZES_SPEC, CARD_IMAGE_SIZES, buildCardImageSizes, CARD_IMAGE_LADDER, GRID_SRC_DEFAULT, CARD_IMAGE_FULL};'
 )();
 
 // ---------------------------------------------------------------------------
@@ -421,22 +431,36 @@ describe('CardSearch createCardHTML no-JS parity', () => {
   });
 });
 
-describe('card grid sizes spec', () => {
-  // card_grid_sizes.json is the source of truth; browsers can't require() JSON so
-  // app.js inlines a copy. These tests are what keep the copy honest.
-  const GRID_SIZES_JSON = require('./card_grid_sizes.json');
+describe('card images spec', () => {
+  // card_images.json is the source of truth; browsers can't require() JSON so
+  // app.js and card.js inline copies. These tests are what keep the copies honest.
+  const CARD_IMAGES_JSON = require('./card_images.json');
 
-  it('app.js embedded spec matches card_grid_sizes.json', () => {
-    expect(CARD_GRID_SIZES_SPEC).toEqual({ layout: GRID_SIZES_JSON.layout, density: GRID_SIZES_JSON.density });
+  it('app.js embedded sizes spec matches card_images.json', () => {
+    expect(CARD_GRID_SIZES_SPEC).toEqual({ layout: CARD_IMAGES_JSON.layout, density: CARD_IMAGES_JSON.density });
+  });
+
+  it('app.js embedded ladder and full dimensions match card_images.json', () => {
+    expect(CARD_IMAGE_LADDER).toEqual(CARD_IMAGES_JSON.ladder);
+    expect(GRID_SRC_DEFAULT).toBe(CARD_IMAGES_JSON.grid_src_default);
+    expect(CARD_IMAGE_FULL).toEqual(CARD_IMAGES_JSON.full);
+  });
+
+  it('card.js embedded constants match card_images.json', () => {
+    // card.js runs page init at load, so check its source text instead of evaluating it
+    const cardJs = fs.readFileSync(path.resolve(__dirname, 'card.js'), 'utf8');
+    const { width, height } = CARD_IMAGES_JSON.full;
+    expect(cardJs).toContain(`const CARD_IMAGE_FULL = { width: ${width}, height: ${height} };`);
+    expect(cardJs).toContain(`const CARD_IMAGE_THUMB_WIDTH = ${CARD_IMAGES_JSON.ladder[0]};`);
   });
 
   it('generated sizes string matches one built from the JSON file', () => {
-    expect(CARD_IMAGE_SIZES).toBe(buildCardImageSizes(GRID_SIZES_JSON));
+    expect(CARD_IMAGE_SIZES).toBe(buildCardImageSizes(CARD_IMAGES_JSON));
   });
 
   it('emits the full density x layout cross product', () => {
     const clauses = CARD_IMAGE_SIZES.split(', ');
-    expect(clauses).toHaveLength(GRID_SIZES_JSON.density.length * GRID_SIZES_JSON.layout.length);
+    expect(clauses).toHaveLength(CARD_IMAGES_JSON.density.length * CARD_IMAGES_JSON.layout.length);
     // last clause is the bare default: no media condition, no budget multiplier
     expect(clauses[clauses.length - 1]).toBe('calc(20vw - 2em - 12px)');
   });
