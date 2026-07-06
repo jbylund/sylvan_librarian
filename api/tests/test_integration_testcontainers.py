@@ -15,7 +15,7 @@ import pytest
 from testcontainers.postgres import PostgresContainer
 
 from api.api_resource import APIResource
-from api.enums import CardOrdering, SortDirection
+from api.enums import CardOrdering, ResponseShape, SortDirection
 from api.tests.helpers import search_kwargs
 from card_engine import QueryEngine
 
@@ -256,6 +256,21 @@ class TestContainerIntegration:
         assert random_card_keys == search_card_keys, (
             f"random_search card keys {random_card_keys} != search card keys {search_card_keys}"
         )
+
+    def test_search_columnar_shape_inverts_to_row_shape(self: TestContainerIntegration, api_resource: APIResource) -> None:
+        """shape=columnar returns per-field lists that invert back to the row-shaped cards."""
+        row_result = api_resource.search(q="cmc>=0", limit=10)
+        columnar_result = api_resource.search(q="cmc>=0", limit=10, shape=ResponseShape.COLUMNAR)
+
+        rows = row_result["cards"]
+        cols = columnar_result["cards"]
+        assert len(rows) >= 1
+        assert isinstance(cols, dict)
+        assert set(cols) == set(rows[0])
+        rebuilt = [dict(zip(cols, values, strict=True)) for values in zip(*cols.values(), strict=True)]
+        assert rebuilt == rows
+        # Envelope stays row-agnostic
+        assert columnar_result["total_cards"] == row_result["total_cards"]
 
     def test_get_pid(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """Test basic API functionality with real database."""

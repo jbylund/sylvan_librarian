@@ -5,7 +5,7 @@ import inspect
 import logging
 from typing import Any
 
-from api.enums import CardOrdering, PreferOrder, SortDirection, UniqueOn
+from api.enums import CardOrdering, PreferOrder, ResponseShape, SortDirection, UniqueOn
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,7 @@ def _convert_string_to_type(str_value: str | None, param_type: Any) -> Any:  # n
         # enums
         "CardOrdering": CardOrdering,
         "PreferOrder": PreferOrder,
+        "ResponseShape": ResponseShape,
         "SortDirection": SortDirection,
         "UniqueOn": UniqueOn,
         # other stuffs
