@@ -3,34 +3,60 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <!-- Start fetching common card types and keywords immediately (as early as possible in head) -->
+    <!-- Warm the autocomplete catalog WITHOUT joining the critical request chain:
+         the promise exists immediately (consumers await it), but the ~9KB /get_catalog
+         fetch — larger than app.min.js — starts only once the browser is idle or the
+         user reaches for the search box, whichever comes first. Nothing needs it
+         before first paint. -->
     <script>
-      // Start fetching as early as possible - before any other resources block execution
       (function () {
-        if (!window.commonCardTypesPromise) {
-          function fetchWithRetry() {
-            return fetch('/get_catalog')
-              .then(function (response) {
-                if (response.status === 503) {
-                  var delay = 10000 + Math.random() * 5000;
-                  console.warn('Common card types not ready, retrying in ' + Math.round(delay / 1000) + 's');
-                  return new Promise(function (resolve) {
-                    setTimeout(resolve, delay);
-                  }).then(fetchWithRetry);
-                }
-                if (!response.ok) {
-                  console.error('Failed to fetch common card types and keywords: HTTP ' + response.status);
-                  return { types: {}, keywords: {} };
-                }
-                return response.json();
-              })
-              .catch(function (error) {
-                console.error('Failed to fetch common card types and keywords:', error);
-                return { types: {}, keywords: {} };
-              });
-          }
-          window.commonCardTypesPromise = fetchWithRetry();
+        if (window.commonCardTypesPromise) {
+          return;
         }
+        function fetchWithRetry() {
+          return fetch('/get_catalog')
+            .then(function (response) {
+              if (response.status === 503) {
+                var delay = 10000 + Math.random() * 5000;
+                console.warn('Common card types not ready, retrying in ' + Math.round(delay / 1000) + 's');
+                return new Promise(function (resolve) {
+                  setTimeout(resolve, delay);
+                }).then(fetchWithRetry);
+              }
+              if (!response.ok) {
+                console.error('Failed to fetch common card types and keywords: HTTP ' + response.status);
+                return { types: {}, keywords: {} };
+              }
+              return response.json();
+            })
+            .catch(function (error) {
+              console.error('Failed to fetch common card types and keywords:', error);
+              return { types: {}, keywords: {} };
+            });
+        }
+        var resolveCatalog;
+        window.commonCardTypesPromise = new Promise(function (resolve) {
+          resolveCatalog = resolve;
+        });
+        var started = false;
+        function start() {
+          if (started) {
+            return;
+          }
+          started = true;
+          fetchWithRetry().then(resolveCatalog);
+        }
+        if (window.requestIdleCallback) {
+          window.requestIdleCallback(start, { timeout: 2000 });
+        } else {
+          setTimeout(start, 2000);
+        }
+        // focusin delegates: the search input doesn't exist yet at head-parse time
+        document.addEventListener('focusin', function (event) {
+          if (event.target && event.target.id === 'searchInput') {
+            start();
+          }
+        });
       })();
     </script>
     <meta

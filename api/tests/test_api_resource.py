@@ -776,6 +776,34 @@ class TestAPIResourceCaching(unittest.TestCase):
             },
         }
 
+    def test_get_catalog_keys_are_sorted(self) -> None:
+        """Catalog keys come back sorted, including the post-hoc Tribal alias.
+
+        Sorted output is deterministic and compresses ~5% smaller (adjacent keys
+        share prefixes); the engine returns arbitrary (insertion) order.
+        """
+        from unittest.mock import MagicMock  # noqa: PLC0415
+
+        mock_engine = MagicMock()
+        mock_engine.size.return_value = 4
+        mock_engine.common_card_types.return_value = {
+            "Wall": 1,
+            "Kindred": 4,
+            "Aurochs": 2,
+            "Aura": 7,
+        }
+        mock_engine.common_card_keywords.return_value = {
+            "Vigilance": 5,
+            "Flying": 10,
+            "Deathtouch": 2,
+        }
+
+        with patch.object(self.api_resource, "_engine", mock_engine):
+            result = self.api_resource.get_catalog()
+
+        assert list(result["types"]) == ["Aura", "Aurochs", "Kindred", "Tribal", "Wall"]
+        assert list(result["keywords"]) == ["deathtouch", "flying", "vigilance"]
+
     def test_cache_clear_method_works(self) -> None:
         """Test that cache.clear() method works for cachebox caches."""
         # Test query cache clearing

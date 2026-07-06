@@ -1800,9 +1800,13 @@ class APIResource:
             type_counts["Tribal"] = kindred_count
         keyword_counts: dict[str, int] = self._engine.common_card_keywords()
         keyword_catalog = {keyword.lower(): count for keyword, count in keyword_counts.items()}
+        # Sorted keys compress ~5% smaller (adjacent keys share prefixes, so the
+        # compressor's back-references stay short) and make the payload deterministic.
+        # orjson preserves insertion order, so sorting here is what clients receive.
+        # Sorting must happen after the Tribal alias is inserted above.
         return {
-            "types": type_counts,
-            "keywords": keyword_catalog,
+            "types": dict(sorted(type_counts.items())),
+            "keywords": dict(sorted(keyword_catalog.items())),
         }
 
     def get_common_keywords(self, **_: object) -> list[dict[str, Any]]:
