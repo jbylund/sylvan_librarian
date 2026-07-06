@@ -1,0 +1,32 @@
+{
+  "README": [
+    "Single source of truth for the card-grid <img sizes> attribute.",
+    "The sizes string is one clause per (density tier x layout breakpoint), and the",
+    "browser uses the first matching clause, so density tiers are ordered densest",
+    "first and each list ends with a null-condition default.",
+    "layout: [media condition, slot-width formula]. Formulas are the CSS grid slot",
+    "widths (body padding 1em x2, card padding 0.8em x2, gap 15px); each max-width",
+    "is one below the corresponding grid min-width threshold in styles.css.",
+    "density: [media condition, multiplier]. Multipliers implement the fidelity",
+    "budget - an effective-DPR cap of ~1.5 for grid thumbnails, computed as",
+    "1.5 / assumed tier DPR (3x, 2x). Grid cells don't earn full retina fidelity;",
+    "the modal is the 1:1 surface. Multipliers are strings so Python and JS emit",
+    "byte-identical text. See docs/issues/homepage-lcp.md for the design.",
+    "Consumers: api/noscript_helpers.py loads this file; api/static/app.js embeds a",
+    "mirrored copy (app.test.js asserts it matches this file, and the shared",
+    "card-HTML parity fixture keeps both renderers' output identical);",
+    "api/tests/test_noscript_parity.py checks the layout table against styles.css."
+  ],
+  "layout": [
+    ["(max-width: 409px)", "100vw - 3.6em"],
+    ["(max-width: 749px)", "50vw - 2.6em - 7.5px"],
+    ["(max-width: 1369px)", "33.33vw - 2.27em - 10px"],
+    ["(max-width: 2499px)", "25vw - 2.1em - 11.25px"],
+    [null, "20vw - 2em - 12px"]
+  ],
+  "density": [
+    ["(min-resolution: 2.9dppx)", "0.5"],
+    ["(min-resolution: 1.9dppx)", "0.75"],
+    [null, null]
+  ]
+}
