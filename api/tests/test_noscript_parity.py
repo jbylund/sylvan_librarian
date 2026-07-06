@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from api.noscript_helpers import CARD_GRID_SIZES_SPEC, CARD_IMAGE_SIZES, create_card_html
+from api.noscript_helpers import CARD_IMAGE_SIZES, CARD_IMAGES_SPEC, create_card_html
 
 _STATIC_DIR = Path(__file__).resolve().parents[1] / "static"
 CARD_HTML_CASES = json.loads((_STATIC_DIR / "fixtures" / "card_html_cases.json").read_text(encoding="utf-8"))
@@ -42,7 +42,7 @@ def test_create_card_html_matches_shared_fixture(card: dict, index: int, expecte
 
 
 def test_sizes_layout_matches_css_grid() -> None:
-    """The layout table in card_grid_sizes.json must mirror the grid in styles.css.
+    """The layout table in card_images.json must mirror the grid in styles.css.
 
     Each sizes max-width must sit one below a grid min-width threshold (< vs <=), and
     each slot-width formula's leading vw term must match that range's column count.
@@ -58,7 +58,7 @@ def test_sizes_layout_matches_css_grid() -> None:
     columns = [1] + [int(cols) for _, cols in grid_media]
     expected_ranges = list(zip([*thresholds, None], columns, strict=True))
 
-    layout = CARD_GRID_SIZES_SPEC["layout"]
+    layout = CARD_IMAGES_SPEC["layout"]
     assert len(layout) == len(expected_ranges)
     for (condition, formula), (threshold, cols) in zip(layout, expected_ranges, strict=True):
         if threshold is None:
@@ -71,7 +71,7 @@ def test_sizes_layout_matches_css_grid() -> None:
 
 def test_sizes_clause_structure() -> None:
     """The generated sizes string is the full density x layout cross product, densest first."""
-    spec = CARD_GRID_SIZES_SPEC
+    spec = CARD_IMAGES_SPEC
     clauses = CARD_IMAGE_SIZES.split(", ")
     assert len(clauses) == len(spec["density"]) * len(spec["layout"])
     assert clauses[0] == "(min-resolution: 2.9dppx) and (max-width: 409px) calc((100vw - 3.6em) * 0.5)"
@@ -80,3 +80,26 @@ def test_sizes_clause_structure() -> None:
     # first-match-wins: density conditions must be ordered densest to sparsest
     resolutions = [float(cond.split(" ")[1].removesuffix("dppx)")) for cond, _ in spec["density"] if cond]
     assert resolutions == sorted(resolutions, reverse=True)
+
+
+def test_image_ladder_structure() -> None:
+    """The ladder is ascending, topped by the full-resolution width, with a valid grid default."""
+    ladder = CARD_IMAGES_SPEC["ladder"]
+    assert all(isinstance(width, int) for width in ladder)
+    assert ladder == sorted(set(ladder))
+    assert ladder[-1] == CARD_IMAGES_SPEC["full"]["width"]
+    assert CARD_IMAGES_SPEC["grid_src_default"] in ladder
+
+
+def test_css_card_dimensions_match_spec() -> None:
+    """styles.css can't read JSON, so its card dimension literals are enforced here.
+
+    Guards the aspect-ratio and the modal max-height/max-width formulas against
+    drifting from the real image dimensions (this test caught a stale 1041).
+    """
+    css = (_STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+    width = CARD_IMAGES_SPEC["full"]["width"]
+    height = CARD_IMAGES_SPEC["full"]["height"]
+    assert f"aspect-ratio: {width} / {height};" in css
+    assert f"max-height: min(100vh, {height}px);" in css
+    assert f"max-width: min(100%, {width}px, calc(min(100vh, {height}px) * {width} / {height}));" in css
