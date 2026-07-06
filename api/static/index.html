@@ -3,12 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <!-- Warm the autocomplete catalog WITHOUT joining the critical request chain:
-         the promise exists immediately (consumers await it), but the ~9KB /get_catalog
-         fetch — larger than app.min.js — starts only once the browser is idle or the
-         user reaches for the search box, whichever comes first. Nothing needs it
-         before first paint. -->
     <script>
+      // Warm the autocomplete catalog WITHOUT joining the critical request chain:
+      // the promise exists immediately (consumers await it), but the ~9KB /get_catalog
+      // fetch - larger than app.min.js - starts only once the browser is idle or the
+      // user reaches for the search box, whichever comes first. Nothing needs it
+      // before first paint. (JS comments are stripped by minify_js; HTML comments
+      // would ship - keep_comments=True protects the SERVER_SIDE_* splice anchors.)
       (function () {
         if (window.commonCardTypesPromise) {
           return;
@@ -156,11 +157,8 @@
       <!-- FOOTER -->
     </div>
 
-    <!-- Modal for card details -->
     <div id="modalOverlay" class="modal-overlay">
-      <div id="modalContent" class="modal-content">
-        <!-- Modal content will be dynamically inserted here -->
-      </div>
+      <div id="modalContent" class="modal-content"></div>
     </div>
     <script>
       <!-- SERVER_SIDE_EMBEDDED_DATA -->
