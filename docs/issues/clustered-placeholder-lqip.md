@@ -36,7 +36,7 @@ gen `{o,m,5}`, treatment `{b,w,x,f}`, color `{w,u,b,r,g,d,a,l}` (d = gold). Stab
 construction; 96-slot space, ~50 realized; packs to 7 bits if ever needed.
 
 **Per-card stored value** (~24 chars): `"<bucket> <boxL> <boxR> <art>"`, e.g.
-`mbl 8ab4c8 c8a468 3d5a55`. Semantics matter: the two colors are the **text-box
+`mbl 8ab4c8 c8a468 3d5a55` (3ch bucket + 3 separators + 18ch color payload). Semantics matter: the two colors are the **text-box
 halves**, not the frame trim. Within a bucket the trim hue is constant by
 construction, while the box carries the per-card signal (dual-land gradients, gold
 component tints, parchment vs colored, comic white). NULL = unmeasured → client
@@ -81,15 +81,17 @@ either renderer; parity + no-JS + paint-before-JS all favor pre-encoded URIs. Pr
 `data:image/webp;base64,` is constant → prepended client-side, not stored. Size curve
 is flat to 16×12 (container overhead dominates), knee after:
 
-| tier | value chars | /search raw (100 cards) | /search gzipped |
+| tier | value chars | /search raw (100 cards, columnar) | gzipped |
 |---|---|---|---|
-| baseline | — | 34.3KB | 2.2KB |
-| flat art | ~24 | +13.7% | **+72% (+16B/card)** |
-| art 16×12 | ~173 | +53.9% | **+580% (+126B/card)** |
+| baseline (shape=columnar, PR #612) | — | 23.6KB | 1.88KB |
+| flat art | ~24 | +11.5% | **+79% (+15B/card)** |
+| flat art, 50% backfilled | — | +6.9% | +41% (+8B/card — null runs compress ~free) |
+| art 16×12 | ~173 | +69.9% | **+671% (+126B/card)** |
 
-The gzipped baseline is tiny (card JSON is highly redundant); colors/base64 are
-incompressible, so thumbs would make /search a 15KB endpoint whose payload is mostly
-placeholder data shown for ~200ms. **Ship flat art in defaults; expose thumbs via
+(Row-shaped numbers are ~10% milder relatively; absolute per-card costs identical —
+the values are incompressible entropy, and columnar ships each key once so field
+naming is free.) The gzipped baseline is tiny; thumbs would make /search a ~15KB
+endpoint whose payload is mostly placeholder data shown for ~200ms. **Ship flat art in defaults; expose thumbs via
 `fields=` if a flash test (mockup + delay slider, not built) ever justifies them.**
 Engine string table: flat ≈ +2.5MB @100k printings; 16×12 ≈ +18MB.
 
