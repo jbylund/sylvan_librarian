@@ -1,9 +1,9 @@
 use super::{
     build_numeric_index, build_oracle_text_index, build_tag_index, build_trigram_index,
-    build_type_index, cards_of_printings, count_common_keywords, count_common_types,
-    build_artist_index, build_range_index, date_range_candidates, narrow_candidates,
+    build_type_index, build_rarity_index, cards_of_printings, count_common_keywords, count_common_types,
+    build_artist_index, build_range_index, date_range_candidates, narrow_candidates, rarity_candidates,
     range_too_broad_to_narrow, run_query, trigram_candidates, DateIndex, NARROW_FLOOR,
-    ArtistIndex, CardData, CardIndexes, Candidates,
+    ArtistIndex, CardData, CardIndexes, Candidates, NumExpr, NumField, RarityIndex,
     CollField, CmpOp, FilterExpr, InlineStr, Interner, ManaCost, OracleCard, Printing, TagIndex,
     Tri, TrigramIndex, VocabInterner, ARTIST_NONE, NONE_STR, TYPE_ARTIFACT, TYPE_CREATURE, TYPE_INSTANT,
     TYPE_LEGENDARY, TYPE_PLANESWALKER,
@@ -265,6 +265,83 @@ fn narrow_candidates_spaces() {
     match narrow_candidates(&and, archived, offsets) {
         Some(Candidates::Cards(v)) => assert_eq!(v, vec![1]),
         _ => panic!("mixed And must produce card-space candidates"),
+    }
+}
+
+// build_rarity_index posts each card once per distinct printing rarity;
+// rarity-less printings contribute nothing.
+#[test]
+fn rarity_index_posts_cards_per_distinct_rarity() {
+    // card 0: printings at common(0) and mythic(3); card 1: rare(2) twice
+    // (deduped by the mask); card 2: no rarity anywhere.
+    let mut printings: Vec<Printing> = (1..=5).map(|i| stub_printing(i, i, None)).collect();
+    printings[0].card_rarity_int = Some(0);
+    printings[1].card_rarity_int = Some(3);
+    printings[2].card_rarity_int = Some(2);
+    printings[3].card_rarity_int = Some(2);
+    let offsets = vec![0u32, 2, 4, 5];
+
+    let idx = build_rarity_index(&printings, &offsets);
+    assert_eq!(idx[0], vec![0]); // common: card 0
+    assert_eq!(idx[2], vec![1]); // rare: card 1, once despite two rare printings
+    assert_eq!(idx[3], vec![0]); // mythic: card 0
+    assert!(idx[1].is_empty() && idx[4].is_empty() && idx[5].is_empty());
+}
+
+// rarity_candidates unions the qualifying buckets, refuses Ne and all-bucket
+// unions, and proves empty sets for impossible comparisons.
+#[test]
+fn rarity_candidates_ops() {
+    // common {0,3}, uncommon {1}, rare {2,3}, mythic {4}, special {}, bonus {}
+    let idx: RarityIndex = [vec![0, 3], vec![1], vec![2, 3], vec![4], vec![], vec![]];
+    let bytes = rkyv::to_bytes::<Error>(&idx).expect("serialize");
+    let archived = rkyv::access::<Archived<RarityIndex>, Error>(&bytes).expect("access");
+
+    // Eq picks one bucket; a card in several buckets appears via each.
+    assert_eq!(rarity_candidates(archived, CmpOp::Eq, 2.0), Some(vec![2, 3]));
+    // Ge unions rare and above; card 3 (common+rare) appears once.
+    assert_eq!(rarity_candidates(archived, CmpOp::Ge, 2.0), Some(vec![2, 3, 4]));
+    // Lt 2 = common|uncommon.
+    assert_eq!(rarity_candidates(archived, CmpOp::Lt, 2.0), Some(vec![0, 1, 3]));
+    // Impossible comparisons prove the empty set (exact, not "no narrowing").
+    assert_eq!(rarity_candidates(archived, CmpOp::Eq, 2.5), Some(vec![]));
+    assert_eq!(rarity_candidates(archived, CmpOp::Gt, 5.0), Some(vec![]));
+    // Ne and all-bucket unions decline to narrow.
+    assert!(rarity_candidates(archived, CmpOp::Ne, 2.0).is_none());
+    assert!(rarity_candidates(archived, CmpOp::Ge, 0.0).is_none());
+    assert!(rarity_candidates(archived, CmpOp::Le, 5.0).is_none());
+}
+
+// The NumericCmp narrowing arm routes rarity through the index in card space,
+// for both operand orders.
+#[test]
+fn narrow_candidates_rarity_card_space() {
+    let rarity: RarityIndex = [vec![], vec![], vec![0, 2], vec![1], vec![], vec![]];
+    let indexes = CardIndexes { rarity, ..Default::default() };
+    let bytes = rkyv::to_bytes::<Error>(&indexes).expect("serialize");
+    let archived = rkyv::access::<Archived<CardIndexes>, Error>(&bytes).expect("access");
+    let offsets_bytes = rkyv::to_bytes::<Error>(&vec![0u32, 2, 4, 6]).expect("serialize offsets");
+    let offsets = rkyv::access::<Archived<Vec<u32>>, Error>(&offsets_bytes).expect("access offsets");
+
+    let cmp = FilterExpr::NumericCmp {
+        lhs: NumExpr::Field(NumField::RarityInt),
+        op: CmpOp::Ge,
+        rhs: NumExpr::Const(2.0),
+    };
+    match narrow_candidates(&cmp, archived, offsets) {
+        Some(Candidates::Cards(v)) => assert_eq!(v, vec![0, 1, 2]),
+        _ => panic!("rarity must narrow in card space"),
+    }
+
+    // Flipped operand order: 3 <= rarity ≡ rarity >= 3.
+    let flipped = FilterExpr::NumericCmp {
+        lhs: NumExpr::Const(3.0),
+        op: CmpOp::Le,
+        rhs: NumExpr::Field(NumField::RarityInt),
+    };
+    match narrow_candidates(&flipped, archived, offsets) {
+        Some(Candidates::Cards(v)) => assert_eq!(v, vec![1]),
+        _ => panic!("flipped rarity must narrow in card space"),
     }
 }
 
@@ -549,6 +626,7 @@ fn bench_checked_vs_unchecked_access() {
         power:          build_numeric_index(&cards, |c| c.creature_power.map(|v| v as i16)),
         toughness:      build_numeric_index(&cards, |c| c.creature_toughness.map(|v| v as i16)),
         type_bits:      build_type_index(&cards),
+        rarity:         build_rarity_index(&printings, &offsets),
         subtypes:       build_tag_index(&cards, &vocab.strings, |c| &c.card_subtypes),
         keywords:       build_tag_index(&cards, &vocab.strings, |c| &c.card_keywords),
         oracle_tags:    build_tag_index(&cards, &vocab.strings, |c| &c.card_oracle_tags),

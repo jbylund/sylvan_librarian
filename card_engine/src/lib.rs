@@ -1055,6 +1055,66 @@ fn build_type_index(cards: &[OracleCard]) -> TypeIndex {
     idx // lists are sorted: cards iterated in ascending index order
 }
 
+// ─── Rarity index ────────────────────────────────────────────────────────────
+// rarity int (0-5) -> sorted card ids with at least one printing at that
+// rarity. A card printed at several rarities appears in each of its lists
+// (~34.8k entries over ~31.5k cards; 91% of cards have a single rarity).
+// Card space deliberately: the per-rarity card lists shrink the evaluation
+// domain, so no selectivity guard is needed (see numeric_candidates) — even
+// the broadest bucket (rare, ~35% of cards) measures ahead of the scan.
+
+type RarityIndex = [Vec<u32>; 6];
+
+fn build_rarity_index(printings: &[Printing], offsets: &[u32]) -> RarityIndex {
+    let mut idx: RarityIndex = Default::default();
+    for card in 0..offsets.len().saturating_sub(1) {
+        let range = offsets[card] as usize..offsets[card + 1] as usize;
+        let mut mask: u8 = 0;
+        for p in &printings[range] {
+            if let Some(r) = p.card_rarity_int {
+                if (r as usize) < idx.len() {
+                    mask |= 1 << r;
+                }
+            }
+        }
+        let mut bits = mask;
+        while bits != 0 {
+            let bit = bits.trailing_zeros() as usize;
+            idx[bit].push(card as u32);
+            bits &= bits - 1;
+        }
+    }
+    idx // lists are sorted: cards iterated in ascending index order
+}
+
+/// Union the rarity posting lists whose value satisfies `op val`. Returns None
+/// for Ne (matches nearly every card, same convention as numeric_candidates)
+/// and when every bucket qualifies (the union is the whole store — the scan
+/// costs the same without materializing it). An empty union is exact: no
+/// printing exists at a rarity satisfying the comparison.
+fn rarity_candidates(idx: &Archived<RarityIndex>, op: CmpOp, val: f64) -> Option<Vec<u32>> {
+    if matches!(op, CmpOp::Ne) {
+        return None;
+    }
+    let keep = |r: f64| match op {
+        CmpOp::Eq => r == val,
+        CmpOp::Lt => r < val,
+        CmpOp::Le => r <= val,
+        CmpOp::Gt => r > val,
+        CmpOp::Ge => r >= val,
+        CmpOp::Ne => false,
+    };
+    let buckets: Vec<usize> = (0..idx.len()).filter(|&r| keep(r as f64)).collect();
+    if buckets.len() == idx.len() {
+        return None;
+    }
+    let mut result: Vec<u32> = Vec::new();
+    for b in buckets {
+        result = union_sorted(result, idx[b].iter().map(|x| u32::from(*x)).collect());
+    }
+    Some(result)
+}
+
 // ─── Combined indexes ────────────────────────────────────────────────────────
 
 // Postings live in two id spaces: card-level indexes post OracleCard indices
@@ -1068,6 +1128,7 @@ struct CardIndexes {
     power:          NumericIndex,    // card space
     toughness:      NumericIndex,    // card space
     type_bits:      TypeIndex,       // card space
+    rarity:         RarityIndex,     // card space (any-printing-at-rarity)
     subtypes:       TagIndex,        // card space
     keywords:       TagIndex,        // card space
     oracle_tags:    TagIndex,        // card space
@@ -1088,6 +1149,7 @@ impl Default for CardIndexes {
             power:          Vec::new(),
             toughness:      Vec::new(),
             type_bits:      Default::default(),
+            rarity:         Default::default(),
             subtypes:       HashMap::new(),
             keywords:       HashMap::new(),
             oracle_tags:    HashMap::new(),
@@ -1193,6 +1255,10 @@ fn narrow_candidates(filter: &FilterExpr, indexes: &Archived<CardIndexes>, offse
                 numeric_candidates(&indexes.toughness, *op, *v).map(Candidates::Cards),
             (NumExpr::Const(v), NumExpr::Field(NumField::Toughness)) =>
                 numeric_candidates(&indexes.toughness, flip_op(*op), *v).map(Candidates::Cards),
+            (NumExpr::Field(NumField::RarityInt), NumExpr::Const(v)) =>
+                rarity_candidates(&indexes.rarity, *op, *v).map(Candidates::Cards),
+            (NumExpr::Const(v), NumExpr::Field(NumField::RarityInt)) =>
+                rarity_candidates(&indexes.rarity, flip_op(*op), *v).map(Candidates::Cards),
             (NumExpr::Field(NumField::PriceUsd), NumExpr::Const(v)) =>
                 price_candidates(&indexes.price_usd, *op, *v).map(Candidates::Printings),
             (NumExpr::Const(v), NumExpr::Field(NumField::PriceUsd)) =>
@@ -1673,7 +1739,7 @@ fn card_to_pydict<'py>(
 const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 /// Bump on any archived-data-model change the struct sizes below wouldn't
 /// catch (e.g. reordering same-size fields, changing an index type).
-const ARCHIVE_FORMAT_VERSION: u32 = 20260707;
+const ARCHIVE_FORMAT_VERSION: u32 = 20260708;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -2039,6 +2105,7 @@ impl QueryEngine {
             power:          build_numeric_index(&cards, |c| c.creature_power.map(|v| v as i16)),
             toughness:      build_numeric_index(&cards, |c| c.creature_toughness.map(|v| v as i16)),
             type_bits:      build_type_index(&cards),
+            rarity:         build_rarity_index(&printings, &offsets),
             subtypes:       build_tag_index(&cards, &coll_vocab, |c| &c.card_subtypes),
             keywords:       build_tag_index(&cards, &coll_vocab, |c| &c.card_keywords),
             oracle_tags:    build_tag_index(&cards, &coll_vocab, |c| &c.card_oracle_tags),
