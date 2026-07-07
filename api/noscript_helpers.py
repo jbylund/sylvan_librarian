@@ -255,6 +255,45 @@ def build_image_url(card: dict, size: str) -> str:
     return f"https://d1hot9ps2xugbc.cloudfront.net/img/{set_code}/{collector_number}/{face}/{size}.webp"
 
 
+# Stored placeholder value shape: "<bucket> <frameL> <frameR> <art>" with bare hex colors.
+# Anchored and charset-limited so the parts can be embedded in class/style attributes directly.
+_PLACEHOLDER_VALUE_RE = re.compile(r"^([a-z0-9-]+) ([0-9a-f]{6}) ([0-9a-f]{6}) ([0-9a-f]{6})$")
+
+
+def placeholder_parts(card: dict) -> tuple[str, str]:
+    """CSS class and inline style of the placeholder shown behind the card image while it loads.
+
+    Measured printings carry an image_placeholder value naming a frame-template bucket
+    plus three tint colors (classes/templates in static/placeholders-v1.css); the colors
+    ride as CSS custom properties. Unmeasured printings fall back to a coarse ph-fb-*
+    class derived from type line and mana cost, whose bucket-default colors are baked
+    into the stylesheet. Matches placeholderParts in JS createCardHTML.
+
+    Args:
+    ----
+        card: Card dictionary with image_placeholder, type_line, and mana_cost
+
+    Returns:
+    -------
+        (class name, style attribute value or empty string)
+    """
+    match = _PLACEHOLDER_VALUE_RE.match(card.get("image_placeholder") or "")
+    if match:
+        bucket, frame_l, frame_r, art = match.groups()
+        return f"ph-{bucket}", f"--frame-l:#{frame_l};--frame-r:#{frame_r};--art:#{art}"
+    type_line = card.get("type_line") or ""
+    if "Land" in type_line:
+        return "ph-fb-land", ""
+    if "Artifact" in type_line:
+        return "ph-fb-artifact", ""
+    colors = {symbol for symbol in card.get("mana_cost") or "" if symbol in "WUBRG"}
+    if len(colors) > 1:
+        return "ph-fb-gold", ""
+    if len(colors) == 1:
+        return f"ph-fb-{colors.pop().lower()}", ""
+    return "ph-fb-artifact", ""
+
+
 def _build_alt_text(card: dict) -> str:
     """Build descriptive image alt text with card name, mana cost, and oracle text.
 
@@ -325,8 +364,10 @@ def create_card_html(card: dict, index: int) -> str:
     # Use 388px as default src (good middle ground for initial load)
     priority_attr = ' fetchpriority="high"' if index == 0 else ""
     lazy_attr = "" if index < _EAGER_LOAD_COUNT else ' loading="lazy"'
+    ph_class, ph_style = placeholder_parts(card)
+    ph_style_attr = f' style="{ph_style}"' if ph_style else ""
     img_tag = (
-        f'<img class="card-image" '
+        f'<img class="card-image {ph_class}"{ph_style_attr} '
         f'src="{escape_html(image_388)}" '
         f'srcset="{srcset}" '
         f'sizes="{sizes}" '

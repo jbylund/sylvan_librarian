@@ -202,7 +202,7 @@ class TestContainerIntegration:
         assert cards[0]["name"] == "Serra Angel"
 
     def test_search_sql_default_fields(self: TestContainerIntegration, api_resource: APIResource) -> None:
-        """Omitting fields= keeps the historical 9-key shape."""
+        """Omitting fields= keeps the historical 9-key shape plus image_placeholder."""
         result = api_resource._search_sql(**search_kwargs("name:bolt", limit=10))
         assert result["cards"][0].keys() == {
             "name",
@@ -214,6 +214,7 @@ class TestContainerIntegration:
             "oracle_text",
             "set_name",
             "type_line",
+            "image_placeholder",
         }
 
     def test_search_sql_with_custom_fields(self: TestContainerIntegration, api_resource: APIResource) -> None:
