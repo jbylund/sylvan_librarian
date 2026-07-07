@@ -1,9 +1,10 @@
 use super::{
-    build_numeric_index, build_oracle_text_index, build_tag_index, build_trigram_index,
+    build_card_permutation, build_numeric_index, build_oracle_text_index, build_tag_index, build_trigram_index,
     build_type_index, build_rarity_index, build_flavor_index, flavor_fingerprint, flavor_match_sets,
     cards_of_printings, count_common_keywords, count_common_types,
     build_artist_index, build_range_index, date_range_candidates, narrow_candidates, rarity_candidates,
-    range_too_broad_to_narrow, run_query, trigram_candidates, DateIndex, NARROW_FLOOR,
+    orderby_to_col, range_too_broad_to_narrow, run_query, run_query_gather, trigram_candidates, DateIndex, Mode, NARROW_FLOOR,
+    Prefer,
     ArtistIndex, CardData, CardIndexes, Candidates, NumExpr, NumField, RarityIndex,
     CollField, CmpOp, FilterExpr, InlineStr, Interner, ManaCost, OracleCard, Printing, TagIndex,
     Tri, TrigramIndex, VocabInterner, ARTIST_NONE, NONE_STR, TYPE_ARTIFACT, TYPE_CREATURE, TYPE_INSTANT,
@@ -212,7 +213,15 @@ fn store_of(cards: Vec<OracleCard>, printing_counts: &[usize], vocab: VocabInter
     }
     // Real type index so TypeCmp narrowing sees the cards (an empty Default
     // index would narrow every type query to zero candidates).
-    let indexes = CardIndexes { type_bits: build_type_index(&cards), ..Default::default() };
+    let indexes = CardIndexes {
+        type_bits: build_type_index(&cards),
+        perm_edhrec: build_card_permutation(&cards, |c| c.edhrec_rank),
+        perm_cubecobra: build_card_permutation(&cards, |c| c.cubecobra_score.map(super::f32_sort_bits)),
+        perm_cmc: build_card_permutation(&cards, |c| c.cmc.map(|v| v as u32)),
+        perm_power: build_card_permutation(&cards, |c| c.creature_power.map(|v| super::f32_sort_bits(v as f32))),
+        perm_toughness: build_card_permutation(&cards, |c| c.creature_toughness.map(|v| super::f32_sort_bits(v as f32))),
+        ..Default::default()
+    };
     CardData {
         cards,
         printings,
@@ -580,6 +589,37 @@ fn run_query_artwork_groups_shared_illustrations() {
     assert!(chosen.contains(&1) && !chosen.contains(&3));
 }
 
+#[test]
+fn run_query_streaming_matches_gather_for_card_mode() {
+    let mut vocab = VocabInterner::new();
+    let mut cards = Vec::new();
+    let mut printing_counts = Vec::new();
+    for i in 0..1100 {
+        let mut c = stub_card((i + 1) as u128, TYPE_CREATURE, &[], &mut vocab);
+        c.cmc = Some((i % 10) as u8);
+        c.edhrec_rank = Some((i + 1) as u32);
+        cards.push(c);
+        printing_counts.push(1usize);
+    }
+    let data = store_of(cards, &printing_counts, vocab);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let all = FilterExpr::True;
+    let streaming = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &all, "card", "default", "cmc", "asc", 50, 25, &archived.indexes,
+    );
+    let gather = run_query_gather(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &all, Mode::Card, Prefer::Default, orderby_to_col("cmc"), false, 50, 25, &archived.indexes,
+    );
+    assert_eq!(streaming.0, gather.0);
+    let stream_ids: Vec<u128> = streaming.1.iter().map(|(_, p)| u128::from(p.scryfall_id)).collect();
+    let gather_ids: Vec<u128> = gather.1.iter().map(|(_, p)| u128::from(p.scryfall_id)).collect();
+    assert_eq!(stream_ids, gather_ids);
+}
+
 /// Measures checked rkyv::access vs access_unchecked on a production-scale
 /// archive. This is the evidence behind the access_unchecked safety comments
 /// on query()/size(): checked access re-validates the entire archive graph
@@ -633,6 +673,11 @@ fn bench_checked_vs_unchecked_access() {
         cmc:            build_numeric_index(&cards, |c| c.cmc.map(|v| v as i16)),
         power:          build_numeric_index(&cards, |c| c.creature_power.map(|v| v as i16)),
         toughness:      build_numeric_index(&cards, |c| c.creature_toughness.map(|v| v as i16)),
+        perm_edhrec:    build_card_permutation(&cards, |c| c.edhrec_rank),
+        perm_cubecobra: build_card_permutation(&cards, |c| c.cubecobra_score.map(super::f32_sort_bits)),
+        perm_cmc:       build_card_permutation(&cards, |c| c.cmc.map(|v| v as u32)),
+        perm_power:     build_card_permutation(&cards, |c| c.creature_power.map(|v| super::f32_sort_bits(v as f32))),
+        perm_toughness: build_card_permutation(&cards, |c| c.creature_toughness.map(|v| super::f32_sort_bits(v as f32))),
         type_bits:      build_type_index(&cards),
         rarity:         build_rarity_index(&printings, &offsets),
         subtypes:       build_tag_index(&cards, &vocab.strings, |c| &c.card_subtypes),
