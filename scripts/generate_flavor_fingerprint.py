@@ -1,9 +1,11 @@
 """Generate the frozen 128-feature table for the flavor-text fingerprint.
 
 Selects 128 ASCII-alpha 1/2/3-grams over the distinct lowercase flavor texts:
-greedy selection minimizing residual pass rate over a needle workload sampled
-from the corpus vocabulary, with a backfill invariant that reserves enough
-tail slots for every unchosen letter of the alphabet — so every possible
+greedy selection minimizing residual pass rate over a needle workload — the
+4,500-word training half of a seeded random split of the corpus vocabulary's
+5,000 most common words (the held-out 500 validate selectivity) — with a
+backfill invariant that reserves enough tail slots for every unchosen letter
+of the alphabet — so every possible
 needle fires at least one bit and the filter can forgo benefit but never
 regress to worse than the letter-mask floor.
 
@@ -32,8 +34,8 @@ import numpy as np
 
 BITS = 128
 SEED = 7
-TRAIN_NEEDLES = 300
-VOCAB_POOL = 4000
+TRAIN_NEEDLES = 4500
+VOCAB_POOL = 5000
 CANDIDATE_POOL = 1000
 MIN_TEXT_DF = 20  # ignore grams rarer than this many texts (too corpus-specific)
 MIN_NEEDLE_COVERAGE = 2  # unless the gram is rare enough to be a filter on its own
@@ -85,7 +87,8 @@ def select_features(texts: list[str], text_grams: list[set], df: Counter) -> lis
             vocab[w] += 1
     rng = random.Random(SEED)
     words = [w for w, _ in vocab.most_common(VOCAB_POOL)]
-    train = rng.sample(words, TRAIN_NEEDLES)
+    rng.shuffle(words)
+    train = words[:TRAIN_NEEDLES]
 
     cands, train_contains = candidate_grams(df, n_texts, train)
     pres = {g: np.zeros(n_texts, dtype=bool) for g in cands}

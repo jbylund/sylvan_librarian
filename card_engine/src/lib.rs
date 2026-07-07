@@ -985,27 +985,27 @@ fn expand_artist_ids(idx: &Archived<ArtistIndex>, artist_ids: &[u16]) -> Vec<u32
 // minimize residual pass rate on a corpus-vocabulary needle workload, with
 // enough tail slots backfilled with the unchosen letters that every needle
 // fires at least one bit (worst case degrades to the letter-mask floor, never
-// to an unfiltered scan). Measured: ~3% of texts survive typical needles.
+// to an unfiltered scan). Measured: ~2% of texts survive typical needles (held-out 500-word split).
 // Regenerate with scripts/generate_flavor_fingerprint.py if selectivity
 // drifts; staleness costs selectivity, never correctness.
 
 const FLAVOR_FP_FEATURES: [&str; 128] = [
-    "ed", "se", "ch", "tr", "ss", "te", "la", "ing",
-    "ad", "rs", "ns", "ec", "har", "ne", "el", "ts",
-    "am", "gi", "ous", "re", "sh", "p", "ra", "un",
-    "ay", "ol", "ce", "ge", "si", "di", "ca", "es",
-    "nt", "ni", "end", "mi", "ee", "al", "ro", "tir",
-    "on", "ds", "is", "mb", "mer", "v", "gh", "ga",
-    "po", "sa", "hin", "ob", "ste", "oi", "le", "ur",
-    "ild", "ls", "br", "ea", "red", "ri", "pe", "oo",
-    "ul", "ya", "ba", "de", "pa", "mas", "et", "li",
-    "hu", "ha", "rd", "em", "cl", "su", "aw", "rk",
-    "oy", "ser", "so", "ly", "ta", "om", "ty", "fe",
-    "ot", "uys", "ac", "sp", "are", "va", "ag", "pi",
-    "bos", "alf", "fou", "liq", "nto", "en", "rc", "ze",
-    "a", "b", "c", "d", "e", "f", "g", "h",
-    "i", "j", "k", "l", "m", "n", "o", "q",
-    "r", "s", "t", "u", "w", "x", "y", "z",
+    "ed", "ri", "ra", "es", "te", "le", "p", "ng",
+    "nt", "de", "al", "el", "ns", "ar", "v", "k",
+    "ti", "la", "ce", "se", "ro", "ta", "ch", "ea",
+    "co", "sh", "li", "rs", "ni", "di", "mi", "ol",
+    "ur", "un", "si", "ts", "lo", "ne", "or", "ai",
+    "ge", "st", "me", "il", "en", "ec", "ly", "b",
+    "tr", "ma", "sa", "z", "ds", "ic", "ss", "pe",
+    "io", "ie", "re", "ul", "na", "ho", "ee", "us",
+    "fa", "rd", "oo", "ca", "x", "et", "cr", "su",
+    "ia", "wa", "so", "ga", "rt", "id", "mo", "ty",
+    "ls", "er", "ad", "bo", "sp", "gh", "j", "ru",
+    "am", "cl", "fi", "ow", "pr", "fe", "gi", "da",
+    "is", "ac", "gr", "ha", "rn", "dr", "gu", "as",
+    "em", "ir", "lu", "at", "vi", "a", "c", "d",
+    "e", "f", "g", "h", "i", "l", "m", "n",
+    "o", "q", "r", "s", "t", "u", "w", "y",
 ];
 
 static FLAVOR_FP_MAP: std::sync::OnceLock<HashMap<&'static [u8], u32>> = std::sync::OnceLock::new();
