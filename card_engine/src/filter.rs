@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use regex::Regex;
 use serde_json::Value;
-use super::{AOracleCard, APrinting, AStrings, str_at, is_devotion_sym, mana_pip_counts, mana_cmc, color_list_to_mask, card_type_str_to_bit, ARTIST_NONE};
+use super::{AOracleCard, APrinting, AStrings, str_at, is_devotion_sym, mana_pip_counts, mana_cmc, color_list_to_mask, card_type_str_to_bit, ARTIST_NONE, NONE_STR, FlavorIndex, flavor_fingerprint, flavor_match_sets};
 use super::legality::{LEGALITY_LEGAL, LEGALITY_BANNED, LEGALITY_RESTRICTED, format_shift};
 
 // ─── Comparison / arithmetic operators ───────────────────────────────────────
@@ -288,6 +288,15 @@ pub(crate) enum FilterExpr {
     ArtistMatch {
         ids: Vec<u16>,
     },
+    /// A flavor-text predicate (contains/exact/regex) after bind() resolved it
+    /// against the ~26.3k distinct flavor texts (fingerprint-prefiltered scan):
+    /// sorted global string ids whose text satisfies the predicate — matching
+    /// is an integer binary search per printing — plus the dense text ids for
+    /// CSR narrowing in printing space.
+    FlavorMatch {
+        gids: Vec<u32>,
+        dense_ids: Vec<u32>,
+    },
     TextExact {
         field: TextField,
         op: CmpOp,
@@ -370,14 +379,24 @@ impl FilterExpr {
     ///   holding the sorted ids that satisfied them — per-printing matching is
     ///   then an integer membership test, and narrow_candidates can expand the
     ///   ids through the artist CSR index.
-    pub(crate) fn bind(&mut self, vocab: &AStrings, sorted_ids: &rkyv::Archived<Vec<u16>>, artist_vocab: &AStrings) {
+    /// - Flavor predicates get the same treatment against the ~26.3k distinct
+    ///   flavor texts (FlavorMatch), with a fingerprint prefilter skipping
+    ///   texts that cannot contain the needle (see FLAVOR_FP_FEATURES).
+    pub(crate) fn bind(
+        &mut self,
+        vocab: &AStrings,
+        sorted_ids: &rkyv::Archived<Vec<u16>>,
+        artist_vocab: &AStrings,
+        flavor: &rkyv::Archived<FlavorIndex>,
+        strings: &AStrings,
+    ) {
         match self {
             FilterExpr::And(children) | FilterExpr::Or(children) => {
                 for c in children {
-                    c.bind(vocab, sorted_ids, artist_vocab);
+                    c.bind(vocab, sorted_ids, artist_vocab, flavor, strings);
                 }
             }
-            FilterExpr::Not(inner) => inner.bind(vocab, sorted_ids, artist_vocab),
+            FilterExpr::Not(inner) => inner.bind(vocab, sorted_ids, artist_vocab, flavor, strings),
             FilterExpr::CollectionCmp { value, value_id, .. } => {
                 let i = sorted_ids.partition_point(|id| vocab[u16::from(*id) as usize].as_str() < value.as_str());
                 *value_id = sorted_ids
@@ -404,6 +423,30 @@ impl FilterExpr {
             FilterExpr::TextRegex { field: TextField::ArtistLower, regex } => {
                 let ids = artist_match_ids(artist_vocab, |s| regex.is_match(s));
                 *self = FilterExpr::ArtistMatch { ids };
+            }
+            FilterExpr::TextContains { field: TextSearchField::FlavorTextLower, word } => {
+                let mask = flavor_fingerprint(word.as_str());
+                let (gids, dense_ids) = flavor_match_sets(flavor, strings, mask, |s| s.contains(word.as_str()));
+                *self = FilterExpr::FlavorMatch { gids, dense_ids };
+            }
+            FilterExpr::TextExact { field: TextField::FlavorTextLower, op, value } => {
+                let (op, value) = (*op, std::mem::take(value));
+                // Equality implies containment, so Eq can use the fingerprint;
+                // the other comparisons carry no containment implication.
+                let mask = if op == CmpOp::Eq { flavor_fingerprint(value.as_str()) } else { 0 };
+                let (gids, dense_ids) = flavor_match_sets(flavor, strings, mask, |s| match op {
+                    CmpOp::Eq => s == value,
+                    CmpOp::Ne => s != value,
+                    CmpOp::Lt => s < value.as_str(),
+                    CmpOp::Le => s <= value.as_str(),
+                    CmpOp::Gt => s > value.as_str(),
+                    CmpOp::Ge => s >= value.as_str(),
+                });
+                *self = FilterExpr::FlavorMatch { gids, dense_ids };
+            }
+            FilterExpr::TextRegex { field: TextField::FlavorTextLower, regex } => {
+                let (gids, dense_ids) = flavor_match_sets(flavor, strings, 0, |s| regex.is_match(s));
+                *self = FilterExpr::FlavorMatch { gids, dense_ids };
             }
             _ => {}
         }
@@ -582,6 +625,16 @@ impl FilterExpr {
                     Tri::Null // no artist: SQL NULL, like the missing-string case before
                 } else {
                     tri_bool(ids.binary_search(&vid).is_ok())
+                }
+            }
+
+            FilterExpr::FlavorMatch { gids, .. } => {
+                let Some(p) = printing else { return Tri::PrintingDep };
+                let gid = u32::from(p.flavor_text_lower_id);
+                if gid == NONE_STR {
+                    Tri::Null // no flavor text: SQL NULL, matching the pre-bind semantics
+                } else {
+                    tri_bool(gids.binary_search(&gid).is_ok())
                 }
             }
 

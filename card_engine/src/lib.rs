@@ -970,6 +970,170 @@ fn expand_artist_ids(idx: &Archived<ArtistIndex>, artist_ids: &[u16]) -> Vec<u32
     out
 }
 
+// ─── Flavor-text index ────────────────────────────────────────────────────────
+// Flavor is the last unindexed text field: predicates used to run per printing
+// (52k contains over 26.3k distinct texts) and could never narrow, voiding Or
+// narrowing for the whole node. Instead of a trigram index (measured ~5-9 MB),
+// bind() evaluates the predicate once over the distinct texts and rewrites the
+// node to FlavorMatch (the ArtistMatch pattern at 12x the vocab size); the CSR
+// here expands matched texts to printing candidates for narrowing (~0.4 MB).
+//
+// The bind scan is prefiltered by a 128-bit learned fingerprint per distinct
+// text: one bit per feature gram, and a text can contain the needle only if it
+// contains every feature gram the needle contains — `(text & needle) == needle`
+// in one u128 compare. Features were selected greedily over the live corpus to
+// minimize residual pass rate on a corpus-vocabulary needle workload, with
+// enough tail slots backfilled with the unchosen letters that every needle
+// fires at least one bit (worst case degrades to the letter-mask floor, never
+// to an unfiltered scan). Measured: ~3% of texts survive typical needles.
+// Regenerate with scripts/generate_flavor_fingerprint.py if selectivity
+// drifts; staleness costs selectivity, never correctness.
+
+const FLAVOR_FP_FEATURES: [&str; 128] = [
+    "ed", "se", "ch", "tr", "ss", "te", "la", "ing",
+    "ad", "rs", "ns", "ec", "har", "ne", "el", "ts",
+    "am", "gi", "ous", "re", "sh", "p", "ra", "un",
+    "ay", "ol", "ce", "ge", "si", "di", "ca", "es",
+    "nt", "ni", "end", "mi", "ee", "al", "ro", "tir",
+    "on", "ds", "is", "mb", "mer", "v", "gh", "ga",
+    "po", "sa", "hin", "ob", "ste", "oi", "le", "ur",
+    "ild", "ls", "br", "ea", "red", "ri", "pe", "oo",
+    "ul", "ya", "ba", "de", "pa", "mas", "et", "li",
+    "hu", "ha", "rd", "em", "cl", "su", "aw", "rk",
+    "oy", "ser", "so", "ly", "ta", "om", "ty", "fe",
+    "ot", "uys", "ac", "sp", "are", "va", "ag", "pi",
+    "bos", "alf", "fou", "liq", "nto", "en", "rc", "ze",
+    "a", "b", "c", "d", "e", "f", "g", "h",
+    "i", "j", "k", "l", "m", "n", "o", "q",
+    "r", "s", "t", "u", "w", "x", "y", "z",
+];
+
+static FLAVOR_FP_MAP: std::sync::OnceLock<HashMap<&'static [u8], u32>> = std::sync::OnceLock::new();
+
+/// 128-bit feature mask of a (lowercase) string: bit i set iff the string
+/// contains FLAVOR_FP_FEATURES[i]. Both distinct texts (at build) and needles
+/// (at bind) are masked with this same table, which is what makes the superset
+/// test sound. ASCII-alpha byte windows only, so multi-byte UTF-8 is skipped
+/// harmlessly (features are all ASCII).
+pub(crate) fn flavor_fingerprint(s: &str) -> u128 {
+    let map = FLAVOR_FP_MAP
+        .get_or_init(|| FLAVOR_FP_FEATURES.iter().enumerate().map(|(i, f)| (f.as_bytes(), i as u32)).collect());
+    let b = s.as_bytes();
+    let mut fp = 0u128;
+    for n in 1..=3usize {
+        if b.len() < n {
+            break;
+        }
+        for w in b.windows(n) {
+            if w.iter().all(|c| c.is_ascii_lowercase()) {
+                if let Some(&i) = map.get(w) {
+                    fp |= 1u128 << i;
+                }
+            }
+        }
+    }
+    fp
+}
+
+#[derive(Archive, Serialize, Deserialize, Default)]
+pub(crate) struct FlavorIndex {
+    /// Dense flavor text id → global string id (CardData.strings) of the
+    /// distinct lowercase flavor text, in first-seen printing order.
+    gids: Vec<u32>,
+    /// Parallel to gids: [lo, hi] halves of the text's u128 fingerprint.
+    fingerprints: Vec<[u64; 2]>,
+    /// CSR: printings carrying text `d` live at
+    /// `printings[offsets[d] .. offsets[d + 1]]`. Length gids.len() + 1.
+    offsets: Vec<u32>,
+    printings: Vec<u32>,
+}
+
+fn build_flavor_index(printings: &[Printing], strings: &[String]) -> FlavorIndex {
+    let mut dense_of: HashMap<u32, u32> = HashMap::new();
+    let mut gids: Vec<u32> = Vec::new();
+    let mut counts: Vec<u32> = Vec::new();
+    for p in printings {
+        let gid = p.flavor_text_lower_id;
+        if gid == NONE_STR {
+            continue;
+        }
+        let d = *dense_of.entry(gid).or_insert_with(|| {
+            gids.push(gid);
+            counts.push(0);
+            (gids.len() - 1) as u32
+        });
+        counts[d as usize] += 1;
+    }
+    let n = gids.len();
+    let mut offsets = vec![0u32; n + 1];
+    for i in 0..n {
+        offsets[i + 1] = offsets[i] + counts[i];
+    }
+    let mut cursor = offsets.clone();
+    let mut out = vec![0u32; offsets[n] as usize];
+    for (i, p) in printings.iter().enumerate() {
+        let gid = p.flavor_text_lower_id;
+        if gid == NONE_STR {
+            continue;
+        }
+        let d = dense_of[&gid] as usize;
+        out[cursor[d] as usize] = i as u32;
+        cursor[d] += 1;
+    }
+    let fingerprints = gids
+        .iter()
+        .map(|&g| {
+            let fp = flavor_fingerprint(strings[g as usize].as_str());
+            [fp as u64, (fp >> 64) as u64]
+        })
+        .collect();
+    FlavorIndex { gids, fingerprints, offsets, printings: out }
+}
+
+/// Resolve a flavor predicate against the distinct texts: (sorted global
+/// string ids for per-printing membership, dense text ids for CSR narrowing).
+/// `needle_mask` skips texts that cannot contain the needle (0 = no prefilter,
+/// e.g. regex or non-containment comparisons).
+pub(crate) fn flavor_match_sets(
+    flavor: &Archived<FlavorIndex>,
+    strings: &AStrings,
+    needle_mask: u128,
+    pred: impl Fn(&str) -> bool,
+) -> (Vec<u32>, Vec<u32>) {
+    let mut gids: Vec<u32> = Vec::new();
+    let mut dense: Vec<u32> = Vec::new();
+    for (d, gid) in flavor.gids.iter().enumerate() {
+        if needle_mask != 0 {
+            let fp = &flavor.fingerprints[d];
+            let mask = u64::from(fp[0]) as u128 | ((u64::from(fp[1]) as u128) << 64);
+            if mask & needle_mask != needle_mask {
+                continue;
+            }
+        }
+        let g = u32::from(*gid);
+        if pred(strings[g as usize].as_str()) {
+            gids.push(g);
+            dense.push(d as u32);
+        }
+    }
+    // Dense ids are ascending by construction; global ids follow interner
+    // order, not first-seen printing order — sort for binary-search membership.
+    gids.sort_unstable();
+    (gids, dense)
+}
+
+/// Expand matched dense flavor text ids to sorted printing ids via the CSR.
+fn expand_flavor_ids(idx: &Archived<FlavorIndex>, dense_ids: &[u32]) -> Vec<u32> {
+    let mut out: Vec<u32> = Vec::new();
+    for &d in dense_ids {
+        let start = u32::from(idx.offsets[d as usize]) as usize;
+        let end = u32::from(idx.offsets[d as usize + 1]) as usize;
+        out.extend(idx.printings[start..end].iter().map(|x| u32::from(*x)));
+    }
+    out.sort_unstable();
+    out
+}
+
 // ─── Sorted-u32 range indexes (released_at, price) ───────────────────────────
 // Sorted (value, printing idx); binary-searched ranges answer range filters in
 // printing space. Printings without the value are absent (they can never
@@ -1154,6 +1318,7 @@ struct CardIndexes {
     art_tags:       TagIndex,        // printing space
     is_tags:        TagIndex,        // printing space
     artists:        ArtistIndex,     // printing space (CSR by artist vocab id)
+    flavor:         FlavorIndex,     // printing space (CSR by dense flavor text id)
     set_codes:      TagIndex,        // printing space
     released_at:    DateIndex,       // printing space
     price_usd:      DateIndex,       // printing space (f32_sort_bits of the price)
@@ -1175,6 +1340,7 @@ impl Default for CardIndexes {
             art_tags:       HashMap::new(),
             is_tags:        HashMap::new(),
             artists:        ArtistIndex::default(),
+            flavor:         FlavorIndex::default(),
             set_codes:      HashMap::new(),
             released_at:    Vec::new(),
             price_usd:      Vec::new(),
@@ -1315,6 +1481,23 @@ fn narrow_candidates(filter: &FilterExpr, indexes: &Archived<CardIndexes>, offse
             // ids resolved at bind time; empty means no artist satisfies the
             // predicate, which proves the empty candidate set.
             Some(Candidates::Printings(expand_artist_ids(&indexes.artists, ids)))
+        }
+
+        FilterExpr::FlavorMatch { dense_ids, .. } => {
+            // Resolved at bind; empty proves the empty candidate set (printings
+            // without flavor evaluate to Null and can never match). Printing-
+            // space candidates, so near-total match sets (e.g. `ft!=x`) fall
+            // under the same broad-range guard as the price index — size the
+            // expansion from the CSR offsets before materializing it.
+            let flavor = &indexes.flavor;
+            let total: usize = dense_ids
+                .iter()
+                .map(|&d| (u32::from(flavor.offsets[d as usize + 1]) - u32::from(flavor.offsets[d as usize])) as usize)
+                .sum();
+            if range_too_broad_to_narrow(total, flavor.printings.len()) {
+                return None;
+            }
+            Some(Candidates::Printings(expand_flavor_ids(flavor, dense_ids)))
         }
 
         FilterExpr::TextExact { field: TextField::SetCode, op: CmpOp::Eq, value } => {
@@ -1758,7 +1941,7 @@ fn card_to_pydict<'py>(
 const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 /// Bump on any archived-data-model change the struct sizes below wouldn't
 /// catch (e.g. reordering same-size fields, changing an index type).
-const ARCHIVE_FORMAT_VERSION: u32 = 20260708;
+const ARCHIVE_FORMAT_VERSION: u32 = 20260709;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -2131,6 +2314,7 @@ impl QueryEngine {
             art_tags:       build_tag_index(&printings, &coll_vocab, |p| &p.card_art_tags),
             is_tags:        build_tag_index(&printings, &coll_vocab, |p| &p.card_is_tags),
             artists:        build_artist_index(&printings, artist_vocab.len()),
+            flavor:         build_flavor_index(&printings, &strings),
             set_codes:      {
                 let mut idx: TagIndex = HashMap::new();
                 for (i, p) in printings.iter().enumerate() {
@@ -2278,7 +2462,7 @@ impl QueryEngine {
         sync_format_shifts(&data.format_shifts);
         let mut filter_expr = build_filter(&json_val)
             .map_err(|e| QueryError::new_err(format!("build_filter: {e}")))?;
-        filter_expr.bind(&data.coll_vocab, &data.coll_vocab_sorted, &data.artist_vocab);
+        filter_expr.bind(&data.coll_vocab, &data.coll_vocab_sorted, &data.artist_vocab, &data.indexes.flavor, &data.strings);
 
         let (total, page) = run_query(
             &data.cards, &data.printings, &data.offsets, &data.strings, &filter_expr,

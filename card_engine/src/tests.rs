@@ -1,6 +1,7 @@
 use super::{
     build_numeric_index, build_oracle_text_index, build_tag_index, build_trigram_index,
-    build_type_index, build_rarity_index, cards_of_printings, count_common_keywords, count_common_types,
+    build_type_index, build_rarity_index, build_flavor_index, flavor_fingerprint, flavor_match_sets,
+    cards_of_printings, count_common_keywords, count_common_types,
     build_artist_index, build_range_index, date_range_candidates, narrow_candidates, rarity_candidates,
     range_too_broad_to_narrow, run_query, trigram_candidates, DateIndex, NARROW_FLOOR,
     ArtistIndex, CardData, CardIndexes, Candidates, NumExpr, NumField, RarityIndex,
@@ -438,7 +439,7 @@ fn collection_cmp_binds_vocab_ids_and_matches() {
             value: value.to_string(),
             value_id: None,
         };
-        f.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab);
+        f.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab, &archived.indexes.flavor, &archived.strings);
         archived.cards.iter().map(|c| f.eval_card(c, &archived.strings) == Tri::True).collect()
     };
 
@@ -468,7 +469,7 @@ fn printing_level_predicates_are_printing_dep_in_card_pass() {
         value: "wolf".to_string(),
         value_id: None,
     };
-    f.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab);
+    f.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab, &archived.indexes.flavor, &archived.strings);
 
     let card = &archived.cards[0];
     // Card pass can't decide an art-tag predicate...
@@ -640,6 +641,7 @@ fn bench_checked_vs_unchecked_access() {
         art_tags:       build_tag_index(&printings, &vocab.strings, |p| &p.card_art_tags),
         is_tags:        build_tag_index(&printings, &vocab.strings, |p| &p.card_is_tags),
         artists:        ArtistIndex::default(),
+        flavor:         build_flavor_index(&printings, &strings),
         set_codes:      HashMap::new(),
         released_at:    Vec::new(),
         price_usd:      Vec::new(),
@@ -697,7 +699,7 @@ fn card_pass_extracts_residual_and_matches() {
         value: "wolf".to_string(),
         value_id: None,
     };
-    wolf.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab);
+    wolf.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab, &archived.indexes.flavor, &archived.strings);
     let creature = || FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
 
     // And[t:creature, art:wolf]: the type check is proven at card level and
@@ -725,7 +727,7 @@ fn card_pass_extracts_residual_and_matches() {
         value: "wolf".to_string(),
         value_id: None,
     };
-    wolf2.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab);
+    wolf2.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab, &archived.indexes.flavor, &archived.strings);
     let or = FilterExpr::Or(vec![creature(), wolf2]);
     let t = or.card_pass(&archived.cards[0], &archived.strings, &mut residual, &mut is_or);
     assert!(t == Tri::True && residual.is_empty());
@@ -756,7 +758,7 @@ fn artist_predicates_bind_to_vocab_ids_and_narrow() {
         field: super::TextSearchField::ArtistLower,
         word: "rebecca".to_string(),
     };
-    f.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab);
+    f.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab, &archived.indexes.flavor, &archived.strings);
     // bind rewrites the contains into an id-set match
     let FilterExpr::ArtistMatch { ref ids } = f else { panic!("expected ArtistMatch after bind") };
     assert_eq!(ids, &vec![rebecca]);
@@ -779,11 +781,130 @@ fn artist_predicates_bind_to_vocab_ids_and_narrow() {
         field: super::TextSearchField::ArtistLower,
         word: "zzz".to_string(),
     };
-    g.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab);
+    g.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab, &archived.indexes.flavor, &archived.strings);
     match narrow_candidates(&g, &archived.indexes, &archived.offsets) {
         Some(Candidates::Printings(v)) => assert!(v.is_empty()),
         _ => panic!("empty artist match must narrow to the empty set"),
     }
+}
+
+// The fingerprint is a sound necessary-condition filter: a text containing the
+// needle carries every feature bit the needle carries.
+#[test]
+fn flavor_fingerprint_superset_property() {
+    let text = flavor_fingerprint("the dream of fire never dies");
+    for needle in ["dream", "fire", "never", "the dream", "re", "e"] {
+        let n = flavor_fingerprint(needle);
+        assert_eq!(text & n, n, "contained needle {needle:?} must be a mask subset");
+    }
+    // A non-contained needle with rare features is filterable.
+    let z = flavor_fingerprint("zombie");
+    assert_ne!(text & z, z);
+    // Non-ASCII and non-alpha bytes contribute no bits on either side.
+    assert_eq!(flavor_fingerprint("¡0—9!"), 0);
+}
+
+// FlavorMatch mirrors ArtistMatch at flavor scale: bind resolves the predicate
+// once over the distinct texts (fingerprint-prefiltered), eval is integer
+// membership with SQL NULL for flavorless printings, and narrowing expands the
+// CSR in printing space.
+#[test]
+fn flavor_match_bind_eval_and_narrow() {
+    let mut vocab = VocabInterner::new();
+    let cards = vec![stub_card(1, TYPE_CREATURE, &[], &mut vocab), stub_card(2, TYPE_CREATURE, &[], &mut vocab)];
+    let mut data = store_of(cards, &[2, 2], vocab);
+    let mut interner = Interner::new();
+    let shared = interner.intern("the dream of fire".to_string());
+    data.printings[0].flavor_text_lower_id = shared;
+    data.printings[2].flavor_text_lower_id = shared; // same text on two printings
+    data.printings[1].flavor_text_lower_id = interner.intern("a quiet forest".to_string());
+    // printings[3] keeps NONE_STR: no flavor text at all
+    data.strings = interner.strings;
+    data.indexes.flavor = build_flavor_index(&data.printings, &data.strings);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let bound = |f: &mut FilterExpr| {
+        f.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab, &archived.indexes.flavor, &archived.strings);
+    };
+
+    let mut f = FilterExpr::TextContains {
+        field: super::TextSearchField::FlavorTextLower,
+        word: "dream".to_string(),
+    };
+    bound(&mut f);
+    let FilterExpr::FlavorMatch { ref gids, ref dense_ids } = f else { panic!("expected FlavorMatch after bind") };
+    assert_eq!(gids, &vec![shared]);
+    assert_eq!(dense_ids, &vec![0]); // dense ids are first-seen order
+
+    // Per-printing evaluation: membership on the shared text, Null (no match)
+    // for the flavorless printing, printing-dependent at the card level.
+    let card0 = &archived.cards[0];
+    let card1 = &archived.cards[1];
+    assert!(f.matches(card0, &archived.printings[0], &archived.strings));
+    assert!(!f.matches(card0, &archived.printings[1], &archived.strings));
+    assert!(f.matches(card1, &archived.printings[2], &archived.strings));
+    assert!(!f.matches(card1, &archived.printings[3], &archived.strings));
+    assert!(f.eval_card(card0, &archived.strings) == Tri::PrintingDep);
+
+    // NOT keeps NULL semantics: a flavorless printing matches neither ft:dream
+    // nor its negation.
+    let mut inner = FilterExpr::TextContains {
+        field: super::TextSearchField::FlavorTextLower,
+        word: "dream".to_string(),
+    };
+    bound(&mut inner);
+    let neg = FilterExpr::Not(Box::new(inner));
+    assert!(!neg.matches(card1, &archived.printings[3], &archived.strings));
+    assert!(neg.matches(card0, &archived.printings[1], &archived.strings));
+
+    // Narrowing expands the matched texts' CSR rows to sorted printing ids —
+    // this is what makes ft: participate in Or narrowing.
+    match narrow_candidates(&f, &archived.indexes, &archived.offsets) {
+        Some(Candidates::Printings(v)) => assert_eq!(v, vec![0, 2]),
+        _ => panic!("flavor predicate must narrow in printing space"),
+    }
+
+    // Exact and regex forms resolve through the same mechanism.
+    let mut ex = FilterExpr::TextExact {
+        field: super::TextField::FlavorTextLower,
+        op: CmpOp::Eq,
+        value: "a quiet forest".to_string(),
+    };
+    bound(&mut ex);
+    match narrow_candidates(&ex, &archived.indexes, &archived.offsets) {
+        Some(Candidates::Printings(v)) => assert_eq!(v, vec![1]),
+        _ => panic!("exact flavor must narrow"),
+    }
+    let mut rx = FilterExpr::TextRegex {
+        field: super::TextField::FlavorTextLower,
+        regex: regex::Regex::new("qu.et").unwrap(),
+    };
+    bound(&mut rx);
+    assert!(rx.matches(card0, &archived.printings[1], &archived.strings));
+    match narrow_candidates(&rx, &archived.indexes, &archived.offsets) {
+        Some(Candidates::Printings(v)) => assert_eq!(v, vec![1]),
+        _ => panic!("regex flavor must narrow"),
+    }
+
+    // A needle matching nothing proves the empty candidate set.
+    let mut none = FilterExpr::TextContains {
+        field: super::TextSearchField::FlavorTextLower,
+        word: "zzzqqq".to_string(),
+    };
+    bound(&mut none);
+    match narrow_candidates(&none, &archived.indexes, &archived.offsets) {
+        Some(Candidates::Printings(v)) => assert!(v.is_empty()),
+        _ => panic!("empty flavor match must narrow to the empty set"),
+    }
+
+    // The fingerprint prefilter must not change results: same sets with the
+    // prefilter on (mask of the needle) and off (mask 0).
+    let mask = flavor_fingerprint("dream");
+    assert_ne!(mask, 0);
+    let with = flavor_match_sets(&archived.indexes.flavor, &archived.strings, mask, |s| s.contains("dream"));
+    let without = flavor_match_sets(&archived.indexes.flavor, &archived.strings, 0, |s| s.contains("dream"));
+    assert_eq!(with, without);
 }
 
 #[test]
