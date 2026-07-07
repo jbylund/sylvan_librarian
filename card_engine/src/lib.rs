@@ -1060,8 +1060,8 @@ fn build_type_index(cards: &[OracleCard]) -> TypeIndex {
 // rarity. A card printed at several rarities appears in each of its lists
 // (~34.8k entries over ~31.5k cards; 91% of cards have a single rarity).
 // Card space deliberately: the per-rarity card lists shrink the evaluation
-// domain, so no selectivity guard is needed (see numeric_candidates) — even
-// the broadest bucket (rare, ~35% of cards) measures ahead of the scan.
+// domain, so even the broadest bucket (rare, ~35% of cards) measures ahead of
+// the scan. Near-total unions still lose — see MAX_UNION_FRACTION.
 
 type RarityIndex = [Vec<u32>; 6];
 
@@ -1087,11 +1087,28 @@ fn build_rarity_index(printings: &[Printing], offsets: &[u32]) -> RarityIndex {
     idx // lists are sorted: cards iterated in ascending index order
 }
 
+/// Ceiling for union-based card-space narrowing, as a fraction of the index's
+/// total posting entries. The card-space range indexes need no guard (their
+/// slice is a free contiguous window over an always-smaller domain), but a
+/// posting union pays a gather-and-merge per bucket, and at near-total
+/// coverage that buys nothing: measured on the live corpus with the default
+/// prefer, `rarity<=mythic` (99% of entries) ran 0.85× the scan while
+/// `rarity>=uncommon` (69%) won 1.44× — break-even ≈ 90%. Non-default
+/// prefers compress the win (the same 69% union wins only 1.10× under
+/// prefer=usd_high, extrapolating to break-even ≈ 72–75%), so the ceiling
+/// sits below the worst prefer's crossover, per the usual asymmetry argument
+/// (declining early forgoes a small win, declining late pays on every
+/// query). For rarity this is not restrictive: no bucket combination covers
+/// between 69% and 91% of entries, so any ceiling in that band admits the
+/// same unions.
+const MAX_UNION_FRACTION: f64 = 0.70;
+
 /// Union the rarity posting lists whose value satisfies `op val`. Returns None
 /// for Ne (matches nearly every card, same convention as numeric_candidates)
-/// and when every bucket qualifies (the union is the whole store — the scan
-/// costs the same without materializing it). An empty union is exact: no
-/// printing exists at a rarity satisfying the comparison.
+/// and when the qualifying buckets cover more than MAX_UNION_FRACTION of the
+/// index's entries (the scan costs the same without materializing the union).
+/// An empty union is exact: no printing exists at a rarity satisfying the
+/// comparison.
 fn rarity_candidates(idx: &Archived<RarityIndex>, op: CmpOp, val: f64) -> Option<Vec<u32>> {
     if matches!(op, CmpOp::Ne) {
         return None;
@@ -1105,7 +1122,9 @@ fn rarity_candidates(idx: &Archived<RarityIndex>, op: CmpOp, val: f64) -> Option
         CmpOp::Ne => false,
     };
     let buckets: Vec<usize> = (0..idx.len()).filter(|&r| keep(r as f64)).collect();
-    if buckets.len() == idx.len() {
+    let total: usize = idx.iter().map(|b| b.len()).sum();
+    let selected: usize = buckets.iter().map(|&b| idx[b].len()).sum();
+    if selected as f64 > total as f64 * MAX_UNION_FRACTION {
         return None;
     }
     let mut result: Vec<u32> = Vec::new();

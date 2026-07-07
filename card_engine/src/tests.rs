@@ -288,8 +288,9 @@ fn rarity_index_posts_cards_per_distinct_rarity() {
     assert!(idx[1].is_empty() && idx[4].is_empty() && idx[5].is_empty());
 }
 
-// rarity_candidates unions the qualifying buckets, refuses Ne and all-bucket
-// unions, and proves empty sets for impossible comparisons.
+// rarity_candidates unions the qualifying buckets, refuses Ne and unions past
+// MAX_UNION_FRACTION of posting entries, and proves empty sets for impossible
+// comparisons.
 #[test]
 fn rarity_candidates_ops() {
     // common {0,3}, uncommon {1}, rare {2,3}, mythic {4}, special {}, bonus {}
@@ -306,17 +307,23 @@ fn rarity_candidates_ops() {
     // Impossible comparisons prove the empty set (exact, not "no narrowing").
     assert_eq!(rarity_candidates(archived, CmpOp::Eq, 2.5), Some(vec![]));
     assert_eq!(rarity_candidates(archived, CmpOp::Gt, 5.0), Some(vec![]));
-    // Ne and all-bucket unions decline to narrow.
+    // Ne and over-ceiling unions decline to narrow.
     assert!(rarity_candidates(archived, CmpOp::Ne, 2.0).is_none());
     assert!(rarity_candidates(archived, CmpOp::Ge, 0.0).is_none());
     assert!(rarity_candidates(archived, CmpOp::Le, 5.0).is_none());
+    // The ceiling is entries-based, not bucket-count: Le 3 selects only 4 of
+    // 6 buckets but 100% of posting entries (special/bonus are empty), which
+    // exceeds MAX_UNION_FRACTION and must decline.
+    assert!(rarity_candidates(archived, CmpOp::Le, 3.0).is_none());
 }
 
 // The NumericCmp narrowing arm routes rarity through the index in card space,
 // for both operand orders.
 #[test]
 fn narrow_candidates_rarity_card_space() {
-    let rarity: RarityIndex = [vec![], vec![], vec![0, 2], vec![1], vec![], vec![]];
+    // All three cards also at common, so the rare/mythic unions stay under
+    // MAX_UNION_FRACTION of the six entries.
+    let rarity: RarityIndex = [vec![0, 1, 2], vec![], vec![0, 2], vec![1], vec![], vec![]];
     let indexes = CardIndexes { rarity, ..Default::default() };
     let bytes = rkyv::to_bytes::<Error>(&indexes).expect("serialize");
     let archived = rkyv::access::<Archived<CardIndexes>, Error>(&bytes).expect("access");
