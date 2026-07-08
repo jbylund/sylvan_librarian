@@ -1291,33 +1291,42 @@ fn build_range_index(printings: &[Printing], get: impl Fn(&Printing) -> Option<u
     idx
 }
 
-/// Sorted printing ids satisfying `price op value`, via the f32_sort_bits
-/// index. Query values are f64 while prices are f32, so bounds are widened by
-/// one position where rounding could otherwise exclude a real match —
-/// narrowing must stay a superset; the walk verifies exactly.
-fn price_candidates(idx: &Archived<PrintingRangeIndex>, op: CmpOp, value: f64) -> Option<Vec<u32>> {
+/// Half-open [lo, hi) sort-bits bounds for `price op value`, or None for Ne.
+/// Query values are f64 while prices are f32, so bounds are widened by one
+/// position where rounding could otherwise exclude a real match — narrowing
+/// must stay a superset; the walk verifies exactly.
+fn price_bounds(op: CmpOp, value: f64) -> Option<(u32, u32)> {
     let b = f32_sort_bits(value as f32);
-    let (lo, hi) = match op {
-        CmpOp::Ne => return None,
-        CmpOp::Eq => (b, b.saturating_add(1)),
-        CmpOp::Lt | CmpOp::Le => (0, b.saturating_add(1)),
-        CmpOp::Gt | CmpOp::Ge => (b, u32::MAX),
-    };
+    match op {
+        CmpOp::Ne => None,
+        CmpOp::Eq => Some((b, b.saturating_add(1))),
+        CmpOp::Lt | CmpOp::Le => Some((0, b.saturating_add(1))),
+        CmpOp::Gt | CmpOp::Ge => Some((b, u32::MAX)),
+    }
+}
+
+/// Sorted printing ids satisfying `price op value`, via the f32_sort_bits index.
+/// The query driver goes through range_narrowed() (which never declines);
+/// this vec-only form is kept as the tests' reference for the bounds/guard
+/// semantics, like FilterExpr::matches().
+#[cfg(test)]
+fn price_candidates(idx: &Archived<PrintingRangeIndex>, op: CmpOp, value: f64) -> Option<Vec<u32>> {
+    let (lo, hi) = price_bounds(op, value)?;
     range_candidates(idx, lo, hi)
 }
 
-/// Sorted printing ids satisfying `int_value op value`, for indexes over plain
-/// integers (collector number). Query values are f64 and may be fractional or
-/// out of range; bounds are chosen so the half-open [lo, hi) range is exact
-/// for every op — `cn<100.5` means value <= 100, `cn:100.5` matches nothing
+/// Half-open [lo, hi) bounds for indexes over plain integers (collector
+/// number). Query values are f64 and may be fractional or out of range; bounds
+/// are chosen so the range is exact for every op — `cn<100.5` means
+/// value <= 100. Outer None = Ne (never narrows); inner None = provably empty
 /// (an exact empty narrowing, not "no index").
-fn int_range_candidates(idx: &Archived<PrintingRangeIndex>, op: CmpOp, value: f64) -> Option<Vec<u32>> {
+fn int_range_bounds(op: CmpOp, value: f64) -> Option<Option<(u32, u32)>> {
     const TOP: i64 = u32::MAX as i64;
     let (lo, hi): (i64, i64) = match op {
         CmpOp::Ne => return None,
         CmpOp::Eq => {
             if value.fract() != 0.0 || value < 0.0 || value > TOP as f64 {
-                return Some(Vec::new());
+                return Some(None);
             }
             (value as i64, value as i64 + 1)
         }
@@ -1327,14 +1336,25 @@ fn int_range_candidates(idx: &Archived<PrintingRangeIndex>, op: CmpOp, value: f6
         CmpOp::Ge => (value.ceil().clamp(0.0, TOP as f64) as i64, TOP),
     };
     if hi <= lo {
-        return Some(Vec::new());
+        return Some(None);
     }
-    range_candidates(idx, lo as u32, hi as u32)
+    Some(Some((lo as u32, hi as u32)))
+}
+
+/// Sorted printing ids satisfying `int_value op value`. Test-only reference,
+/// see price_candidates().
+#[cfg(test)]
+fn int_range_candidates(idx: &Archived<PrintingRangeIndex>, op: CmpOp, value: f64) -> Option<Vec<u32>> {
+    match int_range_bounds(op, value)? {
+        None => Some(Vec::new()),
+        Some((lo, hi)) => range_candidates(idx, lo, hi),
+    }
 }
 
 /// Sorted printing ids with an indexed value in [lo, hi), or None for ranges
-/// too broad to be worth narrowing (see MAX_NARROW_FRACTION). Callers translate
-/// ops into half-open ranges; Ne is not selective and never narrows.
+/// too broad to be worth narrowing (see MAX_NARROW_FRACTION). Test-only
+/// reference for the sparse path range_narrowed() shares.
+#[cfg(test)]
 fn range_candidates(idx: &Archived<PrintingRangeIndex>, lo: u32, hi: u32) -> Option<Vec<u32>> {
     let s = idx.partition_point(|p| u32::from(p.0) < lo);
     let e = idx.partition_point(|p| u32::from(p.0) < hi);
@@ -1344,6 +1364,43 @@ fn range_candidates(idx: &Archived<PrintingRangeIndex>, lo: u32, hi: u32) -> Opt
     let mut result: Vec<u32> = idx[s..e].iter().map(|p| u32::from(p.1)).collect();
     result.sort_unstable();
     Some(result)
+}
+
+/// Range narrowing that never declines (#636): sparse ranges keep the sorted-vec
+/// path above; broad ranges become printing bitmaps instead of vetoing. A range
+/// predicate selects a contiguous slice of the value-sorted postings, so the
+/// bitmap is an O(k) scatter of whichever side is smaller — the broad slice is
+/// represented as the complement of its sparse opposite without ever touching
+/// its members (the gather-and-sort cost #609 measured never happens). The
+/// complement over-includes unindexed printings (value NULL there), so that
+/// variant is loose; direct scatters and the vec path are tight.
+/// `exact` says whether [lo, hi) is the predicate's exact extent: integer
+/// bounds (date/year/collector number) are; price bounds are deliberately
+/// widened one position for f32/f64 rounding (see price_bounds) and therefore
+/// produce supersets that must never be marked tight — a Not would complement
+/// away the boundary printings, which are exactly the negation's matches.
+fn range_narrowed(idx: &Archived<PrintingRangeIndex>, lo: u32, hi: u32, n_printings: usize, broad_ok: bool, exact: bool) -> Option<Narrowed> {
+    let s = idx.partition_point(|p| u32::from(p.0) < lo);
+    let e = idx.partition_point(|p| u32::from(p.0) < hi);
+    let k = e - s;
+    if !range_too_broad_to_narrow(k, idx.len()) {
+        let mut result: Vec<u32> = idx[s..e].iter().map(|p| u32::from(p.1)).collect();
+        result.sort_unstable();
+        return Some(Narrowed { set: Candidates::Printings(result), tight: exact });
+    }
+    if !broad_ok {
+        return None; // nothing downstream would consume the bitmap — pre-#636 behavior
+    }
+    if k <= idx.len() - k {
+        let bits = scatter_bits(idx[s..e].iter().map(|p| u32::from(p.1)), n_printings);
+        return Some(Narrowed { set: Candidates::PrintingBits(bits), tight: exact });
+    }
+    let mut bits = scatter_bits(
+        idx[..s].iter().chain(idx[e..].iter()).map(|p| u32::from(p.1)),
+        n_printings,
+    );
+    complement_bits(&mut bits, n_printings);
+    Narrowed::loose(Candidates::PrintingBits(bits))
 }
 
 // ─── Type bit index ───────────────────────────────────────────────────────────
@@ -1535,18 +1592,104 @@ struct CardData {
 
 // ─── Candidate narrowing ─────────────────────────────────────────────────────
 
-/// A narrowed candidate set, tagged with the id space its members live in.
-/// Narrowing is advisory (the driver re-verifies), so converting between spaces
-/// can only loosen or tighten candidates, never change results.
+/// A narrowed candidate set, tagged with the id space its members live in and
+/// its representation (#636): sorted id vecs for sparse sets — cheap merges,
+/// today's fast path — and bitmaps for broad sets, unions, and complements,
+/// whose word-wise ops cost O(n/64) regardless of density. Narrowing is
+/// advisory (the driver re-verifies), so converting between spaces or
+/// representations can only loosen or tighten candidates, never change results.
 enum Candidates {
     Cards(Vec<u32>),
     Printings(Vec<u32>),
+    CardBits(Vec<u64>),
+    PrintingBits(Vec<u64>),
+}
+
+/// A candidate set plus the property the Not arm needs: `tight` means every
+/// member satisfies the subtree in its own space (for card-space sets: for
+/// every printing). Complementing a tight set yields a sound superset of the
+/// negation's matches; complementing a loose (superset) set would *exclude*
+/// real matches, so Not narrows only through tight children. Tightness
+/// survives same-space And/Or of tight sets and is lost by space projection,
+/// complement (Nulls get over-included), and any loose input.
+struct Narrowed {
+    set: Candidates,
+    tight: bool,
+}
+
+/// Ids-to-bits promotion threshold for And/Or composition. Below it the
+/// sorted-vec merge paths are already microseconds and byte-identical to the
+/// pre-#636 behavior; above it, scatters plus word loops avoid the
+/// gather-merge allocations that made broad unions lose (#618). Same
+/// measured-constant philosophy as STREAM_MIN_MATCHES / MAX_NARROW_FRACTION.
+const BITS_PROMOTE: usize = 4_096;
+
+/// Set bits for each id (any order, duplicates fine) in a fresh n-bit buffer.
+fn scatter_bits<I: IntoIterator<Item = u32>>(ids: I, n: usize) -> Vec<u64> {
+    let mut bits = vec![0u64; n.div_ceil(64)];
+    for id in ids {
+        bits[(id >> 6) as usize] |= 1u64 << (id & 63);
+    }
+    bits
+}
+
+/// In-place complement over an n-element domain (tail bits stay clear).
+fn complement_bits(bits: &mut [u64], n: usize) {
+    for w in bits.iter_mut() {
+        *w = !*w;
+    }
+    let tail = n % 64;
+    if tail != 0 {
+        bits[n.div_ceil(64) - 1] &= (1u64 << tail) - 1;
+    }
+}
+
+fn or_bits_into(acc: &mut [u64], other: &[u64]) {
+    for (a, b) in acc.iter_mut().zip(other) {
+        *a |= b;
+    }
+}
+
+fn and_bits_into(acc: &mut [u64], other: &[u64]) {
+    for (a, b) in acc.iter_mut().zip(other) {
+        *a &= b;
+    }
+}
+
+/// Project a printing-space bitmap up to card space. Printings of card i are
+/// contiguous, and set bits come out ascending, so a single monotone cursor
+/// replaces the per-posting binary search cards_of_printings pays —
+/// O(set bits + cards), independent of density.
+fn printing_bits_to_card_bits(pbits: &[u64], offsets: &AOffsets, n_cards: usize) -> Vec<u64> {
+    let mut out = vec![0u64; n_cards.div_ceil(64)];
+    let mut card: usize = 0;
+    for (i, &word) in pbits.iter().enumerate() {
+        let mut w = word;
+        while w != 0 {
+            let p = ((i as u32) << 6) | w.trailing_zeros();
+            w &= w - 1;
+            while u32::from(offsets[card + 1]) <= p {
+                card += 1;
+            }
+            out[card >> 6] |= 1u64 << (card & 63);
+        }
+    }
+    out
 }
 
 /// Map a sorted printing-id list up to its sorted card-id list. Printings are
 /// grouped contiguously by card, so the mapped list arrives sorted with adjacent
-/// duplicates — dedup is a single linear pass.
+/// duplicates — dedup is a single linear pass. Small lists pay a binary search
+/// per posting; past a few hundred, scattering into a printing bitmap and
+/// walking it with a monotone card cursor is cheaper (O(k + words) instead of
+/// O(k log n)) and produces the same ascending, deduped output.
 fn cards_of_printings(offsets: &AOffsets, printing_ids: &[u32]) -> Vec<u32> {
+    if printing_ids.len() > 1024 {
+        let n_cards = offsets.len().saturating_sub(1);
+        let n_printings = if n_cards == 0 { 0 } else { u32::from(offsets[n_cards]) as usize };
+        let bits = scatter_bits(printing_ids.iter().copied(), n_printings);
+        return bitmap_card_ids(&printing_bits_to_card_bits(&bits, offsets, n_cards));
+    }
     let mut out: Vec<u32> = Vec::with_capacity(printing_ids.len());
     for &p in printing_ids {
         let card = offsets.partition_point(|o| u32::from(*o) <= p) as u32 - 1;
@@ -1558,89 +1701,328 @@ fn cards_of_printings(offsets: &AOffsets, printing_ids: &[u32]) -> Vec<u32> {
 }
 
 impl Candidates {
-    /// Project into card space (identity for card-space sets).
+    /// Project into card space (identity for card-space sets) and materialize
+    /// as ascending card ids. Bitmap materialization needs no sort — set bits
+    /// come out ascending, sidestepping the gather-and-sort cost of #609.
     fn into_cards(self, offsets: &AOffsets) -> Vec<u32> {
+        let n_cards = offsets.len().saturating_sub(1);
         match self {
             Candidates::Cards(v) => v,
             Candidates::Printings(v) => cards_of_printings(offsets, &v),
+            Candidates::CardBits(b) => bitmap_card_ids(&b),
+            Candidates::PrintingBits(b) => bitmap_card_ids(&printing_bits_to_card_bits(&b, offsets, n_cards)),
+        }
+    }
+
+    fn is_printing_space(&self) -> bool {
+        matches!(self, Candidates::Printings(_) | Candidates::PrintingBits(_))
+    }
+
+    /// Approximate member count (exact for both representations).
+    fn len(&self) -> usize {
+        match self {
+            Candidates::Cards(v) | Candidates::Printings(v) => v.len(),
+            Candidates::CardBits(b) | Candidates::PrintingBits(b) => b.iter().map(|w| w.count_ones() as usize).sum(),
+        }
+    }
+
+    /// The set as a bitmap over an n-element domain (scatters vec variants;
+    /// space is unchanged — callers pass the domain size of the set's space).
+    fn into_bits(self, n: usize) -> Vec<u64> {
+        match self {
+            Candidates::Cards(v) | Candidates::Printings(v) => scatter_bits(v, n),
+            Candidates::CardBits(b) | Candidates::PrintingBits(b) => b,
         }
     }
 }
 
+impl Narrowed {
+    fn tight(set: Candidates) -> Option<Narrowed> {
+        Some(Narrowed { set, tight: true })
+    }
+
+    fn loose(set: Candidates) -> Option<Narrowed> {
+        Some(Narrowed { set, tight: false })
+    }
+
+    /// Project into card space. Printing→card projection is an existence
+    /// projection ("some printing matches"), which loses tightness.
+    fn into_card_space(self, offsets: &AOffsets) -> Narrowed {
+        let n_cards = offsets.len().saturating_sub(1);
+        match self.set {
+            Candidates::Cards(_) | Candidates::CardBits(_) => self,
+            Candidates::Printings(v) => Narrowed { set: Candidates::Cards(cards_of_printings(offsets, &v)), tight: false },
+            Candidates::PrintingBits(b) => {
+                Narrowed { set: Candidates::CardBits(printing_bits_to_card_bits(&b, offsets, n_cards)), tight: false }
+            }
+        }
+    }
+}
+
+/// Intersect same-space sets. All-vec inputs keep today's sort-by-length merge
+/// chain; any bitmap input (or a later promotion) runs word-wise AND. `n` is
+/// the domain size of the space. Tight iff every input is tight.
+fn and_all(mut sets: Vec<Narrowed>, n: usize) -> Option<Narrowed> {
+    if sets.is_empty() {
+        return None;
+    }
+    if sets.len() == 1 {
+        return sets.pop();
+    }
+    let tight = sets.iter().all(|s| s.tight);
+    let card_space = !sets[0].set.is_printing_space();
+    let mut vecs: Vec<Vec<u32>> = Vec::new();
+    let mut bit_sets: Vec<Vec<u64>> = Vec::new();
+    for s in sets {
+        match s.set {
+            Candidates::Cards(v) | Candidates::Printings(v) => vecs.push(v),
+            Candidates::CardBits(b) | Candidates::PrintingBits(b) => bit_sets.push(b),
+        }
+    }
+    // Intersect the vecs by ascending length (today's path), AND the bitmaps
+    // word-wise, then combine by retaining the vec against the bitmap — the
+    // sparse side never gets scattered, and the result stays a vec whenever
+    // any input was one.
+    let vec_result = (!vecs.is_empty()).then(|| {
+        vecs.sort_unstable_by_key(Vec::len);
+        let mut result = vecs.swap_remove(0);
+        for v in vecs {
+            if result.is_empty() {
+                break;
+            }
+            result = intersect_sorted(&result, &v);
+        }
+        result
+    });
+    let bits_result = bit_sets.split_first().map(|(first, rest)| {
+        let mut acc = first.clone();
+        for b in rest {
+            and_bits_into(&mut acc, b);
+        }
+        acc
+    });
+    let set = match (vec_result, bits_result) {
+        (Some(mut v), Some(b)) => {
+            v.retain(|&id| b[(id >> 6) as usize] >> (id & 63) & 1 == 1);
+            if card_space { Candidates::Cards(v) } else { Candidates::Printings(v) }
+        }
+        (Some(v), None) => {
+            if card_space { Candidates::Cards(v) } else { Candidates::Printings(v) }
+        }
+        (None, Some(b)) => {
+            if card_space { Candidates::CardBits(b) } else { Candidates::PrintingBits(b) }
+        }
+        (None, None) => unreachable!("sets was non-empty"),
+    };
+    Some(Narrowed { set, tight })
+}
+
+/// Union same-space sets. Small all-vec inputs keep today's merge; anything
+/// broad or bitmap-shaped promotes to a bitmap union — O(n/64) per input with
+/// no per-pair merge allocations (the #618 union-materialization cost).
+fn or_all(mut sets: Vec<Narrowed>, n: usize) -> Option<Narrowed> {
+    if sets.is_empty() {
+        return None;
+    }
+    if sets.len() == 1 {
+        return sets.pop();
+    }
+    let tight = sets.iter().all(|s| s.tight);
+    let card_space = !sets[0].set.is_printing_space();
+    let all_small_vecs = sets
+        .iter()
+        .all(|s| !matches!(s.set, Candidates::CardBits(_) | Candidates::PrintingBits(_)))
+        && sets.iter().map(|s| s.set.len()).sum::<usize>() <= BITS_PROMOTE;
+    let set = if all_small_vecs {
+        let mut union: Vec<u32> = Vec::new();
+        for s in sets {
+            match s.set {
+                Candidates::Cards(v) | Candidates::Printings(v) => union = union_sorted(union, v),
+                _ => unreachable!(),
+            }
+        }
+        if card_space { Candidates::Cards(union) } else { Candidates::Printings(union) }
+    } else {
+        let mut iter = sets.into_iter();
+        let mut acc = iter.next().unwrap().set.into_bits(n);
+        for s in iter {
+            or_bits_into(&mut acc, &s.set.into_bits(n));
+        }
+        if card_space { Candidates::CardBits(acc) } else { Candidates::PrintingBits(acc) }
+    };
+    Some(Narrowed { set, tight })
+}
+
+/// Static answer to "could narrow_rec(f) produce a tight set, and in which
+/// space?" — Some(true) = printing space, Some(false) = card space, None =
+/// never tight. Conservative: loose-by-construction sources and mixed-space
+/// compositions return None without computing anything. Used by the Not arm,
+/// whose complement is only sound over tight sets.
+fn tight_narrow_space(f: &FilterExpr) -> Option<bool> {
+    match f {
+        FilterExpr::ColorCmp { .. } | FilterExpr::TypeCmp { .. } => Some(false),
+        FilterExpr::CollectionCmp { field, op: CmpOp::Ge, .. } => {
+            Some(matches!(field, CollField::ArtTags | CollField::IsTags | CollField::FrameData))
+        }
+        FilterExpr::NumericCmp { lhs, rhs, .. } => {
+            let f = |e: &NumExpr| match e {
+                NumExpr::Field(NumField::Cmc | NumField::Power | NumField::Toughness) => Some(false),
+                // Price is absent deliberately: its bounds are widened
+                // supersets (see range_narrowed), never tight.
+                NumExpr::Field(NumField::CollectorNumberInt) => Some(true),
+                NumExpr::Const(_) => None,
+                _ => None,
+            };
+            match (f(lhs), f(rhs), matches!(lhs, NumExpr::Const(_)) || matches!(rhs, NumExpr::Const(_))) {
+                (Some(space), None, true) | (None, Some(space), true) => Some(space),
+                _ => None,
+            }
+        }
+        FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. } => Some(true),
+        FilterExpr::TextExact { field: TextField::SetCode, op: CmpOp::Eq, .. } => Some(true),
+        FilterExpr::ArtistMatch { .. } | FilterExpr::FlavorMatch { .. } => Some(true),
+        FilterExpr::And(children) | FilterExpr::Or(children) => {
+            let mut spaces = children.iter().map(tight_narrow_space);
+            let first = spaces.next()??;
+            spaces.all(|s| s == Some(first)).then_some(first)
+        }
+        _ => None,
+    }
+}
+
 fn narrow_candidates(filter: &FilterExpr, indexes: &Archived<CardIndexes>, offsets: &AOffsets) -> Option<Candidates> {
+    let n_cards = offsets.len().saturating_sub(1);
+    let n_printings = if n_cards == 0 { 0 } else { u32::from(offsets[n_cards]) as usize };
+    narrow_rec(filter, indexes, offsets, false)
+        .filter(|n| {
+            // Near-total sets narrow nothing; dropping them here (a popcount,
+            // before any projection or materialization) keeps broad composed
+            // results from paying conversion costs on the way to being useless.
+            let domain = if n.set.is_printing_space() { n_printings } else { n_cards };
+            n.set.len() <= domain - domain / 4
+        })
+        .map(|n| n.set)
+}
+
+/// Once any candidate source in an And is this selective, evaluating further
+/// (costlier) children buys nothing the driver's verification doesn't already
+/// do — the remaining children are skipped. Measured-constant philosophy.
+const AND_SKIP_THRESHOLD: usize = 2_048;
+
+/// Evaluation-cost rank for And children: cheap sources first (postings,
+/// planes, card numerics, trigram lookups), printing-space ranges second
+/// (their broad form pays an O(k) scatter), complements last (broad by
+/// construction, useful only when nothing else narrowed).
+fn and_child_rank(f: &FilterExpr) -> u8 {
+    match f {
+        FilterExpr::Not(_) => 2,
+        FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. } => 1,
+        FilterExpr::NumericCmp { lhs, rhs, .. } => {
+            let field = |e: &NumExpr| matches!(e, NumExpr::Field(NumField::PriceUsd | NumField::CollectorNumberInt));
+            if field(lhs) || field(rhs) { 1 } else { 0 }
+        }
+        _ => 0,
+    }
+}
+
+/// `broad_ok` says whether a broad printing-range child may materialize its
+/// bitmap: true under Or (the union consumes it) and Not (the complement
+/// trick needs it), false where nothing would — a lone broad set at the root
+/// or in a candidate-less And is discarded anyway, so the scatter would be
+/// pure waste (the 10x And regressions of the first benchmark round).
+fn narrow_rec(filter: &FilterExpr, indexes: &Archived<CardIndexes>, offsets: &AOffsets, broad_ok: bool) -> Option<Narrowed> {
+    let n_cards = offsets.len().saturating_sub(1);
+    let n_printings = if n_cards == 0 { 0 } else { u32::from(offsets[n_cards]) as usize };
+
+    // Plane-expressible subtrees (color/type comparisons under any And/Or/Not
+    // combination) evaluate to an exact card bitmap in a few hundred word ops —
+    // the planes are the precomputed corner of this algebra. Whole-plane
+    // filters were already consumed by split_planes; this catches the ones
+    // left inside mixed contexts, where they previously could not narrow at
+    // all (an Or with a color child was a guaranteed full scan). True is
+    // excluded: its all-ones bitmap narrows nothing.
+    if !matches!(filter, FilterExpr::True)
+        && u32::from(indexes.planes.n_cards) as usize == n_cards
+        && n_cards > 0
+    {
+        if let Some(pe) = compile_plane(filter) {
+            let mut bits: Vec<u64> = Vec::new();
+            eval_planes(&pe, &indexes.planes, &mut bits);
+            return Narrowed::tight(Candidates::CardBits(bits));
+        }
+    }
+
     match filter {
         FilterExpr::TextContains { field, word }
             if word.len() >= 3
                 && matches!(field, TextSearchField::NameLower | TextSearchField::OracleTextLower) =>
         {
+            // Trigram candidates are supersets (false positives until the walk
+            // verifies), so these sets are loose.
             match field {
-                TextSearchField::NameLower => trigram_candidates(&indexes.name_trigram, word).map(Candidates::Cards),
+                TextSearchField::NameLower => trigram_candidates(&indexes.name_trigram, word)
+                    .and_then(|v| Narrowed::loose(Candidates::Cards(v))),
                 // Oracle postings are in dense text-id space (see OracleTextIndex);
                 // intersect there, then expand the survivors to card indices
                 // through the CSR table.
                 _ => trigram_candidates(&indexes.oracle_trigram.trigrams, word)
-                    .map(|text_ids| Candidates::Cards(expand_text_ids(&indexes.oracle_trigram, &text_ids))),
+                    .and_then(|text_ids| Narrowed::loose(Candidates::Cards(expand_text_ids(&indexes.oracle_trigram, &text_ids)))),
             }
         }
 
-        FilterExpr::NumericCmp { lhs, op, rhs } => match (lhs, rhs) {
-            (NumExpr::Field(NumField::Cmc), NumExpr::Const(v)) =>
-                numeric_candidates(&indexes.cmc, *op, *v).map(Candidates::Cards),
-            (NumExpr::Const(v), NumExpr::Field(NumField::Cmc)) =>
-                numeric_candidates(&indexes.cmc, flip_op(*op), *v).map(Candidates::Cards),
-            (NumExpr::Field(NumField::Power), NumExpr::Const(v)) =>
-                numeric_candidates(&indexes.power, *op, *v).map(Candidates::Cards),
-            (NumExpr::Const(v), NumExpr::Field(NumField::Power)) =>
-                numeric_candidates(&indexes.power, flip_op(*op), *v).map(Candidates::Cards),
-            (NumExpr::Field(NumField::Toughness), NumExpr::Const(v)) =>
-                numeric_candidates(&indexes.toughness, *op, *v).map(Candidates::Cards),
-            (NumExpr::Const(v), NumExpr::Field(NumField::Toughness)) =>
-                numeric_candidates(&indexes.toughness, flip_op(*op), *v).map(Candidates::Cards),
-            (NumExpr::Field(NumField::RarityInt), NumExpr::Const(v)) =>
-                rarity_candidates(&indexes.rarity, *op, *v).map(Candidates::Cards),
-            (NumExpr::Const(v), NumExpr::Field(NumField::RarityInt)) =>
-                rarity_candidates(&indexes.rarity, flip_op(*op), *v).map(Candidates::Cards),
-            (NumExpr::Field(NumField::PriceUsd), NumExpr::Const(v)) =>
-                price_candidates(&indexes.price_usd, *op, *v).map(Candidates::Printings),
-            (NumExpr::Const(v), NumExpr::Field(NumField::PriceUsd)) =>
-                price_candidates(&indexes.price_usd, flip_op(*op), *v).map(Candidates::Printings),
-            (NumExpr::Field(NumField::CollectorNumberInt), NumExpr::Const(v)) =>
-                int_range_candidates(&indexes.collector_number, *op, *v).map(Candidates::Printings),
-            (NumExpr::Const(v), NumExpr::Field(NumField::CollectorNumberInt)) =>
-                int_range_candidates(&indexes.collector_number, flip_op(*op), *v).map(Candidates::Printings),
-            _ => None,
-        },
-
-        FilterExpr::TypeCmp { mask, op } if matches!(op, CmpOp::Ge) => {
-            let mut result: Vec<u32> = Vec::new();
-            let mut m = *mask;
-            while m != 0 {
-                let bit = m.trailing_zeros() as usize;
-                m &= m - 1;
-                if bit < 14 {
-                    let bit_list: Vec<u32> = indexes.type_bits[bit].iter().map(|x| u32::from(*x)).collect();
-                    result = union_sorted(result, bit_list);
-                }
+        FilterExpr::NumericCmp { lhs, op, rhs } => {
+            // Card-space numeric postings are tight: every posted card
+            // satisfies the comparison at card level. Rarity postings are
+            // loose in the sense that matters for Not: a posted card can have
+            // other printings that do NOT satisfy the comparison, so the
+            // complement would wrongly exclude cards `-rarity:x` matches.
+            let numeric = |idx, op, v: &f64| numeric_candidates(idx, op, *v).and_then(|c| Narrowed::tight(Candidates::Cards(c)));
+            let rarity = |op, v: &f64| rarity_candidates(&indexes.rarity, op, *v).and_then(|c| Narrowed::loose(Candidates::Cards(c)));
+            let price = |op, v: &f64| {
+                price_bounds(op, *v).and_then(|(lo, hi)| range_narrowed(&indexes.price_usd, lo, hi, n_printings, broad_ok, false))
+            };
+            let cn = |op, v: &f64| match int_range_bounds(op, *v)? {
+                None => Narrowed::tight(Candidates::Printings(Vec::new())),
+                Some((lo, hi)) => range_narrowed(&indexes.collector_number, lo, hi, n_printings, broad_ok, true),
+            };
+            match (lhs, rhs) {
+                (NumExpr::Field(NumField::Cmc), NumExpr::Const(v)) => numeric(&indexes.cmc, *op, v),
+                (NumExpr::Const(v), NumExpr::Field(NumField::Cmc)) => numeric(&indexes.cmc, flip_op(*op), v),
+                (NumExpr::Field(NumField::Power), NumExpr::Const(v)) => numeric(&indexes.power, *op, v),
+                (NumExpr::Const(v), NumExpr::Field(NumField::Power)) => numeric(&indexes.power, flip_op(*op), v),
+                (NumExpr::Field(NumField::Toughness), NumExpr::Const(v)) => numeric(&indexes.toughness, *op, v),
+                (NumExpr::Const(v), NumExpr::Field(NumField::Toughness)) => numeric(&indexes.toughness, flip_op(*op), v),
+                (NumExpr::Field(NumField::RarityInt), NumExpr::Const(v)) => rarity(*op, v),
+                (NumExpr::Const(v), NumExpr::Field(NumField::RarityInt)) => rarity(flip_op(*op), v),
+                (NumExpr::Field(NumField::PriceUsd), NumExpr::Const(v)) => price(*op, v),
+                (NumExpr::Const(v), NumExpr::Field(NumField::PriceUsd)) => price(flip_op(*op), v),
+                (NumExpr::Field(NumField::CollectorNumberInt), NumExpr::Const(v)) => cn(*op, v),
+                (NumExpr::Const(v), NumExpr::Field(NumField::CollectorNumberInt)) => cn(flip_op(*op), v),
+                _ => None,
             }
-            Some(Candidates::Cards(result))
         }
 
         FilterExpr::CollectionCmp { field, op, value, .. } if matches!(op, CmpOp::Ge) => {
-            let (idx, space): (_, fn(Vec<u32>) -> Candidates) = match field {
-                CollField::Subtypes   => (&indexes.subtypes,    Candidates::Cards as fn(_) -> _),
-                CollField::Keywords   => (&indexes.keywords,    Candidates::Cards),
-                CollField::OracleTags => (&indexes.oracle_tags, Candidates::Cards),
-                CollField::ArtTags    => (&indexes.art_tags,    Candidates::Printings),
-                CollField::IsTags     => (&indexes.is_tags,     Candidates::Printings),
-                CollField::FrameData  => (&indexes.frame_data,  Candidates::Printings),
+            let (idx, card_space) = match field {
+                CollField::Subtypes   => (&indexes.subtypes,    true),
+                CollField::Keywords   => (&indexes.keywords,    true),
+                CollField::OracleTags => (&indexes.oracle_tags, true),
+                CollField::ArtTags    => (&indexes.art_tags,    false),
+                CollField::IsTags     => (&indexes.is_tags,     false),
+                CollField::FrameData  => (&indexes.frame_data,  false),
             };
-            idx.get(value.as_str()).map(|v| space(v.iter().map(|x| u32::from(*x)).collect()))
+            // Ge is containment: every posted row carries the tag — tight.
+            idx.get(value.as_str()).and_then(|v| {
+                let ids: Vec<u32> = v.iter().map(|x| u32::from(*x)).collect();
+                Narrowed::tight(if card_space { Candidates::Cards(ids) } else { Candidates::Printings(ids) })
+            })
         }
 
         FilterExpr::ArtistMatch { ids } => {
             // ids resolved at bind time; empty means no artist satisfies the
-            // predicate, which proves the empty candidate set.
-            Some(Candidates::Printings(expand_artist_ids(&indexes.artists, ids)))
+            // predicate, which proves the empty candidate set. Every expanded
+            // printing carries a matching artist — tight.
+            Narrowed::tight(Candidates::Printings(expand_artist_ids(&indexes.artists, ids)))
         }
 
         FilterExpr::FlavorMatch { dense_ids, .. } => {
@@ -1657,14 +2039,14 @@ fn narrow_candidates(filter: &FilterExpr, indexes: &Archived<CardIndexes>, offse
             if range_too_broad_to_narrow(total, flavor.printings.len()) {
                 return None;
             }
-            Some(Candidates::Printings(expand_flavor_ids(flavor, dense_ids)))
+            Narrowed::tight(Candidates::Printings(expand_flavor_ids(flavor, dense_ids)))
         }
 
         FilterExpr::TextExact { field: TextField::SetCode, op: CmpOp::Eq, value } => {
             // A set code absent from the index appears on no printing: narrowing
             // to the empty set is exact, matching the tag-index convention would
             // be None, but unlike tags the index covers every non-empty code.
-            Some(Candidates::Printings(
+            Narrowed::tight(Candidates::Printings(
                 indexes.set_codes.get(value.as_str()).map_or_else(Vec::new, |v| v.iter().map(|x| u32::from(*x)).collect()),
             ))
         }
@@ -1678,7 +2060,7 @@ fn narrow_candidates(filter: &FilterExpr, indexes: &Archived<CardIndexes>, offse
                 CmpOp::Gt => (value.saturating_add(1), u32::MAX),
                 CmpOp::Ge => (*value, u32::MAX),
             };
-            range_candidates(&indexes.released_at, lo, hi).map(Candidates::Printings)
+            range_narrowed(&indexes.released_at, lo, hi, n_printings, broad_ok, true)
         }
 
         FilterExpr::YearCmp { op, year } => {
@@ -1694,70 +2076,159 @@ fn narrow_candidates(filter: &FilterExpr, indexes: &Archived<CardIndexes>, offse
                 CmpOp::Gt => ((y + 1) * 10_000, u32::MAX),
                 CmpOp::Ge => (y * 10_000, u32::MAX),
             };
-            range_candidates(&indexes.released_at, lo, hi).map(Candidates::Printings)
+            range_narrowed(&indexes.released_at, lo, hi, n_printings, broad_ok, true)
         }
 
         FilterExpr::And(children) => {
-            // Combine within each id space first (card lists are ~3× shorter),
+            // Combine within each id space first (card lists are ~3x shorter),
             // then cross the boundary once by projecting the printing product up.
             // Projection loses which printings matched — the driver's per-printing
-            // verification restores exactness.
-            let mut card_sets: Vec<Vec<u32>> = Vec::new();
-            let mut printing_sets: Vec<Vec<u32>> = Vec::new();
-            for c in children {
-                match narrow_candidates(c, indexes, offsets) {
-                    Some(Candidates::Cards(v)) => card_sets.push(v),
-                    Some(Candidates::Printings(v)) => printing_sets.push(v),
-                    None => {}
+            // verification restores exactness — and therefore loses tightness.
+            // Cheap sources first, printing ranges second, complements last —
+            // and stop entirely once any source is selective enough that the
+            // driver's verification makes further narrowing pointless. Broad
+            // range bitmaps only materialize when a printing-space partner
+            // exists to intersect them with; complements only when nothing
+            // else narrowed at all.
+            let mut ranked: Vec<(u8, &FilterExpr)> = children.iter().map(|c| (and_child_rank(c), c)).collect();
+            ranked.sort_by_key(|(r, _)| *r);
+            let mut card_sets: Vec<Narrowed> = Vec::new();
+            let mut printing_sets: Vec<Narrowed> = Vec::new();
+            // Tightness of the And requires every child to be represented in
+            // the intersection: a member of a partial intersection need not
+            // satisfy the skipped children, and a complement taken over a
+            // falsely-tight set would drop real matches of the negation.
+            let mut every_child_included = true;
+            for (rank, c) in ranked {
+                let best = card_sets.iter().chain(printing_sets.iter()).map(|n| n.set.len()).min();
+                if rank > 0 && best.is_some_and(|b| b <= AND_SKIP_THRESHOLD) {
+                    every_child_included = false;
+                    break;
+                }
+                if rank == 2 && !(card_sets.is_empty() && printing_sets.is_empty()) {
+                    every_child_included = false;
+                    continue; // complements are broad; they only pay as the sole source
+                }
+                let child_broad_ok = match rank {
+                    1 => !printing_sets.is_empty(),
+                    _ => broad_ok,
+                };
+                if let Some(n) = narrow_rec(c, indexes, offsets, child_broad_ok) {
+                    // A child covering most of its domain barely narrows the
+                    // intersection; skipping it is advisory-sound and avoids
+                    // paying its projection/materialization for ~nothing.
+                    let domain = if n.set.is_printing_space() { n_printings } else { n_cards };
+                    if n.set.len() > domain - domain / 4 {
+                        every_child_included = false;
+                        continue;
+                    }
+                    if n.set.is_printing_space() { printing_sets.push(n) } else { card_sets.push(n) }
+                } else {
+                    every_child_included = false;
                 }
             }
-            let intersect_all = |mut sets: Vec<Vec<u32>>| -> Option<Vec<u32>> {
-                if sets.is_empty() { return None; }
-                sets.sort_unstable_by_key(|s| s.len());
-                let mut result = sets.swap_remove(0);
-                for set in sets {
-                    if result.is_empty() { break; }
-                    result = intersect_sorted(&result, &set);
-                }
-                Some(result)
+            let cards = and_all(card_sets, n_cards);
+            let printings = and_all(printing_sets, n_printings);
+            let seal = |mut n: Narrowed| {
+                n.tight &= every_child_included;
+                n
             };
-            let cards = intersect_all(card_sets);
-            let printings = intersect_all(printing_sets);
             match (cards, printings) {
                 (None, None) => None,
-                (Some(c), None) => Some(Candidates::Cards(c)),
-                (None, Some(p)) => Some(Candidates::Printings(p)),
+                (Some(c), None) => Some(seal(c)),
+                (None, Some(p)) => {
+                    // A lone broad printing-space bitmap is not worth crossing
+                    // the space boundary for: the projection walks every set
+                    // bit and the projected set barely shrinks the card walk —
+                    // measured as a wash at best against the scan it replaces.
+                    // Sparse results (vecs, and bitmaps under a quarter of the
+                    // space) project as before.
+                    match &p.set {
+                        Candidates::PrintingBits(b) if p.set.len() > n_printings / 4 => {
+                            let _ = b;
+                            None
+                        }
+                        _ => Some(seal(p)),
+                    }
+                }
                 (Some(c), Some(p)) => {
-                    let p_cards = cards_of_printings(offsets, &p);
-                    Some(Candidates::Cards(intersect_sorted(&c, &p_cards)))
+                    // With a card-side result in hand, a broad printing-side
+                    // bitmap adds little and costs its projection — keep the
+                    // card side alone. Sparse printing results still intersect.
+                    match &p.set {
+                        Candidates::PrintingBits(_) if p.set.len() > n_printings / 4 => {
+                            // The dropped printing side's children are now
+                            // unrepresented — the card result cannot stay tight.
+                            Some(Narrowed { tight: false, ..seal(c) })
+                        }
+                        _ => {
+                            let pc = p.into_card_space(offsets);
+                            and_all(vec![c, pc], n_cards).map(seal)
+                        }
+                    }
                 }
             }
         }
 
         FilterExpr::Or(children) => {
-            // Every child must narrow or the union is unbounded. Mixed spaces
-            // union in card space (projection up is loosening-only, and the
-            // driver re-verifies).
-            let mut sets: Vec<Candidates> = Vec::with_capacity(children.len());
+            // Every child must narrow or the union is unbounded — with one big
+            // change from the vec-only days: broad children (guard-declined
+            // ranges, color/type planes) now produce bitmaps instead of None,
+            // so an individually-broad child no longer vetoes its selective
+            // siblings. Mixed spaces union in card space (projection up is
+            // loosening-only, and the driver re-verifies).
+            let mut sets: Vec<Narrowed> = Vec::with_capacity(children.len());
             for child in children {
-                match narrow_candidates(child, indexes, offsets) {
-                    None => return None,
-                    Some(c) => sets.push(c),
+                let n = narrow_rec(child, indexes, offsets, true)?;
+                // One near-total child makes the union near-total: the
+                // \"candidates\" would visit almost every card while paying
+                // union, projection, and materialization on the way.
+                let domain = if n.set.is_printing_space() { n_printings } else { n_cards };
+                if n.set.len() > domain - domain / 4 {
+                    return None;
                 }
+                sets.push(n);
             }
-            if sets.iter().all(|s| matches!(s, Candidates::Printings(_))) {
-                let mut union: Vec<u32> = Vec::new();
-                for s in sets {
-                    if let Candidates::Printings(v) = s { union = union_sorted(union, v); }
-                }
-                Some(Candidates::Printings(union))
+            if sets.iter().all(|s| s.set.is_printing_space()) {
+                or_all(sets, n_printings)
             } else {
-                let mut union: Vec<u32> = Vec::new();
-                for s in sets {
-                    union = union_sorted(union, s.into_cards(offsets));
+                // Projection amplifies density ~3x (multiple printings per
+                // card), so a broad printing bitmap would blanket card space:
+                // the union cannot narrow, and the projection walk would be
+                // paid on the way to the near-total drop.
+                if sets
+                    .iter()
+                    .any(|s| matches!(s.set, Candidates::PrintingBits(_)) && s.set.len() > n_printings / 4)
+                {
+                    return None;
                 }
-                Some(Candidates::Cards(union))
+                let sets = sets.into_iter().map(|s| s.into_card_space(offsets)).collect();
+                or_all(sets, n_cards)
             }
+        }
+
+        FilterExpr::Not(inner) => {
+            // Complement is only sound through a tight child: every member of a
+            // tight set satisfies the inner predicate, so the complement
+            // contains every element the negation can match. Complementing a
+            // loose superset would exclude real matches. The result is loose —
+            // elements where the inner predicate is Null (which the negation
+            // also does not match) are over-included, and the driver verifies.
+            // Cheap static pre-reject: only compute the child's set when its
+            // shape could possibly be tight. Loose-by-construction sources
+            // (trigram supersets, rarity existence, nested complements) and
+            // mixed-space compositions (projection always loosens) would only
+            // be computed to be discarded — sometimes at real cost (a
+            // mixed-space Or pays vec sorts and a projection).
+            tight_narrow_space(inner)?;
+            let n = narrow_rec(inner, indexes, offsets, true)?;
+            if !n.tight {
+                return None;
+            }
+            let (printing_space, domain) = (n.set.is_printing_space(), if n.set.is_printing_space() { n_printings } else { n_cards });
+            let mut bits = n.set.into_bits(domain);
+            complement_bits(&mut bits, domain);
+            Narrowed::loose(if printing_space { Candidates::PrintingBits(bits) } else { Candidates::CardBits(bits) })
         }
 
         _ => None,
@@ -2068,8 +2539,14 @@ fn run_query<'a>(
 
     // Candidates in either space project to card ids for the walk; the walk's
     // per-printing verification restores exactness for printing-space losses.
-    let candidate_cards: Option<Vec<u32>> =
-        narrow_candidates(filter, indexes, offsets).map(|c| c.into_cards(offsets));
+    // A list covering nearly the whole corpus narrows nothing — the walk would
+    // visit almost every card anyway, and the list costs its materialization.
+    // Broad-range bitmaps (#636) can produce such lists; treating them as
+    // unnarrowed also keeps the #635 memoization trigger firing for these
+    // queries exactly as before.
+    let candidate_cards: Option<Vec<u32>> = narrow_candidates(filter, indexes, offsets)
+        .map(|c| c.into_cards(offsets))
+        .filter(|v| v.len() < cards.len() - cards.len() / 8);
 
     // The plane bitmap is the exact card-level truth of the plane-consumed
     // subexpression (split_planes), so it composes with the residual's postings
