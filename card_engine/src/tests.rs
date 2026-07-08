@@ -8,7 +8,7 @@ use super::{
     bitmap_contains, compile_plane, eval_planes, split_planes,
     ArtistIndex, CardData, CardIndexes, Candidates, ColorField, NumExpr, NumField, RarityIndex,
     CollField, CmpOp, FilterExpr, InlineStr, Interner, ManaCost, OracleCard, Printing, TagIndex,
-    TextSearchField, Tri, TrigramIndex, VocabInterner, ARTIST_NONE, NONE_STR, TYPE_ARTIFACT, TYPE_CREATURE,
+    TextField, TextSearchField, Tri, TrigramIndex, VocabInterner, ARTIST_NONE, NONE_STR, TYPE_ARTIFACT, TYPE_CREATURE,
     TYPE_ENCHANTMENT, TYPE_INSTANT, TYPE_LAND, TYPE_LEGENDARY, TYPE_PLANESWALKER, TYPE_SNOW, TYPE_SORCERY,
 };
 use rkyv::{rancor::Error, Archived};
@@ -943,7 +943,10 @@ fn collector_number_narrowing() {
     };
     let narrow = |f: &FilterExpr| match narrow_candidates(f, &archived.indexes, &archived.offsets) {
         Some(Candidates::Printings(v)) => Some(v),
-        Some(Candidates::Cards(_)) => panic!("cn must narrow in printing space"),
+        // Bitmaps materialize in ascending id order, so both representations
+        // compare against the same expected vectors.
+        Some(Candidates::PrintingBits(b)) => Some(super::bitmap_card_ids(&b)),
+        Some(_) => panic!("cn must narrow in printing space"),
         None => None,
     };
 
@@ -1583,4 +1586,274 @@ fn oracle_match_none_str_mirrors_text_contains() {
     let plain = FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: "draw".to_string() };
     assert!(memoized.eval_card(&archived.cards[0], &archived.strings) == Tri::Null);
     assert!(plain.eval_card(&archived.cards[0], &archived.strings) == Tri::Null);
+}
+
+// ─── Adaptive candidate sets (#636) ───────────────────────────────────────────
+
+// range_narrowed never declines: sparse ranges keep the vec path, broad ones
+// become bitmaps — scattered directly when the slice is the smaller side,
+// complement-scattered (loose) when it isn't. Uses a synthetic index large
+// enough to clear NARROW_FLOOR, which tiny fixtures never do.
+#[test]
+fn range_narrowed_representations() {
+    let printings: Vec<Printing> = (0..4096u32).map(|i| {
+        let mut p = stub_printing(u128::from(i) + 1, u128::from(i) + 1, None);
+        // values 0..1024, four printings per value; printings 0-3 get value 0, etc.
+        p.price_usd = Some((i / 4) as f32);
+        p
+    }).collect();
+    let idx = build_range_index(&printings, |p| p.price_usd.map(super::f32_sort_bits));
+    let bytes = rkyv::to_bytes::<Error>(&idx).expect("serialize");
+    let archived = rkyv::access::<Archived<PrintingRangeIndex>, Error>(&bytes).expect("access");
+    let n = printings.len();
+    let bounds = |op, v| super::price_bounds(op, v).unwrap();
+
+    // Bounds are widened one position for f32 rounding, so `< v` includes v's
+    // own printings as superset members — counts below are values 0..=v.
+    // Sparse (164 entries, 4%): vec, tight.
+    let (lo, hi) = bounds(CmpOp::Lt, 40.0);
+    let nr = super::range_narrowed(archived, lo, hi, n, false, false).expect("sparse ranges narrow in any context");
+    assert!(!nr.tight, "price bounds are widened supersets, never tight");
+    match nr.set {
+        Candidates::Printings(v) => assert_eq!(v.len(), 164),
+        _ => panic!("sparse range must stay a vec"),
+    }
+
+    // Broad but at most half (values 0..=400 → 1604 entries, 39%): direct scatter, tight.
+    let (lo, hi) = bounds(CmpOp::Lt, 400.0);
+    assert!(super::range_narrowed(archived, lo, hi, n, false, true).is_none(), "broad bits need a consumer (broad_ok)");
+    let nr = super::range_narrowed(archived, lo, hi, n, true, true).expect("broad_ok materializes the bitmap");
+    assert!(nr.tight, "integer-exact bounds keep the direct scatter tight");
+    match &nr.set {
+        Candidates::PrintingBits(b) => {
+            assert_eq!(b.iter().map(|w| w.count_ones()).sum::<u32>(), 1604);
+            assert!(bitmap_contains(b, 0) && !bitmap_contains(b, 1700));
+        }
+        _ => panic!("broad range must be a bitmap"),
+    }
+
+    // Beyond half (values 0..=900 → 3604 entries, 88%): complement scatter, loose.
+    let (lo, hi) = bounds(CmpOp::Lt, 900.0);
+    let nr = super::range_narrowed(archived, lo, hi, n, true, true).expect("broad_ok materializes the complement");
+    assert!(!nr.tight, "complement over-includes unindexed printings");
+    match &nr.set {
+        Candidates::PrintingBits(b) => {
+            assert_eq!(b.iter().map(|w| w.count_ones()).sum::<u32>(), 3604);
+            assert!(bitmap_contains(b, 0) && !bitmap_contains(b, 3700));
+        }
+        _ => panic!("broad range must be a bitmap"),
+    }
+}
+
+/// Store for composition tests: subtypes, colors/types (planes), per-printing
+/// set codes and rarities, with the real index builders the reload path uses.
+fn narrow_fixture_store() -> CardData {
+    let mut vocab = VocabInterner::new();
+    let specs: &[(&[&str], u8, u16)] = &[
+        (&["goblin"], 8, TYPE_CREATURE),         // R goblin
+        (&["goblin"], 8, TYPE_CREATURE),         // R goblin
+        (&["merfolk"], 2, TYPE_CREATURE),        // U merfolk
+        (&[], 16, TYPE_ENCHANTMENT),             // G enchantment
+        (&[], 0, TYPE_ARTIFACT),                 // colorless artifact
+        (&["wizard"], 2, TYPE_CREATURE),         // U wizard
+    ];
+    let cards: Vec<OracleCard> = specs.iter().enumerate().map(|(i, &(subs, colors, types))| {
+        let mut c = stub_card(i as u128 + 1, types, subs, &mut vocab);
+        c.card_colors = colors;
+        c.card_color_identity = colors;
+        c
+    }).collect();
+    let mut data = store_of(cards, &[2usize; 6], vocab);
+    for (i, p) in data.printings.iter_mut().enumerate() {
+        p.card_set_code = InlineStr::from_str(if i % 2 == 0 { "lea" } else { "m21" });
+        p.card_rarity_int = Some((i % 2) as u8); // even printings common, odd uncommon
+    }
+    data.indexes.subtypes = build_tag_index(&data.cards, &data.coll_vocab, |c| &c.card_subtypes);
+    data.indexes.rarity = build_rarity_index(&data.printings, &data.offsets);
+    let mut set_codes: TagIndex = HashMap::new();
+    for (i, p) in data.printings.iter().enumerate() {
+        set_codes.entry(p.card_set_code.as_str().to_string()).or_default().push(i as u32);
+    }
+    data.indexes.set_codes = set_codes;
+    data
+}
+
+// Tightness and complement rules: Not narrows only through tight children.
+// Rarity postings are the trap — a mixed-rarity card matches both `r:x` and
+// `-r:x`, so complementing its card-space existence set would drop real
+// matches; the loose tag must block the Not arm.
+#[test]
+fn not_narrows_only_tight_children() {
+    let data = narrow_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let rec = |f: &FilterExpr| super::narrow_rec(f, &archived.indexes, &archived.offsets, true);
+
+    // value_id bound as production's bind() would — narrowing keys on the
+    // string, evaluation on the id, and they must agree.
+    let goblin_id = archived.coll_vocab.iter().position(|s| s.as_str() == "goblin").map(|i| i as u16);
+    let goblin = || FilterExpr::CollectionCmp { field: CollField::Subtypes, op: CmpOp::Ge, value: "goblin".into(), value_id: goblin_id };
+    let rarity = || FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), op: CmpOp::Eq, rhs: NumExpr::Const(0.0) };
+    let name2 = || FilterExpr::TextContains { field: TextSearchField::NameLower, word: "da".into() };
+
+    // Tight leaf → complement narrows, loose, and covers every ¬-match.
+    let n = rec(&FilterExpr::Not(Box::new(goblin()))).expect("Not(subtype) must narrow");
+    assert!(!n.tight);
+    let cand = n.set.into_cards(&archived.offsets);
+    for (cid, card) in archived.cards.iter().enumerate() {
+        let matches_not = (u32::from(archived.offsets[cid])..u32::from(archived.offsets[cid + 1]))
+            .any(|p| FilterExpr::Not(Box::new(goblin())).matches(card, &archived.printings[p as usize], &archived.strings));
+        if matches_not {
+            assert!(cand.contains(&(cid as u32)), "complement must not drop card {cid}");
+        }
+    }
+
+    // Loose children block the Not arm entirely.
+    assert!(rec(&FilterExpr::Not(Box::new(rarity()))).is_none(), "rarity existence sets are not complement-safe");
+    assert!(rec(&FilterExpr::Not(Box::new(name2()))).is_none(), "trigram-less text cannot narrow at all");
+    let double_not = FilterExpr::Not(Box::new(FilterExpr::Not(Box::new(goblin()))));
+    assert!(rec(&double_not).is_none(), "complements are loose, so double negation stops narrowing");
+
+    // Printing-space complement: -set:lea covers the m21 printings' cards.
+    let not_lea = FilterExpr::Not(Box::new(FilterExpr::TextExact { field: TextField::SetCode, op: CmpOp::Eq, value: "lea".into() }));
+    let n = rec(&not_lea).expect("Not(set) must narrow");
+    assert!(matches!(n.set, Candidates::PrintingBits(_)));
+}
+
+// Or composition with previously-vetoing children: a plane-expressible color
+// child and a Not child now contribute bitmaps instead of forcing None.
+#[test]
+fn or_composes_plane_and_complement_children() {
+    let data = narrow_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let rec = |f: &FilterExpr| super::narrow_rec(f, &archived.indexes, &archived.offsets, true);
+
+    let goblin_id = archived.coll_vocab.iter().position(|s| s.as_str() == "goblin").map(|i| i as u16);
+    let goblin = || FilterExpr::CollectionCmp { field: CollField::Subtypes, op: CmpOp::Ge, value: "goblin".into(), value_id: goblin_id };
+    let green = || FilterExpr::ColorCmp { field: ColorField::Colors, op: CmpOp::Ge, mask: 16 };
+
+    // ColorCmp had no narrowing arm before #636; via the plane feed-in the Or composes.
+    let or = FilterExpr::Or(vec![goblin(), green()]);
+    let n = rec(&or).expect("Or(subtype, color) must narrow");
+    let cand = n.set.into_cards(&archived.offsets);
+    assert_eq!(cand, vec![0, 1, 3], "goblins ∪ green");
+
+    // An unindexable child still vetoes: nothing can represent it.
+    let or = FilterExpr::Or(vec![goblin(), FilterExpr::TextContains { field: TextSearchField::NameLower, word: "da".into() }]);
+    assert!(rec(&or).is_none());
+}
+
+// End-to-end: run_query totals equal brute-force counts for shapes that
+// exercise every new composition rule. Narrowing is advisory, so an unsound
+// candidate set shows up here as a missing match.
+#[test]
+fn adaptive_narrowing_run_query_parity() {
+    let data = narrow_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let goblin_id = archived.coll_vocab.iter().position(|s| s.as_str() == "goblin").map(|i| i as u16);
+    let goblin = || FilterExpr::CollectionCmp { field: CollField::Subtypes, op: CmpOp::Ge, value: "goblin".into(), value_id: goblin_id };
+    let green = || FilterExpr::ColorCmp { field: ColorField::Colors, op: CmpOp::Ge, mask: 16 };
+    let lea = || FilterExpr::TextExact { field: TextField::SetCode, op: CmpOp::Eq, value: "lea".into() };
+    let rarity = || FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), op: CmpOp::Eq, rhs: NumExpr::Const(0.0) };
+
+    let filters: Vec<FilterExpr> = vec![
+        FilterExpr::Or(vec![goblin(), green()]),
+        FilterExpr::Or(vec![goblin(), rarity()]),
+        FilterExpr::Not(Box::new(goblin())),
+        FilterExpr::Not(Box::new(lea())),
+        FilterExpr::Not(Box::new(rarity())),
+        FilterExpr::And(vec![FilterExpr::Not(Box::new(lea())), goblin()]),
+        FilterExpr::And(vec![green(), FilterExpr::Or(vec![goblin(), lea()])]),
+        FilterExpr::Or(vec![FilterExpr::Not(Box::new(goblin())), lea()]),
+    ];
+    for f in filters {
+        let brute = archived
+            .cards
+            .iter()
+            .enumerate()
+            .filter(|(cid, card)| {
+                (u32::from(archived.offsets[*cid])..u32::from(archived.offsets[cid + 1]))
+                    .any(|p| f.matches(card, &archived.printings[p as usize], &archived.strings))
+            })
+            .count();
+        let mut f2 = f;
+        let (total, _) = run_query(
+            &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+            &mut f2, None, "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+        );
+        assert_eq!(total, brute, "narrowing must stay advisory-sound");
+    }
+}
+
+// Not over a partially-represented And: if a child contributes no candidate
+// set (unindexable, skipped, or dropped), the And's intersection members need
+// not satisfy that child, so the result must NOT be tight — a complement over
+// it would drop cards that fail the unrepresented child (which is exactly what
+// makes them match the negation). Caught by inspection in review; pinned here.
+#[test]
+fn not_over_partial_and_is_blocked() {
+    let data = narrow_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let goblin_id = archived.coll_vocab.iter().position(|s| s.as_str() == "goblin").map(|i| i as u16);
+    let goblin = || FilterExpr::CollectionCmp { field: CollField::Subtypes, op: CmpOp::Ge, value: "goblin".into(), value_id: goblin_id };
+    let unindexable = || FilterExpr::TextContains { field: TextSearchField::NameLower, word: "da".into() };
+
+    // Static check: And with an unrepresentable child can't be tight → Not
+    // must refuse to narrow at all.
+    let not_partial = FilterExpr::Not(Box::new(FilterExpr::And(vec![goblin(), unindexable()])));
+    assert!(super::narrow_rec(&not_partial, &archived.indexes, &archived.offsets, true).is_none());
+
+    // Dynamic check via run_query: totals must equal brute force. Every card
+    // fails `name:da` here, so every card matches the negation — a complement
+    // of the goblins-only set would have dropped cards 0 and 1.
+    let brute = archived
+        .cards
+        .iter()
+        .enumerate()
+        .filter(|(cid, card)| {
+            (u32::from(archived.offsets[*cid])..u32::from(archived.offsets[cid + 1]))
+                .any(|p| not_partial.matches(card, &archived.printings[p as usize], &archived.strings))
+        })
+        .count();
+    let mut f = FilterExpr::Not(Box::new(FilterExpr::And(vec![goblin(), unindexable()])));
+    let (total, _) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut f, None, "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+    );
+    assert_eq!(total, brute);
+    assert_eq!(total, 6, "every card matches -(goblin and name:da)");
+}
+
+
+// The review's reproduction: price bounds are widened one position for
+// f32/f64 rounding (superset contract), so a price-range set must never be
+// tight — Not would complement away the boundary printings, which are exactly
+// the negation's matches. A printing priced exactly 5.0 fails `usd>5` and
+// must survive `-usd>5`.
+#[test]
+fn not_over_price_range_keeps_boundary_matches() {
+    let mut vocab = VocabInterner::new();
+    let cards: Vec<OracleCard> = (0..6).map(|i| stub_card(i as u128 + 1, TYPE_CREATURE, &[], &mut vocab)).collect();
+    let mut data = store_of(cards, &[2usize; 6], vocab);
+    for (i, p) in data.printings.iter_mut().enumerate() {
+        p.price_usd = Some(if i < 2 { 5.0 } else { 10.0 }); // card 0 sits on the boundary
+    }
+    data.indexes.price_usd = build_range_index(&data.printings, |p| p.price_usd.map(super::f32_sort_bits));
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let mut f = FilterExpr::Not(Box::new(FilterExpr::NumericCmp {
+        lhs: NumExpr::Field(NumField::PriceUsd),
+        op: CmpOp::Gt,
+        rhs: NumExpr::Const(5.0),
+    }));
+    let (total, _) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut f, None, "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+    );
+    assert_eq!(total, 1, "the boundary-priced card matches -usd>5 and must not be complemented away");
 }
