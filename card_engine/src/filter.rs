@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use regex::Regex;
 use serde_json::Value;
-use super::{AOracleCard, APrinting, AStrings, str_at, is_devotion_sym, mana_pip_counts, mana_cmc, color_list_to_mask, card_type_str_to_bit, trigram_candidates, trigram_min_posting, ARTIST_NONE, NONE_STR, FlavorIndex, OracleTextIndex, TrigramIndex, flavor_fingerprint, flavor_match_sets};
+use super::{AOracleCard, APrinting, AStrings, str_at, is_devotion_sym, mana_pip_counts, mana_cmc, color_list_to_mask, card_type_str_to_bit, trigram_candidates, trigram_min_posting, ARTIST_NONE, NONE_STR, FlavorIndex, NameBigramIndex, OracleTextIndex, TrigramIndex, flavor_fingerprint, flavor_match_sets};
 use super::legality::{LEGALITY_LEGAL, LEGALITY_BANNED, LEGALITY_RESTRICTED, format_shift};
 
 // ─── Comparison / arithmetic operators ───────────────────────────────────────
@@ -496,15 +496,48 @@ impl FilterExpr {
         cards: &[AOracleCard],
         strings: &AStrings,
         name_trigram: &rkyv::Archived<TrigramIndex>,
+        name_bigrams: &rkyv::Archived<NameBigramIndex>,
         oracle: &rkyv::Archived<OracleTextIndex>,
     ) {
         match self {
             FilterExpr::And(children) | FilterExpr::Or(children) => {
                 for c in children.iter_mut() {
-                    c.memoize_text_predicates(cards, strings, name_trigram, oracle);
+                    c.memoize_text_predicates(cards, strings, name_trigram, name_bigrams, oracle);
                 }
             }
-            FilterExpr::Not(inner) => inner.memoize_text_predicates(cards, strings, name_trigram, oracle),
+            FilterExpr::Not(inner) => inner.memoize_text_predicates(cards, strings, name_trigram, name_bigrams, oracle),
+            FilterExpr::TextContains { field: TextSearchField::NameLower, word } if word.len() == 2 => {
+                // 2-byte needles resolve exactly through the bigram index: the
+                // member cards are the complete match set (containment IS
+                // bigram membership), so no contains() verification runs at
+                // all — the ids just re-key to card_name_id for eval.
+                if u32::from(name_bigrams.n_cards) as usize != cards.len() {
+                    return;
+                }
+                let bg = [word.as_bytes()[0], word.as_bytes()[1]];
+                let mut ids: Vec<u32> = if let Some(p) = name_bigrams.plane_of.get(&bg) {
+                    let wpp = cards.len().div_ceil(64);
+                    let start = u32::from(*p) as usize * wpp;
+                    let mut out = Vec::new();
+                    for (i, w) in name_bigrams.plane_words[start..start + wpp].iter().enumerate() {
+                        let mut w = u64::from(*w);
+                        while w != 0 {
+                            let cid = ((i as u32) << 6) | w.trailing_zeros();
+                            w &= w - 1;
+                            out.push(u32::from(cards[cid as usize].card_name_id));
+                        }
+                    }
+                    out
+                } else {
+                    name_bigrams
+                        .postings
+                        .get(&bg)
+                        .map_or_else(Vec::new, |v| v.iter().map(|x| u32::from(cards[u16::from(*x) as usize].card_name_id)).collect())
+                };
+                ids.sort_unstable();
+                ids.dedup();
+                *self = FilterExpr::NameMatch { ids };
+            }
             FilterExpr::TextContains { field: TextSearchField::NameLower, word } => {
                 // The intersection is bounded by the shortest posting list, so
                 // checking that bound first makes the decline path free — no

@@ -1,7 +1,7 @@
 use super::{
     build_numeric_index, build_oracle_text_index, build_tag_index, build_trigram_index,
     build_type_index, build_rarity_index, build_flavor_index, build_thresholded_tag_index, build_sort_permutations,
-    build_artwork_group_counts, build_bit_planes, flavor_fingerprint, flavor_match_sets,
+    build_artwork_group_counts, build_bit_planes, build_name_bigram_index, flavor_fingerprint, flavor_match_sets,
     cards_of_printings, count_common_keywords, count_common_types,
     build_artist_index, build_range_index, range_candidates, narrow_candidates, rarity_candidates,
     range_too_broad_to_narrow, run_query, trigram_candidates, int_range_candidates, PrintingRangeIndex, NARROW_FLOOR,
@@ -218,6 +218,7 @@ fn store_of(cards: Vec<OracleCard>, printing_counts: &[usize], vocab: VocabInter
     let indexes = CardIndexes {
         type_bits: build_type_index(&cards),
         planes: build_bit_planes(&cards),
+        name_bigrams: build_name_bigram_index(&cards),
         ..Default::default()
     };
     CardData {
@@ -657,6 +658,7 @@ fn bench_checked_vs_unchecked_access() {
         sort_perms:     build_sort_permutations(&cards, &printings, &offsets),
         artwork_groups: build_artwork_group_counts(&printings, &offsets),
         planes:         build_bit_planes(&cards),
+        name_bigrams:   build_name_bigram_index(&cards),
     };
     let data = CardData {
         cards,
@@ -1479,7 +1481,7 @@ fn memoize_text_predicates_parity() {
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
     let memo = |mut f: FilterExpr| {
-        f.memoize_text_predicates(&archived.cards, &archived.strings, &archived.indexes.name_trigram, &archived.indexes.oracle_trigram);
+        f.memoize_text_predicates(&archived.cards, &archived.strings, &archived.indexes.name_trigram, &archived.indexes.name_bigrams, &archived.indexes.oracle_trigram);
         f
     };
     let oracle = |w: &str| FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: w.to_string() };
@@ -1518,7 +1520,7 @@ fn memoize_text_predicates_guards() {
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
     let memo = |mut f: FilterExpr| {
-        f.memoize_text_predicates(&archived.cards, &archived.strings, &archived.indexes.name_trigram, &archived.indexes.oracle_trigram);
+        f.memoize_text_predicates(&archived.cards, &archived.strings, &archived.indexes.name_trigram, &archived.indexes.name_bigrams, &archived.indexes.oracle_trigram);
         f
     };
     let short = memo(FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: "dr".to_string() });
@@ -1694,7 +1696,8 @@ fn not_narrows_only_tight_children() {
     let goblin_id = archived.coll_vocab.iter().position(|s| s.as_str() == "goblin").map(|i| i as u16);
     let goblin = || FilterExpr::CollectionCmp { field: CollField::Subtypes, op: CmpOp::Ge, value: "goblin".into(), value_id: goblin_id };
     let rarity = || FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), op: CmpOp::Eq, rhs: NumExpr::Const(0.0) };
-    let name2 = || FilterExpr::TextContains { field: TextSearchField::NameLower, word: "da".into() };
+    // 1-char: below even the bigram floor, so genuinely unindexable.
+    let name1 = || FilterExpr::TextContains { field: TextSearchField::NameLower, word: "q".into() };
 
     // Tight leaf → complement narrows, loose, and covers every ¬-match.
     let n = rec(&FilterExpr::Not(Box::new(goblin()))).expect("Not(subtype) must narrow");
@@ -1710,7 +1713,7 @@ fn not_narrows_only_tight_children() {
 
     // Loose children block the Not arm entirely.
     assert!(rec(&FilterExpr::Not(Box::new(rarity()))).is_none(), "rarity existence sets are not complement-safe");
-    assert!(rec(&FilterExpr::Not(Box::new(name2()))).is_none(), "trigram-less text cannot narrow at all");
+    assert!(rec(&FilterExpr::Not(Box::new(name1()))).is_none(), "sub-bigram text cannot narrow at all");
     let double_not = FilterExpr::Not(Box::new(FilterExpr::Not(Box::new(goblin()))));
     assert!(rec(&double_not).is_none(), "complements are loose, so double negation stops narrowing");
 
@@ -1739,8 +1742,9 @@ fn or_composes_plane_and_complement_children() {
     let cand = n.set.into_cards(&archived.offsets);
     assert_eq!(cand, vec![0, 1, 3], "goblins ∪ green");
 
-    // An unindexable child still vetoes: nothing can represent it.
-    let or = FilterExpr::Or(vec![goblin(), FilterExpr::TextContains { field: TextSearchField::NameLower, word: "da".into() }]);
+    // An unindexable child still vetoes: nothing can represent it (1-char is
+    // below even the bigram floor).
+    let or = FilterExpr::Or(vec![goblin(), FilterExpr::TextContains { field: TextSearchField::NameLower, word: "q".into() }]);
     assert!(rec(&or).is_none());
 }
 
@@ -1800,7 +1804,7 @@ fn not_over_partial_and_is_blocked() {
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
     let goblin_id = archived.coll_vocab.iter().position(|s| s.as_str() == "goblin").map(|i| i as u16);
     let goblin = || FilterExpr::CollectionCmp { field: CollField::Subtypes, op: CmpOp::Ge, value: "goblin".into(), value_id: goblin_id };
-    let unindexable = || FilterExpr::TextContains { field: TextSearchField::NameLower, word: "da".into() };
+    let unindexable = || FilterExpr::TextContains { field: TextSearchField::NameLower, word: "q".into() };
 
     // Static check: And with an unrepresentable child can't be tight → Not
     // must refuse to narrow at all.
@@ -1808,7 +1812,7 @@ fn not_over_partial_and_is_blocked() {
     assert!(super::narrow_rec(&not_partial, &archived.indexes, &archived.offsets, true).is_none());
 
     // Dynamic check via run_query: totals must equal brute force. Every card
-    // fails `name:da` here, so every card matches the negation — a complement
+    // fails `name:q` here, so every card matches the negation — a complement
     // of the goblins-only set would have dropped cards 0 and 1.
     let brute = archived
         .cards
@@ -1825,7 +1829,7 @@ fn not_over_partial_and_is_blocked() {
         &mut f, None, "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
     );
     assert_eq!(total, brute);
-    assert_eq!(total, 6, "every card matches -(goblin and name:da)");
+    assert_eq!(total, 6, "every card matches -(goblin and name:q)");
 }
 
 
@@ -1856,4 +1860,111 @@ fn not_over_price_range_keeps_boundary_matches() {
         &mut f, None, "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
     );
     assert_eq!(total, 1, "the boundary-priced card matches -usd>5 and must not be complemented away");
+}
+
+// ─── Name bigram index (#639) ─────────────────────────────────────────────────
+
+// Tier assignment at the derived crossover (plane bytes vs 2 bytes/entry),
+// and exactness on both tiers: for a 2-byte needle, the set IS the answer.
+#[test]
+fn name_bigrams_tiers_and_exactness() {
+    // 4,096 cards: every card contains "zz" (dense → plane tier); every 64th
+    // contains "qx" (64 entries × 2 B ≤ the 512 B plane cost at this store
+    // size → u16 postings tier; the crossover scales with n_cards).
+    let mut vocab = VocabInterner::new();
+    let cards: Vec<OracleCard> = (0..4096u32).map(|i| {
+        let mut c = stub_card(u128::from(i) + 1, TYPE_CREATURE, &[], &mut vocab);
+        let name = if i % 64 == 0 { format!("azz qx{i}") } else { format!("azz b{i}") };
+        c.card_name_lower = InlineStr::from_str(&name);
+        c
+    }).collect();
+    let data = store_of(cards, &vec![1usize; 4096], vocab);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let idx = &archived.indexes.name_bigrams;
+
+    assert!(idx.plane_of.get(&[b'z', b'z']).is_some(), "4,096-name bigram must promote to a plane");
+    assert!(idx.postings.get(&[b'q', b'x']).is_some(), "64-name bigram stays a posting list");
+
+    let rec = |w: &str| {
+        let f = FilterExpr::TextContains { field: TextSearchField::NameLower, word: w.to_string() };
+        super::narrow_rec(&f, &archived.indexes, &archived.offsets, false)
+    };
+    // Dense tier: exact bitmap, tight.
+    let n = rec("zz").expect("dense bigram narrows");
+    assert!(n.tight);
+    assert!(matches!(n.set, Candidates::CardBits(_)));
+    assert_eq!(n.set.len(), 4096);
+    // Sparse tier: exact vec, tight, and byte-for-byte the contains() answer.
+    let n = rec("qx").expect("sparse bigram narrows");
+    assert!(n.tight);
+    let cand = n.set.into_cards(&archived.offsets);
+    let brute: Vec<u32> = archived.cards.iter().enumerate()
+        .filter(|(_, c)| c.card_name_lower.as_str().contains("qx"))
+        .map(|(i, _)| i as u32)
+        .collect();
+    assert_eq!(cand, brute, "bigram membership IS containment for 2-byte needles");
+    // Absent bigram: exact empty (no name contains it), not None.
+    let n = rec("vw").expect("absent bigram is an exact empty narrowing");
+    assert_eq!(n.set.len(), 0);
+    // 1-char stays unindexable.
+    let f = FilterExpr::TextContains { field: TextSearchField::NameLower, word: "z".to_string() };
+    assert!(super::narrow_rec(&f, &archived.indexes, &archived.offsets, false).is_none());
+}
+
+// The motivating composition: `name:xx or name:yy` previously full-scanned
+// (two per-card substring searches); both children now contribute exact sets.
+// Also: Not(bigram) is a sound complement, and memoize rewrites 2-byte needles
+// to NameMatch with zero contains() calls in full-scan contexts.
+#[test]
+fn name_bigrams_compose_and_memoize() {
+    let mut vocab = VocabInterner::new();
+    let mut interner = Interner::new();
+    let names = ["fire drake", "field agent", "drone", "bear", "firm hand", "quiet"];
+    let cards: Vec<OracleCard> = names.iter().enumerate().map(|(i, name)| {
+        let mut c = stub_card(i as u128 + 1, TYPE_CREATURE, &[], &mut vocab);
+        c.card_name_lower = InlineStr::from_str(name);
+        c.card_name_id = interner.intern(name.to_string());
+        c
+    }).collect();
+    let mut data = store_of(cards, &[1usize; 6], vocab);
+    data.strings = interner.strings;
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let name2 = |w: &str| FilterExpr::TextContains { field: TextSearchField::NameLower, word: w.to_string() };
+
+    // Or of two bigram children composes: "fi" → {0,1,4}, "dr" → {0,2}.
+    let or = FilterExpr::Or(vec![name2("fi"), name2("dr")]);
+    let n = super::narrow_rec(&or, &archived.indexes, &archived.offsets, false).expect("bigram Or composes");
+    assert_eq!(n.set.into_cards(&archived.offsets), vec![0, 1, 2, 4]);
+
+    // run_query parity across the new shapes, negation included.
+    for f in [or, FilterExpr::Not(Box::new(name2("fi")))] {
+        let brute = archived.cards.iter().enumerate()
+            .filter(|(cid, card)| {
+                (u32::from(archived.offsets[*cid])..u32::from(archived.offsets[cid + 1]))
+                    .any(|p| f.matches(card, &archived.printings[p as usize], &archived.strings))
+            })
+            .count();
+        let mut f2 = f;
+        let (total, _) = run_query(
+            &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+            &mut f2, None, "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+        );
+        assert_eq!(total, brute);
+    }
+
+    // Memoize path: a 2-byte needle in a full-scan context becomes NameMatch
+    // through the bigram index (exact — no contains() verification).
+    let mut f = name2("fi");
+    f.memoize_text_predicates(&archived.cards, &archived.strings, &archived.indexes.name_trigram, &archived.indexes.name_bigrams, &archived.indexes.oracle_trigram);
+    match &f {
+        FilterExpr::NameMatch { ids } => assert_eq!(ids.len(), 3),
+        _ => panic!("2-byte needle must memoize via bigrams"),
+    }
+    for (cid, card) in archived.cards.iter().enumerate() {
+        let want = card.card_name_lower.as_str().contains("fi");
+        assert!((f.eval_card(card, &archived.strings) == Tri::True) == want, "NameMatch parity at card {cid}");
+    }
 }

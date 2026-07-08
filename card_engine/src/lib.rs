@@ -772,6 +772,68 @@ fn expand_text_ids(idx: &Archived<OracleTextIndex>, text_ids: &[u32]) -> Vec<u32
     out
 }
 
+// ─── Name bigram index (#639 short-name narrowing) ──────────────────────────
+// Trigram narrowing needs a 3-byte needle, so 2-character name searches (the
+// typeahead shape: name:fi, name:dr) full-scanned with per-card substring
+// searches. For a 2-byte needle, containment IS bigram membership, so a
+// bigram index is not a prefilter but the exact answer — sets enter the
+// candidate algebra tight, with no verification pass to pay.
+//
+// Two-tier storage, split at the derived crossover where a card bitplane
+// (n_cards/8 bytes, flat) undercuts a u16 posting list (2 bytes/entry):
+// ~2k entries at 31.5k cards, 6.3% density. 74 of 951 corpus bigrams sit
+// above it, carrying 53% of all posting entries — promoting them saves ~22%
+// of the index and hands the #636 algebra pre-built bitmaps for exactly the
+// bigrams broad enough to want them. This is #630 phase 3's density-promotion
+// rule with the threshold derived from a storage identity instead of tuned.
+
+#[derive(Archive, Serialize, Deserialize, Default)]
+struct NameBigramIndex {
+    /// Sparse tier: bigram → ascending card ids. u16 on purpose (cards fit;
+    /// see build); half the bytes of the u32 posting convention.
+    postings: HashMap<[u8; 2], Vec<u16>>,
+    /// Dense tier: bigram → plane index into `plane_words`.
+    plane_of: HashMap<[u8; 2], u32>,
+    /// plane_of.len() × words_per_plane(n_cards), flattened plane-major —
+    /// the BitPlanes layout.
+    plane_words: Vec<u64>,
+    n_cards: u32,
+}
+
+fn build_name_bigram_index(cards: &[OracleCard]) -> NameBigramIndex {
+    let mut lists: HashMap<[u8; 2], Vec<u32>> = HashMap::new();
+    for (i, card) in cards.iter().enumerate() {
+        let bytes = card.card_name_lower.as_str().as_bytes();
+        let mut seen: Vec<[u8; 2]> = Vec::new(); // names are short; a vec beats a set
+        for w in bytes.windows(2) {
+            let bg = [w[0], w[1]];
+            if !seen.contains(&bg) {
+                seen.push(bg);
+                lists.entry(bg).or_default().push(i as u32);
+            }
+        }
+    }
+    let wpp = cards.len().div_ceil(64);
+    let plane_bytes = wpp * 8;
+    let mut idx = NameBigramIndex { n_cards: cards.len() as u32, ..Default::default() };
+    // u16 ids require the card count to fit; past that every bigram promotes
+    // (a plane is valid at any count). Production is ~31.5k cards.
+    let u16_ok = cards.len() <= u16::MAX as usize + 1;
+    for (bg, ids) in lists {
+        if u16_ok && ids.len() * 2 <= plane_bytes {
+            idx.postings.insert(bg, ids.into_iter().map(|c| c as u16).collect());
+        } else {
+            let plane = idx.plane_of.len() as u32;
+            idx.plane_of.insert(bg, plane);
+            idx.plane_words.resize((plane as usize + 1) * wpp, 0);
+            for c in ids {
+                idx.plane_words[plane as usize * wpp + (c >> 6) as usize] |= 1u64 << (c & 63);
+            }
+        }
+    }
+    idx
+}
+
 // Named lifetime (not elided/HRTB) so get_text may return text borrowed from the
 // string table rather than from the card itself.
 fn build_trigram_index<'a, T>(rows: &'a [T], get_text: impl Fn(&'a T) -> &'a str) -> TrigramIndex {
@@ -1530,6 +1592,7 @@ struct CardIndexes {
     sort_perms:     SortPermutations,          // card space (streamed selection)
     artwork_groups: Vec<u16>,                  // card space: distinct illustration groups
     planes:         BitPlanes,                 // card space: transposed low-cardinality dims (#630)
+    name_bigrams:   NameBigramIndex,           // card space: exact 2-byte name containment (#639)
 }
 
 impl Default for CardIndexes {
@@ -1557,6 +1620,7 @@ impl Default for CardIndexes {
             sort_perms:     SortPermutations::default(),
             artwork_groups: Vec::new(),
             planes:         BitPlanes::default(),
+            name_bigrams:   NameBigramIndex::default(),
         }
     }
 }
@@ -1861,6 +1925,8 @@ fn or_all(mut sets: Vec<Narrowed>, n: usize) -> Option<Narrowed> {
 fn tight_narrow_space(f: &FilterExpr) -> Option<bool> {
     match f {
         FilterExpr::ColorCmp { .. } | FilterExpr::TypeCmp { .. } => Some(false),
+        // 2-byte name needles resolve exactly through the bigram index.
+        FilterExpr::TextContains { field: TextSearchField::NameLower, word } if word.len() == 2 => Some(false),
         FilterExpr::CollectionCmp { field, op: CmpOp::Ge, .. } => {
             Some(matches!(field, CollField::ArtTags | CollField::IsTags | CollField::FrameData))
         }
@@ -1953,6 +2019,29 @@ fn narrow_rec(filter: &FilterExpr, indexes: &Archived<CardIndexes>, offsets: &AO
     }
 
     match filter {
+        FilterExpr::TextContains { field: TextSearchField::NameLower, word } if word.len() == 2 => {
+            // A 2-byte needle's containment IS bigram membership, so the tier
+            // lookup is the complete answer — tight, with no false positives
+            // for the walk to reject. A bigram absent from the index appears
+            // in no name, so the empty narrowing is exact too.
+            let idx = &indexes.name_bigrams;
+            if u32::from(idx.n_cards) as usize != n_cards {
+                return None; // archive without bigrams for this store
+            }
+            let bg = [word.as_bytes()[0], word.as_bytes()[1]];
+            if let Some(p) = idx.plane_of.get(&bg) {
+                let wpp = n_cards.div_ceil(64);
+                let start = u32::from(*p) as usize * wpp;
+                let bits: Vec<u64> = idx.plane_words[start..start + wpp].iter().map(|w| u64::from(*w)).collect();
+                return Narrowed::tight(Candidates::CardBits(bits));
+            }
+            let ids: Vec<u32> = idx
+                .postings
+                .get(&bg)
+                .map_or_else(Vec::new, |v| v.iter().map(|x| u32::from(u16::from(*x))).collect());
+            Narrowed::tight(Candidates::Cards(ids))
+        }
+
         FilterExpr::TextContains { field, word }
             if word.len() >= 3
                 && matches!(field, TextSearchField::NameLower | TextSearchField::OracleTextLower) =>
@@ -2583,7 +2672,7 @@ fn run_query<'a>(
     // turns those per-card substring searches into integer binary searches.
     // The half-corpus line mirrors memoize_text_predicates' decline guard.
     if candidate_cards.as_ref().is_none_or(|v| v.len() > cards.len() / 2) {
-        filter.memoize_text_predicates(cards, strings, &indexes.name_trigram, &indexes.oracle_trigram);
+        filter.memoize_text_predicates(cards, strings, &indexes.name_trigram, &indexes.name_bigrams, &indexes.oracle_trigram);
     }
     let card_ids: Box<dyn Iterator<Item = u32>> = match &candidate_cards {
         Some(v) => Box::new(v.iter().copied()),
@@ -2873,7 +2962,7 @@ const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 /// catch (e.g. reordering same-size fields, changing an index type) — and on
 /// any FLAVOR_FP_FEATURES change: archived fingerprints are built with that
 /// table, so a new table reading old fingerprints breaks the superset test.
-const ARCHIVE_FORMAT_VERSION: u32 = 20260715;
+const ARCHIVE_FORMAT_VERSION: u32 = 20260716;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -3264,6 +3353,7 @@ impl QueryEngine {
             sort_perms:     build_sort_permutations(&cards, &printings, &offsets),
             artwork_groups: build_artwork_group_counts(&printings, &offsets),
             planes:         build_bit_planes(&cards),
+            name_bigrams:   build_name_bigram_index(&cards),
         };
 
         #[cfg(feature = "alloc-counter")]

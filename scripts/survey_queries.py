@@ -33,7 +33,7 @@ from scripts.bench_bitplanes import load_engine  # noqa: E402
 # the tail with rows we've decided not to optimize. NOTE: changing this list
 # changes the seeded corpus — regenerate baselines when it changes.
 _EXCLUDED_DIMS = {"price_tix", "price_eur"}
-_DIM_WEIGHTS = [w for w, n in zip(_DIM_WEIGHTS, _DIM_NAMES) if n not in _EXCLUDED_DIMS]
+_DIM_WEIGHTS = [w for w, n in zip(_DIM_WEIGHTS, _DIM_NAMES, strict=False) if n not in _EXCLUDED_DIMS]
 _DIM_NAMES = [n for n in _DIM_NAMES if n not in _EXCLUDED_DIMS]
 
 # Realistic parameter biases: UI default ordering dominates; unique matches
