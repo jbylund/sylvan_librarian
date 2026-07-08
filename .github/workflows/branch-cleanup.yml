@@ -12,7 +12,7 @@ name: Branch Cleanup
 
 on:
   schedule:
-    - cron: "17 6 * * 1" # weekly, Monday 06:17 UTC
+    - cron: "17 6 * * *" # daily, 06:17 UTC — the 3-day grace period is the safety margin; frequency just bounds cleanup latency
   workflow_dispatch: {}
 
 permissions:
