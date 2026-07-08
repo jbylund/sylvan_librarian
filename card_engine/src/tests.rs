@@ -1,6 +1,7 @@
 use super::{
     build_numeric_index, build_oracle_text_index, build_tag_index, build_trigram_index,
-    build_type_index, build_rarity_index, build_flavor_index, build_thresholded_tag_index, build_sort_permutations, flavor_fingerprint, flavor_match_sets,
+    build_type_index, build_rarity_index, build_flavor_index, build_thresholded_tag_index, build_sort_permutations,
+    build_artwork_group_counts, flavor_fingerprint, flavor_match_sets,
     cards_of_printings, count_common_keywords, count_common_types,
     build_artist_index, build_range_index, range_candidates, narrow_candidates, rarity_candidates,
     range_too_broad_to_narrow, run_query, trigram_candidates, int_range_candidates, PrintingRangeIndex, NARROW_FLOOR,
@@ -648,6 +649,7 @@ fn bench_checked_vs_unchecked_access() {
         price_usd:      Vec::new(),
         collector_number: Vec::new(),
         sort_perms:     build_sort_permutations(&cards, &printings, &offsets),
+        artwork_groups: build_artwork_group_counts(&printings, &offsets),
     };
     let data = CardData {
         cards,
@@ -1036,6 +1038,7 @@ fn streamed_selection_matches_gathered() {
         }
         if with_perms {
             data.indexes.sort_perms = build_sort_permutations(&data.cards, &data.printings, &data.offsets);
+            data.indexes.artwork_groups = build_artwork_group_counts(&data.printings, &data.offsets);
         }
         rkyv::to_bytes::<Error>(&data).expect("serialize")
     };
@@ -1074,6 +1077,19 @@ fn streamed_selection_matches_gathered() {
             }
         }
     }
+}
+
+// Group counts collapse duplicate illustrations within a card.
+#[test]
+fn artwork_group_counts_dedup_illustrations() {
+    let mut vocab = VocabInterner::new();
+    let cards = vec![stub_card(1, TYPE_CREATURE, &[], &mut vocab)];
+    let mut data = store_of(cards, &[4], vocab);
+    data.printings[0].illustration_id = 7;
+    data.printings[1].illustration_id = 7; // same art, different printing
+    data.printings[2].illustration_id = 9;
+    data.printings[3].illustration_id = 7;
+    assert_eq!(build_artwork_group_counts(&data.printings, &data.offsets), vec![2]);
 }
 
 // Permutations put missing sort values last in both directions and reverse

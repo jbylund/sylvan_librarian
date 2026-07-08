@@ -1216,6 +1216,25 @@ fn build_sort_permutations(cards: &[OracleCard], printings: &[Printing], offsets
     }
 }
 
+/// Distinct illustration groups per card (u16: max printings per card is ~1k).
+/// The streamed match phase uses this when the card pass already proved every
+/// printing matches: the artwork-mode contribution is then a build-time
+/// constant and the per-printing grouping walk is skipped entirely.
+fn build_artwork_group_counts(printings: &[Printing], offsets: &[u32]) -> Vec<u16> {
+    let mut counts = Vec::with_capacity(offsets.len().saturating_sub(1));
+    let mut ills: Vec<u128> = Vec::new();
+    for w in offsets.windows(2) {
+        ills.clear();
+        for p in &printings[w[0] as usize..w[1] as usize] {
+            if !ills.contains(&p.illustration_id) {
+                ills.push(p.illustration_id);
+            }
+        }
+        counts.push(ills.len() as u16);
+    }
+    counts
+}
+
 // ─── Printing-space range indexes (released_at, price, collector number) ─────
 // Sorted (value, printing idx); binary-searched ranges answer range filters in
 // printing space. Printings without the value are absent (they can never
@@ -1434,6 +1453,7 @@ struct CardIndexes {
     price_usd:      PrintingRangeIndex,       // printing space (f32_sort_bits of the price)
     collector_number: PrintingRangeIndex,     // printing space (extracted int)
     sort_perms:     SortPermutations,          // card space (streamed selection)
+    artwork_groups: Vec<u16>,                  // card space: distinct illustration groups
 }
 
 impl Default for CardIndexes {
@@ -1459,6 +1479,7 @@ impl Default for CardIndexes {
             price_usd:      Vec::new(),
             collector_number: Vec::new(),
             sort_perms:     SortPermutations::default(),
+            artwork_groups: Vec::new(),
         }
     }
 }
@@ -2043,7 +2064,7 @@ fn run_query<'a>(
         if maybe_broad && perm.len() == cards.len() && !cards.is_empty() {
             return run_query_streamed(
                 cards, printings, offsets, strings, filter, mode, prefer, sort_col, descending, limit,
-                page_offset, perm, card_ids,
+                page_offset, perm, card_ids, &indexes.artwork_groups,
             );
         }
     }
@@ -2096,6 +2117,7 @@ fn run_query_streamed<'a>(
     page_offset: usize,
     perm: &Archived<Vec<u32>>,
     card_ids: Box<dyn Iterator<Item = u32> + '_>,
+    artwork_groups: &Archived<Vec<u16>>,
 ) -> (usize, Vec<(&'a AOracleCard, &'a APrinting)>) {
     let mut residual: Vec<&FilterExpr> = Vec::new();
     let mut residual_is_or = false;
@@ -2103,7 +2125,16 @@ fn run_query_streamed<'a>(
 
     // Match phase: sequential (candidate-order) evaluation into per-card
     // counts. Exact total = sum of counts, known before emission strategy.
-    let mut counts: Vec<u32> = vec![0; cards.len()];
+    // The counts buffer is reused across queries (thread-local) — the
+    // per-query ~126 kB allocation was measurable on selective queries.
+    thread_local! {
+        static COUNTS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    COUNTS.with(|counts_cell| {
+    let mut counts = counts_cell.borrow_mut();
+    counts.clear();
+    counts.resize(cards.len(), 0);
+    let have_group_counts = artwork_groups.len() == cards.len();
     let mut total: usize = 0;
     for cid in card_ids {
         let card = &cards[cid as usize];
@@ -2114,7 +2145,13 @@ fn run_query_streamed<'a>(
         };
         let start = u32::from(offsets[cid as usize]) as usize;
         let end   = u32::from(offsets[cid as usize + 1]) as usize;
-        let c = card_match_count(card, printings, start, end, all_match, &residual, residual_is_or, mode, strings, &mut ills);
+        // Every printing matches: card/printing counts are O(1) inside the
+        // helper, and the artwork group count is a build-time constant.
+        let c = if all_match && matches!(mode, Mode::Artwork) && have_group_counts {
+            u32::from(u16::from(artwork_groups[cid as usize]))
+        } else {
+            card_match_count(card, printings, start, end, all_match, &residual, residual_is_or, mode, strings, &mut ills)
+        };
         counts[cid as usize] = c;
         total += c as usize;
     }
@@ -2191,6 +2228,7 @@ fn run_query_streamed<'a>(
         skip = 0;
     }
     (total, page)
+    }) // COUNTS.with
 }
 
 // ─── Result field selection ───────────────────────────────────────────────────
@@ -2688,6 +2726,7 @@ impl QueryEngine {
             price_usd:      build_range_index(&printings, |p| p.price_usd.map(f32_sort_bits)),
             collector_number: build_range_index(&printings, |p| p.collector_number_int.map(u32::from)),
             sort_perms:     build_sort_permutations(&cards, &printings, &offsets),
+            artwork_groups: build_artwork_group_counts(&printings, &offsets),
         };
 
         #[cfg(feature = "alloc-counter")]
