@@ -1417,6 +1417,8 @@ class APIResource:
             # what's in the query => the db column name
             CardOrdering.CMC: "cmc",
             CardOrdering.EDHREC: "edhrec_rank",
+            # lower() matches the engine, which sorts on card_name_lower
+            CardOrdering.NAME: "lower(card_name)",
             CardOrdering.POWER: "creature_power",
             CardOrdering.RARITY: "card_rarity_int",
             CardOrdering.TOUGHNESS: "creature_toughness",

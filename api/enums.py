@@ -28,6 +28,7 @@ class CardOrdering(enum.StrEnum):
     CMC = enum.auto()
     CUBECOBRA = enum.auto()
     EDHREC = enum.auto()
+    NAME = enum.auto()
     POWER = enum.auto()
     RARITY = enum.auto()
     TOUGHNESS = enum.auto()
