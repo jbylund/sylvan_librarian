@@ -833,6 +833,18 @@ fn trigram_candidates(idx: &Archived<TrigramIndex>, word: &str) -> Option<Vec<u3
     Some(result)
 }
 
+/// Length of the needle's shortest trigram posting list — an upper bound on
+/// trigram_candidates()' result size, available without materializing or
+/// intersecting anything. None: needle under 3 bytes (no trigrams).
+/// Some(0): a trigram is absent from the index, so nothing can match.
+fn trigram_min_posting(idx: &Archived<TrigramIndex>, word: &str) -> Option<usize> {
+    let bytes = word.as_bytes();
+    if bytes.len() < 3 {
+        return None;
+    }
+    bytes.windows(3).map(|w| idx.get(&[w[0], w[1], w[2]]).map_or(0, |l| l.len())).min()
+}
+
 fn union_sorted(a: Vec<u32>, b: Vec<u32>) -> Vec<u32> {
     let mut out = Vec::with_capacity(a.len() + b.len());
     let (mut i, mut j) = (0, 0);
@@ -2030,7 +2042,7 @@ fn run_query<'a>(
     printings: &'a [APrinting],
     offsets: &AOffsets,
     strings: &AStrings,
-    filter: &FilterExpr,
+    filter: &mut FilterExpr,
     plane: Option<&PlaneExpr>,
     unique: &str,
     prefer: &str,
@@ -2081,6 +2093,17 @@ fn run_query<'a>(
             })
         }
     };
+
+    // Memoize when the driver is about to evaluate the filter against (nearly)
+    // every card: no candidates at all, or a candidate set so broad it hardly
+    // narrows — a broad plane bitmap ANDed with an unnarrowable Or would
+    // otherwise run its substring scans over most of the corpus. Resolving the
+    // indexable text predicates through their trigram indexes once here (#624)
+    // turns those per-card substring searches into integer binary searches.
+    // The half-corpus line mirrors memoize_text_predicates' decline guard.
+    if candidate_cards.as_ref().is_none_or(|v| v.len() > cards.len() / 2) {
+        filter.memoize_text_predicates(cards, strings, &indexes.name_trigram, &indexes.oracle_trigram);
+    }
     let card_ids: Box<dyn Iterator<Item = u32>> = match &candidate_cards {
         Some(v) => Box::new(v.iter().copied()),
         None    => Box::new(0..cards.len() as u32),
@@ -2902,7 +2925,7 @@ impl QueryEngine {
         // hundred word ops instead of per-card dispatch. Guarded on the archive
         // carrying planes for this card count — the format-version bump already
         // rejects pre-plane archives, this is defense in depth.
-        let (plane_expr, filter_expr) =
+        let (plane_expr, mut filter_expr) =
             if u32::from(data.indexes.planes.n_cards) as usize == data.cards.len() && !data.cards.is_empty() {
                 split_planes(filter_expr)
             } else {
@@ -2910,7 +2933,7 @@ impl QueryEngine {
             };
 
         let (total, page) = run_query(
-            &data.cards, &data.printings, &data.offsets, &data.strings, &filter_expr, plane_expr.as_ref(),
+            &data.cards, &data.printings, &data.offsets, &data.strings, &mut filter_expr, plane_expr.as_ref(),
             unique, prefer, orderby, direction, limit, offset, &data.indexes,
         );
 

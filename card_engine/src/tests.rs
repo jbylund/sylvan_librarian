@@ -532,11 +532,11 @@ fn run_query_walk_dedups_and_prefers() {
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
-    let creatures = FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
-    let run = |unique: &str, prefer: &str| {
+    let mut creatures = FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
+    let mut run = |unique: &str, prefer: &str| {
         run_query(
             &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
-            &creatures, None, unique, prefer, "edhrec", "asc", 100, 0, &archived.indexes,
+            &mut creatures, None, unique, prefer, "edhrec", "asc", 100, 0, &archived.indexes,
         )
     };
 
@@ -575,10 +575,10 @@ fn run_query_artwork_groups_shared_illustrations() {
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
-    let all = FilterExpr::True;
+    let mut all = FilterExpr::True;
     let (total, page) = run_query(
         &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
-        &all, None, "artwork", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+        &mut all, None, "artwork", "default", "edhrec", "asc", 100, 0, &archived.indexes,
     );
     assert_eq!(total, 3); // illustrations {1, 2, 4}
     // Group {printings 0, 2}: printing 0 has the higher prefer score (desc order)
@@ -1065,14 +1065,16 @@ fn streamed_selection_matches_gathered() {
             for orderby in ["edhrec", "cmc"] {
                 for direction in ["asc", "desc"] {
                     for offset in [0usize, 7, 1120] {
-                        let f = filt();
+                        // Fresh filter per store: run_query may memoize text
+                        // predicates into store-specific string ids, so a
+                        // filter must never outlive the store it ran against.
                         let (tg, pg) = run_query(
                             &gathered.cards, &gathered.printings, &gathered.offsets, &gathered.strings,
-                            &f, None, unique, prefer, orderby, direction, 10, offset, &gathered.indexes,
+                            &mut filt(), None, unique, prefer, orderby, direction, 10, offset, &gathered.indexes,
                         );
                         let (ts, ps) = run_query(
                             &streamed.cards, &streamed.printings, &streamed.offsets, &streamed.strings,
-                            &f, None, unique, prefer, orderby, direction, 10, offset, &streamed.indexes,
+                            &mut filt(), None, unique, prefer, orderby, direction, 10, offset, &streamed.indexes,
                         );
                         let ids = |v: &[(&super::AOracleCard, &super::APrinting)]| -> Vec<(u128, u128)> {
                             v.iter().map(|(c, p)| (u128::from(c.oracle_id), u128::from(p.scryfall_id))).collect()
@@ -1410,15 +1412,15 @@ fn run_query_plane_path_parity() {
     ];
     for make in &filters {
         for unique in ["card", "printing", "artwork"] {
-            let plain = make();
+            let mut plain = make();
             let (t0, p0) = run_query(
                 &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
-                &plain, None, unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
+                &mut plain, None, unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
             );
-            let (pe, residual) = split_planes(make());
+            let (pe, mut residual) = split_planes(make());
             let (t1, p1) = run_query(
                 &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
-                &residual, pe.as_ref(), unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
+                &mut residual, pe.as_ref(), unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
             );
             assert_eq!(t0, t1, "totals must agree (unique={unique})");
             let ids = |page: &[(&super::AOracleCard, &super::APrinting)]| -> Vec<u128> {
@@ -1427,4 +1429,158 @@ fn run_query_plane_path_parity() {
             assert_eq!(ids(&p0), ids(&p1), "pages must agree (unique={unique})");
         }
     }
+}
+
+// ─── Bind-time text-predicate memoization (#624) ─────────────────────────────
+
+/// Store with real interned oracle texts and a name trigram index, for the
+/// memoization tests. Card 3 has no oracle text — interned as "" exactly like
+/// card_from_pydict does (contains on it is False, not NULL); card 4's text is
+/// a trigram candidate for "abcde" that contains() must reject; four texts
+/// share the marker "xyz" so a needle can exceed the half-corpus guard.
+fn text_fixture_store() -> CardData {
+    let mut vocab = VocabInterner::new();
+    let mut interner = Interner::new();
+    let specs: &[(&str, Option<&str>)] = &[
+        ("lightning bolt", Some("deal 3 damage to any target xyz")),
+        ("healing angel", Some("when this enters, you gain 3 life xyz")),
+        ("goblin token maker", Some("create two 1/1 red goblin creature tokens xyz")),
+        ("vanilla bear", None),
+        ("trigram trap", Some("abcbcde xyz")),
+        ("draw engine", Some("draw a card. draw another card")),
+    ];
+    let cards: Vec<OracleCard> = specs
+        .iter()
+        .enumerate()
+        .map(|(i, &(name, text))| {
+            let mut c = stub_card(i as u128 + 1, TYPE_CREATURE, &[], &mut vocab);
+            c.card_name_lower = InlineStr::from_str(name);
+            c.card_name_id = interner.intern(name.to_string());
+            c.oracle_text_lower_id = interner.intern(text.unwrap_or_default().to_string());
+            c
+        })
+        .collect();
+    let mut data = store_of(cards, &[1usize; 6], vocab);
+    data.strings = interner.strings;
+    data.indexes.name_trigram = build_trigram_index(&data.cards, |c| c.card_name_lower.as_str());
+    data.indexes.oracle_trigram = build_oracle_text_index(&data.cards, &data.strings);
+    data
+}
+
+// Memoized nodes must reproduce TextContains truth for every card — including
+// NULL on textless cards, trigram false positives rejected by the verify, and
+// negation (Not(Null) stays Null, so `-o:x` still excludes textless cards).
+#[test]
+fn memoize_text_predicates_parity() {
+    let data = text_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let memo = |mut f: FilterExpr| {
+        f.memoize_text_predicates(&archived.cards, &archived.strings, &archived.indexes.name_trigram, &archived.indexes.oracle_trigram);
+        f
+    };
+    let oracle = |w: &str| FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: w.to_string() };
+    let name = |w: &str| FilterExpr::TextContains { field: TextSearchField::NameLower, word: w.to_string() };
+
+    for needle in ["damage", "draw", "goblin", "abcde", "card.", "zzz"] {
+        let rewritten = memo(oracle(needle));
+        assert!(matches!(rewritten, FilterExpr::OracleMatch { .. }), "oracle:{needle} must rewrite");
+        let neg = memo(FilterExpr::Not(Box::new(oracle(needle))));
+        let neg_orig = FilterExpr::Not(Box::new(oracle(needle)));
+        for card in archived.cards.iter() {
+            assert!(rewritten.eval_card(card, &archived.strings) == oracle(needle).eval_card(card, &archived.strings));
+            assert!(neg.eval_card(card, &archived.strings) == neg_orig.eval_card(card, &archived.strings));
+        }
+    }
+    for needle in ["angel", "goblin", "trap", "zzz"] {
+        let rewritten = memo(name(needle));
+        assert!(matches!(rewritten, FilterExpr::NameMatch { .. }), "name:{needle} must rewrite");
+        for card in archived.cards.iter() {
+            assert!(rewritten.eval_card(card, &archived.strings) == name(needle).eval_card(card, &archived.strings));
+        }
+    }
+    // "abcde"'s trigrams all exist in "abcbcde" but the text does not contain
+    // it: the verify must reject, leaving an empty match set.
+    match memo(oracle("abcde")) {
+        FilterExpr::OracleMatch { gids } => assert!(gids.is_empty(), "trigram false positive must be verified away"),
+        _ => panic!("must rewrite"),
+    }
+}
+
+// The rewrite must refuse: sub-trigram needles, non-card text fields, and
+// needles whose candidates exceed half the corpus (binary search stops paying).
+#[test]
+fn memoize_text_predicates_guards() {
+    let data = text_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let memo = |mut f: FilterExpr| {
+        f.memoize_text_predicates(&archived.cards, &archived.strings, &archived.indexes.name_trigram, &archived.indexes.oracle_trigram);
+        f
+    };
+    let short = memo(FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: "dr".to_string() });
+    assert!(matches!(short, FilterExpr::TextContains { .. }), "2-char needle has no trigrams");
+    let flavor = memo(FilterExpr::TextContains { field: TextSearchField::FlavorTextLower, word: "damage".to_string() });
+    assert!(matches!(flavor, FilterExpr::TextContains { .. }), "flavor is printing-level, not ours");
+    // "xyz" appears in 4 of the 6 distinct texts (> half): guard keeps the scan.
+    let broad = memo(FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: "xyz".to_string() });
+    assert!(matches!(broad, FilterExpr::TextContains { .. }), "broad needle stays unrewritten");
+}
+
+// End-to-end trigger: a full-scan Or (unnarrowable sibling) memoizes inside
+// run_query and returns the brute-force result; a narrowable query is left
+// untouched.
+#[test]
+fn run_query_memoizes_only_full_scans() {
+    let data = text_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let oracle = |w: &str| FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: w.to_string() };
+    // Keywords <= "flying": no narrowing arm for Le, true for keyword-less cards.
+    let broad_sibling = || FilterExpr::CollectionCmp {
+        field: CollField::Keywords,
+        op: CmpOp::Le,
+        value: "flying".to_string(),
+        value_id: None,
+    };
+
+    let mut f = FilterExpr::Or(vec![oracle("draw"), broad_sibling()]);
+    let (total, _) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut f, None, "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+    );
+    assert_eq!(total, 6, "every card matches the Or (empty keywords pass Le)");
+    match &f {
+        FilterExpr::Or(children) => assert!(
+            matches!(children[0], FilterExpr::OracleMatch { .. }),
+            "full-scan Or must memoize its oracle child"
+        ),
+        _ => panic!("shape preserved"),
+    }
+
+    // Narrowable single predicate: candidates exist, no rewrite.
+    let mut g = oracle("draw");
+    let (total, _) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut g, None, "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+    );
+    assert_eq!(total, 1);
+    assert!(matches!(g, FilterExpr::TextContains { .. }), "narrowable query stays unrewritten");
+}
+
+// The NONE_STR → Null defense in OracleMatch mirrors TextContains exactly.
+// Loaded cards can't produce this state (missing text interns ""), but stub
+// cards can, and both paths must agree there too.
+#[test]
+fn oracle_match_none_str_mirrors_text_contains() {
+    let mut vocab = VocabInterner::new();
+    let card = stub_card(1, TYPE_CREATURE, &[], &mut vocab); // oracle_text_lower_id = NONE_STR
+    let data = store_of(vec![card], &[1], vocab);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let memoized = FilterExpr::OracleMatch { gids: Vec::new() };
+    let plain = FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: "draw".to_string() };
+    assert!(memoized.eval_card(&archived.cards[0], &archived.strings) == Tri::Null);
+    assert!(plain.eval_card(&archived.cards[0], &archived.strings) == Tri::Null);
 }
