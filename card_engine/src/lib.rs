@@ -1855,6 +1855,7 @@ enum Mode { Card, Artwork, Printing }
 /// passing printings for Printing mode, distinct illustrations with a passing
 /// printing for Artwork mode. `ills` is a reused scratch buffer.
 #[allow(clippy::too_many_arguments)]
+#[inline(always)]
 fn card_match_count(
     card: &AOracleCard,
     printings: &[APrinting],
@@ -1910,6 +1911,7 @@ fn card_match_count(
 /// Emit this card's matches as (sort key, cid, pid) tuples — the per-card body
 /// of the gathered path, shared by the streamed path for page cards.
 #[allow(clippy::too_many_arguments)]
+#[inline(always)]
 fn push_card_matches(
     card: &AOracleCard,
     cid: u32,
@@ -2031,9 +2033,14 @@ fn run_query<'a>(
         None    => Box::new(0..cards.len() as u32),
     };
 
-    // Streamed selection when the orderby has a precomputed permutation.
+    // Streamed selection when the orderby has a precomputed permutation — and
+    // the query is broad enough for the match/emit split to pay: a narrowed
+    // candidate list at or below the gather threshold can't produce more
+    // matches than that, so the fused path is already microseconds and the
+    // match phase would be pure overhead.
+    let maybe_broad = candidate_cards.as_ref().is_none_or(|v| v.len() > STREAM_MIN_MATCHES);
     if let Some(perm) = indexes.sort_perms.get(sort_col, descending) {
-        if perm.len() == cards.len() && !cards.is_empty() {
+        if maybe_broad && perm.len() == cards.len() && !cards.is_empty() {
             return run_query_streamed(
                 cards, printings, offsets, strings, filter, mode, prefer, sort_col, descending, limit,
                 page_offset, perm, card_ids,
