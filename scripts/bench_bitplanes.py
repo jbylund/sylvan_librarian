@@ -32,9 +32,8 @@ import time
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-import card_engine
-
-from api.parsing import parse_scryfall_query
+import card_engine  # noqa: E402
+from api.parsing import parse_scryfall_query  # noqa: E402
 
 # (group, query, unique, orderby, prefer) — direction=asc, limit=100, offset=0 throughout.
 # Groups map to the #630 phases; "control" rows are selective queries that must not regress.
@@ -87,7 +86,8 @@ def load_engine(corpus: pathlib.Path, shm_path: pathlib.Path) -> card_engine.Que
     """Build a fresh engine store from the corpus JSONL via the staged reload API."""
     engine = card_engine.QueryEngine(str(shm_path))
     if not engine.reload_begin():
-        raise RuntimeError("reload_begin returned False (stale archive published concurrently?)")
+        msg = "reload_begin returned False (stale archive published concurrently?)"
+        raise RuntimeError(msg)
     t0 = time.monotonic()
     batch: list[dict] = []
     with corpus.open() as fh:
@@ -103,10 +103,19 @@ def load_engine(corpus: pathlib.Path, shm_path: pathlib.Path) -> card_engine.Que
     return engine
 
 
-def bench_one(engine: card_engine.QueryEngine, query: str, unique: str, orderby: str, prefer: str, window: float):
-    """Return (total, n, avg_ms, min_ms) for one config over a fixed timed window."""
+def bench_one(engine: card_engine.QueryEngine, config: tuple[str, str, str, str], window: float) -> tuple[int, int, float, float]:
+    """Return (total, n, avg_ms, min_ms) for one (query, unique, orderby, prefer) config over a fixed timed window."""
+    query, unique, orderby, prefer = config
     filters = parse_scryfall_query(query)
-    kw = dict(filters=filters, unique=unique, prefer=prefer, orderby=orderby, direction="asc", limit=100, offset=0)
+    kw = {
+        "filters": filters,
+        "unique": unique,
+        "prefer": prefer,
+        "orderby": orderby,
+        "direction": "asc",
+        "limit": 100,
+        "offset": 0,
+    }
     total = engine.query(**kw)[0]
     for _ in range(WARMUP):
         engine.query(**kw)
@@ -125,6 +134,7 @@ def bench_one(engine: card_engine.QueryEngine, query: str, unique: str, orderby:
 
 
 def main() -> None:
+    """Load the corpus, time every config, and write the results CSV."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--corpus", type=pathlib.Path, default=REPO_ROOT / "benchmarks/bitplanes/corpus.jsonl")
     parser.add_argument("--out", type=pathlib.Path, required=True, help="CSV output path")
@@ -146,10 +156,12 @@ def main() -> None:
         writer = csv.writer(fh)
         writer.writerow(["rev", "group", "query", "unique", "orderby", "prefer", "total", "n", "avg_ms", "min_ms"])
         for group, query, unique, orderby, prefer in CONFIGS:
-            total, n, avg_ms, min_ms = bench_one(engine, query, unique, orderby, prefer, args.window)
+            total, n, avg_ms, min_ms = bench_one(engine, (query, unique, orderby, prefer), args.window)
             writer.writerow([rev, group, query, unique, orderby, prefer, total, n, f"{avg_ms:.4f}", f"{min_ms:.4f}"])
             fh.flush()
-            print(f"{group:<11} {query:<26} {unique:<9} {orderby:<8} {prefer:<9} {total:>7} {avg_ms:>8.3f} {min_ms:>8.3f}", flush=True)
+            print(
+                f"{group:<11} {query:<26} {unique:<9} {orderby:<8} {prefer:<9} {total:>7} {avg_ms:>8.3f} {min_ms:>8.3f}", flush=True
+            )
 
     print(f"\nWrote {args.out}")
 
