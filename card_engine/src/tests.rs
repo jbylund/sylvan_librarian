@@ -2,8 +2,8 @@ use super::{
     build_numeric_index, build_oracle_text_index, build_tag_index, build_trigram_index,
     build_type_index, build_rarity_index, build_flavor_index, flavor_fingerprint, flavor_match_sets,
     cards_of_printings, count_common_keywords, count_common_types,
-    build_artist_index, build_range_index, date_range_candidates, narrow_candidates, rarity_candidates,
-    range_too_broad_to_narrow, run_query, trigram_candidates, DateIndex, NARROW_FLOOR,
+    build_artist_index, build_range_index, range_candidates, narrow_candidates, rarity_candidates,
+    range_too_broad_to_narrow, run_query, trigram_candidates, int_range_candidates, PrintingRangeIndex, NARROW_FLOOR,
     ArtistIndex, CardData, CardIndexes, Candidates, NumExpr, NumField, RarityIndex,
     CollField, CmpOp, FilterExpr, InlineStr, Interner, ManaCost, OracleCard, Printing, TagIndex,
     Tri, TrigramIndex, VocabInterner, ARTIST_NONE, NONE_STR, TYPE_ARTIFACT, TYPE_CREATURE, TYPE_INSTANT,
@@ -645,6 +645,7 @@ fn bench_checked_vs_unchecked_access() {
         set_codes:      HashMap::new(),
         released_at:    Vec::new(),
         price_usd:      Vec::new(),
+        collector_number: Vec::new(),
     };
     let data = CardData {
         cards,
@@ -907,6 +908,62 @@ fn flavor_match_bind_eval_and_narrow() {
     assert_eq!(with, without);
 }
 
+// Collector numbers index the extracted int; fractional and out-of-range
+// query values resolve to exact half-open ranges (or exact empty sets), and
+// printings without a numeric part are absent (SQL NULL semantics).
+#[test]
+fn collector_number_narrowing() {
+    let mut vocab = VocabInterner::new();
+    let cards = vec![stub_card(1, TYPE_CREATURE, &[], &mut vocab), stub_card(2, TYPE_CREATURE, &[], &mut vocab)];
+    let mut data = store_of(cards, &[2, 2], vocab);
+    data.printings[0].collector_number_int = Some(100);
+    data.printings[1].collector_number_int = Some(228); // "228s" extracts to 228
+    data.printings[2].collector_number_int = Some(101);
+    // printings[3] has no numeric part: absent from the index
+    data.indexes.collector_number =
+        build_range_index(&data.printings, |p| p.collector_number_int.map(u32::from));
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let cn = |op, v| FilterExpr::NumericCmp {
+        lhs: NumExpr::Field(NumField::CollectorNumberInt),
+        op,
+        rhs: NumExpr::Const(v),
+    };
+    let narrow = |f: &FilterExpr| match narrow_candidates(f, &archived.indexes, &archived.offsets) {
+        Some(Candidates::Printings(v)) => Some(v),
+        Some(Candidates::Cards(_)) => panic!("cn must narrow in printing space"),
+        None => None,
+    };
+
+    assert_eq!(narrow(&cn(CmpOp::Eq, 100.0)), Some(vec![0]));
+    assert_eq!(narrow(&cn(CmpOp::Ge, 101.0)), Some(vec![1, 2]));
+    assert_eq!(narrow(&cn(CmpOp::Gt, 101.0)), Some(vec![1]));
+    // Fractional bounds are exact: cn<100.5 means cn<=100; cn>100.5 means cn>=101.
+    assert_eq!(narrow(&cn(CmpOp::Lt, 100.5)), Some(vec![0]));
+    assert_eq!(narrow(&cn(CmpOp::Gt, 100.5)), Some(vec![1, 2]));
+    // Fractional equality and out-of-range comparisons prove the empty set.
+    assert_eq!(narrow(&cn(CmpOp::Eq, 100.5)), Some(vec![]));
+    assert_eq!(narrow(&cn(CmpOp::Lt, -3.0)), Some(vec![]));
+    // Negative lower bounds cover everything indexed (printing 3 stays absent).
+    assert_eq!(narrow(&cn(CmpOp::Ge, -3.0)), Some(vec![0, 1, 2]));
+    // Ne never narrows.
+    assert_eq!(narrow(&cn(CmpOp::Ne, 100.0)), None);
+
+    // Flipped operand order: 101 <= cn.
+    let flipped = FilterExpr::NumericCmp {
+        lhs: NumExpr::Const(101.0),
+        op: CmpOp::Le,
+        rhs: NumExpr::Field(NumField::CollectorNumberInt),
+    };
+    assert_eq!(narrow(&flipped), Some(vec![1, 2]));
+
+    // The structural payoff: an Or with a trigram-narrowable sibling stays
+    // narrowable now that cn has an index (this was the post-#622 worst query).
+    let or = FilterExpr::Or(vec![cn(CmpOp::Eq, 228.0), cn(CmpOp::Eq, 100.0)]);
+    assert_eq!(narrow(&or), Some(vec![0, 1]));
+}
+
 #[test]
 fn set_code_and_date_narrowing() {
     let mut vocab = VocabInterner::new();
@@ -975,11 +1032,11 @@ fn broad_ranges_decline_to_narrow() {
 
     // End-to-end through the archived index: a broad slice returns None (fall
     // back to the scan), a selective slice still narrows.
-    let idx: DateIndex = (0..8_000u32).map(|v| (v, v)).collect();
+    let idx: PrintingRangeIndex = (0..8_000u32).map(|v| (v, v)).collect();
     let bytes = rkyv::to_bytes::<Error>(&idx).expect("serialize");
-    let archived = rkyv::access::<Archived<DateIndex>, Error>(&bytes).expect("access");
-    assert!(date_range_candidates(archived, 0, u32::MAX).is_none());
-    assert_eq!(date_range_candidates(archived, 100, 200).map(|v| v.len()), Some(100));
+    let archived = rkyv::access::<Archived<PrintingRangeIndex>, Error>(&bytes).expect("access");
+    assert!(range_candidates(archived, 0, u32::MAX).is_none());
+    assert_eq!(range_candidates(archived, 100, 200).map(|v| v.len()), Some(100));
 }
 
 #[test]

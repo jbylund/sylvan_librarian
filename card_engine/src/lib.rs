@@ -1134,13 +1134,14 @@ fn expand_flavor_ids(idx: &Archived<FlavorIndex>, dense_ids: &[u32]) -> Vec<u32>
     out
 }
 
-// ─── Sorted-u32 range indexes (released_at, price) ───────────────────────────
+// ─── Printing-space range indexes (released_at, price, collector number) ─────
 // Sorted (value, printing idx); binary-searched ranges answer range filters in
 // printing space. Printings without the value are absent (they can never
 // satisfy a comparison — SQL NULL semantics). Dates store yyyymmdd directly;
-// prices store f32_sort_bits(price), which orders like the float.
+// collector numbers store the extracted int; prices store
+// f32_sort_bits(price), which orders like the float.
 
-type DateIndex = Vec<(u32, u32)>;
+type PrintingRangeIndex = Vec<(u32, u32)>;
 
 // Printing-space range narrowing is a pessimization when the matched slice
 // covers too much of the index: gathering + sorting the candidate ids and
@@ -1161,8 +1162,8 @@ fn range_too_broad_to_narrow(matched: usize, index_len: usize) -> bool {
     matched > NARROW_FLOOR && matched as f64 > index_len as f64 * MAX_NARROW_FRACTION
 }
 
-fn build_range_index(printings: &[Printing], get: impl Fn(&Printing) -> Option<u32>) -> DateIndex {
-    let mut idx: DateIndex = printings
+fn build_range_index(printings: &[Printing], get: impl Fn(&Printing) -> Option<u32>) -> PrintingRangeIndex {
+    let mut idx: PrintingRangeIndex = printings
         .iter()
         .enumerate()
         .filter_map(|(i, p)| get(p).map(|v| (v, i as u32)))
@@ -1175,7 +1176,7 @@ fn build_range_index(printings: &[Printing], get: impl Fn(&Printing) -> Option<u
 /// index. Query values are f64 while prices are f32, so bounds are widened by
 /// one position where rounding could otherwise exclude a real match —
 /// narrowing must stay a superset; the walk verifies exactly.
-fn price_candidates(idx: &Archived<DateIndex>, op: CmpOp, value: f64) -> Option<Vec<u32>> {
+fn price_candidates(idx: &Archived<PrintingRangeIndex>, op: CmpOp, value: f64) -> Option<Vec<u32>> {
     let b = f32_sort_bits(value as f32);
     let (lo, hi) = match op {
         CmpOp::Ne => return None,
@@ -1183,13 +1184,39 @@ fn price_candidates(idx: &Archived<DateIndex>, op: CmpOp, value: f64) -> Option<
         CmpOp::Lt | CmpOp::Le => (0, b.saturating_add(1)),
         CmpOp::Gt | CmpOp::Ge => (b, u32::MAX),
     };
-    date_range_candidates(idx, lo, hi)
+    range_candidates(idx, lo, hi)
+}
+
+/// Sorted printing ids satisfying `int_value op value`, for indexes over plain
+/// integers (collector number). Query values are f64 and may be fractional or
+/// out of range; bounds are chosen so the half-open [lo, hi) range is exact
+/// for every op — `cn<100.5` means value <= 100, `cn:100.5` matches nothing
+/// (an exact empty narrowing, not "no index").
+fn int_range_candidates(idx: &Archived<PrintingRangeIndex>, op: CmpOp, value: f64) -> Option<Vec<u32>> {
+    const TOP: i64 = u32::MAX as i64;
+    let (lo, hi): (i64, i64) = match op {
+        CmpOp::Ne => return None,
+        CmpOp::Eq => {
+            if value.fract() != 0.0 || value < 0.0 || value > TOP as f64 {
+                return Some(Vec::new());
+            }
+            (value as i64, value as i64 + 1)
+        }
+        CmpOp::Lt => (0, value.ceil().clamp(0.0, TOP as f64) as i64),
+        CmpOp::Le => (0, value.floor().clamp(-1.0, TOP as f64) as i64 + 1),
+        CmpOp::Gt => (value.floor().clamp(-1.0, TOP as f64) as i64 + 1, TOP),
+        CmpOp::Ge => (value.ceil().clamp(0.0, TOP as f64) as i64, TOP),
+    };
+    if hi <= lo {
+        return Some(Vec::new());
+    }
+    range_candidates(idx, lo as u32, hi as u32)
 }
 
 /// Sorted printing ids with an indexed value in [lo, hi), or None for ranges
 /// too broad to be worth narrowing (see MAX_NARROW_FRACTION). Callers translate
 /// ops into half-open ranges; Ne is not selective and never narrows.
-fn date_range_candidates(idx: &Archived<DateIndex>, lo: u32, hi: u32) -> Option<Vec<u32>> {
+fn range_candidates(idx: &Archived<PrintingRangeIndex>, lo: u32, hi: u32) -> Option<Vec<u32>> {
     let s = idx.partition_point(|p| u32::from(p.0) < lo);
     let e = idx.partition_point(|p| u32::from(p.0) < hi);
     if range_too_broad_to_narrow(e - s, idx.len()) {
@@ -1320,8 +1347,9 @@ struct CardIndexes {
     artists:        ArtistIndex,     // printing space (CSR by artist vocab id)
     flavor:         FlavorIndex,     // printing space (CSR by dense flavor text id)
     set_codes:      TagIndex,        // printing space
-    released_at:    DateIndex,       // printing space
-    price_usd:      DateIndex,       // printing space (f32_sort_bits of the price)
+    released_at:    PrintingRangeIndex,       // printing space
+    price_usd:      PrintingRangeIndex,       // printing space (f32_sort_bits of the price)
+    collector_number: PrintingRangeIndex,     // printing space (extracted int)
 }
 
 impl Default for CardIndexes {
@@ -1344,6 +1372,7 @@ impl Default for CardIndexes {
             set_codes:      HashMap::new(),
             released_at:    Vec::new(),
             price_usd:      Vec::new(),
+            collector_number: Vec::new(),
         }
     }
 }
@@ -1448,6 +1477,10 @@ fn narrow_candidates(filter: &FilterExpr, indexes: &Archived<CardIndexes>, offse
                 price_candidates(&indexes.price_usd, *op, *v).map(Candidates::Printings),
             (NumExpr::Const(v), NumExpr::Field(NumField::PriceUsd)) =>
                 price_candidates(&indexes.price_usd, flip_op(*op), *v).map(Candidates::Printings),
+            (NumExpr::Field(NumField::CollectorNumberInt), NumExpr::Const(v)) =>
+                int_range_candidates(&indexes.collector_number, *op, *v).map(Candidates::Printings),
+            (NumExpr::Const(v), NumExpr::Field(NumField::CollectorNumberInt)) =>
+                int_range_candidates(&indexes.collector_number, flip_op(*op), *v).map(Candidates::Printings),
             _ => None,
         },
 
@@ -1518,7 +1551,7 @@ fn narrow_candidates(filter: &FilterExpr, indexes: &Archived<CardIndexes>, offse
                 CmpOp::Gt => (value.saturating_add(1), u32::MAX),
                 CmpOp::Ge => (*value, u32::MAX),
             };
-            date_range_candidates(&indexes.released_at, lo, hi).map(Candidates::Printings)
+            range_candidates(&indexes.released_at, lo, hi).map(Candidates::Printings)
         }
 
         FilterExpr::YearCmp { op, year } => {
@@ -1534,7 +1567,7 @@ fn narrow_candidates(filter: &FilterExpr, indexes: &Archived<CardIndexes>, offse
                 CmpOp::Gt => ((y + 1) * 10_000, u32::MAX),
                 CmpOp::Ge => (y * 10_000, u32::MAX),
             };
-            date_range_candidates(&indexes.released_at, lo, hi).map(Candidates::Printings)
+            range_candidates(&indexes.released_at, lo, hi).map(Candidates::Printings)
         }
 
         FilterExpr::And(children) => {
@@ -1940,8 +1973,10 @@ fn card_to_pydict<'py>(
 
 const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 /// Bump on any archived-data-model change the struct sizes below wouldn't
-/// catch (e.g. reordering same-size fields, changing an index type).
-const ARCHIVE_FORMAT_VERSION: u32 = 20260709;
+/// catch (e.g. reordering same-size fields, changing an index type) — and on
+/// any FLAVOR_FP_FEATURES change: archived fingerprints are built with that
+/// table, so a new table reading old fingerprints breaks the superset test.
+const ARCHIVE_FORMAT_VERSION: u32 = 20260710;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -2327,6 +2362,7 @@ impl QueryEngine {
             },
             released_at:    build_range_index(&printings, |p| p.released_at_int),
             price_usd:      build_range_index(&printings, |p| p.price_usd.map(f32_sort_bits)),
+            collector_number: build_range_index(&printings, |p| p.collector_number_int.map(u32::from)),
         };
 
         #[cfg(feature = "alloc-counter")]
