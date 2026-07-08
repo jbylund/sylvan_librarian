@@ -665,6 +665,8 @@ fn card_from_pydict(d: &Bound<PyDict>, it: &mut Interner, vocab: &mut VocabInter
 
 mod filter;
 use filter::*;
+mod planes;
+use planes::*;
 
 // ─── Trigram index ────────────────────────────────────────────────────────────
 
@@ -1454,6 +1456,7 @@ struct CardIndexes {
     collector_number: PrintingRangeIndex,     // printing space (extracted int)
     sort_perms:     SortPermutations,          // card space (streamed selection)
     artwork_groups: Vec<u16>,                  // card space: distinct illustration groups
+    planes:         BitPlanes,                 // card space: transposed low-cardinality dims (#630)
 }
 
 impl Default for CardIndexes {
@@ -1480,6 +1483,7 @@ impl Default for CardIndexes {
             collector_number: Vec::new(),
             sort_perms:     SortPermutations::default(),
             artwork_groups: Vec::new(),
+            planes:         BitPlanes::default(),
         }
     }
 }
@@ -2027,6 +2031,7 @@ fn run_query<'a>(
     offsets: &AOffsets,
     strings: &AStrings,
     filter: &FilterExpr,
+    plane: Option<&PlaneExpr>,
     unique: &str,
     prefer: &str,
     orderby: &str,
@@ -2049,6 +2054,33 @@ fn run_query<'a>(
     // per-printing verification restores exactness for printing-space losses.
     let candidate_cards: Option<Vec<u32>> =
         narrow_candidates(filter, indexes, offsets).map(|c| c.into_cards(offsets));
+
+    // The plane bitmap is the exact card-level truth of the plane-consumed
+    // subexpression (split_planes), so it composes with the residual's postings
+    // candidates by intersection — and with no postings it IS the candidate
+    // list. Either way every surviving card still runs the residual through
+    // card_pass, which is what keeps printing-space losses and Null semantics
+    // with the residual, not the planes. The bitmap buffer is reused across
+    // queries (thread-local), same as the streamed counts buffer.
+    let candidate_cards: Option<Vec<u32>> = match plane {
+        None => candidate_cards,
+        Some(expr) => {
+            thread_local! {
+                static PLANE_BITMAP: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+            }
+            PLANE_BITMAP.with(|cell| {
+                let mut bitmap = cell.borrow_mut();
+                eval_planes(expr, &indexes.planes, &mut bitmap);
+                match candidate_cards {
+                    Some(mut v) => {
+                        v.retain(|&cid| bitmap_contains(&bitmap, cid));
+                        Some(v)
+                    }
+                    None => Some(bitmap_card_ids(&bitmap)),
+                }
+            })
+        }
+    };
     let card_ids: Box<dyn Iterator<Item = u32>> = match &candidate_cards {
         Some(v) => Box::new(v.iter().copied()),
         None    => Box::new(0..cards.len() as u32),
@@ -2337,7 +2369,7 @@ const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 /// catch (e.g. reordering same-size fields, changing an index type) — and on
 /// any FLAVOR_FP_FEATURES change: archived fingerprints are built with that
 /// table, so a new table reading old fingerprints breaks the superset test.
-const ARCHIVE_FORMAT_VERSION: u32 = 20260712;
+const ARCHIVE_FORMAT_VERSION: u32 = 20260714;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -2727,6 +2759,7 @@ impl QueryEngine {
             collector_number: build_range_index(&printings, |p| p.collector_number_int.map(u32::from)),
             sort_perms:     build_sort_permutations(&cards, &printings, &offsets),
             artwork_groups: build_artwork_group_counts(&printings, &offsets),
+            planes:         build_bit_planes(&cards),
         };
 
         #[cfg(feature = "alloc-counter")]
@@ -2864,8 +2897,20 @@ impl QueryEngine {
             .map_err(|e| QueryError::new_err(format!("build_filter: {e}")))?;
         filter_expr.bind(&data.coll_vocab, &data.coll_vocab_sorted, &data.artist_vocab, &data.indexes.flavor, &data.strings);
 
+        // Consume the plane-expressible part of the filter (colors/identity/
+        // types) into a bitmap expression; run_query evaluates it in a few
+        // hundred word ops instead of per-card dispatch. Guarded on the archive
+        // carrying planes for this card count — the format-version bump already
+        // rejects pre-plane archives, this is defense in depth.
+        let (plane_expr, filter_expr) =
+            if u32::from(data.indexes.planes.n_cards) as usize == data.cards.len() && !data.cards.is_empty() {
+                split_planes(filter_expr)
+            } else {
+                (None, filter_expr)
+            };
+
         let (total, page) = run_query(
-            &data.cards, &data.printings, &data.offsets, &data.strings, &filter_expr,
+            &data.cards, &data.printings, &data.offsets, &data.strings, &filter_expr, plane_expr.as_ref(),
             unique, prefer, orderby, direction, limit, offset, &data.indexes,
         );
 

@@ -1,14 +1,15 @@
 use super::{
     build_numeric_index, build_oracle_text_index, build_tag_index, build_trigram_index,
     build_type_index, build_rarity_index, build_flavor_index, build_thresholded_tag_index, build_sort_permutations,
-    build_artwork_group_counts, flavor_fingerprint, flavor_match_sets,
+    build_artwork_group_counts, build_bit_planes, flavor_fingerprint, flavor_match_sets,
     cards_of_printings, count_common_keywords, count_common_types,
     build_artist_index, build_range_index, range_candidates, narrow_candidates, rarity_candidates,
     range_too_broad_to_narrow, run_query, trigram_candidates, int_range_candidates, PrintingRangeIndex, NARROW_FLOOR,
-    ArtistIndex, CardData, CardIndexes, Candidates, NumExpr, NumField, RarityIndex,
+    bitmap_contains, compile_plane, eval_planes, split_planes,
+    ArtistIndex, CardData, CardIndexes, Candidates, ColorField, NumExpr, NumField, RarityIndex,
     CollField, CmpOp, FilterExpr, InlineStr, Interner, ManaCost, OracleCard, Printing, TagIndex,
-    Tri, TrigramIndex, VocabInterner, ARTIST_NONE, NONE_STR, TYPE_ARTIFACT, TYPE_CREATURE, TYPE_INSTANT,
-    TYPE_LEGENDARY, TYPE_PLANESWALKER,
+    TextSearchField, Tri, TrigramIndex, VocabInterner, ARTIST_NONE, NONE_STR, TYPE_ARTIFACT, TYPE_CREATURE,
+    TYPE_ENCHANTMENT, TYPE_INSTANT, TYPE_LAND, TYPE_LEGENDARY, TYPE_PLANESWALKER, TYPE_SNOW, TYPE_SORCERY,
 };
 use rkyv::{rancor::Error, Archived};
 use std::collections::HashMap;
@@ -212,8 +213,13 @@ fn store_of(cards: Vec<OracleCard>, printing_counts: &[usize], vocab: VocabInter
         offsets.push(printings.len() as u32);
     }
     // Real type index so TypeCmp narrowing sees the cards (an empty Default
-    // index would narrow every type query to zero candidates).
-    let indexes = CardIndexes { type_bits: build_type_index(&cards), ..Default::default() };
+    // index would narrow every type query to zero candidates), and real planes
+    // so plane-path tests see the same store shape reload_commit builds.
+    let indexes = CardIndexes {
+        type_bits: build_type_index(&cards),
+        planes: build_bit_planes(&cards),
+        ..Default::default()
+    };
     CardData {
         cards,
         printings,
@@ -530,7 +536,7 @@ fn run_query_walk_dedups_and_prefers() {
     let run = |unique: &str, prefer: &str| {
         run_query(
             &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
-            &creatures, unique, prefer, "edhrec", "asc", 100, 0, &archived.indexes,
+            &creatures, None, unique, prefer, "edhrec", "asc", 100, 0, &archived.indexes,
         )
     };
 
@@ -572,7 +578,7 @@ fn run_query_artwork_groups_shared_illustrations() {
     let all = FilterExpr::True;
     let (total, page) = run_query(
         &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
-        &all, "artwork", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+        &all, None, "artwork", "default", "edhrec", "asc", 100, 0, &archived.indexes,
     );
     assert_eq!(total, 3); // illustrations {1, 2, 4}
     // Group {printings 0, 2}: printing 0 has the higher prefer score (desc order)
@@ -650,6 +656,7 @@ fn bench_checked_vs_unchecked_access() {
         collector_number: Vec::new(),
         sort_perms:     build_sort_permutations(&cards, &printings, &offsets),
         artwork_groups: build_artwork_group_counts(&printings, &offsets),
+        planes:         build_bit_planes(&cards),
     };
     let data = CardData {
         cards,
@@ -1061,11 +1068,11 @@ fn streamed_selection_matches_gathered() {
                         let f = filt();
                         let (tg, pg) = run_query(
                             &gathered.cards, &gathered.printings, &gathered.offsets, &gathered.strings,
-                            &f, unique, prefer, orderby, direction, 10, offset, &gathered.indexes,
+                            &f, None, unique, prefer, orderby, direction, 10, offset, &gathered.indexes,
                         );
                         let (ts, ps) = run_query(
                             &streamed.cards, &streamed.printings, &streamed.offsets, &streamed.strings,
-                            &f, unique, prefer, orderby, direction, 10, offset, &streamed.indexes,
+                            &f, None, unique, prefer, orderby, direction, 10, offset, &streamed.indexes,
                         );
                         let ids = |v: &[(&super::AOracleCard, &super::APrinting)]| -> Vec<(u128, u128)> {
                             v.iter().map(|(c, p)| (u128::from(c.oracle_id), u128::from(p.scryfall_id))).collect()
@@ -1234,4 +1241,190 @@ fn price_narrowing_is_a_superset_under_f32_rounding() {
         rhs: super::NumExpr::Const(1.0),
     };
     assert!(narrow_candidates(&ne, &archived.indexes, &archived.offsets).is_none());
+}
+
+// ─── Bitplanes (#630) ─────────────────────────────────────────────────────────
+
+/// A color/type-diverse store for plane parity: colorless, mono, guild pairs,
+/// lands whose identity exceeds their colors, multi-type cards — and Fallaji
+/// Wayfarer, the one real card (of 97,206 printings, checked 2026-07-07) whose
+/// colors are NOT a subset of its color identity ("is all colors" CDA vs. a
+/// {G} mana cost). Any plane scheme assuming colors ⊆ identity must fail here.
+const FALLAJI_CID: usize = 5;
+fn plane_fixture_store() -> CardData {
+    let mut vocab = VocabInterner::new();
+    // (card_colors, card_color_identity, card_types); color bits W=1 U=2 B=4 R=8 G=16 C=32
+    let specs: &[(u8, u8, u16)] = &[
+        (0, 0, TYPE_ARTIFACT),                     // colorless artifact
+        (16, 16, TYPE_CREATURE),                   // mono G creature
+        (1, 1, TYPE_CREATURE | TYPE_LEGENDARY),    // mono W legendary creature
+        (3, 3, TYPE_INSTANT),                      // WU instant
+        (0, 24, TYPE_LAND),                        // land: no colors, RG identity (Taiga)
+        (31, 16, TYPE_CREATURE),                   // Fallaji Wayfarer (see FALLAJI_CID)
+        (2, 3, TYPE_SORCERY),                      // U sorcery with WU identity
+        (24, 31, TYPE_CREATURE | TYPE_ARTIFACT),   // RG artifact creature, WUBRG identity
+        (4, 4, TYPE_ENCHANTMENT | TYPE_SNOW),      // mono B snow enchantment
+        (0, 32, TYPE_LAND),                        // C-bit identity, exercising the C plane
+    ];
+    let cards = specs
+        .iter()
+        .enumerate()
+        .map(|(i, &(colors, identity, types))| {
+            let mut c = stub_card(i as u128 + 1, types, &[], &mut vocab);
+            c.card_colors = colors;
+            c.card_color_identity = identity;
+            c
+        })
+        .collect();
+    store_of(cards, &[1usize; 10], vocab)
+}
+
+// Every plane-expressible op on every color/type mask must reproduce the
+// filter's card-level truth bit for bit — including Not/And/Or composition.
+#[test]
+fn plane_parity_color_and_type_ops() {
+    let data = plane_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let mut bitmap: Vec<u64> = Vec::new();
+    let mut check = |f: &FilterExpr| {
+        let pe = compile_plane(f).expect("filter must be plane-expressible");
+        eval_planes(&pe, &archived.indexes.planes, &mut bitmap);
+        for (cid, card) in archived.cards.iter().enumerate() {
+            let want = f.eval_card(card, &archived.strings) == Tri::True;
+            assert_eq!(
+                bitmap_contains(&bitmap, cid as u32),
+                want,
+                "plane/filter mismatch at card {cid}"
+            );
+        }
+    };
+
+    let ops = [CmpOp::Eq, CmpOp::Ne, CmpOp::Lt, CmpOp::Le, CmpOp::Gt, CmpOp::Ge];
+    let color_masks: [u8; 8] = [0, 1, 2, 16, 3, 24, 31, 32];
+    let type_masks: [u16; 6] = [
+        0, TYPE_CREATURE, TYPE_ARTIFACT | TYPE_CREATURE, TYPE_INSTANT,
+        TYPE_LEGENDARY | TYPE_CREATURE, TYPE_SNOW,
+    ];
+    for op in ops {
+        for mask in color_masks {
+            check(&FilterExpr::ColorCmp { field: ColorField::Colors, op, mask });
+            check(&FilterExpr::ColorCmp { field: ColorField::ColorIdentity, op, mask });
+        }
+        for mask in type_masks {
+            check(&FilterExpr::TypeCmp { mask, op });
+        }
+    }
+
+    let green = || FilterExpr::ColorCmp { field: ColorField::Colors, op: CmpOp::Ge, mask: 16 };
+    let creature = || FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
+    check(&FilterExpr::And(vec![green(), creature()]));
+    check(&FilterExpr::Or(vec![green(), creature()]));
+    check(&FilterExpr::Not(Box::new(FilterExpr::Or(vec![green(), creature()]))));
+}
+
+// The Fallaji shape specifically: color planes and identity planes must be
+// independent transpositions, not derived from one another.
+#[test]
+fn plane_fallaji_colors_not_subset_of_identity() {
+    let data = plane_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let mut bitmap: Vec<u64> = Vec::new();
+    let mut matches = |field: ColorField, op: CmpOp, mask: u8| {
+        let f = FilterExpr::ColorCmp { field, op, mask };
+        eval_planes(&compile_plane(&f).unwrap(), &archived.indexes.planes, &mut bitmap);
+        bitmap_contains(&bitmap, FALLAJI_CID as u32)
+    };
+    assert!(matches(ColorField::Colors, CmpOp::Ge, 1)); // c>=W: colors carry W
+    assert!(!matches(ColorField::ColorIdentity, CmpOp::Ge, 1)); // id>=W: identity is only G
+    assert!(matches(ColorField::ColorIdentity, CmpOp::Le, 16)); // id<=G holds
+    assert!(!matches(ColorField::Colors, CmpOp::Le, 16)); // c<=G does not
+}
+
+// split_planes composition rules: And partitions, Or is all-or-nothing,
+// produced mana and bare True stay residual.
+#[test]
+fn split_planes_composition_rules() {
+    let green = || FilterExpr::ColorCmp { field: ColorField::Colors, op: CmpOp::Ge, mask: 16 };
+    let creature = || FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
+    let text = || FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: "draw".to_string() };
+
+    // And(plane, plane, text): planes consumed, the lone leftover unwraps.
+    let (pe, residual) = split_planes(FilterExpr::And(vec![green(), creature(), text()]));
+    assert!(pe.is_some());
+    assert!(matches!(residual, FilterExpr::TextContains { .. }));
+
+    // Fully plane-expressible tree is consumed whole.
+    let (pe, residual) = split_planes(FilterExpr::And(vec![green(), creature()]));
+    assert!(pe.is_some());
+    assert!(matches!(residual, FilterExpr::True));
+    let (pe, residual) = split_planes(FilterExpr::Or(vec![green(), creature()]));
+    assert!(pe.is_some());
+    assert!(matches!(residual, FilterExpr::True));
+
+    // Or mixing plane and non-plane children stays entirely residual:
+    // mask ∨ residual is not a narrowing mask.
+    let (pe, residual) = split_planes(FilterExpr::Or(vec![green(), text()]));
+    assert!(pe.is_none());
+    assert!(matches!(residual, FilterExpr::Or(ref v) if v.len() == 2));
+
+    // Produced mana is deliberately unplaned in phase 1.
+    let produces = FilterExpr::ColorCmp { field: ColorField::ProducedMana, op: CmpOp::Ge, mask: 16 };
+    let (pe, residual) = split_planes(produces);
+    assert!(pe.is_none());
+    assert!(matches!(residual, FilterExpr::ColorCmp { field: ColorField::ProducedMana, .. }));
+
+    // Bare True keeps the range-scan path (no all-ones bitmap materialization).
+    let (pe, residual) = split_planes(FilterExpr::True);
+    assert!(pe.is_none());
+    assert!(matches!(residual, FilterExpr::True));
+}
+
+// End-to-end: run_query through the plane path returns the same totals and
+// pages as the plain filter path, across uniques and a mixed filter.
+#[test]
+fn run_query_plane_path_parity() {
+    let data = plane_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let filters: Vec<Box<dyn Fn() -> FilterExpr>> = vec![
+        Box::new(|| FilterExpr::ColorCmp { field: ColorField::Colors, op: CmpOp::Ge, mask: 16 }),
+        Box::new(|| FilterExpr::ColorCmp { field: ColorField::Colors, op: CmpOp::Ne, mask: 0 }),
+        Box::new(|| {
+            FilterExpr::And(vec![
+                FilterExpr::ColorCmp { field: ColorField::Colors, op: CmpOp::Ge, mask: 16 },
+                FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge },
+            ])
+        }),
+        Box::new(|| {
+            // Mixed: the type check planes out, the numeric check stays residual.
+            FilterExpr::And(vec![
+                FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge },
+                FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Cmc), op: CmpOp::Ne, rhs: NumExpr::Const(1.0) },
+            ])
+        }),
+    ];
+    for make in &filters {
+        for unique in ["card", "printing", "artwork"] {
+            let plain = make();
+            let (t0, p0) = run_query(
+                &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+                &plain, None, unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
+            );
+            let (pe, residual) = split_planes(make());
+            let (t1, p1) = run_query(
+                &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+                &residual, pe.as_ref(), unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
+            );
+            assert_eq!(t0, t1, "totals must agree (unique={unique})");
+            let ids = |page: &[(&super::AOracleCard, &super::APrinting)]| -> Vec<u128> {
+                page.iter().map(|(_, p)| u128::from(p.scryfall_id)).collect()
+            };
+            assert_eq!(ids(&p0), ids(&p1), "pages must agree (unique={unique})");
+        }
+    }
 }
