@@ -265,8 +265,15 @@ fn narrow_candidates_spaces() {
         Some(Candidates::Cards(v)) => assert_eq!(v, vec![1]),
         _ => panic!("keyword must narrow in card space"),
     }
-    // A tag not in the index cannot narrow; the eval step handles correctness.
-    assert!(narrow_candidates(&coll(CollField::ArtTags, "zombie"), archived, offsets).is_none());
+    // A tag with no postings in a complete index proves the empty set (an
+    // unbound value_id matches nothing at eval either).
+    match narrow_candidates(&coll(CollField::ArtTags, "zombie"), archived, offsets) {
+        Some(Candidates::Printings(v)) => assert!(v.is_empty(), "absent tag narrows to the exact empty set"),
+        _ => panic!("absent tag must narrow to empty, not decline"),
+    }
+    // frame_data is selectivity-thresholded (#628): dense values are absent by
+    // design, so absence proves nothing and it must keep declining.
+    assert!(narrow_candidates(&coll(CollField::FrameData, "zombie"), archived, offsets).is_none());
 
     // And of mixed spaces projects the printing product up and intersects in
     // card space: art printings {0,2} → cards {0,1}, ∩ keyword cards {1} = {1}.
@@ -1967,4 +1974,43 @@ fn name_bigrams_compose_and_memoize() {
         let want = card.card_name_lower.as_str().contains("fi");
         assert!((f.eval_card(card, &archived.strings) == Tri::True) == want, "NameMatch parity at card {cid}");
     }
+}
+
+// Broad printing-space tag postings behave like broad ranges (#640): scatter
+// to a tight bitmap when a consumer exists (broad_ok), decline otherwise —
+// never gather tens of thousands of ids raw. Sparse tags keep the vec path.
+#[test]
+fn broad_tag_postings_scatter_or_decline() {
+    let mut vocab = VocabInterner::new();
+    let spell = vocab.intern("spell".to_string()).unwrap();
+    let rare_tag = vocab.intern("etched".to_string()).unwrap();
+    let cards: Vec<OracleCard> = (0..1200u32).map(|i| stub_card(u128::from(i) + 1, TYPE_CREATURE, &[], &mut vocab)).collect();
+    let mut data = store_of(cards, &vec![4usize; 1200], vocab); // 4,800 printings
+    for (i, p) in data.printings.iter_mut().enumerate() {
+        // "spell" on half of all printings (2,400 = 50% > MAX_NARROW_FRACTION);
+        // "etched" on 1 in 100 (48, sparse).
+        if i % 2 == 0 { p.card_is_tags.push(spell); }
+        if i % 100 == 0 { p.card_is_tags.push(rare_tag); }
+    }
+    data.indexes.is_tags = build_tag_index(&data.printings, &data.coll_vocab, |p| &p.card_is_tags);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let tag = |v: &str| FilterExpr::CollectionCmp { field: CollField::IsTags, op: CmpOp::Ge, value: v.into(), value_id: None };
+    let rec = |f: &FilterExpr, broad_ok: bool| super::narrow_rec(f, &archived.indexes, &archived.offsets, broad_ok);
+
+    // Broad tag: bitmap under broad_ok, decline without.
+    assert!(rec(&tag("spell"), false).is_none(), "broad tag without a consumer reverts to the scan");
+    let n = rec(&tag("spell"), true).expect("broad tag scatters for a consumer");
+    assert!(n.tight, "every posted printing carries the tag");
+    match &n.set {
+        Candidates::PrintingBits(b) => assert_eq!(b.iter().map(|w| w.count_ones()).sum::<u32>(), 2400),
+        _ => panic!("broad tag must be a bitmap"),
+    }
+    // Sparse tag: vec either way.
+    let n = rec(&tag("etched"), false).expect("sparse tag narrows in any context");
+    assert!(matches!(n.set, Candidates::Printings(ref v) if v.len() == 48));
+    // Absent tag: exact empty.
+    let n = rec(&tag("foil"), false).expect("absent tag proves the empty set");
+    assert_eq!(n.set.len(), 0);
 }

@@ -2092,19 +2092,46 @@ fn narrow_rec(filter: &FilterExpr, indexes: &Archived<CardIndexes>, offsets: &AO
         }
 
         FilterExpr::CollectionCmp { field, op, value, .. } if matches!(op, CmpOp::Ge) => {
-            let (idx, card_space) = match field {
-                CollField::Subtypes   => (&indexes.subtypes,    true),
-                CollField::Keywords   => (&indexes.keywords,    true),
-                CollField::OracleTags => (&indexes.oracle_tags, true),
-                CollField::ArtTags    => (&indexes.art_tags,    false),
-                CollField::IsTags     => (&indexes.is_tags,     false),
-                CollField::FrameData  => (&indexes.frame_data,  false),
+            // `complete` marks indexes that post every occurrence of every
+            // value — all of them except frame_data, whose dense values are
+            // deliberately dropped at build (#628), so absence proves nothing
+            // there.
+            let (idx, card_space, complete) = match field {
+                CollField::Subtypes   => (&indexes.subtypes,    true,  true),
+                CollField::Keywords   => (&indexes.keywords,    true,  true),
+                CollField::OracleTags => (&indexes.oracle_tags, true,  true),
+                CollField::ArtTags    => (&indexes.art_tags,    false, true),
+                CollField::IsTags     => (&indexes.is_tags,     false, true),
+                CollField::FrameData  => (&indexes.frame_data,  false, false),
             };
-            // Ge is containment: every posted row carries the tag — tight.
-            idx.get(value.as_str()).and_then(|v| {
-                let ids: Vec<u32> = v.iter().map(|x| u32::from(*x)).collect();
-                Narrowed::tight(if card_space { Candidates::Cards(ids) } else { Candidates::Printings(ids) })
-            })
+            match idx.get(value.as_str()) {
+                // Ge is containment, so a value with no postings in a complete
+                // index matches no row: an exact empty narrowing, not "cannot
+                // narrow" — `is:permanent` spent 0.6 ms full-scanning to
+                // return zero results.
+                None if complete => {
+                    Narrowed::tight(if card_space { Candidates::Cards(Vec::new()) } else { Candidates::Printings(Vec::new()) })
+                }
+                None => None,
+                Some(v) => {
+                    // Broad printing-space postings pay the same gather cost
+                    // the range indexes guard against (is:spell is ~60k ids);
+                    // past the fraction they scatter to a bitmap when
+                    // something will consume it and decline otherwise. Every
+                    // posted row carries the tag, so both paths stay tight.
+                    // Card-space lists need no guard — same argument as
+                    // numeric_candidates.
+                    if !card_space && range_too_broad_to_narrow(v.len(), n_printings) {
+                        if !broad_ok {
+                            return None;
+                        }
+                        let bits = scatter_bits(v.iter().map(|x| u32::from(*x)), n_printings);
+                        return Narrowed::tight(Candidates::PrintingBits(bits));
+                    }
+                    let ids: Vec<u32> = v.iter().map(|x| u32::from(*x)).collect();
+                    Narrowed::tight(if card_space { Candidates::Cards(ids) } else { Candidates::Printings(ids) })
+                }
+            }
         }
 
         FilterExpr::ArtistMatch { ids } => {
