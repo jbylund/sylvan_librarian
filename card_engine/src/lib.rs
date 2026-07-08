@@ -936,6 +936,19 @@ struct ArtistIndex {
     printings: Vec<u32>,
 }
 
+/// build_tag_index with the printing-space selectivity threshold applied at
+/// build time: values whose posting would be declined by the range guard
+/// anyway (frame:2015 covers 66% of printings) are simply not stored — the
+/// absent-key convention already means "no narrowing", so dropped and unknown
+/// values both fall back to the scan. Third application of the threshold
+/// after the range guard (#609) and rarity's union ceiling (#618).
+fn build_thresholded_tag_index<T>(rows: &[T], vocab: &[String], get_ids: impl Fn(&T) -> &Vec<u16>) -> TagIndex {
+    let mut idx = build_tag_index(rows, vocab, get_ids);
+    let n = rows.len();
+    idx.retain(|_, postings| !range_too_broad_to_narrow(postings.len(), n));
+    idx
+}
+
 fn build_artist_index(printings: &[Printing], n_artists: usize) -> ArtistIndex {
     let mut offsets = vec![0u32; n_artists + 1];
     for p in printings {
@@ -1344,6 +1357,7 @@ struct CardIndexes {
     oracle_tags:    TagIndex,        // card space
     art_tags:       TagIndex,        // printing space
     is_tags:        TagIndex,        // printing space
+    frame_data:     TagIndex,        // printing space (selectivity-thresholded)
     artists:        ArtistIndex,     // printing space (CSR by artist vocab id)
     flavor:         FlavorIndex,     // printing space (CSR by dense flavor text id)
     set_codes:      TagIndex,        // printing space
@@ -1367,6 +1381,7 @@ impl Default for CardIndexes {
             oracle_tags:    HashMap::new(),
             art_tags:       HashMap::new(),
             is_tags:        HashMap::new(),
+            frame_data:     HashMap::new(),
             artists:        ArtistIndex::default(),
             flavor:         FlavorIndex::default(),
             set_codes:      HashMap::new(),
@@ -1505,7 +1520,7 @@ fn narrow_candidates(filter: &FilterExpr, indexes: &Archived<CardIndexes>, offse
                 CollField::OracleTags => (&indexes.oracle_tags, Candidates::Cards),
                 CollField::ArtTags    => (&indexes.art_tags,    Candidates::Printings),
                 CollField::IsTags     => (&indexes.is_tags,     Candidates::Printings),
-                CollField::FrameData  => return None, // no index (low-selectivity values dominate)
+                CollField::FrameData  => (&indexes.frame_data,  Candidates::Printings),
             };
             idx.get(value.as_str()).map(|v| space(v.iter().map(|x| u32::from(*x)).collect()))
         }
@@ -1976,7 +1991,7 @@ const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 /// catch (e.g. reordering same-size fields, changing an index type) — and on
 /// any FLAVOR_FP_FEATURES change: archived fingerprints are built with that
 /// table, so a new table reading old fingerprints breaks the superset test.
-const ARCHIVE_FORMAT_VERSION: u32 = 20260710;
+const ARCHIVE_FORMAT_VERSION: u32 = 20260711;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -2348,6 +2363,7 @@ impl QueryEngine {
             oracle_tags:    build_tag_index(&cards, &coll_vocab, |c| &c.card_oracle_tags),
             art_tags:       build_tag_index(&printings, &coll_vocab, |p| &p.card_art_tags),
             is_tags:        build_tag_index(&printings, &coll_vocab, |p| &p.card_is_tags),
+            frame_data:     build_thresholded_tag_index(&printings, &coll_vocab, |p| &p.card_frame_data),
             artists:        build_artist_index(&printings, artist_vocab.len()),
             flavor:         build_flavor_index(&printings, &strings),
             set_codes:      {

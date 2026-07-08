@@ -1,6 +1,6 @@
 use super::{
     build_numeric_index, build_oracle_text_index, build_tag_index, build_trigram_index,
-    build_type_index, build_rarity_index, build_flavor_index, flavor_fingerprint, flavor_match_sets,
+    build_type_index, build_rarity_index, build_flavor_index, build_thresholded_tag_index, flavor_fingerprint, flavor_match_sets,
     cards_of_printings, count_common_keywords, count_common_types,
     build_artist_index, build_range_index, range_candidates, narrow_candidates, rarity_candidates,
     range_too_broad_to_narrow, run_query, trigram_candidates, int_range_candidates, PrintingRangeIndex, NARROW_FLOOR,
@@ -640,6 +640,7 @@ fn bench_checked_vs_unchecked_access() {
         oracle_tags:    build_tag_index(&cards, &vocab.strings, |c| &c.card_oracle_tags),
         art_tags:       build_tag_index(&printings, &vocab.strings, |p| &p.card_art_tags),
         is_tags:        build_tag_index(&printings, &vocab.strings, |p| &p.card_is_tags),
+        frame_data:     HashMap::new(),
         artists:        ArtistIndex::default(),
         flavor:         build_flavor_index(&printings, &strings),
         set_codes:      HashMap::new(),
@@ -962,6 +963,49 @@ fn collector_number_narrowing() {
     // narrowable now that cn has an index (this was the post-#622 worst query).
     let or = FilterExpr::Or(vec![cn(CmpOp::Eq, 228.0), cn(CmpOp::Eq, 100.0)]);
     assert_eq!(narrow(&or), Some(vec![0, 1]));
+}
+
+// Frame postings are selectivity-thresholded at build: values covering more
+// of printing space than the range guard would accept are not stored, and the
+// absent-key convention makes them (and unknown values) fall back to the scan.
+#[test]
+fn frame_postings_thresholded_at_build() {
+    let mut vocab = VocabInterner::new();
+    let modern = vocab_ids(&mut vocab, &["2015"]);
+    let showcase = vocab_ids(&mut vocab, &["Showcase"]);
+    // 2,000 printings: all carry "2015" (dominant, must be dropped: >1,000 and
+    // >25%), the first 40 also carry "Showcase" (selective, must be kept).
+    let mut printings: Vec<Printing> = (1..=2000u128).map(|i| stub_printing(i, i, None)).collect();
+    for (i, p) in printings.iter_mut().enumerate() {
+        p.card_frame_data = modern.clone();
+        if i < 40 {
+            p.card_frame_data = [modern.clone(), showcase.clone()].concat();
+            p.card_frame_data.sort_unstable();
+        }
+    }
+    let idx = build_thresholded_tag_index(&printings, &vocab.strings, |p| &p.card_frame_data);
+    assert!(idx.get("2015").is_none(), "dominant value must be dropped by the threshold");
+    assert_eq!(idx.get("Showcase").map(|v| v.len()), Some(40));
+
+    // Wired into narrowing: selective value narrows in printing space, the
+    // dropped value declines (None, not empty — the scan still answers it).
+    let indexes = CardIndexes { frame_data: idx, ..Default::default() };
+    let bytes = rkyv::to_bytes::<Error>(&indexes).expect("serialize");
+    let archived = rkyv::access::<Archived<CardIndexes>, Error>(&bytes).expect("access");
+    let offsets_bytes = rkyv::to_bytes::<Error>(&vec![0u32, 2000]).expect("serialize offsets");
+    let offsets = rkyv::access::<Archived<Vec<u32>>, Error>(&offsets_bytes).expect("access offsets");
+    let coll = |value: &str| FilterExpr::CollectionCmp {
+        field: CollField::FrameData,
+        op: CmpOp::Ge,
+        value: value.to_string(),
+        value_id: None,
+    };
+    match narrow_candidates(&coll("Showcase"), archived, offsets) {
+        Some(Candidates::Printings(v)) => assert_eq!(v.len(), 40),
+        _ => panic!("selective frame value must narrow in printing space"),
+    }
+    assert!(narrow_candidates(&coll("2015"), archived, offsets).is_none());
+    assert!(narrow_candidates(&coll("Zzz"), archived, offsets).is_none());
 }
 
 #[test]
