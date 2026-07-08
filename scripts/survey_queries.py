@@ -28,6 +28,14 @@ from api.parsing import parse_scryfall_query  # noqa: E402
 from client.query_runner import _DIM_NAMES, _DIM_VALUES, _DIM_WEIGHTS  # noqa: E402
 from scripts.bench_bitplanes import load_engine  # noqa: E402
 
+# tix/eur are excluded from the survey (issue #638, priority low): they are not
+# part of our real search traffic, and they have no index, so they'd dominate
+# the tail with rows we've decided not to optimize. NOTE: changing this list
+# changes the seeded corpus — regenerate baselines when it changes.
+_EXCLUDED_DIMS = {"price_tix", "price_eur"}
+_DIM_WEIGHTS = [w for w, n in zip(_DIM_WEIGHTS, _DIM_NAMES) if n not in _EXCLUDED_DIMS]
+_DIM_NAMES = [n for n in _DIM_NAMES if n not in _EXCLUDED_DIMS]
+
 # Realistic parameter biases: UI default ordering dominates; unique matches
 # query_runner's 75/20/5 split.
 _ORDERBYS = ["edhrec"] * 55 + ["usd"] * 10 + ["cmc"] * 10 + ["rarity"] * 8 + ["cubecobra"] * 7 + ["power"] * 5 + ["toughness"] * 5
