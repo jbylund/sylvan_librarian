@@ -17,6 +17,7 @@ class TestWatermarkParsing:
         ("query", "expected_attr", "expected_value"),
         [
             ("watermark:azorius", "card_watermark", "azorius"),
+            ("wm:orzhov", "card_watermark", "orzhov"),
             ("watermark:dimir", "card_watermark", "dimir"),
             ("watermark:rakdos", "card_watermark", "rakdos"),
             ("watermark:gruul", "card_watermark", "gruul"),

@@ -14,6 +14,7 @@ class TestWatermarkSQLGeneration:
         ("query", "expected_column", "expected_value"),
         [
             ("watermark:azorius", "card.card_watermark", "azorius"),
+            ("wm:orzhov", "card.card_watermark", "orzhov"),
             ("watermark:dimir", "card.card_watermark", "dimir"),
             ("watermark:rakdos", "card.card_watermark", "rakdos"),
             ("watermark:gruul", "card.card_watermark", "gruul"),

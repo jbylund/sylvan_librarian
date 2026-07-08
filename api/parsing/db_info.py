@@ -220,7 +220,7 @@ DB_COLUMNS = [
     FieldInfo(
         db_column_name="card_set_code",
         field_type=FieldType.TEXT,
-        search_aliases=["set", "s"],
+        search_aliases=["set", "s", "e"],
         parser_class=ParserClass.TEXT,
     ),
     FieldInfo(
@@ -256,7 +256,7 @@ DB_COLUMNS = [
     FieldInfo(
         db_column_name="card_watermark",
         field_type=FieldType.TEXT,
-        search_aliases=["watermark"],
+        search_aliases=["watermark", "wm"],
         parser_class=ParserClass.TEXT,
     ),
     FieldInfo(
