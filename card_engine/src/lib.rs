@@ -685,6 +685,10 @@ type TrigramIndex = HashMap<[u8; 3], Vec<u32>>;
 struct OracleTextIndex {
     /// trigram → ascending list of dense text ids whose text contains it.
     trigrams: TrigramIndex,
+    /// Dense text id → global string id (CardData.strings) of the distinct
+    /// lowercase oracle text, in first-seen card order — same shape as
+    /// FlavorIndex.gids. Length n_texts.
+    gids: Vec<u32>,
     /// Row boundaries: cards of text id `t` live at
     /// `card_indices[offsets[t] .. offsets[t + 1]]`. Length n_texts + 1.
     offsets: Vec<u32>,
@@ -747,7 +751,7 @@ fn build_oracle_text_index(cards: &[OracleCard], strings: &[String]) -> OracleTe
         cursor[t as usize] += 1;
     }
 
-    OracleTextIndex { trigrams, offsets, card_indices }
+    OracleTextIndex { trigrams, gids: global_of_dense, offsets, card_indices }
 }
 
 /// Expand surviving dense text ids to card indices via the CSR table.
@@ -2392,7 +2396,7 @@ const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 /// catch (e.g. reordering same-size fields, changing an index type) — and on
 /// any FLAVOR_FP_FEATURES change: archived fingerprints are built with that
 /// table, so a new table reading old fingerprints breaks the superset test.
-const ARCHIVE_FORMAT_VERSION: u32 = 20260714;
+const ARCHIVE_FORMAT_VERSION: u32 = 20260715;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {

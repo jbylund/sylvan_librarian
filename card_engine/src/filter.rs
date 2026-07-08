@@ -528,18 +528,13 @@ impl FilterExpr {
             }
             FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word } => {
                 match trigram_min_posting(&oracle.trigrams, word) {
-                    Some(min) if min <= oracle.offsets.len().saturating_sub(1) / 2 => {}
+                    Some(min) if min <= oracle.gids.len() / 2 => {}
                     _ => return,
                 }
                 let Some(dense) = trigram_candidates(&oracle.trigrams, word) else { return };
                 let mut gids: Vec<u32> = Vec::with_capacity(dense.len());
                 for d in dense {
-                    // Every CSR row is non-empty by construction (dense ids are
-                    // only minted from cards), so the row's first card supplies
-                    // the text's global string id.
-                    debug_assert!(oracle.offsets[d as usize] < oracle.offsets[d as usize + 1]);
-                    let first_card = u32::from(oracle.card_indices[u32::from(oracle.offsets[d as usize]) as usize]);
-                    let gid = u32::from(cards[first_card as usize].oracle_text_lower_id);
+                    let gid = u32::from(oracle.gids[d as usize]);
                     if str_at(strings, gid).is_some_and(|s| s.contains(word.as_str())) {
                         gids.push(gid);
                     }
