@@ -1465,25 +1465,6 @@ fn range_narrowed(idx: &Archived<PrintingRangeIndex>, lo: u32, hi: u32, n_printi
     Narrowed::loose(Candidates::PrintingBits(bits))
 }
 
-// ─── Type bit index ───────────────────────────────────────────────────────────
-// One sorted Vec<u32> per type bit (14 bits, matching the TYPE_* constants).
-// Bit position N corresponds to TYPE_* = 1 << N.
-
-type TypeIndex = [Vec<u32>; 14];
-
-fn build_type_index(cards: &[OracleCard]) -> TypeIndex {
-    let mut idx: TypeIndex = Default::default();
-    for (i, card) in cards.iter().enumerate() {
-        let mut bits = card.card_types;
-        while bits != 0 {
-            let bit = bits.trailing_zeros() as usize;
-            idx[bit].push(i as u32);
-            bits &= bits - 1;
-        }
-    }
-    idx // lists are sorted: cards iterated in ascending index order
-}
-
 // ─── Rarity index ────────────────────────────────────────────────────────────
 // rarity int (0-5) -> sorted card ids with at least one printing at that
 // rarity. A card printed at several rarities appears in each of its lists
@@ -1575,7 +1556,6 @@ struct CardIndexes {
     cmc:            NumericIndex,    // card space
     power:          NumericIndex,    // card space
     toughness:      NumericIndex,    // card space
-    type_bits:      TypeIndex,       // card space
     rarity:         RarityIndex,     // card space (any-printing-at-rarity)
     subtypes:       TagIndex,        // card space
     keywords:       TagIndex,        // card space
@@ -1603,7 +1583,6 @@ impl Default for CardIndexes {
             cmc:            Vec::new(),
             power:          Vec::new(),
             toughness:      Vec::new(),
-            type_bits:      Default::default(),
             rarity:         Default::default(),
             subtypes:       HashMap::new(),
             keywords:       HashMap::new(),
@@ -2089,6 +2068,20 @@ fn narrow_rec(filter: &FilterExpr, indexes: &Archived<CardIndexes>, offsets: &AO
                 (NumExpr::Const(v), NumExpr::Field(NumField::CollectorNumberInt)) => cn(flip_op(*op), v),
                 _ => None,
             }
+        }
+
+        FilterExpr::Devotion { op: CmpOp::Ge | CmpOp::Gt, pips } => {
+            // The exact compiler (plane arm above) declined: some queried
+            // count exceeds the 2-bit saturation. The saturated bucket is a
+            // superset of every deeper match — ~0.5% of cards per color — so
+            // it narrows loosely and the driver verifies the real counts.
+            if u32::from(indexes.planes.n_cards) as usize != n_cards || n_cards == 0 {
+                return None;
+            }
+            let pe = compile_devotion_superset(pips)?;
+            let mut bits: Vec<u64> = Vec::new();
+            eval_planes(&pe, &indexes.planes, &mut bits);
+            Narrowed::loose(Candidates::CardBits(bits))
         }
 
         FilterExpr::CollectionCmp { field, op, value, .. } if matches!(op, CmpOp::Ge) => {
@@ -2987,7 +2980,7 @@ const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 /// catch (e.g. reordering same-size fields, changing an index type) — and on
 /// any FLAVOR_FP_FEATURES change: archived fingerprints are built with that
 /// table, so a new table reading old fingerprints breaks the superset test.
-const ARCHIVE_FORMAT_VERSION: u32 = 20260716;
+const ARCHIVE_FORMAT_VERSION: u32 = 20260717;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -3352,7 +3345,6 @@ impl QueryEngine {
             cmc:            build_numeric_index(&cards, |c| c.cmc.map(|v| v as i16)),
             power:          build_numeric_index(&cards, |c| c.creature_power.map(|v| v as i16)),
             toughness:      build_numeric_index(&cards, |c| c.creature_toughness.map(|v| v as i16)),
-            type_bits:      build_type_index(&cards),
             rarity:         build_rarity_index(&printings, &offsets),
             subtypes:       build_tag_index(&cards, &coll_vocab, |c| &c.card_subtypes),
             keywords:       build_tag_index(&cards, &coll_vocab, |c| &c.card_keywords),

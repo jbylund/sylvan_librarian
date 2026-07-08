@@ -7,10 +7,11 @@
 //! cache line per card) the driver loop pays to prove the same bits one card
 //! at a time.
 //!
-//! Phase 1 covers the exactly-consumable dimensions: colors, color identity,
-//! and the card type bits. All three are card-level and two-valued (their
-//! tri() never returns Null or PrintingDep), so plane algebra — including
-//! complement for Not — reproduces the filter's card-level truth exactly.
+//! The exactly-consumable dimensions: colors, color identity, the card type
+//! bits, and (bit-sliced, two saturating bits per color) devotion counts. All
+//! are card-level and two-valued (their tri() never returns Null or
+//! PrintingDep), so plane algebra — including complement for Not —
+//! reproduces the filter's card-level truth exactly.
 //! Produced mana is deliberately left out for now; `produces:` queries stay on
 //! the residual path. Rarity and legality need the narrowing/divergence
 //! machinery from later phases (see the issue).
@@ -29,7 +30,14 @@ const TYPE_PLANES: usize = 14;
 const PLANE_COLORS: usize = 0;
 const PLANE_IDENTITY: usize = COLOR_PLANES;
 const PLANE_TYPES: usize = 2 * COLOR_PLANES;
-pub(crate) const PLANE_COUNT: usize = PLANE_TYPES + TYPE_PLANES;
+/// Devotion is bit-sliced: two saturating bits per color (count clamped to
+/// 0..=3), so `devotion:uu` is one plane read and `devotion:uuu` is exactly
+/// the saturated bucket. Counts come from the same hybrid-expanded map the
+/// evaluator uses; the ~0.5% of cards at 3+ per color are the verification
+/// set for deeper queries (see the saturated-superset arm in narrow_rec).
+const PLANE_DEVOTION: usize = PLANE_TYPES + TYPE_PLANES;
+const DEVOTION_BITS: usize = 2;
+pub(crate) const PLANE_COUNT: usize = PLANE_DEVOTION + DEVOTION_BITS * COLOR_PLANES;
 
 #[derive(Archive, Serialize, Deserialize, Default)]
 pub(crate) struct BitPlanes {
@@ -42,6 +50,16 @@ pub(crate) struct BitPlanes {
 pub(crate) fn words_per_plane(n_cards: usize) -> usize {
     n_cards.div_ceil(64)
 }
+
+/// A card's effective per-color devotion count, saturated to 0..=3 —
+/// exactly the map FilterExpr::Devotion evaluates (hybrid-expanded when
+/// hybrids are present, raw pips otherwise).
+fn devotion_count(card: &OracleCard, sym: &str) -> u8 {
+    let map = card.mana_cost.devotion.as_ref().unwrap_or(&card.mana_cost.pips);
+    map.get(sym).copied().unwrap_or(0).min(3)
+}
+
+const DEVOTION_SYMS: [&str; COLOR_PLANES] = ["W", "U", "B", "R", "G", "C"];
 
 pub(crate) fn build_bit_planes(cards: &[OracleCard]) -> BitPlanes {
     let wpp = words_per_plane(cards.len());
@@ -60,6 +78,23 @@ pub(crate) fn build_bit_planes(cards: &[OracleCard]) -> BitPlanes {
         while bits != 0 {
             set(PLANE_TYPES + bits.trailing_zeros() as usize);
             bits &= bits - 1;
+        }
+        for (b, sym) in DEVOTION_SYMS.iter().enumerate() {
+            let count = devotion_count(card, sym);
+            if count & 1 != 0 {
+                set(PLANE_DEVOTION + DEVOTION_BITS * b);
+            }
+            if count & 2 != 0 {
+                set(PLANE_DEVOTION + DEVOTION_BITS * b + 1);
+            }
+            // Data-integrity tripwire (verified corpus-wide 2026-07-08, zero
+            // violations): cost symbols feed color identity by rule, so
+            // colored devotion without the identity bit means a loading bug.
+            // C is exempt — {C} pips never join identity.
+            debug_assert!(
+                count == 0 || b == 5 || card.card_color_identity & (1 << b) != 0,
+                "devotion without identity: card {i} color {sym}"
+            );
         }
     }
     BitPlanes { n_cards: cards.len() as u32, words }
@@ -139,6 +174,83 @@ fn cmp_expr(base: usize, width: usize, mask: u16, op: CmpOp, ge_any: bool) -> Pl
     }
 }
 
+/// One color's devotion-count comparison over its two saturating bit-slices.
+/// Exactness boundaries: `>= k` is exact through k = 3 (the saturated value 3
+/// MEANS >= 3), `== k` and `<= k` through k = 2 (value 3 is a bucket, not a
+/// count). None past the boundary.
+fn dev_ge(color: usize, k: u8) -> Option<PlaneExpr> {
+    let b0 = || PlaneExpr::Plane((PLANE_DEVOTION + DEVOTION_BITS * color) as u16);
+    let b1 = || PlaneExpr::Plane((PLANE_DEVOTION + DEVOTION_BITS * color + 1) as u16);
+    match k {
+        0 => Some(PlaneExpr::Const(true)),
+        1 => Some(or_of(vec![b0(), b1()])),
+        2 => Some(b1()),
+        3 => Some(and_of(vec![b0(), b1()])),
+        _ => None,
+    }
+}
+
+fn dev_eq(color: usize, k: u8) -> Option<PlaneExpr> {
+    let b0 = || PlaneExpr::Plane((PLANE_DEVOTION + DEVOTION_BITS * color) as u16);
+    let b1 = || PlaneExpr::Plane((PLANE_DEVOTION + DEVOTION_BITS * color + 1) as u16);
+    match k {
+        0 => Some(PlaneExpr::Not(Box::new(or_of(vec![b0(), b1()])))),
+        1 => Some(and_of(vec![b0(), PlaneExpr::Not(Box::new(b1()))])),
+        2 => Some(and_of(vec![b1(), PlaneExpr::Not(Box::new(b0()))])),
+        _ => None,
+    }
+}
+
+fn dev_le(color: usize, k: u8) -> Option<PlaneExpr> {
+    // count <= k  ⟺  not (count >= k + 1); k <= 2 keeps >= k+1 exact.
+    if k > 2 {
+        return None;
+    }
+    dev_ge(color, k + 1).map(|ge| PlaneExpr::Not(Box::new(ge)))
+}
+
+fn devotion_color(sym: &str) -> Option<usize> {
+    DEVOTION_SYMS.iter().position(|s| *s == sym)
+}
+
+/// Compile a Devotion node exactly, mirroring FilterExpr::Devotion's tri():
+/// Ge constrains only the queried colors; Le/Eq additionally pin every
+/// unqueried color to zero (SQL devotion-column containment semantics).
+/// None whenever any needed comparison crosses the saturation boundary.
+fn compile_devotion(op: CmpOp, pips: &std::collections::HashMap<String, u8>) -> Option<PlaneExpr> {
+    let query: Vec<(usize, u8)> = pips
+        .iter()
+        .map(|(sym, &k)| devotion_color(sym).map(|c| (c, k)))
+        .collect::<Option<Vec<_>>>()?;
+    let ge = || query.iter().map(|&(c, k)| dev_ge(c, k)).collect::<Option<Vec<_>>>().map(and_of);
+    let all_colors = |f: &dyn Fn(usize, u8) -> Option<PlaneExpr>| {
+        (0..COLOR_PLANES)
+            .map(|c| f(c, query.iter().find(|&&(qc, _)| qc == c).map_or(0, |&(_, k)| k)))
+            .collect::<Option<Vec<_>>>()
+            .map(and_of)
+    };
+    let eq = || all_colors(&dev_eq);
+    match op {
+        CmpOp::Ge => ge(),
+        CmpOp::Le => all_colors(&dev_le),
+        CmpOp::Eq => eq(),
+        CmpOp::Ne => eq().map(|e| PlaneExpr::Not(Box::new(e))),
+        CmpOp::Gt => Some(and_of(vec![ge()?, PlaneExpr::Not(Box::new(eq()?))])),
+        CmpOp::Lt => Some(and_of(vec![all_colors(&dev_le)?, PlaneExpr::Not(Box::new(eq()?))])),
+    }
+}
+
+/// Saturated superset for devotion comparisons the exact compiler declines
+/// (Ge/Gt past the boundary): clamp each queried count to 3. Every real match
+/// has count >= k >= 3 per queried color, so it lands in the saturated bucket
+/// — a loose candidate set for the driver to verify (~0.5% of cards/color).
+pub(crate) fn compile_devotion_superset(pips: &std::collections::HashMap<String, u8>) -> Option<PlaneExpr> {
+    pips.iter()
+        .map(|(sym, &k)| devotion_color(sym).and_then(|c| dev_ge(c, k.min(3))))
+        .collect::<Option<Vec<_>>>()
+        .map(and_of)
+}
+
 /// Compile a filter subtree to a plane expression, or None if any node in it
 /// is not plane-expressible. Only two-valued card-level nodes may compile:
 /// complement (Not) is only sound when the node can never be Null or
@@ -177,6 +289,9 @@ pub(crate) fn compile_plane(filter: &FilterExpr) -> Option<PlaneExpr> {
             }
             Some(cmp_expr(PLANE_TYPES, TYPE_PLANES, *mask, *op, true))
         }
+        // Devotion is card-level and two-valued (tri_bool always), so its
+        // bit-sliced planes compile exactly within the saturation boundary.
+        FilterExpr::Devotion { op, pips } => compile_devotion(*op, pips),
         _ => None,
     }
 }
