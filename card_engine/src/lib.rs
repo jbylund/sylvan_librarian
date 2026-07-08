@@ -1147,6 +1147,75 @@ fn expand_flavor_ids(idx: &Archived<FlavorIndex>, dense_ids: &[u32]) -> Vec<u32>
     out
 }
 
+// ─── Sort permutations (streamed selection) ──────────────────────────────────
+// One precomputed card ordering per (card-level sort column, direction), used
+// by the streamed emission path (see run_query): walk the permutation, test
+// membership in the match bitmap, and only page cards are ever touched — no
+// sort keys, no quickselect, no prefer walk outside the page. Keys mirror
+// sort_key_bits with the card's store-preferred first printing standing in
+// for the query-chosen one: exact for the dominant unique=card default-prefer
+// case, and only orderable-differently inside blocks tied on both the primary
+// column and edhrec rank. Two permutations per column because direction folds
+// into the primary key only — secondaries keep their fixed order in both
+// directions, so a reversed ascending walk would be wrong inside ties.
+// 10 × ~126 kB ≈ 1.26 MB.
+
+#[derive(Archive, Serialize, Deserialize, Default)]
+struct SortPermutations {
+    // [ascending, descending] per column
+    edhrec:    [Vec<u32>; 2],
+    cubecobra: [Vec<u32>; 2],
+    cmc:       [Vec<u32>; 2],
+    power:     [Vec<u32>; 2],
+    toughness: [Vec<u32>; 2],
+}
+
+impl ArchivedSortPermutations {
+    /// The permutation for a streamable column/direction; None for the
+    /// printing-keyed columns (rarity, usd), whose sort key depends on the
+    /// prefer-chosen printing and cannot be precomputed.
+    fn get(&self, col: SortCol, descending: bool) -> Option<&Archived<Vec<u32>>> {
+        let pair = match col {
+            SortCol::EdhrecRank => &self.edhrec,
+            SortCol::Cubecobra  => &self.cubecobra,
+            SortCol::Cmc        => &self.cmc,
+            SortCol::Power      => &self.power,
+            SortCol::Toughness  => &self.toughness,
+            SortCol::Rarity | SortCol::PriceUsd => return None,
+        };
+        Some(&pair[descending as usize])
+    }
+}
+
+fn build_sort_permutations(cards: &[OracleCard], printings: &[Printing], offsets: &[u32]) -> SortPermutations {
+    let perm = |get: &dyn Fn(&OracleCard) -> Option<f32>, descending: bool| -> Vec<u32> {
+        let mut ids: Vec<u32> = (0..cards.len() as u32).collect();
+        ids.sort_unstable_by_key(|&i| {
+            let c = &cards[i as usize];
+            let pk = get(c).map_or(u32::MAX, |v| f32_sort_bits(if descending { -v } else { v }));
+            let e = c.edhrec_rank.unwrap_or(u32::MAX);
+            // Canonical secondary: the first (store-preferred) printing's
+            // default prefer score, matching sort_key_bits' third component
+            // for the printing the default prefer chooses.
+            let first = offsets[i as usize] as usize;
+            let sc = printings
+                .get(first)
+                .and_then(|p| p.prefer_score)
+                .map_or(u32::MAX, |v| f32_sort_bits(-v));
+            (((pk as u128) << 64) | ((e as u128) << 32) | (sc as u128), i)
+        });
+        ids
+    };
+    let both = |get: &dyn Fn(&OracleCard) -> Option<f32>| [perm(get, false), perm(get, true)];
+    SortPermutations {
+        edhrec:    both(&|c| c.edhrec_rank.map(|v| v as f32)),
+        cubecobra: both(&|c| c.cubecobra_score),
+        cmc:       both(&|c| c.cmc.map(|v| v as f32)),
+        power:     both(&|c| c.creature_power.map(|v| v as f32)),
+        toughness: both(&|c| c.creature_toughness.map(|v| v as f32)),
+    }
+}
+
 // ─── Printing-space range indexes (released_at, price, collector number) ─────
 // Sorted (value, printing idx); binary-searched ranges answer range filters in
 // printing space. Printings without the value are absent (they can never
@@ -1364,6 +1433,7 @@ struct CardIndexes {
     released_at:    PrintingRangeIndex,       // printing space
     price_usd:      PrintingRangeIndex,       // printing space (f32_sort_bits of the price)
     collector_number: PrintingRangeIndex,     // printing space (extracted int)
+    sort_perms:     SortPermutations,          // card space (streamed selection)
 }
 
 impl Default for CardIndexes {
@@ -1388,6 +1458,7 @@ impl Default for CardIndexes {
             released_at:    Vec::new(),
             price_usd:      Vec::new(),
             collector_number: Vec::new(),
+            sort_perms:     SortPermutations::default(),
         }
     }
 }
@@ -1761,6 +1832,171 @@ fn select_page(mut v: Vec<Match>, offset: usize, limit: usize) -> Vec<(u32, u32)
 // reconstruct per query. Per candidate card the filter is evaluated once at card
 // level; only when it depends on printing-level fields (Tri::PrintingDep) are the
 // card's printings evaluated individually.
+//
+// Selection runs in one of two shapes:
+//
+// - Gathered (the pre-#619 path): every match gets a sort key pushed into a
+//   Vec and select_page quickselects the page. Kept for the printing-keyed
+//   orderbys (rarity, usd) and for small match counts, where it is exact and
+//   already microseconds.
+// - Streamed: a match phase records per-card match counts (total = their sum,
+//   exact), then the orderby's precomputed permutation is walked, skipping
+//   counts until page_offset is consumed and emitting only page cards. No
+//   sort keys, no quickselect, and the prefer walk runs on ~limit cards
+//   instead of every match — the emission cost measured at 47-65% of broad
+//   non-default-prefer/artwork queries disappears. The match phase stays
+//   sequential (the #609-measured ~2x random-access penalty is why evaluation
+//   never happens in permutation order).
+
+#[derive(Clone, Copy)]
+enum Mode { Card, Artwork, Printing }
+
+/// Matches this card contributes: 0/1 for Card mode (existence, short-circuit),
+/// passing printings for Printing mode, distinct illustrations with a passing
+/// printing for Artwork mode. `ills` is a reused scratch buffer.
+#[allow(clippy::too_many_arguments)]
+fn card_match_count(
+    card: &AOracleCard,
+    printings: &[APrinting],
+    start: usize,
+    end: usize,
+    all_match: bool,
+    residual: &[&FilterExpr],
+    residual_is_or: bool,
+    mode: Mode,
+    strings: &AStrings,
+    ills: &mut Vec<u128>,
+) -> u32 {
+    match mode {
+        Mode::Card => {
+            if all_match {
+                return u32::from(start < end);
+            }
+            for pid in start..end {
+                if FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or) {
+                    return 1;
+                }
+            }
+            0
+        }
+        Mode::Printing => {
+            if all_match {
+                return (end - start) as u32;
+            }
+            let mut n = 0u32;
+            for pid in start..end {
+                if FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or) {
+                    n += 1;
+                }
+            }
+            n
+        }
+        Mode::Artwork => {
+            ills.clear();
+            for pid in start..end {
+                if !all_match && !FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or) {
+                    continue;
+                }
+                let ill = u128::from(printings[pid].illustration_id);
+                if !ills.contains(&ill) {
+                    ills.push(ill);
+                }
+            }
+            ills.len() as u32
+        }
+    }
+}
+
+/// Emit this card's matches as (sort key, cid, pid) tuples — the per-card body
+/// of the gathered path, shared by the streamed path for page cards.
+#[allow(clippy::too_many_arguments)]
+fn push_card_matches(
+    card: &AOracleCard,
+    cid: u32,
+    printings: &[APrinting],
+    start: usize,
+    end: usize,
+    all_match: bool,
+    residual: &[&FilterExpr],
+    residual_is_or: bool,
+    mode: Mode,
+    prefer: Prefer,
+    sort_col: SortCol,
+    descending: bool,
+    strings: &AStrings,
+    out: &mut Vec<Match>,
+    groups: &mut Vec<(u128, u32, f64)>,
+) {
+    match mode {
+        Mode::Card => {
+            // Printings are stored in descending default-prefer order, so
+            // for the default prefer the first matching printing IS the
+            // chosen one — O(1) when the card pass already said True.
+            let chosen: Option<u32> = if matches!(prefer, Prefer::Default) {
+                let mut found: Option<u32> = None;
+                for pid in start..end {
+                    if all_match || FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or) {
+                        found = Some(pid as u32);
+                        break;
+                    }
+                }
+                found
+            } else {
+                let mut chosen: Option<(u32, f64)> = None;
+                for pid in start..end {
+                    let p = &printings[pid];
+                    if !all_match && !FilterExpr::residual_matches(card, p, strings, residual, residual_is_or) { continue; }
+                    let score = prefer_score(card, p, prefer);
+                    if chosen.is_none_or(|(_, s)| score > s) {
+                        chosen = Some((pid as u32, score));
+                    }
+                }
+                chosen.map(|(pid, _)| pid)
+            };
+            if let Some(pid) = chosen {
+                out.push((sort_key_bits(card, &printings[pid as usize], sort_col, descending), cid, pid));
+            }
+        }
+        Mode::Printing => {
+            for pid in start..end {
+                let p = &printings[pid];
+                if !all_match && !FilterExpr::residual_matches(card, p, strings, residual, residual_is_or) { continue; }
+                out.push((sort_key_bits(card, p, sort_col, descending), cid, pid as u32));
+            }
+        }
+        Mode::Artwork => {
+            // Within-range order is prefer-score-desc (not illustration),
+            // so group by illustration with a small per-card scan — ranges
+            // are tiny (median 2 printings). `groups` is reused across
+            // cards to avoid per-card allocation.
+            groups.clear();
+            for pid in start..end {
+                let p = &printings[pid];
+                if !all_match && !FilterExpr::residual_matches(card, p, strings, residual, residual_is_or) { continue; }
+                let ill = u128::from(p.illustration_id);
+                let score = prefer_score(card, p, prefer);
+                match groups.iter_mut().find(|g: &&mut (u128, u32, f64)| g.0 == ill) {
+                    Some(g) => {
+                        if score > g.2 {
+                            g.1 = pid as u32;
+                            g.2 = score;
+                        }
+                    }
+                    None => groups.push((ill, pid as u32, score)),
+                }
+            }
+            for &(_, bp, _) in groups.iter() {
+                out.push((sort_key_bits(card, &printings[bp as usize], sort_col, descending), cid, bp));
+            }
+        }
+    }
+}
+
+/// Below this many matches the gathered path is already microseconds and
+/// byte-identical to the pre-streaming behavior; above it, walking the
+/// permutation (a fixed ~n bit-tests over the counts array) plus per-page-card
+/// emission wins. Same measured-constant philosophy as MAX_NARROW_FRACTION.
+const STREAM_MIN_MATCHES: usize = 1_024;
 
 fn run_query<'a>(
     cards: &'a [AOracleCard],
@@ -1780,7 +2016,6 @@ fn run_query<'a>(
     let descending = direction == "desc";
     let prefer     = prefer_from_str(prefer);
 
-    enum Mode { Card, Artwork, Printing }
     let mode = match unique {
         "artwork"  => Mode::Artwork,
         "printing" => Mode::Printing,
@@ -1796,6 +2031,17 @@ fn run_query<'a>(
         None    => Box::new(0..cards.len() as u32),
     };
 
+    // Streamed selection when the orderby has a precomputed permutation.
+    if let Some(perm) = indexes.sort_perms.get(sort_col, descending) {
+        if perm.len() == cards.len() && !cards.is_empty() {
+            return run_query_streamed(
+                cards, printings, offsets, strings, filter, mode, prefer, sort_col, descending, limit,
+                page_offset, perm, card_ids,
+            );
+        }
+    }
+
+    // Gathered path (printing-keyed orderbys, or stores without permutations).
     let mut best: Vec<Match> = Vec::new();
     let mut groups: Vec<(u128, u32, f64)> = Vec::new(); // artwork-mode scratch, reused per card
     // card_pass residual: the top-level children still printing-dependent for
@@ -1811,70 +2057,10 @@ fn run_query<'a>(
         };
         let start = u32::from(offsets[cid as usize]) as usize;
         let end   = u32::from(offsets[cid as usize + 1]) as usize;
-
-        match mode {
-            Mode::Card => {
-                // Printings are stored in descending default-prefer order, so
-                // for the default prefer the first matching printing IS the
-                // chosen one — O(1) when the card pass already said True.
-                let chosen: Option<u32> = if matches!(prefer, Prefer::Default) {
-                    let mut found: Option<u32> = None;
-                    for pid in start..end {
-                        if all_match || FilterExpr::residual_matches(card, &printings[pid], strings, &residual, residual_is_or) {
-                            found = Some(pid as u32);
-                            break;
-                        }
-                    }
-                    found
-                } else {
-                    let mut chosen: Option<(u32, f64)> = None;
-                    for pid in start..end {
-                        let p = &printings[pid];
-                        if !all_match && !FilterExpr::residual_matches(card, p, strings, &residual, residual_is_or) { continue; }
-                        let score = prefer_score(card, p, prefer);
-                        if chosen.is_none_or(|(_, s)| score > s) {
-                            chosen = Some((pid as u32, score));
-                        }
-                    }
-                    chosen.map(|(pid, _)| pid)
-                };
-                if let Some(pid) = chosen {
-                    best.push((sort_key_bits(card, &printings[pid as usize], sort_col, descending), cid, pid));
-                }
-            }
-            Mode::Printing => {
-                for pid in start..end {
-                    let p = &printings[pid];
-                    if !all_match && !FilterExpr::residual_matches(card, p, strings, &residual, residual_is_or) { continue; }
-                    best.push((sort_key_bits(card, p, sort_col, descending), cid, pid as u32));
-                }
-            }
-            Mode::Artwork => {
-                // Within-range order is prefer-score-desc (not illustration),
-                // so group by illustration with a small per-card scan — ranges
-                // are tiny (median 2 printings). `groups` is reused across
-                // cards to avoid per-card allocation.
-                groups.clear();
-                for pid in start..end {
-                    let p = &printings[pid];
-                    if !all_match && !FilterExpr::residual_matches(card, p, strings, &residual, residual_is_or) { continue; }
-                    let ill = u128::from(p.illustration_id);
-                    let score = prefer_score(card, p, prefer);
-                    match groups.iter_mut().find(|g: &&mut (u128, u32, f64)| g.0 == ill) {
-                        Some(g) => {
-                            if score > g.2 {
-                                g.1 = pid as u32;
-                                g.2 = score;
-                            }
-                        }
-                        None => groups.push((ill, pid as u32, score)),
-                    }
-                }
-                for &(_, bp, _) in groups.iter() {
-                    best.push((sort_key_bits(card, &printings[bp as usize], sort_col, descending), cid, bp));
-                }
-            }
-        }
+        push_card_matches(
+            card, cid, printings, start, end, all_match, &residual, residual_is_or, mode, prefer,
+            sort_col, descending, strings, &mut best, &mut groups,
+        );
     }
 
     let total = best.len();
@@ -1882,6 +2068,121 @@ fn run_query<'a>(
         .into_iter()
         .map(|(cid, pid)| (&cards[cid as usize], &printings[pid as usize]))
         .collect();
+    (total, page)
+}
+
+/// Streamed selection: match phase records per-card match counts (total is
+/// their sum), then either gathers (small totals — byte-identical to the
+/// gathered path) or walks the orderby permutation emitting only page cards.
+#[allow(clippy::too_many_arguments)]
+fn run_query_streamed<'a>(
+    cards: &'a [AOracleCard],
+    printings: &'a [APrinting],
+    offsets: &AOffsets,
+    strings: &AStrings,
+    filter: &FilterExpr,
+    mode: Mode,
+    prefer: Prefer,
+    sort_col: SortCol,
+    descending: bool,
+    limit: usize,
+    page_offset: usize,
+    perm: &Archived<Vec<u32>>,
+    card_ids: Box<dyn Iterator<Item = u32> + '_>,
+) -> (usize, Vec<(&'a AOracleCard, &'a APrinting)>) {
+    let mut residual: Vec<&FilterExpr> = Vec::new();
+    let mut residual_is_or = false;
+    let mut ills: Vec<u128> = Vec::new();
+
+    // Match phase: sequential (candidate-order) evaluation into per-card
+    // counts. Exact total = sum of counts, known before emission strategy.
+    let mut counts: Vec<u32> = vec![0; cards.len()];
+    let mut total: usize = 0;
+    for cid in card_ids {
+        let card = &cards[cid as usize];
+        let all_match = match filter.card_pass(card, strings, &mut residual, &mut residual_is_or) {
+            Tri::False | Tri::Null => continue,
+            Tri::True => true,
+            Tri::PrintingDep => false,
+        };
+        let start = u32::from(offsets[cid as usize]) as usize;
+        let end   = u32::from(offsets[cid as usize + 1]) as usize;
+        let c = card_match_count(card, printings, start, end, all_match, &residual, residual_is_or, mode, strings, &mut ills);
+        counts[cid as usize] = c;
+        total += c as usize;
+    }
+    if total == 0 || page_offset >= total {
+        return (total, Vec::new());
+    }
+
+    let mut groups: Vec<(u128, u32, f64)> = Vec::new();
+    let cmp = |a: &Match, b: &Match| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2));
+
+    // Small totals: gather and quickselect — same result as the gathered path.
+    if total <= STREAM_MIN_MATCHES {
+        let mut best: Vec<Match> = Vec::with_capacity(total);
+        for cid in 0..cards.len() as u32 {
+            if counts[cid as usize] == 0 {
+                continue;
+            }
+            let card = &cards[cid as usize];
+            let all_match = match filter.card_pass(card, strings, &mut residual, &mut residual_is_or) {
+                Tri::True => true,
+                Tri::PrintingDep => false,
+                _ => continue,
+            };
+            let start = u32::from(offsets[cid as usize]) as usize;
+            let end   = u32::from(offsets[cid as usize + 1]) as usize;
+            push_card_matches(
+                card, cid, printings, start, end, all_match, &residual, residual_is_or, mode, prefer,
+                sort_col, descending, strings, &mut best, &mut groups,
+            );
+        }
+        let page = select_page(best, page_offset, limit)
+            .into_iter()
+            .map(|(cid, pid)| (&cards[cid as usize], &printings[pid as usize]))
+            .collect();
+        return (total, page);
+    }
+
+    // Stream: walk the permutation, consume page_offset from the counts, emit
+    // page cards only. Within a card, items order by (sort key, pid) — the
+    // same comparator select_page uses; across cards the permutation supplies
+    // the order.
+    let mut skip = page_offset;
+    let mut page: Vec<(&AOracleCard, &APrinting)> = Vec::with_capacity(limit);
+    let mut scratch: Vec<Match> = Vec::new();
+    'walk: for cid in perm.iter().map(|x| u32::from(*x)) {
+        let c = counts[cid as usize] as usize;
+        if c == 0 {
+            continue;
+        }
+        if skip >= c {
+            skip -= c;
+            continue;
+        }
+        let card = &cards[cid as usize];
+        let all_match = match filter.card_pass(card, strings, &mut residual, &mut residual_is_or) {
+            Tri::True => true,
+            Tri::PrintingDep => false,
+            _ => continue,
+        };
+        let start = u32::from(offsets[cid as usize]) as usize;
+        let end   = u32::from(offsets[cid as usize + 1]) as usize;
+        scratch.clear();
+        push_card_matches(
+            card, cid, printings, start, end, all_match, &residual, residual_is_or, mode, prefer,
+            sort_col, descending, strings, &mut scratch, &mut groups,
+        );
+        scratch.sort_unstable_by(cmp);
+        for m in scratch.iter().skip(skip) {
+            page.push((&cards[m.1 as usize], &printings[m.2 as usize]));
+            if page.len() == limit {
+                break 'walk;
+            }
+        }
+        skip = 0;
+    }
     (total, page)
 }
 
@@ -1991,7 +2292,7 @@ const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 /// catch (e.g. reordering same-size fields, changing an index type) — and on
 /// any FLAVOR_FP_FEATURES change: archived fingerprints are built with that
 /// table, so a new table reading old fingerprints breaks the superset test.
-const ARCHIVE_FORMAT_VERSION: u32 = 20260711;
+const ARCHIVE_FORMAT_VERSION: u32 = 20260712;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -2379,6 +2680,7 @@ impl QueryEngine {
             released_at:    build_range_index(&printings, |p| p.released_at_int),
             price_usd:      build_range_index(&printings, |p| p.price_usd.map(f32_sort_bits)),
             collector_number: build_range_index(&printings, |p| p.collector_number_int.map(u32::from)),
+            sort_perms:     build_sort_permutations(&cards, &printings, &offsets),
         };
 
         #[cfg(feature = "alloc-counter")]

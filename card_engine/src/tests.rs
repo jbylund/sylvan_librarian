@@ -1,6 +1,6 @@
 use super::{
     build_numeric_index, build_oracle_text_index, build_tag_index, build_trigram_index,
-    build_type_index, build_rarity_index, build_flavor_index, build_thresholded_tag_index, flavor_fingerprint, flavor_match_sets,
+    build_type_index, build_rarity_index, build_flavor_index, build_thresholded_tag_index, build_sort_permutations, flavor_fingerprint, flavor_match_sets,
     cards_of_printings, count_common_keywords, count_common_types,
     build_artist_index, build_range_index, range_candidates, narrow_candidates, rarity_candidates,
     range_too_broad_to_narrow, run_query, trigram_candidates, int_range_candidates, PrintingRangeIndex, NARROW_FLOOR,
@@ -647,6 +647,7 @@ fn bench_checked_vs_unchecked_access() {
         released_at:    Vec::new(),
         price_usd:      Vec::new(),
         collector_number: Vec::new(),
+        sort_perms:     build_sort_permutations(&cards, &printings, &offsets),
     };
     let data = CardData {
         cards,
@@ -1006,6 +1007,92 @@ fn frame_postings_thresholded_at_build() {
     }
     assert!(narrow_candidates(&coll("2015"), archived, offsets).is_none());
     assert!(narrow_candidates(&coll("Zzz"), archived, offsets).is_none());
+}
+
+// Streamed selection must agree with the gathered path. Two stores identical
+// except for the presence of sort permutations: the perm-less store takes the
+// gathered path, the other streams (matches > STREAM_MIN_MATCHES). Distinct
+// edhrec ranks everywhere, so no full-key tie blocks (the one place the
+// canonical-secondary permutation is allowed to order differently).
+#[test]
+fn streamed_selection_matches_gathered() {
+    const N: usize = 1_500;
+    let build = |with_perms: bool| {
+        let mut vocab = VocabInterner::new();
+        let mut cards = Vec::with_capacity(N);
+        for i in 0..N {
+            let mut c = stub_card((i + 1) as u128, TYPE_CREATURE, &[], &mut vocab);
+            c.cmc = Some((i % 8) as u8);
+            c.edhrec_rank = Some(((i * 37) % N) as u32 + 1); // distinct, shuffled
+            if i % 11 == 0 {
+                c.edhrec_rank = None; // a null block, ordered by canonical secondary
+            }
+            cards.push(c);
+        }
+        let mut data = store_of(cards, &vec![3usize; N], vocab);
+        // vary prices so prefer=usd_high picks different printings
+        for (pid, p) in data.printings.iter_mut().enumerate() {
+            p.price_usd = Some((pid % 7) as f32 + 0.5);
+        }
+        if with_perms {
+            data.indexes.sort_perms = build_sort_permutations(&data.cards, &data.printings, &data.offsets);
+        }
+        rkyv::to_bytes::<Error>(&data).expect("serialize")
+    };
+    let gathered_bytes = build(false);
+    let streamed_bytes = build(true);
+    let gathered = rkyv::access::<Archived<CardData>, Error>(&gathered_bytes).expect("access");
+    let streamed = rkyv::access::<Archived<CardData>, Error>(&streamed_bytes).expect("access");
+
+    // cmc >= 2 matches 6/8 of cards (1,125 > STREAM_MIN_MATCHES streams).
+    let filt = || FilterExpr::NumericCmp {
+        lhs: NumExpr::Field(NumField::Cmc),
+        op: CmpOp::Ge,
+        rhs: NumExpr::Const(2.0),
+    };
+    for unique in ["card", "printing", "artwork"] {
+        for prefer in ["default", "usd_high"] {
+            for orderby in ["edhrec", "cmc"] {
+                for direction in ["asc", "desc"] {
+                    for offset in [0usize, 7, 1120] {
+                        let f = filt();
+                        let (tg, pg) = run_query(
+                            &gathered.cards, &gathered.printings, &gathered.offsets, &gathered.strings,
+                            &f, unique, prefer, orderby, direction, 10, offset, &gathered.indexes,
+                        );
+                        let (ts, ps) = run_query(
+                            &streamed.cards, &streamed.printings, &streamed.offsets, &streamed.strings,
+                            &f, unique, prefer, orderby, direction, 10, offset, &streamed.indexes,
+                        );
+                        let ids = |v: &[(&super::AOracleCard, &super::APrinting)]| -> Vec<(u128, u128)> {
+                            v.iter().map(|(c, p)| (u128::from(c.oracle_id), u128::from(p.scryfall_id))).collect()
+                        };
+                        assert_eq!(tg, ts, "total {unique}/{prefer}/{orderby}/{direction}/{offset}");
+                        assert_eq!(ids(&pg), ids(&ps), "page {unique}/{prefer}/{orderby}/{direction}/{offset}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Permutations put missing sort values last in both directions and reverse
+// only the non-null primary order, matching sort_key_bits semantics.
+#[test]
+fn sort_permutations_nulls_last_both_directions() {
+    let mut vocab = VocabInterner::new();
+    let mut cards = vec![
+        stub_card(1, TYPE_CREATURE, &[], &mut vocab),
+        stub_card(2, TYPE_CREATURE, &[], &mut vocab),
+        stub_card(3, TYPE_CREATURE, &[], &mut vocab),
+    ];
+    cards[0].cmc = Some(5);
+    cards[1].cmc = None;
+    cards[2].cmc = Some(1);
+    let data = store_of(cards, &[1, 1, 1], vocab);
+    let perms = build_sort_permutations(&data.cards, &data.printings, &data.offsets);
+    assert_eq!(perms.cmc[0], vec![2, 0, 1], "asc: 1, 5, null");
+    assert_eq!(perms.cmc[1], vec![0, 2, 1], "desc: 5, 1, null");
 }
 
 #[test]
