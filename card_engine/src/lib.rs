@@ -2664,16 +2664,14 @@ fn run_query<'a>(
         }
     };
 
-    // Memoize when the driver is about to evaluate the filter against (nearly)
-    // every card: no candidates at all, or a candidate set so broad it hardly
-    // narrows — a broad plane bitmap ANDed with an unnarrowable Or would
-    // otherwise run its substring scans over most of the corpus. Resolving the
-    // indexable text predicates through their trigram indexes once here (#624)
-    // turns those per-card substring searches into integer binary searches.
-    // The half-corpus line mirrors memoize_text_predicates' decline guard.
-    if candidate_cards.as_ref().is_none_or(|v| v.len() > cards.len() / 2) {
-        filter.memoize_text_predicates(cards, strings, &indexes.name_trigram, &indexes.name_bigrams, &indexes.oracle_trigram);
-    }
+    // Resolve indexable text predicates through their indexes once (#624)
+    // when the per-card evaluation they'd replace outweighs the bind cost —
+    // the gate is per-node and cost-based (see memoize_pays): each predicate
+    // compares its own bind bound against the evaluation domain, so a broad
+    // candidate set with a selective needle memoizes while a narrow one
+    // leaves the scan alone.
+    let eval_domain = candidate_cards.as_ref().map_or(cards.len(), Vec::len);
+    filter.memoize_text_predicates(cards, strings, &indexes.name_trigram, &indexes.name_bigrams, &indexes.oracle_trigram, eval_domain);
     let card_ids: Box<dyn Iterator<Item = u32>> = match &candidate_cards {
         Some(v) => Box::new(v.iter().copied()),
         None    => Box::new(0..cards.len() as u32),

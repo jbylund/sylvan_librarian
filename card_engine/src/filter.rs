@@ -491,6 +491,20 @@ impl FilterExpr {
     /// candidates exceed half the corpus stay unrewritten too — at that
     /// density a binary search costs about what contains() does, so the
     /// verify pass couldn't earn its keep.
+    /// Cost-based memoization gate, measured (bench_memo_crossover.py, six
+    /// needles spanning 493-11,933 candidate texts × eight candidate-domain
+    /// sizes, memoize-always vs memoize-never builds): the bind cost breaks
+    /// even when the evaluation domain reaches ~1.25× the needle's shortest
+    /// trigram posting list. The factor here is 2 — declining early forgoes a
+    /// small win, declining late pays on every query — with a floor below
+    /// which the whole effect sits inside measurement noise (scaled down for
+    /// tiny stores so tests and partial imports still exercise the rewrite).
+    fn memoize_pays(bind_bound: usize, eval_domain: usize, n_rows: usize) -> bool {
+        const MEMO_DOMAIN_FACTOR: usize = 2;
+        const MEMO_DOMAIN_FLOOR: usize = 2_048;
+        eval_domain >= (bind_bound * MEMO_DOMAIN_FACTOR).max(MEMO_DOMAIN_FLOOR.min(n_rows / 4))
+    }
+
     pub(crate) fn memoize_text_predicates(
         &mut self,
         cards: &[AOracleCard],
@@ -498,14 +512,15 @@ impl FilterExpr {
         name_trigram: &rkyv::Archived<TrigramIndex>,
         name_bigrams: &rkyv::Archived<NameBigramIndex>,
         oracle: &rkyv::Archived<OracleTextIndex>,
+        eval_domain: usize,
     ) {
         match self {
             FilterExpr::And(children) | FilterExpr::Or(children) => {
                 for c in children.iter_mut() {
-                    c.memoize_text_predicates(cards, strings, name_trigram, name_bigrams, oracle);
+                    c.memoize_text_predicates(cards, strings, name_trigram, name_bigrams, oracle, eval_domain);
                 }
             }
-            FilterExpr::Not(inner) => inner.memoize_text_predicates(cards, strings, name_trigram, name_bigrams, oracle),
+            FilterExpr::Not(inner) => inner.memoize_text_predicates(cards, strings, name_trigram, name_bigrams, oracle, eval_domain),
             FilterExpr::TextContains { field: TextSearchField::NameLower, word } if word.len() == 2 => {
                 // 2-byte needles resolve exactly through the bigram index: the
                 // member cards are the complete match set (containment IS
@@ -515,6 +530,13 @@ impl FilterExpr {
                     return;
                 }
                 let bg = [word.as_bytes()[0], word.as_bytes()[1]];
+                let bind_bound = name_bigrams.postings.get(&bg).map_or_else(
+                    || name_bigrams.plane_of.get(&bg).map_or(0, |_| cards.len() / 8),
+                    |v| v.len(),
+                );
+                if !Self::memoize_pays(bind_bound, eval_domain, cards.len()) {
+                    return;
+                }
                 let mut ids: Vec<u32> = if let Some(p) = name_bigrams.plane_of.get(&bg) {
                     let wpp = cards.len().div_ceil(64);
                     let start = u32::from(*p) as usize * wpp;
@@ -546,7 +568,7 @@ impl FilterExpr {
                 // it can only happen when every trigram of the needle is
                 // ultra-common, where the match set is broad anyway.
                 match trigram_min_posting(name_trigram, word) {
-                    Some(min) if min <= cards.len() / 2 => {}
+                    Some(min) if min <= cards.len() / 2 && Self::memoize_pays(min, eval_domain, cards.len()) => {}
                     _ => return,
                 }
                 let Some(cand) = trigram_candidates(name_trigram, word) else { return };
@@ -561,7 +583,7 @@ impl FilterExpr {
             }
             FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word } => {
                 match trigram_min_posting(&oracle.trigrams, word) {
-                    Some(min) if min <= oracle.gids.len() / 2 => {}
+                    Some(min) if min <= oracle.gids.len() / 2 && Self::memoize_pays(min, eval_domain, cards.len()) => {}
                     _ => return,
                 }
                 let Some(dense) = trigram_candidates(&oracle.trigrams, word) else { return };
