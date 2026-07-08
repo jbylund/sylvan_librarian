@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use regex::Regex;
 use serde_json::Value;
-use super::{AOracleCard, APrinting, AStrings, str_at, is_devotion_sym, mana_pip_counts, mana_cmc, color_list_to_mask, card_type_str_to_bit, ARTIST_NONE, NONE_STR, FlavorIndex, flavor_fingerprint, flavor_match_sets};
+use super::{AOracleCard, APrinting, AStrings, str_at, is_devotion_sym, mana_pip_counts, mana_cmc, color_list_to_mask, card_type_str_to_bit, trigram_candidates, trigram_min_posting, ARTIST_NONE, NONE_STR, FlavorIndex, OracleTextIndex, TrigramIndex, flavor_fingerprint, flavor_match_sets};
 use super::legality::{LEGALITY_LEGAL, LEGALITY_BANNED, LEGALITY_RESTRICTED, format_shift};
 
 // ─── Comparison / arithmetic operators ───────────────────────────────────────
@@ -297,6 +297,25 @@ pub(crate) enum FilterExpr {
         gids: Vec<u32>,
         dense_ids: Vec<u32>,
     },
+    /// A name contains-predicate after memoize_text_predicates() resolved it
+    /// through the name trigram index in a full-scan query: sorted
+    /// card_name_id values of the cards whose lowercase name contains the
+    /// needle. Names are always Known (missing names intern as ""), so
+    /// matching is a plain two-valued binary search. The ids are specific to
+    /// the store the rewrite ran against — a memoized filter must not outlive
+    /// that store or that query.
+    NameMatch {
+        ids: Vec<u32>,
+    },
+    /// An oracle-text contains-predicate after memoize_text_predicates()
+    /// resolved it through the oracle trigram index in a full-scan query:
+    /// sorted oracle_text_lower_id values whose text contains the needle.
+    /// Textless cards intern "" at load (never NONE_STR), so like TextContains
+    /// they evaluate False, not Null; the Null arm in tri() only mirrors the
+    /// str_at() contract defensively. Store-bound, same as NameMatch.
+    OracleMatch {
+        gids: Vec<u32>,
+    },
     TextExact {
         field: TextField,
         op: CmpOp,
@@ -382,6 +401,11 @@ impl FilterExpr {
     /// - Flavor predicates get the same treatment against the ~26.3k distinct
     ///   flavor texts (FlavorMatch), with a fingerprint prefilter skipping
     ///   texts that cannot contain the needle (see FLAVOR_FP_FEATURES).
+    ///
+    /// Name/oracle-text contains predicates are deliberately NOT rewritten
+    /// here: their rewrite is only profitable when the query full-scans, which
+    /// isn't known until run_query computes candidates — see
+    /// memoize_text_predicates().
     pub(crate) fn bind(
         &mut self,
         vocab: &AStrings,
@@ -447,6 +471,76 @@ impl FilterExpr {
             FilterExpr::TextRegex { field: TextField::FlavorTextLower, regex } => {
                 let (gids, dense_ids) = flavor_match_sets(flavor, strings, 0, |s| regex.is_match(s));
                 *self = FilterExpr::FlavorMatch { gids, dense_ids };
+            }
+            _ => {}
+        }
+    }
+
+    /// Memoize indexable text predicates in a query the driver is about to
+    /// evaluate against every card (#624) — the third instance of the
+    /// ArtistMatch/FlavorMatch pattern. Name/oracle contains-nodes resolve
+    /// through their trigram indexes: gather candidates (bounded by the
+    /// needle's rarest trigram), verify each with the real contains() once,
+    /// and rewrite to a sorted match-id set whose per-card evaluation is an
+    /// integer binary search instead of a substring search.
+    ///
+    /// Only called when the query has no candidates (no postings narrowing
+    /// and no plane bitmap): with candidates, the driver evaluates only those
+    /// cards and the bind-time verify would mostly be wasted work. Needles
+    /// under 3 bytes have no trigrams and keep the scan; needles whose
+    /// candidates exceed half the corpus stay unrewritten too — at that
+    /// density a binary search costs about what contains() does, so the
+    /// verify pass couldn't earn its keep.
+    pub(crate) fn memoize_text_predicates(
+        &mut self,
+        cards: &[AOracleCard],
+        strings: &AStrings,
+        name_trigram: &rkyv::Archived<TrigramIndex>,
+        oracle: &rkyv::Archived<OracleTextIndex>,
+    ) {
+        match self {
+            FilterExpr::And(children) | FilterExpr::Or(children) => {
+                for c in children.iter_mut() {
+                    c.memoize_text_predicates(cards, strings, name_trigram, oracle);
+                }
+            }
+            FilterExpr::Not(inner) => inner.memoize_text_predicates(cards, strings, name_trigram, oracle),
+            FilterExpr::TextContains { field: TextSearchField::NameLower, word } => {
+                // The intersection is bounded by the shortest posting list, so
+                // checking that bound first makes the decline path free — no
+                // gather, no intersection. Declining when only the *bound*
+                // (not the exact count) exceeds half the corpus is deliberate:
+                // it can only happen when every trigram of the needle is
+                // ultra-common, where the match set is broad anyway.
+                match trigram_min_posting(name_trigram, word) {
+                    Some(min) if min <= cards.len() / 2 => {}
+                    _ => return,
+                }
+                let Some(cand) = trigram_candidates(name_trigram, word) else { return };
+                let mut ids: Vec<u32> = cand
+                    .into_iter()
+                    .filter(|&cid| cards[cid as usize].card_name_lower.as_str().contains(word.as_str()))
+                    .map(|cid| u32::from(cards[cid as usize].card_name_id))
+                    .collect();
+                ids.sort_unstable();
+                ids.dedup();
+                *self = FilterExpr::NameMatch { ids };
+            }
+            FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word } => {
+                match trigram_min_posting(&oracle.trigrams, word) {
+                    Some(min) if min <= oracle.gids.len() / 2 => {}
+                    _ => return,
+                }
+                let Some(dense) = trigram_candidates(&oracle.trigrams, word) else { return };
+                let mut gids: Vec<u32> = Vec::with_capacity(dense.len());
+                for d in dense {
+                    let gid = u32::from(oracle.gids[d as usize]);
+                    if str_at(strings, gid).is_some_and(|s| s.contains(word.as_str())) {
+                        gids.push(gid);
+                    }
+                }
+                gids.sort_unstable();
+                *self = FilterExpr::OracleMatch { gids };
             }
             _ => {}
         }
@@ -633,6 +727,25 @@ impl FilterExpr {
                 let gid = u32::from(p.flavor_text_lower_id);
                 if gid == NONE_STR {
                     Tri::Null // no flavor text: SQL NULL, matching the pre-bind semantics
+                } else {
+                    tri_bool(gids.binary_search(&gid).is_ok())
+                }
+            }
+
+            // Names are always present (TextContains on NameLower is always
+            // Known), so membership is two-valued: an id absent from `ids`
+            // means the name didn't contain the needle, exactly like
+            // contains() on the inline string.
+            FilterExpr::NameMatch { ids } => tri_bool(ids.binary_search(&u32::from(card.card_name_id)).is_ok()),
+
+            FilterExpr::OracleMatch { gids } => {
+                let gid = u32::from(card.oracle_text_lower_id);
+                if gid == NONE_STR {
+                    // Unreachable for loaded cards (missing text interns "" —
+                    // contains() on it is False, and so is a binary-search
+                    // miss); kept to mirror str_at()'s NONE_STR → None
+                    // contract, which TextContains maps to Null via opt_sv.
+                    Tri::Null
                 } else {
                     tri_bool(gids.binary_search(&gid).is_ok())
                 }
