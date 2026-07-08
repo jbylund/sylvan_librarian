@@ -1,6 +1,6 @@
 use super::{
     build_numeric_index, build_oracle_text_index, build_tag_index, build_trigram_index,
-    build_type_index, build_rarity_index, build_flavor_index, build_thresholded_tag_index, build_sort_permutations,
+    build_rarity_index, build_flavor_index, build_thresholded_tag_index, build_sort_permutations,
     build_artwork_group_counts, build_bit_planes, build_name_bigram_index, flavor_fingerprint, flavor_match_sets,
     cards_of_printings, count_common_keywords, count_common_types,
     build_artist_index, build_range_index, range_candidates, narrow_candidates, rarity_candidates,
@@ -212,11 +212,9 @@ fn store_of(cards: Vec<OracleCard>, printing_counts: &[usize], vocab: VocabInter
         }
         offsets.push(printings.len() as u32);
     }
-    // Real type index so TypeCmp narrowing sees the cards (an empty Default
-    // index would narrow every type query to zero candidates), and real planes
-    // so plane-path tests see the same store shape reload_commit builds.
+    // Real planes and bigrams so narrowing tests see the same store shape
+    // reload_commit builds (type narrowing goes through the planes since #637).
     let indexes = CardIndexes {
-        type_bits: build_type_index(&cards),
         planes: build_bit_planes(&cards),
         name_bigrams: build_name_bigram_index(&cards),
         ..Default::default()
@@ -648,7 +646,6 @@ fn bench_checked_vs_unchecked_access() {
         cmc:            build_numeric_index(&cards, |c| c.cmc.map(|v| v as i16)),
         power:          build_numeric_index(&cards, |c| c.creature_power.map(|v| v as i16)),
         toughness:      build_numeric_index(&cards, |c| c.creature_toughness.map(|v| v as i16)),
-        type_bits:      build_type_index(&cards),
         rarity:         build_rarity_index(&printings, &offsets),
         subtypes:       build_tag_index(&cards, &vocab.strings, |c| &c.card_subtypes),
         keywords:       build_tag_index(&cards, &vocab.strings, |c| &c.card_keywords),
@@ -2013,4 +2010,120 @@ fn broad_tag_postings_scatter_or_decline() {
     // Absent tag: exact empty.
     let n = rec(&tag("foil"), false).expect("absent tag proves the empty set");
     assert_eq!(n.set.len(), 0);
+}
+
+// ─── Devotion bit-sliced planes ───────────────────────────────────────────────
+
+/// Cards with controlled mana costs, hybrids included. A {R/G} pip counts
+/// toward BOTH red and green devotion (the loader's hybrid expansion), which
+/// the planes must reproduce.
+fn devotion_fixture_store() -> CardData {
+    let mut vocab = VocabInterner::new();
+    let costs: &[(&[(&str, u8)], bool)] = &[
+        (&[], false),                       // no cost
+        (&[("U", 1)], false),               // {U}
+        (&[("U", 2)], false),               // {U}{U}
+        (&[("U", 3)], false),               // {U}{U}{U}
+        (&[("U", 5)], false),               // deep: saturates
+        (&[("R/G", 1)], true),              // {R/G}: 1 red AND 1 green
+        (&[("R/G", 2), ("R", 1)], true),    // {R/G}{R/G}{R}: R=3, G=2
+        (&[("W", 1), ("U", 1)], false),     // {W}{U}
+        (&[("C", 2)], false),               // {C}{C}: colorless devotion
+    ];
+    let cards: Vec<OracleCard> = costs.iter().enumerate().map(|(i, &(pips, hybrid))| {
+        let mut c = stub_card(i as u128 + 1, TYPE_CREATURE, &[], &mut vocab);
+        let pip_map: HashMap<String, u8> = pips.iter().map(|&(s, n)| (s.to_string(), n)).collect();
+        let devotion = if hybrid {
+            let mut d: HashMap<String, u8> = HashMap::new();
+            for (sym, &n) in &pip_map {
+                if sym.contains('/') {
+                    for part in sym.split('/') {
+                        *d.entry(part.to_string()).or_insert(0) += n;
+                    }
+                } else {
+                    *d.entry(sym.clone()).or_insert(0) += n;
+                }
+            }
+            Some(d)
+        } else {
+            None
+        };
+        // identity must cover devotion colors (the build tripwire enforces it)
+        let mut ident = 0u8;
+        for sym in ["W", "U", "B", "R", "G"] {
+            let m = devotion.as_ref().unwrap_or(&pip_map);
+            if m.get(sym).copied().unwrap_or(0) > 0 {
+                ident |= super::color_list_to_mask(&[sym]);
+            }
+        }
+        c.card_color_identity = ident;
+        c.mana_cost = ManaCost { pips: pip_map, devotion, cmc: 0.0 };
+        c
+    }).collect();
+    store_of(cards, &[1usize; 9], vocab)
+}
+
+// Every devotion op agrees with tri() through the planes, at every saturation
+// depth — and past the boundary the compiler declines rather than guesses.
+#[test]
+fn devotion_plane_parity_and_boundaries() {
+    let data = devotion_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let dev = |op, pips: &[(&str, u8)]| FilterExpr::Devotion {
+        op,
+        pips: pips.iter().map(|&(s, n)| (s.to_string(), n)).collect(),
+    };
+    let mut bitmap: Vec<u64> = Vec::new();
+    let mut check_exact = |f: &FilterExpr| {
+        let pe = compile_plane(f).expect("must compile exactly");
+        eval_planes(&pe, &archived.indexes.planes, &mut bitmap);
+        for (cid, card) in archived.cards.iter().enumerate() {
+            let want = f.eval_card(card, &archived.strings) == Tri::True;
+            assert_eq!(bitmap_contains(&bitmap, cid as u32), want, "devotion parity at card {cid}");
+        }
+    };
+    for op in [CmpOp::Ge, CmpOp::Eq, CmpOp::Le, CmpOp::Ne, CmpOp::Gt, CmpOp::Lt] {
+        for k in 1..=2u8 {
+            check_exact(&dev(op, &[("U", k)]));
+        }
+    }
+    check_exact(&dev(CmpOp::Ge, &[("U", 3)])); // saturated value 3 means >= 3: exact
+    check_exact(&dev(CmpOp::Ge, &[("R", 1), ("G", 1)])); // multi-color, hybrid cards in play
+    check_exact(&dev(CmpOp::Ge, &[("C", 2)])); // colorless devotion
+    check_exact(&dev(CmpOp::Ge, &[("R", 3)])); // {R/G}{R/G}{R} card reaches R=3
+
+    // Past the saturation boundary the exact compiler declines...
+    assert!(compile_plane(&dev(CmpOp::Ge, &[("U", 4)])).is_none());
+    assert!(compile_plane(&dev(CmpOp::Eq, &[("U", 3)])).is_none());
+    assert!(compile_plane(&dev(CmpOp::Le, &[("U", 3)])).is_none());
+    // ...and the saturated superset covers every deep match for narrowing.
+    let deep = dev(CmpOp::Ge, &[("U", 5)]);
+    let n = super::narrow_rec(&deep, &archived.indexes, &archived.offsets, false).expect("deep-k narrows loosely");
+    assert!(!n.tight);
+    let cand = n.set.into_cards(&archived.offsets);
+    for (cid, card) in archived.cards.iter().enumerate() {
+        if deep.eval_card(card, &archived.strings) == Tri::True {
+            assert!(cand.contains(&(cid as u32)), "superset must cover card {cid}");
+        }
+    }
+}
+
+// The user-specified hybrid invariant, pinned: a card costing {R/G} has one
+// red devotion AND one green devotion.
+#[test]
+fn hybrid_pip_counts_toward_both_colors() {
+    let data = devotion_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let dev = |sym: &str, k: u8| FilterExpr::Devotion {
+        op: CmpOp::Ge,
+        pips: std::iter::once((sym.to_string(), k)).collect(),
+    };
+    let mut bitmap: Vec<u64> = Vec::new();
+    let rg_card = 5; // {R/G}
+    for (f, want) in [(dev("R", 1), true), (dev("G", 1), true), (dev("R", 2), false), (dev("U", 1), false)] {
+        eval_planes(&compile_plane(&f).unwrap(), &archived.indexes.planes, &mut bitmap);
+        assert_eq!(bitmap_contains(&bitmap, rg_card), want);
+    }
 }

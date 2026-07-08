@@ -90,6 +90,13 @@ FRAGMENTS = [
     "o:destroy",
     "o:flying",
     "o:xy",
+    # devotion: exact depths, the saturation boundary, Eq, and negation
+    "devotion:u",
+    "devotion:uu",
+    "devotion:uuu",
+    "devotion:uuuu",
+    "devotion=gg",
+    "-devotion:rr",
 ]
 
 
@@ -112,8 +119,22 @@ def _make_cards(rng: random.Random) -> list[dict[str, Any]]:
         # keywords are JSONB objects (the loader reads dict KEYS), types and
         # subtypes are capitalized lists (the parser capitalizes query values).
         # UUIDs start at 1 — the all-zero UUID is the loader's null sentinel.
+        # mana cost: sym -> positional array (count = len), ~10% hybrid pips
+        pips: dict[str, int] = {}
+        if "Land" not in types:
+            for c in colors:
+                pips[c] = rng.choice([1, 1, 2, 2, 3, 4])
+            if rng.random() < 0.1 and len(colors) >= 1:
+                other = rng.choice([x for x in "WUBRG" if x != colors[0]] or ["C"])
+                pips[f"{colors[0]}/{other}"] = rng.choice([1, 2])
+        pos = 1
+        mana_cost_jsonb: dict[str, list[int]] = {}
+        for sym, n in pips.items():
+            mana_cost_jsonb[sym] = list(range(pos, pos + n))
+            pos += n
         card = {
             "oracle_id": f"00000000-0000-0000-0000-{i + 1:012d}",
+            "mana_cost_jsonb": mana_cost_jsonb,
             "card_name": name,
             "oracle_text": oracle,
             "card_colors": dict.fromkeys(colors, True),
@@ -185,6 +206,21 @@ def _ref_leaf(frag: str, card: dict[str, Any]) -> bool | None:  # noqa: PLR0911,
             return year == int(rest)
         m = _split_num(frag, "year")
         return _tri_cmp(year, *m)
+    if frag.startswith(("devotion:", "devotion=")):
+        op = frag[len("devotion")]
+        counts: dict[str, int] = {}
+        for sym, positions in card["mana_cost_jsonb"].items():
+            for part in sym.split("/"):
+                if part in "WUBRGC":
+                    counts[part] = counts.get(part, 0) + len(positions)
+        want: dict[str, int] = {}
+        for ch in frag[len("devotion") + 1 :]:
+            want[ch.upper()] = want.get(ch.upper(), 0) + 1
+        ge = all(counts.get(c, 0) >= k for c, k in want.items())
+        if op == ":":
+            return ge
+        # "=": exact per-color counts AND no devotion outside the queried colors
+        return all(counts.get(c, 0) == k for c, k in want.items()) and all(c in want for c, n in counts.items() if n > 0)
     if field == "name":
         return rest in card["card_name"].lower()
     if field == "o":
