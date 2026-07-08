@@ -588,6 +588,12 @@ def test_case_insensitive_attributes(parse_query, input_query: str, expected_sql
             r"(card.card_set_code = %(p_str_aWtv)s)",
             {"p_str_aWtv": "iko"},
         ),
+        # Set search with 'e:' shorthand (Scryfall-compatible)
+        (
+            "e:iko",
+            r"(card.card_set_code = %(p_str_aWtv)s)",
+            {"p_str_aWtv": "iko"},
+        ),
         # Case-insensitive set attribute search
         (
             "SET:iko",
