@@ -44,7 +44,13 @@ import scripts.survey_queries as sq  # noqa: E402
 
 OUTDIR = REPO_ROOT / "benchmarks/verify-order"
 
+# Both branches set the toggle explicitly and to equal-length values: an env
+# var present in one branch only shifts the process memory layout enough to
+# move sub-100us queries a consistent ~15% either way (classic measurement-
+# bias artifact; reproduced here on single-predicate queries the toggle
+# cannot affect, and eliminated by equalizing the environment).
 OLD_ENV = {"CARD_ENGINE_VERIFY_ORDER": "0"}
+NEW_ENV = {"CARD_ENGINE_VERIFY_ORDER": "1"}
 
 # Same seeded survey corpus as the standing baselines (survey_queries.py --seed 42).
 BROAD_SEED = 42
@@ -66,7 +72,7 @@ MAX_ITERS = 400
 #                 (candidates already cover the cheap child), single
 #                 predicates, name lookups
 _PAIRS: list[tuple[str, str, str]] = [
-    # (family, expensive-first, cheap-first)
+    # family name, then the expensive-first and cheap-first spellings
     ("regex-legality", "o:/^\\{t\\}: add/ f:standard", "f:standard o:/^\\{t\\}: add/"),
     ("regex-legality", "o:/draw .* cards?/ f:pauper", "f:pauper o:/draw .* cards?/"),
     ("regex-legality-broad", "o:/^\\{t\\}: add/ f:commander", "f:commander o:/^\\{t\\}: add/"),
@@ -78,7 +84,7 @@ _PAIRS: list[tuple[str, str, str]] = [
     ("or-mixed", "o:/enters the battlefield tapped/ or t:land", "t:land or o:/enters the battlefield tapped/"),
     ("or-mixed", "o:/^flying$/ or c:g", "c:g or o:/^flying$/"),
     ("set-size", "o:creature flavor:dragon", "flavor:dragon o:creature"),
-    ("set-size", "artist:\"rebecca guay\" o:enchant", "o:enchant artist:\"rebecca guay\""),
+    ("set-size", 'artist:"rebecca guay" o:enchant', 'o:enchant artist:"rebecca guay"'),
     ("control-narrowed", "o:/^\\{t\\}: add/ t:land c:g", "t:land c:g o:/^\\{t\\}: add/"),
     ("control-narrowed", "o:/storm/ cmc>9", "cmc>9 o:/storm/"),
 ]
@@ -131,7 +137,7 @@ def build_spec_set(store: pathlib.Path, path: pathlib.Path) -> None:
     print(f"spec set: {len(kept)} specs ({n_broad} broad, {len(kept) - n_broad} enrich) -> {path}")
 
 
-def bench_one(engine, spec: dict, window: float) -> tuple[int, int, float, float]:
+def bench_one(engine: object, spec: dict, window: float) -> tuple[int, int, float, float]:
     """Return (total, n, median_ms, min_ms) for one query spec over a timed window."""
     from api.parsing import parse_scryfall_query  # noqa: PLC0415 — worker-only import
 
@@ -199,7 +205,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     if not args.out.exists():
         args.out.write_text("branch,rep,qid,query,section,family,pair,variant,total,n,med_ms,min_ms\n")
     for rep in range(1, args.reps + 1):
-        branches = [("old", OLD_ENV), ("new", {})]
+        branches = [("old", OLD_ENV), ("new", NEW_ENV)]
         if rep % 2 == 0:
             branches.reverse()
         for branch, env in branches:
@@ -207,12 +213,18 @@ def cmd_run(args: argparse.Namespace) -> None:
                 sys.executable,
                 str(pathlib.Path(__file__)),
                 "worker",
-                "--branch", branch,
-                "--rep", str(rep),
-                "--store", str(store),
-                "--queries", str(queries),
-                "--out", str(args.out),
-                "--window", str(args.window),
+                "--branch",
+                branch,
+                "--rep",
+                str(rep),
+                "--store",
+                str(store),
+                "--queries",
+                str(queries),
+                "--out",
+                str(args.out),
+                "--window",
+                str(args.window),
             ]
             subprocess.run(cmd, check=True, env={**os.environ, **env}, cwd=REPO_ROOT)
     cmd_analyze(args)
@@ -268,25 +280,31 @@ def cmd_analyze(args: argparse.Namespace) -> None:
             r = meta[q]
             print(f"  {ratios[q]:6.2f}x  {old[q]:8.3f} -> {new[q]:8.3f} ms  total={r['total']:>6}  {r['query']!r}")
 
-    # Spelling-pair symmetry: on the new branch the two spellings of a pair
-    # must cost the same; the old branch's spread IS the written-order bug.
+    _print_pair_symmetry(qids, meta, old, new, ratios)
+
+
+def _print_pair_symmetry(qids: list[str], meta: dict, old: dict, new: dict, ratios: dict) -> None:
+    """Print the spelling-pair symmetry table.
+
+    On the new branch the two spellings of a pair must cost the same; the old
+    branch's spread IS the written-order bug.
+    """
     pairs: dict[str, dict[str, str]] = {}
     for q in qids:
         r = meta[q]
         if r["pair"]:
             pairs.setdefault(r["pair"], {})[r["variant"]] = q
-    if pairs:
-        print("\n=== spelling pairs: expensive-first / cheap-first cost ratio ===")
-        print(f"  {'family':<22} {'old spread':>10} {'new spread':>10} {'exp-first speedup':>18}  query")
-        for pid, variants in sorted(pairs.items(), key=lambda kv: int(kv[0])):
-            if set(variants) != {"expensive-first", "cheap-first"}:
-                continue
-            qe, qc = variants["expensive-first"], variants["cheap-first"]
-            old_spread = old[qe] / old[qc]
-            new_spread = new[qe] / new[qc]
-            print(
-                f"  {meta[qe]['family']:<22} {old_spread:>9.2f}x {new_spread:>9.2f}x {ratios[qe]:>17.2f}x  {meta[qe]['query']!r}"
-            )
+    if not pairs:
+        return
+    print("\n=== spelling pairs: expensive-first / cheap-first cost ratio ===")
+    print(f"  {'family':<22} {'old spread':>10} {'new spread':>10} {'exp-first speedup':>18}  query")
+    for variants in (kv[1] for kv in sorted(pairs.items(), key=lambda kv: int(kv[0]))):
+        if set(variants) != {"expensive-first", "cheap-first"}:
+            continue
+        qe, qc = variants["expensive-first"], variants["cheap-first"]
+        old_spread = old[qe] / old[qc]
+        new_spread = new[qe] / new[qc]
+        print(f"  {meta[qe]['family']:<22} {old_spread:>9.2f}x {new_spread:>9.2f}x {ratios[qe]:>17.2f}x  {meta[qe]['query']!r}")
 
 
 def main() -> None:
