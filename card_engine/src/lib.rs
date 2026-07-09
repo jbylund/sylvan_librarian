@@ -3821,3 +3821,5 @@ mod card_engine {
 mod tests;
 #[cfg(test)]
 mod bench_mana;
+#[cfg(test)]
+mod bench_verify_cost;

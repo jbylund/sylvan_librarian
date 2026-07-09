@@ -2301,21 +2301,23 @@ fn machinery_regex() -> FilterExpr {
     FilterExpr::TextRegex { field: TextField::OracleTextLower, regex: regex::Regex::new("draw .* cards?").unwrap() }
 }
 
-// Pattern-shape cost classification: anchored literals are memcmp-cheap,
-// bare literals cost a substring scan, real machinery gets the top tier.
+// Pattern-shape cost classification: anchored literals are memcmp-cheap
+// (SET_LOOKUP_NS100); everything else — bare literals included, measured the
+// same cost as real machinery, not a text scan (bench_verify_cost.rs) —
+// shares REGEX_MACHINERY_NS100.
 #[test]
 fn regex_tier_classifies_pattern_shapes() {
-    use super::regex_tier;
-    assert_eq!(regex_tier("(?i)^flying$"), 1);
-    assert_eq!(regex_tier("dragon$"), 1);
-    assert_eq!(regex_tier("(?i)^\\{t\\}: add"), 1, "escaped punctuation is literal");
-    assert_eq!(regex_tier("^gob"), 1);
-    assert_eq!(regex_tier("(?i)flying"), 2, "unanchored literal = contains cost");
-    assert_eq!(regex_tier("draw .* cards?"), 3);
-    assert_eq!(regex_tier("^[aeiou]"), 3);
-    assert_eq!(regex_tier("(?i)^\\d+$"), 3, "class escapes are machinery");
-    assert_eq!(regex_tier("a|b"), 3);
-    assert_eq!(regex_tier("ends with backslash\\"), 3, "dangling escape: not literal");
+    use super::{regex_tier, REGEX_MACHINERY_NS100, SET_LOOKUP_NS100};
+    assert_eq!(regex_tier("(?i)^flying$"), SET_LOOKUP_NS100);
+    assert_eq!(regex_tier("dragon$"), SET_LOOKUP_NS100);
+    assert_eq!(regex_tier("(?i)^\\{t\\}: add"), SET_LOOKUP_NS100, "escaped punctuation is literal");
+    assert_eq!(regex_tier("^gob"), SET_LOOKUP_NS100);
+    assert_eq!(regex_tier("(?i)flying"), REGEX_MACHINERY_NS100, "unanchored literal measures the same as machinery");
+    assert_eq!(regex_tier("draw .* cards?"), REGEX_MACHINERY_NS100);
+    assert_eq!(regex_tier("^[aeiou]"), REGEX_MACHINERY_NS100);
+    assert_eq!(regex_tier("(?i)^\\d+$"), REGEX_MACHINERY_NS100, "class escapes are machinery");
+    assert_eq!(regex_tier("a|b"), REGEX_MACHINERY_NS100);
+    assert_eq!(regex_tier("ends with backslash\\"), REGEX_MACHINERY_NS100, "dangling escape: not literal");
 }
 
 // And children reorder cheapest-tier-first regardless of written order, and
