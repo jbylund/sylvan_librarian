@@ -221,6 +221,8 @@ def _ref_leaf(frag: str, card: dict[str, Any]) -> bool | None:  # noqa: PLR0911,
             return ge
         # "=": exact per-color counts AND no devotion outside the queried colors
         return all(counts.get(c, 0) == k for c, k in want.items()) and all(c in want for c, n in counts.items() if n > 0)
+    if frag.startswith('!"'):
+        return card["card_name"].lower() == frag[2:-1].lower()
     if field == "name":
         return rest in card["card_name"].lower()
     if field == "o":
@@ -272,13 +274,27 @@ def _ref_totals(shape: Any, cards: list[dict[str, Any]]) -> tuple[int, int]:
 # ─── Query generation: fragments composed across every shape ─────────────────
 
 
-def _gen_queries(rng: random.Random, count: int) -> list[tuple[str, Any]]:
+def _exact_name_fragments(cards: list[dict[str, Any]]) -> list[str]:
+    """Exact-name lookups derived from the generated store.
+
+    A single-printing hit, a multi-printing hit, and a guaranteed miss (names
+    embed their card index, so no generated name matches it).
+    """
+    by_count: dict[str, int] = {}
+    for c in cards:
+        by_count[c["card_name"]] = by_count.get(c["card_name"], 0) + 1
+    single = next(n for n, k in by_count.items() if k == 1)
+    multi = next(n for n, k in by_count.items() if k >= 3)
+    return [f'!"{single}"', f'!"{multi}"', '!"zzz no such card"']
+
+
+def _gen_queries(rng: random.Random, count: int, fragments: list[str]) -> list[tuple[str, Any]]:
     """(query string, reference shape) pairs across single/and/or/nested/neg."""
     out: list[tuple[str, Any]] = []
     leaf = lambda f: ("leaf", f.lstrip("-")) if not f.startswith("-") else ("not", ("leaf", f[1:]))  # noqa: E731
     while len(out) < count:
         k = rng.random()
-        picks = rng.sample(FRAGMENTS, 4)
+        picks = rng.sample(fragments, 4)
         if k < 0.2:
             q, shape = picks[0], leaf(picks[0])
         elif k < 0.45:
@@ -337,7 +353,7 @@ class TestEnginePropertyParity:
 
     def test_totals_match_reference_across_shapes(self, property_setup: tuple[QueryEngine, list[dict[str, Any]]]) -> None:
         engine, cards = property_setup
-        queries = _gen_queries(random.Random(42), 250)
+        queries = _gen_queries(random.Random(42), 250, [*FRAGMENTS, *_exact_name_fragments(cards)])
         failures = []
         for q, shape in queries:
             want_card, want_printing = _ref_totals(shape, cards)
@@ -350,7 +366,7 @@ class TestEnginePropertyParity:
     def test_every_fragment_matches_reference_standalone(self, property_setup: tuple[QueryEngine, list[dict[str, Any]]]) -> None:
         engine, cards = property_setup
         failures = []
-        for frag in FRAGMENTS:
+        for frag in [*FRAGMENTS, *_exact_name_fragments(cards)]:
             shape = ("not", ("leaf", frag[1:])) if frag.startswith("-") else ("leaf", frag)
             want = _ref_totals(shape, cards)
             got = (_engine_total(engine, frag, "card"), _engine_total(engine, frag, "printing"))

@@ -1,4 +1,5 @@
 use super::{
+    assign_name_ranks,
     build_numeric_index, build_oracle_text_index, build_tag_index, build_trigram_index,
     build_rarity_index, build_flavor_index, build_thresholded_tag_index, build_sort_permutations,
     build_artwork_group_counts, build_bit_planes, build_name_bigram_index, flavor_fingerprint, flavor_match_sets,
@@ -156,6 +157,7 @@ fn stub_card(oracle_id: u128, card_types: u16, subtypes: &[&str], vocab: &mut Vo
         planeswalker_loyalty: None,
         edhrec_rank: None,
         cubecobra_score: None,
+        name_rank: 0,
         card_subtypes: subtypes.iter().map(|s| vocab.intern(s.to_string()).unwrap()).collect(),
         card_keywords: Vec::new(),
         card_oracle_tags: Vec::new(),
@@ -255,28 +257,28 @@ fn narrow_candidates_spaces() {
         value_id: None,
     };
 
-    match narrow_candidates(&coll(CollField::ArtTags, "wolf"), archived, offsets) {
+    match narrow_candidates(&coll(CollField::ArtTags, "wolf"), archived, offsets, &[]) {
         Some(Candidates::Printings(v)) => assert_eq!(v, vec![0, 2]),
         _ => panic!("art tag must narrow in printing space"),
     }
-    match narrow_candidates(&coll(CollField::Keywords, "Flying"), archived, offsets) {
+    match narrow_candidates(&coll(CollField::Keywords, "Flying"), archived, offsets, &[]) {
         Some(Candidates::Cards(v)) => assert_eq!(v, vec![1]),
         _ => panic!("keyword must narrow in card space"),
     }
     // A tag with no postings in a complete index proves the empty set (an
     // unbound value_id matches nothing at eval either).
-    match narrow_candidates(&coll(CollField::ArtTags, "zombie"), archived, offsets) {
+    match narrow_candidates(&coll(CollField::ArtTags, "zombie"), archived, offsets, &[]) {
         Some(Candidates::Printings(v)) => assert!(v.is_empty(), "absent tag narrows to the exact empty set"),
         _ => panic!("absent tag must narrow to empty, not decline"),
     }
     // frame_data is selectivity-thresholded (#628): dense values are absent by
     // design, so absence proves nothing and it must keep declining.
-    assert!(narrow_candidates(&coll(CollField::FrameData, "zombie"), archived, offsets).is_none());
+    assert!(narrow_candidates(&coll(CollField::FrameData, "zombie"), archived, offsets, &[]).is_none());
 
     // And of mixed spaces projects the printing product up and intersects in
     // card space: art printings {0,2} → cards {0,1}, ∩ keyword cards {1} = {1}.
     let and = FilterExpr::And(vec![coll(CollField::ArtTags, "wolf"), coll(CollField::Keywords, "Flying")]);
-    match narrow_candidates(&and, archived, offsets) {
+    match narrow_candidates(&and, archived, offsets, &[]) {
         Some(Candidates::Cards(v)) => assert_eq!(v, vec![1]),
         _ => panic!("mixed And must produce card-space candidates"),
     }
@@ -349,7 +351,7 @@ fn narrow_candidates_rarity_card_space() {
         op: CmpOp::Ge,
         rhs: NumExpr::Const(2.0),
     };
-    match narrow_candidates(&cmp, archived, offsets) {
+    match narrow_candidates(&cmp, archived, offsets, &[]) {
         Some(Candidates::Cards(v)) => assert_eq!(v, vec![0, 1, 2]),
         _ => panic!("rarity must narrow in card space"),
     }
@@ -360,7 +362,7 @@ fn narrow_candidates_rarity_card_space() {
         op: CmpOp::Le,
         rhs: NumExpr::Field(NumField::RarityInt),
     };
-    match narrow_candidates(&flipped, archived, offsets) {
+    match narrow_candidates(&flipped, archived, offsets, &[]) {
         Some(Candidates::Cards(v)) => assert_eq!(v, vec![1]),
         _ => panic!("flipped rarity must narrow in card space"),
     }
@@ -789,7 +791,7 @@ fn artist_predicates_bind_to_vocab_ids_and_narrow() {
     assert!(f.eval_card(card, &archived.strings) == Tri::PrintingDep);
 
     // narrowing expands the CSR rows to sorted printing ids
-    match narrow_candidates(&f, &archived.indexes, &archived.offsets) {
+    match narrow_candidates(&f, &archived.indexes, &archived.offsets, &archived.cards) {
         Some(Candidates::Printings(v)) => assert_eq!(v, vec![0, 2]),
         _ => panic!("artist predicate must narrow in printing space"),
     }
@@ -800,7 +802,7 @@ fn artist_predicates_bind_to_vocab_ids_and_narrow() {
         word: "zzz".to_string(),
     };
     g.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab, &archived.indexes.flavor, &archived.strings);
-    match narrow_candidates(&g, &archived.indexes, &archived.offsets) {
+    match narrow_candidates(&g, &archived.indexes, &archived.offsets, &archived.cards) {
         Some(Candidates::Printings(v)) => assert!(v.is_empty()),
         _ => panic!("empty artist match must narrow to the empty set"),
     }
@@ -878,7 +880,7 @@ fn flavor_match_bind_eval_and_narrow() {
 
     // Narrowing expands the matched texts' CSR rows to sorted printing ids —
     // this is what makes ft: participate in Or narrowing.
-    match narrow_candidates(&f, &archived.indexes, &archived.offsets) {
+    match narrow_candidates(&f, &archived.indexes, &archived.offsets, &archived.cards) {
         Some(Candidates::Printings(v)) => assert_eq!(v, vec![0, 2]),
         _ => panic!("flavor predicate must narrow in printing space"),
     }
@@ -890,7 +892,7 @@ fn flavor_match_bind_eval_and_narrow() {
         value: "a quiet forest".to_string(),
     };
     bound(&mut ex);
-    match narrow_candidates(&ex, &archived.indexes, &archived.offsets) {
+    match narrow_candidates(&ex, &archived.indexes, &archived.offsets, &archived.cards) {
         Some(Candidates::Printings(v)) => assert_eq!(v, vec![1]),
         _ => panic!("exact flavor must narrow"),
     }
@@ -900,7 +902,7 @@ fn flavor_match_bind_eval_and_narrow() {
     };
     bound(&mut rx);
     assert!(rx.matches(card0, &archived.printings[1], &archived.strings));
-    match narrow_candidates(&rx, &archived.indexes, &archived.offsets) {
+    match narrow_candidates(&rx, &archived.indexes, &archived.offsets, &archived.cards) {
         Some(Candidates::Printings(v)) => assert_eq!(v, vec![1]),
         _ => panic!("regex flavor must narrow"),
     }
@@ -911,7 +913,7 @@ fn flavor_match_bind_eval_and_narrow() {
         word: "zzzqqq".to_string(),
     };
     bound(&mut none);
-    match narrow_candidates(&none, &archived.indexes, &archived.offsets) {
+    match narrow_candidates(&none, &archived.indexes, &archived.offsets, &archived.cards) {
         Some(Candidates::Printings(v)) => assert!(v.is_empty()),
         _ => panic!("empty flavor match must narrow to the empty set"),
     }
@@ -947,7 +949,7 @@ fn collector_number_narrowing() {
         op,
         rhs: NumExpr::Const(v),
     };
-    let narrow = |f: &FilterExpr| match narrow_candidates(f, &archived.indexes, &archived.offsets) {
+    let narrow = |f: &FilterExpr| match narrow_candidates(f, &archived.indexes, &archived.offsets, &archived.cards) {
         Some(Candidates::Printings(v)) => Some(v),
         // Bitmaps materialize in ascending id order, so both representations
         // compare against the same expected vectors.
@@ -1019,12 +1021,12 @@ fn frame_postings_thresholded_at_build() {
         value: value.to_string(),
         value_id: None,
     };
-    match narrow_candidates(&coll("Showcase"), archived, offsets) {
+    match narrow_candidates(&coll("Showcase"), archived, offsets, &[]) {
         Some(Candidates::Printings(v)) => assert_eq!(v.len(), 40),
         _ => panic!("selective frame value must narrow in printing space"),
     }
-    assert!(narrow_candidates(&coll("2015"), archived, offsets).is_none());
-    assert!(narrow_candidates(&coll("Zzz"), archived, offsets).is_none());
+    assert!(narrow_candidates(&coll("2015"), archived, offsets, &[]).is_none());
+    assert!(narrow_candidates(&coll("Zzz"), archived, offsets, &[]).is_none());
 }
 
 // Streamed selection must agree with the gathered path. Two stores identical
@@ -1155,7 +1157,7 @@ fn set_code_and_date_narrowing() {
         op: CmpOp::Eq,
         value: "lea".to_string(),
     };
-    match narrow_candidates(&lea, &archived.indexes, &archived.offsets) {
+    match narrow_candidates(&lea, &archived.indexes, &archived.offsets, &archived.cards) {
         Some(Candidates::Printings(v)) => assert_eq!(v, vec![0, 2]),
         _ => panic!("set code must narrow in printing space"),
     }
@@ -1165,23 +1167,23 @@ fn set_code_and_date_narrowing() {
         op: CmpOp::Eq,
         value: "zzz".to_string(),
     };
-    match narrow_candidates(&none, &archived.indexes, &archived.offsets) {
+    match narrow_candidates(&none, &archived.indexes, &archived.offsets, &archived.cards) {
         Some(Candidates::Printings(v)) => assert!(v.is_empty()),
         _ => panic!("unknown set code must narrow to the empty set"),
     }
 
     let year1993 = FilterExpr::YearCmp { op: CmpOp::Eq, year: 1993 };
-    match narrow_candidates(&year1993, &archived.indexes, &archived.offsets) {
+    match narrow_candidates(&year1993, &archived.indexes, &archived.offsets, &archived.cards) {
         Some(Candidates::Printings(v)) => assert_eq!(v, vec![0]),
         _ => panic!("year must narrow in printing space"),
     }
     let date_ge = FilterExpr::DateCmp { op: CmpOp::Ge, value: 20240101 };
-    match narrow_candidates(&date_ge, &archived.indexes, &archived.offsets) {
+    match narrow_candidates(&date_ge, &archived.indexes, &archived.offsets, &archived.cards) {
         Some(Candidates::Printings(v)) => assert_eq!(v, vec![1]),
         _ => panic!("date must narrow in printing space"),
     }
     // Ne is not selective and must not narrow.
-    assert!(narrow_candidates(&FilterExpr::DateCmp { op: CmpOp::Ne, value: 19930805 }, &archived.indexes, &archived.offsets).is_none());
+    assert!(narrow_candidates(&FilterExpr::DateCmp { op: CmpOp::Ne, value: 19930805 }, &archived.indexes, &archived.offsets, &archived.cards).is_none());
 }
 
 #[test]
@@ -1224,7 +1226,7 @@ fn price_narrowing_is_a_superset_under_f32_rounding() {
     };
     // 0.10f64 is not representable as f32; the widened bound may include the
     // boundary printing as a candidate, but must never lose printing 0.
-    match narrow_candidates(&cheap, &archived.indexes, &archived.offsets) {
+    match narrow_candidates(&cheap, &archived.indexes, &archived.offsets, &archived.cards) {
         Some(Candidates::Printings(v)) => {
             assert!(v.contains(&0));
             assert!(!v.contains(&2) && !v.contains(&3));
@@ -1241,7 +1243,7 @@ fn price_narrowing_is_a_superset_under_f32_rounding() {
         op: CmpOp::Lt,
         rhs: super::NumExpr::Field(super::NumField::PriceUsd),
     };
-    match narrow_candidates(&pricey, &archived.indexes, &archived.offsets) {
+    match narrow_candidates(&pricey, &archived.indexes, &archived.offsets, &archived.cards) {
         Some(Candidates::Printings(v)) => assert_eq!(v, vec![2]),
         _ => panic!("flipped usd comparison must narrow"),
     }
@@ -1251,7 +1253,7 @@ fn price_narrowing_is_a_superset_under_f32_rounding() {
         op: CmpOp::Ne,
         rhs: super::NumExpr::Const(1.0),
     };
-    assert!(narrow_candidates(&ne, &archived.indexes, &archived.offsets).is_none());
+    assert!(narrow_candidates(&ne, &archived.indexes, &archived.offsets, &archived.cards).is_none());
 }
 
 // ─── Bitplanes (#630) ─────────────────────────────────────────────────────────
@@ -1693,7 +1695,7 @@ fn not_narrows_only_tight_children() {
     let data = narrow_fixture_store();
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
-    let rec = |f: &FilterExpr| super::narrow_rec(f, &archived.indexes, &archived.offsets, true);
+    let rec = |f: &FilterExpr| super::narrow_rec(f, &archived.indexes, &archived.offsets, &archived.cards, true);
 
     // value_id bound as production's bind() would — narrowing keys on the
     // string, evaluation on the id, and they must agree.
@@ -1734,7 +1736,7 @@ fn or_composes_plane_and_complement_children() {
     let data = narrow_fixture_store();
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
-    let rec = |f: &FilterExpr| super::narrow_rec(f, &archived.indexes, &archived.offsets, true);
+    let rec = |f: &FilterExpr| super::narrow_rec(f, &archived.indexes, &archived.offsets, &archived.cards, true);
 
     let goblin_id = archived.coll_vocab.iter().position(|s| s.as_str() == "goblin").map(|i| i as u16);
     let goblin = || FilterExpr::CollectionCmp { field: CollField::Subtypes, op: CmpOp::Ge, value: "goblin".into(), value_id: goblin_id };
@@ -1813,7 +1815,7 @@ fn not_over_partial_and_is_blocked() {
     // Static check: And with an unrepresentable child can't be tight → Not
     // must refuse to narrow at all.
     let not_partial = FilterExpr::Not(Box::new(FilterExpr::And(vec![goblin(), unindexable()])));
-    assert!(super::narrow_rec(&not_partial, &archived.indexes, &archived.offsets, true).is_none());
+    assert!(super::narrow_rec(&not_partial, &archived.indexes, &archived.offsets, &archived.cards, true).is_none());
 
     // Dynamic check via run_query: totals must equal brute force. Every card
     // fails `name:q` here, so every card matches the negation — a complement
@@ -1892,7 +1894,7 @@ fn name_bigrams_tiers_and_exactness() {
 
     let rec = |w: &str| {
         let f = FilterExpr::TextContains { field: TextSearchField::NameLower, word: w.to_string() };
-        super::narrow_rec(&f, &archived.indexes, &archived.offsets, false)
+        super::narrow_rec(&f, &archived.indexes, &archived.offsets, &archived.cards, false)
     };
     // Dense tier: exact bitmap, tight.
     let n = rec("zz").expect("dense bigram narrows");
@@ -1913,7 +1915,7 @@ fn name_bigrams_tiers_and_exactness() {
     assert_eq!(n.set.len(), 0);
     // 1-char stays unindexable.
     let f = FilterExpr::TextContains { field: TextSearchField::NameLower, word: "z".to_string() };
-    assert!(super::narrow_rec(&f, &archived.indexes, &archived.offsets, false).is_none());
+    assert!(super::narrow_rec(&f, &archived.indexes, &archived.offsets, &archived.cards, false).is_none());
 }
 
 // The motivating composition: `name:xx or name:yy` previously full-scanned
@@ -1940,7 +1942,7 @@ fn name_bigrams_compose_and_memoize() {
 
     // Or of two bigram children composes: "fi" → {0,1,4}, "dr" → {0,2}.
     let or = FilterExpr::Or(vec![name2("fi"), name2("dr")]);
-    let n = super::narrow_rec(&or, &archived.indexes, &archived.offsets, false).expect("bigram Or composes");
+    let n = super::narrow_rec(&or, &archived.indexes, &archived.offsets, &archived.cards, false).expect("bigram Or composes");
     assert_eq!(n.set.into_cards(&archived.offsets), vec![0, 1, 2, 4]);
 
     // run_query parity across the new shapes, negation included.
@@ -1994,7 +1996,7 @@ fn broad_tag_postings_scatter_or_decline() {
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
     let tag = |v: &str| FilterExpr::CollectionCmp { field: CollField::IsTags, op: CmpOp::Ge, value: v.into(), value_id: None };
-    let rec = |f: &FilterExpr, broad_ok: bool| super::narrow_rec(f, &archived.indexes, &archived.offsets, broad_ok);
+    let rec = |f: &FilterExpr, broad_ok: bool| super::narrow_rec(f, &archived.indexes, &archived.offsets, &archived.cards, broad_ok);
 
     // Broad tag: bitmap under broad_ok, decline without.
     assert!(rec(&tag("spell"), false).is_none(), "broad tag without a consumer reverts to the scan");
@@ -2099,7 +2101,7 @@ fn devotion_plane_parity_and_boundaries() {
     assert!(compile_plane(&dev(CmpOp::Le, &[("U", 3)])).is_none());
     // ...and the saturated superset covers every deep match for narrowing.
     let deep = dev(CmpOp::Ge, &[("U", 5)]);
-    let n = super::narrow_rec(&deep, &archived.indexes, &archived.offsets, false).expect("deep-k narrows loosely");
+    let n = super::narrow_rec(&deep, &archived.indexes, &archived.offsets, &archived.cards, false).expect("deep-k narrows loosely");
     assert!(!n.tight);
     let cand = n.set.into_cards(&archived.offsets);
     for (cid, card) in archived.cards.iter().enumerate() {
@@ -2126,4 +2128,137 @@ fn hybrid_pip_counts_toward_both_colors() {
         eval_planes(&compile_plane(&f).unwrap(), &archived.indexes.planes, &mut bitmap);
         assert_eq!(bitmap_contains(&bitmap, rg_card), want);
     }
+}
+
+// ─── Sorted name index: order:name + exact-name narrowing ────────────────────
+
+/// Six single-printing cards with names out of store order, one duplicated
+/// ("sol ring" twice), ranks assigned and sort permutations built exactly as
+/// the real load path does. Sorted name order: atog, black lotus, cancel,
+/// fog, sol ring, sol ring — with the duplicate pair tied on name_rank and
+/// separated by their edhrec ranks.
+fn named_store() -> CardData {
+    let mut vocab = VocabInterner::new();
+    let names = ["fog", "sol ring", "atog", "sol ring", "black lotus", "cancel"];
+    let mut cards: Vec<OracleCard> = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let mut c = stub_card((i + 1) as u128, TYPE_CREATURE, &[], &mut vocab);
+            c.card_name_lower = InlineStr::from_str(name);
+            // Distinct, deliberately store-order-scrambled edhrec ranks: the
+            // second "sol ring" (card 3) outranks the first (card 1).
+            c.edhrec_rank = Some([40, 60, 10, 20, 30, 50][i]);
+            c
+        })
+        .collect();
+    assign_name_ranks(&mut cards);
+    let mut data = store_of(cards, &[1; 6], vocab);
+    data.indexes.sort_perms = build_sort_permutations(&data.cards, &data.printings, &data.offsets);
+    data
+}
+
+// Equal names share a dense rank; distinct names rank in byte order.
+#[test]
+fn name_ranks_dense_and_shared_across_duplicates() {
+    let data = named_store();
+    let ranks: Vec<u32> = data.cards.iter().map(|c| c.name_rank).collect();
+    // fog=3, sol ring=4 (both copies), atog=0, black lotus=1, cancel=2
+    assert_eq!(ranks, vec![3, 4, 0, 4, 1, 2]);
+}
+
+// ExactName narrows to the exact, tight card set through the ascending name
+// permutation: hit (single), hit (duplicate pair), boundary names, and a miss
+// proving the empty set.
+#[test]
+fn exact_name_narrows_tight() {
+    let data = named_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let exact = |name: &str| FilterExpr::ExactName(name.to_string());
+    let narrow = |name: &str| {
+        super::narrow_rec(&exact(name), &archived.indexes, &archived.offsets, &archived.cards, false)
+            .expect("exact name must narrow")
+    };
+
+    for (name, mut want) in [
+        ("fog", vec![0u32]),
+        ("sol ring", vec![1, 3]),
+        ("atog", vec![2]),          // first in sorted order
+        ("cancel", vec![5]),        // adjacent to the last block
+        ("zzz past the end", vec![]),
+        ("aaa before the start", vec![]),
+        ("sol rin", vec![]),        // prefix of a real name is still a miss
+    ] {
+        let n = narrow(name);
+        assert!(n.tight, "{name}: equality through the sorted permutation is exact");
+        let mut got = n.set.into_cards(&archived.offsets);
+        got.sort_unstable();
+        want.sort_unstable();
+        assert_eq!(got, want, "candidates for {name:?}");
+    }
+
+    // Composition: the tight set participates in the candidate algebra, and
+    // run_query totals agree with a full scan on every shape.
+    let mut shapes: Vec<FilterExpr> = vec![
+        exact("sol ring"),
+        exact("no such card"),
+        FilterExpr::Or(vec![exact("sol ring"), FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge }]),
+        FilterExpr::And(vec![exact("fog"), FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge }]),
+        FilterExpr::Not(Box::new(exact("sol ring"))),
+    ];
+    for (i, f) in shapes.iter_mut().enumerate() {
+        let brute = archived
+            .cards
+            .iter()
+            .filter(|c| f.eval_card(c, &archived.strings) == Tri::True)
+            .count();
+        let (total, _) = run_query(
+            &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+            f, None, "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+        );
+        assert_eq!(total, brute, "totals parity for shape {i}");
+    }
+}
+
+// order:name sorts pages by name in both directions, breaks the duplicate-name
+// tie by edhrec rank in BOTH directions (direction folds into the primary key
+// only), and paginates consistently.
+#[test]
+fn order_name_sorts_and_paginates() {
+    let data = named_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let run = |direction: &str, limit: usize, offset: usize| -> Vec<String> {
+        let mut all = FilterExpr::True;
+        let (total, page) = run_query(
+            &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+            &mut all, None, "card", "default", "name", direction, limit, offset, &archived.indexes,
+        );
+        assert_eq!(total, 6);
+        page.iter().map(|(c, _)| c.card_name_lower.as_str().to_string()).collect()
+    };
+
+    assert_eq!(run("asc", 100, 0), ["atog", "black lotus", "cancel", "fog", "sol ring", "sol ring"]);
+    assert_eq!(run("desc", 100, 0), ["sol ring", "sol ring", "fog", "cancel", "black lotus", "atog"]);
+    // Pagination: the page [2, 4) of the ascending order.
+    assert_eq!(run("asc", 2, 2), ["cancel", "fog"]);
+
+    // The duplicate pair ties on name and must break by edhrec rank ascending
+    // in both directions: card 3 (rank 20) before card 0 (rank 60).
+    let ids = |direction: &str| -> Vec<u128> {
+        let mut all = FilterExpr::True;
+        let (_, page) = run_query(
+            &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+            &mut all, None, "card", "default", "name", direction, 100, 0, &archived.indexes,
+        );
+        page.iter()
+            .filter(|(c, _)| c.card_name_lower.as_str() == "sol ring")
+            .map(|(c, _)| u128::from(c.oracle_id))
+            .collect()
+    };
+    assert_eq!(ids("asc"), [4, 2], "within the tie: lower edhrec rank first");
+    assert_eq!(ids("desc"), [4, 2], "secondaries keep their order under desc");
 }

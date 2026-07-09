@@ -197,6 +197,11 @@ struct OracleCard {
     planeswalker_loyalty: Option<u8>, // always 1-12
     edhrec_rank: Option<u32>,         // up to ~30k unique cards
     cubecobra_score: Option<f32>,
+    // Dense rank of card_name_lower in byte order (equal names share a rank so
+    // sort secondaries break their ties). Assigned post-load by
+    // assign_name_ranks; the sort key for SortCol::Name. Ranks stay below 2^24
+    // so the f32 sort-key conversion is exact.
+    name_rank: u32,
 
     // Collection elements interned as u16 ids into CardData.coll_vocab (see
     // VocabInterner). card_subtypes preserves the printed order; the set-like
@@ -1248,6 +1253,10 @@ struct SortPermutations {
     cmc:       [Vec<u32>; 2],
     power:     [Vec<u32>; 2],
     toughness: [Vec<u32>; 2],
+    // Keyed on name_rank, so the ascending permutation is also the sorted-name
+    // lookup table: equal-name blocks are contiguous (rank is the primary key)
+    // and narrow_rec's ExactName arm binary-searches it.
+    name:      [Vec<u32>; 2],
 }
 
 impl ArchivedSortPermutations {
@@ -1261,9 +1270,29 @@ impl ArchivedSortPermutations {
             SortCol::Cmc        => &self.cmc,
             SortCol::Power      => &self.power,
             SortCol::Toughness  => &self.toughness,
+            SortCol::Name       => &self.name,
             SortCol::Rarity | SortCol::PriceUsd => return None,
         };
         Some(&pair[descending as usize])
+    }
+}
+
+/// Dense byte-order rank of card_name_lower onto each card (equal names share
+/// a rank; the standard sort secondaries break their ties). Every card has a
+/// name, so unlike the other sort columns the rank is never absent.
+fn assign_name_ranks(cards: &mut [OracleCard]) {
+    let mut ids: Vec<u32> = (0..cards.len() as u32).collect();
+    ids.sort_unstable_by(|&a, &b| {
+        cards[a as usize].card_name_lower.as_str().cmp(cards[b as usize].card_name_lower.as_str())
+    });
+    let mut rank = 0u32;
+    for i in 0..ids.len() {
+        if i > 0
+            && cards[ids[i - 1] as usize].card_name_lower.as_str() != cards[ids[i] as usize].card_name_lower.as_str()
+        {
+            rank += 1;
+        }
+        cards[ids[i] as usize].name_rank = rank;
     }
 }
 
@@ -1293,6 +1322,7 @@ fn build_sort_permutations(cards: &[OracleCard], printings: &[Printing], offsets
         cmc:       both(&|c| c.cmc.map(|v| v as f32)),
         power:     both(&|c| c.creature_power.map(|v| v as f32)),
         toughness: both(&|c| c.creature_toughness.map(|v| v as f32)),
+        name:      both(&|c| Some(c.name_rank as f32)),
     }
 }
 
@@ -1904,6 +1934,8 @@ fn or_all(mut sets: Vec<Narrowed>, n: usize) -> Option<Narrowed> {
 fn tight_narrow_space(f: &FilterExpr) -> Option<bool> {
     match f {
         FilterExpr::ColorCmp { .. } | FilterExpr::TypeCmp { .. } => Some(false),
+        // Exact names resolve exactly through the sorted name permutation.
+        FilterExpr::ExactName(_) => Some(false),
         // 2-byte name needles resolve exactly through the bigram index.
         FilterExpr::TextContains { field: TextSearchField::NameLower, word } if word.len() == 2 => Some(false),
         FilterExpr::CollectionCmp { field, op: CmpOp::Ge, .. } => {
@@ -1935,10 +1967,15 @@ fn tight_narrow_space(f: &FilterExpr) -> Option<bool> {
     }
 }
 
-fn narrow_candidates(filter: &FilterExpr, indexes: &Archived<CardIndexes>, offsets: &AOffsets) -> Option<Candidates> {
+fn narrow_candidates(
+    filter: &FilterExpr,
+    indexes: &Archived<CardIndexes>,
+    offsets: &AOffsets,
+    cards: &[AOracleCard],
+) -> Option<Candidates> {
     let n_cards = offsets.len().saturating_sub(1);
     let n_printings = if n_cards == 0 { 0 } else { u32::from(offsets[n_cards]) as usize };
-    narrow_rec(filter, indexes, offsets, false)
+    narrow_rec(filter, indexes, offsets, cards, false)
         .filter(|n| {
             // Near-total sets narrow nothing; dropping them here (a popcount,
             // before any projection or materialization) keeps broad composed
@@ -1975,7 +2012,13 @@ fn and_child_rank(f: &FilterExpr) -> u8 {
 /// trick needs it), false where nothing would — a lone broad set at the root
 /// or in a candidate-less And is discarded anyway, so the scatter would be
 /// pure waste (the 10x And regressions of the first benchmark round).
-fn narrow_rec(filter: &FilterExpr, indexes: &Archived<CardIndexes>, offsets: &AOffsets, broad_ok: bool) -> Option<Narrowed> {
+fn narrow_rec(
+    filter: &FilterExpr,
+    indexes: &Archived<CardIndexes>,
+    offsets: &AOffsets,
+    cards: &[AOracleCard],
+    broad_ok: bool,
+) -> Option<Narrowed> {
     let n_cards = offsets.len().saturating_sub(1);
     let n_printings = if n_cards == 0 { 0 } else { u32::from(offsets[n_cards]) as usize };
 
@@ -1998,6 +2041,22 @@ fn narrow_rec(filter: &FilterExpr, indexes: &Archived<CardIndexes>, offsets: &AO
     }
 
     match filter {
+        FilterExpr::ExactName(needle) => {
+            // The ascending name permutation is keyed on name_rank — i.e. on
+            // card_name_lower byte order — so equal-name blocks are contiguous
+            // and equality is a binary-searched range: an exact, tight card
+            // set. A miss proves the empty set (names are never null).
+            let perm = &indexes.sort_perms.name[0];
+            if perm.len() != n_cards || cards.len() != n_cards || n_cards == 0 {
+                return None; // store without name permutations
+            }
+            let name_of = |cid: &Archived<u32>| cards[u32::from(*cid) as usize].card_name_lower.as_str();
+            let lo = perm.partition_point(|cid| name_of(cid) < needle.as_str());
+            let width = perm[lo..].partition_point(|cid| name_of(cid) == needle.as_str());
+            let ids: Vec<u32> = perm[lo..lo + width].iter().map(|x| u32::from(*x)).collect();
+            Narrowed::tight(Candidates::Cards(ids))
+        }
+
         FilterExpr::TextContains { field: TextSearchField::NameLower, word } if word.len() == 2 => {
             // A 2-byte needle's containment IS bigram membership, so the tier
             // lookup is the complete answer — tight, with no false positives
@@ -2222,7 +2281,7 @@ fn narrow_rec(filter: &FilterExpr, indexes: &Archived<CardIndexes>, offsets: &AO
                     1 => !printing_sets.is_empty(),
                     _ => broad_ok,
                 };
-                if let Some(n) = narrow_rec(c, indexes, offsets, child_broad_ok) {
+                if let Some(n) = narrow_rec(c, indexes, offsets, cards, child_broad_ok) {
                     // A child covering most of its domain barely narrows the
                     // intersection; skipping it is advisory-sound and avoids
                     // paying its projection/materialization for ~nothing.
@@ -2288,7 +2347,7 @@ fn narrow_rec(filter: &FilterExpr, indexes: &Archived<CardIndexes>, offsets: &AO
             // loosening-only, and the driver re-verifies).
             let mut sets: Vec<Narrowed> = Vec::with_capacity(children.len());
             for child in children {
-                let n = narrow_rec(child, indexes, offsets, true)?;
+                let n = narrow_rec(child, indexes, offsets, cards, true)?;
                 // One near-total child makes the union near-total: the
                 // \"candidates\" would visit almost every card while paying
                 // union, projection, and materialization on the way.
@@ -2330,7 +2389,7 @@ fn narrow_rec(filter: &FilterExpr, indexes: &Archived<CardIndexes>, offsets: &AO
             // be computed to be discarded — sometimes at real cost (a
             // mixed-space Or pays vec sorts and a projection).
             tight_narrow_space(inner)?;
-            let n = narrow_rec(inner, indexes, offsets, true)?;
+            let n = narrow_rec(inner, indexes, offsets, cards, true)?;
             if !n.tight {
                 return None;
             }
@@ -2377,7 +2436,7 @@ fn prefer_score(card: &AOracleCard, p: &APrinting, prefer: Prefer) -> f64 {
 }
 
 #[derive(Clone, Copy)]
-enum SortCol { Cmc, Power, Toughness, Rarity, PriceUsd, Cubecobra, EdhrecRank }
+enum SortCol { Cmc, Power, Toughness, Rarity, PriceUsd, Cubecobra, EdhrecRank, Name }
 
 fn orderby_to_col(orderby: &str) -> SortCol {
     match orderby {
@@ -2387,6 +2446,7 @@ fn orderby_to_col(orderby: &str) -> SortCol {
         "toughness" => SortCol::Toughness,
         "usd"       => SortCol::PriceUsd,
         "cubecobra" => SortCol::Cubecobra,
+        "name"      => SortCol::Name,
         _           => SortCol::EdhrecRank,
     }
 }
@@ -2413,6 +2473,7 @@ fn sort_key_bits(card: &AOracleCard, p: &APrinting, sort_col: SortCol, descendin
         SortCol::PriceUsd   => p.price_usd.as_ref().map(|v| f32::from(*v)),
         SortCol::Cubecobra  => card.cubecobra_score.as_ref().map(|v| f32::from(*v)),
         SortCol::EdhrecRank => card.edhrec_rank.as_ref().map(|v| u32::from(*v) as f32),
+        SortCol::Name       => Some(u32::from(card.name_rank) as f32),
     };
     let pk = primary.map_or(u32::MAX, |v| f32_sort_bits(if descending { -v } else { v }));
     let e = card.edhrec_rank.as_ref().map(|v| u32::from(*v)).unwrap_or(u32::MAX);
@@ -2653,7 +2714,7 @@ fn run_query<'a>(
     // Broad-range bitmaps (#636) can produce such lists; treating them as
     // unnarrowed also keeps the #635 memoization trigger firing for these
     // queries exactly as before.
-    let candidate_cards: Option<Vec<u32>> = narrow_candidates(filter, indexes, offsets)
+    let candidate_cards: Option<Vec<u32>> = narrow_candidates(filter, indexes, offsets, cards)
         .map(|c| c.into_cards(offsets))
         .filter(|v| v.len() < cards.len() - cards.len() / 8);
 
@@ -2980,7 +3041,7 @@ const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 /// catch (e.g. reordering same-size fields, changing an index type) — and on
 /// any FLAVOR_FP_FEATURES change: archived fingerprints are built with that
 /// table, so a new table reading old fingerprints breaks the superset test.
-const ARCHIVE_FORMAT_VERSION: u32 = 20260717;
+const ARCHIVE_FORMAT_VERSION: u32 = 20260718;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -3289,6 +3350,8 @@ impl QueryEngine {
                     planeswalker_loyalty: row.planeswalker_loyalty,
                     edhrec_rank: row.edhrec_rank,
                     cubecobra_score: row.cubecobra_score,
+                    name_rank: 0, // assigned after grouping by assign_name_ranks
+
                     card_subtypes: std::mem::take(&mut row.card_subtypes),
                     card_keywords: std::mem::take(&mut row.card_keywords),
                     card_oracle_tags: std::mem::take(&mut row.card_oracle_tags),
@@ -3325,6 +3388,7 @@ impl QueryEngine {
             });
         }
         offsets.push(printings.len() as u32);
+        assign_name_ranks(&mut cards);
 
         #[cfg(feature = "alloc-counter")]
         let stats_after_cards = (alloc_stats::live(), alloc_stats::allocs());
