@@ -2262,3 +2262,146 @@ fn order_name_sorts_and_paginates() {
     assert_eq!(ids("asc"), [4, 2], "within the tie: lower edhrec rank first");
     assert_eq!(ids("desc"), [4, 2], "secondaries keep their order under desc");
 }
+
+// ─── Verifier cost ordering ───────────────────────────────────────────────────
+
+fn tier0_type() -> FilterExpr {
+    FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge }
+}
+
+fn tier2_contains() -> FilterExpr {
+    FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: "draw".to_string() }
+}
+
+fn tier3_regex() -> FilterExpr {
+    FilterExpr::TextRegex { field: TextField::OracleTextLower, regex: regex::Regex::new("draw .* cards?").unwrap() }
+}
+
+// Pattern-shape cost classification: anchored literals are memcmp-cheap,
+// bare literals cost a substring scan, real machinery gets the top tier.
+#[test]
+fn regex_tier_classifies_pattern_shapes() {
+    use super::regex_tier;
+    assert_eq!(regex_tier("(?i)^flying$"), 1);
+    assert_eq!(regex_tier("dragon$"), 1);
+    assert_eq!(regex_tier("(?i)^\\{t\\}: add"), 1, "escaped punctuation is literal");
+    assert_eq!(regex_tier("^gob"), 1);
+    assert_eq!(regex_tier("(?i)flying"), 2, "unanchored literal = contains cost");
+    assert_eq!(regex_tier("draw .* cards?"), 3);
+    assert_eq!(regex_tier("^[aeiou]"), 3);
+    assert_eq!(regex_tier("(?i)^\\d+$"), 3, "class escapes are machinery");
+    assert_eq!(regex_tier("a|b"), 3);
+    assert_eq!(regex_tier("ends with backslash\\"), 3, "dangling escape: not literal");
+}
+
+// And children reorder cheapest-tier-first regardless of written order, and
+// equal-tier children keep their written order (stable sort).
+#[test]
+fn verify_order_sorts_and_children_cheap_first() {
+    let cmc_lt = |v: f64| FilterExpr::NumericCmp {
+        lhs: NumExpr::Field(NumField::Cmc),
+        op: CmpOp::Lt,
+        rhs: NumExpr::Const(v),
+    };
+    let mut f = FilterExpr::And(vec![tier3_regex(), cmc_lt(3.0), tier2_contains(), cmc_lt(5.0), tier0_type()]);
+    f.order_children_by_verify_cost();
+    let FilterExpr::And(children) = &f else { panic!("still an And") };
+    assert!(matches!(children[0], FilterExpr::NumericCmp { rhs: NumExpr::Const(v), .. } if v == 3.0));
+    assert!(matches!(children[1], FilterExpr::NumericCmp { rhs: NumExpr::Const(v), .. } if v == 5.0));
+    assert!(matches!(children[2], FilterExpr::TypeCmp { .. }));
+    assert!(matches!(children[3], FilterExpr::TextContains { .. }));
+    assert!(matches!(children[4], FilterExpr::TextRegex { .. }));
+}
+
+// Within the memoized-set tier, And children refine to ascending set size
+// (smaller set = more rejections per identical binary-search cost); tier-1
+// children without a known size (collections) come after the sized sets.
+#[test]
+fn verify_order_and_refines_by_set_size() {
+    let coll = FilterExpr::CollectionCmp { field: CollField::Keywords, op: CmpOp::Ge, value: "flying".to_string(), value_id: None };
+    let mut f = FilterExpr::And(vec![
+        coll,
+        FilterExpr::NameMatch { ids: vec![1, 2, 3, 4, 5] },
+        FilterExpr::OracleMatch { gids: vec![7, 9] },
+    ]);
+    f.order_children_by_verify_cost();
+    let FilterExpr::And(children) = &f else { panic!("still an And") };
+    assert!(matches!(&children[0], FilterExpr::OracleMatch { gids } if gids.len() == 2));
+    assert!(matches!(&children[1], FilterExpr::NameMatch { ids } if ids.len() == 5));
+    assert!(matches!(children[2], FilterExpr::CollectionCmp { .. }));
+}
+
+// Or children sort by tier only: acceptance short-circuits an Or, and a small
+// set is the worst acceptance lead, so set size must NOT reorder Or children.
+#[test]
+fn verify_order_or_sorts_by_tier_only() {
+    let mut f = FilterExpr::Or(vec![
+        tier3_regex(),
+        FilterExpr::NameMatch { ids: vec![1, 2, 3, 4, 5] },
+        FilterExpr::OracleMatch { gids: vec![7, 9] },
+        tier0_type(),
+    ]);
+    f.order_children_by_verify_cost();
+    let FilterExpr::Or(children) = &f else { panic!("still an Or") };
+    assert!(matches!(children[0], FilterExpr::TypeCmp { .. }));
+    assert!(matches!(&children[1], FilterExpr::NameMatch { ids } if ids.len() == 5), "written order kept within tier");
+    assert!(matches!(&children[2], FilterExpr::OracleMatch { gids } if gids.len() == 2));
+    assert!(matches!(children[3], FilterExpr::TextRegex { .. }));
+}
+
+// Composites rank as the max of their children (their evaluation may have to
+// run every child), and the sort recurses through And/Or/Not nesting.
+#[test]
+fn verify_order_recurses_and_ranks_composites() {
+    let inner_or = FilterExpr::Or(vec![tier3_regex(), tier0_type()]);
+    let mut f = FilterExpr::Not(Box::new(FilterExpr::And(vec![inner_or, tier2_contains(), tier0_type()])));
+    f.order_children_by_verify_cost();
+    let FilterExpr::Not(inner) = &f else { panic!("still a Not") };
+    let FilterExpr::And(children) = inner.as_ref() else { panic!("still an And") };
+    assert!(matches!(children[0], FilterExpr::TypeCmp { .. }));
+    assert!(matches!(children[1], FilterExpr::TextContains { .. }));
+    let FilterExpr::Or(or_children) = &children[2] else { panic!("Or ranks tier 3, last") };
+    assert!(matches!(or_children[0], FilterExpr::TypeCmp { .. }), "nested Or sorted too");
+    assert!(matches!(or_children[1], FilterExpr::TextRegex { .. }));
+}
+
+// End-to-end: the two spellings of a mixed-cost conjunction return identical
+// totals and pages through run_query — ordering is a speed dial, not a
+// semantics change.
+#[test]
+fn verify_order_spellings_agree_end_to_end() {
+    let mut vocab = VocabInterner::new();
+    let mut strings = Interner::new();
+    let mut cards = Vec::new();
+    for i in 0..12u32 {
+        let types = if i % 2 == 0 { TYPE_CREATURE } else { TYPE_INSTANT };
+        let mut c = stub_card((i + 1) as u128, types, &[], &mut vocab);
+        let text = if i % 3 == 0 { "flying" } else { "draw a card" };
+        c.oracle_text_lower_id = strings.intern(text.to_string());
+        c.edhrec_rank = Some(i + 1);
+        cards.push(c);
+    }
+    let mut data = store_of(cards, &vec![2usize; 12], vocab);
+    data.strings = strings.strings;
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let run = |mut filter: FilterExpr| {
+        let (total, page) = run_query(
+            &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+            &mut filter, None, "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+        );
+        let ids: Vec<u128> = page.iter().map(|(c, _)| u128::from(c.oracle_id)).collect();
+        (total, ids)
+    };
+    let expensive_first = FilterExpr::And(vec![tier3_regex(), tier0_type()]);
+    let cheap_first = FilterExpr::And(vec![tier0_type(), tier3_regex()]);
+    let (t1, p1) = run(expensive_first);
+    let (t2, p2) = run(cheap_first);
+    assert_eq!(t1, 4, "creatures with draw-a-card text: cards 3, 5, 9, 11");
+    assert_eq!((t1, p1), (t2, p2));
+
+    let or_a = FilterExpr::Or(vec![tier3_regex(), tier0_type()]);
+    let or_b = FilterExpr::Or(vec![tier0_type(), tier3_regex()]);
+    assert_eq!(run(or_a), run(or_b));
+}

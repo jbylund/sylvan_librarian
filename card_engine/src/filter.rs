@@ -376,6 +376,97 @@ pub(crate) enum FilterExpr {
     },
 }
 
+/// Per-candidate verification cost of a node in the tri walk, grouped into
+/// tiers wide enough that the ranking is safe without measurement:
+///
+///   0 — field loads and integer/float/mask compares (numerics, dates,
+///       colors, types, legality words, exact string equality)
+///   1 — bounded lookups: a binary search over a bind/memoize-resolved id set
+///       (ArtistMatch/FlavorMatch/NameMatch/OracleMatch) or a card collection
+///       (CollectionCmp), and anchored-literal regexes (a memcmp at a known
+///       position — see regex_tier)
+///   2 — per-candidate text/map scans of comparable cost: TextContains
+///       (substring scan; artist/flavor contains were rewritten to tier 1 at
+///       bind), unanchored-literal regexes, and the pip-map walks of
+///       Devotion / ManaCostCmp (string-keyed hashmap iteration — measured
+///       within ~2× of a substring scan, so no reliable gap to exploit)
+///   3 — TextRegex with real regex machinery — the single worst
+///       per-candidate cost the engine has
+///
+/// Composites take the max of their children: their short-circuit may have to
+/// evaluate every child, so the most expensive child bounds the cost.
+fn verify_cost_tier(f: &FilterExpr) -> u8 {
+    match f {
+        FilterExpr::TextRegex { regex, .. } => regex_tier(regex.as_str()),
+        FilterExpr::TextContains { .. }
+        | FilterExpr::Devotion { .. }
+        | FilterExpr::ManaCostCmp { .. } => 2,
+        FilterExpr::ArtistMatch { .. }
+        | FilterExpr::FlavorMatch { .. }
+        | FilterExpr::NameMatch { .. }
+        | FilterExpr::OracleMatch { .. }
+        | FilterExpr::CollectionCmp { .. } => 1,
+        FilterExpr::And(children) | FilterExpr::Or(children) => {
+            children.iter().map(verify_cost_tier).max().unwrap_or(0)
+        }
+        FilterExpr::Not(inner) => verify_cost_tier(inner),
+        _ => 0,
+    }
+}
+
+/// Classify a regex pattern's per-candidate cost by shape. The regex crate
+/// compiles literal-only patterns to memcmp-style matchers (with case
+/// folding for the (?i) every query regex carries), and anchors bound the
+/// scan to one position — measured on the real corpus, `^flying$` costs
+/// ~half a substring scan while an unanchored literal costs about the same
+/// as one. Ranking them as general regexes inverted real costs and made
+/// `o:/^flying$/ oracle:sacrifice` 2.4× slower, so:
+///
+///   1 — literal with a ^ or $ anchor (starts_with/ends_with/equality)
+///   2 — bare literal (substring search, same tier as TextContains)
+///   3 — anything with live regex metacharacters
+pub(crate) fn regex_tier(pattern: &str) -> u8 {
+    let mut p = pattern.strip_prefix("(?i)").unwrap_or(pattern);
+    let anchored_start = p.starts_with('^');
+    if anchored_start {
+        p = &p[1..];
+    }
+    let bytes = p.as_bytes();
+    let mut anchored_end = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            // An escape of punctuation (\{ \. \$) is a literal character; an
+            // alphanumeric escape (\d \w \b \p…) is a class — real machinery.
+            b'\\' => match bytes.get(i + 1) {
+                Some(c) if !c.is_ascii_alphanumeric() => i += 2,
+                _ => return 3,
+            },
+            b'$' if i == bytes.len() - 1 => {
+                anchored_end = true;
+                i += 1;
+            }
+            b'.' | b'*' | b'+' | b'?' | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'|' | b'^' | b'$' => return 3,
+            _ => i += 1,
+        }
+    }
+    if anchored_start || anchored_end { 1 } else { 2 }
+}
+
+/// Within-tier refinement for And children: memoized sets know their own
+/// size, and under an And a smaller set is more selective — it rejects more
+/// candidates per (identical) binary-search cost, so it should run first.
+/// Nodes without a known set size sort after sized ones in their tier and
+/// keep written order among themselves (the sort is stable).
+fn and_child_set_len(f: &FilterExpr) -> usize {
+    match f {
+        FilterExpr::ArtistMatch { ids } => ids.len(),
+        FilterExpr::NameMatch { ids } => ids.len(),
+        FilterExpr::FlavorMatch { gids, .. } | FilterExpr::OracleMatch { gids } => gids.len(),
+        _ => usize::MAX,
+    }
+}
+
 /// Vocab ids (ascending) whose artist string satisfies `pred`.
 fn artist_match_ids(artist_vocab: &AStrings, pred: impl Fn(&str) -> bool) -> Vec<u16> {
     artist_vocab
@@ -597,6 +688,45 @@ impl FilterExpr {
                 gids.sort_unstable();
                 *self = FilterExpr::OracleMatch { gids };
             }
+            _ => {}
+        }
+    }
+
+    /// Reorder And/Or children cheapest-verification-first so the tri walk's
+    /// short-circuit (first False settles an And, first True settles an Or)
+    /// runs the expensive text predicates on as few cards as possible. The tri
+    /// accumulation is commutative — False/True dominate and the Null /
+    /// PrintingDep flags just OR together — so any child order is
+    /// semantics-preserving; only the cost changes. Without this, whether a
+    /// broad scan pays a regex before or after the cheap mask checks depends
+    /// on how the user typed the query.
+    ///
+    /// Within an And's memoized-set tier the sort key refines to ascending set
+    /// size: a smaller match set rejects more candidates per unit cost, and
+    /// the size is already known (ids.len()). Or children stop at the tier —
+    /// their short-circuit is acceptance, where small sets are the *worst*
+    /// lead, and there is no cheap acceptance-rate estimate to sort by.
+    ///
+    /// The sort is stable, so equal-cost children keep written order and the
+    /// result is deterministic. Must run after memoize_text_predicates():
+    /// memoization flips TextContains nodes from the scan tier to the set
+    /// tier. The per-printing residual pass inherits the order too, since
+    /// card_pass() pushes residual children in child order.
+    pub(crate) fn order_children_by_verify_cost(&mut self) {
+        match self {
+            FilterExpr::And(children) => {
+                for c in children.iter_mut() {
+                    c.order_children_by_verify_cost();
+                }
+                children.sort_by_key(|c| (verify_cost_tier(c), and_child_set_len(c)));
+            }
+            FilterExpr::Or(children) => {
+                for c in children.iter_mut() {
+                    c.order_children_by_verify_cost();
+                }
+                children.sort_by_key(verify_cost_tier);
+            }
+            FilterExpr::Not(inner) => inner.order_children_by_verify_cost(),
             _ => {}
         }
     }

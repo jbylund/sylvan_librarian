@@ -2717,6 +2717,14 @@ fn push_card_matches(
 /// streaming's win grows fast (~1.8× by 8k), so the trigger stays put.
 static STREAM_MIN_MATCHES: LazyLock<usize> = LazyLock::new(|| guard_env("CARD_ENGINE_STREAM_MIN_MATCHES", 1_024));
 
+/// Whether run_query reorders And/Or children cheapest-verification-first
+/// before the evaluation walk (see FilterExpr::order_children_by_verify_cost).
+/// Unlike the guards above this is a binary A/B switch, not a threshold:
+/// cost-only ordering never adds work (when nothing short-circuits, every
+/// child ran anyway), so there is no crossover to calibrate — the off
+/// position exists for benchmarking written-order sensitivity.
+static VERIFY_ORDER: LazyLock<usize> = LazyLock::new(|| guard_env("CARD_ENGINE_VERIFY_ORDER", 1));
+
 fn run_query<'a>(
     cards: &'a [AOracleCard],
     printings: &'a [APrinting],
@@ -2788,6 +2796,13 @@ fn run_query<'a>(
     // leaves the scan alone.
     let eval_domain = candidate_cards.as_ref().map_or(cards.len(), Vec::len);
     filter.memoize_text_predicates(cards, strings, &indexes.name_trigram, &indexes.name_bigrams, &indexes.oracle_trigram, eval_domain);
+    // Sort And/Or children cheapest-verification-first so the walk's
+    // short-circuit spares the expensive text predicates (semantics-preserving;
+    // see order_children_by_verify_cost). After memoization, which flips
+    // TextContains nodes from the scan tier to the set tier.
+    if *VERIFY_ORDER != 0 {
+        filter.order_children_by_verify_cost();
+    }
     let card_ids: Box<dyn Iterator<Item = u32>> = match &candidate_cards {
         Some(v) => Box::new(v.iter().copied()),
         None    => Box::new(0..cards.len() as u32),
