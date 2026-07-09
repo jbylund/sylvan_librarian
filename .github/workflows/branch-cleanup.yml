@@ -1,0 +1,54 @@
+name: Branch Cleanup
+
+# Deletes remote branches whose work has landed. The repo squash-merges, so
+# "0 commits ahead" can never identify a landed branch (the squash is a new
+# commit and the branch's commits are never ancestors of main) — PR state is
+# the source of truth instead: a branch is deletable iff it is the head of a
+# merged PR, is not the head or base of any open PR (stacked PRs keep their
+# parents alive), and its PR merged more than three days ago (grace period so
+# an in-flight stack is never yanked mid-train). Replaces the repo's
+# delete-branch-on-merge setting, which closed stacked dependent PRs when a
+# parent landed.
+
+on:
+  schedule:
+    - cron: "17 6 * * *" # daily, 06:17 UTC — the 3-day grace period is the safety margin; frequency just bounds cleanup latency
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const graceMs = 3 * 24 * 60 * 60 * 1000;
+
+            const openPrs = await github.paginate(github.rest.pulls.list, { owner, repo, state: "open", per_page: 100 });
+            const inUse = new Set();
+            for (const pr of openPrs) {
+              inUse.add(pr.head.ref);
+              inUse.add(pr.base.ref);
+            }
+
+            const branches = await github.paginate(github.rest.repos.listBranches, { owner, repo, per_page: 100 });
+            for (const branch of branches) {
+              const name = branch.name;
+              if (name === "main" || branch.protected || inUse.has(name)) continue;
+
+              const prs = await github.paginate(github.rest.pulls.list, {
+                owner, repo, state: "closed", head: `${owner}:${name}`, per_page: 100,
+              });
+              const merged = prs.filter((p) => p.merged_at !== null);
+              if (merged.length === 0) continue; // never merged: not ours to judge
+              const newest = Math.max(...merged.map((p) => Date.parse(p.merged_at)));
+              if (Date.now() - newest < graceMs) continue;
+
+              core.info(`deleting ${name} (merged PR #${merged.map((p) => p.number).join(", #")})`);
+              await github.rest.git.deleteRef({ owner, repo, ref: `heads/${name}` });
+            }
