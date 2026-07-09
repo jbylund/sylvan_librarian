@@ -264,6 +264,10 @@ fn text_field_value<'a>(
 
 // ─── FilterExpr ───────────────────────────────────────────────────────────────
 
+/// When adding a variant, check its classification in verify_cost_tier() and
+/// printing_dependent() (likewise num_pdep for new NumFields): their wildcard
+/// arms silently rank unknown nodes cheapest/card-level, which misorders the
+/// verifier walk — a perf bug no test will catch.
 pub(crate) enum FilterExpr {
     True,
     And(Vec<FilterExpr>),

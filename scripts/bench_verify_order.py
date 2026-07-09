@@ -32,6 +32,7 @@ import json
 import math
 import os
 import pathlib
+import random
 import statistics
 import subprocess
 import sys
@@ -115,7 +116,7 @@ def build_spec_set(store: pathlib.Path, path: pathlib.Path) -> None:
     """Freeze broad (survey-sampled) + enrichment specs that parse and run."""
     import card_engine  # noqa: PLC0415 — heavy import, only run needs it
 
-    rng = __import__("random").Random(BROAD_SEED)
+    rng = random.Random(BROAD_SEED)
     broad = sq.generate(rng, BROAD_GENERATED) + sq.sample_wild(rng, BROAD_WILD)
     for s in broad:
         s.update({"section": "broad", "family": s["shape"], "pair": None, "variant": None})
@@ -239,7 +240,6 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     """Parity-check totals, then print percentile, ratio, and pair-symmetry tables."""
     with args.out.open() as fh:
         rows = list(csv.DictReader(fh))
-    bad = {}
     totals: dict[str, set] = {}
     for r in rows:
         totals.setdefault(r["qid"], set()).add(r["total"])
@@ -256,6 +256,12 @@ def cmd_analyze(args: argparse.Namespace) -> None:
         med.setdefault((r["qid"], r["branch"]), []).append(float(r["med_ms"]))
         meta[r["qid"]] = r
     qids = sorted({q for q, _ in med}, key=int)
+    # An interrupted run can leave a qid with rows from only one branch;
+    # ratios need both, so drop the stragglers rather than KeyError.
+    incomplete = [q for q in qids if (q, "old") not in med or (q, "new") not in med]
+    if incomplete:
+        print(f"skipping {len(incomplete)} queries with rows from only one branch (interrupted run?)", file=sys.stderr)
+        qids = [q for q in qids if q not in set(incomplete)]
     old = {q: statistics.median(med[(q, "old")]) for q in qids}
     new = {q: statistics.median(med[(q, "new")]) for q in qids}
     ratios = {q: old[q] / new[q] for q in qids}

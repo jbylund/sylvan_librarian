@@ -5,7 +5,7 @@ The narrowing pass has ordered And children by materialization cost since
 query that full-scans (regex conjuncts, legality/arithmetic partners), whether
 each card paid the expensive text predicate before or after the cheap mask
 checks depended on how the user typed the query — `o:/draw .* cards?/
-f:pauper` and `f:pauper o:/draw .* cards?/` differed by ~2.4×.
+f:pauper` and `f:pauper o:/draw .* cards?/` differed by ~2.1×.
 
 `run_query` now sorts And/Or children cheapest-verification-tier-first after
 text-predicate memoization (which changes tiers), using a stable sort so
