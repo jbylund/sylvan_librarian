@@ -2539,6 +2539,12 @@ fn mana_fixture_store() -> CardData {
         let mut c = stub_card(i as u128 + 1, TYPE_CREATURE, &[], &mut vocab);
         c.mana_cost = mana_cost_of(pips, &mut mana_vocab);
         c.mana_cost.cmc = cmc;
+        // identity must cover devotion colors (the build tripwire enforces it)
+        for (lane, sym) in ["W", "U", "B", "R", "G"].iter().enumerate() {
+            if super::lane_get(c.mana_cost.devotion, lane) > 0 {
+                c.card_color_identity |= super::color_list_to_mask(&[sym]);
+            }
+        }
         c
     }).collect();
     let mut data = store_of(cards, &[1usize; 7], vocab);
