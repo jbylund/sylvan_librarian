@@ -1483,16 +1483,6 @@ fn price_bounds(op: CmpOp, value: f64) -> Option<(u32, u32)> {
     }
 }
 
-/// Sorted printing ids satisfying `price op value`, via the f32_sort_bits index.
-/// The query driver goes through range_narrowed() (which never declines);
-/// this vec-only form is kept as the tests' reference for the bounds/guard
-/// semantics, like FilterExpr::matches().
-#[cfg(test)]
-fn price_candidates(idx: &Archived<PrintingRangeIndex>, op: CmpOp, value: f64) -> Option<Vec<u32>> {
-    let (lo, hi) = price_bounds(op, value)?;
-    range_candidates(idx, lo, hi)
-}
-
 /// Half-open [lo, hi) bounds for indexes over plain integers (collector
 /// number). Query values are f64 and may be fractional or out of range; bounds
 /// are chosen so the range is exact for every op — `cn<100.5` means
@@ -1517,16 +1507,6 @@ fn int_range_bounds(op: CmpOp, value: f64) -> Option<Option<(u32, u32)>> {
         return Some(None);
     }
     Some(Some((lo as u32, hi as u32)))
-}
-
-/// Sorted printing ids satisfying `int_value op value`. Test-only reference,
-/// see price_candidates().
-#[cfg(test)]
-fn int_range_candidates(idx: &Archived<PrintingRangeIndex>, op: CmpOp, value: f64) -> Option<Vec<u32>> {
-    match int_range_bounds(op, value)? {
-        None => Some(Vec::new()),
-        Some((lo, hi)) => range_candidates(idx, lo, hi),
-    }
 }
 
 /// Sorted printing ids with an indexed value in [lo, hi), or None for ranges
@@ -1927,9 +1907,9 @@ impl Narrowed {
 }
 
 /// Intersect same-space sets. All-vec inputs keep today's sort-by-length merge
-/// chain; any bitmap input (or a later promotion) runs word-wise AND. `n` is
-/// the domain size of the space. Tight iff every input is tight.
-fn and_all(mut sets: Vec<Narrowed>, n: usize) -> Option<Narrowed> {
+/// chain; any bitmap input (or a later promotion) runs word-wise AND. Tight
+/// iff every input is tight.
+fn and_all(mut sets: Vec<Narrowed>) -> Option<Narrowed> {
     if sets.is_empty() {
         return None;
     }
@@ -2399,8 +2379,8 @@ fn narrow_rec(
                     every_child_included = false;
                 }
             }
-            let cards = and_all(card_sets, n_cards);
-            let printings = and_all(printing_sets, n_printings);
+            let cards = and_all(card_sets);
+            let printings = and_all(printing_sets);
             let seal = |mut n: Narrowed| {
                 n.tight &= every_child_included;
                 n
@@ -2435,7 +2415,7 @@ fn narrow_rec(
                         }
                         _ => {
                             let pc = p.into_card_space(offsets);
-                            and_all(vec![c, pc], n_cards).map(seal)
+                            and_all(vec![c, pc]).map(seal)
                         }
                     }
                 }
