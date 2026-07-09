@@ -2262,3 +2262,233 @@ fn order_name_sorts_and_paginates() {
     assert_eq!(ids("asc"), [4, 2], "within the tie: lower edhrec rank first");
     assert_eq!(ids("desc"), [4, 2], "secondaries keep their order under desc");
 }
+
+// ─── Verifier cost ordering ───────────────────────────────────────────────────
+
+fn type_mask() -> FilterExpr {
+    FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge }
+}
+
+fn contains_scan() -> FilterExpr {
+    FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: "draw".to_string() }
+}
+
+fn machinery_regex() -> FilterExpr {
+    FilterExpr::TextRegex { field: TextField::OracleTextLower, regex: regex::Regex::new("draw .* cards?").unwrap() }
+}
+
+// Pattern-shape cost classification: anchored literals are memcmp-cheap,
+// bare literals cost a substring scan, real machinery gets the top tier.
+#[test]
+fn regex_tier_classifies_pattern_shapes() {
+    use super::regex_tier;
+    assert_eq!(regex_tier("(?i)^flying$"), 1);
+    assert_eq!(regex_tier("dragon$"), 1);
+    assert_eq!(regex_tier("(?i)^\\{t\\}: add"), 1, "escaped punctuation is literal");
+    assert_eq!(regex_tier("^gob"), 1);
+    assert_eq!(regex_tier("(?i)flying"), 3, "unanchored literal = contains cost");
+    assert_eq!(regex_tier("draw .* cards?"), 4);
+    assert_eq!(regex_tier("^[aeiou]"), 4);
+    assert_eq!(regex_tier("(?i)^\\d+$"), 4, "class escapes are machinery");
+    assert_eq!(regex_tier("a|b"), 4);
+    assert_eq!(regex_tier("ends with backslash\\"), 4, "dangling escape: not literal");
+}
+
+// And children reorder cheapest-tier-first regardless of written order, and
+// equal-tier children keep their written order (stable sort).
+#[test]
+fn verify_order_sorts_and_children_cheap_first() {
+    let cmc_lt = |v: f64| FilterExpr::NumericCmp {
+        lhs: NumExpr::Field(NumField::Cmc),
+        op: CmpOp::Lt,
+        rhs: NumExpr::Const(v),
+    };
+    let mut f = FilterExpr::And(vec![machinery_regex(), cmc_lt(3.0), contains_scan(), cmc_lt(5.0), type_mask()]);
+    f.order_children_by_verify_cost();
+    let FilterExpr::And(children) = &f else { panic!("still an And") };
+    assert!(matches!(children[0], FilterExpr::NumericCmp { rhs: NumExpr::Const(v), .. } if v == 3.0));
+    assert!(matches!(children[1], FilterExpr::NumericCmp { rhs: NumExpr::Const(v), .. } if v == 5.0));
+    assert!(matches!(children[2], FilterExpr::TypeCmp { .. }));
+    assert!(matches!(children[3], FilterExpr::TextContains { .. }));
+    assert!(matches!(children[4], FilterExpr::TextRegex { .. }));
+}
+
+// Within the memoized-set tier, And children refine to ascending set size
+// (smaller set = more rejections per identical binary-search cost); tier-1
+// children without a known size (collections) come after the sized sets.
+#[test]
+fn verify_order_and_refines_by_set_size() {
+    let coll = FilterExpr::CollectionCmp { field: CollField::Keywords, op: CmpOp::Ge, value: "flying".to_string(), value_id: None };
+    let mut f = FilterExpr::And(vec![
+        coll,
+        FilterExpr::NameMatch { ids: vec![1, 2, 3, 4, 5] },
+        FilterExpr::OracleMatch { gids: vec![7, 9] },
+    ]);
+    f.order_children_by_verify_cost();
+    let FilterExpr::And(children) = &f else { panic!("still an And") };
+    assert!(matches!(&children[0], FilterExpr::OracleMatch { gids } if gids.len() == 2));
+    assert!(matches!(&children[1], FilterExpr::NameMatch { ids } if ids.len() == 5));
+    assert!(matches!(children[2], FilterExpr::CollectionCmp { .. }));
+}
+
+// Or children sort by coarse buckets: acceptance short-circuits an Or, and a
+// small set is the worst acceptance lead, so neither set size nor fine cost
+// tiers may reorder Or children — only decisive gaps do.
+#[test]
+fn verify_order_or_sorts_by_bucket_only() {
+    let mut f = FilterExpr::Or(vec![
+        machinery_regex(),
+        FilterExpr::NameMatch { ids: vec![1, 2, 3, 4, 5] },
+        FilterExpr::OracleMatch { gids: vec![7, 9] },
+        type_mask(),
+    ]);
+    f.order_children_by_verify_cost();
+    let FilterExpr::Or(children) = &f else { panic!("still an Or") };
+    assert!(matches!(children[0], FilterExpr::TypeCmp { .. }));
+    assert!(matches!(&children[1], FilterExpr::NameMatch { ids } if ids.len() == 5), "written order kept within tier");
+    assert!(matches!(&children[2], FilterExpr::OracleMatch { gids } if gids.len() == 2));
+    assert!(matches!(children[3], FilterExpr::TextRegex { .. }));
+}
+
+// Within an Or, nodes of text-scan-adjacent cost (pip maps, contains, bare
+// literals) keep written order: their cost gap is too small to outweigh the
+// unknowable acceptance rates (devotion-first cost `oracle:vigilance or
+// devotion:bbb` 1.2× when measured).
+#[test]
+fn verify_order_or_keeps_scan_cost_band_in_written_order() {
+    let devotion = || FilterExpr::Devotion { op: CmpOp::Ge, pips: HashMap::from([("B".to_string(), 3u8)]) };
+    let mut f = FilterExpr::Or(vec![contains_scan(), devotion()]);
+    f.order_children_by_verify_cost();
+    let FilterExpr::Or(children) = &f else { panic!("still an Or") };
+    assert!(matches!(children[0], FilterExpr::TextContains { .. }), "contains keeps its written lead");
+    assert!(matches!(children[1], FilterExpr::Devotion { .. }));
+
+    // In an And the same pair DOES reorder: rejection is what And children
+    // short-circuit on, and the pip walk measures ~3× under the text scan.
+    let mut g = FilterExpr::And(vec![contains_scan(), devotion()]);
+    g.order_children_by_verify_cost();
+    let FilterExpr::And(children) = &g else { panic!("still an And") };
+    assert!(matches!(children[0], FilterExpr::Devotion { .. }), "And sorts the cheaper pip walk first");
+    assert!(matches!(children[1], FilterExpr::TextContains { .. }));
+}
+
+// Within an Or, a memoized set must NOT jump ahead of a contains: the ~3×
+// cost gap between a binary search and a substring scan is smaller than the
+// acceptance-rate swing it gambles on (measured: `(… or color:g)
+// (oracle:token or name:storm)` lost 1.1× to set-first ordering).
+#[test]
+fn verify_order_or_keeps_sets_and_scans_in_written_order() {
+    let mut f = FilterExpr::Or(vec![contains_scan(), FilterExpr::NameMatch { ids: vec![1, 2] }]);
+    f.order_children_by_verify_cost();
+    let FilterExpr::Or(children) = &f else { panic!("still an Or") };
+    assert!(matches!(children[0], FilterExpr::TextContains { .. }));
+    assert!(matches!(children[1], FilterExpr::NameMatch { .. }));
+}
+
+// And children that can reject at card level run before printing-dependent
+// ones, which never can: `usd>20 t:dragon` must check the subtype first so
+// rejected cards skip the price eval entirely. A composite with any
+// card-level member can still settle at card level, so it stays early.
+#[test]
+fn verify_order_and_defers_printing_dependent_children() {
+    let usd = || FilterExpr::NumericCmp {
+        lhs: NumExpr::Field(NumField::PriceUsd),
+        op: CmpOp::Gt,
+        rhs: NumExpr::Const(20.0),
+    };
+    let dragon = || FilterExpr::CollectionCmp { field: CollField::Subtypes, op: CmpOp::Ge, value: "dragon".to_string(), value_id: None };
+    let mut f = FilterExpr::And(vec![usd(), dragon()]);
+    f.order_children_by_verify_cost();
+    let FilterExpr::And(children) = &f else { panic!("still an And") };
+    assert!(matches!(children[0], FilterExpr::CollectionCmp { .. }), "card-level rejector first");
+    assert!(matches!(children[1], FilterExpr::NumericCmp { .. }));
+
+    // Or(usd, type) can settle at card level through its type member (a True
+    // settles an Or), so it is not printing-dependent and leads the contains.
+    let mut g = FilterExpr::And(vec![contains_scan(), FilterExpr::Or(vec![usd(), type_mask()])]);
+    g.order_children_by_verify_cost();
+    let FilterExpr::And(children) = &g else { panic!("still an And") };
+    assert!(matches!(children[0], FilterExpr::Or(_)), "mixed composite can settle: stays card-level");
+    assert!(matches!(children[1], FilterExpr::TextContains { .. }));
+}
+
+// Printing-dependent Or children can never settle the Or during the card
+// pass, so a cheap tier never pulls them ahead of card-level children —
+// `usd>20` must not jump ahead of the contains it can't short-circuit.
+#[test]
+fn verify_order_or_defers_printing_dependent_children() {
+    let usd = || FilterExpr::NumericCmp {
+        lhs: NumExpr::Field(NumField::PriceUsd),
+        op: CmpOp::Gt,
+        rhs: NumExpr::Const(20.0),
+    };
+    let mut f = FilterExpr::Or(vec![contains_scan(), usd()]);
+    f.order_children_by_verify_cost();
+    let FilterExpr::Or(children) = &f else { panic!("still an Or") };
+    assert!(matches!(children[0], FilterExpr::TextContains { .. }), "card-level scan stays ahead of pdep numeric");
+    assert!(matches!(children[1], FilterExpr::NumericCmp { .. }));
+
+    // A card-level mask still moves ahead of a printing-dependent set lookup.
+    let mut g = FilterExpr::Or(vec![FilterExpr::FlavorMatch { gids: vec![3], dense_ids: vec![] }, type_mask()]);
+    g.order_children_by_verify_cost();
+    let FilterExpr::Or(children) = &g else { panic!("still an Or") };
+    assert!(matches!(children[0], FilterExpr::TypeCmp { .. }));
+    assert!(matches!(children[1], FilterExpr::FlavorMatch { .. }));
+}
+
+// Composites rank as the max of their children (their evaluation may have to
+// run every child), and the sort recurses through And/Or/Not nesting.
+#[test]
+fn verify_order_recurses_and_ranks_composites() {
+    let inner_or = FilterExpr::Or(vec![machinery_regex(), type_mask()]);
+    let mut f = FilterExpr::Not(Box::new(FilterExpr::And(vec![inner_or, contains_scan(), type_mask()])));
+    f.order_children_by_verify_cost();
+    let FilterExpr::Not(inner) = &f else { panic!("still a Not") };
+    let FilterExpr::And(children) = inner.as_ref() else { panic!("still an And") };
+    assert!(matches!(children[0], FilterExpr::TypeCmp { .. }));
+    assert!(matches!(children[1], FilterExpr::TextContains { .. }));
+    let FilterExpr::Or(or_children) = &children[2] else { panic!("Or ranks tier 3, last") };
+    assert!(matches!(or_children[0], FilterExpr::TypeCmp { .. }), "nested Or sorted too");
+    assert!(matches!(or_children[1], FilterExpr::TextRegex { .. }));
+}
+
+// End-to-end: the two spellings of a mixed-cost conjunction return identical
+// totals and pages through run_query — ordering is a speed dial, not a
+// semantics change.
+#[test]
+fn verify_order_spellings_agree_end_to_end() {
+    let mut vocab = VocabInterner::new();
+    let mut strings = Interner::new();
+    let mut cards = Vec::new();
+    for i in 0..12u32 {
+        let types = if i % 2 == 0 { TYPE_CREATURE } else { TYPE_INSTANT };
+        let mut c = stub_card((i + 1) as u128, types, &[], &mut vocab);
+        let text = if i % 3 == 0 { "flying" } else { "draw a card" };
+        c.oracle_text_lower_id = strings.intern(text.to_string());
+        c.edhrec_rank = Some(i + 1);
+        cards.push(c);
+    }
+    let mut data = store_of(cards, &vec![2usize; 12], vocab);
+    data.strings = strings.strings;
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let run = |mut filter: FilterExpr| {
+        let (total, page) = run_query(
+            &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+            &mut filter, None, "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+        );
+        let ids: Vec<u128> = page.iter().map(|(c, _)| u128::from(c.oracle_id)).collect();
+        (total, ids)
+    };
+    let expensive_first = FilterExpr::And(vec![machinery_regex(), type_mask()]);
+    let cheap_first = FilterExpr::And(vec![type_mask(), machinery_regex()]);
+    let (t1, p1) = run(expensive_first);
+    let (t2, p2) = run(cheap_first);
+    assert_eq!(t1, 4, "creatures with draw-a-card text: cards 3, 5, 9, 11");
+    assert_eq!((t1, p1), (t2, p2));
+
+    let or_a = FilterExpr::Or(vec![machinery_regex(), type_mask()]);
+    let or_b = FilterExpr::Or(vec![type_mask(), machinery_regex()]);
+    assert_eq!(run(or_a), run(or_b));
+}

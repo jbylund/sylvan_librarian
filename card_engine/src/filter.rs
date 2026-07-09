@@ -264,6 +264,10 @@ fn text_field_value<'a>(
 
 // ─── FilterExpr ───────────────────────────────────────────────────────────────
 
+/// verify_cost_tier() and printing_dependent() match on this enum
+/// exhaustively (no `_` arm), so adding a variant is a compile error until
+/// it's classified in both — deliberately, since a silent default there
+/// would misorder the verifier walk without failing any test.
 pub(crate) enum FilterExpr {
     True,
     And(Vec<FilterExpr>),
@@ -374,6 +378,204 @@ pub(crate) enum FilterExpr {
         op: CmpOp,
         year: i32,
     },
+}
+
+/// Per-candidate verification cost of a node in the tri walk, grouped into
+/// tiers wide enough that the ranking is safe without measurement:
+///
+///   0 — field loads and integer/float/mask compares (numerics, dates,
+///       colors, types, legality words, exact string equality)
+///   1 — bounded lookups: a binary search over a bind/memoize-resolved id set
+///       (ArtistMatch/FlavorMatch/NameMatch/OracleMatch) or a card collection
+///       (CollectionCmp), and anchored-literal regexes (a memcmp at a known
+///       position — see regex_tier)
+///   2 — pip-map walks of Devotion / ManaCostCmp: string-keyed hashmap
+///       iteration, measured ~3× cheaper than a text scan on the real corpus
+///   3 — per-candidate text scans: TextContains (substring search; artist /
+///       flavor contains were rewritten to tier 1 at bind) and
+///       unanchored-literal regexes, whose prefilter costs the same scan
+///   4 — TextRegex with real regex machinery — the single worst
+///       per-candidate cost the engine has
+///
+/// Composites take the max of their children: their short-circuit may have to
+/// evaluate every child, so the most expensive child bounds the cost.
+fn verify_cost_tier(f: &FilterExpr) -> u8 {
+    match f {
+        FilterExpr::TextRegex { regex, .. } => regex_tier(regex.as_str()),
+        FilterExpr::TextContains { .. } => 3,
+        FilterExpr::Devotion { .. } | FilterExpr::ManaCostCmp { .. } => 2,
+        FilterExpr::ArtistMatch { .. }
+        | FilterExpr::FlavorMatch { .. }
+        | FilterExpr::NameMatch { .. }
+        | FilterExpr::OracleMatch { .. }
+        | FilterExpr::CollectionCmp { .. } => 1,
+        FilterExpr::And(children) | FilterExpr::Or(children) => {
+            children.iter().map(verify_cost_tier).max().unwrap_or(0)
+        }
+        FilterExpr::Not(inner) => verify_cost_tier(inner),
+        // Exhaustive, not `_ => 0`: a new variant must get a considered tier
+        // here rather than silently inheriting tier 0 (cheapest).
+        FilterExpr::True
+        | FilterExpr::ExactName(_)
+        | FilterExpr::NumericCmp { .. }
+        | FilterExpr::TextExact { .. }
+        | FilterExpr::ColorCmp { .. }
+        | FilterExpr::TypeCmp { .. }
+        | FilterExpr::Legality { .. }
+        | FilterExpr::DateCmp { .. }
+        | FilterExpr::YearCmp { .. } => 0,
+    }
+}
+
+/// Classify a regex pattern's per-candidate cost by shape. The regex crate
+/// compiles literal-only patterns to memcmp-style matchers (with case
+/// folding for the (?i) every query regex carries), and anchors bound the
+/// scan to one position — measured on the real corpus, `^flying$` costs
+/// ~half a substring scan while an unanchored literal costs about the same
+/// as one. Ranking them as general regexes inverted real costs and made
+/// `o:/^flying$/ oracle:sacrifice` 2.4× slower, so:
+///
+///   1 — literal with a ^ or $ anchor (starts_with/ends_with/equality)
+///   3 — bare literal (substring search, same tier as TextContains)
+///   4 — anything with live regex metacharacters
+pub(crate) fn regex_tier(pattern: &str) -> u8 {
+    let mut p = pattern.strip_prefix("(?i)").unwrap_or(pattern);
+    let anchored_start = p.starts_with('^');
+    if anchored_start {
+        p = &p[1..];
+    }
+    let bytes = p.as_bytes();
+    let mut anchored_end = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            // An escape of punctuation (\{ \. \$) is a literal character; an
+            // alphanumeric escape (\d \w \b \p…) is a class — real machinery.
+            b'\\' => match bytes.get(i + 1) {
+                Some(c) if !c.is_ascii_alphanumeric() => i += 2,
+                _ => return 4,
+            },
+            b'$' if i == bytes.len() - 1 => {
+                anchored_end = true;
+                i += 1;
+            }
+            b'.' | b'*' | b'+' | b'?' | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'|' | b'^' | b'$' => return 4,
+            _ => i += 1,
+        }
+    }
+    if anchored_start || anchored_end { 1 } else { 3 }
+}
+
+/// Whether a node can NEVER settle the card-level pass — it compares only
+/// printing-level fields, so at card level it always returns PrintingDep and
+/// its evaluation there is pure deferral. Ordering such children after the
+/// card-level ones is a free win in both And and Or: they cannot reject an
+/// And or accept an Or at card level, so a card-level sibling that settles
+/// first skips their eval entirely, and nothing is lost when it doesn't.
+///
+/// Composites settle at card level when ANY child can (a card-level False
+/// settles an And, a card-level True settles an Or), so a composite is
+/// printing-dependent only when ALL its children are.
+fn printing_dependent(f: &FilterExpr) -> bool {
+    fn num_pdep(e: &NumExpr) -> bool {
+        match e {
+            NumExpr::Const(_) => false,
+            // Exhaustive over NumField, not `matches!` with a hidden `_ =>
+            // false`: a new field must get a considered answer here rather
+            // than silently inheriting "card-level".
+            NumExpr::Field(field) => match field {
+                NumField::RarityInt
+                | NumField::CollectorNumberInt
+                | NumField::PriceUsd
+                | NumField::PriceEur
+                | NumField::PriceTix
+                | NumField::PreferScore => true,
+                NumField::Cmc | NumField::Power | NumField::Toughness | NumField::Loyalty | NumField::EdhrEc => false,
+            },
+            NumExpr::Arith(lhs, _, rhs) => num_pdep(lhs) || num_pdep(rhs),
+        }
+    }
+    match f {
+        FilterExpr::NumericCmp { lhs, rhs, .. } => num_pdep(lhs) || num_pdep(rhs),
+        FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. } => true,
+        FilterExpr::ArtistMatch { .. } | FilterExpr::FlavorMatch { .. } => true,
+        // Exhaustive over TextSearchField (no `matches!`), same reason as num_pdep.
+        FilterExpr::TextContains { field, .. } => match field {
+            TextSearchField::FlavorTextLower => true,
+            TextSearchField::NameLower | TextSearchField::OracleTextLower | TextSearchField::ArtistLower => false,
+        },
+        // Exhaustive over TextField (no `matches!`), same reason as num_pdep.
+        FilterExpr::TextExact { field, .. } | FilterExpr::TextRegex { field, .. } => match field {
+            TextField::FlavorTextLower | TextField::SetCode | TextField::Border | TextField::Watermark | TextField::CollectorNumber => {
+                true
+            }
+            TextField::NameLower | TextField::OracleTextLower | TextField::ArtistLower | TextField::Layout => false,
+        },
+        // Exhaustive over CollField (no `matches!`), same reason as num_pdep.
+        FilterExpr::CollectionCmp { field, .. } => match field {
+            CollField::ArtTags | CollField::IsTags | CollField::FrameData => true,
+            CollField::Subtypes | CollField::Keywords | CollField::OracleTags => false,
+        },
+        // Divergent-legality cards defer to the printing, but they are a rare
+        // exception (non-tournament reprints); rank by the common card-level case.
+        FilterExpr::Legality { .. } => false,
+        FilterExpr::And(children) | FilterExpr::Or(children) => children.iter().all(printing_dependent),
+        FilterExpr::Not(inner) => printing_dependent(inner),
+        // Exhaustive, not `_ => false`: a new variant must get a considered
+        // answer here rather than silently inheriting "can settle at card level".
+        FilterExpr::True
+        | FilterExpr::ExactName(_)
+        | FilterExpr::NameMatch { .. }
+        | FilterExpr::OracleMatch { .. }
+        | FilterExpr::ColorCmp { .. }
+        | FilterExpr::TypeCmp { .. }
+        | FilterExpr::ManaCostCmp { .. }
+        | FilterExpr::Devotion { .. } => false,
+    }
+}
+
+/// Or-child sort key. An Or short-circuits on acceptance, and acceptance
+/// rates — unlike costs — are unknowable statically, so ordering an Or by
+/// fine-grained cost backfires when a cheap child rarely accepts (measured
+/// twice: `oracle:vigilance or devotion:bbb` lost 1.2× to devotion-first,
+/// and a memoized name set jumping a contains lost 1.1×). The key therefore
+/// only separates classes with a decisive gap:
+///
+///   bucket 0 — card-level tier-0 checks: cheap enough (a few ns) that
+///              leading with them is near-free even when they rarely accept
+///   bucket 1 — everything else below regex machinery (set lookups, pip
+///              maps, text scans) in written order: costs within ~3× of
+///              each other, where acceptance dominates
+///   bucket 2 — regex machinery, always last
+///
+/// Within a bucket, printing-dependent children order last: they can never
+/// settle the Or at card level (see printing_dependent), so leading with
+/// them is pure deferral cost.
+fn or_child_key(f: &FilterExpr) -> (u8, bool) {
+    let tier = verify_cost_tier(f);
+    let pdep = printing_dependent(f);
+    let bucket = if tier >= 4 {
+        2
+    } else if tier == 0 && !pdep {
+        0
+    } else {
+        1
+    };
+    (bucket, pdep)
+}
+
+/// Within-tier refinement for And children: memoized sets know their own
+/// size, and under an And a smaller set is more selective — it rejects more
+/// candidates per (identical) binary-search cost, so it should run first.
+/// Nodes without a known set size sort after sized ones in their tier and
+/// keep written order among themselves (the sort is stable).
+fn and_child_set_len(f: &FilterExpr) -> usize {
+    match f {
+        FilterExpr::ArtistMatch { ids } => ids.len(),
+        FilterExpr::NameMatch { ids } => ids.len(),
+        FilterExpr::FlavorMatch { gids, .. } | FilterExpr::OracleMatch { gids } => gids.len(),
+        _ => usize::MAX,
+    }
 }
 
 /// Vocab ids (ascending) whose artist string satisfies `pred`.
@@ -597,6 +799,48 @@ impl FilterExpr {
                 gids.sort_unstable();
                 *self = FilterExpr::OracleMatch { gids };
             }
+            _ => {}
+        }
+    }
+
+    /// Reorder And/Or children cheapest-verification-first so the tri walk's
+    /// short-circuit (first False settles an And, first True settles an Or)
+    /// runs the expensive text predicates on as few cards as possible. The tri
+    /// accumulation is commutative — False/True dominate and the Null /
+    /// PrintingDep flags just OR together — so any child order is
+    /// semantics-preserving; only the cost changes. Without this, whether a
+    /// broad scan pays a regex before or after the cheap mask checks depends
+    /// on how the user typed the query.
+    ///
+    /// And children sort card-level-first (a printing-dependent child cannot
+    /// reject at card level, so any card-level sibling that rejects first
+    /// skips its eval — free, never negative), then on the full cost tiers,
+    /// refined within the memoized-set tier to ascending set size: a smaller
+    /// match set rejects more candidates per unit cost, and the size is
+    /// already known (ids.len()). Or children sort on the coarser
+    /// or_child_key — their short-circuit is acceptance, which no static
+    /// cost model can see, so only decisive cost gaps reorder them.
+    ///
+    /// The sorts are stable, so equal-cost children keep written order and
+    /// the result is deterministic. Must run after memoize_text_predicates():
+    /// memoization flips TextContains nodes from the scan tier to the set
+    /// tier. The per-printing residual pass inherits the order too, since
+    /// card_pass() pushes residual children in child order.
+    pub(crate) fn order_children_by_verify_cost(&mut self) {
+        match self {
+            FilterExpr::And(children) => {
+                for c in children.iter_mut() {
+                    c.order_children_by_verify_cost();
+                }
+                children.sort_by_key(|c| (printing_dependent(c), verify_cost_tier(c), and_child_set_len(c)));
+            }
+            FilterExpr::Or(children) => {
+                for c in children.iter_mut() {
+                    c.order_children_by_verify_cost();
+                }
+                children.sort_by_key(or_child_key);
+            }
+            FilterExpr::Not(inner) => inner.order_children_by_verify_cost(),
             _ => {}
         }
     }
