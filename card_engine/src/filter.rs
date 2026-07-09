@@ -264,10 +264,10 @@ fn text_field_value<'a>(
 
 // ─── FilterExpr ───────────────────────────────────────────────────────────────
 
-/// When adding a variant, check its classification in verify_cost_tier() and
-/// printing_dependent() (likewise num_pdep for new NumFields): their wildcard
-/// arms silently rank unknown nodes cheapest/card-level, which misorders the
-/// verifier walk — a perf bug no test will catch.
+/// verify_cost_tier() and printing_dependent() match on this enum
+/// exhaustively (no `_` arm), so adding a variant is a compile error until
+/// it's classified in both — deliberately, since a silent default there
+/// would misorder the verifier walk without failing any test.
 pub(crate) enum FilterExpr {
     True,
     And(Vec<FilterExpr>),
@@ -413,7 +413,17 @@ fn verify_cost_tier(f: &FilterExpr) -> u8 {
             children.iter().map(verify_cost_tier).max().unwrap_or(0)
         }
         FilterExpr::Not(inner) => verify_cost_tier(inner),
-        _ => 0,
+        // Exhaustive, not `_ => 0`: a new variant must get a considered tier
+        // here rather than silently inheriting tier 0 (cheapest).
+        FilterExpr::True
+        | FilterExpr::ExactName(_)
+        | FilterExpr::NumericCmp { .. }
+        | FilterExpr::TextExact { .. }
+        | FilterExpr::ColorCmp { .. }
+        | FilterExpr::TypeCmp { .. }
+        | FilterExpr::Legality { .. }
+        | FilterExpr::DateCmp { .. }
+        | FilterExpr::YearCmp { .. } => 0,
     }
 }
 
@@ -469,36 +479,58 @@ pub(crate) fn regex_tier(pattern: &str) -> u8 {
 fn printing_dependent(f: &FilterExpr) -> bool {
     fn num_pdep(e: &NumExpr) -> bool {
         match e {
-            NumExpr::Field(
+            NumExpr::Const(_) => false,
+            // Exhaustive over NumField, not `matches!` with a hidden `_ =>
+            // false`: a new field must get a considered answer here rather
+            // than silently inheriting "card-level".
+            NumExpr::Field(field) => match field {
                 NumField::RarityInt
                 | NumField::CollectorNumberInt
                 | NumField::PriceUsd
                 | NumField::PriceEur
                 | NumField::PriceTix
-                | NumField::PreferScore,
-            ) => true,
+                | NumField::PreferScore => true,
+                NumField::Cmc | NumField::Power | NumField::Toughness | NumField::Loyalty | NumField::EdhrEc => false,
+            },
             NumExpr::Arith(lhs, _, rhs) => num_pdep(lhs) || num_pdep(rhs),
-            _ => false,
         }
     }
     match f {
         FilterExpr::NumericCmp { lhs, rhs, .. } => num_pdep(lhs) || num_pdep(rhs),
         FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. } => true,
         FilterExpr::ArtistMatch { .. } | FilterExpr::FlavorMatch { .. } => true,
-        FilterExpr::TextContains { field: TextSearchField::FlavorTextLower, .. } => true,
-        FilterExpr::TextExact { field, .. } | FilterExpr::TextRegex { field, .. } => matches!(
-            field,
-            TextField::FlavorTextLower | TextField::SetCode | TextField::Border | TextField::Watermark | TextField::CollectorNumber
-        ),
-        FilterExpr::CollectionCmp { field, .. } => {
-            matches!(field, CollField::ArtTags | CollField::IsTags | CollField::FrameData)
-        }
+        // Exhaustive over TextSearchField (no `matches!`), same reason as num_pdep.
+        FilterExpr::TextContains { field, .. } => match field {
+            TextSearchField::FlavorTextLower => true,
+            TextSearchField::NameLower | TextSearchField::OracleTextLower | TextSearchField::ArtistLower => false,
+        },
+        // Exhaustive over TextField (no `matches!`), same reason as num_pdep.
+        FilterExpr::TextExact { field, .. } | FilterExpr::TextRegex { field, .. } => match field {
+            TextField::FlavorTextLower | TextField::SetCode | TextField::Border | TextField::Watermark | TextField::CollectorNumber => {
+                true
+            }
+            TextField::NameLower | TextField::OracleTextLower | TextField::ArtistLower | TextField::Layout => false,
+        },
+        // Exhaustive over CollField (no `matches!`), same reason as num_pdep.
+        FilterExpr::CollectionCmp { field, .. } => match field {
+            CollField::ArtTags | CollField::IsTags | CollField::FrameData => true,
+            CollField::Subtypes | CollField::Keywords | CollField::OracleTags => false,
+        },
         // Divergent-legality cards defer to the printing, but they are a rare
         // exception (non-tournament reprints); rank by the common card-level case.
         FilterExpr::Legality { .. } => false,
         FilterExpr::And(children) | FilterExpr::Or(children) => children.iter().all(printing_dependent),
         FilterExpr::Not(inner) => printing_dependent(inner),
-        _ => false,
+        // Exhaustive, not `_ => false`: a new variant must get a considered
+        // answer here rather than silently inheriting "can settle at card level".
+        FilterExpr::True
+        | FilterExpr::ExactName(_)
+        | FilterExpr::NameMatch { .. }
+        | FilterExpr::OracleMatch { .. }
+        | FilterExpr::ColorCmp { .. }
+        | FilterExpr::TypeCmp { .. }
+        | FilterExpr::ManaCostCmp { .. }
+        | FilterExpr::Devotion { .. } => false,
     }
 }
 
