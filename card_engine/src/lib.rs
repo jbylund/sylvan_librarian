@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::io::Write as IoWrite;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 
@@ -1354,23 +1354,39 @@ fn build_artwork_group_counts(printings: &[Printing], offsets: &[u32]) -> Vec<u1
 
 type PrintingRangeIndex = Vec<(u32, u32)>;
 
+/// One-shot env override for the guard statics below: reads
+/// `CARD_ENGINE_<NAME>` once (each static is a LazyLock), falling back to the
+/// measured default when the var is unset or unparseable. Production leaves
+/// the vars unset; the calibration harness (scripts/bench_cost_guards.py)
+/// sets them in fresh subprocesses to force one branch of each guard.
+fn guard_env<T: std::str::FromStr>(name: &str, default: T) -> T {
+    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
 // Printing-space range narrowing is a pessimization when the matched slice
 // covers too much of the index: gathering + sorting the candidate ids and
 // evaluating them by random access costs ~2× per element what the sequential
 // full scan pays, and unlike the card-space indexes the candidate set doesn't
-// shrink the eval domain. Measured break-even is around a third of the store;
-// past the fraction below the indexes decline to narrow and the query falls
-// back to the scan. Narrowing is advisory (eval verifies every candidate), so
-// this is purely a speed dial, not a correctness concern.
-const MAX_NARROW_FRACTION: f64 = 0.25;
+// shrink the eval domain. Past the fraction below the indexes decline to
+// narrow and the query falls back to the scan. Narrowing is advisory (eval
+// verifies every candidate), so this is purely a speed dial, not a
+// correctness concern. Calibrated (scripts/bench_cost_guards.py, forced-branch
+// sweeps on an exact-selectivity synthetic corpus): crossover at 0.33 ± 0.01
+// of the index on the 97k-printing corpus but 0.28 ± 0.01 at half size, so
+// 0.25 is the most aggressive trigger clear of the pooled spread (narrowing
+// still wins ~1.06-1.15× there).
+static MAX_NARROW_FRACTION: LazyLock<f64> = LazyLock::new(|| guard_env("CARD_ENGINE_MAX_NARROW_FRACTION", 0.25));
 
 /// Below this many matched ids narrowing always wins regardless of fraction —
 /// gathering a handful of ids is microseconds. Also keeps tiny stores (tests,
-/// partial imports) narrowing, where any match trips the fraction.
-const NARROW_FLOOR: usize = 1_000;
+/// partial imports) narrowing, where any match trips the fraction. Not
+/// measurable on the calibration corpus (1k ids is ~1% of the index, far
+/// below the fraction crossover); it only binds on stores small enough that
+/// any answer is microseconds.
+static NARROW_FLOOR: LazyLock<usize> = LazyLock::new(|| guard_env("CARD_ENGINE_NARROW_FLOOR", 1_000));
 
 fn range_too_broad_to_narrow(matched: usize, index_len: usize) -> bool {
-    matched > NARROW_FLOOR && matched as f64 > index_len as f64 * MAX_NARROW_FRACTION
+    matched > *NARROW_FLOOR && matched as f64 > index_len as f64 * *MAX_NARROW_FRACTION
 }
 
 fn build_range_index(printings: &[Printing], get: impl Fn(&Printing) -> Option<u32>) -> PrintingRangeIndex {
@@ -1695,7 +1711,11 @@ struct Narrowed {
 /// pre-#636 behavior; above it, scatters plus word loops avoid the
 /// gather-merge allocations that made broad unions lose (#618). Same
 /// measured-constant philosophy as STREAM_MIN_MATCHES / MAX_NARROW_FRACTION.
-const BITS_PROMOTE: usize = 4_096;
+/// Calibrated (scripts/bench_cost_guards.py, `usd<x or usd>y` with two exactly
+/// dialable sets): vec-merge wins ~8% below ~512 combined ids, and everything
+/// from 1k to 32k sits inside the ±5% benchmark noise floor — the curves are
+/// too flat there to justify moving the trigger, so it stays at 4,096.
+static BITS_PROMOTE: LazyLock<usize> = LazyLock::new(|| guard_env("CARD_ENGINE_BITS_PROMOTE", 4_096));
 
 /// Set bits for each id (any order, duplicates fine) in a fresh n-bit buffer.
 fn scatter_bits<I: IntoIterator<Item = u32>>(ids: I, n: usize) -> Vec<u64> {
@@ -1905,7 +1925,7 @@ fn or_all(mut sets: Vec<Narrowed>, n: usize) -> Option<Narrowed> {
     let all_small_vecs = sets
         .iter()
         .all(|s| !matches!(s.set, Candidates::CardBits(_) | Candidates::PrintingBits(_)))
-        && sets.iter().map(|s| s.set.len()).sum::<usize>() <= BITS_PROMOTE;
+        && sets.iter().map(|s| s.set.len()).sum::<usize>() <= *BITS_PROMOTE;
     let set = if all_small_vecs {
         let mut union: Vec<u32> = Vec::new();
         for s in sets {
@@ -1988,8 +2008,18 @@ fn narrow_candidates(
 
 /// Once any candidate source in an And is this selective, evaluating further
 /// (costlier) children buys nothing the driver's verification doesn't already
-/// do — the remaining children are skipped. Measured-constant philosophy.
-const AND_SKIP_THRESHOLD: usize = 2_048;
+/// do — the remaining children are skipped. Calibrated
+/// (scripts/bench_cost_guards.py): the synthetic crossover where including a
+/// printing-range child starts paying is wobbly (2.8k-11k driver cards) and
+/// its *sign* depends on the child's selectivity — a selective child wins
+/// ~2× included at 4k drivers, a broad child loses ~2× there. A wild-query
+/// A/B of 2,048 vs 8,192 on a pre-name-index build regressed 8k by 3%
+/// geomean with 4-8× tails (skipped `cn:` children under then-broad
+/// exact-name drivers); rerun after the exact-name index landed, those
+/// drivers are tiny and skip under any threshold, making the A/B a wash. So
+/// 2,048 — just below the pooled synthetic spread — stands, and nothing on
+/// real traffic argues for moving it.
+static AND_SKIP_THRESHOLD: LazyLock<usize> = LazyLock::new(|| guard_env("CARD_ENGINE_AND_SKIP_THRESHOLD", 2_048));
 
 /// Evaluation-cost rank for And children: cheap sources first (postings,
 /// planes, card numerics, trigram lookups), printing-space ranges second
@@ -2269,7 +2299,7 @@ fn narrow_rec(
             let mut every_child_included = true;
             for (rank, c) in ranked {
                 let best = card_sets.iter().chain(printing_sets.iter()).map(|n| n.set.len()).min();
-                if rank > 0 && best.is_some_and(|b| b <= AND_SKIP_THRESHOLD) {
+                if rank > 0 && best.is_some_and(|b| b <= *AND_SKIP_THRESHOLD) {
                     every_child_included = false;
                     break;
                 }
@@ -2680,7 +2710,12 @@ fn push_card_matches(
 /// byte-identical to the pre-streaming behavior; above it, walking the
 /// permutation (a fixed ~n bit-tests over the counts array) plus per-page-card
 /// emission wins. Same measured-constant philosophy as MAX_NARROW_FRACTION.
-const STREAM_MIN_MATCHES: usize = 1_024;
+/// Calibrated (scripts/bench_cost_guards.py, `cmc<K` with exactly dialable
+/// card counts): the crossover wanders 0.6k-1.1k across reps and corpus
+/// sizes with branch differences under the ~5% noise floor throughout that
+/// band; 1,024 sits at the spread's upper (gather/simple) edge, and past it
+/// streaming's win grows fast (~1.8× by 8k), so the trigger stays put.
+static STREAM_MIN_MATCHES: LazyLock<usize> = LazyLock::new(|| guard_env("CARD_ENGINE_STREAM_MIN_MATCHES", 1_024));
 
 fn run_query<'a>(
     cards: &'a [AOracleCard],
@@ -2763,7 +2798,7 @@ fn run_query<'a>(
     // candidate list at or below the gather threshold can't produce more
     // matches than that, so the fused path is already microseconds and the
     // match phase would be pure overhead.
-    let maybe_broad = candidate_cards.as_ref().is_none_or(|v| v.len() > STREAM_MIN_MATCHES);
+    let maybe_broad = candidate_cards.as_ref().is_none_or(|v| v.len() > *STREAM_MIN_MATCHES);
     if let Some(perm) = indexes.sort_perms.get(sort_col, descending) {
         if maybe_broad && perm.len() == cards.len() && !cards.is_empty() {
             return run_query_streamed(
@@ -2867,7 +2902,7 @@ fn run_query_streamed<'a>(
     let cmp = |a: &Match, b: &Match| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2));
 
     // Small totals: gather and quickselect — same result as the gathered path.
-    if total <= STREAM_MIN_MATCHES {
+    if total <= *STREAM_MIN_MATCHES {
         let mut best: Vec<Match> = Vec::with_capacity(total);
         for cid in 0..cards.len() as u32 {
             if counts[cid as usize] == 0 {

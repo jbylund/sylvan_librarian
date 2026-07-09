@@ -1194,8 +1194,8 @@ fn broad_ranges_decline_to_narrow() {
     assert!(range_too_broad_to_narrow(2_501, 10_000)); // past it: scan
     // Absolute floor: small candidate counts always narrow, even when they
     // cover the whole index (tiny stores, tests, partial imports).
-    assert!(!range_too_broad_to_narrow(NARROW_FLOOR, 10));
-    assert!(range_too_broad_to_narrow(NARROW_FLOOR + 1, 10));
+    assert!(!range_too_broad_to_narrow(*NARROW_FLOOR, 10));
+    assert!(range_too_broad_to_narrow(*NARROW_FLOOR + 1, 10));
 
     // End-to-end through the archived index: a broad slice returns None (fall
     // back to the scan), a selective slice still narrows.
