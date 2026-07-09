@@ -19,7 +19,7 @@
 use rkyv::{Archive, Deserialize, Serialize};
 
 use super::filter::{CmpOp, ColorField, FilterExpr};
-use super::OracleCard;
+use super::{lane_get, OracleCard};
 
 /// Plane layout, plane-major in BitPlanes.words: six color planes per color
 /// field (W U B R G C, bit order matching color_to_bit — C is always zero for
@@ -51,15 +51,11 @@ pub(crate) fn words_per_plane(n_cards: usize) -> usize {
     n_cards.div_ceil(64)
 }
 
-/// A card's effective per-color devotion count, saturated to 0..=3 —
-/// exactly the map FilterExpr::Devotion evaluates (hybrid-expanded when
-/// hybrids are present, raw pips otherwise).
-fn devotion_count(card: &OracleCard, sym: &str) -> u8 {
-    let map = card.mana_cost.devotion.as_ref().unwrap_or(&card.mana_cost.pips);
-    map.get(sym).copied().unwrap_or(0).min(3)
+/// A card's effective devotion count for one color lane, saturated to 0..=3
+/// — exactly the packed lanes FilterExpr::Devotion evaluates.
+fn devotion_count(card: &OracleCard, lane: usize) -> u8 {
+    lane_get(card.mana_cost.devotion, lane).min(3)
 }
-
-const DEVOTION_SYMS: [&str; COLOR_PLANES] = ["W", "U", "B", "R", "G", "C"];
 
 pub(crate) fn build_bit_planes(cards: &[OracleCard]) -> BitPlanes {
     let wpp = words_per_plane(cards.len());
@@ -79,8 +75,8 @@ pub(crate) fn build_bit_planes(cards: &[OracleCard]) -> BitPlanes {
             set(PLANE_TYPES + bits.trailing_zeros() as usize);
             bits &= bits - 1;
         }
-        for (b, sym) in DEVOTION_SYMS.iter().enumerate() {
-            let count = devotion_count(card, sym);
+        for b in 0..COLOR_PLANES {
+            let count = devotion_count(card, b);
             if count & 1 != 0 {
                 set(PLANE_DEVOTION + DEVOTION_BITS * b);
             }
@@ -93,7 +89,7 @@ pub(crate) fn build_bit_planes(cards: &[OracleCard]) -> BitPlanes {
             // C is exempt — {C} pips never join identity.
             debug_assert!(
                 count == 0 || b == 5 || card.card_color_identity & (1 << b) != 0,
-                "devotion without identity: card {i} color {sym}"
+                "devotion without identity: card {i} color lane {b}"
             );
         }
     }
@@ -209,19 +205,18 @@ fn dev_le(color: usize, k: u8) -> Option<PlaneExpr> {
     dev_ge(color, k + 1).map(|ge| PlaneExpr::Not(Box::new(ge)))
 }
 
-fn devotion_color(sym: &str) -> Option<usize> {
-    DEVOTION_SYMS.iter().position(|s| *s == sym)
-}
-
 /// Compile a Devotion node exactly, mirroring FilterExpr::Devotion's tri():
-/// Ge constrains only the queried colors; Le/Eq additionally pin every
-/// unqueried color to zero (SQL devotion-column containment semantics).
-/// None whenever any needed comparison crosses the saturation boundary.
-fn compile_devotion(op: CmpOp, pips: &std::collections::HashMap<String, u8>) -> Option<PlaneExpr> {
-    let query: Vec<(usize, u8)> = pips
-        .iter()
-        .map(|(sym, &k)| devotion_color(sym).map(|c| (c, k)))
-        .collect::<Option<Vec<_>>>()?;
+/// Ge constrains only the queried colors (the nonzero lanes); Le/Eq
+/// additionally pin every unqueried color to zero (SQL devotion-column
+/// containment semantics). None whenever any needed comparison crosses the
+/// saturation boundary.
+fn compile_devotion(op: CmpOp, pips: u64) -> Option<PlaneExpr> {
+    let query: Vec<(usize, u8)> = (0..COLOR_PLANES)
+        .filter_map(|c| {
+            let k = lane_get(pips, c);
+            (k > 0).then_some((c, k))
+        })
+        .collect();
     let ge = || query.iter().map(|&(c, k)| dev_ge(c, k)).collect::<Option<Vec<_>>>().map(and_of);
     let all_colors = |f: &dyn Fn(usize, u8) -> Option<PlaneExpr>| {
         (0..COLOR_PLANES)
@@ -244,9 +239,12 @@ fn compile_devotion(op: CmpOp, pips: &std::collections::HashMap<String, u8>) -> 
 /// (Ge/Gt past the boundary): clamp each queried count to 3. Every real match
 /// has count >= k >= 3 per queried color, so it lands in the saturated bucket
 /// — a loose candidate set for the driver to verify (~0.5% of cards/color).
-pub(crate) fn compile_devotion_superset(pips: &std::collections::HashMap<String, u8>) -> Option<PlaneExpr> {
-    pips.iter()
-        .map(|(sym, &k)| devotion_color(sym).and_then(|c| dev_ge(c, k.min(3))))
+pub(crate) fn compile_devotion_superset(pips: u64) -> Option<PlaneExpr> {
+    (0..COLOR_PLANES)
+        .filter_map(|c| {
+            let k = lane_get(pips, c);
+            (k > 0).then(|| dev_ge(c, k.min(3)))
+        })
         .collect::<Option<Vec<_>>>()
         .map(and_of)
 }
@@ -291,7 +289,7 @@ pub(crate) fn compile_plane(filter: &FilterExpr) -> Option<PlaneExpr> {
         }
         // Devotion is card-level and two-valued (tri_bool always), so its
         // bit-sliced planes compile exactly within the saturation boundary.
-        FilterExpr::Devotion { op, pips } => compile_devotion(*op, pips),
+        FilterExpr::Devotion { op, pips } => compile_devotion(*op, *pips),
         _ => None,
     }
 }

@@ -162,7 +162,7 @@ fn stub_card(oracle_id: u128, card_types: u16, subtypes: &[&str], vocab: &mut Vo
         card_keywords: Vec::new(),
         card_oracle_tags: Vec::new(),
         card_legalities: 0,
-        mana_cost: ManaCost { pips: HashMap::new(), devotion: None, cmc: 0.0 },
+        mana_cost: ManaCost { core: 0, hybrids: Vec::new(), devotion: 0, cmc: 0.0 },
         creature_power_text_id: NONE_STR,
         creature_toughness_text_id: NONE_STR,
     }
@@ -229,6 +229,7 @@ fn store_of(cards: Vec<OracleCard>, printing_counts: &[usize], vocab: VocabInter
         coll_vocab_sorted: sorted_vocab_ids(&vocab.strings),
         coll_vocab: vocab.strings,
         artist_vocab: vec![],
+        mana_vocab: vec![],
         indexes,
         format_shifts: HashMap::new(),
     }
@@ -454,7 +455,7 @@ fn collection_cmp_binds_vocab_ids_and_matches() {
             value: value.to_string(),
             value_id: None,
         };
-        f.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab, &archived.indexes.flavor, &archived.strings);
+        f.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
         archived.cards.iter().map(|c| f.eval_card(c, &archived.strings) == Tri::True).collect()
     };
 
@@ -484,7 +485,7 @@ fn printing_level_predicates_are_printing_dep_in_card_pass() {
         value: "wolf".to_string(),
         value_id: None,
     };
-    f.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab, &archived.indexes.flavor, &archived.strings);
+    f.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
 
     let card = &archived.cards[0];
     // Card pass can't decide an art-tag predicate...
@@ -674,6 +675,7 @@ fn bench_checked_vs_unchecked_access() {
         coll_vocab_sorted: sorted_vocab_ids(&vocab.strings),
         coll_vocab: vocab.strings,
         artist_vocab: vec![],
+        mana_vocab: vec![],
         indexes,
         format_shifts: HashMap::new(),
     };
@@ -719,7 +721,7 @@ fn card_pass_extracts_residual_and_matches() {
         value: "wolf".to_string(),
         value_id: None,
     };
-    wolf.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab, &archived.indexes.flavor, &archived.strings);
+    wolf.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
     let creature = || FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
 
     // And[t:creature, art:wolf]: the type check is proven at card level and
@@ -747,7 +749,7 @@ fn card_pass_extracts_residual_and_matches() {
         value: "wolf".to_string(),
         value_id: None,
     };
-    wolf2.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab, &archived.indexes.flavor, &archived.strings);
+    wolf2.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
     let or = FilterExpr::Or(vec![creature(), wolf2]);
     let t = or.card_pass(&archived.cards[0], &archived.strings, &mut residual, &mut is_or);
     assert!(t == Tri::True && residual.is_empty());
@@ -778,7 +780,7 @@ fn artist_predicates_bind_to_vocab_ids_and_narrow() {
         field: super::TextSearchField::ArtistLower,
         word: "rebecca".to_string(),
     };
-    f.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab, &archived.indexes.flavor, &archived.strings);
+    f.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
     // bind rewrites the contains into an id-set match
     let FilterExpr::ArtistMatch { ref ids } = f else { panic!("expected ArtistMatch after bind") };
     assert_eq!(ids, &vec![rebecca]);
@@ -801,7 +803,7 @@ fn artist_predicates_bind_to_vocab_ids_and_narrow() {
         field: super::TextSearchField::ArtistLower,
         word: "zzz".to_string(),
     };
-    g.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab, &archived.indexes.flavor, &archived.strings);
+    g.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
     match narrow_candidates(&g, &archived.indexes, &archived.offsets, &archived.cards) {
         Some(Candidates::Printings(v)) => assert!(v.is_empty()),
         _ => panic!("empty artist match must narrow to the empty set"),
@@ -845,7 +847,7 @@ fn flavor_match_bind_eval_and_narrow() {
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
     let bound = |f: &mut FilterExpr| {
-        f.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab, &archived.indexes.flavor, &archived.strings);
+        f.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
     };
 
     let mut f = FilterExpr::TextContains {
@@ -2021,48 +2023,76 @@ fn broad_tag_postings_scatter_or_decline() {
 /// the planes must reproduce.
 fn devotion_fixture_store() -> CardData {
     let mut vocab = VocabInterner::new();
-    let costs: &[(&[(&str, u8)], bool)] = &[
-        (&[], false),                       // no cost
-        (&[("U", 1)], false),               // {U}
-        (&[("U", 2)], false),               // {U}{U}
-        (&[("U", 3)], false),               // {U}{U}{U}
-        (&[("U", 5)], false),               // deep: saturates
-        (&[("R/G", 1)], true),              // {R/G}: 1 red AND 1 green
-        (&[("R/G", 2), ("R", 1)], true),    // {R/G}{R/G}{R}: R=3, G=2
-        (&[("W", 1), ("U", 1)], false),     // {W}{U}
-        (&[("C", 2)], false),               // {C}{C}: colorless devotion
+    let costs: &[&[(&str, u8)]] = &[
+        &[],                       // no cost
+        &[("U", 1)],               // {U}
+        &[("U", 2)],               // {U}{U}
+        &[("U", 3)],               // {U}{U}{U}
+        &[("U", 5)],               // deep: saturates
+        &[("R/G", 1)],             // {R/G}: 1 red AND 1 green
+        &[("R/G", 2), ("R", 1)],   // {R/G}{R/G}{R}: R=3, G=2
+        &[("W", 1), ("U", 1)],     // {W}{U}
+        &[("C", 2)],               // {C}{C}: colorless devotion
     ];
-    let cards: Vec<OracleCard> = costs.iter().enumerate().map(|(i, &(pips, hybrid))| {
+    let mut mana_vocab: Vec<String> = Vec::new();
+    let cards: Vec<OracleCard> = costs.iter().enumerate().map(|(i, &pips)| {
         let mut c = stub_card(i as u128 + 1, TYPE_CREATURE, &[], &mut vocab);
-        let pip_map: HashMap<String, u8> = pips.iter().map(|&(s, n)| (s.to_string(), n)).collect();
-        let devotion = if hybrid {
-            let mut d: HashMap<String, u8> = HashMap::new();
-            for (sym, &n) in &pip_map {
-                if sym.contains('/') {
-                    for part in sym.split('/') {
-                        *d.entry(part.to_string()).or_insert(0) += n;
-                    }
-                } else {
-                    *d.entry(sym.clone()).or_insert(0) += n;
-                }
-            }
-            Some(d)
-        } else {
-            None
-        };
+        c.mana_cost = mana_cost_of(pips, &mut mana_vocab);
         // identity must cover devotion colors (the build tripwire enforces it)
         let mut ident = 0u8;
-        for sym in ["W", "U", "B", "R", "G"] {
-            let m = devotion.as_ref().unwrap_or(&pip_map);
-            if m.get(sym).copied().unwrap_or(0) > 0 {
+        for (lane, sym) in ["W", "U", "B", "R", "G"].iter().enumerate() {
+            if super::lane_get(c.mana_cost.devotion, lane) > 0 {
                 ident |= super::color_list_to_mask(&[sym]);
             }
         }
         c.card_color_identity = ident;
-        c.mana_cost = ManaCost { pips: pip_map, devotion, cmc: 0.0 };
         c
     }).collect();
-    store_of(cards, &[1usize; 9], vocab)
+    let mut data = store_of(cards, &[1usize; 9], vocab);
+    data.mana_vocab = mana_vocab;
+    data
+}
+
+/// Build a ManaCost from (symbol, count) pairs the way the loader does:
+/// lane symbols pack into core, hybrids expand into devotion and intern into
+/// `mana_vocab` (the store's table, shared across cards).
+fn mana_cost_of(pips: &[(&str, u8)], mana_vocab: &mut Vec<String>) -> ManaCost {
+    let mut core = 0u64;
+    let mut devotion = 0u64;
+    let mut hybrids: Vec<(u8, u8)> = Vec::new();
+    for &(sym, n) in pips {
+        match super::mana_lane(sym) {
+            Some(lane) => {
+                core = super::lane_add(core, lane, n);
+                if lane < 6 {
+                    devotion = super::lane_add(devotion, lane, n);
+                }
+            }
+            None => {
+                let id = mana_vocab.iter().position(|v| v == sym).unwrap_or_else(|| {
+                    mana_vocab.push(sym.to_string());
+                    mana_vocab.len() - 1
+                });
+                hybrids.push((id as u8, n));
+                for part in sym.split('/') {
+                    if let Some(lane) = super::mana_lane(part).filter(|&l| l < 6) {
+                        devotion = super::lane_add(devotion, lane, n);
+                    }
+                }
+            }
+        }
+    }
+    hybrids.sort_unstable();
+    ManaCost { core, hybrids, devotion, cmc: 0.0 }
+}
+
+/// Pack WUBRGC (symbol, count) pairs into devotion lanes for query pips.
+fn packed_pips(pips: &[(&str, u8)]) -> u64 {
+    let mut p = 0u64;
+    for &(sym, n) in pips {
+        p = super::lane_add(p, super::mana_lane(sym).expect("lane symbol"), n);
+    }
+    p
 }
 
 // Every devotion op agrees with tri() through the planes, at every saturation
@@ -2072,10 +2102,7 @@ fn devotion_plane_parity_and_boundaries() {
     let data = devotion_fixture_store();
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
-    let dev = |op, pips: &[(&str, u8)]| FilterExpr::Devotion {
-        op,
-        pips: pips.iter().map(|&(s, n)| (s.to_string(), n)).collect(),
-    };
+    let dev = |op, pips: &[(&str, u8)]| FilterExpr::Devotion { op, pips: packed_pips(pips) };
     let mut bitmap: Vec<u64> = Vec::new();
     let mut check_exact = |f: &FilterExpr| {
         let pe = compile_plane(f).expect("must compile exactly");
@@ -2118,10 +2145,7 @@ fn hybrid_pip_counts_toward_both_colors() {
     let data = devotion_fixture_store();
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
-    let dev = |sym: &str, k: u8| FilterExpr::Devotion {
-        op: CmpOp::Ge,
-        pips: std::iter::once((sym.to_string(), k)).collect(),
-    };
+    let dev = |sym: &str, k: u8| FilterExpr::Devotion { op: CmpOp::Ge, pips: packed_pips(&[(sym, k)]) };
     let mut bitmap: Vec<u64> = Vec::new();
     let rg_card = 5; // {R/G}
     for (f, want) in [(dev("R", 1), true), (dev("G", 1), true), (dev("R", 2), false), (dev("U", 1), false)] {
@@ -2286,12 +2310,12 @@ fn regex_tier_classifies_pattern_shapes() {
     assert_eq!(regex_tier("dragon$"), 1);
     assert_eq!(regex_tier("(?i)^\\{t\\}: add"), 1, "escaped punctuation is literal");
     assert_eq!(regex_tier("^gob"), 1);
-    assert_eq!(regex_tier("(?i)flying"), 3, "unanchored literal = contains cost");
-    assert_eq!(regex_tier("draw .* cards?"), 4);
-    assert_eq!(regex_tier("^[aeiou]"), 4);
-    assert_eq!(regex_tier("(?i)^\\d+$"), 4, "class escapes are machinery");
-    assert_eq!(regex_tier("a|b"), 4);
-    assert_eq!(regex_tier("ends with backslash\\"), 4, "dangling escape: not literal");
+    assert_eq!(regex_tier("(?i)flying"), 2, "unanchored literal = contains cost");
+    assert_eq!(regex_tier("draw .* cards?"), 3);
+    assert_eq!(regex_tier("^[aeiou]"), 3);
+    assert_eq!(regex_tier("(?i)^\\d+$"), 3, "class escapes are machinery");
+    assert_eq!(regex_tier("a|b"), 3);
+    assert_eq!(regex_tier("ends with backslash\\"), 3, "dangling escape: not literal");
 }
 
 // And children reorder cheapest-tier-first regardless of written order, and
@@ -2356,7 +2380,7 @@ fn verify_order_or_sorts_by_bucket_only() {
 // devotion:bbb` 1.2× when measured).
 #[test]
 fn verify_order_or_keeps_scan_cost_band_in_written_order() {
-    let devotion = || FilterExpr::Devotion { op: CmpOp::Ge, pips: HashMap::from([("B".to_string(), 3u8)]) };
+    let devotion = || FilterExpr::Devotion { op: CmpOp::Ge, pips: packed_pips(&[("B", 3)]) };
     let mut f = FilterExpr::Or(vec![contains_scan(), devotion()]);
     f.order_children_by_verify_cost();
     let FilterExpr::Or(children) = &f else { panic!("still an Or") };
@@ -2491,4 +2515,130 @@ fn verify_order_spellings_agree_end_to_end() {
     let or_a = FilterExpr::Or(vec![machinery_regex(), type_mask()]);
     let or_b = FilterExpr::Or(vec![type_mask(), machinery_regex()]);
     assert_eq!(run(or_a), run(or_b));
+}
+
+// ─── Packed mana pips: ManaCostCmp semantics ─────────────────────────────────
+
+/// Store with a spread of cost shapes: plain, multi-pip, hybrid, X, snow,
+/// empty — enough to exercise every ManaCostCmp op against the packed lanes,
+/// the hybrid overflow vec, and the bind path.
+fn mana_fixture_store() -> CardData {
+    let mut vocab = VocabInterner::new();
+    let mut mana_vocab: Vec<String> = Vec::new();
+    // (pips, cmc): oracle ids 1..=7 in this order
+    let costs: &[(&[(&str, u8)], f32)] = &[
+        (&[("W", 1)], 1.0),               // 1: {W}
+        (&[("W", 2)], 2.0),               // 2: {W}{W}
+        (&[("W", 1), ("U", 1)], 2.0),     // 3: {W}{U}
+        (&[("R/G", 1)], 1.0),             // 4: {R/G}
+        (&[("X", 1), ("R", 1)], 1.0),     // 5: {X}{R}
+        (&[("S", 1), ("G", 1)], 2.0),     // 6: {S}{G}
+        (&[], 0.0),                       // 7: no cost
+    ];
+    let cards: Vec<OracleCard> = costs.iter().enumerate().map(|(i, &(pips, cmc))| {
+        let mut c = stub_card(i as u128 + 1, TYPE_CREATURE, &[], &mut vocab);
+        c.mana_cost = mana_cost_of(pips, &mut mana_vocab);
+        c.mana_cost.cmc = cmc;
+        c
+    }).collect();
+    let mut data = store_of(cards, &[1usize; 7], vocab);
+    data.mana_vocab = mana_vocab;
+    data
+}
+
+/// Build a bound ManaCostCmp the way build_binary + bind would: lane symbols
+/// pack into core, hybrid symbols resolve against the store's vocab (or the
+/// reserved unknown id when absent).
+fn mana_cmp_of(op: CmpOp, pips: &[(&str, u8)], cmc: f32, mana_vocab: &[String]) -> FilterExpr {
+    let mut core = 0u64;
+    let mut hybrids: Vec<(String, u8)> = Vec::new();
+    let mut hybrid_ids: Vec<(u8, u8)> = Vec::new();
+    let mut unknown = 0u8;
+    for &(sym, n) in pips {
+        match super::mana_lane(sym) {
+            Some(lane) => core = super::lane_add(core, lane, n),
+            None => {
+                hybrids.push((sym.to_string(), n));
+                match mana_vocab.iter().position(|v| v == sym) {
+                    Some(i) => hybrid_ids.push((i as u8, n)),
+                    None => unknown = unknown.saturating_add(n),
+                }
+            }
+        }
+    }
+    hybrids.sort_unstable();
+    hybrid_ids.sort_unstable();
+    if unknown > 0 {
+        hybrid_ids.push((super::MANA_SYM_UNKNOWN, unknown));
+    }
+    FilterExpr::ManaCostCmp { op, core, hybrids, hybrid_ids, cmc }
+}
+
+// Containment, exactness, and their strict/negated variants over the packed
+// representation, matching the jsonb multiset semantics they replace: `=`
+// needs the same distinct symbols with the same counts (a zero lane IS an
+// absent key), hybrids are their own symbols (never lane-expanded for
+// mana=), and X on a card blocks exactness against an X-less query.
+#[test]
+fn mana_cost_cmp_packed_semantics() {
+    let data = mana_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let matches = |f: &FilterExpr| -> Vec<u128> {
+        archived.cards.iter()
+            .filter(|c| f.eval_card(c, &archived.strings) == Tri::True)
+            .map(|c| u128::from(c.oracle_id))
+            .collect()
+    };
+    let mv: Vec<String> = archived.mana_vocab.iter().map(|s| s.to_string()).collect();
+
+    // Ge = query ⊆ card (and cmc >=): every white cost with cmc >= 1.
+    assert_eq!(matches(&mana_cmp_of(CmpOp::Ge, &[("W", 1)], 1.0, &mv)), [1, 2, 3]);
+    // Eq: same symbols, same counts, same cmc — {W} only, not {W}{W} or {W}{U}.
+    assert_eq!(matches(&mana_cmp_of(CmpOp::Eq, &[("W", 1)], 1.0, &mv)), [1]);
+    // Le = card ⊆ query: {W}, {W}{W}, and the empty cost.
+    assert_eq!(matches(&mana_cmp_of(CmpOp::Le, &[("W", 2)], 2.0, &mv)), [1, 2, 7]);
+    // Strict variants exclude the exact cost.
+    assert_eq!(matches(&mana_cmp_of(CmpOp::Gt, &[("W", 1)], 1.0, &mv)), [2, 3]);
+    assert_eq!(matches(&mana_cmp_of(CmpOp::Lt, &[("W", 2)], 2.0, &mv)), [1, 7]);
+    // Hybrid pips are distinct symbols: {R/G} matches only through the vocab.
+    assert_eq!(matches(&mana_cmp_of(CmpOp::Ge, &[("R/G", 1)], 1.0, &mv)), [4]);
+    assert_eq!(matches(&mana_cmp_of(CmpOp::Eq, &[("R/G", 1)], 1.0, &mv)), [4]);
+    // ...and {R} does not contain {R/G}, nor does the {X}{R} card equal {R}.
+    assert_eq!(matches(&mana_cmp_of(CmpOp::Ge, &[("R", 1)], 1.0, &mv)), [5]);
+    assert_eq!(matches(&mana_cmp_of(CmpOp::Eq, &[("R", 1)], 1.0, &mv)), Vec::<u128>::new());
+    // Snow is a lane like any other.
+    assert_eq!(matches(&mana_cmp_of(CmpOp::Ge, &[("S", 1)], 1.0, &mv)), [6]);
+    // A symbol no card carries: containment and exactness fail everywhere;
+    // card ⊆ query still holds for the empty cost (query-only symbols never
+    // constrain the subset direction — same as the HashMap semantics).
+    assert_eq!(matches(&mana_cmp_of(CmpOp::Ge, &[("Q/Z", 1)], 1.0, &mv)), Vec::<u128>::new());
+    assert_eq!(matches(&mana_cmp_of(CmpOp::Eq, &[("Q/Z", 1)], 1.0, &mv)), Vec::<u128>::new());
+    assert_eq!(matches(&mana_cmp_of(CmpOp::Le, &[("Q/Z", 1)], 2.0, &mv)), [7]);
+    // Ne is not-exactly-equal.
+    assert_eq!(matches(&mana_cmp_of(CmpOp::Ne, &[("W", 1)], 1.0, &mv)), [2, 3, 4, 5, 6, 7]);
+}
+
+// The SWAR lane comparison agrees with the scalar per-lane loop across the
+// value spectrum, including the saturation cap that keeps it sound.
+#[test]
+fn lanes_ge_matches_scalar_compare() {
+    let vals = [0u8, 1, 2, 3, 5, 126, 127];
+    for &a0 in &vals {
+        for &b0 in &vals {
+            for &a5 in &vals {
+                for &b5 in &vals {
+                    let a = super::lane_add(super::lane_add(0, 0, a0), 5, a5);
+                    let b = super::lane_add(super::lane_add(0, 0, b0), 5, b5);
+                    let want = a0 >= b0 && a5 >= b5;
+                    assert_eq!(super::lanes_ge(a, b, super::LANES6_HI), want, "a0={a0} b0={b0} a5={a5} b5={b5}");
+                }
+            }
+        }
+    }
+    // lane_add saturates below the lane's high bit, so borrows can't escape.
+    let big = super::lane_add(super::lane_add(0, 2, 120), 2, 120);
+    assert_eq!(super::lane_get(big, 2), 127);
+    assert_eq!(super::lane_get(big, 1), 0);
+    assert_eq!(super::lane_get(big, 3), 0);
 }
