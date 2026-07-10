@@ -4,6 +4,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDate, PyDateAccess, PyDict, PyList, PyTuple};
 use rkyv::{Archive, Archived, Deserialize, Serialize};
 use memmap2::Mmap;
+use memchr::memmem;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::io::Write as IoWrite;
@@ -769,7 +770,186 @@ use planes::*;
 
 // ─── Trigram index ────────────────────────────────────────────────────────────
 
-type TrigramIndex = HashMap<[u8; 3], Vec<u32>>;
+/// Two-tier trigram → posting-list index, generic over the id domain it posts
+/// (card ids for `name_trigram`, dense oracle-text ids for
+/// `OracleTextIndex.trigrams`) — `domain` records which, both for the
+/// dense-plane word count and as a build/read compatibility check.
+///
+/// Same #639 crossover this reuses everywhere else: past `words_per_plane(domain)*8`
+/// bytes a plane is smaller *and* faster to probe than a posting list, so build
+/// time buckets each trigram into whichever tier it's cheaper in — never both,
+/// no discriminant per entry (see `NameBigramIndex` for the same split with a
+/// worked rationale). Keys are sorted ascending within each tier so query time
+/// binary-searches instead of hashing; this is also what makes the structure
+/// zero-copy archivable with rkyv, unlike the `HashMap` it replaces.
+#[derive(Archive, Serialize, Deserialize, Default)]
+struct SortedTrigramIndex {
+    /// Card id (name index) or dense text id (oracle index) count the
+    /// postings/planes below range over.
+    domain: u32,
+    /// Sorted ascending; parallel to `dense_bits` (each entry is
+    /// `words_per_plane(domain)` words) and `dense_counts`.
+    dense_keys: Vec<[u8; 3]>,
+    /// Match count per dense entry, parallel to `dense_keys` — avoids a
+    /// popcount just to answer trigram_min_posting's size query.
+    dense_counts: Vec<u32>,
+    dense_bits: Vec<u64>,
+    /// Sorted ascending; CSR row `sparse_postings[sparse_offsets[i]..sparse_offsets[i+1]]`.
+    sparse_keys: Vec<[u8; 3]>,
+    sparse_offsets: Vec<u32>,
+    /// u16: both domains (card ids, dense text ids) fit comfortably at this
+    /// corpus size — half the bytes of a u32 posting. `finalize_trigram_index`
+    /// forces every entry dense if `domain` ever doesn't fit, so this never
+    /// silently truncates.
+    sparse_postings: Vec<u16>,
+}
+
+/// Bucket a trigram→postings map into `SortedTrigramIndex`'s two tiers.
+/// `domain` is the id space the postings range over (card count for the name
+/// index, distinct-text count for the oracle index) — both the crossover math
+/// and the u16-fits check key off it.
+fn finalize_trigram_index(map: HashMap<[u8; 3], Vec<u32>>, domain: usize) -> SortedTrigramIndex {
+    let wpp = words_per_plane(domain);
+    let plane_bytes = wpp * 8;
+    let u16_ok = domain <= u16::MAX as usize + 1;
+    let mut entries: Vec<([u8; 3], Vec<u32>)> = map.into_iter().collect();
+    entries.sort_unstable_by_key(|(k, _)| *k);
+
+    let mut idx = SortedTrigramIndex { domain: domain as u32, ..Default::default() };
+    idx.sparse_offsets.push(0);
+    for (key, ids) in entries {
+        if u16_ok && ids.len() * 2 <= plane_bytes {
+            idx.sparse_keys.push(key);
+            idx.sparse_postings.extend(ids.iter().map(|&i| i as u16));
+            idx.sparse_offsets.push(idx.sparse_postings.len() as u32);
+        } else {
+            idx.dense_keys.push(key);
+            idx.dense_counts.push(ids.len() as u32);
+            let base = idx.dense_bits.len();
+            idx.dense_bits.resize(base + wpp, 0);
+            for id in ids {
+                idx.dense_bits[base + (id as usize >> 6)] |= 1u64 << (id & 63);
+            }
+        }
+    }
+    idx
+}
+
+/// Word dictionary + inverted index over distinct oracle texts, for needles
+/// longer than 3 characters that are a single tokenized fragment (no
+/// whitespace/punctuation) — see docs/issues/engine-oracle-word-index.md.
+/// Tokenization boundaries are exactly the characters absent from such a
+/// needle, so any occurrence of the needle lies entirely inside one
+/// tokenized word: scanning the dictionary for words containing it and
+/// unioning their postings is the exact match set, no verification pass.
+///
+/// Needles of length <= 3 don't need an entry here at all: a 3-character
+/// needle IS a trigram, and the existing trigram index's posting list is
+/// already the exact answer for it (no intersection, no ambiguity) — see the
+/// design doc's "3-character case is already solved" section. So this
+/// dictionary only holds words longer than 3 characters.
+///
+/// Two tiers, split by #639's crossover (reused with domain = n_texts, the
+/// same distinct-text count `SortedTrigramIndex`'s oracle instance uses):
+/// - `sparse_*`: below the crossover, postings are ascending dense *text*
+///   ids (like the trigram index) — expanded to cards via the shared CSR at
+///   query time.
+/// - `dense_*`: at/above the crossover, stored as **card-space** bitmaps,
+///   already expanded through the CSR at build time. This is deliberately a
+///   different domain than the sparse tier: the dense tier exists so
+///   `compile_plane` can AND it directly against other card planes with zero
+///   further expansion, and the query-time answer is card space either way,
+///   so there's no reason to also materialize a text-id-space bitmap only to
+///   immediately re-expand it.
+#[derive(Archive, Serialize, Deserialize, Default)]
+struct OracleWordIndex {
+    /// Card count the dense tier's bitmaps are sized to — a build/read
+    /// compatibility check, same convention as `NameBigramIndex.n_cards`.
+    n_cards: u32,
+    /// Sorted ascending (for determinism — query-time lookup goes through
+    /// `sparse_blob` below, not this list directly; a word containing the
+    /// needle can land anywhere lexicographically, so it isn't
+    /// binary-searchable on its own).
+    sparse_words: Vec<String>,
+    /// CSR row boundaries into `sparse_postings`, length sparse_words.len()+1.
+    sparse_offsets: Vec<u32>,
+    /// Ascending dense text ids per row. u16: n_texts fits comfortably at
+    /// this corpus size (build forces every word dense if it doesn't).
+    sparse_postings: Vec<u16>,
+    /// `sparse_words` concatenated in order, each preceded by a `\0` byte —
+    /// a byte no tokenized word or eligible query needle ever contains (see
+    /// `oracle_word_eligible`), so a needle match can never straddle two
+    /// words. Query time scans this ONE buffer with `memchr::memmem`
+    /// instead of calling `.contains()` once per dictionary word: calling
+    /// `.contains()` ~6,300 times (once per sparse word, measured against
+    /// the real corpus) redoes substring-search setup on every call — the
+    /// actual bottleneck the naive per-word loop pays — where concatenating
+    /// and scanning once amortizes that setup, and memmem's SIMD scan beats
+    /// std's `match_indices` by 5-6x on this same blob for real dictionary
+    /// sizes (bench_word_dict_scan.rs) — the reverse of the per-card-haystack
+    /// finding in bench_text_search.rs, because this is one long contiguous
+    /// scan rather than many short separate ones. `sparse_word_starts` maps
+    /// a match's byte offset back to a word index by binary search.
+    sparse_blob: String,
+    /// Byte offset of `sparse_words[i]`'s leading `\0` in `sparse_blob`,
+    /// ascending, length sparse_words.len(). A match at position p belongs
+    /// to word `partition_point(|&s| s <= p) - 1`.
+    sparse_word_starts: Vec<u32>,
+    /// Sorted ascending, parallel to a `dense_bits` slice of
+    /// `words_per_plane(n_cards)` words each. Not blobbed: at ~56 entries
+    /// (per the design doc's corpus measurement) a plain loop is already far
+    /// cheaper than the sparse tier's scan ever was.
+    dense_words: Vec<String>,
+    dense_bits: Vec<u64>,
+}
+
+/// Byte that never appears in a tokenized dictionary word or an eligible
+/// query needle (see `oracle_word_eligible`'s `[a-z0-9']` charset) — safe as
+/// a `sparse_blob` word separator with no escaping needed.
+const WORD_BLOB_DELIM: u8 = 0;
+
+/// True for needles the word index can answer exactly: longer than 3 bytes
+/// (see `OracleWordIndex`'s doc) and composed only of tokenizer word bytes
+/// (`[a-z0-9']`) — i.e. a single fragment that can't itself straddle a
+/// tokenization boundary. Multi-word phrases and anything shorter falls
+/// through to the trigram path unchanged.
+fn oracle_word_eligible(word: &str) -> bool {
+    word.len() > 3 && word.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'\'')
+}
+
+/// Which dictionary words (by index into their tier) contain `needle` as a
+/// substring — the whole query-time cost of the word index.
+pub(crate) struct OracleWordScan {
+    pub(crate) dense: Vec<u32>,
+    pub(crate) sparse: Vec<u32>,
+}
+
+pub(crate) fn scan_oracle_words(idx: &Archived<OracleWordIndex>, needle: &str) -> OracleWordScan {
+    // Dense tier is tiny (~56 entries in production): a plain per-word loop
+    // costs nothing next to the sparse tier's scan below.
+    let dense = idx.dense_words.iter().enumerate().filter(|(_, w)| w.as_str().contains(needle)).map(|(i, _)| i as u32).collect();
+
+    // Sparse tier: one memchr::memmem pass over the whole concatenated blob
+    // instead of ~6,300 separate `.contains()` calls — see `sparse_blob`'s
+    // doc. memmem measured 5-6x faster here than std `match_indices`
+    // (bench_word_dict_scan.rs, real dictionary blob) — the reverse of
+    // bench_text_search.rs's earlier finding, because this is one long
+    // contiguous scan rather than many separate short-haystack calls (where
+    // memmem's setup cost dominated instead). Matches never straddle a word
+    // (the delimiter can't appear in `needle`), so each hit maps to exactly
+    // one word via a binary search on its start offset; consecutive hits
+    // within the same word (a needle can occur more than once in one word)
+    // collapse to a single push.
+    let mut sparse: Vec<u32> = Vec::new();
+    let blob = idx.sparse_blob.as_str().as_bytes();
+    for pos in memmem::find_iter(blob, needle.as_bytes()) {
+        let word_idx = (idx.sparse_word_starts.partition_point(|s| (u32::from(*s) as usize) <= pos) - 1) as u32;
+        if sparse.last() != Some(&word_idx) {
+            sparse.push(word_idx);
+        }
+    }
+    OracleWordScan { dense, sparse }
+}
 
 /// Oracle-text trigram index, deduplicated by distinct text.
 ///
@@ -783,7 +963,7 @@ type TrigramIndex = HashMap<[u8; 3], Vec<u32>>;
 #[derive(Archive, Serialize, Deserialize, Default)]
 struct OracleTextIndex {
     /// trigram → ascending list of dense text ids whose text contains it.
-    trigrams: TrigramIndex,
+    trigrams: SortedTrigramIndex,
     /// Dense text id → global string id (CardData.strings) of the distinct
     /// lowercase oracle text, in first-seen card order — same shape as
     /// FlavorIndex.gids. Length n_texts.
@@ -794,6 +974,34 @@ struct OracleTextIndex {
     /// All card indices, grouped by text id; every card appears exactly once
     /// (its text interned to exactly one id), so expansion can never duplicate.
     card_indices: Vec<u32>,
+    /// Word dictionary + inverted index, built in the same pass as the
+    /// trigrams above (docs/issues/engine-oracle-word-index.md).
+    words: OracleWordIndex,
+}
+
+/// Emit each maximal run of `[a-z0-9']` bytes at least 4 long in `text`.
+/// Byte-indexed slicing is safe here: every boundary sits on an ASCII byte
+/// (word bytes are all < 0x80, and any non-word byte — including every
+/// continuation/lead byte of a multi-byte UTF-8 sequence, all >= 0x80 —
+/// immediately ends the run), so slice bounds always land on char boundaries.
+fn tokenize_words_ge4(text: &str, mut emit: impl FnMut(&str)) {
+    let is_word_byte = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'\'';
+    let bytes = text.as_bytes();
+    let mut start: Option<usize> = None;
+    for (i, &b) in bytes.iter().enumerate() {
+        if is_word_byte(b) {
+            start.get_or_insert(i);
+        } else if let Some(s) = start.take() {
+            if i - s >= 4 {
+                emit(&text[s..i]);
+            }
+        }
+    }
+    if let Some(s) = start {
+        if bytes.len() - s >= 4 {
+            emit(&text[s..]);
+        }
+    }
 }
 
 fn build_oracle_text_index(cards: &[OracleCard], strings: &[String]) -> OracleTextIndex {
@@ -815,22 +1023,30 @@ fn build_oracle_text_index(cards: &[OracleCard], strings: &[String]) -> OracleTe
         global_of_dense[d as usize] = global;
     }
 
-    // Trigram postings over distinct texts only — the window-sliding loop runs once
-    // per text instead of once per printing. Visiting texts in ascending dense-id
-    // order appends ids in ascending order, giving the sorted posting lists that
-    // intersect_sorted() requires, with no per-list sort.
-    let mut trigrams: TrigramIndex = HashMap::new();
+    // Trigram postings and the word dictionary's postings, over distinct texts
+    // only, in the same window-sliding/tokenizing pass per text (one pass
+    // instead of one for each of trigrams/words). Visiting texts in ascending
+    // dense-id order appends ids in ascending order for both, giving sorted
+    // posting lists with no per-list sort needed.
+    let mut trigrams: HashMap<[u8; 3], Vec<u32>> = HashMap::new();
+    let mut words: HashMap<String, Vec<u32>> = HashMap::new();
     for (d, &global) in global_of_dense.iter().enumerate() {
-        let bytes = strings[global as usize].as_bytes();
-        if bytes.len() < 3 {
-            continue;
+        let text = strings[global as usize].as_str();
+        let bytes = text.as_bytes();
+        if bytes.len() >= 3 {
+            for w in bytes.windows(3) {
+                let list = trigrams.entry([w[0], w[1], w[2]]).or_default();
+                if list.last() != Some(&(d as u32)) {
+                    list.push(d as u32);
+                }
+            }
         }
-        for w in bytes.windows(3) {
-            let list = trigrams.entry([w[0], w[1], w[2]]).or_default();
+        tokenize_words_ge4(text, |word| {
+            let list = words.entry(word.to_string()).or_default();
             if list.last() != Some(&(d as u32)) {
                 list.push(d as u32);
             }
-        }
+        });
     }
 
     // CSR expansion table via counting sort: count cards per text, prefix-sum
@@ -850,7 +1066,49 @@ fn build_oracle_text_index(cards: &[OracleCard], strings: &[String]) -> OracleTe
         cursor[t as usize] += 1;
     }
 
-    OracleTextIndex { trigrams, gids: global_of_dense, offsets, card_indices }
+    // Word dictionary split: #639's crossover, reused verbatim with domain =
+    // n_texts (matching SortedTrigramIndex's oracle instance) to decide
+    // sparse-vs-dense, but a promoted word's *stored* bitmap is expanded
+    // through the CSR just built above to card space — see OracleWordIndex's
+    // doc for why.
+    let n_cards = cards.len();
+    let wpp_cards = words_per_plane(n_cards);
+    let wpp_texts = words_per_plane(n_texts);
+    let text_u16_ok = n_texts <= u16::MAX as usize + 1;
+    let mut word_entries: Vec<(String, Vec<u32>)> = words.into_iter().collect();
+    word_entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+
+    let mut oracle_words = OracleWordIndex { n_cards: n_cards as u32, ..Default::default() };
+    oracle_words.sparse_offsets.push(0);
+    for (word, text_ids) in word_entries {
+        if text_u16_ok && text_ids.len() * 2 <= wpp_texts * 8 {
+            oracle_words.sparse_word_starts.push(oracle_words.sparse_blob.len() as u32);
+            oracle_words.sparse_blob.push(WORD_BLOB_DELIM as char);
+            oracle_words.sparse_blob.push_str(&word);
+            oracle_words.sparse_words.push(word);
+            oracle_words.sparse_postings.extend(text_ids.iter().map(|&t| t as u16));
+            oracle_words.sparse_offsets.push(oracle_words.sparse_postings.len() as u32);
+        } else {
+            let base = oracle_words.dense_bits.len();
+            oracle_words.dense_bits.resize(base + wpp_cards, 0);
+            for t in text_ids {
+                let start = offsets[t as usize] as usize;
+                let end = offsets[t as usize + 1] as usize;
+                for &cid in &card_indices[start..end] {
+                    oracle_words.dense_bits[base + (cid as usize >> 6)] |= 1u64 << (cid & 63);
+                }
+            }
+            oracle_words.dense_words.push(word);
+        }
+    }
+
+    OracleTextIndex {
+        trigrams: finalize_trigram_index(trigrams, n_texts),
+        gids: global_of_dense,
+        offsets,
+        card_indices,
+        words: oracle_words,
+    }
 }
 
 /// Expand surviving dense text ids to card indices via the CSR table.
@@ -935,8 +1193,8 @@ fn build_name_bigram_index(cards: &[OracleCard]) -> NameBigramIndex {
 
 // Named lifetime (not elided/HRTB) so get_text may return text borrowed from the
 // string table rather than from the card itself.
-fn build_trigram_index<'a, T>(rows: &'a [T], get_text: impl Fn(&'a T) -> &'a str) -> TrigramIndex {
-    let mut idx: TrigramIndex = HashMap::new();
+fn build_trigram_index<'a, T>(rows: &'a [T], get_text: impl Fn(&'a T) -> &'a str) -> SortedTrigramIndex {
+    let mut idx: HashMap<[u8; 3], Vec<u32>> = HashMap::new();
     for (i, card) in rows.iter().enumerate() {
         let text  = get_text(card);
         let bytes = text.as_bytes();
@@ -949,7 +1207,7 @@ fn build_trigram_index<'a, T>(rows: &'a [T], get_text: impl Fn(&'a T) -> &'a str
             }
         }
     }
-    idx
+    finalize_trigram_index(idx, rows.len())
 }
 
 // Generic over the second operand's element type so it can walk archived
@@ -969,45 +1227,122 @@ where
     out
 }
 
-fn trigram_candidates(idx: &Archived<TrigramIndex>, word: &str) -> Option<Vec<u32>> {
+/// One trigram's resolved posting, either tier. trigram_min_posting answers
+/// its size bound straight from the index (dense_counts / offsets), without
+/// going through this at all, so there's no reason to carry a count here too.
+enum TriOperand {
+    Posting(Vec<u32>),
+    Plane(Vec<u64>),
+}
+
+fn lookup_trigram(idx: &Archived<SortedTrigramIndex>, key: [u8; 3]) -> Option<TriOperand> {
+    if let Ok(pos) = idx.dense_keys.binary_search(&key) {
+        let wpp = words_per_plane(u32::from(idx.domain) as usize);
+        let start = pos * wpp;
+        let bits = idx.dense_bits[start..start + wpp].iter().map(|w| u64::from(*w)).collect();
+        return Some(TriOperand::Plane(bits));
+    }
+    if let Ok(pos) = idx.sparse_keys.binary_search(&key) {
+        let start = u32::from(idx.sparse_offsets[pos]) as usize;
+        let end = u32::from(idx.sparse_offsets[pos + 1]) as usize;
+        let ids = idx.sparse_postings[start..end].iter().map(|x| u32::from(u16::from(*x))).collect();
+        return Some(TriOperand::Posting(ids));
+    }
+    None
+}
+
+/// Posting-vs-plane dispatch (docs/issues/engine-oracle-word-index.md's
+/// crossover table): posting×posting merges, posting×plane probes the
+/// posting's ids into the plane directly, plane×plane bitmap-ANDs. The
+/// smallest posting seeds the working set (as before this index had a dense
+/// tier at all); every plane operand filters that seed before any remaining
+/// posting merges, since a plane never loses to probing/merging a posting
+/// against it. If every operand is dense (no posting to seed from), AND the
+/// planes together first and bit-scan the result.
+fn intersect_operands(ops: Vec<TriOperand>) -> Vec<u32> {
+    let mut planes: Vec<Vec<u64>> = Vec::new();
+    let mut postings: Vec<Vec<u32>> = Vec::new();
+    for op in ops {
+        match op {
+            TriOperand::Plane(bits) => planes.push(bits),
+            TriOperand::Posting(ids) => postings.push(ids),
+        }
+    }
+    if postings.is_empty() {
+        // No sparse operand to seed a working set from — every trigram window
+        // landed in the dense tier. Two different shapes get here: a 3-byte
+        // needle (a single window, ordinary whenever that one trigram is
+        // common enough to be dense) and a longer multi-window needle where
+        // every window happens to be a hot trigram (uncommon — a longer
+        // needle usually has at least one rarer window, which is what lets
+        // the sparse-seeded path below narrow well).
+        let mut acc = planes.swap_remove(0);
+        for p in &planes {
+            for (a, b) in acc.iter_mut().zip(p) {
+                *a &= *b;
+            }
+        }
+        return bitmap_card_ids(&acc);
+    }
+    postings.sort_by_key(Vec::len);
+    let mut result = postings.swap_remove(0);
+    for p in &planes {
+        result.retain(|&id| (p[(id >> 6) as usize] >> (id & 63)) & 1 != 0);
+    }
+    for p in &postings {
+        if result.is_empty() {
+            break;
+        }
+        result = intersect_sorted(&result, p.as_slice());
+    }
+    result
+}
+
+fn trigram_candidates(idx: &Archived<SortedTrigramIndex>, word: &str) -> Option<Vec<u32>> {
     let bytes = word.as_bytes();
     if bytes.len() < 3 { return None; }
 
-    let mut lists: Vec<&Archived<Vec<u32>>> = Vec::with_capacity(bytes.len() - 2);
+    let mut seen: Vec<[u8; 3]> = Vec::with_capacity(bytes.len() - 2);
+    let mut ops: Vec<TriOperand> = Vec::with_capacity(bytes.len() - 2);
     for w in bytes.windows(3) {
-        match idx.get(&[w[0], w[1], w[2]]) {
-            Some(list) => lists.push(list),
+        let key = [w[0], w[1], w[2]];
+        // Repeated trigrams (e.g. "aaaa") would otherwise intersect the same
+        // operand against itself for no benefit.
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+        match lookup_trigram(idx, key) {
+            Some(op) => ops.push(op),
             // A trigram absent from the index appears in no card: nothing can match.
             None => return Some(Vec::new()),
         }
     }
-    lists.sort_unstable_by_key(|l| l.len());
-    // Repeated trigrams (e.g. "aaaa") resolve to the same archived entry — drop
-    // the pointer-equal duplicates instead of intersecting them again.
-    lists.dedup_by(|a, b| std::ptr::eq(*a, *b));
-
-    // Posting lists are built sorted (build_trigram_index and the oracle CSR
-    // both append ids in ascending order), so intersection runs directly over
-    // the archived lists; only the shortest one is materialized as the
-    // working set.
-    let mut result: Vec<u32> = lists[0].iter().map(|x| u32::from(*x)).collect();
-    for list in &lists[1..] {
-        if result.is_empty() { break; }
-        result = intersect_sorted(&result, list.as_slice());
-    }
-    Some(result)
+    Some(intersect_operands(ops))
 }
 
-/// Length of the needle's shortest trigram posting list — an upper bound on
+/// Length of the needle's shortest trigram posting/plane — an upper bound on
 /// trigram_candidates()' result size, available without materializing or
 /// intersecting anything. None: needle under 3 bytes (no trigrams).
 /// Some(0): a trigram is absent from the index, so nothing can match.
-fn trigram_min_posting(idx: &Archived<TrigramIndex>, word: &str) -> Option<usize> {
+fn trigram_min_posting(idx: &Archived<SortedTrigramIndex>, word: &str) -> Option<usize> {
     let bytes = word.as_bytes();
     if bytes.len() < 3 {
         return None;
     }
-    bytes.windows(3).map(|w| idx.get(&[w[0], w[1], w[2]]).map_or(0, |l| l.len())).min()
+    bytes
+        .windows(3)
+        .map(|w| {
+            let key = [w[0], w[1], w[2]];
+            if let Ok(pos) = idx.dense_keys.binary_search(&key) {
+                u32::from(idx.dense_counts[pos]) as usize
+            } else if let Ok(pos) = idx.sparse_keys.binary_search(&key) {
+                (u32::from(idx.sparse_offsets[pos + 1]) - u32::from(idx.sparse_offsets[pos])) as usize
+            } else {
+                0
+            }
+        })
+        .min()
 }
 
 fn union_sorted(a: Vec<u32>, b: Vec<u32>) -> Vec<u32> {
@@ -1723,7 +2058,7 @@ fn rarity_candidates(idx: &Archived<RarityIndex>, op: CmpOp, val: f64) -> Option
 // carry their space (see Candidates) and convert at combine points.
 #[derive(Archive, Serialize, Deserialize)]
 struct CardIndexes {
-    name_trigram:   TrigramIndex,    // card space
+    name_trigram:   SortedTrigramIndex, // card space
     oracle_trigram: OracleTextIndex, // card space (via dense text ids)
     cmc:            NumericIndex,    // card space
     power:          NumericIndex,    // card space
@@ -1751,7 +2086,7 @@ struct CardIndexes {
 impl Default for CardIndexes {
     fn default() -> Self {
         CardIndexes {
-            name_trigram:   HashMap::new(),
+            name_trigram:   SortedTrigramIndex::default(),
             oracle_trigram: OracleTextIndex::default(),
             cmc:            Vec::new(),
             power:          Vec::new(),
@@ -2258,12 +2593,24 @@ fn narrow_rec(
     // filters were already consumed by split_planes; this catches the ones
     // left inside mixed contexts, where they previously could not narrow at
     // all (an Or with a color child was a guaranteed full scan). True is
-    // excluded: its all-ones bitmap narrows nothing.
-    if !matches!(filter, FilterExpr::True)
+    // excluded: its all-ones bitmap narrows nothing. A lone oracle-word leaf
+    // is excluded too: compile_plane's bonus arm for it is a strict subset of
+    // the dedicated TextContains arm below (same dictionary scan, just also
+    // requiring "no sparse hit" to return a PlaneExpr instead of a Narrowed),
+    // so speculatively trying it here only pays for a second full dictionary
+    // scan on every shape the dedicated arm below was going to handle anyway
+    // — measured (scripts/bench_oracle_word_index.py) as a genuine 2x
+    // regression on `o:token`-shaped queries before this exclusion.
+    let lone_oracle_word_leaf = matches!(
+        filter,
+        FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word } if oracle_word_eligible(word)
+    );
+    if !lone_oracle_word_leaf
+        && !matches!(filter, FilterExpr::True)
         && u32::from(indexes.planes.n_cards) as usize == n_cards
         && n_cards > 0
     {
-        if let Some(pe) = compile_plane(filter, &indexes.planes) {
+        if let Some(pe) = compile_plane(filter, &indexes.planes, &indexes.oracle_trigram.words) {
             let mut bits: Vec<u64> = Vec::new();
             eval_planes(&pe, &indexes.planes, &mut bits);
             return Narrowed::tight(Candidates::CardBits(bits));
@@ -2308,6 +2655,53 @@ fn narrow_rec(
                 .get(&bg)
                 .map_or_else(Vec::new, |v| v.iter().map(|x| u32::from(u16::from(*x))).collect());
             Narrowed::tight(Candidates::Cards(ids))
+        }
+
+        FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word }
+            if oracle_word_eligible(word) && u32::from(indexes.oracle_trigram.words.n_cards) as usize == n_cards =>
+        {
+            // Exact, not a superset: every occurrence of `word` lies entirely
+            // inside one tokenized dictionary word (see OracleWordIndex's
+            // doc), so the union of postings for every dictionary word
+            // containing it is precisely the match set — no verification.
+            let words = &indexes.oracle_trigram.words;
+            let scan = scan_oracle_words(words, word);
+            let wpp = words_per_plane(n_cards);
+            let sparse_text_ids = |sparse: &[u32]| -> Vec<u32> {
+                let mut ids: Vec<u32> = Vec::new();
+                for &s in sparse {
+                    let start = u32::from(words.sparse_offsets[s as usize]) as usize;
+                    let end = u32::from(words.sparse_offsets[s as usize + 1]) as usize;
+                    let row: Vec<u32> = words.sparse_postings[start..end].iter().map(|x| u32::from(u16::from(*x))).collect();
+                    ids = union_sorted(ids, row);
+                }
+                ids
+            };
+            match (scan.dense.as_slice(), scan.sparse.as_slice()) {
+                ([], []) => Narrowed::tight(Candidates::Cards(Vec::new())),
+                ([], sparse) => {
+                    let text_ids = sparse_text_ids(sparse);
+                    Narrowed::tight(Candidates::Cards(expand_text_ids(&indexes.oracle_trigram, &text_ids)))
+                }
+                ([d], []) => {
+                    let start = *d as usize * wpp;
+                    let bits: Vec<u64> = words.dense_bits[start..start + wpp].iter().map(|w| u64::from(*w)).collect();
+                    Narrowed::tight(Candidates::CardBits(bits))
+                }
+                (dense, sparse) => {
+                    let mut acc = vec![0u64; wpp];
+                    for &d in dense {
+                        let start = d as usize * wpp;
+                        for (a, w) in acc.iter_mut().zip(&words.dense_bits[start..start + wpp]) {
+                            *a |= u64::from(*w);
+                        }
+                    }
+                    for cid in expand_text_ids(&indexes.oracle_trigram, &sparse_text_ids(sparse)) {
+                        acc[(cid >> 6) as usize] |= 1u64 << (cid & 63);
+                    }
+                    Narrowed::tight(Candidates::CardBits(acc))
+                }
+            }
         }
 
         FilterExpr::TextContains { field, word }
@@ -4037,7 +4431,7 @@ impl QueryEngine {
         // rejects pre-plane archives, this is defense in depth.
         let (plane_expr, mut filter_expr) =
             if u32::from(data.indexes.planes.n_cards) as usize == data.cards.len() && !data.cards.is_empty() {
-                split_planes(filter_expr, &data.indexes.planes)
+                split_planes(filter_expr, &data.indexes.planes, &data.indexes.oracle_trigram.words)
             } else {
                 (None, filter_expr)
             };
@@ -4174,3 +4568,11 @@ mod tests;
 mod bench_mana;
 #[cfg(test)]
 mod bench_verify_cost;
+#[cfg(test)]
+mod bench_text_search;
+#[cfg(test)]
+mod bench_iter_dispatch;
+#[cfg(test)]
+mod bench_posting_intersect;
+#[cfg(test)]
+mod bench_word_dict_scan;
