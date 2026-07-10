@@ -190,23 +190,62 @@ genuinely exact queries (single and compound predicates, card and printing
 modes, and biggest at deep pagination offsets); correctly flat for broad/
 advisory/mixed cases that must not promote.
 
-**Step 2 (Part A: permuted bitmap + popcount-skip order phase)**
-- Inverse permutations for the four numeric/rank sort columns already in
-  `SortPermutations` (`cmc`, `power`, `toughness`, `edhrec`/`cubecobra`);
-  `name` deferred (added to `SortPermutations` after this issue was filed —
-  revisit once Step 1/2 are stable). Archive version bump.
-- Scatter matched bits (plane ∧ Step-1-exact residual) through the inverse
-  permutation into a fresh permuted-order bitmap.
-- `unique=card`: total = popcount; skip = accumulate word popcounts to the
-  boundary word; emit = walk set bits from there, map back through the
-  forward permutation for `limit` cards.
-- `unique=printing`/`artwork` under all_match: O(1) card weights (offsets
-  diff / `artwork_groups`) via a `trailing_zeros` walk over set bits.
+**Step 2 (Part A: permuted bitmap + popcount-skip order phase) — done**
+- Inverse permutations for all six `SortPermutations` columns (`cmc`, `power`,
+  `toughness`, `edhrec`, `cubecobra`, `name` — no reason to defer `name`,
+  same mechanism). **Correction to the original issue's design** (caught
+  before writing any code, by re-deriving the sort-key construction rather
+  than trusting the "desc = n-1-pos, no second table" shortcut): this
+  codebase's tie-breakers (`edhrec_rank`, then `prefer_score`) never flip sign
+  with the primary column's direction (`build_sort_permutations`'s `perm`
+  closure negates only the primary key for `descending`), so cards tied on
+  the primary value keep *identical* relative order in both the ascending and
+  descending permutations. Reversing the ascending inverse (`n-1-pos`) would
+  also reverse that internal tied-group order, which is wrong whenever the
+  sort column has ties — the common case, not the exception (`cmc=3` alone is
+  7,602 of 31,508 cards). Storing both inverse permutations explicitly, same
+  as the forward tables already do, costs another ~1.26 MB (matching the
+  forward tables' own size) — trivial against a >70 MB archive, and correct
+  regardless of tie clustering. Archive version bump.
+- New `run_query_streamed_popcount`: scatters the plane bitmap through the
+  inverse permutation, then works in word space — total = popcount, skip =
+  running word-popcount sum to the boundary word, emit = walk set bits from
+  there mapping back through the forward permutation.
+- **Scope, deliberately narrower than the original plan**: engages only when
+  `unique=card` and the filter fully consumed to `FilterExpr::True` (plane
+  bitmap IS the exact match set — colors/types/legality, any selectivity).
+  Compound exact filters that didn't fully consume (`t:creature power>3`,
+  residual = `power>3`) and `unique=printing`/`artwork` still use Step 1's
+  path unchanged — extending to those is a reasonable fast-follow, not
+  required to deliver the core win. Also: `cmc<=6` alone does **not** speed up
+  under Step 2 either, for the same reason noted under Step 1 — `cmc` has no
+  bitmap representation without the separate numeric-range-planes work, so
+  there's nothing to scatter without first paying the O(match count) cost
+  Step 2 exists to eliminate.
 - Unchanged: `rarity`/`usd` orderbys (no permutation, gathered path already),
-  `STREAM_MIN_MATCHES` gate, emission/tiebreak semantics.
-- Target: `deep-offset` rows, where today's forward-perm walk already hides
-  most of the offset cost, but the O(candidates) counts-buffer fill remains
-  regardless of depth — collapsing that to O(words) is the actual win.
+  `STREAM_MIN_MATCHES` gate, emission/tiebreak semantics — verified via a
+  direct equivalence test against the non-popcount path, not just inspection.
+
+**Step 2 results** (same protocol as Step 1, `min_ms`, machine quiesced):
+
+| query | Step 1 | Step 2 | speedup (Step 2 alone) | cumulative vs. pre-#634 |
+|---|---|---|---|---|
+| `t:creature` (offset 0) | 0.096 ms | 0.060 ms | **1.59×** | **2.09×** (0.126 ms baseline) |
+| `t:creature` (offset 5,000) | 0.104 ms | 0.062 ms | **1.67×** | **2.16×** (0.134 ms baseline) |
+| `t:creature` (offset 15,000) | 0.113 ms | 0.060 ms | **1.89×** | **2.38×** (0.143 ms baseline) |
+| `c:g` (offset 0) | 0.065 ms | 0.053 ms | 1.23× | — |
+| `c:g` (offset 3,000) | 0.074 ms | 0.054 ms | **1.37×** | — |
+| `t:instant` | 0.056 ms | 0.049 ms | 1.16× | — |
+| `t:creature power>3` (compound, out of scope) | 0.087 ms | 0.088 ms | ~1.0× (expected) | — |
+| `t:creature` printing/artwork (out of scope) | 0.090/0.117 ms | 0.093/0.118 ms | ~1.0× (expected) | — |
+| `cmc<=6`, advisory/mixed/control | — | — | ~1.0× (expected, no bitmap available) | — |
+
+The headline result: at pre-#634 baseline, `t:creature` cost **grew with page
+depth** (0.126 → 0.134 → 0.143 ms across offset 0/5,000/15,000 — a ~13%
+increase). Under Step 2 it's **flat** (0.060 → 0.062 → 0.060 ms) — the exact
+"deep pagination becomes O(words)" property Step 2 was built for, and not
+plausibly noise given the specific shape (flat, not just lower). All totals
+verified identical across every config throughout.
 
 ### Step 1.5 (proposed, not yet designed): per-child exact-node elision
 
