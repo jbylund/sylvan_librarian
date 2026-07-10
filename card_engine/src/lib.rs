@@ -2245,6 +2245,15 @@ fn legal_candidate_bits(indexes: &Archived<CardIndexes>, n_cards: usize, shift: 
     Some(bits)
 }
 
+fn border_candidate_bits(indexes: &Archived<CardIndexes>, n_cards: usize, plane: usize) -> Option<Vec<u64>> {
+    if u32::from(indexes.planes.n_cards) as usize != n_cards || n_cards == 0 {
+        return None;
+    }
+    let wpp = words_per_plane(n_cards);
+    let words = &indexes.planes.words;
+    Some(words[plane * wpp..(plane + 1) * wpp].iter().map(|w| u64::from(*w)).collect())
+}
+
 /// Project a printing-space bitmap up to card space. Printings of card i are
 /// contiguous, and set bits come out ascending, so a single monotone cursor
 /// replaces the per-posting binary search cards_of_printings pays —
@@ -2861,6 +2870,20 @@ fn narrow_rec(
             Narrowed::tight(Candidates::Printings(
                 indexes.set_codes.get(value.as_str()).map_or_else(Vec::new, |v| v.iter().map(|x| u32::from(*x)).collect()),
             ))
+        }
+
+        // `border` varies per printing, so these card-space planes are a loose
+        // card-level prefilter only (never compile_plane exactness): they
+        // narrow to cards that have at least one printing with the queried
+        // border, then the existing residual walk still verifies each printing.
+        FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value } => {
+            let plane = match value.as_str() {
+                "black" => PLANE_BORDER_BLACK,
+                "borderless" => PLANE_BORDER_BORDERLESS,
+                "white" => PLANE_BORDER_WHITE,
+                _ => return None,
+            };
+            Narrowed::loose(Candidates::CardBits(border_candidate_bits(indexes, n_cards, plane)?))
         }
 
         FilterExpr::DateCmp { op, value } => {
@@ -4284,7 +4307,7 @@ impl QueryEngine {
             collector_number: build_range_index(&printings, |p| p.collector_number_int.map(u32::from)),
             sort_perms:     build_sort_permutations(&cards, &printings, &offsets),
             artwork_groups: build_artwork_group_counts(&printings, &offsets),
-            planes:         build_bit_planes(&cards),
+            planes:         build_bit_planes(&cards, &printings, &offsets, &strings),
             name_bigrams:   build_name_bigram_index(&cards),
             legal_divergent: build_divergent_ids(&cards),
         };

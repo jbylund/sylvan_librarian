@@ -20,7 +20,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 
 use super::filter::{CmpOp, ColorField, FilterExpr, NumExpr, NumField, TextSearchField};
 use super::legality::{LEGALITY_LEGAL, MAX_FORMATS};
-use super::{flip_op, lane_get, oracle_word_eligible, scan_oracle_words, OracleCard, OracleWordIndex};
+use super::{flip_op, lane_get, oracle_word_eligible, scan_oracle_words, OracleCard, OracleWordIndex, Printing, NONE_STR};
 
 /// Plane layout, plane-major in BitPlanes.words: six color planes per color
 /// field (W U B R G C, bit order matching color_to_bit — C is always zero for
@@ -46,6 +46,9 @@ const DEVOTION_BITS: usize = 2;
 /// Legality can return Tri::PrintingDep for divergent cards, which compile_plane
 /// already excludes from exact consumption (only two-valued nodes qualify).
 pub(crate) const PLANE_LEGAL: usize = PLANE_DEVOTION + DEVOTION_BITS * COLOR_PLANES;
+pub(crate) const PLANE_BORDER_BLACK: usize = PLANE_LEGAL + MAX_FORMATS;
+pub(crate) const PLANE_BORDER_BORDERLESS: usize = PLANE_BORDER_BLACK + 1;
+pub(crate) const PLANE_BORDER_WHITE: usize = PLANE_BORDER_BORDERLESS + 1;
 /// One-hot planes for cmc/power/toughness (#655), covering the interior
 /// range [0,12] — hundreds-to-thousands of cards per value — plus a shared
 /// "13+" high-tail bucket per field (all three have a genuine spread of rare
@@ -60,7 +63,7 @@ pub(crate) const PLANE_LEGAL: usize = PLANE_DEVOTION + DEVOTION_BITS * COLOR_PLA
 const NUM_INTERIOR_LO: i32 = 0;
 const NUM_INTERIOR_HI: i32 = 12;
 const NUM_INTERIOR_WIDTH: usize = (NUM_INTERIOR_HI - NUM_INTERIOR_LO + 1) as usize;
-pub(crate) const PLANE_CMC: usize = PLANE_LEGAL + MAX_FORMATS;
+pub(crate) const PLANE_CMC: usize = PLANE_BORDER_WHITE + 1;
 pub(crate) const PLANE_CMC_HI: usize = PLANE_CMC + NUM_INTERIOR_WIDTH;
 pub(crate) const PLANE_POWER_LO: usize = PLANE_CMC_HI + 1;
 pub(crate) const PLANE_POWER: usize = PLANE_POWER_LO + 1;
@@ -146,9 +149,14 @@ fn set_numeric_plane(
     }
 }
 
-pub(crate) fn build_bit_planes(cards: &[OracleCard]) -> BitPlanes {
+pub(crate) fn build_bit_planes(cards: &[OracleCard], printings: &[Printing], offsets: &[u32], strings: &[String]) -> BitPlanes {
     let wpp = words_per_plane(cards.len());
     let mut words = vec![0u64; PLANE_COUNT * wpp];
+    let border_id =
+        |needle: &str| strings.iter().position(|s| s == needle).map(|i| i as u32).filter(|&id| id != NONE_STR);
+    let border_black = border_id("black");
+    let border_borderless = border_id("borderless");
+    let border_white = border_id("white");
     let mut cmc_hi = BucketBounds::default();
     let mut power_lo = BucketBounds::default();
     let mut power_hi = BucketBounds::default();
@@ -200,6 +208,29 @@ pub(crate) fn build_bit_planes(cards: &[OracleCard]) -> BitPlanes {
             if !card.legality_divergent && (card.card_legalities >> shift) & 0b11 == LEGALITY_LEGAL {
                 set(PLANE_LEGAL + f);
             }
+        }
+        let start = offsets[i] as usize;
+        let end = offsets[i + 1] as usize;
+        let mut has_black = false;
+        let mut has_borderless = false;
+        let mut has_white = false;
+        for p in &printings[start..end] {
+            let bid = p.card_border_id;
+            has_black |= border_black == Some(bid);
+            has_borderless |= border_borderless == Some(bid);
+            has_white |= border_white == Some(bid);
+            if has_black && has_borderless && has_white {
+                break;
+            }
+        }
+        if has_black {
+            set(PLANE_BORDER_BLACK);
+        }
+        if has_borderless {
+            set(PLANE_BORDER_BORDERLESS);
+        }
+        if has_white {
+            set(PLANE_BORDER_WHITE);
         }
         // #655: cmc is Option<u8>, type-guaranteed non-negative, so it has no
         // low bucket. Power/toughness are Option<i8> and do (Char-Rumbler and

@@ -224,7 +224,7 @@ fn store_of(cards: Vec<OracleCard>, printing_counts: &[usize], vocab: VocabInter
     // Real planes and bigrams so narrowing tests see the same store shape
     // reload_commit builds (type narrowing goes through the planes since #637).
     let indexes = CardIndexes {
-        planes: build_bit_planes(&cards),
+        planes: build_bit_planes(&cards, &printings, &offsets, &[]),
         name_bigrams: build_name_bigram_index(&cards),
         legal_divergent: build_divergent_ids(&cards),
         sort_perms: build_sort_permutations(&cards, &printings, &offsets),
@@ -844,7 +844,7 @@ fn bench_checked_vs_unchecked_access() {
         collector_number: Vec::new(),
         sort_perms:     build_sort_permutations(&cards, &printings, &offsets),
         artwork_groups: build_artwork_group_counts(&printings, &offsets),
-        planes:         build_bit_planes(&cards),
+        planes:         build_bit_planes(&cards, &printings, &offsets, &strings),
         name_bigrams:   build_name_bigram_index(&cards),
         legal_divergent: build_divergent_ids(&cards),
     };
@@ -2575,6 +2575,33 @@ fn narrow_fixture_store() -> CardData {
     data
 }
 
+fn border_fixture_store() -> CardData {
+    let mut vocab = VocabInterner::new();
+    let cards = vec![
+        stub_card(1, TYPE_CREATURE, &[], &mut vocab),
+        stub_card(2, TYPE_CREATURE, &[], &mut vocab),
+        stub_card(3, TYPE_CREATURE, &[], &mut vocab),
+        stub_card(4, TYPE_CREATURE, &[], &mut vocab),
+        stub_card(5, TYPE_ENCHANTMENT, &[], &mut vocab),
+    ];
+    let mut data = store_of(cards, &[2usize, 1, 1, 1, 1], vocab);
+    let mut interner = Interner::new();
+    let black = interner.intern("black".to_string());
+    let borderless = interner.intern("borderless".to_string());
+    let white = interner.intern("white".to_string());
+    let gold = interner.intern("gold".to_string());
+    let yellow = interner.intern("yellow".to_string());
+    data.strings = interner.strings;
+    data.printings[0].card_border_id = black;
+    data.printings[1].card_border_id = borderless;
+    data.printings[2].card_border_id = white;
+    data.printings[3].card_border_id = gold;
+    data.printings[4].card_border_id = yellow;
+    data.printings[5].card_border_id = black;
+    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
+    data
+}
+
 // Tightness and complement rules: Not narrows only through tight children.
 // Rarity postings are the trap — a mixed-rarity card matches both `r:x` and
 // `-r:x`, so complementing its card-space existence set would drop real
@@ -2685,6 +2712,46 @@ fn adaptive_narrowing_run_query_parity() {
         );
         assert_eq!(total, brute, "narrowing must stay advisory-sound");
     }
+}
+
+#[test]
+fn border_planes_narrow_loose_and_preserve_shared_witness_correctness() {
+    let data = border_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let border = |value: &str| FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value: value.to_string() };
+    let run_total = |mut filter: FilterExpr, unique: &str| {
+        run_query(
+            &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+            &mut filter, None, unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
+        )
+        .0
+    };
+
+    let rec_black = super::narrow_rec(&border("black"), &archived.indexes, &archived.offsets, &archived.cards, true).expect("border:black narrows");
+    assert!(!rec_black.tight, "border planes are loose-only card-level prefilters");
+    assert_eq!(rec_black.set.into_cards(&archived.offsets), vec![0, 4]);
+    let rec_borderless =
+        super::narrow_rec(&border("borderless"), &archived.indexes, &archived.offsets, &archived.cards, true).expect("borderless narrows");
+    assert!(!rec_borderless.tight);
+    assert_eq!(rec_borderless.set.into_cards(&archived.offsets), vec![0]);
+    let rec_white = super::narrow_rec(&border("white"), &archived.indexes, &archived.offsets, &archived.cards, true).expect("white narrows");
+    assert!(!rec_white.tight);
+    assert_eq!(rec_white.set.into_cards(&archived.offsets), vec![1]);
+    assert!(
+        super::narrow_rec(&border("gold"), &archived.indexes, &archived.offsets, &archived.cards, true).is_none(),
+        "gold stays unindexed by design"
+    );
+
+    // Shared-witness regression guard: card 0 has one black and one borderless
+    // printing, but no single printing that is both.
+    for unique in ["card", "printing", "artwork"] {
+        let shared_witness_trap = FilterExpr::And(vec![border("black"), border("borderless")]);
+        assert_eq!(run_total(shared_witness_trap, unique), 0, "border:black border:borderless must stay empty for unique={unique}");
+    }
+    assert_eq!(run_total(FilterExpr::And(vec![border("black"), FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge }]), "card"), 1);
+    assert_eq!(run_total(border("gold"), "card"), 1);
+    assert_eq!(run_total(border("yellow"), "card"), 1);
 }
 
 // Not over a partially-represented And: if a child contributes no candidate
