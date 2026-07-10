@@ -36,6 +36,12 @@ SETS = ["lea", "m21", "znr", "neo", "mom", "ltr", "woe", "mkm"]
 COLORS = "wubrg"
 N_CARDS = 3000
 
+# Devotion (MTG comprehensive rules) is defined only over permanents' mana
+# costs, confirmed against the real Scryfall API (devotion: never matches a
+# pure Instant/Sorcery). Mirrors PERMANENT_TYPES in card_processing.py /
+# PERMANENT_TYPES in lib.rs.
+PERMANENT_TYPES = {"Artifact", "Battle", "Creature", "Enchantment", "Land", "Planeswalker"}
+
 FRAGMENTS = [
     # colors / identity across ops (":" on id is subset; on c it is contains)
     "c:g",
@@ -97,6 +103,12 @@ FRAGMENTS = [
     "devotion:uuuu",
     "devotion=gg",
     "-devotion:rr",
+    # mana: pip containment + cmc (unlike devotion, no hybrid splitting and
+    # every op ANDs in a cmc compare), Eq, and negation
+    "mana:u",
+    "mana:uu",
+    "mana=gg",
+    "-mana:rr",
 ]
 
 
@@ -125,7 +137,11 @@ def _make_cards(rng: random.Random) -> list[dict[str, Any]]:
             for c in colors:
                 pips[c] = rng.choice([1, 1, 2, 2, 3, 4])
             if rng.random() < 0.1 and len(colors) >= 1:
-                other = rng.choice([x for x in "WUBRG" if x != colors[0]] or ["C"])
+                # ~30% of hybrid pips are Phyrexian ({W/P}) rather than
+                # color/color or generic/color, so devotion:/mana: get fuzzed
+                # against Phyrexian symbols too (a plain color letter, "P",
+                # never a devotion-tracked letter).
+                other = "P" if rng.random() < 0.3 else rng.choice([x for x in "WUBRG" if x != colors[0]] or ["C"])
                 pips[f"{colors[0]}/{other}"] = rng.choice([1, 2])
         pos = 1
         mana_cost_jsonb: dict[str, list[int]] = {}
@@ -209,10 +225,14 @@ def _ref_leaf(frag: str, card: dict[str, Any]) -> bool | None:  # noqa: PLR0911,
     if frag.startswith(("devotion:", "devotion=")):
         op = frag[len("devotion")]
         counts: dict[str, int] = {}
-        for sym, positions in card["mana_cost_jsonb"].items():
-            for part in sym.split("/"):
-                if part in "WUBRGC":
-                    counts[part] = counts.get(part, 0) + len(positions)
+        # Devotion only counts permanents' mana costs (MTG comprehensive
+        # rules; confirmed against the real Scryfall API) — a nonpermanent's
+        # pips never contribute, regardless of the operator.
+        if PERMANENT_TYPES & set(card["card_types"]):
+            for sym, positions in card["mana_cost_jsonb"].items():
+                for part in sym.split("/"):
+                    if part in "WUBRGC":
+                        counts[part] = counts.get(part, 0) + len(positions)
         want: dict[str, int] = {}
         for ch in frag[len("devotion") + 1 :]:
             want[ch.upper()] = want.get(ch.upper(), 0) + 1
@@ -221,6 +241,24 @@ def _ref_leaf(frag: str, card: dict[str, Any]) -> bool | None:  # noqa: PLR0911,
             return ge
         # "=": exact per-color counts AND no devotion outside the queried colors
         return all(counts.get(c, 0) == k for c, k in want.items()) and all(c in want for c, n in counts.items() if n > 0)
+    if frag.startswith(("mana:", "mana=")):
+        op = frag[len("mana")]
+        want_pips: dict[str, int] = {}
+        for ch in frag[len("mana") + 1 :]:
+            want_pips[ch.upper()] = want_pips.get(ch.upper(), 0) + 1
+        want_cmc = sum(want_pips.values())
+        # Unlike devotion, mana: never splits hybrid symbols (they're opaque
+        # keys) and every op ANDs in a cmc compare alongside pip containment.
+        have_pips = {sym: len(positions) for sym, positions in card["mana_cost_jsonb"].items()}
+        cmc = card["cmc"]
+        if op == ":":
+            if not all(have_pips.get(sym, 0) >= n for sym, n in want_pips.items()):
+                return False
+            return None if cmc is None else cmc >= want_cmc
+        # "=": the exact same distinct symbols with the same counts, and the same cmc.
+        if have_pips != want_pips:
+            return False
+        return None if cmc is None else cmc == want_cmc
     if frag.startswith('!"'):
         return card["card_name"].lower() == frag[2:-1].lower()
     if field == "name":

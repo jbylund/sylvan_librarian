@@ -51,6 +51,17 @@ const TYPE_SNOW:         u16 = 1 << 11;
 const TYPE_SORCERY:      u16 = 1 << 12;
 const TYPE_WORLD:        u16 = 1 << 13;
 
+/// Card types that can exist as a permanent on the battlefield. Devotion
+/// (MTG comprehensive rules) is defined only over permanents' mana costs —
+/// confirmed against the real Scryfall API (`devotion:` never matches a pure
+/// Instant/Sorcery, e.g. the real Lightning Bolt) — so `mana_cost.devotion` is
+/// zeroed at load for any card with no bit in this mask. `TYPE_INSTANT` and
+/// `TYPE_SORCERY` are the only nonpermanent primary types; every other bit
+/// (BASIC, CONSPIRACY, KINDRED, LEGENDARY, SNOW, WORLD) is a supertype that
+/// always co-occurs with a permanent or nonpermanent primary type, never
+/// determines it alone.
+const PERMANENT_TYPES: u16 = TYPE_ARTIFACT | TYPE_BATTLE | TYPE_CREATURE | TYPE_ENCHANTMENT | TYPE_LAND | TYPE_PLANESWALKER;
+
 pub(crate) fn card_type_str_to_bit(s: &str) -> u16 {
     match s {
         "Artifact"     => TYPE_ARTIFACT,
@@ -635,7 +646,7 @@ fn jsonb_obj_to_ids(d: &Bound<PyDict>, key: &str, vocab: &mut VocabInterner) -> 
 mod legality;
 use legality::*;
 
-fn mana_cost_from_pydict(d: &Bound<PyDict>, cmc_val: Option<f32>, mana_vocab: &mut ManaVocabInterner) -> PyResult<ManaCost> {
+fn mana_cost_from_pydict(d: &Bound<PyDict>, cmc_val: Option<f32>, mana_vocab: &mut ManaVocabInterner, card_types: u16) -> PyResult<ManaCost> {
     let mut core = 0u64;
     let mut devotion = 0u64;
     let mut hybrids: Vec<(u8, u8)> = Vec::new();
@@ -663,6 +674,11 @@ fn mana_cost_from_pydict(d: &Bound<PyDict>, cmc_val: Option<f32>, mana_vocab: &m
         }
     }
     hybrids.sort_unstable();
+    // Nonpermanents (Instant/Sorcery) never contribute devotion, regardless of
+    // their mana cost — see PERMANENT_TYPES.
+    if card_types & PERMANENT_TYPES == 0 {
+        devotion = 0;
+    }
     Ok(ManaCost { core, hybrids, devotion, cmc: cmc_val.unwrap_or(0.0) })
 }
 
@@ -680,6 +696,7 @@ fn card_from_pydict(d: &Bound<PyDict>, it: &mut Interner, vocab: &mut VocabInter
         Some(a) => artists.intern(a.to_lowercase())?,
         None => ARTIST_NONE,
     };
+    let card_types = card_types_list_to_bits(&str_list(d, "card_types"));
 
     Ok(CardRow {
         scryfall_id: opt_uuid(d, "scryfall_id"),
@@ -720,7 +737,7 @@ fn card_from_pydict(d: &Bound<PyDict>, it: &mut Interner, vocab: &mut VocabInter
         prefer_score: opt_f32(d, "prefer_score"),
         cubecobra_score: opt_f32(d, "cubecobra_score"),
 
-        card_types: card_types_list_to_bits(&str_list(d, "card_types")),
+        card_types,
         card_subtypes: str_list_to_ids(d, "card_subtypes", vocab)?,
         card_keywords: jsonb_obj_to_ids(d, "card_keywords", vocab)?,
         card_legalities: jsonb_obj_to_legality_bits(d, "card_legalities"),
@@ -729,7 +746,7 @@ fn card_from_pydict(d: &Bound<PyDict>, it: &mut Interner, vocab: &mut VocabInter
         card_is_tags: jsonb_obj_to_ids(d, "card_is_tags", vocab)?,
         card_frame_data: jsonb_obj_to_ids(d, "card_frame_data", vocab)?,
 
-        mana_cost: mana_cost_from_pydict(d, opt_f32(d, "cmc"), mana)?,
+        mana_cost: mana_cost_from_pydict(d, opt_f32(d, "cmc"), mana, card_types)?,
 
         creature_power_text_id: it.intern_opt(opt_str(d, "creature_power_text")),
         creature_toughness_text_id: it.intern_opt(opt_str(d, "creature_toughness_text")),

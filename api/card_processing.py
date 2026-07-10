@@ -22,6 +22,14 @@ def extract_image_location_uuid(card: dict[str, Any]) -> str:
     raise AssertionError(msg)
 
 
+# Card types that can exist as a permanent on the battlefield. Devotion (MTG
+# comprehensive rules) is defined only over permanents' mana costs, confirmed
+# against the real Scryfall API (devotion: never matches a pure Instant/Sorcery,
+# e.g. the real Lightning Bolt), so calculate_devotion()'s result is discarded
+# for any card with no type in this set. Title-cased to match parse_type_line().
+PERMANENT_CARD_TYPES = {"Artifact", "Battle", "Creature", "Enchantment", "Land", "Planeswalker"}
+
+
 def parse_type_line(type_line: str) -> tuple[list[str], list[str]]:
     """Parse the type line of a card."""
     card_types, _, card_subtypes = (x.strip().split() for x in type_line.title().partition("\u2014"))
@@ -214,7 +222,10 @@ def preprocess_card(card: dict[str, Any]) -> list[dict[str, Any]]:  # noqa: PLR0
 
     mana_cost_text = card.get("mana_cost", "")
     card["mana_cost_jsonb"] = mana_cost_str_to_dict(mana_cost_text)
-    card["devotion"] = calculate_devotion(mana_cost_text)
+    # Nonpermanents (Instant/Sorcery) never contribute devotion, regardless of
+    # their mana cost - see PERMANENT_CARD_TYPES.
+    is_permanent = bool(PERMANENT_CARD_TYPES & set(card_types))
+    card["devotion"] = calculate_devotion(mana_cost_text) if is_permanent else {}
 
     # Map field names to match database column names for jsonb_populate_record
     # Don't overwrite card_name if already set (for DFCs, it's set before processing faces)

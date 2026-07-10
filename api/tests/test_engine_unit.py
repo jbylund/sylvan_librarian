@@ -102,8 +102,8 @@ def _names(cards: list[dict]) -> list[str]:
 class TestFilters:
     def test_match_all(self, engine: QueryEngine) -> None:
         total, cards = _run(engine)
-        assert total == 87
-        assert len(cards) == 87
+        assert total == 89
+        assert len(cards) == 89
 
     def test_name_exact(self, engine: QueryEngine) -> None:
         total, cards = _run(engine, 'name="Lightning Bolt"')
@@ -181,19 +181,21 @@ class TestFilters:
         assert t_lower == t_proper
 
     def test_color_red(self, engine: QueryEngine) -> None:
-        # Lightning Bolt (10) + Shivan Dragon (5) + Nicol Bolas (7) + Boggart Ram-Gang (4)
+        # Lightning Bolt (10) + Shivan Dragon (5) + Nicol Bolas (7) + Boggart
+        # Ram-Gang (4) + Monastery Messenger (1, R/U/W)
         total, _ = _run(engine, "c:r")
-        assert total == 26
+        assert total == 27
 
     def test_color_white(self, engine: QueryEngine) -> None:
-        # Serra Angel (7) + Kitchen Finks (6) + Spectral Procession (6)
+        # Serra Angel (7) + Kitchen Finks (6) + Spectral Procession (6) +
+        # Monastery Messenger (1, R/U/W) + Cathedral Membrane (1, W)
         total, _ = _run(engine, "c:w")
-        assert total == 19
+        assert total == 21
 
     def test_color_blue(self, engine: QueryEngine) -> None:
-        # Counterspell (6) + Jace (10) + Nicol Bolas (7)
+        # Counterspell (6) + Jace (10) + Nicol Bolas (7) + Monastery Messenger (1, R/U/W)
         total, _ = _run(engine, "c:u")
-        assert total == 23
+        assert total == 24
 
     def test_color_black(self, engine: QueryEngine) -> None:
         # Dark Ritual (5) + Nicol Bolas (7)
@@ -222,9 +224,10 @@ class TestFilters:
 
     def test_cmc_gte_four(self, engine: QueryEngine) -> None:
         # Jace (cmc=4, 10) + Serra Angel (cmc=5, 7) + Shivan Dragon (cmc=6, 5)
-        # + Spectral Procession (cmc=6, 6) + Nicol Bolas (cmc=8, 7)
+        # + Spectral Procession (cmc=6, 6) + Nicol Bolas (cmc=8, 7) +
+        # Monastery Messenger (cmc=6, 1)
         total, _ = _run(engine, "cmc>=4")
-        assert total == 35
+        assert total == 36
 
     def test_type_instant(self, engine: QueryEngine) -> None:
         # Lightning Bolt (10) + Counterspell (6) + Dark Ritual (5)
@@ -232,9 +235,11 @@ class TestFilters:
         assert total == 21
 
     def test_type_creature(self, engine: QueryEngine) -> None:
-        # Serra Angel (7) + Tarmogoyf (11) + Shivan Dragon (5) + Boggart Ram-Gang (4) + Kitchen Finks (6)
+        # Serra Angel (7) + Tarmogoyf (11) + Shivan Dragon (5) + Boggart
+        # Ram-Gang (4) + Kitchen Finks (6) + Monastery Messenger (1) +
+        # Cathedral Membrane (1, Artifact Creature)
         total, _ = _run(engine, "t:creature")
-        assert total == 33
+        assert total == 35
 
     def test_type_planeswalker(self, engine: QueryEngine) -> None:
         # Jace (10) + Nicol Bolas (7)
@@ -242,9 +247,9 @@ class TestFilters:
         assert total == 17
 
     def test_type_artifact(self, engine: QueryEngine) -> None:
-        # Black Lotus (5) + Sol Ring (5)
+        # Black Lotus (5) + Sol Ring (5) + Cathedral Membrane (1, Artifact Creature)
         total, _ = _run(engine, "t:artifact")
-        assert total == 10
+        assert total == 11
 
     def test_power_eq(self, engine: QueryEngine) -> None:
         total, cards = _run(engine, "pow=4")
@@ -257,9 +262,10 @@ class TestFilters:
         assert all(c["name"] == "Serra Angel" for c in cards)
 
     def test_oracle_text_contains_flying(self, engine: QueryEngine) -> None:
-        # Serra Angel (7) + Shivan Dragon (5) + Spectral Procession (6, creates flying tokens)
+        # Serra Angel (7) + Shivan Dragon (5) + Spectral Procession (6, creates
+        # flying tokens) + Monastery Messenger (1, oracle text is "Flying")
         total, _ = _run(engine, "o:flying")
-        assert total == 18
+        assert total == 19
 
     def test_set_filter(self, engine: QueryEngine) -> None:
         total, cards = _run(engine, "s:lea")
@@ -288,7 +294,9 @@ class TestFilters:
     def test_not_filter(self, engine: QueryEngine) -> None:
         # All creatures except Serra Angel
         total, cards = _run(engine, "t:creature -name:serra")
-        assert total == 26  # Tarmogoyf (11) + Shivan Dragon (5) + Boggart Ram-Gang (4) + Kitchen Finks (6)
+        # Tarmogoyf (11) + Shivan Dragon (5) + Boggart Ram-Gang (4) + Kitchen
+        # Finks (6) + Monastery Messenger (1) + Cathedral Membrane (1)
+        assert total == 28
         assert all(c["name"] != "Serra Angel" for c in cards)
 
 
@@ -306,9 +314,10 @@ class TestArithmetic:
         assert {c["name"] for c in cards} == {"Shivan Dragon"}
 
     def test_cmc_plus_constant_gt_power(self, engine: QueryEngine) -> None:
-        # All 4 creature types: cmc+1 > power for all of them
+        # All creature types: cmc+1 > power for all of them, Monastery
+        # Messenger (6+1>2) and Cathedral Membrane (2+1>0) included
         total, _ = _run(engine, "cmc+1>power")
-        assert total == 22
+        assert total == 24
 
 
 class TestCollectionOperators:
@@ -321,18 +330,21 @@ class TestCollectionOperators:
 
     def test_type_gt_contains_plus_more(self, engine: QueryEngine) -> None:
         # Jace (10) + Nicol Bolas (7) are {Legendary, Planeswalker} ⊋ {Planeswalker};
-        # every fixture creature is exactly {Creature}, so t>creature matches nothing.
+        # Cathedral Membrane is {Artifact, Creature} ⊋ {Creature} — every other
+        # fixture creature is exactly {Creature}.
         total_pw, _ = _run(engine, "t>planeswalker")
         total_creature, _ = _run(engine, "t>creature")
         assert total_pw == 17
-        assert total_creature == 0
+        assert total_creature == 1
 
     def test_type_eq_exact(self, engine: QueryEngine) -> None:
-        # All 33 creature printings are exactly {Creature}; both planeswalkers
-        # carry Legendary too, so t=planeswalker matches nothing.
+        # 34 creature printings are exactly {Creature} (the 33 pre-existing
+        # ones plus Monastery Messenger); Cathedral Membrane is {Artifact,
+        # Creature}, not exactly {Creature}. Both planeswalkers carry
+        # Legendary too, so t=planeswalker matches nothing.
         total_creature, _ = _run(engine, "t=creature")
         total_pw, _ = _run(engine, "t=planeswalker")
-        assert total_creature == 33
+        assert total_creature == 34
         assert total_pw == 0
 
     def test_type_lt_matches_nothing(self, engine: QueryEngine) -> None:
@@ -341,9 +353,9 @@ class TestCollectionOperators:
         assert total == 0
 
     def test_type_ne_not_exactly(self, engine: QueryEngine) -> None:
-        # Everything except the 33 exactly-{Creature} printings.
+        # Everything except the 34 exactly-{Creature} printings.
         total, _ = _run(engine, "t!=creature")
-        assert total == 54
+        assert total == 55
 
     def test_keyword_eq_exact(self, engine: QueryEngine) -> None:
         # Shivan Dragon has exactly {Flying}; Serra Angel has {Flying, Vigilance}.
@@ -397,7 +409,7 @@ class TestStagedReload:
         one_shot = fresh_engine()
         one_shot.reload(cards)
 
-        assert staged.size() == one_shot.size() == 87
+        assert staged.size() == one_shot.size() == 89
         for q in ("t:creature", "name:bolt", "devotion:{R}", "cmc>=4"):
             t_staged, c_staged = _run(staged, q, orderby="cmc")
             t_one, c_one = _run(one_shot, q, orderby="cmc")
@@ -422,7 +434,7 @@ class TestStagedReload:
         assert e.reload_begin() is True
         e.add_batch(cards[:5])
         e.reload_abort()
-        assert e.size() == 87
+        assert e.size() == 89
         # And the lock must have been released: a fresh cycle works
         e.reload(cards[:5])
         assert e.size() == 5
@@ -466,17 +478,17 @@ class TestUnique:
 
     def test_unique_printing_returns_all(self, engine: QueryEngine) -> None:
         total, _ = _run(engine, unique="printing")
-        assert total == 87
+        assert total == 89
 
     def test_unique_card_deduplicates_by_oracle_id(self, engine: QueryEngine) -> None:
         total, cards = _run(engine, unique="card")
-        assert total == 13
-        assert len({c["name"] for c in cards}) == 13
+        assert total == 15
+        assert len({c["name"] for c in cards}) == 15
 
     def test_unique_artwork_deduplicates_by_illustration(self, engine: QueryEngine) -> None:
-        # 38 distinct illustration_ids across the 87 fixture printings
+        # 40 distinct illustration_ids across the 89 fixture printings
         total, _ = _run(engine, unique="artwork")
-        assert total == 38
+        assert total == 40
 
     def test_unique_card_single_result_per_name(self, engine: QueryEngine) -> None:
         total, _ = _run(engine, 'name="Lightning Bolt"', unique="card")
@@ -519,8 +531,8 @@ class TestPrefer:
 
     def test_prefer_default_returns_one_per_oracle(self, engine: QueryEngine) -> None:
         total, cards = _run(engine, unique="card", prefer="default")
-        assert total == 13
-        assert len({c["name"] for c in cards}) == 13
+        assert total == 15
+        assert len({c["name"] for c in cards}) == 15
 
 
 class TestSort:
@@ -542,7 +554,7 @@ class TestSort:
 
     def test_limit_caps_returned_cards(self, engine: QueryEngine) -> None:
         total, cards = _run(engine, limit=5)
-        assert total == 87  # total reflects full match count
+        assert total == 89  # total reflects full match count
         assert len(cards) == 5
 
     def test_sort_direction_desc_reverses_order(self, engine: QueryEngine) -> None:
@@ -558,12 +570,35 @@ class TestDevotion:
     Hybrid symbols like {R/G} must contribute to BOTH R and G devotion,
     matching calculate_devotion() in the SQL path. Previously the engine
     kept {R/G} as a single key and missed pure-color devotion queries.
+
+    Devotion only counts permanents' mana costs (MTG comprehensive rules;
+    confirmed against the real Scryfall API — devotion: never matches a pure
+    Instant/Sorcery). Test subjects here are deliberately permanents
+    (Tarmogoyf, Shivan Dragon, Boggart Ram-Gang, Kitchen Finks, Monastery
+    Messenger) — see test_devotion_nonpermanent_never_counts for the
+    nonpermanent case.
     """
 
     def test_devotion_pure_color(self, engine: QueryEngine) -> None:
-        # Lightning Bolt {R}: each printing has 1 R pip, so devotion:{R} should match all 10
-        total, _ = _run(engine, 'devotion:{R} name="Lightning Bolt"')
-        assert total == 10
+        # Tarmogoyf {G}: each printing has 1 G pip, so devotion:{G} should match all 11.
+        # Tarmogoyf (Creature), not Lightning Bolt (Instant): devotion only counts
+        # permanents' mana costs (see test_devotion_nonpermanent_never_counts).
+        total, _ = _run(engine, 'devotion:{G} name="Tarmogoyf"')
+        assert total == 11
+
+    def test_devotion_nonpermanent_never_counts(self, engine: QueryEngine) -> None:
+        # Devotion (MTG comprehensive rules) is defined only over permanents'
+        # mana costs — confirmed against the real Scryfall API, where devotion:r
+        # never matches the real Lightning Bolt (an Instant). Sylvan Librarian
+        # mirrors that: a nonpermanent's colored pips never count, no matter the
+        # operator — a positive devotion query never matches, and <= (subset)
+        # always matches since its devotion is the empty set.
+        total_ge, _ = _run(engine, 'devotion:{R} name="Lightning Bolt"')
+        total_le, _ = _run(engine, 'devotion<={R} name="Lightning Bolt"')
+        total_sorcery, _ = _run(engine, 'devotion:{W} name="Spectral Procession"')
+        assert total_ge == 0
+        assert total_le == 10
+        assert total_sorcery == 0
 
     def test_devotion_hybrid_rg_counts_as_red(self, engine: QueryEngine) -> None:
         # Boggart Ram-Gang {R/G}{R/G}{R/G}: each {R/G} counts as 1 R pip
@@ -587,10 +622,12 @@ class TestDevotion:
         assert total == 6
 
     def test_devotion_2w_hybrid_counts_as_white(self, engine: QueryEngine) -> None:
-        # Spectral Procession {2/W}{2/W}{2/W}: the W in each {2/W} counts as 1 W pip
-        # devotion:{W} (at least 1 W) should match all 6 printings
-        total, _cards = _run(engine, 'devotion:{W} name="Spectral Procession"')
-        assert total == 6
+        # Monastery Messenger {2/U}{2/R}{2/W}: the W in {2/W} counts as 1 W pip.
+        # Must be a permanent (Creature) — Spectral Procession is a Sorcery, so
+        # it no longer counts for devotion at all (see
+        # test_devotion_nonpermanent_never_counts).
+        total, _cards = _run(engine, 'devotion:{W} name="Monastery Messenger"')
+        assert total == 1
 
     def test_devotion_threshold_hybrid(self, engine: QueryEngine) -> None:
         # Boggart Ram-Gang has 3 R pips and 3 G pips from {R/G}{R/G}{R/G}
@@ -604,9 +641,11 @@ class TestDevotion:
     # column: = is exact, <= is subset (<@), > is containment-but-not-equal, etc.
 
     def test_devotion_eq_exact_match(self, engine: QueryEngine) -> None:
-        # Lightning Bolt {R} has devotion exactly {R: 1}
-        total, _ = _run(engine, 'devotion={R} name="Lightning Bolt"')
-        assert total == 10
+        # Tarmogoyf {G} has devotion exactly {G: 1} (a permanent — see
+        # test_devotion_nonpermanent_never_counts for why this can't be
+        # Lightning Bolt, whose devotion is now the empty set).
+        total, _ = _run(engine, 'devotion={G} name="Tarmogoyf"')
+        assert total == 11
 
     def test_devotion_eq_rejects_higher_count(self, engine: QueryEngine) -> None:
         # Shivan Dragon {4}{R}{R} has devotion {R: 2}, not exactly {R: 1}
@@ -635,18 +674,29 @@ class TestDevotion:
         assert total == 5
 
     def test_devotion_gt_strict(self, engine: QueryEngine) -> None:
-        # > means contains-but-not-equal: Boggart {R: 3, G: 3} > {R}; Bolt {R: 1} is not > {R}
+        # > means contains-but-not-equal: Boggart {R: 3, G: 3} > {R}; Bolt's
+        # devotion is the empty set (Instant, not a permanent), which can't
+        # satisfy any positive devotion query, > included.
         total_boggart, _ = _run(engine, 'devotion>{R} name="Boggart Ram-Gang"')
         total_bolt, _ = _run(engine, 'devotion>{R} name="Lightning Bolt"')
         assert total_boggart == 4
         assert total_bolt == 0
 
     def test_devotion_ne(self, engine: QueryEngine) -> None:
-        # != is not-exactly-equal: Bolt {R: 1} is exactly {R: 1}; Shivan {R: 2} is not
+        # != is not-exactly-equal: Bolt's devotion is the empty set (Instant),
+        # which is never exactly {R: 1}, so != matches all 10 printings; Shivan
+        # {R: 2} is a permanent whose devotion isn't exactly {R: 1} either.
         total_bolt, _ = _run(engine, 'devotion!={R} name="Lightning Bolt"')
         total_shivan, _ = _run(engine, 'devotion!={R} name="Shivan Dragon"')
-        assert total_bolt == 0
+        assert total_bolt == 10
         assert total_shivan == 5
+
+    def test_devotion_phyrexian_counts_as_color(self, engine: QueryEngine) -> None:
+        # Cathedral Membrane {1}{W/P}: the W in {W/P} counts as 1 W pip, same
+        # as any other hybrid — Phyrexian's "or 2 life" alternate cost doesn't
+        # change how the color letter counts toward devotion.
+        total, _ = _run(engine, 'devotion:{W} name="Cathedral Membrane"')
+        assert total == 1
 
 
 class TestManaCost:
@@ -693,6 +743,18 @@ class TestManaCost:
         total, _ = _run(engine, 'mana:{W} name="Spectral Procession"')
         assert total == 0
 
+    def test_mana_contains_phyrexian_symbol(self, engine: QueryEngine) -> None:
+        # Cathedral Membrane costs {1}{W/P}; mana:{W/P} matches. Like any
+        # other hybrid, {W/P} is an opaque key for mana: (no color/devotion
+        # splitting — see test_mana_phyrexian_does_not_match_pure_white).
+        total, _ = _run(engine, 'mana:{W/P} name="Cathedral Membrane"')
+        assert total == 1
+
+    def test_mana_phyrexian_does_not_match_pure_white(self, engine: QueryEngine) -> None:
+        # Cathedral Membrane has no pure {W} pips — only {W/P}.
+        total, _ = _run(engine, 'mana:{W} name="Cathedral Membrane"')
+        assert total == 0
+
 
 class TestColorIdentity:
     def test_identity_subset_green(self, engine: QueryEngine) -> None:
@@ -709,7 +771,7 @@ class TestColorIdentity:
     def test_identity_superset_matches_all(self, engine: QueryEngine) -> None:
         # Every card fits in a 5-color deck
         total, _ = _run(engine, "id:wubrg")
-        assert total == 87
+        assert total == 89
 
     def test_identity_differs_from_color(self, engine: QueryEngine) -> None:
         # Nicol Bolas (UBR) has c:r but only cards with identity ⊆ {R} fit in a mono-red deck
@@ -721,8 +783,9 @@ class TestColorIdentity:
 
 class TestRarityAndLoyalty:
     def test_rarity_common(self, engine: QueryEngine) -> None:
+        # +2: Monastery Messenger and Cathedral Membrane are both common
         total, _ = _run(engine, "r=common")
-        assert total == 15
+        assert total == 17
 
     def test_rarity_rare(self, engine: QueryEngine) -> None:
         total, _ = _run(engine, "r=rare")
@@ -802,14 +865,16 @@ class TestKeywordsAndSubtypes:
 
 class TestLegalityAndFormats:
     def test_legal_in_legacy(self, engine: QueryEngine) -> None:
-        # Black Lotus is banned in legacy — 77 cards are legal
+        # Black Lotus is banned in legacy — 79 cards are legal (both Monastery
+        # Messenger and Cathedral Membrane are legacy-legal)
         total, _ = _run(engine, "f:legacy")
-        assert total == 77
+        assert total == 79
 
     def test_legal_in_pauper(self, engine: QueryEngine) -> None:
-        # Only commons are legal in pauper
+        # Only commons are legal in pauper; Monastery Messenger is pauper-legal,
+        # Cathedral Membrane is not
         total, _ = _run(engine, "f:pauper")
-        assert total == 21
+        assert total == 22
 
     def test_banned_in_commander(self, engine: QueryEngine) -> None:
         # Black Lotus (5 printings) is banned in commander
@@ -825,8 +890,9 @@ class TestLegalityAndFormats:
 
 class TestCardProperties:
     def test_border_black(self, engine: QueryEngine) -> None:
+        # +2: Monastery Messenger and Cathedral Membrane are both black-bordered
         total, _ = _run(engine, "border:black")
-        assert total == 70
+        assert total == 72
 
     def test_border_borderless(self, engine: QueryEngine) -> None:
         total, _ = _run(engine, "border:borderless")
@@ -835,7 +901,7 @@ class TestCardProperties:
     def test_layout_normal(self, engine: QueryEngine) -> None:
         # All fixture cards are normal layout
         total, _ = _run(engine, "layout:normal")
-        assert total == 87
+        assert total == 89
 
     def test_frame_2015(self, engine: QueryEngine) -> None:
         total_2015, _ = _run(engine, "frame:2015")
@@ -934,8 +1000,9 @@ class TestCardProperties:
         assert cards[0]["name"] == "Black Lotus"
 
     def test_collector_number_lte(self, engine: QueryEngine) -> None:
+        # +1: Cathedral Membrane is cn 5 (Monastery Messenger is cn 208, excluded)
         total, _ = _run(engine, "cn<=10")
-        assert total == 6
+        assert total == 7
 
     def test_flavor_text_contains(self, engine: QueryEngine) -> None:
         # Shivan Dragon flavor text mentions "dragon"
@@ -1027,10 +1094,12 @@ class TestCommonCardTypes:
 
     def test_type_counts(self, engine: QueryEngine) -> None:
         result = engine.common_card_types()
-        # 13 oracle groups: 2 artifacts, 5 creatures, 3 instants, 2 legendary
-        # planeswalkers, 1 sorcery. Jace and Nicol Bolas are both Legendary+Planeswalker.
-        assert result["Artifact"] == 2
-        assert result["Creature"] == 5
+        # 15 oracle groups: 3 artifacts, 7 creatures, 3 instants, 2 legendary
+        # planeswalkers, 1 sorcery. Jace and Nicol Bolas are both
+        # Legendary+Planeswalker; Cathedral Membrane is Artifact+Creature
+        # (counts toward both); Monastery Messenger is a plain Creature.
+        assert result["Artifact"] == 3
+        assert result["Creature"] == 7
         assert result["Instant"] == 3
         assert result["Legendary"] == 2
         assert result["Planeswalker"] == 2
