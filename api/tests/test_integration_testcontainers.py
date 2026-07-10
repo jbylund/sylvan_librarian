@@ -147,10 +147,10 @@ class TestContainerIntegration:
         assert isinstance(result, dict)
         assert "cards" in result
 
-        # Should find Serra Angel (the only creature in test data)
+        # Should find every creature in test data (Serra Angel, Boggart
+        # Ram-Gang, and the Artifact Creature Cathedral Membrane)
         cards = result["cards"]
-        assert len(cards) == 1
-        assert cards[0]["name"] == "Serra Angel"
+        assert {c["name"] for c in cards} == {"Serra Angel", "Boggart Ram-Gang", "Cathedral Membrane"}
 
     def test_card_search_by_name(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """Test searching for cards by name."""
@@ -172,10 +172,10 @@ class TestContainerIntegration:
         assert isinstance(result, dict)
         assert "cards" in result
 
-        # Should find Lightning Bolt (red card)
+        # Should find every red card (Lightning Bolt, Boggart Ram-Gang which
+        # is R/G, and Fireball which is {X}{R})
         cards = result["cards"]
-        assert len(cards) == 1
-        assert cards[0]["name"] == "Lightning Bolt"
+        assert {c["name"] for c in cards} == {"Lightning Bolt", "Boggart Ram-Gang", "Fireball"}
 
     def test_cmc_search(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """Test searching for cards by converted mana cost."""
@@ -200,6 +200,52 @@ class TestContainerIntegration:
         cards = result["cards"]
         assert len(cards) == 1
         assert cards[0]["name"] == "Serra Angel"
+
+    def test_mana_cost_search(self: TestContainerIntegration, api_resource: APIResource) -> None:
+        """mana: is exact-symbol containment (plus cmc) — hybrid keys don't split."""
+        result = api_resource._search_sql(**search_kwargs("mana:{R}", limit=10))
+        # Lightning Bolt has a pure {R} pip, as does Fireball ({X}{R}, and X
+        # doesn't block containment on R); Boggart Ram-Gang only has {R/G} —
+        # an opaque hybrid key that mana:{R} must not match.
+        assert {c["name"] for c in result["cards"]} == {"Lightning Bolt", "Fireball"}
+
+    def test_mana_cost_x_symbol(self: TestContainerIntegration, api_resource: APIResource) -> None:
+        """X is its own pip symbol (not a hybrid); bare x behaves like braced {X}."""
+        braced = api_resource._search_sql(**search_kwargs("mana:{X}", limit=10))
+        bare = api_resource._search_sql(**search_kwargs("mana:x", limit=10))
+        assert {c["name"] for c in braced["cards"]} == {c["name"] for c in bare["cards"]} == {"Fireball"}
+        # X contributes 0 to cmc: mana:{X}{R}{R} implies cmc 2, but Fireball's
+        # actual cmc is 1 — must not match.
+        too_high = api_resource._search_sql(**search_kwargs("mana:{X}{R}{R}", limit=10))
+        assert too_high["cards"] == []
+
+    def test_mana_cost_exact_match(self: TestContainerIntegration, api_resource: APIResource) -> None:
+        """mana= requires the exact same distinct symbols, counts, and cmc."""
+        result = api_resource._search_sql(**search_kwargs('mana="{R}"', limit=10))
+        assert {c["name"] for c in result["cards"]} == {"Lightning Bolt"}
+
+    def test_devotion_search(self: TestContainerIntegration, api_resource: APIResource) -> None:
+        """devotion: counts a permanent's colored pips, hybrids (incl. Phyrexian) split."""
+        result = api_resource._search_sql(**search_kwargs("devotion:{W}", limit=10))
+        # Serra Angel {W}{W} and Cathedral Membrane {1}{W/P} (Phyrexian W
+        # counts toward W devotion, same as a plain hybrid would)
+        assert {c["name"] for c in result["cards"]} == {"Serra Angel", "Cathedral Membrane"}
+
+    def test_devotion_hybrid_search(self: TestContainerIntegration, api_resource: APIResource) -> None:
+        """A color/color hybrid contributes to BOTH colors' devotion."""
+        red = api_resource._search_sql(**search_kwargs("devotion:{R}", limit=10))
+        green = api_resource._search_sql(**search_kwargs("devotion:{G}", limit=10))
+        assert {c["name"] for c in red["cards"]} == {"Boggart Ram-Gang"}
+        assert {c["name"] for c in green["cards"]} == {"Boggart Ram-Gang"}
+
+    def test_devotion_permanent_only(self: TestContainerIntegration, api_resource: APIResource) -> None:
+        """Devotion only counts permanents — an Instant's colored pips never count.
+
+        Confirmed against the real Scryfall API: devotion:r never matches the
+        real Lightning Bolt, despite its {R} mana cost.
+        """
+        result = api_resource._search_sql(**search_kwargs("devotion:{R}", limit=10))
+        assert "Lightning Bolt" not in {c["name"] for c in result["cards"]}
 
     def test_search_sql_default_fields(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """Omitting fields= keeps the historical 9-key shape."""
@@ -237,9 +283,9 @@ class TestContainerIntegration:
 
         # Should only have our test cards
         cards = result["cards"]
-        assert len(cards) == 3
+        assert len(cards) == 6
         card_names = {card["name"] for card in cards}
-        expected_names = {"Lightning Bolt", "Serra Angel", "Black Lotus"}
+        expected_names = {"Lightning Bolt", "Serra Angel", "Black Lotus", "Boggart Ram-Gang", "Cathedral Membrane", "Fireball"}
         assert card_names == expected_names
 
     def test_random_search_shape_matches_search(self: TestContainerIntegration, api_resource: APIResource) -> None:

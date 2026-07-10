@@ -2023,21 +2023,27 @@ fn broad_tag_postings_scatter_or_decline() {
 /// the planes must reproduce.
 fn devotion_fixture_store() -> CardData {
     let mut vocab = VocabInterner::new();
-    let costs: &[&[(&str, u8)]] = &[
-        &[],                       // no cost
-        &[("U", 1)],               // {U}
-        &[("U", 2)],               // {U}{U}
-        &[("U", 3)],               // {U}{U}{U}
-        &[("U", 5)],               // deep: saturates
-        &[("R/G", 1)],             // {R/G}: 1 red AND 1 green
-        &[("R/G", 2), ("R", 1)],   // {R/G}{R/G}{R}: R=3, G=2
-        &[("W", 1), ("U", 1)],     // {W}{U}
-        &[("C", 2)],               // {C}{C}: colorless devotion
+    let costs: &[(&[(&str, u8)], u16)] = &[
+        (&[], TYPE_CREATURE),                     // no cost
+        (&[("U", 1)], TYPE_CREATURE),              // {U}
+        (&[("U", 2)], TYPE_CREATURE),              // {U}{U}
+        (&[("U", 3)], TYPE_CREATURE),              // {U}{U}{U}
+        (&[("U", 5)], TYPE_CREATURE),              // deep: saturates
+        (&[("R/G", 1)], TYPE_CREATURE),            // {R/G}: 1 red AND 1 green
+        (&[("R/G", 2), ("R", 1)], TYPE_CREATURE),  // {R/G}{R/G}{R}: R=3, G=2
+        (&[("W", 1), ("U", 1)], TYPE_CREATURE),    // {W}{U}
+        (&[("C", 2)], TYPE_CREATURE),               // {C}{C}: colorless devotion
+        (&[("R", 1)], TYPE_INSTANT),                // {R} on an Instant: never counts (see devotion_ignores_nonpermanent_pips)
     ];
     let mut mana_vocab: Vec<String> = Vec::new();
-    let cards: Vec<OracleCard> = costs.iter().enumerate().map(|(i, &pips)| {
-        let mut c = stub_card(i as u128 + 1, TYPE_CREATURE, &[], &mut vocab);
+    let cards: Vec<OracleCard> = costs.iter().enumerate().map(|(i, &(pips, card_types))| {
+        let mut c = stub_card(i as u128 + 1, card_types, &[], &mut vocab);
         c.mana_cost = mana_cost_of(pips, &mut mana_vocab);
+        // Mirrors mana_cost_from_pydict()'s PERMANENT_TYPES gate (lib.rs):
+        // devotion only exists for permanents, regardless of the raw pips.
+        if card_types & super::PERMANENT_TYPES == 0 {
+            c.mana_cost.devotion = 0;
+        }
         // identity must cover devotion colors (the build tripwire enforces it)
         let mut ident = 0u8;
         for (lane, sym) in ["W", "U", "B", "R", "G"].iter().enumerate() {
@@ -2048,7 +2054,7 @@ fn devotion_fixture_store() -> CardData {
         c.card_color_identity = ident;
         c
     }).collect();
-    let mut data = store_of(cards, &[1usize; 9], vocab);
+    let mut data = store_of(cards, &[1usize; 10], vocab);
     data.mana_vocab = mana_vocab;
     data
 }
@@ -2152,6 +2158,23 @@ fn hybrid_pip_counts_toward_both_colors() {
         eval_planes(&compile_plane(&f).unwrap(), &archived.indexes.planes, &mut bitmap);
         assert_eq!(bitmap_contains(&bitmap, rg_card), want);
     }
+}
+
+// Devotion (MTG comprehensive rules) is defined only over permanents' mana
+// costs, confirmed against the real Scryfall API (devotion: never matches a
+// pure Instant/Sorcery, e.g. the real Lightning Bolt). A colored pip on a
+// nonpermanent must contribute zero devotion, no matter the operator.
+#[test]
+fn devotion_ignores_nonpermanent_pips() {
+    let data = devotion_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let instant_card = &archived.cards[9]; // {R} on TYPE_INSTANT
+    assert_eq!(u64::from(instant_card.mana_cost.devotion), 0, "an Instant's devotion must be zeroed at load, regardless of its pips");
+    let ge_r = FilterExpr::Devotion { op: CmpOp::Ge, pips: packed_pips(&[("R", 1)]) };
+    let le_r = FilterExpr::Devotion { op: CmpOp::Le, pips: packed_pips(&[("R", 1)]) };
+    assert!(ge_r.eval_card(instant_card, &archived.strings) != Tri::True, "a nonpermanent's {{R}} must not satisfy devotion:{{R}}");
+    assert!(le_r.eval_card(instant_card, &archived.strings) == Tri::True, "empty devotion is a subset of any query");
 }
 
 // ─── Sorted name index: order:name + exact-name narrowing ────────────────────
@@ -2519,6 +2542,40 @@ fn verify_order_spellings_agree_end_to_end() {
     assert_eq!(run(or_a), run(or_b));
 }
 
+// ─── Query-string mana parsing: mana_pip_counts / mana_cmc ───────────────────
+
+// X is its own pip symbol (its own lane, see MANA_LANE_SYMS), not a hybrid and
+// not excluded — only its cmc contribution is 0, handled by mana_cmc
+// separately. Confirmed against the real Scryfall API: mana:{X} matches
+// Fireball ({X}{R}) and mana:x behaves identically to mana:{x}. This parser
+// (used only for query-time mana:/devotion: values — see build_binary's
+// attr == "mana_cost_jsonb"/"devotion" arms) once dropped X entirely, braced
+// or not, silently degrading `mana:{X}{R}` into `mana:{R}` and matching cards
+// with no X pip at all (e.g. Shivan Dragon, {4}{R}{R}).
+#[test]
+fn mana_pip_counts_treats_x_as_a_real_symbol() {
+    use super::mana_pip_counts;
+    let braced = mana_pip_counts("{X}{R}");
+    assert_eq!(braced.get("X"), Some(&1), "braced X must not be dropped");
+    assert_eq!(braced.get("R"), Some(&1));
+    let bare = mana_pip_counts("XR");
+    assert_eq!(bare.get("X"), Some(&1), "bare X must be recognized, same as braced");
+    assert_eq!(bare.get("R"), Some(&1));
+    let doubled = mana_pip_counts("{X}{X}{R}");
+    assert_eq!(doubled.get("X"), Some(&2), "repeated X pips must accumulate");
+}
+
+// mana_cmc's X-exclusion was already correct (X contributes 0 whether braced
+// or bare) — pinned here so a future refactor of mana_pip_counts can't
+// accidentally couple the two functions' X handling back together.
+#[test]
+fn mana_cmc_excludes_x_braced_and_bare() {
+    use super::mana_cmc;
+    assert_eq!(mana_cmc("{X}{R}"), 1.0);
+    assert_eq!(mana_cmc("XR"), 1.0);
+    assert_eq!(mana_cmc("{X}{X}{2}{R}"), 3.0, "two generic + one R; both Xs contribute 0");
+}
+
 // ─── Packed mana pips: ManaCostCmp semantics ─────────────────────────────────
 
 /// Store with a spread of cost shapes: plain, multi-pip, hybrid, X, snow,
@@ -2527,7 +2584,7 @@ fn verify_order_spellings_agree_end_to_end() {
 fn mana_fixture_store() -> CardData {
     let mut vocab = VocabInterner::new();
     let mut mana_vocab: Vec<String> = Vec::new();
-    // (pips, cmc): oracle ids 1..=7 in this order
+    // (pips, cmc): oracle ids 1..=8 in this order
     let costs: &[(&[(&str, u8)], f32)] = &[
         (&[("W", 1)], 1.0),               // 1: {W}
         (&[("W", 2)], 2.0),               // 2: {W}{W}
@@ -2536,6 +2593,7 @@ fn mana_fixture_store() -> CardData {
         (&[("X", 1), ("R", 1)], 1.0),     // 5: {X}{R}
         (&[("S", 1), ("G", 1)], 2.0),     // 6: {S}{G}
         (&[], 0.0),                       // 7: no cost
+        (&[("W/P", 1)], 1.0),             // 8: {W/P} (Phyrexian — an opaque hybrid key, same as {R/G})
     ];
     let cards: Vec<OracleCard> = costs.iter().enumerate().map(|(i, &(pips, cmc))| {
         let mut c = stub_card(i as u128 + 1, TYPE_CREATURE, &[], &mut vocab);
@@ -2549,7 +2607,7 @@ fn mana_fixture_store() -> CardData {
         }
         c
     }).collect();
-    let mut data = store_of(cards, &[1usize; 7], vocab);
+    let mut data = store_of(cards, &[1usize; 8], vocab);
     data.mana_vocab = mana_vocab;
     data
 }
@@ -2615,8 +2673,22 @@ fn mana_cost_cmp_packed_semantics() {
     // ...and {R} does not contain {R/G}, nor does the {X}{R} card equal {R}.
     assert_eq!(matches(&mana_cmp_of(CmpOp::Ge, &[("R", 1)], 1.0, &mv)), [5]);
     assert_eq!(matches(&mana_cmp_of(CmpOp::Eq, &[("R", 1)], 1.0, &mv)), Vec::<u128>::new());
+    // Phyrexian mana is just another opaque hybrid symbol for mana: — {W/P}
+    // matches only through the vocab, and {W} does not contain it (mirrors
+    // {R/G} above; the "Phyrexian still counts toward W devotion" invariant
+    // is pinned in api/tests/test_engine_unit.py and test_data.sql instead,
+    // since this fixture only exercises ManaCostCmp, not Devotion).
+    assert_eq!(matches(&mana_cmp_of(CmpOp::Ge, &[("W/P", 1)], 1.0, &mv)), [8]);
+    assert_eq!(matches(&mana_cmp_of(CmpOp::Eq, &[("W/P", 1)], 1.0, &mv)), [8]);
     // Snow is a lane like any other.
     assert_eq!(matches(&mana_cmp_of(CmpOp::Ge, &[("S", 1)], 1.0, &mv)), [6]);
+    // X is a lane like any other too, not a hybrid — only card 5 carries it.
+    // (This exercises the FilterExpr evaluator's already-correct lane
+    // handling; the query-string parser's X-dropping bug is pinned directly
+    // in mana_pip_counts_treats_x_as_a_real_symbol above, since mana_cmp_of
+    // builds the FilterExpr from typed pips and bypasses string parsing.)
+    assert_eq!(matches(&mana_cmp_of(CmpOp::Ge, &[("X", 1)], 0.0, &mv)), [5]);
+    assert_eq!(matches(&mana_cmp_of(CmpOp::Eq, &[("X", 1), ("R", 1)], 1.0, &mv)), [5]);
     // A symbol no card carries: containment and exactness fail everywhere;
     // card ⊆ query still holds for the empty cost (query-only symbols never
     // constrain the subset direction — same as the HashMap semantics).
@@ -2624,7 +2696,7 @@ fn mana_cost_cmp_packed_semantics() {
     assert_eq!(matches(&mana_cmp_of(CmpOp::Eq, &[("Q/Z", 1)], 1.0, &mv)), Vec::<u128>::new());
     assert_eq!(matches(&mana_cmp_of(CmpOp::Le, &[("Q/Z", 1)], 2.0, &mv)), [7]);
     // Ne is not-exactly-equal.
-    assert_eq!(matches(&mana_cmp_of(CmpOp::Ne, &[("W", 1)], 1.0, &mv)), [2, 3, 4, 5, 6, 7]);
+    assert_eq!(matches(&mana_cmp_of(CmpOp::Ne, &[("W", 1)], 1.0, &mv)), [2, 3, 4, 5, 6, 7, 8]);
 }
 
 // The SWAR lane comparison agrees with the scalar per-lane loop across the

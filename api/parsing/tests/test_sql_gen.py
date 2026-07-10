@@ -128,6 +128,53 @@ def test_full_sql_translation(parse_query, input_query: str, expected_sql: str, 
             r"(card.devotion @> %(p_dict_eydSJzogWzFdLCAnRyc6IFsxXX0)s)",
             {"p_dict_eydSJzogWzFdLCAnRyc6IFsxXX0": {"G": [1], "R": [1]}},
         ),
+        # mana: tests — unlike devotion, every op ANDs in a cmc compare
+        # alongside jsonb containment/equality (see
+        # _handle_mana_cost_approximate_comparison), and ":" normalizes to ">=".
+        (
+            "mana:{g}",
+            r"(%(p_dict_eydHJzogWzFdfQ)s <@ card.mana_cost_jsonb AND card.cmc >= %(p_int_MQ)s)",
+            {"p_dict_eydHJzogWzFdfQ": {"G": [1]}, "p_int_MQ": 1},
+        ),
+        (
+            "mana={g}",
+            r"(card.mana_cost_jsonb = %(p_dict_eydHJzogWzFdfQ)s AND card.cmc = %(p_int_MQ)s)",
+            {"p_dict_eydHJzogWzFdfQ": {"G": [1]}, "p_int_MQ": 1},
+        ),
+        (
+            "mana<={g}",
+            r"(card.mana_cost_jsonb <@ %(p_dict_eydHJzogWzFdfQ)s AND card.cmc <= %(p_int_MQ)s)",
+            {"p_dict_eydHJzogWzFdfQ": {"G": [1]}, "p_int_MQ": 1},
+        ),
+        (
+            "mana<{g}",
+            r"(card.mana_cost_jsonb <@ %(p_dict_eydHJzogWzFdfQ)s AND card.cmc <= %(p_int_MQ)s AND card.mana_cost_jsonb <> %(p_dict_eydHJzogWzFdfQ)s)",
+            {"p_dict_eydHJzogWzFdfQ": {"G": [1]}, "p_int_MQ": 1},
+        ),
+        (
+            "mana>={g}{r}",
+            r"(%(p_dict_eydHJzogWzFdLCAnUic6IFsxXX0)s <@ card.mana_cost_jsonb AND card.cmc >= %(p_int_Mg)s)",
+            {"p_dict_eydHJzogWzFdLCAnUic6IFsxXX0": {"G": [1], "R": [1]}, "p_int_Mg": 2},
+        ),
+        (
+            "mana>{g}",
+            r"(%(p_dict_eydHJzogWzFdfQ)s <@ card.mana_cost_jsonb AND card.cmc >= %(p_int_MQ)s AND card.mana_cost_jsonb <> %(p_dict_eydHJzogWzFdfQ)s)",
+            {"p_dict_eydHJzogWzFdfQ": {"G": [1]}, "p_int_MQ": 1},
+        ),
+        # X is its own pip symbol, not a hybrid, and contributes 0 to cmc
+        # (mana_cost_jsonb keeps the X key; cmc excludes it) — braced and bare
+        # forms must produce identical SQL, since mana_cost_str_to_dict()
+        # treats them the same.
+        (
+            "mana:{X}{R}",
+            r"(%(p_dict_eydYJzogWzFdLCAnUic6IFsxXX0)s <@ card.mana_cost_jsonb AND card.cmc >= %(p_int_MQ)s)",
+            {"p_dict_eydYJzogWzFdLCAnUic6IFsxXX0": {"X": [1], "R": [1]}, "p_int_MQ": 1},
+        ),
+        (
+            "mana:xr",
+            r"(%(p_dict_eydYJzogWzFdLCAnUic6IFsxXX0)s <@ card.mana_cost_jsonb AND card.cmc >= %(p_int_MQ)s)",
+            {"p_dict_eydYJzogWzFdLCAnUic6IFsxXX0": {"X": [1], "R": [1]}, "p_int_MQ": 1},
+        ),
     ],
 )
 def test_full_sql_translation_jsonb_colors(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:

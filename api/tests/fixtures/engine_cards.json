@@ -7296,5 +7296,255 @@
     "type_line": "Sorcery",
     "prefer_score": 170.64348,
     "cubecobra_score": 9.339396
+  },
+  {
+    "scryfall_id": "0c9eeced-6464-41f0-bbea-05b3af4cc005",
+    "oracle_id": "325b88e1-ec7f-4d22-887c-a7f18a868bb0",
+    "illustration_id": "325b88e1-ec7f-4d22-887c-a7f18a868bb0",
+    "card_artist": "Forrest Imel",
+    "card_border": "black",
+    "card_color_identity": {
+      "R": true,
+      "U": true,
+      "W": true
+    },
+    "card_colors": {
+      "R": true,
+      "U": true,
+      "W": true
+    },
+    "card_frame_data": {},
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "legal",
+      "penny": "not_legal",
+      "predh": "not_legal",
+      "future": "legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "legal",
+      "alchemy": "legal",
+      "pioneer": "legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "not_legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "legal",
+      "paupercommander": "legal"
+    },
+    "card_name": "Monastery Messenger",
+    "card_oracle_tags": {},
+    "card_rarity_int": 0,
+    "card_set_code": "tdm",
+    "card_subtypes": [
+      "Bird",
+      "Scout"
+    ],
+    "card_types": [
+      "Creature"
+    ],
+    "card_watermark": null,
+    "cmc": 6,
+    "collector_number": "208",
+    "collector_number_int": 208,
+    "creature_power": 2,
+    "creature_toughness": 3,
+    "edhrec_rank": null,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "2/U": [
+        1
+      ],
+      "2/R": [
+        1
+      ],
+      "2/W": [
+        1
+      ]
+    },
+    "mana_cost_text": "{2/U}{2/R}{2/W}",
+    "oracle_text": "Flying",
+    "planeswalker_loyalty": null,
+    "price_eur": null,
+    "price_tix": null,
+    "price_usd": null,
+    "produced_mana": {},
+    "released_at": "2025-04-11",
+    "creature_power_text": "2",
+    "creature_toughness_text": "3",
+    "set_name": "Tarkir: Dragonstorm",
+    "type_line": "Creature \u2014 Bird Scout",
+    "prefer_score": 0.0,
+    "cubecobra_score": 0.0
+  },
+  {
+    "scryfall_id": "07592731-68be-4218-bb2c-c2523c5a27f1",
+    "oracle_id": "0297eeb2-47ec-4f9a-b1ad-4e7286994f00",
+    "illustration_id": "0297eeb2-47ec-4f9a-b1ad-4e7286994f00",
+    "card_artist": "Nils Hamm",
+    "card_border": "black",
+    "card_color_identity": {
+      "W": true
+    },
+    "card_colors": {
+      "W": true
+    },
+    "card_frame_data": {},
+    "card_is_tags": {},
+    "card_keywords": {
+      "Defender": true
+    },
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "not_legal",
+      "penny": "not_legal",
+      "predh": "not_legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "not_legal",
+      "vintage": "legal",
+      "historic": "not_legal",
+      "standard": "not_legal",
+      "timeless": "not_legal",
+      "commander": "legal",
+      "gladiator": "not_legal",
+      "oldschool": "not_legal",
+      "premodern": "legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Cathedral Membrane",
+    "card_oracle_tags": {},
+    "card_rarity_int": 0,
+    "card_set_code": "nph",
+    "card_subtypes": [
+      "Phyrexian",
+      "Wall"
+    ],
+    "card_types": [
+      "Artifact",
+      "Creature"
+    ],
+    "card_watermark": "phyrexian",
+    "cmc": 2,
+    "collector_number": "5",
+    "collector_number_int": 5,
+    "creature_power": 0,
+    "creature_toughness": 3,
+    "edhrec_rank": null,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "W/P": [
+        1
+      ]
+    },
+    "mana_cost_text": "{1}{W/P}",
+    "oracle_text": "({W/P} can be paid with either {W} or 2 life.)\nDefender",
+    "planeswalker_loyalty": null,
+    "price_eur": null,
+    "price_tix": null,
+    "price_usd": null,
+    "produced_mana": {},
+    "released_at": "2011-05-13",
+    "creature_power_text": "0",
+    "creature_toughness_text": "3",
+    "set_name": "New Phyrexia",
+    "type_line": "Artifact Creature \u2014 Phyrexian Wall",
+    "prefer_score": 0.0,
+    "cubecobra_score": 0.0
+  },
+  {
+    "scryfall_id": "df45a43e-a5b7-4fd4-873b-7b3c021be198",
+    "oracle_id": "aa7714b0-2bfb-458a-8ebf-37ec2c53383e",
+    "illustration_id": "aa7714b0-2bfb-458a-8ebf-37ec2c53383e",
+    "card_artist": "Xavier Ribeiro",
+    "card_border": "black",
+    "card_color_identity": {
+      "R": true
+    },
+    "card_colors": {
+      "R": true
+    },
+    "card_frame_data": {},
+    "card_is_tags": {},
+    "card_keywords": {},
+    "card_layout": "normal",
+    "card_legalities": {
+      "tlr": "not_legal",
+      "duel": "legal",
+      "brawl": "not_legal",
+      "penny": "legal",
+      "predh": "legal",
+      "future": "not_legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "pauper": "not_legal",
+      "alchemy": "not_legal",
+      "pioneer": "legal",
+      "vintage": "legal",
+      "historic": "legal",
+      "standard": "not_legal",
+      "timeless": "legal",
+      "commander": "legal",
+      "gladiator": "legal",
+      "oldschool": "not_legal",
+      "premodern": "legal",
+      "oathbreaker": "legal",
+      "standardbrawl": "not_legal",
+      "paupercommander": "not_legal"
+    },
+    "card_name": "Fireball",
+    "card_oracle_tags": {},
+    "card_rarity_int": 1,
+    "card_set_code": "clb",
+    "card_subtypes": [],
+    "card_types": [
+      "Sorcery"
+    ],
+    "card_watermark": null,
+    "cmc": 1,
+    "collector_number": "175",
+    "collector_number_int": 175,
+    "creature_power": null,
+    "creature_toughness": null,
+    "edhrec_rank": null,
+    "flavor_text": null,
+    "mana_cost_jsonb": {
+      "X": [
+        1
+      ],
+      "R": [
+        1
+      ]
+    },
+    "mana_cost_text": "{X}{R}",
+    "oracle_text": "This spell costs {1} more to cast for each target it has beyond the first.\nFireball deals X damage divided as you choose among any number of targets.",
+    "planeswalker_loyalty": null,
+    "price_eur": null,
+    "price_tix": null,
+    "price_usd": null,
+    "produced_mana": {},
+    "released_at": "2022-06-10",
+    "creature_power_text": null,
+    "creature_toughness_text": null,
+    "set_name": "Commander Legends: Battle for Baldur's Gate",
+    "type_line": "Sorcery",
+    "prefer_score": 0.0,
+    "cubecobra_score": 0.0
   }
 ]
