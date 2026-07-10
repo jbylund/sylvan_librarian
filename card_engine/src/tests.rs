@@ -2294,6 +2294,40 @@ fn oracle_word_fixture_store() -> CardData {
     data
 }
 
+/// 6 distinct texts (n_texts=6, words_per_plane=1, dense iff a word's own
+/// text count exceeds 4) engineered so a single needle has TWO dense hits and
+/// ZERO sparse hits: "wordone" and "wordtwo" each appear in 5 of the 6 texts,
+/// and both contain "word" as a substring, with no other dictionary word
+/// containing it. This is the one dispatch shape oracle_word_fixture_store
+/// doesn't produce — "creature" there mixes one dense hit with one sparse hit
+/// ("creaturehood"), never two-or-more dense hits alone — even though both
+/// land in the same catch-all match arm in narrow_rec.
+fn oracle_word_multi_dense_fixture_store() -> CardData {
+    let mut vocab = VocabInterner::new();
+    let mut interner = Interner::new();
+    let texts: &[&str] = &[
+        "wordone wordtwo alpha",
+        "wordone wordtwo beta",
+        "wordone wordtwo gamma",
+        "wordone wordtwo delta",
+        "wordone wordtwo epsilon",
+        "nothing relevant here",
+    ];
+    let cards: Vec<OracleCard> = texts
+        .iter()
+        .enumerate()
+        .map(|(i, text)| {
+            let mut c = stub_card(i as u128 + 1, TYPE_CREATURE, &[], &mut vocab);
+            c.oracle_text_lower_id = interner.intern(text.to_string());
+            c
+        })
+        .collect();
+    let mut data = store_of(cards, &[1usize; 6], vocab);
+    data.strings = interner.strings;
+    data.indexes.oracle_trigram = build_oracle_text_index(&data.cards, &data.strings);
+    data
+}
+
 /// Brute-force `oracle:<needle>` over every card, for differential comparison.
 fn brute_force_oracle_contains(archived: &Archived<CardData>, needle: &str) -> Vec<u32> {
     (0..archived.cards.len() as u32)
@@ -2355,6 +2389,29 @@ fn oracle_word_index_dispatch_shapes() {
         Candidates::CardBits(_) => {}
         other => panic!("mixed dense+sparse must return CardBits, got {other:?}", other = std::mem::discriminant(&other)),
     }
+}
+
+// Two-or-more dense hits with zero sparse hits lands in the same catch-all
+// match arm as "mixed dense+sparse" above, but oracle_word_fixture_store never
+// produces that exact shape (its only multi-hit needle, "creature", always
+// pairs a dense hit with a sparse one) — so this pins it with a dedicated
+// fixture, both for exactness and for the CardBits representation.
+#[test]
+fn oracle_word_index_multi_dense_no_sparse() {
+    let data = oracle_word_multi_dense_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let rec = |f: &FilterExpr| super::narrow_rec(f, &archived.indexes, &archived.offsets, &archived.cards, true);
+    let oracle = |w: &str| FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: w.to_string() };
+
+    let expected = brute_force_oracle_contains(archived, "word");
+    let n = rec(&oracle("word")).expect("oracle:word must narrow");
+    assert!(n.tight, "oracle:word must narrow tight (exact, no verification)");
+    match &n.set {
+        Candidates::CardBits(_) => {}
+        other => panic!("2+ dense hits, no sparse, must return CardBits, got {other:?}", other = std::mem::discriminant(other)),
+    }
+    assert_eq!(n.set.into_cards(&archived.offsets), expected, "oracle:word must match the brute-force set exactly");
 }
 
 // compile_plane's bonus arm only fires for the single-dense-hit shape (needed
