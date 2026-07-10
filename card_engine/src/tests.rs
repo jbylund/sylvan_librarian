@@ -1161,6 +1161,96 @@ fn collector_number_narrowing() {
     assert_eq!(narrow(&or), Some(vec![0, 1]));
 }
 
+// ─── #634 Step 1: all_match promotion ─────────────────────────────────────────
+
+/// The regression this suite exists to prevent: a printing-space predicate
+/// narrowing "tight" (every posted printing genuinely matches — see
+/// collector_number_narrowing above) does NOT mean "every printing of the
+/// associated card matches," which is what `all_match`/`Tri::True` means at
+/// card_pass's level. card 0 has two printings — one at cn=100 (matches),
+/// one at cn=228 (does not) — so `cn=100` must resolve to exactly one
+/// printing match, never both (which is what wrongly promoting a tight
+/// printing-space result to all_match would produce).
+#[test]
+fn all_match_promotion_never_fires_for_printing_space_tight_results() {
+    let mut vocab = VocabInterner::new();
+    let cards = vec![stub_card(1, TYPE_CREATURE, &[], &mut vocab), stub_card(2, TYPE_CREATURE, &[], &mut vocab)];
+    let mut data = store_of(cards, &[2, 2], vocab);
+    data.printings[0].collector_number_int = Some(100);
+    data.printings[1].collector_number_int = Some(228);
+    data.printings[2].collector_number_int = Some(101);
+    data.indexes.collector_number = build_range_index(&data.printings, |p| p.collector_number_int.map(u32::from));
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let mut cn_eq_100 = FilterExpr::NumericCmp {
+        lhs: NumExpr::Field(NumField::CollectorNumberInt),
+        op: CmpOp::Eq,
+        rhs: NumExpr::Const(100.0),
+    };
+    let (total, page) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut cn_eq_100, None, "printing", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+    );
+    assert_eq!(total, 1, "cn=100 must match exactly one printing, not both of card 0's printings");
+    assert_eq!(u128::from(page[0].1.scryfall_id), 1); // the cn=100 printing specifically
+
+    // unique=card must also see exactly one matching card (not both, and not
+    // zero), and it must be card 0.
+    let mut cn_eq_100b = FilterExpr::NumericCmp {
+        lhs: NumExpr::Field(NumField::CollectorNumberInt),
+        op: CmpOp::Eq,
+        rhs: NumExpr::Const(100.0),
+    };
+    let (total, page) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut cn_eq_100b, None, "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+    );
+    assert_eq!(total, 1);
+    assert_eq!(u128::from(page[0].0.oracle_id), 1);
+}
+
+/// The positive case: a genuinely card-space exact predicate (a numeric
+/// range — cmc/power/toughness are card-level fields, identical across every
+/// printing) gets the same correct results with or without all_match
+/// promotion. Doesn't assert card_pass was skipped (an implementation
+/// detail) — just that results stay correct, across uniques, when the
+/// narrowing IS safe to trust directly.
+#[test]
+fn all_match_promotion_correct_for_card_space_exact_predicate() {
+    let mut vocab = VocabInterner::new();
+    let mut card0 = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
+    card0.creature_power = Some(5);
+    let mut card1 = stub_card(2, TYPE_CREATURE, &[], &mut vocab);
+    card1.creature_power = Some(1);
+    let mut data = store_of(vec![card0, card1], &[2, 3], vocab);
+    data.indexes.power = build_numeric_index(&data.cards, |c| c.creature_power.map(|v| v as i16));
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let mut power_gt_3 = FilterExpr::NumericCmp {
+        lhs: NumExpr::Field(NumField::Power),
+        op: CmpOp::Gt,
+        rhs: NumExpr::Const(3.0),
+    };
+    let (total, _) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut power_gt_3, None, "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+    );
+    assert_eq!(total, 1); // only card0 (power 5)
+
+    let mut power_gt_3p = FilterExpr::NumericCmp {
+        lhs: NumExpr::Field(NumField::Power),
+        op: CmpOp::Gt,
+        rhs: NumExpr::Const(3.0),
+    };
+    let (total, _) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut power_gt_3p, None, "printing", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+    );
+    assert_eq!(total, 2); // card0's 2 printings, all matching (power is card-level)
+}
+
 // Frame postings are selectivity-thresholded at build: values covering more
 // of printing space than the range guard would accept are not stored, and the
 // absent-key convention makes them (and unknown values) fall back to the scan.

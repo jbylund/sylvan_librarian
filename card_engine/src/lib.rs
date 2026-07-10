@@ -2096,23 +2096,62 @@ fn tight_narrow_space(f: &FilterExpr) -> Option<bool> {
     }
 }
 
+/// Like narrow_candidates, but also reports whether the returned set (when
+/// Some) is card-level exact — #634 Step 1's all_match promotion needs this:
+/// when the residual is provably both tight (no false positives) and
+/// complete (every true match included, which `narrow_rec`'s `tight` already
+/// tracks through its And/Or composition — see `and_all`/`or_all`), the whole
+/// original query is exact whenever a present `plane` is too (always true —
+/// that's what `compile_plane` already guarantees), and per-candidate
+/// `card_pass` becomes redundant work the narrowing already did.
+///
+/// Critically, `tight` alone is not enough: it means every member of the set
+/// truly satisfies the predicate *in the set's own space*. For a printing-
+/// space result that's "this specific printing matches," not "every printing
+/// of the associated card matches" — but `card_pass`'s `Tri::True` (what
+/// `all_match` stands in for) specifically means the latter. A card can have
+/// printings in and out of a printing-space match (e.g. `set:war` — most
+/// cards have other-set printings too), so a tight-but-printing-space result
+/// must never promote. Only a genuinely card-space tight result qualifies.
+///
+/// A discarded-for-broadness result never promotes either: "exact" alone
+/// isn't enough without the actual membership in hand to skip verification
+/// safely — a too-broad-to-narrow-with `cmc<=6` is still exact in principle,
+/// but we don't have its membership without paying to materialize it, which
+/// isn't worth doing just for this (see
+/// docs/issues/engine-permuted-bitmap-order-phase.md).
+fn narrow_candidates_exact(
+    filter: &FilterExpr,
+    indexes: &Archived<CardIndexes>,
+    offsets: &AOffsets,
+    cards: &[AOracleCard],
+) -> (Option<Candidates>, bool) {
+    let n_cards = offsets.len().saturating_sub(1);
+    let n_printings = if n_cards == 0 { 0 } else { u32::from(offsets[n_cards]) as usize };
+    match narrow_rec(filter, indexes, offsets, cards, false) {
+        None => (None, false),
+        Some(n) => {
+            let printing_space = n.set.is_printing_space();
+            let domain = if printing_space { n_printings } else { n_cards };
+            if n.set.len() <= domain - domain / 4 {
+                (Some(n.set), n.tight && !printing_space)
+            } else {
+                (None, false)
+            }
+        }
+    }
+}
+
+// Only run_query needs the exactness bit (#634 Step 1); every other caller —
+// all in tests — just wants the candidate set, same as before that change.
+#[cfg(test)]
 fn narrow_candidates(
     filter: &FilterExpr,
     indexes: &Archived<CardIndexes>,
     offsets: &AOffsets,
     cards: &[AOracleCard],
 ) -> Option<Candidates> {
-    let n_cards = offsets.len().saturating_sub(1);
-    let n_printings = if n_cards == 0 { 0 } else { u32::from(offsets[n_cards]) as usize };
-    narrow_rec(filter, indexes, offsets, cards, false)
-        .filter(|n| {
-            // Near-total sets narrow nothing; dropping them here (a popcount,
-            // before any projection or materialization) keeps broad composed
-            // results from paying conversion costs on the way to being useless.
-            let domain = if n.set.is_printing_space() { n_printings } else { n_cards };
-            n.set.len() <= domain - domain / 4
-        })
-        .map(|n| n.set)
+    narrow_candidates_exact(filter, indexes, offsets, cards).0
 }
 
 /// Once any candidate source in an And is this selective, evaluating further
@@ -2888,7 +2927,17 @@ fn run_query<'a>(
     // queries exactly as before. Left un-materialized (Candidates, not
     // Vec<u32>) here so the plane branch below can AND two card-space bitmaps
     // directly instead of paying to materialize one of them first.
-    let raw_candidates: Option<Candidates> = narrow_candidates(filter, indexes, offsets, cards);
+    let (raw_candidates, residual_exact): (Option<Candidates>, bool) =
+        narrow_candidates_exact(filter, indexes, offsets, cards);
+    // A present plane is always exact (that's what compile_plane guarantees),
+    // so the whole original query is exact iff the residual is too — either
+    // because split_planes consumed all of it (bare True) or narrow_rec
+    // proved the remainder tight and complete with its membership in hand
+    // (see narrow_candidates_exact). #634 Step 1: when this holds, every
+    // candidate is already known to match, so the per-candidate card_pass
+    // calls below and in run_query_streamed become redundant re-verification
+    // of what the narrowing already established.
+    let all_match_known = matches!(filter, FilterExpr::True) || residual_exact;
 
     // The plane bitmap is the exact card-level truth of the plane-consumed
     // subexpression (split_planes), so it composes with the residual's
@@ -2938,15 +2987,18 @@ fn run_query<'a>(
     // the gate is per-node and cost-based (see memoize_pays): each predicate
     // compares its own bind bound against the evaluation domain, so a broad
     // candidate set with a selective needle memoizes while a narrow one
-    // leaves the scan alone.
-    let eval_domain = candidate_cards.as_ref().map_or(cards.len(), Vec::len);
-    filter.memoize_text_predicates(cards, strings, &indexes.name_trigram, &indexes.name_bigrams, &indexes.oracle_trigram, eval_domain);
-    // Sort And/Or children cheapest-verification-first so the walk's
-    // short-circuit spares the expensive text predicates (semantics-preserving;
-    // see order_children_by_verify_cost). After memoization, which flips
-    // TextContains nodes from the scan tier to the set tier.
-    if *VERIFY_ORDER != 0 {
-        filter.order_children_by_verify_cost();
+    // leaves the scan alone. Skipped entirely when all_match_known: card_pass
+    // never runs, so there is nothing left for the rewrite to speed up.
+    if !all_match_known {
+        let eval_domain = candidate_cards.as_ref().map_or(cards.len(), Vec::len);
+        filter.memoize_text_predicates(cards, strings, &indexes.name_trigram, &indexes.name_bigrams, &indexes.oracle_trigram, eval_domain);
+        // Sort And/Or children cheapest-verification-first so the walk's
+        // short-circuit spares the expensive text predicates (semantics-preserving;
+        // see order_children_by_verify_cost). After memoization, which flips
+        // TextContains nodes from the scan tier to the set tier.
+        if *VERIFY_ORDER != 0 {
+            filter.order_children_by_verify_cost();
+        }
     }
     let card_ids: Box<dyn Iterator<Item = u32>> = match &candidate_cards {
         Some(v) => Box::new(v.iter().copied()),
@@ -2962,7 +3014,7 @@ fn run_query<'a>(
     if let Some(perm) = indexes.sort_perms.get(sort_col, descending) {
         if maybe_broad && perm.len() == cards.len() && !cards.is_empty() {
             return run_query_streamed(
-                cards, printings, offsets, strings, filter, mode, prefer, sort_col, descending, limit,
+                cards, printings, offsets, strings, filter, all_match_known, mode, prefer, sort_col, descending, limit,
                 page_offset, perm, card_ids, &indexes.artwork_groups,
             );
         }
@@ -2977,11 +3029,15 @@ fn run_query<'a>(
     let mut residual_is_or = false;
     for cid in card_ids {
         let card = &cards[cid as usize];
-        let all_match = match filter.card_pass(card, strings, &mut residual, &mut residual_is_or) {
-            Tri::False | Tri::Null => continue,
-            Tri::True => true,          // every printing matches: skip per-printing checks
-            Tri::PrintingDep => false,  // verify each printing against the residual below
-        };
+        // #634 Step 1: all_match_known means the narrowing already proved
+        // every candidate matches — card_pass would just re-derive Tri::True
+        // at real per-node evaluation cost for nothing.
+        let all_match = all_match_known
+            || match filter.card_pass(card, strings, &mut residual, &mut residual_is_or) {
+                Tri::False | Tri::Null => continue,
+                Tri::True => true,          // every printing matches: skip per-printing checks
+                Tri::PrintingDep => false,  // verify each printing against the residual below
+            };
         let start = u32::from(offsets[cid as usize]) as usize;
         let end   = u32::from(offsets[cid as usize + 1]) as usize;
         push_card_matches(
@@ -3008,6 +3064,7 @@ fn run_query_streamed<'a>(
     offsets: &AOffsets,
     strings: &AStrings,
     filter: &FilterExpr,
+    all_match_known: bool,
     mode: Mode,
     prefer: Prefer,
     sort_col: SortCol,
@@ -3037,11 +3094,22 @@ fn run_query_streamed<'a>(
     let mut total: usize = 0;
     for cid in card_ids {
         let card = &cards[cid as usize];
-        let all_match = match filter.card_pass(card, strings, &mut residual, &mut residual_is_or) {
-            Tri::False | Tri::Null => continue,
-            Tri::True => true,
-            Tri::PrintingDep => false,
-        };
+        // #634 Step 1: skip the redundant card_pass re-derivation of Tri::True
+        // when the narrowing already proved every candidate matches. Gated
+        // off for Mode::Artwork specifically: measured a ~45% regression for
+        // `t:creature` unique=artwork with this applied unconditionally here
+        // (0.13ms -> 0.19ms typical, isolated by bisecting call sites) despite
+        // being a no-op change in card_pass's own return value (True either
+        // way) — an unexplained codegen/scheduling effect in this loop for
+        // that mode specifically, not a logical cost. Card/Printing modes
+        // showed no such effect and do benefit (this loop visits every
+        // candidate, not just the ~limit emitted).
+        let all_match = (all_match_known && !matches!(mode, Mode::Artwork))
+            || match filter.card_pass(card, strings, &mut residual, &mut residual_is_or) {
+                Tri::False | Tri::Null => continue,
+                Tri::True => true,
+                Tri::PrintingDep => false,
+            };
         let start = u32::from(offsets[cid as usize]) as usize;
         let end   = u32::from(offsets[cid as usize + 1]) as usize;
         // Every printing matches: card/printing counts are O(1) inside the
@@ -3069,11 +3137,12 @@ fn run_query_streamed<'a>(
                 continue;
             }
             let card = &cards[cid as usize];
-            let all_match = match filter.card_pass(card, strings, &mut residual, &mut residual_is_or) {
-                Tri::True => true,
-                Tri::PrintingDep => false,
-                _ => continue,
-            };
+            let all_match = all_match_known
+                || match filter.card_pass(card, strings, &mut residual, &mut residual_is_or) {
+                    Tri::True => true,
+                    Tri::PrintingDep => false,
+                    _ => continue,
+                };
             let start = u32::from(offsets[cid as usize]) as usize;
             let end   = u32::from(offsets[cid as usize + 1]) as usize;
             push_card_matches(
@@ -3105,11 +3174,12 @@ fn run_query_streamed<'a>(
             continue;
         }
         let card = &cards[cid as usize];
-        let all_match = match filter.card_pass(card, strings, &mut residual, &mut residual_is_or) {
-            Tri::True => true,
-            Tri::PrintingDep => false,
-            _ => continue,
-        };
+        let all_match = all_match_known
+            || match filter.card_pass(card, strings, &mut residual, &mut residual_is_or) {
+                Tri::True => true,
+                Tri::PrintingDep => false,
+                _ => continue,
+            };
         let start = u32::from(offsets[cid as usize]) as usize;
         let end   = u32::from(offsets[cid as usize + 1]) as usize;
         scratch.clear();
