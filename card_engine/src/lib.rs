@@ -1693,6 +1693,7 @@ struct CardIndexes {
     artwork_groups: Vec<u16>,                  // card space: distinct illustration groups
     planes:         BitPlanes,                 // card space: transposed low-cardinality dims (#630)
     name_bigrams:   NameBigramIndex,           // card space: exact 2-byte name containment (#639)
+    legal_divergent: Vec<u16>,                // card space: ids with divergent legality (#630 phase 2), postings not a plane — see build_divergent_ids
 }
 
 impl Default for CardIndexes {
@@ -1720,6 +1721,7 @@ impl Default for CardIndexes {
             artwork_groups: Vec::new(),
             planes:         BitPlanes::default(),
             name_bigrams:   NameBigramIndex::default(),
+            legal_divergent: Vec::new(),
         }
     }
 }
@@ -1825,6 +1827,35 @@ fn and_bits_into(acc: &mut [u64], other: &[u64]) {
     for (a, b) in acc.iter_mut().zip(other) {
         *a &= b;
     }
+}
+
+/// Card-space candidate mask for one format's `legal_x OR divergent` (or,
+/// when `negate`, `NOT(legal_x) OR divergent`) — always a superset of the true
+/// match set. `legal_x` (PLANE_LEGAL) is exact only for non-divergent cards
+/// (see planes.rs), so every divergent card is unconditionally included
+/// regardless of its own canonical status, leaving the existing
+/// card_pass/residual walk (unchanged, PrintingDep and all) to resolve it
+/// exactly. See docs/issues/engine-legality-bitplanes.md.
+fn legal_candidate_bits(indexes: &Archived<CardIndexes>, n_cards: usize, shift: u8, negate: bool) -> Option<Vec<u64>> {
+    if u32::from(indexes.planes.n_cards) as usize != n_cards || n_cards == 0 {
+        return None;
+    }
+    let wpp = words_per_plane(n_cards);
+    let legal_plane = PLANE_LEGAL + shift as usize / 2;
+    let words = &indexes.planes.words;
+    let mut bits: Vec<u64> = words[legal_plane * wpp..(legal_plane + 1) * wpp].iter().map(|w| u64::from(*w)).collect();
+    if negate {
+        complement_bits(&mut bits, n_cards);
+    }
+    // The divergent set is a fixed, tiny (~556-card) postings list, not a
+    // plane (see build_divergent_ids) — scattered directly into the mask
+    // rather than intersected through the general Candidates machinery,
+    // since it's always this same list, never query-dependent.
+    for &cid in indexes.legal_divergent.iter() {
+        let cid = u16::from(cid) as usize;
+        bits[cid / 64] |= 1u64 << (cid % 64);
+    }
+    Some(bits)
 }
 
 /// Project a printing-space bitmap up to card space. Printings of card i are
@@ -2249,6 +2280,26 @@ fn narrow_rec(
             let mut bits: Vec<u64> = Vec::new();
             eval_planes(&pe, &indexes.planes, &mut bits);
             Narrowed::loose(Candidates::CardBits(bits))
+        }
+
+        // f:x / format:x — narrowing only (never exact-consumed via
+        // compile_plane): Legality can return Tri::PrintingDep for divergent
+        // cards, which compile_plane's two-valued-only rule already excludes.
+        // banned:/restricted: (expected != LEGALITY_LEGAL) and formats absent
+        // from loaded data (shift: None) fall through unindexed, unchanged.
+        FilterExpr::Legality { shift: Some(shift), expected } if *expected == LEGALITY_LEGAL => {
+            Narrowed::loose(Candidates::CardBits(legal_candidate_bits(indexes, n_cards, *shift, false)?))
+        }
+
+        // -f:x — matched as its own leaf shape rather than falling through to
+        // the generic Not-complement below, which requires a `tight` child;
+        // legal_candidate_bits has false positives among divergent cards by
+        // construction, so the generic path would (correctly) refuse it.
+        FilterExpr::Not(inner)
+            if matches!(inner.as_ref(), FilterExpr::Legality { shift: Some(_), expected } if *expected == LEGALITY_LEGAL) =>
+        {
+            let FilterExpr::Legality { shift: Some(shift), .. } = inner.as_ref() else { unreachable!() };
+            Narrowed::loose(Candidates::CardBits(legal_candidate_bits(indexes, n_cards, *shift, true)?))
         }
 
         FilterExpr::CollectionCmp { field, op, value, .. } if matches!(op, CmpOp::Ge) => {
@@ -2834,20 +2885,23 @@ fn run_query<'a>(
     // visit almost every card anyway, and the list costs its materialization.
     // Broad-range bitmaps (#636) can produce such lists; treating them as
     // unnarrowed also keeps the #635 memoization trigger firing for these
-    // queries exactly as before.
-    let candidate_cards: Option<Vec<u32>> = narrow_candidates(filter, indexes, offsets, cards)
-        .map(|c| c.into_cards(offsets))
-        .filter(|v| v.len() < cards.len() - cards.len() / 8);
+    // queries exactly as before. Left un-materialized (Candidates, not
+    // Vec<u32>) here so the plane branch below can AND two card-space bitmaps
+    // directly instead of paying to materialize one of them first.
+    let raw_candidates: Option<Candidates> = narrow_candidates(filter, indexes, offsets, cards);
 
     // The plane bitmap is the exact card-level truth of the plane-consumed
-    // subexpression (split_planes), so it composes with the residual's postings
-    // candidates by intersection — and with no postings it IS the candidate
-    // list. Either way every surviving card still runs the residual through
-    // card_pass, which is what keeps printing-space losses and Null semantics
-    // with the residual, not the planes. The bitmap buffer is reused across
-    // queries (thread-local), same as the streamed counts buffer.
+    // subexpression (split_planes), so it composes with the residual's
+    // narrowed candidates by intersection — and with no candidates it IS the
+    // candidate list. Either way every surviving card still runs the residual
+    // through card_pass, which is what keeps printing-space losses and Null
+    // semantics with the residual, not the planes. The bitmap buffer is
+    // reused across queries (thread-local), same as the streamed counts
+    // buffer.
     let candidate_cards: Option<Vec<u32>> = match plane {
-        None => candidate_cards,
+        None => raw_candidates
+            .map(|c| c.into_cards(offsets))
+            .filter(|v| v.len() < cards.len() - cards.len() / 8),
         Some(expr) => {
             thread_local! {
                 static PLANE_BITMAP: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -2855,8 +2909,21 @@ fn run_query<'a>(
             PLANE_BITMAP.with(|cell| {
                 let mut bitmap = cell.borrow_mut();
                 eval_planes(expr, &indexes.planes, &mut bitmap);
-                match candidate_cards {
-                    Some(mut v) => {
+                match raw_candidates {
+                    // Both sides already card-space bitmaps (e.g. #630 phase
+                    // 2's legal-format masks, or the devotion superset arm):
+                    // AND them directly, O(words) regardless of either side's
+                    // popcount. Materializing the residual's ids first and
+                    // retaining against the plane — the general path below —
+                    // costs O(residual popcount), which is a poor trade when
+                    // the residual is a broad mask (a legal-format narrowing
+                    // is often 50-99% of the store) and the plane is tight.
+                    Some(Candidates::CardBits(mut b)) => {
+                        and_bits_into(&mut b, &bitmap);
+                        Some(bitmap_card_ids(&b))
+                    }
+                    Some(c) => {
+                        let mut v = c.into_cards(offsets);
                         v.retain(|&cid| bitmap_contains(&bitmap, cid));
                         Some(v)
                     }
@@ -3169,7 +3236,7 @@ const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 /// catch (e.g. reordering same-size fields, changing an index type) — and on
 /// any FLAVOR_FP_FEATURES change: archived fingerprints are built with that
 /// table, so a new table reading old fingerprints breaks the superset test.
-const ARCHIVE_FORMAT_VERSION: u32 = 20260719;
+const ARCHIVE_FORMAT_VERSION: u32 = 20260720;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -3566,6 +3633,7 @@ impl QueryEngine {
             artwork_groups: build_artwork_group_counts(&printings, &offsets),
             planes:         build_bit_planes(&cards),
             name_bigrams:   build_name_bigram_index(&cards),
+            legal_divergent: build_divergent_ids(&cards),
         };
 
         #[cfg(feature = "alloc-counter")]

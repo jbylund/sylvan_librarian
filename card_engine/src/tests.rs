@@ -2,7 +2,7 @@ use super::{
     assign_name_ranks,
     build_numeric_index, build_oracle_text_index, build_tag_index, build_trigram_index,
     build_rarity_index, build_flavor_index, build_thresholded_tag_index, build_sort_permutations,
-    build_artwork_group_counts, build_bit_planes, build_name_bigram_index, flavor_fingerprint, flavor_match_sets,
+    build_artwork_group_counts, build_bit_planes, build_divergent_ids, build_name_bigram_index, flavor_fingerprint, flavor_match_sets,
     cards_of_printings, count_common_keywords, count_common_types,
     build_artist_index, build_range_index, range_candidates, narrow_candidates, rarity_candidates,
     range_too_broad_to_narrow, run_query, trigram_candidates, PrintingRangeIndex, NARROW_FLOOR,
@@ -219,6 +219,7 @@ fn store_of(cards: Vec<OracleCard>, printing_counts: &[usize], vocab: VocabInter
     let indexes = CardIndexes {
         planes: build_bit_planes(&cards),
         name_bigrams: build_name_bigram_index(&cards),
+        legal_divergent: build_divergent_ids(&cards),
         ..Default::default()
     };
     CardData {
@@ -525,6 +526,177 @@ fn divergent_legality_defers_to_printings() {
     assert!(!f.matches(&archived.cards[1], &archived.printings[2], &archived.strings));
 }
 
+// ─── Legality bitplanes (#630 phase 2) ────────────────────────────────────────
+
+/// card0: legal in format A (shift 0) only. card1: legal in format B (shift 2)
+/// only. card2: divergent, canonical (preferred-printing) word says legal in
+/// neither — the OR-with-divergent-postings narrowing must still include it.
+fn legal_plane_fixture() -> (Vec<OracleCard>, VocabInterner) {
+    let mut vocab = VocabInterner::new();
+    let mut card0 = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
+    card0.card_legalities = 0b01; // legal at shift 0
+    let mut card1 = stub_card(2, TYPE_CREATURE, &[], &mut vocab);
+    card1.card_legalities = 0b01 << 2; // legal at shift 2
+    let mut card2 = stub_card(3, TYPE_CREATURE, &[], &mut vocab);
+    card2.card_legalities = 0; // not legal in either, canonically
+    card2.legality_divergent = true;
+    (vec![card0, card1, card2], vocab)
+}
+
+#[test]
+fn legal_plane_narrows_positive_includes_divergent() {
+    let (cards, vocab) = legal_plane_fixture();
+    let data = store_of(cards, &[1, 1, 1], vocab);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    // Format A (shift 0): card0 (truly legal) + card2 (divergent, always
+    // included) narrow in; card1 (legal only in format B) must not.
+    let f = FilterExpr::Legality { shift: Some(0), expected: 0b01 };
+    match narrow_candidates(&f, &archived.indexes, &archived.offsets, &archived.cards) {
+        Some(Candidates::CardBits(bits)) => {
+            assert!(bitmap_contains(&bits, 0), "truly legal card must narrow in");
+            assert!(!bitmap_contains(&bits, 1), "card legal only in a different format must not narrow in");
+            assert!(bitmap_contains(&bits, 2), "divergent card must always narrow in, regardless of canonical status");
+        }
+        _ => panic!("expected a card bitmap"),
+    }
+
+    // Format B (shift 2): card1 narrows in, card0 does not, card2 still does
+    // (shift math must independently address each format's plane).
+    let g = FilterExpr::Legality { shift: Some(2), expected: 0b01 };
+    match narrow_candidates(&g, &archived.indexes, &archived.offsets, &archived.cards) {
+        Some(Candidates::CardBits(bits)) => {
+            assert!(!bitmap_contains(&bits, 0));
+            assert!(bitmap_contains(&bits, 1));
+            assert!(bitmap_contains(&bits, 2));
+        }
+        _ => panic!("expected a card bitmap"),
+    }
+}
+
+#[test]
+fn legal_plane_narrows_negated_includes_divergent() {
+    let (cards, vocab) = legal_plane_fixture();
+    let data = store_of(cards, &[1, 1, 1], vocab);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    // -f:A: card0 is truly legal in A, so it must NOT narrow in; card1 (not
+    // legal in A) and card2 (divergent) must.
+    let not_a = FilterExpr::Not(Box::new(FilterExpr::Legality { shift: Some(0), expected: 0b01 }));
+    match narrow_candidates(&not_a, &archived.indexes, &archived.offsets, &archived.cards) {
+        Some(Candidates::CardBits(bits)) => {
+            assert!(!bitmap_contains(&bits, 0), "truly legal card must not narrow into the negation");
+            assert!(bitmap_contains(&bits, 1), "truly not-legal card must narrow into the negation");
+            assert!(bitmap_contains(&bits, 2), "divergent card must always narrow in, regardless of polarity");
+        }
+        _ => panic!("expected a card bitmap"),
+    }
+}
+
+#[test]
+fn legal_plane_declines_banned_restricted_and_absent_format() {
+    let (cards, vocab) = legal_plane_fixture();
+    let data = store_of(cards, &[1, 1, 1], vocab);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    // banned:/restricted: never plane-narrow — unindexed and unchanged.
+    let banned = FilterExpr::Legality { shift: Some(0), expected: 0b11 };
+    assert!(narrow_candidates(&banned, &archived.indexes, &archived.offsets, &archived.cards).is_none());
+    let restricted = FilterExpr::Legality { shift: Some(0), expected: 0b10 };
+    assert!(narrow_candidates(&restricted, &archived.indexes, &archived.offsets, &archived.cards).is_none());
+    // Not(banned) falls through the generic Not path, which also declines
+    // (no tight source to complement) — still correct, just unnarrowed.
+    let not_banned = FilterExpr::Not(Box::new(banned));
+    assert!(narrow_candidates(&not_banned, &archived.indexes, &archived.offsets, &archived.cards).is_none());
+
+    // A format absent from all loaded data (shift: None) matches nothing at
+    // eval and isn't plane-narrowed either — falls to the (cheap, correct)
+    // full scan.
+    let absent = FilterExpr::Legality { shift: None, expected: 0b01 };
+    assert!(narrow_candidates(&absent, &archived.indexes, &archived.offsets, &archived.cards).is_none());
+}
+
+/// The correctness property the whole design hinges on: a divergent card must
+/// never be silently dropped by the narrowing, in either polarity, even when
+/// its *preferred* printing's status disagrees with a non-preferred printing
+/// that the query should actually match. This exercises the full path
+/// (narrow_rec's new arms feeding run_query's unmodified card_pass/residual
+/// walk), not just the bitmap in isolation.
+#[test]
+fn legal_plane_narrowing_preserves_divergent_printing_correctness() {
+    let mut vocab = VocabInterner::new();
+    // Preferred printing (higher prefer_score, sorts first) says NOT legal;
+    // the second, non-preferred printing says legal — the opposite of the
+    // "usual" case, deliberately, to stress the narrowing's superset property.
+    let mut card = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
+    card.card_legalities = 0; // preferred printing's status: not legal
+    card.legality_divergent = true;
+    let mut data = store_of(vec![card], &[2], vocab);
+    data.printings[0].card_legalities = 0; // preferred: not legal
+    data.printings[1].card_legalities = 0b01; // non-preferred: legal
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let run = |filter: &mut FilterExpr, unique: &str| {
+        run_query(
+            &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+            filter, None, unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
+        )
+    };
+
+    // f:A, unique=printing: exactly the one legal printing, not the not-legal one.
+    let mut f = FilterExpr::Legality { shift: Some(0), expected: 0b01 };
+    let (total, page) = run(&mut f, "printing");
+    assert_eq!(total, 1);
+    assert_eq!(u128::from(page[0].1.scryfall_id), 2); // the non-preferred, legal printing
+
+    // f:A, unique=card: the card matches (at least one printing is legal),
+    // even though the narrowing's own candidate bit for this card came only
+    // from the divergent postings, not from the (canonically "not legal") legal_x bit.
+    let mut f2 = FilterExpr::Legality { shift: Some(0), expected: 0b01 };
+    let (total, _) = run(&mut f2, "card");
+    assert_eq!(total, 1);
+
+    // -f:A, unique=printing: exactly the one not-legal printing.
+    let mut not_f = FilterExpr::Not(Box::new(FilterExpr::Legality { shift: Some(0), expected: 0b01 }));
+    let (total, page) = run(&mut not_f, "printing");
+    assert_eq!(total, 1);
+    assert_eq!(u128::from(page[0].1.scryfall_id), 1); // the preferred, not-legal printing
+}
+
+/// Word-boundary check: plane-index and bit-index arithmetic must stay correct
+/// past the first 64-card word, for a non-zero format shift.
+#[test]
+fn legal_plane_narrows_correctly_across_word_boundary() {
+    let mut vocab = VocabInterner::new();
+    let n = 70;
+    let cards: Vec<OracleCard> = (0..n)
+        .map(|i| {
+            let mut c = stub_card(1 + i as u128, TYPE_CREATURE, &[], &mut vocab);
+            // Legal (at shift 2) on even ids only, spanning past the 64-bit word boundary.
+            c.card_legalities = if i % 2 == 0 { 0b01 << 2 } else { 0 };
+            c
+        })
+        .collect();
+    let printing_counts = vec![1usize; n];
+    let data = store_of(cards, &printing_counts, vocab);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let f = FilterExpr::Legality { shift: Some(2), expected: 0b01 };
+    match narrow_candidates(&f, &archived.indexes, &archived.offsets, &archived.cards) {
+        Some(Candidates::CardBits(bits)) => {
+            for i in 0..n {
+                assert_eq!(bitmap_contains(&bits, i as u32), i % 2 == 0, "card {i} narrowing mismatch");
+            }
+        }
+        _ => panic!("expected a card bitmap"),
+    }
+}
+
 #[test]
 fn run_query_walk_dedups_and_prefers() {
     // card 0: Creature with 3 printings, card 1: Instant with 1, card 2: Creature with 2.
@@ -666,6 +838,7 @@ fn bench_checked_vs_unchecked_access() {
         artwork_groups: build_artwork_group_counts(&printings, &offsets),
         planes:         build_bit_planes(&cards),
         name_bigrams:   build_name_bigram_index(&cards),
+        legal_divergent: build_divergent_ids(&cards),
     };
     let data = CardData {
         cards,
