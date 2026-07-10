@@ -96,10 +96,48 @@ pub(crate) fn color_list_to_mask(colors: &[&str]) -> u8 {
 
 // ─── Mana cost helpers ───────────────────────────────────────────────────────
 
-/// Symbols that contribute to devotion, matching calculate_devotion() in SQL
-/// (which counts only WUBRGC characters of the mana cost string).
-pub(crate) fn is_devotion_sym(s: &str) -> bool {
-    s.len() == 1 && "WUBRGC".contains(s)
+// ─── Packed pip lanes ────────────────────────────────────────────────────────
+// Pip counts pack into a u64 as eight 8-bit lanes (chosen over the jsonb-
+// mirroring HashMap it replaces — that shape existed to make the Postgres
+// query easy to write, not because the engine needed it). The eight
+// single-symbol keys of mana_cost_jsonb (WUBRGC + snow + X; generic numbers
+// are dropped by mana_cost_str_to_dict on the card side and mana_pip_counts
+// on the query side) each own a lane; the ~29 hybrid '/' symbols overflow to
+// a small sorted (vocab id, count) vec that is empty on ~97% of cards.
+// Per-lane comparisons are three branchless ops (see lanes_ge), and pip-set
+// equality is integer equality — a zero lane and an absent HashMap key are
+// the same thing, which is what makes `mana=`'s distinct-key semantics fall
+// out for free. Lane counts saturate at 127 so the borrow trick stays sound
+// (real costs peak around 16 pips).
+
+pub(crate) const MANA_LANE_SYMS: [&str; 8] = ["W", "U", "B", "R", "G", "C", "S", "X"];
+/// High bit of each of the 8 core-pip lanes / the 6 devotion lanes.
+pub(crate) const LANES8_HI: u64 = 0x8080_8080_8080_8080;
+pub(crate) const LANES6_HI: u64 = 0x0000_8080_8080_8080;
+const LANE_MAX: u8 = 0x7f;
+
+pub(crate) fn mana_lane(sym: &str) -> Option<usize> {
+    MANA_LANE_SYMS.iter().position(|s| *s == sym)
+}
+
+pub(crate) fn lane_get(packed: u64, lane: usize) -> u8 {
+    (packed >> (8 * lane)) as u8
+}
+
+/// Add `n` to a lane, saturating at LANE_MAX so lanes can never borrow into
+/// their neighbor and the SWAR compares stay per-lane exact.
+pub(crate) fn lane_add(packed: u64, lane: usize, n: u8) -> u64 {
+    let cur = lane_get(packed, lane);
+    let new = cur.saturating_add(n).min(LANE_MAX);
+    (packed & !(0xffu64 << (8 * lane))) | ((new as u64) << (8 * lane))
+}
+
+/// Per-lane a >= b across every lane of `hi` (the SWAR borrow trick): setting
+/// each lane's high bit in `a` guarantees the per-lane subtraction cannot
+/// borrow out of the lane, and the high bit survives exactly when that lane's
+/// a >= b. Sound because lane values are saturated below 0x80.
+pub(crate) fn lanes_ge(a: u64, b: u64, hi: u64) -> bool {
+    ((a | hi).wrapping_sub(b)) & hi == hi
 }
 
 pub(crate) fn mana_pip_counts(s: &str) -> HashMap<String, u8> {
@@ -160,8 +198,17 @@ pub(crate) fn mana_cmc(s: &str) -> f32 {
 
 #[derive(Archive, Serialize, Deserialize, Clone)]
 struct ManaCost {
-    pips: HashMap<String, u8>,              // faithful to mana_cost_jsonb; used for mana= queries
-    devotion: Option<HashMap<String, u8>>,  // Some only when hybrids are present; used for devotion queries
+    /// Single-symbol pip counts (WUBRGC/S/X) packed into 8-bit lanes — see
+    /// the packed-pip-lanes section. Together with `hybrids` this is the
+    /// faithful multiset of mana_cost_jsonb's keys, used for mana= queries.
+    core: u64,
+    /// Hybrid '/' pips as (mana_vocab id, count), sorted by id; empty on
+    /// ~97% of cards. Any future non-hybrid symbol Scryfall invents lands
+    /// here too — the vocab interns whatever the data contains.
+    hybrids: Vec<(u8, u8)>,
+    /// WUBRGC devotion counts (hybrids expanded) in the low six lanes,
+    /// always materialized; used for devotion queries.
+    devotion: u64,
     cmc: f32,
 }
 
@@ -394,6 +441,36 @@ impl VocabInterner {
     }
 }
 
+/// Build-time interner for hybrid mana symbols; `strings` becomes
+/// CardData.mana_vocab. The real-data universe is ~29 hybrid symbols, so u8
+/// ids leave ample headroom; id 255 is reserved for query symbols absent
+/// from the vocab (see MANA_SYM_UNKNOWN), hence the 254 cap.
+struct ManaVocabInterner {
+    map: HashMap<String, u8>,
+    strings: Vec<String>,
+}
+
+impl ManaVocabInterner {
+    fn new() -> Self {
+        ManaVocabInterner { map: HashMap::new(), strings: Vec::new() }
+    }
+
+    fn intern(&mut self, s: &str) -> PyResult<u8> {
+        if let Some(&id) = self.map.get(s) {
+            return Ok(id);
+        }
+        if self.strings.len() >= 255 {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "mana symbol vocabulary exceeded 254 distinct values; widen ManaCost hybrid ids",
+            ));
+        }
+        let id = self.strings.len() as u8;
+        self.strings.push(s.to_string());
+        self.map.insert(s.to_string(), id);
+        Ok(id)
+    }
+}
+
 // ─── Loading helpers ─────────────────────────────────────────────────────────
 
 fn opt_str(d: &Bound<PyDict>, key: &str) -> Option<String> {
@@ -558,45 +635,38 @@ fn jsonb_obj_to_ids(d: &Bound<PyDict>, key: &str, vocab: &mut VocabInterner) -> 
 mod legality;
 use legality::*;
 
-fn mana_cost_from_pydict(d: &Bound<PyDict>, cmc_val: Option<f32>) -> ManaCost {
-    let pips: HashMap<String, u8> = d
-        .get_item("mana_cost_jsonb")
-        .ok()
-        .flatten()
-        .and_then(|v| {
-            v.cast::<PyDict>().ok().map(|m| {
-                m.iter()
-                    .filter_map(|(k, v)| {
-                        let sym = k.extract::<String>().ok()?;
-                        let count = v.cast::<PyList>().ok().map(|l| l.len() as u8).unwrap_or(0);
-                        Some((sym, count))
-                    })
-                    .collect()
-            })
-        })
-        .unwrap_or_default();
-    let devotion = if pips.keys().any(|s| s.contains('/')) {
-        let mut d: HashMap<String, u8> = HashMap::new();
-        for (sym, &n) in &pips {
-            if sym.contains('/') {
-                for part in sym.split('/') {
-                    // WUBRGC: SQL's calculate_devotion counts C too ({C/W} hybrids)
-                    if is_devotion_sym(part) {
-                        *d.entry(part.to_string()).or_insert(0) += n;
+fn mana_cost_from_pydict(d: &Bound<PyDict>, cmc_val: Option<f32>, mana_vocab: &mut ManaVocabInterner) -> PyResult<ManaCost> {
+    let mut core = 0u64;
+    let mut devotion = 0u64;
+    let mut hybrids: Vec<(u8, u8)> = Vec::new();
+    if let Some(m) = d.get_item("mana_cost_jsonb").ok().flatten().and_then(|v| v.cast_into::<PyDict>().ok()) {
+        for (k, v) in m.iter() {
+            let Ok(sym) = k.extract::<String>() else { continue };
+            let count = v.cast::<PyList>().ok().map(|l| l.len().min(127) as u8).unwrap_or(0);
+            match mana_lane(&sym) {
+                Some(lane) => {
+                    core = lane_add(core, lane, count);
+                    if lane < 6 {
+                        devotion = lane_add(devotion, lane, count);
                     }
                 }
-            } else {
-                *d.entry(sym.clone()).or_insert(0) += n;
+                None => {
+                    hybrids.push((mana_vocab.intern(&sym)?, count));
+                    for part in sym.split('/') {
+                        // WUBRGC: SQL's calculate_devotion counts C too ({C/W} hybrids)
+                        if let Some(lane) = mana_lane(part).filter(|&l| l < 6) {
+                            devotion = lane_add(devotion, lane, count);
+                        }
+                    }
+                }
             }
         }
-        Some(d)
-    } else {
-        None
-    };
-    ManaCost { pips, devotion, cmc: cmc_val.unwrap_or(0.0) }
+    }
+    hybrids.sort_unstable();
+    Ok(ManaCost { core, hybrids, devotion, cmc: cmc_val.unwrap_or(0.0) })
 }
 
-fn card_from_pydict(d: &Bound<PyDict>, it: &mut Interner, vocab: &mut VocabInterner, artists: &mut VocabInterner) -> PyResult<CardRow> {
+fn card_from_pydict(d: &Bound<PyDict>, it: &mut Interner, vocab: &mut VocabInterner, artists: &mut VocabInterner, mana: &mut ManaVocabInterner) -> PyResult<CardRow> {
     let released_at = opt_date_str(d, "released_at").unwrap_or_default();
     let released_at_int: Option<u32> = released_at.replace('-', "").parse().ok();
     // Raw strings from the dict; interned to ids as the struct is built below.
@@ -659,7 +729,7 @@ fn card_from_pydict(d: &Bound<PyDict>, it: &mut Interner, vocab: &mut VocabInter
         card_is_tags: jsonb_obj_to_ids(d, "card_is_tags", vocab)?,
         card_frame_data: jsonb_obj_to_ids(d, "card_frame_data", vocab)?,
 
-        mana_cost: mana_cost_from_pydict(d, opt_f32(d, "cmc")),
+        mana_cost: mana_cost_from_pydict(d, opt_f32(d, "cmc"), mana)?,
 
         creature_power_text_id: it.intern_opt(opt_str(d, "creature_power_text")),
         creature_toughness_text_id: it.intern_opt(opt_str(d, "creature_toughness_text")),
@@ -1413,16 +1483,6 @@ fn price_bounds(op: CmpOp, value: f64) -> Option<(u32, u32)> {
     }
 }
 
-/// Sorted printing ids satisfying `price op value`, via the f32_sort_bits index.
-/// The query driver goes through range_narrowed() (which never declines);
-/// this vec-only form is kept as the tests' reference for the bounds/guard
-/// semantics, like FilterExpr::matches().
-#[cfg(test)]
-fn price_candidates(idx: &Archived<PrintingRangeIndex>, op: CmpOp, value: f64) -> Option<Vec<u32>> {
-    let (lo, hi) = price_bounds(op, value)?;
-    range_candidates(idx, lo, hi)
-}
-
 /// Half-open [lo, hi) bounds for indexes over plain integers (collector
 /// number). Query values are f64 and may be fractional or out of range; bounds
 /// are chosen so the range is exact for every op — `cn<100.5` means
@@ -1447,16 +1507,6 @@ fn int_range_bounds(op: CmpOp, value: f64) -> Option<Option<(u32, u32)>> {
         return Some(None);
     }
     Some(Some((lo as u32, hi as u32)))
-}
-
-/// Sorted printing ids satisfying `int_value op value`. Test-only reference,
-/// see price_candidates().
-#[cfg(test)]
-fn int_range_candidates(idx: &Archived<PrintingRangeIndex>, op: CmpOp, value: f64) -> Option<Vec<u32>> {
-    match int_range_bounds(op, value)? {
-        None => Some(Vec::new()),
-        Some((lo, hi)) => range_candidates(idx, lo, hi),
-    }
 }
 
 /// Sorted printing ids with an indexed value in [lo, hi), or None for ranges
@@ -1672,6 +1722,10 @@ struct CardData {
     // Artist predicates (contains/exact/regex) evaluate against these ~2.2k
     // strings once per query instead of per printing.
     artist_vocab: Vec<String>,
+    // Distinct hybrid mana symbols, indexed by ManaCost.hybrids ids (~29
+    // entries). ManaCostCmp binds query symbols against these (see
+    // MANA_SYM_UNKNOWN for symbols no card carries).
+    mana_vocab: Vec<String>,
     indexes: CardIndexes,
     // The writer's format→shift assignments. Persisted so reader processes —
     // which never run the load path that feeds FORMAT_SHIFTS — resolve
@@ -1853,9 +1907,9 @@ impl Narrowed {
 }
 
 /// Intersect same-space sets. All-vec inputs keep today's sort-by-length merge
-/// chain; any bitmap input (or a later promotion) runs word-wise AND. `n` is
-/// the domain size of the space. Tight iff every input is tight.
-fn and_all(mut sets: Vec<Narrowed>, n: usize) -> Option<Narrowed> {
+/// chain; any bitmap input (or a later promotion) runs word-wise AND. Tight
+/// iff every input is tight.
+fn and_all(mut sets: Vec<Narrowed>) -> Option<Narrowed> {
     if sets.is_empty() {
         return None;
     }
@@ -2167,7 +2221,7 @@ fn narrow_rec(
             if u32::from(indexes.planes.n_cards) as usize != n_cards || n_cards == 0 {
                 return None;
             }
-            let pe = compile_devotion_superset(pips)?;
+            let pe = compile_devotion_superset(*pips)?;
             let mut bits: Vec<u64> = Vec::new();
             eval_planes(&pe, &indexes.planes, &mut bits);
             Narrowed::loose(Candidates::CardBits(bits))
@@ -2325,8 +2379,8 @@ fn narrow_rec(
                     every_child_included = false;
                 }
             }
-            let cards = and_all(card_sets, n_cards);
-            let printings = and_all(printing_sets, n_printings);
+            let cards = and_all(card_sets);
+            let printings = and_all(printing_sets);
             let seal = |mut n: Narrowed| {
                 n.tight &= every_child_included;
                 n
@@ -2361,7 +2415,7 @@ fn narrow_rec(
                         }
                         _ => {
                             let pc = p.into_card_space(offsets);
-                            and_all(vec![c, pc], n_cards).map(seal)
+                            and_all(vec![c, pc]).map(seal)
                         }
                     }
                 }
@@ -3091,7 +3145,7 @@ const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 /// catch (e.g. reordering same-size fields, changing an index type) — and on
 /// any FLAVOR_FP_FEATURES change: archived fingerprints are built with that
 /// table, so a new table reading old fingerprints breaks the superset test.
-const ARCHIVE_FORMAT_VERSION: u32 = 20260718;
+const ARCHIVE_FORMAT_VERSION: u32 = 20260719;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -3125,6 +3179,7 @@ struct Staging {
     interner: Interner,
     vocab: VocabInterner,
     artists: VocabInterner,
+    mana: ManaVocabInterner,
     #[allow(dead_code)] // held for its flock; released on drop
     lock_file: std::fs::File,
 }
@@ -3306,7 +3361,7 @@ impl QueryEngine {
         #[cfg(feature = "alloc-counter")]
         alloc_stats::reset_peak();
 
-        *staging = Some(Staging { rows: Vec::new(), interner: Interner::new(), vocab: VocabInterner::new(), artists: VocabInterner::new(), lock_file });
+        *staging = Some(Staging { rows: Vec::new(), interner: Interner::new(), vocab: VocabInterner::new(), artists: VocabInterner::new(), mana: ManaVocabInterner::new(), lock_file });
         Ok(true)
     }
 
@@ -3318,7 +3373,7 @@ impl QueryEngine {
         })?;
         for item in db_rows.iter() {
             if let Ok(d) = item.cast::<PyDict>() {
-                staging.rows.push(card_from_pydict(&d, &mut staging.interner, &mut staging.vocab, &mut staging.artists)?);
+                staging.rows.push(card_from_pydict(&d, &mut staging.interner, &mut staging.vocab, &mut staging.artists, &mut staging.mana)?);
             }
         }
         Ok(())
@@ -3337,7 +3392,7 @@ impl QueryEngine {
         let staging = self.staging.lock().unwrap().take().ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err("reload_commit called without reload_begin")
         })?;
-        let Staging { mut rows, interner, vocab, artists, lock_file } = staging;
+        let Staging { mut rows, interner, vocab, artists, mana, lock_file } = staging;
 
         // The store groups printings by oracle_id, so rows without one would all
         // collapse into a single card. The DB enforces NOT NULL; fail loudly here
@@ -3449,6 +3504,8 @@ impl QueryEngine {
         drop(vocab.map);
         let artist_vocab = artists.strings;
         drop(artists.map);
+        let mana_vocab = mana.strings;
+        drop(mana.map);
         // String-sorted permutation of the vocab ids; VocabInterner caps the
         // vocab at u16::MAX entries so the cast can't truncate.
         let mut coll_vocab_sorted: Vec<u16> = (0..coll_vocab.len() as u16).collect();
@@ -3493,7 +3550,7 @@ impl QueryEngine {
         // Snapshot the registry card_from_pydict just populated so reader
         // processes can adopt the same format→shift assignments.
         let format_shifts_snapshot = format_shifts().read().map(|m| m.clone()).unwrap_or_default();
-        let card_data = CardData { cards, printings, offsets, strings, coll_vocab, coll_vocab_sorted, artist_vocab, indexes, format_shifts: format_shifts_snapshot };
+        let card_data = CardData { cards, printings, offsets, strings, coll_vocab, coll_vocab_sorted, artist_vocab, mana_vocab, indexes, format_shifts: format_shifts_snapshot };
 
         // Write atomically: stream into a per-PID .tmp, then rename over shm_path.
         // Per-PID avoids the race where two workers write to the same .tmp and
@@ -3620,7 +3677,7 @@ impl QueryEngine {
         sync_format_shifts(&data.format_shifts);
         let mut filter_expr = build_filter(&json_val)
             .map_err(|e| QueryError::new_err(format!("build_filter: {e}")))?;
-        filter_expr.bind(&data.coll_vocab, &data.coll_vocab_sorted, &data.artist_vocab, &data.indexes.flavor, &data.strings);
+        filter_expr.bind(&data.coll_vocab, &data.coll_vocab_sorted, &data.artist_vocab, &data.mana_vocab, &data.indexes.flavor, &data.strings);
 
         // Consume the plane-expressible part of the filter (colors/identity/
         // types) into a bitmap expression; run_query evaluates it in a few
@@ -3762,3 +3819,5 @@ mod card_engine {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod bench_mana;

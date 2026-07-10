@@ -1,7 +1,6 @@
-use std::collections::HashMap;
 use regex::Regex;
 use serde_json::Value;
-use super::{AOracleCard, APrinting, AStrings, str_at, is_devotion_sym, mana_pip_counts, mana_cmc, color_list_to_mask, card_type_str_to_bit, trigram_candidates, trigram_min_posting, ARTIST_NONE, NONE_STR, FlavorIndex, NameBigramIndex, OracleTextIndex, TrigramIndex, flavor_fingerprint, flavor_match_sets};
+use super::{AOracleCard, APrinting, AStrings, str_at, mana_lane, lane_add, lanes_ge, LANES6_HI, LANES8_HI, mana_pip_counts, mana_cmc, color_list_to_mask, card_type_str_to_bit, trigram_candidates, trigram_min_posting, ARTIST_NONE, NONE_STR, FlavorIndex, NameBigramIndex, OracleTextIndex, TrigramIndex, flavor_fingerprint, flavor_match_sets};
 use super::legality::{LEGALITY_LEGAL, LEGALITY_BANNED, LEGALITY_RESTRICTED, format_shift};
 
 // ─── Comparison / arithmetic operators ───────────────────────────────────────
@@ -360,13 +359,27 @@ pub(crate) enum FilterExpr {
 
     ManaCostCmp {
         op: CmpOp,
-        pips: HashMap<String, u8>,
+        /// Single-symbol pip counts of the query cost, packed into the same
+        /// 8-bit lanes as ManaCost.core (see the packed-pip-lanes section).
+        core: u64,
+        /// The query's hybrid '/' symbols as (symbol, count), sorted; kept as
+        /// strings so bind() can resolve them against the store's mana vocab.
+        hybrids: Vec<(String, u8)>,
+        /// `hybrids` resolved to sorted (mana_vocab id, count) by bind().
+        /// Symbols absent from the vocab — which no card can carry — merge
+        /// into the reserved MANA_SYM_UNKNOWN id, preserving exact match
+        /// semantics. Built all-unknown, so an unbound filter behaves as if
+        /// every hybrid symbol were unknown (mirroring CollectionCmp).
+        hybrid_ids: Vec<(u8, u8)>,
         cmc: f32,
     },
 
     Devotion {
         op: CmpOp,
-        pips: HashMap<String, u8>,
+        /// Queried WUBRGC devotion counts in the low six 8-bit lanes,
+        /// hybrid query pips expanded at build — same layout as
+        /// ManaCost.devotion, so every comparison is lane arithmetic.
+        pips: u64,
     },
 
     DateCmp {
@@ -387,14 +400,13 @@ pub(crate) enum FilterExpr {
 ///       colors, types, legality words, exact string equality)
 ///   1 — bounded lookups: a binary search over a bind/memoize-resolved id set
 ///       (ArtistMatch/FlavorMatch/NameMatch/OracleMatch) or a card collection
-///       (CollectionCmp), and anchored-literal regexes (a memcmp at a known
-///       position — see regex_tier)
-///   2 — pip-map walks of Devotion / ManaCostCmp: string-keyed hashmap
-///       iteration, measured ~3× cheaper than a text scan on the real corpus
-///   3 — per-candidate text scans: TextContains (substring search; artist /
+///       (CollectionCmp), anchored-literal regexes (a memcmp at a known
+///       position — see regex_tier), and the packed-lane pip compares of
+///       Devotion / ManaCostCmp (SWAR plus a usually-empty hybrid walk)
+///   2 — per-candidate text scans: TextContains (substring search; artist /
 ///       flavor contains were rewritten to tier 1 at bind) and
 ///       unanchored-literal regexes, whose prefilter costs the same scan
-///   4 — TextRegex with real regex machinery — the single worst
+///   3 — TextRegex with real regex machinery — the single worst
 ///       per-candidate cost the engine has
 ///
 /// Composites take the max of their children: their short-circuit may have to
@@ -402,8 +414,8 @@ pub(crate) enum FilterExpr {
 fn verify_cost_tier(f: &FilterExpr) -> u8 {
     match f {
         FilterExpr::TextRegex { regex, .. } => regex_tier(regex.as_str()),
-        FilterExpr::TextContains { .. } => 3,
-        FilterExpr::Devotion { .. } | FilterExpr::ManaCostCmp { .. } => 2,
+        FilterExpr::TextContains { .. } => 2,
+        FilterExpr::Devotion { .. } | FilterExpr::ManaCostCmp { .. } => 1,
         FilterExpr::ArtistMatch { .. }
         | FilterExpr::FlavorMatch { .. }
         | FilterExpr::NameMatch { .. }
@@ -436,8 +448,8 @@ fn verify_cost_tier(f: &FilterExpr) -> u8 {
 /// `o:/^flying$/ oracle:sacrifice` 2.4× slower, so:
 ///
 ///   1 — literal with a ^ or $ anchor (starts_with/ends_with/equality)
-///   3 — bare literal (substring search, same tier as TextContains)
-///   4 — anything with live regex metacharacters
+///   2 — bare literal (substring search, same tier as TextContains)
+///   3 — anything with live regex metacharacters
 pub(crate) fn regex_tier(pattern: &str) -> u8 {
     let mut p = pattern.strip_prefix("(?i)").unwrap_or(pattern);
     let anchored_start = p.starts_with('^');
@@ -453,17 +465,17 @@ pub(crate) fn regex_tier(pattern: &str) -> u8 {
             // alphanumeric escape (\d \w \b \p…) is a class — real machinery.
             b'\\' => match bytes.get(i + 1) {
                 Some(c) if !c.is_ascii_alphanumeric() => i += 2,
-                _ => return 4,
+                _ => return 3,
             },
             b'$' if i == bytes.len() - 1 => {
                 anchored_end = true;
                 i += 1;
             }
-            b'.' | b'*' | b'+' | b'?' | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'|' | b'^' | b'$' => return 4,
+            b'.' | b'*' | b'+' | b'?' | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'|' | b'^' | b'$' => return 3,
             _ => i += 1,
         }
     }
-    if anchored_start || anchored_end { 1 } else { 3 }
+    if anchored_start || anchored_end { 1 } else { 2 }
 }
 
 /// Whether a node can NEVER settle the card-level pass — it compares only
@@ -554,7 +566,7 @@ fn printing_dependent(f: &FilterExpr) -> bool {
 fn or_child_key(f: &FilterExpr) -> (u8, bool) {
     let tier = verify_cost_tier(f);
     let pdep = printing_dependent(f);
-    let bucket = if tier >= 4 {
+    let bucket = if tier >= 3 {
         2
     } else if tier == 0 && !pdep {
         0
@@ -576,6 +588,51 @@ fn and_child_set_len(f: &FilterExpr) -> usize {
         FilterExpr::FlavorMatch { gids, .. } | FilterExpr::OracleMatch { gids } => gids.len(),
         _ => usize::MAX,
     }
+}
+
+/// Reserved ManaCost hybrid id for query symbols absent from the store's
+/// mana vocab: no card carries it, so containment fails and exactness fails
+/// against any card, exactly like a HashMap key nothing else holds. Distinct
+/// unknown symbols merge into one entry — safe for the same reason.
+pub(crate) const MANA_SYM_UNKNOWN: u8 = u8::MAX;
+
+type AHybrids = rkyv::Archived<Vec<(u8, u8)>>;
+
+/// Resolve the query's hybrid symbols to sorted (mana_vocab id, count).
+fn bind_mana_hybrids(hybrids: &[(String, u8)], mana_vocab: &AStrings) -> Vec<(u8, u8)> {
+    let mut out = Vec::with_capacity(hybrids.len());
+    let mut unknown = 0u8;
+    for (sym, n) in hybrids {
+        // Linear scan: the vocab is ~29 entries and queries carry 0-2 hybrids.
+        match mana_vocab.iter().position(|v| v.as_str() == sym.as_str()) {
+            Some(i) => out.push((i as u8, *n)),
+            None => unknown = unknown.saturating_add(*n),
+        }
+    }
+    out.sort_unstable();
+    if unknown > 0 {
+        out.push((MANA_SYM_UNKNOWN, unknown)); // sorts last: real ids are < 255
+    }
+    out
+}
+
+fn hybrid_count(card: &AHybrids, id: u8) -> u8 {
+    card.iter().find(|e| e.0 == id).map_or(0, |e| e.1)
+}
+
+/// Every query hybrid is contained in the card's (query ⊆ card).
+fn hybrids_ge(card: &AHybrids, query: &[(u8, u8)]) -> bool {
+    query.iter().all(|&(id, n)| hybrid_count(card, id) >= n)
+}
+
+/// Every card hybrid is contained in the query's (card ⊆ query).
+fn hybrids_le(card: &AHybrids, query: &[(u8, u8)]) -> bool {
+    card.iter().all(|e| query.iter().find(|q| q.0 == e.0).map_or(0, |q| q.1) >= e.1)
+}
+
+/// Same hybrid multiset — both sides sorted, so pairwise equality suffices.
+fn hybrids_eq(card: &AHybrids, query: &[(u8, u8)]) -> bool {
+    card.len() == query.len() && card.iter().zip(query).all(|(c, q)| c.0 == q.0 && c.1 == q.1)
 }
 
 /// Vocab ids (ascending) whose artist string satisfies `pred`.
@@ -613,16 +670,20 @@ impl FilterExpr {
         vocab: &AStrings,
         sorted_ids: &rkyv::Archived<Vec<u16>>,
         artist_vocab: &AStrings,
+        mana_vocab: &AStrings,
         flavor: &rkyv::Archived<FlavorIndex>,
         strings: &AStrings,
     ) {
         match self {
             FilterExpr::And(children) | FilterExpr::Or(children) => {
                 for c in children {
-                    c.bind(vocab, sorted_ids, artist_vocab, flavor, strings);
+                    c.bind(vocab, sorted_ids, artist_vocab, mana_vocab, flavor, strings);
                 }
             }
-            FilterExpr::Not(inner) => inner.bind(vocab, sorted_ids, artist_vocab, flavor, strings),
+            FilterExpr::Not(inner) => inner.bind(vocab, sorted_ids, artist_vocab, mana_vocab, flavor, strings),
+            FilterExpr::ManaCostCmp { hybrids, hybrid_ids, .. } if !hybrids.is_empty() => {
+                *hybrid_ids = bind_mana_hybrids(hybrids, mana_vocab);
+            }
             FilterExpr::CollectionCmp { value, value_id, .. } => {
                 let i = sorted_ids.partition_point(|id| vocab[u16::from(*id) as usize].as_str() < value.as_str());
                 *value_id = sorted_ids
@@ -1146,56 +1207,23 @@ impl FilterExpr {
                 tri_bool((word >> shift) & 0b11 == *expected)
             }
 
-            FilterExpr::ManaCostCmp { op, pips, cmc } => {
-                let card_cmc = f32::from(card.mana_cost.cmc);
-                let card_pips = &card.mana_cost.pips;
+            FilterExpr::ManaCostCmp { op, core, hybrid_ids, cmc, .. } => {
+                // Containment/equality over the pip multiset = the same test
+                // per lane (SWAR, all eight at once) and per hybrid entry
+                // (sorted-slice walks; both sides empty on ~97% of cards).
+                let mc = &card.mana_cost;
+                let card_core = u64::from(mc.core);
+                let card_cmc = f32::from(mc.cmc);
+                let ge = || lanes_ge(card_core, *core, LANES8_HI) && hybrids_ge(&mc.hybrids, hybrid_ids) && card_cmc >= *cmc;
+                let le = || lanes_ge(*core, card_core, LANES8_HI) && hybrids_le(&mc.hybrids, hybrid_ids) && card_cmc <= *cmc;
+                let eq = || card_cmc == *cmc && card_core == *core && hybrids_eq(&mc.hybrids, hybrid_ids);
                 tri_bool(match op {
-                    CmpOp::Ge => {
-                        pips.iter().all(|(sym, &n)| {
-                            card_pips.get(sym.as_str()).map(|v| u8::from(*v)).unwrap_or(0) >= n
-                        }) && card_cmc >= *cmc
-                    }
-                    CmpOp::Le => {
-                        card_pips.iter().all(|(sym, n)| {
-                            pips.get(sym.as_str()).copied().unwrap_or(0) >= u8::from(*n)
-                        }) && card_cmc <= *cmc
-                    }
-                    CmpOp::Eq => {
-                        card_cmc == *cmc
-                            && card_pips.len() == pips.len()
-                            && pips.iter().all(|(sym, &n)| {
-                                card_pips.get(sym.as_str()).map(|v| u8::from(*v)).unwrap_or(0) == n
-                            })
-                    }
-                    CmpOp::Gt => {
-                        let contains = pips.iter().all(|(sym, &n)| {
-                            card_pips.get(sym.as_str()).map(|v| u8::from(*v)).unwrap_or(0) >= n
-                        }) && card_cmc >= *cmc;
-                        let exact = card_cmc == *cmc
-                            && card_pips.len() == pips.len()
-                            && pips.iter().all(|(sym, &n)| {
-                                card_pips.get(sym.as_str()).map(|v| u8::from(*v)).unwrap_or(0) == n
-                            });
-                        contains && !exact
-                    }
-                    CmpOp::Lt => {
-                        let subset = card_pips.iter().all(|(sym, n)| {
-                            pips.get(sym.as_str()).copied().unwrap_or(0) >= u8::from(*n)
-                        }) && card_cmc <= *cmc;
-                        let exact = card_cmc == *cmc
-                            && card_pips.len() == pips.len()
-                            && pips.iter().all(|(sym, &n)| {
-                                card_pips.get(sym.as_str()).map(|v| u8::from(*v)).unwrap_or(0) == n
-                            });
-                        subset && !exact
-                    }
-                    CmpOp::Ne => {
-                        !(card_cmc == *cmc
-                            && card_pips.len() == pips.len()
-                            && pips.iter().all(|(sym, &n)| {
-                                card_pips.get(sym.as_str()).map(|v| u8::from(*v)).unwrap_or(0) == n
-                            }))
-                    }
+                    CmpOp::Ge => ge(),
+                    CmpOp::Le => le(),
+                    CmpOp::Eq => eq(),
+                    CmpOp::Gt => ge() && !eq(),
+                    CmpOp::Lt => le() && !eq(),
+                    CmpOp::Ne => !eq(),
                 })
             }
 
@@ -1203,26 +1231,13 @@ impl FilterExpr {
                 // Mirrors the SQL path's JSONB containment on the devotion column
                 // (devotion @> query, <@, =, and the strict/negated variants):
                 // per-color positional arrays contain each other iff the counts
-                // compare, so containment reduces to count comparisons here.
-                // The card-side map can carry non-color keys (generic pips like "1"
-                // come straight from mana_cost_jsonb) that the DB's devotion column
-                // never holds, so only WUBRGC entries participate — query pips are
-                // already color-only (see build_binary).
-                let devotion = if card.mana_cost.devotion.is_some() {
-                    card.mana_cost.devotion.as_ref().unwrap()
-                } else {
-                    &card.mana_cost.pips
-                };
-                let ge = pips.iter().all(|(sym, &n)| {
-                    devotion.get(sym.as_str()).map(|v| u8::from(*v)).unwrap_or(0) >= n
-                });
-                let le = devotion.iter()
-                    .filter(|(sym, _)| is_devotion_sym(sym.as_str()))
-                    .all(|(sym, n)| pips.get(sym.as_str()).copied().unwrap_or(0) >= u8::from(*n));
-                let eq = devotion.keys().filter(|sym| is_devotion_sym(sym.as_str())).count() == pips.len()
-                    && pips.iter().all(|(sym, &n)| {
-                        devotion.get(sym.as_str()).map(|v| u8::from(*v)).unwrap_or(0) == n
-                    });
+                // compare, so containment is per-lane count comparison — one
+                // SWAR op across all six colors — and equality is integer
+                // equality (a zero lane and an absent key are the same thing).
+                let d = u64::from(card.mana_cost.devotion);
+                let ge = lanes_ge(d, *pips, LANES6_HI);
+                let le = lanes_ge(*pips, d, LANES6_HI);
+                let eq = d == *pips;
                 tri_bool(match op {
                     CmpOp::Ge => ge,
                     CmpOp::Eq => eq,
@@ -1426,27 +1441,39 @@ fn build_binary(kw: &Value) -> Result<FilterExpr, String> {
 
     if attr == "mana_cost_jsonb" {
         let mana_str = rhs_value_str(rhs);
-        let pips = mana_pip_counts(mana_str);
-        let cmc  = mana_cmc(mana_str);
+        let mut core = 0u64;
+        let mut hybrids: Vec<(String, u8)> = Vec::new();
+        for (sym, n) in mana_pip_counts(mana_str) {
+            match mana_lane(&sym) {
+                Some(lane) => core = lane_add(core, lane, n),
+                None => hybrids.push((sym, n)),
+            }
+        }
+        hybrids.sort_unstable();
+        // Until bind() resolves them against the store's vocab, hybrid
+        // symbols count as unknown — one merged entry no card can match.
+        let hybrid_ids = if hybrids.is_empty() { Vec::new() } else { vec![(MANA_SYM_UNKNOWN, 1)] };
+        let cmc = mana_cmc(mana_str);
         let cmp_op = match op { ":" => CmpOp::Ge, _ => str_op_to_cmp(op)? };
-        return Ok(FilterExpr::ManaCostCmp { op: cmp_op, pips, cmc });
+        return Ok(FilterExpr::ManaCostCmp { op: cmp_op, core, hybrids, hybrid_ids, cmc });
     }
 
     if attr == "devotion" {
         let mana_str = rhs_value_str(rhs);
-        // Split hybrid symbols ({R/G} -> R:1, G:1) and keep only WUBRGC, matching
-        // calculate_devotion() in SQL (which counts only color characters).
-        // mana_pip_counts is NOT used directly because it keeps hybrids as single keys.
-        let mut pips: HashMap<String, u8> = HashMap::new();
+        // Split hybrid symbols ({R/G} -> R:1, G:1) and keep only the WUBRGC
+        // lanes, matching calculate_devotion() in SQL (which counts only
+        // color characters). mana_pip_counts is NOT used lane-directly
+        // because it keeps hybrids as single keys.
+        let mut pips = 0u64;
         for (sym, n) in mana_pip_counts(mana_str) {
             if sym.contains('/') {
                 for part in sym.split('/') {
-                    if is_devotion_sym(part) {
-                        *pips.entry(part.to_string()).or_insert(0) += n;
+                    if let Some(lane) = mana_lane(part).filter(|&l| l < 6) {
+                        pips = lane_add(pips, lane, n);
                     }
                 }
-            } else if is_devotion_sym(&sym) {
-                *pips.entry(sym).or_insert(0) += n;
+            } else if let Some(lane) = mana_lane(&sym).filter(|&l| l < 6) {
+                pips = lane_add(pips, lane, n);
             }
         }
         let cmp_op = match op { ":" => CmpOp::Ge, _ => str_op_to_cmp(op)? };
