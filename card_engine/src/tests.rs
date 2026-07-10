@@ -1294,7 +1294,7 @@ fn popcount_skip_tie_breaking_preserves_group_order_both_directions() {
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
     let creature = FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
-    let (plane, mut residual) = split_planes(creature);
+    let (plane, mut residual) = split_planes(creature, &archived.indexes.planes);
     assert!(matches!(residual, FilterExpr::True), "t:creature must fully plane-consume");
 
     let mut run = |direction: &str| {
@@ -1332,7 +1332,7 @@ fn popcount_skip_offset_lands_inside_tied_group() {
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
     let creature = FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
-    let (plane, mut residual) = split_planes(creature);
+    let (plane, mut residual) = split_planes(creature, &archived.indexes.planes);
 
     // Full ascending order is [card3, card1, card0, card2, card4] (oracle ids
     // [4,2,1,3,5]); offset=2 must skip card3 and card1, landing on card0.
@@ -1365,7 +1365,7 @@ fn popcount_skip_matches_non_popcount_path() {
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
     let creature = FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
-    let (plane, mut residual_true) = split_planes(creature);
+    let (plane, mut residual_true) = split_planes(creature, &archived.indexes.planes);
     assert!(matches!(residual_true, FilterExpr::True));
 
     // Popcount path: plane present, residual True.
@@ -1704,7 +1704,7 @@ fn plane_parity_color_and_type_ops() {
 
     let mut bitmap: Vec<u64> = Vec::new();
     let mut check = |f: &FilterExpr| {
-        let pe = compile_plane(f).expect("filter must be plane-expressible");
+        let pe = compile_plane(f, &archived.indexes.planes).expect("filter must be plane-expressible");
         eval_planes(&pe, &archived.indexes.planes, &mut bitmap);
         for (cid, card) in archived.cards.iter().enumerate() {
             let want = f.eval_card(card, &archived.strings) == Tri::True;
@@ -1750,7 +1750,7 @@ fn plane_fallaji_colors_not_subset_of_identity() {
     let mut bitmap: Vec<u64> = Vec::new();
     let mut matches = |field: ColorField, op: CmpOp, mask: u8| {
         let f = FilterExpr::ColorCmp { field, op, mask };
-        eval_planes(&compile_plane(&f).unwrap(), &archived.indexes.planes, &mut bitmap);
+        eval_planes(&compile_plane(&f, &archived.indexes.planes).unwrap(), &archived.indexes.planes, &mut bitmap);
         bitmap_contains(&bitmap, FALLAJI_CID as u32)
     };
     assert!(matches(ColorField::Colors, CmpOp::Ge, 1)); // c>=W: colors carry W
@@ -1763,37 +1763,42 @@ fn plane_fallaji_colors_not_subset_of_identity() {
 // produced mana and bare True stay residual.
 #[test]
 fn split_planes_composition_rules() {
+    let data = plane_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let bounds = &archived.indexes.planes;
+
     let green = || FilterExpr::ColorCmp { field: ColorField::Colors, op: CmpOp::Ge, mask: 16 };
     let creature = || FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
     let text = || FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: "draw".to_string() };
 
     // And(plane, plane, text): planes consumed, the lone leftover unwraps.
-    let (pe, residual) = split_planes(FilterExpr::And(vec![green(), creature(), text()]));
+    let (pe, residual) = split_planes(FilterExpr::And(vec![green(), creature(), text()]), bounds);
     assert!(pe.is_some());
     assert!(matches!(residual, FilterExpr::TextContains { .. }));
 
     // Fully plane-expressible tree is consumed whole.
-    let (pe, residual) = split_planes(FilterExpr::And(vec![green(), creature()]));
+    let (pe, residual) = split_planes(FilterExpr::And(vec![green(), creature()]), bounds);
     assert!(pe.is_some());
     assert!(matches!(residual, FilterExpr::True));
-    let (pe, residual) = split_planes(FilterExpr::Or(vec![green(), creature()]));
+    let (pe, residual) = split_planes(FilterExpr::Or(vec![green(), creature()]), bounds);
     assert!(pe.is_some());
     assert!(matches!(residual, FilterExpr::True));
 
     // Or mixing plane and non-plane children stays entirely residual:
     // mask ∨ residual is not a narrowing mask.
-    let (pe, residual) = split_planes(FilterExpr::Or(vec![green(), text()]));
+    let (pe, residual) = split_planes(FilterExpr::Or(vec![green(), text()]), bounds);
     assert!(pe.is_none());
     assert!(matches!(residual, FilterExpr::Or(ref v) if v.len() == 2));
 
     // Produced mana is deliberately unplaned in phase 1.
     let produces = FilterExpr::ColorCmp { field: ColorField::ProducedMana, op: CmpOp::Ge, mask: 16 };
-    let (pe, residual) = split_planes(produces);
+    let (pe, residual) = split_planes(produces, bounds);
     assert!(pe.is_none());
     assert!(matches!(residual, FilterExpr::ColorCmp { field: ColorField::ProducedMana, .. }));
 
     // Bare True keeps the range-scan path (no all-ones bitmap materialization).
-    let (pe, residual) = split_planes(FilterExpr::True);
+    let (pe, residual) = split_planes(FilterExpr::True, bounds);
     assert!(pe.is_none());
     assert!(matches!(residual, FilterExpr::True));
 }
@@ -1830,7 +1835,7 @@ fn run_query_plane_path_parity() {
                 &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
                 &mut plain, None, unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
             );
-            let (pe, mut residual) = split_planes(make());
+            let (pe, mut residual) = split_planes(make(), &archived.indexes.planes);
             let (t1, p1) = run_query(
                 &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
                 &mut residual, pe.as_ref(), unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
@@ -1842,6 +1847,236 @@ fn run_query_plane_path_parity() {
             assert_eq!(ids(&p0), ids(&p1), "pages must agree (unique={unique})");
         }
     }
+}
+
+// ─── Numeric-range planes (#655) ───────────────────────────────────────────────
+
+/// A cmc/power/toughness-diverse store: interior values at both extremes (0,
+/// 12), the low tail (negative power/toughness — legal per the source data,
+/// e.g. `*`-power cards), TWO distinct high-tail values per field (so the
+/// high bucket is genuinely ambiguous for a within-bucket threshold, not
+/// trivially a single-value bucket), and a noncreature card whose power/
+/// toughness are absent (`Tri::Null`) entirely.
+fn numeric_plane_fixture_store() -> CardData {
+    let mut vocab = VocabInterner::new();
+    // (cmc, power, toughness); card 0 is a noncreature (power/toughness absent).
+    let specs: &[(u8, Option<i8>, Option<i8>)] = &[
+        (0, None, None),
+        (4, Some(-1), Some(-1)),
+        (12, Some(12), Some(12)),
+        (13, Some(15), Some(20)),
+        (14, Some(16), Some(25)),
+        (6, Some(3), Some(3)),
+        (3, Some(0), Some(0)),
+    ];
+    let cards = specs
+        .iter()
+        .enumerate()
+        .map(|(i, &(cmc, power, toughness))| {
+            let mut c = stub_card(i as u128 + 1, TYPE_CREATURE, &[], &mut vocab);
+            c.cmc = Some(cmc);
+            c.creature_power = power;
+            c.creature_toughness = toughness;
+            c
+        })
+        .collect();
+    store_of(cards, &[1usize; 7], vocab)
+}
+
+// Every numeric plane that compiles must reproduce the filter's card-level
+// truth bit for bit, across both operand orders, every operator, and
+// thresholds spanning the low tail / interior / high tail. Declines (Ne
+// always, and Eq/Lt/Le/Gt/Ge inside an ambiguous bucket) are skipped here —
+// their contract is just "fall back," proven separately below.
+#[test]
+fn numeric_plane_parity_interior_and_tails() {
+    let data = numeric_plane_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let mut bitmap: Vec<u64> = Vec::new();
+    let mut check = |f: &FilterExpr, label: &str| {
+        let Some(pe) = compile_plane(f, &archived.indexes.planes) else { return };
+        eval_planes(&pe, &archived.indexes.planes, &mut bitmap);
+        for (cid, card) in archived.cards.iter().enumerate() {
+            let want = f.eval_card(card, &archived.strings) == Tri::True;
+            assert_eq!(bitmap_contains(&bitmap, cid as u32), want, "numeric plane mismatch at card {cid} for {label}");
+        }
+    };
+
+    let field_name = |f: NumField| match f {
+        NumField::Cmc => "cmc",
+        NumField::Power => "power",
+        NumField::Toughness => "toughness",
+        _ => "other",
+    };
+    let op_name = |op: CmpOp| match op {
+        CmpOp::Eq => "=",
+        CmpOp::Ne => "!=",
+        CmpOp::Lt => "<",
+        CmpOp::Le => "<=",
+        CmpOp::Gt => ">",
+        CmpOp::Ge => ">=",
+    };
+
+    let fields = [NumField::Cmc, NumField::Power, NumField::Toughness];
+    let ops = [CmpOp::Eq, CmpOp::Ne, CmpOp::Lt, CmpOp::Le, CmpOp::Gt, CmpOp::Ge];
+    // Spans the low tail, every interior value's boundary, and the high tail.
+    let thresholds: [f64; 8] = [-1.0, 0.0, 3.0, 6.0, 12.0, 13.0, 15.0, 20.0];
+    for field in fields {
+        for op in ops {
+            for &t in &thresholds {
+                let label = format!("{} {} {t}", field_name(field), op_name(op));
+                check(&FilterExpr::NumericCmp { lhs: NumExpr::Field(field), op, rhs: NumExpr::Const(t) }, &label);
+                check(
+                    &FilterExpr::NumericCmp { lhs: NumExpr::Const(t), op, rhs: NumExpr::Field(field) },
+                    &format!("{t} {} {}", op_name(op), field_name(field)),
+                );
+            }
+        }
+    }
+}
+
+// Boundary-crossing ranges (needing the low or high tail bucket folded in,
+// not just the interior) must still compile exactly, and within-bucket
+// distinguishing queries must decline rather than guess.
+#[test]
+fn numeric_plane_boundary_inclusion_and_decline() {
+    let data = numeric_plane_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let bounds = &archived.indexes.planes;
+
+    let cmp = |field, op, v: f64| FilterExpr::NumericCmp { lhs: NumExpr::Field(field), op, rhs: NumExpr::Const(v) };
+
+    // Crosses into the high tail, but includes BOTH high-tail values (13, 14)
+    // fully — unambiguous, since every possible bucket member qualifies.
+    assert!(compile_plane(&cmp(NumField::Cmc, CmpOp::Le, 14.0), bounds).is_some());
+    // Crosses into the low tail: power>=-1 must include the power=-1 card.
+    assert!(compile_plane(&cmp(NumField::Power, CmpOp::Ge, -1.0), bounds).is_some());
+    // Entirely within the interior: no bucket involved at all.
+    assert!(compile_plane(&cmp(NumField::Toughness, CmpOp::Le, 6.0), bounds).is_some());
+
+    // Distinguishing inside the high tail bucket (which now holds two
+    // distinct values each) can't be answered by the cumulative plane alone.
+    assert!(compile_plane(&cmp(NumField::Cmc, CmpOp::Eq, 13.0), bounds).is_none());
+    assert!(compile_plane(&cmp(NumField::Toughness, CmpOp::Eq, 20.0), bounds).is_none());
+    assert!(compile_plane(&cmp(NumField::Toughness, CmpOp::Lt, 22.0), bounds).is_none());
+}
+
+// Ne is declined unconditionally, matching numeric_candidates' own choice
+// ("Ne is not selective") rather than trying to express it as a plane
+// complement (which would also fail the Not-safety guard for power/toughness).
+#[test]
+fn numeric_plane_declines_ne_unconditionally() {
+    let data = numeric_plane_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let bounds = &archived.indexes.planes;
+    for field in [NumField::Cmc, NumField::Power, NumField::Toughness] {
+        let ne = FilterExpr::NumericCmp { lhs: NumExpr::Field(field), op: CmpOp::Ne, rhs: NumExpr::Const(3.0) };
+        assert!(compile_plane(&ne, bounds).is_none());
+    }
+}
+
+// Tri::Null (a noncreature's absent power/toughness) propagates through Not
+// as Null, never flipped to True (filter.rs's FilterExpr::Not tri() arm) — so
+// Not(NumericCmp) on cmc/power/toughness must always decline compile_plane,
+// standalone or buried under And/Or, even though the un-negated comparison
+// compiles fine on its own.
+#[test]
+fn numeric_plane_declines_not_over_numeric_cmp() {
+    let data = numeric_plane_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let bounds = &archived.indexes.planes;
+
+    let power_gt3 = FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Power), op: CmpOp::Gt, rhs: NumExpr::Const(3.0) };
+    assert!(compile_plane(&power_gt3, bounds).is_some(), "power>3 alone must compile");
+    let make_negated = || FilterExpr::Not(Box::new(FilterExpr::NumericCmp {
+        lhs: NumExpr::Field(NumField::Power),
+        op: CmpOp::Gt,
+        rhs: NumExpr::Const(3.0),
+    }));
+    assert!(compile_plane(&make_negated(), bounds).is_none(), "Not(power>3) must decline: Null doesn't flip to True");
+
+    // Buried under And/Or, not just at the top.
+    let buried_and = FilterExpr::And(vec![make_negated(), FilterExpr::True]);
+    assert!(compile_plane(&buried_and, bounds).is_none());
+    let buried_or = FilterExpr::Or(vec![make_negated(), FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge }]);
+    assert!(compile_plane(&buried_or, bounds).is_none());
+
+    // cmc is Option<u8> (never negative) but can still be unset on odd data,
+    // so the guard applies uniformly across all three fields, not just the
+    // two that are visibly Option in this fixture.
+    let cmc_le6 = || FilterExpr::Not(Box::new(FilterExpr::NumericCmp {
+        lhs: NumExpr::Field(NumField::Cmc),
+        op: CmpOp::Le,
+        rhs: NumExpr::Const(6.0),
+    }));
+    assert!(compile_plane(&cmc_le6(), bounds).is_none());
+
+    // A Not over a non-numeric plane child must still compile fine — the
+    // guard must not over-decline unrelated Not subtrees.
+    let not_creature = FilterExpr::Not(Box::new(FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge }));
+    assert!(compile_plane(&not_creature, bounds).is_some());
+}
+
+// End-to-end: run_query through the numeric-plane path (split_planes consumes
+// the filter to True) must return identical totals/pages to the same filter
+// run unconsumed (the pre-#655 fallback path), across uniques.
+#[test]
+fn run_query_numeric_plane_path_parity() {
+    let data = numeric_plane_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let filters: Vec<Box<dyn Fn() -> FilterExpr>> = vec![
+        Box::new(|| FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Cmc), op: CmpOp::Le, rhs: NumExpr::Const(6.0) }),
+        Box::new(|| FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Power), op: CmpOp::Ge, rhs: NumExpr::Const(-1.0) }),
+        Box::new(|| FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Toughness), op: CmpOp::Lt, rhs: NumExpr::Const(-1.0) }),
+        Box::new(|| {
+            FilterExpr::And(vec![
+                FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge },
+                FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Cmc), op: CmpOp::Le, rhs: NumExpr::Const(12.0) },
+            ])
+        }),
+    ];
+    for make in &filters {
+        for unique in ["card", "printing", "artwork"] {
+            let mut plain = make();
+            let (t0, p0) = run_query(
+                &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+                &mut plain, None, unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
+            );
+            let (pe, mut residual) = split_planes(make(), &archived.indexes.planes);
+            let (t1, p1) = run_query(
+                &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+                &mut residual, pe.as_ref(), unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
+            );
+            assert_eq!(t0, t1, "totals must agree (unique={unique})");
+            let ids = |page: &[(&super::AOracleCard, &super::APrinting)]| -> Vec<u128> {
+                page.iter().map(|(_, p)| u128::from(p.scryfall_id)).collect()
+            };
+            assert_eq!(ids(&p0), ids(&p1), "pages must agree (unique={unique})");
+        }
+    }
+}
+
+// Step-2 eligibility (#634): a numeric range that fully consumes to True via
+// split_planes must feed the same popcount-skip order-phase path that
+// color/type planes already do — proven by a real all_match promotion, not
+// just an equal-output check (which the parity test above already covers).
+#[test]
+fn numeric_plane_enables_all_match_promotion() {
+    let data = numeric_plane_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let cmc_le12 = FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Cmc), op: CmpOp::Le, rhs: NumExpr::Const(12.0) };
+    let (pe, residual) = split_planes(cmc_le12, &archived.indexes.planes);
+    assert!(pe.is_some(), "cmc<=12 must plane-compile");
+    assert!(matches!(residual, FilterExpr::True), "cmc<=12 must fully consume: no residual card_pass needed");
 }
 
 // ─── Bind-time text-predicate memoization (#624) ─────────────────────────────
@@ -2511,7 +2746,7 @@ fn devotion_plane_parity_and_boundaries() {
     let dev = |op, pips: &[(&str, u8)]| FilterExpr::Devotion { op, pips: packed_pips(pips) };
     let mut bitmap: Vec<u64> = Vec::new();
     let mut check_exact = |f: &FilterExpr| {
-        let pe = compile_plane(f).expect("must compile exactly");
+        let pe = compile_plane(f, &archived.indexes.planes).expect("must compile exactly");
         eval_planes(&pe, &archived.indexes.planes, &mut bitmap);
         for (cid, card) in archived.cards.iter().enumerate() {
             let want = f.eval_card(card, &archived.strings) == Tri::True;
@@ -2529,9 +2764,9 @@ fn devotion_plane_parity_and_boundaries() {
     check_exact(&dev(CmpOp::Ge, &[("R", 3)])); // {R/G}{R/G}{R} card reaches R=3
 
     // Past the saturation boundary the exact compiler declines...
-    assert!(compile_plane(&dev(CmpOp::Ge, &[("U", 4)])).is_none());
-    assert!(compile_plane(&dev(CmpOp::Eq, &[("U", 3)])).is_none());
-    assert!(compile_plane(&dev(CmpOp::Le, &[("U", 3)])).is_none());
+    assert!(compile_plane(&dev(CmpOp::Ge, &[("U", 4)]), &archived.indexes.planes).is_none());
+    assert!(compile_plane(&dev(CmpOp::Eq, &[("U", 3)]), &archived.indexes.planes).is_none());
+    assert!(compile_plane(&dev(CmpOp::Le, &[("U", 3)]), &archived.indexes.planes).is_none());
     // ...and the saturated superset covers every deep match for narrowing.
     let deep = dev(CmpOp::Ge, &[("U", 5)]);
     let n = super::narrow_rec(&deep, &archived.indexes, &archived.offsets, &archived.cards, false).expect("deep-k narrows loosely");
@@ -2555,7 +2790,7 @@ fn hybrid_pip_counts_toward_both_colors() {
     let mut bitmap: Vec<u64> = Vec::new();
     let rg_card = 5; // {R/G}
     for (f, want) in [(dev("R", 1), true), (dev("G", 1), true), (dev("R", 2), false), (dev("U", 1), false)] {
-        eval_planes(&compile_plane(&f).unwrap(), &archived.indexes.planes, &mut bitmap);
+        eval_planes(&compile_plane(&f, &archived.indexes.planes).unwrap(), &archived.indexes.planes, &mut bitmap);
         assert_eq!(bitmap_contains(&bitmap, rg_card), want);
     }
 }
