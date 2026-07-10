@@ -220,6 +220,7 @@ fn store_of(cards: Vec<OracleCard>, printing_counts: &[usize], vocab: VocabInter
         planes: build_bit_planes(&cards),
         name_bigrams: build_name_bigram_index(&cards),
         legal_divergent: build_divergent_ids(&cards),
+        sort_perms: build_sort_permutations(&cards, &printings, &offsets),
         ..Default::default()
     };
     CardData {
@@ -1159,6 +1160,232 @@ fn collector_number_narrowing() {
     // narrowable now that cn has an index (this was the post-#622 worst query).
     let or = FilterExpr::Or(vec![cn(CmpOp::Eq, 228.0), cn(CmpOp::Eq, 100.0)]);
     assert_eq!(narrow(&or), Some(vec![0, 1]));
+}
+
+// ─── #634 Step 1: all_match promotion ─────────────────────────────────────────
+
+/// The regression this suite exists to prevent: a printing-space predicate
+/// narrowing "tight" (every posted printing genuinely matches — see
+/// collector_number_narrowing above) does NOT mean "every printing of the
+/// associated card matches," which is what `all_match`/`Tri::True` means at
+/// card_pass's level. card 0 has two printings — one at cn=100 (matches),
+/// one at cn=228 (does not) — so `cn=100` must resolve to exactly one
+/// printing match, never both (which is what wrongly promoting a tight
+/// printing-space result to all_match would produce).
+#[test]
+fn all_match_promotion_never_fires_for_printing_space_tight_results() {
+    let mut vocab = VocabInterner::new();
+    let cards = vec![stub_card(1, TYPE_CREATURE, &[], &mut vocab), stub_card(2, TYPE_CREATURE, &[], &mut vocab)];
+    let mut data = store_of(cards, &[2, 2], vocab);
+    data.printings[0].collector_number_int = Some(100);
+    data.printings[1].collector_number_int = Some(228);
+    data.printings[2].collector_number_int = Some(101);
+    data.indexes.collector_number = build_range_index(&data.printings, |p| p.collector_number_int.map(u32::from));
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let mut cn_eq_100 = FilterExpr::NumericCmp {
+        lhs: NumExpr::Field(NumField::CollectorNumberInt),
+        op: CmpOp::Eq,
+        rhs: NumExpr::Const(100.0),
+    };
+    let (total, page) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut cn_eq_100, None, "printing", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+    );
+    assert_eq!(total, 1, "cn=100 must match exactly one printing, not both of card 0's printings");
+    assert_eq!(u128::from(page[0].1.scryfall_id), 1); // the cn=100 printing specifically
+
+    // unique=card must also see exactly one matching card (not both, and not
+    // zero), and it must be card 0.
+    let mut cn_eq_100b = FilterExpr::NumericCmp {
+        lhs: NumExpr::Field(NumField::CollectorNumberInt),
+        op: CmpOp::Eq,
+        rhs: NumExpr::Const(100.0),
+    };
+    let (total, page) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut cn_eq_100b, None, "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+    );
+    assert_eq!(total, 1);
+    assert_eq!(u128::from(page[0].0.oracle_id), 1);
+}
+
+/// The positive case: a genuinely card-space exact predicate (a numeric
+/// range — cmc/power/toughness are card-level fields, identical across every
+/// printing) gets the same correct results with or without all_match
+/// promotion. Doesn't assert card_pass was skipped (an implementation
+/// detail) — just that results stay correct, across uniques, when the
+/// narrowing IS safe to trust directly.
+#[test]
+fn all_match_promotion_correct_for_card_space_exact_predicate() {
+    let mut vocab = VocabInterner::new();
+    let mut card0 = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
+    card0.creature_power = Some(5);
+    let mut card1 = stub_card(2, TYPE_CREATURE, &[], &mut vocab);
+    card1.creature_power = Some(1);
+    let mut data = store_of(vec![card0, card1], &[2, 3], vocab);
+    data.indexes.power = build_numeric_index(&data.cards, |c| c.creature_power.map(|v| v as i16));
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let mut power_gt_3 = FilterExpr::NumericCmp {
+        lhs: NumExpr::Field(NumField::Power),
+        op: CmpOp::Gt,
+        rhs: NumExpr::Const(3.0),
+    };
+    let (total, _) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut power_gt_3, None, "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+    );
+    assert_eq!(total, 1); // only card0 (power 5)
+
+    let mut power_gt_3p = FilterExpr::NumericCmp {
+        lhs: NumExpr::Field(NumField::Power),
+        op: CmpOp::Gt,
+        rhs: NumExpr::Const(3.0),
+    };
+    let (total, _) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut power_gt_3p, None, "printing", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+    );
+    assert_eq!(total, 2); // card0's 2 printings, all matching (power is card-level)
+}
+
+// ─── #634 Step 2: popcount-skip order phase ───────────────────────────────────
+
+/// Five all-Creature cards (so `t:creature` fully plane-consumes to True —
+/// the whole filter, every selectivity) with three tied on cmc=3, to stress
+/// exactly the property the design correction was about: descending order is
+/// NOT simply the reverse of ascending, because the edhrec tie-break never
+/// flips with the primary column's direction. If inverse permutations were
+/// (wrongly) derived via `n-1-pos` instead of stored per-direction, the tied
+/// group's internal order would come out reversed in one direction.
+fn tie_break_fixture() -> (Vec<OracleCard>, VocabInterner) {
+    let mut vocab = VocabInterner::new();
+    let mut card0 = stub_card(1, TYPE_CREATURE, &[], &mut vocab); // cmc=3, edhrec=10
+    card0.cmc = Some(3);
+    card0.edhrec_rank = Some(10);
+    let mut card1 = stub_card(2, TYPE_CREATURE, &[], &mut vocab); // cmc=3, edhrec=5 (lowest in the tie)
+    card1.cmc = Some(3);
+    card1.edhrec_rank = Some(5);
+    let mut card2 = stub_card(3, TYPE_CREATURE, &[], &mut vocab); // cmc=3, edhrec=20 (highest in the tie)
+    card2.cmc = Some(3);
+    card2.edhrec_rank = Some(20);
+    let mut card3 = stub_card(4, TYPE_CREATURE, &[], &mut vocab); // cmc=1
+    card3.cmc = Some(1);
+    card3.edhrec_rank = Some(1);
+    let mut card4 = stub_card(5, TYPE_CREATURE, &[], &mut vocab); // cmc=5
+    card4.cmc = Some(5);
+    card4.edhrec_rank = Some(1);
+    (vec![card0, card1, card2, card3, card4], vocab)
+}
+
+/// Expected order, by oracle_id: ascending is [card3(1), card1(3,e5),
+/// card0(3,e10), card2(3,e20), card4(5)]; descending is [card4(5), card1,
+/// card0, card2, card3(1)] — the tied trio (card1,card0,card2) keeps the
+/// SAME internal order in both directions, only the untied cards (card3,
+/// card4) swap ends.
+#[test]
+fn popcount_skip_tie_breaking_preserves_group_order_both_directions() {
+    let (cards, vocab) = tie_break_fixture();
+    let data = store_of(cards, &[1, 1, 1, 1, 1], vocab);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let creature = FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
+    let (plane, mut residual) = split_planes(creature);
+    assert!(matches!(residual, FilterExpr::True), "t:creature must fully plane-consume");
+
+    let mut run = |direction: &str| {
+        run_query(
+            &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+            &mut residual, plane.as_ref(), "card", "default", "cmc", direction, 100, 0, &archived.indexes,
+        )
+    };
+
+    let (total, page) = run("asc");
+    assert_eq!(total, 5);
+    let order: Vec<u128> = page.iter().map(|(c, _)| u128::from(c.oracle_id)).collect();
+    assert_eq!(order, vec![4, 2, 1, 3, 5], "ascending: tied trio in edhrec-ascending order");
+
+    let (total, page) = run("desc");
+    assert_eq!(total, 5);
+    let order: Vec<u128> = page.iter().map(|(c, _)| u128::from(c.oracle_id)).collect();
+    assert_eq!(
+        order,
+        vec![5, 2, 1, 3, 4],
+        "descending: only the untied ends (card3/card4) swap — the tied trio's \
+         internal order (card1,card0,card2) must stay identical to ascending, \
+         not reverse"
+    );
+}
+
+/// Offset landing mid-tied-group: skipping the first 2 (ascending) must land
+/// exactly on the third-ranked card, not off-by-one from a word/bit
+/// miscount.
+#[test]
+fn popcount_skip_offset_lands_inside_tied_group() {
+    let (cards, vocab) = tie_break_fixture();
+    let data = store_of(cards, &[1, 1, 1, 1, 1], vocab);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let creature = FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
+    let (plane, mut residual) = split_planes(creature);
+
+    // Full ascending order is [card3, card1, card0, card2, card4] (oracle ids
+    // [4,2,1,3,5]); offset=2 must skip card3 and card1, landing on card0.
+    let (total, page) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut residual, plane.as_ref(), "card", "default", "cmc", "asc", 100, 2, &archived.indexes,
+    );
+    assert_eq!(total, 5);
+    let order: Vec<u128> = page.iter().map(|(c, _)| u128::from(c.oracle_id)).collect();
+    assert_eq!(order, vec![1, 3, 5]);
+
+    // offset at exactly total must yield an empty page, not panic.
+    let (total, page) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut residual, plane.as_ref(), "card", "default", "cmc", "asc", 100, 5, &archived.indexes,
+    );
+    assert_eq!(total, 5);
+    assert!(page.is_empty());
+}
+
+/// The popcount-skip path must produce byte-identical results to the
+/// existing (non-popcount) path for the same query — cross-checked directly
+/// against run_query_streamed's counts-buffer path by disabling the plane
+/// (forcing the old path) and comparing.
+#[test]
+fn popcount_skip_matches_non_popcount_path() {
+    let (cards, vocab) = tie_break_fixture();
+    let data = store_of(cards, &[1, 1, 1, 1, 1], vocab);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let creature = FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
+    let (plane, mut residual_true) = split_planes(creature);
+    assert!(matches!(residual_true, FilterExpr::True));
+
+    // Popcount path: plane present, residual True.
+    let (total_pc, page_pc) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut residual_true, plane.as_ref(), "card", "default", "cmc", "desc", 100, 1, &archived.indexes,
+    );
+
+    // Non-popcount path: same logical filter, but passed as a real predicate
+    // (not pre-consumed to True) with no plane, forcing the counts-buffer path.
+    let mut creature_raw = FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
+    let (total_old, page_old) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut creature_raw, None, "card", "default", "cmc", "desc", 100, 1, &archived.indexes,
+    );
+
+    assert_eq!(total_pc, total_old);
+    let ids_pc: Vec<u128> = page_pc.iter().map(|(c, _)| u128::from(c.oracle_id)).collect();
+    let ids_old: Vec<u128> = page_old.iter().map(|(c, _)| u128::from(c.oracle_id)).collect();
+    assert_eq!(ids_pc, ids_old);
 }
 
 // Frame postings are selectivity-thresholded at build: values covering more

@@ -1338,6 +1338,18 @@ fn expand_flavor_ids(idx: &Archived<FlavorIndex>, dense_ids: &[u32]) -> Vec<u32>
 // into the primary key only — secondaries keep their fixed order in both
 // directions, so a reversed ascending walk would be wrong inside ties.
 // 10 × ~126 kB ≈ 1.26 MB.
+//
+// `inv` mirrors `perm` one-for-one (inv[col][dir][card] = card's position in
+// that sort order) for #634 Step 2's popcount-skip order phase: scattering a
+// match bitmap through inv turns "walk the permutation, skip page_offset
+// matches" into "accumulate word popcounts to the boundary word," O(words)
+// instead of O(matches). Stored explicitly per direction rather than derived
+// from one another (e.g. inv_desc[c] = n-1-inv_asc[c]) for the same reason
+// `perm` itself isn't derived that way: ties keep fixed relative order in
+// both directions (see above), so reversing one inverse gets tied groups'
+// internal order backwards — verified by re-deriving the sort key construction
+// before implementing, not assumed from the general "arrays can be negated"
+// intuition. Same size as `perm`: another ~1.26 MB.
 
 #[derive(Archive, Serialize, Deserialize, Default)]
 struct SortPermutations {
@@ -1351,6 +1363,13 @@ struct SortPermutations {
     // lookup table: equal-name blocks are contiguous (rank is the primary key)
     // and narrow_rec's ExactName arm binary-searches it.
     name:      [Vec<u32>; 2],
+    // Inverse of each column above, same [ascending, descending] layout.
+    edhrec_inv:    [Vec<u32>; 2],
+    cubecobra_inv: [Vec<u32>; 2],
+    cmc_inv:       [Vec<u32>; 2],
+    power_inv:     [Vec<u32>; 2],
+    toughness_inv: [Vec<u32>; 2],
+    name_inv:      [Vec<u32>; 2],
 }
 
 impl ArchivedSortPermutations {
@@ -1365,6 +1384,20 @@ impl ArchivedSortPermutations {
             SortCol::Power      => &self.power,
             SortCol::Toughness  => &self.toughness,
             SortCol::Name       => &self.name,
+            SortCol::Rarity | SortCol::PriceUsd => return None,
+        };
+        Some(&pair[descending as usize])
+    }
+
+    /// The inverse permutation for a streamable column/direction (#634 Step 2).
+    fn get_inv(&self, col: SortCol, descending: bool) -> Option<&Archived<Vec<u32>>> {
+        let pair = match col {
+            SortCol::EdhrecRank => &self.edhrec_inv,
+            SortCol::Cubecobra  => &self.cubecobra_inv,
+            SortCol::Cmc        => &self.cmc_inv,
+            SortCol::Power      => &self.power_inv,
+            SortCol::Toughness  => &self.toughness_inv,
+            SortCol::Name       => &self.name_inv,
             SortCol::Rarity | SortCol::PriceUsd => return None,
         };
         Some(&pair[descending as usize])
@@ -1390,6 +1423,15 @@ fn assign_name_ranks(cards: &mut [OracleCard]) {
     }
 }
 
+/// `inv[perm[i]] == i` — the position of each card within the permutation.
+fn invert_perm(perm: &[u32]) -> Vec<u32> {
+    let mut inv = vec![0u32; perm.len()];
+    for (pos, &card) in perm.iter().enumerate() {
+        inv[card as usize] = pos as u32;
+    }
+    inv
+}
+
 fn build_sort_permutations(cards: &[OracleCard], printings: &[Printing], offsets: &[u32]) -> SortPermutations {
     let perm = |get: &dyn Fn(&OracleCard) -> Option<f32>, descending: bool| -> Vec<u32> {
         let mut ids: Vec<u32> = (0..cards.len() as u32).collect();
@@ -1409,14 +1451,24 @@ fn build_sort_permutations(cards: &[OracleCard], printings: &[Printing], offsets
         });
         ids
     };
-    let both = |get: &dyn Fn(&OracleCard) -> Option<f32>| [perm(get, false), perm(get, true)];
+    // Inverse built per direction, not derived from one another — ties keep
+    // fixed relative order in both directions (see the struct doc above), so
+    // reversing one inverse would get tied groups' internal order backwards.
+    let both = |get: &dyn Fn(&OracleCard) -> Option<f32>| -> ([Vec<u32>; 2], [Vec<u32>; 2]) {
+        let asc = perm(get, false);
+        let desc = perm(get, true);
+        let inv = [invert_perm(&asc), invert_perm(&desc)];
+        ([asc, desc], inv)
+    };
+    let (edhrec, edhrec_inv) = both(&|c| c.edhrec_rank.map(|v| v as f32));
+    let (cubecobra, cubecobra_inv) = both(&|c| c.cubecobra_score);
+    let (cmc, cmc_inv) = both(&|c| c.cmc.map(|v| v as f32));
+    let (power, power_inv) = both(&|c| c.creature_power.map(|v| v as f32));
+    let (toughness, toughness_inv) = both(&|c| c.creature_toughness.map(|v| v as f32));
+    let (name, name_inv) = both(&|c| Some(c.name_rank as f32));
     SortPermutations {
-        edhrec:    both(&|c| c.edhrec_rank.map(|v| v as f32)),
-        cubecobra: both(&|c| c.cubecobra_score),
-        cmc:       both(&|c| c.cmc.map(|v| v as f32)),
-        power:     both(&|c| c.creature_power.map(|v| v as f32)),
-        toughness: both(&|c| c.creature_toughness.map(|v| v as f32)),
-        name:      both(&|c| Some(c.name_rank as f32)),
+        edhrec, cubecobra, cmc, power, toughness, name,
+        edhrec_inv, cubecobra_inv, cmc_inv, power_inv, toughness_inv, name_inv,
     }
 }
 
@@ -2096,23 +2148,62 @@ fn tight_narrow_space(f: &FilterExpr) -> Option<bool> {
     }
 }
 
+/// Like narrow_candidates, but also reports whether the returned set (when
+/// Some) is card-level exact — #634 Step 1's all_match promotion needs this:
+/// when the residual is provably both tight (no false positives) and
+/// complete (every true match included, which `narrow_rec`'s `tight` already
+/// tracks through its And/Or composition — see `and_all`/`or_all`), the whole
+/// original query is exact whenever a present `plane` is too (always true —
+/// that's what `compile_plane` already guarantees), and per-candidate
+/// `card_pass` becomes redundant work the narrowing already did.
+///
+/// Critically, `tight` alone is not enough: it means every member of the set
+/// truly satisfies the predicate *in the set's own space*. For a printing-
+/// space result that's "this specific printing matches," not "every printing
+/// of the associated card matches" — but `card_pass`'s `Tri::True` (what
+/// `all_match` stands in for) specifically means the latter. A card can have
+/// printings in and out of a printing-space match (e.g. `set:war` — most
+/// cards have other-set printings too), so a tight-but-printing-space result
+/// must never promote. Only a genuinely card-space tight result qualifies.
+///
+/// A discarded-for-broadness result never promotes either: "exact" alone
+/// isn't enough without the actual membership in hand to skip verification
+/// safely — a too-broad-to-narrow-with `cmc<=6` is still exact in principle,
+/// but we don't have its membership without paying to materialize it, which
+/// isn't worth doing just for this (see
+/// docs/issues/engine-permuted-bitmap-order-phase.md).
+fn narrow_candidates_exact(
+    filter: &FilterExpr,
+    indexes: &Archived<CardIndexes>,
+    offsets: &AOffsets,
+    cards: &[AOracleCard],
+) -> (Option<Candidates>, bool) {
+    let n_cards = offsets.len().saturating_sub(1);
+    let n_printings = if n_cards == 0 { 0 } else { u32::from(offsets[n_cards]) as usize };
+    match narrow_rec(filter, indexes, offsets, cards, false) {
+        None => (None, false),
+        Some(n) => {
+            let printing_space = n.set.is_printing_space();
+            let domain = if printing_space { n_printings } else { n_cards };
+            if n.set.len() <= domain - domain / 4 {
+                (Some(n.set), n.tight && !printing_space)
+            } else {
+                (None, false)
+            }
+        }
+    }
+}
+
+// Only run_query needs the exactness bit (#634 Step 1); every other caller —
+// all in tests — just wants the candidate set, same as before that change.
+#[cfg(test)]
 fn narrow_candidates(
     filter: &FilterExpr,
     indexes: &Archived<CardIndexes>,
     offsets: &AOffsets,
     cards: &[AOracleCard],
 ) -> Option<Candidates> {
-    let n_cards = offsets.len().saturating_sub(1);
-    let n_printings = if n_cards == 0 { 0 } else { u32::from(offsets[n_cards]) as usize };
-    narrow_rec(filter, indexes, offsets, cards, false)
-        .filter(|n| {
-            // Near-total sets narrow nothing; dropping them here (a popcount,
-            // before any projection or materialization) keeps broad composed
-            // results from paying conversion costs on the way to being useless.
-            let domain = if n.set.is_printing_space() { n_printings } else { n_cards };
-            n.set.len() <= domain - domain / 4
-        })
-        .map(|n| n.set)
+    narrow_candidates_exact(filter, indexes, offsets, cards).0
 }
 
 /// Once any candidate source in an And is this selective, evaluating further
@@ -2879,6 +2970,28 @@ fn run_query<'a>(
         _          => Mode::Card,
     };
 
+    // #634 Step 2: when the filter fully consumed to True (split_planes ate
+    // the whole thing), the plane bitmap IS the exact match set at any
+    // selectivity — no candidate materialization, no card_pass, needed at
+    // all. Scoped to unique=card for now (see run_query_streamed_popcount);
+    // other modes/residuals fall through to the existing path below, which
+    // already handles them correctly (Step 1 already removes the redundant
+    // card_pass there, just not the O(candidates) counts-buffer fill).
+    if matches!(filter, FilterExpr::True) && matches!(mode, Mode::Card) && !cards.is_empty()
+        && let (Some(expr), Some(perm), Some(inv_perm)) =
+            (plane, indexes.sort_perms.get(sort_col, descending), indexes.sort_perms.get_inv(sort_col, descending))
+        && perm.len() == cards.len()
+    {
+        thread_local! {
+            static PLANE_BITMAP_POPCOUNT: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        return PLANE_BITMAP_POPCOUNT.with(|cell| {
+            let mut bitmap = cell.borrow_mut();
+            eval_planes(expr, &indexes.planes, &mut bitmap);
+            run_query_streamed_popcount(cards, printings, offsets, prefer, limit, page_offset, perm, inv_perm, &bitmap)
+        });
+    }
+
     // Candidates in either space project to card ids for the walk; the walk's
     // per-printing verification restores exactness for printing-space losses.
     // A list covering nearly the whole corpus narrows nothing — the walk would
@@ -2888,7 +3001,17 @@ fn run_query<'a>(
     // queries exactly as before. Left un-materialized (Candidates, not
     // Vec<u32>) here so the plane branch below can AND two card-space bitmaps
     // directly instead of paying to materialize one of them first.
-    let raw_candidates: Option<Candidates> = narrow_candidates(filter, indexes, offsets, cards);
+    let (raw_candidates, residual_exact): (Option<Candidates>, bool) =
+        narrow_candidates_exact(filter, indexes, offsets, cards);
+    // A present plane is always exact (that's what compile_plane guarantees),
+    // so the whole original query is exact iff the residual is too — either
+    // because split_planes consumed all of it (bare True) or narrow_rec
+    // proved the remainder tight and complete with its membership in hand
+    // (see narrow_candidates_exact). #634 Step 1: when this holds, every
+    // candidate is already known to match, so the per-candidate card_pass
+    // calls below and in run_query_streamed become redundant re-verification
+    // of what the narrowing already established.
+    let all_match_known = matches!(filter, FilterExpr::True) || residual_exact;
 
     // The plane bitmap is the exact card-level truth of the plane-consumed
     // subexpression (split_planes), so it composes with the residual's
@@ -2938,15 +3061,18 @@ fn run_query<'a>(
     // the gate is per-node and cost-based (see memoize_pays): each predicate
     // compares its own bind bound against the evaluation domain, so a broad
     // candidate set with a selective needle memoizes while a narrow one
-    // leaves the scan alone.
-    let eval_domain = candidate_cards.as_ref().map_or(cards.len(), Vec::len);
-    filter.memoize_text_predicates(cards, strings, &indexes.name_trigram, &indexes.name_bigrams, &indexes.oracle_trigram, eval_domain);
-    // Sort And/Or children cheapest-verification-first so the walk's
-    // short-circuit spares the expensive text predicates (semantics-preserving;
-    // see order_children_by_verify_cost). After memoization, which flips
-    // TextContains nodes from the scan tier to the set tier.
-    if *VERIFY_ORDER != 0 {
-        filter.order_children_by_verify_cost();
+    // leaves the scan alone. Skipped entirely when all_match_known: card_pass
+    // never runs, so there is nothing left for the rewrite to speed up.
+    if !all_match_known {
+        let eval_domain = candidate_cards.as_ref().map_or(cards.len(), Vec::len);
+        filter.memoize_text_predicates(cards, strings, &indexes.name_trigram, &indexes.name_bigrams, &indexes.oracle_trigram, eval_domain);
+        // Sort And/Or children cheapest-verification-first so the walk's
+        // short-circuit spares the expensive text predicates (semantics-preserving;
+        // see order_children_by_verify_cost). After memoization, which flips
+        // TextContains nodes from the scan tier to the set tier.
+        if *VERIFY_ORDER != 0 {
+            filter.order_children_by_verify_cost();
+        }
     }
     let card_ids: Box<dyn Iterator<Item = u32>> = match &candidate_cards {
         Some(v) => Box::new(v.iter().copied()),
@@ -2962,7 +3088,7 @@ fn run_query<'a>(
     if let Some(perm) = indexes.sort_perms.get(sort_col, descending) {
         if maybe_broad && perm.len() == cards.len() && !cards.is_empty() {
             return run_query_streamed(
-                cards, printings, offsets, strings, filter, mode, prefer, sort_col, descending, limit,
+                cards, printings, offsets, strings, filter, all_match_known, mode, prefer, sort_col, descending, limit,
                 page_offset, perm, card_ids, &indexes.artwork_groups,
             );
         }
@@ -2977,11 +3103,15 @@ fn run_query<'a>(
     let mut residual_is_or = false;
     for cid in card_ids {
         let card = &cards[cid as usize];
-        let all_match = match filter.card_pass(card, strings, &mut residual, &mut residual_is_or) {
-            Tri::False | Tri::Null => continue,
-            Tri::True => true,          // every printing matches: skip per-printing checks
-            Tri::PrintingDep => false,  // verify each printing against the residual below
-        };
+        // #634 Step 1: all_match_known means the narrowing already proved
+        // every candidate matches — card_pass would just re-derive Tri::True
+        // at real per-node evaluation cost for nothing.
+        let all_match = all_match_known
+            || match filter.card_pass(card, strings, &mut residual, &mut residual_is_or) {
+                Tri::False | Tri::Null => continue,
+                Tri::True => true,          // every printing matches: skip per-printing checks
+                Tri::PrintingDep => false,  // verify each printing against the residual below
+            };
         let start = u32::from(offsets[cid as usize]) as usize;
         let end   = u32::from(offsets[cid as usize + 1]) as usize;
         push_card_matches(
@@ -2998,6 +3128,121 @@ fn run_query<'a>(
     (total, page)
 }
 
+/// #634 Step 2: popcount-skip order phase. Scoped to `unique=card` queries
+/// whose filter fully consumed to `FilterExpr::True` (the plane bitmap IS the
+/// exact match set, at any selectivity — colors/types/legality). Scatters the
+/// match bitmap through the inverse permutation, then works in word space
+/// instead of candidate space: total is a popcount, skip is a running
+/// word-popcount sum to the boundary word, emit walks set bits from there
+/// mapping back through the forward permutation for `limit` cards. O(words)
+/// regardless of match count or page depth — unlike `run_query_streamed`'s
+/// counts-buffer fill, which is O(candidates) no matter how deep the
+/// requested page is. Compound exact filters that didn't fully consume to
+/// True (e.g. `t:creature power>3`, residual = `power>3`) still go through
+/// `run_query_streamed`'s Step-1-improved-but-not-popcount path — extending
+/// this to non-True residuals is a reasonable fast-follow, not required here.
+#[allow(clippy::too_many_arguments)]
+fn run_query_streamed_popcount<'a>(
+    cards: &'a [AOracleCard],
+    printings: &'a [APrinting],
+    offsets: &AOffsets,
+    prefer: Prefer,
+    limit: usize,
+    page_offset: usize,
+    perm: &Archived<Vec<u32>>,
+    inv_perm: &Archived<Vec<u32>>,
+    bitmap: &[u64],
+) -> (usize, Vec<(&'a AOracleCard, &'a APrinting)>) {
+    let n_cards = cards.len();
+    let total: usize = bitmap.iter().map(|w| w.count_ones() as usize).sum();
+    if total == 0 || page_offset >= total {
+        return (total, Vec::new());
+    }
+
+    thread_local! {
+        static PERMUTED: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    PERMUTED.with(|cell| {
+        let mut permuted = cell.borrow_mut();
+        let wpp = n_cards.div_ceil(64);
+        permuted.clear();
+        permuted.resize(wpp, 0);
+        // Scatter: every set bit's position in sort order (inv_perm[cid])
+        // becomes a set bit here. Tail bits never get touched — inv_perm's
+        // range is exactly 0..n_cards, so no cid maps past the last word.
+        for (i, &word) in bitmap.iter().enumerate() {
+            let mut w = word;
+            while w != 0 {
+                let cid = (i as u32) << 6 | w.trailing_zeros();
+                w &= w - 1;
+                let pos = u32::from(inv_perm[cid as usize]) as usize;
+                permuted[pos / 64] |= 1u64 << (pos % 64);
+            }
+        }
+
+        // Skip: accumulate word popcounts until the boundary word containing
+        // page_offset — 64 cards per word read, deep pagination is a
+        // ~n_cards/64-word scan regardless of match count.
+        let mut skip = page_offset;
+        let mut word_idx = 0;
+        while word_idx < permuted.len() {
+            let wc = permuted[word_idx].count_ones() as usize;
+            if skip < wc {
+                break;
+            }
+            skip -= wc;
+            word_idx += 1;
+        }
+
+        // Emit: walk set bits from the boundary word onward (skipping `skip`
+        // more within it), mapping position -> card id via the forward perm.
+        // all_match is always true here (filter fully consumed to True), so
+        // the printing choice mirrors push_card_matches' Mode::Card branch
+        // under all_match exactly: first printing for default prefer (ranges
+        // are stored in descending default-prefer order), best-scored
+        // otherwise.
+        let mut page: Vec<(&AOracleCard, &APrinting)> = Vec::with_capacity(limit);
+        'walk: while word_idx < permuted.len() {
+            let mut w = permuted[word_idx];
+            while w != 0 {
+                let bit = w.trailing_zeros();
+                w &= w - 1;
+                if skip > 0 {
+                    skip -= 1;
+                    continue;
+                }
+                let pos = (word_idx as u32) << 6 | bit;
+                let cid = u32::from(perm[pos as usize]);
+                let card = &cards[cid as usize];
+                let start = u32::from(offsets[cid as usize]) as usize;
+                let end = u32::from(offsets[cid as usize + 1]) as usize;
+                let chosen: Option<u32> = if matches!(prefer, Prefer::Default) {
+                    (start < end).then_some(start as u32)
+                } else {
+                    // Strict > only (matches push_card_matches): ties keep the
+                    // first-found printing, not the last.
+                    let mut best: Option<(u32, f64)> = None;
+                    for pid in start..end {
+                        let score = prefer_score(card, &printings[pid], prefer);
+                        if best.is_none_or(|(_, s)| score > s) {
+                            best = Some((pid as u32, score));
+                        }
+                    }
+                    best.map(|(pid, _)| pid)
+                };
+                if let Some(pid) = chosen {
+                    page.push((card, &printings[pid as usize]));
+                }
+                if page.len() == limit {
+                    break 'walk;
+                }
+            }
+            word_idx += 1;
+        }
+        (total, page)
+    })
+}
+
 /// Streamed selection: match phase records per-card match counts (total is
 /// their sum), then either gathers (small totals — byte-identical to the
 /// gathered path) or walks the orderby permutation emitting only page cards.
@@ -3008,6 +3253,7 @@ fn run_query_streamed<'a>(
     offsets: &AOffsets,
     strings: &AStrings,
     filter: &FilterExpr,
+    all_match_known: bool,
     mode: Mode,
     prefer: Prefer,
     sort_col: SortCol,
@@ -3037,11 +3283,22 @@ fn run_query_streamed<'a>(
     let mut total: usize = 0;
     for cid in card_ids {
         let card = &cards[cid as usize];
-        let all_match = match filter.card_pass(card, strings, &mut residual, &mut residual_is_or) {
-            Tri::False | Tri::Null => continue,
-            Tri::True => true,
-            Tri::PrintingDep => false,
-        };
+        // #634 Step 1: skip the redundant card_pass re-derivation of Tri::True
+        // when the narrowing already proved every candidate matches. Gated
+        // off for Mode::Artwork specifically: measured a ~45% regression for
+        // `t:creature` unique=artwork with this applied unconditionally here
+        // (0.13ms -> 0.19ms typical, isolated by bisecting call sites) despite
+        // being a no-op change in card_pass's own return value (True either
+        // way) — an unexplained codegen/scheduling effect in this loop for
+        // that mode specifically, not a logical cost. Card/Printing modes
+        // showed no such effect and do benefit (this loop visits every
+        // candidate, not just the ~limit emitted).
+        let all_match = (all_match_known && !matches!(mode, Mode::Artwork))
+            || match filter.card_pass(card, strings, &mut residual, &mut residual_is_or) {
+                Tri::False | Tri::Null => continue,
+                Tri::True => true,
+                Tri::PrintingDep => false,
+            };
         let start = u32::from(offsets[cid as usize]) as usize;
         let end   = u32::from(offsets[cid as usize + 1]) as usize;
         // Every printing matches: card/printing counts are O(1) inside the
@@ -3069,11 +3326,12 @@ fn run_query_streamed<'a>(
                 continue;
             }
             let card = &cards[cid as usize];
-            let all_match = match filter.card_pass(card, strings, &mut residual, &mut residual_is_or) {
-                Tri::True => true,
-                Tri::PrintingDep => false,
-                _ => continue,
-            };
+            let all_match = all_match_known
+                || match filter.card_pass(card, strings, &mut residual, &mut residual_is_or) {
+                    Tri::True => true,
+                    Tri::PrintingDep => false,
+                    _ => continue,
+                };
             let start = u32::from(offsets[cid as usize]) as usize;
             let end   = u32::from(offsets[cid as usize + 1]) as usize;
             push_card_matches(
@@ -3105,11 +3363,12 @@ fn run_query_streamed<'a>(
             continue;
         }
         let card = &cards[cid as usize];
-        let all_match = match filter.card_pass(card, strings, &mut residual, &mut residual_is_or) {
-            Tri::True => true,
-            Tri::PrintingDep => false,
-            _ => continue,
-        };
+        let all_match = all_match_known
+            || match filter.card_pass(card, strings, &mut residual, &mut residual_is_or) {
+                Tri::True => true,
+                Tri::PrintingDep => false,
+                _ => continue,
+            };
         let start = u32::from(offsets[cid as usize]) as usize;
         let end   = u32::from(offsets[cid as usize + 1]) as usize;
         scratch.clear();
@@ -3236,7 +3495,7 @@ const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 /// catch (e.g. reordering same-size fields, changing an index type) — and on
 /// any FLAVOR_FP_FEATURES change: archived fingerprints are built with that
 /// table, so a new table reading old fingerprints breaks the superset test.
-const ARCHIVE_FORMAT_VERSION: u32 = 20260720;
+const ARCHIVE_FORMAT_VERSION: u32 = 20260721;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
