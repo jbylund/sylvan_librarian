@@ -56,10 +56,31 @@ CONFIGS: list[tuple[str, str, str, str, str]] = [
     # Phase 1: paths outside permutation streaming (gathered orderby, non-default prefer)
     ("p1-path", "c:g", "card", "usd", "default"),
     ("p1-path", "t:creature", "card", "edhrec", "usd_high"),
-    # Phase 2: legality
-    ("p2-legal", "f:modern", "card", "edhrec", "default"),
+    # Phase 2: legality — broad (>99% legal), mid, narrow (<20% legal) formats
     ("p2-legal", "f:commander", "card", "edhrec", "default"),
-    ("p2-legal", "c:g t:creature f:modern", "card", "edhrec", "default"),
+    ("p2-legal", "f:legacy", "card", "edhrec", "default"),
+    ("p2-legal", "f:vintage", "card", "edhrec", "default"),
+    ("p2-legal", "f:modern", "card", "edhrec", "default"),
+    ("p2-legal", "f:modern", "printing", "edhrec", "default"),
+    ("p2-legal", "f:pioneer", "card", "edhrec", "default"),
+    ("p2-legal", "f:standard", "card", "edhrec", "default"),
+    ("p2-legal", "f:pauper", "card", "edhrec", "default"),
+    ("p2-legal", "f:alchemy", "card", "edhrec", "default"),
+    ("p2-legal", "f:oldschool", "card", "edhrec", "default"),
+    # Phase 2: negated legality (format inversion) — same format spread
+    ("p2-legal-not", "-f:commander", "card", "edhrec", "default"),
+    ("p2-legal-not", "-f:modern", "card", "edhrec", "default"),
+    ("p2-legal-not", "-f:standard", "card", "edhrec", "default"),
+    ("p2-legal-not", "-f:oldschool", "card", "edhrec", "default"),
+    # Phase 2: composite (#634's motivating fully-index-resolved case) and mixed
+    ("p2-legal-mix", "c:g t:creature f:modern", "card", "edhrec", "default"),
+    ("p2-legal-mix", "f:modern t:creature power>3", "card", "edhrec", "default"),
+    ("p2-legal-mix", "f:pioneer c:ur", "card", "edhrec", "default"),
+    ("p2-legal-mix", "f:modern o:draw", "card", "edhrec", "default"),
+    ("p2-legal-mix", "f:modern or o:draw", "card", "edhrec", "default"),
+    # Phase 2: unindexed status controls — must not regress (banned/restricted stay full-scan)
+    ("p2-legal-ctl", "banned:modern", "card", "edhrec", "default"),
+    ("p2-legal-ctl", "restricted:vintage", "card", "edhrec", "default"),
     # Phase 3: rarity (narrowing mode) and dense keywords
     ("p3-rarity", "r:mythic", "card", "edhrec", "default"),
     ("p3-rarity", "rarity<=mythic", "card", "edhrec", "default"),

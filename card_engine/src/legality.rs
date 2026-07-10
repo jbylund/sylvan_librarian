@@ -13,7 +13,7 @@ const LEGALITY_NOT_LEGAL: u64 = 0;
 pub(crate) const LEGALITY_LEGAL: u64 = 1;
 pub(crate) const LEGALITY_RESTRICTED: u64 = 2;
 pub(crate) const LEGALITY_BANNED: u64 = 3;
-const MAX_FORMATS: usize = 32;
+pub(crate) const MAX_FORMATS: usize = 32;
 
 static FORMAT_SHIFTS: OnceLock<RwLock<HashMap<String, u8>>> = OnceLock::new();
 

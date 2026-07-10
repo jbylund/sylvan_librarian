@@ -19,6 +19,7 @@
 use rkyv::{Archive, Deserialize, Serialize};
 
 use super::filter::{CmpOp, ColorField, FilterExpr};
+use super::legality::{LEGALITY_LEGAL, MAX_FORMATS};
 use super::{lane_get, OracleCard};
 
 /// Plane layout, plane-major in BitPlanes.words: six color planes per color
@@ -37,7 +38,15 @@ const PLANE_TYPES: usize = 2 * COLOR_PLANES;
 /// set for deeper queries (see the saturated-superset arm in narrow_rec).
 const PLANE_DEVOTION: usize = PLANE_TYPES + TYPE_PLANES;
 const DEVOTION_BITS: usize = 2;
-pub(crate) const PLANE_COUNT: usize = PLANE_DEVOTION + DEVOTION_BITS * COLOR_PLANES;
+/// One plane per format's "legal" bit (#630 phase 2), fixed-width at
+/// MAX_FORMATS regardless of how many formats loaded data actually uses —
+/// unused slots are permanently-zero planes, matching the existing `shift:
+/// None` "format absent" semantics. These are narrowing-only candidate masks
+/// (see narrow_rec's Legality arms in lib.rs), never exact-consumed here:
+/// Legality can return Tri::PrintingDep for divergent cards, which compile_plane
+/// already excludes from exact consumption (only two-valued nodes qualify).
+pub(crate) const PLANE_LEGAL: usize = PLANE_DEVOTION + DEVOTION_BITS * COLOR_PLANES;
+pub(crate) const PLANE_COUNT: usize = PLANE_LEGAL + MAX_FORMATS;
 
 #[derive(Archive, Serialize, Deserialize, Default)]
 pub(crate) struct BitPlanes {
@@ -92,8 +101,43 @@ pub(crate) fn build_bit_planes(cards: &[OracleCard]) -> BitPlanes {
                 "devotion without identity: card {i} color lane {b}"
             );
         }
+        // "legal AND not divergent", not raw status: this makes the plane a
+        // pure exact predicate (no false positives, ever) rather than one that
+        // merely happens to be corrected downstream. narrow_rec's OR-with-
+        // divergent-postings formula (see legal_candidate_bits in lib.rs)
+        // produces an identical candidate mask either way (De Morgan's), so
+        // this costs nothing today — but it means `legal_x` alone is already
+        // the exact card-space source #634 wants to popcount directly, with
+        // the divergent set as the one small carve-out #634's promotion path
+        // would still need to verify per-candidate.
+        for f in 0..MAX_FORMATS {
+            let shift = (f * 2) as u32;
+            if !card.legality_divergent && (card.card_legalities >> shift) & 0b11 == LEGALITY_LEGAL {
+                set(PLANE_LEGAL + f);
+            }
+        }
     }
     BitPlanes { n_cards: cards.len() as u32, words }
+}
+
+/// Ascending card ids with divergent legality (~556 of 31,508 in production —
+/// well under the postings/plane byte crossover the bigram index established
+/// (PR #639): postings cost 2 bytes/entry, a plane costs words_per_plane*8
+/// bytes flat regardless of density, so a fixed, tiny, shared set like this
+/// one is cheaper as a list than as a 33rd plane. `u16` on purpose, same
+/// assumption the name-bigram index's sparse tier makes: card ids fit
+/// (production is ~31.5k, comfortably under u16::MAX). Scattered directly
+/// into a format's legal_x candidate mask by legal_candidate_bits (lib.rs)
+/// rather than intersected via the general Candidates machinery — the set is
+/// always this same small list, not query-dependent, so there's nothing to
+/// look up.
+pub(crate) fn build_divergent_ids(cards: &[OracleCard]) -> Vec<u16> {
+    debug_assert!(cards.len() <= u16::MAX as usize + 1, "card count exceeds u16 range for divergent postings");
+    cards
+        .iter()
+        .enumerate()
+        .filter_map(|(i, card)| card.legality_divergent.then_some(i as u16))
+        .collect()
 }
 
 // ─── Plane expressions ────────────────────────────────────────────────────────
