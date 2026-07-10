@@ -393,40 +393,63 @@ pub(crate) enum FilterExpr {
     },
 }
 
-/// Per-candidate verification cost of a node in the tri walk, grouped into
-/// tiers wide enough that the ranking is safe without measurement:
+/// Verifier per-candidate cost estimates, in hundredths of a nanosecond
+/// (ns * 100 — e.g. 1.83 ns -> 183) so sub-nanosecond gaps between measured
+/// ops stay representable as plain integers, and adding or recalibrating one
+/// op is a one-line constant edit instead of a renumbering of its neighbors
+/// (#651 forced exactly that churn on the previous 0..4 ordinal scheme).
 ///
-///   0 — field loads and integer/float/mask compares (numerics, dates,
-///       colors, types, legality words, exact string equality)
-///   1 — bounded lookups: a binary search over a bind/memoize-resolved id set
-///       (ArtistMatch/FlavorMatch/NameMatch/OracleMatch) or a card collection
-///       (CollectionCmp), anchored-literal regexes (a memcmp at a known
-///       position — see regex_tier), and the packed-lane pip compares of
-///       Devotion / ManaCostCmp (SWAR plus a usually-empty hybrid walk)
-///   2 — per-candidate text scans: TextContains (substring search; artist /
-///       flavor contains were rewritten to tier 1 at bind) and
-///       unanchored-literal regexes, whose prefilter costs the same scan
-///   3 — TextRegex with real regex machinery — the single worst
-///       per-candidate cost the engine has
+/// Measured on the real corpus (`bench_verify_cost.rs`, `cargo test --release
+/// bench_verify_cost -- --ignored --nocapture`, 31,508 oracle cards, min-of-50
+/// per kernel, 3 repeated runs — see that file for the per-op numbers):
 ///
-/// Composites take the max of their children: their short-circuit may have to
-/// evaluate every child, so the most expensive child bounds the cost.
-fn verify_cost_tier(f: &FilterExpr) -> u8 {
+/// - field loads and integer/float/mask compares (TypeCmp, ColorCmp,
+///   NumericCmp, ExactName, TextExact, Legality, DateCmp, YearCmp): 1.8-5.6 ns
+///   measured; NumericCmp is the priciest member (NumExpr::eval() indirection
+///   on both sides costs more than a direct field load), so the constant sits
+///   above it.
+pub(crate) const MASK_COMPARE_NS100: u32 = 600;
+/// - bounded lookups: a binary search over a bind/memoize-resolved id set
+///   (ArtistMatch/FlavorMatch/NameMatch/OracleMatch), a card collection
+///   (CollectionCmp), and anchored-literal regexes (a memcmp at a known
+///   position — see regex_tier): 1.8-8.1 ns measured. Devotion/ManaCostCmp
+///   (#651, bench_mana.rs) measure below this range (0.65-2 ns) but share the
+///   constant deliberately — see their arm below.
+pub(crate) const SET_LOOKUP_NS100: u32 = 900;
+/// - per-candidate text scans: unmemoized TextContains: 21.6-22.7 ns measured.
+pub(crate) const TEXT_SCAN_NS100: u32 = 2_300;
+/// - regex without a usable anchor: bare literal and general machinery
+///   measured statistically identical (~44-49 ns) once compared on equal
+///   footing (both carrying the (?i) every query regex has) — the regex
+///   crate's literal-prefix optimization doesn't meaningfully beat a full
+///   scan for an *unanchored* pattern. This corrects the previous assumption
+///   that bare-literal costs the same as TextContains (it measures ~2x more).
+///   An anchored non-literal pattern (e.g. `^[aeiou]`) measured far cheaper
+///   (~17.7 ns, anchoring bounds the scan regardless of what's being tested)
+///   but regex_tier() doesn't distinguish that case from general machinery —
+///   left as a known conservative overestimate, not fixed here (would need a
+///   regex_tier() classification change, not just a constant recalibration).
+pub(crate) const REGEX_MACHINERY_NS100: u32 = 5_000;
+
+/// Per-candidate verification cost of a node in the tri walk. Composites take
+/// the max of their children: their short-circuit may have to evaluate every
+/// child, so the most expensive child bounds the cost.
+fn verify_cost_tier(f: &FilterExpr) -> u32 {
     match f {
         FilterExpr::TextRegex { regex, .. } => regex_tier(regex.as_str()),
-        FilterExpr::TextContains { .. } => 2,
-        FilterExpr::Devotion { .. } | FilterExpr::ManaCostCmp { .. } => 1,
+        FilterExpr::TextContains { .. } => TEXT_SCAN_NS100,
+        FilterExpr::Devotion { .. } | FilterExpr::ManaCostCmp { .. } => SET_LOOKUP_NS100,
         FilterExpr::ArtistMatch { .. }
         | FilterExpr::FlavorMatch { .. }
         | FilterExpr::NameMatch { .. }
         | FilterExpr::OracleMatch { .. }
-        | FilterExpr::CollectionCmp { .. } => 1,
+        | FilterExpr::CollectionCmp { .. } => SET_LOOKUP_NS100,
         FilterExpr::And(children) | FilterExpr::Or(children) => {
             children.iter().map(verify_cost_tier).max().unwrap_or(0)
         }
         FilterExpr::Not(inner) => verify_cost_tier(inner),
-        // Exhaustive, not `_ => 0`: a new variant must get a considered tier
-        // here rather than silently inheriting tier 0 (cheapest).
+        // Exhaustive, not `_ => MASK_COMPARE_NS100`: a new variant must get a
+        // considered cost here rather than silently inheriting the cheapest.
         FilterExpr::True
         | FilterExpr::ExactName(_)
         | FilterExpr::NumericCmp { .. }
@@ -435,7 +458,7 @@ fn verify_cost_tier(f: &FilterExpr) -> u8 {
         | FilterExpr::TypeCmp { .. }
         | FilterExpr::Legality { .. }
         | FilterExpr::DateCmp { .. }
-        | FilterExpr::YearCmp { .. } => 0,
+        | FilterExpr::YearCmp { .. } => MASK_COMPARE_NS100,
     }
 }
 
@@ -447,10 +470,12 @@ fn verify_cost_tier(f: &FilterExpr) -> u8 {
 /// as one. Ranking them as general regexes inverted real costs and made
 /// `o:/^flying$/ oracle:sacrifice` 2.4× slower, so:
 ///
-///   1 — literal with a ^ or $ anchor (starts_with/ends_with/equality)
-///   2 — bare literal (substring search, same tier as TextContains)
-///   3 — anything with live regex metacharacters
-pub(crate) fn regex_tier(pattern: &str) -> u8 {
+///   SET_LOOKUP_NS100    — literal with a ^ or $ anchor (starts_with/
+///                         ends_with/equality; memcmp at a known position)
+///   REGEX_MACHINERY_NS100 — everything else: bare literal (measured the
+///                         same cost as live metacharacters, not the same as
+///                         TextContains — see REGEX_MACHINERY_NS100's doc)
+pub(crate) fn regex_tier(pattern: &str) -> u32 {
     let mut p = pattern.strip_prefix("(?i)").unwrap_or(pattern);
     let anchored_start = p.starts_with('^');
     if anchored_start {
@@ -465,17 +490,17 @@ pub(crate) fn regex_tier(pattern: &str) -> u8 {
             // alphanumeric escape (\d \w \b \p…) is a class — real machinery.
             b'\\' => match bytes.get(i + 1) {
                 Some(c) if !c.is_ascii_alphanumeric() => i += 2,
-                _ => return 3,
+                _ => return REGEX_MACHINERY_NS100,
             },
             b'$' if i == bytes.len() - 1 => {
                 anchored_end = true;
                 i += 1;
             }
-            b'.' | b'*' | b'+' | b'?' | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'|' | b'^' | b'$' => return 3,
+            b'.' | b'*' | b'+' | b'?' | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'|' | b'^' | b'$' => return REGEX_MACHINERY_NS100,
             _ => i += 1,
         }
     }
-    if anchored_start || anchored_end { 1 } else { 2 }
+    if anchored_start || anchored_end { SET_LOOKUP_NS100 } else { REGEX_MACHINERY_NS100 }
 }
 
 /// Whether a node can NEVER settle the card-level pass — it compares only
@@ -566,9 +591,9 @@ fn printing_dependent(f: &FilterExpr) -> bool {
 fn or_child_key(f: &FilterExpr) -> (u8, bool) {
     let tier = verify_cost_tier(f);
     let pdep = printing_dependent(f);
-    let bucket = if tier >= 3 {
+    let bucket = if tier >= REGEX_MACHINERY_NS100 {
         2
-    } else if tier == 0 && !pdep {
+    } else if tier == MASK_COMPARE_NS100 && !pdep {
         0
     } else {
         1
