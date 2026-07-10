@@ -43,31 +43,65 @@ All three are heavily right-skewed: cmc<=6 alone is 96% of the corpus.
 One-hot planes for 0..12 (13 planes) plus a saturated "13+" bucket cover
 99.98%+ of cmc values; similar for power/toughness.
 
-## Design sketch
+## Design (revised — the original sketch below was wrong, kept for context)
 
-- One-hot plane per value 0..M (M≈12), plus one saturated "M+" plane (like
-  devotion's top bucket): `field<=K`/`field>=K`/`field=K` compile exactly via
-  mask OR whenever the comparison stays within 0..M, or crosses cleanly into
-  "M+" without needing to distinguish values inside it (`field>=K` for K<=M
-  is exact: OR planes K..M plus the M+ plane; `field=15` specifically is not
-  — decline, fall back to today's exact index for that ~6-11-card sliver).
-- No postings-repair / divergent-carve-out needed, unlike legality — these
-  are pure card-level fields, never `Tri::PrintingDep`, never ambiguous. The
-  tail simply declines to plane-compile and falls back to the existing exact
-  numeric index, which is already cheap at that size.
-- **Asymmetry to resolve before implementing:** cmc has no negative values
-  (min 0), but power/toughness do (`-1` on 1-2 cards each, presumably `*`-power
-  cards encoded oddly). cmc only needs saturation at the top; power/toughness
-  need it at both ends, or a range like `power<=2` would silently exclude
-  those 1-2 cards. Check what `-1` actually represents in the source data
-  before committing to a bidirectional scheme.
+**Planes for the common range** (roughly 0 through 10-12, hundreds-to-
+thousands of cards each): one-hot plane per distinct value, OR'd together
+for a range comparison — `cmc<=6` = 7 planes ORed, exact, O(words)
+regardless of match count.
+
+**A compile-time-resolved correction for sparse/outlier values** — power's
+2 cards at `power=-1`, toughness's 1 card at `toughness=-1`, and cmc's high
+tail (13→1, 14→1, 15→4, 16→1) — instead of either a saturating bucket
+(declines to compile exactly whenever a query needs to distinguish *within*
+the bucket, e.g. `cmc=15`) or a dedicated plane per rare value (an entire
+3,944-byte plane, plus one more word-OR on *every* query touching that
+dimension forever, to encode 1-4 cards' membership — wasteful).
+
+The key realization, initially missed: unlike legality's divergent-card
+correction (#654), which has to happen **per candidate at query time**
+because a divergent card's true status depends on which printing you're
+looking at (unknowable until `card_pass` runs), a card's numeric value is
+fixed and known at *build* time — there's no ambiguity to defer. So the
+correction can happen **once per query, at compile time**: for each sparse
+tail value (a tiny precomputed `value -> card_ids` side table), check
+whether `value <op> threshold` holds — a single scalar comparison — and if
+so, scatter that value's few known card ids directly into the result
+bitmap. Not "always include and let something re-verify" (legality's
+pattern) but "resolve statically, include only when actually true" —
+strictly exact, O(1) per query plus O(tail size) to scatter, no
+decline/fallback case anywhere. This also removes the high-tail
+saturating-bucket problem: `cmc=15` becomes exactly resolvable (check
+13/14/15/16 against `=15`, scatter in the 4 matching ids) instead of
+falling back to the old scan.
+
+**Implementation note:** `compile_plane` currently returns just
+`Option<PlaneExpr>`. Folding in "a few extra known ids to OR into the
+result" needs a small side-channel out of that function — not a new
+`PlaneExpr` tree node, just a few extra ids scattered into the evaluated
+bitmap once after the tree evaluates (the same way `legal_candidate_bits`
+scatters legality's divergent postings today). Empty/unused for every
+existing caller (colors/types/devotion), populated only for numeric-range
+tail values.
+
+### Original sketch (superseded)
+
+The first pass proposed a saturating "M+" bucket (declining to compile
+`field=15` exactly, falling back to the old scan) and treated power/
+toughness's negative tail as an open question ("check what -1 means before
+committing to a bidirectional scheme"). Superseded by the compile-time
+resolution above, which handles both ends of both tails exactly with less
+storage than either a bucket or dedicated planes, and needs no fallback path
+at all.
 
 ## Expected
 
 Should compound with #634: a plane-compiled `cmc<=6` becomes exact by
-construction, feeding directly into #634 Part B's all_match promotion — no
-separate exactness-classification work needed for this dimension once both
-land.
+construction, feeding directly into #634's all_match promotion and
+popcount-skip order phase — no separate exactness-classification work
+needed for this dimension once both land. Because every value (common or
+sparse) resolves exactly, there's no residual/fallback path to test for
+these three fields at all.
 
 ## Related
 
