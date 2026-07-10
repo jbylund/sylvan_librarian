@@ -119,6 +119,22 @@ needed for this dimension once both land. Because every value (common or
 sparse) resolves exactly, there's no residual/fallback path to test for
 these three fields at all.
 
+## Results (implemented, 97,206-printing corpus, min-of-N ms)
+
+Broad interior ranges go from an index-scan-and-resort to a pure plane OR:
+`cmc<=4` 0.445 → 0.062 ms (**7.1×**), `cmc<=6` 0.405 → 0.067 ms (**6.1×**),
+`toughness<=3` 0.131 → 0.060 ms (**2.2×**). The tail-crossing cases that
+motivated the cumulative-boundary design also resolve exactly and fast:
+`power<=2` 0.113 → 0.058 ms (**1.9×**), `toughness<=2` 0.106 → 0.057 ms
+(**1.9×**). The flagged anomaly compounds with #634 as expected: `c:g
+t:creature cmc<=4` 0.225 → 0.063 ms at offset 0 (**3.6×**), and 0.175 → 0.012
+ms at offset 5000 (**15.0×**) once the fully-consumed filter unlocks the
+popcount-skip order phase. Declines stay exactly flat, proving the
+correctness tripwires hold: `cmc=15` (within-bucket, always declines)
+0.0047 → 0.0049 ms; `-power>3` (Not over a nullable numeric field, must
+always decline) 0.451 → 0.435 ms. No regressions across the exact/deep/
+advisory/control groups already tracked for #634.
+
 ## Related
 
 - #630 — parent issue; phase 1 (colors/types, PR #633) explicitly considered

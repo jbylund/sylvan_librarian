@@ -59,6 +59,40 @@ CONFIGS: list[tuple[str, str, str, str, str, int]] = [
     ("deep-offset", "c:g", "card", "edhrec", "default", 3000),
     ("deep-offset", "t:creature power>3", "card", "edhrec", "default", 5000),
     ("deep-offset", "cmc<=6", "card", "cmc", "default", 500),
+    # #655 numeric-range planes: interior-range queries (well within the
+    # one-hot [0,12] range for all three fields) — should go from a
+    # materialize-and-resort scan to a pure plane OR.
+    ("numeric-plane", "cmc<=4", "card", "cmc", "default", 0),
+    ("numeric-plane", "cmc<=6", "card", "cmc", "default", 0),
+    ("numeric-plane", "power>=5", "card", "power", "default", 0),
+    ("numeric-plane", "toughness<=3", "card", "edhrec", "default", 0),
+    ("numeric-plane", "power=3", "card", "edhrec", "default", 0),
+    # Boundary-crossing: needs the low tail (power/toughness's single
+    # negative-value card) or the high tail (all three fields) folded into
+    # the query's plane composition to stay exact — not just the interior.
+    ("numeric-plane-tail", "power<=2", "card", "power", "default", 0),
+    ("numeric-plane-tail", "toughness<=2", "card", "edhrec", "default", 0),
+    ("numeric-plane-tail", "cmc>=10", "card", "cmc", "default", 0),
+    ("numeric-plane-tail", "power>=15", "card", "edhrec", "default", 0),
+    ("numeric-plane-tail", "toughness>=8", "card", "edhrec", "default", 0),
+    # Must decline gracefully (distinguish *inside* a boundary bucket) and
+    # stay correct — same cost as today, not a regression target. (power=-1
+    # isn't parseable by the hand-rolled parser — negative literals aren't
+    # supported in this position — covered directly in Rust tests instead.)
+    ("numeric-plane-decline", "cmc=15", "card", "edhrec", "default", 0),
+    # Must NOT get plane-accelerated at all (Tri::Null propagates through Not
+    # as Null, not flipped — blindly complementing would wrongly match
+    # non-creature/no-value cards). Correctness tripwire, not a perf target.
+    ("numeric-plane-negated", "-power>3", "card", "edhrec", "default", 0),
+    ("numeric-plane-negated", "-cmc<=4", "card", "edhrec", "default", 0),
+    # The flagged anomaly and its relatives: compound queries that should now
+    # fully consume to True (both children plane-backed), unlocking #634
+    # Step 2's popcount-skip on top of the plane-OR itself.
+    ("numeric-plane-compound", "c:g t:creature cmc<=4", "card", "edhrec", "default", 0),
+    ("numeric-plane-compound", "t:creature power>3", "card", "edhrec", "default", 0),
+    ("numeric-plane-compound", "c:g t:creature power>3", "card", "edhrec", "default", 0),
+    ("numeric-plane-compound", "c:g t:creature cmc<=4", "card", "edhrec", "default", 5000),
+    ("numeric-plane-compound", "t:creature power>3", "card", "edhrec", "default", 5000),
     # Advisory sources that must stay un-promoted: oracle text (trigram-loose),
     # legality (#630 phase 2's divergent carve-out), rarity (narrowing-mode).
     # Also the correctness tripwire: mixed exact+advisory must still verify

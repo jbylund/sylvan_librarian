@@ -18,9 +18,9 @@
 
 use rkyv::{Archive, Deserialize, Serialize};
 
-use super::filter::{CmpOp, ColorField, FilterExpr};
+use super::filter::{CmpOp, ColorField, FilterExpr, NumExpr, NumField};
 use super::legality::{LEGALITY_LEGAL, MAX_FORMATS};
-use super::{lane_get, OracleCard};
+use super::{flip_op, lane_get, OracleCard};
 
 /// Plane layout, plane-major in BitPlanes.words: six color planes per color
 /// field (W U B R G C, bit order matching color_to_bit — C is always zero for
@@ -46,7 +46,55 @@ const DEVOTION_BITS: usize = 2;
 /// Legality can return Tri::PrintingDep for divergent cards, which compile_plane
 /// already excludes from exact consumption (only two-valued nodes qualify).
 pub(crate) const PLANE_LEGAL: usize = PLANE_DEVOTION + DEVOTION_BITS * COLOR_PLANES;
-pub(crate) const PLANE_COUNT: usize = PLANE_LEGAL + MAX_FORMATS;
+/// One-hot planes for cmc/power/toughness (#655), covering the interior
+/// range [0,12] — hundreds-to-thousands of cards per value — plus a shared
+/// "13+" high-tail bucket per field (all three have a genuine spread of rare
+/// high values, e.g. toughness up to 30) and a shared "<0" low-tail bucket
+/// for power/toughness only (`cmc: Option<u8>` is type-guaranteed
+/// non-negative, so it never needs one). Buckets are cumulative planes built
+/// with the exact same machinery as the interior values — "power<=0" is
+/// just another plane, no different from "power==5" — which is what lets a
+/// sparse tail (power has 2 cards at -1) get absorbed automatically instead
+/// of needing a side table or a live re-query. See
+/// docs/issues/engine-numeric-range-planes.md for the design history.
+const NUM_INTERIOR_LO: i32 = 0;
+const NUM_INTERIOR_HI: i32 = 12;
+const NUM_INTERIOR_WIDTH: usize = (NUM_INTERIOR_HI - NUM_INTERIOR_LO + 1) as usize;
+pub(crate) const PLANE_CMC: usize = PLANE_LEGAL + MAX_FORMATS;
+pub(crate) const PLANE_CMC_HI: usize = PLANE_CMC + NUM_INTERIOR_WIDTH;
+pub(crate) const PLANE_POWER_LO: usize = PLANE_CMC_HI + 1;
+pub(crate) const PLANE_POWER: usize = PLANE_POWER_LO + 1;
+pub(crate) const PLANE_POWER_HI: usize = PLANE_POWER + NUM_INTERIOR_WIDTH;
+pub(crate) const PLANE_TOUGHNESS_LO: usize = PLANE_POWER_HI + 1;
+pub(crate) const PLANE_TOUGHNESS: usize = PLANE_TOUGHNESS_LO + 1;
+pub(crate) const PLANE_TOUGHNESS_HI: usize = PLANE_TOUGHNESS + NUM_INTERIOR_WIDTH;
+pub(crate) const PLANE_COUNT: usize = PLANE_TOUGHNESS_HI + 1;
+
+/// The observed [min,max] of whatever cards landed in one bucket plane,
+/// recomputed on every build/reload (never hardcoded from a one-time data
+/// snapshot — a future card outside today's observed range must still
+/// compile exactly, not silently misclassify). `min > max` is the empty-
+/// bucket sentinel: no card has ever been observed there, so the bucket
+/// contributes nothing to any comparison, in either direction — see
+/// `bucket_verdict`.
+#[derive(Archive, Serialize, Deserialize, Clone, Copy)]
+pub(crate) struct BucketBounds {
+    pub(crate) min: i16,
+    pub(crate) max: i16,
+}
+
+impl Default for BucketBounds {
+    fn default() -> Self {
+        BucketBounds { min: i16::MAX, max: i16::MIN }
+    }
+}
+
+impl BucketBounds {
+    fn observe(&mut self, v: i16) {
+        self.min = self.min.min(v);
+        self.max = self.max.max(v);
+    }
+}
 
 #[derive(Archive, Serialize, Deserialize, Default)]
 pub(crate) struct BitPlanes {
@@ -54,6 +102,12 @@ pub(crate) struct BitPlanes {
     /// PLANE_COUNT × words_per_plane, flattened plane-major; bit i of plane p
     /// is words[p * wpp + i/64] >> (i%64) & 1.
     pub(crate) words: Vec<u64>,
+    // #655: live bounds for the five numeric-range bucket planes.
+    pub(crate) cmc_hi: BucketBounds,
+    pub(crate) power_lo: BucketBounds,
+    pub(crate) power_hi: BucketBounds,
+    pub(crate) toughness_lo: BucketBounds,
+    pub(crate) toughness_hi: BucketBounds,
 }
 
 pub(crate) fn words_per_plane(n_cards: usize) -> usize {
@@ -66,9 +120,40 @@ fn devotion_count(card: &OracleCard, lane: usize) -> u8 {
     lane_get(card.mana_cost.devotion, lane).min(3)
 }
 
+/// One card's cmc/power/toughness value against one field's plane layout:
+/// set the interior one-hot plane for values in [0,12], or a bucket plane
+/// (tracking its live [min,max]) for values outside it. `lo_bucket` is
+/// `None` for cmc (`Option<u8>` is type-guaranteed non-negative, so no card
+/// can ever land below the interior).
+fn set_numeric_plane(
+    set: &mut impl FnMut(usize),
+    v: Option<i32>,
+    interior_base: usize,
+    lo_bucket: Option<(usize, &mut BucketBounds)>,
+    hi_bucket: (usize, &mut BucketBounds),
+) {
+    let Some(v) = v else { return }; // missing value: no bit set anywhere, correctly excluded from any comparison
+    if v < NUM_INTERIOR_LO {
+        let (plane, bounds) = lo_bucket.expect("value below the interior range with no low bucket configured");
+        bounds.observe(v as i16);
+        set(plane);
+    } else if v <= NUM_INTERIOR_HI {
+        set(interior_base + (v - NUM_INTERIOR_LO) as usize);
+    } else {
+        let (plane, bounds) = hi_bucket;
+        bounds.observe(v as i16);
+        set(plane);
+    }
+}
+
 pub(crate) fn build_bit_planes(cards: &[OracleCard]) -> BitPlanes {
     let wpp = words_per_plane(cards.len());
     let mut words = vec![0u64; PLANE_COUNT * wpp];
+    let mut cmc_hi = BucketBounds::default();
+    let mut power_lo = BucketBounds::default();
+    let mut power_hi = BucketBounds::default();
+    let mut toughness_lo = BucketBounds::default();
+    let mut toughness_hi = BucketBounds::default();
     for (i, card) in cards.iter().enumerate() {
         let mut set = |plane: usize| words[plane * wpp + i / 64] |= 1u64 << (i % 64);
         for b in 0..COLOR_PLANES {
@@ -116,8 +201,26 @@ pub(crate) fn build_bit_planes(cards: &[OracleCard]) -> BitPlanes {
                 set(PLANE_LEGAL + f);
             }
         }
+        // #655: cmc is Option<u8>, type-guaranteed non-negative, so it has no
+        // low bucket. Power/toughness are Option<i8> and do (Char-Rumbler and
+        // similar).
+        set_numeric_plane(&mut set, card.cmc.map(i32::from), PLANE_CMC, None, (PLANE_CMC_HI, &mut cmc_hi));
+        set_numeric_plane(
+            &mut set,
+            card.creature_power.map(i32::from),
+            PLANE_POWER,
+            Some((PLANE_POWER_LO, &mut power_lo)),
+            (PLANE_POWER_HI, &mut power_hi),
+        );
+        set_numeric_plane(
+            &mut set,
+            card.creature_toughness.map(i32::from),
+            PLANE_TOUGHNESS,
+            Some((PLANE_TOUGHNESS_LO, &mut toughness_lo)),
+            (PLANE_TOUGHNESS_HI, &mut toughness_hi),
+        );
     }
-    BitPlanes { n_cards: cards.len() as u32, words }
+    BitPlanes { n_cards: cards.len() as u32, words, cmc_hi, power_lo, power_hi, toughness_lo, toughness_hi }
 }
 
 /// Ascending card ids with divergent legality (~556 of 31,508 in production —
@@ -293,24 +396,215 @@ pub(crate) fn compile_devotion_superset(pips: u64) -> Option<PlaneExpr> {
         .map(and_of)
 }
 
+// ─── Numeric-range planes (#655) ───────────────────────────────────────────────
+
+/// One field's plane layout: interior one-hot base (13 planes, values
+/// [0,12]), an optional low bucket (power/toughness only), and a high bucket
+/// (all three fields).
+struct NumericLayout {
+    interior_base: usize,
+    lo_bucket: Option<(usize, Bucket)>,
+    hi_bucket: (usize, Bucket),
+}
+
+/// A bucket's live-observed range. `min > max` means empty (no card has ever
+/// landed there) — see `bucket_verdict`.
+#[derive(Clone, Copy)]
+struct Bucket {
+    min: i32,
+    max: i32,
+}
+
+fn numeric_layout(field: NumField, bounds: &rkyv::Archived<BitPlanes>) -> Option<NumericLayout> {
+    let bucket = |b: &rkyv::Archived<BucketBounds>| Bucket { min: i16::from(b.min) as i32, max: i16::from(b.max) as i32 };
+    match field {
+        NumField::Cmc => Some(NumericLayout {
+            interior_base: PLANE_CMC,
+            lo_bucket: None,
+            hi_bucket: (PLANE_CMC_HI, bucket(&bounds.cmc_hi)),
+        }),
+        NumField::Power => Some(NumericLayout {
+            interior_base: PLANE_POWER,
+            lo_bucket: Some((PLANE_POWER_LO, bucket(&bounds.power_lo))),
+            hi_bucket: (PLANE_POWER_HI, bucket(&bounds.power_hi)),
+        }),
+        NumField::Toughness => Some(NumericLayout {
+            interior_base: PLANE_TOUGHNESS,
+            lo_bucket: Some((PLANE_TOUGHNESS_LO, bucket(&bounds.toughness_lo))),
+            hi_bucket: (PLANE_TOUGHNESS_HI, bucket(&bounds.toughness_hi)),
+        }),
+        _ => None,
+    }
+}
+
+/// Whether `v <op> threshold` holds — the exact same float comparison
+/// `numeric_candidates` (lib.rs) uses, so the plane-compiled answer and the
+/// index-scan fallback can never disagree on a fractional-threshold edge
+/// case (e.g. `cmc>6.5`).
+fn matches_op(op: CmpOp, v: f64, threshold: f64) -> bool {
+    match op {
+        CmpOp::Eq => v == threshold,
+        CmpOp::Ne => v != threshold,
+        CmpOp::Lt => v < threshold,
+        CmpOp::Le => v <= threshold,
+        CmpOp::Gt => v > threshold,
+        CmpOp::Ge => v >= threshold,
+    }
+}
+
+enum BucketVerdict {
+    /// Every possible value in the bucket satisfies the comparison.
+    FullyIncluded,
+    /// No possible value in the bucket satisfies it (including: bucket empty).
+    FullyExcluded,
+    /// Depends on which specific value a member card has — the bucket plane
+    /// can't distinguish, so the caller must decline.
+    Ambiguous,
+}
+
+/// Decide a bucket's fate for `field <op> threshold`, using only the
+/// bucket's observed [min,max] — never the actual per-card values, which the
+/// bucket plane doesn't retain. Sound because Lt/Le/Gt/Ge are monotonic in v
+/// (checking the two endpoints suffices) and Eq only ever resolves when the
+/// bucket is a single observed value equal to the threshold; anything less
+/// certain declines rather than guesses. Ne is never called here — its
+/// caller declines unconditionally, matching `numeric_candidates`'s own
+/// choice ("Ne is not selective").
+fn bucket_verdict(op: CmpOp, threshold: f64, bucket: Bucket) -> BucketVerdict {
+    if bucket.min > bucket.max {
+        return BucketVerdict::FullyExcluded; // empty: no observed member at all
+    }
+    let (min, max) = (bucket.min as f64, bucket.max as f64);
+    match op {
+        CmpOp::Ge => {
+            if min >= threshold {
+                BucketVerdict::FullyIncluded
+            } else if max < threshold {
+                BucketVerdict::FullyExcluded
+            } else {
+                BucketVerdict::Ambiguous
+            }
+        }
+        CmpOp::Gt => {
+            if min > threshold {
+                BucketVerdict::FullyIncluded
+            } else if max <= threshold {
+                BucketVerdict::FullyExcluded
+            } else {
+                BucketVerdict::Ambiguous
+            }
+        }
+        CmpOp::Le => {
+            if max <= threshold {
+                BucketVerdict::FullyIncluded
+            } else if min > threshold {
+                BucketVerdict::FullyExcluded
+            } else {
+                BucketVerdict::Ambiguous
+            }
+        }
+        CmpOp::Lt => {
+            if max < threshold {
+                BucketVerdict::FullyIncluded
+            } else if min >= threshold {
+                BucketVerdict::FullyExcluded
+            } else {
+                BucketVerdict::Ambiguous
+            }
+        }
+        CmpOp::Eq => {
+            if threshold < min || threshold > max {
+                BucketVerdict::FullyExcluded
+            } else if bucket.min == bucket.max && min == threshold {
+                BucketVerdict::FullyIncluded
+            } else {
+                BucketVerdict::Ambiguous
+            }
+        }
+        CmpOp::Ne => unreachable!("Ne declines before reaching bucket_verdict"),
+    }
+}
+
+/// Compile `field <op> threshold` for cmc/power/toughness. Interior values
+/// are never ambiguous (a one-hot plane is a single integer point — either
+/// fully in or fully out); only the bucket planes can force a decline.
+/// Missing values (non-creature power/toughness, an unset cmc) set no bit
+/// anywhere in the field's planes, so they're correctly excluded from any
+/// `Or` here — the Null-collapses-to-false semantics `filter.rs`'s
+/// `NumericCmp::tri()` already implements, reproduced by omission rather
+/// than by checking for it explicitly.
+fn compile_numeric_cmp(field: NumField, op: CmpOp, threshold: f64, bounds: &rkyv::Archived<BitPlanes>) -> Option<PlaneExpr> {
+    if matches!(op, CmpOp::Ne) {
+        return None; // matches numeric_candidates: Ne is not selective, decline
+    }
+    let layout = numeric_layout(field, bounds)?;
+    let mut included: Vec<PlaneExpr> = Vec::new();
+    for v in NUM_INTERIOR_LO..=NUM_INTERIOR_HI {
+        if matches_op(op, v as f64, threshold) {
+            included.push(PlaneExpr::Plane((layout.interior_base + (v - NUM_INTERIOR_LO) as usize) as u16));
+        }
+    }
+    if let Some((plane, bucket)) = layout.lo_bucket {
+        match bucket_verdict(op, threshold, bucket) {
+            BucketVerdict::FullyIncluded => included.push(PlaneExpr::Plane(plane as u16)),
+            BucketVerdict::FullyExcluded => {}
+            BucketVerdict::Ambiguous => return None,
+        }
+    }
+    let (hi_plane, hi_bucket) = layout.hi_bucket;
+    match bucket_verdict(op, threshold, hi_bucket) {
+        BucketVerdict::FullyIncluded => included.push(PlaneExpr::Plane(hi_plane as u16)),
+        BucketVerdict::FullyExcluded => {}
+        BucketVerdict::Ambiguous => return None,
+    }
+    Some(or_of(included))
+}
+
+/// True if `filter` (recursively through And/Or/Not) contains a NumericCmp
+/// on a plane-backed field (cmc/power/toughness). These are NOT safe to
+/// blindly complement via `PlaneExpr::Not`, unlike ColorCmp/TypeCmp/Devotion:
+/// the field can be absent (`Tri::Null` — non-creature cards for power/
+/// toughness, an unset cmc), and Null propagates through Not as Null
+/// (`filter.rs`'s `FilterExpr::Not` arm: Kleene logic, never flipped to
+/// True) — so blindly complementing the plane would wrongly match
+/// missing-value cards. Other NumericCmp fields (rarity, price, ...)
+/// already decline via `compile_plane`'s catch-all regardless of Not, so
+/// they need no special handling here.
+fn contains_unnegatable_numeric(filter: &FilterExpr) -> bool {
+    let is_planeable = |e: &NumExpr| matches!(e, NumExpr::Field(NumField::Cmc | NumField::Power | NumField::Toughness));
+    match filter {
+        FilterExpr::NumericCmp { lhs, rhs, .. } => is_planeable(lhs) || is_planeable(rhs),
+        FilterExpr::And(children) | FilterExpr::Or(children) => children.iter().any(contains_unnegatable_numeric),
+        FilterExpr::Not(inner) => contains_unnegatable_numeric(inner),
+        _ => false,
+    }
+}
+
 /// Compile a filter subtree to a plane expression, or None if any node in it
 /// is not plane-expressible. Only two-valued card-level nodes may compile:
 /// complement (Not) is only sound when the node can never be Null or
-/// PrintingDep, which holds for ColorCmp and TypeCmp by their tri() arms.
-pub(crate) fn compile_plane(filter: &FilterExpr) -> Option<PlaneExpr> {
+/// PrintingDep, which holds for ColorCmp and TypeCmp by their tri() arms —
+/// and, for NumericCmp on cmc/power/toughness, only when the subtree being
+/// negated doesn't contain one at all (see `contains_unnegatable_numeric`).
+pub(crate) fn compile_plane(filter: &FilterExpr, bounds: &rkyv::Archived<BitPlanes>) -> Option<PlaneExpr> {
     match filter {
         FilterExpr::True => Some(PlaneExpr::Const(true)),
         FilterExpr::And(children) => children
             .iter()
-            .map(compile_plane)
+            .map(|c| compile_plane(c, bounds))
             .collect::<Option<Vec<_>>>()
             .map(and_of),
         FilterExpr::Or(children) => children
             .iter()
-            .map(compile_plane)
+            .map(|c| compile_plane(c, bounds))
             .collect::<Option<Vec<_>>>()
             .map(or_of),
-        FilterExpr::Not(inner) => compile_plane(inner).map(|p| PlaneExpr::Not(Box::new(p))),
+        FilterExpr::Not(inner) => {
+            if contains_unnegatable_numeric(inner) {
+                return None;
+            }
+            compile_plane(inner, bounds).map(|p| PlaneExpr::Not(Box::new(p)))
+        }
         FilterExpr::ColorCmp { field, op, mask } => {
             let base = match field {
                 ColorField::Colors => PLANE_COLORS,
@@ -334,6 +628,11 @@ pub(crate) fn compile_plane(filter: &FilterExpr) -> Option<PlaneExpr> {
         // Devotion is card-level and two-valued (tri_bool always), so its
         // bit-sliced planes compile exactly within the saturation boundary.
         FilterExpr::Devotion { op, pips } => compile_devotion(*op, *pips),
+        FilterExpr::NumericCmp { lhs, op, rhs } => match (lhs, rhs) {
+            (NumExpr::Field(f), NumExpr::Const(v)) => compile_numeric_cmp(*f, *op, *v, bounds),
+            (NumExpr::Const(v), NumExpr::Field(f)) => compile_numeric_cmp(*f, flip_op(*op), *v, bounds),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -349,11 +648,11 @@ pub(crate) fn compile_plane(filter: &FilterExpr) -> Option<PlaneExpr> {
 /// narrowing mask, so a partially compilable Or stays entirely residual.
 /// A bare True is left alone — the full-range scan beats materializing an
 /// all-ones bitmap into a candidate list.
-pub(crate) fn split_planes(filter: FilterExpr) -> (Option<PlaneExpr>, FilterExpr) {
+pub(crate) fn split_planes(filter: FilterExpr, bounds: &rkyv::Archived<BitPlanes>) -> (Option<PlaneExpr>, FilterExpr) {
     if matches!(filter, FilterExpr::True) {
         return (None, filter);
     }
-    if let Some(pe) = compile_plane(&filter) {
+    if let Some(pe) = compile_plane(&filter, bounds) {
         return (Some(pe), FilterExpr::True);
     }
     match filter {
@@ -361,7 +660,7 @@ pub(crate) fn split_planes(filter: FilterExpr) -> (Option<PlaneExpr>, FilterExpr
             let mut planes: Vec<PlaneExpr> = Vec::new();
             let mut rest: Vec<FilterExpr> = Vec::new();
             for c in children {
-                match compile_plane(&c) {
+                match compile_plane(&c, bounds) {
                     Some(pe) => planes.push(pe),
                     None => rest.push(c),
                 }

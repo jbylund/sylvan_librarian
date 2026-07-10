@@ -2263,7 +2263,7 @@ fn narrow_rec(
         && u32::from(indexes.planes.n_cards) as usize == n_cards
         && n_cards > 0
     {
-        if let Some(pe) = compile_plane(filter) {
+        if let Some(pe) = compile_plane(filter, &indexes.planes) {
             let mut bits: Vec<u64> = Vec::new();
             eval_planes(&pe, &indexes.planes, &mut bits);
             return Narrowed::tight(Candidates::CardBits(bits));
@@ -3495,7 +3495,7 @@ const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 /// catch (e.g. reordering same-size fields, changing an index type) — and on
 /// any FLAVOR_FP_FEATURES change: archived fingerprints are built with that
 /// table, so a new table reading old fingerprints breaks the superset test.
-const ARCHIVE_FORMAT_VERSION: u32 = 20260721;
+const ARCHIVE_FORMAT_VERSION: u32 = 20260722;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -4037,7 +4037,7 @@ impl QueryEngine {
         // rejects pre-plane archives, this is defense in depth.
         let (plane_expr, mut filter_expr) =
             if u32::from(data.indexes.planes.n_cards) as usize == data.cards.len() && !data.cards.is_empty() {
-                split_planes(filter_expr)
+                split_planes(filter_expr, &data.indexes.planes)
             } else {
                 (None, filter_expr)
             };
