@@ -152,11 +152,14 @@ fn set_numeric_plane(
 pub(crate) fn build_bit_planes(cards: &[OracleCard], printings: &[Printing], offsets: &[u32], strings: &[String]) -> BitPlanes {
     let wpp = words_per_plane(cards.len());
     let mut words = vec![0u64; PLANE_COUNT * wpp];
-    let border_id =
+    // NONE_STR is the "absent optional string" sentinel (u32::MAX), never a
+    // real interner id; filtering it out keeps the border-id lookup strictly
+    // in the valid 0..strings.len() range used by Printing.card_border_id.
+    let find_border_id =
         |needle: &str| strings.iter().position(|s| s == needle).map(|i| i as u32).filter(|&id| id != NONE_STR);
-    let border_black = border_id("black");
-    let border_borderless = border_id("borderless");
-    let border_white = border_id("white");
+    let border_black = find_border_id("black");
+    let border_borderless = find_border_id("borderless");
+    let border_white = find_border_id("white");
     let mut cmc_hi = BucketBounds::default();
     let mut power_lo = BucketBounds::default();
     let mut power_hi = BucketBounds::default();
@@ -211,25 +214,29 @@ pub(crate) fn build_bit_planes(cards: &[OracleCard], printings: &[Printing], off
         }
         let start = offsets[i] as usize;
         let end = offsets[i + 1] as usize;
-        let mut has_black = false;
-        let mut has_borderless = false;
-        let mut has_white = false;
+        let mut border_mask = 0u8;
         for p in &printings[start..end] {
             let bid = p.card_border_id;
-            has_black |= border_black == Some(bid);
-            has_borderless |= border_borderless == Some(bid);
-            has_white |= border_white == Some(bid);
-            if has_black && has_borderless && has_white {
+            if border_black == Some(bid) {
+                border_mask |= 0b001;
+            }
+            if border_borderless == Some(bid) {
+                border_mask |= 0b010;
+            }
+            if border_white == Some(bid) {
+                border_mask |= 0b100;
+            }
+            if border_mask == 0b111 {
                 break;
             }
         }
-        if has_black {
+        if border_mask & 0b001 != 0 {
             set(PLANE_BORDER_BLACK);
         }
-        if has_borderless {
+        if border_mask & 0b010 != 0 {
             set(PLANE_BORDER_BORDERLESS);
         }
-        if has_white {
+        if border_mask & 0b100 != 0 {
             set(PLANE_BORDER_WHITE);
         }
         // #655: cmc is Option<u8>, type-guaranteed non-negative, so it has no

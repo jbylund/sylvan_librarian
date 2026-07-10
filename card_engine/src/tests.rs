@@ -2727,15 +2727,18 @@ fn border_planes_narrow_loose_and_preserve_shared_witness_correctness() {
         )
         .0
     };
+    let get_narrowed_border = |value: &str| {
+        super::narrow_rec(&border(value), &archived.indexes, &archived.offsets, &archived.cards, true)
+            .unwrap_or_else(|| panic!("border:{value} narrows"))
+    };
 
-    let rec_black = super::narrow_rec(&border("black"), &archived.indexes, &archived.offsets, &archived.cards, true).expect("border:black narrows");
+    let rec_black = get_narrowed_border("black");
     assert!(!rec_black.tight, "border planes are loose-only card-level prefilters");
     assert_eq!(rec_black.set.into_cards(&archived.offsets), vec![0, 4]);
-    let rec_borderless =
-        super::narrow_rec(&border("borderless"), &archived.indexes, &archived.offsets, &archived.cards, true).expect("borderless narrows");
+    let rec_borderless = get_narrowed_border("borderless");
     assert!(!rec_borderless.tight);
     assert_eq!(rec_borderless.set.into_cards(&archived.offsets), vec![0]);
-    let rec_white = super::narrow_rec(&border("white"), &archived.indexes, &archived.offsets, &archived.cards, true).expect("white narrows");
+    let rec_white = get_narrowed_border("white");
     assert!(!rec_white.tight);
     assert_eq!(rec_white.set.into_cards(&archived.offsets), vec![1]);
     assert!(

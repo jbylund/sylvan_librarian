@@ -56,8 +56,8 @@ def main() -> None:
     ).stdout.strip()
     if dirty:
         rev += "-dirty"
-    shm_path = args.shm_path or args.out.with_suffix(".store")
-    engine = load_engine(args.corpus, shm_path)
+    archive_path = args.shm_path or args.out.with_suffix(".store")
+    engine = load_engine(args.corpus, archive_path)
 
     for _, query, _, _, _ in CONFIGS:
         parse_scryfall_query(query)
