@@ -18,9 +18,9 @@
 
 use rkyv::{Archive, Deserialize, Serialize};
 
-use super::filter::{CmpOp, ColorField, FilterExpr, NumExpr, NumField};
+use super::filter::{CmpOp, ColorField, FilterExpr, NumExpr, NumField, TextSearchField};
 use super::legality::{LEGALITY_LEGAL, MAX_FORMATS};
-use super::{flip_op, lane_get, OracleCard};
+use super::{flip_op, lane_get, oracle_word_eligible, scan_oracle_words, OracleCard, OracleWordIndex};
 
 /// Plane layout, plane-major in BitPlanes.words: six color planes per color
 /// field (W U B R G C, bit order matching color_to_bit — C is always zero for
@@ -250,6 +250,13 @@ pub(crate) fn build_divergent_ids(cards: &[OracleCard]) -> Vec<u16> {
 /// temporaries.
 pub(crate) enum PlaneExpr {
     Plane(u16),
+    /// An externally-precomputed card bitmap, cloned in whole at compile
+    /// time (docs/issues/engine-oracle-word-index.md's dense word dictionary — see
+    /// compile_plane's TextContains arm). Not part of BitPlanes' fixed
+    /// layout: which words promote to a bitmap is data-dependent, unlike the
+    /// compile-time-known dimensions the other variants index into. A clone
+    /// (a few KB) is paid once per query, never per row.
+    Bits(Vec<u64>),
     And(Vec<PlaneExpr>),
     Or(Vec<PlaneExpr>),
     Not(Box<PlaneExpr>),
@@ -586,24 +593,61 @@ fn contains_unnegatable_numeric(filter: &FilterExpr) -> bool {
 /// PrintingDep, which holds for ColorCmp and TypeCmp by their tri() arms —
 /// and, for NumericCmp on cmc/power/toughness, only when the subtree being
 /// negated doesn't contain one at all (see `contains_unnegatable_numeric`).
-pub(crate) fn compile_plane(filter: &FilterExpr, bounds: &rkyv::Archived<BitPlanes>) -> Option<PlaneExpr> {
+/// Sort key for trying And/Or children in compile_plane: oracle-word leaves
+/// (the only shape that pays a real cost — a dictionary scan — just to find
+/// out whether it declines) sort last, so a cheap-to-reject sibling (e.g. a
+/// NumericCmp field compile_numeric_cmp doesn't handle) fails the whole
+/// `.collect::<Option<Vec<_>>>()` before the scan ever runs. Both And and Or
+/// are order-independent once compiled, so reordering only for this internal
+/// short-circuit check never changes the result.
+fn plane_precheck_rank(f: &FilterExpr) -> u8 {
+    match f {
+        FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word } if oracle_word_eligible(word) => 1,
+        _ => 0,
+    }
+}
+
+/// Try children cheapest-to-reject first (see plane_precheck_rank), short-
+/// circuiting on the first None without disturbing the caller's requested
+/// order — `and_of`/`or_of` don't care about member order, so this is free.
+fn compile_plane_children(children: &[FilterExpr], bounds: &rkyv::Archived<BitPlanes>, words: &rkyv::Archived<OracleWordIndex>) -> Option<Vec<PlaneExpr>> {
+    let mut order: Vec<&FilterExpr> = children.iter().collect();
+    order.sort_by_key(|c| plane_precheck_rank(c));
+    order.into_iter().map(|c| compile_plane(c, bounds, words)).collect()
+}
+
+pub(crate) fn compile_plane(filter: &FilterExpr, bounds: &rkyv::Archived<BitPlanes>, words: &rkyv::Archived<OracleWordIndex>) -> Option<PlaneExpr> {
     match filter {
         FilterExpr::True => Some(PlaneExpr::Const(true)),
-        FilterExpr::And(children) => children
-            .iter()
-            .map(|c| compile_plane(c, bounds))
-            .collect::<Option<Vec<_>>>()
-            .map(and_of),
-        FilterExpr::Or(children) => children
-            .iter()
-            .map(|c| compile_plane(c, bounds))
-            .collect::<Option<Vec<_>>>()
-            .map(or_of),
+        FilterExpr::And(children) => compile_plane_children(children, bounds, words).map(and_of),
+        FilterExpr::Or(children) => compile_plane_children(children, bounds, words).map(or_of),
         FilterExpr::Not(inner) => {
             if contains_unnegatable_numeric(inner) {
                 return None;
             }
-            compile_plane(inner, bounds).map(|p| PlaneExpr::Not(Box::new(p)))
+            compile_plane(inner, bounds, words).map(|p| PlaneExpr::Not(Box::new(p)))
+        }
+        // Bonus consumption (docs/issues/engine-oracle-word-index.md): only
+        // when the needle matches exactly one dictionary word total (dense or
+        // sparse) and that word is dense — the same "single dense hit, no
+        // sparse hits" case narrow_rec's general dispatch handles, just
+        // reached here first so it composes with other planes via And/Or
+        // instead of forcing the whole subtree residual. Any other shape
+        // (multiple hits, or a sparse hit at all) declines: unioning would be
+        // needed, which this bonus arm intentionally doesn't attempt — the
+        // general path in narrow_rec already covers it correctly.
+        FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word }
+            if oracle_word_eligible(word) && u32::from(words.n_cards) == u32::from(bounds.n_cards) =>
+        {
+            let scan = scan_oracle_words(words, word);
+            match (scan.dense.as_slice(), scan.sparse.as_slice()) {
+                ([d], []) => {
+                    let wpp = words_per_plane(u32::from(words.n_cards) as usize);
+                    let start = *d as usize * wpp;
+                    Some(PlaneExpr::Bits(words.dense_bits[start..start + wpp].iter().map(|w| u64::from(*w)).collect()))
+                }
+                _ => None,
+            }
         }
         FilterExpr::ColorCmp { field, op, mask } => {
             let base = match field {
@@ -648,11 +692,11 @@ pub(crate) fn compile_plane(filter: &FilterExpr, bounds: &rkyv::Archived<BitPlan
 /// narrowing mask, so a partially compilable Or stays entirely residual.
 /// A bare True is left alone — the full-range scan beats materializing an
 /// all-ones bitmap into a candidate list.
-pub(crate) fn split_planes(filter: FilterExpr, bounds: &rkyv::Archived<BitPlanes>) -> (Option<PlaneExpr>, FilterExpr) {
+pub(crate) fn split_planes(filter: FilterExpr, bounds: &rkyv::Archived<BitPlanes>, words: &rkyv::Archived<OracleWordIndex>) -> (Option<PlaneExpr>, FilterExpr) {
     if matches!(filter, FilterExpr::True) {
         return (None, filter);
     }
-    if let Some(pe) = compile_plane(&filter, bounds) {
+    if let Some(pe) = compile_plane(&filter, bounds, words) {
         return (Some(pe), FilterExpr::True);
     }
     match filter {
@@ -660,7 +704,7 @@ pub(crate) fn split_planes(filter: FilterExpr, bounds: &rkyv::Archived<BitPlanes
             let mut planes: Vec<PlaneExpr> = Vec::new();
             let mut rest: Vec<FilterExpr> = Vec::new();
             for c in children {
-                match compile_plane(&c, bounds) {
+                match compile_plane(&c, bounds, words) {
                     Some(pe) => planes.push(pe),
                     None => rest.push(c),
                 }
@@ -685,6 +729,7 @@ impl PlaneExpr {
     fn eval_word(&self, words: &rkyv::Archived<Vec<u64>>, wpp: usize, i: usize) -> u64 {
         match self {
             PlaneExpr::Plane(p) => u64::from(words[*p as usize * wpp + i]),
+            PlaneExpr::Bits(bits) => bits[i],
             PlaneExpr::And(children) => {
                 let mut acc = !0u64;
                 for c in children {

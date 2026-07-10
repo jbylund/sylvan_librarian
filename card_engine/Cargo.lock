@@ -51,6 +51,7 @@ name = "card_engine"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "memchr",
  "memmap2",
  "pyo3",
  "rand",

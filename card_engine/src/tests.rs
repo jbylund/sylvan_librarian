@@ -5,11 +5,11 @@ use super::{
     build_artwork_group_counts, build_bit_planes, build_divergent_ids, build_name_bigram_index, flavor_fingerprint, flavor_match_sets,
     cards_of_printings, count_common_keywords, count_common_types,
     build_artist_index, build_range_index, range_candidates, narrow_candidates, rarity_candidates,
-    range_too_broad_to_narrow, run_query, trigram_candidates, PrintingRangeIndex, NARROW_FLOOR,
-    bitmap_contains, compile_plane, eval_planes, split_planes,
+    range_too_broad_to_narrow, run_query, trigram_candidates, finalize_trigram_index, PrintingRangeIndex, NARROW_FLOOR,
+    bitmap_contains, bitmap_card_ids, compile_plane, eval_planes, split_planes,
     ArtistIndex, CardData, CardIndexes, Candidates, ColorField, NumExpr, NumField, RarityIndex,
     CollField, CmpOp, FilterExpr, InlineStr, Interner, ManaCost, OracleCard, Printing, TagIndex,
-    TextField, TextSearchField, Tri, TrigramIndex, VocabInterner, ARTIST_NONE, NONE_STR, TYPE_ARTIFACT, TYPE_CREATURE,
+    TextField, TextSearchField, Tri, SortedTrigramIndex, VocabInterner, ARTIST_NONE, NONE_STR, TYPE_ARTIFACT, TYPE_CREATURE,
     TYPE_ENCHANTMENT, TYPE_INSTANT, TYPE_LAND, TYPE_LEGENDARY, TYPE_PLANESWALKER, TYPE_SNOW, TYPE_SORCERY,
 };
 use rkyv::{rancor::Error, Archived};
@@ -31,9 +31,16 @@ fn vocab_ids(vocab: &mut VocabInterner, items: &[&str]) -> Vec<u16> {
     ids
 }
 
-/// Build a TrigramIndex mapping each word's trigrams to the given card ids.
-fn index_of(words: &[(&str, &[u32])]) -> TrigramIndex {
-    let mut idx: TrigramIndex = HashMap::new();
+/// Build a SortedTrigramIndex mapping each word's trigrams to the given card
+/// ids. Domain is a large fixed constant so tiny test posting lists never
+/// cross into the dense tier by accident — tests that specifically want the
+/// dense/plane path use `index_of_domain` with a small domain instead.
+fn index_of(words: &[(&str, &[u32])]) -> SortedTrigramIndex {
+    index_of_domain(words, 100_000)
+}
+
+fn index_of_domain(words: &[(&str, &[u32])], domain: usize) -> SortedTrigramIndex {
+    let mut idx: HashMap<[u8; 3], Vec<u32>> = HashMap::new();
     for (word, cards) in words {
         for w in word.as_bytes().windows(3) {
             let entry = idx.entry([w[0], w[1], w[2]]).or_default();
@@ -43,13 +50,13 @@ fn index_of(words: &[(&str, &[u32])]) -> TrigramIndex {
             entry.sort_unstable();
         }
     }
-    idx
+    finalize_trigram_index(idx, domain)
 }
 
 /// Archive the index and query it, matching how the engine reads the shared snapshot.
-fn candidates(idx: &TrigramIndex, word: &str) -> Option<Vec<u32>> {
+fn candidates(idx: &SortedTrigramIndex, word: &str) -> Option<Vec<u32>> {
     let bytes = rkyv::to_bytes::<Error>(idx).expect("serialize trigram index");
-    let archived = rkyv::access::<Archived<TrigramIndex>, Error>(&bytes).expect("access trigram index");
+    let archived = rkyv::access::<Archived<SortedTrigramIndex>, Error>(&bytes).expect("access trigram index");
     trigram_candidates(archived, word)
 }
 
@@ -1294,7 +1301,7 @@ fn popcount_skip_tie_breaking_preserves_group_order_both_directions() {
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
     let creature = FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
-    let (plane, mut residual) = split_planes(creature, &archived.indexes.planes);
+    let (plane, mut residual) = split_planes(creature, &archived.indexes.planes, &archived.indexes.oracle_trigram.words);
     assert!(matches!(residual, FilterExpr::True), "t:creature must fully plane-consume");
 
     let mut run = |direction: &str| {
@@ -1332,7 +1339,7 @@ fn popcount_skip_offset_lands_inside_tied_group() {
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
     let creature = FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
-    let (plane, mut residual) = split_planes(creature, &archived.indexes.planes);
+    let (plane, mut residual) = split_planes(creature, &archived.indexes.planes, &archived.indexes.oracle_trigram.words);
 
     // Full ascending order is [card3, card1, card0, card2, card4] (oracle ids
     // [4,2,1,3,5]); offset=2 must skip card3 and card1, landing on card0.
@@ -1365,7 +1372,7 @@ fn popcount_skip_matches_non_popcount_path() {
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
     let creature = FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
-    let (plane, mut residual_true) = split_planes(creature, &archived.indexes.planes);
+    let (plane, mut residual_true) = split_planes(creature, &archived.indexes.planes, &archived.indexes.oracle_trigram.words);
     assert!(matches!(residual_true, FilterExpr::True));
 
     // Popcount path: plane present, residual True.
@@ -1704,7 +1711,7 @@ fn plane_parity_color_and_type_ops() {
 
     let mut bitmap: Vec<u64> = Vec::new();
     let mut check = |f: &FilterExpr| {
-        let pe = compile_plane(f, &archived.indexes.planes).expect("filter must be plane-expressible");
+        let pe = compile_plane(f, &archived.indexes.planes, &archived.indexes.oracle_trigram.words).expect("filter must be plane-expressible");
         eval_planes(&pe, &archived.indexes.planes, &mut bitmap);
         for (cid, card) in archived.cards.iter().enumerate() {
             let want = f.eval_card(card, &archived.strings) == Tri::True;
@@ -1750,7 +1757,7 @@ fn plane_fallaji_colors_not_subset_of_identity() {
     let mut bitmap: Vec<u64> = Vec::new();
     let mut matches = |field: ColorField, op: CmpOp, mask: u8| {
         let f = FilterExpr::ColorCmp { field, op, mask };
-        eval_planes(&compile_plane(&f, &archived.indexes.planes).unwrap(), &archived.indexes.planes, &mut bitmap);
+        eval_planes(&compile_plane(&f, &archived.indexes.planes, &archived.indexes.oracle_trigram.words).unwrap(), &archived.indexes.planes, &mut bitmap);
         bitmap_contains(&bitmap, FALLAJI_CID as u32)
     };
     assert!(matches(ColorField::Colors, CmpOp::Ge, 1)); // c>=W: colors carry W
@@ -1767,38 +1774,39 @@ fn split_planes_composition_rules() {
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
     let bounds = &archived.indexes.planes;
+    let words = &archived.indexes.oracle_trigram.words;
 
     let green = || FilterExpr::ColorCmp { field: ColorField::Colors, op: CmpOp::Ge, mask: 16 };
     let creature = || FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
     let text = || FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: "draw".to_string() };
 
     // And(plane, plane, text): planes consumed, the lone leftover unwraps.
-    let (pe, residual) = split_planes(FilterExpr::And(vec![green(), creature(), text()]), bounds);
+    let (pe, residual) = split_planes(FilterExpr::And(vec![green(), creature(), text()]), bounds, words);
     assert!(pe.is_some());
     assert!(matches!(residual, FilterExpr::TextContains { .. }));
 
     // Fully plane-expressible tree is consumed whole.
-    let (pe, residual) = split_planes(FilterExpr::And(vec![green(), creature()]), bounds);
+    let (pe, residual) = split_planes(FilterExpr::And(vec![green(), creature()]), bounds, words);
     assert!(pe.is_some());
     assert!(matches!(residual, FilterExpr::True));
-    let (pe, residual) = split_planes(FilterExpr::Or(vec![green(), creature()]), bounds);
+    let (pe, residual) = split_planes(FilterExpr::Or(vec![green(), creature()]), bounds, words);
     assert!(pe.is_some());
     assert!(matches!(residual, FilterExpr::True));
 
     // Or mixing plane and non-plane children stays entirely residual:
     // mask ∨ residual is not a narrowing mask.
-    let (pe, residual) = split_planes(FilterExpr::Or(vec![green(), text()]), bounds);
+    let (pe, residual) = split_planes(FilterExpr::Or(vec![green(), text()]), bounds, words);
     assert!(pe.is_none());
     assert!(matches!(residual, FilterExpr::Or(ref v) if v.len() == 2));
 
     // Produced mana is deliberately unplaned in phase 1.
     let produces = FilterExpr::ColorCmp { field: ColorField::ProducedMana, op: CmpOp::Ge, mask: 16 };
-    let (pe, residual) = split_planes(produces, bounds);
+    let (pe, residual) = split_planes(produces, bounds, words);
     assert!(pe.is_none());
     assert!(matches!(residual, FilterExpr::ColorCmp { field: ColorField::ProducedMana, .. }));
 
     // Bare True keeps the range-scan path (no all-ones bitmap materialization).
-    let (pe, residual) = split_planes(FilterExpr::True, bounds);
+    let (pe, residual) = split_planes(FilterExpr::True, bounds, words);
     assert!(pe.is_none());
     assert!(matches!(residual, FilterExpr::True));
 }
@@ -1835,7 +1843,7 @@ fn run_query_plane_path_parity() {
                 &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
                 &mut plain, None, unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
             );
-            let (pe, mut residual) = split_planes(make(), &archived.indexes.planes);
+            let (pe, mut residual) = split_planes(make(), &archived.indexes.planes, &archived.indexes.oracle_trigram.words);
             let (t1, p1) = run_query(
                 &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
                 &mut residual, pe.as_ref(), unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
@@ -1896,7 +1904,7 @@ fn numeric_plane_parity_interior_and_tails() {
 
     let mut bitmap: Vec<u64> = Vec::new();
     let mut check = |f: &FilterExpr, label: &str| {
-        let Some(pe) = compile_plane(f, &archived.indexes.planes) else { return };
+        let Some(pe) = compile_plane(f, &archived.indexes.planes, &archived.indexes.oracle_trigram.words) else { return };
         eval_planes(&pe, &archived.indexes.planes, &mut bitmap);
         for (cid, card) in archived.cards.iter().enumerate() {
             let want = f.eval_card(card, &archived.strings) == Tri::True;
@@ -1946,22 +1954,23 @@ fn numeric_plane_boundary_inclusion_and_decline() {
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
     let bounds = &archived.indexes.planes;
+    let words = &archived.indexes.oracle_trigram.words;
 
     let cmp = |field, op, v: f64| FilterExpr::NumericCmp { lhs: NumExpr::Field(field), op, rhs: NumExpr::Const(v) };
 
     // Crosses into the high tail, but includes BOTH high-tail values (13, 14)
     // fully — unambiguous, since every possible bucket member qualifies.
-    assert!(compile_plane(&cmp(NumField::Cmc, CmpOp::Le, 14.0), bounds).is_some());
+    assert!(compile_plane(&cmp(NumField::Cmc, CmpOp::Le, 14.0), bounds, words).is_some());
     // Crosses into the low tail: power>=-1 must include the power=-1 card.
-    assert!(compile_plane(&cmp(NumField::Power, CmpOp::Ge, -1.0), bounds).is_some());
+    assert!(compile_plane(&cmp(NumField::Power, CmpOp::Ge, -1.0), bounds, words).is_some());
     // Entirely within the interior: no bucket involved at all.
-    assert!(compile_plane(&cmp(NumField::Toughness, CmpOp::Le, 6.0), bounds).is_some());
+    assert!(compile_plane(&cmp(NumField::Toughness, CmpOp::Le, 6.0), bounds, words).is_some());
 
     // Distinguishing inside the high tail bucket (which now holds two
     // distinct values each) can't be answered by the cumulative plane alone.
-    assert!(compile_plane(&cmp(NumField::Cmc, CmpOp::Eq, 13.0), bounds).is_none());
-    assert!(compile_plane(&cmp(NumField::Toughness, CmpOp::Eq, 20.0), bounds).is_none());
-    assert!(compile_plane(&cmp(NumField::Toughness, CmpOp::Lt, 22.0), bounds).is_none());
+    assert!(compile_plane(&cmp(NumField::Cmc, CmpOp::Eq, 13.0), bounds, words).is_none());
+    assert!(compile_plane(&cmp(NumField::Toughness, CmpOp::Eq, 20.0), bounds, words).is_none());
+    assert!(compile_plane(&cmp(NumField::Toughness, CmpOp::Lt, 22.0), bounds, words).is_none());
 }
 
 // Ne is declined unconditionally, matching numeric_candidates' own choice
@@ -1973,9 +1982,10 @@ fn numeric_plane_declines_ne_unconditionally() {
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
     let bounds = &archived.indexes.planes;
+    let words = &archived.indexes.oracle_trigram.words;
     for field in [NumField::Cmc, NumField::Power, NumField::Toughness] {
         let ne = FilterExpr::NumericCmp { lhs: NumExpr::Field(field), op: CmpOp::Ne, rhs: NumExpr::Const(3.0) };
-        assert!(compile_plane(&ne, bounds).is_none());
+        assert!(compile_plane(&ne, bounds, words).is_none());
     }
 }
 
@@ -1990,21 +2000,22 @@ fn numeric_plane_declines_not_over_numeric_cmp() {
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
     let bounds = &archived.indexes.planes;
+    let words = &archived.indexes.oracle_trigram.words;
 
     let power_gt3 = FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Power), op: CmpOp::Gt, rhs: NumExpr::Const(3.0) };
-    assert!(compile_plane(&power_gt3, bounds).is_some(), "power>3 alone must compile");
+    assert!(compile_plane(&power_gt3, bounds, words).is_some(), "power>3 alone must compile");
     let make_negated = || FilterExpr::Not(Box::new(FilterExpr::NumericCmp {
         lhs: NumExpr::Field(NumField::Power),
         op: CmpOp::Gt,
         rhs: NumExpr::Const(3.0),
     }));
-    assert!(compile_plane(&make_negated(), bounds).is_none(), "Not(power>3) must decline: Null doesn't flip to True");
+    assert!(compile_plane(&make_negated(), bounds, words).is_none(), "Not(power>3) must decline: Null doesn't flip to True");
 
     // Buried under And/Or, not just at the top.
     let buried_and = FilterExpr::And(vec![make_negated(), FilterExpr::True]);
-    assert!(compile_plane(&buried_and, bounds).is_none());
+    assert!(compile_plane(&buried_and, bounds, words).is_none());
     let buried_or = FilterExpr::Or(vec![make_negated(), FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge }]);
-    assert!(compile_plane(&buried_or, bounds).is_none());
+    assert!(compile_plane(&buried_or, bounds, words).is_none());
 
     // cmc is Option<u8> (never negative) but can still be unset on odd data,
     // so the guard applies uniformly across all three fields, not just the
@@ -2014,12 +2025,12 @@ fn numeric_plane_declines_not_over_numeric_cmp() {
         op: CmpOp::Le,
         rhs: NumExpr::Const(6.0),
     }));
-    assert!(compile_plane(&cmc_le6(), bounds).is_none());
+    assert!(compile_plane(&cmc_le6(), bounds, words).is_none());
 
     // A Not over a non-numeric plane child must still compile fine — the
     // guard must not over-decline unrelated Not subtrees.
     let not_creature = FilterExpr::Not(Box::new(FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge }));
-    assert!(compile_plane(&not_creature, bounds).is_some());
+    assert!(compile_plane(&not_creature, bounds, words).is_some());
 }
 
 // End-to-end: run_query through the numeric-plane path (split_planes consumes
@@ -2049,7 +2060,7 @@ fn run_query_numeric_plane_path_parity() {
                 &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
                 &mut plain, None, unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
             );
-            let (pe, mut residual) = split_planes(make(), &archived.indexes.planes);
+            let (pe, mut residual) = split_planes(make(), &archived.indexes.planes, &archived.indexes.oracle_trigram.words);
             let (t1, p1) = run_query(
                 &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
                 &mut residual, pe.as_ref(), unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
@@ -2074,7 +2085,7 @@ fn numeric_plane_enables_all_match_promotion() {
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
     let cmc_le12 = FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Cmc), op: CmpOp::Le, rhs: NumExpr::Const(12.0) };
-    let (pe, residual) = split_planes(cmc_le12, &archived.indexes.planes);
+    let (pe, residual) = split_planes(cmc_le12, &archived.indexes.planes, &archived.indexes.oracle_trigram.words);
     assert!(pe.is_some(), "cmc<=12 must plane-compile");
     assert!(matches!(residual, FilterExpr::True), "cmc<=12 must fully consume: no residual card_pass needed");
 }
@@ -2231,6 +2242,190 @@ fn oracle_match_none_str_mirrors_text_contains() {
     let plain = FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: "draw".to_string() };
     assert!(memoized.eval_card(&archived.cards[0], &archived.strings) == Tri::Null);
     assert!(plain.eval_card(&archived.cards[0], &archived.strings) == Tri::Null);
+}
+
+// ─── Oracle word index (docs/issues/engine-oracle-word-index.md) ────────────
+
+/// 17 distinct oracle texts (n_texts=17, so words_per_plane=1 and the #639
+/// crossover is "dense iff a word's own text count exceeds 4"), deliberately
+/// engineered so a single `oracle:` needle can exercise every cell of the
+/// query-time dispatch:
+/// - "target": word "target" alone contains it (5 texts, dense) and no other
+///   dictionary word does — the single-dense-hit, no-sparse-hit shape.
+/// - "creature": word "creature" (9 texts, dense) plus "creaturehood" (1
+///   text, sparse) both contain it — the mixed dense+sparse shape.
+/// - "cast": "cast"/"recast"/"broadcast" (1 text each, all sparse) all
+///   contain it — the dense-empty, multi-sparse-hit shape.
+/// - "zzzzz": nothing contains it — the both-empty shape.
+fn oracle_word_fixture_store() -> CardData {
+    let mut vocab = VocabInterner::new();
+    let mut interner = Interner::new();
+    let texts: &[&str] = &[
+        "this creature has flying",
+        "this creature has trample",
+        "when this creature enters draw a card",
+        "sacrifice a creature gain 1 life",
+        "target creature gets plus one plus one",
+        "destroy target creature",
+        "return target creature to owner hand",
+        "counter target creature spell",
+        "create a token",
+        "create two tokens",
+        "create a token thats a copy",
+        "exile target artifact or creature",
+        "cast this spell only during combat",
+        "you may recast spells",
+        "broadcast a signal to allies",
+        "vanilla bear with no text",
+        "no true creaturehood exists",
+    ];
+    let cards: Vec<OracleCard> = texts
+        .iter()
+        .enumerate()
+        .map(|(i, text)| {
+            let mut c = stub_card(i as u128 + 1, TYPE_CREATURE, &[], &mut vocab);
+            c.oracle_text_lower_id = interner.intern(text.to_string());
+            c
+        })
+        .collect();
+    let mut data = store_of(cards, &[1usize; 17], vocab);
+    data.strings = interner.strings;
+    data.indexes.oracle_trigram = build_oracle_text_index(&data.cards, &data.strings);
+    data
+}
+
+/// Brute-force `oracle:<needle>` over every card, for differential comparison.
+fn brute_force_oracle_contains(archived: &Archived<CardData>, needle: &str) -> Vec<u32> {
+    (0..archived.cards.len() as u32)
+        .filter(|&cid| archived.strings[u32::from(archived.cards[cid as usize].oracle_text_lower_id) as usize].as_str().contains(needle))
+        .collect()
+}
+
+// Every eligible needle (len > 3, no token-boundary bytes) must narrow to the
+// exact brute-force match set, tight — no verification pass, matching the
+// design doc's exactness argument.
+#[test]
+fn oracle_word_index_exact_union_parity() {
+    let data = oracle_word_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let rec = |f: &FilterExpr| super::narrow_rec(f, &archived.indexes, &archived.offsets, &archived.cards, true);
+    let oracle = |w: &str| FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: w.to_string() };
+
+    for needle in ["target", "creature", "cast", "zzzzz"] {
+        let expected = brute_force_oracle_contains(archived, needle);
+        let n = rec(&oracle(needle)).unwrap_or_else(|| panic!("oracle:{needle} must narrow"));
+        assert!(n.tight, "oracle:{needle} must narrow tight (exact, no verification)");
+        assert_eq!(n.set.into_cards(&archived.offsets), expected, "oracle:{needle} must match the brute-force set exactly");
+    }
+}
+
+// Pins the specific representation each needle takes, so a future change that
+// silently falls back to a superset (losing exactness) or picks the wrong
+// tier fails loudly here instead of only in the parity test above.
+#[test]
+fn oracle_word_index_dispatch_shapes() {
+    let data = oracle_word_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let rec = |f: &FilterExpr| super::narrow_rec(f, &archived.indexes, &archived.offsets, &archived.cards, true);
+    let oracle = |w: &str| FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: w.to_string() };
+
+    // Single dense hit, no sparse hit: the dense word's bitmap comes back
+    // directly, no allocation-and-scatter round trip.
+    match rec(&oracle("target")).expect("must narrow").set {
+        Candidates::CardBits(_) => {}
+        other => panic!("single dense hit must return CardBits directly, got {other:?}", other = std::mem::discriminant(&other)),
+    }
+    // Dense-empty, sparse hits only: a plain sorted-merge union, no bitmap
+    // touched at all.
+    match rec(&oracle("cast")).expect("must narrow").set {
+        Candidates::Cards(_) => {}
+        other => panic!("sparse-only hits must stay a Cards vec, got {other:?}", other = std::mem::discriminant(&other)),
+    }
+    // Both empty: the empty set is exact (no card can contain a needle no
+    // dictionary word contains), not a decline.
+    match rec(&oracle("zzzzz")).expect("empty is still exact narrowing").set {
+        Candidates::Cards(v) => assert!(v.is_empty()),
+        other => panic!("no-hit shape must be an empty Cards vec, got {other:?}", other = std::mem::discriminant(&other)),
+    }
+    // Mixed dense+sparse: scratch bitmap, OR the dense hit in, scatter the
+    // expanded sparse hit on top.
+    match rec(&oracle("creature")).expect("must narrow").set {
+        Candidates::CardBits(_) => {}
+        other => panic!("mixed dense+sparse must return CardBits, got {other:?}", other = std::mem::discriminant(&other)),
+    }
+}
+
+// compile_plane's bonus arm only fires for the single-dense-hit shape (needed
+// for correctness — a mixed shape's dense bitmap alone would undercount) and,
+// when it does, composes with an unrelated plane predicate via a plain AND —
+// exercising PlaneExpr::Bits directly instead of just the standalone
+// narrow_rec path above.
+#[test]
+fn compile_plane_word_bonus_composes_with_other_planes() {
+    let data = oracle_word_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let bounds = &archived.indexes.planes;
+    let words = &archived.indexes.oracle_trigram.words;
+    let oracle = |w: &str| FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: w.to_string() };
+
+    // Single-dense-hit needle: compile_plane must consume it directly.
+    assert!(compile_plane(&oracle("target"), bounds, words).is_some(), "single dense hit must compile to a plane");
+    // Mixed dense+sparse needle: compile_plane must decline (the dense bitmap
+    // alone would miss the sparse "creaturehood" match) — narrow_rec's
+    // general dispatch is the only correct path for this shape.
+    assert!(compile_plane(&oracle("creature"), bounds, words).is_none(), "mixed dense+sparse must not compile: dense bitmap alone would undercount");
+
+    // AND with an unrelated plane-expressible predicate (every card here is a
+    // creature, so this is a true tautological AND, just exercising composition).
+    let creature_type = FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
+    let both = FilterExpr::And(vec![oracle("target"), creature_type]);
+    let pe = compile_plane(&both, bounds, words).expect("dense word AND a plane predicate must compile whole");
+    let mut bitmap: Vec<u64> = Vec::new();
+    eval_planes(&pe, bounds, &mut bitmap);
+    assert_eq!(bitmap_card_ids(&bitmap), brute_force_oracle_contains(archived, "target"), "every card here is a creature, so the AND changes nothing");
+}
+
+// SortedTrigramIndex's posting-vs-plane dispatch (merge/probe/AND), forced
+// through every combination by picking a domain small enough that some
+// trigrams promote to the dense tier and some don't.
+#[test]
+fn trigram_dense_sparse_dispatch_parity() {
+    // Domain 40: words_per_plane(40)=1, plane_bytes=8, dense iff count > 4.
+    let domain = 40usize;
+    // "aaa": 6 ids (dense). "bbb": 6 ids, same 6 ids as "aaa" (dense x dense,
+    // AND path). "ccc": 2 ids, subset of aaa's (sparse x dense, probe path).
+    // "ddd": 2 ids disjoint from "ccc" (sparse x sparse, merge path — already
+    // covered elsewhere, included here for completeness).
+    let mut idx: HashMap<[u8; 3], Vec<u32>> = HashMap::new();
+    idx.insert(*b"aaa", vec![1, 2, 3, 4, 5, 6]);
+    idx.insert(*b"bbb", vec![1, 2, 3, 4, 5, 6]);
+    idx.insert(*b"ccc", vec![2, 4]);
+    idx.insert(*b"ddd", vec![7, 8]);
+    let finalized = super::finalize_trigram_index(idx, domain);
+    let bytes = rkyv::to_bytes::<Error>(&finalized).expect("serialize");
+    let archived = rkyv::access::<Archived<SortedTrigramIndex>, Error>(&bytes).expect("access");
+
+    // "aaabbb": trigrams aaa, aab(absent -> empty), ... — use a needle whose
+    // trigrams are exactly {aaa, bbb} minus the absent middle ones isn't
+    // possible with real sliding windows, so exercise the dispatch directly
+    // through needles built to hit exactly the desired trigram pairs.
+    assert_eq!(trigram_candidates(archived, "aaa").unwrap(), vec![1, 2, 3, 4, 5, 6], "single dense trigram: bitmap bit-scanned back to ids");
+    assert_eq!(super::trigram_min_posting(archived, "aaa"), Some(6));
+    assert_eq!(super::trigram_min_posting(archived, "ccc"), Some(2));
+
+    // ccc's sparse posting [2,4] probed against aaa's dense plane: both 2 and
+    // 4 are set, so the probe keeps everything — same answer as a merge would
+    // give, but taken through the posting-vs-plane path.
+    let ops = vec![super::lookup_trigram(archived, *b"aaa").unwrap(), super::lookup_trigram(archived, *b"ccc").unwrap()];
+    assert_eq!(super::intersect_operands(ops), vec![2, 4], "posting seed probed against a plane operand");
+
+    // aaa AND bbb (both dense, identical bitmaps): plane x plane AND path,
+    // with no posting to seed from at all.
+    let ops = vec![super::lookup_trigram(archived, *b"aaa").unwrap(), super::lookup_trigram(archived, *b"bbb").unwrap()];
+    assert_eq!(super::intersect_operands(ops), vec![1, 2, 3, 4, 5, 6], "plane x plane AND path, no posting seed available");
 }
 
 // ─── Adaptive candidate sets (#636) ───────────────────────────────────────────
@@ -2746,7 +2941,7 @@ fn devotion_plane_parity_and_boundaries() {
     let dev = |op, pips: &[(&str, u8)]| FilterExpr::Devotion { op, pips: packed_pips(pips) };
     let mut bitmap: Vec<u64> = Vec::new();
     let mut check_exact = |f: &FilterExpr| {
-        let pe = compile_plane(f, &archived.indexes.planes).expect("must compile exactly");
+        let pe = compile_plane(f, &archived.indexes.planes, &archived.indexes.oracle_trigram.words).expect("must compile exactly");
         eval_planes(&pe, &archived.indexes.planes, &mut bitmap);
         for (cid, card) in archived.cards.iter().enumerate() {
             let want = f.eval_card(card, &archived.strings) == Tri::True;
@@ -2764,9 +2959,9 @@ fn devotion_plane_parity_and_boundaries() {
     check_exact(&dev(CmpOp::Ge, &[("R", 3)])); // {R/G}{R/G}{R} card reaches R=3
 
     // Past the saturation boundary the exact compiler declines...
-    assert!(compile_plane(&dev(CmpOp::Ge, &[("U", 4)]), &archived.indexes.planes).is_none());
-    assert!(compile_plane(&dev(CmpOp::Eq, &[("U", 3)]), &archived.indexes.planes).is_none());
-    assert!(compile_plane(&dev(CmpOp::Le, &[("U", 3)]), &archived.indexes.planes).is_none());
+    assert!(compile_plane(&dev(CmpOp::Ge, &[("U", 4)]), &archived.indexes.planes, &archived.indexes.oracle_trigram.words).is_none());
+    assert!(compile_plane(&dev(CmpOp::Eq, &[("U", 3)]), &archived.indexes.planes, &archived.indexes.oracle_trigram.words).is_none());
+    assert!(compile_plane(&dev(CmpOp::Le, &[("U", 3)]), &archived.indexes.planes, &archived.indexes.oracle_trigram.words).is_none());
     // ...and the saturated superset covers every deep match for narrowing.
     let deep = dev(CmpOp::Ge, &[("U", 5)]);
     let n = super::narrow_rec(&deep, &archived.indexes, &archived.offsets, &archived.cards, false).expect("deep-k narrows loosely");
@@ -2790,7 +2985,7 @@ fn hybrid_pip_counts_toward_both_colors() {
     let mut bitmap: Vec<u64> = Vec::new();
     let rg_card = 5; // {R/G}
     for (f, want) in [(dev("R", 1), true), (dev("G", 1), true), (dev("R", 2), false), (dev("U", 1), false)] {
-        eval_planes(&compile_plane(&f, &archived.indexes.planes).unwrap(), &archived.indexes.planes, &mut bitmap);
+        eval_planes(&compile_plane(&f, &archived.indexes.planes, &archived.indexes.oracle_trigram.words).unwrap(), &archived.indexes.planes, &mut bitmap);
         assert_eq!(bitmap_contains(&bitmap, rg_card), want);
     }
 }

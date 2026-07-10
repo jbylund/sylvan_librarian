@@ -1,6 +1,6 @@
 use regex::Regex;
 use serde_json::Value;
-use super::{AOracleCard, APrinting, AStrings, str_at, mana_lane, lane_add, lanes_ge, LANES6_HI, LANES8_HI, mana_pip_counts, mana_cmc, color_list_to_mask, card_type_str_to_bit, trigram_candidates, trigram_min_posting, ARTIST_NONE, NONE_STR, FlavorIndex, NameBigramIndex, OracleTextIndex, TrigramIndex, flavor_fingerprint, flavor_match_sets};
+use super::{AOracleCard, APrinting, AStrings, str_at, mana_lane, lane_add, lanes_ge, LANES6_HI, LANES8_HI, mana_pip_counts, mana_cmc, color_list_to_mask, card_type_str_to_bit, trigram_candidates, trigram_min_posting, ARTIST_NONE, NONE_STR, FlavorIndex, NameBigramIndex, OracleTextIndex, SortedTrigramIndex, flavor_fingerprint, flavor_match_sets};
 use super::legality::{LEGALITY_LEGAL, LEGALITY_BANNED, LEGALITY_RESTRICTED, format_shift};
 
 // ─── Comparison / arithmetic operators ───────────────────────────────────────
@@ -797,7 +797,7 @@ impl FilterExpr {
         &mut self,
         cards: &[AOracleCard],
         strings: &AStrings,
-        name_trigram: &rkyv::Archived<TrigramIndex>,
+        name_trigram: &rkyv::Archived<SortedTrigramIndex>,
         name_bigrams: &rkyv::Archived<NameBigramIndex>,
         oracle: &rkyv::Archived<OracleTextIndex>,
         eval_domain: usize,
