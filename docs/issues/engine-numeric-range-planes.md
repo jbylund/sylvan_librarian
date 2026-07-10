@@ -43,56 +43,72 @@ All three are heavily right-skewed: cmc<=6 alone is 96% of the corpus.
 One-hot planes for 0..12 (13 planes) plus a saturated "13+" bucket cover
 99.98%+ of cmc values; similar for power/toughness.
 
-## Design (revised — the original sketch below was wrong, kept for context)
+## Design (final — one-hot interior planes + two cumulative boundary planes)
 
-**Planes for the common range** (roughly 0 through 10-12, hundreds-to-
-thousands of cards each): one-hot plane per distinct value, OR'd together
-for a range comparison — `cmc<=6` = 7 planes ORed, exact, O(words)
-regardless of match count.
+This went through three passes before landing here; see below for what
+didn't work and why.
 
-**A compile-time-resolved correction for sparse/outlier values** — power's
-2 cards at `power=-1`, toughness's 1 card at `toughness=-1`, and cmc's high
-tail (13→1, 14→1, 15→4, 16→1) — instead of either a saturating bucket
-(declines to compile exactly whenever a query needs to distinguish *within*
-the bucket, e.g. `cmc=15`) or a dedicated plane per rare value (an entire
-3,944-byte plane, plus one more word-OR on *every* query touching that
-dimension forever, to encode 1-4 cards' membership — wasteful).
+**One-hot planes for the well-populated interior** (roughly 1 through
+9-10, hundreds-to-thousands of cards each): `field=K` for the interior
+compiles directly to a plane read; ranges OR the relevant interior planes
+together, same as colors/types.
 
-The key realization, initially missed: unlike legality's divergent-card
-correction (#654), which has to happen **per candidate at query time**
-because a divergent card's true status depends on which printing you're
-looking at (unknowable until `card_pass` runs), a card's numeric value is
-fixed and known at *build* time — there's no ambiguity to defer. So the
-correction can happen **once per query, at compile time**: for each sparse
-tail value (a tiny precomputed `value -> card_ids` side table), check
-whether `value <op> threshold` holds — a single scalar comparison — and if
-so, scatter that value's few known card ids directly into the result
-bitmap. Not "always include and let something re-verify" (legality's
-pattern) but "resolve statically, include only when actually true" —
-strictly exact, O(1) per query plus O(tail size) to scatter, no
-decline/fallback case anywhere. This also removes the high-tail
-saturating-bucket problem: `cmc=15` becomes exactly resolvable (check
-13/14/15/16 against `=15`, scatter in the 4 matching ids) instead of
-falling back to the old scan.
+**Two *cumulative* boundary planes per dimension, not one-hot per boundary
+value:** `field<=L` (e.g. `power<=0`) and `field>=H` (e.g. `power>=10`),
+built with the exact same plane machinery as everything else — a card's
+bit is set if its value satisfies the threshold, full stop. This is the
+key simplification:
 
-**Implementation note:** `compile_plane` currently returns just
-`Option<PlaneExpr>`. Folding in "a few extra known ids to OR into the
-result" needs a small side-channel out of that function — not a new
-`PlaneExpr` tree node, just a few extra ids scattered into the evaluated
-bitmap once after the tree evaluates (the same way `legal_candidate_bits`
-scatters legality's divergent postings today). Empty/unused for every
-existing caller (colors/types/devotion), populated only for numeric-range
-tail values.
+- The low boundary plane (`<=0`) automatically absorbs whatever sparse
+  negative values exist (power's 2 cards at -1, toughness's 1 card at -1)
+  purely because that's what "value <= 0" already means — no separate
+  handling of the negative tail, no side table, no live re-query needed.
+- The high boundary plane (`>=10`, or wherever the interior stops)
+  automatically absorbs the sparse high tail (cmc's 13-16, power/
+  toughness's 13+) the same way.
+- Any query of the shape `field<=K` or `field>=K` for **any** K — interior
+  or landing on/beyond a boundary — compiles exactly as an OR of {relevant
+  interior one-hot planes, the relevant boundary plane}. Zero new data
+  structures, zero index queries at compile time — just more entries in
+  the same `PlaneExpr::Or`, evaluated by the existing `eval_planes`.
 
-### Original sketch (superseded)
+**What still declines, and why that's fine:** queries that need to
+distinguish *inside* a boundary bucket — `power=-1` specifically, or
+`power<-1` (strictly tighter than what the `<=0` plane alone resolves) —
+`compile_plane` simply returns `None` for these, exactly its existing
+contract for anything outside a plane's scope, falling back to today's
+`numeric_candidates` path unchanged. Not a compromise: these are
+inherently selective queries (2 cards, 4 cards), and #630's original
+verdict on numeric ranges only broke down for *broad* queries, which the
+boundary planes now fully cover. No side-channel out of `compile_plane`,
+no new `PlaneExpr` variant, no live re-query mechanism needed anywhere —
+the exactness-boundary logic per operator (`Le`/`Lt`/`Ge`/`Gt`/`Eq`/`Ne`
+against interior-range-plus-two-boundaries) mirrors `compile_devotion`'s
+existing boundary tracking almost exactly, just with two saturation edges
+instead of one.
 
-The first pass proposed a saturating "M+" bucket (declining to compile
-`field=15` exactly, falling back to the old scan) and treated power/
-toughness's negative tail as an open question ("check what -1 means before
-committing to a bidirectional scheme"). Superseded by the compile-time
-resolution above, which handles both ends of both tails exactly with less
-storage than either a bucket or dedicated planes, and needs no fallback path
-at all.
+### Earlier passes (superseded, kept for context on why they lost)
+
+1. **Saturating "M+" bucket only, decline on the low tail as an open
+   question.** Original sketch — left power/toughness's negative values
+   unresolved ("check what -1 means before committing to a bidirectional
+   scheme") and declined `field=15`-style queries entirely.
+2. **A precomputed `value -> card_ids` side table for sparse values,
+   resolved once per query at compile time.** Better — exact, no decline
+   case — but needed a new side-channel out of `compile_plane` (it
+   currently returns just `Option<PlaneExpr>`) to carry "a few extra ids
+   to OR in" back to the caller, plus a new small build-time structure to
+   maintain.
+3. **Skip the side table, re-query the existing `numeric_candidates`
+   index live at compile time** for whatever falls outside the one-hot
+   range. No new storage, but still needed the same `compile_plane`
+   side-channel, just fed by a live lookup instead of a precomputed table.
+
+The final design above needs neither: making the boundaries themselves
+*planes* (cumulative, not one-hot) means the sparse tails are absorbed
+automatically by a mechanism that already exists, and the only "new"
+behavior is `compile_plane` declining for the rare within-bucket case —
+which is just its existing contract, unchanged.
 
 ## Expected
 
