@@ -6,7 +6,7 @@ use super::{
     cards_of_printings, count_common_keywords, count_common_types,
     build_artist_index, build_range_index, range_candidates, narrow_candidates, rarity_candidates,
     range_too_broad_to_narrow, run_query, trigram_candidates, PrintingRangeIndex, NARROW_FLOOR,
-    bitmap_contains, compile_plane, eval_planes, split_planes,
+    bitmap_contains, compile_plane, eval_plane_bit, eval_planes, split_planes,
     ArtistIndex, CardData, CardIndexes, Candidates, ColorField, NumExpr, NumField, RarityIndex,
     CollField, CmpOp, FilterExpr, InlineStr, Interner, ManaCost, OracleCard, Printing, TagIndex,
     TextField, TextSearchField, Tri, TrigramIndex, VocabInterner, ARTIST_NONE, NONE_STR, TYPE_ARTIFACT, TYPE_CREATURE,
@@ -2077,6 +2077,109 @@ fn numeric_plane_enables_all_match_promotion() {
     let (pe, residual) = split_planes(cmc_le12, &archived.indexes.planes);
     assert!(pe.is_some(), "cmc<=12 must plane-compile");
     assert!(matches!(residual, FilterExpr::True), "cmc<=12 must fully consume: no residual card_pass needed");
+}
+
+// ─── Plane/candidate fast path (eval_plane_bit) ────────────────────────────────
+
+/// `eval_plane_bit` must agree with `eval_planes` + `bitmap_contains` for
+/// every card, across a diverse set of plane expressions (a single plane, an
+/// And, an Or, and a Not over a genuinely two-valued node) — the direct
+/// correctness guarantee the run_query-level fast path leans on, independent
+/// of whatever candidate-count threshold picks between them.
+#[test]
+fn eval_plane_bit_matches_eval_planes_bitmap() {
+    let data = plane_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let bounds = &archived.indexes.planes;
+
+    let green = || FilterExpr::ColorCmp { field: ColorField::Colors, op: CmpOp::Ge, mask: 16 };
+    let creature = || FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
+    let exprs = [
+        compile_plane(&green(), bounds).unwrap(),
+        compile_plane(&creature(), bounds).unwrap(),
+        compile_plane(&FilterExpr::And(vec![green(), creature()]), bounds).unwrap(),
+        compile_plane(&FilterExpr::Or(vec![green(), creature()]), bounds).unwrap(),
+        compile_plane(&FilterExpr::Not(Box::new(creature())), bounds).unwrap(),
+    ];
+    let mut bitmap: Vec<u64> = Vec::new();
+    for pe in &exprs {
+        eval_planes(pe, bounds, &mut bitmap);
+        for cid in 0..archived.cards.len() as u32 {
+            assert_eq!(
+                eval_plane_bit(pe, bounds, cid),
+                bitmap_contains(&bitmap, cid),
+                "eval_plane_bit disagreed with eval_planes at card {cid}"
+            );
+        }
+    }
+}
+
+/// A store large enough to straddle PLANE_CANDIDATE_MAX's default (64) on
+/// both sides in one fixture: 200 creature cards, alternating colors (even
+/// ids green, odd not), a "Flying" keyword on 5 green cards (well under the
+/// threshold — exercises the eval_plane_bit fast path) and a "Trample"
+/// keyword on 100 green cards (well over it — exercises the eval_planes
+/// fallback, unchanged from before this change).
+fn plane_candidate_fastpath_fixture() -> CardData {
+    let mut vocab = VocabInterner::new();
+    let cards: Vec<OracleCard> = (0..200)
+        .map(|i| {
+            let mut c = stub_card(i as u128 + 1, TYPE_CREATURE, &[], &mut vocab);
+            c.card_colors = if i % 2 == 0 { 16 } else { 1 }; // even: green, odd: white
+            c.card_color_identity = c.card_colors;
+            c
+        })
+        .collect();
+    let mut data = store_of(cards, &[1usize; 200], vocab);
+    let mut keywords: TagIndex = HashMap::new();
+    keywords.insert("Flying".to_string(), (0..10).step_by(2).collect()); // 5 green cards
+    keywords.insert("Trample".to_string(), (0..200).step_by(2).collect()); // 100 green cards
+    data.indexes.keywords = keywords;
+    data
+}
+
+/// End-to-end parity: `c:g <keyword>` must return identical totals/pages to
+/// the same filter evaluated with no plane at all (the pre-this-change
+/// fallback), whether the keyword's candidate count lands on the
+/// eval_plane_bit side (Flying, 5) or the eval_planes side (Trample, 100) of
+/// the default threshold.
+#[test]
+fn run_query_plane_candidate_fastpath_parity() {
+    let data = plane_candidate_fastpath_fixture();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let green = || FilterExpr::ColorCmp { field: ColorField::Colors, op: CmpOp::Ge, mask: 16 };
+    let coll = |value: &str| FilterExpr::CollectionCmp { field: CollField::Keywords, op: CmpOp::Ge, value: value.to_string(), value_id: None };
+
+    for (keyword, expected_total) in [("Flying", 5), ("Trample", 100)] {
+        for unique in ["card", "printing"] {
+            let mut plain = FilterExpr::And(vec![green(), coll(keyword)]);
+            let (t0, p0) = run_query(
+                &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+                &mut plain, None, unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
+            );
+            assert_eq!(t0, expected_total, "sanity: {keyword} total (unique={unique})");
+
+            // green() fully plane-consumes on its own (split_planes's whole-
+            // tree check succeeds for a bare ColorCmp), so the residual left
+            // for run_query is exactly the keyword predicate — the same
+            // shape split_planes would leave behind for a real
+            // And(green(), keyword) at the query() boundary.
+            let (pe, _) = split_planes(green(), &archived.indexes.planes);
+            let mut residual = coll(keyword);
+            let (t1, p1) = run_query(
+                &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+                &mut residual, pe.as_ref(), unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
+            );
+            assert_eq!(t0, t1, "totals must agree ({keyword}, unique={unique})");
+            let ids = |page: &[(&super::AOracleCard, &super::APrinting)]| -> Vec<u128> {
+                page.iter().map(|(_, p)| u128::from(p.scryfall_id)).collect()
+            };
+            assert_eq!(ids(&p0), ids(&p1), "pages must agree ({keyword}, unique={unique})");
+        }
+    }
 }
 
 // ─── Bind-time text-predicate memoization (#624) ─────────────────────────────

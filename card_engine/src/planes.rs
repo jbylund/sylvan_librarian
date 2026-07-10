@@ -715,6 +715,23 @@ impl PlaneExpr {
             }
         }
     }
+
+    /// One card's bit, short-circuiting per-candidate rather than per-word:
+    /// `eval_word`'s And/Or only stop early when the *whole word* (all 64
+    /// candidates sharing it) is already decided, which almost never happens
+    /// for a single candidate. `all`/`any` here stop as soon as *this*
+    /// candidate's bit is decided — e.g. a non-green card never touches the
+    /// creature plane's word at all for `c:g AND t:creature`. Used by
+    /// `eval_plane_bit`, the per-candidate fast path in lib.rs's `run_query`.
+    fn eval_bit(&self, words: &rkyv::Archived<Vec<u64>>, wpp: usize, word_idx: usize, bit: u32) -> bool {
+        match self {
+            PlaneExpr::Plane(p) => (u64::from(words[*p as usize * wpp + word_idx]) >> bit) & 1 != 0,
+            PlaneExpr::And(children) => children.iter().all(|c| c.eval_bit(words, wpp, word_idx, bit)),
+            PlaneExpr::Or(children) => children.iter().any(|c| c.eval_bit(words, wpp, word_idx, bit)),
+            PlaneExpr::Not(inner) => !inner.eval_bit(words, wpp, word_idx, bit),
+            PlaneExpr::Const(b) => *b,
+        }
+    }
 }
 
 /// Evaluate a plane expression into a card bitmap (`out` is a reused buffer).
@@ -731,6 +748,21 @@ pub(crate) fn eval_planes(expr: &PlaneExpr, planes: &rkyv::Archived<BitPlanes>, 
     if tail != 0 {
         out[wpp - 1] &= (1u64 << tail) - 1;
     }
+}
+
+/// Evaluate a plane expression for exactly one card, without materializing
+/// the full bitmap. Uses `eval_bit`, not `eval_word` — `eval_word`'s And/Or
+/// short-circuit only when the *whole word* (all 64 candidates sharing it)
+/// is decided, which is rare for a single candidate; `eval_bit` short-
+/// circuits per-candidate instead, so e.g. a non-green card never touches
+/// the creature plane's word at all for `c:g AND t:creature`. Cheaper than
+/// `eval_planes` below some candidate count (see lib.rs's `run_query`,
+/// PLANE_CANDIDATE_MAX): a full `eval_planes` pass always costs
+/// O(words_per_plane × tree size) regardless of how few cards are actually
+/// in play.
+pub(crate) fn eval_plane_bit(expr: &PlaneExpr, planes: &rkyv::Archived<BitPlanes>, cid: u32) -> bool {
+    let wpp = words_per_plane(u32::from(planes.n_cards) as usize);
+    expr.eval_bit(&planes.words, wpp, (cid / 64) as usize, cid % 64)
 }
 
 /// True iff card `cid`'s bit is set in the bitmap.

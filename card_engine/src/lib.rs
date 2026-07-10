@@ -2945,6 +2945,33 @@ static STREAM_MIN_MATCHES: LazyLock<usize> = LazyLock::new(|| guard_env("CARD_EN
 /// position exists for benchmarking written-order sensitivity.
 static VERIFY_ORDER: LazyLock<usize> = LazyLock::new(|| guard_env("CARD_ENGINE_VERIFY_ORDER", 1));
 
+/// When a present `plane` meets an already-narrowed, non-bitmap candidate set
+/// (`Candidates::Cards`/`Printings`/`PrintingBits` — e.g. an ExactName or tag
+/// lookup), checking each candidate against the plane one word at a time
+/// (`eval_plane_bit`) below this many candidates beats materializing the
+/// whole plane bitmap (`eval_planes`, a flat O(words_per_plane) cost
+/// regardless of candidate count) and retaining against it. `CardBits`
+/// candidates are unaffected — they already get an O(words) direct AND (see
+/// #654) with no per-candidate cost either way. Same measured-constant
+/// philosophy as STREAM_MIN_MATCHES/MAX_NARROW_FRACTION. Calibrated
+/// (card_engine's own `bench_plane_candidate` kernel micro-benchmark, real
+/// 31,508-card corpus, isolated from query-driver/PyO3 overhead — an
+/// end-to-end Python-level sweep couldn't resolve this cleanly, since
+/// downstream materialize/sort/paginate cost scales with match count
+/// regardless of which branch wins and swamped the signal): `eval_planes`
+/// costs a flat ~700-2,100 ns depending on plane-tree size (single `c:g` vs.
+/// `c:g t:creature`); `eval_plane_bit` (which short-circuits per candidate —
+/// see its doc comment in planes.rs) scales per candidate and crosses that
+/// flat cost around 650-770 candidates for both shapes and both an
+/// adversarial and a realistic-random candidate distribution, consistent
+/// across repeated runs. 384 sits comfortably below that crossover (still a
+/// measured ~1.7-1.9x win there) with margin for noise and untested
+/// (deeper) plane trees. A sort-and-group-by-shared-word variant was also
+/// tried and dropped: measured, it never beat both `eval_plane_bit` and
+/// `eval_planes` at the same candidate count (see docs/issues/
+/// engine-plane-candidate-fastpath.md).
+static PLANE_CANDIDATE_MAX: LazyLock<usize> = LazyLock::new(|| guard_env("CARD_ENGINE_PLANE_CANDIDATE_MAX", 384));
+
 fn run_query<'a>(
     cards: &'a [AOracleCard],
     printings: &'a [APrinting],
@@ -3029,30 +3056,50 @@ fn run_query<'a>(
             thread_local! {
                 static PLANE_BITMAP: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
             }
-            PLANE_BITMAP.with(|cell| {
-                let mut bitmap = cell.borrow_mut();
-                eval_planes(expr, &indexes.planes, &mut bitmap);
-                match raw_candidates {
-                    // Both sides already card-space bitmaps (e.g. #630 phase
-                    // 2's legal-format masks, or the devotion superset arm):
-                    // AND them directly, O(words) regardless of either side's
-                    // popcount. Materializing the residual's ids first and
-                    // retaining against the plane — the general path below —
-                    // costs O(residual popcount), which is a poor trade when
-                    // the residual is a broad mask (a legal-format narrowing
-                    // is often 50-99% of the store) and the plane is tight.
-                    Some(Candidates::CardBits(mut b)) => {
-                        and_bits_into(&mut b, &bitmap);
-                        Some(bitmap_card_ids(&b))
+            match raw_candidates {
+                // Both sides already card-space bitmaps (e.g. #630 phase
+                // 2's legal-format masks, or the devotion superset arm):
+                // AND them directly, O(words) regardless of either side's
+                // popcount. Materializing the residual's ids first and
+                // retaining against the plane — the general path below —
+                // costs O(residual popcount), which is a poor trade when
+                // the residual is a broad mask (a legal-format narrowing
+                // is often 50-99% of the store) and the plane is tight.
+                Some(Candidates::CardBits(mut b)) => PLANE_BITMAP.with(|cell| {
+                    let mut bitmap = cell.borrow_mut();
+                    eval_planes(expr, &indexes.planes, &mut bitmap);
+                    and_bits_into(&mut b, &bitmap);
+                    Some(bitmap_card_ids(&b))
+                }),
+                // A small already-known candidate list (ExactName, a tag/
+                // keyword lookup, ...): below PLANE_CANDIDATE_MAX, checking
+                // each one against the plane directly (eval_plane_bit, which
+                // short-circuits per candidate — see its doc comment) beats
+                // eval_planes's flat O(words_per_plane × tree size) cost to
+                // materialize a bitmap answering a question about the whole
+                // store when only a handful of ids are actually in play. A
+                // grouped/sorted variant was measured and dropped: it never
+                // beat both eval_plane_bit and eval_planes at the same candidate
+                // count (see docs/issues/engine-plane-candidate-fastpath.md).
+                Some(c) => {
+                    let mut v = c.into_cards(offsets);
+                    if v.len() <= *PLANE_CANDIDATE_MAX {
+                        v.retain(|&cid| eval_plane_bit(expr, &indexes.planes, cid));
+                    } else {
+                        PLANE_BITMAP.with(|cell| {
+                            let mut bitmap = cell.borrow_mut();
+                            eval_planes(expr, &indexes.planes, &mut bitmap);
+                            v.retain(|&cid| bitmap_contains(&bitmap, cid));
+                        });
                     }
-                    Some(c) => {
-                        let mut v = c.into_cards(offsets);
-                        v.retain(|&cid| bitmap_contains(&bitmap, cid));
-                        Some(v)
-                    }
-                    None => Some(bitmap_card_ids(&bitmap)),
+                    Some(v)
                 }
-            })
+                None => PLANE_BITMAP.with(|cell| {
+                    let mut bitmap = cell.borrow_mut();
+                    eval_planes(expr, &indexes.planes, &mut bitmap);
+                    Some(bitmap_card_ids(&bitmap))
+                }),
+            }
         }
     };
 
@@ -4174,3 +4221,5 @@ mod tests;
 mod bench_mana;
 #[cfg(test)]
 mod bench_verify_cost;
+#[cfg(test)]
+mod bench_plane_candidate;

@@ -106,6 +106,19 @@ CONFIGS: list[tuple[str, str, str, str, str, int]] = [
     # Unrelated selective controls — must not regress.
     ("control", "name:soldier", "card", "edhrec", "default", 0),
     ("control", "t:merfolk name:tide", "card", "edhrec", "default", 0),
+    # Plane/candidate fast path: a plane-eligible predicate (c:g/t:creature)
+    # combined with a narrow_rec candidate small enough to check directly
+    # (eval_plane_bit) instead of materializing the whole plane bitmap.
+    # Counts (real corpus): Llanowar Elves=1, convoke=26, kicker=54 — all
+    # well under PLANE_CANDIDATE_MAX (384). flying=208 is also under the
+    # threshold; goblin=large is the control that must still hit the
+    # eval_planes fallback unchanged.
+    ("plane-candidate", 'c:g !"Llanowar Elves"', "card", "edhrec", "default", 0),
+    ("plane-candidate", "c:g keyword:convoke", "card", "edhrec", "default", 0),
+    ("plane-candidate", "c:g keyword:kicker", "card", "edhrec", "default", 0),
+    ("plane-candidate", "c:g keyword:flying", "card", "edhrec", "default", 0),
+    ("plane-candidate", "t:creature keyword:convoke", "card", "edhrec", "default", 0),
+    ("plane-candidate-ctl", "c:g keyword:trample", "card", "edhrec", "default", 0),
 ]
 
 WARMUP = 20
