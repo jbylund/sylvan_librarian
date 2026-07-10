@@ -2540,6 +2540,40 @@ fn verify_order_spellings_agree_end_to_end() {
     assert_eq!(run(or_a), run(or_b));
 }
 
+// ─── Query-string mana parsing: mana_pip_counts / mana_cmc ───────────────────
+
+// X is its own pip symbol (its own lane, see MANA_LANE_SYMS), not a hybrid and
+// not excluded — only its cmc contribution is 0, handled by mana_cmc
+// separately. Confirmed against the real Scryfall API: mana:{X} matches
+// Fireball ({X}{R}) and mana:x behaves identically to mana:{x}. This parser
+// (used only for query-time mana:/devotion: values — see build_binary's
+// attr == "mana_cost_jsonb"/"devotion" arms) once dropped X entirely, braced
+// or not, silently degrading `mana:{X}{R}` into `mana:{R}` and matching cards
+// with no X pip at all (e.g. Shivan Dragon, {4}{R}{R}).
+#[test]
+fn mana_pip_counts_treats_x_as_a_real_symbol() {
+    use super::mana_pip_counts;
+    let braced = mana_pip_counts("{X}{R}");
+    assert_eq!(braced.get("X"), Some(&1), "braced X must not be dropped");
+    assert_eq!(braced.get("R"), Some(&1));
+    let bare = mana_pip_counts("XR");
+    assert_eq!(bare.get("X"), Some(&1), "bare X must be recognized, same as braced");
+    assert_eq!(bare.get("R"), Some(&1));
+    let doubled = mana_pip_counts("{X}{X}{R}");
+    assert_eq!(doubled.get("X"), Some(&2), "repeated X pips must accumulate");
+}
+
+// mana_cmc's X-exclusion was already correct (X contributes 0 whether braced
+// or bare) — pinned here so a future refactor of mana_pip_counts can't
+// accidentally couple the two functions' X handling back together.
+#[test]
+fn mana_cmc_excludes_x_braced_and_bare() {
+    use super::mana_cmc;
+    assert_eq!(mana_cmc("{X}{R}"), 1.0);
+    assert_eq!(mana_cmc("XR"), 1.0);
+    assert_eq!(mana_cmc("{X}{X}{2}{R}"), 3.0, "two generic + one R; both Xs contribute 0");
+}
+
 // ─── Packed mana pips: ManaCostCmp semantics ─────────────────────────────────
 
 /// Store with a spread of cost shapes: plain, multi-pip, hybrid, X, snow,
@@ -2646,6 +2680,13 @@ fn mana_cost_cmp_packed_semantics() {
     assert_eq!(matches(&mana_cmp_of(CmpOp::Eq, &[("W/P", 1)], 1.0, &mv)), [8]);
     // Snow is a lane like any other.
     assert_eq!(matches(&mana_cmp_of(CmpOp::Ge, &[("S", 1)], 1.0, &mv)), [6]);
+    // X is a lane like any other too, not a hybrid — only card 5 carries it.
+    // (This exercises the FilterExpr evaluator's already-correct lane
+    // handling; the query-string parser's X-dropping bug is pinned directly
+    // in mana_pip_counts_treats_x_as_a_real_symbol above, since mana_cmp_of
+    // builds the FilterExpr from typed pips and bypasses string parsing.)
+    assert_eq!(matches(&mana_cmp_of(CmpOp::Ge, &[("X", 1)], 0.0, &mv)), [5]);
+    assert_eq!(matches(&mana_cmp_of(CmpOp::Eq, &[("X", 1), ("R", 1)], 1.0, &mv)), [5]);
     // A symbol no card carries: containment and exactness fail everywhere;
     // card ⊆ query still holds for the empty cost (query-only symbols never
     // constrain the subset direction — same as the HashMap semantics).

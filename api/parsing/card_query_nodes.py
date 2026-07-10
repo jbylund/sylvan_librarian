@@ -379,6 +379,8 @@ def mana_cost_str_to_dict(mana_cost_str: str) -> dict:
     """Convert a mana cost string to a dictionary of colored symbols and their counts.
 
     Supports both braced format ({W}{U}), unbraced format (WU or wu), and mixed format (R{G}).
+    X is a real pip symbol here (its cmc contribution of 0 is handled separately
+    by calculate_cmc), not a hybrid — {X} and bare X both produce an "X" key.
     """
     colored_symbol_counts = {}
     mana_cost_upper = mana_cost_str.upper()
@@ -397,8 +399,10 @@ def mana_cost_str_to_dict(mana_cost_str: str) -> dict:
     # We don't care about digits here, only colored symbols
     unbraced_part = re.sub(r"{[^}]*}", " ", mana_cost_upper)
     for char in unbraced_part:
-        # Only count color characters (W, U, B, R, G, C)
-        if char in "WUBRGC":
+        # Color characters (W, U, B, R, G, C) plus X, its own pip symbol —
+        # confirmed against the real Scryfall API: mana:x behaves identically
+        # to mana:{x}. calculate_cmc() already excludes X from cmc separately.
+        if char in "WUBRGCX":
             colored_symbol_counts[char] = colored_symbol_counts.get(char, 0) + 1
 
     as_dict = {}

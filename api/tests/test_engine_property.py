@@ -109,6 +109,11 @@ FRAGMENTS = [
     "mana:uu",
     "mana=gg",
     "-mana:rr",
+    # X: its own pip symbol (not a hybrid, 0 cmc contribution), bare (no
+    # braces) — real Scryfall treats bare mana:x identically to mana:{x}.
+    "mana:x",
+    "mana:xr",
+    "-mana:x",
 ]
 
 
@@ -143,6 +148,11 @@ def _make_cards(rng: random.Random) -> list[dict[str, Any]]:
                 # never a devotion-tracked letter).
                 other = "P" if rng.random() < 0.3 else rng.choice([x for x in "WUBRG" if x != colors[0]] or ["C"])
                 pips[f"{colors[0]}/{other}"] = rng.choice([1, 2])
+            if rng.random() < 0.08:
+                # X is its own pip symbol (mana:{X} matches Fireball-style
+                # cards on real Scryfall), not a hybrid, and contributes 0 to
+                # cmc — independent of the color pips above.
+                pips["X"] = rng.choice([1, 2])
         pos = 1
         mana_cost_jsonb: dict[str, list[int]] = {}
         for sym, n in pips.items():
@@ -246,7 +256,9 @@ def _ref_leaf(frag: str, card: dict[str, Any]) -> bool | None:  # noqa: PLR0911,
         want_pips: dict[str, int] = {}
         for ch in frag[len("mana") + 1 :]:
             want_pips[ch.upper()] = want_pips.get(ch.upper(), 0) + 1
-        want_cmc = sum(want_pips.values())
+        # X contributes 0 to cmc (confirmed on real Scryfall: Fireball {X}{R}
+        # has cmc 1.0, not 2.0) — every other symbol contributes 1.
+        want_cmc = sum(n for sym, n in want_pips.items() if sym != "X")
         # Unlike devotion, mana: never splits hybrid symbols (they're opaque
         # keys) and every op ANDs in a cmc compare alongside pip containment.
         have_pips = {sym: len(positions) for sym, positions in card["mana_cost_jsonb"].items()}

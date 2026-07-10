@@ -172,10 +172,10 @@ class TestContainerIntegration:
         assert isinstance(result, dict)
         assert "cards" in result
 
-        # Should find every red card (Lightning Bolt, and Boggart Ram-Gang
-        # which is R/G)
+        # Should find every red card (Lightning Bolt, Boggart Ram-Gang which
+        # is R/G, and Fireball which is {X}{R})
         cards = result["cards"]
-        assert {c["name"] for c in cards} == {"Lightning Bolt", "Boggart Ram-Gang"}
+        assert {c["name"] for c in cards} == {"Lightning Bolt", "Boggart Ram-Gang", "Fireball"}
 
     def test_cmc_search(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """Test searching for cards by converted mana cost."""
@@ -204,9 +204,20 @@ class TestContainerIntegration:
     def test_mana_cost_search(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """mana: is exact-symbol containment (plus cmc) — hybrid keys don't split."""
         result = api_resource._search_sql(**search_kwargs("mana:{R}", limit=10))
-        # Lightning Bolt has a pure {R} pip; Boggart Ram-Gang only has {R/G} —
+        # Lightning Bolt has a pure {R} pip, as does Fireball ({X}{R}, and X
+        # doesn't block containment on R); Boggart Ram-Gang only has {R/G} —
         # an opaque hybrid key that mana:{R} must not match.
-        assert {c["name"] for c in result["cards"]} == {"Lightning Bolt"}
+        assert {c["name"] for c in result["cards"]} == {"Lightning Bolt", "Fireball"}
+
+    def test_mana_cost_x_symbol(self: TestContainerIntegration, api_resource: APIResource) -> None:
+        """X is its own pip symbol (not a hybrid); bare x behaves like braced {X}."""
+        braced = api_resource._search_sql(**search_kwargs("mana:{X}", limit=10))
+        bare = api_resource._search_sql(**search_kwargs("mana:x", limit=10))
+        assert {c["name"] for c in braced["cards"]} == {c["name"] for c in bare["cards"]} == {"Fireball"}
+        # X contributes 0 to cmc: mana:{X}{R}{R} implies cmc 2, but Fireball's
+        # actual cmc is 1 — must not match.
+        too_high = api_resource._search_sql(**search_kwargs("mana:{X}{R}{R}", limit=10))
+        assert too_high["cards"] == []
 
     def test_mana_cost_exact_match(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """mana= requires the exact same distinct symbols, counts, and cmc."""
@@ -272,9 +283,9 @@ class TestContainerIntegration:
 
         # Should only have our test cards
         cards = result["cards"]
-        assert len(cards) == 5
+        assert len(cards) == 6
         card_names = {card["name"] for card in cards}
-        expected_names = {"Lightning Bolt", "Serra Angel", "Black Lotus", "Boggart Ram-Gang", "Cathedral Membrane"}
+        expected_names = {"Lightning Bolt", "Serra Angel", "Black Lotus", "Boggart Ram-Gang", "Cathedral Membrane", "Fireball"}
         assert card_names == expected_names
 
     def test_random_search_shape_matches_search(self: TestContainerIntegration, api_resource: APIResource) -> None:

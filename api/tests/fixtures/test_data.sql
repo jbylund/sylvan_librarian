@@ -129,6 +129,32 @@ INSERT INTO magic.cards (
     '5',
     5,
     '2011-05-13'
+),
+(
+    -- Fireball {X}{R} (real card, clb #175): X is its own pip symbol (not a
+    -- hybrid) and contributes 0 to cmc — mana:{X} and bare mana:x must both
+    -- match it, and mana:{X}{R}{R} (implied cmc 2) must not (cmc is 1).
+    -- Sorcery: nonpermanent, so devotion is empty despite the {R} pip.
+    '00000000-0000-0000-0000-000000000006',
+    'aa7714b0-2bfb-458a-8ebf-37ec2c53383e',
+    'Fireball',
+    1,
+    '{X}{R}',
+    '{"X": [1], "R": [1]}',
+    '{}',
+    '{"name": "Fireball", "type": "Sorcery", "collector_number": "175"}',
+    '["Sorcery"]',
+    '[]',
+    '{"R": true}',
+    '{"R": true}',
+    '{}',
+    'This spell costs {1} more to cast for each target it has beyond the first.\nFireball deals X damage divided as you choose among any number of targets.',
+    NULL,
+    NULL,
+    '{}',
+    '175',
+    175,
+    '2022-06-10'
 ) ON CONFLICT (scryfall_id) DO NOTHING;
 
 -- Insert test tags

@@ -160,13 +160,20 @@ pub(crate) fn mana_pip_counts(s: &str) -> HashMap<String, u8> {
         match c {
             '{' => { in_brace = true; sym.clear(); }
             '}' => {
-                if in_brace && sym.parse::<u32>().is_err() && sym != "X" {
+                // X is a real pip symbol (its own lane, see MANA_LANE_SYMS) —
+                // only its cmc contribution is 0, handled separately by
+                // mana_cmc. Confirmed against the real Scryfall API:
+                // mana:{X} matches Fireball ({X}{R}) and excludes cards with
+                // no X pip, which this exclusion broke.
+                if in_brace && sym.parse::<u32>().is_err() {
                     *pips.entry(sym.clone()).or_insert(0) += 1;
                 }
                 in_brace = false;
             }
             _ if in_brace => sym.push(c),
-            _ if "WUBRGC".contains(c) => { *pips.entry(c.to_string()).or_insert(0) += 1; }
+            // Bare (unbraced) X is a real pip symbol too — confirmed against
+            // the real Scryfall API: mana:x behaves identically to mana:{x}.
+            _ if "WUBRGCX".contains(c) => { *pips.entry(c.to_string()).or_insert(0) += 1; }
             _ => {}
         }
     }
