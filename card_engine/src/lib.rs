@@ -1269,6 +1269,13 @@ fn intersect_operands(ops: Vec<TriOperand>) -> Vec<u32> {
         }
     }
     if postings.is_empty() {
+        // No sparse operand to seed a working set from — every trigram window
+        // landed in the dense tier. Two different shapes get here: a 3-byte
+        // needle (a single window, ordinary whenever that one trigram is
+        // common enough to be dense) and a longer multi-window needle where
+        // every window happens to be a hot trigram (uncommon — a longer
+        // needle usually has at least one rarer window, which is what lets
+        // the sparse-seeded path below narrow well).
         let mut acc = planes.swap_remove(0);
         for p in &planes {
             for (a, b) in acc.iter_mut().zip(p) {
