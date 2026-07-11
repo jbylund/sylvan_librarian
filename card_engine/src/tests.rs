@@ -1757,6 +1757,38 @@ fn plane_parity_color_and_type_ops() {
     check(&FilterExpr::Not(Box::new(produces_red())));
 }
 
+// Regression for #668 (color:c / produces:c matching every card): Ge with an
+// empty mask is the "c"/"colorless" query, and must reduce to bits == 0, not
+// the vacuously-true and_of([])/bits & 0 == 0 shape. Checked against both the
+// row-scan filter and the bitplane compiler, since each has its own Ge arm.
+#[test]
+fn color_cmp_ge_empty_mask_is_colorless_only() {
+    let data = plane_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let check = |field: ColorField, want_true: &[usize]| {
+        let f = FilterExpr::ColorCmp { field, op: CmpOp::Ge, mask: 0 };
+        for (cid, card) in archived.cards.iter().enumerate() {
+            let want = want_true.contains(&cid);
+            assert_eq!(f.eval_card(card, &archived.strings) == Tri::True, want, "eval_card mismatch at card {cid}");
+        }
+        let pe = compile_plane(&f, &archived.indexes.planes, &archived.indexes.oracle_trigram.words).expect("filter must be plane-expressible");
+        let mut bitmap: Vec<u64> = Vec::new();
+        eval_planes(&pe, &archived.indexes.planes, &mut bitmap);
+        for cid in 0..archived.cards.len() {
+            assert_eq!(bitmap_contains(&bitmap, cid as u32), want_true.contains(&cid), "plane mismatch at card {cid}");
+        }
+    };
+
+    // card_colors == 0: cards 0, 4, 9 (see plane_fixture_store specs above)
+    check(ColorField::Colors, &[0, 4, 9]);
+    // produced_mana == 0: cards 1, 2, 3, 6, 8
+    check(ColorField::ProducedMana, &[1, 2, 3, 6, 8]);
+    // card_color_identity == 0: only card 0
+    check(ColorField::ColorIdentity, &[0]);
+}
+
 // produced_mana must be its own independent transposition, not derived from
 // colors or identity: card 0 (colorless, produces everything) and card 5
 // (Fallaji Wayfarer, colors=WUBR/identity=G, produces only C) both have

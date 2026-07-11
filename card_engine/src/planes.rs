@@ -325,6 +325,13 @@ fn cmp_expr(base: usize, width: usize, mask: u16, op: CmpOp, ge_any: bool) -> Pl
         if ge_any { or_of(inp) } else { and_of(inp) }
     };
     match op {
+        // All-of Ge (ColorCmp) with mask 0 means the query was literally
+        // "c"/"colorless": and_of([]) is vacuously true, but the intended
+        // semantics are exact equality (bits == 0), matching the ColorCmp::Ge
+        // special case in filter.rs's eval_card. Gt's own use of ge() below is
+        // deliberately untouched -- Gt's "no colors" case correctly depends on
+        // the vacuous-true shape to reduce to "not equal".
+        CmpOp::Ge if !ge_any && mask == 0 => eq_expr(base, width, mask),
         CmpOp::Ge => ge(),
         CmpOp::Eq => eq_expr(base, width, mask),
         CmpOp::Le => le_expr(base, width, mask),

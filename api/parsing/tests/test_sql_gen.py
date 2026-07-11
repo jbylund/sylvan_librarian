@@ -4,7 +4,13 @@ import pytest
 
 from api import parsing
 from api.parsing import QueryContext, generate_sql_query
-from api.parsing.card_query_nodes import _color_dict_to_mask, _proper_subset_masks, _subset_masks, get_legality_comparison_object
+from api.parsing.card_query_nodes import (
+    _color_dict_to_mask,
+    _proper_subset_masks,
+    _subset_masks,
+    get_colors_comparison_object,
+    get_legality_comparison_object,
+)
 
 
 @pytest.mark.parametrize(
@@ -248,6 +254,69 @@ def test_full_sql_translation_jsonb_colors(parse_query, input_query: str, expect
     ],
 )
 def test_color_identity_sql_translation(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
+    parsed = parse_query(input_query)
+    observed_params = QueryContext()
+    observed_sql = parsed.to_sql(observed_params)
+    assert (observed_sql, observed_params) == (
+        expected_sql,
+        expected_parameters,
+    ), f"\nExpected: {expected_sql}\t{expected_parameters}\nObserved: {observed_sql}\t{observed_params}"
+
+
+@pytest.mark.parametrize(
+    argnames=("input_query", "expected_sql", "expected_parameters"),
+    argvalues=[
+        (
+            "color=rg",
+            r"(card.card_colors = %(p_dict_eydSJzogVHJ1ZSwgJ0cnOiBUcnVlfQ)s)",
+            {"p_dict_eydSJzogVHJ1ZSwgJ0cnOiBUcnVlfQ": {"R": True, "G": True}},
+        ),
+        (
+            "color:rg",
+            r"(card.card_colors @> %(p_dict_eydSJzogVHJ1ZSwgJ0cnOiBUcnVlfQ)s)",
+            {"p_dict_eydSJzogVHJ1ZSwgJ0cnOiBUcnVlfQ": {"R": True, "G": True}},
+        ),
+        # Regression for #668: ":"/">=" (Ge) against jsonb containment (@>) is
+        # vacuously true for an empty rhs, so colorless must fall back to "="
+        # instead -- card_colors/card_color_identity store colorless as {}
+        # (verified against the live Scryfall API: Sol Ring's colors is []).
+        (
+            "color:c",
+            r"(card.card_colors = %(p_dict_e30)s)",
+            {"p_dict_e30": {}},
+        ),
+        (
+            "c:c",
+            r"(card.card_colors = %(p_dict_e30)s)",
+            {"p_dict_e30": {}},
+        ),
+        (
+            "color=c",
+            r"(card.card_colors = %(p_dict_e30)s)",
+            {"p_dict_e30": {}},
+        ),
+        # produced_mana is different: Scryfall's produced_mana array can
+        # contain "C" as a genuine value (Sol Ring's produced_mana is ["C"],
+        # not []), so "colorless" here is an ordinary containment query
+        # against {"C": True}, not an empty-set special case.
+        (
+            "produces:c",
+            r"(card.produced_mana @> %(p_dict_eydDJzogVHJ1ZX0)s)",
+            {"p_dict_eydDJzogVHJ1ZX0": {"C": True}},
+        ),
+        (
+            "produces=c",
+            r"(card.produced_mana = %(p_dict_eydDJzogVHJ1ZX0)s)",
+            {"p_dict_eydDJzogVHJ1ZX0": {"C": True}},
+        ),
+        (
+            "produces:colorless",
+            r"(card.produced_mana @> %(p_dict_eydDJzogVHJ1ZX0)s)",
+            {"p_dict_eydDJzogVHJ1ZX0": {"C": True}},
+        ),
+    ],
+)
+def test_color_and_produces_sql_translation(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
     parsed = parse_query(input_query)
     observed_params = QueryContext()
     observed_sql = parsed.to_sql(observed_params)
@@ -1304,6 +1373,31 @@ def test_empty_query_generates_true(parse_query, query: str | None) -> None:
     sql, params = generate_sql_query(parse_query(query))
     assert sql == "TRUE"
     assert params == {}
+
+
+testcases_colors_comparison_object = {
+    # card_colors/card_color_identity: colorless is the absence of color.
+    "colors_c": {"val": "c", "attr": "card_colors", "expected": {}},
+    "colors_colorless": {"val": "colorless", "attr": "card_colors", "expected": {}},
+    "identity_c": {"val": "c", "attr": "card_color_identity", "expected": {}},
+    "colors_rg": {"val": "rg", "attr": "card_colors", "expected": {"R": True, "G": True}},
+    # produced_mana: colorless ("C") is a genuine producible value, per Scryfall's
+    # own data (Sol Ring's produced_mana is ["C"], not []).
+    "produces_c": {"val": "c", "attr": "produced_mana", "expected": {"C": True}},
+    "produces_colorless": {"val": "colorless", "attr": "produced_mana", "expected": {"C": True}},
+    "produces_wc": {"val": "wc", "attr": "produced_mana", "expected": {"W": True, "C": True}},
+}
+
+
+@pytest.mark.parametrize(
+    argnames=sorted(next(iter(testcases_colors_comparison_object.values()))),
+    argvalues=[
+        [v for k, v in sorted(testcases_colors_comparison_object[t].items())] for t in sorted(testcases_colors_comparison_object)
+    ],
+    ids=sorted(testcases_colors_comparison_object),
+)
+def test_get_colors_comparison_object(val: str, attr: str, expected: dict) -> None:
+    assert get_colors_comparison_object(val, attr) == expected
 
 
 testcases_color_dict_to_mask = {

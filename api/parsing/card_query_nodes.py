@@ -212,23 +212,31 @@ def _proper_subset_masks(query_mask: int) -> list[int]:
     return [v for v in range(32) if (v & ~query_mask) == 0 and v != query_mask]  # 5 colors => 2^5 possible bitmask values
 
 
-def get_colors_comparison_object(val: str) -> dict[str, bool]:
+def get_colors_comparison_object(val: str, attr: str = "card_colors") -> dict[str, bool]:
     """Convert color string to comparison object for database queries.
 
     Args:
         val: Color string (either color codes like 'WUBRG' or color name like 'red').
+        attr: The DB column this value is being compared against. Colorless means two
+            different things depending on the field: for card_colors/card_color_identity
+            it's the *absence* of any color (Scryfall stores both as `[]`, verified
+            against the live API — e.g. Sol Ring's colors/color_identity are both `[]`),
+            so 'c'/'colorless' maps to an empty dict. For produced_mana, colorless is a
+            genuine producible value (Sol Ring's produced_mana is `["C"]`, not `[]`), so
+            it must map to {"C": True} there instead.
 
     Returns:
         Dictionary mapping color codes to True for matching colors.
-        Returns an empty dict for colorless ('c' or 'colorless'), since colorless
-        cards are stored with an empty color identity in the database.
 
     Raises:
         ValueError: If the color string is invalid.
     """
+    colorless_is_value = attr == "produced_mana"
     # If all chars are color codes
     color_code_set = set(COLOR_CODE_TO_NAME)
     if val and set(val) <= color_code_set:
+        if colorless_is_value:
+            return {c.upper(): True for c in val}
         # Colorless-only queries use an empty dict, matching how colorless cards
         # are stored (card_color_identity = {}) rather than {"C": True}.
         return {c.upper(): True for c in val if c != "c"}
@@ -236,7 +244,7 @@ def get_colors_comparison_object(val: str) -> dict[str, bool]:
     try:
         letter_code = COLOR_NAME_TO_CODE[val]
         if letter_code == "c":
-            return {}
+            return {"C": True} if colorless_is_value else {}
         return {letter_code.upper(): True}
     except KeyError as e:
         msg = f"Invalid color string: {val}"
@@ -559,7 +567,7 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
                 return _node_to_json(self.rhs)
             val = self.rhs.value.strip()
             if attr in ("card_colors", "card_color_identity", "produced_mana"):
-                return list(get_colors_comparison_object(val.lower()).keys())
+                return list(get_colors_comparison_object(val.lower(), attr).keys())
             if attr == "card_keywords":
                 return list(get_keywords_comparison_object(val).keys())
             if attr == "card_frame_data":
@@ -970,7 +978,7 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         attr = self.lhs.attribute_name
         is_color_identity = False
         if attr in ("card_colors", "card_color_identity", "produced_mana"):
-            rhs = get_colors_comparison_object(self.rhs.value.strip().lower())
+            rhs = get_colors_comparison_object(self.rhs.value.strip().lower(), attr)
             is_color_identity = attr == "card_color_identity"
             if is_color_identity and self.operator in (":", "<="):
                 subsets = IntArray(_subset_masks(_color_dict_to_mask(rhs)))
@@ -981,6 +989,12 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
                 pmask = context.add(subsets)
                 return f"(magic.color_identity_mask({lhs_sql}) = ANY({pmask}::smallint[]))"
             placeholder = context.add(rhs)
+            # An empty rhs means the query was literally "c"/"colorless", not
+            # "at least zero colors" -- jsonb containment against an empty
+            # object (@>) is vacuously true for every row, so ":"/">=" must
+            # fall back to exact equality when rhs is empty.
+            if not rhs and self.operator in (":", ">="):
+                return f"({lhs_sql} = {placeholder})"
         elif attr == "devotion":
             # Devotion uses mana cost syntax, so we need to convert it to color comparison
             # Extract color codes from mana cost syntax like {G}, {R}{G}, etc.
