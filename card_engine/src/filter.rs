@@ -1162,7 +1162,11 @@ impl FilterExpr {
             FilterExpr::ColorCmp { field, op, mask } => {
                 let bits = card_colors(card, *field);
                 tri_bool(match op {
-                    CmpOp::Ge => bits & mask == *mask,
+                    // mask == 0 means the query was literally "c"/"colorless" (see
+                    // get_colors_comparison_object on the Python side), not "at
+                    // least zero colors" -- bits & 0 == 0 is vacuously true for
+                    // every card, so Ge must fall back to exact equality here.
+                    CmpOp::Ge => if *mask == 0 { bits == 0 } else { bits & mask == *mask },
                     CmpOp::Eq => bits == *mask,
                     CmpOp::Le => bits & !mask == 0,
                     CmpOp::Lt => bits & !mask == 0 && bits != *mask,

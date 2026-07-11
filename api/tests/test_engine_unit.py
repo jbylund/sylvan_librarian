@@ -211,9 +211,23 @@ class TestFilters:
         assert total == 21
 
     def test_colorless(self, engine: QueryEngine) -> None:
-        # Black Lotus (5) + Sol Ring (5); use color= (exact) not c: (contains empty set = all cards)
+        # Black Lotus (5) + Sol Ring (5): the only colorless cards in the fixture
         total, _ = _run(engine, "color=c")
         assert total == 10
+
+    def test_colorless_default_operator(self, engine: QueryEngine) -> None:
+        # Regression for #668: c:/color: (the default ":" operator) must match
+        # the same 10 colorless printings as color=c, not every card in the
+        # fixture (":" is Ge, and Ge with an empty mask is vacuously true
+        # unless colorless is special-cased back to equality).
+        total_colon, _ = _run(engine, "c:c")
+        total_eq, _ = _run(engine, "c=c")
+        assert total_colon == total_eq == 10
+
+    def test_produces_colorless(self, engine: QueryEngine) -> None:
+        # Only Sol Ring (5) produces {C}; Black Lotus produces WUBRG, not C.
+        total, _ = _run(engine, "produces:c")
+        assert total == 5
 
     def test_cmc_equals_zero(self, engine: QueryEngine) -> None:
         total, cards = _run(engine, "cmc=0")
