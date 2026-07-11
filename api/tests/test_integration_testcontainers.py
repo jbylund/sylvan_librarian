@@ -248,7 +248,7 @@ class TestContainerIntegration:
         assert "Lightning Bolt" not in {c["name"] for c in result["cards"]}
 
     def test_search_sql_default_fields(self: TestContainerIntegration, api_resource: APIResource) -> None:
-        """Omitting fields= keeps the historical 9-key shape."""
+        """Omitting fields= keeps the historical 9-key shape plus image_cluster_id."""
         result = api_resource._search_sql(**search_kwargs("name:bolt", limit=10))
         assert result["cards"][0].keys() == {
             "name",
@@ -260,6 +260,7 @@ class TestContainerIntegration:
             "oracle_text",
             "set_name",
             "type_line",
+            "image_cluster_id",
         }
 
     def test_search_sql_with_custom_fields(self: TestContainerIntegration, api_resource: APIResource) -> None:

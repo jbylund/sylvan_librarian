@@ -1199,7 +1199,7 @@ class TestCommonCardKeywords:
 
 
 class TestFieldSelection:
-    """fields= selects which keys come back per card; None keeps the historical 9."""
+    """fields= selects which keys come back per card; None keeps the historical 9 + image_cluster_id."""
 
     def test_default_fields_omit_illustration_and_price(self, engine: QueryEngine) -> None:
         _, cards = _run(engine, 'name="Lightning Bolt"', unique="printing", limit=1)
@@ -1213,7 +1213,15 @@ class TestFieldSelection:
             "oracle_text",
             "set_name",
             "type_line",
+            "image_cluster_id",
         }
+
+    def test_image_cluster_id_round_trips(self, engine: QueryEngine) -> None:
+        """The m11 printing carries image_cluster_id=27 in the fixture; others are None."""
+        _, cards = _run(engine, 'name="Lightning Bolt"', unique="printing", limit=100)
+        by_set = {card["set_code"]: card["image_cluster_id"] for card in cards}
+        assert by_set["m11"] == 27
+        assert by_set["lea"] is None
 
     def test_requested_fields_returned_exactly(self, engine: QueryEngine) -> None:
         _, cards = _run(

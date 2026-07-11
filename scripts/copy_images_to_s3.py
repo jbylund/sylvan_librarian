@@ -12,6 +12,7 @@ This script:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import datetime
 import json
 import logging
@@ -23,7 +24,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import boto3
 import psycopg
@@ -31,6 +32,9 @@ import requests
 from botocore.exceptions import ClientError
 
 from api.utils.db_utils import configure_connection, get_pg_creds
+
+if TYPE_CHECKING:
+    from scripts.placeholder_assignment import PlaceholderCodebook
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +175,29 @@ def fetch_cards_from_db(
     return cards
 
 
+_CODEBOOK_UNSET = object()
+_placeholder_codebook: Any = _CODEBOOK_UNSET
+
+
+def get_placeholder_codebook() -> PlaceholderCodebook | None:
+    """Load the placeholder codebook lazily, once per process (workers each load their own).
+
+    Returns None (with a one-time warning) when the optional deps from
+    requirements/placeholders.txt (numpy, pillow) are not installed, so image
+    copying still works without them — assignments are just skipped.
+    """
+    global _placeholder_codebook  # noqa: PLW0603 - per-process cache
+    if _placeholder_codebook is _CODEBOOK_UNSET:
+        try:
+            from scripts.placeholder_assignment import PlaceholderCodebook  # noqa: PLC0415 - optional dep
+
+            _placeholder_codebook = PlaceholderCodebook()
+        except ImportError as exc:
+            logger.warning("Placeholder assignment disabled (missing optional deps): %s", exc)
+            _placeholder_codebook = None
+    return _placeholder_codebook
+
+
 def download_image(url: str, output_path: Path) -> bool:
     """Download an image from a URL.
 
@@ -302,23 +329,29 @@ def process_card(
         dry_run: If True, skip actual downloads and uploads
 
     Returns:
-        Dict with success status for each size (280, 388, 538, 745)
+        Dict with card identity, per-size success status ("sizes"), and the assigned
+        placeholder cluster id ("image_cluster_id", None when unassigned)
     """
     set_code = card["card_set_code"]
     collector_number = card["collector_number"]
     png_url = card["png_url"]
+    out: dict[str, Any] = {
+        "card_set_code": set_code,
+        "collector_number": collector_number,
+        "sizes": {SMALL_KEY: False, MEDIUM_KEY: False, LARGE_KEY: False, XLARGE_KEY: False},
+        "image_cluster_id": None,
+    }
 
     if not set_code or not collector_number or not png_url:
         logger.warning("Skipping card with missing data: %s", card)
-        return {SMALL_KEY: False, MEDIUM_KEY: False, LARGE_KEY: False, XLARGE_KEY: False}
+        return out
 
     logger.info("Processing %s/%s", set_code, collector_number)
 
     if dry_run:
         logger.info("[DRY RUN] Would process %s/%s", set_code, collector_number)
-        return {SMALL_KEY: True, MEDIUM_KEY: True, LARGE_KEY: True, XLARGE_KEY: True}
-
-    results = {SMALL_KEY: False, MEDIUM_KEY: False, LARGE_KEY: False, XLARGE_KEY: False}
+        out["sizes"] = {SMALL_KEY: True, MEDIUM_KEY: True, LARGE_KEY: True, XLARGE_KEY: True}
+        return out
 
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
@@ -327,7 +360,7 @@ def process_card(
         png_path = temp_path / "original.png"
 
         if not download_image(png_url, png_path):
-            return results
+            return out
 
         sizes = {
             SMALL_KEY: SMALL_WIDTH,
@@ -343,16 +376,26 @@ def process_card(
             if not convert_to_webp(png_path, webp_path, width):
                 continue
 
+            # The 280px thumbnail is what the placeholder codebook was built from —
+            # assign while the decoded pixels are already in hand.
+            if size_name == SMALL_KEY:
+                codebook = get_placeholder_codebook()
+                if codebook is not None:
+                    try:
+                        out["image_cluster_id"] = codebook.assign_file(webp_path)
+                    except Exception:
+                        logger.exception("Placeholder assignment failed for %s/%s", set_code, collector_number)
+
             # Face-aware key structure: img/{set_code}/{collector_number}/{face}/{size}.webp
             s3_key = f"img/{set_code}/{collector_number}/{DEFAULT_FACE}/{size_name}.webp"
 
             if upload_to_s3(s3_client, webp_path, bucket, s3_key):
-                results[size_name] = True
+                out["sizes"][size_name] = True
 
-    success_count = sum(results.values())
+    success_count = sum(out["sizes"].values())
     logger.info("Completed %s/%s: %d/4 sizes uploaded", set_code, collector_number, success_count)
 
-    return results
+    return out
 
 
 class CardProcessorPool:
@@ -384,7 +427,7 @@ class CardProcessorPool:
             job_task: Dict of job task
 
         Returns:
-            Dict with success status for each size (280, 388, 538, 745)
+            Dict with card identity, per-size success status, and placeholder cluster id
         """
         bucket = job_task.pop("bucket")
         dry_run = job_task.pop("dry_run")
@@ -412,6 +455,7 @@ class Args:
     dry_run: bool = False
     verbose: bool = False
     workers: int = 8
+    assign_only: bool = False
 
 
 def get_args() -> Args:
@@ -470,6 +514,11 @@ def get_args() -> Args:
         type=int,
         default=8,
         help="Number of parallel worker processes (default: 8)",
+    )
+    parser.add_argument(
+        "--assign-only",
+        action="store_true",
+        help="Skip image processing; backfill image_cluster_id for rows missing it, from the 280px webps already in S3",
     )
     return Args(**vars(parser.parse_args()))
 
@@ -571,6 +620,88 @@ def get_s3_cards(args: Args) -> set[CardImage]:
     return s3_cards
 
 
+def update_cluster_assignments(assignments: dict[tuple[str, str], int]) -> None:
+    """Write placeholder cluster ids to magic.cards.
+
+    Args:
+        assignments: Mapping of (card_set_code, collector_number) -> cluster id
+    """
+    if not assignments:
+        return
+    conn = get_database_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.executemany(
+                "UPDATE magic.cards SET image_cluster_id = %s WHERE card_set_code = %s AND collector_number = %s",
+                [(cluster_id, set_code, cn) for (set_code, cn), cluster_id in assignments.items()],
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    logger.info("Updated image_cluster_id for %d cards", len(assignments))
+
+
+def assign_existing_images(args: Args) -> None:
+    """Backfill image_cluster_id from the 280px webps already in S3.
+
+    Fetches rows missing an assignment, downloads just their 280px thumbnail
+    (~20KB each), assigns against the codebook, and batch-updates the database.
+    """
+    codebook = get_placeholder_codebook()
+    if codebook is None:
+        logger.error("Cannot backfill without the placeholder deps (pip install -r requirements/placeholders.txt)")
+        sys.exit(1)
+
+    conn = get_database_connection()
+    with conn.cursor() as cursor:
+        conditions, params = ["image_cluster_id IS NULL"], []
+        if args.set_code:
+            conditions.append("card_set_code = %s")
+            params.append(args.set_code)
+        cursor.execute(
+            f"""
+            SELECT DISTINCT card_set_code, collector_number
+            FROM magic.cards
+            WHERE {" AND ".join(conditions)}
+            LIMIT {json.dumps(args.limit)}
+            """,
+            params,
+        )
+        rows = cursor.fetchall()
+    conn.close()
+    logger.info("Found %d cards missing image_cluster_id", len(rows))
+
+    s3_client = boto3.client("s3")
+
+    def fetch_and_assign(row: dict[str, Any]) -> tuple[tuple[str, str], int] | None:
+        key = f"img/{row['card_set_code']}/{row['collector_number']}/{DEFAULT_FACE}/{SMALL_KEY}.webp"
+        try:
+            body = s3_client.get_object(Bucket=args.bucket, Key=key)["Body"].read()
+        except ClientError:
+            logger.debug("No 280px image in S3 for %s", key)
+            return None
+        try:
+            cluster_id = codebook.assign_bytes(body)
+        except Exception:
+            logger.exception("Placeholder assignment failed for %s", key)
+            return None
+        return (row["card_set_code"], row["collector_number"]), cluster_id
+
+    assignments: dict[tuple[str, str], int] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
+        for idx, result in enumerate(pool.map(fetch_and_assign, rows), 1):
+            if result is not None:
+                key, cluster_id = result
+                assignments[key] = cluster_id
+            if idx % 1000 == 0 or idx == len(rows):
+                logger.info("Assigned %d / %d cards", len(assignments), idx)
+
+    if args.dry_run:
+        logger.info("[DRY RUN] Would update image_cluster_id for %d cards", len(assignments))
+        return
+    update_cluster_assignments(assignments)
+
+
 def main() -> None:
     """Main entry point for the script."""
     args = get_args()
@@ -579,8 +710,13 @@ def main() -> None:
     if args.dry_run:
         logger.info("Running in DRY RUN mode - no actual downloads or uploads")
 
-    check_cwebp()
     configure_env()
+
+    if args.assign_only:
+        assign_existing_images(args)
+        return
+
+    check_cwebp()
 
     db_cards = get_db_cards(args)
     s3_cards = get_s3_cards(args)
@@ -615,6 +751,7 @@ def main() -> None:
     logger.info("Processing cards using %d worker processes", args.workers)
 
     successful_cards = failed_cards = 0
+    assignments: dict[tuple[str, str], int] = {}
     start_time = time.monotonic()
 
     pool = multiprocessing.Pool(processes=args.workers, initializer=CardProcessorPool.init_worker)
@@ -639,7 +776,9 @@ def main() -> None:
                     estimated_remaining_duration,
                 )
 
-            if all(results.values()):
+            if results["image_cluster_id"] is not None:
+                assignments[(results["card_set_code"], results["collector_number"])] = results["image_cluster_id"]
+            if all(results["sizes"].values()):
                 successful_cards += 1
             else:
                 failed_cards += 1
@@ -654,6 +793,9 @@ def main() -> None:
         failed_cards,
         len(cards_with_missing_images),
     )
+
+    if not args.dry_run:
+        update_cluster_assignments(assignments)
 
 
 if __name__ == "__main__":

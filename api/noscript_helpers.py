@@ -255,6 +255,37 @@ def build_image_url(card: dict, size: str) -> str:
     return f"https://d1hot9ps2xugbc.cloudfront.net/img/{set_code}/{collector_number}/{face}/{size}.webp"
 
 
+def placeholder_class(card: dict) -> str:
+    """CSS class of the blurred placeholder shown behind the card image while it loads.
+
+    Classes are defined in static/placeholders-v1.css. Assigned printings carry an
+    image_cluster_id; unassigned ones fall back to a coarse bucket derived from type line
+    and mana cost (ph-fb-* aliases). Matches placeholderClass in JS createCardHTML.
+
+    Args:
+    ----
+        card: Card dictionary with image_cluster_id, type_line, and mana_cost
+
+    Returns:
+    -------
+        CSS class name
+    """
+    cluster_id = card.get("image_cluster_id")
+    if cluster_id is not None:
+        return f"ph-{cluster_id}"
+    type_line = card.get("type_line") or ""
+    if "Land" in type_line:
+        return "ph-fb-land"
+    if "Artifact" in type_line:
+        return "ph-fb-artifact"
+    colors = {symbol for symbol in card.get("mana_cost") or "" if symbol in "WUBRG"}
+    if len(colors) > 1:
+        return "ph-fb-gold"
+    if len(colors) == 1:
+        return f"ph-fb-{colors.pop().lower()}"
+    return "ph-fb-artifact"
+
+
 def _build_alt_text(card: dict) -> str:
     """Build descriptive image alt text with card name, mana cost, and oracle text.
 
@@ -326,7 +357,7 @@ def create_card_html(card: dict, index: int) -> str:
     priority_attr = ' fetchpriority="high"' if index == 0 else ""
     lazy_attr = "" if index < _EAGER_LOAD_COUNT else ' loading="lazy"'
     img_tag = (
-        f'<img class="card-image" '
+        f'<img class="card-image {placeholder_class(card)}" '
         f'src="{escape_html(image_388)}" '
         f'srcset="{srcset}" '
         f'sizes="{sizes}" '
