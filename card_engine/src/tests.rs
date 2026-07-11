@@ -224,7 +224,7 @@ fn store_of(cards: Vec<OracleCard>, printing_counts: &[usize], vocab: VocabInter
     // Real planes and bigrams so narrowing tests see the same store shape
     // reload_commit builds (type narrowing goes through the planes since #637).
     let indexes = CardIndexes {
-        planes: build_bit_planes(&cards),
+        planes: build_bit_planes(&cards, &printings, &offsets),
         name_bigrams: build_name_bigram_index(&cards),
         legal_divergent: build_divergent_ids(&cards),
         sort_perms: build_sort_permutations(&cards, &printings, &offsets),
@@ -375,6 +375,210 @@ fn narrow_candidates_rarity_card_space() {
     match narrow_candidates(&flipped, archived, offsets, &[]) {
         Some(Candidates::Cards(v)) => assert_eq!(v, vec![1]),
         _ => panic!("flipped rarity must narrow in card space"),
+    }
+}
+
+/// Card i's printing rarities (docs/issues/engine-rarity-planes.md): one value
+/// per printing, None for no-rarity. Covers all 6 buckets, cards spanning two
+/// buckets at once (mixed within the planed range, and mixed across the
+/// plane/postings-tail boundary), and a card with no rarity anywhere.
+const RARITY_PLANE_FIXTURE: &[&[Option<u8>]] = &[
+    &[Some(0)],         // card 0: common only
+    &[Some(1)],         // card 1: uncommon only
+    &[Some(2)],         // card 2: rare only
+    &[Some(3)],         // card 3: mythic only
+    &[Some(4)],         // card 4: special only
+    &[Some(5)],         // card 5: bonus only
+    &[Some(0), Some(3)], // card 6: common + mythic (mixed, both planed)
+    &[Some(2), Some(4)], // card 7: rare + special (mixed, spans plane/tail)
+    &[None],             // card 8: no rarity anywhere
+];
+
+fn rarity_plane_fixture_store() -> CardData {
+    let mut vocab = VocabInterner::new();
+    let cards: Vec<OracleCard> = (0..RARITY_PLANE_FIXTURE.len())
+        .map(|i| stub_card(i as u128 + 1, TYPE_CREATURE, &[], &mut vocab))
+        .collect();
+    let counts: Vec<usize> = RARITY_PLANE_FIXTURE.iter().map(|r| r.len()).collect();
+    let mut data = store_of(cards, &counts, vocab);
+    let mut p_idx = 0;
+    for rarities in RARITY_PLANE_FIXTURE {
+        for &r in *rarities {
+            data.printings[p_idx].card_rarity_int = r;
+            p_idx += 1;
+        }
+    }
+    data.indexes.rarity = build_rarity_index(&data.printings, &data.offsets);
+    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets);
+    data
+}
+
+/// The plane-aware narrowing function must reproduce the true existence
+/// projection ("does any printing of this card satisfy op(rarity, val)") for
+/// every op, across the full 0-5 domain and an impossible threshold — the
+/// reference here is brute force over RARITY_PLANE_FIXTURE directly, not
+/// rarity_candidates (which declines for Ne and over-ceiling unions, so it
+/// can't serve as the reference for every op the way the plane path must
+/// still answer).
+#[test]
+fn rarity_plane_candidates_matches_existence_projection() {
+    let data = rarity_plane_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let n_cards = RARITY_PLANE_FIXTURE.len();
+
+    let keep = |op: CmpOp, r: f64, val: f64| match op {
+        CmpOp::Eq => r == val,
+        CmpOp::Lt => r < val,
+        CmpOp::Le => r <= val,
+        CmpOp::Gt => r > val,
+        CmpOp::Ge => r >= val,
+        CmpOp::Ne => r != val,
+    };
+
+    let ops = [
+        ("Eq", CmpOp::Eq), ("Ne", CmpOp::Ne), ("Lt", CmpOp::Lt),
+        ("Le", CmpOp::Le), ("Gt", CmpOp::Gt), ("Ge", CmpOp::Ge),
+    ];
+    for (name, op) in ops {
+        for val in [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 2.5, -1.0, 6.0] {
+            let bits = super::rarity_plane_candidates(&archived.indexes, n_cards, op, val).expect("plane path must not decline");
+            let want: Vec<u32> = RARITY_PLANE_FIXTURE
+                .iter()
+                .enumerate()
+                .filter(|(_, rarities)| rarities.iter().any(|r| r.is_some_and(|r| keep(op, f64::from(r), val))))
+                .map(|(cid, _)| cid as u32)
+                .collect();
+            for cid in 0..n_cards as u32 {
+                assert_eq!(
+                    bitmap_contains(&bits, cid),
+                    want.contains(&cid),
+                    "op {name} val {val}: card {cid} membership mismatch"
+                );
+            }
+        }
+    }
+}
+
+/// Card 8 (RARITY_PLANE_FIXTURE) has no rarity on any printing -- it must not
+/// appear under any comparison, matching build_rarity_index's own None-skips
+/// silently behavior (this repo's history of Null-semantics bugs elsewhere
+/// makes this worth its own explicit case, not just incidental coverage in
+/// the parity test above).
+#[test]
+fn rarity_plane_null_rarity_card_matches_nothing() {
+    let data = rarity_plane_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let n_cards = RARITY_PLANE_FIXTURE.len();
+    let null_card = 8u32;
+
+    let ops = [
+        ("Eq", CmpOp::Eq), ("Ne", CmpOp::Ne), ("Lt", CmpOp::Lt),
+        ("Le", CmpOp::Le), ("Gt", CmpOp::Gt), ("Ge", CmpOp::Ge),
+    ];
+    for (name, op) in ops {
+        for val in [0.0, 1.0, 2.0, 3.0, 4.0, 5.0] {
+            let bits = super::rarity_plane_candidates(&archived.indexes, n_cards, op, val).expect("plane path must not decline");
+            assert!(!bitmap_contains(&bits, null_card), "op {name} val {val}: null-rarity card must never match");
+        }
+    }
+}
+
+/// Rarity is PrintingDep (a card can have printings at multiple rarities), so
+/// it must never be exact-consumed via compile_plane/split_planes -- only the
+/// loose narrowing path (tested above) is sound. This is the correctness
+/// property the whole design depends on: routing rarity through compile_plane
+/// would silently promote it to all_match, skipping the per-printing
+/// verification that resolves mixed-rarity cards correctly.
+#[test]
+fn rarity_never_exact_consumed() {
+    let data = plane_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let bounds = &archived.indexes.planes;
+    let words = &archived.indexes.oracle_trigram.words;
+
+    let rarity = FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), op: CmpOp::Eq, rhs: NumExpr::Const(3.0) };
+    assert!(compile_plane(&rarity, bounds, words).is_none(), "rarity must never compile to a plane expression");
+
+    // Mixed with an otherwise fully plane-expressible sibling: the rarity
+    // child must stay in the residual, not get silently dropped or promoted.
+    let creature = FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
+    let (pe, residual) = split_planes(FilterExpr::And(vec![creature, rarity]), bounds, words);
+    assert!(pe.is_some(), "the creature child must still plane-consume");
+    assert!(
+        matches!(&residual, FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), .. }),
+        "rarity must remain in the residual, not be consumed to True"
+    );
+}
+
+/// -rarity:x / rarity:x negation, exercised through narrow_rec end-to-end
+/// (not just narrow_rarity directly), through the dedicated Not arm --
+/// recomputes with negate_op(op) rather than complementing the existing
+/// candidate set. Covers both operand orders (Field/Const and Const/Field,
+/// the latter needing negate_op(flip_op(op))) and confirms the negated form
+/// agrees with the same brute-force existence projection used for the
+/// non-negated ops above.
+#[test]
+fn rarity_not_arm_matches_existence_projection() {
+    let data = rarity_plane_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let n_cards = RARITY_PLANE_FIXTURE.len();
+
+    let keep = |op: CmpOp, r: f64, val: f64| match op {
+        CmpOp::Eq => r == val,
+        CmpOp::Lt => r < val,
+        CmpOp::Le => r <= val,
+        CmpOp::Gt => r > val,
+        CmpOp::Ge => r >= val,
+        CmpOp::Ne => r != val,
+    };
+
+    let ops = [
+        ("Eq", CmpOp::Eq), ("Ne", CmpOp::Ne), ("Lt", CmpOp::Lt),
+        ("Le", CmpOp::Le), ("Gt", CmpOp::Gt), ("Ge", CmpOp::Ge),
+    ];
+    for (name, op) in ops {
+        for val in [0.0, 1.0, 2.0, 3.0, 4.0, 5.0] {
+            // Not(field op val).
+            let filter = FilterExpr::Not(Box::new(FilterExpr::NumericCmp {
+                lhs: NumExpr::Field(NumField::RarityInt),
+                op,
+                rhs: NumExpr::Const(val),
+            }));
+            let n = super::narrow_rec(&filter, &archived.indexes, &archived.offsets, &archived.cards, true)
+                .unwrap_or_else(|| panic!("Not(rarity {name} {val}) must narrow"));
+            let cand = n.set.into_cards(&archived.offsets);
+            let want: Vec<u32> = RARITY_PLANE_FIXTURE
+                .iter()
+                .enumerate()
+                .filter(|(_, rarities)| rarities.iter().any(|r| r.is_some_and(|r| !keep(op, f64::from(r), val))))
+                .map(|(cid, _)| cid as u32)
+                .collect();
+            for cid in 0..n_cards as u32 {
+                assert_eq!(
+                    cand.contains(&cid),
+                    want.contains(&cid),
+                    "Not(field {name} {val}): card {cid} membership mismatch"
+                );
+            }
+
+            // Not(val flip_op(op) field) -- the flipped operand order
+            // expressing the SAME predicate as `field op val` (e.g. `field <
+            // val` is `val > field`, not `val < field` -- same op on both
+            // sides would be a different comparison entirely).
+            let filter_flipped = FilterExpr::Not(Box::new(FilterExpr::NumericCmp {
+                lhs: NumExpr::Const(val),
+                op: super::flip_op(op),
+                rhs: NumExpr::Field(NumField::RarityInt),
+            }));
+            let n2 = super::narrow_rec(&filter_flipped, &archived.indexes, &archived.offsets, &archived.cards, true)
+                .unwrap_or_else(|| panic!("Not({val} {name} field) must narrow"));
+            let cand2 = n2.set.into_cards(&archived.offsets);
+            assert_eq!(cand, cand2, "operand order must not change the result: {name} {val}");
+        }
     }
 }
 
@@ -844,7 +1048,7 @@ fn bench_checked_vs_unchecked_access() {
         collector_number: Vec::new(),
         sort_perms:     build_sort_permutations(&cards, &printings, &offsets),
         artwork_groups: build_artwork_group_counts(&printings, &offsets),
-        planes:         build_bit_planes(&cards),
+        planes:         build_bit_planes(&cards, &printings, &offsets),
         name_bigrams:   build_name_bigram_index(&cards),
         legal_divergent: build_divergent_ids(&cards),
         border_planes:  build_border_planes(&cards, &printings, &offsets, &strings),
@@ -2788,6 +2992,11 @@ fn narrow_fixture_store() -> CardData {
     }
     data.indexes.subtypes = build_tag_index(&data.cards, &data.coll_vocab, |c| &c.card_subtypes);
     data.indexes.rarity = build_rarity_index(&data.printings, &data.offsets);
+    // Rarity planes are built from the same printings, so they must be
+    // rebuilt here too -- build_bit_planes already ran once inside store_of
+    // before card_rarity_int was overwritten above, leaving stale (all-zero)
+    // rarity plane bits otherwise.
+    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets);
     let mut set_codes: TagIndex = HashMap::new();
     for (i, p) in data.printings.iter().enumerate() {
         set_codes.entry(p.card_set_code.as_str().to_string()).or_default().push(i as u32);
@@ -2827,8 +3036,23 @@ fn not_narrows_only_tight_children() {
         }
     }
 
-    // Loose children block the Not arm entirely.
-    assert!(rec(&FilterExpr::Not(Box::new(rarity()))).is_none(), "rarity existence sets are not complement-safe");
+    // -r:x narrows via its own dedicated Not(NumericCmp{RarityInt}) arm --
+    // recomputing with the negated op (Not(Eq) -> Ne), not complementing the
+    // existing loose rarity candidate set (which would be unsafe: a posted
+    // card can have other printings that don't satisfy the comparison). Same
+    // superset check as the tight-child case above, just via a different arm.
+    let n = rec(&FilterExpr::Not(Box::new(rarity()))).expect("-r:x must narrow via the negated-op arm");
+    assert!(!n.tight);
+    let cand = n.set.into_cards(&archived.offsets);
+    for (cid, card) in archived.cards.iter().enumerate() {
+        let matches_not = (u32::from(archived.offsets[cid])..u32::from(archived.offsets[cid + 1]))
+            .any(|p| FilterExpr::Not(Box::new(rarity())).matches(card, &archived.printings[p as usize], &archived.strings));
+        if matches_not {
+            assert!(cand.contains(&(cid as u32)), "-r:x narrowing must not drop card {cid}");
+        }
+    }
+
+    // Genuinely loose children with no dedicated Not arm still block it.
     assert!(rec(&FilterExpr::Not(Box::new(name1()))).is_none(), "sub-bigram text cannot narrow at all");
     let double_not = FilterExpr::Not(Box::new(FilterExpr::Not(Box::new(goblin()))));
     assert!(rec(&double_not).is_none(), "complements are loose, so double negation stops narrowing");
