@@ -12,15 +12,15 @@
 //! are card-level and two-valued (their tri() never returns Null or
 //! PrintingDep), so plane algebra — including complement for Not —
 //! reproduces the filter's card-level truth exactly.
-//! Produced mana is deliberately left out for now; `produces:` queries stay on
-//! the residual path. Rarity and legality need the narrowing/divergence
-//! machinery from later phases (see the issue).
+//! Legality is narrowing-only (see PLANE_LEGAL). Rarity (the 4 most common
+//! values; docs/issues/engine-rarity-planes.md) is narrowing-only too, for
+//! the same PrintingDep reason -- see PLANE_RARITY.
 
 use rkyv::{Archive, Deserialize, Serialize};
 
 use super::filter::{CmpOp, ColorField, FilterExpr, NumExpr, NumField, TextSearchField};
 use super::legality::{LEGALITY_LEGAL, MAX_FORMATS};
-use super::{flip_op, lane_get, oracle_word_eligible, scan_oracle_words, OracleCard, OracleWordIndex};
+use super::{flip_op, lane_get, oracle_word_eligible, scan_oracle_words, OracleCard, OracleWordIndex, Printing};
 
 /// Plane layout, plane-major in BitPlanes.words: six color planes per color
 /// field (W U B R G C, bit order matching color_to_bit — C is always zero for
@@ -75,7 +75,18 @@ pub(crate) const PLANE_POWER_HI: usize = PLANE_POWER + NUM_INTERIOR_WIDTH;
 pub(crate) const PLANE_TOUGHNESS_LO: usize = PLANE_POWER_HI + 1;
 pub(crate) const PLANE_TOUGHNESS: usize = PLANE_TOUGHNESS_LO + 1;
 pub(crate) const PLANE_TOUGHNESS_HI: usize = PLANE_TOUGHNESS + NUM_INTERIOR_WIDTH;
-pub(crate) const PLANE_COUNT: usize = PLANE_TOUGHNESS_HI + 1;
+/// One-hot planes for rarity (docs/issues/engine-rarity-planes.md), covering only the
+/// 4 most common values -- common=0, uncommon=1, rare=2, mythic=3, matching
+/// `magic.rarity_text_to_int`'s numbering directly (no offset needed). special=4/
+/// bonus=5 are far too sparse in production (1.17%/0.00% of cards) to be worth a
+/// fixed-cost plane each; they stay on the existing `RarityIndex` postings path
+/// (`lib.rs`'s `rarity_candidates`). Unlike cmc/power/toughness, there's no interior/
+/// overflow-bucket split: the planed range is the entire domain of interest, not a
+/// window into an unbounded numeric range, so no `BucketBounds` tracking is needed
+/// either -- a plain one-hot block, same shape as `PLANE_TYPES`.
+pub(crate) const RARITY_PLANES: usize = 4;
+pub(crate) const PLANE_RARITY: usize = PLANE_TOUGHNESS_HI + 1;
+pub(crate) const PLANE_COUNT: usize = PLANE_RARITY + RARITY_PLANES;
 
 /// The observed [min,max] of whatever cards landed in one bucket plane,
 /// recomputed on every build/reload (never hardcoded from a one-time data
@@ -153,7 +164,7 @@ fn set_numeric_plane(
     }
 }
 
-pub(crate) fn build_bit_planes(cards: &[OracleCard]) -> BitPlanes {
+pub(crate) fn build_bit_planes(cards: &[OracleCard], printings: &[Printing], offsets: &[u32]) -> BitPlanes {
     let wpp = words_per_plane(cards.len());
     let mut words = vec![0u64; PLANE_COUNT * wpp];
     let mut cmc_hi = BucketBounds::default();
@@ -163,6 +174,24 @@ pub(crate) fn build_bit_planes(cards: &[OracleCard]) -> BitPlanes {
     let mut toughness_hi = BucketBounds::default();
     for (i, card) in cards.iter().enumerate() {
         let mut set = |plane: usize| words[plane * wpp + i / 64] |= 1u64 << (i % 64);
+        // Rarity (docs/issues/engine-rarity-planes.md): "any printing at this
+        // rarity" existence projection, same aggregation build_rarity_index
+        // does over the same range, just OR'd into planes instead of postings
+        // for the 4 most common values. Missing rarity (None) contributes no
+        // bit, same as build_rarity_index -- a card whose printings are all
+        // null-rarity correctly sets nothing here.
+        let range = offsets[i] as usize..offsets[i + 1] as usize;
+        let mut rarity_mask: u8 = 0;
+        for p in &printings[range] {
+            if let Some(r) = p.card_rarity_int {
+                rarity_mask |= 1 << r;
+            }
+        }
+        for b in 0..RARITY_PLANES {
+            if rarity_mask & (1 << b) != 0 {
+                set(PLANE_RARITY + b);
+            }
+        }
         for b in 0..COLOR_PLANES {
             if card.card_colors & (1 << b) != 0 {
                 set(PLANE_COLORS + b);
