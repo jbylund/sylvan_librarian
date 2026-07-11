@@ -194,51 +194,85 @@ the 91% of cards with a single distinct rarity), explicitly distinguished from #
 elision only helps children `narrow_candidates_exact` already proved exact; rarity is never
 exact/tight to begin with, so #657 gives it nothing).
 
-The real, measured wins are exactly the two cases predicted above — where the old path either
-declined outright or was near its decline ceiling:
+**Second-round finding: the initial `Ne` win didn't reach the way people actually write "not this
+rarity."** `-r:common` parses to `Not(Eq(common))`, not `Ne(common)` directly, and `Not` only
+narrows through *tight* children — rarity's narrowing is always loose, so `-r:common` declined to a
+full scan in both old and new code even after the first round of this change, despite `r!=common`
+(the literal, rarely-typed `!=` operator) already showing a 1.78x win. Fixed by giving `-r:x` its
+own dedicated `Not` arm in `narrow_rec` — the same pattern `-f:x` already established
+(`legal_candidate_bits(..., negate: true)`) — that recomputes narrowing with a logically negated
+operator (`negate_op`: `Eq`↔`Ne`, `Lt`↔`Ge`, `Le`↔`Gt`) rather than complementing the existing
+candidate bitmap, which would be unsound for the same reason the `NumericCmp` arm's own comment
+already flagged (a posted/planed card can have other printings that don't satisfy the comparison,
+so bit-complementing would wrongly drop real matches). The `Not(Eq(v)) == Ne(v)` equivalence this
+relies on was checked against `filter.rs`'s actual `tri()` implementation before writing the code,
+not assumed from boolean-logic intuition alone — `NumericCmp`'s `NumVal::Null` branch short-circuits
+to `Tri::Null` before the op-specific comparison runs, for every op including `Ne`, and `Not`'s own
+`Tri::Null => Tri::Null` line confirms it never flips to a false match — so the two forms agree on
+null-rarity printings too, not just known values.
+
+One test bug caught by this second round, not the benchmark: `not_narrows_only_tight_children` had
+asserted `-r:x` *never* narrows as a correctness guard (true before this fix) — updated to assert
+the new, correct narrowing behavior instead, verified against the same brute-force superset check
+already used for the tight-child case in that test. A test bug of my own also surfaced while
+writing the new parity test for the negation arm: constructing "the same predicate, operands
+flipped" needs `flip_op(op)` on the flipped side (`field < val` is `val > field`, not `val < field`)
+— caught immediately by the new test disagreeing with itself across operand orders, not by manual
+inspection.
+
+The real, measured wins are exactly the two shapes predicted, plus the `-r:x` fix:
 
 Targeted (`scripts/bench_rarity_planes.py`, `benchmarks/bitplanes/corpus.jsonl`, 3s window/config,
 `min_ms`, 21 configs):
 
 | group | query | unique | before | after | change |
 |---|---|---|---|---|---|
-| solo | `r:common` | card | 0.168ms | 0.169ms | 0.99x |
-| solo | `r:uncommon` | card | 0.173ms | 0.176ms | 0.98x |
-| solo | `r:rare` | card | 0.224ms | 0.226ms | 1.00x |
-| solo | `r:mythic` | card | 0.112ms | 0.112ms | 1.00x |
-| ceiling | `rarity<=mythic` | card | 0.344ms | 0.351ms | 0.98x |
-| ceiling | `rarity>=uncommon` | card | 0.346ms | 0.311ms | **1.11x** |
-| ne | `r!=mythic` | card | 0.407ms | 0.414ms | 0.98x |
-| ne | `r!=common` | card | 0.554ms | 0.311ms | **1.78x** |
-| mixed-tail | `r>=rare` | card | 0.258ms | 0.246ms | 1.05x |
-| mixed-tail | `-r:common` | card | 0.626ms | 0.632ms | 0.99x |
-| tail-control | `r:special` | card | 0.067ms | 0.068ms | 0.99x |
+| solo | `r:common` | card | 0.168ms | 0.171ms | 0.98x |
+| solo | `r:uncommon` | card | 0.173ms | 0.177ms | 0.97x |
+| solo | `r:rare` | card | 0.224ms | 0.230ms | 0.98x |
+| solo | `r:mythic` | card | 0.112ms | 0.113ms | 0.99x |
+| ceiling | `rarity<=mythic` | card | 0.344ms | 0.349ms | 0.99x |
+| ceiling | `rarity>=uncommon` | card | 0.346ms | 0.312ms | **1.11x** |
+| ne | `r!=mythic` | card | 0.407ms | 0.411ms | 0.99x |
+| ne | `r!=common` | card | 0.554ms | 0.312ms | **1.78x** |
+| mixed-tail | `r>=rare` | card | 0.258ms | 0.249ms | 1.04x |
+| mixed-tail | `-r:common` | card | 0.626ms | 0.364ms | **1.72x** |
+| tail-control | `r:special` | card | 0.067ms | 0.069ms | 0.98x |
 | tail-control | `r:bonus` | card | 0.003ms | 0.003ms | 0.93x |
-| negation | `-r:mythic` | card | 0.482ms | 0.483ms | 1.00x |
-| and-combo | `t:creature r:mythic` | card | 0.083ms | 0.081ms | 1.03x |
-| and-combo | `f:modern r:mythic` | card | 0.108ms | 0.107ms | 1.01x |
-| uniques | `r:mythic` (printing) | printing | 0.150ms | 0.149ms | 1.00x |
-| uniques | `r:mythic` (artwork) | artwork | 0.173ms | 0.172ms | 1.00x |
-| control | `name:soldier` | card | 0.029ms | 0.029ms | 1.00x |
-| control | `cmc>6` | card | 0.057ms | 0.056ms | 1.01x |
-| control | `oracle:creature` | card | 0.121ms | 0.120ms | 1.01x |
-| control | `c:g` | card | 0.053ms | 0.051ms | 1.02x |
+| negation | `-r:mythic` | card | 0.482ms | 0.487ms | 0.99x |
+| and-combo | `t:creature r:mythic` | card | 0.083ms | 0.084ms | 0.99x |
+| and-combo | `f:modern r:mythic` | card | 0.108ms | 0.109ms | 0.98x |
+| uniques | `r:mythic` (printing) | printing | 0.150ms | 0.154ms | 0.98x |
+| uniques | `r:mythic` (artwork) | artwork | 0.173ms | 0.177ms | 0.98x |
+| control | `name:soldier` | card | 0.029ms | 0.030ms | 0.97x |
+| control | `cmc>6` | card | 0.057ms | 0.058ms | 0.97x |
+| control | `oracle:creature` | card | 0.121ms | 0.123ms | 0.99x |
+| control | `c:g` | card | 0.053ms | 0.053ms | 0.99x |
 
-Geomean 1.03x across all 21 configs, 1.07x restricted to rarity-touching configs. Total-row-count
-parity held on every config, every run.
+Geomean 1.04x across all 21 configs. Total-row-count parity held on every config, every run.
+`-r:common` (1.72x) now matches `r!=common` (1.78x) closely, as expected — verified-identical
+predicates. `-r:mythic`/`r!=mythic` both stay flat: "not mythic" narrows to only ~94% of the corpus
+(mythic is the rarest planed value at 8.15% of cards, so almost every card has *some* non-mythic
+printing), leaving little for narrowing to exclude before `card_pass` regardless — same underlying
+"narrowing only pays off when the exclusion is substantial" dynamic as the solo-`Eq` finding above,
+not a new phenomenon. The small (1-3%) dips across otherwise-unrelated `control`/`and-combo`/
+`uniques` rows are within this corpus's normal run-to-run noise band for sub-millisecond queries,
+not attributable to a code path those queries don't exercise (none of them touch `Not`).
 
-Broad survey (`scripts/survey_queries.py`, seed 42, 520 queries): overall geomean 1.02x (flat), no
-attributable regressions — the two configs moving >15% (`type:artifact (id:gw or is:modal)`,
-`id:wu oracle:trample frame:showcase`) contain no rarity predicate at all, consistent with
-single-run timing noise on sub-millisecond queries rather than anything this change touched.
+Broad survey (`scripts/survey_queries.py`, seed 42, 520 queries): geomean 1.01x (flat), zero
+regressions >15%. No rarity-predicate queries happened to land in this particular random sample
+(the generator doesn't appear to weight `r:`/`rarity:` filters at all — only `orderby=rarity` sorts
+showed up under that tag), so this run serves as a pure regression safety net rather than
+demonstrating the win, which the targeted benchmark above covers directly.
 
 Memory (`--features alloc-counter`): `archive_bytes` +15,784 bytes (+0.023%) — matches the
-predicted 4 planes × 493 words × 8 bytes almost exactly. `cards_rkyv_bytes` unchanged, confirming
-no `OracleCard` growth. `reload_peak` unchanged.
+predicted 4 planes × 493 words × 8 bytes almost exactly, unchanged by the `-r:x` fix (pure logic,
+no new data). `cards_rkyv_bytes` unchanged, confirming no `OracleCard` growth. `reload_peak`
+unchanged.
 
-One real bug caught during implementation, not by the benchmark: `narrow_fixture_store` (an
-existing test fixture) rebuilt `RarityIndex` after mutating printing rarities but not `BitPlanes`,
-leaving stale (pre-mutation, all-zero) rarity plane bits — caught by
+One real bug caught during the first implementation round, not by the benchmark:
+`narrow_fixture_store` (an existing test fixture) rebuilt `RarityIndex` after mutating printing
+rarities but not `BitPlanes`, leaving stale (pre-mutation, all-zero) rarity plane bits — caught by
 `adaptive_narrowing_run_query_parity` failing (`total=2` vs brute-force `6`) on first test run.
 Fixed by rebuilding `indexes.planes` alongside `indexes.rarity` in that fixture.
 
@@ -246,8 +280,9 @@ Fixed by rebuilding `indexes.planes` alongside `indexes.rarity` in that fixture.
 established — colors/types bitplanes (#633) didn't move `t:creature` either, until #634 added
 exactness propagation on top; shipping the narrowing substrate before the verification-side win
 lands is this codebase's normal pattern, not a deviation from it. This PR retires part of the #618
-union-materialization cost and closes two real gaps (`Ne` declining, near-ceiling `Ge`/`Le`) on its
-own merits, independent of whether/when #674 lands.
+union-materialization cost and closes three real gaps (`Ne` declining, `-r:x` declining via the
+tight-only `Not` rule, near-ceiling `Ge`/`Le`) on its own merits, independent of whether/when #674
+lands.
 
 ## Related
 

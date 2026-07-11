@@ -513,6 +513,75 @@ fn rarity_never_exact_consumed() {
     );
 }
 
+/// -rarity:x / rarity:x negation, exercised through narrow_rec end-to-end
+/// (not just narrow_rarity directly), through the dedicated Not arm --
+/// recomputes with negate_op(op) rather than complementing the existing
+/// candidate set. Covers both operand orders (Field/Const and Const/Field,
+/// the latter needing negate_op(flip_op(op))) and confirms the negated form
+/// agrees with the same brute-force existence projection used for the
+/// non-negated ops above.
+#[test]
+fn rarity_not_arm_matches_existence_projection() {
+    let data = rarity_plane_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let n_cards = RARITY_PLANE_FIXTURE.len();
+
+    let keep = |op: CmpOp, r: f64, val: f64| match op {
+        CmpOp::Eq => r == val,
+        CmpOp::Lt => r < val,
+        CmpOp::Le => r <= val,
+        CmpOp::Gt => r > val,
+        CmpOp::Ge => r >= val,
+        CmpOp::Ne => r != val,
+    };
+
+    let ops = [
+        ("Eq", CmpOp::Eq), ("Ne", CmpOp::Ne), ("Lt", CmpOp::Lt),
+        ("Le", CmpOp::Le), ("Gt", CmpOp::Gt), ("Ge", CmpOp::Ge),
+    ];
+    for (name, op) in ops {
+        for val in [0.0, 1.0, 2.0, 3.0, 4.0, 5.0] {
+            // Not(field op val).
+            let filter = FilterExpr::Not(Box::new(FilterExpr::NumericCmp {
+                lhs: NumExpr::Field(NumField::RarityInt),
+                op,
+                rhs: NumExpr::Const(val),
+            }));
+            let n = super::narrow_rec(&filter, &archived.indexes, &archived.offsets, &archived.cards, true)
+                .unwrap_or_else(|| panic!("Not(rarity {name} {val}) must narrow"));
+            let cand = n.set.into_cards(&archived.offsets);
+            let want: Vec<u32> = RARITY_PLANE_FIXTURE
+                .iter()
+                .enumerate()
+                .filter(|(_, rarities)| rarities.iter().any(|r| r.is_some_and(|r| !keep(op, f64::from(r), val))))
+                .map(|(cid, _)| cid as u32)
+                .collect();
+            for cid in 0..n_cards as u32 {
+                assert_eq!(
+                    cand.contains(&cid),
+                    want.contains(&cid),
+                    "Not(field {name} {val}): card {cid} membership mismatch"
+                );
+            }
+
+            // Not(val flip_op(op) field) -- the flipped operand order
+            // expressing the SAME predicate as `field op val` (e.g. `field <
+            // val` is `val > field`, not `val < field` -- same op on both
+            // sides would be a different comparison entirely).
+            let filter_flipped = FilterExpr::Not(Box::new(FilterExpr::NumericCmp {
+                lhs: NumExpr::Const(val),
+                op: super::flip_op(op),
+                rhs: NumExpr::Field(NumField::RarityInt),
+            }));
+            let n2 = super::narrow_rec(&filter_flipped, &archived.indexes, &archived.offsets, &archived.cards, true)
+                .unwrap_or_else(|| panic!("Not({val} {name} field) must narrow"));
+            let cand2 = n2.set.into_cards(&archived.offsets);
+            assert_eq!(cand, cand2, "operand order must not change the result: {name} {val}");
+        }
+    }
+}
+
 #[test]
 fn cards_of_printings_maps_and_dedups() {
     let offsets_bytes = rkyv::to_bytes::<Error>(&vec![0u32, 3, 4, 7]).expect("serialize");
@@ -2967,8 +3036,23 @@ fn not_narrows_only_tight_children() {
         }
     }
 
-    // Loose children block the Not arm entirely.
-    assert!(rec(&FilterExpr::Not(Box::new(rarity()))).is_none(), "rarity existence sets are not complement-safe");
+    // -r:x narrows via its own dedicated Not(NumericCmp{RarityInt}) arm --
+    // recomputing with the negated op (Not(Eq) -> Ne), not complementing the
+    // existing loose rarity candidate set (which would be unsafe: a posted
+    // card can have other printings that don't satisfy the comparison). Same
+    // superset check as the tight-child case above, just via a different arm.
+    let n = rec(&FilterExpr::Not(Box::new(rarity()))).expect("-r:x must narrow via the negated-op arm");
+    assert!(!n.tight);
+    let cand = n.set.into_cards(&archived.offsets);
+    for (cid, card) in archived.cards.iter().enumerate() {
+        let matches_not = (u32::from(archived.offsets[cid])..u32::from(archived.offsets[cid + 1]))
+            .any(|p| FilterExpr::Not(Box::new(rarity())).matches(card, &archived.printings[p as usize], &archived.strings));
+        if matches_not {
+            assert!(cand.contains(&(cid as u32)), "-r:x narrowing must not drop card {cid}");
+        }
+    }
+
+    // Genuinely loose children with no dedicated Not arm still block it.
     assert!(rec(&FilterExpr::Not(Box::new(name1()))).is_none(), "sub-bigram text cannot narrow at all");
     let double_not = FilterExpr::Not(Box::new(FilterExpr::Not(Box::new(goblin()))));
     assert!(rec(&double_not).is_none(), "complements are loose, so double negation stops narrowing");

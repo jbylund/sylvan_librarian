@@ -1447,6 +1447,24 @@ fn flip_op(op: CmpOp) -> CmpOp {
     }
 }
 
+/// Logical negation of a comparison operator (NOT(a op b) == a negate_op(op) b),
+/// as opposed to flip_op's operand-order swap. Verified against filter.rs's
+/// actual tri() implementation, not just boolean-logic intuition: NumericCmp's
+/// NumVal::Null branch short-circuits to Tri::Null before the op-specific
+/// comparison ever runs, for every op including Ne, and Not(Null) stays Null
+/// (never flips to True) -- so Not(Eq(v)) and Ne(v) agree on null-valued
+/// printings too, not just known ones.
+fn negate_op(op: CmpOp) -> CmpOp {
+    match op {
+        CmpOp::Eq => CmpOp::Ne,
+        CmpOp::Ne => CmpOp::Eq,
+        CmpOp::Lt => CmpOp::Ge,
+        CmpOp::Ge => CmpOp::Lt,
+        CmpOp::Le => CmpOp::Gt,
+        CmpOp::Gt => CmpOp::Le,
+    }
+}
+
 /// Return sorted card indices satisfying `field op val` using the numeric index.
 /// Returns None for Ne (not selective) and Some(empty) when no cards can match.
 /// Card-space narrowing needs no selectivity guard (unlike MAX_NARROW_FRACTION
@@ -2157,6 +2175,18 @@ fn rarity_plane_candidates(indexes: &Archived<CardIndexes>, n_cards: usize, op: 
     Some(bits)
 }
 
+/// Narrow `rarity <op> val`: plane path first, postings fallback otherwise
+/// (see rarity_plane_candidates's doc). Standalone rather than a narrow_rec-
+/// local closure so both the direct NumericCmp arm and -rarity:x's dedicated
+/// Not arm can share it -- the latter calls this with negate_op(op), not a
+/// bitmap complement (see that arm's comment for why the distinction matters).
+fn narrow_rarity(indexes: &Archived<CardIndexes>, n_cards: usize, op: CmpOp, val: f64) -> Option<Narrowed> {
+    if let Some(bits) = rarity_plane_candidates(indexes, n_cards, op, val) {
+        return Narrowed::loose(Candidates::CardBits(bits));
+    }
+    rarity_candidates(&indexes.rarity, op, val).and_then(|c| Narrowed::loose(Candidates::Cards(c)))
+}
+
 // ─── Combined indexes ────────────────────────────────────────────────────────
 
 // Postings live in two id spaces: card-level indexes post OracleCard indices
@@ -2836,17 +2866,7 @@ fn narrow_rec(
             // other printings that do NOT satisfy the comparison, so the
             // complement would wrongly exclude cards `-rarity:x` matches.
             let numeric = |idx, op, v: &f64| numeric_candidates(idx, op, *v).and_then(|c| Narrowed::tight(Candidates::Cards(c)));
-            // Plane path first (docs/issues/engine-rarity-planes.md): almost
-            // always available (the guard only declines on a mismatched/empty
-            // archive, mirroring legal_candidate_bits), and unlike the postings
-            // path never declines on selectivity -- a plane-OR is O(words)
-            // regardless of how broad the comparison is.
-            let rarity = |op, v: &f64| {
-                if let Some(bits) = rarity_plane_candidates(indexes, n_cards, op, *v) {
-                    return Narrowed::loose(Candidates::CardBits(bits));
-                }
-                rarity_candidates(&indexes.rarity, op, *v).and_then(|c| Narrowed::loose(Candidates::Cards(c)))
-            };
+            let rarity = |op, v: &f64| narrow_rarity(indexes, n_cards, op, *v);
             let price = |op, v: &f64| {
                 price_bounds(op, *v).and_then(|(lo, hi)| range_narrowed(&indexes.price_usd, lo, hi, n_printings, broad_ok, false))
             };
@@ -2903,6 +2923,31 @@ fn narrow_rec(
         {
             let FilterExpr::Legality { shift: Some(shift), .. } = inner.as_ref() else { unreachable!() };
             Narrowed::loose(Candidates::CardBits(legal_candidate_bits(indexes, n_cards, *shift, true)?))
+        }
+
+        // -r:x / -rarity:x — same reason as -f:x above: rarity's narrowing is
+        // loose (docs/issues/engine-rarity-planes.md), so the generic
+        // Not-complement below would (correctly) refuse it -- a posted/planed
+        // card can have other printings that don't satisfy the comparison, so
+        // bit-complementing the existing candidate set would wrongly drop
+        // real -r:x matches (see the comment on the NumericCmp arm above).
+        // This is NOT a complement: it recomputes narrowing from scratch with
+        // the logically-negated operator (Not(Eq(v)) == Ne(v), verified
+        // against tri()'s actual Null handling in negate_op's doc comment),
+        // which is a different and correct operation.
+        FilterExpr::Not(inner)
+            if matches!(
+                inner.as_ref(),
+                FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), rhs: NumExpr::Const(_), .. }
+                    | FilterExpr::NumericCmp { lhs: NumExpr::Const(_), rhs: NumExpr::Field(NumField::RarityInt), .. }
+            ) =>
+        {
+            let FilterExpr::NumericCmp { lhs, op, rhs } = inner.as_ref() else { unreachable!() };
+            match (lhs, rhs) {
+                (NumExpr::Field(NumField::RarityInt), NumExpr::Const(v)) => narrow_rarity(indexes, n_cards, negate_op(*op), *v),
+                (NumExpr::Const(v), NumExpr::Field(NumField::RarityInt)) => narrow_rarity(indexes, n_cards, negate_op(flip_op(*op)), *v),
+                _ => unreachable!(),
+            }
         }
 
         FilterExpr::CollectionCmp { field, op, value, .. } if matches!(op, CmpOp::Ge) => {
