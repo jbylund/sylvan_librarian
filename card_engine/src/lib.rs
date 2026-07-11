@@ -1191,6 +1191,65 @@ fn build_name_bigram_index(cards: &[OracleCard]) -> NameBigramIndex {
     idx
 }
 
+// ─── Border planes (#664: loose card-level narrowing for border:) ──────────
+// card_border_id is a *printing*-level interned string (a card can have both a
+// black and a borderless printing), unlike everything BitPlanes/compile_plane
+// already handle (colors/types/devotion are card-invariant — identical across
+// every printing). unique=card semantics require one printing to satisfy the
+// *whole* filter, not each predicate independently satisfied by some
+// (possibly different) printing, so an AND of two independent per-card "has
+// X border" bits can false-positive: `border:black border:borderless` has no
+// shared witness and must return zero, but two independently-true bits would
+// wrongly say every card with one of each qualifies. These planes are
+// therefore *always* `Narrowed::loose` — real candidates, never fed through
+// `compile_plane`'s exact/tight machinery, which is safe only because nothing
+// else it touches varies per printing. Loose narrowing only shrinks which
+// cards' printings the residual per-printing walk bothers checking at all;
+// the real answer always comes from that walk, same as today.
+// See docs/issues/engine-border-planes.md for the full rationale, including
+// why `-border:x` (Not, which narrows only through tight children) and the
+// rare gold/yellow values are both deliberately left on the existing full
+// scan rather than chasing exactness this representation can't safely give.
+//
+// Real corpus (benchmarks/bitplanes/corpus.jsonl): black 98.92% of cards
+// (declines via the existing broadness guard, no special-casing needed),
+// borderless 10.73%, white 6.53% — gold/yellow (2.02% combined) get no plane.
+const BORDER_BLACK: usize = 0;
+const BORDER_BORDERLESS: usize = 1;
+const BORDER_WHITE: usize = 2;
+const BORDER_PLANE_COUNT: usize = 3;
+
+#[derive(Archive, Serialize, Deserialize, Default)]
+struct BorderPlanes {
+    n_cards: u32,
+    /// BORDER_PLANE_COUNT × words_per_plane(n_cards), flattened plane-major —
+    /// the same layout convention as BitPlanes.words, just not fed through
+    /// compile_plane (see the module doc above for why).
+    words: Vec<u64>,
+}
+
+fn build_border_planes(cards: &[OracleCard], printings: &[Printing], offsets: &[u32], strings: &[String]) -> BorderPlanes {
+    let n_cards = cards.len();
+    let wpp = words_per_plane(n_cards);
+    let mut words = vec![0u64; BORDER_PLANE_COUNT * wpp];
+    for card in 0..n_cards {
+        let range = offsets[card] as usize..offsets[card + 1] as usize;
+        for p in &printings[range] {
+            if p.card_border_id == NONE_STR {
+                continue;
+            }
+            let plane = match strings[p.card_border_id as usize].as_str() {
+                "black" => BORDER_BLACK,
+                "borderless" => BORDER_BORDERLESS,
+                "white" => BORDER_WHITE,
+                _ => continue,
+            };
+            words[plane * wpp + (card >> 6)] |= 1u64 << (card & 63);
+        }
+    }
+    BorderPlanes { n_cards: n_cards as u32, words }
+}
+
 // Named lifetime (not elided/HRTB) so get_text may return text borrowed from the
 // string table rather than from the card itself.
 fn build_trigram_index<'a, T>(rows: &'a [T], get_text: impl Fn(&'a T) -> &'a str) -> SortedTrigramIndex {
@@ -2081,6 +2140,7 @@ struct CardIndexes {
     planes:         BitPlanes,                 // card space: transposed low-cardinality dims (#630)
     name_bigrams:   NameBigramIndex,           // card space: exact 2-byte name containment (#639)
     legal_divergent: Vec<u16>,                // card space: ids with divergent legality (#630 phase 2), postings not a plane — see build_divergent_ids
+    border_planes:  BorderPlanes,              // card space: loose narrowing only for border: (#664), never compile_plane-consumable — see BorderPlanes' doc
 }
 
 impl Default for CardIndexes {
@@ -2109,6 +2169,7 @@ impl Default for CardIndexes {
             planes:         BitPlanes::default(),
             name_bigrams:   NameBigramIndex::default(),
             legal_divergent: Vec::new(),
+            border_planes:  BorderPlanes::default(),
         }
     }
 }
@@ -2861,6 +2922,27 @@ fn narrow_rec(
             Narrowed::tight(Candidates::Printings(
                 indexes.set_codes.get(value.as_str()).map_or_else(Vec::new, |v| v.iter().map(|x| u32::from(*x)).collect()),
             ))
+        }
+
+        // border: (#664) — loose, card-level only. Only Eq on the three tracked
+        // values narrows at all; every other op/value (Ne, Lt/Le/Gt/Ge, gold,
+        // yellow, anything unrecognized) declines to the existing full scan,
+        // same as today. See BorderPlanes' doc for why this can never be tight.
+        FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value } => {
+            let idx = &indexes.border_planes;
+            if u32::from(idx.n_cards) as usize != n_cards {
+                return None; // archive without border planes for this store
+            }
+            let plane = match value.as_str() {
+                "black" => BORDER_BLACK,
+                "borderless" => BORDER_BORDERLESS,
+                "white" => BORDER_WHITE,
+                _ => return None,
+            };
+            let wpp = words_per_plane(n_cards);
+            let start = plane * wpp;
+            let bits: Vec<u64> = idx.words[start..start + wpp].iter().map(|w| u64::from(*w)).collect();
+            Narrowed::loose(Candidates::CardBits(bits))
         }
 
         FilterExpr::DateCmp { op, value } => {
@@ -4287,6 +4369,7 @@ impl QueryEngine {
             planes:         build_bit_planes(&cards),
             name_bigrams:   build_name_bigram_index(&cards),
             legal_divergent: build_divergent_ids(&cards),
+            border_planes:  build_border_planes(&cards, &printings, &offsets, &strings),
         };
 
         #[cfg(feature = "alloc-counter")]

@@ -2,7 +2,7 @@ use super::{
     assign_name_ranks,
     build_numeric_index, build_oracle_text_index, build_tag_index, build_trigram_index,
     build_rarity_index, build_flavor_index, build_thresholded_tag_index, build_sort_permutations,
-    build_artwork_group_counts, build_bit_planes, build_divergent_ids, build_name_bigram_index, flavor_fingerprint, flavor_match_sets,
+    build_artwork_group_counts, build_bit_planes, build_border_planes, build_divergent_ids, build_name_bigram_index, flavor_fingerprint, flavor_match_sets,
     cards_of_printings, count_common_keywords, count_common_types,
     build_artist_index, build_range_index, range_candidates, narrow_candidates, rarity_candidates,
     range_too_broad_to_narrow, run_query, trigram_candidates, finalize_trigram_index, PrintingRangeIndex, NARROW_FLOOR,
@@ -847,6 +847,7 @@ fn bench_checked_vs_unchecked_access() {
         planes:         build_bit_planes(&cards),
         name_bigrams:   build_name_bigram_index(&cards),
         legal_divergent: build_divergent_ids(&cards),
+        border_planes:  build_border_planes(&cards, &printings, &offsets, &strings),
     };
     let data = CardData {
         cards,
@@ -2483,6 +2484,163 @@ fn trigram_dense_sparse_dispatch_parity() {
     // with no posting to seed from at all.
     let ops = vec![super::lookup_trigram(archived, *b"aaa").unwrap(), super::lookup_trigram(archived, *b"bbb").unwrap()];
     assert_eq!(super::intersect_operands(ops), vec![1, 2, 3, 4, 5, 6], "plane x plane AND path, no posting seed available");
+}
+
+// ─── Border planes (docs/issues/engine-border-planes.md, #664) ─────────────
+
+/// 8 cards with varied printing-level border colors. Card 3 independently has
+/// a black printing *and* a separate borderless printing — the shared-witness
+/// correctness canary subject: `border:black border:borderless` must find no
+/// single printing satisfying both, even though the card "has" each color.
+fn border_planes_fixture_store() -> CardData {
+    let mut vocab = VocabInterner::new();
+    let mut interner = Interner::new();
+    let specs: &[&[Option<&str>]] = &[
+        &[Some("black")],                                     // 0: pure black
+        &[Some("black"), Some("black")],                       // 1: pure black, 2 printings
+        &[Some("borderless")],                                 // 2: pure borderless
+        &[Some("black"), Some("borderless")],                  // 3: shared-witness subject
+        &[Some("white")],                                       // 4: pure white
+        &[Some("gold")],                                        // 5: untracked value only
+        &[None],                                                 // 6: missing border
+        &[Some("black"), Some("white"), Some("borderless")],   // 7: all three tracked
+    ];
+    let cards: Vec<OracleCard> = specs.iter().enumerate().map(|(i, _)| stub_card(i as u128 + 1, TYPE_CREATURE, &[], &mut vocab)).collect();
+    let printing_counts: Vec<usize> = specs.iter().map(|s| s.len()).collect();
+    let mut data = store_of(cards, &printing_counts, vocab);
+    let mut idx = 0;
+    for borders in specs {
+        for border in borders.iter() {
+            data.printings[idx].card_border_id = border.map_or(NONE_STR, |b| interner.intern(b.to_string()));
+            idx += 1;
+        }
+    }
+    data.strings = interner.strings;
+    data.indexes.border_planes = build_border_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
+    data
+}
+
+/// Brute-force `border:<value>` over every card, for differential comparison:
+/// does any printing of this card carry the given border color.
+fn brute_force_has_border(archived: &Archived<CardData>, border: &str) -> Vec<u32> {
+    (0..archived.cards.len() as u32)
+        .filter(|&cid| {
+            let start = u32::from(archived.offsets[cid as usize]);
+            let end = u32::from(archived.offsets[cid as usize + 1]);
+            (start..end).any(|p| {
+                let bid = u32::from(archived.printings[p as usize].card_border_id);
+                bid != NONE_STR && archived.strings[bid as usize].as_str() == border
+            })
+        })
+        .collect()
+}
+
+// The narrowed set must match the brute-force existential exactly (a solo
+// leaf's per-card existential really is exact), but must never be marked
+// tight -- these planes are never safe to feed through compile_plane or
+// complement via Not, regardless of how correct they happen to be in
+// isolation. See BorderPlanes' doc for why.
+#[test]
+fn border_planes_exact_union_parity() {
+    let data = border_planes_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let rec = |f: &FilterExpr| super::narrow_rec(f, &archived.indexes, &archived.offsets, &archived.cards, true);
+    let border = |v: &str| FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value: v.to_string() };
+
+    for value in ["borderless", "white"] {
+        let expected = brute_force_has_border(archived, value);
+        let n = rec(&border(value)).unwrap_or_else(|| panic!("border:{value} must narrow"));
+        assert!(!n.tight, "border planes must always narrow loose, never tight");
+        assert_eq!(n.set.into_cards(&archived.offsets), expected, "border:{value} narrowed set must match brute force");
+    }
+}
+
+// The regression test this design exists to guarantee: two independent
+// per-card "has X border" bits, ANDed, would wrongly include card 3 (which
+// has a black printing and a separate borderless printing, independently
+// satisfying both) -- but no single printing is both, so the real answer
+// (found by the residual per-printing walk the loose narrowing never
+// bypasses) must be zero matches.
+#[test]
+fn border_shared_witness_correctness() {
+    let data = border_planes_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let border = |v: &str| FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value: v.to_string() };
+
+    let mut f = FilterExpr::And(vec![border("black"), border("borderless")]);
+    let (total, _) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut f, None, "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+    );
+    assert_eq!(total, 0, "no printing is both black and borderless: must be zero matches, not a false positive from independent narrowing");
+}
+
+// Untracked values (gold/yellow) and non-Eq ops must decline to narrow at all
+// -- but the evaluated result (via the untouched residual path) must still be
+// correct end to end, since narrowing declining is advisory, not a
+// correctness concern.
+#[test]
+fn border_planes_decline_shapes() {
+    let data = border_planes_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let rec = |f: &FilterExpr| super::narrow_rec(f, &archived.indexes, &archived.offsets, &archived.cards, true);
+    let border_eq = |v: &str| FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value: v.to_string() };
+
+    assert!(rec(&border_eq("gold")).is_none(), "untracked border value must decline to narrow");
+    assert!(rec(&border_eq("yellow")).is_none());
+
+    let border_ne = FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Ne, value: "black".to_string() };
+    assert!(rec(&border_ne).is_none(), "Ne must decline: these planes are never tight, so Not/Ne can't invert them");
+
+    let mut f = border_eq("gold");
+    let (total, _) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut f, None, "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+    );
+    assert_eq!(total, 1, "exactly card 5 has a gold printing");
+}
+
+/// 7 of 8 cards have a black printing (87.5%, past narrow_candidates_exact's
+/// keep-if-<=75%-of-domain broadness guard, `domain - domain/4` with integer
+/// division); the 8th has a borderless printing (12.5%).
+fn border_broadness_fixture_store() -> CardData {
+    let mut vocab = VocabInterner::new();
+    let mut interner = Interner::new();
+    let specs: &[&str] = &["black", "black", "black", "black", "black", "black", "black", "borderless"];
+    let cards: Vec<OracleCard> = specs.iter().enumerate().map(|(i, _)| stub_card(i as u128 + 1, TYPE_CREATURE, &[], &mut vocab)).collect();
+    let mut data = store_of(cards, &[1usize; 8], vocab);
+    for (i, border) in specs.iter().enumerate() {
+        data.printings[i].card_border_id = interner.intern(border.to_string());
+    }
+    data.strings = interner.strings;
+    data.indexes.border_planes = build_border_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
+    data
+}
+
+// The dedicated arm always narrows (that's its whole job), but
+// narrow_candidates_exact's existing broadness guard -- unrelated to this
+// PR, already exercised elsewhere -- must still decline an overly-broad
+// result at the root, exactly as it would for any other narrowing source.
+// No special-casing needed for border:black: this is the guard doing its
+// job, not a gap this design has to plug itself.
+#[test]
+fn border_black_declines_via_broadness_guard() {
+    let data = border_broadness_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let border = |v: &str| FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value: v.to_string() };
+
+    let n = super::narrow_rec(&border("black"), &archived.indexes, &archived.offsets, &archived.cards, true).expect("the dedicated arm itself always narrows");
+    assert_eq!(n.set.into_cards(&archived.offsets).len(), 7);
+
+    assert!(
+        narrow_candidates(&border("black"), &archived.indexes, &archived.offsets, &archived.cards).is_none(),
+        "border:black alone must decline: 87.5% exceeds narrow_candidates_exact's 75% broadness cutoff"
+    );
+    assert!(narrow_candidates(&border("borderless"), &archived.indexes, &archived.offsets, &archived.cards).is_some());
 }
 
 // ─── Adaptive candidate sets (#636) ───────────────────────────────────────────
