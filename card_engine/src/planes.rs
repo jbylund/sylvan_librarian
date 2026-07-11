@@ -30,7 +30,14 @@ const COLOR_PLANES: usize = 6;
 const TYPE_PLANES: usize = 14;
 const PLANE_COLORS: usize = 0;
 const PLANE_IDENTITY: usize = COLOR_PLANES;
-const PLANE_TYPES: usize = 2 * COLOR_PLANES;
+/// Produced mana (docs/issues/engine-produces-planes.md): a plain per-color
+/// bitmask on OracleCard, built with the same jsonb_color_to_bits helper and
+/// evaluated through the same ColorCmp code path as Colors/ColorIdentity —
+/// structurally identical in every way that matters for plane-exactness
+/// (card-level, never Null/PrintingDep). Was deliberately left unplaned in
+/// #630 phase 1; this closes that gap the same way, no new machinery needed.
+const PLANE_PRODUCED_MANA: usize = PLANE_IDENTITY + COLOR_PLANES;
+const PLANE_TYPES: usize = PLANE_PRODUCED_MANA + COLOR_PLANES;
 /// Devotion is bit-sliced: two saturating bits per color (count clamped to
 /// 0..=3), so `devotion:uu` is one plane read and `devotion:uuu` is exactly
 /// the saturated bucket. Counts come from the same hybrid-expanded map the
@@ -162,6 +169,9 @@ pub(crate) fn build_bit_planes(cards: &[OracleCard]) -> BitPlanes {
             }
             if card.card_color_identity & (1 << b) != 0 {
                 set(PLANE_IDENTITY + b);
+            }
+            if card.produced_mana & (1 << b) != 0 {
+                set(PLANE_PRODUCED_MANA + b);
             }
         }
         let mut bits = card.card_types;
@@ -653,8 +663,7 @@ pub(crate) fn compile_plane(filter: &FilterExpr, bounds: &rkyv::Archived<BitPlan
             let base = match field {
                 ColorField::Colors => PLANE_COLORS,
                 ColorField::ColorIdentity => PLANE_IDENTITY,
-                // Deliberately unplaned for now (#630): produces: stays residual.
-                ColorField::ProducedMana => return None,
+                ColorField::ProducedMana => PLANE_PRODUCED_MANA,
             };
             // color_to_bit only sets bits 0..6; anything else would make the
             // plane complement unsound, so refuse rather than assume.

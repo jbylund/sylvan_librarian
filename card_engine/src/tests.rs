@@ -1676,26 +1676,32 @@ fn price_narrowing_is_a_superset_under_f32_rounding() {
 const FALLAJI_CID: usize = 5;
 fn plane_fixture_store() -> CardData {
     let mut vocab = VocabInterner::new();
-    // (card_colors, card_color_identity, card_types); color bits W=1 U=2 B=4 R=8 G=16 C=32
-    let specs: &[(u8, u8, u16)] = &[
-        (0, 0, TYPE_ARTIFACT),                     // colorless artifact
-        (16, 16, TYPE_CREATURE),                   // mono G creature
-        (1, 1, TYPE_CREATURE | TYPE_LEGENDARY),    // mono W legendary creature
-        (3, 3, TYPE_INSTANT),                      // WU instant
-        (0, 24, TYPE_LAND),                        // land: no colors, RG identity (Taiga)
-        (31, 16, TYPE_CREATURE),                   // Fallaji Wayfarer (see FALLAJI_CID)
-        (2, 3, TYPE_SORCERY),                      // U sorcery with WU identity
-        (24, 31, TYPE_CREATURE | TYPE_ARTIFACT),   // RG artifact creature, WUBRG identity
-        (4, 4, TYPE_ENCHANTMENT | TYPE_SNOW),      // mono B snow enchantment
-        (0, 32, TYPE_LAND),                        // C-bit identity, exercising the C plane
+    // (card_colors, card_color_identity, card_types, produced_mana); color bits W=1 U=2 B=4 R=8 G=16 C=32.
+    // produced_mana is deliberately independent of colors/identity on several
+    // rows (card 0: colorless artifact that produces all five + C, like a
+    // mana rock; card 5: Fallaji Wayfarer produces only C, matching neither
+    // its own colors (31) nor its identity (16)) to prove the plane is its
+    // own independent transposition, not derived from the other two.
+    let specs: &[(u8, u8, u16, u8)] = &[
+        (0, 0, TYPE_ARTIFACT, 63),                   // colorless artifact, produces everything
+        (16, 16, TYPE_CREATURE, 0),                  // mono G creature, produces nothing
+        (1, 1, TYPE_CREATURE | TYPE_LEGENDARY, 0),   // mono W legendary creature
+        (3, 3, TYPE_INSTANT, 0),                      // WU instant
+        (0, 24, TYPE_LAND, 24),                       // land: no colors, RG identity (Taiga), produces RG
+        (31, 16, TYPE_CREATURE, 32),                  // Fallaji Wayfarer (see FALLAJI_CID), produces only C
+        (2, 3, TYPE_SORCERY, 0),                       // U sorcery with WU identity
+        (24, 31, TYPE_CREATURE | TYPE_ARTIFACT, 8),   // RG artifact creature, WUBRG identity, produces only R
+        (4, 4, TYPE_ENCHANTMENT | TYPE_SNOW, 0),      // mono B snow enchantment
+        (0, 32, TYPE_LAND, 32),                        // C-bit identity, exercising the C plane, produces C
     ];
     let cards = specs
         .iter()
         .enumerate()
-        .map(|(i, &(colors, identity, types))| {
+        .map(|(i, &(colors, identity, types, produced))| {
             let mut c = stub_card(i as u128 + 1, types, &[], &mut vocab);
             c.card_colors = colors;
             c.card_color_identity = identity;
+            c.produced_mana = produced;
             c
         })
         .collect();
@@ -1734,6 +1740,7 @@ fn plane_parity_color_and_type_ops() {
         for mask in color_masks {
             check(&FilterExpr::ColorCmp { field: ColorField::Colors, op, mask });
             check(&FilterExpr::ColorCmp { field: ColorField::ColorIdentity, op, mask });
+            check(&FilterExpr::ColorCmp { field: ColorField::ProducedMana, op, mask });
         }
         for mask in type_masks {
             check(&FilterExpr::TypeCmp { mask, op });
@@ -1742,9 +1749,32 @@ fn plane_parity_color_and_type_ops() {
 
     let green = || FilterExpr::ColorCmp { field: ColorField::Colors, op: CmpOp::Ge, mask: 16 };
     let creature = || FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
+    let produces_red = || FilterExpr::ColorCmp { field: ColorField::ProducedMana, op: CmpOp::Ge, mask: 8 };
     check(&FilterExpr::And(vec![green(), creature()]));
     check(&FilterExpr::Or(vec![green(), creature()]));
     check(&FilterExpr::Not(Box::new(FilterExpr::Or(vec![green(), creature()]))));
+    check(&FilterExpr::And(vec![produces_red(), creature()]));
+    check(&FilterExpr::Not(Box::new(produces_red())));
+}
+
+// produced_mana must be its own independent transposition, not derived from
+// colors or identity: card 0 (colorless, produces everything) and card 5
+// (Fallaji Wayfarer, colors=WUBR/identity=G, produces only C) both have
+// produced_mana disjoint from their own colors/identity bits.
+#[test]
+fn plane_produces_independent_of_colors_and_identity() {
+    let data = plane_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let bounds = &archived.indexes.planes;
+    let words = &archived.indexes.oracle_trigram.words;
+
+    let produces_white = FilterExpr::ColorCmp { field: ColorField::ProducedMana, op: CmpOp::Ge, mask: 1 };
+    let pe = compile_plane(&produces_white, bounds, words).expect("produces: must be plane-expressible");
+    let mut bitmap: Vec<u64> = Vec::new();
+    eval_planes(&pe, bounds, &mut bitmap);
+    assert!(bitmap_contains(&bitmap, 0), "colorless artifact produces white (mask 63) despite having no colors of its own");
+    assert!(!bitmap_contains(&bitmap, 5), "Fallaji Wayfarer (colors WUBR) produces only C, not white");
 }
 
 // The Fallaji shape specifically: color planes and identity planes must be
@@ -1800,11 +1830,12 @@ fn split_planes_composition_rules() {
     assert!(pe.is_none());
     assert!(matches!(residual, FilterExpr::Or(ref v) if v.len() == 2));
 
-    // Produced mana is deliberately unplaned in phase 1.
+    // Produced mana is plane-expressible (docs/issues/engine-produces-planes.md):
+    // same card-level, always-known bitmask shape as Colors/ColorIdentity.
     let produces = FilterExpr::ColorCmp { field: ColorField::ProducedMana, op: CmpOp::Ge, mask: 16 };
     let (pe, residual) = split_planes(produces, bounds, words);
-    assert!(pe.is_none());
-    assert!(matches!(residual, FilterExpr::ColorCmp { field: ColorField::ProducedMana, .. }));
+    assert!(pe.is_some());
+    assert!(matches!(residual, FilterExpr::True));
 
     // Bare True keeps the range-scan path (no all-ones bitmap materialization).
     let (pe, residual) = split_planes(FilterExpr::True, bounds, words);
