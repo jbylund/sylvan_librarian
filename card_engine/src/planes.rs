@@ -12,9 +12,13 @@
 //! are card-level and two-valued (their tri() never returns Null or
 //! PrintingDep), so plane algebra — including complement for Not —
 //! reproduces the filter's card-level truth exactly.
-//! Legality is narrowing-only (see PLANE_LEGAL). Rarity (the 4 most common
-//! values; docs/issues/engine-rarity-planes.md) is narrowing-only too, for
-//! the same PrintingDep reason -- see PLANE_RARITY.
+//! Legality (docs/issues/engine-legality-divergent-carveout.md) is exact via
+//! two planes per format -- PLANE_LEGAL_EXISTS ("some printing is legal") and
+//! PLANE_LEGAL_ILLEGAL ("some printing is not legal"), both computed directly
+//! from printings so they're correct for every card including ones whose
+//! printings disagree, unlike a single card-level bit. Rarity (the 4 most
+//! common values; docs/issues/engine-rarity-planes.md) is narrowing-only, for
+//! the PrintingDep reason legality used to have -- see PLANE_RARITY.
 
 use rkyv::{Archive, Deserialize, Serialize};
 
@@ -45,14 +49,18 @@ const PLANE_TYPES: usize = PLANE_PRODUCED_MANA + COLOR_PLANES;
 /// set for deeper queries (see the saturated-superset arm in narrow_rec).
 const PLANE_DEVOTION: usize = PLANE_TYPES + TYPE_PLANES;
 const DEVOTION_BITS: usize = 2;
-/// One plane per format's "legal" bit (#630 phase 2), fixed-width at
-/// MAX_FORMATS regardless of how many formats loaded data actually uses —
-/// unused slots are permanently-zero planes, matching the existing `shift:
-/// None` "format absent" semantics. These are narrowing-only candidate masks
-/// (see narrow_rec's Legality arms in lib.rs), never exact-consumed here:
-/// Legality can return Tri::PrintingDep for divergent cards, which compile_plane
-/// already excludes from exact consumption (only two-valued nodes qualify).
-pub(crate) const PLANE_LEGAL: usize = PLANE_DEVOTION + DEVOTION_BITS * COLOR_PLANES;
+/// Two planes per format (docs/issues/engine-legality-divergent-carveout.md),
+/// fixed-width at MAX_FORMATS each regardless of how many formats loaded data
+/// actually uses -- unused slots are permanently-zero planes, matching the
+/// existing `shift: None` "format absent" semantics. Both are computed
+/// directly from printings (`build_bit_planes`), not the card-level canonical
+/// word, so both are exact -- including divergent cards, which is what makes
+/// `compile_plane` able to consume `Legality` at all: `∃p: legal(p)` and
+/// `∃p: ¬legal(p)` are genuinely different facts for a divergent card (both
+/// can be true at once), so `-format:X` needs its own plane rather than a
+/// bit-complement of the first (which would compute `∀p: ¬legal(p)`, wrong).
+pub(crate) const PLANE_LEGAL_EXISTS: usize = PLANE_DEVOTION + DEVOTION_BITS * COLOR_PLANES;
+pub(crate) const PLANE_LEGAL_ILLEGAL: usize = PLANE_LEGAL_EXISTS + MAX_FORMATS;
 /// One-hot planes for cmc/power/toughness (#655), covering the interior
 /// range [0,12] — hundreds-to-thousands of cards per value — plus a shared
 /// "13+" high-tail bucket per field (all three have a genuine spread of rare
@@ -67,7 +75,7 @@ pub(crate) const PLANE_LEGAL: usize = PLANE_DEVOTION + DEVOTION_BITS * COLOR_PLA
 const NUM_INTERIOR_LO: i32 = 0;
 const NUM_INTERIOR_HI: i32 = 12;
 const NUM_INTERIOR_WIDTH: usize = (NUM_INTERIOR_HI - NUM_INTERIOR_LO + 1) as usize;
-pub(crate) const PLANE_CMC: usize = PLANE_LEGAL + MAX_FORMATS;
+pub(crate) const PLANE_CMC: usize = PLANE_LEGAL_ILLEGAL + MAX_FORMATS;
 pub(crate) const PLANE_CMC_HI: usize = PLANE_CMC + NUM_INTERIOR_WIDTH;
 pub(crate) const PLANE_POWER_LO: usize = PLANE_CMC_HI + 1;
 pub(crate) const PLANE_POWER: usize = PLANE_POWER_LO + 1;
@@ -182,7 +190,7 @@ pub(crate) fn build_bit_planes(cards: &[OracleCard], printings: &[Printing], off
         // null-rarity correctly sets nothing here.
         let range = offsets[i] as usize..offsets[i + 1] as usize;
         let mut rarity_mask: u8 = 0;
-        for p in &printings[range] {
+        for p in &printings[range.clone()] {
             if let Some(r) = p.card_rarity_int {
                 rarity_mask |= 1 << r;
             }
@@ -225,19 +233,32 @@ pub(crate) fn build_bit_planes(cards: &[OracleCard], printings: &[Printing], off
                 "devotion without identity: card {i} color lane {b}"
             );
         }
-        // "legal AND not divergent", not raw status: this makes the plane a
-        // pure exact predicate (no false positives, ever) rather than one that
-        // merely happens to be corrected downstream. narrow_rec's OR-with-
-        // divergent-postings formula (see legal_candidate_bits in lib.rs)
-        // produces an identical candidate mask either way (De Morgan's), so
-        // this costs nothing today — but it means `legal_x` alone is already
-        // the exact card-space source #634 wants to popcount directly, with
-        // the divergent set as the one small carve-out #634's promotion path
-        // would still need to verify per-candidate.
+        // Legality (docs/issues/engine-legality-divergent-carveout.md): two
+        // existence projections per format, computed directly from this
+        // card's own printings (the `range` rarity already sliced above) --
+        // legal_exists = some printing legal, illegal_exists = some printing
+        // not legal. Both exact for every card, including ones whose
+        // printings disagree, since neither depends on a single canonical
+        // card-level word or a divergence flag. MAX_FORMATS (32) fits a u64
+        // mask with room to spare.
+        let mut legal_mask: u64 = 0;
+        let mut illegal_mask: u64 = 0;
+        for p in &printings[range] {
+            for f in 0..MAX_FORMATS {
+                let shift = (f * 2) as u32;
+                if (p.card_legalities >> shift) & 0b11 == LEGALITY_LEGAL {
+                    legal_mask |= 1 << f;
+                } else {
+                    illegal_mask |= 1 << f;
+                }
+            }
+        }
         for f in 0..MAX_FORMATS {
-            let shift = (f * 2) as u32;
-            if !card.legality_divergent && (card.card_legalities >> shift) & 0b11 == LEGALITY_LEGAL {
-                set(PLANE_LEGAL + f);
+            if legal_mask & (1 << f) != 0 {
+                set(PLANE_LEGAL_EXISTS + f);
+            }
+            if illegal_mask & (1 << f) != 0 {
+                set(PLANE_LEGAL_ILLEGAL + f);
             }
         }
         // #655: cmc is Option<u8>, type-guaranteed non-negative, so it has no
@@ -662,17 +683,105 @@ fn compile_plane_children(children: &[FilterExpr], bounds: &rkyv::Archived<BitPl
     order.into_iter().map(|c| compile_plane(c, bounds, words)).collect()
 }
 
+/// Collect distinct (format, polarity) pairs referenced by legality-plane
+/// leaves within `expr`, appending into `out` (deduplicated). Polarity is
+/// part of the key, not folded away: `format:A` and `-format:A` read
+/// different planes (`legal_exists`/`illegal_exists`) backing different,
+/// independently-true-or-false existence facts about the same format, so
+/// `format:A AND -format:A` is exactly as shared-witness-prone as
+/// `format:A AND format:B` -- a divergent-on-A card satisfies both
+/// `legal_exists(A)` and `illegal_exists(A)` at once, even though no single
+/// printing can be both legal and not-legal in A simultaneously (see
+/// `and_of_checked_for_shared_witness`'s doc). A literal duplicate leaf
+/// (`format:A AND format:A`) collapses to one entry and is fine to compose --
+/// it's the same underlying fact checked twice, not two facts needing a
+/// shared witness.
+fn collect_legality_formats(expr: &PlaneExpr, out: &mut Vec<(usize, bool)>) {
+    match expr {
+        PlaneExpr::Plane(p) => {
+            let p = *p as usize;
+            let fmt = if (PLANE_LEGAL_EXISTS..PLANE_LEGAL_EXISTS + MAX_FORMATS).contains(&p) {
+                Some((p - PLANE_LEGAL_EXISTS, false))
+            } else if (PLANE_LEGAL_ILLEGAL..PLANE_LEGAL_ILLEGAL + MAX_FORMATS).contains(&p) {
+                Some((p - PLANE_LEGAL_ILLEGAL, true))
+            } else {
+                None
+            };
+            if let Some(entry) = fmt
+                && !out.contains(&entry)
+            {
+                out.push(entry);
+            }
+        }
+        PlaneExpr::Bits(_) | PlaneExpr::Const(_) => {}
+        PlaneExpr::And(cs) | PlaneExpr::Or(cs) => {
+            for c in cs {
+                collect_legality_formats(c, out);
+            }
+        }
+        PlaneExpr::Not(inner) => collect_legality_formats(inner, out),
+    }
+}
+
+/// Whether any leaf of a compiled plane expression reads a legality plane
+/// (`PLANE_LEGAL_EXISTS`/`PLANE_LEGAL_ILLEGAL`). These are existence
+/// projections over per-printing-varying data ("*some* printing is/isn't
+/// legal") -- unlike every other plane (colors, types, numeric buckets,
+/// devotion, border, all card-invariant), a card-level True here does not
+/// imply every printing of the card individually satisfies the query. Used
+/// to gate the #634 Step 1 `all_match_known` fast path to `unique=card`,
+/// where existence is exactly the semantics needed (docs/issues/
+/// engine-legality-divergent-carveout.md; Step 2's popcount path is already
+/// `Mode::Card`-only for unrelated reasons, see `run_query`).
+pub(crate) fn plane_expr_is_existential(expr: &PlaneExpr) -> bool {
+    match expr {
+        PlaneExpr::Plane(p) => {
+            let p = *p as usize;
+            (PLANE_LEGAL_EXISTS..PLANE_LEGAL_EXISTS + MAX_FORMATS).contains(&p)
+                || (PLANE_LEGAL_ILLEGAL..PLANE_LEGAL_ILLEGAL + MAX_FORMATS).contains(&p)
+        }
+        PlaneExpr::Bits(_) | PlaneExpr::Const(_) => false,
+        PlaneExpr::And(cs) | PlaneExpr::Or(cs) => cs.iter().any(plane_expr_is_existential),
+        PlaneExpr::Not(inner) => plane_expr_is_existential(inner),
+    }
+}
+
+/// `And` two-or-more legality-plane leaves referencing *different* formats
+/// (or the same format under both polarities -- `format:A AND -format:A`)
+/// can't be answered by ANDing independent existence projections: `∃p:
+/// legal_A(p) ∧ legal_B(p)` requires one printing to satisfy both at once,
+/// which isn't the same as `(∃p: legal_A(p)) ∧ (∃p: legal_B(p))` (a false
+/// positive the moment different printings would be the witness for each).
+/// `Or` never has this problem (`∃` distributes over `∨`), so this is only
+/// called where an `And` is about to be assembled -- both the direct case
+/// and the De-Morgan'd `Not(Or(...))` case in `compile_plane_neg`. Declining
+/// (falling back to `narrow_rec`'s existing, correct `Legality` narrowing) is
+/// deliberately simpler than building a shared-witness-safe joint check for a
+/// shape nobody realistically writes --
+/// docs/issues/engine-printing-varying-plane-repair-pattern.md has the joint
+/// per-printing evaluation this would need if it ever mattered enough to build.
+fn and_of_checked_for_shared_witness(children: Vec<PlaneExpr>) -> Option<PlaneExpr> {
+    let mut formats = Vec::new();
+    for c in &children {
+        collect_legality_formats(c, &mut formats);
+    }
+    if formats.len() > 1 {
+        return None;
+    }
+    Some(and_of(children))
+}
+
 pub(crate) fn compile_plane(filter: &FilterExpr, bounds: &rkyv::Archived<BitPlanes>, words: &rkyv::Archived<OracleWordIndex>) -> Option<PlaneExpr> {
     match filter {
         FilterExpr::True => Some(PlaneExpr::Const(true)),
-        FilterExpr::And(children) => compile_plane_children(children, bounds, words).map(and_of),
+        FilterExpr::And(children) => and_of_checked_for_shared_witness(compile_plane_children(children, bounds, words)?),
         FilterExpr::Or(children) => compile_plane_children(children, bounds, words).map(or_of),
-        FilterExpr::Not(inner) => {
-            if contains_unnegatable_numeric(inner) {
-                return None;
-            }
-            compile_plane(inner, bounds, words).map(|p| PlaneExpr::Not(Box::new(p)))
-        }
+        // De Morgan pushdown so a Not that reaches a Legality leaf lands on
+        // `illegal_exists` instead of bit-complementing `legal_exists` (wrong
+        // for divergent cards -- see PLANE_LEGAL_EXISTS's doc). Handles the
+        // contains_unnegatable_numeric guard itself, per-leaf, via its own
+        // catch-all arm -- see compile_plane_neg's doc.
+        FilterExpr::Not(inner) => compile_plane_neg(inner, bounds, words),
         // Bonus consumption (docs/issues/engine-oracle-word-index.md): only
         // when the needle matches exactly one dictionary word total (dense or
         // sparse) and that word is dense — the same "single dense hit, no
@@ -722,8 +831,58 @@ pub(crate) fn compile_plane(filter: &FilterExpr, bounds: &rkyv::Archived<BitPlan
             (NumExpr::Const(v), NumExpr::Field(f)) => compile_numeric_cmp(*f, flip_op(*op), *v, bounds),
             _ => None,
         },
+        // f:x / format:x (docs/issues/engine-legality-divergent-carveout.md):
+        // exact for every card via PLANE_LEGAL_EXISTS -- no divergent-card
+        // caveat, unlike the single-plane design this replaced. banned:/
+        // restricted: (expected != LEGALITY_LEGAL) and absent formats
+        // (shift: None) stay unindexed, matching narrow_rec's existing
+        // restriction; `Not` is handled by compile_plane_neg, not here.
+        FilterExpr::Legality { shift: Some(shift), expected } if *expected == LEGALITY_LEGAL => {
+            Some(PlaneExpr::Plane((PLANE_LEGAL_EXISTS + *shift as usize / 2) as u16))
+        }
         _ => None,
     }
+}
+
+/// Compile `Not(filter)` directly, pushing negation down to `Legality` leaves
+/// (which need `PLANE_LEGAL_ILLEGAL`, not a bit-complement of
+/// `PLANE_LEGAL_EXISTS`) via De Morgan, while leaves that are safe to
+/// bit-complement (colors/types/devotion/non-null-valued numerics) fall
+/// through to the cheaper "compile positive, wrap in `PlaneExpr::Not`" path
+/// unchanged. Mutually recursive with `compile_plane`.
+fn compile_plane_neg(filter: &FilterExpr, bounds: &rkyv::Archived<BitPlanes>, words: &rkyv::Archived<OracleWordIndex>) -> Option<PlaneExpr> {
+    match filter {
+        FilterExpr::Legality { shift: Some(shift), expected } if *expected == LEGALITY_LEGAL => {
+            Some(PlaneExpr::Plane((PLANE_LEGAL_ILLEGAL + *shift as usize / 2) as u16))
+        }
+        // Not(And(cs)) = Or(Not(c) for c in cs) -- existence distributes over
+        // Or, so no shared-witness check is needed here regardless of how
+        // many legality leaves end up among the children.
+        FilterExpr::And(children) => compile_plane_neg_children(children, bounds, words).map(or_of),
+        // Not(Or(cs)) = And(Not(c) for c in cs) -- THIS does have the
+        // shared-witness exposure (see and_of_checked_for_shared_witness).
+        FilterExpr::Or(children) => and_of_checked_for_shared_witness(compile_plane_neg_children(children, bounds, words)?),
+        FilterExpr::Not(inner) => compile_plane(inner, bounds, words), // double negation
+        FilterExpr::True => Some(PlaneExpr::Const(false)),
+        // Everything else: only Legality has a divergent-card correctness
+        // gap, so every other plane-eligible leaf is safe to compile
+        // positive and wrap -- contains_unnegatable_numeric still guards
+        // cmc/power/toughness's Null-vs-missing-value issue exactly as
+        // before, just checked per-leaf here instead of once upfront (this
+        // function's own And/Or recursion propagates a declined leaf's None
+        // through .collect::<Option<_>>() the same way the old upfront check
+        // did for the whole subtree).
+        other => {
+            if contains_unnegatable_numeric(other) {
+                return None;
+            }
+            compile_plane(other, bounds, words).map(|p| PlaneExpr::Not(Box::new(p)))
+        }
+    }
+}
+
+fn compile_plane_neg_children(children: &[FilterExpr], bounds: &rkyv::Archived<BitPlanes>, words: &rkyv::Archived<OracleWordIndex>) -> Option<Vec<PlaneExpr>> {
+    children.iter().map(|c| compile_plane_neg(c, bounds, words)).collect()
 }
 
 /// Consume the plane-expressible part of a bound filter. Returns the compiled
@@ -737,28 +896,85 @@ pub(crate) fn compile_plane(filter: &FilterExpr, bounds: &rkyv::Archived<BitPlan
 /// narrowing mask, so a partially compilable Or stays entirely residual.
 /// A bare True is left alone — the full-range scan beats materializing an
 /// all-ones bitmap into a candidate list.
-pub(crate) fn split_planes(filter: FilterExpr, bounds: &rkyv::Archived<BitPlanes>, words: &rkyv::Archived<OracleWordIndex>) -> (Option<PlaneExpr>, FilterExpr) {
+///
+/// `unique_is_card` gates legality specifically: its planes are existence
+/// projections ("*some* printing matches"), so consuming a leaf touching them
+/// to a bare `True` residual (docs/issues/engine-legality-divergent-
+/// carveout.md) is only sound for `unique=card`, where existence is the
+/// semantics wanted. For `unique=printing`/`artwork`, doing so would discard
+/// the only thing that can re-derive *which* printing actually matches --
+/// there's no information left in a `True` residual to recover it from, so
+/// this must decline the fold at the source rather than try to patch it up
+/// after (`plane_expr_is_existential` in `run_query` is kept anyway, as a
+/// defense-in-depth check for any other caller of `split_planes`/`run_query`
+/// that doesn't route through here). Every other plane (card-invariant
+/// fields) has no such exposure and ignores this flag entirely.
+pub(crate) fn split_planes(
+    filter: FilterExpr,
+    bounds: &rkyv::Archived<BitPlanes>,
+    words: &rkyv::Archived<OracleWordIndex>,
+    unique_is_card: bool,
+) -> (Option<PlaneExpr>, FilterExpr) {
     if matches!(filter, FilterExpr::True) {
         return (None, filter);
     }
-    if let Some(pe) = compile_plane(&filter, bounds, words) {
+    if let Some(pe) = compile_plane(&filter, bounds, words)
+        && (unique_is_card || !plane_expr_is_existential(&pe))
+    {
         return (Some(pe), FilterExpr::True);
     }
     match filter {
         FilterExpr::And(children) => {
             let mut planes: Vec<PlaneExpr> = Vec::new();
             let mut rest: Vec<FilterExpr> = Vec::new();
+            // Legality-touching children are held back until every child has
+            // been tried, so the shared-witness check (see
+            // and_of_checked_for_shared_witness) sees the full picture --
+            // this loop calls compile_plane per child directly (not the
+            // whole-And path above, which already failed), so it needs its
+            // own version of that same guard. Non-legality children
+            // (colors/types) have no shared-witness exposure and are always
+            // safe to extract immediately, whether or not the rest resolves
+            // -- unlike the first (repair-based) design for this issue,
+            // there's no tax to avoid paying here anymore.
+            let mut legality_children: Vec<(FilterExpr, PlaneExpr)> = Vec::new();
             for c in children {
                 match compile_plane(&c, bounds, words) {
-                    Some(pe) => planes.push(pe),
+                    Some(pe) => {
+                        let mut fmts = Vec::new();
+                        collect_legality_formats(&pe, &mut fmts);
+                        if fmts.is_empty() {
+                            planes.push(pe);
+                        } else {
+                            legality_children.push((c, pe));
+                        }
+                    }
                     None => rest.push(c),
+                }
+            }
+            let mut all_formats = Vec::new();
+            for (_, pe) in &legality_children {
+                collect_legality_formats(pe, &mut all_formats);
+            }
+            if unique_is_card && all_formats.len() <= 1 {
+                for (_, pe) in legality_children {
+                    planes.push(pe);
+                }
+            } else {
+                // 2+ distinct (format, polarity) pairs can't be ANDed
+                // together safely regardless of mode (shared-witness); a
+                // single one is safe for the plane's own exactness but still
+                // deferred for unique=printing/artwork, same reasoning as the
+                // top-level shortcut above. Either way it falls back to
+                // narrow_rec's existing (correct, still exact as of this
+                // issue) Legality narrowing arm instead.
+                for (c, _) in legality_children {
+                    rest.push(c);
                 }
             }
             if planes.is_empty() {
                 return (None, FilterExpr::And(rest));
             }
-            // rest is nonempty here: had every child compiled, the whole-tree
-            // compile above would have consumed the And.
             let residual = if rest.len() == 1 { rest.pop().unwrap() } else { FilterExpr::And(rest) };
             (Some(and_of(planes)), residual)
         }

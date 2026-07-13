@@ -505,7 +505,7 @@ fn rarity_never_exact_consumed() {
     // Mixed with an otherwise fully plane-expressible sibling: the rarity
     // child must stay in the residual, not get silently dropped or promoted.
     let creature = FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
-    let (pe, residual) = split_planes(FilterExpr::And(vec![creature, rarity]), bounds, words);
+    let (pe, residual) = split_planes(FilterExpr::And(vec![creature, rarity]), bounds, words, true);
     assert!(pe.is_some(), "the creature child must still plane-consume");
     assert!(
         matches!(&residual, FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), .. }),
@@ -738,50 +738,63 @@ fn divergent_legality_defers_to_printings() {
     assert!(!f.matches(&archived.cards[1], &archived.printings[2], &archived.strings));
 }
 
-// ─── Legality bitplanes (#630 phase 2) ────────────────────────────────────────
+// ─── Legality bitplanes (#630 phase 2 / #667 dual-exact-plane redesign) ───────
 
-/// card0: legal in format A (shift 0) only. card1: legal in format B (shift 2)
-/// only. card2: divergent, canonical (preferred-printing) word says legal in
-/// neither — the OR-with-divergent-postings narrowing must still include it.
-fn legal_plane_fixture() -> (Vec<OracleCard>, VocabInterner) {
+/// card0: legal in format A (shift 0) only, single printing. card1: legal in
+/// format B (shift 2) only, single printing. card2: genuinely divergent for
+/// format A — two printings, one legal and one not — so both
+/// `legal_exists(A)` and `illegal_exists(A)` are true for it at once
+/// (docs/issues/engine-legality-divergent-carveout.md).
+fn legal_plane_fixture() -> CardData {
     let mut vocab = VocabInterner::new();
     let mut card0 = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
     card0.card_legalities = 0b01; // legal at shift 0
     let mut card1 = stub_card(2, TYPE_CREATURE, &[], &mut vocab);
     card1.card_legalities = 0b01 << 2; // legal at shift 2
     let mut card2 = stub_card(3, TYPE_CREATURE, &[], &mut vocab);
-    card2.card_legalities = 0; // not legal in either, canonically
     card2.legality_divergent = true;
-    (vec![card0, card1, card2], vocab)
+    let mut data = store_of(vec![card0, card1, card2], &[1, 1, 2], vocab);
+    // build_bit_planes reads printing-level card_legalities, not the
+    // OracleCard-level field set above -- store_of's stub printings all
+    // default to 0, so every printing needs its own legality set here before
+    // the planes are rebuilt below. card2's two printings deliberately
+    // disagree on format A: one legal, one not.
+    data.printings[0].card_legalities = 0b01; // card0: legal in A
+    data.printings[1].card_legalities = 0b01 << 2; // card1: legal in B
+    data.printings[2].card_legalities = 0b01; // card2 printing 1: legal in A
+    data.printings[3].card_legalities = 0; // card2 printing 2: not legal in A
+    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets);
+    data.indexes.legal_divergent = build_divergent_ids(&data.cards);
+    data
 }
 
 #[test]
 fn legal_plane_narrows_positive_includes_divergent() {
-    let (cards, vocab) = legal_plane_fixture();
-    let data = store_of(cards, &[1, 1, 1], vocab);
+    let data = legal_plane_fixture();
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
-    // Format A (shift 0): card0 (truly legal) + card2 (divergent, always
-    // included) narrow in; card1 (legal only in format B) must not.
+    // Format A (shift 0): card0 (truly legal) + card2 (divergent, has a legal
+    // printing) narrow in; card1 (legal only in format B) must not.
     let f = FilterExpr::Legality { shift: Some(0), expected: 0b01 };
     match narrow_candidates(&f, &archived.indexes, &archived.offsets, &archived.cards) {
         Some(Candidates::CardBits(bits)) => {
             assert!(bitmap_contains(&bits, 0), "truly legal card must narrow in");
             assert!(!bitmap_contains(&bits, 1), "card legal only in a different format must not narrow in");
-            assert!(bitmap_contains(&bits, 2), "divergent card must always narrow in, regardless of canonical status");
+            assert!(bitmap_contains(&bits, 2), "divergent card with a legal printing must narrow in");
         }
         _ => panic!("expected a card bitmap"),
     }
 
-    // Format B (shift 2): card1 narrows in, card0 does not, card2 still does
-    // (shift math must independently address each format's plane).
+    // Format B (shift 2): card1 narrows in, card0 does not, card2 does not
+    // (its printings only vary on format A; shift math must independently
+    // address each format's plane).
     let g = FilterExpr::Legality { shift: Some(2), expected: 0b01 };
     match narrow_candidates(&g, &archived.indexes, &archived.offsets, &archived.cards) {
         Some(Candidates::CardBits(bits)) => {
             assert!(!bitmap_contains(&bits, 0));
             assert!(bitmap_contains(&bits, 1));
-            assert!(bitmap_contains(&bits, 2));
+            assert!(!bitmap_contains(&bits, 2));
         }
         _ => panic!("expected a card bitmap"),
     }
@@ -789,19 +802,19 @@ fn legal_plane_narrows_positive_includes_divergent() {
 
 #[test]
 fn legal_plane_narrows_negated_includes_divergent() {
-    let (cards, vocab) = legal_plane_fixture();
-    let data = store_of(cards, &[1, 1, 1], vocab);
+    let data = legal_plane_fixture();
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
-    // -f:A: card0 is truly legal in A, so it must NOT narrow in; card1 (not
-    // legal in A) and card2 (divergent) must.
+    // -f:A: card0 is truly legal in A (no illegal printing), so it must NOT
+    // narrow in; card1 (not legal in A) and card2 (divergent, has a
+    // not-legal printing too) must.
     let not_a = FilterExpr::Not(Box::new(FilterExpr::Legality { shift: Some(0), expected: 0b01 }));
     match narrow_candidates(&not_a, &archived.indexes, &archived.offsets, &archived.cards) {
         Some(Candidates::CardBits(bits)) => {
             assert!(!bitmap_contains(&bits, 0), "truly legal card must not narrow into the negation");
             assert!(bitmap_contains(&bits, 1), "truly not-legal card must narrow into the negation");
-            assert!(bitmap_contains(&bits, 2), "divergent card must always narrow in, regardless of polarity");
+            assert!(bitmap_contains(&bits, 2), "divergent card with a not-legal printing must narrow into the negation");
         }
         _ => panic!("expected a card bitmap"),
     }
@@ -809,8 +822,7 @@ fn legal_plane_narrows_negated_includes_divergent() {
 
 #[test]
 fn legal_plane_declines_banned_restricted_and_absent_format() {
-    let (cards, vocab) = legal_plane_fixture();
-    let data = store_of(cards, &[1, 1, 1], vocab);
+    let data = legal_plane_fixture();
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
@@ -835,20 +847,22 @@ fn legal_plane_declines_banned_restricted_and_absent_format() {
 /// never be silently dropped by the narrowing, in either polarity, even when
 /// its *preferred* printing's status disagrees with a non-preferred printing
 /// that the query should actually match. This exercises the full path
-/// (narrow_rec's new arms feeding run_query's unmodified card_pass/residual
+/// (narrow_rec's plane arms feeding run_query's unmodified card_pass/residual
 /// walk), not just the bitmap in isolation.
 #[test]
 fn legal_plane_narrowing_preserves_divergent_printing_correctness() {
     let mut vocab = VocabInterner::new();
     // Preferred printing (higher prefer_score, sorts first) says NOT legal;
     // the second, non-preferred printing says legal — the opposite of the
-    // "usual" case, deliberately, to stress the narrowing's superset property.
+    // "usual" case, deliberately, to stress that narrowing is built from
+    // per-printing truth, not just the preferred printing's status.
     let mut card = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
-    card.card_legalities = 0; // preferred printing's status: not legal
     card.legality_divergent = true;
     let mut data = store_of(vec![card], &[2], vocab);
     data.printings[0].card_legalities = 0; // preferred: not legal
     data.printings[1].card_legalities = 0b01; // non-preferred: legal
+    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets);
+    data.indexes.legal_divergent = build_divergent_ids(&data.cards);
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
@@ -866,8 +880,7 @@ fn legal_plane_narrowing_preserves_divergent_printing_correctness() {
     assert_eq!(u128::from(page[0].1.scryfall_id), 2); // the non-preferred, legal printing
 
     // f:A, unique=card: the card matches (at least one printing is legal),
-    // even though the narrowing's own candidate bit for this card came only
-    // from the divergent postings, not from the (canonically "not legal") legal_x bit.
+    // read straight from the exact legal_exists(A) plane bit.
     let mut f2 = FilterExpr::Legality { shift: Some(0), expected: 0b01 };
     let (total, _) = run(&mut f2, "card");
     assert_eq!(total, 1);
@@ -885,16 +898,15 @@ fn legal_plane_narrowing_preserves_divergent_printing_correctness() {
 fn legal_plane_narrows_correctly_across_word_boundary() {
     let mut vocab = VocabInterner::new();
     let n = 70;
-    let cards: Vec<OracleCard> = (0..n)
-        .map(|i| {
-            let mut c = stub_card(1 + i as u128, TYPE_CREATURE, &[], &mut vocab);
-            // Legal (at shift 2) on even ids only, spanning past the 64-bit word boundary.
-            c.card_legalities = if i % 2 == 0 { 0b01 << 2 } else { 0 };
-            c
-        })
-        .collect();
+    let cards: Vec<OracleCard> = (0..n).map(|i| stub_card(1 + i as u128, TYPE_CREATURE, &[], &mut vocab)).collect();
     let printing_counts = vec![1usize; n];
-    let data = store_of(cards, &printing_counts, vocab);
+    let mut data = store_of(cards, &printing_counts, vocab);
+    // Legal (at shift 2) on even ids only, spanning past the 64-bit word
+    // boundary; printing_counts is all 1s so printing i belongs to card i.
+    for i in 0..n {
+        data.printings[i].card_legalities = if i % 2 == 0 { 0b01 << 2 } else { 0 };
+    }
+    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets);
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
@@ -907,6 +919,193 @@ fn legal_plane_narrows_correctly_across_word_boundary() {
         }
         _ => panic!("expected a card bitmap"),
     }
+}
+
+/// `plane_expr_is_existential` is the whole mode-aware-all_match fix's load-
+/// bearing check: it must flag any compiled expression touching a legality
+/// plane (docs/issues/engine-legality-divergent-carveout.md) and only those
+/// -- card-invariant fields (types here) must never be flagged, and an And
+/// mixing the two must still be flagged (any existential leaf taints the
+/// whole composed expression).
+#[test]
+fn plane_expr_is_existential_identifies_legality_only() {
+    let data = legal_plane_fixture();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let bounds = &archived.indexes.planes;
+    let words = &archived.indexes.oracle_trigram.words;
+
+    let legality_pe = compile_plane(&FilterExpr::Legality { shift: Some(0), expected: 0b01 }, bounds, words).unwrap();
+    assert!(super::plane_expr_is_existential(&legality_pe));
+
+    let creature_pe = compile_plane(&FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge }, bounds, words).unwrap();
+    assert!(!super::plane_expr_is_existential(&creature_pe));
+
+    let mixed = compile_plane(
+        &FilterExpr::And(vec![
+            FilterExpr::Legality { shift: Some(0), expected: 0b01 },
+            FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge },
+        ]),
+        bounds,
+        words,
+    )
+    .unwrap();
+    assert!(super::plane_expr_is_existential(&mixed), "one existential leaf must taint the whole And");
+}
+
+/// Regression for the mode-aware all_match bug found while building this
+/// design: `format:A` run through the *real* pipeline (split_planes, not a
+/// direct narrow_candidates/run_query call with plane=None) must not let
+/// unique=printing see every printing of a matching card just because the
+/// card-level existence fact is true. A bare Legality leaf fully consumed to
+/// `FilterExpr::True` regardless of mode would discard the only thing that
+/// could re-derive *which* printing matches, so split_planes now declines the
+/// fold itself for unique=printing/artwork (`unique_is_card=false`), leaving
+/// the original Legality node in the residual for the normal per-printing
+/// card_pass walk. unique=card is unaffected: existence is exactly what it
+/// needs, so it still takes the fully-consumed fast path.
+#[test]
+fn legality_plane_promotion_respects_mode_through_split_planes() {
+    let mut vocab = VocabInterner::new();
+    // Preferred printing not legal, non-preferred printing legal -- same
+    // deliberately-inverted shape as the narrow_rec-level correctness test
+    // above, but exercised through split_planes this time.
+    let mut card = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
+    card.legality_divergent = true;
+    let mut data = store_of(vec![card], &[2], vocab);
+    data.printings[0].card_legalities = 0; // preferred: not legal
+    data.printings[1].card_legalities = 0b01; // non-preferred: legal
+    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets);
+    data.indexes.legal_divergent = build_divergent_ids(&data.cards);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let bounds = &archived.indexes.planes;
+    let words = &archived.indexes.oracle_trigram.words;
+
+    let run_mode = |unique: &str| {
+        let f = FilterExpr::Legality { shift: Some(0), expected: 0b01 };
+        let unique_is_card = unique != "printing" && unique != "artwork";
+        let (plane, mut residual) = split_planes(f, bounds, words, unique_is_card);
+        if unique_is_card {
+            assert!(plane.is_some(), "a bare Legality leaf must still fully plane-consume for unique=card");
+            assert!(matches!(residual, FilterExpr::True), "split_planes must leave a bare True residual for unique=card");
+        } else {
+            assert!(plane.is_none(), "unique=printing/artwork must decline the fold, not just patch around it");
+            assert!(matches!(residual, FilterExpr::Legality { .. }), "the original Legality node must survive for per-printing verification");
+        }
+        run_query(
+            &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+            &mut residual, plane.as_ref(), unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
+        )
+    };
+
+    let (total, page) = run_mode("printing");
+    assert_eq!(total, 1, "only the one legal printing may match, even though the plane says the card matches");
+    assert_eq!(u128::from(page[0].1.scryfall_id), 2);
+
+    let (total, _) = run_mode("card");
+    assert_eq!(total, 1, "unique=card only needs the existence fact the plane already proves");
+}
+
+/// format:A AND format:B (two distinct formats) can't be answered by ANDing
+/// independent existence-projection planes -- ∃p: legal_A(p) ∧ legal_B(p) is
+/// not the same as (∃p: legal_A(p)) ∧ (∃p: legal_B(p)); a card can have
+/// different witness printings for each side. compile_plane must decline this
+/// shape and shared-format-both-polarities alike, while Or of two distinct
+/// formats has no such problem and does compile (∃ distributes over ∨).
+#[test]
+fn legality_and_of_two_formats_declines_but_or_compiles() {
+    let data = legal_plane_fixture();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let bounds = &archived.indexes.planes;
+    let words = &archived.indexes.oracle_trigram.words;
+
+    let a = || FilterExpr::Legality { shift: Some(0), expected: 0b01 };
+    let b = || FilterExpr::Legality { shift: Some(2), expected: 0b01 };
+
+    assert!(
+        compile_plane(&FilterExpr::And(vec![a(), b()]), bounds, words).is_none(),
+        "two distinct formats ANDed must decline (shared-witness)"
+    );
+    assert!(
+        compile_plane(&FilterExpr::Or(vec![a(), b()]), bounds, words).is_some(),
+        "OR of two formats has no shared-witness problem and must compile"
+    );
+    assert!(
+        compile_plane(&FilterExpr::And(vec![a(), FilterExpr::Not(Box::new(a()))]), bounds, words).is_none(),
+        "format:A AND -format:A (same format, both polarities) is the same contradiction-prone shape and must also decline"
+    );
+}
+
+/// The shared-witness decline's fallback must still be *correct*, not just
+/// declined: a card legal in A via one printing and legal in B via a
+/// different printing (no single printing satisfies both) is the trap in
+/// action -- legal_exists(A) AND legal_exists(B) would wrongly say true.
+/// Routed through the real split_planes + run_query pipeline.
+#[test]
+fn legality_shared_witness_and_falls_back_to_correct_result() {
+    let mut vocab = VocabInterner::new();
+    let card = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
+    let mut data = store_of(vec![card], &[2], vocab);
+    data.printings[0].card_legalities = 0b01; // legal in A (shift 0) only
+    data.printings[1].card_legalities = 0b01 << 2; // legal in B (shift 2) only
+    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let bounds = &archived.indexes.planes;
+    let words = &archived.indexes.oracle_trigram.words;
+
+    let and_both = FilterExpr::And(vec![
+        FilterExpr::Legality { shift: Some(0), expected: 0b01 },
+        FilterExpr::Legality { shift: Some(2), expected: 0b01 },
+    ]);
+    let (plane, mut residual) = split_planes(and_both, bounds, words, true);
+    assert!(plane.is_none(), "shared-witness AND must not partially promote either leaf into the plane");
+    assert!(matches!(residual, FilterExpr::And(_)), "both legality children must remain in the residual");
+
+    let (total, _) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut residual, plane.as_ref(), "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+    );
+    assert_eq!(total, 0, "no single printing is legal in both A and B at once");
+}
+
+/// -(format:A AND t:creature): Not wrapping a compound needs De Morgan pushed
+/// to compile time so the Not lands on the Legality leaf directly (swapping
+/// to illegal_exists), never as a bit-complement of the AND's compiled plane.
+/// Demonstrated against a card divergent in A: the positive AND is true for
+/// it (its legal-in-A printing is also a creature), so a naive complement
+/// would wrongly exclude it -- but the card's *other*, not-legal-in-A
+/// printing separately satisfies the negation, so the correct answer
+/// includes it.
+#[test]
+fn legality_de_morgan_not_of_compound() {
+    let mut vocab = VocabInterner::new();
+    let card = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
+    let mut data = store_of(vec![card], &[2], vocab);
+    data.printings[0].card_legalities = 0b01; // legal in A
+    data.printings[1].card_legalities = 0; // not legal in A
+    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let bounds = &archived.indexes.planes;
+    let words = &archived.indexes.oracle_trigram.words;
+
+    let a = || FilterExpr::Legality { shift: Some(0), expected: 0b01 };
+    let creature = || FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
+
+    let and_pe = compile_plane(&FilterExpr::And(vec![a(), creature()]), bounds, words)
+        .expect("format:A AND t:creature must compile (one format, no shared-witness issue)");
+    let mut and_bits: Vec<u64> = Vec::new();
+    eval_planes(&and_pe, &archived.indexes.planes, &mut and_bits);
+    assert!(bitmap_contains(&and_bits, 0), "printing0 is legal in A and a creature, so the positive AND is true for card 0");
+
+    let not_and = FilterExpr::Not(Box::new(FilterExpr::And(vec![a(), creature()])));
+    let pe = compile_plane(&not_and, bounds, words).expect("-(format:A AND t:creature) must still compile via De Morgan");
+    let mut bits: Vec<u64> = Vec::new();
+    eval_planes(&pe, &archived.indexes.planes, &mut bits);
+    assert!(bitmap_contains(&bits, 0), "card has a not-legal-in-A printing, so it satisfies the negation despite the positive AND being true");
 }
 
 #[test]
@@ -1506,7 +1705,7 @@ fn popcount_skip_tie_breaking_preserves_group_order_both_directions() {
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
     let creature = FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
-    let (plane, mut residual) = split_planes(creature, &archived.indexes.planes, &archived.indexes.oracle_trigram.words);
+    let (plane, mut residual) = split_planes(creature, &archived.indexes.planes, &archived.indexes.oracle_trigram.words, true);
     assert!(matches!(residual, FilterExpr::True), "t:creature must fully plane-consume");
 
     let mut run = |direction: &str| {
@@ -1544,7 +1743,7 @@ fn popcount_skip_offset_lands_inside_tied_group() {
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
     let creature = FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
-    let (plane, mut residual) = split_planes(creature, &archived.indexes.planes, &archived.indexes.oracle_trigram.words);
+    let (plane, mut residual) = split_planes(creature, &archived.indexes.planes, &archived.indexes.oracle_trigram.words, true);
 
     // Full ascending order is [card3, card1, card0, card2, card4] (oracle ids
     // [4,2,1,3,5]); offset=2 must skip card3 and card1, landing on card0.
@@ -1577,7 +1776,7 @@ fn popcount_skip_matches_non_popcount_path() {
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
     let creature = FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
-    let (plane, mut residual_true) = split_planes(creature, &archived.indexes.planes, &archived.indexes.oracle_trigram.words);
+    let (plane, mut residual_true) = split_planes(creature, &archived.indexes.planes, &archived.indexes.oracle_trigram.words, true);
     assert!(matches!(residual_true, FilterExpr::True));
 
     // Popcount path: plane present, residual True.
@@ -2048,33 +2247,33 @@ fn split_planes_composition_rules() {
     let text = || FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: "draw".to_string() };
 
     // And(plane, plane, text): planes consumed, the lone leftover unwraps.
-    let (pe, residual) = split_planes(FilterExpr::And(vec![green(), creature(), text()]), bounds, words);
+    let (pe, residual) = split_planes(FilterExpr::And(vec![green(), creature(), text()]), bounds, words, true);
     assert!(pe.is_some());
     assert!(matches!(residual, FilterExpr::TextContains { .. }));
 
     // Fully plane-expressible tree is consumed whole.
-    let (pe, residual) = split_planes(FilterExpr::And(vec![green(), creature()]), bounds, words);
+    let (pe, residual) = split_planes(FilterExpr::And(vec![green(), creature()]), bounds, words, true);
     assert!(pe.is_some());
     assert!(matches!(residual, FilterExpr::True));
-    let (pe, residual) = split_planes(FilterExpr::Or(vec![green(), creature()]), bounds, words);
+    let (pe, residual) = split_planes(FilterExpr::Or(vec![green(), creature()]), bounds, words, true);
     assert!(pe.is_some());
     assert!(matches!(residual, FilterExpr::True));
 
     // Or mixing plane and non-plane children stays entirely residual:
     // mask ∨ residual is not a narrowing mask.
-    let (pe, residual) = split_planes(FilterExpr::Or(vec![green(), text()]), bounds, words);
+    let (pe, residual) = split_planes(FilterExpr::Or(vec![green(), text()]), bounds, words, true);
     assert!(pe.is_none());
     assert!(matches!(residual, FilterExpr::Or(ref v) if v.len() == 2));
 
     // Produced mana is plane-expressible (docs/issues/engine-produces-planes.md):
     // same card-level, always-known bitmask shape as Colors/ColorIdentity.
     let produces = FilterExpr::ColorCmp { field: ColorField::ProducedMana, op: CmpOp::Ge, mask: 16 };
-    let (pe, residual) = split_planes(produces, bounds, words);
+    let (pe, residual) = split_planes(produces, bounds, words, true);
     assert!(pe.is_some());
     assert!(matches!(residual, FilterExpr::True));
 
     // Bare True keeps the range-scan path (no all-ones bitmap materialization).
-    let (pe, residual) = split_planes(FilterExpr::True, bounds, words);
+    let (pe, residual) = split_planes(FilterExpr::True, bounds, words, true);
     assert!(pe.is_none());
     assert!(matches!(residual, FilterExpr::True));
 }
@@ -2111,7 +2310,7 @@ fn run_query_plane_path_parity() {
                 &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
                 &mut plain, None, unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
             );
-            let (pe, mut residual) = split_planes(make(), &archived.indexes.planes, &archived.indexes.oracle_trigram.words);
+            let (pe, mut residual) = split_planes(make(), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, true);
             let (t1, p1) = run_query(
                 &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
                 &mut residual, pe.as_ref(), unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
@@ -2328,7 +2527,7 @@ fn run_query_numeric_plane_path_parity() {
                 &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
                 &mut plain, None, unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
             );
-            let (pe, mut residual) = split_planes(make(), &archived.indexes.planes, &archived.indexes.oracle_trigram.words);
+            let (pe, mut residual) = split_planes(make(), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, true);
             let (t1, p1) = run_query(
                 &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
                 &mut residual, pe.as_ref(), unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
@@ -2353,7 +2552,7 @@ fn numeric_plane_enables_all_match_promotion() {
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
     let cmc_le12 = FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Cmc), op: CmpOp::Le, rhs: NumExpr::Const(12.0) };
-    let (pe, residual) = split_planes(cmc_le12, &archived.indexes.planes, &archived.indexes.oracle_trigram.words);
+    let (pe, residual) = split_planes(cmc_le12, &archived.indexes.planes, &archived.indexes.oracle_trigram.words, true);
     assert!(pe.is_some(), "cmc<=12 must plane-compile");
     assert!(matches!(residual, FilterExpr::True), "cmc<=12 must fully consume: no residual card_pass needed");
 }

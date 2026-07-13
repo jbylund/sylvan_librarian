@@ -2354,33 +2354,27 @@ fn and_bits_into(acc: &mut [u64], other: &[u64]) {
     }
 }
 
-/// Card-space candidate mask for one format's `legal_x OR divergent` (or,
-/// when `negate`, `NOT(legal_x) OR divergent`) — always a superset of the true
-/// match set. `legal_x` (PLANE_LEGAL) is exact only for non-divergent cards
-/// (see planes.rs), so every divergent card is unconditionally included
-/// regardless of its own canonical status, leaving the existing
-/// card_pass/residual walk (unchanged, PrintingDep and all) to resolve it
-/// exactly. See docs/issues/engine-legality-bitplanes.md.
+/// Card-space candidate mask for one format's legality check --
+/// (docs/issues/engine-legality-divergent-carveout.md) exact for every card,
+/// including divergent ones: reads `PLANE_LEGAL_EXISTS` directly for the
+/// positive case or `PLANE_LEGAL_ILLEGAL` for the negated case, never a
+/// bit-complement of the other (that would compute `∀p: ¬legal(p)`, wrong --
+/// a divergent card can satisfy both `∃p: legal(p)` and `∃p: ¬legal(p)` at
+/// once). Exact as a *narrowing* set (no divergent-postings OR needed
+/// anymore -- `legal_divergent` is unchanged and still used by `filter.rs`'s
+/// per-printing `Legality` evaluation, just not here), but callers still
+/// report `Narrowed::loose`: existence-for-some-printing isn't the
+/// true-for-every-printing fact `tight` requires (see `narrow_rec`'s
+/// `Legality` arms and `Narrowed`'s doc).
 fn legal_candidate_bits(indexes: &Archived<CardIndexes>, n_cards: usize, shift: u8, negate: bool) -> Option<Vec<u64>> {
     if u32::from(indexes.planes.n_cards) as usize != n_cards || n_cards == 0 {
         return None;
     }
     let wpp = words_per_plane(n_cards);
-    let legal_plane = PLANE_LEGAL + shift as usize / 2;
+    let base = if negate { PLANE_LEGAL_ILLEGAL } else { PLANE_LEGAL_EXISTS };
+    let legal_plane = base + shift as usize / 2;
     let words = &indexes.planes.words;
-    let mut bits: Vec<u64> = words[legal_plane * wpp..(legal_plane + 1) * wpp].iter().map(|w| u64::from(*w)).collect();
-    if negate {
-        complement_bits(&mut bits, n_cards);
-    }
-    // The divergent set is a fixed, tiny (~556-card) postings list, not a
-    // plane (see build_divergent_ids) — scattered directly into the mask
-    // rather than intersected through the general Candidates machinery,
-    // since it's always this same list, never query-dependent.
-    for &cid in indexes.legal_divergent.iter() {
-        let cid = u16::from(cid) as usize;
-        bits[cid / 64] |= 1u64 << (cid % 64);
-    }
-    Some(bits)
+    Some(words[legal_plane * wpp..(legal_plane + 1) * wpp].iter().map(|w| u64::from(*w)).collect())
 }
 
 /// Project a printing-space bitmap up to card space. Printings of card i are
@@ -2751,7 +2745,17 @@ fn narrow_rec(
         if let Some(pe) = compile_plane(filter, &indexes.planes, &indexes.oracle_trigram.words) {
             let mut bits: Vec<u64> = Vec::new();
             eval_planes(&pe, &indexes.planes, &mut bits);
-            return Narrowed::tight(Candidates::CardBits(bits));
+            // Legality's planes are existence projections, not true-for-
+            // every-printing facts (docs/issues/engine-legality-divergent-
+            // carveout.md) -- `tight`'s contract needs the latter (see
+            // `Narrowed`'s doc and the dedicated `Legality` arms below), so a
+            // compiled expression touching them can only narrow loosely here,
+            // same as if it had fallen through to those arms directly.
+            return if plane_expr_is_existential(&pe) {
+                Narrowed::loose(Candidates::CardBits(bits))
+            } else {
+                Narrowed::tight(Candidates::CardBits(bits))
+            };
         }
     }
 
@@ -2905,19 +2909,32 @@ fn narrow_rec(
             Narrowed::loose(Candidates::CardBits(bits))
         }
 
-        // f:x / format:x — narrowing only (never exact-consumed via
-        // compile_plane): Legality can return Tri::PrintingDep for divergent
-        // cards, which compile_plane's two-valued-only rule already excludes.
-        // banned:/restricted: (expected != LEGALITY_LEGAL) and formats absent
-        // from loaded data (shift: None) fall through unindexed, unchanged.
+        // f:x / format:x (docs/issues/engine-legality-divergent-carveout.md):
+        // legal_candidate_bits reads PLANE_LEGAL_EXISTS directly, so this is
+        // exact card-space narrowing -- but still reported `loose`, not
+        // `tight`: `tight` means true for *every* printing (see the Narrowed
+        // struct's doc), and legality genuinely varies printing-to-printing,
+        // so "the card has some legal printing" doesn't satisfy that
+        // contract, same reason -r:x below is loose despite rarity's plane
+        // also being exact. compile_plane separately exact-consumes this
+        // shape for unique=card (see planes.rs, plane_expr_is_existential);
+        // this arm still matters for mixed filters compile_plane declines
+        // (the shared-witness 2+-distinct-format case) and for unique=printing/
+        // artwork, where the residual card_pass verification this `loose`
+        // narrowing feeds into is required for correctness. banned:/
+        // restricted: (expected != LEGALITY_LEGAL) and formats absent from
+        // loaded data (shift: None) fall through unindexed, unchanged.
         FilterExpr::Legality { shift: Some(shift), expected } if *expected == LEGALITY_LEGAL => {
             Narrowed::loose(Candidates::CardBits(legal_candidate_bits(indexes, n_cards, *shift, false)?))
         }
 
         // -f:x — matched as its own leaf shape rather than falling through to
-        // the generic Not-complement below, which requires a `tight` child;
-        // legal_candidate_bits has false positives among divergent cards by
-        // construction, so the generic path would (correctly) refuse it.
+        // the generic Not-complement below (which requires a `tight` child
+        // and wouldn't apply here regardless): bit-complementing the positive
+        // plane would compute `∀p: ¬legal(p)` (wrong for a divergent card,
+        // which can satisfy both `∃p: legal(p)` and `∃p: ¬legal(p)` at once)
+        // instead of reading PLANE_LEGAL_ILLEGAL directly, which is what this
+        // arm does.
         FilterExpr::Not(inner)
             if matches!(inner.as_ref(), FilterExpr::Legality { shift: Some(_), expected } if *expected == LEGALITY_LEGAL) =>
         {
@@ -3589,7 +3606,21 @@ fn run_query<'a>(
     // candidate is already known to match, so the per-candidate card_pass
     // calls below and in run_query_streamed become redundant re-verification
     // of what the narrowing already established.
-    let all_match_known = matches!(filter, FilterExpr::True) || residual_exact;
+    //
+    // A plane-driven True residual needs one more check first: legality's
+    // planes (docs/issues/engine-legality-divergent-carveout.md) are
+    // existence projections ("*some* printing matches"), unlike every other
+    // plane (card-invariant fields, true or false alike for every printing
+    // of a card). For unique=card that's exactly the semantics wanted --
+    // Mode::Card only needs *a* matching printing to exist, same as Step 2
+    // above. But Mode::Printing/Artwork enumerate individual printings, and
+    // "the card has some legal printing" does not mean "this printing is
+    // legal" -- card_pass must still run per printing there whenever the
+    // plane touched legality, so this only trusts a True residual for those
+    // modes when the plane is existential-free (plane_expr_is_existential).
+    let plane_true_for_mode =
+        plane.is_none_or(|expr| matches!(mode, Mode::Card) || !plane_expr_is_existential(expr));
+    let all_match_known = (matches!(filter, FilterExpr::True) && plane_true_for_mode) || residual_exact;
 
     // The plane bitmap is the exact card-level truth of the plane-consumed
     // subexpression (split_planes), so it composes with the residual's
@@ -4616,7 +4647,11 @@ impl QueryEngine {
         // rejects pre-plane archives, this is defense in depth.
         let (plane_expr, mut filter_expr) =
             if u32::from(data.indexes.planes.n_cards) as usize == data.cards.len() && !data.cards.is_empty() {
-                split_planes(filter_expr, &data.indexes.planes, &data.indexes.oracle_trigram.words)
+                // Matches run_query's own unique -> Mode mapping exactly
+                // (anything other than "artwork"/"printing" is Mode::Card,
+                // not just the literal string "card") -- see split_planes's
+                // unique_is_card doc.
+                split_planes(filter_expr, &data.indexes.planes, &data.indexes.oracle_trigram.words, !matches!(unique, "artwork" | "printing"))
             } else {
                 (None, filter_expr)
             };
