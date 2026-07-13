@@ -2133,7 +2133,7 @@ fn rarity_candidates(idx: &Archived<RarityIndex>, op: CmpOp, val: f64) -> Option
 /// docs/issues/engine-rarity-planes.md), OR'd together directly from the
 /// plane words; buckets 4-5 (special/bonus) have no plane, so whenever the
 /// comparison also selects one of those two, their RarityIndex postings are
-/// scattered directly into the same mask (same shape as legal_candidate_bits's
+/// scattered directly into the same mask (same shape as legality_candidate_bits's
 /// divergent-set scatter, just op-dependent instead of a fixed list). Loose,
 /// same as rarity_candidates: rarity is PrintingDep at card level, so this
 /// only narrows candidates — card_pass/printing-level residual eval still
@@ -2354,24 +2354,26 @@ fn and_bits_into(acc: &mut [u64], other: &[u64]) {
     }
 }
 
-/// Card-space candidate mask for one format's legality check --
-/// (docs/issues/engine-legality-divergent-carveout.md) exact for every card,
-/// including divergent ones: reads `PLANE_LEGAL_EXISTS` directly for the
-/// positive case or `PLANE_LEGAL_ILLEGAL` for the negated case, never a
-/// bit-complement of the other (that would compute `∀p: ¬legal(p)`, wrong --
-/// a divergent card can satisfy both `∃p: legal(p)` and `∃p: ¬legal(p)` at
-/// once). Exact as a *narrowing* set (no divergent-postings OR needed
-/// anymore -- `legal_divergent` is unchanged and still used by `filter.rs`'s
-/// per-printing `Legality` evaluation, just not here), but callers still
-/// report `Narrowed::loose`: existence-for-some-printing isn't the
-/// true-for-every-printing fact `tight` requires (see `narrow_rec`'s
-/// `Legality` arms and `Narrowed`'s doc).
-fn legal_candidate_bits(indexes: &Archived<CardIndexes>, n_cards: usize, shift: u8, negate: bool) -> Option<Vec<u64>> {
+/// Card-space candidate mask for one (format, status) legality check --
+/// (docs/issues/engine-legality-divergent-carveout.md, generalized to
+/// banned/restricted by #678, see docs/issues/engine-legality-banned-
+/// restricted-planes.md) exact for every card, including divergent ones:
+/// reads the status's `_EXISTS` plane directly for the positive case or its
+/// `_ABSENT`/`_ILLEGAL` plane for the negated case, never a bit-complement of
+/// the other (that would compute `∀p: ¬status(p)`, wrong -- a divergent card
+/// can satisfy both `∃p: status(p)` and `∃p: ¬status(p)` at once). Exact as a
+/// *narrowing* set (no divergent-postings OR needed anymore -- `legal_divergent`
+/// is unchanged and still used by `filter.rs`'s per-printing `Legality`
+/// evaluation, just not here), but callers still report `Narrowed::loose`:
+/// existence-for-some-printing isn't the true-for-every-printing fact `tight`
+/// requires (see `narrow_rec`'s `Legality` arms and `Narrowed`'s doc).
+fn legality_candidate_bits(indexes: &Archived<CardIndexes>, n_cards: usize, shift: u8, expected: u64, negate: bool) -> Option<Vec<u64>> {
     if u32::from(indexes.planes.n_cards) as usize != n_cards || n_cards == 0 {
         return None;
     }
+    let (exists_base, absent_base) = status_plane_bases(expected)?;
     let wpp = words_per_plane(n_cards);
-    let base = if negate { PLANE_LEGAL_ILLEGAL } else { PLANE_LEGAL_EXISTS };
+    let base = if negate { absent_base } else { exists_base };
     let legal_plane = base + shift as usize / 2;
     let words = &indexes.planes.words;
     Some(words[legal_plane * wpp..(legal_plane + 1) * wpp].iter().map(|w| u64::from(*w)).collect())
@@ -2909,37 +2911,40 @@ fn narrow_rec(
             Narrowed::loose(Candidates::CardBits(bits))
         }
 
-        // f:x / format:x (docs/issues/engine-legality-divergent-carveout.md):
-        // legal_candidate_bits reads PLANE_LEGAL_EXISTS directly, so this is
-        // exact card-space narrowing -- but still reported `loose`, not
-        // `tight`: `tight` means true for *every* printing (see the Narrowed
-        // struct's doc), and legality genuinely varies printing-to-printing,
-        // so "the card has some legal printing" doesn't satisfy that
-        // contract, same reason -r:x below is loose despite rarity's plane
-        // also being exact. compile_plane separately exact-consumes this
-        // shape for unique=card (see planes.rs, plane_expr_is_existential);
-        // this arm still matters for mixed filters compile_plane declines
-        // (the shared-witness 2+-distinct-format case) and for unique=printing/
-        // artwork, where the residual card_pass verification this `loose`
-        // narrowing feeds into is required for correctness. banned:/
-        // restricted: (expected != LEGALITY_LEGAL) and formats absent from
-        // loaded data (shift: None) fall through unindexed, unchanged.
-        FilterExpr::Legality { shift: Some(shift), expected } if *expected == LEGALITY_LEGAL => {
-            Narrowed::loose(Candidates::CardBits(legal_candidate_bits(indexes, n_cards, *shift, false)?))
+        // f:x / format:x / banned:x / restricted:x (docs/issues/
+        // engine-legality-divergent-carveout.md, generalized by #678 -- see
+        // docs/issues/engine-legality-banned-restricted-planes.md):
+        // legality_candidate_bits reads the status's `_EXISTS` plane
+        // directly, so this is exact card-space narrowing -- but still
+        // reported `loose`, not `tight`: `tight` means true for *every*
+        // printing (see the Narrowed struct's doc), and legality genuinely
+        // varies printing-to-printing, so "the card has some printing with
+        // this status" doesn't satisfy that contract, same reason -r:x below
+        // is loose despite rarity's plane also being exact. compile_plane
+        // separately exact-consumes this shape for unique=card (see
+        // planes.rs, plane_expr_is_existential); this arm still matters for
+        // mixed filters compile_plane declines (the shared-witness
+        // 2+-distinct-fact case) and for unique=printing/artwork, where the
+        // residual card_pass verification this `loose` narrowing feeds into
+        // is required for correctness. Formats absent from loaded data
+        // (shift: None) fall through unindexed, unchanged.
+        FilterExpr::Legality { shift: Some(shift), expected } if status_plane_bases(*expected).is_some() => {
+            Narrowed::loose(Candidates::CardBits(legality_candidate_bits(indexes, n_cards, *shift, *expected, false)?))
         }
 
-        // -f:x — matched as its own leaf shape rather than falling through to
-        // the generic Not-complement below (which requires a `tight` child
-        // and wouldn't apply here regardless): bit-complementing the positive
-        // plane would compute `∀p: ¬legal(p)` (wrong for a divergent card,
-        // which can satisfy both `∃p: legal(p)` and `∃p: ¬legal(p)` at once)
-        // instead of reading PLANE_LEGAL_ILLEGAL directly, which is what this
-        // arm does.
+        // -f:x / -banned:x / -restricted:x — matched as its own leaf shape
+        // rather than falling through to the generic Not-complement below
+        // (which requires a `tight` child and wouldn't apply here
+        // regardless): bit-complementing the positive plane would compute
+        // `∀p: ¬status(p)` (wrong for a divergent card, which can satisfy
+        // both `∃p: status(p)` and `∃p: ¬status(p)` at once) instead of
+        // reading the status's `_ABSENT`/`_ILLEGAL` plane directly, which is
+        // what this arm does.
         FilterExpr::Not(inner)
-            if matches!(inner.as_ref(), FilterExpr::Legality { shift: Some(_), expected } if *expected == LEGALITY_LEGAL) =>
+            if matches!(inner.as_ref(), FilterExpr::Legality { shift: Some(_), expected } if status_plane_bases(*expected).is_some()) =>
         {
-            let FilterExpr::Legality { shift: Some(shift), .. } = inner.as_ref() else { unreachable!() };
-            Narrowed::loose(Candidates::CardBits(legal_candidate_bits(indexes, n_cards, *shift, true)?))
+            let FilterExpr::Legality { shift: Some(shift), expected } = inner.as_ref() else { unreachable!() };
+            Narrowed::loose(Candidates::CardBits(legality_candidate_bits(indexes, n_cards, *shift, *expected, true)?))
         }
 
         // -r:x / -rarity:x — same reason as -f:x above: rarity's narrowing is
