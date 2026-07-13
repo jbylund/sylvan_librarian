@@ -49,12 +49,27 @@ CONFIGS: list[tuple[str, str, str, str, str, int]] = [
     # the most common real usage pattern for this engine.
     ("promoted-compound", "format:modern c:g t:creature", "card", "edhrec", "default", 0),
     # Deep pagination on the promoted shapes -- popcount-skip's specific advantage (#634).
-    ("deep-offset", "format:modern", "card", "edhrec", "default", 5000),
-    ("deep-offset", "format:modern", "card", "edhrec", "default", 15000),
-    ("deep-offset", "format:modern id:g t:creature", "card", "edhrec", "default", 5000),
-    ("deep-offset", "format:modern t:creature", "card", "edhrec", "default", 15000),
-    ("deep-offset", "format:modern c:g t:creature", "card", "edhrec", "default", 5000),
-    ("deep-offset", "format:modern c:g t:creature", "card", "edhrec", "default", 15000),
+    # Offsets must stay *below* each query's own total or run_query_streamed_popcount's
+    # own "page_offset >= total" early return (an empty page, no scatter/skip/emit at
+    # all) kicks in instead -- a real, correct code path, but a fundamentally different
+    # and much cheaper one than genuine deep pagination, so mixing the two under one
+    # "deep-offset" label is misleading (a prior version of this file did exactly that
+    # for format:modern id:g t:creature/format:modern t:creature/format:modern c:g
+    # t:creature, whose totals -- 2539/12251/2928 -- are all below the 5000/15000
+    # offsets that were being used for them).
+    ("deep-offset", "format:modern", "card", "edhrec", "default", 5000),  # total 22264
+    ("deep-offset", "format:modern", "card", "edhrec", "default", 15000),  # total 22264
+    ("deep-offset", "format:modern id:g t:creature", "card", "edhrec", "default", 2000),  # total 2539
+    ("deep-offset", "format:modern t:creature", "card", "edhrec", "default", 5000),  # total 12251
+    ("deep-offset", "format:modern t:creature", "card", "edhrec", "default", 10000),  # total 12251
+    ("deep-offset", "format:modern c:g t:creature", "card", "edhrec", "default", 2000),  # total 2928
+    ("deep-offset", "format:modern c:g t:creature", "card", "edhrec", "default", 2500),  # total 2928
+    # Offset *past* a query's own total -- the early-return path above, correct and
+    # deliberately cheap, but not "deep pagination stays flat" the way the group above
+    # is. Kept as its own labeled group so the two aren't conflated in results.
+    ("offset-beyond-total", "format:modern id:g t:creature", "card", "edhrec", "default", 5000),  # total 2539
+    ("offset-beyond-total", "format:modern t:creature", "card", "edhrec", "default", 15000),  # total 12251
+    ("offset-beyond-total", "format:modern c:g t:creature", "card", "edhrec", "default", 5000),  # total 2928
     # unique=printing/artwork: Step 2 stays unique=card-only pending #656 -- must be unaffected.
     ("uniques", "format:modern t:creature", "printing", "edhrec", "default", 0),
     ("uniques", "format:modern t:creature", "artwork", "edhrec", "default", 0),

@@ -371,15 +371,26 @@ given in μs rather than ms:
 
 | config | main | branch | speedup |
 |---|---|---|---|
-| `format:modern` | 190μs | 65μs | 2.9x |
-| `format:pioneer` | 159μs | 61μs | 2.6x |
-| `-format:modern` | 154μs | 57μs | 2.7x |
-| `format:modern or format:pioneer` | 207μs | 71μs | 2.9x |
-| `format:modern c:g t:creature` (cited real usage shape) | 83μs | 67μs | 1.2x |
-| `format:modern` @ offset 15000 | 203μs | 68μs | 3.0x (flat with offset — Step 2) |
-| `format:modern t:creature` @ offset 15000 | 85μs | 7μs | 12x |
-| `format:modern t:creature`, `unique=printing`/`artwork` | 140/143μs | 131/135μs | unaffected (correctly not promoted) |
-| `banned:modern`/`restricted:vintage`/`c:g` (controls) | 203/198/58μs | 201/199/60μs | unaffected (re-verified post-conjunction-fix) |
+| `format:modern` | 194μs | 66μs | 2.9x |
+| `format:pioneer` | 164μs | 64μs | 2.6x |
+| `-format:modern` | 158μs | 57μs | 2.8x |
+| `format:modern or format:pioneer` | 210μs | 70μs | 3.0x |
+| `format:modern t:creature` | 142μs | 68μs | 2.1x |
+| `format:modern c:g t:creature` (cited real usage shape) | 84μs | 66μs | 1.3x |
+| `format:modern` @ offset 15000 (total 22264 — genuine deep page) | 208μs | 69μs | 3.0x (flat with offset — Step 2) |
+| `format:modern t:creature` @ offset 10000 (total 12251 — genuine deep page; compare to the plain offset-0 row above: flat both sides) | 158μs | 67μs | 2.4x |
+| `format:modern t:creature` @ offset 15000 (**past** its own total of 12251) | 89μs | 7μs | not comparable to the row above — an offset past the total hits a different, much cheaper code path (empty page, no scatter/skip/emit), not deep pagination |
+| `format:modern t:creature`, `unique=printing`/`artwork` | 143/147μs | 137/136μs | unaffected (correctly not promoted) |
+| `banned:modern`/`restricted:vintage`/`c:g` (controls) | 204/199/60μs | 200/197/59μs | unaffected (re-verified post-conjunction-fix) |
+
+An earlier version of this table compared `format:modern t:creature` at offset 15000 against other
+rows at offset 0 and made the former look implausibly fast (7μs vs the 60-70μs range everywhere else)
+— offset 15000 exceeds that query's own total of 12251, so it was measuring
+`run_query_streamed_popcount`'s early-return-on-empty-page path (`page_offset >= total`), not deep
+pagination. `scripts/bench_legality_divergent.py`'s `deep-offset` configs are now chosen to stay
+within each query's own total (2 of the original 6 rows didn't — a real gap in the benchmark, not the
+engine); the past-total case is kept as its own separately-labeled `offset-beyond-total` group so the
+two shapes are never conflated again.
 
 Total-row-count parity: 0 mismatches across all 24 targeted configs and a 520-query broad survey
 (`scripts/survey_queries.py --seed 667`) run against both builds. Re-measured after the row-selection
