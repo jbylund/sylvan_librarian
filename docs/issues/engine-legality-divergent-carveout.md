@@ -329,8 +329,11 @@ are for the one thing they're still needed for: `filter.rs`'s per-printing `Lega
    produces correct results (not just a decline check); `narrow_rec`'s exact-but-still-`loose`
    `Legality` arms; the mode-aware `all_match` fix exercised through the real `split_planes`/
    `run_query` pipeline (not just direct `narrow_rec`/`run_query`-with-`plane=None` calls, which would
-   have missed it); the De Morgan `Not`-of-compound case. A regression test that
-   `contains_unnegatable_numeric`'s existing cmc/power/toughness guard is untouched is still open.
+   have missed it); the De Morgan `Not`-of-compound case; a regression test
+   (`legality_not_still_declines_with_unnegatable_numeric_sibling`, added after a second reviewer
+   flagged this doc's own self-acknowledged gap) that `contains_unnegatable_numeric`'s existing
+   cmc/power/toughness guard still declines correctly when composed with a legality leaf under `Not`,
+   through both `compile_plane_neg`'s `And` and `Or` arms.
    **Gap found in review**: the existing divergent-card test asserted `unique=card`'s *count* but
    discarded the returned page (`let (total, _) = run_mode("card")`) — it never checked *which*
    printing came back, which is exactly where the row-selection bug (below) was hiding. Total-row-count

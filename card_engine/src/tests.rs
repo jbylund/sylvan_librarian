@@ -1200,6 +1200,55 @@ fn legality_de_morgan_not_of_compound() {
     assert!(bitmap_contains(&bits, 0), "card has a not-legal-in-A printing, so it satisfies the negation despite the positive AND being true");
 }
 
+/// Regression closing a gap this design doc's own Acceptance section left
+/// open (and a second reviewer flagged): `contains_unnegatable_numeric`'s
+/// pre-existing guard (declining `Not` entirely when a null-valued numeric
+/// field like power/toughness is anywhere inside, since `Tri::Null` never
+/// flips to `True`) must still fire correctly now that `compile_plane_neg`
+/// has a Legality-aware `And`/`Or` arm alongside it -- composing a legality
+/// leaf with an unnegatable numeric leaf under `Not` must decline exactly
+/// like composing it with any other card-invariant leaf already did
+/// (`numeric_plane_declines_not_over_numeric_cmp` covers the pre-existing,
+/// Legality-free shapes; this covers the new interaction specifically).
+#[test]
+fn legality_not_still_declines_with_unnegatable_numeric_sibling() {
+    let data = legal_plane_fixture();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let bounds = &archived.indexes.planes;
+    let words = &archived.indexes.oracle_trigram.words;
+
+    let a = || FilterExpr::Legality { shift: Some(0), expected: 0b01 };
+    let power_gt3 = || FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Power), op: CmpOp::Gt, rhs: NumExpr::Const(3.0) };
+
+    // Sanity: the positive compound compiles fine on its own (one format,
+    // no shared-witness issue, and the un-negated numeric comparison is
+    // plane-eligible) -- isolates the failure to the Not/Null interaction.
+    assert!(
+        compile_plane(&FilterExpr::And(vec![a(), power_gt3()]), bounds, words).is_some(),
+        "format:A AND power>3 must compile without a Not present"
+    );
+
+    // Not(And(legality, unnegatable numeric)): the And arm of compile_plane_neg
+    // recurses per child (De Morgan into an Or) -- the numeric child must
+    // still decline via contains_unnegatable_numeric's catch-all check,
+    // collapsing the whole compile to None through the `?` propagation.
+    let not_and = FilterExpr::Not(Box::new(FilterExpr::And(vec![a(), power_gt3()])));
+    assert!(
+        compile_plane(&not_and, bounds, words).is_none(),
+        "-(format:A AND power>3) must decline: Null doesn't flip to True, even with a legality sibling"
+    );
+
+    // Not(Or(legality, unnegatable numeric)): the Or arm goes through
+    // and_of_checked_for_shared_witness, a different code path than And's --
+    // must decline there too, not just in the And arm.
+    let not_or = FilterExpr::Not(Box::new(FilterExpr::Or(vec![a(), power_gt3()])));
+    assert!(
+        compile_plane(&not_or, bounds, words).is_none(),
+        "-(format:A OR power>3) must decline via the Or arm of compile_plane_neg too"
+    );
+}
+
 #[test]
 fn run_query_walk_dedups_and_prefers() {
     // card 0: Creature with 3 printings, card 1: Instant with 1, card 2: Creature with 2.
