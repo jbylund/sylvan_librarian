@@ -3381,10 +3381,22 @@ enum Mode { Card, Artwork, Printing }
 /// Matches this card contributes: 0/1 for Card mode (existence, short-circuit),
 /// passing printings for Printing mode, distinct illustrations with a passing
 /// printing for Artwork mode. `ills` is a reused scratch buffer.
+// #676 review: a legality leaf promoted into `plane` alongside a genuinely
+// printing-dependent residual (DateCmp, ArtistMatch, ...) needs *both*
+// checked against the *same* printing -- `all_match`/`residual_matches` alone
+// only proves the residual holds for some printing, `existential_plane` alone
+// only proves the plane's existential leaf holds for some (possibly
+// different) printing. Neither implies a single printing satisfies both, so
+// `format:A AND date>X` (unique=card) must not count/match unless some
+// printing is *both* legal-in-A and past the cutoff. `existential_plane` is
+// only ever `Some` for `Mode::Card` (see its computation in `run_query`), so
+// `Mode::Printing`/`Artwork` below are unaffected -- their planes, if any,
+// were never folded to begin with when existential (`unique_is_card`).
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn card_match_count(
     card: &AOracleCard,
+    cid: u32,
     printings: &[APrinting],
     start: usize,
     end: usize,
@@ -3393,27 +3405,38 @@ fn card_match_count(
     residual_is_or: bool,
     mode: Mode,
     strings: &AStrings,
+    existential_plane: Option<(&PlaneExpr, &Archived<BitPlanes>)>,
     ills: &mut Vec<u128>,
 ) -> u32 {
+    let satisfies = |pid: usize| {
+        let residual_ok = all_match || FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or);
+        match existential_plane {
+            Some((pe, planes)) => residual_ok && eval_plane_expr_for_printing(pe, planes, cid, &printings[pid]),
+            None => residual_ok,
+        }
+    };
+    // The blind "every printing matches" shortcut only holds when there's no
+    // existential plane to re-verify per printing -- see this function's doc.
+    let blind_all_match = all_match && existential_plane.is_none();
     match mode {
         Mode::Card => {
-            if all_match {
+            if blind_all_match {
                 return u32::from(start < end);
             }
             for pid in start..end {
-                if FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or) {
+                if satisfies(pid) {
                     return 1;
                 }
             }
             0
         }
         Mode::Printing => {
-            if all_match {
+            if blind_all_match {
                 return (end - start) as u32;
             }
             let mut n = 0u32;
             for pid in start..end {
-                if FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or) {
+                if satisfies(pid) {
                     n += 1;
                 }
             }
@@ -3422,7 +3445,7 @@ fn card_match_count(
         Mode::Artwork => {
             ills.clear();
             for pid in start..end {
-                if !all_match && !FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or) {
+                if !satisfies(pid) {
                     continue;
                 }
                 let ill = u128::from(printings[pid].illustration_id);
@@ -3441,13 +3464,16 @@ fn card_match_count(
 /// `existential_plane`: `Some((plane, planes))` iff `mode` is `Card` and the
 /// plane driving `all_match` touched a legality leaf
 /// (docs/issues/engine-legality-divergent-carveout.md "Row selection for
-/// unique=card") — `all_match` there only proves *some* printing matches, not
-/// whichever one prefer-order would pick, so the chosen printing must be
-/// verified against the plane directly instead of trusted blindly. `None`
-/// (the overwhelmingly common case) keeps today's behavior exactly: `Mode`s
-/// other than `Card` never hit this (their planes are never folded this way,
-/// see `unique_is_card`), and a card-invariant `all_match` needs no check
-/// (every printing already agrees).
+/// unique=card") — `all_match`/`residual` there only prove *some* printing
+/// satisfies the residual, not that it's the same printing the plane's
+/// existential leaf is true for, so the chosen printing must satisfy *both*
+/// checked against each other, not either one alone (a legality leaf ANDed
+/// with a genuinely printing-dependent residual like `DateCmp` needs one
+/// printing past the cutoff *and* legal at once — checking only the plane
+/// missed this, caught in #676's review). `None` (the overwhelmingly common
+/// case) keeps today's behavior exactly: `Mode`s other than `Card` never hit
+/// this (their planes are never folded this way, see `unique_is_card`), and a
+/// card-invariant `all_match` needs no check (every printing already agrees).
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn push_card_matches(
@@ -3473,9 +3499,20 @@ fn push_card_matches(
             // Printings are stored in descending default-prefer order, so
             // for the default prefer the first matching printing IS the
             // chosen one — O(1) when the card pass already said True.
-            let satisfies = |pid: usize| match existential_plane {
-                Some((pe, planes)) => eval_plane_expr_for_printing(pe, planes, cid, &printings[pid]),
-                None => all_match || FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or),
+            //
+            // #676 review: when `existential_plane` is `Some`, the residual
+            // check is still required, not replaced -- a legality leaf folded
+            // into `plane` alongside a genuinely printing-dependent residual
+            // (DateCmp, ArtistMatch, ...) needs a printing satisfying *both*
+            // at once (docs/issues/engine-legality-divergent-carveout.md "Row
+            // selection for unique=card"); checking only the plane could pick
+            // a printing that's legal but fails the residual, or vice versa.
+            let satisfies = |pid: usize| {
+                let residual_ok = all_match || FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or);
+                match existential_plane {
+                    Some((pe, planes)) => residual_ok && eval_plane_expr_for_printing(pe, planes, cid, &printings[pid]),
+                    None => residual_ok,
+                }
             };
             let chosen: Option<u32> = if matches!(prefer, Prefer::Default) {
                 (start..end).find(|&pid| satisfies(pid)).map(|pid| pid as u32)
@@ -3773,7 +3810,6 @@ fn run_query<'a>(
 /// `run_query_streamed`'s Step-1-improved-but-not-popcount path — extending
 /// this to non-True residuals is a reasonable fast-follow, not required here.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn run_query_streamed_popcount<'a>(
     cards: &'a [AOracleCard],
     printings: &'a [APrinting],
@@ -3952,7 +3988,10 @@ fn run_query_streamed<'a>(
         let c = if all_match && matches!(mode, Mode::Artwork) && have_group_counts {
             u32::from(u16::from(artwork_groups[cid as usize]))
         } else {
-            card_match_count(card, printings, start, end, all_match, &residual, residual_is_or, mode, strings, &mut ills)
+            card_match_count(
+                card, cid, printings, start, end, all_match, &residual, residual_is_or, mode, strings, existential_plane,
+                &mut ills,
+            )
         };
         counts[cid as usize] = c;
         total += c as usize;

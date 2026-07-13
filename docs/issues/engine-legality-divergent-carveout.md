@@ -223,6 +223,41 @@ satisfies it.
 the existing (correct) per-printing `card_pass` walk over their full candidate set, which was never
 skipping a per-printing check to begin with.
 
+### A third correctness hole: the plane check and the residual check must be conjoined, not either-or
+
+Found in PR review (not by the test suite — `card_engine/src/tests.rs`'s existing compound test only
+covered a legality leaf ANDed with a *card-invariant* sibling, colors/types, never a genuinely
+printing-dependent one). `split_planes`'s `And` arm can promote a single-format legality leaf into
+`plane` while a real, printing-varying predicate stays behind in the residual — `DateCmp`,
+`ArtistMatch`, `FlavorMatch`, printing-level `CollectionCmp`, and anything else that never appears in
+`planes.rs` and so can never itself be plane-compiled. `format:A AND date>20200101` (`unique=card`) is
+the concrete shape: `format:A` promotes to `legal_exists_A`, `date>20200101` stays as the residual.
+
+The first cut of the row-selection fix checked *only* `eval_plane_expr_for_printing` whenever
+`existential_plane` was `Some`, dropping the residual/`all_match` check entirely — so it would happily
+pick a printing that's legal in A but fails the date filter (or, symmetrically, undercount by ignoring
+that the date-satisfying printing isn't legal). Confirmed with a fixture: printing 0 legal-in-A but
+released before the cutoff, printing 1 released after the cutoff but not legal in A — no single
+printing satisfies both, correct answer is 0 matches, buggy code returned 1. `card_match_count` (the
+counting phase inside `run_query_streamed`, untouched by the first cut of this fix) has the mirror
+gap: it only ever consulted `residual_matches`, with no `existential_plane` awareness at all, so the
+*count* itself — not just which row gets shown — was wrong for this shape.
+
+Fix: both checks must be satisfied by the *same* printing, not either one independently —
+`eval_plane_expr_for_printing(...) && (all_match || residual_matches(...))` in both
+`push_card_matches` and (newly) `card_match_count`, which now also takes `cid` and
+`existential_plane`. This is sound because `eval_plane_expr_for_printing` was already exact per
+printing (it wasn't wrong, just incomplete on its own) — conjoining doesn't change its cost profile,
+still bounded by `limit` in `push_card_matches`'s case, and by the candidate set in
+`card_match_count`'s case (same cost that path already paid for the residual check alone; the extra
+plane check per printing is now the same shape of work already being done for the residual, not a
+new order-of-magnitude).
+
+Verified against the real corpus, not just the fixture: 247 oracle_ids in
+`benchmarks/bitplanes/corpus.jsonl` are genuinely this conflict shape for `oldschool` legality +
+release date (some printing legal, some printing past a cutoff, never the same printing) — 0
+violations post-fix, for both `unique=card` and `unique=printing`.
+
 ### A free upgrade to the existing narrowing fallback
 
 `narrow_rec`'s existing `Legality` arm (`legal_candidate_bits`, used whenever a shape declines full
@@ -279,6 +314,13 @@ are for the one thing they're still needed for: `filter.rs`'s per-printing `Lega
    asserting the returned `scryfall_id` is the legal printing, not the preferred one (mirrors the
    existing `unique=printing` assertion, which already caught this for that mode). Additionally
    verified against the real benchmark corpus, not just hand-built fixtures — see Results.
+8. **Conjunction fix (done)**: found in PR review, see "A third correctness hole" above —
+   `eval_plane_expr_for_printing` and the residual check must both hold for the *same* printing, not
+   either independently; `card_match_count` needed the same `existential_plane` awareness the first
+   cut only gave `push_card_matches`. New unit test: legality leaf ANDed with a genuinely
+   printing-dependent `DateCmp` residual, `unique=card`, asserting 0 matches when no single printing
+   satisfies both. Verified against the real corpus's 247 oracle_ids that are exactly this conflict
+   shape — 0 violations post-fix.
 
 ## Results
 

@@ -1057,6 +1057,48 @@ fn legality_compound_and_respects_row_selection_for_unique_card() {
     );
 }
 
+/// Found in #676's review: a legality leaf ANDed with a genuinely
+/// printing-dependent, non-plane-compilable residual (`DateCmp` here --
+/// never appears in `planes.rs`, so it always stays in the residual after
+/// `split_planes`'s partial extraction) needs *both* checked against the
+/// *same* printing. printing 0 is legal in A but released before the cutoff;
+/// printing 1 is released after the cutoff but not legal in A -- no single
+/// printing satisfies both, so `format:A AND date>cutoff` (unique=card) must
+/// match 0 times, not pick either printing on the strength of just one half
+/// of the conjunction.
+#[test]
+fn legality_and_date_residual_must_be_checked_together() {
+    let mut vocab = VocabInterner::new();
+    let card = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
+    let mut data = store_of(vec![card], &[2], vocab);
+    data.printings[0].card_legalities = 0b01; // legal in A, but...
+    data.printings[0].released_at_int = Some(20100101); // ...released before the cutoff
+    data.printings[1].card_legalities = 0; // not legal in A, but...
+    data.printings[1].released_at_int = Some(20220101); // ...released after the cutoff
+    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let bounds = &archived.indexes.planes;
+    let words = &archived.indexes.oracle_trigram.words;
+
+    let filter = FilterExpr::And(vec![
+        FilterExpr::Legality { shift: Some(0), expected: 0b01 },
+        FilterExpr::DateCmp { op: CmpOp::Gt, value: 20200101 },
+    ]);
+    let (plane, mut residual) = split_planes(filter, bounds, words, true);
+    assert!(plane.is_some(), "the legality leaf alone must still promote into the plane");
+    assert!(
+        matches!(residual, FilterExpr::DateCmp { .. }),
+        "date> isn't plane-compilable, so it must remain a real residual, not collapse to True"
+    );
+
+    let (total, _) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut residual, plane.as_ref(), "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+    );
+    assert_eq!(total, 0, "no single printing is both legal in A and released after the cutoff");
+}
+
 /// format:A AND format:B (two distinct formats) can't be answered by ANDing
 /// independent existence-projection planes -- ∃p: legal_A(p) ∧ legal_B(p) is
 /// not the same as (∃p: legal_A(p)) ∧ (∃p: legal_B(p)); a card can have
