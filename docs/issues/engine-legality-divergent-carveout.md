@@ -412,6 +412,8 @@ doc's own acceptance criteria asked for. Trivial regardless, against a ~68MB arc
   `border:` out of `compile_plane` for exactly this reason, for every mode
 - #677 — property-based fuzzer for row-selection correctness, split out as follow-on general test
   infrastructure rather than bundled into this PR; the row-selection bug here is its motivating case
+- #678 — indexing `banned:`/`restricted:` (currently unindexed full scan, deliberately out of scope
+  here — this issue's planes only cover `expected == LEGALITY_LEGAL`)
 - [engine-printing-varying-plane-repair-pattern.md](engine-printing-varying-plane-repair-pattern.md)
   — the repair-based first design, preserved for a future field that can't use this issue's escape
   hatch (query space not finite/enumerable at build time)
