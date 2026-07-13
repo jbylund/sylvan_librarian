@@ -258,6 +258,39 @@ Verified against the real corpus, not just the fixture: 247 oracle_ids in
 release date (some printing legal, some printing past a cutoff, never the same printing) — 0
 violations post-fix, for both `unique=card` and `unique=printing`.
 
+### A performance regression, caught by the broad survey, not the targeted script
+
+The first cut of the conjunction fix routed both the "no existential plane" (overwhelmingly common)
+and "existential plane present" cases through one closure-based `satisfies` helper inside
+`card_match_count`. Correct either way, but `card_match_count` runs once per *candidate* — for
+`run_query_streamed`'s counting phase, that's potentially the whole candidate set, not just the
+emitted page — so it's exactly the kind of hot loop where an extra closure indirection and branch,
+paid on *every* call regardless of whether `existential_plane` is ever `Some`, can show up in
+aggregate even though it changes nothing for the common case.
+
+It did: `banned:modern`/`restricted:vintage` — queries with zero code-path overlap with anything in
+this issue (`expected != LEGALITY_LEGAL`, never plane-compilable, always an unindexed full scan, on
+`main` and this branch alike) — went from ~0.20ms to ~0.23ms, a ~15% regression on a control that
+should have been provably unaffected. This is exactly the trap `docs/issues/engine-printing-varying-
+plane-repair-pattern.md`'s repair-toolkit history already warned about, and the reason this design
+doc's own Acceptance section insists the broad survey is "not optional": the targeted script
+(`scripts/bench_legality_divergent.py`) doesn't include a plain unindexed-scan control at the same
+`unique=card` shape being exercised by the change, so it had nothing that would have caught this;
+the 520-query survey did, immediately, once actually re-run after the conjunction fix (worth noting:
+it wasn't re-run automatically — re-running the broad survey after every change in this branch had to
+be a deliberate, repeated step, not a one-time acceptance gate).
+
+Fixed by splitting `card_match_count` (and, for consistency, `push_card_matches`'s `Mode::Card`
+branch) into two code paths instead of one closure branching on `existential_plane` every call: the
+`None` branch is now byte-for-byte the same shape the function had before `existential_plane` existed
+at all, and the `Some` branch (only ever reached for `Mode::Card` with a promoted legality leaf) pays
+the extra conjunction cost. Re-measured: `banned:modern`/`restricted:vintage` back to ~0.20ms,
+matching a freshly-captured `main` baseline; 0 regressions (>15% and >0.01ms) across all 24 targeted
+configs and the full 520-query survey, re-run back-to-back with a fresh `main` build specifically to
+rule out machine-state drift between runs (this session's first comparison used a `main` baseline
+captured hours earlier, which briefly looked like it might explain some survey deltas until the
+provably-untouched controls proved otherwise).
+
 ### A free upgrade to the existing narrowing fallback
 
 `narrow_rec`'s existing `Legality` arm (`legal_candidate_bits`, used whenever a shape declines full
@@ -321,6 +354,11 @@ are for the one thing they're still needed for: `filter.rs`'s per-printing `Lega
    printing-dependent `DateCmp` residual, `unique=card`, asserting 0 matches when no single printing
    satisfies both. Verified against the real corpus's 247 oracle_ids that are exactly this conflict
    shape — 0 violations post-fix.
+9. **Performance regression fix (done)**: see "A performance regression, caught by the broad survey"
+   above — the conjunction fix's first cut cost `banned:modern`/`restricted:vintage` (and likely other
+   `run_query_streamed`-counting-phase queries) ~15%, caught only by re-running the full broad survey
+   after the conjunction fix, not by the targeted script. Fixed by isolating the no-existential-plane
+   path back to its original code shape instead of routing everything through one closure.
 
 ## Results
 

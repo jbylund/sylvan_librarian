@@ -3408,21 +3408,67 @@ fn card_match_count(
     existential_plane: Option<(&PlaneExpr, &Archived<BitPlanes>)>,
     ills: &mut Vec<u128>,
 ) -> u32 {
-    let satisfies = |pid: usize| {
-        let residual_ok = all_match || FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or);
-        match existential_plane {
-            Some((pe, planes)) => residual_ok && eval_plane_expr_for_printing(pe, planes, cid, &printings[pid]),
-            None => residual_ok,
-        }
+    // No existential plane: identical code shape to before #676's
+    // existential_plane parameter existed at all -- no closure, no extra
+    // branch inside the hot loop. This is the overwhelmingly common case
+    // (every query without a promoted legality leaf), and it's called once
+    // per *candidate*, not once per emitted row, so its cost is on the
+    // critical path for every non-Step-2 query. A prior version of this
+    // function routed both cases through one closure-based `satisfies`
+    // helper regardless of `existential_plane`; measured as a real (~15%)
+    // regression on `banned:modern`/`restricted:vintage` (full-candidate-set
+    // scans, unaffected by `existential_plane` in outcome but paying its
+    // indirection anyway) via the broad survey, not the targeted benchmark --
+    // isolating the fast path here restores it.
+    let Some((pe, planes)) = existential_plane else {
+        return match mode {
+            Mode::Card => {
+                if all_match {
+                    return u32::from(start < end);
+                }
+                for pid in start..end {
+                    if FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or) {
+                        return 1;
+                    }
+                }
+                0
+            }
+            Mode::Printing => {
+                if all_match {
+                    return (end - start) as u32;
+                }
+                let mut n = 0u32;
+                for pid in start..end {
+                    if FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or) {
+                        n += 1;
+                    }
+                }
+                n
+            }
+            Mode::Artwork => {
+                ills.clear();
+                for pid in start..end {
+                    if !all_match && !FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or) {
+                        continue;
+                    }
+                    let ill = u128::from(printings[pid].illustration_id);
+                    if !ills.contains(&ill) {
+                        ills.push(ill);
+                    }
+                }
+                ills.len() as u32
+            }
+        };
     };
-    // The blind "every printing matches" shortcut only holds when there's no
-    // existential plane to re-verify per printing -- see this function's doc.
-    let blind_all_match = all_match && existential_plane.is_none();
+
+    // Existential plane present (Mode::Card only -- see this function's
+    // doc): the blind all_match shortcut never applies, and both the
+    // residual and the plane must hold for the same printing.
+    let satisfies =
+        |pid: usize| eval_plane_expr_for_printing(pe, planes, cid, &printings[pid])
+            && (all_match || FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or));
     match mode {
         Mode::Card => {
-            if blind_all_match {
-                return u32::from(start < end);
-            }
             for pid in start..end {
                 if satisfies(pid) {
                     return 1;
@@ -3431,9 +3477,6 @@ fn card_match_count(
             0
         }
         Mode::Printing => {
-            if blind_all_match {
-                return (end - start) as u32;
-            }
             let mut n = 0u32;
             for pid in start..end {
                 if satisfies(pid) {
@@ -3507,22 +3550,46 @@ fn push_card_matches(
             // at once (docs/issues/engine-legality-divergent-carveout.md "Row
             // selection for unique=card"); checking only the plane could pick
             // a printing that's legal but fails the residual, or vice versa.
-            let satisfies = |pid: usize| {
-                let residual_ok = all_match || FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or);
-                match existential_plane {
-                    Some((pe, planes)) => residual_ok && eval_plane_expr_for_printing(pe, planes, cid, &printings[pid]),
-                    None => residual_ok,
+            // Kept as two separate closures (not one closure branching on
+            // `existential_plane` every call) for the same reason
+            // `card_match_count` is split this way — see its doc.
+            let chosen: Option<u32> = if let Some((pe, planes)) = existential_plane {
+                let satisfies = |pid: usize| {
+                    eval_plane_expr_for_printing(pe, planes, cid, &printings[pid])
+                        && (all_match || FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or))
+                };
+                if matches!(prefer, Prefer::Default) {
+                    (start..end).find(|&pid| satisfies(pid)).map(|pid| pid as u32)
+                } else {
+                    let mut chosen: Option<(u32, f64)> = None;
+                    for pid in start..end {
+                        if !satisfies(pid) {
+                            continue;
+                        }
+                        let score = prefer_score(card, &printings[pid], prefer);
+                        if chosen.is_none_or(|(_, s)| score > s) {
+                            chosen = Some((pid as u32, score));
+                        }
+                    }
+                    chosen.map(|(pid, _)| pid)
                 }
-            };
-            let chosen: Option<u32> = if matches!(prefer, Prefer::Default) {
-                (start..end).find(|&pid| satisfies(pid)).map(|pid| pid as u32)
+            } else if matches!(prefer, Prefer::Default) {
+                let mut found: Option<u32> = None;
+                for pid in start..end {
+                    if all_match || FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or) {
+                        found = Some(pid as u32);
+                        break;
+                    }
+                }
+                found
             } else {
                 let mut chosen: Option<(u32, f64)> = None;
                 for pid in start..end {
-                    if !satisfies(pid) {
+                    let p = &printings[pid];
+                    if !all_match && !FilterExpr::residual_matches(card, p, strings, residual, residual_is_or) {
                         continue;
                     }
-                    let score = prefer_score(card, &printings[pid], prefer);
+                    let score = prefer_score(card, p, prefer);
                     if chosen.is_none_or(|(_, s)| score > s) {
                         chosen = Some((pid as u32, score));
                     }
