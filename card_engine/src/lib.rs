@@ -3437,6 +3437,17 @@ fn card_match_count(
 
 /// Emit this card's matches as (sort key, cid, pid) tuples — the per-card body
 /// of the gathered path, shared by the streamed path for page cards.
+///
+/// `existential_plane`: `Some((plane, planes))` iff `mode` is `Card` and the
+/// plane driving `all_match` touched a legality leaf
+/// (docs/issues/engine-legality-divergent-carveout.md "Row selection for
+/// unique=card") — `all_match` there only proves *some* printing matches, not
+/// whichever one prefer-order would pick, so the chosen printing must be
+/// verified against the plane directly instead of trusted blindly. `None`
+/// (the overwhelmingly common case) keeps today's behavior exactly: `Mode`s
+/// other than `Card` never hit this (their planes are never folded this way,
+/// see `unique_is_card`), and a card-invariant `all_match` needs no check
+/// (every printing already agrees).
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn push_card_matches(
@@ -3453,6 +3464,7 @@ fn push_card_matches(
     sort_col: SortCol,
     descending: bool,
     strings: &AStrings,
+    existential_plane: Option<(&PlaneExpr, &Archived<BitPlanes>)>,
     out: &mut Vec<Match>,
     groups: &mut Vec<(u128, u32, f64)>,
 ) {
@@ -3461,21 +3473,19 @@ fn push_card_matches(
             // Printings are stored in descending default-prefer order, so
             // for the default prefer the first matching printing IS the
             // chosen one — O(1) when the card pass already said True.
+            let satisfies = |pid: usize| match existential_plane {
+                Some((pe, planes)) => eval_plane_expr_for_printing(pe, planes, cid, &printings[pid]),
+                None => all_match || FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or),
+            };
             let chosen: Option<u32> = if matches!(prefer, Prefer::Default) {
-                let mut found: Option<u32> = None;
-                for pid in start..end {
-                    if all_match || FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or) {
-                        found = Some(pid as u32);
-                        break;
-                    }
-                }
-                found
+                (start..end).find(|&pid| satisfies(pid)).map(|pid| pid as u32)
             } else {
                 let mut chosen: Option<(u32, f64)> = None;
                 for pid in start..end {
-                    let p = &printings[pid];
-                    if !all_match && !FilterExpr::residual_matches(card, p, strings, residual, residual_is_or) { continue; }
-                    let score = prefer_score(card, p, prefer);
+                    if !satisfies(pid) {
+                        continue;
+                    }
+                    let score = prefer_score(card, &printings[pid], prefer);
                     if chosen.is_none_or(|(_, s)| score > s) {
                         chosen = Some((pid as u32, score));
                     }
@@ -3583,7 +3593,9 @@ fn run_query<'a>(
         return PLANE_BITMAP_POPCOUNT.with(|cell| {
             let mut bitmap = cell.borrow_mut();
             eval_planes(expr, &indexes.planes, &mut bitmap);
-            run_query_streamed_popcount(cards, printings, offsets, prefer, limit, page_offset, perm, inv_perm, &bitmap)
+            run_query_streamed_popcount(
+                cards, printings, offsets, prefer, limit, page_offset, perm, inv_perm, &bitmap, expr, &indexes.planes,
+            )
         });
     }
 
@@ -3693,12 +3705,22 @@ fn run_query<'a>(
     // candidate list at or below the gather threshold can't produce more
     // matches than that, so the fused path is already microseconds and the
     // match phase would be pure overhead.
+    // Row selection (docs/issues/engine-legality-divergent-carveout.md "Row
+    // selection for unique=card"): only Mode::Card can have folded a legality
+    // leaf into `plane` at all (unique_is_card declines the fold otherwise),
+    // and only then does all_match's "the card matches" stop implying "any
+    // printing will do" for picking which one to show.
+    let existential_plane: Option<(&PlaneExpr, &Archived<BitPlanes>)> = match (mode, plane) {
+        (Mode::Card, Some(pe)) if plane_expr_is_existential(pe) => Some((pe, &indexes.planes)),
+        _ => None,
+    };
+
     let maybe_broad = candidate_cards.as_ref().is_none_or(|v| v.len() > *STREAM_MIN_MATCHES);
     if let Some(perm) = indexes.sort_perms.get(sort_col, descending) {
         if maybe_broad && perm.len() == cards.len() && !cards.is_empty() {
             return run_query_streamed(
                 cards, printings, offsets, strings, filter, all_match_known, mode, prefer, sort_col, descending, limit,
-                page_offset, perm, card_ids, &indexes.artwork_groups,
+                page_offset, perm, card_ids, &indexes.artwork_groups, existential_plane,
             );
         }
     }
@@ -3725,7 +3747,7 @@ fn run_query<'a>(
         let end   = u32::from(offsets[cid as usize + 1]) as usize;
         push_card_matches(
             card, cid, printings, start, end, all_match, &residual, residual_is_or, mode, prefer,
-            sort_col, descending, strings, &mut best, &mut groups,
+            sort_col, descending, strings, existential_plane, &mut best, &mut groups,
         );
     }
 
@@ -3751,6 +3773,7 @@ fn run_query<'a>(
 /// `run_query_streamed`'s Step-1-improved-but-not-popcount path — extending
 /// this to non-True residuals is a reasonable fast-follow, not required here.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn run_query_streamed_popcount<'a>(
     cards: &'a [AOracleCard],
     printings: &'a [APrinting],
@@ -3761,6 +3784,8 @@ fn run_query_streamed_popcount<'a>(
     perm: &Archived<Vec<u32>>,
     inv_perm: &Archived<Vec<u32>>,
     bitmap: &[u64],
+    plane: &PlaneExpr,
+    planes: &Archived<BitPlanes>,
 ) -> (usize, Vec<(&'a AOracleCard, &'a APrinting)>) {
     let n_cards = cards.len();
     let total: usize = bitmap.iter().map(|w| w.count_ones() as usize).sum();
@@ -3807,9 +3832,16 @@ fn run_query_streamed_popcount<'a>(
         // more within it), mapping position -> card id via the forward perm.
         // all_match is always true here (filter fully consumed to True), so
         // the printing choice mirrors push_card_matches' Mode::Card branch
-        // under all_match exactly: first printing for default prefer (ranges
-        // are stored in descending default-prefer order), best-scored
-        // otherwise.
+        // under all_match: first printing for default prefer (ranges are
+        // stored in descending default-prefer order), best-scored otherwise
+        // -- *unless* the plane touched a legality leaf
+        // (docs/issues/engine-legality-divergent-carveout.md "Row selection
+        // for unique=card"), in which case card-level truth only proves
+        // *some* printing matches, not whichever one prefer-order would pick
+        // blindly -- verify against `eval_plane_expr_for_printing` too. Cheap
+        // even then: bounded by `limit` emitted cards, not the candidate set,
+        // and only pays the extra check at all for legality-touching planes.
+        let existential = plane_expr_is_existential(plane);
         let mut page: Vec<(&AOracleCard, &APrinting)> = Vec::with_capacity(limit);
         'walk: while word_idx < permuted.len() {
             let mut w = permuted[word_idx];
@@ -3825,13 +3857,17 @@ fn run_query_streamed_popcount<'a>(
                 let card = &cards[cid as usize];
                 let start = u32::from(offsets[cid as usize]) as usize;
                 let end = u32::from(offsets[cid as usize + 1]) as usize;
+                let satisfies = |pid: usize| !existential || eval_plane_expr_for_printing(plane, planes, cid, &printings[pid]);
                 let chosen: Option<u32> = if matches!(prefer, Prefer::Default) {
-                    (start < end).then_some(start as u32)
+                    (start..end).find(|&pid| satisfies(pid)).map(|pid| pid as u32)
                 } else {
                     // Strict > only (matches push_card_matches): ties keep the
                     // first-found printing, not the last.
                     let mut best: Option<(u32, f64)> = None;
                     for pid in start..end {
+                        if !satisfies(pid) {
+                            continue;
+                        }
                         let score = prefer_score(card, &printings[pid], prefer);
                         if best.is_none_or(|(_, s)| score > s) {
                             best = Some((pid as u32, score));
@@ -3872,6 +3908,7 @@ fn run_query_streamed<'a>(
     perm: &Archived<Vec<u32>>,
     card_ids: Box<dyn Iterator<Item = u32> + '_>,
     artwork_groups: &Archived<Vec<u16>>,
+    existential_plane: Option<(&PlaneExpr, &Archived<BitPlanes>)>,
 ) -> (usize, Vec<(&'a AOracleCard, &'a APrinting)>) {
     let mut residual: Vec<&FilterExpr> = Vec::new();
     let mut residual_is_or = false;
@@ -3945,7 +3982,7 @@ fn run_query_streamed<'a>(
             let end   = u32::from(offsets[cid as usize + 1]) as usize;
             push_card_matches(
                 card, cid, printings, start, end, all_match, &residual, residual_is_or, mode, prefer,
-                sort_col, descending, strings, &mut best, &mut groups,
+                sort_col, descending, strings, existential_plane, &mut best, &mut groups,
             );
         }
         let page = select_page(best, page_offset, limit)
@@ -3983,7 +4020,7 @@ fn run_query_streamed<'a>(
         scratch.clear();
         push_card_matches(
             card, cid, printings, start, end, all_match, &residual, residual_is_or, mode, prefer,
-            sort_col, descending, strings, &mut scratch, &mut groups,
+            sort_col, descending, strings, existential_plane, &mut scratch, &mut groups,
         );
         scratch.sort_unstable_by(cmp);
         for m in scratch.iter().skip(skip) {

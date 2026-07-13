@@ -1039,6 +1039,61 @@ pub(crate) fn eval_planes(expr: &PlaneExpr, planes: &rkyv::Archived<BitPlanes>, 
     }
 }
 
+/// If plane `p` is one of legality's existence planes, the (shift, is_illegal)
+/// it addresses -- `shift` matches `FilterExpr::Legality`'s own field, and
+/// `is_illegal` distinguishes `PLANE_LEGAL_ILLEGAL` (the negated-check plane)
+/// from `PLANE_LEGAL_EXISTS`. `None` for every other (card-invariant) plane.
+fn legality_plane_shift(p: usize) -> Option<(u8, bool)> {
+    if (PLANE_LEGAL_EXISTS..PLANE_LEGAL_EXISTS + MAX_FORMATS).contains(&p) {
+        Some((((p - PLANE_LEGAL_EXISTS) * 2) as u8, false))
+    } else if (PLANE_LEGAL_ILLEGAL..PLANE_LEGAL_ILLEGAL + MAX_FORMATS).contains(&p) {
+        Some((((p - PLANE_LEGAL_ILLEGAL) * 2) as u8, true))
+    } else {
+        None
+    }
+}
+
+/// Evaluate a compiled plane expression against one specific printing, rather
+/// than a card's already-known aggregate truth -- needed wherever row
+/// emission picks/verifies a printing for a card whose card-level match came
+/// through a legality leaf (docs/issues/engine-legality-divergent-carveout.md
+/// "Row selection for unique=card"): `legal_exists`/`illegal_exists` only
+/// guarantee *some* printing satisfies the expression, not this one. Every
+/// other (card-invariant) leaf reads the same card-level bit `eval_planes`
+/// would have used -- identical for every printing of the card by
+/// construction -- so this only actually diverges from the card-level answer
+/// at a legality leaf, which consults `printing` directly instead, mirroring
+/// `tri()`'s own per-printing check (`filter.rs`'s `Legality` arm). Callers
+/// only need this for the bounded set of printings being emitted, never the
+/// whole candidate set -- see the design doc for why that scoping is what
+/// makes this cheap instead of repeating the abandoned first design's
+/// performance mistake.
+pub(crate) fn eval_plane_expr_for_printing(
+    expr: &PlaneExpr,
+    planes: &rkyv::Archived<BitPlanes>,
+    cid: u32,
+    printing: &rkyv::Archived<Printing>,
+) -> bool {
+    match expr {
+        PlaneExpr::Plane(p) => {
+            let p = *p as usize;
+            if let Some((shift, is_illegal)) = legality_plane_shift(p) {
+                let status = (u64::from(printing.card_legalities) >> shift) & 0b11;
+                if is_illegal { status != LEGALITY_LEGAL } else { status == LEGALITY_LEGAL }
+            } else {
+                let wpp = words_per_plane(u32::from(planes.n_cards) as usize);
+                let word = u64::from(planes.words[p * wpp + cid as usize / 64]);
+                (word >> (cid % 64)) & 1 == 1
+            }
+        }
+        PlaneExpr::Bits(bits) => bitmap_contains(bits, cid),
+        PlaneExpr::Const(b) => *b,
+        PlaneExpr::And(children) => children.iter().all(|c| eval_plane_expr_for_printing(c, planes, cid, printing)),
+        PlaneExpr::Or(children) => children.iter().any(|c| eval_plane_expr_for_printing(c, planes, cid, printing)),
+        PlaneExpr::Not(inner) => !eval_plane_expr_for_printing(inner, planes, cid, printing),
+    }
+}
+
 /// True iff card `cid`'s bit is set in the bitmap.
 pub(crate) fn bitmap_contains(bitmap: &[u64], cid: u32) -> bool {
     bitmap[(cid >> 6) as usize] >> (cid & 63) & 1 != 0

@@ -1,7 +1,7 @@
 # Engine: legality divergent-card carve-out for all_match promotion
 
-Status: implemented and benchmarked (second design, replacing a repair-based first draft), pending PR.
-GitHub: #667.
+Status: implemented, including the row-selection fix (see "Row selection for `unique=card`" below),
+benchmarked, pending PR merge. GitHub: #667.
 Follows [docs/workflows/performance-pr-workflow.md](../workflows/performance-pr-workflow.md).
 Follow-on to #634 (Steps 1/2, shipped in #658), flagged in that issue's own comment thread.
 
@@ -157,6 +157,72 @@ exactly the semantics wanted (same as Step 2). The fix has two parts:
   directly). Every other, card-invariant plane ignores `unique_is_card` entirely and reaches
   `all_match` exactly as before, for every mode.
 
+### Row selection for `unique=card`: a second correctness hole, found in review
+
+Fixing the mode-aware hole above is not the whole fix. Even restricted to `unique=card` (where it's
+legitimate to trust `all_match_known` for the *count*), row emission has its own, separate bug: for a
+divergent card, the code picks the card's normal default-preferred printing to *display* without
+checking that this specific printing is actually legal in the queried format.
+
+`docs/issues/engine-border-planes.md` (#666, already shipped) documents the actual invariant this
+violates, for a different printing-varying field:
+
+> `unique=card` semantics require a *single* printing to satisfy the *whole* filter, not each
+> predicate independently satisfied by *some* (possibly different) printing.
+
+That's exactly why `border:` was kept out of `compile_plane` entirely, for *every* mode, not just
+`unique=printing`/`artwork` — the doc got this right and this issue's second design should have
+re-checked it before assuming existence was enough for row selection too. Confirmed empirically, not
+just by inspection: a fixture with printing 0 (preferred, not legal) and printing 1 (non-preferred,
+legal) returns printing 0 for `f:modern unique=card` — the wrong one. `frame:white f:modern` makes the
+same point concretely: the returned printing for each card must actually have a white frame, not just
+be "the card's usual printing" on a card that happens to have *some* white-framed printing somewhere.
+
+**The two exactness properties this needs are already both in the codebase, just not connected.**
+`Narrowed::tight` already means the stronger, correct thing for row selection — "true for *every*
+printing" (see its own doc comment) — which is exactly why legality's `narrow_rec` arms correctly
+report `loose`, not `tight` (see below). The bug is that `compile_plane`/`split_planes`/
+`all_match_known` has no equivalent second bit: every existing arm (colors, types, cmc, devotion,
+border where it's used at all) happens to be printing-universal, so "compiled successfully" and
+"safe to skip per-printing work when picking a row" were always the same fact — until Legality, which
+is the first plane where they diverge. `plane_expr_is_existential` already *is* the missing bit
+(`existential` = card-exact-only, `!existential` = printing-universal); it was just aimed too
+narrowly, at gating whether `split_planes` attempts the fold per mode, rather than being kept around
+for row emission regardless of mode.
+
+**The count/candidate-membership fast path is unaffected and doesn't need to change.** The number of
+matching *cards* is genuinely mode-independent and existence is genuinely sufficient to compute it —
+Step 2's popcount-skip walk (`run_query_streamed_popcount`) stays exactly as fast as measured. Only
+*row selection* — picking which printing to attribute to a matching card — needs the extra check, and
+only when `plane_expr_is_existential(plane)` is true.
+
+**Proposed fix**: a printing-level evaluator for a compiled `PlaneExpr`, structurally the same idea as
+the abandoned first design's `eval_plane_expr_for_printing` (walk the tree once per printing; a
+`Plane` leaf outside the legality ranges reads the already-known card-level bit — cheap, since
+card-invariant fields don't vary by printing; a `Plane` leaf inside `PLANE_LEGAL_EXISTS`/
+`PLANE_LEGAL_ILLEGAL` reads `printing.card_legalities` directly instead, the same check `tri()`
+already does per printing). The critical difference from the abandoned design, which is what makes
+this cheap rather than a repeat of the earlier performance mistake: that version ran this over *every*
+divergent candidate to repair a bulk bitmap; this only needs to run over the printings of cards in the
+*emitted page* (bounded by `limit`), never the whole candidate set — the count already came from the
+plane without touching this at all. Soundness: whenever the compiled expression is true at the card
+level, at least one printing is guaranteed to satisfy it too (card-invariant leaves hold for every
+printing by construction, and the shared-witness decline already rules out the one composition shape
+where an existentially-true card could lack any single witnessing printing), so the search over a
+card's printings always terminates with a match — it just needs to actually run instead of being
+skipped by `all_match`.
+
+Two call sites need this: `run_query_streamed_popcount`'s emit loop (currently `(start <
+end).then_some(start)` for `Prefer::Default`, unconditionally) and `push_card_matches`'s `Mode::Card`
+branch (same unconditional `all_match || ...` shortcut). Both should fall back to the printing-level
+walk specifically when the plane touched a legality leaf, in preferred-printing order, taking the
+first (or best-`prefer_score`, matching the existing non-default-prefer branch) printing that
+satisfies it.
+
+`unique=printing`/`artwork` need no change: they already decline the fold via `unique_is_card` and run
+the existing (correct) per-printing `card_pass` walk over their full candidate set, which was never
+skipping a per-printing check to begin with.
+
 ### A free upgrade to the existing narrowing fallback
 
 `narrow_rec`'s existing `Legality` arm (`legal_candidate_bits`, used whenever a shape declines full
@@ -197,8 +263,22 @@ are for the one thing they're still needed for: `filter.rs`'s per-printing `Lega
    `run_query` pipeline (not just direct `narrow_rec`/`run_query`-with-`plane=None` calls, which would
    have missed it); the De Morgan `Not`-of-compound case. A regression test that
    `contains_unnegatable_numeric`'s existing cmc/power/toughness guard is untouched is still open.
+   **Gap found in review**: the existing divergent-card test asserted `unique=card`'s *count* but
+   discarded the returned page (`let (total, _) = run_mode("card")`) — it never checked *which*
+   printing came back, which is exactly where the row-selection bug (below) was hiding. Total-row-count
+   parity and the broad survey (both count-only) couldn't have caught this either; it needs an
+   assertion on the actual returned `scryfall_id`, on a fixture where the preferred printing is
+   deliberately the *non-matching* one.
 5. Total-row-count parity on every config, every run.
 6. Re-measure (targeted *and* broad survey) and iterate until clean; open PR linking #667.
+7. **Row-selection fix (done)**: `eval_plane_expr_for_printing` (`planes.rs`), used by
+   `run_query_streamed_popcount`'s emit loop and `push_card_matches`'s `Mode::Card` branch (both the
+   gathered path and both call sites inside `run_query_streamed`) whenever `plane_expr_is_existential`
+   is true for the query's plane, replacing the unconditional "pick the default-preferred printing"
+   shortcut. New unit tests: a bare-leaf and a compound-`And` divergent-card fixture, `unique=card`,
+   asserting the returned `scryfall_id` is the legal printing, not the preferred one (mirrors the
+   existing `unique=printing` assertion, which already caught this for that mode). Additionally
+   verified against the real benchmark corpus, not just hand-built fixtures — see Results.
 
 ## Results
 
@@ -218,7 +298,20 @@ Measured on `benchmarks/bitplanes/corpus.jsonl` (97,206 printings), `main` @ `96
 | `banned:modern`/`restricted:vintage`/`c:g` (controls) | — | — | unaffected |
 
 Total-row-count parity: 0 mismatches across all 24 targeted configs and a 520-query broad survey
-(`scripts/survey_queries.py --seed 667`) run against both builds.
+(`scripts/survey_queries.py --seed 667`) run against both builds. Re-measured after the row-selection
+fix too: identical speedups, no detectable regression from the extra per-emitted-row check (expected —
+it's bounded by `limit`, not the candidate set, and only runs at all for legality-touching queries).
+
+**Row-selection correctness, checked against the real corpus, not just hand-built fixtures** —
+total-row-count parity only proves the *count* is right, which is exactly the blind spot that let the
+row-selection bug through review once already. Cross-referencing every returned `scryfall_id` against
+the corpus's own per-printing `card_legalities`: `oldschool` is this corpus's best real divergent case
+(536 of its 556 divergent oracle_ids, `modern` itself happens to have zero in this specific sample).
+`f:oldschool unique=card` returns 961 cards, 536 of them genuinely divergent-on-`oldschool`, **0**
+returned a printing that isn't actually `oldschool`-legal. Same clean result (0 violations) for
+`-f:oldschool` under both `unique=card` and `unique=printing`, and for the compound
+`f:oldschool t:creature` under both modes — mirroring the shared-witness-safe compound shape this
+issue's own motivating query has.
 
 Memory: archive size grew by 126,208 bytes (123.25 KiB) on this corpus (31,508 cards) — exactly 32 net
 new planes (64 new `legal_exists`/`illegal_exists` planes minus the 32 removed single-polarity
@@ -234,6 +327,9 @@ doc's own acceptance criteria asked for. Trivial regardless, against a ~68MB arc
   built; this issue replaces the plane (two exact planes instead of one approximate one) but keeps
   the postings list for `filter.rs`'s per-printing evaluation
 - #656 — extends Step 2 to compound residuals and printing/artwork modes; orthogonal to this issue
+- #666 — `border:` planes; its design doc already documents the "single printing must satisfy the
+  whole filter" invariant that this issue's row-selection bug violated, and deliberately keeps
+  `border:` out of `compile_plane` for exactly this reason, for every mode
 - [engine-printing-varying-plane-repair-pattern.md](engine-printing-varying-plane-repair-pattern.md)
   — the repair-based first design, preserved for a future field that can't use this issue's escape
   hatch (query space not finite/enumerable at build time)

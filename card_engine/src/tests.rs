@@ -1003,8 +1003,58 @@ fn legality_plane_promotion_respects_mode_through_split_planes() {
     assert_eq!(total, 1, "only the one legal printing may match, even though the plane says the card matches");
     assert_eq!(u128::from(page[0].1.scryfall_id), 2);
 
-    let (total, _) = run_mode("card");
+    // unique=card: the count is right via existence alone, but the *returned
+    // printing* must still be the legal one, not just the card's normal
+    // default-preferred printing (docs/issues/engine-legality-divergent-
+    // carveout.md "Row selection for unique=card") -- this is exactly the
+    // case a prior version of this test missed, by discarding `page` here.
+    let (total, page) = run_mode("card");
     assert_eq!(total, 1, "unique=card only needs the existence fact the plane already proves");
+    assert_eq!(
+        u128::from(page[0].1.scryfall_id),
+        2,
+        "unique=card must return the legal printing, not the preferred-but-not-legal one"
+    );
+}
+
+/// The same row-selection bug, but reached via a compound filter (the shape
+/// this issue's own motivating query has: `format:X` ANDed with a
+/// card-invariant sibling) rather than a bare Legality leaf -- exercises
+/// `existential_plane` detection on a composed `PlaneExpr::And`, not just a
+/// single `PlaneExpr::Plane`.
+#[test]
+fn legality_compound_and_respects_row_selection_for_unique_card() {
+    let mut vocab = VocabInterner::new();
+    let mut card = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
+    card.legality_divergent = true;
+    let mut data = store_of(vec![card], &[2], vocab);
+    data.printings[0].card_legalities = 0; // preferred: not legal in A
+    data.printings[1].card_legalities = 0b01; // non-preferred: legal in A
+    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets);
+    data.indexes.legal_divergent = build_divergent_ids(&data.cards);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let bounds = &archived.indexes.planes;
+    let words = &archived.indexes.oracle_trigram.words;
+
+    let filter = FilterExpr::And(vec![
+        FilterExpr::Legality { shift: Some(0), expected: 0b01 },
+        FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge },
+    ]);
+    let (plane, mut residual) = split_planes(filter, bounds, words, true);
+    assert!(plane.is_some(), "format:A AND t:creature (one format, no shared-witness issue) must compile whole");
+    assert!(matches!(residual, FilterExpr::True));
+
+    let (total, page) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut residual, plane.as_ref(), "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+    );
+    assert_eq!(total, 1);
+    assert_eq!(
+        u128::from(page[0].1.scryfall_id),
+        2,
+        "the compound's card-invariant sibling must not mask the legality leaf's row-selection requirement"
+    );
 }
 
 /// format:A AND format:B (two distinct formats) can't be answered by ANDing
