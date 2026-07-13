@@ -2354,33 +2354,27 @@ fn and_bits_into(acc: &mut [u64], other: &[u64]) {
     }
 }
 
-/// Card-space candidate mask for one format's `legal_x OR divergent` (or,
-/// when `negate`, `NOT(legal_x) OR divergent`) — always a superset of the true
-/// match set. `legal_x` (PLANE_LEGAL) is exact only for non-divergent cards
-/// (see planes.rs), so every divergent card is unconditionally included
-/// regardless of its own canonical status, leaving the existing
-/// card_pass/residual walk (unchanged, PrintingDep and all) to resolve it
-/// exactly. See docs/issues/engine-legality-bitplanes.md.
+/// Card-space candidate mask for one format's legality check --
+/// (docs/issues/engine-legality-divergent-carveout.md) exact for every card,
+/// including divergent ones: reads `PLANE_LEGAL_EXISTS` directly for the
+/// positive case or `PLANE_LEGAL_ILLEGAL` for the negated case, never a
+/// bit-complement of the other (that would compute `∀p: ¬legal(p)`, wrong --
+/// a divergent card can satisfy both `∃p: legal(p)` and `∃p: ¬legal(p)` at
+/// once). Exact as a *narrowing* set (no divergent-postings OR needed
+/// anymore -- `legal_divergent` is unchanged and still used by `filter.rs`'s
+/// per-printing `Legality` evaluation, just not here), but callers still
+/// report `Narrowed::loose`: existence-for-some-printing isn't the
+/// true-for-every-printing fact `tight` requires (see `narrow_rec`'s
+/// `Legality` arms and `Narrowed`'s doc).
 fn legal_candidate_bits(indexes: &Archived<CardIndexes>, n_cards: usize, shift: u8, negate: bool) -> Option<Vec<u64>> {
     if u32::from(indexes.planes.n_cards) as usize != n_cards || n_cards == 0 {
         return None;
     }
     let wpp = words_per_plane(n_cards);
-    let legal_plane = PLANE_LEGAL + shift as usize / 2;
+    let base = if negate { PLANE_LEGAL_ILLEGAL } else { PLANE_LEGAL_EXISTS };
+    let legal_plane = base + shift as usize / 2;
     let words = &indexes.planes.words;
-    let mut bits: Vec<u64> = words[legal_plane * wpp..(legal_plane + 1) * wpp].iter().map(|w| u64::from(*w)).collect();
-    if negate {
-        complement_bits(&mut bits, n_cards);
-    }
-    // The divergent set is a fixed, tiny (~556-card) postings list, not a
-    // plane (see build_divergent_ids) — scattered directly into the mask
-    // rather than intersected through the general Candidates machinery,
-    // since it's always this same list, never query-dependent.
-    for &cid in indexes.legal_divergent.iter() {
-        let cid = u16::from(cid) as usize;
-        bits[cid / 64] |= 1u64 << (cid % 64);
-    }
-    Some(bits)
+    Some(words[legal_plane * wpp..(legal_plane + 1) * wpp].iter().map(|w| u64::from(*w)).collect())
 }
 
 /// Project a printing-space bitmap up to card space. Printings of card i are
@@ -2751,7 +2745,17 @@ fn narrow_rec(
         if let Some(pe) = compile_plane(filter, &indexes.planes, &indexes.oracle_trigram.words) {
             let mut bits: Vec<u64> = Vec::new();
             eval_planes(&pe, &indexes.planes, &mut bits);
-            return Narrowed::tight(Candidates::CardBits(bits));
+            // Legality's planes are existence projections, not true-for-
+            // every-printing facts (docs/issues/engine-legality-divergent-
+            // carveout.md) -- `tight`'s contract needs the latter (see
+            // `Narrowed`'s doc and the dedicated `Legality` arms below), so a
+            // compiled expression touching them can only narrow loosely here,
+            // same as if it had fallen through to those arms directly.
+            return if plane_expr_is_existential(&pe) {
+                Narrowed::loose(Candidates::CardBits(bits))
+            } else {
+                Narrowed::tight(Candidates::CardBits(bits))
+            };
         }
     }
 
@@ -2905,19 +2909,32 @@ fn narrow_rec(
             Narrowed::loose(Candidates::CardBits(bits))
         }
 
-        // f:x / format:x — narrowing only (never exact-consumed via
-        // compile_plane): Legality can return Tri::PrintingDep for divergent
-        // cards, which compile_plane's two-valued-only rule already excludes.
-        // banned:/restricted: (expected != LEGALITY_LEGAL) and formats absent
-        // from loaded data (shift: None) fall through unindexed, unchanged.
+        // f:x / format:x (docs/issues/engine-legality-divergent-carveout.md):
+        // legal_candidate_bits reads PLANE_LEGAL_EXISTS directly, so this is
+        // exact card-space narrowing -- but still reported `loose`, not
+        // `tight`: `tight` means true for *every* printing (see the Narrowed
+        // struct's doc), and legality genuinely varies printing-to-printing,
+        // so "the card has some legal printing" doesn't satisfy that
+        // contract, same reason -r:x below is loose despite rarity's plane
+        // also being exact. compile_plane separately exact-consumes this
+        // shape for unique=card (see planes.rs, plane_expr_is_existential);
+        // this arm still matters for mixed filters compile_plane declines
+        // (the shared-witness 2+-distinct-format case) and for unique=printing/
+        // artwork, where the residual card_pass verification this `loose`
+        // narrowing feeds into is required for correctness. banned:/
+        // restricted: (expected != LEGALITY_LEGAL) and formats absent from
+        // loaded data (shift: None) fall through unindexed, unchanged.
         FilterExpr::Legality { shift: Some(shift), expected } if *expected == LEGALITY_LEGAL => {
             Narrowed::loose(Candidates::CardBits(legal_candidate_bits(indexes, n_cards, *shift, false)?))
         }
 
         // -f:x — matched as its own leaf shape rather than falling through to
-        // the generic Not-complement below, which requires a `tight` child;
-        // legal_candidate_bits has false positives among divergent cards by
-        // construction, so the generic path would (correctly) refuse it.
+        // the generic Not-complement below (which requires a `tight` child
+        // and wouldn't apply here regardless): bit-complementing the positive
+        // plane would compute `∀p: ¬legal(p)` (wrong for a divergent card,
+        // which can satisfy both `∃p: legal(p)` and `∃p: ¬legal(p)` at once)
+        // instead of reading PLANE_LEGAL_ILLEGAL directly, which is what this
+        // arm does.
         FilterExpr::Not(inner)
             if matches!(inner.as_ref(), FilterExpr::Legality { shift: Some(_), expected } if *expected == LEGALITY_LEGAL) =>
         {
@@ -3364,10 +3381,22 @@ enum Mode { Card, Artwork, Printing }
 /// Matches this card contributes: 0/1 for Card mode (existence, short-circuit),
 /// passing printings for Printing mode, distinct illustrations with a passing
 /// printing for Artwork mode. `ills` is a reused scratch buffer.
+// #676 review: a legality leaf promoted into `plane` alongside a genuinely
+// printing-dependent residual (DateCmp, ArtistMatch, ...) needs *both*
+// checked against the *same* printing -- `all_match`/`residual_matches` alone
+// only proves the residual holds for some printing, `existential_plane` alone
+// only proves the plane's existential leaf holds for some (possibly
+// different) printing. Neither implies a single printing satisfies both, so
+// `format:A AND date>X` (unique=card) must not count/match unless some
+// printing is *both* legal-in-A and past the cutoff. `existential_plane` is
+// only ever `Some` for `Mode::Card` (see its computation in `run_query`), so
+// `Mode::Printing`/`Artwork` below are unaffected -- their planes, if any,
+// were never folded to begin with when existential (`unique_is_card`).
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn card_match_count(
     card: &AOracleCard,
+    cid: u32,
     printings: &[APrinting],
     start: usize,
     end: usize,
@@ -3376,27 +3405,81 @@ fn card_match_count(
     residual_is_or: bool,
     mode: Mode,
     strings: &AStrings,
+    existential_plane: Option<(&PlaneExpr, &Archived<BitPlanes>)>,
     ills: &mut Vec<u128>,
 ) -> u32 {
+    // No existential plane: identical code shape to before #676's
+    // existential_plane parameter existed at all -- no closure, no extra
+    // branch inside the hot loop. This is the overwhelmingly common case
+    // (every query without a promoted legality leaf), and it's called once
+    // per *candidate*, not once per emitted row, so its cost is on the
+    // critical path for every non-Step-2 query. A prior version of this
+    // function routed both cases through one closure-based `satisfies`
+    // helper regardless of `existential_plane`; measured as a real (~15%)
+    // regression on `banned:modern`/`restricted:vintage` (full-candidate-set
+    // scans, unaffected by `existential_plane` in outcome but paying its
+    // indirection anyway) via the broad survey, not the targeted benchmark --
+    // isolating the fast path here restores it.
+    let Some((pe, planes)) = existential_plane else {
+        return match mode {
+            Mode::Card => {
+                if all_match {
+                    return u32::from(start < end);
+                }
+                for pid in start..end {
+                    if FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or) {
+                        return 1;
+                    }
+                }
+                0
+            }
+            Mode::Printing => {
+                if all_match {
+                    return (end - start) as u32;
+                }
+                let mut n = 0u32;
+                for pid in start..end {
+                    if FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or) {
+                        n += 1;
+                    }
+                }
+                n
+            }
+            Mode::Artwork => {
+                ills.clear();
+                for pid in start..end {
+                    if !all_match && !FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or) {
+                        continue;
+                    }
+                    let ill = u128::from(printings[pid].illustration_id);
+                    if !ills.contains(&ill) {
+                        ills.push(ill);
+                    }
+                }
+                ills.len() as u32
+            }
+        };
+    };
+
+    // Existential plane present (Mode::Card only -- see this function's
+    // doc): the blind all_match shortcut never applies, and both the
+    // residual and the plane must hold for the same printing.
+    let satisfies =
+        |pid: usize| eval_plane_expr_for_printing(pe, planes, cid, &printings[pid])
+            && (all_match || FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or));
     match mode {
         Mode::Card => {
-            if all_match {
-                return u32::from(start < end);
-            }
             for pid in start..end {
-                if FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or) {
+                if satisfies(pid) {
                     return 1;
                 }
             }
             0
         }
         Mode::Printing => {
-            if all_match {
-                return (end - start) as u32;
-            }
             let mut n = 0u32;
             for pid in start..end {
-                if FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or) {
+                if satisfies(pid) {
                     n += 1;
                 }
             }
@@ -3405,7 +3488,7 @@ fn card_match_count(
         Mode::Artwork => {
             ills.clear();
             for pid in start..end {
-                if !all_match && !FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or) {
+                if !satisfies(pid) {
                     continue;
                 }
                 let ill = u128::from(printings[pid].illustration_id);
@@ -3420,6 +3503,20 @@ fn card_match_count(
 
 /// Emit this card's matches as (sort key, cid, pid) tuples — the per-card body
 /// of the gathered path, shared by the streamed path for page cards.
+///
+/// `existential_plane`: `Some((plane, planes))` iff `mode` is `Card` and the
+/// plane driving `all_match` touched a legality leaf
+/// (docs/issues/engine-legality-divergent-carveout.md "Row selection for
+/// unique=card") — `all_match`/`residual` there only prove *some* printing
+/// satisfies the residual, not that it's the same printing the plane's
+/// existential leaf is true for, so the chosen printing must satisfy *both*
+/// checked against each other, not either one alone (a legality leaf ANDed
+/// with a genuinely printing-dependent residual like `DateCmp` needs one
+/// printing past the cutoff *and* legal at once — checking only the plane
+/// missed this, caught in #676's review). `None` (the overwhelmingly common
+/// case) keeps today's behavior exactly: `Mode`s other than `Card` never hit
+/// this (their planes are never folded this way, see `unique_is_card`), and a
+/// card-invariant `all_match` needs no check (every printing already agrees).
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn push_card_matches(
@@ -3436,6 +3533,7 @@ fn push_card_matches(
     sort_col: SortCol,
     descending: bool,
     strings: &AStrings,
+    existential_plane: Option<(&PlaneExpr, &Archived<BitPlanes>)>,
     out: &mut Vec<Match>,
     groups: &mut Vec<(u128, u32, f64)>,
 ) {
@@ -3444,7 +3542,38 @@ fn push_card_matches(
             // Printings are stored in descending default-prefer order, so
             // for the default prefer the first matching printing IS the
             // chosen one — O(1) when the card pass already said True.
-            let chosen: Option<u32> = if matches!(prefer, Prefer::Default) {
+            //
+            // #676 review: when `existential_plane` is `Some`, the residual
+            // check is still required, not replaced -- a legality leaf folded
+            // into `plane` alongside a genuinely printing-dependent residual
+            // (DateCmp, ArtistMatch, ...) needs a printing satisfying *both*
+            // at once (docs/issues/engine-legality-divergent-carveout.md "Row
+            // selection for unique=card"); checking only the plane could pick
+            // a printing that's legal but fails the residual, or vice versa.
+            // Kept as two separate closures (not one closure branching on
+            // `existential_plane` every call) for the same reason
+            // `card_match_count` is split this way — see its doc.
+            let chosen: Option<u32> = if let Some((pe, planes)) = existential_plane {
+                let satisfies = |pid: usize| {
+                    eval_plane_expr_for_printing(pe, planes, cid, &printings[pid])
+                        && (all_match || FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or))
+                };
+                if matches!(prefer, Prefer::Default) {
+                    (start..end).find(|&pid| satisfies(pid)).map(|pid| pid as u32)
+                } else {
+                    let mut chosen: Option<(u32, f64)> = None;
+                    for pid in start..end {
+                        if !satisfies(pid) {
+                            continue;
+                        }
+                        let score = prefer_score(card, &printings[pid], prefer);
+                        if chosen.is_none_or(|(_, s)| score > s) {
+                            chosen = Some((pid as u32, score));
+                        }
+                    }
+                    chosen.map(|(pid, _)| pid)
+                }
+            } else if matches!(prefer, Prefer::Default) {
                 let mut found: Option<u32> = None;
                 for pid in start..end {
                     if all_match || FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or) {
@@ -3457,7 +3586,9 @@ fn push_card_matches(
                 let mut chosen: Option<(u32, f64)> = None;
                 for pid in start..end {
                     let p = &printings[pid];
-                    if !all_match && !FilterExpr::residual_matches(card, p, strings, residual, residual_is_or) { continue; }
+                    if !all_match && !FilterExpr::residual_matches(card, p, strings, residual, residual_is_or) {
+                        continue;
+                    }
                     let score = prefer_score(card, p, prefer);
                     if chosen.is_none_or(|(_, s)| score > s) {
                         chosen = Some((pid as u32, score));
@@ -3566,7 +3697,9 @@ fn run_query<'a>(
         return PLANE_BITMAP_POPCOUNT.with(|cell| {
             let mut bitmap = cell.borrow_mut();
             eval_planes(expr, &indexes.planes, &mut bitmap);
-            run_query_streamed_popcount(cards, printings, offsets, prefer, limit, page_offset, perm, inv_perm, &bitmap)
+            run_query_streamed_popcount(
+                cards, printings, offsets, prefer, limit, page_offset, perm, inv_perm, &bitmap, expr, &indexes.planes,
+            )
         });
     }
 
@@ -3589,7 +3722,21 @@ fn run_query<'a>(
     // candidate is already known to match, so the per-candidate card_pass
     // calls below and in run_query_streamed become redundant re-verification
     // of what the narrowing already established.
-    let all_match_known = matches!(filter, FilterExpr::True) || residual_exact;
+    //
+    // A plane-driven True residual needs one more check first: legality's
+    // planes (docs/issues/engine-legality-divergent-carveout.md) are
+    // existence projections ("*some* printing matches"), unlike every other
+    // plane (card-invariant fields, true or false alike for every printing
+    // of a card). For unique=card that's exactly the semantics wanted --
+    // Mode::Card only needs *a* matching printing to exist, same as Step 2
+    // above. But Mode::Printing/Artwork enumerate individual printings, and
+    // "the card has some legal printing" does not mean "this printing is
+    // legal" -- card_pass must still run per printing there whenever the
+    // plane touched legality, so this only trusts a True residual for those
+    // modes when the plane is existential-free (plane_expr_is_existential).
+    let plane_true_for_mode =
+        plane.is_none_or(|expr| matches!(mode, Mode::Card) || !plane_expr_is_existential(expr));
+    let all_match_known = (matches!(filter, FilterExpr::True) && plane_true_for_mode) || residual_exact;
 
     // The plane bitmap is the exact card-level truth of the plane-consumed
     // subexpression (split_planes), so it composes with the residual's
@@ -3662,12 +3809,22 @@ fn run_query<'a>(
     // candidate list at or below the gather threshold can't produce more
     // matches than that, so the fused path is already microseconds and the
     // match phase would be pure overhead.
+    // Row selection (docs/issues/engine-legality-divergent-carveout.md "Row
+    // selection for unique=card"): only Mode::Card can have folded a legality
+    // leaf into `plane` at all (unique_is_card declines the fold otherwise),
+    // and only then does all_match's "the card matches" stop implying "any
+    // printing will do" for picking which one to show.
+    let existential_plane: Option<(&PlaneExpr, &Archived<BitPlanes>)> = match (mode, plane) {
+        (Mode::Card, Some(pe)) if plane_expr_is_existential(pe) => Some((pe, &indexes.planes)),
+        _ => None,
+    };
+
     let maybe_broad = candidate_cards.as_ref().is_none_or(|v| v.len() > *STREAM_MIN_MATCHES);
     if let Some(perm) = indexes.sort_perms.get(sort_col, descending) {
         if maybe_broad && perm.len() == cards.len() && !cards.is_empty() {
             return run_query_streamed(
                 cards, printings, offsets, strings, filter, all_match_known, mode, prefer, sort_col, descending, limit,
-                page_offset, perm, card_ids, &indexes.artwork_groups,
+                page_offset, perm, card_ids, &indexes.artwork_groups, existential_plane,
             );
         }
     }
@@ -3694,7 +3851,7 @@ fn run_query<'a>(
         let end   = u32::from(offsets[cid as usize + 1]) as usize;
         push_card_matches(
             card, cid, printings, start, end, all_match, &residual, residual_is_or, mode, prefer,
-            sort_col, descending, strings, &mut best, &mut groups,
+            sort_col, descending, strings, existential_plane, &mut best, &mut groups,
         );
     }
 
@@ -3730,6 +3887,8 @@ fn run_query_streamed_popcount<'a>(
     perm: &Archived<Vec<u32>>,
     inv_perm: &Archived<Vec<u32>>,
     bitmap: &[u64],
+    plane: &PlaneExpr,
+    planes: &Archived<BitPlanes>,
 ) -> (usize, Vec<(&'a AOracleCard, &'a APrinting)>) {
     let n_cards = cards.len();
     let total: usize = bitmap.iter().map(|w| w.count_ones() as usize).sum();
@@ -3776,9 +3935,16 @@ fn run_query_streamed_popcount<'a>(
         // more within it), mapping position -> card id via the forward perm.
         // all_match is always true here (filter fully consumed to True), so
         // the printing choice mirrors push_card_matches' Mode::Card branch
-        // under all_match exactly: first printing for default prefer (ranges
-        // are stored in descending default-prefer order), best-scored
-        // otherwise.
+        // under all_match: first printing for default prefer (ranges are
+        // stored in descending default-prefer order), best-scored otherwise
+        // -- *unless* the plane touched a legality leaf
+        // (docs/issues/engine-legality-divergent-carveout.md "Row selection
+        // for unique=card"), in which case card-level truth only proves
+        // *some* printing matches, not whichever one prefer-order would pick
+        // blindly -- verify against `eval_plane_expr_for_printing` too. Cheap
+        // even then: bounded by `limit` emitted cards, not the candidate set,
+        // and only pays the extra check at all for legality-touching planes.
+        let existential = plane_expr_is_existential(plane);
         let mut page: Vec<(&AOracleCard, &APrinting)> = Vec::with_capacity(limit);
         'walk: while word_idx < permuted.len() {
             let mut w = permuted[word_idx];
@@ -3794,13 +3960,17 @@ fn run_query_streamed_popcount<'a>(
                 let card = &cards[cid as usize];
                 let start = u32::from(offsets[cid as usize]) as usize;
                 let end = u32::from(offsets[cid as usize + 1]) as usize;
+                let satisfies = |pid: usize| !existential || eval_plane_expr_for_printing(plane, planes, cid, &printings[pid]);
                 let chosen: Option<u32> = if matches!(prefer, Prefer::Default) {
-                    (start < end).then_some(start as u32)
+                    (start..end).find(|&pid| satisfies(pid)).map(|pid| pid as u32)
                 } else {
                     // Strict > only (matches push_card_matches): ties keep the
                     // first-found printing, not the last.
                     let mut best: Option<(u32, f64)> = None;
                     for pid in start..end {
+                        if !satisfies(pid) {
+                            continue;
+                        }
                         let score = prefer_score(card, &printings[pid], prefer);
                         if best.is_none_or(|(_, s)| score > s) {
                             best = Some((pid as u32, score));
@@ -3841,6 +4011,7 @@ fn run_query_streamed<'a>(
     perm: &Archived<Vec<u32>>,
     card_ids: Box<dyn Iterator<Item = u32> + '_>,
     artwork_groups: &Archived<Vec<u16>>,
+    existential_plane: Option<(&PlaneExpr, &Archived<BitPlanes>)>,
 ) -> (usize, Vec<(&'a AOracleCard, &'a APrinting)>) {
     let mut residual: Vec<&FilterExpr> = Vec::new();
     let mut residual_is_or = false;
@@ -3884,7 +4055,10 @@ fn run_query_streamed<'a>(
         let c = if all_match && matches!(mode, Mode::Artwork) && have_group_counts {
             u32::from(u16::from(artwork_groups[cid as usize]))
         } else {
-            card_match_count(card, printings, start, end, all_match, &residual, residual_is_or, mode, strings, &mut ills)
+            card_match_count(
+                card, cid, printings, start, end, all_match, &residual, residual_is_or, mode, strings, existential_plane,
+                &mut ills,
+            )
         };
         counts[cid as usize] = c;
         total += c as usize;
@@ -3914,7 +4088,7 @@ fn run_query_streamed<'a>(
             let end   = u32::from(offsets[cid as usize + 1]) as usize;
             push_card_matches(
                 card, cid, printings, start, end, all_match, &residual, residual_is_or, mode, prefer,
-                sort_col, descending, strings, &mut best, &mut groups,
+                sort_col, descending, strings, existential_plane, &mut best, &mut groups,
             );
         }
         let page = select_page(best, page_offset, limit)
@@ -3952,7 +4126,7 @@ fn run_query_streamed<'a>(
         scratch.clear();
         push_card_matches(
             card, cid, printings, start, end, all_match, &residual, residual_is_or, mode, prefer,
-            sort_col, descending, strings, &mut scratch, &mut groups,
+            sort_col, descending, strings, existential_plane, &mut scratch, &mut groups,
         );
         scratch.sort_unstable_by(cmp);
         for m in scratch.iter().skip(skip) {
@@ -4616,7 +4790,11 @@ impl QueryEngine {
         // rejects pre-plane archives, this is defense in depth.
         let (plane_expr, mut filter_expr) =
             if u32::from(data.indexes.planes.n_cards) as usize == data.cards.len() && !data.cards.is_empty() {
-                split_planes(filter_expr, &data.indexes.planes, &data.indexes.oracle_trigram.words)
+                // Matches run_query's own unique -> Mode mapping exactly
+                // (anything other than "artwork"/"printing" is Mode::Card,
+                // not just the literal string "card") -- see split_planes's
+                // unique_is_card doc.
+                split_planes(filter_expr, &data.indexes.planes, &data.indexes.oracle_trigram.words, !matches!(unique, "artwork" | "printing"))
             } else {
                 (None, filter_expr)
             };
