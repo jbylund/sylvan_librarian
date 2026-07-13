@@ -744,7 +744,13 @@ fn divergent_legality_defers_to_printings() {
 /// format B (shift 2) only, single printing. card2: genuinely divergent for
 /// format A — two printings, one legal and one not — so both
 /// `legal_exists(A)` and `illegal_exists(A)` are true for it at once
-/// (docs/issues/engine-legality-divergent-carveout.md).
+/// (docs/issues/engine-legality-divergent-carveout.md). All three also carry
+/// a format C (shift 4) banned/restricted status, generalized by #678 (see
+/// docs/issues/engine-legality-banned-restricted-planes.md): card0 banned in
+/// C (single printing), card1 restricted in C (single printing), card2
+/// divergent on *banned(C)* too — one printing banned, the other merely
+/// legal (not banned) — mirroring the real `restricted:oldschool` shape
+/// (a 30th-Anniversary-style promo printing disagreeing with the rest).
 fn legal_plane_fixture() -> CardData {
     let mut vocab = VocabInterner::new();
     let mut card0 = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
@@ -759,10 +765,10 @@ fn legal_plane_fixture() -> CardData {
     // default to 0, so every printing needs its own legality set here before
     // the planes are rebuilt below. card2's two printings deliberately
     // disagree on format A: one legal, one not.
-    data.printings[0].card_legalities = 0b01; // card0: legal in A
-    data.printings[1].card_legalities = 0b01 << 2; // card1: legal in B
-    data.printings[2].card_legalities = 0b01; // card2 printing 1: legal in A
-    data.printings[3].card_legalities = 0; // card2 printing 2: not legal in A
+    data.printings[0].card_legalities = 0b01 | (0b11 << 4); // card0: legal in A, banned in C
+    data.printings[1].card_legalities = (0b01 << 2) | (0b10 << 4); // card1: legal in B, restricted in C
+    data.printings[2].card_legalities = 0b01 | (0b11 << 4); // card2 printing 1: legal in A, banned in C
+    data.printings[3].card_legalities = 0b01 << 4; // card2 printing 2: not legal in A, legal (not banned) in C
     data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets);
     data.indexes.legal_divergent = build_divergent_ids(&data.cards);
     data
@@ -820,27 +826,166 @@ fn legal_plane_narrows_negated_includes_divergent() {
     }
 }
 
+/// #678: banned:/restricted: now plane-narrow exactly like format:, including
+/// through a divergent card (card2, banned in C via one printing, merely
+/// legal via the other — see `legal_plane_fixture`'s doc). Only a format
+/// absent from all loaded data (shift: None) still declines.
 #[test]
-fn legal_plane_declines_banned_restricted_and_absent_format() {
+fn banned_restricted_plane_narrows_positive_includes_divergent() {
     let data = legal_plane_fixture();
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
-    // banned:/restricted: never plane-narrow — unindexed and unchanged.
-    let banned = FilterExpr::Legality { shift: Some(0), expected: 0b11 };
-    assert!(narrow_candidates(&banned, &archived.indexes, &archived.offsets, &archived.cards).is_none());
-    let restricted = FilterExpr::Legality { shift: Some(0), expected: 0b10 };
-    assert!(narrow_candidates(&restricted, &archived.indexes, &archived.offsets, &archived.cards).is_none());
-    // Not(banned) falls through the generic Not path, which also declines
-    // (no tight source to complement) — still correct, just unnarrowed.
-    let not_banned = FilterExpr::Not(Box::new(banned));
-    assert!(narrow_candidates(&not_banned, &archived.indexes, &archived.offsets, &archived.cards).is_none());
+    let banned_c = FilterExpr::Legality { shift: Some(4), expected: 0b11 };
+    match narrow_candidates(&banned_c, &archived.indexes, &archived.offsets, &archived.cards) {
+        Some(Candidates::CardBits(bits)) => {
+            assert!(bitmap_contains(&bits, 0), "card0 truly banned in C must narrow in");
+            assert!(!bitmap_contains(&bits, 1), "card1 is restricted, not banned, in C");
+            assert!(bitmap_contains(&bits, 2), "divergent card2 has a banned-in-C printing");
+        }
+        _ => panic!("expected a card bitmap for banned:C"),
+    }
+
+    let restricted_c = FilterExpr::Legality { shift: Some(4), expected: 0b10 };
+    match narrow_candidates(&restricted_c, &archived.indexes, &archived.offsets, &archived.cards) {
+        Some(Candidates::CardBits(bits)) => {
+            assert!(!bitmap_contains(&bits, 0), "card0 is banned, not restricted, in C");
+            assert!(bitmap_contains(&bits, 1), "card1 truly restricted in C must narrow in");
+            assert!(!bitmap_contains(&bits, 2), "card2 has no restricted-in-C printing");
+        }
+        _ => panic!("expected a card bitmap for restricted:C"),
+    }
 
     // A format absent from all loaded data (shift: None) matches nothing at
     // eval and isn't plane-narrowed either — falls to the (cheap, correct)
-    // full scan.
-    let absent = FilterExpr::Legality { shift: None, expected: 0b01 };
-    assert!(narrow_candidates(&absent, &archived.indexes, &archived.offsets, &archived.cards).is_none());
+    // full scan, for every indexed status.
+    let absent_banned = FilterExpr::Legality { shift: None, expected: 0b11 };
+    assert!(narrow_candidates(&absent_banned, &archived.indexes, &archived.offsets, &archived.cards).is_none());
+    let absent_restricted = FilterExpr::Legality { shift: None, expected: 0b10 };
+    assert!(narrow_candidates(&absent_restricted, &archived.indexes, &archived.offsets, &archived.cards).is_none());
+}
+
+/// -banned:C: card0 (truly banned) must not narrow in; card1 (restricted, so
+/// not banned) and card2 (divergent, has a not-banned printing) must.
+#[test]
+fn banned_restricted_plane_narrows_negated_includes_divergent() {
+    let data = legal_plane_fixture();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let not_banned_c = FilterExpr::Not(Box::new(FilterExpr::Legality { shift: Some(4), expected: 0b11 }));
+    match narrow_candidates(&not_banned_c, &archived.indexes, &archived.offsets, &archived.cards) {
+        Some(Candidates::CardBits(bits)) => {
+            assert!(!bitmap_contains(&bits, 0), "truly banned-in-C card must not narrow into the negation");
+            assert!(bitmap_contains(&bits, 1), "restricted (not banned) card must narrow into the negation");
+            assert!(bitmap_contains(&bits, 2), "divergent card with a not-banned-in-C printing must narrow in");
+        }
+        _ => panic!("expected a card bitmap"),
+    }
+}
+
+/// banned:C AND restricted:C: two distinct existence facts about the *same*
+/// format — the same shared-witness exposure as two distinct formats or two
+/// polarities of one format, now reachable because `collect_legality_formats`
+/// dedupes by raw plane index (#678) rather than a `(format, polarity)` tuple
+/// that had no way to express "same format, different status."
+#[test]
+fn legality_same_format_cross_status_declines_shared_witness() {
+    let data = legal_plane_fixture();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let bounds = &archived.indexes.planes;
+    let words = &archived.indexes.oracle_trigram.words;
+
+    let banned_c = || FilterExpr::Legality { shift: Some(4), expected: 0b11 };
+    let restricted_c = || FilterExpr::Legality { shift: Some(4), expected: 0b10 };
+
+    assert!(
+        compile_plane(&FilterExpr::And(vec![banned_c(), restricted_c()]), bounds, words).is_none(),
+        "banned:C AND restricted:C (same format, distinct statuses) must decline (shared-witness)"
+    );
+    assert!(
+        compile_plane(&FilterExpr::Or(vec![banned_c(), restricted_c()]), bounds, words).is_some(),
+        "OR has no shared-witness problem and must compile"
+    );
+}
+
+/// The shared-witness decline's fallback must still be *correct*: a card
+/// banned in C via one printing and restricted in C via a different printing
+/// (no single printing is both) is the trap in action — banned_exists(C) AND
+/// restricted_exists(C) would wrongly say true if naively ANDed.
+#[test]
+fn legality_cross_status_shared_witness_falls_back_to_correct_result() {
+    let mut vocab = VocabInterner::new();
+    let card = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
+    let mut data = store_of(vec![card], &[2], vocab);
+    data.printings[0].card_legalities = 0b11 << 4; // banned in C only
+    data.printings[1].card_legalities = 0b10 << 4; // restricted in C only
+    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let bounds = &archived.indexes.planes;
+    let words = &archived.indexes.oracle_trigram.words;
+
+    let and_both = FilterExpr::And(vec![
+        FilterExpr::Legality { shift: Some(4), expected: 0b11 },
+        FilterExpr::Legality { shift: Some(4), expected: 0b10 },
+    ]);
+    let (plane, mut residual) = split_planes(and_both, bounds, words, true);
+    assert!(plane.is_none(), "shared-witness AND must not partially promote either leaf into the plane");
+    assert!(matches!(residual, FilterExpr::And(_)), "both legality children must remain in the residual");
+
+    let (total, _) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut residual, plane.as_ref(), "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+    );
+    assert_eq!(total, 0, "no single printing is both banned and restricted in C at once");
+}
+
+/// Row-selection correctness (docs/issues/engine-legality-divergent-carveout.md
+/// "Row selection for unique=card") through the real `run_query` pipeline,
+/// mirroring `legal_plane_narrowing_preserves_divergent_printing_correctness`
+/// but for `banned:` — the preferred printing deliberately says NOT banned,
+/// the non-preferred one says banned, to stress that row emission for
+/// `unique=printing` picks the printing that actually satisfies the query,
+/// not just the card's usual preferred one.
+#[test]
+fn banned_plane_row_selection_preserves_divergent_printing_correctness() {
+    let mut vocab = VocabInterner::new();
+    let mut card = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
+    card.legality_divergent = true;
+    let mut data = store_of(vec![card], &[2], vocab);
+    data.printings[0].card_legalities = 0b01 << 4; // preferred: legal (not banned) in C
+    data.printings[1].card_legalities = 0b11 << 4; // non-preferred: banned in C
+    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets);
+    data.indexes.legal_divergent = build_divergent_ids(&data.cards);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let run = |filter: &mut FilterExpr, unique: &str| {
+        run_query(
+            &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+            filter, None, unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
+        )
+    };
+
+    // banned:C, unique=printing: exactly the one banned printing.
+    let mut f = FilterExpr::Legality { shift: Some(4), expected: 0b11 };
+    let (total, page) = run(&mut f, "printing");
+    assert_eq!(total, 1);
+    assert_eq!(u128::from(page[0].1.scryfall_id), 2); // the non-preferred, banned printing
+
+    // banned:C, unique=card: the card matches (at least one printing is
+    // banned), read straight from the exact banned_exists(C) plane bit.
+    let mut f2 = FilterExpr::Legality { shift: Some(4), expected: 0b11 };
+    let (total, _) = run(&mut f2, "card");
+    assert_eq!(total, 1);
+
+    // -banned:C, unique=printing: exactly the one not-banned printing.
+    let mut not_f = FilterExpr::Not(Box::new(FilterExpr::Legality { shift: Some(4), expected: 0b11 }));
+    let (total, page) = run(&mut not_f, "printing");
+    assert_eq!(total, 1);
+    assert_eq!(u128::from(page[0].1.scryfall_id), 1); // the preferred, not-banned printing
 }
 
 /// The correctness property the whole design hinges on: a divergent card must

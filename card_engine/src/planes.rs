@@ -12,10 +12,12 @@
 //! are card-level and two-valued (their tri() never returns Null or
 //! PrintingDep), so plane algebra — including complement for Not —
 //! reproduces the filter's card-level truth exactly.
-//! Legality (docs/issues/engine-legality-divergent-carveout.md) is exact via
-//! two planes per format -- PLANE_LEGAL_EXISTS ("some printing is legal") and
-//! PLANE_LEGAL_ILLEGAL ("some printing is not legal"), both computed directly
-//! from printings so they're correct for every card including ones whose
+//! Legality (docs/issues/engine-legality-divergent-carveout.md, generalized
+//! to banned/restricted by docs/issues/engine-legality-banned-restricted-
+//! planes.md, #678) is exact via two planes per (format, status) -- an
+//! `_EXISTS` plane ("some printing has this status") and an `_ABSENT`/
+//! `_ILLEGAL` plane ("some printing doesn't"), both computed directly from
+//! printings so they're correct for every card including ones whose
 //! printings disagree, unlike a single card-level bit. Rarity (the 4 most
 //! common values; docs/issues/engine-rarity-planes.md) is narrowing-only, for
 //! the PrintingDep reason legality used to have -- see PLANE_RARITY.
@@ -23,7 +25,7 @@
 use rkyv::{Archive, Deserialize, Serialize};
 
 use super::filter::{CmpOp, ColorField, FilterExpr, NumExpr, NumField, TextSearchField};
-use super::legality::{LEGALITY_LEGAL, MAX_FORMATS};
+use super::legality::{LEGALITY_BANNED, LEGALITY_LEGAL, LEGALITY_RESTRICTED, MAX_FORMATS};
 use super::{flip_op, lane_get, oracle_word_eligible, scan_oracle_words, OracleCard, OracleWordIndex, Printing};
 
 /// Plane layout, plane-major in BitPlanes.words: six color planes per color
@@ -61,6 +63,21 @@ const DEVOTION_BITS: usize = 2;
 /// bit-complement of the first (which would compute `∀p: ¬legal(p)`, wrong).
 pub(crate) const PLANE_LEGAL_EXISTS: usize = PLANE_DEVOTION + DEVOTION_BITS * COLOR_PLANES;
 pub(crate) const PLANE_LEGAL_ILLEGAL: usize = PLANE_LEGAL_EXISTS + MAX_FORMATS;
+/// Same escape hatch, generalized to `banned`/`restricted`
+/// (docs/issues/engine-legality-banned-restricted-planes.md, #678): the query
+/// space (`expected` against a fixed format list) is exactly as finite and
+/// build-time-precomputable for these two values as it was for `LEGAL`, so
+/// the identical two-exact-planes construction applies, just with more
+/// blocks. `restricted` genuinely diverges per printing for `oldschool`
+/// (30th Anniversary Edition / Vintage Championship promo prints, the same
+/// divergent-printing pattern `LEGAL` already has) -- `build_bit_planes`
+/// reads printings directly here too, so it's exact regardless. `banned`
+/// never diverges in the real corpus, but gets the same treatment for
+/// uniformity rather than a third, special-cased mechanism.
+pub(crate) const PLANE_BANNED_EXISTS: usize = PLANE_LEGAL_ILLEGAL + MAX_FORMATS;
+pub(crate) const PLANE_BANNED_ABSENT: usize = PLANE_BANNED_EXISTS + MAX_FORMATS;
+pub(crate) const PLANE_RESTRICTED_EXISTS: usize = PLANE_BANNED_ABSENT + MAX_FORMATS;
+pub(crate) const PLANE_RESTRICTED_ABSENT: usize = PLANE_RESTRICTED_EXISTS + MAX_FORMATS;
 /// One-hot planes for cmc/power/toughness (#655), covering the interior
 /// range [0,12] — hundreds-to-thousands of cards per value — plus a shared
 /// "13+" high-tail bucket per field (all three have a genuine spread of rare
@@ -75,7 +92,7 @@ pub(crate) const PLANE_LEGAL_ILLEGAL: usize = PLANE_LEGAL_EXISTS + MAX_FORMATS;
 const NUM_INTERIOR_LO: i32 = 0;
 const NUM_INTERIOR_HI: i32 = 12;
 const NUM_INTERIOR_WIDTH: usize = (NUM_INTERIOR_HI - NUM_INTERIOR_LO + 1) as usize;
-pub(crate) const PLANE_CMC: usize = PLANE_LEGAL_ILLEGAL + MAX_FORMATS;
+pub(crate) const PLANE_CMC: usize = PLANE_RESTRICTED_ABSENT + MAX_FORMATS;
 pub(crate) const PLANE_CMC_HI: usize = PLANE_CMC + NUM_INTERIOR_WIDTH;
 pub(crate) const PLANE_POWER_LO: usize = PLANE_CMC_HI + 1;
 pub(crate) const PLANE_POWER: usize = PLANE_POWER_LO + 1;
@@ -138,6 +155,29 @@ pub(crate) struct BitPlanes {
 
 pub(crate) fn words_per_plane(n_cards: usize) -> usize {
     n_cards.div_ceil(64)
+}
+
+/// Single source of truth for every indexed legality status: `(expected,
+/// exists_base, absent_base)`. Every other legality-plane helper
+/// (`status_plane_bases`, `legality_plane_shift`, `is_legality_plane`,
+/// `build_bit_planes`'s scatter loop) derives from this one table instead of
+/// each maintaining its own parallel copy -- adding a 4th indexed status is a
+/// one-line change here, nowhere else
+/// (docs/issues/engine-legality-banned-restricted-planes.md, #678).
+/// `LEGALITY_NOT_LEGAL` has no row: the parser never emits a bare `Legality`
+/// leaf with that `expected` (`-format:X` is
+/// `Not(Legality{expected: LEGALITY_LEGAL})`, not a literal `NOT_LEGAL` leaf).
+const LEGALITY_STATUS_TABLE: [(u64, usize, usize); 3] = [
+    (LEGALITY_LEGAL, PLANE_LEGAL_EXISTS, PLANE_LEGAL_ILLEGAL),
+    (LEGALITY_BANNED, PLANE_BANNED_EXISTS, PLANE_BANNED_ABSENT),
+    (LEGALITY_RESTRICTED, PLANE_RESTRICTED_EXISTS, PLANE_RESTRICTED_ABSENT),
+];
+
+/// The (exists_base, absent_base) plane block pair for one `Legality::expected`
+/// value, or `None` for a value with no indexed plane. Used by every place
+/// that used to hardcode `expected == LEGALITY_LEGAL`.
+pub(crate) fn status_plane_bases(expected: u64) -> Option<(usize, usize)> {
+    LEGALITY_STATUS_TABLE.iter().find(|&&(e, ..)| e == expected).map(|&(_, exists_base, absent_base)| (exists_base, absent_base))
 }
 
 /// A card's effective devotion count for one color lane, saturated to 0..=3
@@ -233,32 +273,43 @@ pub(crate) fn build_bit_planes(cards: &[OracleCard], printings: &[Printing], off
                 "devotion without identity: card {i} color lane {b}"
             );
         }
-        // Legality (docs/issues/engine-legality-divergent-carveout.md): two
-        // existence projections per format, computed directly from this
-        // card's own printings (the `range` rarity already sliced above) --
-        // legal_exists = some printing legal, illegal_exists = some printing
-        // not legal. Both exact for every card, including ones whose
+        // Legality (docs/issues/engine-legality-divergent-carveout.md,
+        // generalized to banned/restricted by #678 -- see
+        // docs/issues/engine-legality-banned-restricted-planes.md): two
+        // existence projections per (format, status), computed directly from
+        // this card's own printings (the `range` rarity already sliced
+        // above) -- exists = some printing has this status, absent = some
+        // printing doesn't. Both exact for every card, including ones whose
         // printings disagree, since neither depends on a single canonical
         // card-level word or a divergence flag. MAX_FORMATS (32) fits a u64
         // mask with room to spare.
-        let mut legal_mask: u64 = 0;
-        let mut illegal_mask: u64 = 0;
+        // Indexed by position in LEGALITY_STATUS_TABLE -- the same single
+        // source of truth status_plane_bases/legality_plane_shift read, so
+        // this loop can never drift out of sync with which plane block a
+        // status writes into.
+        let mut exists_masks = [0u64; LEGALITY_STATUS_TABLE.len()];
+        let mut absent_masks = [0u64; LEGALITY_STATUS_TABLE.len()];
         for p in &printings[range] {
             for f in 0..MAX_FORMATS {
                 let shift = (f * 2) as u32;
-                if (p.card_legalities >> shift) & 0b11 == LEGALITY_LEGAL {
-                    legal_mask |= 1 << f;
-                } else {
-                    illegal_mask |= 1 << f;
+                let status = (p.card_legalities >> shift) & 0b11;
+                for (i, &(want, ..)) in LEGALITY_STATUS_TABLE.iter().enumerate() {
+                    if status == want {
+                        exists_masks[i] |= 1 << f;
+                    } else {
+                        absent_masks[i] |= 1 << f;
+                    }
                 }
             }
         }
-        for f in 0..MAX_FORMATS {
-            if legal_mask & (1 << f) != 0 {
-                set(PLANE_LEGAL_EXISTS + f);
-            }
-            if illegal_mask & (1 << f) != 0 {
-                set(PLANE_LEGAL_ILLEGAL + f);
+        for (i, &(_, exists_base, absent_base)) in LEGALITY_STATUS_TABLE.iter().enumerate() {
+            for f in 0..MAX_FORMATS {
+                if exists_masks[i] & (1 << f) != 0 {
+                    set(exists_base + f);
+                }
+                if absent_masks[i] & (1 << f) != 0 {
+                    set(absent_base + f);
+                }
             }
         }
         // #655: cmc is Option<u8>, type-guaranteed non-negative, so it has no
@@ -289,11 +340,11 @@ pub(crate) fn build_bit_planes(cards: &[OracleCard], printings: &[Printing], off
 /// bytes flat regardless of density, so a fixed, tiny, shared set like this
 /// one is cheaper as a list than as a 33rd plane. `u16` on purpose, same
 /// assumption the name-bigram index's sparse tier makes: card ids fit
-/// (production is ~31.5k, comfortably under u16::MAX). Scattered directly
-/// into a format's legal_x candidate mask by legal_candidate_bits (lib.rs)
-/// rather than intersected via the general Candidates machinery — the set is
-/// always this same small list, not query-dependent, so there's nothing to
-/// look up.
+/// (production is ~31.5k, comfortably under u16::MAX). No longer scattered
+/// into any candidate mask -- `legality_candidate_bits` (lib.rs) narrows via
+/// the exact `_EXISTS`/`_ABSENT` planes directly (docs/issues/engine-
+/// legality-divergent-carveout.md's "free upgrade"), so this list is now only
+/// consulted by `filter.rs`'s per-printing `Legality` `tri()` residual check.
 pub(crate) fn build_divergent_ids(cards: &[OracleCard]) -> Vec<u16> {
     debug_assert!(cards.len() <= u16::MAX as usize + 1, "card count exceeds u16 range for divergent postings");
     cards
@@ -683,34 +734,32 @@ fn compile_plane_children(children: &[FilterExpr], bounds: &rkyv::Archived<BitPl
     order.into_iter().map(|c| compile_plane(c, bounds, words)).collect()
 }
 
-/// Collect distinct (format, polarity) pairs referenced by legality-plane
-/// leaves within `expr`, appending into `out` (deduplicated). Polarity is
-/// part of the key, not folded away: `format:A` and `-format:A` read
-/// different planes (`legal_exists`/`illegal_exists`) backing different,
-/// independently-true-or-false existence facts about the same format, so
-/// `format:A AND -format:A` is exactly as shared-witness-prone as
-/// `format:A AND format:B` -- a divergent-on-A card satisfies both
-/// `legal_exists(A)` and `illegal_exists(A)` at once, even though no single
-/// printing can be both legal and not-legal in A simultaneously (see
-/// `and_of_checked_for_shared_witness`'s doc). A literal duplicate leaf
-/// (`format:A AND format:A`) collapses to one entry and is fine to compose --
-/// it's the same underlying fact checked twice, not two facts needing a
-/// shared witness.
-fn collect_legality_formats(expr: &PlaneExpr, out: &mut Vec<(usize, bool)>) {
+/// Whether plane index `p` falls in any legality existence-projection block
+/// (`LEGALITY_STATUS_TABLE`), regardless of which status/polarity it is.
+fn is_legality_plane(p: usize) -> bool {
+    legality_plane_shift(p).is_some()
+}
+
+/// Collect distinct legality plane indices referenced by legality-plane
+/// leaves within `expr`, appending into `out` (deduplicated). Each specific
+/// plane index already identifies one (format, status, polarity) existence
+/// fact, so deduping on the raw index is exactly the right granularity --
+/// simpler than (and a superset of) the old `(format, polarity)` tuple key,
+/// which only had to consider `LEGAL`. Every distinct fact referenced inside
+/// an `And` is shared-witness-prone: `format:A AND -format:A` (same format,
+/// two polarities), `banned:A AND restricted:A` (same format, two statuses),
+/// and `format:A AND format:B` (two formats) are all the identical problem --
+/// a divergent card can satisfy two existence facts via two *different*
+/// witnessing printings, even though no single printing can satisfy both at
+/// once (see `and_of_checked_for_shared_witness`'s doc). A literal duplicate
+/// leaf (`format:A AND format:A`) reads the same plane index and collapses to
+/// one entry, fine to compose -- the same underlying fact checked twice, not
+/// two facts needing a shared witness.
+fn collect_legality_formats(expr: &PlaneExpr, out: &mut Vec<u16>) {
     match expr {
         PlaneExpr::Plane(p) => {
-            let p = *p as usize;
-            let fmt = if (PLANE_LEGAL_EXISTS..PLANE_LEGAL_EXISTS + MAX_FORMATS).contains(&p) {
-                Some((p - PLANE_LEGAL_EXISTS, false))
-            } else if (PLANE_LEGAL_ILLEGAL..PLANE_LEGAL_ILLEGAL + MAX_FORMATS).contains(&p) {
-                Some((p - PLANE_LEGAL_ILLEGAL, true))
-            } else {
-                None
-            };
-            if let Some(entry) = fmt
-                && !out.contains(&entry)
-            {
-                out.push(entry);
+            if is_legality_plane(*p as usize) && !out.contains(p) {
+                out.push(*p);
             }
         }
         PlaneExpr::Bits(_) | PlaneExpr::Const(_) => {}
@@ -724,35 +773,35 @@ fn collect_legality_formats(expr: &PlaneExpr, out: &mut Vec<(usize, bool)>) {
 }
 
 /// Whether any leaf of a compiled plane expression reads a legality plane
-/// (`PLANE_LEGAL_EXISTS`/`PLANE_LEGAL_ILLEGAL`). These are existence
-/// projections over per-printing-varying data ("*some* printing is/isn't
-/// legal") -- unlike every other plane (colors, types, numeric buckets,
-/// devotion, border, all card-invariant), a card-level True here does not
-/// imply every printing of the card individually satisfies the query. Used
-/// to gate the #634 Step 1 `all_match_known` fast path to `unique=card`,
-/// where existence is exactly the semantics needed (docs/issues/
-/// engine-legality-divergent-carveout.md; Step 2's popcount path is already
-/// `Mode::Card`-only for unrelated reasons, see `run_query`).
+/// (any status/polarity in `LEGALITY_STATUS_TABLE`). These are existence projections over
+/// per-printing-varying data ("*some* printing has this status") -- unlike
+/// every other plane (colors, types, numeric buckets, devotion, border, all
+/// card-invariant), a card-level True here does not imply every printing of
+/// the card individually satisfies the query. Used to gate the #634 Step 1
+/// `all_match_known` fast path to `unique=card`, where existence is exactly
+/// the semantics needed (docs/issues/engine-legality-divergent-carveout.md;
+/// Step 2's popcount path is already `Mode::Card`-only for unrelated reasons,
+/// see `run_query`).
 pub(crate) fn plane_expr_is_existential(expr: &PlaneExpr) -> bool {
     match expr {
-        PlaneExpr::Plane(p) => {
-            let p = *p as usize;
-            (PLANE_LEGAL_EXISTS..PLANE_LEGAL_EXISTS + MAX_FORMATS).contains(&p)
-                || (PLANE_LEGAL_ILLEGAL..PLANE_LEGAL_ILLEGAL + MAX_FORMATS).contains(&p)
-        }
+        PlaneExpr::Plane(p) => is_legality_plane(*p as usize),
         PlaneExpr::Bits(_) | PlaneExpr::Const(_) => false,
         PlaneExpr::And(cs) | PlaneExpr::Or(cs) => cs.iter().any(plane_expr_is_existential),
         PlaneExpr::Not(inner) => plane_expr_is_existential(inner),
     }
 }
 
-/// `And` two-or-more legality-plane leaves referencing *different* formats
-/// (or the same format under both polarities -- `format:A AND -format:A`)
-/// can't be answered by ANDing independent existence projections: `∃p:
-/// legal_A(p) ∧ legal_B(p)` requires one printing to satisfy both at once,
-/// which isn't the same as `(∃p: legal_A(p)) ∧ (∃p: legal_B(p))` (a false
-/// positive the moment different printings would be the witness for each).
-/// `Or` never has this problem (`∃` distributes over `∨`), so this is only
+/// `And` two-or-more legality-plane leaves referencing distinct existence
+/// facts -- different formats, the same format under both polarities
+/// (`format:A AND -format:A`), or (#678) the same format under two different
+/// *statuses* (`banned:A AND restricted:A`) -- can't be answered by ANDing
+/// independent existence projections: `∃p: legal_A(p) ∧ legal_B(p)` requires
+/// one printing to satisfy both at once, which isn't the same as `(∃p:
+/// legal_A(p)) ∧ (∃p: legal_B(p))` (a false positive the moment different
+/// printings would be the witness for each) -- the same argument applies
+/// verbatim whichever two distinct facts are involved, since `collect_legality_
+/// formats` dedupes by raw plane index, not by format alone. `Or` never has
+/// this problem (`∃` distributes over `∨`), so this is only
 /// called where an `And` is about to be assembled -- both the direct case
 /// and the De-Morgan'd `Not(Or(...))` case in `compile_plane_neg`. Declining
 /// (falling back to `narrow_rec`'s existing, correct `Legality` narrowing) is
@@ -831,14 +880,15 @@ pub(crate) fn compile_plane(filter: &FilterExpr, bounds: &rkyv::Archived<BitPlan
             (NumExpr::Const(v), NumExpr::Field(f)) => compile_numeric_cmp(*f, flip_op(*op), *v, bounds),
             _ => None,
         },
-        // f:x / format:x (docs/issues/engine-legality-divergent-carveout.md):
-        // exact for every card via PLANE_LEGAL_EXISTS -- no divergent-card
-        // caveat, unlike the single-plane design this replaced. banned:/
-        // restricted: (expected != LEGALITY_LEGAL) and absent formats
-        // (shift: None) stay unindexed, matching narrow_rec's existing
-        // restriction; `Not` is handled by compile_plane_neg, not here.
-        FilterExpr::Legality { shift: Some(shift), expected } if *expected == LEGALITY_LEGAL => {
-            Some(PlaneExpr::Plane((PLANE_LEGAL_EXISTS + *shift as usize / 2) as u16))
+        // f:x / format:x / banned:x / restricted:x (docs/issues/
+        // engine-legality-divergent-carveout.md, generalized by #678 -- see
+        // docs/issues/engine-legality-banned-restricted-planes.md): exact for
+        // every card via the status's `_EXISTS` plane -- no divergent-card
+        // caveat, same as `LEGAL`. Only a format absent from all loaded data
+        // (shift: None) stays unindexed; `Not` is handled by
+        // compile_plane_neg, not here.
+        FilterExpr::Legality { shift: Some(shift), expected } => {
+            status_plane_bases(*expected).map(|(exists_base, _)| PlaneExpr::Plane((exists_base + *shift as usize / 2) as u16))
         }
         _ => None,
     }
@@ -852,8 +902,8 @@ pub(crate) fn compile_plane(filter: &FilterExpr, bounds: &rkyv::Archived<BitPlan
 /// unchanged. Mutually recursive with `compile_plane`.
 fn compile_plane_neg(filter: &FilterExpr, bounds: &rkyv::Archived<BitPlanes>, words: &rkyv::Archived<OracleWordIndex>) -> Option<PlaneExpr> {
     match filter {
-        FilterExpr::Legality { shift: Some(shift), expected } if *expected == LEGALITY_LEGAL => {
-            Some(PlaneExpr::Plane((PLANE_LEGAL_ILLEGAL + *shift as usize / 2) as u16))
+        FilterExpr::Legality { shift: Some(shift), expected } => {
+            status_plane_bases(*expected).map(|(_, absent_base)| PlaneExpr::Plane((absent_base + *shift as usize / 2) as u16))
         }
         // Not(And(cs)) = Or(Not(c) for c in cs) -- existence distributes over
         // Or, so no shared-witness check is needed here regardless of how
@@ -961,13 +1011,16 @@ pub(crate) fn split_planes(
                     planes.push(pe);
                 }
             } else {
-                // 2+ distinct (format, polarity) pairs can't be ANDed
-                // together safely regardless of mode (shared-witness); a
-                // single one is safe for the plane's own exactness but still
-                // deferred for unique=printing/artwork, same reasoning as the
-                // top-level shortcut above. Either way it falls back to
-                // narrow_rec's existing (correct, still exact as of this
-                // issue) Legality narrowing arm instead.
+                // 2+ distinct legality existence facts (different formats,
+                // different statuses of the same format, or the same format
+                // under both polarities -- collect_legality_formats dedupes
+                // by raw plane index, so all three shapes count the same
+                // way) can't be ANDed together safely regardless of mode
+                // (shared-witness); a single one is safe for the plane's own
+                // exactness but still deferred for unique=printing/artwork,
+                // same reasoning as the top-level shortcut above. Either way
+                // it falls back to narrow_rec's existing (correct, still
+                // exact as of this issue) Legality narrowing arm instead.
                 for (c, _) in legality_children {
                     rest.push(c);
                 }
@@ -1039,18 +1092,23 @@ pub(crate) fn eval_planes(expr: &PlaneExpr, planes: &rkyv::Archived<BitPlanes>, 
     }
 }
 
-/// If plane `p` is one of legality's existence planes, the (shift, is_illegal)
-/// it addresses -- `shift` matches `FilterExpr::Legality`'s own field, and
-/// `is_illegal` distinguishes `PLANE_LEGAL_ILLEGAL` (the negated-check plane)
-/// from `PLANE_LEGAL_EXISTS`. `None` for every other (card-invariant) plane.
-fn legality_plane_shift(p: usize) -> Option<(u8, bool)> {
-    if (PLANE_LEGAL_EXISTS..PLANE_LEGAL_EXISTS + MAX_FORMATS).contains(&p) {
-        Some((((p - PLANE_LEGAL_EXISTS) * 2) as u8, false))
-    } else if (PLANE_LEGAL_ILLEGAL..PLANE_LEGAL_ILLEGAL + MAX_FORMATS).contains(&p) {
-        Some((((p - PLANE_LEGAL_ILLEGAL) * 2) as u8, true))
-    } else {
-        None
+/// If plane `p` is one of legality's existence planes, the (shift, expected,
+/// is_illegal) it addresses -- `shift` matches `FilterExpr::Legality`'s own
+/// field, `expected` is the status the block was built for (`LEGAL`/`BANNED`/
+/// `RESTRICTED`), and `is_illegal` distinguishes an `_ABSENT`/`_ILLEGAL`
+/// (negated-check) plane from its `_EXISTS` counterpart. `None` for every
+/// other (card-invariant) plane. Derived from `LEGALITY_STATUS_TABLE`, the
+/// same single source of truth `status_plane_bases` reads.
+fn legality_plane_shift(p: usize) -> Option<(u8, u64, bool)> {
+    for &(expected, exists_base, absent_base) in &LEGALITY_STATUS_TABLE {
+        if (exists_base..exists_base + MAX_FORMATS).contains(&p) {
+            return Some((((p - exists_base) * 2) as u8, expected, false));
+        }
+        if (absent_base..absent_base + MAX_FORMATS).contains(&p) {
+            return Some((((p - absent_base) * 2) as u8, expected, true));
+        }
     }
+    None
 }
 
 /// Evaluate a compiled plane expression against one specific printing, rather
@@ -1077,9 +1135,9 @@ pub(crate) fn eval_plane_expr_for_printing(
     match expr {
         PlaneExpr::Plane(p) => {
             let p = *p as usize;
-            if let Some((shift, is_illegal)) = legality_plane_shift(p) {
+            if let Some((shift, expected, is_illegal)) = legality_plane_shift(p) {
                 let status = (u64::from(printing.card_legalities) >> shift) & 0b11;
-                if is_illegal { status != LEGALITY_LEGAL } else { status == LEGALITY_LEGAL }
+                if is_illegal { status != expected } else { status == expected }
             } else {
                 let wpp = words_per_plane(u32::from(planes.n_cards) as usize);
                 let word = u64::from(planes.words[p * wpp + cid as usize / 64]);
