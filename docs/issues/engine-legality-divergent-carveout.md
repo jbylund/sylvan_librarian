@@ -270,7 +270,7 @@ aggregate even though it changes nothing for the common case.
 
 It did: `banned:modern`/`restricted:vintage` — queries with zero code-path overlap with anything in
 this issue (`expected != LEGALITY_LEGAL`, never plane-compilable, always an unindexed full scan, on
-`main` and this branch alike) — went from ~0.20ms to ~0.23ms, a ~15% regression on a control that
+`main` and this branch alike) — went from ~200μs to ~230μs, a ~15% regression on a control that
 should have been provably unaffected. This is exactly the trap `docs/issues/engine-printing-varying-
 plane-repair-pattern.md`'s repair-toolkit history already warned about, and the reason this design
 doc's own Acceptance section insists the broad survey is "not optional": the targeted script
@@ -284,8 +284,8 @@ Fixed by splitting `card_match_count` (and, for consistency, `push_card_matches`
 branch) into two code paths instead of one closure branching on `existential_plane` every call: the
 `None` branch is now byte-for-byte the same shape the function had before `existential_plane` existed
 at all, and the `Some` branch (only ever reached for `Mode::Card` with a promoted legality leaf) pays
-the extra conjunction cost. Re-measured: `banned:modern`/`restricted:vintage` back to ~0.20ms,
-matching a freshly-captured `main` baseline; 0 regressions (>15% and >0.01ms) across all 24 targeted
+the extra conjunction cost. Re-measured: `banned:modern`/`restricted:vintage` back to ~200μs,
+matching a freshly-captured `main` baseline; 0 regressions (>15% and >10μs) across all 24 targeted
 configs and the full 520-query survey, re-run back-to-back with a fresh `main` build specifically to
 rule out machine-state drift between runs (this session's first comparison used a `main` baseline
 captured hours earlier, which briefly looked like it might explain some survey deltas until the
@@ -366,19 +366,20 @@ are for the one thing they're still needed for: `filter.rs`'s per-printing `Lega
 ## Results
 
 Measured on `benchmarks/bitplanes/corpus.jsonl` (97,206 printings), `main` @ `967a6ca` vs. this branch,
-`scripts/bench_legality_divergent.py` (3s window/config):
+`scripts/bench_legality_divergent.py` (3s window/config). All timings sub-millisecond throughout,
+given in μs rather than ms:
 
 | config | main | branch | speedup |
 |---|---|---|---|
-| `format:modern` | 0.190ms | 0.065ms | 2.9x |
-| `format:pioneer` | 0.159ms | 0.061ms | 2.6x |
-| `-format:modern` | 0.154ms | 0.057ms | 2.7x |
-| `format:modern or format:pioneer` | 0.207ms | 0.071ms | 2.9x |
-| `format:modern c:g t:creature` (cited real usage shape) | 0.083ms | 0.067ms | 1.2x |
-| `format:modern` @ offset 15000 | 0.203ms | 0.068ms | 3.0x (flat with offset — Step 2) |
-| `format:modern t:creature` @ offset 15000 | 0.085ms | 0.007ms | 12x |
-| `format:modern t:creature`, `unique=printing`/`artwork` | 0.140/0.143ms | 0.131/0.135ms | unaffected (correctly not promoted) |
-| `banned:modern`/`restricted:vintage`/`c:g` (controls) | — | — | unaffected |
+| `format:modern` | 190μs | 65μs | 2.9x |
+| `format:pioneer` | 159μs | 61μs | 2.6x |
+| `-format:modern` | 154μs | 57μs | 2.7x |
+| `format:modern or format:pioneer` | 207μs | 71μs | 2.9x |
+| `format:modern c:g t:creature` (cited real usage shape) | 83μs | 67μs | 1.2x |
+| `format:modern` @ offset 15000 | 203μs | 68μs | 3.0x (flat with offset — Step 2) |
+| `format:modern t:creature` @ offset 15000 | 85μs | 7μs | 12x |
+| `format:modern t:creature`, `unique=printing`/`artwork` | 140/143μs | 131/135μs | unaffected (correctly not promoted) |
+| `banned:modern`/`restricted:vintage`/`c:g` (controls) | 203/198/58μs | 201/199/60μs | unaffected (re-verified post-conjunction-fix) |
 
 Total-row-count parity: 0 mismatches across all 24 targeted configs and a 520-query broad survey
 (`scripts/survey_queries.py --seed 667`) run against both builds. Re-measured after the row-selection
