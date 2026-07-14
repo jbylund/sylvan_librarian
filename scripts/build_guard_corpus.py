@@ -2,7 +2,7 @@
 
 Reads the real blue-DB corpus export (the bench_bitplanes.py JSONL) and
 overwrites two knob columns with seeded, exactly-dialable values (see
-docs/issues/engine-cost-guard-calibration.md, Step 2):
+docs/issues/00647-engine-cost-guard-calibration.md, Step 2):
 
 - ``price_usd`` (printing-space knob): a shuffled permutation of ``1..N``
   scaled to ``(0, 1]``, so ``usd<x`` matches exactly ``ceil(x*N)-1``

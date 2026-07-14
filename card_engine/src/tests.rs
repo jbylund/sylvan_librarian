@@ -393,7 +393,7 @@ fn narrow_candidates_rarity_card_space() {
     }
 }
 
-/// Card i's printing rarities (docs/issues/engine-rarity-planes.md): one value
+/// Card i's printing rarities (docs/issues/00670-engine-rarity-planes.md): one value
 /// per printing, None for no-rarity. Covers all 6 buckets, cards spanning two
 /// buckets at once (mixed within the planed range, and mixed across the
 /// plane/postings-tail boundary), and a card with no rarity anywhere.
@@ -431,7 +431,7 @@ fn rarity_plane_fixture_store() -> CardData {
 /// True for the (op, val) pairs where the shared "above mythic" plane can't
 /// resolve the comparison exactly -- val is 4 (special) or 5 (bonus)
 /// specifically, and the op needs to tell them apart (docs/issues/
-/// engine-existential-plane-generalization.md, #680's "K exact + 1 shared
+/// 00680-engine-existential-plane-generalization.md, #680's "K exact + 1 shared
 /// hi bucket" design, following the same tail-bucket shape as
 /// cmc/power/toughness's PLANE_*_HI, just fixed at [4,5] instead of
 /// live-observed). Every other (op, val) combination is unambiguous because
@@ -523,7 +523,7 @@ fn rarity_plane_null_rarity_card_matches_nothing() {
 
 /// Rarity is now an existential-plane field (docs/issues/engine-existential-
 /// plane-generalization.md, #680), promoted the same way legality is
-/// (docs/issues/engine-legality-divergent-carveout.md): the 4 tracked values
+/// (docs/issues/00667-engine-legality-divergent-carveout.md): the 4 tracked values
 /// exact-consume via compile_plane, `!=val` on a tracked value is exact too
 /// (Or of the other tracked planes plus the shared hi plane), but a query
 /// needing to distinguish special from bonus specifically still declines to
@@ -565,7 +565,7 @@ fn rarity_tracked_values_exact_consumed_hi_bucket_declines() {
 /// And (whether from the same field, like a bounded range, or a different
 /// field entirely, like legality) can't be answered from independent
 /// existence planes -- the same argument as two distinct legality facts
-/// (docs/issues/engine-existential-plane-generalization.md point 1's hand
+/// (docs/issues/00680-engine-existential-plane-generalization.md point 1's hand
 /// verification), now exercised with rarity's own indices in scope.
 #[test]
 fn rarity_shared_witness_declines_same_field_and_cross_field() {
@@ -846,9 +846,9 @@ fn divergent_legality_defers_to_printings() {
 /// format B (shift 2) only, single printing. card2: genuinely divergent for
 /// format A — two printings, one legal and one not — so both
 /// `legal_exists(A)` and `illegal_exists(A)` are true for it at once
-/// (docs/issues/engine-legality-divergent-carveout.md). All three also carry
+/// (docs/issues/00667-engine-legality-divergent-carveout.md). All three also carry
 /// a format C (shift 4) banned/restricted status, generalized by #678 (see
-/// docs/issues/engine-legality-banned-restricted-planes.md): card0 banned in
+/// docs/issues/00678-engine-legality-banned-restricted-planes.md): card0 banned in
 /// C (single printing), card1 restricted in C (single printing), card2
 /// divergent on *banned(C)* too — one printing banned, the other merely
 /// legal (not banned) — mirroring the real `restricted:oldschool` shape
@@ -1044,7 +1044,7 @@ fn legality_cross_status_shared_witness_falls_back_to_correct_result() {
     assert_eq!(total, 0, "no single printing is both banned and restricted in C at once");
 }
 
-/// Row-selection correctness (docs/issues/engine-legality-divergent-carveout.md
+/// Row-selection correctness (docs/issues/00667-engine-legality-divergent-carveout.md
 /// "Row selection for unique=card") through the real `run_query` pipeline,
 /// mirroring `legal_plane_narrowing_preserves_divergent_printing_correctness`
 /// but for `banned:` — the preferred printing deliberately says NOT banned,
@@ -1170,7 +1170,7 @@ fn legal_plane_narrows_correctly_across_word_boundary() {
 
 /// `plane_expr_is_existential` is the whole mode-aware-all_match fix's load-
 /// bearing check: it must flag any compiled expression touching a legality
-/// plane (docs/issues/engine-legality-divergent-carveout.md) and only those
+/// plane (docs/issues/00667-engine-legality-divergent-carveout.md) and only those
 /// -- card-invariant fields (types here) must never be flagged, and an And
 /// mixing the two must still be flagged (any existential leaf taints the
 /// whole composed expression).
@@ -3082,7 +3082,7 @@ fn split_planes_composition_rules() {
     assert!(pe.is_none());
     assert!(matches!(residual, FilterExpr::Or(ref v) if v.len() == 2));
 
-    // Produced mana is plane-expressible (docs/issues/engine-produces-planes.md):
+    // Produced mana is plane-expressible (docs/issues/00669-engine-produces-planes.md):
     // same card-level, always-known bitmask shape as Colors/ColorIdentity.
     let produces = FilterExpr::ColorCmp { field: ColorField::ProducedMana, op: CmpOp::Ge, mask: 16 };
     let (pe, residual) = split_planes(produces, bounds, words, true);
@@ -3528,7 +3528,7 @@ fn oracle_match_none_str_mirrors_text_contains() {
     assert!(plain.eval_card(&archived.cards[0], &archived.strings) == Tri::Null);
 }
 
-// ─── Oracle word index (docs/issues/engine-oracle-word-index.md) ────────────
+// ─── Oracle word index (docs/issues/00663-engine-oracle-word-index.md) ────────────
 
 /// 17 distinct oracle texts (n_texts=17, so words_per_plane=1 and the #639
 /// crossover is "dense iff a word's own text count exceeds 4"), deliberately
@@ -3769,9 +3769,9 @@ fn trigram_dense_sparse_dispatch_parity() {
     assert_eq!(super::intersect_operands(ops), vec![1, 2, 3, 4, 5, 6], "plane x plane AND path, no posting seed available");
 }
 
-// ─── Border planes (docs/issues/done/engine-border-planes.md, #664; promoted
+// ─── Border planes (docs/issues/done/00664-engine-border-planes.md, #664; promoted
 // to an existential field reaching compile_plane/all_match for the 4 tracked
-// values by docs/issues/engine-existential-plane-generalization.md, #680) ──
+// values by docs/issues/00680-engine-existential-plane-generalization.md, #680) ──
 
 /// 9 cards with varied printing-level border colors. Card 3 independently has
 /// a black printing *and* a separate borderless printing — the shared-witness

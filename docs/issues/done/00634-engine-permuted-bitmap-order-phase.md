@@ -1,6 +1,7 @@
 # Engine: permuted match bitmaps + exact-candidate promotion
 
-Status: filed 2026-07-08, successor to #630 phase 1 (PR #633). GitHub: #634.
+Status: done — Steps 1/2 merged and shipped. GitHub: #634 (closed). Remaining "Step 1.5"
+scope split out to #656 and #657, successor to #630 phase 1 (PR #633).
 
 ## Problem
 
@@ -37,11 +38,11 @@ set-bit-iteration floor by design.
 
 ## Related
 
-- [engine-card-bitplanes.md](engine-card-bitplanes.md) — #630; phase 2
+- [00630-engine-card-bitplanes.md](00630-engine-card-bitplanes.md) — #630; phase 2
   legality planes widen the exact-composed class
-- [engine-bitmap-streaming-select.md](engine-bitmap-streaming-select.md) —
+- [00619-engine-bitmap-streaming-select.md](00619-engine-bitmap-streaming-select.md) —
   #632 forward perms + counts buffer this partially retires
-- [engine-legality-bitplanes.md](engine-legality-bitplanes.md) — #630 phase 2
+- [local-engine-legality-bitplanes.md](local-engine-legality-bitplanes.md) — #630 phase 2
   (PR #654), base branch for this work; flagged on #634 as a source shape
   ("exact + shared advisory carve-out") the exactness classification below
   doesn't yet have a case for — Step 3 candidate, not in scope here

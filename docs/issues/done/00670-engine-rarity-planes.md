@@ -133,7 +133,7 @@ printings actually match).
 aggregation needs the same behavior (a card whose printings are all null-rarity sets no bits,
 falling through exactly as today's postings do). Explicit parity-test case, given this repo's
 history with Null-semantics bugs in exactly this kind of promotion (#634's implementation caught
-two real ones; see also `docs/issues/engine-null-vs-empty-text-parity.md`).
+two real ones; see also `docs/issues/00685-engine-null-vs-empty-text-parity.md`).
 
 **Two wins beyond the obvious Eq/Ge/Le narrowing**, worth their own benchmark rows:
 

@@ -1,5 +1,5 @@
 //! Micro-benchmark for the oracle word dictionary's sparse-tier scan
-//! (docs/issues/engine-oracle-word-index.md): std `str::match_indices` over
+//! (docs/issues/00663-engine-oracle-word-index.md): std `str::match_indices` over
 //! the concatenated `sparse_blob` vs. `memchr::memmem::Finder::find_iter`
 //! over the same blob.
 //!

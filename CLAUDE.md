@@ -106,3 +106,19 @@ Blog posts live in `docs/blog/posts/<slug>/index.md`. Writing guidance:
 
 Blog posts are not subject to the 100-line length convention in the global markdown rules. Length
 should match the story: long enough to explain the mechanism and show evidence, no longer.
+
+## Issue Tracking
+
+`docs/issues/` holds the deep design/implementation notes for both engine and product work — this
+is the primary source of truth, tracked in git (all of it, no exceptions; `docs/issues/done/` for
+finished work). GitHub issues are secondary: a triage-and-status layer that must stand on its own —
+a reader should understand the problem and the gist of the approach from the GitHub issue alone,
+without needing to open the doc — but the doc is where the real depth (measurements, rejected
+alternatives, iteration history) lives, so the GitHub issue doesn't need to duplicate all of that,
+just link to it.
+
+**Naming:** `#####-slug.md`, 5-digit zero-padded GitHub issue (or PR, if no issue exists)
+number, e.g. `00623-engine-flavor-absent-gram-bitmap.md` for #623. Prefer the issue number over its
+merging PR's number when both exist. A doc with no GitHub issue of its own — a design note, or
+work not yet filed — uses `local-slug.md` instead (e.g. `local-engine-union-summary-planes.md`).
+When a `local-` doc later gets a GitHub issue filed for it, rename it to the assigned number.

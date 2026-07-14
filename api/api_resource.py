@@ -321,7 +321,7 @@ MIN_IMPORT_CARDS = 90_000
 # Rows per batch streamed into the engine during a reload. The reload's memory
 # floor is the Rust-side build (~305 MB), so the batch only needs to be small
 # relative to that: ~2k rows ≈ 18 MB of dicts. Smaller adds round trips for no
-# measurable gain (see docs/issues/engine-incremental-loading.md).
+# measurable gain (see docs/issues/00505-engine-incremental-loading.md).
 _ENGINE_RELOAD_BATCH_SIZE = 2_000
 
 # Public field name -> magic.cards column. The `fields=` vocabulary for /search. This is
@@ -1033,7 +1033,7 @@ class APIResource:
         (reload_begin / add_batch / reload_commit) one batch at a time, so the
         Python-side transient is one batch of row dicts (~18 MB at 2k rows)
         instead of the whole corpus (~840 MB) — measurements in
-        docs/issues/engine-incremental-loading.md. The reload is guarded by a
+        docs/issues/00505-engine-incremental-loading.md. The reload is guarded by a
         cross-worker lock so only one worker pays the build cost at a time.
         With force=False (cold-start warming), losers of the race return
         immediately and pick up the winner's archive via the engine's

@@ -1,6 +1,6 @@
 """Forced-branch crossover sweeps for the engine's cost-guard constants.
 
-For each guard (docs/issues/engine-cost-guard-calibration.md) the two code
+For each guard (docs/issues/00647-engine-cost-guard-calibration.md) the two code
 paths it arbitrates are forced via the CARD_ENGINE_* env overrides — read
 once per process through LazyLock, so every (guard, branch, rep) runs in a
 fresh subprocess — and the workload knob (exact synthetic selectivity, see

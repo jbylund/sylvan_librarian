@@ -51,4 +51,4 @@ to one position regardless of what's being tested there, not just for pure
 literals. `regex_tier()` doesn't currently detect this — any pattern with
 live metacharacters after the anchor still falls to `REGEX_MACHINERY_NS100`,
 a safe but measurably conservative overestimate for this shape. See
-`docs/issues/engine-regex-anchor-detection.md`.
+`docs/issues/local-engine-regex-anchor-detection.md`.

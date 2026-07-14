@@ -3,7 +3,7 @@
 Status: reference only — not an active issue, nothing here is scheduled. Developed while designing
 #667 (legality divergent-card carve-out), then **superseded for legality itself** by a cleaner
 dual-exact-representation design (see
-[docs/issues/engine-legality-divergent-carveout.md](engine-legality-divergent-carveout.md)) that
+[docs/issues/00667-engine-legality-divergent-carveout.md](00667-engine-legality-divergent-carveout.md)) that
 needs none of this. Captured here because the reasoning generalizes to a *future* printing-varying
 field that might not have legality's escape hatch available. If nothing ever needs this, that's
 fine — the design work isn't wasted, it's just not costing anything sitting in a doc either.
@@ -96,6 +96,6 @@ out not to be enumerable ahead of time.
 
 ## Related
 
-- [engine-legality-divergent-carveout.md](engine-legality-divergent-carveout.md) — where this was
+- [00667-engine-legality-divergent-carveout.md](00667-engine-legality-divergent-carveout.md) — where this was
   developed, and the dual-representation design that replaced it
 - #667, #634, #654, #656 — same as that doc's Related section

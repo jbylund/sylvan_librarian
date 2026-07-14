@@ -53,7 +53,7 @@ package `__init__.py`.
 
 Registers `QueryLogMiddleware` in the middleware stack.
 
-### `docs/issues/pg-creds-testcontainers-fallback.md`
+### `docs/issues/local-pg-creds-testcontainers-fallback.md`
 
 Tracks the broader issue of `make_pool`'s silent testcontainers fallback — the right fix is to
 route explicitly on `PYTEST_CURRENT_TEST` rather than falling back silently in production.

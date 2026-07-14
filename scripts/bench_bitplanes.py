@@ -9,7 +9,7 @@ directly comparable CSVs. No SQL side, no Docker: build the engine locally
         --corpus benchmarks/bitplanes/corpus.jsonl \
         --out benchmarks/bitplanes/baseline-main.csv
 
-Export the corpus once from the blue DB (see docs/issues/engine-card-bitplanes.md):
+Export the corpus once from the blue DB (see docs/issues/00630-engine-card-bitplanes.md):
 
     COLS=$(.venv/bin/python -c "import card_engine; print(', '.join(card_engine.ENGINE_COLUMNS))")
     docker exec sylvan_blue-postgres-1 psql -U foouser -d magic -X -At \

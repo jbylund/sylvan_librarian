@@ -12,9 +12,9 @@
 //! are card-level and two-valued (their tri() never returns Null or
 //! PrintingDep), so plane algebra — including complement for Not —
 //! reproduces the filter's card-level truth exactly.
-//! Legality (docs/issues/engine-legality-divergent-carveout.md, generalized
+//! Legality (docs/issues/00667-engine-legality-divergent-carveout.md, generalized
 //! to banned/restricted by docs/issues/engine-legality-banned-restricted-
-//! planes.md, #678) and rarity (docs/issues/engine-rarity-planes.md,
+//! planes.md, #678) and rarity (docs/issues/00670-engine-rarity-planes.md,
 //! promoted from narrowing-only to existential by docs/issues/engine-
 //! existential-plane-generalization.md, #680) are *existential*, not
 //! card-invariant: a card-level True only means "some printing has this
@@ -43,7 +43,7 @@ const COLOR_PLANES: usize = 6;
 const TYPE_PLANES: usize = 14;
 const PLANE_COLORS: usize = 0;
 const PLANE_IDENTITY: usize = COLOR_PLANES;
-/// Produced mana (docs/issues/engine-produces-planes.md): a plain per-color
+/// Produced mana (docs/issues/00669-engine-produces-planes.md): a plain per-color
 /// bitmask on OracleCard, built with the same jsonb_color_to_bits helper and
 /// evaluated through the same ColorCmp code path as Colors/ColorIdentity —
 /// structurally identical in every way that matters for plane-exactness
@@ -58,7 +58,7 @@ const PLANE_TYPES: usize = PLANE_PRODUCED_MANA + COLOR_PLANES;
 /// set for deeper queries (see the saturated-superset arm in narrow_rec).
 const PLANE_DEVOTION: usize = PLANE_TYPES + TYPE_PLANES;
 const DEVOTION_BITS: usize = 2;
-/// Two planes per format (docs/issues/engine-legality-divergent-carveout.md),
+/// Two planes per format (docs/issues/00667-engine-legality-divergent-carveout.md),
 /// fixed-width at MAX_FORMATS each regardless of how many formats loaded data
 /// actually uses -- unused slots are permanently-zero planes, matching the
 /// existing `shift: None` "format absent" semantics. Both are computed
@@ -71,7 +71,7 @@ const DEVOTION_BITS: usize = 2;
 pub(crate) const PLANE_LEGAL_EXISTS: usize = PLANE_DEVOTION + DEVOTION_BITS * COLOR_PLANES;
 pub(crate) const PLANE_LEGAL_ILLEGAL: usize = PLANE_LEGAL_EXISTS + MAX_FORMATS;
 /// Same escape hatch, generalized to `banned`/`restricted`
-/// (docs/issues/engine-legality-banned-restricted-planes.md, #678): the query
+/// (docs/issues/00678-engine-legality-banned-restricted-planes.md, #678): the query
 /// space (`expected` against a fixed format list) is exactly as finite and
 /// build-time-precomputable for these two values as it was for `LEGAL`, so
 /// the identical two-exact-planes construction applies, just with more
@@ -95,7 +95,7 @@ pub(crate) const PLANE_RESTRICTED_ABSENT: usize = PLANE_RESTRICTED_EXISTS + MAX_
 /// just another plane, no different from "power==5" — which is what lets a
 /// sparse tail (power has 2 cards at -1) get absorbed automatically instead
 /// of needing a side table or a live re-query. See
-/// docs/issues/engine-numeric-range-planes.md for the design history.
+/// docs/issues/local-engine-numeric-range-planes.md for the design history.
 const NUM_INTERIOR_LO: i32 = 0;
 const NUM_INTERIOR_HI: i32 = 12;
 const NUM_INTERIOR_WIDTH: usize = (NUM_INTERIOR_HI - NUM_INTERIOR_LO + 1) as usize;
@@ -107,9 +107,9 @@ pub(crate) const PLANE_POWER_HI: usize = PLANE_POWER + NUM_INTERIOR_WIDTH;
 pub(crate) const PLANE_TOUGHNESS_LO: usize = PLANE_POWER_HI + 1;
 pub(crate) const PLANE_TOUGHNESS: usize = PLANE_TOUGHNESS_LO + 1;
 pub(crate) const PLANE_TOUGHNESS_HI: usize = PLANE_TOUGHNESS + NUM_INTERIOR_WIDTH;
-/// Rarity planes (docs/issues/engine-rarity-planes.md, promoted to an
+/// Rarity planes (docs/issues/00670-engine-rarity-planes.md, promoted to an
 /// existential field reaching `compile_plane`/`all_match` by
-/// docs/issues/engine-existential-plane-generalization.md, #680): one-hot
+/// docs/issues/00680-engine-existential-plane-generalization.md, #680): one-hot
 /// planes for the 4 most common values -- common=0, uncommon=1, rare=2,
 /// mythic=3, matching `magic.rarity_text_to_int`'s numbering directly (no
 /// offset needed) -- plus one shared "above mythic" plane covering
@@ -133,7 +133,7 @@ pub(crate) const RARITY_INTERIOR: usize = 4;
 pub(crate) const PLANE_RARITY: usize = PLANE_TOUGHNESS_HI + 1;
 pub(crate) const PLANE_RARITY_HI: usize = PLANE_RARITY + RARITY_INTERIOR;
 
-/// Border planes (docs/issues/done/engine-border-planes.md, #664, promoted
+/// Border planes (docs/issues/done/00664-engine-border-planes.md, #664, promoted
 /// from loose-narrowing-only to an existential field reaching
 /// `compile_plane`/`all_match` by docs/issues/engine-existential-plane-
 /// generalization.md, #680): one-hot planes for the 4 tracked values --
@@ -217,7 +217,7 @@ pub(crate) fn words_per_plane(n_cards: usize) -> usize {
 /// `build_bit_planes`'s scatter loop) derives from this one table instead of
 /// each maintaining its own parallel copy -- adding a 4th indexed status is a
 /// one-line change here, nowhere else
-/// (docs/issues/engine-legality-banned-restricted-planes.md, #678).
+/// (docs/issues/00678-engine-legality-banned-restricted-planes.md, #678).
 /// `LEGALITY_NOT_LEGAL` has no row: the parser never emits a bare `Legality`
 /// leaf with that `expected` (`-format:X` is
 /// `Not(Legality{expected: LEGALITY_LEGAL})`, not a literal `NOT_LEGAL` leaf).
@@ -276,7 +276,7 @@ pub(crate) fn build_bit_planes(cards: &[OracleCard], printings: &[Printing], off
     let mut toughness_hi = BucketBounds::default();
     for (i, card) in cards.iter().enumerate() {
         let mut set = |plane: usize| words[plane * wpp + i / 64] |= 1u64 << (i % 64);
-        // Rarity (docs/issues/engine-rarity-planes.md): "any printing at this
+        // Rarity (docs/issues/00670-engine-rarity-planes.md): "any printing at this
         // rarity" existence projection, same aggregation build_rarity_index
         // does over the same range, just OR'd into planes instead of
         // postings for the 4 tracked values. Missing rarity (None)
@@ -299,7 +299,7 @@ pub(crate) fn build_bit_planes(cards: &[OracleCard], printings: &[Printing], off
         if rarity_mask >> RARITY_INTERIOR != 0 {
             set(PLANE_RARITY_HI);
         }
-        // Border (docs/issues/done/engine-border-planes.md, #664; promoted to
+        // Border (docs/issues/done/00664-engine-border-planes.md, #664; promoted to
         // an existential field by #680 -- see PLANE_BORDER's doc): each
         // printing's border, if known, sets its tracked one-hot plane or the
         // shared "other" plane.
@@ -346,9 +346,9 @@ pub(crate) fn build_bit_planes(cards: &[OracleCard], printings: &[Printing], off
                 "devotion without identity: card {i} color lane {b}"
             );
         }
-        // Legality (docs/issues/engine-legality-divergent-carveout.md,
+        // Legality (docs/issues/00667-engine-legality-divergent-carveout.md,
         // generalized to banned/restricted by #678 -- see
-        // docs/issues/engine-legality-banned-restricted-planes.md): two
+        // docs/issues/00678-engine-legality-banned-restricted-planes.md): two
         // existence projections per (format, status), computed directly from
         // this card's own printings (the `range` rarity already sliced
         // above) -- exists = some printing has this status, absent = some
@@ -435,7 +435,7 @@ pub(crate) fn build_divergent_ids(cards: &[OracleCard]) -> Vec<u16> {
 pub(crate) enum PlaneExpr {
     Plane(u16),
     /// An externally-precomputed card bitmap, cloned in whole at compile
-    /// time (docs/issues/engine-oracle-word-index.md's dense word dictionary — see
+    /// time (docs/issues/00663-engine-oracle-word-index.md's dense word dictionary — see
     /// compile_plane's TextContains arm). Not part of BitPlanes' fixed
     /// layout: which words promote to a bitmap is data-dependent, unlike the
     /// compile-time-known dimensions the other variants index into. A clone
@@ -890,7 +890,7 @@ fn compile_plane_children(children: &[FilterExpr], bounds: &rkyv::Archived<BitPl
 /// Generalizes what was legality-only (docs/issues/engine-legality-divergent-
 /// carveout.md) to any field whose plane is an existence projection over
 /// printing-varying data, not a card-invariant fact
-/// (docs/issues/engine-existential-plane-generalization.md, #680): a
+/// (docs/issues/00680-engine-existential-plane-generalization.md, #680): a
 /// card-level True here does not imply every printing of the card
 /// individually satisfies the query, unlike colors/types/devotion/numeric
 /// buckets.
@@ -1008,8 +1008,8 @@ fn collect_existential_indices(expr: &PlaneExpr, out: &mut Vec<u16>) {
 /// (any family -- legality's status/polarity blocks, rarity's one-hot
 /// values). Used to gate the #634 Step 1 `all_match_known` fast path to
 /// `unique=card`, where existence is exactly the semantics needed
-/// (docs/issues/engine-legality-divergent-carveout.md,
-/// docs/issues/engine-existential-plane-generalization.md; Step 2's popcount
+/// (docs/issues/00667-engine-legality-divergent-carveout.md,
+/// docs/issues/00680-engine-existential-plane-generalization.md; Step 2's popcount
 /// path is already `Mode::Card`-only for unrelated reasons, see `run_query`).
 pub(crate) fn plane_expr_is_existential(expr: &PlaneExpr) -> bool {
     match expr {
@@ -1036,7 +1036,7 @@ pub(crate) fn plane_expr_is_existential(expr: &PlaneExpr) -> bool {
 /// (falling back to `narrow_rec`'s existing, correct `Legality` narrowing) is
 /// deliberately simpler than building a shared-witness-safe joint check for a
 /// shape nobody realistically writes --
-/// docs/issues/engine-printing-varying-plane-repair-pattern.md has the joint
+/// docs/issues/local-engine-printing-varying-plane-repair-pattern.md has the joint
 /// per-printing evaluation this would need if it ever mattered enough to build.
 fn and_of_checked_for_shared_witness(children: Vec<PlaneExpr>) -> Option<PlaneExpr> {
     let mut formats = Vec::new();
@@ -1060,7 +1060,7 @@ pub(crate) fn compile_plane(filter: &FilterExpr, bounds: &rkyv::Archived<BitPlan
         // contains_unnegatable_numeric guard itself, per-leaf, via its own
         // catch-all arm -- see compile_plane_neg's doc.
         FilterExpr::Not(inner) => compile_plane_neg(inner, bounds, words),
-        // Bonus consumption (docs/issues/engine-oracle-word-index.md): only
+        // Bonus consumption (docs/issues/00663-engine-oracle-word-index.md): only
         // when the needle matches exactly one dictionary word total (dense or
         // sparse) and that word is dense — the same "single dense hit, no
         // sparse hits" case narrow_rec's general dispatch handles, just
@@ -1112,8 +1112,8 @@ pub(crate) fn compile_plane(filter: &FilterExpr, bounds: &rkyv::Archived<BitPlan
             _ => None,
         },
         // f:x / format:x / banned:x / restricted:x (docs/issues/
-        // engine-legality-divergent-carveout.md, generalized by #678 -- see
-        // docs/issues/engine-legality-banned-restricted-planes.md): exact for
+        // 00667-engine-legality-divergent-carveout.md, generalized by #678 -- see
+        // docs/issues/00678-engine-legality-banned-restricted-planes.md): exact for
         // every card via the status's `_EXISTS` plane -- no divergent-card
         // caveat, same as `LEGAL`. Only a format absent from all loaded data
         // (shift: None) stays unindexed; `Not` is handled by
@@ -1121,7 +1121,7 @@ pub(crate) fn compile_plane(filter: &FilterExpr, bounds: &rkyv::Archived<BitPlan
         FilterExpr::Legality { shift: Some(shift), expected } => {
             status_plane_bases(*expected).map(|(exists_base, _)| PlaneExpr::Plane((exists_base + *shift as usize / 2) as u16))
         }
-        // border:x (docs/issues/done/engine-border-planes.md, #664,
+        // border:x (docs/issues/done/00664-engine-border-planes.md, #664,
         // promoted by #680 -- see PLANE_BORDER's doc): exact for the 4
         // tracked values via their one-hot plane. An untracked value
         // (`border:yellow`) declines here and falls back to narrow_rec's
@@ -1350,7 +1350,7 @@ pub(crate) fn eval_planes(expr: &PlaneExpr, planes: &rkyv::Archived<BitPlanes>, 
 /// emission picks/verifies a printing for a card whose card-level match came
 /// through an existential leaf (docs/issues/engine-legality-divergent-
 /// carveout.md "Row selection for unique=card",
-/// docs/issues/engine-existential-plane-generalization.md): an existence
+/// docs/issues/00680-engine-existential-plane-generalization.md): an existence
 /// plane only guarantees *some* printing satisfies the expression, not this
 /// one. Every other (card-invariant) leaf reads the same card-level bit
 /// `eval_planes` would have used -- identical for every printing of the card

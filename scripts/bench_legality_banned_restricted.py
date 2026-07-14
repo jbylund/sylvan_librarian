@@ -34,7 +34,7 @@ from scripts.bench_permuted_order import bench_one, load_engine  # noqa: E402
 # (group, query, unique, orderby, prefer, offset) — direction=asc, limit=100 throughout.
 CONFIGS: list[tuple[str, str, str, str, str, int]] = [
     # Solo banned:/restricted:, across the size spread (card-level counts from
-    # engine-legality-bitplanes.md's table): duel banned=91 (largest banned set),
+    # local-engine-legality-bitplanes.md's table): duel banned=91 (largest banned set),
     # vintage restricted=51 (largest restricted set), modern banned=52 (the issue's
     # own cited example), a near-zero set (alchemy banned=1).
     ("promoted-solo", "banned:duel", "card", "edhrec", "default", 0),
