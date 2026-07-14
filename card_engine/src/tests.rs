@@ -2,7 +2,7 @@ use super::{
     assign_name_ranks,
     build_numeric_index, build_oracle_text_index, build_tag_index, build_trigram_index,
     build_rarity_index, build_flavor_index, build_thresholded_tag_index, build_sort_permutations,
-    build_artwork_group_counts, build_bit_planes, build_divergent_ids, build_name_bigram_index, flavor_fingerprint, flavor_match_sets,
+    assign_artwork_groups, build_bit_planes, build_divergent_ids, build_name_bigram_index, flavor_fingerprint, flavor_match_sets,
     cards_of_printings, count_common_keywords, count_common_types,
     build_artist_index, build_range_index, range_candidates, narrow_candidates, rarity_candidates,
     range_too_broad_to_narrow, run_query, trigram_candidates, finalize_trigram_index, PrintingRangeIndex, NARROW_FLOOR,
@@ -202,6 +202,7 @@ fn stub_printing(scryfall_id: u128, illustration_id: u128, prefer_score: Option<
         card_art_tags: Vec::new(),
         card_is_tags: Vec::new(),
         card_frame_data: Vec::new(),
+        artwork_group_id: 0, // placeholder; store_of overwrites via assign_artwork_groups
     }
 }
 
@@ -224,6 +225,12 @@ fn store_of(cards: Vec<OracleCard>, printing_counts: &[usize], vocab: VocabInter
         }
         offsets.push(printings.len() as u32);
     }
+    // Every printing above got a distinct illustration_id (next_id strictly
+    // increases), so this assigns sequential, all-distinct artwork_group_ids by
+    // default -- fixtures that want shared artwork overwrite illustration_id
+    // after store_of returns and must recompute via assign_artwork_groups
+    // themselves (see artwork_group_counts_dedup_illustrations).
+    let artwork_groups = assign_artwork_groups(&mut printings, &offsets);
     // Real planes and bigrams so narrowing tests see the same store shape
     // reload_commit builds (type narrowing goes through the planes since #637).
     let indexes = CardIndexes {
@@ -235,6 +242,7 @@ fn store_of(cards: Vec<OracleCard>, printing_counts: &[usize], vocab: VocabInter
         name_bigrams: build_name_bigram_index(&cards),
         legal_divergent: build_divergent_ids(&cards),
         sort_perms: build_sort_permutations(&cards, &printings, &offsets),
+        artwork_groups,
         ..Default::default()
     };
     CardData {
@@ -1923,7 +1931,10 @@ fn run_query_artwork_groups_shared_illustrations() {
     let mut data = store_of(cards, &[4], vocab);
     // ids from store_of: scryfall/illustration 1,2,3,4. Make printing 2 share
     // printing 0's illustration (non-contiguous under prefer-desc order).
+    // store_of already assigned artwork_group_id from the original (all-distinct)
+    // illustration_ids, so it must be recomputed after this mutation.
     data.printings[2].illustration_id = 1;
+    data.indexes.artwork_groups = assign_artwork_groups(&mut data.printings, &data.offsets);
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
@@ -1985,6 +1996,7 @@ fn bench_checked_vs_unchecked_access() {
     }
     offsets.push(printings.len() as u32);
     let strings = interner.strings;
+    let artwork_groups = assign_artwork_groups(&mut printings, &offsets);
 
     let indexes = CardIndexes {
         name_trigram:   build_trigram_index(&cards, |c| c.card_name_lower.as_str()),
@@ -2006,7 +2018,7 @@ fn bench_checked_vs_unchecked_access() {
         price_usd:      Vec::new(),
         collector_number: Vec::new(),
         sort_perms:     build_sort_permutations(&cards, &printings, &offsets),
-        artwork_groups: build_artwork_group_counts(&printings, &offsets),
+        artwork_groups,
         planes:         build_bit_planes(&cards, &printings, &offsets, &strings),
         name_bigrams:   build_name_bigram_index(&cards),
         legal_divergent: build_divergent_ids(&cards),
@@ -2628,7 +2640,7 @@ fn streamed_selection_matches_gathered() {
         }
         if with_perms {
             data.indexes.sort_perms = build_sort_permutations(&data.cards, &data.printings, &data.offsets);
-            data.indexes.artwork_groups = build_artwork_group_counts(&data.printings, &data.offsets);
+            data.indexes.artwork_groups = assign_artwork_groups(&mut data.printings, &data.offsets);
         }
         rkyv::to_bytes::<Error>(&data).expect("serialize")
     };
@@ -2681,7 +2693,53 @@ fn artwork_group_counts_dedup_illustrations() {
     data.printings[1].illustration_id = 7; // same art, different printing
     data.printings[2].illustration_id = 9;
     data.printings[3].illustration_id = 7;
-    assert_eq!(build_artwork_group_counts(&data.printings, &data.offsets), vec![2]);
+    let counts = assign_artwork_groups(&mut data.printings, &data.offsets);
+    assert_eq!(counts, vec![2]);
+    // 0 = first-seen (printing 0's illustration 7), 1 = next distinct (printing 2's
+    // illustration 9); printings 1 and 3 share illustration 7's group.
+    let gids: Vec<u16> = data.printings.iter().map(|p| p.artwork_group_id).collect();
+    assert_eq!(gids, vec![0, 0, 1, 0]);
+}
+
+// #629: real data has a handful of cards (basic lands) with >64 distinct
+// illustrations -- this exercises the match-count bitmask and emission
+// scratch's growth past a single u64 word / past 64 array slots, and (via a
+// shared-illustration group) that group selection still picks the best-scored
+// *matching* printing, not just the highest prefer_score overall.
+#[test]
+fn artwork_group_ids_handle_more_than_64_groups() {
+    const N: usize = 70;
+    let mut vocab = VocabInterner::new();
+    let cards = vec![stub_card(1, TYPE_CREATURE, &[], &mut vocab)];
+    let mut data = store_of(cards, &[N], vocab);
+    // Printings 0 and 1 share an illustration (one group of 2); 2..70 each
+    // keep their distinct store_of-assigned illustration -- 69 distinct
+    // groups total, past the 64-bit single-word threshold.
+    data.printings[1].illustration_id = data.printings[0].illustration_id;
+    data.indexes.artwork_groups = assign_artwork_groups(&mut data.printings, &data.offsets);
+    assert_eq!(data.indexes.artwork_groups, vec![69]);
+
+    // Printing 0 has the higher prefer_score (store_of orders descending) but
+    // fails usd<50; printing 1 shares its group and passes -- the chosen
+    // representative for that group must be printing 1, not printing 0.
+    data.printings[0].price_usd = Some(100.0);
+    for p in data.printings[1..].iter_mut() {
+        p.price_usd = Some(10.0);
+    }
+    data.indexes.price_usd = build_range_index(&data.printings, |p| p.price_usd.map(super::f32_sort_bits));
+
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let mut filter = FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op: CmpOp::Lt, rhs: NumExpr::Const(50.0) };
+    let (total, page) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut filter, None, "artwork", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+    );
+    assert_eq!(total, 69); // every group has >= 1 passing printing
+    let chosen: Vec<u128> = page.iter().map(|(_, p)| u128::from(p.scryfall_id)).collect();
+    // store_of assigns scryfall_id = printing index + 1, so printing 0 is
+    // scryfall_id 1 and printing 1 is scryfall_id 2.
+    assert!(chosen.contains(&2) && !chosen.contains(&1));
 }
 
 // Permutations put missing sort values last in both directions and reverse

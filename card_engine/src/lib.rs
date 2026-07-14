@@ -321,6 +321,13 @@ struct Printing {
     card_art_tags: Vec<u16>,
     card_is_tags: Vec<u16>,
     card_frame_data: Vec<u16>,
+
+    // Dense id of this printing's illustration within its own card's printing
+    // range: 0 = first-seen illustration (stored order — descending prefer_score),
+    // 1 = next, shared artwork shares the id. Assigned by assign_artwork_groups;
+    // #629's replacement for comparing/deduping on the full illustration_id UUID
+    // in the artwork-mode match-count and emission hot paths.
+    artwork_group_id: u16,
 }
 
 /// Parse-time row: one DB row (= one printing) with every field, before the
@@ -1825,19 +1832,32 @@ fn build_sort_permutations(cards: &[OracleCard], printings: &[Printing], offsets
     }
 }
 
-/// Distinct illustration groups per card (u16: max printings per card is ~1k).
-/// The streamed match phase uses this when the card pass already proved every
-/// printing matches: the artwork-mode contribution is then a build-time
-/// constant and the per-printing grouping walk is skipped entirely.
-fn build_artwork_group_counts(printings: &[Printing], offsets: &[u32]) -> Vec<u16> {
+/// Assigns each printing's `artwork_group_id` (dense, per-card: 0 = first-seen
+/// illustration in stored order — descending prefer_score — 1 = next, shared
+/// artwork shares the id) and returns the per-card distinct-illustration count
+/// (u16: max printings per card is ~1k). Single source of truth for both derived
+/// arrays so they can't drift out of sync with each other or with `illustration_id`.
+///
+/// The count is consumed by the streamed match phase when the card pass already
+/// proved every printing matches: the artwork-mode contribution is then a
+/// build-time constant and the per-printing grouping walk is skipped entirely.
+/// The per-printing id is consumed by `card_match_count`/`push_card_matches`'s
+/// `Mode::Artwork` arms (#629) to replace `illustration_id`-UUID bookkeeping with
+/// dense-integer set operations.
+fn assign_artwork_groups(printings: &mut [Printing], offsets: &[u32]) -> Vec<u16> {
     let mut counts = Vec::with_capacity(offsets.len().saturating_sub(1));
     let mut ills: Vec<u128> = Vec::new();
     for w in offsets.windows(2) {
         ills.clear();
-        for p in &printings[w[0] as usize..w[1] as usize] {
-            if !ills.contains(&p.illustration_id) {
-                ills.push(p.illustration_id);
-            }
+        for p in &mut printings[w[0] as usize..w[1] as usize] {
+            let gid = match ills.iter().position(|&x| x == p.illustration_id) {
+                Some(pos) => pos,
+                None => {
+                    ills.push(p.illustration_id);
+                    ills.len() - 1
+                }
+            };
+            p.artwork_group_id = gid as u16;
         }
         counts.push(ills.len() as u16);
     }
@@ -3329,7 +3349,13 @@ enum Mode { Card, Artwork, Printing }
 
 /// Matches this card contributes: 0/1 for Card mode (existence, short-circuit),
 /// passing printings for Printing mode, distinct illustrations with a passing
-/// printing for Artwork mode. `ills` is a reused scratch buffer.
+/// printing for Artwork mode. `seen_words` is a reused scratch buffer: a
+/// growable bitmask indexed by each printing's dense `artwork_group_id` (#629),
+/// one bit per group, `word = gid / 64`. Grown on demand (`clear()` keeps the
+/// backing allocation), so the common 1-2-group card never reallocates once
+/// warmed up, and the rare >64-group card (a handful of basic lands in real
+/// data) just grows to a few words -- no separate threshold/fallback path, so
+/// there's no O(k²) tail hiding on exactly the highest-printing-count cards.
 // #676 review: a legality leaf promoted into `plane` alongside a genuinely
 // printing-dependent residual (DateCmp, ArtistMatch, ...) needs *both*
 // checked against the *same* printing -- `all_match`/`residual_matches` alone
@@ -3355,7 +3381,7 @@ fn card_match_count(
     mode: Mode,
     strings: &AStrings,
     existential_plane: Option<(&PlaneExpr, &Archived<BitPlanes>)>,
-    ills: &mut Vec<u128>,
+    seen_words: &mut Vec<u64>,
 ) -> u32 {
     // No existential plane: identical code shape to before #676's
     // existential_plane parameter existed at all -- no closure, no extra
@@ -3395,17 +3421,19 @@ fn card_match_count(
                 n
             }
             Mode::Artwork => {
-                ills.clear();
+                seen_words.clear();
                 for pid in start..end {
                     if !all_match && !FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or) {
                         continue;
                     }
-                    let ill = u128::from(printings[pid].illustration_id);
-                    if !ills.contains(&ill) {
-                        ills.push(ill);
+                    let gid = u16::from(printings[pid].artwork_group_id) as usize;
+                    let word = gid / 64;
+                    if seen_words.len() <= word {
+                        seen_words.resize(word + 1, 0);
                     }
+                    seen_words[word] |= 1u64 << (gid % 64);
                 }
-                ills.len() as u32
+                seen_words.iter().map(|w| w.count_ones()).sum()
             }
         };
     };
@@ -3435,17 +3463,19 @@ fn card_match_count(
             n
         }
         Mode::Artwork => {
-            ills.clear();
+            seen_words.clear();
             for pid in start..end {
                 if !satisfies(pid) {
                     continue;
                 }
-                let ill = u128::from(printings[pid].illustration_id);
-                if !ills.contains(&ill) {
-                    ills.push(ill);
+                let gid = u16::from(printings[pid].artwork_group_id) as usize;
+                let word = gid / 64;
+                if seen_words.len() <= word {
+                    seen_words.resize(word + 1, 0);
                 }
+                seen_words[word] |= 1u64 << (gid % 64);
             }
-            ills.len() as u32
+            seen_words.iter().map(|w| w.count_ones()).sum()
         }
     }
 }
@@ -3484,7 +3514,8 @@ fn push_card_matches(
     strings: &AStrings,
     existential_plane: Option<(&PlaneExpr, &Archived<BitPlanes>)>,
     out: &mut Vec<Match>,
-    groups: &mut Vec<(u128, u32, f64)>,
+    group_best: &mut Vec<Option<(u32, f64)>>,
+    touched: &mut Vec<u16>,
 ) {
     match mode {
         Mode::Card => {
@@ -3557,27 +3588,38 @@ fn push_card_matches(
             }
         }
         Mode::Artwork => {
-            // Within-range order is prefer-score-desc (not illustration),
-            // so group by illustration with a small per-card scan — ranges
-            // are tiny (median 2 printings). `groups` is reused across
-            // cards to avoid per-card allocation.
-            groups.clear();
+            // Within-range order is prefer-score-desc (not illustration), so
+            // group by artwork_group_id (#629) with an array-indexed scratch:
+            // `group_best` is reused/grown across cards and never bulk-cleared
+            // (indices below a card's own group count are the only ones ever
+            // touched); `touched` tracks which indices this card set, so only
+            // those get reset via `.take()` after emission. Ranges are tiny
+            // (median 2 printings) so this is mostly a formality for the
+            // common case, but it keeps the rare high-group-count card (basic
+            // lands, up to ~385 distinct illustrations) at O(printings) instead
+            // of the O(printings²) a linear per-printing scan would cost.
+            touched.clear();
             for pid in start..end {
                 let p = &printings[pid];
                 if !all_match && !FilterExpr::residual_matches(card, p, strings, residual, residual_is_or) { continue; }
-                let ill = u128::from(p.illustration_id);
+                let gid = u16::from(p.artwork_group_id) as usize;
+                if group_best.len() <= gid {
+                    group_best.resize(gid + 1, None);
+                }
                 let score = prefer_score(card, p, prefer);
-                match groups.iter_mut().find(|g: &&mut (u128, u32, f64)| g.0 == ill) {
-                    Some(g) => {
-                        if score > g.2 {
-                            g.1 = pid as u32;
-                            g.2 = score;
-                        }
+                match &group_best[gid] {
+                    None => {
+                        group_best[gid] = Some((pid as u32, score));
+                        touched.push(gid as u16);
                     }
-                    None => groups.push((ill, pid as u32, score)),
+                    Some((_, best_score)) if score > *best_score => {
+                        group_best[gid] = Some((pid as u32, score));
+                    }
+                    _ => {}
                 }
             }
-            for &(_, bp, _) in groups.iter() {
+            for &gid in touched.iter() {
+                let (bp, _) = group_best[gid as usize].take().unwrap();
                 out.push((sort_key_bits(card, &printings[bp as usize], sort_col, descending), cid, bp));
             }
         }
@@ -3780,7 +3822,9 @@ fn run_query<'a>(
 
     // Gathered path (printing-keyed orderbys, or stores without permutations).
     let mut best: Vec<Match> = Vec::new();
-    let mut groups: Vec<(u128, u32, f64)> = Vec::new(); // artwork-mode scratch, reused per card
+    // artwork-mode scratch, reused per card (#629: group-id-indexed, not illustration_id-keyed)
+    let mut group_best: Vec<Option<(u32, f64)>> = Vec::new();
+    let mut touched: Vec<u16> = Vec::new();
     // card_pass residual: the top-level children still printing-dependent for
     // the current card (reused buffer; see FilterExpr::card_pass).
     let mut residual: Vec<&FilterExpr> = Vec::new();
@@ -3800,7 +3844,7 @@ fn run_query<'a>(
         let end   = u32::from(offsets[cid as usize + 1]) as usize;
         push_card_matches(
             card, cid, printings, start, end, all_match, &residual, residual_is_or, mode, prefer,
-            sort_col, descending, strings, existential_plane, &mut best, &mut groups,
+            sort_col, descending, strings, existential_plane, &mut best, &mut group_best, &mut touched,
         );
     }
 
@@ -3965,7 +4009,7 @@ fn run_query_streamed<'a>(
 ) -> (usize, Vec<(&'a AOracleCard, &'a APrinting)>) {
     let mut residual: Vec<&FilterExpr> = Vec::new();
     let mut residual_is_or = false;
-    let mut ills: Vec<u128> = Vec::new();
+    let mut seen_words: Vec<u64> = Vec::new(); // #629: artwork-mode match-count scratch
 
     // Match phase: sequential (candidate-order) evaluation into per-card
     // counts. Exact total = sum of counts, known before emission strategy.
@@ -4007,7 +4051,7 @@ fn run_query_streamed<'a>(
         } else {
             card_match_count(
                 card, cid, printings, start, end, all_match, &residual, residual_is_or, mode, strings, existential_plane,
-                &mut ills,
+                &mut seen_words,
             )
         };
         counts[cid as usize] = c;
@@ -4017,7 +4061,9 @@ fn run_query_streamed<'a>(
         return (total, Vec::new());
     }
 
-    let mut groups: Vec<(u128, u32, f64)> = Vec::new();
+    // artwork-mode emission scratch (#629), reused across cards below
+    let mut group_best: Vec<Option<(u32, f64)>> = Vec::new();
+    let mut touched: Vec<u16> = Vec::new();
     let cmp = |a: &Match, b: &Match| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2));
 
     // Small totals: gather and quickselect — same result as the gathered path.
@@ -4038,7 +4084,7 @@ fn run_query_streamed<'a>(
             let end   = u32::from(offsets[cid as usize + 1]) as usize;
             push_card_matches(
                 card, cid, printings, start, end, all_match, &residual, residual_is_or, mode, prefer,
-                sort_col, descending, strings, existential_plane, &mut best, &mut groups,
+                sort_col, descending, strings, existential_plane, &mut best, &mut group_best, &mut touched,
             );
         }
         let page = select_page(best, page_offset, limit)
@@ -4076,7 +4122,7 @@ fn run_query_streamed<'a>(
         scratch.clear();
         push_card_matches(
             card, cid, printings, start, end, all_match, &residual, residual_is_or, mode, prefer,
-            sort_col, descending, strings, existential_plane, &mut scratch, &mut groups,
+            sort_col, descending, strings, existential_plane, &mut scratch, &mut group_best, &mut touched,
         );
         scratch.sort_unstable_by(cmp);
         for m in scratch.iter().skip(skip) {
@@ -4197,7 +4243,7 @@ const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 /// catch (e.g. reordering same-size fields, changing an index type) — and on
 /// any FLAVOR_FP_FEATURES change: archived fingerprints are built with that
 /// table, so a new table reading old fingerprints breaks the superset test.
-const ARCHIVE_FORMAT_VERSION: u32 = 20260723;
+const ARCHIVE_FORMAT_VERSION: u32 = 20260724;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -4542,6 +4588,7 @@ impl QueryEngine {
                 card_art_tags: row.card_art_tags,
                 card_is_tags: row.card_is_tags,
                 card_frame_data: row.card_frame_data,
+                artwork_group_id: 0, // placeholder; assign_artwork_groups fills every printing below
             });
         }
         offsets.push(printings.len() as u32);
@@ -4562,6 +4609,10 @@ impl QueryEngine {
         // vocab at u16::MAX entries so the cast can't truncate.
         let mut coll_vocab_sorted: Vec<u16> = (0..coll_vocab.len() as u16).collect();
         coll_vocab_sorted.sort_unstable_by(|&a, &b| coll_vocab[a as usize].cmp(&coll_vocab[b as usize]));
+        // Assigns every printing's artwork_group_id in place; the returned counts
+        // feed CardIndexes.artwork_groups below. Must run before printings is
+        // borrowed by the builders in the CardIndexes literal.
+        let artwork_group_counts = assign_artwork_groups(&mut printings, &offsets);
         let indexes = CardIndexes {
             name_trigram:   build_trigram_index(&cards, |c| c.card_name_lower.as_str()),
             oracle_trigram: build_oracle_text_index(&cards, &strings),
@@ -4591,7 +4642,7 @@ impl QueryEngine {
             price_usd:      build_range_index(&printings, |p| p.price_usd.map(f32_sort_bits)),
             collector_number: build_range_index(&printings, |p| p.collector_number_int.map(u32::from)),
             sort_perms:     build_sort_permutations(&cards, &printings, &offsets),
-            artwork_groups: build_artwork_group_counts(&printings, &offsets),
+            artwork_groups: artwork_group_counts,
             planes:         build_bit_planes(&cards, &printings, &offsets, &strings),
             name_bigrams:   build_name_bigram_index(&cards),
             legal_divergent: build_divergent_ids(&cards),
