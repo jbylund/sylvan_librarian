@@ -25,7 +25,7 @@ create_exception!(card_engine, UnknownFieldError, QueryError, "Raised when `fiel
 
 // ─── Feature-gated counting allocator (memory measurement only) ──────────────
 // Counts live bytes / live allocations of this extension's Rust heap and records
-// a breakdown of reload(): see docs/issues/engine-store-size-reduction.md step 0.
+// a breakdown of reload(): see docs/issues/00504-engine-store-size-reduction.md step 0.
 
 #[cfg(feature = "alloc-counter")]
 mod alloc_stats;
@@ -213,7 +213,7 @@ pub(crate) fn mana_cmc(s: &str) -> f32 {
 // (genuinely per-printing for non-tournament sets like 30A / Collectors'
 // Edition / gold-border — see the legality_divergent flag) and 3 oracle ids
 // with layout-dependent face-name assembly (first printing's value wins).
-// Design: docs/issues/engine-card-printing-split.md / issue #603.
+// Design: docs/issues/00603-engine-card-printing-split.md / issue #603.
 
 #[derive(Archive, Serialize, Deserialize, Clone)]
 struct ManaCost {
@@ -844,7 +844,7 @@ fn finalize_trigram_index(map: HashMap<[u8; 3], Vec<u32>>, domain: usize) -> Sor
 
 /// Word dictionary + inverted index over distinct oracle texts, for needles
 /// longer than 3 characters that are a single tokenized fragment (no
-/// whitespace/punctuation) — see docs/issues/engine-oracle-word-index.md.
+/// whitespace/punctuation) — see docs/issues/00663-engine-oracle-word-index.md.
 /// Tokenization boundaries are exactly the characters absent from such a
 /// needle, so any occurrence of the needle lies entirely inside one
 /// tokenized word: scanning the dictionary for words containing it and
@@ -982,7 +982,7 @@ struct OracleTextIndex {
     /// (its text interned to exactly one id), so expansion can never duplicate.
     card_indices: Vec<u32>,
     /// Word dictionary + inverted index, built in the same pass as the
-    /// trigrams above (docs/issues/engine-oracle-word-index.md).
+    /// trigrams above (docs/issues/00663-engine-oracle-word-index.md).
     words: OracleWordIndex,
 }
 
@@ -1258,7 +1258,7 @@ fn lookup_trigram(idx: &Archived<SortedTrigramIndex>, key: [u8; 3]) -> Option<Tr
     None
 }
 
-/// Posting-vs-plane dispatch (docs/issues/engine-oracle-word-index.md's
+/// Posting-vs-plane dispatch (docs/issues/00663-engine-oracle-word-index.md's
 /// crossover table): posting×posting merges, posting×plane probes the
 /// posting's ids into the plane directly, plane×plane bitmap-ANDs. The
 /// smallest posting seeds the working set (as before this index had a dense
@@ -2091,16 +2091,16 @@ fn rarity_candidates(idx: &Archived<RarityIndex>, op: CmpOp, val: f64) -> Option
 
 /// Card-space candidate mask for `rarity <op> val` using the 4 tracked
 /// one-hot rarity planes (common/uncommon/rare/mythic, buckets 0-3 —
-/// PLANE_RARITY, docs/issues/engine-rarity-planes.md) plus the shared "above
+/// PLANE_RARITY, docs/issues/00670-engine-rarity-planes.md) plus the shared "above
 /// mythic" plane (PLANE_RARITY_HI, special/bonus combined —
-/// docs/issues/engine-existential-plane-generalization.md, #680), mirroring
+/// docs/issues/00680-engine-existential-plane-generalization.md, #680), mirroring
 /// `compile_rarity_cmp`'s exact-plane construction but producing a raw
 /// bitmap instead of a `PlaneExpr`. `rarity_hi_verdict` decides the hi
 /// plane's fate the same way it does there: `Ambiguous` (the query needs to
 /// distinguish special from bonus specifically) declines the whole plane
 /// path, falling through to `rarity_candidates`'s postings, which already
 /// answer those two values exactly at the same cost measured before this
-/// change (docs/issues/engine-existential-plane-generalization.md's
+/// change (docs/issues/00680-engine-existential-plane-generalization.md's
 /// "Measured problem" -- their cost tracks candidate count, not narrowing
 /// representation, so nothing is lost by keeping them there). Loose, same as
 /// rarity_candidates: rarity is PrintingDep at card level, so this only
@@ -2318,7 +2318,7 @@ fn and_bits_into(acc: &mut [u64], other: &[u64]) {
 }
 
 /// Card-space candidate mask for one (format, status) legality check --
-/// (docs/issues/engine-legality-divergent-carveout.md, generalized to
+/// (docs/issues/00667-engine-legality-divergent-carveout.md, generalized to
 /// banned/restricted by #678, see docs/issues/engine-legality-banned-
 /// restricted-planes.md) exact for every card, including divergent ones:
 /// reads the status's `_EXISTS` plane directly for the positive case or its
@@ -2603,7 +2603,7 @@ fn tight_narrow_space(f: &FilterExpr) -> Option<bool> {
 /// safely — a too-broad-to-narrow-with `cmc<=6` is still exact in principle,
 /// but we don't have its membership without paying to materialize it, which
 /// isn't worth doing just for this (see
-/// docs/issues/engine-permuted-bitmap-order-phase.md).
+/// docs/issues/00634-engine-permuted-bitmap-order-phase.md).
 fn narrow_candidates_exact(
     filter: &FilterExpr,
     indexes: &Archived<CardIndexes>,
@@ -2875,8 +2875,8 @@ fn narrow_rec(
         }
 
         // f:x / format:x / banned:x / restricted:x (docs/issues/
-        // engine-legality-divergent-carveout.md, generalized by #678 -- see
-        // docs/issues/engine-legality-banned-restricted-planes.md):
+        // 00667-engine-legality-divergent-carveout.md, generalized by #678 -- see
+        // docs/issues/00678-engine-legality-banned-restricted-planes.md):
         // legality_candidate_bits reads the status's `_EXISTS` plane
         // directly, so this is exact card-space narrowing -- but still
         // reported `loose`, not `tight`: `tight` means true for *every*
@@ -2911,7 +2911,7 @@ fn narrow_rec(
         }
 
         // -r:x / -rarity:x — same reason as -f:x above: rarity's narrowing is
-        // loose (docs/issues/engine-rarity-planes.md), so the generic
+        // loose (docs/issues/00670-engine-rarity-planes.md), so the generic
         // Not-complement below would (correctly) refuse it -- a posted/planed
         // card can have other printings that don't satisfy the comparison, so
         // bit-complementing the existing candidate set would wrongly drop
@@ -3485,7 +3485,7 @@ fn card_match_count(
 ///
 /// `existential_plane`: `Some((plane, planes))` iff `mode` is `Card` and the
 /// plane driving `all_match` touched a legality leaf
-/// (docs/issues/engine-legality-divergent-carveout.md "Row selection for
+/// (docs/issues/00667-engine-legality-divergent-carveout.md "Row selection for
 /// unique=card") — `all_match`/`residual` there only prove *some* printing
 /// satisfies the residual, not that it's the same printing the plane's
 /// existential leaf is true for, so the chosen printing must satisfy *both*
@@ -3527,7 +3527,7 @@ fn push_card_matches(
             // check is still required, not replaced -- a legality leaf folded
             // into `plane` alongside a genuinely printing-dependent residual
             // (DateCmp, ArtistMatch, ...) needs a printing satisfying *both*
-            // at once (docs/issues/engine-legality-divergent-carveout.md "Row
+            // at once (docs/issues/00667-engine-legality-divergent-carveout.md "Row
             // selection for unique=card"); checking only the plane could pick
             // a printing that's legal but fails the residual, or vice versa.
             // Kept as two separate closures (not one closure branching on
@@ -3715,7 +3715,7 @@ fn run_query<'a>(
     // of what the narrowing already established.
     //
     // A plane-driven True residual needs one more check first: legality's
-    // planes (docs/issues/engine-legality-divergent-carveout.md) are
+    // planes (docs/issues/00667-engine-legality-divergent-carveout.md) are
     // existence projections ("*some* printing matches"), unlike every other
     // plane (card-invariant fields, true or false alike for every printing
     // of a card). For unique=card that's exactly the semantics wanted --
@@ -3800,7 +3800,7 @@ fn run_query<'a>(
     // candidate list at or below the gather threshold can't produce more
     // matches than that, so the fused path is already microseconds and the
     // match phase would be pure overhead.
-    // Row selection (docs/issues/engine-legality-divergent-carveout.md "Row
+    // Row selection (docs/issues/00667-engine-legality-divergent-carveout.md "Row
     // selection for unique=card"): only Mode::Card can have folded a legality
     // leaf into `plane` at all (unique_is_card declines the fold otherwise),
     // and only then does all_match's "the card matches" stop implying "any
@@ -3932,7 +3932,7 @@ fn run_query_streamed_popcount<'a>(
         // under all_match: first printing for default prefer (ranges are
         // stored in descending default-prefer order), best-scored otherwise
         // -- *unless* the plane touched a legality leaf
-        // (docs/issues/engine-legality-divergent-carveout.md "Row selection
+        // (docs/issues/00667-engine-legality-divergent-carveout.md "Row selection
         // for unique=card"), in which case card-level truth only proves
         // *some* printing matches, not whichever one prefer-order would pick
         // blindly -- verify against `eval_plane_expr_for_printing` too. Cheap
@@ -4662,7 +4662,7 @@ impl QueryEngine {
         // Streaming the serialization straight into the file means the archive
         // bytes exist only as file pages — there is no second copy of the
         // archive as a heap buffer, and no realloc-doubling spike while it
-        // grows (see docs/issues/engine-reload-publish-transient.md).
+        // grows (see docs/issues/local-engine-reload-publish-transient.md).
         let tmp_name = format!(
             "{}.{}.tmp",
             self.shm_path.file_name().unwrap_or_default().to_string_lossy(),

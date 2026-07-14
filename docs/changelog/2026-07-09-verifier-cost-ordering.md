@@ -15,5 +15,5 @@ identical binary-search cost. The tri accumulation is commutative, so
 reordering is semantics-preserving; totals are unchanged on every benchmarked
 query. `CARD_ENGINE_VERIFY_ORDER=0` restores written order for A/B runs.
 
-See `docs/issues/engine-verifier-cost-ordering.md` for the design discussion
+See `docs/issues/00648-engine-verifier-cost-ordering.md` for the design discussion
 and the PR for measured results.

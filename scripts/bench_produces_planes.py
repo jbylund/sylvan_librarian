@@ -1,4 +1,4 @@
-"""Engine-vs-engine benchmark for produces: bitplanes (docs/issues/engine-produces-planes.md).
+"""Engine-vs-engine benchmark for produces: bitplanes (docs/issues/00669-engine-produces-planes.md).
 
 Times engine.query() for a fixed set of configs against a corpus JSONL export, so the same script
 run on two builds (main baseline vs. this branch) produces directly comparable CSVs. No SQL side,

@@ -1,10 +1,11 @@
 # Engine: generalize existential planes beyond legality (Y-predicate framework)
 
 Follows [docs/workflows/performance-pr-workflow.md](../workflows/performance-pr-workflow.md).
-GitHub: #680. Status: implemented (rarity + border), benchmarked, pending PR merge. Grew out of
+GitHub: #680. Status: done — merged and shipped (rarity + border). Remaining Y≥2/unique=printing
+scope split out to #681. Grew out of
 investigating #678's rarity follow-on
 (two rejected attempts, see "Measured problem"). Scope widened in discussion to also cover
-`border:` (previously #664/`docs/issues/done/engine-border-planes.md`, which deliberately stopped at
+`border:` (previously #664/`docs/issues/done/00664-engine-border-planes.md`, which deliberately stopped at
 loose narrowing) — folded in here rather than filed separately, since it's the same registry
 mechanism and strengthens the case that this is a general framework, not a legality-specific or
 even a two-field trick.
@@ -148,7 +149,7 @@ selection needs a `printing.card_border_id` accessor in `eval_plane_expr_for_pri
 legality's and rarity's, same conjunction-fix shape.
 
 **5. Y≥2 stays declined, not solved.** The joint per-printing evaluator
-(`docs/issues/engine-printing-varying-plane-repair-pattern.md`'s `eval_plane_expr_for_divergent_card`
+(`docs/issues/local-engine-printing-varying-plane-repair-pattern.md`'s `eval_plane_expr_for_divergent_card`
 design, prototyped for legality and never shipped) is *not* part of this issue. Once rarity and
 border are second and third fields, `r:special AND f:modern` and `border:gold AND r:mythic` become
 real, plausible Y=2 query shapes — more plausible than `format:A AND format:B` ever was — worth
@@ -241,15 +242,15 @@ bucket, border's `+5` unified planes, `-3` for the removed struct, at ~3.9KB/pla
 
 ## Related
 
-- `docs/issues/engine-legality-divergent-carveout.md` (#667/#676) — the concrete Y=1 instance this
+- `docs/issues/00667-engine-legality-divergent-carveout.md` (#667/#676) — the concrete Y=1 instance this
   generalizes; every correctness hole found there is a hole to specifically re-check here
-- `docs/issues/engine-legality-banned-restricted-planes.md` (#678) — where the rarity follow-on
+- `docs/issues/00678-engine-legality-banned-restricted-planes.md` (#678) — where the rarity follow-on
   (and the two rejected narrow_rec-level attempts motivating this doc) came from
-- `docs/issues/engine-rarity-planes.md` — the existing `narrow_rec`-only rarity planes this
+- `docs/issues/00670-engine-rarity-planes.md` — the existing `narrow_rec`-only rarity planes this
   extends
-- `docs/issues/done/engine-border-planes.md` (#664) — the existing loose-only, 3-value border
+- `docs/issues/done/00664-engine-border-planes.md` (#664) — the existing loose-only, 3-value border
   planes this extends to 4 exact + 1 loose catch-all; its shared-witness correctness test
   (`border_shared_witness_correctness`) is the regression this issue's exact-plane version must
   keep passing, not just the loose-narrowing version
-- `docs/issues/engine-printing-varying-plane-repair-pattern.md` — the joint per-printing evaluator
+- `docs/issues/local-engine-printing-varying-plane-repair-pattern.md` — the joint per-printing evaluator
   this issue deliberately does not build (Y≥2 stays declined)

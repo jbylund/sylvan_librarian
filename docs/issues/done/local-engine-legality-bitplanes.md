@@ -1,7 +1,7 @@
 # Engine: legality bitplanes (#630 phase 2)
 
 Successor to #630 phase 1 (PR #633, colors/types) and #634 (permuted bitmap order
-phase). Supersedes [engine-legality-postings.md](engine-legality-postings.md) for
+phase). Supersedes [local-engine-legality-postings.md](local-engine-legality-postings.md) for
 the `legal` dimension; banned/restricted stay postings-eligible (unimplemented,
 out of scope here — see that doc).
 
@@ -194,9 +194,9 @@ narrowing-fraction argument. Negation shows the same pattern mirrored.
 
 - #630 — parent issue; phase 1 (colors/types) shipped as #633
 - #634 — cites `f:modern t:creature power>3` as the motivating composite case
-- [engine-legality-postings.md](engine-legality-postings.md) — banned/restricted
+- [local-engine-legality-postings.md](local-engine-legality-postings.md) — banned/restricted
   postings, still open, unaffected by this
-- [format-legality-search.md](format-legality-search.md) — separate, unimplemented
+- [local-format-legality-search.md](local-format-legality-search.md) — separate, unimplemented
   proposal to change `f:x` semantics to "playable" (legal OR restricted); this
   plan keeps today's exact-legal-only semantics unchanged, so that proposal
   would layer on top later, not conflict

@@ -1,4 +1,4 @@
-"""Engine-vs-engine benchmark for the oracle word index (docs/issues/engine-oracle-word-index.md).
+"""Engine-vs-engine benchmark for the oracle word index (docs/issues/00663-engine-oracle-word-index.md).
 
 Times engine.query() for a fixed set of configs against a corpus JSONL export, so the same
 script run on two builds (main baseline vs. this branch) produces directly comparable CSVs.

@@ -1,6 +1,6 @@
 //! Micro-benchmark comparing posting-list intersection strategies around the
 //! sparse/dense storage crossover — surfaced while designing
-//! docs/issues/engine-oracle-word-index.md's posting/bitmap crossover
+//! docs/issues/00663-engine-oracle-word-index.md's posting/bitmap crossover
 //! section. Question: for lists *below* the ~6.25% memory-parity crossover
 //! (stored sparse), is there still a case for treating them as bitmaps
 //! purely for intersection speed, and does the shortest-first sequential

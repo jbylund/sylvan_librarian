@@ -1,5 +1,5 @@
 //! Micro-benchmark for the verifier cost model (docs/issues/done/
-//! engine-verifier-cost-ordering.md, follow-up to #651).
+//! 00648-engine-verifier-cost-ordering.md, follow-up to #651).
 //!
 //! `verify_cost_tier()`/`regex_tier()` group FilterExpr variants into cost
 //! clusters used to sort And/Or children cheapest-first before the tri walk.

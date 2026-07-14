@@ -139,7 +139,7 @@ advisory/control groups already tracked for #634.
 
 - #630 — parent issue; phase 1 (colors/types, PR #633) explicitly considered
   and rejected numeric ranges with the reasoning this doc revisits
-- [engine-permuted-bitmap-order-phase.md](engine-permuted-bitmap-order-phase.md)
+- [00634-engine-permuted-bitmap-order-phase.md](00634-engine-permuted-bitmap-order-phase.md)
   — #634, where this was surfaced; not bundled into that work
-- [engine-legality-bitplanes.md](engine-legality-bitplanes.md) — the
+- [local-engine-legality-bitplanes.md](local-engine-legality-bitplanes.md) — the
   divergent-carve-out pattern that does *not* apply here, and why

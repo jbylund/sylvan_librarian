@@ -1,4 +1,4 @@
-"""Engine-vs-engine benchmark for card-level border: narrowing planes (docs/issues/engine-border-planes.md).
+"""Engine-vs-engine benchmark for card-level border: narrowing planes (docs/issues/00664-engine-border-planes.md).
 
 Times engine.query() for a fixed set of configs against a corpus JSONL export, so the same script
 run on two builds (main baseline vs. this branch) produces directly comparable CSVs. No SQL side,
