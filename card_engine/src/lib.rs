@@ -1929,6 +1929,22 @@ fn build_range_index(printings: &[Printing], get: impl Fn(&Printing) -> Option<u
 /// defer to a downstream verify pass.
 const PRICE_CENTS_PER_DOLLAR: f64 = 100.0;
 
+/// `value * PRICE_CENTS_PER_DOLLAR` is itself a new floating-point operation, not a lossless
+/// relabeling — for roughly a quarter of two-decimal dollar amounts it lands just off the
+/// intended integer (`0.28_f64 * 100.0 == 28.000000000000004`, `0.57_f64 * 100.0 ==
+/// 56.99999999999999`), which silently shifts floor/ceil's result by a whole cent and produces a
+/// real false negative at that exact boundary (caught in review: `Ge(0.28)` against a printing
+/// priced at exactly $0.28). Snap back to the intended integer first — the error from the
+/// multiplication is on the order of 1e-10 to 1e-15 (`5142.02_f64 * 100.0 ==
+/// 514202.00000000006`), so 1e-6 has enormous margin over the noise while staying far below the
+/// smallest gap we'd ever want to preserve between a genuinely off-grid threshold and its
+/// nearest real cent value (>= 0.005 in every case checked in
+/// `price_bounds_matches_direct_comparison_on_and_off_grid`).
+fn snap_to_nearest_cent(cents: f64) -> f64 {
+    let rounded = cents.round();
+    if (cents - rounded).abs() < 1e-6 { rounded } else { cents }
+}
+
 /// Half-open [lo, hi) sort-bits bounds for `price op value`, or None for Ne.
 fn price_bounds(op: CmpOp, value: f64) -> Option<(u32, u32)> {
     let cent_to_bits = |c: f64| f32_sort_bits((c / PRICE_CENTS_PER_DOLLAR) as f32);
@@ -1941,10 +1957,10 @@ fn price_bounds(op: CmpOp, value: f64) -> Option<(u32, u32)> {
             let b = f32_sort_bits(value as f32);
             Some((b, b.saturating_add(1)))
         }
-        CmpOp::Lt => Some((0, cent_to_bits((value * PRICE_CENTS_PER_DOLLAR).ceil()))),
-        CmpOp::Le => Some((0, cent_to_bits((value * PRICE_CENTS_PER_DOLLAR).floor() + 1.0))),
-        CmpOp::Gt => Some((cent_to_bits((value * PRICE_CENTS_PER_DOLLAR).floor() + 1.0), u32::MAX)),
-        CmpOp::Ge => Some((cent_to_bits((value * PRICE_CENTS_PER_DOLLAR).ceil()), u32::MAX)),
+        CmpOp::Lt => Some((0, cent_to_bits(snap_to_nearest_cent(value * PRICE_CENTS_PER_DOLLAR).ceil()))),
+        CmpOp::Le => Some((0, cent_to_bits(snap_to_nearest_cent(value * PRICE_CENTS_PER_DOLLAR).floor() + 1.0))),
+        CmpOp::Gt => Some((cent_to_bits(snap_to_nearest_cent(value * PRICE_CENTS_PER_DOLLAR).floor() + 1.0), u32::MAX)),
+        CmpOp::Ge => Some((cent_to_bits(snap_to_nearest_cent(value * PRICE_CENTS_PER_DOLLAR).ceil()), u32::MAX)),
     }
 }
 

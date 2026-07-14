@@ -2897,6 +2897,59 @@ fn price_narrowing_is_exact_at_the_boundary() {
     assert!(narrow_candidates(&ne, &archived.indexes, &archived.offsets, &archived.cards).is_none());
 }
 
+// Caught in review: `value * PRICE_CENTS_PER_DOLLAR` is a real floating-point operation, not a
+// lossless relabeling -- `0.28_f64 * 100.0 == 28.000000000000004`, so ceil() rounded up to 29
+// cents instead of 28, silently excluding a printing priced at exactly the Ge threshold from
+// narrowing. Unlike the 0.10 boundary above (`0.10 * 100.0 == 10.0` exactly, no noise), 0.28 and
+// 0.57 actually exercise the multiplication's rounding error -- deliberately chosen because they
+// don't round-trip cleanly, not because they're otherwise special.
+#[test]
+fn price_narrowing_survives_cents_multiplication_noise() {
+    let mut vocab = VocabInterner::new();
+    let cards = vec![stub_card(1, TYPE_CREATURE, &[], &mut vocab)];
+    let mut data = store_of(cards, &[3], vocab);
+    data.printings[0].price_usd = Some(0.27);
+    data.printings[1].price_usd = Some(0.28); // exactly the Ge/Le threshold below
+    data.printings[2].price_usd = Some(0.29);
+    data.indexes.price_usd = build_range_index(&data.printings, |p| p.price_usd.map(super::f32_sort_bits));
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let ge = FilterExpr::NumericCmp {
+        lhs: super::NumExpr::Field(super::NumField::PriceUsd),
+        op: CmpOp::Ge,
+        rhs: super::NumExpr::Const(0.28),
+    };
+    match narrow_candidates(&ge, &archived.indexes, &archived.offsets, &archived.cards) {
+        Some(Candidates::Printings(v)) => {
+            assert!(v.contains(&1), "Ge(0.28) must not drop the printing priced at exactly 0.28");
+            assert!(v.contains(&2) && !v.contains(&0));
+        }
+        _ => panic!("usd must narrow in printing space"),
+    }
+
+    let le = FilterExpr::NumericCmp {
+        lhs: super::NumExpr::Field(super::NumField::PriceUsd),
+        op: CmpOp::Le,
+        rhs: super::NumExpr::Const(0.57),
+    };
+    let mut vocab2 = VocabInterner::new();
+    let cards2 = vec![stub_card(2, TYPE_CREATURE, &[], &mut vocab2)];
+    let mut data2 = store_of(cards2, &[2], vocab2);
+    data2.printings[0].price_usd = Some(0.57); // exactly the Le threshold
+    data2.printings[1].price_usd = Some(0.58);
+    data2.indexes.price_usd = build_range_index(&data2.printings, |p| p.price_usd.map(super::f32_sort_bits));
+    let bytes2 = rkyv::to_bytes::<Error>(&data2).expect("serialize");
+    let archived2 = rkyv::access::<Archived<CardData>, Error>(&bytes2).expect("access");
+    match narrow_candidates(&le, &archived2.indexes, &archived2.offsets, &archived2.cards) {
+        Some(Candidates::Printings(v)) => {
+            assert!(v.contains(&0), "Le(0.57) must not drop the printing priced at exactly 0.57");
+            assert!(!v.contains(&1));
+        }
+        _ => panic!("usd must narrow in printing space"),
+    }
+}
+
 // ─── Bitplanes (#630) ─────────────────────────────────────────────────────────
 
 /// A color/type-diverse store for plane parity: colorless, mono, guild pairs,
@@ -4331,9 +4384,18 @@ fn f32_sort_bits_distinguishes_every_cent_up_to_50k() {
 #[test]
 fn price_bounds_matches_direct_comparison_on_and_off_grid() {
     // Real prices only ever exist at cent granularity; thresholds include on-grid values a user
-    // would actually type, and deliberately off-grid ones an arithmetic expression could produce
-    // (e.g. usd<cmc*7.13) -- price_bounds must be exact for both.
-    let thresholds = [50.00_f64, 49.99, 0.01, 5142.02, 100.00, 49.998, 50.003, 33.335, 0.005, 12.3456789, 0.0];
+    // would actually type (paired with their exact cents value, Some(_)), and deliberately
+    // off-grid ones an arithmetic expression could produce (e.g. usd<cmc*7.13, paired with None)
+    // -- price_bounds must be exact for both. 0.28 and 0.57 are the review-caught repro cases:
+    // `0.28_f64 * 100.0 == 28.000000000000004`, `0.57_f64 * 100.0 == 56.99999999999999` -- a
+    // step-sampled sweep over *other* prices can silently miss a bug that only bites exactly at
+    // a threshold's own value, so every on-grid threshold gets an explicit check against its own
+    // exact price below, not just incidental coverage from the sweep.
+    let thresholds: &[(f64, Option<u32>)] = &[
+        (50.00, Some(5000)), (49.99, Some(4999)), (0.01, Some(1)), (5142.02, Some(514202)),
+        (100.00, Some(10000)), (0.28, Some(28)), (0.57, Some(57)), (0.0, Some(0)),
+        (49.998, None), (50.003, None), (33.335, None), (0.005, None), (12.3456789, None),
+    ];
     let ops = [
         (CmpOp::Lt, "Lt"),
         (CmpOp::Le, "Le"),
@@ -4341,9 +4403,26 @@ fn price_bounds_matches_direct_comparison_on_and_off_grid() {
         (CmpOp::Ge, "Ge"),
         (CmpOp::Eq, "Eq"),
     ];
-    for &t in &thresholds {
+    for &(t, on_grid_cents) in thresholds {
         for &(op, op_name) in &ops {
             let (lo, hi) = super::price_bounds(op, t).expect("price_bounds only returns None for Ne");
+            if let Some(cents) = on_grid_cents {
+                let price = f64::from(cents) / 100.0;
+                let bits = super::f32_sort_bits(price as f32);
+                let expected = match op {
+                    CmpOp::Lt => price < t,
+                    CmpOp::Le => price <= t,
+                    CmpOp::Gt => price > t,
+                    CmpOp::Ge => price >= t,
+                    CmpOp::Eq => true,
+                    CmpOp::Ne => unreachable!(),
+                };
+                let in_range = bits >= lo && bits < hi;
+                assert_eq!(
+                    in_range, expected,
+                    "price_bounds({op_name}, {t}) disagrees with direct comparison AT ITS OWN threshold price {price} (bits {bits}, range [{lo}, {hi}))"
+                );
+            }
             for cents in (1..514_202u32).step_by(37) {
                 // sampled every 37 cents across the real max-price range, not exhaustive --
                 // f32_sort_bits_distinguishes_every_cent_up_to_50k already proves the encoding

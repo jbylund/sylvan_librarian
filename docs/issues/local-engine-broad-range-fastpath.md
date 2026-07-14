@@ -6,32 +6,104 @@ and a direction is picked. Surfaced investigating why `usd<50` costs ~0.4–1 ms
 "Expected (honest)" section: "the ~97k price compares still dominate") — but the mechanism
 isn't price-specific. Every `PrintingRangeIndex`-backed field shares it.
 
-## Prerequisite (ships standalone, before any of this): make `price_bounds` exact
+## Prerequisite: price needs to be exact, not widened-and-deferred
 
-**Status: done**, shipped ahead of the rest of this doc.
+**Status: superseded, redoing from scratch — see "Revised plan: store price as integer cents"
+below.** [PR #687](https://github.com/jbylund/sylvan_librarian/pull/687) shipped a first attempt
+(floor/ceil-in-cents bounds, keeping `f32` storage) that turned out to fix only one of two real
+bugs. History kept here because both bugs, and why the fix needed to go deeper than either one,
+are worth remembering.
 
-`price_bounds` (`lib.rs:1933-1949`) used to share one bound between `Lt`/`Le` and between
-`Gt`/`Ge`, deferring the strict/non-strict distinction to a verify pass — its own comment blamed
-this on "f32/f64 rounding," but that's not the real reason. Checked against real data: every
-stored price is genuinely cent-precise (`abs(price_usd - round(price_usd*100)/100.0) > 0.001`
-matches **0** of 81,540 priced printings), max price is $5,142.02, and f32's ULP at that
-magnitude (~$0.0006) is 16× finer than a cent — nowhere near ambiguous.
+### Bug A (found in review of #687): `price_bounds`'s own cents conversion wasn't exact
 
-Fix, shipped: snap to the cents grid via floor/ceil before computing bounds, mirroring
-`int_range_bounds`'s existing exact-integer technique (`lib.rs:1956-1975`) instead of sharing one
-bound and verifying. `Eq` keeps its original single-bit-pattern bound — it has no strict/
-non-strict ambiguity to resolve, so an off-grid `Eq` value still correctly narrows to nothing:
+`price_bounds` shared one bound between `Lt`/`Le` and between `Gt`/`Ge`, deferring the
+strict/non-strict distinction to a verify pass. The fix computed `value * 100.0` before
+floor/ceil — but that multiplication is itself a new floating-point operation, not a lossless
+relabeling: `0.28_f64 * 100.0 == 28.000000000000004`, `0.57_f64 * 100.0 == 56.99999999999999`.
+For ~a quarter of two-decimal dollar amounts this silently shifted the bound by a whole cent,
+producing a real false negative (`Ge(0.28)` against a printing priced at exactly $0.28, dropped
+from narrowing entirely — not masked by verification, since a card whose only qualifying
+printing gets wrongly excluded from the narrowed set is never visited at all). Patched with a
+`snap_to_nearest_cent` epsilon-correction before flooring/ceiling.
 
-```rust
-let cent_to_bits = |c: f64| f32_sort_bits((c / PRICE_CENTS_PER_DOLLAR) as f32);
-match op {
-    CmpOp::Lt => Some((0, cent_to_bits((value * PRICE_CENTS_PER_DOLLAR).ceil()))),
-    CmpOp::Le => Some((0, cent_to_bits((value * PRICE_CENTS_PER_DOLLAR).floor() + 1.0))),
-    CmpOp::Gt => Some((cent_to_bits((value * PRICE_CENTS_PER_DOLLAR).floor() + 1.0), u32::MAX)),
-    CmpOp::Ge => Some((cent_to_bits((value * PRICE_CENTS_PER_DOLLAR).ceil()), u32::MAX)),
-    // Eq unchanged — see above.
-}
-```
+### Bug B (found stress-testing beyond the review): verification has its own, independent, unrelated mismatch
+
+Stress-testing the fix for Bug A across 20 random seeds × real generated prices turned up
+something else entirely, pre-existing on `main`, untouched by either the original code or the
+Bug A fix: `field_num` (`filter.rs:88-104`) reads a stored price as `f32` and widens it to `f64`
+for comparison (`x as f64`), but `NumExpr::Const` never demotes the query threshold through the
+same lossy step (`NumVal::Known(*v)`, full `f64` precision). These are two different-precision
+representations of "the same" decimal, and they are essentially **never** bit-identical:
+`7.22_f32` widened back to `f64` is `7.21999979019165`, not `7.22`. So `usd=7.22` essentially
+never matches a card actually priced at $7.22, and `Ge`/`Le` are wrong at the exact boundary the
+same way — independent of narrowing entirely, since this is in the verify path that always runs
+regardless of what narrowing produces. Confirmed identically on a clean `main` worktree, so this
+predates both the original code and #687's fix; the `price_bounds` diff never touches it.
+
+**Why patching Bug B in place is the wrong shape of fix.** The generic path (`NumExpr::eval` →
+`NumVal::Known(f64)` → `cmp(op, a, b)`) is one of *two independent* implementations of "does this
+price satisfy this predicate" — the other being `price_bounds`, used for narrowing. Two
+independent encodings of the same rule quietly disagreeing is exactly Bug B's shape; patching the
+comparison to happen to agree with `price_bounds` today doesn't prevent a *third* independent
+encoding from drifting out of sync with both, next time someone touches either one.
+
+### Root cause of both bugs: storing price as a lossy `f32` approximation of an exact quantity
+
+Checked against real data: every stored price is genuinely cent-precise
+(`abs(price_usd - round(price_usd*100)/100.0) > 0.001` matches **0** of 81,540 priced printings),
+max price is $5,142.02, and f32's ULP at that magnitude (~$0.0006) is 16× finer than a cent.
+Prices are not a continuous quantity that happens to usually land on cents — they *are* integer
+cents, always, and storing them as `f32` dollars introduces a lossy step (the `f32` truncation)
+that doesn't need to exist. `cmc`/`power`/`toughness`/`rarity_int`/`collector_number_int` never
+had either bug, because they're stored as exact small integers (`u8`/`u16`) — `as f32 as f64` is
+lossless for them. Price/eur/tix are the only numeric fields where the storage type itself loses
+information before comparison ever happens.
+
+## Revised plan: store price as integer cents
+
+Change `price_usd`/`price_eur`/`price_tix` from `Option<f32>` (dollars) to `Option<u32>` (cents)
+— same 4-byte footprint, no storage penalty. This removes the lossy step both bugs depend on,
+rather than patching around either one:
+
+- **`PrintingRangeIndex` simplifies**: cents *are* the sort key already (a natural, monotonic
+  `u32`) — `f32_sort_bits` disappears entirely for these fields, no encoding step needed.
+- **`price_bounds` still needs floor/ceil-in-cents** (narrowing still has to convert a
+  user-typed `f64` dollar threshold into the integer-cents domain to bound a slice of the
+  now-cents-keyed index — that conversion is still a multiplication, still needs the
+  `snap_to_nearest_cent`-style correction), but can likely become a thin wrapper around
+  `int_range_bounds` directly, rather than a bespoke function — `collector_number` already
+  solves exactly this "arbitrary `f64` threshold against an exact small-integer domain" problem.
+- **`field_num` fixes Bug B directly, with no other changes anywhere**: `known(p.price_usd.as_ref().map(|v| u32::from(*v) as f64 / 100.0))`
+  instead of widening a lossy `f32`. `722.0 / 100.0` and `float("7.22")` are already proven
+  bit-identical (both are single, non-lossy roundings of the same rational number) — so the field
+  side and `NumExpr::Const` (untouched) now agree exactly, and the fully generic `cmp()` in
+  `tri()`'s `NumericCmp` arm needs **no per-field special case at all**. Verification and
+  narrowing don't need to share an implementation to stay consistent once the only lossy step is
+  gone — they're each independently exact.
+- **Ingest**: parse the JSON price and round to the nearest cent once (`(v * 100.0).round() as u32`),
+  not per-query.
+- **API-facing serialization must still return dollars**: `api/tests/test_engine_unit.py::test_price_usd_matches_prefer_ordering`
+  asserts `price_usd == pytest.approx(1.47)` — the public contract doesn't change, only the
+  internal representation.
+- **Archive format version bump required** — this changes the *semantic meaning* of on-disk
+  bytes (dollars vs. cents), not just their size; a stale archive would silently misread as
+  wildly wrong prices without it.
+- Sort/prefer scoring (`Prefer::UsdLow`/`UsdHigh`, `SortCol::PriceUsd`): minor conversions:
+  order-preserving either way, so sorting on raw cents directly is also an option, not just a
+  dollars conversion.
+
+### Plan
+
+- [ ] Branch fresh from `main` (not on top of #687 — this supersedes it) and redo the whole
+      thing as the integer-cents migration, informed by everything above.
+- [ ] Struct/ingest/archive-version changes for `price_usd`/`price_eur`/`price_tix`.
+- [ ] `price_bounds` as a thin wrapper (or direct reuse) of `int_range_bounds`-shaped logic.
+- [ ] `field_num`'s price arms switched to exact cents/100.0 division.
+- [ ] Every test touched by #687 re-verified against the new representation, plus new
+      end-to-end tests proving `Eq`/`Ge`/`Le` now agree with narrowing at the exact boundary —
+      not just that narrowing alone is exact.
+- [ ] Decide #687's fate once the new branch is ready: close unmerged, since the new branch's
+      diff against `main` supersedes it entirely.
 
 **Verified, not just argued** — both checks are now permanent regression tests in `tests.rs`:
 `f32_sort_bits_distinguishes_every_cent_up_to_50k` proves zero sort-bits collisions across every
