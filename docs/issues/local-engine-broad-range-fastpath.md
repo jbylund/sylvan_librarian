@@ -156,46 +156,65 @@ converts the candidate set to card ids and drops it if it covers ≥87.5% of all
 (`lib.rs:3740-3743`), falling back to a raw per-card `card_pass` scan even though the discarded
 set was exact.
 
-## Idea 1: walk the order-by permutation, verify inline, stop at `limit`
+## Idea 1: walk the order-by permutation, verify inline, stop at `limit` — REJECTED
 
 `range_narrowed`'s two `partition_point` binary searches already compute `k = e - s` for free
-(`lib.rs:1990-1992`) before any narrowing decision is made. Instead of materializing or
-discarding a candidate set, walk the existing per-orderby permutation table (built for #634)
-and test each candidate for set membership inline, stopping once `limit` matches are found.
+(`lib.rs:1990-1992`) before any narrowing decision is made. The original idea: instead of
+materializing or discarding a candidate set, walk the existing per-orderby permutation table
+(built for #634) and test each candidate for set membership inline, stopping once `limit` matches
+are found.
 
-- **Cheap when the predicate is broad**: expected candidates visited ≈ `limit / match_rate` —
-  for `usd<50` at 83%, a 20-row page costs ~24 candidate checks. Close to instant.
-- **Unbounded worst case.** If the order-by column is unrelated to the predicate field, there's
-  no seek target, and a low-selectivity predicate with unlucky clustering could blind-walk most
-  of the corpus before finding `limit` matches — worse than today's baseline. Even the
-  *aligned* case (`released_at>2026-06-01 order by released_at`) is pathological if the walk
-  starts at the wrong end: ascending order puts the matches at the far end, so a naive
-  front-to-back walk visits almost everything before the first hit.
-- **`total` for `unique=card`/`artwork` needs `oracle_id` dedup, not just `k` — and this may
-  cost as much as idea 2's whole approach.** `k` alone only works directly for `unique=printing`
-  (no dedup needed, `total = k` for free from the binary search — idea 1's "close to instant"
-  claim is unconditionally true there). For `unique=card`/`artwork`, an *exact* `total` means
-  deduplicating every matched printing by `oracle_id` — touching all `k` matches at least once,
-  the same O(k) idea 1 exists to avoid. If that cost is unavoidable for `unique=card` regardless
-  of page-fetch strategy, idea 1 may not actually beat idea 2 there — idea 2 pays that same O(k)
-  once to build the bitmap and gets offset-independent paging as a bonus for it. **This makes
-  `unique` mode (`printing` vs. `card`/`artwork`) a fourth crossover axis, not a detail** — it
-  may determine which idea is even viable before selectivity/alignment/clustering matter at all.
+**Rejected — its own premise doesn't hold.** The whole appeal was "cheap when the predicate is
+broad *and aligned with the order-by column*: for `usd<50` at 83%, a 20-row page costs ~24
+candidate checks." Trying to actually prove this (Plan: "prove the mechanism on `unique=printing`
+for a tight field, `released_at` or `collector_number`") surfaced that the aligned case doesn't
+exist for any of the three target fields, in the current system:
 
-  `cards_of_printings` (`lib.rs:2392-2407`) dedupes exactly this way, but it's a *batch* operation
-  over a complete, sorted `Vec`/bitmap — reusing it directly would mean materializing the whole
-  matched set upfront, exactly what idea 1 exists to avoid. Idea 1's walk discovers matches one at
-  a time, in permutation (order-by) order, not printing-id order, so it needs an *incremental*
-  version instead: a running card-space "seen" bitmap, and per matched printing, look up its card
-  id and test-and-set a bit (new bit set → a newly-counted distinct card; already set → skip).
-  That per-printing card lookup can't use `cards_of_printings`' own broad-k trick
-  (`printing_bits_to_card_bits`'s monotone cursor needs ascending printing-id order, which a
-  permutation walk doesn't provide) — it needs the direct-array lookup instead, see
-  [local-engine-direct-projection-arrays.md](local-engine-direct-projection-arrays.md), which is
-  worth landing before committing to idea 1 for this reason specifically, not just its narrower
-  standalone win. Still an open, measurement-shaped question (kernel benchmark, not end-to-end
-  timing) whether this incremental floor is cheap enough to make `unique=card` competitive with
-  `unique=printing` — landing the direct array first is what makes that measurement fair.
+- `orderby_to_col` (`lib.rs:3311-3322`) and the API's `CardOrdering` enum
+  (`api/enums.py:25-35`) don't recognize `released_at`/`collector_number` as order-by targets at
+  all — anything unrecognized silently falls back to `edhrec_rank`. There is no way to even
+  request `order by released_at` today.
+- `price_usd` *is* a valid order-by target, but has no permutation table:
+  `ArchivedSortPermutations::get`/`get_inv` (`lib.rs:1755-1780`) explicitly return `None` for
+  `SortCol::PriceUsd`, because a card's price-sort position depends on which printing `prefer`
+  selects — not fixed at index-build time. This isn't an oversight: #634's own design doc
+  (`docs/issues/done/00634-engine-permuted-bitmap-order-phase.md`) scoped its permutation tables
+  to "**card-level** sort column[s]" and states outright "rarity/usd orderbys ... unchanged."
+
+So every real query against these fields hits idea 1's *unbounded worst case* (blind walk against
+an unrelated order-by column, most commonly the default `edhrec_rank`) — the cheap, aligned case
+this idea was chosen for is unreachable in practice. Building it would mean adding new order-by
+targets and permutation mechanisms as a real prerequisite, a materially bigger and separate
+project from what's scoped here.
+
+**Considered and rejected a scoped-down rescue** for `unique=printing` specifically: since each
+`PrintingRangeIndex` (`price_usd`, `collector_number`, `released_at`) is already sorted by
+`(value, printing_idx)`, walking it directly — no new permutation needed — gives an exact,
+offset-independent page for the aligned case, for that one mode. Real for `collector_number`/
+`released_at` (no existing orderby semantics to preserve, so "index order = orderby order" is a
+free, valid choice), but not free for `price_usd`: `order by usd`'s real, already-shipped tiebreak
+is `(price, edhrec_rank asc, prefer_score desc)` (`sort_key_bits`, `lib.rs:3337-3355`), not
+printing store order, so walking the raw index directly gets ties wrong whenever multiple
+printings share a price — common at the cheap end this project cares about most. A bucket
+approach (price values are already contiguous in the index; accumulate whole buckets until the
+page is covered, re-sort only the boundary bucket by the true tiebreak) fixes this correctly, but
+adds real edge-case cost (a pathologically large boundary bucket — e.g. many printings at the
+store's price floor — degrades back toward O(k) anyway) for a win that **only ever applies to
+`unique=printing`**. `unique=card`/`artwork` remain permanently blocked regardless: the card-level
+sort key depends on which printing `prefer` selects, not fixed independent of the query, the same
+reason #634 excluded rarity/usd from its own permutation tables — that's a property of the sort
+key itself, not of how the walk order is produced. Given idea 2 already handles all three
+`unique` modes and all three fields uniformly with no new orderby surface or bucket-size edge
+cases, the narrower, edge-case-prone idea 1 rescue isn't worth the complexity. Decided not to
+pursue idea 1 further, in any form; no crossover to calibrate against idea 2 as a result — idea 2
+is simply the approach.
+
+**`unique=card`/`artwork` total note kept for idea 2's benefit** (idea 1's own motivation for this
+is now moot, but idea 2 needs the same fact): an exact `total` under `unique=card`/`artwork` means
+deduplicating every matched printing by `oracle_id`. `cards_of_printings`
+(`lib.rs:2392-2407`, see [local-engine-direct-projection-arrays.md](local-engine-direct-projection-arrays.md)
+for its now-shipped direct-array projection) already does exactly this, size-adaptively, for
+`Candidates::Printings` — the same dedup idea 2's own bitmap-build step needs, not new design.
 
 ## Idea 2: scatter the exact narrowed set into a bitmap, feed the existing popcount-skip path
 
@@ -212,108 +231,109 @@ framework** (#680) with a new leaf rather than duplicate its row-selection logic
 price genuinely is a per-printing predicate, the same shape format/rarity/border already are.
 
 **This row-selection work is not price-specific — `collector_number` and `released_at` are also
-printing-varying fields.** A card's printings have different collector numbers and release
-dates, same as different prices. Under `unique=card`/`artwork`, *any* printing-varying field
-needs to pick which specific matching printing to emit — that's inherent to varying by printing
-at all, not to price's semantics in particular. So "prove the mechanism on a tight field first
-isolates the crossover question from the row-selection work" (see Plan) is only fully true for
-`unique=printing` — there, each printing is its own row, no selection needed at all. For
-`unique=card`/`artwork` on *any* of these three fields, the same `PrintingRangeBits` mechanism
-is needed. Treat row-selection as one piece of shared work across `price`/`collector_number`/
-`released_at` together, not something deferred specifically until price's turn.
-Tracing `PlaneExpr::Bits` (planes.rs:436-443, `eval_plane_expr_for_printing`,
-`plane_expr_is_existential`) shows this is a contained addition, not a framework rewrite — and
-it's simpler than it first looked, now that narrowing is exact:
+printing-varying fields**, but they compile through entirely separate `FilterExpr` variants
+(`DateCmp`/`YearCmp`, not `NumericCmp`/`NumField` — `NumField` has no `ReleasedAt` member at all),
+so extending `PrintingRangeBits` to them is real, separate follow-up work with its own dedicated
+`compile_plane` arms, not something this slice's `NumericCmp` wiring covers for free.
 
-- `Bits` already supports "compute a card bitmap once per query, clone it into the plane tree"
-  (the oracle-word-index dense-dictionary precedent), but it's card-invariant by design —
-  `eval_plane_expr_for_printing`'s `Bits` arm checks the card id, and `plane_expr_is_existential`
-  hard-codes `Bits => false`. The needed sibling variant is just **two precomputed bitmaps**, no
-  live evaluation at all:
+### Shipped: `PlaneExpr::PrintingRangeBits` for `price_usd`, `unique=card` only
 
-  ```rust
-  PlaneExpr::PrintingRangeBits { card_bits: Vec<u64>, printing_bits: Vec<u64> }
-  ```
+Actual shape landed, differs from the original sketch in two ways found while implementing:
 
-- `eval_planes`: reads `card_bits` exactly like `Bits` does today (the card-level existence
-  answer, already exact courtesy of the prerequisite fix).
-- `plane_expr_is_existential`: `true` for this variant (unlike plain `Bits`).
-- `eval_plane_expr_for_printing`: a bit test against `printing_bits` for this specific printing —
-  no field/op/threshold, no floating-point comparison, just membership in the already-exact
-  narrowed set.
-- `compile_plane`'s `NumericCmp` arm, for printing-varying fields only (`cmc`/`power`/`toughness`
-  keep their existing #655 arm): compute both bitmaps at query time via `range_narrowed`, wrap
-  them in this variant — same "once per query" cost model the oracle-word-index `Bits` case
-  already established.
+```rust
+PlaneExpr::PrintingRangeBits { id: u64, card_bits: Vec<u64>, field: NumField, op: CmpOp, threshold: f64 }
+```
 
-- **Fixed cost regardless of `limit`/offset**: O(k) to build the bitmaps, then O(words) to select
+- **No `printing_bits` bitmap.** The original sketch proposed a second precomputed bitmap for the
+  per-printing check, reasoning it would avoid floating-point comparison at eval time. That
+  reasoning no longer applies: post the integer-cents migration, price/collector_number/
+  released_at are all plain integers on `Printing`, so `eval_plane_expr_for_printing`'s new arm
+  just re-runs `filter.rs`'s own `cmp()` directly against `(field, op, threshold)` — one fewer
+  independent encoding of "does this printing satisfy X" to keep in sync (exactly Bug B's shape).
+- **`id: u64` for shared-witness tracking**, not reusing plane indices. `collect_existential_indices`
+  (the `And`-composition safety check — `format:A AND r:mythic` can't compose via independent
+  card-bitmap intersection, and neither can `usd<50 AND usd>10`: a card can have one printing
+  under $50 and a different one over $10, satisfying both independently without any single
+  printing satisfying both) needs a distinct identity per compiled leaf, including two range
+  conditions on the *same* field at different thresholds. A monotonic counter starting above
+  `PLANE_COUNT` gives each compiled leaf a guaranteed-unique id with no risk of colliding with a
+  real plane index (a hash-based id was considered and rejected — collision risk, however small,
+  is the wrong tradeoff for a correctness-critical check). Same-field range merging (folding
+  `usd<50 AND usd>10` into one combined-bounds leaf, letting them safely share an id) is a real,
+  deliberately deferred optimization, not required for correctness — declining to compose falls
+  back to the always-correct residual `card_pass` path.
+- **`-usd<X` needed its own dedicated negation arm** in `compile_plane_neg`, mirroring
+  rarity/Legality exactly: `∃p: ¬(p.usd<X)` (recompute with the negated op), not `¬∃p: p.usd<X`
+  (bit-complementing `card_bits`) — a card can satisfy both `usd<X` and `-usd<X` at once via
+  different printings, so the two are not logically equivalent. Missing this was caught by the
+  new tests before being caught in production.
+- **Currently reachable only for `unique=card`.** `split_planes`'s `unique_is_card` gate (the same
+  one the original Legality carve-out established) declines to fold *any* existential leaf —
+  `PrintingRangeBits` included, since it correctly returns `true` from `plane_expr_is_existential`
+  — for `unique=printing`/`artwork`, and `run_query`'s own `existential_plane` computation
+  separately gates row-selection to `Mode::Card` only. Both are pre-existing, deliberate gates
+  this variant inherits automatically. The row-selection code (`eval_plane_expr_for_printing`'s
+  new arm) is written and verified correct, but isn't reachable via the real dispatch path yet for
+  the other two modes — loosening those two gates for price specifically is real, separate scope,
+  not silently included here.
+
+**Verified**: `price_plane_path_parity_and_shared_witness` (`tests.rs`) — differential check
+(`split_planes`-compiled path vs. the unplaned `card_pass` path) across `usd<50`, `-usd<50`, and
+`usd<50 AND t:creature`, all three `unique` modes; plus a hand-computed independent ground truth
+for `-usd<50`/`unique=card` specifically (needed because `narrow_rec`'s own internal `compile_plane`
+call means the "unplaned" differential baseline isn't fully independent of `compile_plane_neg` for
+negation — both sides can share the same bug and agree with each other while both being wrong;
+caught this by mutation-testing the differential check itself, not just assuming it was a valid
+oracle). Mutation-tested all three failure modes directly (temporarily reintroducing each bug,
+confirming the relevant test fails, then reverting): the card-only row-selection mistake, skipping
+shared-witness tracking, and removing the dedicated negation arms — all three caught.
+
+**Real-corpus benchmark** (`usd<50`, 97,206 printings): `unique=card` — the mode this slice covers
+— went from the ~0.4-1ms baseline that motivated this whole project down to **~0.18ms**.
+`unique=printing`/`artwork` show no change (**~1.2ms**, unaffected, per the gating above).
+
+- **Fixed cost regardless of `limit`/offset**: O(k) to build the bitmap, then O(words) to select
   any page — same offset-independence #634 Step 2 built for plane-exact filters. Wins on deep
   pagination and on reuse (AND against a plane in a compound query). Predictable worst case:
   never worse than O(k), full stop.
-- **Wasteful for the common case** — pays O(k) even for a 20-row first-page request that idea 1
-  would answer in ~24 checks.
-
-## The crossover needs measurement, not a guess
-
-Every existing adaptive guard in this engine (`AND_SKIP_THRESHOLD`, `MAX_NARROW_FRACTION`/
-`NARROW_FLOOR`, `MAX_UNION_FRACTION`) was derived from a benchmark sweep, not analysis — see
-[00647-engine-cost-guard-calibration.md](done/00647-engine-cost-guard-calibration.md). This
-decision needs three axes:
-
-1. **Match rate** (`k/n`).
-2. **Predicate/order-by field alignment** — same field (seekable directly) vs. unrelated field
-   (blind walk, no seek target).
-3. **For the aligned case, direction vs. clustering** — does the naive walk start at the
-   matching end, or does it need to seek first?
-4. **`unique` mode** (`printing` vs. `card`/`artwork`) — not a speed difference, a viability
-   question. `unique=printing` needs no dedup (`total = k` free); `unique=card`/`artwork` needs
-   an exact card-level `total`, which may cost O(k) regardless of page-fetch strategy (see idea
-   1's `total` note above). If so, idea 1 and idea 2 aren't competing on speed for that mode,
-   they're both paying the same floor and idea 2's offset-independence is pure upside.
-
-The adversarial cell — selective predicate, unrelated order-by, unlucky clustering — is where
-idea 1's actual worst case needs to be measured against today's baseline. If it's worse there,
-that bounds how unconditionally idea 1 can be used. With the prerequisite fix landed, there's no
-fifth (tight/loose) axis to worry about — every field behaves identically there.
+- **Pays O(k) even for a small first-page request** — no idea 1 to compare against anymore, so
+  this is just an honest property of the approach, not a tradeoff being weighed against an
+  alternative.
 
 ## Plan
 
 - [x] Ship the price exactness fix standalone (see Prerequisite above) — landed as the
       integer-cents migration in [#688](https://github.com/jbylund/sylvan_librarian/pull/688).
-- [ ] Ship `printing_to_card` standalone first (see
+- [x] Ship `printing_to_card` standalone first (see
       [local-engine-direct-projection-arrays.md](local-engine-direct-projection-arrays.md)) —
       load-bearing for idea 1's incremental per-match card check, neutral to idea 2, changes this
       doc's crossover-axis-4 baseline numbers.
-- [ ] Prove the fast-path mechanism on `unique=printing` for a tight field first (`released_at`
-      or `collector_number`) — this is the case that genuinely isolates the crossover question
-      from row-selection (no picking-a-printing problem at all when each printing is its own
-      row). Does *not* by itself resolve `unique=card`/`artwork` — see the next item.
-- [ ] Resolve the `unique=card`/`artwork` `total` question (crossover axis 4) before trusting
-      idea 1's cost model there: measure whether an exact card-level `total` can be had for less
-      than O(k), or whether `unique=card` always pays that floor regardless of page-fetch
-      strategy. This may collapse the idea-1-vs-idea-2 choice for that mode entirely.
-- [ ] Sketch idea 1 as a real path: `k`-from-binary-search, order-by-permutation walk with
-      inline membership check, early stop at `limit`.
-- [ ] Sketch idea 2: `PlaneExpr::PrintingRangeBits`, wired into `compile_plane`/`eval_planes`/
-      `plane_expr_is_existential`/`eval_plane_expr_for_printing` — shared across
-      `price`/`collector_number`/`released_at`, not price-specific, once `unique=card`/`artwork`
-      row-selection is in scope for any of them.
-- [ ] Build a sweep harness across all four crossover axes (shape of `bench_cost_guards.py` /
-      `build_guard_corpus.py`), covering `price_usd`, `released_at`, and `collector_number`, plus
-      at least one deliberately-adversarial synthetic case (mismatched order-by field) and both
-      `unique` modes.
-- [ ] Calibrate the guard from measurement (or confirm one design dominates and no guard is
-      needed).
+- [x] Prove/reject idea 1's premise — rejected, see "Idea 1 ... REJECTED" above: no order-by
+      support for `released_at`/`collector_number`, no permutation table for `price_usd`, so the
+      aligned/cheap case is unreachable for any target field.
+- [x] Implement `PlaneExpr::PrintingRangeBits` for `price_usd`, wired into `eval_planes`,
+      `plane_expr_is_existential`, `eval_plane_expr_for_printing`, `collect_existential_indices`,
+      and `compile_plane`/`compile_plane_neg`'s `NumericCmp` arms — see "Shipped" above for the
+      two ways the final shape differs from the original sketch.
+- [x] Benchmark against today's baseline for `unique=card` — real win confirmed (~0.4-1ms → ~0.18ms
+      on `usd<50`).
+- [ ] Extend row-selection to `unique=printing`/`artwork`: loosen `split_planes`'s `unique_is_card`
+      gate and `run_query`'s `existential_plane` `Mode::Card` gate for `PrintingRangeBits`
+      specifically (the eval-time correctness is already written and tested; only the dispatch
+      gating needs to change). Benchmark separately — `unique=printing`/`artwork` pay the
+      `cards_of_printings`/dedup cost `unique=card` doesn't, may not win by the same margin.
+- [ ] Extend to `collector_number`/`released_at` (`DateCmp`/`YearCmp`, separate `compile_plane`
+      arms from `NumericCmp`'s).
 - [ ] Decide the `Not`-arm/`tight_narrow_space` composition-safety question (deferred from the
       Prerequisite section to here) — either bring it into scope (needed for `-usd>8`-shaped
       queries, a real fragment in `test_engine_property.py`'s own suite) or explicitly defer it
       again to a third, later piece of work, with a stated reason rather than silently dropping it.
-- [ ] Acceptance: `usd<50`, a broad `released_at`/`collector_number` query, and the adversarial
-      case all improve or stay flat vs. baseline for at least one `unique` mode; no regression on
-      the existing #634/#655 exact paths; passes (and likely extends, given this exact class of
-      change already produced two independent bugs in the price prerequisite work)
-      `test_engine_property.py`'s differential suite against the reference oracle — a performance
-      delta alone is not sufficient to call this done.
+- [ ] Acceptance: a broad `released_at`/`collector_number` query and `unique=printing`/`artwork`
+      on `usd<50` all improve or stay flat vs. baseline; no regression on the existing #634/#655
+      exact paths; passes (and likely extends, given this exact class of change already produced
+      two independent bugs in the price prerequisite work and one in this slice's own negation
+      handling) `test_engine_property.py`'s differential suite against the reference oracle — a
+      performance delta alone is not sufficient to call this done.
 
 ## Related
 

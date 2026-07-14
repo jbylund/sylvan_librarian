@@ -145,7 +145,7 @@ impl NumExpr {
     }
 }
 
-fn cmp(op: CmpOp, a: f64, b: f64) -> bool {
+pub(crate) fn cmp(op: CmpOp, a: f64, b: f64) -> bool {
     match op {
         CmpOp::Eq => a == b,
         CmpOp::Ne => a != b,

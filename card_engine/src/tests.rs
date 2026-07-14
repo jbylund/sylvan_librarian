@@ -4,7 +4,7 @@ use super::{
     build_rarity_index, build_flavor_index, build_thresholded_tag_index, build_sort_permutations,
     assign_artwork_groups, build_bit_planes, build_divergent_ids, build_name_bigram_index, build_printing_to_card, flavor_fingerprint, flavor_match_sets,
     cards_of_printings, count_common_keywords, count_common_types,
-    build_artist_index, build_range_index, range_candidates, narrow_candidates, rarity_candidates,
+    build_artist_index, build_range_index, price_range_narrowed, range_candidates, narrow_candidates, rarity_candidates,
     range_too_broad_to_narrow, run_query, trigram_candidates, finalize_trigram_index, PrintingRangeIndex, NARROW_FLOOR,
     bitmap_contains, bitmap_card_ids, compile_plane, eval_planes, split_planes,
     ArtistIndex, CardData, CardIndexes, Candidates, ColorField, NumExpr, NumField, RarityIndex,
@@ -544,15 +544,15 @@ fn rarity_tracked_values_exact_consumed_hi_bucket_declines() {
     let rarity_eq = |v: f64| FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), op: CmpOp::Eq, rhs: NumExpr::Const(v) };
 
     // Tracked values (mythic=3) compile exactly.
-    assert!(compile_plane(&rarity_eq(3.0), bounds, words).is_some(), "r:mythic must compile to a plane expression");
+    assert!(compile_plane(&rarity_eq(3.0), bounds, words, &archived.indexes, &archived.offsets).is_some(), "r:mythic must compile to a plane expression");
     // Special/bonus specifically can't be told apart by the shared hi plane.
-    assert!(compile_plane(&rarity_eq(4.0), bounds, words).is_none(), "r:special must decline (hi bucket is ambiguous)");
-    assert!(compile_plane(&rarity_eq(5.0), bounds, words).is_none(), "r:bonus must decline (hi bucket is ambiguous)");
+    assert!(compile_plane(&rarity_eq(4.0), bounds, words, &archived.indexes, &archived.offsets).is_none(), "r:special must decline (hi bucket is ambiguous)");
+    assert!(compile_plane(&rarity_eq(5.0), bounds, words, &archived.indexes, &archived.offsets).is_none(), "r:bonus must decline (hi bucket is ambiguous)");
 
     // Mixed with an otherwise fully plane-expressible sibling: an ambiguous
     // rarity child must stay in the residual, not get silently dropped or promoted.
     let creature = FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
-    let (pe, residual) = split_planes(FilterExpr::And(vec![creature, rarity_eq(4.0)]), bounds, words, true);
+    let (pe, residual) = split_planes(FilterExpr::And(vec![creature, rarity_eq(4.0)]), bounds, words, true, &archived.indexes, &archived.offsets);
     assert!(pe.is_some(), "the creature child must still plane-consume");
     assert!(
         matches!(&residual, FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), .. }),
@@ -561,7 +561,7 @@ fn rarity_tracked_values_exact_consumed_hi_bucket_declines() {
 
     // A tracked value's negation is exact too.
     let not_mythic = FilterExpr::Not(Box::new(rarity_eq(3.0)));
-    assert!(compile_plane(&not_mythic, bounds, words).is_some(), "-r:mythic must compile to a plane expression");
+    assert!(compile_plane(&not_mythic, bounds, words, &archived.indexes, &archived.offsets).is_some(), "-r:mythic must compile to a plane expression");
 }
 
 /// Y=2 shared-witness decline: two distinct rarity plane indices under one
@@ -584,7 +584,7 @@ fn rarity_shared_witness_declines_same_field_and_cross_field() {
     // rarity>=rare AND rarity<=mythic: two distinct tracked plane indices
     // (rare, mythic) shared between the two Or-trees -- must decline.
     let bounded_range = FilterExpr::And(vec![rarity_ge(2.0), rarity_le(3.0)]);
-    assert!(compile_plane(&bounded_range, bounds, words).is_none(), "same-field rarity range must decline (shared witness)");
+    assert!(compile_plane(&bounded_range, bounds, words, &archived.indexes, &archived.offsets).is_none(), "same-field rarity range must decline (shared witness)");
 
     // format:A AND r:mythic: two distinct fields, still the identical
     // shared-witness problem -- collect_existential_indices doesn't care
@@ -593,7 +593,7 @@ fn rarity_shared_witness_declines_same_field_and_cross_field() {
     let cross_field = FilterExpr::And(vec![format_a, FilterExpr::NumericCmp {
         lhs: NumExpr::Field(NumField::RarityInt), op: CmpOp::Eq, rhs: NumExpr::Const(3.0),
     }]);
-    assert!(compile_plane(&cross_field, bounds, words).is_none(), "legality+rarity compound must decline (shared witness)");
+    assert!(compile_plane(&cross_field, bounds, words, &archived.indexes, &archived.offsets).is_none(), "legality+rarity compound must decline (shared witness)");
 
     // The fallback must still produce the correct (not just declined)
     // result: no printing in this fixture is both format-A-legal and
@@ -1066,11 +1066,11 @@ fn legality_same_format_cross_status_declines_shared_witness() {
     let restricted_c = || FilterExpr::Legality { shift: Some(4), expected: 0b10 };
 
     assert!(
-        compile_plane(&FilterExpr::And(vec![banned_c(), restricted_c()]), bounds, words).is_none(),
+        compile_plane(&FilterExpr::And(vec![banned_c(), restricted_c()]), bounds, words, &archived.indexes, &archived.offsets).is_none(),
         "banned:C AND restricted:C (same format, distinct statuses) must decline (shared-witness)"
     );
     assert!(
-        compile_plane(&FilterExpr::Or(vec![banned_c(), restricted_c()]), bounds, words).is_some(),
+        compile_plane(&FilterExpr::Or(vec![banned_c(), restricted_c()]), bounds, words, &archived.indexes, &archived.offsets).is_some(),
         "OR has no shared-witness problem and must compile"
     );
 }
@@ -1096,7 +1096,7 @@ fn legality_cross_status_shared_witness_falls_back_to_correct_result() {
         FilterExpr::Legality { shift: Some(4), expected: 0b11 },
         FilterExpr::Legality { shift: Some(4), expected: 0b10 },
     ]);
-    let (plane, mut residual) = split_planes(and_both, bounds, words, true);
+    let (plane, mut residual) = split_planes(and_both, bounds, words, true, &archived.indexes, &archived.offsets);
     assert!(plane.is_none(), "shared-witness AND must not partially promote either leaf into the plane");
     assert!(matches!(residual, FilterExpr::And(_)), "both legality children must remain in the residual");
 
@@ -1245,10 +1245,10 @@ fn plane_expr_is_existential_identifies_legality_only() {
     let bounds = &archived.indexes.planes;
     let words = &archived.indexes.oracle_trigram.words;
 
-    let legality_pe = compile_plane(&FilterExpr::Legality { shift: Some(0), expected: 0b01 }, bounds, words).unwrap();
+    let legality_pe = compile_plane(&FilterExpr::Legality { shift: Some(0), expected: 0b01 }, bounds, words, &archived.indexes, &archived.offsets).unwrap();
     assert!(super::plane_expr_is_existential(&legality_pe));
 
-    let creature_pe = compile_plane(&FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge }, bounds, words).unwrap();
+    let creature_pe = compile_plane(&FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge }, bounds, words, &archived.indexes, &archived.offsets).unwrap();
     assert!(!super::plane_expr_is_existential(&creature_pe));
 
     let mixed = compile_plane(
@@ -1258,6 +1258,8 @@ fn plane_expr_is_existential_identifies_legality_only() {
         ]),
         bounds,
         words,
+        &archived.indexes,
+        &archived.offsets,
     )
     .unwrap();
     assert!(super::plane_expr_is_existential(&mixed), "one existential leaf must taint the whole And");
@@ -1295,7 +1297,7 @@ fn legality_plane_promotion_respects_mode_through_split_planes() {
     let run_mode = |unique: &str| {
         let f = FilterExpr::Legality { shift: Some(0), expected: 0b01 };
         let unique_is_card = unique != "printing" && unique != "artwork";
-        let (plane, mut residual) = split_planes(f, bounds, words, unique_is_card);
+        let (plane, mut residual) = split_planes(f, bounds, words, unique_is_card, &archived.indexes, &archived.offsets);
         if unique_is_card {
             assert!(plane.is_some(), "a bare Legality leaf must still fully plane-consume for unique=card");
             assert!(matches!(residual, FilterExpr::True), "split_planes must leave a bare True residual for unique=card");
@@ -1351,7 +1353,7 @@ fn legality_compound_and_respects_row_selection_for_unique_card() {
         FilterExpr::Legality { shift: Some(0), expected: 0b01 },
         FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge },
     ]);
-    let (plane, mut residual) = split_planes(filter, bounds, words, true);
+    let (plane, mut residual) = split_planes(filter, bounds, words, true, &archived.indexes, &archived.offsets);
     assert!(plane.is_some(), "format:A AND t:creature (one format, no shared-witness issue) must compile whole");
     assert!(matches!(residual, FilterExpr::True));
 
@@ -1395,7 +1397,7 @@ fn legality_and_date_residual_must_be_checked_together() {
         FilterExpr::Legality { shift: Some(0), expected: 0b01 },
         FilterExpr::DateCmp { op: CmpOp::Gt, value: 20200101 },
     ]);
-    let (plane, mut residual) = split_planes(filter, bounds, words, true);
+    let (plane, mut residual) = split_planes(filter, bounds, words, true, &archived.indexes, &archived.offsets);
     assert!(plane.is_some(), "the legality leaf alone must still promote into the plane");
     assert!(
         matches!(residual, FilterExpr::DateCmp { .. }),
@@ -1727,6 +1729,7 @@ fn fuzz_check_case(archived: &Archived<CardData>, spec: &FuzzSpec, ctx: &str) {
         // the real caller (only Mode::Card may fold an existential legality leaf).
         let (pe, mut residual) = split_planes(
             fuzz_build_filter(spec), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, unique_is_card,
+            &archived.indexes, &archived.offsets,
         );
         let (t1, p1) = run_query(
             &archived.cards, &archived.printings, &archived.offsets, strings,
@@ -1807,15 +1810,15 @@ fn legality_and_of_two_formats_declines_but_or_compiles() {
     let b = || FilterExpr::Legality { shift: Some(2), expected: 0b01 };
 
     assert!(
-        compile_plane(&FilterExpr::And(vec![a(), b()]), bounds, words).is_none(),
+        compile_plane(&FilterExpr::And(vec![a(), b()]), bounds, words, &archived.indexes, &archived.offsets).is_none(),
         "two distinct formats ANDed must decline (shared-witness)"
     );
     assert!(
-        compile_plane(&FilterExpr::Or(vec![a(), b()]), bounds, words).is_some(),
+        compile_plane(&FilterExpr::Or(vec![a(), b()]), bounds, words, &archived.indexes, &archived.offsets).is_some(),
         "OR of two formats has no shared-witness problem and must compile"
     );
     assert!(
-        compile_plane(&FilterExpr::And(vec![a(), FilterExpr::Not(Box::new(a()))]), bounds, words).is_none(),
+        compile_plane(&FilterExpr::And(vec![a(), FilterExpr::Not(Box::new(a()))]), bounds, words, &archived.indexes, &archived.offsets).is_none(),
         "format:A AND -format:A (same format, both polarities) is the same contradiction-prone shape and must also decline"
     );
 }
@@ -1842,7 +1845,7 @@ fn legality_shared_witness_and_falls_back_to_correct_result() {
         FilterExpr::Legality { shift: Some(0), expected: 0b01 },
         FilterExpr::Legality { shift: Some(2), expected: 0b01 },
     ]);
-    let (plane, mut residual) = split_planes(and_both, bounds, words, true);
+    let (plane, mut residual) = split_planes(and_both, bounds, words, true, &archived.indexes, &archived.offsets);
     assert!(plane.is_none(), "shared-witness AND must not partially promote either leaf into the plane");
     assert!(matches!(residual, FilterExpr::And(_)), "both legality children must remain in the residual");
 
@@ -1877,14 +1880,14 @@ fn legality_de_morgan_not_of_compound() {
     let a = || FilterExpr::Legality { shift: Some(0), expected: 0b01 };
     let creature = || FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
 
-    let and_pe = compile_plane(&FilterExpr::And(vec![a(), creature()]), bounds, words)
+    let and_pe = compile_plane(&FilterExpr::And(vec![a(), creature()]), bounds, words, &archived.indexes, &archived.offsets)
         .expect("format:A AND t:creature must compile (one format, no shared-witness issue)");
     let mut and_bits: Vec<u64> = Vec::new();
     eval_planes(&and_pe, &archived.indexes.planes, &mut and_bits);
     assert!(bitmap_contains(&and_bits, 0), "printing0 is legal in A and a creature, so the positive AND is true for card 0");
 
     let not_and = FilterExpr::Not(Box::new(FilterExpr::And(vec![a(), creature()])));
-    let pe = compile_plane(&not_and, bounds, words).expect("-(format:A AND t:creature) must still compile via De Morgan");
+    let pe = compile_plane(&not_and, bounds, words, &archived.indexes, &archived.offsets).expect("-(format:A AND t:creature) must still compile via De Morgan");
     let mut bits: Vec<u64> = Vec::new();
     eval_planes(&pe, &archived.indexes.planes, &mut bits);
     assert!(bitmap_contains(&bits, 0), "card has a not-legal-in-A printing, so it satisfies the negation despite the positive AND being true");
@@ -1915,7 +1918,7 @@ fn legality_not_still_declines_with_unnegatable_numeric_sibling() {
     // no shared-witness issue, and the un-negated numeric comparison is
     // plane-eligible) -- isolates the failure to the Not/Null interaction.
     assert!(
-        compile_plane(&FilterExpr::And(vec![a(), power_gt3()]), bounds, words).is_some(),
+        compile_plane(&FilterExpr::And(vec![a(), power_gt3()]), bounds, words, &archived.indexes, &archived.offsets).is_some(),
         "format:A AND power>3 must compile without a Not present"
     );
 
@@ -1925,7 +1928,7 @@ fn legality_not_still_declines_with_unnegatable_numeric_sibling() {
     // collapsing the whole compile to None through the `?` propagation.
     let not_and = FilterExpr::Not(Box::new(FilterExpr::And(vec![a(), power_gt3()])));
     assert!(
-        compile_plane(&not_and, bounds, words).is_none(),
+        compile_plane(&not_and, bounds, words, &archived.indexes, &archived.offsets).is_none(),
         "-(format:A AND power>3) must decline: Null doesn't flip to True, even with a legality sibling"
     );
 
@@ -1934,7 +1937,7 @@ fn legality_not_still_declines_with_unnegatable_numeric_sibling() {
     // must decline there too, not just in the And arm.
     let not_or = FilterExpr::Not(Box::new(FilterExpr::Or(vec![a(), power_gt3()])));
     assert!(
-        compile_plane(&not_or, bounds, words).is_none(),
+        compile_plane(&not_or, bounds, words, &archived.indexes, &archived.offsets).is_none(),
         "-(format:A OR power>3) must decline via the Or arm of compile_plane_neg too"
     );
 }
@@ -2540,7 +2543,7 @@ fn popcount_skip_tie_breaking_preserves_group_order_both_directions() {
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
     let creature = FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
-    let (plane, mut residual) = split_planes(creature, &archived.indexes.planes, &archived.indexes.oracle_trigram.words, true);
+    let (plane, mut residual) = split_planes(creature, &archived.indexes.planes, &archived.indexes.oracle_trigram.words, true, &archived.indexes, &archived.offsets);
     assert!(matches!(residual, FilterExpr::True), "t:creature must fully plane-consume");
 
     let mut run = |direction: &str| {
@@ -2578,7 +2581,7 @@ fn popcount_skip_offset_lands_inside_tied_group() {
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
     let creature = FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
-    let (plane, mut residual) = split_planes(creature, &archived.indexes.planes, &archived.indexes.oracle_trigram.words, true);
+    let (plane, mut residual) = split_planes(creature, &archived.indexes.planes, &archived.indexes.oracle_trigram.words, true, &archived.indexes, &archived.offsets);
 
     // Full ascending order is [card3, card1, card0, card2, card4] (oracle ids
     // [4,2,1,3,5]); offset=2 must skip card3 and card1, landing on card0.
@@ -2611,7 +2614,7 @@ fn popcount_skip_matches_non_popcount_path() {
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
     let creature = FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
-    let (plane, mut residual_true) = split_planes(creature, &archived.indexes.planes, &archived.indexes.oracle_trigram.words, true);
+    let (plane, mut residual_true) = split_planes(creature, &archived.indexes.planes, &archived.indexes.oracle_trigram.words, true, &archived.indexes, &archived.offsets);
     assert!(matches!(residual_true, FilterExpr::True));
 
     // Popcount path: plane present, residual True.
@@ -2920,9 +2923,19 @@ fn price_narrowing_and_verification_are_exact_at_the_boundary() {
 
     let cmp = |op| FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op, rhs: NumExpr::Const(0.10) };
 
+    // Narrowing exactness is checked directly against price_range_narrowed (the shared
+    // printing-space narrowing `narrow_rec` and `compile_plane` both call) rather than
+    // through narrow_candidates/narrow_rec's full dispatch: on a store this small,
+    // compile_plane's own price arm now also compiles (see docs/issues/local-engine-
+    // broad-range-fastpath.md), so narrow_rec's plane-eligible fast path intercepts first
+    // and returns card-space CardBits instead of printing-space Printings -- a different,
+    // separately-tested representation (see the fastpath doc's compile_price_range
+    // machinery), not a regression in range_narrowed's own exactness this test checks.
+    let n_printings = 4;
+
     // Lt must exclude the boundary printing exactly -- both in narrowing and in verification.
     let lt = cmp(CmpOp::Lt);
-    match narrow_candidates(&lt, &archived.indexes, &archived.offsets, &archived.cards) {
+    match price_range_narrowed(CmpOp::Lt, 0.10, &archived.indexes, n_printings, true).map(|n| n.set) {
         Some(Candidates::Printings(v)) => {
             assert!(v.contains(&0));
             assert!(!v.contains(&1), "Lt must exclude the exact boundary price");
@@ -2938,7 +2951,7 @@ fn price_narrowing_and_verification_are_exact_at_the_boundary() {
     // silently excluded exact matches independent of narrowing).
     for (op, op_name, is_eq) in [(CmpOp::Le, "Le", false), (CmpOp::Ge, "Ge", false), (CmpOp::Eq, "Eq", true)] {
         let f = cmp(op);
-        match narrow_candidates(&f, &archived.indexes, &archived.offsets, &archived.cards) {
+        match price_range_narrowed(op, 0.10, &archived.indexes, n_printings, true).map(|n| n.set) {
             Some(Candidates::Printings(v)) => assert!(v.contains(&1), "narrowing must include the boundary price for {op_name}"),
             None if is_eq => {} // narrow_candidates_exact's broadness filter can decline Eq on a tiny store; matches() below is what matters
             _ => panic!("usd must narrow in printing space for {op_name}"),
@@ -2949,12 +2962,8 @@ fn price_narrowing_and_verification_are_exact_at_the_boundary() {
     let gt = cmp(CmpOp::Gt);
     assert!(!gt.matches(card, &archived.printings[1], &archived.strings));
 
-    let pricey = FilterExpr::NumericCmp {
-        lhs: super::NumExpr::Const(50.0),
-        op: CmpOp::Lt,
-        rhs: super::NumExpr::Field(super::NumField::PriceUsd),
-    };
-    match narrow_candidates(&pricey, &archived.indexes, &archived.offsets, &archived.cards) {
+    // Flipped operand order (50.0 < usd, i.e. usd > 50.0): only the $60 printing qualifies.
+    match price_range_narrowed(CmpOp::Gt, 50.0, &archived.indexes, n_printings, true).map(|n| n.set) {
         Some(Candidates::Printings(v)) => assert_eq!(v, vec![2]),
         _ => panic!("flipped usd comparison must narrow"),
     }
@@ -3107,7 +3116,7 @@ fn plane_parity_color_and_type_ops() {
 
     let mut bitmap: Vec<u64> = Vec::new();
     let mut check = |f: &FilterExpr| {
-        let pe = compile_plane(f, &archived.indexes.planes, &archived.indexes.oracle_trigram.words).expect("filter must be plane-expressible");
+        let pe = compile_plane(f, &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets).expect("filter must be plane-expressible");
         eval_planes(&pe, &archived.indexes.planes, &mut bitmap);
         for (cid, card) in archived.cards.iter().enumerate() {
             let want = f.eval_card(card, &archived.strings) == Tri::True;
@@ -3162,7 +3171,7 @@ fn color_cmp_ge_empty_mask_is_colorless_only() {
             let want = want_true.contains(&cid);
             assert_eq!(f.eval_card(card, &archived.strings) == Tri::True, want, "eval_card mismatch at card {cid}");
         }
-        let pe = compile_plane(&f, &archived.indexes.planes, &archived.indexes.oracle_trigram.words).expect("filter must be plane-expressible");
+        let pe = compile_plane(&f, &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets).expect("filter must be plane-expressible");
         let mut bitmap: Vec<u64> = Vec::new();
         eval_planes(&pe, &archived.indexes.planes, &mut bitmap);
         for cid in 0..archived.cards.len() {
@@ -3191,7 +3200,7 @@ fn plane_produces_independent_of_colors_and_identity() {
     let words = &archived.indexes.oracle_trigram.words;
 
     let produces_white = FilterExpr::ColorCmp { field: ColorField::ProducedMana, op: CmpOp::Ge, mask: 1 };
-    let pe = compile_plane(&produces_white, bounds, words).expect("produces: must be plane-expressible");
+    let pe = compile_plane(&produces_white, bounds, words, &archived.indexes, &archived.offsets).expect("produces: must be plane-expressible");
     let mut bitmap: Vec<u64> = Vec::new();
     eval_planes(&pe, bounds, &mut bitmap);
     assert!(bitmap_contains(&bitmap, 0), "colorless artifact produces white (mask 63) despite having no colors of its own");
@@ -3209,7 +3218,7 @@ fn plane_fallaji_colors_not_subset_of_identity() {
     let mut bitmap: Vec<u64> = Vec::new();
     let mut matches = |field: ColorField, op: CmpOp, mask: u8| {
         let f = FilterExpr::ColorCmp { field, op, mask };
-        eval_planes(&compile_plane(&f, &archived.indexes.planes, &archived.indexes.oracle_trigram.words).unwrap(), &archived.indexes.planes, &mut bitmap);
+        eval_planes(&compile_plane(&f, &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets).unwrap(), &archived.indexes.planes, &mut bitmap);
         bitmap_contains(&bitmap, FALLAJI_CID as u32)
     };
     assert!(matches(ColorField::Colors, CmpOp::Ge, 1)); // c>=W: colors carry W
@@ -3233,33 +3242,33 @@ fn split_planes_composition_rules() {
     let text = || FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: "draw".to_string() };
 
     // And(plane, plane, text): planes consumed, the lone leftover unwraps.
-    let (pe, residual) = split_planes(FilterExpr::And(vec![green(), creature(), text()]), bounds, words, true);
+    let (pe, residual) = split_planes(FilterExpr::And(vec![green(), creature(), text()]), bounds, words, true, &archived.indexes, &archived.offsets);
     assert!(pe.is_some());
     assert!(matches!(residual, FilterExpr::TextContains { .. }));
 
     // Fully plane-expressible tree is consumed whole.
-    let (pe, residual) = split_planes(FilterExpr::And(vec![green(), creature()]), bounds, words, true);
+    let (pe, residual) = split_planes(FilterExpr::And(vec![green(), creature()]), bounds, words, true, &archived.indexes, &archived.offsets);
     assert!(pe.is_some());
     assert!(matches!(residual, FilterExpr::True));
-    let (pe, residual) = split_planes(FilterExpr::Or(vec![green(), creature()]), bounds, words, true);
+    let (pe, residual) = split_planes(FilterExpr::Or(vec![green(), creature()]), bounds, words, true, &archived.indexes, &archived.offsets);
     assert!(pe.is_some());
     assert!(matches!(residual, FilterExpr::True));
 
     // Or mixing plane and non-plane children stays entirely residual:
     // mask ∨ residual is not a narrowing mask.
-    let (pe, residual) = split_planes(FilterExpr::Or(vec![green(), text()]), bounds, words, true);
+    let (pe, residual) = split_planes(FilterExpr::Or(vec![green(), text()]), bounds, words, true, &archived.indexes, &archived.offsets);
     assert!(pe.is_none());
     assert!(matches!(residual, FilterExpr::Or(ref v) if v.len() == 2));
 
     // Produced mana is plane-expressible (docs/issues/00669-engine-produces-planes.md):
     // same card-level, always-known bitmask shape as Colors/ColorIdentity.
     let produces = FilterExpr::ColorCmp { field: ColorField::ProducedMana, op: CmpOp::Ge, mask: 16 };
-    let (pe, residual) = split_planes(produces, bounds, words, true);
+    let (pe, residual) = split_planes(produces, bounds, words, true, &archived.indexes, &archived.offsets);
     assert!(pe.is_some());
     assert!(matches!(residual, FilterExpr::True));
 
     // Bare True keeps the range-scan path (no all-ones bitmap materialization).
-    let (pe, residual) = split_planes(FilterExpr::True, bounds, words, true);
+    let (pe, residual) = split_planes(FilterExpr::True, bounds, words, true, &archived.indexes, &archived.offsets);
     assert!(pe.is_none());
     assert!(matches!(residual, FilterExpr::True));
 }
@@ -3296,7 +3305,7 @@ fn run_query_plane_path_parity() {
                 &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
                 &mut plain, None, unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
             );
-            let (pe, mut residual) = split_planes(make(), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, true);
+            let (pe, mut residual) = split_planes(make(), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, true, &archived.indexes, &archived.offsets);
             let (t1, p1) = run_query(
                 &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
                 &mut residual, pe.as_ref(), unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
@@ -3308,6 +3317,115 @@ fn run_query_plane_path_parity() {
             assert_eq!(ids(&p0), ids(&p1), "pages must agree (unique={unique})");
         }
     }
+}
+
+/// Card 0: two printings, $5 (satisfies `usd<50`) and $200 (doesn't; satisfies
+/// `usd>=50`) -- deliberately divergent w.r.t. any single usd threshold, the
+/// shape that catches row-selection and negation bugs (a card can satisfy
+/// `usd<50` via one printing and `-usd<50` via the *other*, at once). Card 1:
+/// one printing at $500 (never satisfies `usd<50`). Distinct illustration ids
+/// throughout (store_of's default), so unique=artwork mirrors unique=printing
+/// here -- no shared-group collapsing to complicate the comparison.
+fn price_plane_fixture_store() -> CardData {
+    let mut vocab = VocabInterner::new();
+    let cards = vec![stub_card(1, TYPE_CREATURE, &[], &mut vocab), stub_card(2, TYPE_CREATURE, &[], &mut vocab)];
+    let mut data = store_of(cards, &[2, 1], vocab);
+    data.printings[0].price_usd = Some(500); // card 0: $5.00
+    data.printings[1].price_usd = Some(20000); // card 0: $200.00
+    data.printings[2].price_usd = Some(50000); // card 1: $500.00
+    data.indexes.price_usd = build_range_index(&data.printings, |p| p.price_usd);
+    data
+}
+
+/// `PlaneExpr::PrintingRangeBits` (docs/issues/local-engine-broad-range-fastpath.md)
+/// must reproduce exactly what the unplaned (narrow_rec + card_pass) path computes,
+/// for every unique mode -- same differential shape as run_query_plane_path_parity,
+/// covering the three ways this machinery could go wrong: row selection (a card
+/// bitmap doesn't say *which* printing satisfies), negation (must recompute with
+/// the negated op, not bit-complement -- the Legality/rarity trap), and shared
+/// witness (two range conditions on usd must decline to compose via plain card_bits
+/// intersection, not silently combine independent existence facts).
+#[test]
+fn price_plane_path_parity_and_shared_witness() {
+    let data = price_plane_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let usd = |op, v: f64| FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op, rhs: NumExpr::Const(v) };
+
+    // usd<50 compiles to a plane and matches the unplaned path in every mode.
+    // -usd<50 (∃p: ¬(p.usd<50), NOT ¬∃p: p.usd<50) must also match -- card 0 satisfies
+    // *both* usd<50 (via the $5 printing) and -usd<50 (via the $200 printing) at once,
+    // exactly the divergent shape a bit-complement would get wrong.
+    let filters: Vec<Box<dyn Fn() -> FilterExpr>> = vec![
+        Box::new(|| usd(CmpOp::Lt, 50.0)),
+        Box::new(|| FilterExpr::Not(Box::new(usd(CmpOp::Lt, 50.0)))),
+        Box::new(|| FilterExpr::And(vec![usd(CmpOp::Lt, 50.0), FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge }])),
+    ];
+    for make in &filters {
+        for unique in ["card", "printing", "artwork"] {
+            // Matches run_query's own unique -> Mode mapping (see split_planes's
+            // unique_is_card doc): existential leaves like price must NOT fold to a
+            // bare True residual for unique=printing/artwork, or row selection is lost.
+            let unique_is_card = unique != "printing" && unique != "artwork";
+            let mut plain = make();
+            let (t0, p0) = run_query(
+                &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+                &mut plain, None, unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
+            );
+            let (pe, mut residual) = split_planes(
+                make(), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, unique_is_card, &archived.indexes, &archived.offsets,
+            );
+            let (t1, p1) = run_query(
+                &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+                &mut residual, pe.as_ref(), unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
+            );
+            assert_eq!(t0, t1, "totals must agree (unique={unique})");
+            let ids = |page: &[(&super::AOracleCard, &super::APrinting)]| -> Vec<u128> {
+                page.iter().map(|(_, p)| u128::from(p.scryfall_id)).collect()
+            };
+            assert_eq!(ids(&p0), ids(&p1), "pages must agree (unique={unique})");
+        }
+    }
+
+    // Independent ground truth for -usd<50/unique=card, bypassing run_query/narrow_rec/
+    // compile_plane entirely (narrow_rec's own internal plane fast path means run_query's
+    // plane=None "unplaned" baseline above is *not* fully independent of compile_plane_neg --
+    // it would share a bit-complement bug too, since it also tries compile_plane internally
+    // for narrowing). card 0 satisfies -usd<50 via its $200 printing despite also satisfying
+    // usd<50 via its $5 printing; card 1's $500 printing trivially satisfies -usd<50. Correct
+    // total is 2 -- a bit-complement bug (¬∃p: p.usd<50 instead of ∃p: ¬(p.usd<50)) would give
+    // 0, since ∃p: p.usd<50 is true for card 0 (excluding it) and vacuously false for neither.
+    let not_usd = FilterExpr::Not(Box::new(usd(CmpOp::Lt, 50.0)));
+    let expected_cards: usize = (0..archived.cards.len() as u32)
+        .filter(|&cid| {
+            let start = u32::from(archived.offsets[cid as usize]) as usize;
+            let end = u32::from(archived.offsets[cid as usize + 1]) as usize;
+            archived.printings[start..end].iter().any(|p| not_usd.matches(&archived.cards[cid as usize], p, &archived.strings))
+        })
+        .count();
+    assert_eq!(expected_cards, 2, "hand-computed ground truth: both cards have a printing satisfying -usd<50");
+    let (total, _) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut FilterExpr::Not(Box::new(usd(CmpOp::Lt, 50.0))), None, "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+    );
+    assert_eq!(total, expected_cards, "-usd<50 unique=card must match the independent per-printing ground truth");
+
+    // Same-field range AND (usd<50 AND usd>10): no printing of card 0 satisfies both
+    // ($5 fails usd>10, $200 fails usd<50) -- correct total is 0. Confirms the
+    // shared-witness decline doesn't just avoid a crash but that the fallback path
+    // it declines to (residual card_pass) computes the actually-correct answer.
+    let same_field_and = || FilterExpr::And(vec![usd(CmpOp::Lt, 50.0), usd(CmpOp::Gt, 10.0)]);
+    assert!(
+        compile_plane(&same_field_and(), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets)
+            .is_none(),
+        "same-field usd range AND must decline to compile (shared witness)"
+    );
+    let (total, _) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut same_field_and(), None, "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+    );
+    assert_eq!(total, 0, "no single printing satisfies both usd<50 and usd>10");
 }
 
 // ─── Numeric-range planes (#655) ───────────────────────────────────────────────
@@ -3357,7 +3475,7 @@ fn numeric_plane_parity_interior_and_tails() {
 
     let mut bitmap: Vec<u64> = Vec::new();
     let mut check = |f: &FilterExpr, label: &str| {
-        let Some(pe) = compile_plane(f, &archived.indexes.planes, &archived.indexes.oracle_trigram.words) else { return };
+        let Some(pe) = compile_plane(f, &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets) else { return };
         eval_planes(&pe, &archived.indexes.planes, &mut bitmap);
         for (cid, card) in archived.cards.iter().enumerate() {
             let want = f.eval_card(card, &archived.strings) == Tri::True;
@@ -3413,17 +3531,17 @@ fn numeric_plane_boundary_inclusion_and_decline() {
 
     // Crosses into the high tail, but includes BOTH high-tail values (13, 14)
     // fully — unambiguous, since every possible bucket member qualifies.
-    assert!(compile_plane(&cmp(NumField::Cmc, CmpOp::Le, 14.0), bounds, words).is_some());
+    assert!(compile_plane(&cmp(NumField::Cmc, CmpOp::Le, 14.0), bounds, words, &archived.indexes, &archived.offsets).is_some());
     // Crosses into the low tail: power>=-1 must include the power=-1 card.
-    assert!(compile_plane(&cmp(NumField::Power, CmpOp::Ge, -1.0), bounds, words).is_some());
+    assert!(compile_plane(&cmp(NumField::Power, CmpOp::Ge, -1.0), bounds, words, &archived.indexes, &archived.offsets).is_some());
     // Entirely within the interior: no bucket involved at all.
-    assert!(compile_plane(&cmp(NumField::Toughness, CmpOp::Le, 6.0), bounds, words).is_some());
+    assert!(compile_plane(&cmp(NumField::Toughness, CmpOp::Le, 6.0), bounds, words, &archived.indexes, &archived.offsets).is_some());
 
     // Distinguishing inside the high tail bucket (which now holds two
     // distinct values each) can't be answered by the cumulative plane alone.
-    assert!(compile_plane(&cmp(NumField::Cmc, CmpOp::Eq, 13.0), bounds, words).is_none());
-    assert!(compile_plane(&cmp(NumField::Toughness, CmpOp::Eq, 20.0), bounds, words).is_none());
-    assert!(compile_plane(&cmp(NumField::Toughness, CmpOp::Lt, 22.0), bounds, words).is_none());
+    assert!(compile_plane(&cmp(NumField::Cmc, CmpOp::Eq, 13.0), bounds, words, &archived.indexes, &archived.offsets).is_none());
+    assert!(compile_plane(&cmp(NumField::Toughness, CmpOp::Eq, 20.0), bounds, words, &archived.indexes, &archived.offsets).is_none());
+    assert!(compile_plane(&cmp(NumField::Toughness, CmpOp::Lt, 22.0), bounds, words, &archived.indexes, &archived.offsets).is_none());
 }
 
 // Ne is declined unconditionally, matching numeric_candidates' own choice
@@ -3438,7 +3556,7 @@ fn numeric_plane_declines_ne_unconditionally() {
     let words = &archived.indexes.oracle_trigram.words;
     for field in [NumField::Cmc, NumField::Power, NumField::Toughness] {
         let ne = FilterExpr::NumericCmp { lhs: NumExpr::Field(field), op: CmpOp::Ne, rhs: NumExpr::Const(3.0) };
-        assert!(compile_plane(&ne, bounds, words).is_none());
+        assert!(compile_plane(&ne, bounds, words, &archived.indexes, &archived.offsets).is_none());
     }
 }
 
@@ -3456,19 +3574,19 @@ fn numeric_plane_declines_not_over_numeric_cmp() {
     let words = &archived.indexes.oracle_trigram.words;
 
     let power_gt3 = FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Power), op: CmpOp::Gt, rhs: NumExpr::Const(3.0) };
-    assert!(compile_plane(&power_gt3, bounds, words).is_some(), "power>3 alone must compile");
+    assert!(compile_plane(&power_gt3, bounds, words, &archived.indexes, &archived.offsets).is_some(), "power>3 alone must compile");
     let make_negated = || FilterExpr::Not(Box::new(FilterExpr::NumericCmp {
         lhs: NumExpr::Field(NumField::Power),
         op: CmpOp::Gt,
         rhs: NumExpr::Const(3.0),
     }));
-    assert!(compile_plane(&make_negated(), bounds, words).is_none(), "Not(power>3) must decline: Null doesn't flip to True");
+    assert!(compile_plane(&make_negated(), bounds, words, &archived.indexes, &archived.offsets).is_none(), "Not(power>3) must decline: Null doesn't flip to True");
 
     // Buried under And/Or, not just at the top.
     let buried_and = FilterExpr::And(vec![make_negated(), FilterExpr::True]);
-    assert!(compile_plane(&buried_and, bounds, words).is_none());
+    assert!(compile_plane(&buried_and, bounds, words, &archived.indexes, &archived.offsets).is_none());
     let buried_or = FilterExpr::Or(vec![make_negated(), FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge }]);
-    assert!(compile_plane(&buried_or, bounds, words).is_none());
+    assert!(compile_plane(&buried_or, bounds, words, &archived.indexes, &archived.offsets).is_none());
 
     // cmc is Option<u8> (never negative) but can still be unset on odd data,
     // so the guard applies uniformly across all three fields, not just the
@@ -3478,12 +3596,12 @@ fn numeric_plane_declines_not_over_numeric_cmp() {
         op: CmpOp::Le,
         rhs: NumExpr::Const(6.0),
     }));
-    assert!(compile_plane(&cmc_le6(), bounds, words).is_none());
+    assert!(compile_plane(&cmc_le6(), bounds, words, &archived.indexes, &archived.offsets).is_none());
 
     // A Not over a non-numeric plane child must still compile fine — the
     // guard must not over-decline unrelated Not subtrees.
     let not_creature = FilterExpr::Not(Box::new(FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge }));
-    assert!(compile_plane(&not_creature, bounds, words).is_some());
+    assert!(compile_plane(&not_creature, bounds, words, &archived.indexes, &archived.offsets).is_some());
 }
 
 // End-to-end: run_query through the numeric-plane path (split_planes consumes
@@ -3513,7 +3631,7 @@ fn run_query_numeric_plane_path_parity() {
                 &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
                 &mut plain, None, unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
             );
-            let (pe, mut residual) = split_planes(make(), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, true);
+            let (pe, mut residual) = split_planes(make(), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, true, &archived.indexes, &archived.offsets);
             let (t1, p1) = run_query(
                 &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
                 &mut residual, pe.as_ref(), unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
@@ -3538,7 +3656,7 @@ fn numeric_plane_enables_all_match_promotion() {
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
     let cmc_le12 = FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Cmc), op: CmpOp::Le, rhs: NumExpr::Const(12.0) };
-    let (pe, residual) = split_planes(cmc_le12, &archived.indexes.planes, &archived.indexes.oracle_trigram.words, true);
+    let (pe, residual) = split_planes(cmc_le12, &archived.indexes.planes, &archived.indexes.oracle_trigram.words, true, &archived.indexes, &archived.offsets);
     assert!(pe.is_some(), "cmc<=12 must plane-compile");
     assert!(matches!(residual, FilterExpr::True), "cmc<=12 must fully consume: no residual card_pass needed");
 }
@@ -3882,17 +4000,17 @@ fn compile_plane_word_bonus_composes_with_other_planes() {
     let oracle = |w: &str| FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: w.to_string() };
 
     // Single-dense-hit needle: compile_plane must consume it directly.
-    assert!(compile_plane(&oracle("target"), bounds, words).is_some(), "single dense hit must compile to a plane");
+    assert!(compile_plane(&oracle("target"), bounds, words, &archived.indexes, &archived.offsets).is_some(), "single dense hit must compile to a plane");
     // Mixed dense+sparse needle: compile_plane must decline (the dense bitmap
     // alone would miss the sparse "creaturehood" match) — narrow_rec's
     // general dispatch is the only correct path for this shape.
-    assert!(compile_plane(&oracle("creature"), bounds, words).is_none(), "mixed dense+sparse must not compile: dense bitmap alone would undercount");
+    assert!(compile_plane(&oracle("creature"), bounds, words, &archived.indexes, &archived.offsets).is_none(), "mixed dense+sparse must not compile: dense bitmap alone would undercount");
 
     // AND with an unrelated plane-expressible predicate (every card here is a
     // creature, so this is a true tautological AND, just exercising composition).
     let creature_type = FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
     let both = FilterExpr::And(vec![oracle("target"), creature_type]);
-    let pe = compile_plane(&both, bounds, words).expect("dense word AND a plane predicate must compile whole");
+    let pe = compile_plane(&both, bounds, words, &archived.indexes, &archived.offsets).expect("dense word AND a plane predicate must compile whole");
     let mut bitmap: Vec<u64> = Vec::new();
     eval_planes(&pe, bounds, &mut bitmap);
     assert_eq!(bitmap_card_ids(&bitmap), brute_force_oracle_contains(archived, "target"), "every card here is a creature, so the AND changes nothing");
@@ -4044,7 +4162,7 @@ fn border_shared_witness_correctness() {
     let and_both = FilterExpr::And(vec![border("black"), border("borderless")]);
 
     assert!(
-        compile_plane(&and_both, bounds, words).is_none(),
+        compile_plane(&and_both, bounds, words, &archived.indexes, &archived.offsets).is_none(),
         "border:black AND border:borderless must decline to compile exactly (shared witness)"
     );
 
@@ -4057,6 +4175,7 @@ fn border_shared_witness_correctness() {
 
     let (pe, mut residual) = split_planes(
         FilterExpr::And(vec![border("black"), border("borderless")]), bounds, words, true,
+        &archived.indexes, &archived.offsets,
     );
     let (total2, _) = run_query(
         &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
@@ -4082,19 +4201,19 @@ fn border_tracked_values_exact_consumed_other_bucket_declines() {
     let border = |v: &str| FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value: v.to_string() };
 
     for value in ["black", "borderless", "white", "gold"] {
-        assert!(compile_plane(&border(value), bounds, words).is_some(), "border:{value} must compile to a plane expression");
+        assert!(compile_plane(&border(value), bounds, words, &archived.indexes, &archived.offsets).is_some(), "border:{value} must compile to a plane expression");
         let not_value = FilterExpr::Not(Box::new(border(value)));
-        assert!(compile_plane(&not_value, bounds, words).is_some(), "-border:{value} must compile to a plane expression");
+        assert!(compile_plane(&not_value, bounds, words, &archived.indexes, &archived.offsets).is_some(), "-border:{value} must compile to a plane expression");
     }
 
-    assert!(compile_plane(&border("yellow"), bounds, words).is_none(), "border:yellow must decline (other bucket is ambiguous)");
+    assert!(compile_plane(&border("yellow"), bounds, words, &archived.indexes, &archived.offsets).is_none(), "border:yellow must decline (other bucket is ambiguous)");
     let not_yellow = FilterExpr::Not(Box::new(border("yellow")));
-    assert!(compile_plane(&not_yellow, bounds, words).is_none(), "-border:yellow must decline (other bucket is ambiguous)");
+    assert!(compile_plane(&not_yellow, bounds, words, &archived.indexes, &archived.offsets).is_none(), "-border:yellow must decline (other bucket is ambiguous)");
 
     // Mixed with an otherwise fully plane-expressible sibling: the untracked
     // child must stay in the residual, not get silently dropped or promoted.
     let creature = FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
-    let (pe, residual) = split_planes(FilterExpr::And(vec![creature, border("yellow")]), bounds, words, true);
+    let (pe, residual) = split_planes(FilterExpr::And(vec![creature, border("yellow")]), bounds, words, true, &archived.indexes, &archived.offsets);
     assert!(pe.is_some(), "the creature child must still plane-consume");
     assert!(
         matches!(&residual, FilterExpr::TextExact { field: TextField::Border, .. }),
@@ -4118,7 +4237,7 @@ fn border_other_bucket_closes_domain_for_tracked_negation() {
     let yellow_card = 8u32; // card 8: only printing is yellow (untracked)
 
     let not_black = FilterExpr::Not(Box::new(FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value: "black".to_string() }));
-    let pe = compile_plane(&not_black, bounds, words).expect("-border:black must compile");
+    let pe = compile_plane(&not_black, bounds, words, &archived.indexes, &archived.offsets).expect("-border:black must compile");
     let mut bits = Vec::new();
     eval_planes(&pe, bounds, &mut bits);
     assert!(
@@ -4127,7 +4246,7 @@ fn border_other_bucket_closes_domain_for_tracked_negation() {
     );
 
     let black = FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value: "black".to_string() };
-    let pe2 = compile_plane(&black, bounds, words).expect("border:black must compile");
+    let pe2 = compile_plane(&black, bounds, words, &archived.indexes, &archived.offsets).expect("border:black must compile");
     let mut bits2 = Vec::new();
     eval_planes(&pe2, bounds, &mut bits2);
     assert!(!bitmap_contains(&bits2, yellow_card), "the same card must not satisfy border:black");
@@ -4709,7 +4828,7 @@ fn devotion_plane_parity_and_boundaries() {
     let dev = |op, pips: &[(&str, u8)]| FilterExpr::Devotion { op, pips: packed_pips(pips) };
     let mut bitmap: Vec<u64> = Vec::new();
     let mut check_exact = |f: &FilterExpr| {
-        let pe = compile_plane(f, &archived.indexes.planes, &archived.indexes.oracle_trigram.words).expect("must compile exactly");
+        let pe = compile_plane(f, &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets).expect("must compile exactly");
         eval_planes(&pe, &archived.indexes.planes, &mut bitmap);
         for (cid, card) in archived.cards.iter().enumerate() {
             let want = f.eval_card(card, &archived.strings) == Tri::True;
@@ -4727,9 +4846,9 @@ fn devotion_plane_parity_and_boundaries() {
     check_exact(&dev(CmpOp::Ge, &[("R", 3)])); // {R/G}{R/G}{R} card reaches R=3
 
     // Past the saturation boundary the exact compiler declines...
-    assert!(compile_plane(&dev(CmpOp::Ge, &[("U", 4)]), &archived.indexes.planes, &archived.indexes.oracle_trigram.words).is_none());
-    assert!(compile_plane(&dev(CmpOp::Eq, &[("U", 3)]), &archived.indexes.planes, &archived.indexes.oracle_trigram.words).is_none());
-    assert!(compile_plane(&dev(CmpOp::Le, &[("U", 3)]), &archived.indexes.planes, &archived.indexes.oracle_trigram.words).is_none());
+    assert!(compile_plane(&dev(CmpOp::Ge, &[("U", 4)]), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets).is_none());
+    assert!(compile_plane(&dev(CmpOp::Eq, &[("U", 3)]), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets).is_none());
+    assert!(compile_plane(&dev(CmpOp::Le, &[("U", 3)]), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets).is_none());
     // ...and the saturated superset covers every deep match for narrowing.
     let deep = dev(CmpOp::Ge, &[("U", 5)]);
     let n = super::narrow_rec(&deep, &archived.indexes, &archived.offsets, &archived.cards, false).expect("deep-k narrows loosely");
@@ -4753,7 +4872,7 @@ fn hybrid_pip_counts_toward_both_colors() {
     let mut bitmap: Vec<u64> = Vec::new();
     let rg_card = 5; // {R/G}
     for (f, want) in [(dev("R", 1), true), (dev("G", 1), true), (dev("R", 2), false), (dev("U", 1), false)] {
-        eval_planes(&compile_plane(&f, &archived.indexes.planes, &archived.indexes.oracle_trigram.words).unwrap(), &archived.indexes.planes, &mut bitmap);
+        eval_planes(&compile_plane(&f, &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets).unwrap(), &archived.indexes.planes, &mut bitmap);
         assert_eq!(bitmap_contains(&bitmap, rg_card), want);
     }
 }

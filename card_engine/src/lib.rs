@@ -2047,6 +2047,21 @@ fn range_narrowed(idx: &Archived<PrintingRangeIndex>, lo: u32, hi: u32, n_printi
     Narrowed::loose(Candidates::PrintingBits(bits))
 }
 
+/// Shared by `narrow_rec`'s `price` closure and `compile_plane`'s `NumericCmp`
+/// arm (`planes.rs`) — one encoding of "price predicate -> narrowed
+/// printing-space bounds" so the two paths can't independently drift out of
+/// sync, the exact shape that caused Bug B in the price-cents migration (see
+/// docs/issues/local-engine-broad-range-fastpath.md). `*100.0` is itself a new
+/// floating-point operation, not a lossless relabeling (`0.28_f64 * 100.0 ==
+/// 28.000000000000004`), so `snap_to_nearest_cent` guards it before flooring/
+/// ceiling in `int_range_bounds`.
+pub(crate) fn price_range_narrowed(op: CmpOp, v: f64, indexes: &Archived<CardIndexes>, n_printings: usize, broad_ok: bool) -> Option<Narrowed> {
+    match int_range_bounds(op, snap_to_nearest_cent(v * PRICE_CENTS_PER_DOLLAR))? {
+        None => Narrowed::tight(Candidates::Printings(Vec::new())),
+        Some((lo, hi)) => range_narrowed(&indexes.price_usd, lo, hi, n_printings, broad_ok, true),
+    }
+}
+
 // ─── Rarity index ────────────────────────────────────────────────────────────
 // rarity int (0-5) -> sorted card ids with at least one printing at that
 // rarity. A card printed at several rarities appears in each of its lists
@@ -2759,7 +2774,7 @@ fn narrow_rec(
         && u32::from(indexes.planes.n_cards) as usize == n_cards
         && n_cards > 0
     {
-        if let Some(pe) = compile_plane(filter, &indexes.planes, &indexes.oracle_trigram.words) {
+        if let Some(pe) = compile_plane(filter, &indexes.planes, &indexes.oracle_trigram.words, indexes, offsets) {
             let mut bits: Vec<u64> = Vec::new();
             eval_planes(&pe, &indexes.planes, &mut bits);
             // Legality's planes are existence projections, not true-for-
@@ -2888,13 +2903,7 @@ fn narrow_rec(
             // complement would wrongly exclude cards `-rarity:x` matches.
             let numeric = |idx, op, v: &f64| numeric_candidates(idx, op, *v).and_then(|c| Narrowed::tight(Candidates::Cards(c)));
             let rarity = |op, v: &f64| narrow_rarity(indexes, n_cards, op, *v);
-            // Same shape as `cn` below now that price is integer cents, not lossy f32 dollars --
-            // the only price-specific step is snapping the *PRICE_CENTS_PER_DOLLAR conversion
-            // against its own floating-point noise before delegating to int_range_bounds.
-            let price = |op, v: &f64| match int_range_bounds(op, snap_to_nearest_cent(*v * PRICE_CENTS_PER_DOLLAR))? {
-                None => Narrowed::tight(Candidates::Printings(Vec::new())),
-                Some((lo, hi)) => range_narrowed(&indexes.price_usd, lo, hi, n_printings, broad_ok, true),
-            };
+            let price = |op, v: &f64| price_range_narrowed(op, *v, indexes, n_printings, broad_ok);
             let cn = |op, v: &f64| match int_range_bounds(op, *v)? {
                 None => Narrowed::tight(Candidates::Printings(Vec::new())),
                 Some((lo, hi)) => range_narrowed(&indexes.collector_number, lo, hi, n_printings, broad_ok, true),
@@ -4857,7 +4866,14 @@ impl QueryEngine {
                 // (anything other than "artwork"/"printing" is Mode::Card,
                 // not just the literal string "card") -- see split_planes's
                 // unique_is_card doc.
-                split_planes(filter_expr, &data.indexes.planes, &data.indexes.oracle_trigram.words, !matches!(unique, "artwork" | "printing"))
+                split_planes(
+                    filter_expr,
+                    &data.indexes.planes,
+                    &data.indexes.oracle_trigram.words,
+                    !matches!(unique, "artwork" | "printing"),
+                    &data.indexes,
+                    &data.offsets,
+                )
             } else {
                 (None, filter_expr)
             };

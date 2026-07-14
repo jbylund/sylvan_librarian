@@ -31,9 +31,13 @@
 
 use rkyv::{Archive, Deserialize, Serialize};
 
-use super::filter::{CmpOp, ColorField, FilterExpr, NumExpr, NumField, TextField, TextSearchField};
+use super::filter::{cmp, CmpOp, ColorField, FilterExpr, NumExpr, NumField, TextField, TextSearchField};
 use super::legality::{LEGALITY_BANNED, LEGALITY_LEGAL, LEGALITY_RESTRICTED, MAX_FORMATS};
-use super::{flip_op, lane_get, negate_op, oracle_word_eligible, scan_oracle_words, str_at, AStrings, OracleCard, OracleWordIndex, Printing, NONE_STR};
+use super::{
+    flip_op, lane_get, negate_op, oracle_word_eligible, price_range_narrowed, scan_oracle_words, str_at, AOffsets, AStrings, CardIndexes,
+    OracleCard, OracleWordIndex, Printing, NONE_STR,
+};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Plane layout, plane-major in BitPlanes.words: six color planes per color
 /// field (W U B R G C, bit order matching color_to_bit — C is always zero for
@@ -441,10 +445,41 @@ pub(crate) enum PlaneExpr {
     /// compile-time-known dimensions the other variants index into. A clone
     /// (a few KB) is paid once per query, never per row.
     Bits(Vec<u64>),
+    /// A printing-varying numeric range predicate (`price_usd` today —
+    /// `collector_number`/`released_at` are separate `FilterExpr` variants,
+    /// `DateCmp`/`YearCmp`, not yet wired here), compiled via `range_narrowed`
+    /// at query time (docs/issues/local-engine-broad-range-fastpath.md).
+    /// `card_bits` is the card-level existence answer ("some printing
+    /// satisfies"). The per-printing check re-derives the comparison directly
+    /// from `(field, op, threshold)` against the printing's own field instead
+    /// of a second precomputed bitmap — one fewer independent encoding of the
+    /// same fact to keep in sync (exactly the shape that caused Bug B in the
+    /// price-cents migration). `id` is a synthetic shared-witness identity
+    /// (see `collect_existential_indices`) — distinct per compiled leaf, even
+    /// for the same field at a different threshold: two range conditions on
+    /// the same field are a real shared-witness risk (a card could have one
+    /// printing satisfying each half without any single printing satisfying
+    /// both), so they correctly decline to compose via plain `card_bits`
+    /// intersection until same-field interval merging is built (deferred,
+    /// not required for correctness — see the design doc).
+    PrintingRangeBits { id: u64, card_bits: Vec<u64>, field: NumField, op: CmpOp, threshold: f64 },
     And(Vec<PlaneExpr>),
     Or(Vec<PlaneExpr>),
     Not(Box<PlaneExpr>),
     Const(bool),
+}
+
+/// Fresh synthetic identity for each compiled `PrintingRangeBits` leaf, used
+/// by `collect_existential_indices`' shared-witness dedup. Starts above
+/// `PLANE_COUNT` so it can never collide with a real `Plane(u16)` index (cast
+/// to `u64` there for comparison — see that function). Only needs
+/// distinctness within one query's compiled tree, not globally — collisions
+/// across separate queries are harmless, and `u64` never wraps in any
+/// realistic process lifetime, unlike a `u16` counter would.
+static NEXT_RANGE_BITS_ID: AtomicU64 = AtomicU64::new(PLANE_COUNT as u64);
+
+fn next_range_bits_id() -> u64 {
+    NEXT_RANGE_BITS_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 /// And over children, collapsing the empty (vacuously true) and singleton cases.
@@ -876,10 +911,16 @@ fn plane_precheck_rank(f: &FilterExpr) -> u8 {
 /// Try children cheapest-to-reject first (see plane_precheck_rank), short-
 /// circuiting on the first None without disturbing the caller's requested
 /// order — `and_of`/`or_of` don't care about member order, so this is free.
-fn compile_plane_children(children: &[FilterExpr], bounds: &rkyv::Archived<BitPlanes>, words: &rkyv::Archived<OracleWordIndex>) -> Option<Vec<PlaneExpr>> {
+fn compile_plane_children(
+    children: &[FilterExpr],
+    bounds: &rkyv::Archived<BitPlanes>,
+    words: &rkyv::Archived<OracleWordIndex>,
+    indexes: &rkyv::Archived<CardIndexes>,
+    offsets: &AOffsets,
+) -> Option<Vec<PlaneExpr>> {
     let mut order: Vec<&FilterExpr> = children.iter().collect();
     order.sort_by_key(|c| plane_precheck_rank(c));
-    order.into_iter().map(|c| compile_plane(c, bounds, words)).collect()
+    order.into_iter().map(|c| compile_plane(c, bounds, words, indexes, offsets)).collect()
 }
 
 /// Which existential family a plane index addresses, and the per-printing
@@ -987,11 +1028,19 @@ fn existential_leaf(p: usize) -> Option<ExistentialLeaf> {
 /// one. A literal duplicate leaf (`format:A AND format:A`) reads the same
 /// plane index and collapses to one entry, fine to compose -- the same
 /// underlying fact checked twice, not two facts needing a shared witness.
-fn collect_existential_indices(expr: &PlaneExpr, out: &mut Vec<u16>) {
+fn collect_existential_indices(expr: &PlaneExpr, out: &mut Vec<u64>) {
     match expr {
         PlaneExpr::Plane(p) => {
-            if existential_leaf(*p as usize).is_some() && !out.contains(p) {
-                out.push(*p);
+            if existential_leaf(*p as usize).is_some() {
+                let p = u64::from(*p);
+                if !out.contains(&p) {
+                    out.push(p);
+                }
+            }
+        }
+        PlaneExpr::PrintingRangeBits { id, .. } => {
+            if !out.contains(id) {
+                out.push(*id);
             }
         }
         PlaneExpr::Bits(_) | PlaneExpr::Const(_) => {}
@@ -1014,6 +1063,7 @@ fn collect_existential_indices(expr: &PlaneExpr, out: &mut Vec<u16>) {
 pub(crate) fn plane_expr_is_existential(expr: &PlaneExpr) -> bool {
     match expr {
         PlaneExpr::Plane(p) => existential_leaf(*p as usize).is_some(),
+        PlaneExpr::PrintingRangeBits { .. } => true,
         PlaneExpr::Bits(_) | PlaneExpr::Const(_) => false,
         PlaneExpr::And(cs) | PlaneExpr::Or(cs) => cs.iter().any(plane_expr_is_existential),
         PlaneExpr::Not(inner) => plane_expr_is_existential(inner),
@@ -1049,17 +1099,23 @@ fn and_of_checked_for_shared_witness(children: Vec<PlaneExpr>) -> Option<PlaneEx
     Some(and_of(children))
 }
 
-pub(crate) fn compile_plane(filter: &FilterExpr, bounds: &rkyv::Archived<BitPlanes>, words: &rkyv::Archived<OracleWordIndex>) -> Option<PlaneExpr> {
+pub(crate) fn compile_plane(
+    filter: &FilterExpr,
+    bounds: &rkyv::Archived<BitPlanes>,
+    words: &rkyv::Archived<OracleWordIndex>,
+    indexes: &rkyv::Archived<CardIndexes>,
+    offsets: &AOffsets,
+) -> Option<PlaneExpr> {
     match filter {
         FilterExpr::True => Some(PlaneExpr::Const(true)),
-        FilterExpr::And(children) => and_of_checked_for_shared_witness(compile_plane_children(children, bounds, words)?),
-        FilterExpr::Or(children) => compile_plane_children(children, bounds, words).map(or_of),
+        FilterExpr::And(children) => and_of_checked_for_shared_witness(compile_plane_children(children, bounds, words, indexes, offsets)?),
+        FilterExpr::Or(children) => compile_plane_children(children, bounds, words, indexes, offsets).map(or_of),
         // De Morgan pushdown so a Not that reaches a Legality leaf lands on
         // `illegal_exists` instead of bit-complementing `legal_exists` (wrong
         // for divergent cards -- see PLANE_LEGAL_EXISTS's doc). Handles the
         // contains_unnegatable_numeric guard itself, per-leaf, via its own
         // catch-all arm -- see compile_plane_neg's doc.
-        FilterExpr::Not(inner) => compile_plane_neg(inner, bounds, words),
+        FilterExpr::Not(inner) => compile_plane_neg(inner, bounds, words, indexes, offsets),
         // Bonus consumption (docs/issues/00663-engine-oracle-word-index.md): only
         // when the needle matches exactly one dictionary word total (dense or
         // sparse) and that word is dense — the same "single dense hit, no
@@ -1107,6 +1163,8 @@ pub(crate) fn compile_plane(filter: &FilterExpr, bounds: &rkyv::Archived<BitPlan
         FilterExpr::NumericCmp { lhs, op, rhs } => match (lhs, rhs) {
             (NumExpr::Field(NumField::RarityInt), NumExpr::Const(v)) => compile_rarity_cmp(*op, *v),
             (NumExpr::Const(v), NumExpr::Field(NumField::RarityInt)) => compile_rarity_cmp(flip_op(*op), *v),
+            (NumExpr::Field(NumField::PriceUsd), NumExpr::Const(v)) => compile_price_range(*op, *v, indexes, offsets),
+            (NumExpr::Const(v), NumExpr::Field(NumField::PriceUsd)) => compile_price_range(flip_op(*op), *v, indexes, offsets),
             (NumExpr::Field(f), NumExpr::Const(v)) => compile_numeric_cmp(*f, *op, *v, bounds),
             (NumExpr::Const(v), NumExpr::Field(f)) => compile_numeric_cmp(*f, flip_op(*op), *v, bounds),
             _ => None,
@@ -1132,6 +1190,19 @@ pub(crate) fn compile_plane(filter: &FilterExpr, bounds: &rkyv::Archived<BitPlan
     }
 }
 
+/// Compile `usd <op> threshold` to a `PrintingRangeBits` leaf via
+/// `range_narrowed` (shared with `narrow_rec`'s own price closure through
+/// `price_range_narrowed`, so the two paths can't drift). Declines (`None`)
+/// exactly when `price_range_narrowed` does (an op `int_range_bounds` doesn't
+/// support for range narrowing).
+fn compile_price_range(op: CmpOp, threshold: f64, indexes: &rkyv::Archived<CardIndexes>, offsets: &AOffsets) -> Option<PlaneExpr> {
+    let n_cards = offsets.len().saturating_sub(1);
+    let n_printings = if n_cards == 0 { 0 } else { u32::from(offsets[n_cards]) as usize };
+    let narrowed = price_range_narrowed(op, threshold, indexes, n_printings, true)?;
+    let card_bits = narrowed.into_card_space(offsets, &indexes.printing_to_card).set.into_bits(n_cards);
+    Some(PlaneExpr::PrintingRangeBits { id: next_range_bits_id(), card_bits, field: NumField::PriceUsd, op, threshold })
+}
+
 /// Compile `Not(filter)` directly, pushing negation down to `Legality` and
 /// rarity leaves -- both need to be *recomputed*, not bit-complemented
 /// (`Legality` needs `PLANE_LEGAL_ILLEGAL`, not a complement of
@@ -1144,7 +1215,13 @@ pub(crate) fn compile_plane(filter: &FilterExpr, bounds: &rkyv::Archived<BitPlan
 /// safe to bit-complement (colors/types/devotion/non-null-valued numerics)
 /// fall through to the cheaper "compile positive, wrap in `PlaneExpr::Not`"
 /// path unchanged. Mutually recursive with `compile_plane`.
-fn compile_plane_neg(filter: &FilterExpr, bounds: &rkyv::Archived<BitPlanes>, words: &rkyv::Archived<OracleWordIndex>) -> Option<PlaneExpr> {
+fn compile_plane_neg(
+    filter: &FilterExpr,
+    bounds: &rkyv::Archived<BitPlanes>,
+    words: &rkyv::Archived<OracleWordIndex>,
+    indexes: &rkyv::Archived<CardIndexes>,
+    offsets: &AOffsets,
+) -> Option<PlaneExpr> {
     match filter {
         FilterExpr::Legality { shift: Some(shift), expected } => {
             status_plane_bases(*expected).map(|(_, absent_base)| PlaneExpr::Plane((absent_base + *shift as usize / 2) as u16))
@@ -1155,17 +1232,28 @@ fn compile_plane_neg(filter: &FilterExpr, bounds: &rkyv::Archived<BitPlanes>, wo
         FilterExpr::NumericCmp { lhs: NumExpr::Const(v), op, rhs: NumExpr::Field(NumField::RarityInt) } => {
             compile_rarity_cmp(negate_op(flip_op(*op)), *v)
         }
+        // -usd<X: recomputed with the negated op (∃p: ¬(p.usd<X)), not bit-complemented
+        // (¬∃p: p.usd<X) -- same divergent-printing trap as Legality/rarity's own
+        // dedicated negation arms; a card can have some printings under X and some not.
+        FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op, rhs: NumExpr::Const(v) } => {
+            compile_price_range(negate_op(*op), *v, indexes, offsets)
+        }
+        FilterExpr::NumericCmp { lhs: NumExpr::Const(v), op, rhs: NumExpr::Field(NumField::PriceUsd) } => {
+            compile_price_range(negate_op(flip_op(*op)), *v, indexes, offsets)
+        }
         // -border:x: recomputed via compile_border_cmp_neg's Or-of-others,
         // not bit-complemented, same divergent-card reasoning as Legality/rarity.
         FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value } => compile_border_cmp_neg(value),
         // Not(And(cs)) = Or(Not(c) for c in cs) -- existence distributes over
         // Or, so no shared-witness check is needed here regardless of how
         // many legality leaves end up among the children.
-        FilterExpr::And(children) => compile_plane_neg_children(children, bounds, words).map(or_of),
+        FilterExpr::And(children) => compile_plane_neg_children(children, bounds, words, indexes, offsets).map(or_of),
         // Not(Or(cs)) = And(Not(c) for c in cs) -- THIS does have the
         // shared-witness exposure (see and_of_checked_for_shared_witness).
-        FilterExpr::Or(children) => and_of_checked_for_shared_witness(compile_plane_neg_children(children, bounds, words)?),
-        FilterExpr::Not(inner) => compile_plane(inner, bounds, words), // double negation
+        FilterExpr::Or(children) => {
+            and_of_checked_for_shared_witness(compile_plane_neg_children(children, bounds, words, indexes, offsets)?)
+        }
+        FilterExpr::Not(inner) => compile_plane(inner, bounds, words, indexes, offsets), // double negation
         FilterExpr::True => Some(PlaneExpr::Const(false)),
         // Everything else: only Legality has a divergent-card correctness
         // gap, so every other plane-eligible leaf is safe to compile
@@ -1179,13 +1267,19 @@ fn compile_plane_neg(filter: &FilterExpr, bounds: &rkyv::Archived<BitPlanes>, wo
             if contains_unnegatable_numeric(other) {
                 return None;
             }
-            compile_plane(other, bounds, words).map(|p| PlaneExpr::Not(Box::new(p)))
+            compile_plane(other, bounds, words, indexes, offsets).map(|p| PlaneExpr::Not(Box::new(p)))
         }
     }
 }
 
-fn compile_plane_neg_children(children: &[FilterExpr], bounds: &rkyv::Archived<BitPlanes>, words: &rkyv::Archived<OracleWordIndex>) -> Option<Vec<PlaneExpr>> {
-    children.iter().map(|c| compile_plane_neg(c, bounds, words)).collect()
+fn compile_plane_neg_children(
+    children: &[FilterExpr],
+    bounds: &rkyv::Archived<BitPlanes>,
+    words: &rkyv::Archived<OracleWordIndex>,
+    indexes: &rkyv::Archived<CardIndexes>,
+    offsets: &AOffsets,
+) -> Option<Vec<PlaneExpr>> {
+    children.iter().map(|c| compile_plane_neg(c, bounds, words, indexes, offsets)).collect()
 }
 
 /// Consume the plane-expressible part of a bound filter. Returns the compiled
@@ -1217,11 +1311,13 @@ pub(crate) fn split_planes(
     bounds: &rkyv::Archived<BitPlanes>,
     words: &rkyv::Archived<OracleWordIndex>,
     unique_is_card: bool,
+    indexes: &rkyv::Archived<CardIndexes>,
+    offsets: &AOffsets,
 ) -> (Option<PlaneExpr>, FilterExpr) {
     if matches!(filter, FilterExpr::True) {
         return (None, filter);
     }
-    if let Some(pe) = compile_plane(&filter, bounds, words)
+    if let Some(pe) = compile_plane(&filter, bounds, words, indexes, offsets)
         && (unique_is_card || !plane_expr_is_existential(&pe))
     {
         return (Some(pe), FilterExpr::True);
@@ -1242,7 +1338,7 @@ pub(crate) fn split_planes(
             // there's no tax to avoid paying here anymore.
             let mut legality_children: Vec<(FilterExpr, PlaneExpr)> = Vec::new();
             for c in children {
-                match compile_plane(&c, bounds, words) {
+                match compile_plane(&c, bounds, words, indexes, offsets) {
                     Some(pe) => {
                         let mut fmts = Vec::new();
                         collect_existential_indices(&pe, &mut fmts);
@@ -1297,6 +1393,7 @@ impl PlaneExpr {
         match self {
             PlaneExpr::Plane(p) => u64::from(words[*p as usize * wpp + i]),
             PlaneExpr::Bits(bits) => bits[i],
+            PlaneExpr::PrintingRangeBits { card_bits, .. } => card_bits[i],
             PlaneExpr::And(children) => {
                 let mut acc = !0u64;
                 for c in children {
@@ -1395,6 +1492,15 @@ pub(crate) fn eval_plane_expr_for_printing(
             }
         }
         PlaneExpr::Bits(bits) => bitmap_contains(bits, cid),
+        // Re-derives the comparison directly from (field, op, threshold) against this
+        // specific printing's own field -- mirrors filter.rs's NumericCmp arm exactly
+        // (same known_cents-style dollars conversion), rather than a second precomputed
+        // bitmap, so there's no independent encoding of "does this printing satisfy the
+        // predicate" to drift out of sync with the one filter.rs already trusts.
+        PlaneExpr::PrintingRangeBits { field, op, threshold, .. } => match field {
+            NumField::PriceUsd => printing.price_usd.as_ref().is_some_and(|v| cmp(*op, f64::from(u32::from(*v)) / 100.0, *threshold)),
+            _ => unreachable!("PrintingRangeBits only compiled for price_usd so far"),
+        },
         PlaneExpr::Const(b) => *b,
         PlaneExpr::And(children) => children.iter().all(|c| eval_plane_expr_for_printing(c, planes, cid, printing, strings)),
         PlaneExpr::Or(children) => children.iter().any(|c| eval_plane_expr_for_printing(c, planes, cid, printing, strings)),
