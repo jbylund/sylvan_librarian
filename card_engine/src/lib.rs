@@ -1880,6 +1880,23 @@ fn assign_artwork_groups(printings: &mut [Printing], offsets: &[u32]) -> Vec<u16
     counts
 }
 
+/// Direct `printing_id -> card_id` lookup, one linear pass over `offsets`.
+/// Benchmarked (`bench_card_dedup.rs`) at ~2x cheaper than the
+/// scatter-into-printing-bitmap-then-monotone-cursor path `cards_of_printings`
+/// otherwise pays past 1024 matches, and unconditionally cheaper than the
+/// small-k `partition_point` binary search too — see
+/// docs/issues/local-engine-direct-projection-arrays.md.
+fn build_printing_to_card(offsets: &[u32]) -> Vec<u32> {
+    let n_printings = offsets.last().copied().unwrap_or(0) as usize;
+    let mut out = vec![0u32; n_printings];
+    for (card, w) in offsets.windows(2).enumerate() {
+        for p in w[0]..w[1] {
+            out[p as usize] = card as u32;
+        }
+    }
+    out
+}
+
 // ─── Printing-space range indexes (released_at, price, collector number) ─────
 // Sorted (value, printing idx); binary-searched ranges answer range filters in
 // printing space. Printings without the value are absent (they can never
@@ -2199,6 +2216,10 @@ struct CardIndexes {
     collector_number: PrintingRangeIndex,     // printing space (extracted int)
     sort_perms:     SortPermutations,          // card space (streamed selection)
     artwork_groups: Vec<u16>,                  // card space: distinct illustration groups
+    // printing space: printing_id -> card_id, direct lookup. Replaces a
+    // partition_point search on `offsets` in cards_of_printings' hot paths —
+    // see docs/issues/local-engine-direct-projection-arrays.md.
+    printing_to_card: Vec<u32>,
     planes:         BitPlanes,                 // card space: transposed low-cardinality dims (#630)
     name_bigrams:   NameBigramIndex,           // card space: exact 2-byte name containment (#639)
     legal_divergent: Vec<u16>,                // card space: ids with divergent legality (#630 phase 2), postings not a plane — see build_divergent_ids
@@ -2227,6 +2248,7 @@ impl Default for CardIndexes {
             collector_number: Vec::new(),
             sort_perms:     SortPermutations::default(),
             artwork_groups: Vec::new(),
+            printing_to_card: Vec::new(),
             planes:         BitPlanes::default(),
             name_bigrams:   NameBigramIndex::default(),
             legal_divergent: Vec::new(),
@@ -2383,22 +2405,24 @@ fn printing_bits_to_card_bits(pbits: &[u64], offsets: &AOffsets, n_cards: usize)
     out
 }
 
-/// Map a sorted printing-id list up to its sorted card-id list. Printings are
-/// grouped contiguously by card, so the mapped list arrives sorted with adjacent
-/// duplicates — dedup is a single linear pass. Small lists pay a binary search
-/// per posting; past a few hundred, scattering into a printing bitmap and
-/// walking it with a monotone card cursor is cheaper (O(k + words) instead of
-/// O(k log n)) and produces the same ascending, deduped output.
-fn cards_of_printings(offsets: &AOffsets, printing_ids: &[u32]) -> Vec<u32> {
+/// Map a sorted printing-id list up to its sorted card-id list via the
+/// precomputed direct lookup (`CardIndexes::printing_to_card`). Printings are
+/// grouped contiguously by card, so the mapped list arrives sorted with
+/// adjacent duplicates — dedup is a single linear pass for small lists. Past
+/// a few hundred, scattering directly into a card bitmap and extracting set
+/// bits is cheaper than repeated pushes (same reasoning as `scatter_bits`
+/// elsewhere). Both branches use the direct array now — benchmarked
+/// unconditionally cheaper than a `partition_point` search on `offsets` at
+/// every k tested, see docs/issues/local-engine-direct-projection-arrays.md.
+fn cards_of_printings(offsets: &AOffsets, printing_to_card: &AOffsets, printing_ids: &[u32]) -> Vec<u32> {
     if printing_ids.len() > 1024 {
         let n_cards = offsets.len().saturating_sub(1);
-        let n_printings = if n_cards == 0 { 0 } else { u32::from(offsets[n_cards]) as usize };
-        let bits = scatter_bits(printing_ids.iter().copied(), n_printings);
-        return bitmap_card_ids(&printing_bits_to_card_bits(&bits, offsets, n_cards));
+        let bits = scatter_bits(printing_ids.iter().map(|&p| u32::from(printing_to_card[p as usize])), n_cards);
+        return bitmap_card_ids(&bits);
     }
     let mut out: Vec<u32> = Vec::with_capacity(printing_ids.len());
     for &p in printing_ids {
-        let card = offsets.partition_point(|o| u32::from(*o) <= p) as u32 - 1;
+        let card = u32::from(printing_to_card[p as usize]);
         if out.last() != Some(&card) {
             out.push(card);
         }
@@ -2410,11 +2434,11 @@ impl Candidates {
     /// Project into card space (identity for card-space sets) and materialize
     /// as ascending card ids. Bitmap materialization needs no sort — set bits
     /// come out ascending, sidestepping the gather-and-sort cost of #609.
-    fn into_cards(self, offsets: &AOffsets) -> Vec<u32> {
+    fn into_cards(self, offsets: &AOffsets, printing_to_card: &AOffsets) -> Vec<u32> {
         let n_cards = offsets.len().saturating_sub(1);
         match self {
             Candidates::Cards(v) => v,
-            Candidates::Printings(v) => cards_of_printings(offsets, &v),
+            Candidates::Printings(v) => cards_of_printings(offsets, printing_to_card, &v),
             Candidates::CardBits(b) => bitmap_card_ids(&b),
             Candidates::PrintingBits(b) => bitmap_card_ids(&printing_bits_to_card_bits(&b, offsets, n_cards)),
         }
@@ -2453,11 +2477,13 @@ impl Narrowed {
 
     /// Project into card space. Printing→card projection is an existence
     /// projection ("some printing matches"), which loses tightness.
-    fn into_card_space(self, offsets: &AOffsets) -> Narrowed {
+    fn into_card_space(self, offsets: &AOffsets, printing_to_card: &AOffsets) -> Narrowed {
         let n_cards = offsets.len().saturating_sub(1);
         match self.set {
             Candidates::Cards(_) | Candidates::CardBits(_) => self,
-            Candidates::Printings(v) => Narrowed { set: Candidates::Cards(cards_of_printings(offsets, &v)), tight: false },
+            Candidates::Printings(v) => {
+                Narrowed { set: Candidates::Cards(cards_of_printings(offsets, printing_to_card, &v)), tight: false }
+            }
             Candidates::PrintingBits(b) => {
                 Narrowed { set: Candidates::CardBits(printing_bits_to_card_bits(&b, offsets, n_cards)), tight: false }
             }
@@ -3174,7 +3200,7 @@ fn narrow_rec(
                             Some(Narrowed { tight: false, ..seal(c) })
                         }
                         _ => {
-                            let pc = p.into_card_space(offsets);
+                            let pc = p.into_card_space(offsets, &indexes.printing_to_card);
                             and_all(vec![c, pc]).map(seal)
                         }
                     }
@@ -3214,7 +3240,7 @@ fn narrow_rec(
                 {
                     return None;
                 }
-                let sets = sets.into_iter().map(|s| s.into_card_space(offsets)).collect();
+                let sets = sets.into_iter().map(|s| s.into_card_space(offsets, &indexes.printing_to_card)).collect();
                 or_all(sets, n_cards)
             }
         }
@@ -3772,7 +3798,7 @@ fn run_query<'a>(
     // buffer.
     let candidate_cards: Option<Vec<u32>> = match plane {
         None => raw_candidates
-            .map(|c| c.into_cards(offsets))
+            .map(|c| c.into_cards(offsets, &indexes.printing_to_card))
             .filter(|v| v.len() < cards.len() - cards.len() / 8),
         Some(expr) => {
             thread_local! {
@@ -3795,7 +3821,7 @@ fn run_query<'a>(
                         Some(bitmap_card_ids(&b))
                     }
                     Some(c) => {
-                        let mut v = c.into_cards(offsets);
+                        let mut v = c.into_cards(offsets, &indexes.printing_to_card);
                         v.retain(|&cid| bitmap_contains(&bitmap, cid));
                         Some(v)
                     }
@@ -4279,7 +4305,7 @@ const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 /// catch (e.g. reordering same-size fields, changing an index type) — and on
 /// any FLAVOR_FP_FEATURES change: archived fingerprints are built with that
 /// table, so a new table reading old fingerprints breaks the superset test.
-const ARCHIVE_FORMAT_VERSION: u32 = 20260725;
+const ARCHIVE_FORMAT_VERSION: u32 = 20260726;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -4679,6 +4705,7 @@ impl QueryEngine {
             collector_number: build_range_index(&printings, |p| p.collector_number_int.map(u32::from)),
             sort_perms:     build_sort_permutations(&cards, &printings, &offsets),
             artwork_groups: artwork_group_counts,
+            printing_to_card: build_printing_to_card(&offsets),
             planes:         build_bit_planes(&cards, &printings, &offsets, &strings),
             name_bigrams:   build_name_bigram_index(&cards),
             legal_divergent: build_divergent_ids(&cards),
@@ -4975,3 +5002,5 @@ mod bench_iter_dispatch;
 mod bench_posting_intersect;
 #[cfg(test)]
 mod bench_word_dict_scan;
+#[cfg(test)]
+mod bench_card_dedup;
