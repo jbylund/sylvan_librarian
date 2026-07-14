@@ -86,6 +86,15 @@ CONFIGS: list[tuple[str, str, str, str, str]] = [
     ("p3-rarity", "rarity<=mythic", "card", "edhrec", "default"),
     ("p3-rarity", "rarity>=common", "card", "edhrec", "default"),
     ("p3-keyword", "keyword:flying", "card", "edhrec", "default"),
+    # #629: dense per-printing artwork group ids. usd<50/rarity>=common are
+    # printing-dependent, so artwork mode can't use the all_match group-count
+    # shortcut and pays per-candidate bookkeeping -- the case this issue
+    # targets (issue's own acceptance: these should improve; t:creature
+    # artwork above, an all_match row, must stay flat).
+    ("p629-artwork", "usd<50", "artwork", "edhrec", "default"),
+    ("p629-artwork", "rarity>=common", "artwork", "edhrec", "default"),
+    ("p629-artwork", "usd<50", "card", "edhrec", "default"),
+    ("p629-artwork", "rarity>=common", "card", "edhrec", "default"),
     # Mixed filters: plane bitmap as candidate mask, residual eval over set bits
     ("mixed", "t:creature o:draw", "card", "edhrec", "default"),
     ("mixed", "c:g o:draw", "card", "edhrec", "default"),
