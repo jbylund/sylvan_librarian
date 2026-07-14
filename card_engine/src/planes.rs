@@ -908,32 +908,67 @@ enum ExistentialLeaf {
     BorderOther,
 }
 
+/// How to turn an in-block offset into the specific fact a block's plane
+/// index addresses. Blocks vary in what "the fact" even is (a legality
+/// shift/status pair, a one-hot tracked value, or a single no-payload shared
+/// bucket) -- unifying *that* isn't attempted, only which range of plane
+/// indices belongs to which field, which genuinely is uniform (see
+/// `PLANE_BLOCKS`).
+#[derive(Clone, Copy)]
+enum BlockKind {
+    Legality { expected: u64, is_illegal: bool },
+    RarityTracked,
+    RarityHi,
+    BorderTracked,
+    BorderOther,
+}
+
+struct PlaneBlock {
+    base: usize,
+    len: usize,
+    kind: BlockKind,
+}
+
+/// Single source of truth for every existential field's plane layout: one
+/// entry per contiguous `[base, base+len)` range and what it means. Adding a
+/// field's block here (plus an `ExistentialLeaf` variant and one arm in
+/// `existential_leaf`'s match below) is now the only place that needs to
+/// know its plane layout, instead of a hand-written range check per block --
+/// the range-recognition part really is uniform across fields, unlike the
+/// leaf-construction part (see `BlockKind`'s doc). Legality's 3 statuses ×
+/// 2 polarities become 6 flat entries here, still reading `LEGALITY_STATUS_TABLE`
+/// as their single source of truth so a new indexed status can't drift out
+/// of sync with what this recognizes.
+const PLANE_BLOCKS: [PlaneBlock; 10] = [
+    PlaneBlock { base: LEGALITY_STATUS_TABLE[0].1, len: MAX_FORMATS, kind: BlockKind::Legality { expected: LEGALITY_STATUS_TABLE[0].0, is_illegal: false } },
+    PlaneBlock { base: LEGALITY_STATUS_TABLE[0].2, len: MAX_FORMATS, kind: BlockKind::Legality { expected: LEGALITY_STATUS_TABLE[0].0, is_illegal: true } },
+    PlaneBlock { base: LEGALITY_STATUS_TABLE[1].1, len: MAX_FORMATS, kind: BlockKind::Legality { expected: LEGALITY_STATUS_TABLE[1].0, is_illegal: false } },
+    PlaneBlock { base: LEGALITY_STATUS_TABLE[1].2, len: MAX_FORMATS, kind: BlockKind::Legality { expected: LEGALITY_STATUS_TABLE[1].0, is_illegal: true } },
+    PlaneBlock { base: LEGALITY_STATUS_TABLE[2].1, len: MAX_FORMATS, kind: BlockKind::Legality { expected: LEGALITY_STATUS_TABLE[2].0, is_illegal: false } },
+    PlaneBlock { base: LEGALITY_STATUS_TABLE[2].2, len: MAX_FORMATS, kind: BlockKind::Legality { expected: LEGALITY_STATUS_TABLE[2].0, is_illegal: true } },
+    PlaneBlock { base: PLANE_RARITY, len: RARITY_INTERIOR, kind: BlockKind::RarityTracked },
+    PlaneBlock { base: PLANE_RARITY_HI, len: 1, kind: BlockKind::RarityHi },
+    PlaneBlock { base: PLANE_BORDER, len: BORDER_TRACKED, kind: BlockKind::BorderTracked },
+    PlaneBlock { base: PLANE_BORDER_OTHER, len: 1, kind: BlockKind::BorderOther },
+];
+
 /// Plane index `p`'s existential family and fact, or `None` for a
-/// card-invariant plane. Derived from `LEGALITY_STATUS_TABLE`, `PLANE_RARITY`'s
-/// range, and `PLANE_BORDER`'s range -- the same single sources of truth
-/// `status_plane_bases`/`compile_rarity_cmp`/`compile_border_cmp` read -- so a
-/// new indexed status or field can never drift out of sync with what this
-/// recognizes.
+/// card-invariant plane. Walks `PLANE_BLOCKS` once; which block `p` falls in
+/// (if any) says both which field it belongs to and, via the in-block
+/// offset, which specific fact.
 fn existential_leaf(p: usize) -> Option<ExistentialLeaf> {
-    for &(expected, exists_base, absent_base) in &LEGALITY_STATUS_TABLE {
-        if (exists_base..exists_base + MAX_FORMATS).contains(&p) {
-            return Some(ExistentialLeaf::Legality { shift: ((p - exists_base) * 2) as u8, expected, is_illegal: false });
+    for block in &PLANE_BLOCKS {
+        if !(block.base..block.base + block.len).contains(&p) {
+            continue;
         }
-        if (absent_base..absent_base + MAX_FORMATS).contains(&p) {
-            return Some(ExistentialLeaf::Legality { shift: ((p - absent_base) * 2) as u8, expected, is_illegal: true });
-        }
-    }
-    if (PLANE_RARITY..PLANE_RARITY_HI).contains(&p) {
-        return Some(ExistentialLeaf::RarityTracked((p - PLANE_RARITY) as u8));
-    }
-    if p == PLANE_RARITY_HI {
-        return Some(ExistentialLeaf::RarityHi);
-    }
-    if (PLANE_BORDER..PLANE_BORDER_OTHER).contains(&p) {
-        return Some(ExistentialLeaf::BorderTracked((p - PLANE_BORDER) as u8));
-    }
-    if p == PLANE_BORDER_OTHER {
-        return Some(ExistentialLeaf::BorderOther);
+        let offset = (p - block.base) as u8;
+        return Some(match block.kind {
+            BlockKind::Legality { expected, is_illegal } => ExistentialLeaf::Legality { shift: offset * 2, expected, is_illegal },
+            BlockKind::RarityTracked => ExistentialLeaf::RarityTracked(offset),
+            BlockKind::RarityHi => ExistentialLeaf::RarityHi,
+            BlockKind::BorderTracked => ExistentialLeaf::BorderTracked(offset),
+            BlockKind::BorderOther => ExistentialLeaf::BorderOther,
+        });
     }
     None
 }
