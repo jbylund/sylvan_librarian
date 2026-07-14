@@ -1,7 +1,8 @@
 # Engine: generalize existential planes beyond legality (Y-predicate framework)
 
 Follows [docs/workflows/performance-pr-workflow.md](../workflows/performance-pr-workflow.md).
-GitHub: #680. Status: proposed, not started. Grew out of investigating #678's rarity follow-on
+GitHub: #680. Status: implemented (rarity + border), benchmarked, pending PR merge. Grew out of
+investigating #678's rarity follow-on
 (two rejected attempts, see "Measured problem"). Scope widened in discussion to also cover
 `border:` (previously #664/`docs/issues/done/engine-border-planes.md`, which deliberately stopped at
 loose narrowing) — folded in here rather than filed separately, since it's the same registry
@@ -189,6 +190,54 @@ shape and stays correct after this generalization, just reachable via more field
    correctly (via residual fallback) for both positive and negated queries on the tracked values.
 5. Total-row-count parity on every config, every run.
 6. Re-measure and iterate; open PR.
+
+## Results
+
+Implemented in two commits: the field generalization itself (rarity's 4 tracked + 1 ordinal hi
+bucket, border's 4 tracked + 1 unordered `other` bucket, both reaching `compile_plane`/`all_match`),
+then a follow-up extracting `existential_leaf`'s plane-index-range recognition into a single static
+`PLANE_BLOCKS` table walked in a loop (replacing a hand-written if-chain per field) — kept separate
+since it's a distinct, lower-risk change than the field work itself, done as a self-review pass
+after the fact rather than folded in. Both commits: 113 tests passing (debug + release), clippy
+output identical to `main` (verified via a temporary worktree diff, not just eyeballed), zero total-
+count mismatches across every benchmark run.
+
+Targeted (`scripts/bench_rarity_planes.py` / `scripts/bench_border_planes.py`,
+`benchmarks/bitplanes/corpus.jsonl`, 97,206 printings):
+
+| config | before | after | change |
+|---|---|---|---|
+| `r:common`/`uncommon`/`rare`/`mythic` (solo) | 0.12-0.25ms | 0.058-0.062ms | 2.1-4.1x |
+| `rarity<=mythic`, `rarity>=uncommon` | 0.35-0.39ms | 0.074-0.075ms | 4.7-5.4x |
+| `r!=mythic`, `r!=common` | 0.35-0.46ms | 0.074-0.075ms | 4.6-6.3x |
+| `r>=rare`, `-r:common` | 0.28-0.42ms | 0.074-0.076ms | 3.8-5.6x |
+| `-r:mythic` | 0.55ms | 0.075ms | 7.4x |
+| `t:creature r:mythic` | 0.094ms | 0.066ms | 1.4x |
+| `r:special`/`r:bonus` (unaffected control) | 0.075ms / 3.4μs | 0.074ms / 3.3μs | ~1.0x |
+| `f:modern r:mythic` (Y=2, unaffected) | 0.123ms | 0.118ms | ~1.0x |
+| `r:mythic` (`unique=printing`/`artwork`, unaffected) | 0.18-0.21ms | 0.17-0.19ms | ~1.0-1.1x |
+| `border:borderless`/`white` (solo) | 0.17-0.21ms | 0.062-0.063ms | 2.7-3.4x |
+| `border:black` (was decline-via-broadness) | 0.43ms | 0.072ms | 5.9x |
+| `border:gold` (now tracked, was unindexed) | 0.91ms | 0.060ms | 15.0x |
+| `border:yellow` (untracked, now via `other`) | 0.93ms | 0.062ms | 14.9x |
+| `-border:black`, `-border:white` | 0.49-1.17ms | 0.074-0.099ms | 6.6-11.8x |
+| `border:black AND border:borderless` (=0, Y=2 canary) | 0.33ms | 0.31ms | ~1.05x |
+| controls (both scripts) | — | — | flat |
+
+**Geometric mean:** rarity 2.24x (21 configs), border 2.38x (17 configs)
+**Test corpus:** `benchmarks/bitplanes/corpus.jsonl`, 97,206 printings / 31,508 cards
+
+Broad survey (`scripts/survey_queries.py`, 400 generated + 120 wild, seed 42, 520 queries):
+**0 total-count mismatches** across every query, both stages. Overall geomean 1.02x (most queries
+don't touch rarity/border at all, as expected); border-tagged geomean 1.03x over 7 queries drawn by
+this seed (rarity-tagged: 0 queries drawn — `client/query_runner.py` has no rarity dimension at all,
+so this seed's wild slice carries no rarity coverage; the targeted script is doing the real
+verification work there, matching the plan in Acceptance item 1).
+
+Memory: `+11.8KB` archive growth (69,015,816 → 69,027,636 bytes), matching the plane-count math
+exactly (net +3 planes after removing the old standalone `BorderPlanes` struct: rarity's `+1` hi
+bucket, border's `+5` unified planes, `-3` for the removed struct, at ~3.9KB/plane).
+`reload_peak` unchanged.
 
 ## Related
 
