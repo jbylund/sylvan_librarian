@@ -156,6 +156,13 @@ def preprocess_card(card: dict[str, Any]) -> list[dict[str, Any]]:  # noqa: PLR0
     card.setdefault("face_name", card.get("name"))
     card.setdefault("face_idx", 1)
 
+    # Scryfall omits flavor_text entirely when a printing has none (unlike oracle_text, which it
+    # always sends, empty string included, even for vanilla cards). Normalize to '' so negated
+    # flavor-text filters treat "no flavor text" as empty, matching Scryfall's own search behavior
+    # (confirmed empirically: -flavor:<impossible> includes flavorless prints on scryfall.com) and
+    # the engine's existing unwrap_or_default() handling.
+    card["flavor_text"] = card.get("flavor_text") or ""
+
     # Store the original card data before modifications for raw_card_blob
     raw_card_data = copy.deepcopy(card)
     card["raw_card_blob"] = raw_card_data
