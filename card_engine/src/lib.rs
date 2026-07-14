@@ -1191,65 +1191,6 @@ fn build_name_bigram_index(cards: &[OracleCard]) -> NameBigramIndex {
     idx
 }
 
-// ─── Border planes (#664: loose card-level narrowing for border:) ──────────
-// card_border_id is a *printing*-level interned string (a card can have both a
-// black and a borderless printing), unlike everything BitPlanes/compile_plane
-// already handle (colors/types/devotion are card-invariant — identical across
-// every printing). unique=card semantics require one printing to satisfy the
-// *whole* filter, not each predicate independently satisfied by some
-// (possibly different) printing, so an AND of two independent per-card "has
-// X border" bits can false-positive: `border:black border:borderless` has no
-// shared witness and must return zero, but two independently-true bits would
-// wrongly say every card with one of each qualifies. These planes are
-// therefore *always* `Narrowed::loose` — real candidates, never fed through
-// `compile_plane`'s exact/tight machinery, which is safe only because nothing
-// else it touches varies per printing. Loose narrowing only shrinks which
-// cards' printings the residual per-printing walk bothers checking at all;
-// the real answer always comes from that walk, same as today.
-// See docs/issues/engine-border-planes.md for the full rationale, including
-// why `-border:x` (Not, which narrows only through tight children) and the
-// rare gold/yellow values are both deliberately left on the existing full
-// scan rather than chasing exactness this representation can't safely give.
-//
-// Real corpus (benchmarks/bitplanes/corpus.jsonl): black 98.92% of cards
-// (declines via the existing broadness guard, no special-casing needed),
-// borderless 10.73%, white 6.53% — gold/yellow (2.02% combined) get no plane.
-const BORDER_BLACK: usize = 0;
-const BORDER_BORDERLESS: usize = 1;
-const BORDER_WHITE: usize = 2;
-const BORDER_PLANE_COUNT: usize = 3;
-
-#[derive(Archive, Serialize, Deserialize, Default)]
-struct BorderPlanes {
-    n_cards: u32,
-    /// BORDER_PLANE_COUNT × words_per_plane(n_cards), flattened plane-major —
-    /// the same layout convention as BitPlanes.words, just not fed through
-    /// compile_plane (see the module doc above for why).
-    words: Vec<u64>,
-}
-
-fn build_border_planes(cards: &[OracleCard], printings: &[Printing], offsets: &[u32], strings: &[String]) -> BorderPlanes {
-    let n_cards = cards.len();
-    let wpp = words_per_plane(n_cards);
-    let mut words = vec![0u64; BORDER_PLANE_COUNT * wpp];
-    for card in 0..n_cards {
-        let range = offsets[card] as usize..offsets[card + 1] as usize;
-        for p in &printings[range] {
-            if p.card_border_id == NONE_STR {
-                continue;
-            }
-            let plane = match strings[p.card_border_id as usize].as_str() {
-                "black" => BORDER_BLACK,
-                "borderless" => BORDER_BORDERLESS,
-                "white" => BORDER_WHITE,
-                _ => continue,
-            };
-            words[plane * wpp + (card >> 6)] |= 1u64 << (card & 63);
-        }
-    }
-    BorderPlanes { n_cards: n_cards as u32, words }
-}
-
 // Named lifetime (not elided/HRTB) so get_text may return text borrowed from the
 // string table rather than from the card itself.
 fn build_trigram_index<'a, T>(rows: &'a [T], get_text: impl Fn(&'a T) -> &'a str) -> SortedTrigramIndex {
@@ -2128,20 +2069,23 @@ fn rarity_candidates(idx: &Archived<RarityIndex>, op: CmpOp, val: f64) -> Option
     Some(result)
 }
 
-/// Card-space candidate mask for `rarity <op> val` using the 4 planed rarity
-/// values (common/uncommon/rare/mythic, buckets 0-3 — PLANE_RARITY,
-/// docs/issues/engine-rarity-planes.md), OR'd together directly from the
-/// plane words; buckets 4-5 (special/bonus) have no plane, so whenever the
-/// comparison also selects one of those two, their RarityIndex postings are
-/// scattered directly into the same mask (same shape as legality_candidate_bits's
-/// divergent-set scatter, just op-dependent instead of a fixed list). Loose,
-/// same as rarity_candidates: rarity is PrintingDep at card level, so this
-/// only narrows candidates — card_pass/printing-level residual eval still
-/// verifies which printings actually match. Unlike rarity_candidates, Ne
-/// doesn't need to decline: with 4 of 6 buckets plane-backed, "not equal" is
-/// mostly a cheap plane-OR plus a tiny tail scatter, not a near-total postings
-/// union. No bucket_verdict/ambiguity logic needed either — every bucket here
-/// is a single fully-known value, not an open-ended numeric range.
+/// Card-space candidate mask for `rarity <op> val` using the 4 tracked
+/// one-hot rarity planes (common/uncommon/rare/mythic, buckets 0-3 —
+/// PLANE_RARITY, docs/issues/engine-rarity-planes.md) plus the shared "above
+/// mythic" plane (PLANE_RARITY_HI, special/bonus combined —
+/// docs/issues/engine-existential-plane-generalization.md, #680), mirroring
+/// `compile_rarity_cmp`'s exact-plane construction but producing a raw
+/// bitmap instead of a `PlaneExpr`. `rarity_hi_verdict` decides the hi
+/// plane's fate the same way it does there: `Ambiguous` (the query needs to
+/// distinguish special from bonus specifically) declines the whole plane
+/// path, falling through to `rarity_candidates`'s postings, which already
+/// answer those two values exactly at the same cost measured before this
+/// change (docs/issues/engine-existential-plane-generalization.md's
+/// "Measured problem" -- their cost tracks candidate count, not narrowing
+/// representation, so nothing is lost by keeping them there). Loose, same as
+/// rarity_candidates: rarity is PrintingDep at card level, so this only
+/// narrows candidates — card_pass/printing-level residual eval still
+/// verifies which printings actually match.
 fn rarity_plane_candidates(indexes: &Archived<CardIndexes>, n_cards: usize, op: CmpOp, val: f64) -> Option<Vec<u64>> {
     if u32::from(indexes.planes.n_cards) as usize != n_cards || n_cards == 0 {
         return None;
@@ -2156,7 +2100,7 @@ fn rarity_plane_candidates(indexes: &Archived<CardIndexes>, n_cards: usize, op: 
     };
     let wpp = words_per_plane(n_cards);
     let mut bits = vec![0u64; wpp];
-    for b in 0..RARITY_PLANES {
+    for b in 0..RARITY_INTERIOR {
         if keep(b as f64) {
             let plane = PLANE_RARITY + b;
             for (a, w) in bits.iter_mut().zip(&indexes.planes.words[plane * wpp..(plane + 1) * wpp]) {
@@ -2164,13 +2108,14 @@ fn rarity_plane_candidates(indexes: &Archived<CardIndexes>, n_cards: usize, op: 
             }
         }
     }
-    for r in RARITY_PLANES..indexes.rarity.len() {
-        if keep(r as f64) {
-            for &cid in indexes.rarity[r].iter() {
-                let cid = u32::from(cid) as usize;
-                bits[cid / 64] |= 1u64 << (cid % 64);
+    match rarity_hi_verdict(op, val) {
+        BucketVerdict::FullyIncluded => {
+            for (a, w) in bits.iter_mut().zip(&indexes.planes.words[PLANE_RARITY_HI * wpp..(PLANE_RARITY_HI + 1) * wpp]) {
+                *a |= u64::from(*w);
             }
         }
+        BucketVerdict::FullyExcluded => {}
+        BucketVerdict::Ambiguous => return None,
     }
     Some(bits)
 }
@@ -2217,7 +2162,6 @@ struct CardIndexes {
     planes:         BitPlanes,                 // card space: transposed low-cardinality dims (#630)
     name_bigrams:   NameBigramIndex,           // card space: exact 2-byte name containment (#639)
     legal_divergent: Vec<u16>,                // card space: ids with divergent legality (#630 phase 2), postings not a plane — see build_divergent_ids
-    border_planes:  BorderPlanes,              // card space: loose narrowing only for border: (#664), never compile_plane-consumable — see BorderPlanes' doc
 }
 
 impl Default for CardIndexes {
@@ -2246,7 +2190,6 @@ impl Default for CardIndexes {
             planes:         BitPlanes::default(),
             name_bigrams:   NameBigramIndex::default(),
             legal_divergent: Vec::new(),
-            border_planes:  BorderPlanes::default(),
         }
     }
 }
@@ -3048,24 +2991,25 @@ fn narrow_rec(
             ))
         }
 
-        // border: (#664) — loose, card-level only. Only Eq on the three tracked
-        // values narrows at all; every other op/value (Ne, Lt/Le/Gt/Ge, gold,
-        // yellow, anything unrecognized) declines to the existing full scan,
-        // same as today. See BorderPlanes' doc for why this can never be tight.
+        // border: (#664, promoted to an existential field reaching
+        // compile_plane/all_match for tracked values by #680 -- see
+        // PLANE_BORDER's doc) — loose, card-level narrowing here regardless
+        // of tracked/untracked: a tracked value (black/borderless/white/gold)
+        // reads its own one-hot plane; any other Known value (currently just
+        // yellow) reads the shared `other` plane -- narrower than a full
+        // scan even though the residual walk still has to confirm which
+        // specific value it is. Only Eq is handled (compile_plane's arm
+        // handles the exact tracked-value/all_match path; Not is handled by
+        // narrow_rec's generic complement machinery declining, same as ever,
+        // since this is loose).
         FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value } => {
-            let idx = &indexes.border_planes;
-            if u32::from(idx.n_cards) as usize != n_cards {
-                return None; // archive without border planes for this store
+            if u32::from(indexes.planes.n_cards) as usize != n_cards {
+                return None; // archive without these planes for this store
             }
-            let plane = match value.as_str() {
-                "black" => BORDER_BLACK,
-                "borderless" => BORDER_BORDERLESS,
-                "white" => BORDER_WHITE,
-                _ => return None,
-            };
+            let plane = BORDER_TRACKED_VALUES.iter().position(|&v| v == value.as_str()).map_or(PLANE_BORDER_OTHER, |idx| PLANE_BORDER + idx);
             let wpp = words_per_plane(n_cards);
             let start = plane * wpp;
-            let bits: Vec<u64> = idx.words[start..start + wpp].iter().map(|w| u64::from(*w)).collect();
+            let bits: Vec<u64> = indexes.planes.words[start..start + wpp].iter().map(|w| u64::from(*w)).collect();
             Narrowed::loose(Candidates::CardBits(bits))
         }
 
@@ -3470,7 +3414,7 @@ fn card_match_count(
     // doc): the blind all_match shortcut never applies, and both the
     // residual and the plane must hold for the same printing.
     let satisfies =
-        |pid: usize| eval_plane_expr_for_printing(pe, planes, cid, &printings[pid])
+        |pid: usize| eval_plane_expr_for_printing(pe, planes, cid, &printings[pid], strings)
             && (all_match || FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or));
     match mode {
         Mode::Card => {
@@ -3560,7 +3504,7 @@ fn push_card_matches(
             // `card_match_count` is split this way — see its doc.
             let chosen: Option<u32> = if let Some((pe, planes)) = existential_plane {
                 let satisfies = |pid: usize| {
-                    eval_plane_expr_for_printing(pe, planes, cid, &printings[pid])
+                    eval_plane_expr_for_printing(pe, planes, cid, &printings[pid], strings)
                         && (all_match || FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or))
                 };
                 if matches!(prefer, Prefer::Default) {
@@ -3703,7 +3647,7 @@ fn run_query<'a>(
             let mut bitmap = cell.borrow_mut();
             eval_planes(expr, &indexes.planes, &mut bitmap);
             run_query_streamed_popcount(
-                cards, printings, offsets, prefer, limit, page_offset, perm, inv_perm, &bitmap, expr, &indexes.planes,
+                cards, printings, offsets, prefer, limit, page_offset, perm, inv_perm, &bitmap, expr, &indexes.planes, strings,
             )
         });
     }
@@ -3894,6 +3838,7 @@ fn run_query_streamed_popcount<'a>(
     bitmap: &[u64],
     plane: &PlaneExpr,
     planes: &Archived<BitPlanes>,
+    strings: &AStrings,
 ) -> (usize, Vec<(&'a AOracleCard, &'a APrinting)>) {
     let n_cards = cards.len();
     let total: usize = bitmap.iter().map(|w| w.count_ones() as usize).sum();
@@ -3965,7 +3910,7 @@ fn run_query_streamed_popcount<'a>(
                 let card = &cards[cid as usize];
                 let start = u32::from(offsets[cid as usize]) as usize;
                 let end = u32::from(offsets[cid as usize + 1]) as usize;
-                let satisfies = |pid: usize| !existential || eval_plane_expr_for_printing(plane, planes, cid, &printings[pid]);
+                let satisfies = |pid: usize| !existential || eval_plane_expr_for_printing(plane, planes, cid, &printings[pid], strings);
                 let chosen: Option<u32> = if matches!(prefer, Prefer::Default) {
                     (start..end).find(|&pid| satisfies(pid)).map(|pid| pid as u32)
                 } else {
@@ -4252,7 +4197,7 @@ const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 /// catch (e.g. reordering same-size fields, changing an index type) — and on
 /// any FLAVOR_FP_FEATURES change: archived fingerprints are built with that
 /// table, so a new table reading old fingerprints breaks the superset test.
-const ARCHIVE_FORMAT_VERSION: u32 = 20260722;
+const ARCHIVE_FORMAT_VERSION: u32 = 20260723;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -4647,10 +4592,9 @@ impl QueryEngine {
             collector_number: build_range_index(&printings, |p| p.collector_number_int.map(u32::from)),
             sort_perms:     build_sort_permutations(&cards, &printings, &offsets),
             artwork_groups: build_artwork_group_counts(&printings, &offsets),
-            planes:         build_bit_planes(&cards, &printings, &offsets),
+            planes:         build_bit_planes(&cards, &printings, &offsets, &strings),
             name_bigrams:   build_name_bigram_index(&cards),
             legal_divergent: build_divergent_ids(&cards),
-            border_planes:  build_border_planes(&cards, &printings, &offsets, &strings),
         };
 
         #[cfg(feature = "alloc-counter")]

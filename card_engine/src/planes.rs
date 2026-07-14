@@ -14,19 +14,26 @@
 //! reproduces the filter's card-level truth exactly.
 //! Legality (docs/issues/engine-legality-divergent-carveout.md, generalized
 //! to banned/restricted by docs/issues/engine-legality-banned-restricted-
-//! planes.md, #678) is exact via two planes per (format, status) -- an
-//! `_EXISTS` plane ("some printing has this status") and an `_ABSENT`/
+//! planes.md, #678) and rarity (docs/issues/engine-rarity-planes.md,
+//! promoted from narrowing-only to existential by docs/issues/engine-
+//! existential-plane-generalization.md, #680) are *existential*, not
+//! card-invariant: a card-level True only means "some printing has this
+//! fact," not "every printing does," so `compile_plane`/`all_match`
+//! promotion for these is gated to `unique=card` and needs a per-printing
+//! recheck at row-selection time (`eval_plane_expr_for_printing`) -- see
+//! `ExistentialLeaf`. Legality is exact via two planes per (format, status)
+//! -- an `_EXISTS` plane ("some printing has this status") and an `_ABSENT`/
 //! `_ILLEGAL` plane ("some printing doesn't"), both computed directly from
 //! printings so they're correct for every card including ones whose
-//! printings disagree, unlike a single card-level bit. Rarity (the 4 most
-//! common values; docs/issues/engine-rarity-planes.md) is narrowing-only, for
-//! the PrintingDep reason legality used to have -- see PLANE_RARITY.
+//! printings disagree, unlike a single card-level bit. Rarity is one-hot for
+//! the 4 tracked values (common/uncommon/rare/mythic) plus one shared
+//! "above mythic" plane for special/bonus -- see `PLANE_RARITY_HI`.
 
 use rkyv::{Archive, Deserialize, Serialize};
 
-use super::filter::{CmpOp, ColorField, FilterExpr, NumExpr, NumField, TextSearchField};
+use super::filter::{CmpOp, ColorField, FilterExpr, NumExpr, NumField, TextField, TextSearchField};
 use super::legality::{LEGALITY_BANNED, LEGALITY_LEGAL, LEGALITY_RESTRICTED, MAX_FORMATS};
-use super::{flip_op, lane_get, oracle_word_eligible, scan_oracle_words, OracleCard, OracleWordIndex, Printing};
+use super::{flip_op, lane_get, negate_op, oracle_word_eligible, scan_oracle_words, str_at, AStrings, OracleCard, OracleWordIndex, Printing, NONE_STR};
 
 /// Plane layout, plane-major in BitPlanes.words: six color planes per color
 /// field (W U B R G C, bit order matching color_to_bit — C is always zero for
@@ -100,18 +107,65 @@ pub(crate) const PLANE_POWER_HI: usize = PLANE_POWER + NUM_INTERIOR_WIDTH;
 pub(crate) const PLANE_TOUGHNESS_LO: usize = PLANE_POWER_HI + 1;
 pub(crate) const PLANE_TOUGHNESS: usize = PLANE_TOUGHNESS_LO + 1;
 pub(crate) const PLANE_TOUGHNESS_HI: usize = PLANE_TOUGHNESS + NUM_INTERIOR_WIDTH;
-/// One-hot planes for rarity (docs/issues/engine-rarity-planes.md), covering only the
-/// 4 most common values -- common=0, uncommon=1, rare=2, mythic=3, matching
-/// `magic.rarity_text_to_int`'s numbering directly (no offset needed). special=4/
-/// bonus=5 are far too sparse in production (1.17%/0.00% of cards) to be worth a
-/// fixed-cost plane each; they stay on the existing `RarityIndex` postings path
-/// (`lib.rs`'s `rarity_candidates`). Unlike cmc/power/toughness, there's no interior/
-/// overflow-bucket split: the planed range is the entire domain of interest, not a
-/// window into an unbounded numeric range, so no `BucketBounds` tracking is needed
-/// either -- a plain one-hot block, same shape as `PLANE_TYPES`.
-pub(crate) const RARITY_PLANES: usize = 4;
+/// Rarity planes (docs/issues/engine-rarity-planes.md, promoted to an
+/// existential field reaching `compile_plane`/`all_match` by
+/// docs/issues/engine-existential-plane-generalization.md, #680): one-hot
+/// planes for the 4 most common values -- common=0, uncommon=1, rare=2,
+/// mythic=3, matching `magic.rarity_text_to_int`'s numbering directly (no
+/// offset needed) -- plus one shared "above mythic" plane covering
+/// special=4/bonus=5 together. This is the *same shape* as `PLANE_CMC_HI`/
+/// `PLANE_POWER_HI`/`PLANE_TOUGHNESS_HI` (an interior one-hot range plus one
+/// tail bucket for everything past it), not an unordered "unrecognized value"
+/// catch-all the way border's will be -- rarity is ordinal, so "above
+/// mythic" is exactly what the 5th plane means, no vaguer than that. Unlike
+/// those numeric fields' tail buckets, this one needs no live `BucketBounds`
+/// tracking: `{special, bonus}` is a closed, schema-fixed pair (`magic.
+/// valid_rarities` has exactly 6 rows), not an open-ended observed range, so
+/// `rarity_hi_verdict` compares directly against the two known values instead
+/// of a live [min,max]. `!=val` on any of the 4 tracked values is still exact
+/// (Or of the other 3 tracked planes plus the hi plane -- see
+/// `compile_rarity_cmp`), but a query needing to distinguish special from
+/// bonus specifically (`r:special`, `r:bonus`, `-r:special`, ...) can't be
+/// answered from the hi plane alone and declines, falling back to
+/// `RarityIndex`/`rarity_candidates` (`lib.rs`) exactly as today -- unaffected,
+/// still the fastest path for those two rarely-queried, very sparse values.
+pub(crate) const RARITY_INTERIOR: usize = 4;
 pub(crate) const PLANE_RARITY: usize = PLANE_TOUGHNESS_HI + 1;
-pub(crate) const PLANE_COUNT: usize = PLANE_RARITY + RARITY_PLANES;
+pub(crate) const PLANE_RARITY_HI: usize = PLANE_RARITY + RARITY_INTERIOR;
+
+/// Border planes (docs/issues/done/engine-border-planes.md, #664, promoted
+/// from loose-narrowing-only to an existential field reaching
+/// `compile_plane`/`all_match` by docs/issues/engine-existential-plane-
+/// generalization.md, #680): one-hot planes for the 4 tracked values --
+/// black, borderless, white, gold (`BORDER_TRACKED_VALUES`, in plane-index
+/// order) -- plus one shared "other" plane for any Known-but-untracked value
+/// (currently just `yellow`, all from set `dft`/Aetherdrift; real, current
+/// data, not an ingestion artifact -- checked against the live DB, not
+/// assumed). Unlike rarity's hi bucket, this is NOT an ordinal tail --
+/// border has no ordering at all (`TextExact` only ever compiles `Eq`) -- so
+/// "other" really is an unordered catch-all, and unlike rarity's `{special,
+/// bonus}` it isn't schema-closed either: `card_border` is free text (only
+/// `check_card_border_lowercase` constrains it, no FK/enum the way `magic.
+/// valid_rarities` gives rarity), so a brand new Scryfall border color
+/// someday would fall into `other` rather than silently vanishing from every
+/// plane the way an unenumerated value would with no catch-all at all. `Or`
+/// of the other 3 tracked planes plus `other` is still exact for `!=val` on
+/// a tracked value (see `compile_border_cmp_neg`) for the identical reason
+/// rarity's is: `{black, borderless, white, gold, other, null}` is
+/// exhaustive by construction, whatever a printing's real border turns out
+/// to be. A query naming an untracked value specifically (`border:yellow`)
+/// can't be told apart from any other untracked value by the shared bucket,
+/// so it declines to compile exactly (same shape as `r:special`/`r:bonus`)
+/// but still narrows loosely through `other` in `narrow_rec` -- strictly
+/// better than today's unindexed full scan for those values, even without
+/// reaching Y=1 exactness.
+pub(crate) const BORDER_TRACKED_VALUES: [&str; 4] = ["black", "borderless", "white", "gold"];
+pub(crate) const BORDER_TRACKED: usize = BORDER_TRACKED_VALUES.len();
+pub(crate) const BORDER_PLANES: usize = BORDER_TRACKED + 1;
+pub(crate) const PLANE_BORDER: usize = PLANE_RARITY_HI + 1;
+pub(crate) const PLANE_BORDER_OTHER: usize = PLANE_BORDER + BORDER_TRACKED;
+
+pub(crate) const PLANE_COUNT: usize = PLANE_BORDER + BORDER_PLANES;
 
 /// The observed [min,max] of whatever cards landed in one bucket plane,
 /// recomputed on every build/reload (never hardcoded from a one-time data
@@ -212,7 +266,7 @@ fn set_numeric_plane(
     }
 }
 
-pub(crate) fn build_bit_planes(cards: &[OracleCard], printings: &[Printing], offsets: &[u32]) -> BitPlanes {
+pub(crate) fn build_bit_planes(cards: &[OracleCard], printings: &[Printing], offsets: &[u32], strings: &[String]) -> BitPlanes {
     let wpp = words_per_plane(cards.len());
     let mut words = vec![0u64; PLANE_COUNT * wpp];
     let mut cmc_hi = BucketBounds::default();
@@ -224,10 +278,12 @@ pub(crate) fn build_bit_planes(cards: &[OracleCard], printings: &[Printing], off
         let mut set = |plane: usize| words[plane * wpp + i / 64] |= 1u64 << (i % 64);
         // Rarity (docs/issues/engine-rarity-planes.md): "any printing at this
         // rarity" existence projection, same aggregation build_rarity_index
-        // does over the same range, just OR'd into planes instead of postings
-        // for the 4 most common values. Missing rarity (None) contributes no
-        // bit, same as build_rarity_index -- a card whose printings are all
-        // null-rarity correctly sets nothing here.
+        // does over the same range, just OR'd into planes instead of
+        // postings for the 4 tracked values. Missing rarity (None)
+        // contributes no bit, same as build_rarity_index -- a card whose
+        // printings are all null-rarity correctly sets nothing here. Bits 4/5
+        // (special/bonus) fold into the single "above mythic" plane rather
+        // than getting their own -- see PLANE_RARITY_HI's doc.
         let range = offsets[i] as usize..offsets[i + 1] as usize;
         let mut rarity_mask: u8 = 0;
         for p in &printings[range.clone()] {
@@ -235,9 +291,26 @@ pub(crate) fn build_bit_planes(cards: &[OracleCard], printings: &[Printing], off
                 rarity_mask |= 1 << r;
             }
         }
-        for b in 0..RARITY_PLANES {
+        for b in 0..RARITY_INTERIOR {
             if rarity_mask & (1 << b) != 0 {
                 set(PLANE_RARITY + b);
+            }
+        }
+        if rarity_mask >> RARITY_INTERIOR != 0 {
+            set(PLANE_RARITY_HI);
+        }
+        // Border (docs/issues/done/engine-border-planes.md, #664; promoted to
+        // an existential field by #680 -- see PLANE_BORDER's doc): each
+        // printing's border, if known, sets its tracked one-hot plane or the
+        // shared "other" plane.
+        for p in &printings[range.clone()] {
+            if p.card_border_id == NONE_STR {
+                continue;
+            }
+            let s = strings[p.card_border_id as usize].as_str();
+            match BORDER_TRACKED_VALUES.iter().position(|&v| v == s) {
+                Some(idx) => set(PLANE_BORDER + idx),
+                None => set(PLANE_BORDER_OTHER),
             }
         }
         for b in 0..COLOR_PLANES {
@@ -577,7 +650,7 @@ fn matches_op(op: CmpOp, v: f64, threshold: f64) -> bool {
     }
 }
 
-enum BucketVerdict {
+pub(crate) enum BucketVerdict {
     /// Every possible value in the bucket satisfies the comparison.
     FullyIncluded,
     /// No possible value in the bucket satisfies it (including: bucket empty).
@@ -685,6 +758,81 @@ fn compile_numeric_cmp(field: NumField, op: CmpOp, threshold: f64, bounds: &rkyv
     Some(or_of(included))
 }
 
+/// The "above mythic" plane's verdict for `rarity <op> threshold` --
+/// `special`(4)/`bonus`(5) are a closed, schema-fixed pair (`magic.
+/// valid_rarities` has exactly 6 rows), not a live-observed range, so this
+/// compares directly against those two known values rather than reusing
+/// `bucket_verdict`'s `BucketBounds`-based machinery. Deliberately doesn't
+/// reuse `bucket_verdict` itself either: that function's `Ne` arm is
+/// `unreachable!` by contract (every existing caller declines `Ne` before
+/// calling it), whereas rarity's `!=val` on a tracked value genuinely needs
+/// this verdict to resolve `Ne` (see `compile_rarity_cmp`) -- `matches_op`
+/// already implements `Ne` correctly, so comparing both known values
+/// directly through it needs no special-casing at all.
+pub(crate) fn rarity_hi_verdict(op: CmpOp, threshold: f64) -> BucketVerdict {
+    match (matches_op(op, 4.0, threshold), matches_op(op, 5.0, threshold)) {
+        (true, true) => BucketVerdict::FullyIncluded,
+        (false, false) => BucketVerdict::FullyExcluded,
+        _ => BucketVerdict::Ambiguous,
+    }
+}
+
+/// Compile `rarity <op> threshold` to `Or` of the qualifying planes: the 4
+/// tracked one-hot values (never ambiguous -- a one-hot plane is a single
+/// point) plus the shared "above mythic" plane when `rarity_hi_verdict` says
+/// it's fully included. Unlike `compile_numeric_cmp`, `Ne` is not declined
+/// up front: with the domain closed at `{0..=3, hi}` (see `PLANE_RARITY_HI`'s
+/// doc), `!=val` for a tracked `val` is exactly `Or` of the other 3 tracked
+/// planes plus `hi` (safe for the same reason legality's absent-plane
+/// negation is safe -- whatever a printing's real rarity is, it lands in
+/// exactly one of these buckets or is null, so a `True` witness anywhere in
+/// the `Or` really does mean "some printing has a different rarity").
+/// Declines (returns `None`) exactly when the query needs to distinguish
+/// special from bonus specifically (`r:special`, `r:bonus`, `-r:special`,
+/// `-r:bonus`, `rarity>=bonus`, ...) -- the shared plane can't tell them
+/// apart, so those fall back to `RarityIndex` postings (`lib.rs`), unaffected
+/// by this change.
+fn compile_rarity_cmp(op: CmpOp, threshold: f64) -> Option<PlaneExpr> {
+    let mut included: Vec<PlaneExpr> = (0..RARITY_INTERIOR)
+        .filter(|&v| matches_op(op, v as f64, threshold))
+        .map(|v| PlaneExpr::Plane((PLANE_RARITY + v) as u16))
+        .collect();
+    match rarity_hi_verdict(op, threshold) {
+        BucketVerdict::FullyIncluded => included.push(PlaneExpr::Plane(PLANE_RARITY_HI as u16)),
+        BucketVerdict::FullyExcluded => {}
+        BucketVerdict::Ambiguous => return None,
+    }
+    Some(or_of(included))
+}
+
+/// Compile `border == value` to its tracked one-hot plane, or decline for an
+/// untracked value (`other` can't tell which untracked value a printing has --
+/// see `PLANE_BORDER_OTHER`'s doc). `border:gold` and the other 3 tracked
+/// values compile exactly; `border:yellow` (or any future value) declines
+/// here and falls back to `narrow_rec`'s loose narrowing through `other`
+/// instead.
+fn compile_border_cmp(value: &str) -> Option<PlaneExpr> {
+    BORDER_TRACKED_VALUES.iter().position(|&v| v == value).map(|idx| PlaneExpr::Plane((PLANE_BORDER + idx) as u16))
+}
+
+/// Compile `Not(border == value)` for a *tracked* value: `Or` of the other 3
+/// tracked planes plus `other` -- exact for the identical reason
+/// `compile_rarity_cmp`'s `!=val` is: `{black, borderless, white, gold,
+/// other, null}` is exhaustive by construction, so a `True` witness anywhere
+/// in the `Or` really does mean "some printing has a different border."
+/// Declines for an untracked value (`-border:yellow`) -- `other` can't tell
+/// yellow apart from any other untracked value either, same as
+/// `-r:special`/`-r:bonus`.
+fn compile_border_cmp_neg(value: &str) -> Option<PlaneExpr> {
+    let tracked_idx = BORDER_TRACKED_VALUES.iter().position(|&v| v == value)?;
+    let included: Vec<PlaneExpr> = (0..BORDER_TRACKED)
+        .filter(|&i| i != tracked_idx)
+        .map(|i| PlaneExpr::Plane((PLANE_BORDER + i) as u16))
+        .chain(std::iter::once(PlaneExpr::Plane(PLANE_BORDER_OTHER as u16)))
+        .collect();
+    Some(or_of(included))
+}
+
 /// True if `filter` (recursively through And/Or/Not) contains a NumericCmp
 /// on a plane-backed field (cmc/power/toughness). These are NOT safe to
 /// blindly complement via `PlaneExpr::Not`, unlike ColorCmp/TypeCmp/Devotion:
@@ -734,57 +882,138 @@ fn compile_plane_children(children: &[FilterExpr], bounds: &rkyv::Archived<BitPl
     order.into_iter().map(|c| compile_plane(c, bounds, words)).collect()
 }
 
-/// Whether plane index `p` falls in any legality existence-projection block
-/// (`LEGALITY_STATUS_TABLE`), regardless of which status/polarity it is.
-fn is_legality_plane(p: usize) -> bool {
-    legality_plane_shift(p).is_some()
+/// Which existential family a plane index addresses, and the per-printing
+/// fact it stands for -- one source of truth consulted by
+/// `plane_expr_is_existential` (mode gating), `collect_existential_indices`
+/// (shared-witness dedup, across every family at once), and
+/// `eval_plane_expr_for_printing` (per-printing row-selection check).
+/// Generalizes what was legality-only (docs/issues/engine-legality-divergent-
+/// carveout.md) to any field whose plane is an existence projection over
+/// printing-varying data, not a card-invariant fact
+/// (docs/issues/engine-existential-plane-generalization.md, #680): a
+/// card-level True here does not imply every printing of the card
+/// individually satisfies the query, unlike colors/types/devotion/numeric
+/// buckets.
+enum ExistentialLeaf {
+    Legality { shift: u8, expected: u64, is_illegal: bool },
+    /// One of the 4 tracked one-hot rarity values (common/uncommon/rare/mythic).
+    RarityTracked(u8),
+    /// The shared "above mythic" plane (special or bonus, indistinguishable
+    /// from each other here -- see `PLANE_RARITY_HI`'s doc).
+    RarityHi,
+    /// One of the 4 tracked one-hot border values (`BORDER_TRACKED_VALUES`).
+    BorderTracked(u8),
+    /// The shared "other" plane (any Known-but-untracked border value,
+    /// indistinguishable from each other here -- see `PLANE_BORDER_OTHER`'s doc).
+    BorderOther,
 }
 
-/// Collect distinct legality plane indices referenced by legality-plane
-/// leaves within `expr`, appending into `out` (deduplicated). Each specific
-/// plane index already identifies one (format, status, polarity) existence
-/// fact, so deduping on the raw index is exactly the right granularity --
-/// simpler than (and a superset of) the old `(format, polarity)` tuple key,
-/// which only had to consider `LEGAL`. Every distinct fact referenced inside
-/// an `And` is shared-witness-prone: `format:A AND -format:A` (same format,
-/// two polarities), `banned:A AND restricted:A` (same format, two statuses),
-/// and `format:A AND format:B` (two formats) are all the identical problem --
-/// a divergent card can satisfy two existence facts via two *different*
-/// witnessing printings, even though no single printing can satisfy both at
-/// once (see `and_of_checked_for_shared_witness`'s doc). A literal duplicate
-/// leaf (`format:A AND format:A`) reads the same plane index and collapses to
-/// one entry, fine to compose -- the same underlying fact checked twice, not
-/// two facts needing a shared witness.
-fn collect_legality_formats(expr: &PlaneExpr, out: &mut Vec<u16>) {
+/// How to turn an in-block offset into the specific fact a block's plane
+/// index addresses. Blocks vary in what "the fact" even is (a legality
+/// shift/status pair, a one-hot tracked value, or a single no-payload shared
+/// bucket) -- unifying *that* isn't attempted, only which range of plane
+/// indices belongs to which field, which genuinely is uniform (see
+/// `PLANE_BLOCKS`).
+#[derive(Clone, Copy)]
+enum BlockKind {
+    Legality { expected: u64, is_illegal: bool },
+    RarityTracked,
+    RarityHi,
+    BorderTracked,
+    BorderOther,
+}
+
+struct PlaneBlock {
+    base: usize,
+    len: usize,
+    kind: BlockKind,
+}
+
+/// Single source of truth for every existential field's plane layout: one
+/// entry per contiguous `[base, base+len)` range and what it means. Adding a
+/// field's block here (plus an `ExistentialLeaf` variant and one arm in
+/// `existential_leaf`'s match below) is now the only place that needs to
+/// know its plane layout, instead of a hand-written range check per block --
+/// the range-recognition part really is uniform across fields, unlike the
+/// leaf-construction part (see `BlockKind`'s doc). Legality's 3 statuses ×
+/// 2 polarities become 6 flat entries here, still reading `LEGALITY_STATUS_TABLE`
+/// as their single source of truth so a new indexed status can't drift out
+/// of sync with what this recognizes.
+const PLANE_BLOCKS: [PlaneBlock; 10] = [
+    PlaneBlock { base: LEGALITY_STATUS_TABLE[0].1, len: MAX_FORMATS, kind: BlockKind::Legality { expected: LEGALITY_STATUS_TABLE[0].0, is_illegal: false } },
+    PlaneBlock { base: LEGALITY_STATUS_TABLE[0].2, len: MAX_FORMATS, kind: BlockKind::Legality { expected: LEGALITY_STATUS_TABLE[0].0, is_illegal: true } },
+    PlaneBlock { base: LEGALITY_STATUS_TABLE[1].1, len: MAX_FORMATS, kind: BlockKind::Legality { expected: LEGALITY_STATUS_TABLE[1].0, is_illegal: false } },
+    PlaneBlock { base: LEGALITY_STATUS_TABLE[1].2, len: MAX_FORMATS, kind: BlockKind::Legality { expected: LEGALITY_STATUS_TABLE[1].0, is_illegal: true } },
+    PlaneBlock { base: LEGALITY_STATUS_TABLE[2].1, len: MAX_FORMATS, kind: BlockKind::Legality { expected: LEGALITY_STATUS_TABLE[2].0, is_illegal: false } },
+    PlaneBlock { base: LEGALITY_STATUS_TABLE[2].2, len: MAX_FORMATS, kind: BlockKind::Legality { expected: LEGALITY_STATUS_TABLE[2].0, is_illegal: true } },
+    PlaneBlock { base: PLANE_RARITY, len: RARITY_INTERIOR, kind: BlockKind::RarityTracked },
+    PlaneBlock { base: PLANE_RARITY_HI, len: 1, kind: BlockKind::RarityHi },
+    PlaneBlock { base: PLANE_BORDER, len: BORDER_TRACKED, kind: BlockKind::BorderTracked },
+    PlaneBlock { base: PLANE_BORDER_OTHER, len: 1, kind: BlockKind::BorderOther },
+];
+
+/// Plane index `p`'s existential family and fact, or `None` for a
+/// card-invariant plane. Walks `PLANE_BLOCKS` once; which block `p` falls in
+/// (if any) says both which field it belongs to and, via the in-block
+/// offset, which specific fact.
+fn existential_leaf(p: usize) -> Option<ExistentialLeaf> {
+    for block in &PLANE_BLOCKS {
+        if !(block.base..block.base + block.len).contains(&p) {
+            continue;
+        }
+        let offset = (p - block.base) as u8;
+        return Some(match block.kind {
+            BlockKind::Legality { expected, is_illegal } => ExistentialLeaf::Legality { shift: offset * 2, expected, is_illegal },
+            BlockKind::RarityTracked => ExistentialLeaf::RarityTracked(offset),
+            BlockKind::RarityHi => ExistentialLeaf::RarityHi,
+            BlockKind::BorderTracked => ExistentialLeaf::BorderTracked(offset),
+            BlockKind::BorderOther => ExistentialLeaf::BorderOther,
+        });
+    }
+    None
+}
+
+/// Collect distinct existential plane indices referenced anywhere within
+/// `expr`, appending into `out` (deduplicated), regardless of which family
+/// (legality, rarity, ...) each belongs to. Each specific plane index already
+/// identifies one existence fact (one format/status/polarity, or one rarity
+/// value), so deduping on the raw index is exactly the right granularity, and
+/// counting across families is deliberate: `format:A AND r:mythic` is the
+/// identical shared-witness problem as `format:A AND format:B` -- a divergent
+/// card can satisfy two existence facts via two *different* witnessing
+/// printings, even though no single printing can satisfy both at once (see
+/// `and_of_checked_for_shared_witness`'s doc), and that's just as true when
+/// the two facts come from different fields as when they come from the same
+/// one. A literal duplicate leaf (`format:A AND format:A`) reads the same
+/// plane index and collapses to one entry, fine to compose -- the same
+/// underlying fact checked twice, not two facts needing a shared witness.
+fn collect_existential_indices(expr: &PlaneExpr, out: &mut Vec<u16>) {
     match expr {
         PlaneExpr::Plane(p) => {
-            if is_legality_plane(*p as usize) && !out.contains(p) {
+            if existential_leaf(*p as usize).is_some() && !out.contains(p) {
                 out.push(*p);
             }
         }
         PlaneExpr::Bits(_) | PlaneExpr::Const(_) => {}
         PlaneExpr::And(cs) | PlaneExpr::Or(cs) => {
             for c in cs {
-                collect_legality_formats(c, out);
+                collect_existential_indices(c, out);
             }
         }
-        PlaneExpr::Not(inner) => collect_legality_formats(inner, out),
+        PlaneExpr::Not(inner) => collect_existential_indices(inner, out),
     }
 }
 
-/// Whether any leaf of a compiled plane expression reads a legality plane
-/// (any status/polarity in `LEGALITY_STATUS_TABLE`). These are existence projections over
-/// per-printing-varying data ("*some* printing has this status") -- unlike
-/// every other plane (colors, types, numeric buckets, devotion, border, all
-/// card-invariant), a card-level True here does not imply every printing of
-/// the card individually satisfies the query. Used to gate the #634 Step 1
-/// `all_match_known` fast path to `unique=card`, where existence is exactly
-/// the semantics needed (docs/issues/engine-legality-divergent-carveout.md;
-/// Step 2's popcount path is already `Mode::Card`-only for unrelated reasons,
-/// see `run_query`).
+/// Whether any leaf of a compiled plane expression reads an existential plane
+/// (any family -- legality's status/polarity blocks, rarity's one-hot
+/// values). Used to gate the #634 Step 1 `all_match_known` fast path to
+/// `unique=card`, where existence is exactly the semantics needed
+/// (docs/issues/engine-legality-divergent-carveout.md,
+/// docs/issues/engine-existential-plane-generalization.md; Step 2's popcount
+/// path is already `Mode::Card`-only for unrelated reasons, see `run_query`).
 pub(crate) fn plane_expr_is_existential(expr: &PlaneExpr) -> bool {
     match expr {
-        PlaneExpr::Plane(p) => is_legality_plane(*p as usize),
+        PlaneExpr::Plane(p) => existential_leaf(*p as usize).is_some(),
         PlaneExpr::Bits(_) | PlaneExpr::Const(_) => false,
         PlaneExpr::And(cs) | PlaneExpr::Or(cs) => cs.iter().any(plane_expr_is_existential),
         PlaneExpr::Not(inner) => plane_expr_is_existential(inner),
@@ -812,7 +1041,7 @@ pub(crate) fn plane_expr_is_existential(expr: &PlaneExpr) -> bool {
 fn and_of_checked_for_shared_witness(children: Vec<PlaneExpr>) -> Option<PlaneExpr> {
     let mut formats = Vec::new();
     for c in &children {
-        collect_legality_formats(c, &mut formats);
+        collect_existential_indices(c, &mut formats);
     }
     if formats.len() > 1 {
         return None;
@@ -876,6 +1105,8 @@ pub(crate) fn compile_plane(filter: &FilterExpr, bounds: &rkyv::Archived<BitPlan
         // bit-sliced planes compile exactly within the saturation boundary.
         FilterExpr::Devotion { op, pips } => compile_devotion(*op, *pips),
         FilterExpr::NumericCmp { lhs, op, rhs } => match (lhs, rhs) {
+            (NumExpr::Field(NumField::RarityInt), NumExpr::Const(v)) => compile_rarity_cmp(*op, *v),
+            (NumExpr::Const(v), NumExpr::Field(NumField::RarityInt)) => compile_rarity_cmp(flip_op(*op), *v),
             (NumExpr::Field(f), NumExpr::Const(v)) => compile_numeric_cmp(*f, *op, *v, bounds),
             (NumExpr::Const(v), NumExpr::Field(f)) => compile_numeric_cmp(*f, flip_op(*op), *v, bounds),
             _ => None,
@@ -890,21 +1121,43 @@ pub(crate) fn compile_plane(filter: &FilterExpr, bounds: &rkyv::Archived<BitPlan
         FilterExpr::Legality { shift: Some(shift), expected } => {
             status_plane_bases(*expected).map(|(exists_base, _)| PlaneExpr::Plane((exists_base + *shift as usize / 2) as u16))
         }
+        // border:x (docs/issues/done/engine-border-planes.md, #664,
+        // promoted by #680 -- see PLANE_BORDER's doc): exact for the 4
+        // tracked values via their one-hot plane. An untracked value
+        // (`border:yellow`) declines here and falls back to narrow_rec's
+        // loose narrowing through `other`; `Not` is handled by
+        // compile_plane_neg, not here.
+        FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value } => compile_border_cmp(value),
         _ => None,
     }
 }
 
-/// Compile `Not(filter)` directly, pushing negation down to `Legality` leaves
-/// (which need `PLANE_LEGAL_ILLEGAL`, not a bit-complement of
-/// `PLANE_LEGAL_EXISTS`) via De Morgan, while leaves that are safe to
-/// bit-complement (colors/types/devotion/non-null-valued numerics) fall
-/// through to the cheaper "compile positive, wrap in `PlaneExpr::Not`" path
-/// unchanged. Mutually recursive with `compile_plane`.
+/// Compile `Not(filter)` directly, pushing negation down to `Legality` and
+/// rarity leaves -- both need to be *recomputed*, not bit-complemented
+/// (`Legality` needs `PLANE_LEGAL_ILLEGAL`, not a complement of
+/// `PLANE_LEGAL_EXISTS`; rarity needs `compile_rarity_cmp` re-run with
+/// `negate_op` applied, not a complement of the positive Or -- a bit-
+/// complement of `Or(exists-planes)` would wrongly compute "no printing has
+/// this value" (`∀p: r(p)≠val`) instead of the existential `∃p: r(p)≠val`
+/// `compile_rarity_cmp(negate_op(op), val)` already gets right, same
+/// divergent-card trap as Legality's) -- via De Morgan, while leaves that are
+/// safe to bit-complement (colors/types/devotion/non-null-valued numerics)
+/// fall through to the cheaper "compile positive, wrap in `PlaneExpr::Not`"
+/// path unchanged. Mutually recursive with `compile_plane`.
 fn compile_plane_neg(filter: &FilterExpr, bounds: &rkyv::Archived<BitPlanes>, words: &rkyv::Archived<OracleWordIndex>) -> Option<PlaneExpr> {
     match filter {
         FilterExpr::Legality { shift: Some(shift), expected } => {
             status_plane_bases(*expected).map(|(_, absent_base)| PlaneExpr::Plane((absent_base + *shift as usize / 2) as u16))
         }
+        FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), op, rhs: NumExpr::Const(v) } => {
+            compile_rarity_cmp(negate_op(*op), *v)
+        }
+        FilterExpr::NumericCmp { lhs: NumExpr::Const(v), op, rhs: NumExpr::Field(NumField::RarityInt) } => {
+            compile_rarity_cmp(negate_op(flip_op(*op)), *v)
+        }
+        // -border:x: recomputed via compile_border_cmp_neg's Or-of-others,
+        // not bit-complemented, same divergent-card reasoning as Legality/rarity.
+        FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value } => compile_border_cmp_neg(value),
         // Not(And(cs)) = Or(Not(c) for c in cs) -- existence distributes over
         // Or, so no shared-witness check is needed here regardless of how
         // many legality leaves end up among the children.
@@ -992,7 +1245,7 @@ pub(crate) fn split_planes(
                 match compile_plane(&c, bounds, words) {
                     Some(pe) => {
                         let mut fmts = Vec::new();
-                        collect_legality_formats(&pe, &mut fmts);
+                        collect_existential_indices(&pe, &mut fmts);
                         if fmts.is_empty() {
                             planes.push(pe);
                         } else {
@@ -1004,7 +1257,7 @@ pub(crate) fn split_planes(
             }
             let mut all_formats = Vec::new();
             for (_, pe) in &legality_children {
-                collect_legality_formats(pe, &mut all_formats);
+                collect_existential_indices(pe, &mut all_formats);
             }
             if unique_is_card && all_formats.len() <= 1 {
                 for (_, pe) in legality_children {
@@ -1013,7 +1266,7 @@ pub(crate) fn split_planes(
             } else {
                 // 2+ distinct legality existence facts (different formats,
                 // different statuses of the same format, or the same format
-                // under both polarities -- collect_legality_formats dedupes
+                // under both polarities -- collect_existential_indices dedupes
                 // by raw plane index, so all three shapes count the same
                 // way) can't be ANDed together safely regardless of mode
                 // (shared-witness); a single one is safe for the plane's own
@@ -1092,63 +1345,60 @@ pub(crate) fn eval_planes(expr: &PlaneExpr, planes: &rkyv::Archived<BitPlanes>, 
     }
 }
 
-/// If plane `p` is one of legality's existence planes, the (shift, expected,
-/// is_illegal) it addresses -- `shift` matches `FilterExpr::Legality`'s own
-/// field, `expected` is the status the block was built for (`LEGAL`/`BANNED`/
-/// `RESTRICTED`), and `is_illegal` distinguishes an `_ABSENT`/`_ILLEGAL`
-/// (negated-check) plane from its `_EXISTS` counterpart. `None` for every
-/// other (card-invariant) plane. Derived from `LEGALITY_STATUS_TABLE`, the
-/// same single source of truth `status_plane_bases` reads.
-fn legality_plane_shift(p: usize) -> Option<(u8, u64, bool)> {
-    for &(expected, exists_base, absent_base) in &LEGALITY_STATUS_TABLE {
-        if (exists_base..exists_base + MAX_FORMATS).contains(&p) {
-            return Some((((p - exists_base) * 2) as u8, expected, false));
-        }
-        if (absent_base..absent_base + MAX_FORMATS).contains(&p) {
-            return Some((((p - absent_base) * 2) as u8, expected, true));
-        }
-    }
-    None
-}
-
 /// Evaluate a compiled plane expression against one specific printing, rather
 /// than a card's already-known aggregate truth -- needed wherever row
 /// emission picks/verifies a printing for a card whose card-level match came
-/// through a legality leaf (docs/issues/engine-legality-divergent-carveout.md
-/// "Row selection for unique=card"): `legal_exists`/`illegal_exists` only
-/// guarantee *some* printing satisfies the expression, not this one. Every
-/// other (card-invariant) leaf reads the same card-level bit `eval_planes`
-/// would have used -- identical for every printing of the card by
-/// construction -- so this only actually diverges from the card-level answer
-/// at a legality leaf, which consults `printing` directly instead, mirroring
-/// `tri()`'s own per-printing check (`filter.rs`'s `Legality` arm). Callers
-/// only need this for the bounded set of printings being emitted, never the
-/// whole candidate set -- see the design doc for why that scoping is what
-/// makes this cheap instead of repeating the abandoned first design's
-/// performance mistake.
+/// through an existential leaf (docs/issues/engine-legality-divergent-
+/// carveout.md "Row selection for unique=card",
+/// docs/issues/engine-existential-plane-generalization.md): an existence
+/// plane only guarantees *some* printing satisfies the expression, not this
+/// one. Every other (card-invariant) leaf reads the same card-level bit
+/// `eval_planes` would have used -- identical for every printing of the card
+/// by construction -- so this only actually diverges from the card-level
+/// answer at an existential leaf, which consults `printing` directly instead,
+/// mirroring `tri()`'s own per-printing check (`filter.rs`'s `Legality` and
+/// `NumericCmp` arms). Callers only need this for the bounded set of
+/// printings being emitted, never the whole candidate set -- see the design
+/// doc for why that scoping is what makes this cheap instead of repeating the
+/// abandoned first design's performance mistake.
 pub(crate) fn eval_plane_expr_for_printing(
     expr: &PlaneExpr,
     planes: &rkyv::Archived<BitPlanes>,
     cid: u32,
     printing: &rkyv::Archived<Printing>,
+    strings: &AStrings,
 ) -> bool {
     match expr {
         PlaneExpr::Plane(p) => {
             let p = *p as usize;
-            if let Some((shift, expected, is_illegal)) = legality_plane_shift(p) {
-                let status = (u64::from(printing.card_legalities) >> shift) & 0b11;
-                if is_illegal { status != expected } else { status == expected }
-            } else {
-                let wpp = words_per_plane(u32::from(planes.n_cards) as usize);
-                let word = u64::from(planes.words[p * wpp + cid as usize / 64]);
-                (word >> (cid % 64)) & 1 == 1
+            match existential_leaf(p) {
+                Some(ExistentialLeaf::Legality { shift, expected, is_illegal }) => {
+                    let status = (u64::from(printing.card_legalities) >> shift) & 0b11;
+                    if is_illegal { status != expected } else { status == expected }
+                }
+                Some(ExistentialLeaf::RarityTracked(value)) => {
+                    printing.card_rarity_int.as_ref().is_some_and(|v| *v == value)
+                }
+                Some(ExistentialLeaf::RarityHi) => {
+                    printing.card_rarity_int.as_ref().is_some_and(|v| *v >= RARITY_INTERIOR as u8)
+                }
+                Some(ExistentialLeaf::BorderTracked(idx)) => {
+                    str_at(strings, u32::from(printing.card_border_id)) == Some(BORDER_TRACKED_VALUES[idx as usize])
+                }
+                Some(ExistentialLeaf::BorderOther) => str_at(strings, u32::from(printing.card_border_id))
+                    .is_some_and(|s| !BORDER_TRACKED_VALUES.contains(&s)),
+                None => {
+                    let wpp = words_per_plane(u32::from(planes.n_cards) as usize);
+                    let word = u64::from(planes.words[p * wpp + cid as usize / 64]);
+                    (word >> (cid % 64)) & 1 == 1
+                }
             }
         }
         PlaneExpr::Bits(bits) => bitmap_contains(bits, cid),
         PlaneExpr::Const(b) => *b,
-        PlaneExpr::And(children) => children.iter().all(|c| eval_plane_expr_for_printing(c, planes, cid, printing)),
-        PlaneExpr::Or(children) => children.iter().any(|c| eval_plane_expr_for_printing(c, planes, cid, printing)),
-        PlaneExpr::Not(inner) => !eval_plane_expr_for_printing(inner, planes, cid, printing),
+        PlaneExpr::And(children) => children.iter().all(|c| eval_plane_expr_for_printing(c, planes, cid, printing, strings)),
+        PlaneExpr::Or(children) => children.iter().any(|c| eval_plane_expr_for_printing(c, planes, cid, printing, strings)),
+        PlaneExpr::Not(inner) => !eval_plane_expr_for_printing(inner, planes, cid, printing, strings),
     }
 }
 
