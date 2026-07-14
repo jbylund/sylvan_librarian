@@ -171,8 +171,31 @@ and test each candidate for set membership inline, stopping once `limit` matches
   *aligned* case (`released_at>2026-06-01 order by released_at`) is pathological if the walk
   starts at the wrong end: ascending order puts the matches at the far end, so a naive
   front-to-back walk visits almost everything before the first hit.
-- `total` for `unique=card` needs `oracle_id` dedup, not just `k` — `k` alone only works
-  directly for `unique=printing`.
+- **`total` for `unique=card`/`artwork` needs `oracle_id` dedup, not just `k` — and this may
+  cost as much as idea 2's whole approach.** `k` alone only works directly for `unique=printing`
+  (no dedup needed, `total = k` for free from the binary search — idea 1's "close to instant"
+  claim is unconditionally true there). For `unique=card`/`artwork`, an *exact* `total` means
+  deduplicating every matched printing by `oracle_id` — touching all `k` matches at least once,
+  the same O(k) idea 1 exists to avoid. If that cost is unavoidable for `unique=card` regardless
+  of page-fetch strategy, idea 1 may not actually beat idea 2 there — idea 2 pays that same O(k)
+  once to build the bitmap and gets offset-independent paging as a bonus for it. **This makes
+  `unique` mode (`printing` vs. `card`/`artwork`) a fourth crossover axis, not a detail** — it
+  may determine which idea is even viable before selectivity/alignment/clustering matter at all.
+
+  `cards_of_printings` (`lib.rs:2392-2407`) dedupes exactly this way, but it's a *batch* operation
+  over a complete, sorted `Vec`/bitmap — reusing it directly would mean materializing the whole
+  matched set upfront, exactly what idea 1 exists to avoid. Idea 1's walk discovers matches one at
+  a time, in permutation (order-by) order, not printing-id order, so it needs an *incremental*
+  version instead: a running card-space "seen" bitmap, and per matched printing, look up its card
+  id and test-and-set a bit (new bit set → a newly-counted distinct card; already set → skip).
+  That per-printing card lookup can't use `cards_of_printings`' own broad-k trick
+  (`printing_bits_to_card_bits`'s monotone cursor needs ascending printing-id order, which a
+  permutation walk doesn't provide) — it needs the direct-array lookup instead, see
+  [local-engine-direct-projection-arrays.md](local-engine-direct-projection-arrays.md), which is
+  worth landing before committing to idea 1 for this reason specifically, not just its narrower
+  standalone win. Still an open, measurement-shaped question (kernel benchmark, not end-to-end
+  timing) whether this incremental floor is cheap enough to make `unique=card` competitive with
+  `unique=printing` — landing the direct array first is what makes that measurement fair.
 
 ## Idea 2: scatter the exact narrowed set into a bitmap, feed the existing popcount-skip path
 
@@ -187,6 +210,17 @@ tweak — that function's existential row-selection (`plane_expr_is_existential`
 none of these fields compile to today. **Decided: extend the Y-predicate/existential-plane
 framework** (#680) with a new leaf rather than duplicate its row-selection logic outside it —
 price genuinely is a per-printing predicate, the same shape format/rarity/border already are.
+
+**This row-selection work is not price-specific — `collector_number` and `released_at` are also
+printing-varying fields.** A card's printings have different collector numbers and release
+dates, same as different prices. Under `unique=card`/`artwork`, *any* printing-varying field
+needs to pick which specific matching printing to emit — that's inherent to varying by printing
+at all, not to price's semantics in particular. So "prove the mechanism on a tight field first
+isolates the crossover question from the row-selection work" (see Plan) is only fully true for
+`unique=printing` — there, each printing is its own row, no selection needed at all. For
+`unique=card`/`artwork` on *any* of these three fields, the same `PrintingRangeBits` mechanism
+is needed. Treat row-selection as one piece of shared work across `price`/`collector_number`/
+`released_at` together, not something deferred specifically until price's turn.
 Tracing `PlaneExpr::Bits` (planes.rs:436-443, `eval_plane_expr_for_printing`,
 `plane_expr_is_existential`) shows this is a contained addition, not a framework rewrite — and
 it's simpler than it first looked, now that narrowing is exact:
@@ -231,34 +265,60 @@ decision needs three axes:
    (blind walk, no seek target).
 3. **For the aligned case, direction vs. clustering** — does the naive walk start at the
    matching end, or does it need to seek first?
+4. **`unique` mode** (`printing` vs. `card`/`artwork`) — not a speed difference, a viability
+   question. `unique=printing` needs no dedup (`total = k` free); `unique=card`/`artwork` needs
+   an exact card-level `total`, which may cost O(k) regardless of page-fetch strategy (see idea
+   1's `total` note above). If so, idea 1 and idea 2 aren't competing on speed for that mode,
+   they're both paying the same floor and idea 2's offset-independence is pure upside.
 
 The adversarial cell — selective predicate, unrelated order-by, unlucky clustering — is where
 idea 1's actual worst case needs to be measured against today's baseline. If it's worse there,
 that bounds how unconditionally idea 1 can be used. With the prerequisite fix landed, there's no
-fourth (tight/loose) axis to worry about — every field behaves identically here.
+fifth (tight/loose) axis to worry about — every field behaves identically there.
 
 ## Plan
 
-- [ ] Ship the `price_bounds` exactness fix standalone (see Prerequisite above) — already
-      verified, just needs the Rust change + a `tests.rs` regression test.
-- [ ] Prove the fast-path mechanism on a tight field first (`released_at` or
-      `collector_number`, already tight today) — isolates the crossover question from the
-      `PlaneExpr` row-selection work.
+- [x] Ship the price exactness fix standalone (see Prerequisite above) — landed as the
+      integer-cents migration in [#688](https://github.com/jbylund/sylvan_librarian/pull/688).
+- [ ] Ship `printing_to_card` standalone first (see
+      [local-engine-direct-projection-arrays.md](local-engine-direct-projection-arrays.md)) —
+      load-bearing for idea 1's incremental per-match card check, neutral to idea 2, changes this
+      doc's crossover-axis-4 baseline numbers.
+- [ ] Prove the fast-path mechanism on `unique=printing` for a tight field first (`released_at`
+      or `collector_number`) — this is the case that genuinely isolates the crossover question
+      from row-selection (no picking-a-printing problem at all when each printing is its own
+      row). Does *not* by itself resolve `unique=card`/`artwork` — see the next item.
+- [ ] Resolve the `unique=card`/`artwork` `total` question (crossover axis 4) before trusting
+      idea 1's cost model there: measure whether an exact card-level `total` can be had for less
+      than O(k), or whether `unique=card` always pays that floor regardless of page-fetch
+      strategy. This may collapse the idea-1-vs-idea-2 choice for that mode entirely.
 - [ ] Sketch idea 1 as a real path: `k`-from-binary-search, order-by-permutation walk with
-      inline membership check, early stop at `limit`, dedup-aware `total` for `unique=card`.
+      inline membership check, early stop at `limit`.
 - [ ] Sketch idea 2: `PlaneExpr::PrintingRangeBits`, wired into `compile_plane`/`eval_planes`/
-      `plane_expr_is_existential`/`eval_plane_expr_for_printing`.
-- [ ] Build a sweep harness across the three crossover axes (shape of `bench_cost_guards.py` /
+      `plane_expr_is_existential`/`eval_plane_expr_for_printing` — shared across
+      `price`/`collector_number`/`released_at`, not price-specific, once `unique=card`/`artwork`
+      row-selection is in scope for any of them.
+- [ ] Build a sweep harness across all four crossover axes (shape of `bench_cost_guards.py` /
       `build_guard_corpus.py`), covering `price_usd`, `released_at`, and `collector_number`, plus
-      at least one deliberately-adversarial synthetic case (mismatched order-by field).
+      at least one deliberately-adversarial synthetic case (mismatched order-by field) and both
+      `unique` modes.
 - [ ] Calibrate the guard from measurement (or confirm one design dominates and no guard is
       needed).
+- [ ] Decide the `Not`-arm/`tight_narrow_space` composition-safety question (deferred from the
+      Prerequisite section to here) — either bring it into scope (needed for `-usd>8`-shaped
+      queries, a real fragment in `test_engine_property.py`'s own suite) or explicitly defer it
+      again to a third, later piece of work, with a stated reason rather than silently dropping it.
 - [ ] Acceptance: `usd<50`, a broad `released_at`/`collector_number` query, and the adversarial
-      case all improve or stay flat vs. baseline; no regression on the existing #634/#655 exact
-      paths.
+      case all improve or stay flat vs. baseline for at least one `unique` mode; no regression on
+      the existing #634/#655 exact paths; passes (and likely extends, given this exact class of
+      change already produced two independent bugs in the price prerequisite work)
+      `test_engine_property.py`'s differential suite against the reference oracle — a performance
+      delta alone is not sufficient to call this done.
 
 ## Related
 
+- [local-engine-direct-projection-arrays.md](local-engine-direct-projection-arrays.md) —
+  prerequisite `printing_to_card` array, load-bearing for idea 1's per-match card check.
 - [00655-engine-numeric-range-planes.md](done/00655-engine-numeric-range-planes.md) — the
   analogous fix for `cmc`/`power`/`toughness`; doesn't transfer (card-invariant, not existential).
 - [00629-engine-artwork-group-id-bitmasks.md](done/00629-engine-artwork-group-id-bitmasks.md) —
