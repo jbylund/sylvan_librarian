@@ -346,7 +346,7 @@ itself and won't be evidence for this anymore.
   distinct-text CSR idiom this design reuses at word/trigram granularity
 - [00634-engine-permuted-bitmap-order-phase.md](00634-engine-permuted-bitmap-order-phase.md) —
   #634; the all-match/popcount-skip promotion this design can newly reach
-- [local-engine-numeric-range-planes.md](local-engine-numeric-range-planes.md),
+- [00655-engine-numeric-range-planes.md](00655-engine-numeric-range-planes.md),
   [local-engine-legality-postings.md](local-engine-legality-postings.md) — prior
   applications of "threshold and drop to a scan"; this design's contribution
   is replacing "drop" with "represent as a bitmap instead"

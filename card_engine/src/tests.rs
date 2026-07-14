@@ -2837,12 +2837,12 @@ fn broad_ranges_decline_to_narrow() {
 }
 
 #[test]
-fn price_narrowing_is_a_superset_under_f32_rounding() {
+fn price_narrowing_is_exact_at_the_boundary() {
     let mut vocab = VocabInterner::new();
     let cards = vec![stub_card(1, TYPE_CREATURE, &[], &mut vocab)];
     let mut data = store_of(cards, &[4], vocab);
     data.printings[0].price_usd = Some(0.05);
-    data.printings[1].price_usd = Some(0.1); // sits at the query boundary
+    data.printings[1].price_usd = Some(0.1); // sits exactly on the query boundary
     data.printings[2].price_usd = Some(60.0);
     data.printings[3].price_usd = None; // priceless printings never satisfy price filters
     data.indexes.price_usd = build_range_index(&data.printings, |p| p.price_usd.map(super::f32_sort_bits));
@@ -2854,16 +2854,27 @@ fn price_narrowing_is_a_superset_under_f32_rounding() {
         op: CmpOp::Lt,
         rhs: super::NumExpr::Const(0.10),
     };
-    // 0.10f64 is not representable as f32; the widened bound may include the
-    // boundary printing as a candidate, but must never lose printing 0.
+    // price_bounds now snaps to the cents grid (see its doc comment), so Lt(0.10) excludes the
+    // boundary printing exactly -- not "may include, verify catches it later" like before.
     match narrow_candidates(&cheap, &archived.indexes, &archived.offsets, &archived.cards) {
         Some(Candidates::Printings(v)) => {
             assert!(v.contains(&0));
+            assert!(!v.contains(&1), "Lt must exclude the exact boundary price now that bounds are exact");
             assert!(!v.contains(&2) && !v.contains(&3));
         }
         _ => panic!("usd must narrow in printing space"),
     }
-    // ...and the walk's exact evaluation rejects the boundary printing.
+    // Le, unlike Lt, must include the same boundary printing.
+    let cheap_le = FilterExpr::NumericCmp {
+        lhs: super::NumExpr::Field(super::NumField::PriceUsd),
+        op: CmpOp::Le,
+        rhs: super::NumExpr::Const(0.10),
+    };
+    match narrow_candidates(&cheap_le, &archived.indexes, &archived.offsets, &archived.cards) {
+        Some(Candidates::Printings(v)) => assert!(v.contains(&1), "Le must include the exact boundary price"),
+        _ => panic!("usd must narrow in printing space"),
+    }
+    // ...and the walk's exact evaluation agrees.
     let card = &archived.cards[0];
     assert!(cheap.matches(card, &archived.printings[0], &archived.strings));
     assert!(!cheap.matches(card, &archived.printings[1], &archived.strings));
@@ -4024,37 +4035,38 @@ fn range_narrowed_representations() {
     let n = printings.len();
     let bounds = |op, v| super::price_bounds(op, v).unwrap();
 
-    // Bounds are widened one position for f32 rounding, so `< v` includes v's
-    // own printings as superset members — counts below are values 0..=v.
-    // Sparse (164 entries, 4%): vec, tight.
+    // price_bounds snaps to the cents grid now, so `< v` excludes v's own printings exactly —
+    // counts below are values 0..v (v itself excluded), not 0..=v. exact/broad_ok are passed
+    // directly here to exercise range_narrowed's own branching, independent of price_bounds.
+    // Sparse (160 entries, 3.9%): vec, tight.
     let (lo, hi) = bounds(CmpOp::Lt, 40.0);
     let nr = super::range_narrowed(archived, lo, hi, n, false, false).expect("sparse ranges narrow in any context");
-    assert!(!nr.tight, "price bounds are widened supersets, never tight");
+    assert!(!nr.tight, "exact param was passed false here to exercise range_narrowed's own branching");
     match nr.set {
-        Candidates::Printings(v) => assert_eq!(v.len(), 164),
+        Candidates::Printings(v) => assert_eq!(v.len(), 160),
         _ => panic!("sparse range must stay a vec"),
     }
 
-    // Broad but at most half (values 0..=400 → 1604 entries, 39%): direct scatter, tight.
+    // Broad but at most half (values 0..400 → 1600 entries, 39%): direct scatter, tight.
     let (lo, hi) = bounds(CmpOp::Lt, 400.0);
     assert!(super::range_narrowed(archived, lo, hi, n, false, true).is_none(), "broad bits need a consumer (broad_ok)");
     let nr = super::range_narrowed(archived, lo, hi, n, true, true).expect("broad_ok materializes the bitmap");
     assert!(nr.tight, "integer-exact bounds keep the direct scatter tight");
     match &nr.set {
         Candidates::PrintingBits(b) => {
-            assert_eq!(b.iter().map(|w| w.count_ones()).sum::<u32>(), 1604);
+            assert_eq!(b.iter().map(|w| w.count_ones()).sum::<u32>(), 1600);
             assert!(bitmap_contains(b, 0) && !bitmap_contains(b, 1700));
         }
         _ => panic!("broad range must be a bitmap"),
     }
 
-    // Beyond half (values 0..=900 → 3604 entries, 88%): complement scatter, loose.
+    // Beyond half (values 0..900 → 3600 entries, 88%): complement scatter, loose.
     let (lo, hi) = bounds(CmpOp::Lt, 900.0);
     let nr = super::range_narrowed(archived, lo, hi, n, true, true).expect("broad_ok materializes the complement");
     assert!(!nr.tight, "complement over-includes unindexed printings");
     match &nr.set {
         Candidates::PrintingBits(b) => {
-            assert_eq!(b.iter().map(|w| w.count_ones()).sum::<u32>(), 3604);
+            assert_eq!(b.iter().map(|w| w.count_ones()).sum::<u32>(), 3600);
             assert!(bitmap_contains(b, 0) && !bitmap_contains(b, 3700));
         }
         _ => panic!("broad range must be a bitmap"),
@@ -4267,11 +4279,11 @@ fn not_over_partial_and_is_blocked() {
 }
 
 
-// The review's reproduction: price bounds are widened one position for
-// f32/f64 rounding (superset contract), so a price-range set must never be
-// tight — Not would complement away the boundary printings, which are exactly
-// the negation's matches. A printing priced exactly 5.0 fails `usd>5` and
-// must survive `-usd>5`.
+// The review's reproduction: `tight_narrow_space` still declines price (deliberately —
+// composition/Not-arm safety for a printing-varying field is deferred to
+// local-engine-broad-range-fastpath.md's fastpath work, even though price_bounds itself is now
+// exact), so Not(usd>5) takes the plain per-candidate tri() path, not narrow_rec's Not-arm
+// complement shortcut. A printing priced exactly 5.0 fails `usd>5` and must survive `-usd>5`.
 #[test]
 fn not_over_price_range_keeps_boundary_matches() {
     let mut vocab = VocabInterner::new();
@@ -4294,6 +4306,66 @@ fn not_over_price_range_keeps_boundary_matches() {
         &mut f, None, "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
     );
     assert_eq!(total, 1, "the boundary-priced card matches -usd>5 and must not be complemented away");
+}
+
+// price_bounds' exactness rests on two facts, both checked here rather than just asserted in a
+// doc comment: every real cent value up to well past the actual max price ($5,142.02) gets a
+// distinct, monotonically increasing sort-bits encoding (no two different prices collide), and
+// the cents-grid floor/ceil bound matches direct floating comparison for every operator, on- and
+// off-grid alike.
+#[test]
+fn f32_sort_bits_distinguishes_every_cent_up_to_50k() {
+    let mut prev: Option<u32> = None;
+    for cents in 1..=5_000_000u32 {
+        // 10x the real max price ($5,142.02) -- comfortably past where f32 could plausibly
+        // start losing cent resolution (estimated crossover ~$84k from f32's ~2^-23 relative
+        // precision).
+        let bits = super::f32_sort_bits(cents as f32 / 100.0);
+        if let Some(p) = prev {
+            assert!(bits > p, "cents {} and {} collided or went non-monotonic: {} vs {}", cents - 1, cents, p, bits);
+        }
+        prev = Some(bits);
+    }
+}
+
+#[test]
+fn price_bounds_matches_direct_comparison_on_and_off_grid() {
+    // Real prices only ever exist at cent granularity; thresholds include on-grid values a user
+    // would actually type, and deliberately off-grid ones an arithmetic expression could produce
+    // (e.g. usd<cmc*7.13) -- price_bounds must be exact for both.
+    let thresholds = [50.00_f64, 49.99, 0.01, 5142.02, 100.00, 49.998, 50.003, 33.335, 0.005, 12.3456789, 0.0];
+    let ops = [
+        (CmpOp::Lt, "Lt"),
+        (CmpOp::Le, "Le"),
+        (CmpOp::Gt, "Gt"),
+        (CmpOp::Ge, "Ge"),
+        (CmpOp::Eq, "Eq"),
+    ];
+    for &t in &thresholds {
+        for &(op, op_name) in &ops {
+            let (lo, hi) = super::price_bounds(op, t).expect("price_bounds only returns None for Ne");
+            for cents in (1..514_202u32).step_by(37) {
+                // sampled every 37 cents across the real max-price range, not exhaustive --
+                // f32_sort_bits_distinguishes_every_cent_up_to_50k already proves the encoding
+                // itself has no gaps to hide a failure in between sample points.
+                let price = cents as f64 / 100.0;
+                let bits = super::f32_sort_bits(price as f32);
+                let expected = match op {
+                    CmpOp::Lt => price < t,
+                    CmpOp::Le => price <= t,
+                    CmpOp::Gt => price > t,
+                    CmpOp::Ge => price >= t,
+                    CmpOp::Eq => (price - t).abs() < 1e-9,
+                    CmpOp::Ne => unreachable!(),
+                };
+                let in_range = bits >= lo && bits < hi;
+                assert_eq!(
+                    in_range, expected,
+                    "price_bounds({op_name}, {t}) disagrees with direct comparison at price {price} (bits {bits}, range [{lo}, {hi}))"
+                );
+            }
+        }
+    }
 }
 
 // ─── Name bigram index (#639) ─────────────────────────────────────────────────

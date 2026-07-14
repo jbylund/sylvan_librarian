@@ -1,9 +1,10 @@
 # Engine: numeric-range bitplanes for cmc/power/toughness
 
-Follow-on to #630 (phases 1/2 shipped as PR #633, #654). Not in scope for
-#634 (permuted bitmap / exactness promotion, `engine-permuted-bitmap-order-
-phase.md`) — filed separately, surfaced while benchmarking that work. Status:
-proposed, not designed in detail yet.
+GitHub: #655. Follow-on to #630 (phases 1/2 shipped as PR #633, #654). Not in
+scope for #634 (permuted bitmap / exactness promotion,
+[00634-engine-permuted-bitmap-order-phase.md](00634-engine-permuted-bitmap-order-phase.md))
+— filed separately, surfaced while benchmarking that work. Status: done — see
+"Results" below.
 
 ## Problem
 

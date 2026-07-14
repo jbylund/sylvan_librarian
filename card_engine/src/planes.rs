@@ -95,7 +95,7 @@ pub(crate) const PLANE_RESTRICTED_ABSENT: usize = PLANE_RESTRICTED_EXISTS + MAX_
 /// just another plane, no different from "power==5" — which is what lets a
 /// sparse tail (power has 2 cards at -1) get absorbed automatically instead
 /// of needing a side table or a live re-query. See
-/// docs/issues/local-engine-numeric-range-planes.md for the design history.
+/// docs/issues/00655-engine-numeric-range-planes.md for the design history.
 const NUM_INTERIOR_LO: i32 = 0;
 const NUM_INTERIOR_HI: i32 = 12;
 const NUM_INTERIOR_WIDTH: usize = (NUM_INTERIOR_HI - NUM_INTERIOR_LO + 1) as usize;

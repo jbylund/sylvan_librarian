@@ -1918,17 +1918,33 @@ fn build_range_index(printings: &[Printing], get: impl Fn(&Printing) -> Option<u
     idx
 }
 
+/// Every stored price is exactly cent-precise (checked against the corpus: 0 of 81,540 priced
+/// printings differ from their rounded-to-cent value by more than 0.001) and the real max price
+/// ($5,142.02) is far below where f32 loses cent resolution (ULP ~$0.0006 there, 16x finer than
+/// a cent) — verified collision-free for every adjacent cent pair up to $50,000, 10x the real
+/// max (`f32_sort_bits_distinguishes_every_cent_up_to_50k` in tests.rs). So snapping to the
+/// cents grid via floor/ceil before computing bounds — the same technique `int_range_bounds`
+/// uses for `collector_number`'s integer domain — gives an exact bound for any threshold,
+/// on-grid or not (`price_bounds_matches_direct_comparison_on_and_off_grid`), with no need to
+/// defer to a downstream verify pass.
+const PRICE_CENTS_PER_DOLLAR: f64 = 100.0;
+
 /// Half-open [lo, hi) sort-bits bounds for `price op value`, or None for Ne.
-/// Query values are f64 while prices are f32, so bounds are widened by one
-/// position where rounding could otherwise exclude a real match — narrowing
-/// must stay a superset; the walk verifies exactly.
 fn price_bounds(op: CmpOp, value: f64) -> Option<(u32, u32)> {
-    let b = f32_sort_bits(value as f32);
+    let cent_to_bits = |c: f64| f32_sort_bits((c / PRICE_CENTS_PER_DOLLAR) as f32);
     match op {
         CmpOp::Ne => None,
-        CmpOp::Eq => Some((b, b.saturating_add(1))),
-        CmpOp::Lt | CmpOp::Le => Some((0, b.saturating_add(1))),
-        CmpOp::Gt | CmpOp::Ge => Some((b, u32::MAX)),
+        // Eq's single-bit-pattern bound has no strict/non-strict ambiguity to resolve, so it
+        // doesn't need cents-snapping: an off-grid value (no real price could ever equal it)
+        // correctly narrows to nothing, exactly as it does today.
+        CmpOp::Eq => {
+            let b = f32_sort_bits(value as f32);
+            Some((b, b.saturating_add(1)))
+        }
+        CmpOp::Lt => Some((0, cent_to_bits((value * PRICE_CENTS_PER_DOLLAR).ceil()))),
+        CmpOp::Le => Some((0, cent_to_bits((value * PRICE_CENTS_PER_DOLLAR).floor() + 1.0))),
+        CmpOp::Gt => Some((cent_to_bits((value * PRICE_CENTS_PER_DOLLAR).floor() + 1.0), u32::MAX)),
+        CmpOp::Ge => Some((cent_to_bits((value * PRICE_CENTS_PER_DOLLAR).ceil()), u32::MAX)),
     }
 }
 
@@ -2557,8 +2573,11 @@ fn tight_narrow_space(f: &FilterExpr) -> Option<bool> {
         FilterExpr::NumericCmp { lhs, rhs, .. } => {
             let f = |e: &NumExpr| match e {
                 NumExpr::Field(NumField::Cmc | NumField::Power | NumField::Toughness) => Some(false),
-                // Price is absent deliberately: its bounds are widened
-                // supersets (see range_narrowed), never tight.
+                // Price is absent deliberately, even though price_bounds now produces exact
+                // (not widened) bounds: this classifier gates the Not arm's complement-safety
+                // check, which is a separate question from range_narrowed's own exactness —
+                // deferred to local-engine-broad-range-fastpath.md's fastpath work, not yet
+                // reviewed for composition safety here.
                 NumExpr::Field(NumField::CollectorNumberInt) => Some(true),
                 NumExpr::Const(_) => None,
                 _ => None,
@@ -2837,7 +2856,7 @@ fn narrow_rec(
             let numeric = |idx, op, v: &f64| numeric_candidates(idx, op, *v).and_then(|c| Narrowed::tight(Candidates::Cards(c)));
             let rarity = |op, v: &f64| narrow_rarity(indexes, n_cards, op, *v);
             let price = |op, v: &f64| {
-                price_bounds(op, *v).and_then(|(lo, hi)| range_narrowed(&indexes.price_usd, lo, hi, n_printings, broad_ok, false))
+                price_bounds(op, *v).and_then(|(lo, hi)| range_narrowed(&indexes.price_usd, lo, hi, n_printings, broad_ok, true))
             };
             let cn = |op, v: &f64| match int_range_bounds(op, *v)? {
                 None => Narrowed::tight(Candidates::Printings(Vec::new())),
