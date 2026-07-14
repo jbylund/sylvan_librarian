@@ -2928,6 +2928,69 @@ fn price_comparison_matches_exact_value_not_lossy_f32_widening() {
     assert!(!cmp(CmpOp::Gt).matches(card, p, &archived.strings));
 }
 
+// The `price` closure in narrow_rec's NumericCmp arm is int_range_bounds(op,
+// snap_to_nearest_cent(v * PRICE_CENTS_PER_DOLLAR)) -- not a standalone function anymore (the
+// old price_bounds was deleted), so this pins down that exact composition directly rather than
+// through a name that no longer exists. Thresholds include on-grid values a user would actually
+// type (paired with their exact cents value, Some(_)) and deliberately off-grid ones an
+// arithmetic expression could produce (paired with None); 0.28 and 0.57 are the review-caught
+// repro values (`0.28_f64 * 100.0 == 28.000000000000004`, `0.57_f64 * 100.0 ==
+// 56.99999999999999`) that snap_to_nearest_cent exists to correct.
+#[test]
+fn price_narrowing_bound_matches_direct_comparison_on_and_off_grid() {
+    let thresholds: &[(f64, Option<u32>)] = &[
+        (50.00, Some(5000)), (49.99, Some(4999)), (0.01, Some(1)), (5142.02, Some(514202)),
+        (100.00, Some(10000)), (0.28, Some(28)), (0.57, Some(57)), (0.0, Some(0)),
+        (49.998, None), (50.003, None), (33.335, None), (0.005, None), (12.3456789, None),
+    ];
+    let ops = [
+        (CmpOp::Lt, "Lt"),
+        (CmpOp::Le, "Le"),
+        (CmpOp::Gt, "Gt"),
+        (CmpOp::Ge, "Ge"),
+        (CmpOp::Eq, "Eq"),
+    ];
+    let bound = |op, v: f64| super::int_range_bounds(op, super::snap_to_nearest_cent(v * 100.0)).unwrap();
+
+    for &(t, on_grid_cents) in thresholds {
+        for &(op, op_name) in &ops {
+            let range = bound(op, t);
+            let in_range = |cents: u32| match range {
+                None => false, // provably empty
+                Some((lo, hi)) => cents >= lo && cents < hi,
+            };
+            if let Some(cents) = on_grid_cents {
+                let price = f64::from(cents) / 100.0;
+                let expected = match op {
+                    CmpOp::Lt => price < t,
+                    CmpOp::Le => price <= t,
+                    CmpOp::Gt => price > t,
+                    CmpOp::Ge => price >= t,
+                    CmpOp::Eq => true,
+                    CmpOp::Ne => unreachable!(),
+                };
+                assert_eq!(in_range(cents), expected, "{op_name}({t}) disagrees with direct comparison AT ITS OWN threshold price {price}");
+            }
+            for cents in (1..514_202u32).step_by(37) {
+                // sampled every 37 cents across the real max-price range -- not exhaustive, but
+                // int_range_bounds' own exactness over the integer domain is already trusted
+                // (mirrors collector_number's identical usage); this is specifically about
+                // whether *100.0 + snap survives the multiplication noise it's meant to correct.
+                let price = cents as f64 / 100.0;
+                let expected = match op {
+                    CmpOp::Lt => price < t,
+                    CmpOp::Le => price <= t,
+                    CmpOp::Gt => price > t,
+                    CmpOp::Ge => price >= t,
+                    CmpOp::Eq => (price - t).abs() < 1e-9,
+                    CmpOp::Ne => unreachable!(),
+                };
+                assert_eq!(in_range(cents), expected, "{op_name}({t}) disagrees with direct comparison at price {price}");
+            }
+        }
+    }
+}
+
 // ─── Bitplanes (#630) ─────────────────────────────────────────────────────────
 
 /// A color/type-diverse store for plane parity: colorless, mono, guild pairs,

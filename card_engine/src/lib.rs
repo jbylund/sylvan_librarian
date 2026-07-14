@@ -1884,8 +1884,9 @@ fn assign_artwork_groups(printings: &mut [Printing], offsets: &[u32]) -> Vec<u16
 // Sorted (value, printing idx); binary-searched ranges answer range filters in
 // printing space. Printings without the value are absent (they can never
 // satisfy a comparison — SQL NULL semantics). Dates store yyyymmdd directly;
-// collector numbers store the extracted int; prices store
-// f32_sort_bits(price), which orders like the float.
+// collector numbers store the extracted int; prices store raw integer cents
+// directly (see Printing::price_usd's doc comment) — no f32_sort_bits
+// encoding needed, cents are already a natural, monotonic u32.
 
 type PrintingRangeIndex = Vec<(u32, u32)>;
 
@@ -2576,8 +2577,14 @@ fn tight_narrow_space(f: &FilterExpr) -> Option<bool> {
         FilterExpr::NumericCmp { lhs, rhs, .. } => {
             let f = |e: &NumExpr| match e {
                 NumExpr::Field(NumField::Cmc | NumField::Power | NumField::Toughness) => Some(false),
-                // Price is absent deliberately: its bounds are widened
-                // supersets (see range_narrowed), never tight.
+                // Price is absent deliberately, even though range_narrowed is now called with
+                // exact=true for it (see the `price` closure below): this classifier gates the
+                // Not arm's complement-safety check, a separate question from range_narrowed's
+                // own exactness. A price-range set's complement would need to correctly exclude
+                // NULL-priced printings, which are simply absent from the index rather than
+                // failing a bound check -- deferred to
+                // docs/issues/local-engine-broad-range-fastpath.md's fastpath work, not yet
+                // reviewed for composition safety here.
                 NumExpr::Field(NumField::CollectorNumberInt) => Some(true),
                 NumExpr::Const(_) => None,
                 _ => None,

@@ -94,22 +94,29 @@ depended on, rather than patching around either one:
   path uses raw cents directly (order-preserving either way, and cents fit exactly in `f32`'s
   24-bit mantissa up to the real max price, so no dollars conversion needed there at all).
 
-**Verified, not just argued.** Two permanent regression tests in `tests.rs` prove the underlying
-math: `f32_sort_bits_distinguishes_every_cent_up_to_50k` (zero sort-bits collisions across every
-adjacent cent pair to $50,000, 10× the real max price) and
-`price_bounds_matches_direct_comparison_on_and_off_grid` (zero disagreements with direct
-floating comparison across 11 thresholds × 5 operators × ~13,900 sampled real prices, cent-aligned
-and deliberately off-grid alike). Two more prove the end-to-end behavior at the exact boundary:
-`price_narrowing_and_verification_are_exact_at_the_boundary` (`Lt` excludes, `Le`/`Ge`/`Eq`
-include, at a real boundary price) and `price_comparison_matches_exact_value_not_lossy_f32_widening`
-(the literal `$7.22` repro from the Bug B writeup).
+**Verified, not just argued** — three permanent regression tests in `tests.rs`, corrected once
+during review (an earlier draft of this doc named two tests, ported from the design/prototype
+work on the now-closed #687, that never actually made it into this branch's `tests.rs`; caught
+in review of this PR, since #687's `f32_sort_bits`-based test doesn't even apply to this design —
+cents are the raw sort key now, no `f32_sort_bits` encoding involved for price at all):
+
+- `price_narrowing_bound_matches_direct_comparison_on_and_off_grid` — the actual mechanism now in
+  play, `int_range_bounds(op, snap_to_nearest_cent(v * 100.0))` (the `price` closure's exact
+  composition, since standalone `price_bounds` was deleted), checked against direct floating
+  comparison across 13 thresholds (cent-aligned and deliberately off-grid/arithmetic-derived, incl.
+  the review-caught `0.28`/`0.57` repro values) × 5 operators × ~13,900 sampled real prices, zero
+  disagreements.
+- `price_narrowing_and_verification_are_exact_at_the_boundary` — `Lt` excludes, `Le`/`Ge`/`Eq`
+  include, at a real boundary price, both in narrowing and in end-to-end verification.
+- `price_comparison_matches_exact_value_not_lossy_f32_widening` — the literal `$7.22` repro from
+  the Bug B writeup.
 
 Beyond the unit tests, re-ran the exact stress test that originally surfaced Bug B — 20 random
 seeds × up to 30 real generated prices sampled as query thresholds × 5 operators, comparing the
 engine against `test_engine_property.py`'s reference oracle — before the fix this failed on
 essentially every case (`Eq` universally, `Ge`/`Le` at every sampled boundary); after, **0
 failures out of 3,000 checks** (`unique=printing`) **and 0 failures out of 4,000** more
-(`unique=card`/`artwork`). `cargo test` (debug + release): 117 passed. `pytest` on
+(`unique=card`/`artwork`). `cargo test` (debug + release): **116 passed**. `pytest` on
 `test_engine_unit.py`/`test_engine_property.py` (including the 250-seeded-query differential
 suite against a reference oracle sharing no code with the engine): 159 passed. `cargo clippy`:
 37 warnings, diffed by file:line against `main` — identical set, just shifted by this change's
