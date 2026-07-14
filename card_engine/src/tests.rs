@@ -2,7 +2,7 @@ use super::{
     assign_name_ranks,
     build_numeric_index, build_oracle_text_index, build_tag_index, build_trigram_index,
     build_rarity_index, build_flavor_index, build_thresholded_tag_index, build_sort_permutations,
-    build_artwork_group_counts, build_bit_planes, build_border_planes, build_divergent_ids, build_name_bigram_index, flavor_fingerprint, flavor_match_sets,
+    build_artwork_group_counts, build_bit_planes, build_divergent_ids, build_name_bigram_index, flavor_fingerprint, flavor_match_sets,
     cards_of_printings, count_common_keywords, count_common_types,
     build_artist_index, build_range_index, range_candidates, narrow_candidates, rarity_candidates,
     range_too_broad_to_narrow, run_query, trigram_candidates, finalize_trigram_index, PrintingRangeIndex, NARROW_FLOOR,
@@ -227,7 +227,11 @@ fn store_of(cards: Vec<OracleCard>, printing_counts: &[usize], vocab: VocabInter
     // Real planes and bigrams so narrowing tests see the same store shape
     // reload_commit builds (type narrowing goes through the planes since #637).
     let indexes = CardIndexes {
-        planes: build_bit_planes(&cards, &printings, &offsets),
+        // No printing sets card_border_id away from NONE_STR at this point (any
+        // border values a fixture wants get set after store_of returns, same as
+        // border_planes_fixture_store already does), so an empty string table is
+        // safe here -- the border-scatter loop skips every printing regardless.
+        planes: build_bit_planes(&cards, &printings, &offsets, &[]),
         name_bigrams: build_name_bigram_index(&cards),
         legal_divergent: build_divergent_ids(&cards),
         sort_perms: build_sort_permutations(&cards, &printings, &offsets),
@@ -412,13 +416,26 @@ fn rarity_plane_fixture_store() -> CardData {
         }
     }
     data.indexes.rarity = build_rarity_index(&data.printings, &data.offsets);
-    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets);
+    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
     data
+}
+
+/// True for the (op, val) pairs where the shared "above mythic" plane can't
+/// resolve the comparison exactly -- val is 4 (special) or 5 (bonus)
+/// specifically, and the op needs to tell them apart (docs/issues/
+/// engine-existential-plane-generalization.md, #680's "K exact + 1 shared
+/// hi bucket" design, following the same tail-bucket shape as
+/// cmc/power/toughness's PLANE_*_HI, just fixed at [4,5] instead of
+/// live-observed). Every other (op, val) combination is unambiguous because
+/// 4 and 5 always agree on which side of any *other* threshold they fall.
+fn rarity_hi_ambiguous(op: CmpOp, val: f64) -> bool {
+    matches!((val, op), (4.0, CmpOp::Eq | CmpOp::Ne | CmpOp::Le | CmpOp::Gt) | (5.0, CmpOp::Eq | CmpOp::Ne | CmpOp::Lt | CmpOp::Ge))
 }
 
 /// The plane-aware narrowing function must reproduce the true existence
 /// projection ("does any printing of this card satisfy op(rarity, val)") for
-/// every op, across the full 0-5 domain and an impossible threshold — the
+/// every op, across the full 0-5 domain and an impossible threshold, in
+/// every case it doesn't legitimately decline (`rarity_hi_ambiguous`) — the
 /// reference here is brute force over RARITY_PLANE_FIXTURE directly, not
 /// rarity_candidates (which declines for Ne and over-ceiling unions, so it
 /// can't serve as the reference for every op the way the plane path must
@@ -445,19 +462,24 @@ fn rarity_plane_candidates_matches_existence_projection() {
     ];
     for (name, op) in ops {
         for val in [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 2.5, -1.0, 6.0] {
-            let bits = super::rarity_plane_candidates(&archived.indexes, n_cards, op, val).expect("plane path must not decline");
-            let want: Vec<u32> = RARITY_PLANE_FIXTURE
-                .iter()
-                .enumerate()
-                .filter(|(_, rarities)| rarities.iter().any(|r| r.is_some_and(|r| keep(op, f64::from(r), val))))
-                .map(|(cid, _)| cid as u32)
-                .collect();
-            for cid in 0..n_cards as u32 {
-                assert_eq!(
-                    bitmap_contains(&bits, cid),
-                    want.contains(&cid),
-                    "op {name} val {val}: card {cid} membership mismatch"
-                );
+            match super::rarity_plane_candidates(&archived.indexes, n_cards, op, val) {
+                None => assert!(rarity_hi_ambiguous(op, val), "op {name} val {val}: plane path declined unexpectedly"),
+                Some(bits) => {
+                    assert!(!rarity_hi_ambiguous(op, val), "op {name} val {val}: plane path should have declined but didn't");
+                    let want: Vec<u32> = RARITY_PLANE_FIXTURE
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, rarities)| rarities.iter().any(|r| r.is_some_and(|r| keep(op, f64::from(r), val))))
+                        .map(|(cid, _)| cid as u32)
+                        .collect();
+                    for cid in 0..n_cards as u32 {
+                        assert_eq!(
+                            bitmap_contains(&bits, cid),
+                            want.contains(&cid),
+                            "op {name} val {val}: card {cid} membership mismatch"
+                        );
+                    }
+                }
             }
         }
     }
@@ -482,38 +504,96 @@ fn rarity_plane_null_rarity_card_matches_nothing() {
     ];
     for (name, op) in ops {
         for val in [0.0, 1.0, 2.0, 3.0, 4.0, 5.0] {
-            let bits = super::rarity_plane_candidates(&archived.indexes, n_cards, op, val).expect("plane path must not decline");
+            let Some(bits) = super::rarity_plane_candidates(&archived.indexes, n_cards, op, val) else {
+                assert!(rarity_hi_ambiguous(op, val), "op {name} val {val}: plane path declined unexpectedly");
+                continue;
+            };
             assert!(!bitmap_contains(&bits, null_card), "op {name} val {val}: null-rarity card must never match");
         }
     }
 }
 
-/// Rarity is PrintingDep (a card can have printings at multiple rarities), so
-/// it must never be exact-consumed via compile_plane/split_planes -- only the
-/// loose narrowing path (tested above) is sound. This is the correctness
-/// property the whole design depends on: routing rarity through compile_plane
-/// would silently promote it to all_match, skipping the per-printing
-/// verification that resolves mixed-rarity cards correctly.
+/// Rarity is now an existential-plane field (docs/issues/engine-existential-
+/// plane-generalization.md, #680), promoted the same way legality is
+/// (docs/issues/engine-legality-divergent-carveout.md): the 4 tracked values
+/// exact-consume via compile_plane, `!=val` on a tracked value is exact too
+/// (Or of the other tracked planes plus the shared hi plane), but a query
+/// needing to distinguish special from bonus specifically still declines to
+/// compile — the plane can't tell them apart (see `PLANE_RARITY_HI`'s doc) --
+/// and correctly falls back to the (unaffected) narrow_rec/RarityIndex path,
+/// not a silently wrong all_match.
 #[test]
-fn rarity_never_exact_consumed() {
+fn rarity_tracked_values_exact_consumed_hi_bucket_declines() {
     let data = plane_fixture_store();
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
     let bounds = &archived.indexes.planes;
     let words = &archived.indexes.oracle_trigram.words;
 
-    let rarity = FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), op: CmpOp::Eq, rhs: NumExpr::Const(3.0) };
-    assert!(compile_plane(&rarity, bounds, words).is_none(), "rarity must never compile to a plane expression");
+    let rarity_eq = |v: f64| FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), op: CmpOp::Eq, rhs: NumExpr::Const(v) };
 
-    // Mixed with an otherwise fully plane-expressible sibling: the rarity
-    // child must stay in the residual, not get silently dropped or promoted.
+    // Tracked values (mythic=3) compile exactly.
+    assert!(compile_plane(&rarity_eq(3.0), bounds, words).is_some(), "r:mythic must compile to a plane expression");
+    // Special/bonus specifically can't be told apart by the shared hi plane.
+    assert!(compile_plane(&rarity_eq(4.0), bounds, words).is_none(), "r:special must decline (hi bucket is ambiguous)");
+    assert!(compile_plane(&rarity_eq(5.0), bounds, words).is_none(), "r:bonus must decline (hi bucket is ambiguous)");
+
+    // Mixed with an otherwise fully plane-expressible sibling: an ambiguous
+    // rarity child must stay in the residual, not get silently dropped or promoted.
     let creature = FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
-    let (pe, residual) = split_planes(FilterExpr::And(vec![creature, rarity]), bounds, words, true);
+    let (pe, residual) = split_planes(FilterExpr::And(vec![creature, rarity_eq(4.0)]), bounds, words, true);
     assert!(pe.is_some(), "the creature child must still plane-consume");
     assert!(
         matches!(&residual, FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), .. }),
-        "rarity must remain in the residual, not be consumed to True"
+        "r:special must remain in the residual, not be consumed to True"
     );
+
+    // A tracked value's negation is exact too.
+    let not_mythic = FilterExpr::Not(Box::new(rarity_eq(3.0)));
+    assert!(compile_plane(&not_mythic, bounds, words).is_some(), "-r:mythic must compile to a plane expression");
+}
+
+/// Y=2 shared-witness decline: two distinct rarity plane indices under one
+/// And (whether from the same field, like a bounded range, or a different
+/// field entirely, like legality) can't be answered from independent
+/// existence planes -- the same argument as two distinct legality facts
+/// (docs/issues/engine-existential-plane-generalization.md point 1's hand
+/// verification), now exercised with rarity's own indices in scope.
+#[test]
+fn rarity_shared_witness_declines_same_field_and_cross_field() {
+    let data = legal_plane_fixture();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let bounds = &archived.indexes.planes;
+    let words = &archived.indexes.oracle_trigram.words;
+
+    let rarity_ge = |v: f64| FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), op: CmpOp::Ge, rhs: NumExpr::Const(v) };
+    let rarity_le = |v: f64| FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), op: CmpOp::Le, rhs: NumExpr::Const(v) };
+
+    // rarity>=rare AND rarity<=mythic: two distinct tracked plane indices
+    // (rare, mythic) shared between the two Or-trees -- must decline.
+    let bounded_range = FilterExpr::And(vec![rarity_ge(2.0), rarity_le(3.0)]);
+    assert!(compile_plane(&bounded_range, bounds, words).is_none(), "same-field rarity range must decline (shared witness)");
+
+    // format:A AND r:mythic: two distinct fields, still the identical
+    // shared-witness problem -- collect_existential_indices doesn't care
+    // which family a plane index came from.
+    let format_a = FilterExpr::Legality { shift: Some(0), expected: 0b01 };
+    let cross_field = FilterExpr::And(vec![format_a, FilterExpr::NumericCmp {
+        lhs: NumExpr::Field(NumField::RarityInt), op: CmpOp::Eq, rhs: NumExpr::Const(3.0),
+    }]);
+    assert!(compile_plane(&cross_field, bounds, words).is_none(), "legality+rarity compound must decline (shared witness)");
+
+    // The fallback must still produce the correct (not just declined)
+    // result: no printing in this fixture is both format-A-legal and
+    // mythic, so it must be zero, not a false positive from independently
+    // narrowing each fact.
+    let mut residual_check = cross_field;
+    let (total, _) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut residual_check, None, "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+    );
+    assert_eq!(total, 0, "no card in this fixture is both format-A-legal and mythic");
 }
 
 /// -rarity:x / rarity:x negation, exercised through narrow_rec end-to-end
@@ -545,14 +625,25 @@ fn rarity_not_arm_matches_existence_projection() {
     ];
     for (name, op) in ops {
         for val in [0.0, 1.0, 2.0, 3.0, 4.0, 5.0] {
-            // Not(field op val).
+            // A tracked value narrows exactly via the plane. Special/bonus
+            // specifically (val 4 or 5, hi-bucket-ambiguous op) may decline
+            // the plane and fall to RarityIndex postings instead -- which can
+            // itself decline for its own, pre-existing, unrelated reason (the
+            // MAX_UNION_FRACTION broadness guard, when the negated op selects
+            // most of the corpus). Either decline is a correct answer (a full
+            // residual scan is always correct, just unnarrowed), so this test
+            // only checks correctness when narrowing *does* happen -- the
+            // plane's own decline boundary is pinned down precisely by
+            // rarity_hi_ambiguous elsewhere, which doesn't depend on corpus
+            // shape the way the postings guard does.
             let filter = FilterExpr::Not(Box::new(FilterExpr::NumericCmp {
                 lhs: NumExpr::Field(NumField::RarityInt),
                 op,
                 rhs: NumExpr::Const(val),
             }));
-            let n = super::narrow_rec(&filter, &archived.indexes, &archived.offsets, &archived.cards, true)
-                .unwrap_or_else(|| panic!("Not(rarity {name} {val}) must narrow"));
+            let Some(n) = super::narrow_rec(&filter, &archived.indexes, &archived.offsets, &archived.cards, true) else {
+                continue;
+            };
             let cand = n.set.into_cards(&archived.offsets);
             let want: Vec<u32> = RARITY_PLANE_FIXTURE
                 .iter()
@@ -578,7 +669,7 @@ fn rarity_not_arm_matches_existence_projection() {
                 rhs: NumExpr::Field(NumField::RarityInt),
             }));
             let n2 = super::narrow_rec(&filter_flipped, &archived.indexes, &archived.offsets, &archived.cards, true)
-                .unwrap_or_else(|| panic!("Not({val} {name} field) must narrow"));
+                .unwrap_or_else(|| panic!("Not({val} {name} field) must narrow given Not(field {name} {val}) did"));
             let cand2 = n2.set.into_cards(&archived.offsets);
             assert_eq!(cand, cand2, "operand order must not change the result: {name} {val}");
         }
@@ -772,7 +863,7 @@ fn legal_plane_fixture() -> CardData {
     data.printings[1].card_legalities = (0b01 << 2) | (0b10 << 4); // card1: legal in B, restricted in C
     data.printings[2].card_legalities = 0b01 | (0b11 << 4); // card2 printing 1: legal in A, banned in C
     data.printings[3].card_legalities = 0b01 << 4; // card2 printing 2: not legal in A, legal (not banned) in C
-    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets);
+    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
     data.indexes.legal_divergent = build_divergent_ids(&data.cards);
     data
 }
@@ -924,7 +1015,7 @@ fn legality_cross_status_shared_witness_falls_back_to_correct_result() {
     let mut data = store_of(vec![card], &[2], vocab);
     data.printings[0].card_legalities = 0b11 << 4; // banned in C only
     data.printings[1].card_legalities = 0b10 << 4; // restricted in C only
-    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets);
+    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
     let bounds = &archived.indexes.planes;
@@ -960,7 +1051,7 @@ fn banned_plane_row_selection_preserves_divergent_printing_correctness() {
     let mut data = store_of(vec![card], &[2], vocab);
     data.printings[0].card_legalities = 0b01 << 4; // preferred: legal (not banned) in C
     data.printings[1].card_legalities = 0b11 << 4; // non-preferred: banned in C
-    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets);
+    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
     data.indexes.legal_divergent = build_divergent_ids(&data.cards);
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
@@ -1009,7 +1100,7 @@ fn legal_plane_narrowing_preserves_divergent_printing_correctness() {
     let mut data = store_of(vec![card], &[2], vocab);
     data.printings[0].card_legalities = 0; // preferred: not legal
     data.printings[1].card_legalities = 0b01; // non-preferred: legal
-    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets);
+    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
     data.indexes.legal_divergent = build_divergent_ids(&data.cards);
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
@@ -1054,7 +1145,7 @@ fn legal_plane_narrows_correctly_across_word_boundary() {
     for i in 0..n {
         data.printings[i].card_legalities = if i % 2 == 0 { 0b01 << 2 } else { 0 };
     }
-    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets);
+    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
@@ -1123,7 +1214,7 @@ fn legality_plane_promotion_respects_mode_through_split_planes() {
     let mut data = store_of(vec![card], &[2], vocab);
     data.printings[0].card_legalities = 0; // preferred: not legal
     data.printings[1].card_legalities = 0b01; // non-preferred: legal
-    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets);
+    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
     data.indexes.legal_divergent = build_divergent_ids(&data.cards);
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
@@ -1178,7 +1269,7 @@ fn legality_compound_and_respects_row_selection_for_unique_card() {
     let mut data = store_of(vec![card], &[2], vocab);
     data.printings[0].card_legalities = 0; // preferred: not legal in A
     data.printings[1].card_legalities = 0b01; // non-preferred: legal in A
-    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets);
+    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
     data.indexes.legal_divergent = build_divergent_ids(&data.cards);
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
@@ -1223,7 +1314,7 @@ fn legality_and_date_residual_must_be_checked_together() {
     data.printings[0].released_at_int = Some(20100101); // ...released before the cutoff
     data.printings[1].card_legalities = 0; // not legal in A, but...
     data.printings[1].released_at_int = Some(20220101); // ...released after the cutoff
-    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets);
+    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
     let bounds = &archived.indexes.planes;
@@ -1311,10 +1402,11 @@ fn fuzz_leaf_rarity(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
     FuzzSpec::Leaf(FuzzLeaf::Rarity { op: fuzz_op(rng), val: rng.random_range(0..=4u8) as f64 })
 }
 fn fuzz_leaf_border(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
-    // "gold" is deliberately untracked by the border planes (they only cover
-    // black/white/borderless) — a decline-to-narrow case that must still be
+    // "yellow" is deliberately untracked by the border planes (#680 tracks
+    // black/white/borderless/gold, folding anything else into the shared
+    // `other` plane) — a decline-to-compile-exactly case that must still be
     // evaluated correctly via the residual path.
-    const BORDERS: [&str; 4] = ["black", "white", "borderless", "gold"];
+    const BORDERS: [&str; 5] = ["black", "white", "borderless", "gold", "yellow"];
     FuzzSpec::Leaf(FuzzLeaf::Border { value: BORDERS[rng.random_range(0..BORDERS.len())].to_string() })
 }
 fn fuzz_leaf_legality(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
@@ -1430,7 +1522,7 @@ fn fuzz_store(rng: &mut rand::rngs::SmallRng) -> CardData {
     fn rand_word(rng: &mut rand::rngs::SmallRng) -> u64 {
         FUZZ_SHIFTS.iter().fold(0u64, |w, &s| w | (rng.random_range(0..4u64) << s))
     }
-    const BORDERS: [Option<&str>; 5] = [Some("black"), Some("white"), Some("borderless"), Some("gold"), None];
+    const BORDERS: [Option<&str>; 6] = [Some("black"), Some("white"), Some("borderless"), Some("gold"), Some("yellow"), None];
 
     let ncards = rng.random_range(5..=15usize);
     let mut vocab = VocabInterner::new();
@@ -1491,9 +1583,8 @@ fn fuzz_store(rng: &mut rand::rngs::SmallRng) -> CardData {
     // store_of built indexes from the placeholder printings; rebuild every index
     // that depends on the fields mutated above.
     data.indexes.rarity = build_rarity_index(&data.printings, &data.offsets);
-    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets);
+    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
     data.indexes.legal_divergent = build_divergent_ids(&data.cards);
-    data.indexes.border_planes = build_border_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
     data.indexes.sort_perms = build_sort_permutations(&data.cards, &data.printings, &data.offsets);
     data
 }
@@ -1670,7 +1761,7 @@ fn legality_shared_witness_and_falls_back_to_correct_result() {
     let mut data = store_of(vec![card], &[2], vocab);
     data.printings[0].card_legalities = 0b01; // legal in A (shift 0) only
     data.printings[1].card_legalities = 0b01 << 2; // legal in B (shift 2) only
-    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets);
+    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
     let bounds = &archived.indexes.planes;
@@ -1706,7 +1797,7 @@ fn legality_de_morgan_not_of_compound() {
     let mut data = store_of(vec![card], &[2], vocab);
     data.printings[0].card_legalities = 0b01; // legal in A
     data.printings[1].card_legalities = 0; // not legal in A
-    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets);
+    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
     let bounds = &archived.indexes.planes;
@@ -1916,10 +2007,9 @@ fn bench_checked_vs_unchecked_access() {
         collector_number: Vec::new(),
         sort_perms:     build_sort_permutations(&cards, &printings, &offsets),
         artwork_groups: build_artwork_group_counts(&printings, &offsets),
-        planes:         build_bit_planes(&cards, &printings, &offsets),
+        planes:         build_bit_planes(&cards, &printings, &offsets, &strings),
         name_bigrams:   build_name_bigram_index(&cards),
         legal_divergent: build_divergent_ids(&cards),
-        border_planes:  build_border_planes(&cards, &printings, &offsets, &strings),
     };
     let data = CardData {
         cards,
@@ -3621,12 +3711,18 @@ fn trigram_dense_sparse_dispatch_parity() {
     assert_eq!(super::intersect_operands(ops), vec![1, 2, 3, 4, 5, 6], "plane x plane AND path, no posting seed available");
 }
 
-// ─── Border planes (docs/issues/engine-border-planes.md, #664) ─────────────
+// ─── Border planes (docs/issues/done/engine-border-planes.md, #664; promoted
+// to an existential field reaching compile_plane/all_match for the 4 tracked
+// values by docs/issues/engine-existential-plane-generalization.md, #680) ──
 
-/// 8 cards with varied printing-level border colors. Card 3 independently has
+/// 9 cards with varied printing-level border colors. Card 3 independently has
 /// a black printing *and* a separate borderless printing — the shared-witness
 /// correctness canary subject: `border:black border:borderless` must find no
 /// single printing satisfying both, even though the card "has" each color.
+/// Card 5 (gold) is now a *tracked* value, unlike before #680; card 8
+/// (yellow) is the genuinely-untracked subject exercising the shared `other`
+/// plane -- real Scryfall data (all yellow-border cards are from Aetherdrift/
+/// `dft`), not a synthetic placeholder.
 fn border_planes_fixture_store() -> CardData {
     let mut vocab = VocabInterner::new();
     let mut interner = Interner::new();
@@ -3636,9 +3732,10 @@ fn border_planes_fixture_store() -> CardData {
         &[Some("borderless")],                                 // 2: pure borderless
         &[Some("black"), Some("borderless")],                  // 3: shared-witness subject
         &[Some("white")],                                       // 4: pure white
-        &[Some("gold")],                                        // 5: untracked value only
+        &[Some("gold")],                                        // 5: tracked (4th value)
         &[None],                                                 // 6: missing border
-        &[Some("black"), Some("white"), Some("borderless")],   // 7: all three tracked
+        &[Some("black"), Some("white"), Some("borderless")],   // 7: all tracked values at once
+        &[Some("yellow")],                                       // 8: untracked -- the shared `other` plane's subject
     ];
     let cards: Vec<OracleCard> = specs.iter().enumerate().map(|(i, _)| stub_card(i as u128 + 1, TYPE_CREATURE, &[], &mut vocab)).collect();
     let printing_counts: Vec<usize> = specs.iter().map(|s| s.len()).collect();
@@ -3651,7 +3748,7 @@ fn border_planes_fixture_store() -> CardData {
         }
     }
     data.strings = interner.strings;
-    data.indexes.border_planes = build_border_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
+    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
     data
 }
 
@@ -3670,11 +3767,11 @@ fn brute_force_has_border(archived: &Archived<CardData>, border: &str) -> Vec<u3
         .collect()
 }
 
-// The narrowed set must match the brute-force existential exactly (a solo
-// leaf's per-card existential really is exact), but must never be marked
-// tight -- these planes are never safe to feed through compile_plane or
-// complement via Not, regardless of how correct they happen to be in
-// isolation. See BorderPlanes' doc for why.
+// narrow_rec's border arm must reproduce the brute-force existential exactly
+// for every tracked value (a solo leaf's per-card existential really is
+// exact), but never mark it tight -- narrow_rec's loose narrowing feeds the
+// residual per-printing walk regardless of what compile_plane can separately
+// do with the same leaf (tested below).
 #[test]
 fn border_planes_exact_union_parity() {
     let data = border_planes_fixture_store();
@@ -3683,12 +3780,20 @@ fn border_planes_exact_union_parity() {
     let rec = |f: &FilterExpr| super::narrow_rec(f, &archived.indexes, &archived.offsets, &archived.cards, true);
     let border = |v: &str| FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value: v.to_string() };
 
-    for value in ["borderless", "white"] {
+    for value in ["borderless", "white", "gold"] {
         let expected = brute_force_has_border(archived, value);
         let n = rec(&border(value)).unwrap_or_else(|| panic!("border:{value} must narrow"));
-        assert!(!n.tight, "border planes must always narrow loose, never tight");
+        assert!(!n.tight, "border planes narrow loose through narrow_rec, tight or not is compile_plane's separate call to make");
         assert_eq!(n.set.into_cards(&archived.offsets), expected, "border:{value} narrowed set must match brute force");
     }
+
+    // Untracked (yellow): narrows loosely through the shared `other` plane --
+    // strictly better than declining outright, even though it can't tell
+    // yellow apart from a hypothetical second untracked value.
+    let expected_yellow = brute_force_has_border(archived, "yellow");
+    let n = rec(&border("yellow")).expect("untracked value must still narrow via the shared other plane");
+    assert!(!n.tight);
+    assert_eq!(n.set.into_cards(&archived.offsets), expected_yellow, "border:yellow narrowed set must match brute force");
 }
 
 // The regression test this design exists to guarantee: two independent
@@ -3696,46 +3801,109 @@ fn border_planes_exact_union_parity() {
 // has a black printing and a separate borderless printing, independently
 // satisfying both) -- but no single printing is both, so the real answer
 // (found by the residual per-printing walk the loose narrowing never
-// bypasses) must be zero matches.
+// bypasses) must be zero matches. Checked through both the unplaned path
+// (plane: None, exercising narrow_rec + card_pass alone) and the real planed
+// path (split_planes, exercising compile_plane's new shared-witness decline
+// for border -- see and_of_checked_for_shared_witness's generalization).
 #[test]
 fn border_shared_witness_correctness() {
     let data = border_planes_fixture_store();
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let bounds = &archived.indexes.planes;
+    let words = &archived.indexes.oracle_trigram.words;
     let border = |v: &str| FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value: v.to_string() };
 
-    let mut f = FilterExpr::And(vec![border("black"), border("borderless")]);
+    let and_both = FilterExpr::And(vec![border("black"), border("borderless")]);
+
+    assert!(
+        compile_plane(&and_both, bounds, words).is_none(),
+        "border:black AND border:borderless must decline to compile exactly (shared witness)"
+    );
+
+    let mut f = and_both;
     let (total, _) = run_query(
         &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
         &mut f, None, "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
     );
-    assert_eq!(total, 0, "no printing is both black and borderless: must be zero matches, not a false positive from independent narrowing");
+    assert_eq!(total, 0, "unplaned: no printing is both black and borderless");
+
+    let (pe, mut residual) = split_planes(
+        FilterExpr::And(vec![border("black"), border("borderless")]), bounds, words, true,
+    );
+    let (total2, _) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut residual, pe.as_ref(), "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+    );
+    assert_eq!(total2, 0, "planed: falls back to the same correct zero result, not a false positive from independent narrowing");
 }
 
-// Untracked values (gold/yellow) and non-Eq ops must decline to narrow at all
-// -- but the evaluated result (via the untouched residual path) must still be
-// correct end to end, since narrowing declining is advisory, not a
-// correctness concern.
+/// Tracked values (black/borderless/white/gold) now exact-consume via
+/// compile_plane, mirroring rarity/legality; an untracked value
+/// (`border:yellow`) can't be told apart from any other untracked value by
+/// the shared `other` plane, so it declines to compile exactly -- same shape
+/// as `r:special`/`r:bonus` -- while still narrowing loosely (tested above).
+/// Negation on a tracked value is exact too (Or of the other 3 tracked planes
+/// plus `other`).
 #[test]
-fn border_planes_decline_shapes() {
+fn border_tracked_values_exact_consumed_other_bucket_declines() {
     let data = border_planes_fixture_store();
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
-    let rec = |f: &FilterExpr| super::narrow_rec(f, &archived.indexes, &archived.offsets, &archived.cards, true);
-    let border_eq = |v: &str| FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value: v.to_string() };
+    let bounds = &archived.indexes.planes;
+    let words = &archived.indexes.oracle_trigram.words;
+    let border = |v: &str| FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value: v.to_string() };
 
-    assert!(rec(&border_eq("gold")).is_none(), "untracked border value must decline to narrow");
-    assert!(rec(&border_eq("yellow")).is_none());
+    for value in ["black", "borderless", "white", "gold"] {
+        assert!(compile_plane(&border(value), bounds, words).is_some(), "border:{value} must compile to a plane expression");
+        let not_value = FilterExpr::Not(Box::new(border(value)));
+        assert!(compile_plane(&not_value, bounds, words).is_some(), "-border:{value} must compile to a plane expression");
+    }
 
-    let border_ne = FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Ne, value: "black".to_string() };
-    assert!(rec(&border_ne).is_none(), "Ne must decline: these planes are never tight, so Not/Ne can't invert them");
+    assert!(compile_plane(&border("yellow"), bounds, words).is_none(), "border:yellow must decline (other bucket is ambiguous)");
+    let not_yellow = FilterExpr::Not(Box::new(border("yellow")));
+    assert!(compile_plane(&not_yellow, bounds, words).is_none(), "-border:yellow must decline (other bucket is ambiguous)");
 
-    let mut f = border_eq("gold");
-    let (total, _) = run_query(
-        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
-        &mut f, None, "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+    // Mixed with an otherwise fully plane-expressible sibling: the untracked
+    // child must stay in the residual, not get silently dropped or promoted.
+    let creature = FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
+    let (pe, residual) = split_planes(FilterExpr::And(vec![creature, border("yellow")]), bounds, words, true);
+    assert!(pe.is_some(), "the creature child must still plane-consume");
+    assert!(
+        matches!(&residual, FilterExpr::TextExact { field: TextField::Border, .. }),
+        "border:yellow must remain in the residual, not be consumed to True"
     );
-    assert_eq!(total, 1, "exactly card 5 has a gold printing");
+}
+
+/// The `other` bucket's exact-negation safety net, specifically: a card whose
+/// *only* printing carries an untracked border must still evaluate correctly
+/// (via `Or(..., other)`) for both a positive and a negated query on a
+/// tracked value -- proving the shared bucket really does close the domain by
+/// construction the way the design doc argues, not just for the cards this
+/// fixture happens to include incidentally.
+#[test]
+fn border_other_bucket_closes_domain_for_tracked_negation() {
+    let data = border_planes_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let bounds = &archived.indexes.planes;
+    let words = &archived.indexes.oracle_trigram.words;
+    let yellow_card = 8u32; // card 8: only printing is yellow (untracked)
+
+    let not_black = FilterExpr::Not(Box::new(FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value: "black".to_string() }));
+    let pe = compile_plane(&not_black, bounds, words).expect("-border:black must compile");
+    let mut bits = Vec::new();
+    eval_planes(&pe, bounds, &mut bits);
+    assert!(
+        bitmap_contains(&bits, yellow_card),
+        "a card whose only printing is untracked must satisfy -border:black (it has no black printing)"
+    );
+
+    let black = FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value: "black".to_string() };
+    let pe2 = compile_plane(&black, bounds, words).expect("border:black must compile");
+    let mut bits2 = Vec::new();
+    eval_planes(&pe2, bounds, &mut bits2);
+    assert!(!bitmap_contains(&bits2, yellow_card), "the same card must not satisfy border:black");
 }
 
 /// 7 of 8 cards have a black printing (87.5%, past narrow_candidates_exact's
@@ -3751,7 +3919,7 @@ fn border_broadness_fixture_store() -> CardData {
         data.printings[i].card_border_id = interner.intern(border.to_string());
     }
     data.strings = interner.strings;
-    data.indexes.border_planes = build_border_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
+    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
     data
 }
 
@@ -3864,7 +4032,7 @@ fn narrow_fixture_store() -> CardData {
     // rebuilt here too -- build_bit_planes already ran once inside store_of
     // before card_rarity_int was overwritten above, leaving stale (all-zero)
     // rarity plane bits otherwise.
-    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets);
+    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
     let mut set_codes: TagIndex = HashMap::new();
     for (i, p) in data.printings.iter().enumerate() {
         set_codes.entry(p.card_set_code.as_str().to_string()).or_default().push(i as u32);
