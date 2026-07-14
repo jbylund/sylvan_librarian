@@ -344,6 +344,31 @@ class TestCardProcessing:
         assert result["price_eur"] is None
         assert result["price_tix"] is None
 
+    def test_preprocess_card_defaults_missing_flavor_text_to_empty_string(self) -> None:
+        """Scryfall omits flavor_text entirely when a printing has none; we normalize to ''."""
+        card = create_test_card()
+        assert "flavor_text" not in card
+
+        result = preprocess_card(card)
+
+        assert result[0]["flavor_text"] == ""
+
+    def test_preprocess_card_defaults_null_flavor_text_to_empty_string(self) -> None:
+        """An explicit null flavor_text (not just an absent key) also normalizes to ''."""
+        card = create_test_card(flavor_text=None)
+
+        result = preprocess_card(card)
+
+        assert result[0]["flavor_text"] == ""
+
+    def test_preprocess_card_preserves_present_flavor_text(self) -> None:
+        """A real flavor_text value passes through unchanged."""
+        card = create_test_card(flavor_text="A flavor line.")
+
+        result = preprocess_card(card)
+
+        assert result[0]["flavor_text"] == "A flavor line."
+
     def test_preprocess_card_handles_non_numeric_power_toughness(self) -> None:
         """Test preprocess_card handles non-numeric power/toughness values."""
         card = create_test_card(
