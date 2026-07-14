@@ -309,9 +309,15 @@ struct Printing {
 
     card_rarity_int: Option<u8>,       // 0-5
     collector_number_int: Option<u16>, // some sets exceed i8::MAX
-    price_usd: Option<f32>,
-    price_eur: Option<f32>,
-    price_tix: Option<f32>,
+    // Integer cents, not f32 dollars: every real price is exactly cent-precise (checked against
+    // the corpus, 0 of 81,540 priced printings differ from their rounded-to-cent value by more
+    // than 0.001), and storing the lossy f32 approximation instead of the exact integer caused
+    // two real bugs (see docs/issues/local-engine-broad-range-fastpath.md) — a narrowing false
+    // negative from price_bounds' own cents conversion, and a verification false negative from
+    // comparing a widened-then-lossy field value against a full-precision query constant.
+    price_usd: Option<u32>,
+    price_eur: Option<u32>,
+    price_tix: Option<u32>,
     prefer_score: Option<f32>,
 
     // This printing's exact legality word; only consulted when the owning
@@ -367,9 +373,9 @@ struct CardRow {
     card_rarity_int: Option<u8>,
     collector_number_int: Option<u16>,
     edhrec_rank: Option<u32>,
-    price_usd: Option<f32>,
-    price_eur: Option<f32>,
-    price_tix: Option<f32>,
+    price_usd: Option<u32>, // integer cents -- see Printing's field for why
+    price_eur: Option<u32>,
+    price_tix: Option<u32>,
     prefer_score: Option<f32>,
     cubecobra_score: Option<f32>,
 
@@ -582,6 +588,16 @@ fn opt_date_str(d: &Bound<PyDict>, key: &str) -> Option<String> {
     Some(format!("{:04}-{:02}-{:02}", date.get_year(), date.get_month(), date.get_day()))
 }
 
+/// Parse a dollar-denominated price field into integer cents. Round rather than truncate --
+/// the source value is a decimal price (from Scryfall's JSON via Python's json/psycopg, both
+/// already correctly-rounded f64), so rounding to the nearest cent recovers the exact intended
+/// value even if the f64 isn't bit-exact for the decimal (see Printing's price_usd doc comment).
+fn opt_price_cents(d: &Bound<PyDict>, key: &str) -> Option<u32> {
+    d.get_item(key).ok().flatten().and_then(|v| {
+        v.extract::<f64>().ok().or_else(|| v.extract::<i64>().ok().map(|n| n as f64))
+    }).map(|dollars| (dollars * 100.0).round() as u32)
+}
+
 fn opt_f32(d: &Bound<PyDict>, key: &str) -> Option<f32> {
     d.get_item(key).ok().flatten().and_then(|v| {
         v.extract::<f64>().ok().map(|n| n as f32)
@@ -746,9 +762,9 @@ fn card_from_pydict(d: &Bound<PyDict>, it: &mut Interner, vocab: &mut VocabInter
         card_rarity_int: opt_u8(d, "card_rarity_int"),
         collector_number_int: opt_u16(d, "collector_number_int"),
         edhrec_rank: opt_u32(d, "edhrec_rank"),
-        price_usd: opt_f32(d, "price_usd"),
-        price_eur: opt_f32(d, "price_eur"),
-        price_tix: opt_f32(d, "price_tix"),
+        price_usd: opt_price_cents(d, "price_usd"),
+        price_eur: opt_price_cents(d, "price_eur"),
+        price_tix: opt_price_cents(d, "price_tix"),
         prefer_score: opt_f32(d, "prefer_score"),
         cubecobra_score: opt_f32(d, "cubecobra_score"),
 
@@ -1868,8 +1884,9 @@ fn assign_artwork_groups(printings: &mut [Printing], offsets: &[u32]) -> Vec<u16
 // Sorted (value, printing idx); binary-searched ranges answer range filters in
 // printing space. Printings without the value are absent (they can never
 // satisfy a comparison — SQL NULL semantics). Dates store yyyymmdd directly;
-// collector numbers store the extracted int; prices store
-// f32_sort_bits(price), which orders like the float.
+// collector numbers store the extracted int; prices store raw integer cents
+// directly (see Printing::price_usd's doc comment) — no f32_sort_bits
+// encoding needed, cents are already a natural, monotonic u32.
 
 type PrintingRangeIndex = Vec<(u32, u32)>;
 
@@ -1918,18 +1935,21 @@ fn build_range_index(printings: &[Printing], get: impl Fn(&Printing) -> Option<u
     idx
 }
 
-/// Half-open [lo, hi) sort-bits bounds for `price op value`, or None for Ne.
-/// Query values are f64 while prices are f32, so bounds are widened by one
-/// position where rounding could otherwise exclude a real match — narrowing
-/// must stay a superset; the walk verifies exactly.
-fn price_bounds(op: CmpOp, value: f64) -> Option<(u32, u32)> {
-    let b = f32_sort_bits(value as f32);
-    match op {
-        CmpOp::Ne => None,
-        CmpOp::Eq => Some((b, b.saturating_add(1))),
-        CmpOp::Lt | CmpOp::Le => Some((0, b.saturating_add(1))),
-        CmpOp::Gt | CmpOp::Ge => Some((b, u32::MAX)),
-    }
+/// Cents per dollar for price fields, now stored as integer cents (see Printing::price_usd's
+/// doc comment) rather than lossy f32 dollars.
+const PRICE_CENTS_PER_DOLLAR: f64 = 100.0;
+
+/// `value * PRICE_CENTS_PER_DOLLAR` is itself a new floating-point operation, not a lossless
+/// relabeling -- for roughly a quarter of two-decimal dollar amounts it lands just off the
+/// intended integer (`0.28_f64 * 100.0 == 28.000000000000004`), which would silently shift
+/// int_range_bounds' floor/ceil by a whole cent. The error is on the order of 1e-10 to 1e-15
+/// (`5142.02_f64 * 100.0 == 514202.00000000006`, the real max price), so 1e-6 has enormous
+/// margin over the noise while staying far below the smallest gap between a genuinely off-grid
+/// threshold and its nearest real cent value (checked empirically down to 0.005 in
+/// price_bounds_matches_direct_comparison_on_and_off_grid).
+fn snap_to_nearest_cent(cents: f64) -> f64 {
+    let rounded = cents.round();
+    if (cents - rounded).abs() < 1e-6 { rounded } else { cents }
 }
 
 /// Half-open [lo, hi) bounds for indexes over plain integers (collector
@@ -2175,7 +2195,7 @@ struct CardIndexes {
     flavor:         FlavorIndex,     // printing space (CSR by dense flavor text id)
     set_codes:      TagIndex,        // printing space
     released_at:    PrintingRangeIndex,       // printing space
-    price_usd:      PrintingRangeIndex,       // printing space (f32_sort_bits of the price)
+    price_usd:      PrintingRangeIndex,       // printing space (integer cents, already order-preserving)
     collector_number: PrintingRangeIndex,     // printing space (extracted int)
     sort_perms:     SortPermutations,          // card space (streamed selection)
     artwork_groups: Vec<u16>,                  // card space: distinct illustration groups
@@ -2557,8 +2577,14 @@ fn tight_narrow_space(f: &FilterExpr) -> Option<bool> {
         FilterExpr::NumericCmp { lhs, rhs, .. } => {
             let f = |e: &NumExpr| match e {
                 NumExpr::Field(NumField::Cmc | NumField::Power | NumField::Toughness) => Some(false),
-                // Price is absent deliberately: its bounds are widened
-                // supersets (see range_narrowed), never tight.
+                // Price is absent deliberately, even though range_narrowed is now called with
+                // exact=true for it (see the `price` closure below): this classifier gates the
+                // Not arm's complement-safety check, a separate question from range_narrowed's
+                // own exactness. A price-range set's complement would need to correctly exclude
+                // NULL-priced printings, which are simply absent from the index rather than
+                // failing a bound check -- deferred to
+                // docs/issues/local-engine-broad-range-fastpath.md's fastpath work, not yet
+                // reviewed for composition safety here.
                 NumExpr::Field(NumField::CollectorNumberInt) => Some(true),
                 NumExpr::Const(_) => None,
                 _ => None,
@@ -2836,8 +2862,12 @@ fn narrow_rec(
             // complement would wrongly exclude cards `-rarity:x` matches.
             let numeric = |idx, op, v: &f64| numeric_candidates(idx, op, *v).and_then(|c| Narrowed::tight(Candidates::Cards(c)));
             let rarity = |op, v: &f64| narrow_rarity(indexes, n_cards, op, *v);
-            let price = |op, v: &f64| {
-                price_bounds(op, *v).and_then(|(lo, hi)| range_narrowed(&indexes.price_usd, lo, hi, n_printings, broad_ok, false))
+            // Same shape as `cn` below now that price is integer cents, not lossy f32 dollars --
+            // the only price-specific step is snapping the *PRICE_CENTS_PER_DOLLAR conversion
+            // against its own floating-point noise before delegating to int_range_bounds.
+            let price = |op, v: &f64| match int_range_bounds(op, snap_to_nearest_cent(*v * PRICE_CENTS_PER_DOLLAR))? {
+                None => Narrowed::tight(Candidates::Printings(Vec::new())),
+                Some((lo, hi)) => range_narrowed(&indexes.price_usd, lo, hi, n_printings, broad_ok, true),
             };
             let cn = |op, v: &f64| match int_range_bounds(op, *v)? {
                 None => Narrowed::tight(Candidates::Printings(Vec::new())),
@@ -3240,8 +3270,8 @@ fn prefer_score(card: &AOracleCard, p: &APrinting, prefer: Prefer) -> f64 {
     match prefer {
         Prefer::Oldest  => -(p.released_at_int.as_ref().map(|v| u32::from(*v)).unwrap_or(99_999_999) as f64),
         Prefer::Newest  => p.released_at_int.as_ref().map(|v| u32::from(*v)).unwrap_or(0) as f64,
-        Prefer::UsdLow  => -(p.price_usd.as_ref().map(|v| f32::from(*v)).unwrap_or(f32::INFINITY) as f64),
-        Prefer::UsdHigh => p.price_usd.as_ref().map(|v| f32::from(*v)).unwrap_or(0.0) as f64,
+        Prefer::UsdLow  => -p.price_usd.as_ref().map(|v| f64::from(u32::from(*v)) / 100.0).unwrap_or(f64::INFINITY),
+        Prefer::UsdHigh => p.price_usd.as_ref().map(|v| f64::from(u32::from(*v)) / 100.0).unwrap_or(0.0),
         // Card-level (edhrec is oracle-scoped): every printing ties, so the
         // first printing in store order is chosen — same as before the split.
         Prefer::Promo   => -(card.edhrec_rank.as_ref().map(|r| u32::from(*r) as f64).unwrap_or(f64::INFINITY)),
@@ -3284,7 +3314,10 @@ fn sort_key_bits(card: &AOracleCard, p: &APrinting, sort_col: SortCol, descendin
         SortCol::Power      => card.creature_power.as_ref().map(|v| i8::from(*v) as f32),
         SortCol::Toughness  => card.creature_toughness.as_ref().map(|v| i8::from(*v) as f32),
         SortCol::Rarity     => p.card_rarity_int.as_ref().map(|v| u8::from(*v) as f32),
-        SortCol::PriceUsd   => p.price_usd.as_ref().map(|v| f32::from(*v)),
+        // Raw cents, not dollars -- order-preserving either way (this is a sort key, not an
+        // exposed value), and cents fit exactly in f32 (max real price 514,202 cents, f32
+        // represents any integer up to 2^24 exactly), so skip the /100.0 dollars conversion.
+        SortCol::PriceUsd   => p.price_usd.as_ref().map(|v| u32::from(*v) as f32),
         SortCol::Cubecobra  => card.cubecobra_score.as_ref().map(|v| f32::from(*v)),
         SortCol::EdhrecRank => card.edhrec_rank.as_ref().map(|v| u32::from(*v) as f32),
         SortCol::Name       => Some(u32::from(card.name_rank) as f32),
@@ -4158,7 +4191,10 @@ const FIELD_TABLE: &[(&str, FieldExtractor)] = &[
     ("type_line", |py, c, _p, s, _v| Ok(str_at(s, u32::from(c.type_line_id)).into_pyobject(py)?.into_any())),
     ("illustration_id", |py, _c, p, _s, _v| Ok(uuid_from_u128(u128::from(p.illustration_id)).into_pyobject(py)?.into_any())),
     ("scryfall_id", |py, _c, p, _s, _v| Ok(uuid_from_u128(u128::from(p.scryfall_id)).into_pyobject(py)?.into_any())),
-    ("price_usd", |py, _c, p, _s, _v| Ok(p.price_usd.as_ref().map(|v| f32::from(*v)).into_pyobject(py)?.into_any())),
+    // Exact f64 dollars from the stored integer cents, not the old lossy f32 -- API consumers
+    // now see the true price (e.g. 1.47, not the nearest f32 to 1.47) instead of an
+    // approximation.
+    ("price_usd", |py, _c, p, _s, _v| Ok(p.price_usd.as_ref().map(|v| f64::from(u32::from(*v)) / 100.0).into_pyobject(py)?.into_any())),
     ("prefer_score", |py, _c, p, _s, _v| Ok(p.prefer_score.as_ref().map(|v| f32::from(*v)).into_pyobject(py)?.into_any())),
     // card_subtypes preserves the printed order; the set-like collections are stored
     // sorted by vocab id (first-seen order), so they get re-sorted lexicographically
@@ -4243,7 +4279,7 @@ const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 /// catch (e.g. reordering same-size fields, changing an index type) — and on
 /// any FLAVOR_FP_FEATURES change: archived fingerprints are built with that
 /// table, so a new table reading old fingerprints breaks the superset test.
-const ARCHIVE_FORMAT_VERSION: u32 = 20260724;
+const ARCHIVE_FORMAT_VERSION: u32 = 20260725;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -4639,7 +4675,7 @@ impl QueryEngine {
                 idx
             },
             released_at:    build_range_index(&printings, |p| p.released_at_int),
-            price_usd:      build_range_index(&printings, |p| p.price_usd.map(f32_sort_bits)),
+            price_usd:      build_range_index(&printings, |p| p.price_usd),
             collector_number: build_range_index(&printings, |p| p.collector_number_int.map(u32::from)),
             sort_perms:     build_sort_permutations(&cards, &printings, &offsets),
             artwork_groups: artwork_group_counts,

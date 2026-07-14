@@ -2636,7 +2636,7 @@ fn streamed_selection_matches_gathered() {
         let mut data = store_of(cards, &vec![3usize; N], vocab);
         // vary prices so prefer=usd_high picks different printings
         for (pid, p) in data.printings.iter_mut().enumerate() {
-            p.price_usd = Some((pid % 7) as f32 + 0.5);
+            p.price_usd = Some((pid % 7) as u32 * 100 + 50); // $0.50, $1.50, ... $6.50
         }
         if with_perms {
             data.indexes.sort_perms = build_sort_permutations(&data.cards, &data.printings, &data.offsets);
@@ -2722,11 +2722,11 @@ fn artwork_group_ids_handle_more_than_64_groups() {
     // Printing 0 has the higher prefer_score (store_of orders descending) but
     // fails usd<50; printing 1 shares its group and passes -- the chosen
     // representative for that group must be printing 1, not printing 0.
-    data.printings[0].price_usd = Some(100.0);
+    data.printings[0].price_usd = Some(10_000); // $100.00
     for p in data.printings[1..].iter_mut() {
-        p.price_usd = Some(10.0);
+        p.price_usd = Some(1_000); // $10.00
     }
-    data.indexes.price_usd = build_range_index(&data.printings, |p| p.price_usd.map(super::f32_sort_bits));
+    data.indexes.price_usd = build_range_index(&data.printings, |p| p.price_usd);
 
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
@@ -2836,37 +2836,54 @@ fn broad_ranges_decline_to_narrow() {
     assert_eq!(range_candidates(archived, 100, 200).map(|v| v.len()), Some(100));
 }
 
+// Price is stored as integer cents (see Printing::price_usd's doc comment) specifically to make
+// both narrowing (via int_range_bounds, same as collector_number) and verification (field_num's
+// exact cents/100.0 division) genuinely exact at the boundary -- not "may include as a
+// candidate, verified later" like the old f32-dollars representation.
 #[test]
-fn price_narrowing_is_a_superset_under_f32_rounding() {
+fn price_narrowing_and_verification_are_exact_at_the_boundary() {
     let mut vocab = VocabInterner::new();
     let cards = vec![stub_card(1, TYPE_CREATURE, &[], &mut vocab)];
     let mut data = store_of(cards, &[4], vocab);
-    data.printings[0].price_usd = Some(0.05);
-    data.printings[1].price_usd = Some(0.1); // sits at the query boundary
-    data.printings[2].price_usd = Some(60.0);
+    data.printings[0].price_usd = Some(5); // $0.05
+    data.printings[1].price_usd = Some(10); // $0.10 -- sits exactly on the query boundary
+    data.printings[2].price_usd = Some(6000); // $60.00
     data.printings[3].price_usd = None; // priceless printings never satisfy price filters
-    data.indexes.price_usd = build_range_index(&data.printings, |p| p.price_usd.map(super::f32_sort_bits));
+    data.indexes.price_usd = build_range_index(&data.printings, |p| p.price_usd);
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let card = &archived.cards[0];
 
-    let cheap = FilterExpr::NumericCmp {
-        lhs: super::NumExpr::Field(super::NumField::PriceUsd),
-        op: CmpOp::Lt,
-        rhs: super::NumExpr::Const(0.10),
-    };
-    // 0.10f64 is not representable as f32; the widened bound may include the
-    // boundary printing as a candidate, but must never lose printing 0.
-    match narrow_candidates(&cheap, &archived.indexes, &archived.offsets, &archived.cards) {
+    let cmp = |op| FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op, rhs: NumExpr::Const(0.10) };
+
+    // Lt must exclude the boundary printing exactly -- both in narrowing and in verification.
+    let lt = cmp(CmpOp::Lt);
+    match narrow_candidates(&lt, &archived.indexes, &archived.offsets, &archived.cards) {
         Some(Candidates::Printings(v)) => {
             assert!(v.contains(&0));
+            assert!(!v.contains(&1), "Lt must exclude the exact boundary price");
             assert!(!v.contains(&2) && !v.contains(&3));
         }
         _ => panic!("usd must narrow in printing space"),
     }
-    // ...and the walk's exact evaluation rejects the boundary printing.
-    let card = &archived.cards[0];
-    assert!(cheap.matches(card, &archived.printings[0], &archived.strings));
-    assert!(!cheap.matches(card, &archived.printings[1], &archived.strings));
+    assert!(lt.matches(card, &archived.printings[0], &archived.strings));
+    assert!(!lt.matches(card, &archived.printings[1], &archived.strings));
+
+    // Le, Ge, Eq must all include the boundary printing -- the Bug B repro (a stored price
+    // widened from f32 essentially never bit-matched a full-precision query constant, so Ge/Eq
+    // silently excluded exact matches independent of narrowing).
+    for (op, op_name, is_eq) in [(CmpOp::Le, "Le", false), (CmpOp::Ge, "Ge", false), (CmpOp::Eq, "Eq", true)] {
+        let f = cmp(op);
+        match narrow_candidates(&f, &archived.indexes, &archived.offsets, &archived.cards) {
+            Some(Candidates::Printings(v)) => assert!(v.contains(&1), "narrowing must include the boundary price for {op_name}"),
+            None if is_eq => {} // narrow_candidates_exact's broadness filter can decline Eq on a tiny store; matches() below is what matters
+            _ => panic!("usd must narrow in printing space for {op_name}"),
+        }
+        assert!(f.matches(card, &archived.printings[1], &archived.strings), "verification must include the boundary price for {op_name}");
+    }
+    // Gt must exclude it.
+    let gt = cmp(CmpOp::Gt);
+    assert!(!gt.matches(card, &archived.printings[1], &archived.strings));
 
     let pricey = FilterExpr::NumericCmp {
         lhs: super::NumExpr::Const(50.0),
@@ -2884,6 +2901,94 @@ fn price_narrowing_is_a_superset_under_f32_rounding() {
         rhs: super::NumExpr::Const(1.0),
     };
     assert!(narrow_candidates(&ne, &archived.indexes, &archived.offsets, &archived.cards).is_none());
+}
+
+// Direct repro of the review-caught bug: comparing a stored price widened from a lossy f32 to
+// f64 against a full-precision query constant essentially never matched, even at the exact
+// value the query was checking for. usd=7.22 must match a printing priced at exactly $7.22, and
+// usd>=7.22 must not drop it -- confirmed on a clean main worktree that both failed identically
+// before this fix (unrelated to narrowing, since it's in field_num/cmp's verification path).
+#[test]
+fn price_comparison_matches_exact_value_not_lossy_f32_widening() {
+    let mut vocab = VocabInterner::new();
+    let cards = vec![stub_card(1, TYPE_CREATURE, &[], &mut vocab)];
+    let mut data = store_of(cards, &[1], vocab);
+    data.printings[0].price_usd = Some(722); // $7.22 -- 7.22_f32 widened to f64 is 7.21999979019165
+    data.indexes.price_usd = build_range_index(&data.printings, |p| p.price_usd);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let card = &archived.cards[0];
+    let p = &archived.printings[0];
+
+    let cmp = |op| FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op, rhs: NumExpr::Const(7.22) };
+    assert!(cmp(CmpOp::Eq).matches(card, p, &archived.strings), "usd=7.22 must match a printing priced at exactly $7.22");
+    assert!(cmp(CmpOp::Ge).matches(card, p, &archived.strings), "usd>=7.22 must not drop the exact match");
+    assert!(cmp(CmpOp::Le).matches(card, p, &archived.strings));
+    assert!(!cmp(CmpOp::Lt).matches(card, p, &archived.strings));
+    assert!(!cmp(CmpOp::Gt).matches(card, p, &archived.strings));
+}
+
+// The `price` closure in narrow_rec's NumericCmp arm is int_range_bounds(op,
+// snap_to_nearest_cent(v * PRICE_CENTS_PER_DOLLAR)) -- not a standalone function anymore (the
+// old price_bounds was deleted), so this pins down that exact composition directly rather than
+// through a name that no longer exists. Thresholds include on-grid values a user would actually
+// type (paired with their exact cents value, Some(_)) and deliberately off-grid ones an
+// arithmetic expression could produce (paired with None); 0.28 and 0.57 are the review-caught
+// repro values (`0.28_f64 * 100.0 == 28.000000000000004`, `0.57_f64 * 100.0 ==
+// 56.99999999999999`) that snap_to_nearest_cent exists to correct.
+#[test]
+fn price_narrowing_bound_matches_direct_comparison_on_and_off_grid() {
+    let thresholds: &[(f64, Option<u32>)] = &[
+        (50.00, Some(5000)), (49.99, Some(4999)), (0.01, Some(1)), (5142.02, Some(514202)),
+        (100.00, Some(10000)), (0.28, Some(28)), (0.57, Some(57)), (0.0, Some(0)),
+        (49.998, None), (50.003, None), (33.335, None), (0.005, None), (12.3456789, None),
+    ];
+    let ops = [
+        (CmpOp::Lt, "Lt"),
+        (CmpOp::Le, "Le"),
+        (CmpOp::Gt, "Gt"),
+        (CmpOp::Ge, "Ge"),
+        (CmpOp::Eq, "Eq"),
+    ];
+    let bound = |op, v: f64| super::int_range_bounds(op, super::snap_to_nearest_cent(v * 100.0)).unwrap();
+
+    for &(t, on_grid_cents) in thresholds {
+        for &(op, op_name) in &ops {
+            let range = bound(op, t);
+            let in_range = |cents: u32| match range {
+                None => false, // provably empty
+                Some((lo, hi)) => cents >= lo && cents < hi,
+            };
+            if let Some(cents) = on_grid_cents {
+                let price = f64::from(cents) / 100.0;
+                let expected = match op {
+                    CmpOp::Lt => price < t,
+                    CmpOp::Le => price <= t,
+                    CmpOp::Gt => price > t,
+                    CmpOp::Ge => price >= t,
+                    CmpOp::Eq => true,
+                    CmpOp::Ne => unreachable!(),
+                };
+                assert_eq!(in_range(cents), expected, "{op_name}({t}) disagrees with direct comparison AT ITS OWN threshold price {price}");
+            }
+            for cents in (1..514_202u32).step_by(37) {
+                // sampled every 37 cents across the real max-price range -- not exhaustive, but
+                // int_range_bounds' own exactness over the integer domain is already trusted
+                // (mirrors collector_number's identical usage); this is specifically about
+                // whether *100.0 + snap survives the multiplication noise it's meant to correct.
+                let price = cents as f64 / 100.0;
+                let expected = match op {
+                    CmpOp::Lt => price < t,
+                    CmpOp::Le => price <= t,
+                    CmpOp::Gt => price > t,
+                    CmpOp::Ge => price >= t,
+                    CmpOp::Eq => (price - t).abs() < 1e-9,
+                    CmpOp::Ne => unreachable!(),
+                };
+                assert_eq!(in_range(cents), expected, "{op_name}({t}) disagrees with direct comparison at price {price}");
+            }
+        }
+    }
 }
 
 // ─── Bitplanes (#630) ─────────────────────────────────────────────────────────
@@ -4014,47 +4119,50 @@ fn border_black_declines_via_broadness_guard() {
 fn range_narrowed_representations() {
     let printings: Vec<Printing> = (0..4096u32).map(|i| {
         let mut p = stub_printing(u128::from(i) + 1, u128::from(i) + 1, None);
-        // values 0..1024, four printings per value; printings 0-3 get value 0, etc.
-        p.price_usd = Some((i / 4) as f32);
+        // values (cents) 0..1024, four printings per value; printings 0-3 get value 0, etc.
+        p.price_usd = Some(i / 4);
         p
     }).collect();
-    let idx = build_range_index(&printings, |p| p.price_usd.map(super::f32_sort_bits));
+    let idx = build_range_index(&printings, |p| p.price_usd);
     let bytes = rkyv::to_bytes::<Error>(&idx).expect("serialize");
     let archived = rkyv::access::<Archived<PrintingRangeIndex>, Error>(&bytes).expect("access");
     let n = printings.len();
-    let bounds = |op, v| super::price_bounds(op, v).unwrap();
+    // int_range_bounds directly (not through the dollars->cents *100 step) -- this test is
+    // about range_narrowed's own branching, exercised via the plain integer domain it always
+    // operates on, same as collector_number's own tests would.
+    let bounds = |op, v| super::int_range_bounds(op, v).unwrap().unwrap();
 
-    // Bounds are widened one position for f32 rounding, so `< v` includes v's
-    // own printings as superset members — counts below are values 0..=v.
-    // Sparse (164 entries, 4%): vec, tight.
+    // Bounds are exact (no widening) -- `< v` excludes v's own value, counts below are values
+    // 0..v (v itself excluded).
+    // Sparse (160 entries, 3.9%): vec, tight.
     let (lo, hi) = bounds(CmpOp::Lt, 40.0);
     let nr = super::range_narrowed(archived, lo, hi, n, false, false).expect("sparse ranges narrow in any context");
-    assert!(!nr.tight, "price bounds are widened supersets, never tight");
+    assert!(!nr.tight, "exact param was passed false here to exercise range_narrowed's own branching");
     match nr.set {
-        Candidates::Printings(v) => assert_eq!(v.len(), 164),
+        Candidates::Printings(v) => assert_eq!(v.len(), 160),
         _ => panic!("sparse range must stay a vec"),
     }
 
-    // Broad but at most half (values 0..=400 → 1604 entries, 39%): direct scatter, tight.
+    // Broad but at most half (values 0..400 → 1600 entries, 39%): direct scatter, tight.
     let (lo, hi) = bounds(CmpOp::Lt, 400.0);
     assert!(super::range_narrowed(archived, lo, hi, n, false, true).is_none(), "broad bits need a consumer (broad_ok)");
     let nr = super::range_narrowed(archived, lo, hi, n, true, true).expect("broad_ok materializes the bitmap");
     assert!(nr.tight, "integer-exact bounds keep the direct scatter tight");
     match &nr.set {
         Candidates::PrintingBits(b) => {
-            assert_eq!(b.iter().map(|w| w.count_ones()).sum::<u32>(), 1604);
+            assert_eq!(b.iter().map(|w| w.count_ones()).sum::<u32>(), 1600);
             assert!(bitmap_contains(b, 0) && !bitmap_contains(b, 1700));
         }
         _ => panic!("broad range must be a bitmap"),
     }
 
-    // Beyond half (values 0..=900 → 3604 entries, 88%): complement scatter, loose.
+    // Beyond half (values 0..900 → 3600 entries, 88%): complement scatter, loose.
     let (lo, hi) = bounds(CmpOp::Lt, 900.0);
     let nr = super::range_narrowed(archived, lo, hi, n, true, true).expect("broad_ok materializes the complement");
     assert!(!nr.tight, "complement over-includes unindexed printings");
     match &nr.set {
         Candidates::PrintingBits(b) => {
-            assert_eq!(b.iter().map(|w| w.count_ones()).sum::<u32>(), 3604);
+            assert_eq!(b.iter().map(|w| w.count_ones()).sum::<u32>(), 3600);
             assert!(bitmap_contains(b, 0) && !bitmap_contains(b, 3700));
         }
         _ => panic!("broad range must be a bitmap"),
@@ -4267,20 +4375,20 @@ fn not_over_partial_and_is_blocked() {
 }
 
 
-// The review's reproduction: price bounds are widened one position for
-// f32/f64 rounding (superset contract), so a price-range set must never be
-// tight — Not would complement away the boundary printings, which are exactly
-// the negation's matches. A printing priced exactly 5.0 fails `usd>5` and
-// must survive `-usd>5`.
+// The review's reproduction: `tight_narrow_space` still declines price (deliberately --
+// composition/Not-arm safety for a printing-varying field is a separate question from
+// price_bounds/field_num's own exactness, not addressed by the integer-cents migration), so
+// Not(usd>5) takes the plain per-candidate tri() path, not narrow_rec's Not-arm complement
+// shortcut. A printing priced exactly 5.0 fails `usd>5` and must survive `-usd>5`.
 #[test]
 fn not_over_price_range_keeps_boundary_matches() {
     let mut vocab = VocabInterner::new();
     let cards: Vec<OracleCard> = (0..6).map(|i| stub_card(i as u128 + 1, TYPE_CREATURE, &[], &mut vocab)).collect();
     let mut data = store_of(cards, &[2usize; 6], vocab);
     for (i, p) in data.printings.iter_mut().enumerate() {
-        p.price_usd = Some(if i < 2 { 5.0 } else { 10.0 }); // card 0 sits on the boundary
+        p.price_usd = Some(if i < 2 { 500 } else { 1000 }); // card 0 sits on the boundary ($5.00)
     }
-    data.indexes.price_usd = build_range_index(&data.printings, |p| p.price_usd.map(super::f32_sort_bits));
+    data.indexes.price_usd = build_range_index(&data.printings, |p| p.price_usd);
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 

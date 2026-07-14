@@ -89,6 +89,16 @@ fn field_num(card: &AOracleCard, printing: Option<&APrinting>, f: NumField) -> N
     fn known(v: Option<f32>) -> NumVal {
         v.map_or(NumVal::Null, |x| NumVal::Known(x as f64))
     }
+    // Cents -> dollars via exact f64 division, not through f32 -- 722.0 / 100.0 and a
+    // directly-parsed query constant "7.22" round to the identical nearest f64 (both are
+    // single, non-lossy roundings of the same rational number), so this and NumExpr::Const
+    // (untouched) always agree exactly. The old `v as f32 as f64` path widened an
+    // already-lossy f32 approximation, which essentially never matched a full-precision query
+    // constant even at the exact boundary it was supposed to represent -- see
+    // docs/issues/local-engine-broad-range-fastpath.md.
+    fn known_cents(v: Option<u32>) -> NumVal {
+        v.map_or(NumVal::Null, |cents| NumVal::Known(f64::from(cents) / 100.0))
+    }
     match f {
         NumField::Cmc                => known(card.cmc.as_ref().map(|v| u8::from(*v) as f32)),
         NumField::Power              => known(card.creature_power.as_ref().map(|v| i8::from(*v) as f32)),
@@ -97,9 +107,9 @@ fn field_num(card: &AOracleCard, printing: Option<&APrinting>, f: NumField) -> N
         NumField::EdhrEc             => known(card.edhrec_rank.as_ref().map(|v| u32::from(*v) as f32)),
         NumField::RarityInt          => printing.map_or(NumVal::PDep, |p| known(p.card_rarity_int.as_ref().map(|v| u8::from(*v) as f32))),
         NumField::CollectorNumberInt => printing.map_or(NumVal::PDep, |p| known(p.collector_number_int.as_ref().map(|v| u16::from(*v) as f32))),
-        NumField::PriceUsd           => printing.map_or(NumVal::PDep, |p| known(p.price_usd.as_ref().map(|v| f32::from(*v)))),
-        NumField::PriceEur           => printing.map_or(NumVal::PDep, |p| known(p.price_eur.as_ref().map(|v| f32::from(*v)))),
-        NumField::PriceTix           => printing.map_or(NumVal::PDep, |p| known(p.price_tix.as_ref().map(|v| f32::from(*v)))),
+        NumField::PriceUsd           => printing.map_or(NumVal::PDep, |p| known_cents(p.price_usd.as_ref().map(|v| u32::from(*v)))),
+        NumField::PriceEur           => printing.map_or(NumVal::PDep, |p| known_cents(p.price_eur.as_ref().map(|v| u32::from(*v)))),
+        NumField::PriceTix           => printing.map_or(NumVal::PDep, |p| known_cents(p.price_tix.as_ref().map(|v| u32::from(*v)))),
         NumField::PreferScore        => printing.map_or(NumVal::PDep, |p| known(p.prefer_score.as_ref().map(|v| f32::from(*v)))),
     }
 }
