@@ -92,10 +92,12 @@ fn field_num(card: &AOracleCard, printing: Option<&APrinting>, f: NumField) -> N
     // Cents -> dollars via exact f64 division, not through f32 -- 722.0 / 100.0 and a
     // directly-parsed query constant "7.22" round to the identical nearest f64 (both are
     // single, non-lossy roundings of the same rational number), so this and NumExpr::Const
-    // (untouched) always agree exactly. The old `v as f32 as f64` path widened an
-    // already-lossy f32 approximation, which essentially never matched a full-precision query
-    // constant even at the exact boundary it was supposed to represent -- see
-    // docs/issues/local-engine-broad-range-fastpath.md.
+    // (untouched) always agree exactly. Unconditional, regardless of comparison shape
+    // (Arith, Field-vs-Field, bare Field-vs-Const, ...): a bind-time fast path that
+    // special-cased only the bare shape shipped two silent correctness bugs
+    // (`usd+1<power`, `usd<cmc` -- see docs/issues/local-engine-broad-range-fastpath.md)
+    // for a ~2-3% win on the one shape it covered, not worth the ongoing risk of a
+    // representation that's easy to bypass by rephrasing a logically identical query.
     fn known_cents(v: Option<u32>) -> NumVal {
         v.map_or(NumVal::Null, |cents| NumVal::Known(f64::from(cents) / 100.0))
     }
@@ -121,26 +123,42 @@ pub(crate) enum NumExpr {
 }
 
 impl NumExpr {
+    // #[inline(always)] alone doesn't reach the goal here: LLVM's
+    // always-inliner refuses to inline ANY self-recursive function at ANY
+    // call site, not just the recursive edge -- confirmed in the release
+    // disassembly, where a first attempt at just adding the attribute to a
+    // still-self-recursive eval() left both `bl NumExpr::eval` calls in
+    // FilterExpr::tri's NumericCmp arm untouched. Splitting the Arith case
+    // into its own (separately named, not force-inlined) function makes
+    // eval() itself non-recursive, so the attribute now actually applies:
+    // for the common Const/Field leaf case (e.g. `usd<50`, no arithmetic),
+    // eval()'s whole body -- including field_num, already small enough to
+    // inline on its own -- folds directly into tri(), eliminating both
+    // calls' prologue/epilogue/jump-table tax. Arith (`cmc+1<power`) is
+    // colder and still recurses through eval_arith, unaffected either way.
+    #[inline(always)]
     fn eval(&self, card: &AOracleCard, printing: Option<&APrinting>) -> NumVal {
         match self {
             NumExpr::Const(v) => NumVal::Known(*v),
             NumExpr::Field(f) => field_num(card, printing, *f),
-            NumExpr::Arith(lhs, op, rhs) => {
-                // Null dominates PDep: Null op anything is Null for every
-                // printing, so the card-level result is already exact.
-                match (lhs.eval(card, printing), rhs.eval(card, printing)) {
-                    (NumVal::Null, _) | (_, NumVal::Null) => NumVal::Null,
-                    (NumVal::PDep, _) | (_, NumVal::PDep) => NumVal::PDep,
-                    (NumVal::Known(l), NumVal::Known(r)) => match op {
-                        ArithOp::Add => NumVal::Known(l + r),
-                        ArithOp::Sub => NumVal::Known(l - r),
-                        ArithOp::Mul => NumVal::Known(l * r),
-                        ArithOp::Div => {
-                            if r == 0.0 { NumVal::Null } else { NumVal::Known(l / r) }
-                        }
-                    },
+            NumExpr::Arith(lhs, op, rhs) => Self::eval_arith(lhs, *op, rhs, card, printing),
+        }
+    }
+
+    fn eval_arith(lhs: &NumExpr, op: ArithOp, rhs: &NumExpr, card: &AOracleCard, printing: Option<&APrinting>) -> NumVal {
+        // Null dominates PDep: Null op anything is Null for every
+        // printing, so the card-level result is already exact.
+        match (lhs.eval(card, printing), rhs.eval(card, printing)) {
+            (NumVal::Null, _) | (_, NumVal::Null) => NumVal::Null,
+            (NumVal::PDep, _) | (_, NumVal::PDep) => NumVal::PDep,
+            (NumVal::Known(l), NumVal::Known(r)) => match op {
+                ArithOp::Add => NumVal::Known(l + r),
+                ArithOp::Sub => NumVal::Known(l - r),
+                ArithOp::Mul => NumVal::Known(l * r),
+                ArithOp::Div => {
+                    if r == 0.0 { NumVal::Null } else { NumVal::Known(l / r) }
                 }
-            }
+            },
         }
     }
 }

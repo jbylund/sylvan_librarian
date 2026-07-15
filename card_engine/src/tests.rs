@@ -2,12 +2,12 @@ use super::{
     assign_name_ranks,
     build_numeric_index, build_oracle_text_index, build_tag_index, build_trigram_index,
     build_rarity_index, build_flavor_index, build_thresholded_tag_index, build_sort_permutations,
-    assign_artwork_groups, build_bit_planes, build_divergent_ids, build_name_bigram_index, flavor_fingerprint, flavor_match_sets,
+    assign_artwork_groups, build_bit_planes, build_divergent_ids, build_name_bigram_index, build_printing_to_card, flavor_fingerprint, flavor_match_sets,
     cards_of_printings, count_common_keywords, count_common_types,
     build_artist_index, build_range_index, range_candidates, narrow_candidates, rarity_candidates,
     range_too_broad_to_narrow, run_query, trigram_candidates, finalize_trigram_index, PrintingRangeIndex, NARROW_FLOOR,
     bitmap_contains, bitmap_card_ids, compile_plane, eval_planes, split_planes,
-    ArtistIndex, CardData, CardIndexes, Candidates, ColorField, NumExpr, NumField, RarityIndex,
+    ArithOp, ArtistIndex, CardData, CardIndexes, Candidates, ColorField, NumExpr, NumField, RarityIndex,
     CollField, CmpOp, FilterExpr, InlineStr, Interner, ManaCost, OracleCard, Printing, TagIndex,
     TextField, TextSearchField, Tri, SortedTrigramIndex, VocabInterner, ARTIST_NONE, NONE_STR, TYPE_ARTIFACT, TYPE_CREATURE,
     TYPE_ENCHANTMENT, TYPE_INSTANT, TYPE_LAND, TYPE_LEGENDARY, TYPE_PLANESWALKER, TYPE_SNOW, TYPE_SORCERY,
@@ -206,6 +206,13 @@ fn stub_printing(scryfall_id: u128, illustration_id: u128, prefer_score: Option<
     }
 }
 
+/// A `usd <op> dollars` comparison. `field_num` divides cents to dollars
+/// unconditionally regardless of shape, so this is just a plain `Const` in
+/// dollars -- no `bind()` step or unit conversion required.
+fn usd_cmp(op: CmpOp, dollars: f64) -> FilterExpr {
+    FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op, rhs: NumExpr::Const(dollars) }
+}
+
 /// Assemble a CardData where card i owns `printing_counts[i]` printings, in the
 /// store's within-bucket invariant order: descending default prefer_score (the
 /// first printing of each range is the default-preferred one). Printings get
@@ -243,6 +250,7 @@ fn store_of(cards: Vec<OracleCard>, printing_counts: &[usize], vocab: VocabInter
         legal_divergent: build_divergent_ids(&cards),
         sort_perms: build_sort_permutations(&cards, &printings, &offsets),
         artwork_groups,
+        printing_to_card: build_printing_to_card(&offsets),
         ..Default::default()
     };
     CardData {
@@ -268,11 +276,13 @@ fn narrow_candidates_spaces() {
     let mut keywords: TagIndex = HashMap::new();
     keywords.insert("Flying".to_string(), vec![1]);
 
-    let indexes = CardIndexes { art_tags, keywords, ..Default::default() };
+    // offsets for 2 cards with 2 printings each: printings 0-1 → card 0, 2-3 → card 1
+    let raw_offsets = vec![0u32, 2, 4];
+    let printing_to_card = build_printing_to_card(&raw_offsets);
+    let indexes = CardIndexes { art_tags, keywords, printing_to_card, ..Default::default() };
     let bytes = rkyv::to_bytes::<Error>(&indexes).expect("serialize");
     let archived = rkyv::access::<Archived<CardIndexes>, Error>(&bytes).expect("access");
-    // offsets for 2 cards with 2 printings each: printings 0-1 → card 0, 2-3 → card 1
-    let offsets_bytes = rkyv::to_bytes::<Error>(&vec![0u32, 2, 4]).expect("serialize offsets");
+    let offsets_bytes = rkyv::to_bytes::<Error>(&raw_offsets).expect("serialize offsets");
     let offsets = rkyv::access::<Archived<Vec<u32>>, Error>(&offsets_bytes).expect("access offsets");
 
     let coll = |field, value: &str| FilterExpr::CollectionCmp {
@@ -652,7 +662,7 @@ fn rarity_not_arm_matches_existence_projection() {
             let Some(n) = super::narrow_rec(&filter, &archived.indexes, &archived.offsets, &archived.cards, true) else {
                 continue;
             };
-            let cand = n.set.into_cards(&archived.offsets);
+            let cand = n.set.into_cards(&archived.offsets, &archived.indexes.printing_to_card);
             let want: Vec<u32> = RARITY_PLANE_FIXTURE
                 .iter()
                 .enumerate()
@@ -678,7 +688,7 @@ fn rarity_not_arm_matches_existence_projection() {
             }));
             let n2 = super::narrow_rec(&filter_flipped, &archived.indexes, &archived.offsets, &archived.cards, true)
                 .unwrap_or_else(|| panic!("Not({val} {name} field) must narrow given Not(field {name} {val}) did"));
-            let cand2 = n2.set.into_cards(&archived.offsets);
+            let cand2 = n2.set.into_cards(&archived.offsets, &archived.indexes.printing_to_card);
             assert_eq!(cand, cand2, "operand order must not change the result: {name} {val}");
         }
     }
@@ -686,12 +696,72 @@ fn rarity_not_arm_matches_existence_projection() {
 
 #[test]
 fn cards_of_printings_maps_and_dedups() {
-    let offsets_bytes = rkyv::to_bytes::<Error>(&vec![0u32, 3, 4, 7]).expect("serialize");
+    let raw_offsets = vec![0u32, 3, 4, 7];
+    let offsets_bytes = rkyv::to_bytes::<Error>(&raw_offsets).expect("serialize");
     let offsets = rkyv::access::<Archived<Vec<u32>>, Error>(&offsets_bytes).expect("access");
+    let printing_to_card_bytes = rkyv::to_bytes::<Error>(&build_printing_to_card(&raw_offsets)).expect("serialize");
+    let printing_to_card = rkyv::access::<Archived<Vec<u32>>, Error>(&printing_to_card_bytes).expect("access");
     // printings 0-2 → card 0, 3 → card 1, 4-6 → card 2
-    assert_eq!(cards_of_printings(offsets, &[0, 1, 2, 3, 5, 6]), vec![0, 1, 2]);
-    assert_eq!(cards_of_printings(offsets, &[1]), vec![0]);
-    assert_eq!(cards_of_printings(offsets, &[]), Vec::<u32>::new());
+    assert_eq!(cards_of_printings(offsets, printing_to_card, &[0, 1, 2, 3, 5, 6]), vec![0, 1, 2]);
+    assert_eq!(cards_of_printings(offsets, printing_to_card, &[1]), vec![0]);
+    assert_eq!(cards_of_printings(offsets, printing_to_card, &[]), Vec::<u32>::new());
+}
+
+/// Differential test for the direct-array projection
+/// (docs/issues/local-engine-direct-projection-arrays.md): `cards_of_printings`
+/// must agree with an independent reference oracle (a `partition_point` search on
+/// `offsets`, applied uniformly regardless of size -- the mechanism the small-k
+/// path itself used before this change) at every k, spanning both the small-k
+/// (<=1024) and broad-k (>1024) branches, so the branch split is provably a pure
+/// performance choice, not a behavior change.
+#[test]
+fn cards_of_printings_matches_naive_projection_across_sizes() {
+    use rand::SeedableRng;
+    const NUM_SEEDS: u64 = 40;
+    const N_CARDS: usize = 200;
+
+    for seed in 0..NUM_SEEDS {
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(seed);
+        let mut raw_offsets = Vec::with_capacity(N_CARDS + 1);
+        raw_offsets.push(0u32);
+        let mut total = 0u32;
+        for _ in 0..N_CARDS {
+            total += rng.random_range(1..=20);
+            raw_offsets.push(total);
+        }
+        let n_printings = total as usize;
+
+        let offsets_bytes = rkyv::to_bytes::<Error>(&raw_offsets).expect("serialize");
+        let offsets = rkyv::access::<Archived<Vec<u32>>, Error>(&offsets_bytes).expect("access");
+        let printing_to_card_vec = build_printing_to_card(&raw_offsets);
+        let printing_to_card_bytes = rkyv::to_bytes::<Error>(&printing_to_card_vec).expect("serialize");
+        let printing_to_card = rkyv::access::<Archived<Vec<u32>>, Error>(&printing_to_card_bytes).expect("access");
+
+        // k values straddling the 1024 small/broad split; clamp to n_printings.
+        for &k in &[0usize, 1, 5, 50, 999, 1024, 1025, 2000, 5000] {
+            let k = k.min(n_printings);
+            let mut printing_ids: Vec<u32> = {
+                let mut set = std::collections::HashSet::with_capacity(k);
+                while set.len() < k {
+                    set.insert(rng.random_range(0..n_printings as u32));
+                }
+                set.into_iter().collect()
+            };
+            printing_ids.sort_unstable();
+
+            let got = cards_of_printings(offsets, printing_to_card, &printing_ids);
+
+            // Reference oracle: partition_point on offsets directly, shares no
+            // code with build_printing_to_card or cards_of_printings' branches.
+            let mut want: Vec<u32> = printing_ids
+                .iter()
+                .map(|&p| raw_offsets.partition_point(|&o| o <= p) as u32 - 1)
+                .collect();
+            want.dedup();
+
+            assert_eq!(got, want, "seed={seed}, k={k}, n_printings={n_printings}");
+        }
+    }
 }
 
 #[test]
@@ -2019,6 +2089,7 @@ fn bench_checked_vs_unchecked_access() {
         collector_number: Vec::new(),
         sort_perms:     build_sort_permutations(&cards, &printings, &offsets),
         artwork_groups,
+        printing_to_card: build_printing_to_card(&offsets),
         planes:         build_bit_planes(&cards, &printings, &offsets, &strings),
         name_bigrams:   build_name_bigram_index(&cards),
         legal_divergent: build_divergent_ids(&cards),
@@ -2730,7 +2801,7 @@ fn artwork_group_ids_handle_more_than_64_groups() {
 
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
-    let mut filter = FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op: CmpOp::Lt, rhs: NumExpr::Const(50.0) };
+    let mut filter = usd_cmp(CmpOp::Lt, 50.0);
     let (total, page) = run_query(
         &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
         &mut filter, None, "artwork", "default", "edhrec", "asc", 100, 0, &archived.indexes,
@@ -2854,7 +2925,7 @@ fn price_narrowing_and_verification_are_exact_at_the_boundary() {
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
     let card = &archived.cards[0];
 
-    let cmp = |op| FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op, rhs: NumExpr::Const(0.10) };
+    let cmp = |op| usd_cmp(op, 0.10);
 
     // Lt must exclude the boundary printing exactly -- both in narrowing and in verification.
     let lt = cmp(CmpOp::Lt);
@@ -2885,21 +2956,14 @@ fn price_narrowing_and_verification_are_exact_at_the_boundary() {
     let gt = cmp(CmpOp::Gt);
     assert!(!gt.matches(card, &archived.printings[1], &archived.strings));
 
-    let pricey = FilterExpr::NumericCmp {
-        lhs: super::NumExpr::Const(50.0),
-        op: CmpOp::Lt,
-        rhs: super::NumExpr::Field(super::NumField::PriceUsd),
-    };
+    // Flipped operand order (50.0 < usd, i.e. usd > 50.0): only the $60 printing qualifies.
+    let pricey = FilterExpr::NumericCmp { lhs: NumExpr::Const(50.0), op: CmpOp::Lt, rhs: NumExpr::Field(NumField::PriceUsd) };
     match narrow_candidates(&pricey, &archived.indexes, &archived.offsets, &archived.cards) {
         Some(Candidates::Printings(v)) => assert_eq!(v, vec![2]),
         _ => panic!("flipped usd comparison must narrow"),
     }
     // Ne is not selective.
-    let ne = FilterExpr::NumericCmp {
-        lhs: super::NumExpr::Field(super::NumField::PriceUsd),
-        op: CmpOp::Ne,
-        rhs: super::NumExpr::Const(1.0),
-    };
+    let ne = usd_cmp(CmpOp::Ne, 1.0);
     assert!(narrow_candidates(&ne, &archived.indexes, &archived.offsets, &archived.cards).is_none());
 }
 
@@ -2920,7 +2984,7 @@ fn price_comparison_matches_exact_value_not_lossy_f32_widening() {
     let card = &archived.cards[0];
     let p = &archived.printings[0];
 
-    let cmp = |op| FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op, rhs: NumExpr::Const(7.22) };
+    let cmp = |op| usd_cmp(op, 7.22);
     assert!(cmp(CmpOp::Eq).matches(card, p, &archived.strings), "usd=7.22 must match a printing priced at exactly $7.22");
     assert!(cmp(CmpOp::Ge).matches(card, p, &archived.strings), "usd>=7.22 must not drop the exact match");
     assert!(cmp(CmpOp::Le).matches(card, p, &archived.strings));
@@ -3244,6 +3308,72 @@ fn run_query_plane_path_parity() {
             assert_eq!(ids(&p0), ids(&p1), "pages must agree (unique={unique})");
         }
     }
+}
+
+/// Regression for a real bug that shipped briefly in this area: an earlier
+/// version rewrote a bare price `Field` (compared directly against a
+/// `Const`) into a cents-only fast path at bind time, to avoid dividing on
+/// every printing evaluated. That rewrite only recognized the *exact* bare
+/// shape -- it did not recurse into `NumExpr::Arith`. `usd+1<power` (price
+/// inside an arithmetic expression -- `parser_class=NUMERIC` on
+/// `usd`/`eur`/`tix` admits this grammatically, same as `cmc`/`power`) left
+/// the `1` in dollars while the fast path made `field_num` return cents
+/// unconditionally, silently computing `(cents+1)<power` instead of
+/// `(dollars+1)<power` -- off by a factor of 100. A second, independent
+/// instance of the same bug (`usd<cmc`, a price `Field` compared directly
+/// against *another* `Field`, no `Const` anywhere) confirmed the rewrite
+/// couldn't be patched to cover every shape without either false negatives
+/// or a full scaling transform on both sides of the comparison. Reverted the
+/// whole optimization: `NumExpr::Field(Price*)` always means dollars again
+/// (matching every build before it), for a ~2-3% loss on the one shape the
+/// fast path covered, in exchange for making every shape correct by
+/// construction rather than by rewrite coverage. Kept as a permanent
+/// regression test for exactly this class of bug, in case a similar
+/// shape-specific fast path is tried again later.
+#[test]
+fn usd_inside_arithmetic_evaluates_in_dollars_not_cents() {
+    let mut vocab = VocabInterner::new();
+    let mut card = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
+    card.creature_power = Some(52);
+    let mut data = store_of(vec![card], &[1], vocab);
+    data.printings[0].price_usd = Some(5000); // $50.00
+    data.indexes.price_usd = build_range_index(&data.printings, |p| p.price_usd);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let card = &archived.cards[0];
+    let printing = &archived.printings[0];
+
+    // usd+1<power: $50.00 + 1 = 51 < power(52) -- must match.
+    let mut f = FilterExpr::NumericCmp {
+        lhs: NumExpr::Arith(Box::new(NumExpr::Field(NumField::PriceUsd)), ArithOp::Add, Box::new(NumExpr::Const(1.0))),
+        op: CmpOp::Lt,
+        rhs: NumExpr::Field(NumField::Power),
+    };
+    f.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
+    assert!(f.matches(card, printing, &archived.strings), "usd+1<power must evaluate in dollars: 50+1=51 < 52");
+}
+
+/// The second independent instance referenced in the doc above:
+/// `usd<cmc` -- a price `Field` compared directly against *another* `Field`,
+/// no `Const` anywhere -- which no version of a `Const`-rewriting fast path
+/// could have covered at all, since there's no `Const` to rewrite.
+#[test]
+fn usd_compared_directly_against_another_field_evaluates_in_dollars() {
+    let mut vocab = VocabInterner::new();
+    let mut card = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
+    card.cmc = Some(3);
+    let mut data = store_of(vec![card], &[1], vocab);
+    data.printings[0].price_usd = Some(200); // $2.00
+    data.indexes.price_usd = build_range_index(&data.printings, |p| p.price_usd);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let card = &archived.cards[0];
+    let printing = &archived.printings[0];
+
+    // usd<cmc: $2.00 < cmc(3) -- must match.
+    let mut f = FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op: CmpOp::Lt, rhs: NumExpr::Field(NumField::Cmc) };
+    f.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
+    assert!(f.matches(card, printing, &archived.strings), "usd<cmc must evaluate in dollars: 2.00 < 3");
 }
 
 // ─── Numeric-range planes (#655) ───────────────────────────────────────────────
@@ -3739,7 +3869,7 @@ fn oracle_word_index_exact_union_parity() {
         let expected = brute_force_oracle_contains(archived, needle);
         let n = rec(&oracle(needle)).unwrap_or_else(|| panic!("oracle:{needle} must narrow"));
         assert!(n.tight, "oracle:{needle} must narrow tight (exact, no verification)");
-        assert_eq!(n.set.into_cards(&archived.offsets), expected, "oracle:{needle} must match the brute-force set exactly");
+        assert_eq!(n.set.into_cards(&archived.offsets, &archived.indexes.printing_to_card), expected, "oracle:{needle} must match the brute-force set exactly");
     }
 }
 
@@ -3800,7 +3930,7 @@ fn oracle_word_index_multi_dense_no_sparse() {
         Candidates::CardBits(_) => {}
         other => panic!("2+ dense hits, no sparse, must return CardBits, got {other:?}", other = std::mem::discriminant(other)),
     }
-    assert_eq!(n.set.into_cards(&archived.offsets), expected, "oracle:word must match the brute-force set exactly");
+    assert_eq!(n.set.into_cards(&archived.offsets, &archived.indexes.printing_to_card), expected, "oracle:word must match the brute-force set exactly");
 }
 
 // compile_plane's bonus arm only fires for the single-dense-hit shape (needed
@@ -3947,7 +4077,7 @@ fn border_planes_exact_union_parity() {
         let expected = brute_force_has_border(archived, value);
         let n = rec(&border(value)).unwrap_or_else(|| panic!("border:{value} must narrow"));
         assert!(!n.tight, "border planes narrow loose through narrow_rec, tight or not is compile_plane's separate call to make");
-        assert_eq!(n.set.into_cards(&archived.offsets), expected, "border:{value} narrowed set must match brute force");
+        assert_eq!(n.set.into_cards(&archived.offsets, &archived.indexes.printing_to_card), expected, "border:{value} narrowed set must match brute force");
     }
 
     // Untracked (yellow): narrows loosely through the shared `other` plane --
@@ -3956,7 +4086,7 @@ fn border_planes_exact_union_parity() {
     let expected_yellow = brute_force_has_border(archived, "yellow");
     let n = rec(&border("yellow")).expect("untracked value must still narrow via the shared other plane");
     assert!(!n.tight);
-    assert_eq!(n.set.into_cards(&archived.offsets), expected_yellow, "border:yellow narrowed set must match brute force");
+    assert_eq!(n.set.into_cards(&archived.offsets, &archived.indexes.printing_to_card), expected_yellow, "border:yellow narrowed set must match brute force");
 }
 
 // The regression test this design exists to guarantee: two independent
@@ -4100,7 +4230,7 @@ fn border_black_declines_via_broadness_guard() {
     let border = |v: &str| FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value: v.to_string() };
 
     let n = super::narrow_rec(&border("black"), &archived.indexes, &archived.offsets, &archived.cards, true).expect("the dedicated arm itself always narrows");
-    assert_eq!(n.set.into_cards(&archived.offsets).len(), 7);
+    assert_eq!(n.set.into_cards(&archived.offsets, &archived.indexes.printing_to_card).len(), 7);
 
     assert!(
         narrow_candidates(&border("black"), &archived.indexes, &archived.offsets, &archived.cards).is_none(),
@@ -4229,7 +4359,7 @@ fn not_narrows_only_tight_children() {
     // Tight leaf → complement narrows, loose, and covers every ¬-match.
     let n = rec(&FilterExpr::Not(Box::new(goblin()))).expect("Not(subtype) must narrow");
     assert!(!n.tight);
-    let cand = n.set.into_cards(&archived.offsets);
+    let cand = n.set.into_cards(&archived.offsets, &archived.indexes.printing_to_card);
     for (cid, card) in archived.cards.iter().enumerate() {
         let matches_not = (u32::from(archived.offsets[cid])..u32::from(archived.offsets[cid + 1]))
             .any(|p| FilterExpr::Not(Box::new(goblin())).matches(card, &archived.printings[p as usize], &archived.strings));
@@ -4245,7 +4375,7 @@ fn not_narrows_only_tight_children() {
     // superset check as the tight-child case above, just via a different arm.
     let n = rec(&FilterExpr::Not(Box::new(rarity()))).expect("-r:x must narrow via the negated-op arm");
     assert!(!n.tight);
-    let cand = n.set.into_cards(&archived.offsets);
+    let cand = n.set.into_cards(&archived.offsets, &archived.indexes.printing_to_card);
     for (cid, card) in archived.cards.iter().enumerate() {
         let matches_not = (u32::from(archived.offsets[cid])..u32::from(archived.offsets[cid + 1]))
             .any(|p| FilterExpr::Not(Box::new(rarity())).matches(card, &archived.printings[p as usize], &archived.strings));
@@ -4281,7 +4411,7 @@ fn or_composes_plane_and_complement_children() {
     // ColorCmp had no narrowing arm before #636; via the plane feed-in the Or composes.
     let or = FilterExpr::Or(vec![goblin(), green()]);
     let n = rec(&or).expect("Or(subtype, color) must narrow");
-    let cand = n.set.into_cards(&archived.offsets);
+    let cand = n.set.into_cards(&archived.offsets, &archived.indexes.printing_to_card);
     assert_eq!(cand, vec![0, 1, 3], "goblins ∪ green");
 
     // An unindexable child still vetoes: nothing can represent it (1-char is
@@ -4392,11 +4522,7 @@ fn not_over_price_range_keeps_boundary_matches() {
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
-    let mut f = FilterExpr::Not(Box::new(FilterExpr::NumericCmp {
-        lhs: NumExpr::Field(NumField::PriceUsd),
-        op: CmpOp::Gt,
-        rhs: NumExpr::Const(5.0),
-    }));
+    let mut f = FilterExpr::Not(Box::new(usd_cmp(CmpOp::Gt, 5.0)));
     let (total, _) = run_query(
         &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
         &mut f, None, "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
@@ -4440,7 +4566,7 @@ fn name_bigrams_tiers_and_exactness() {
     // Sparse tier: exact vec, tight, and byte-for-byte the contains() answer.
     let n = rec("qx").expect("sparse bigram narrows");
     assert!(n.tight);
-    let cand = n.set.into_cards(&archived.offsets);
+    let cand = n.set.into_cards(&archived.offsets, &archived.indexes.printing_to_card);
     let brute: Vec<u32> = archived.cards.iter().enumerate()
         .filter(|(_, c)| c.card_name_lower.as_str().contains("qx"))
         .map(|(i, _)| i as u32)
@@ -4479,7 +4605,7 @@ fn name_bigrams_compose_and_memoize() {
     // Or of two bigram children composes: "fi" → {0,1,4}, "dr" → {0,2}.
     let or = FilterExpr::Or(vec![name2("fi"), name2("dr")]);
     let n = super::narrow_rec(&or, &archived.indexes, &archived.offsets, &archived.cards, false).expect("bigram Or composes");
-    assert_eq!(n.set.into_cards(&archived.offsets), vec![0, 1, 2, 4]);
+    assert_eq!(n.set.into_cards(&archived.offsets, &archived.indexes.printing_to_card), vec![0, 1, 2, 4]);
 
     // run_query parity across the new shapes, negation included.
     for f in [or, FilterExpr::Not(Box::new(name2("fi")))] {
@@ -4670,7 +4796,7 @@ fn devotion_plane_parity_and_boundaries() {
     let deep = dev(CmpOp::Ge, &[("U", 5)]);
     let n = super::narrow_rec(&deep, &archived.indexes, &archived.offsets, &archived.cards, false).expect("deep-k narrows loosely");
     assert!(!n.tight);
-    let cand = n.set.into_cards(&archived.offsets);
+    let cand = n.set.into_cards(&archived.offsets, &archived.indexes.printing_to_card);
     for (cid, card) in archived.cards.iter().enumerate() {
         if deep.eval_card(card, &archived.strings) == Tri::True {
             assert!(cand.contains(&(cid as u32)), "superset must cover card {cid}");
@@ -4774,7 +4900,7 @@ fn exact_name_narrows_tight() {
     ] {
         let n = narrow(name);
         assert!(n.tight, "{name}: equality through the sorted permutation is exact");
-        let mut got = n.set.into_cards(&archived.offsets);
+        let mut got = n.set.into_cards(&archived.offsets, &archived.indexes.printing_to_card);
         got.sort_unstable();
         want.sort_unstable();
         assert_eq!(got, want, "candidates for {name:?}");
@@ -4974,11 +5100,7 @@ fn verify_order_or_keeps_sets_and_scans_in_written_order() {
 // card-level member can still settle at card level, so it stays early.
 #[test]
 fn verify_order_and_defers_printing_dependent_children() {
-    let usd = || FilterExpr::NumericCmp {
-        lhs: NumExpr::Field(NumField::PriceUsd),
-        op: CmpOp::Gt,
-        rhs: NumExpr::Const(20.0),
-    };
+    let usd = || usd_cmp(CmpOp::Gt, 20.0);
     let dragon = || FilterExpr::CollectionCmp { field: CollField::Subtypes, op: CmpOp::Ge, value: "dragon".to_string(), value_id: None };
     let mut f = FilterExpr::And(vec![usd(), dragon()]);
     f.order_children_by_verify_cost();
@@ -5000,11 +5122,7 @@ fn verify_order_and_defers_printing_dependent_children() {
 // `usd>20` must not jump ahead of the contains it can't short-circuit.
 #[test]
 fn verify_order_or_defers_printing_dependent_children() {
-    let usd = || FilterExpr::NumericCmp {
-        lhs: NumExpr::Field(NumField::PriceUsd),
-        op: CmpOp::Gt,
-        rhs: NumExpr::Const(20.0),
-    };
+    let usd = || usd_cmp(CmpOp::Gt, 20.0);
     let mut f = FilterExpr::Or(vec![contains_scan(), usd()]);
     f.order_children_by_verify_cost();
     let FilterExpr::Or(children) = &f else { panic!("still an Or") };
