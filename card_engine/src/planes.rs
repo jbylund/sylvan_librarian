@@ -461,8 +461,19 @@ pub(crate) enum PlaneExpr {
     /// printing satisfying each half without any single printing satisfying
     /// both), so they correctly decline to compose via plain `card_bits`
     /// intersection until same-field interval merging is built (deferred,
-    /// not required for correctness — see the design doc).
-    PrintingRangeBits { id: u64, card_bits: Vec<u64>, field: RangePredicateField, op: CmpOp, threshold: f64 },
+    /// not required for correctness — see the design doc). `exact` mirrors
+    /// `Narrowed.tight` from the narrowing that produced `card_bits`:
+    /// `range_narrowed`'s complement shortcut (majority-match case) over-
+    /// includes NULL-valued printings, so `card_bits` can be a loose
+    /// superset there. That's harmless when this leaf only narrows a
+    /// candidate set that gets re-verified downstream regardless (`narrow_
+    /// rec`'s own fastpath, or `split_planes` for `unique=printing`/
+    /// `artwork`, which never folds an existential leaf to a bare `True`
+    /// residual at all) -- but load-bearing exactly once: `split_planes`'s
+    /// `unique=card` fold discards the residual entirely, so `run_query`
+    /// trusts `card_bits`' popcount directly with no recheck. See
+    /// `plane_expr_is_exact` and its callers.
+    PrintingRangeBits { id: u64, card_bits: Vec<u64>, field: RangePredicateField, op: CmpOp, threshold: f64, exact: bool },
     And(Vec<PlaneExpr>),
     Or(Vec<PlaneExpr>),
     Not(Box<PlaneExpr>),
@@ -1061,10 +1072,11 @@ fn compile_plane_children(
     words: &rkyv::Archived<OracleWordIndex>,
     indexes: &rkyv::Archived<CardIndexes>,
     offsets: &AOffsets,
+    must_be_tight: bool,
 ) -> Option<Vec<PlaneExpr>> {
     let mut order: Vec<&FilterExpr> = children.iter().collect();
     order.sort_by_key(|c| plane_precheck_rank(c));
-    order.into_iter().map(|c| compile_plane(c, bounds, words, indexes, offsets)).collect()
+    order.into_iter().map(|c| compile_plane(c, bounds, words, indexes, offsets, must_be_tight)).collect()
 }
 
 /// Which existential family a plane index addresses, and the per-printing
@@ -1214,6 +1226,26 @@ pub(crate) fn plane_expr_is_existential(expr: &PlaneExpr) -> bool {
     }
 }
 
+/// Whether every `PrintingRangeBits` leaf in a compiled plane expression has
+/// `exact: true` -- everything else (`Plane`/`Bits`/`Const`) is always exact,
+/// only a range leaf that hit `range_narrowed`'s complement shortcut for a
+/// majority-match query can be `false`. Only load-bearing at exactly one
+/// point: `split_planes`'s `unique=card` fold, which discards the residual
+/// entirely and lets `run_query` trust `card_bits`' popcount with no
+/// recheck -- see `PlaneExpr::PrintingRangeBits`'s doc. Every other consumer
+/// of a compiled plane (`narrow_rec`'s own fastpath; `split_planes` for
+/// `unique=printing`/`artwork`, which never folds an existential leaf away)
+/// always re-verifies downstream regardless, so they call `compile_plane`
+/// without ever consulting this.
+pub(crate) fn plane_expr_is_exact(expr: &PlaneExpr) -> bool {
+    match expr {
+        PlaneExpr::PrintingRangeBits { exact, .. } => *exact,
+        PlaneExpr::Plane(_) | PlaneExpr::Bits(_) | PlaneExpr::Const(_) => true,
+        PlaneExpr::And(cs) | PlaneExpr::Or(cs) => cs.iter().all(plane_expr_is_exact),
+        PlaneExpr::Not(inner) => plane_expr_is_exact(inner),
+    }
+}
+
 /// `And` two-or-more legality-plane leaves referencing distinct existence
 /// facts -- different formats, the same format under both polarities
 /// (`format:A AND -format:A`), or (#678) the same format under two different
@@ -1243,23 +1275,37 @@ fn and_of_checked_for_shared_witness(children: Vec<PlaneExpr>) -> Option<PlaneEx
     Some(and_of(children))
 }
 
+/// `must_be_tight` propagates to every `PrintingRangeBits` leaf compiled
+/// within (`compile_price_range`/`compile_collector_number_range`/
+/// `compile_date_range`/`compile_year_range`): `true` when the caller will
+/// trust the result without a downstream recheck (`split_planes`'s
+/// `unique=card` fold specifically), `false` everywhere else (`narrow_rec`'s
+/// own fastpath; `split_planes` for `unique=printing`/`artwork`, which never
+/// folds an existential leaf away regardless) -- see `range_narrowed`'s own
+/// doc for why forcing it unconditionally was tried and reverted: it fixed a
+/// real NULL-over-inclusion bug but broke the fastpath's own reason to
+/// exist for the *broadest* queries, which are exactly the ones that always
+/// hit the complement shortcut this guards.
 pub(crate) fn compile_plane(
     filter: &FilterExpr,
     bounds: &rkyv::Archived<BitPlanes>,
     words: &rkyv::Archived<OracleWordIndex>,
     indexes: &rkyv::Archived<CardIndexes>,
     offsets: &AOffsets,
+    must_be_tight: bool,
 ) -> Option<PlaneExpr> {
     match filter {
         FilterExpr::True => Some(PlaneExpr::Const(true)),
-        FilterExpr::And(children) => and_of_checked_for_shared_witness(compile_plane_children(children, bounds, words, indexes, offsets)?),
-        FilterExpr::Or(children) => compile_plane_children(children, bounds, words, indexes, offsets).map(or_of),
+        FilterExpr::And(children) => {
+            and_of_checked_for_shared_witness(compile_plane_children(children, bounds, words, indexes, offsets, must_be_tight)?)
+        }
+        FilterExpr::Or(children) => compile_plane_children(children, bounds, words, indexes, offsets, must_be_tight).map(or_of),
         // De Morgan pushdown so a Not that reaches a Legality leaf lands on
         // `illegal_exists` instead of bit-complementing `legal_exists` (wrong
         // for divergent cards -- see PLANE_LEGAL_EXISTS's doc). Handles the
         // contains_unnegatable_numeric guard itself, per-leaf, via its own
         // catch-all arm -- see compile_plane_neg's doc.
-        FilterExpr::Not(inner) => compile_plane_neg(inner, bounds, words, indexes, offsets),
+        FilterExpr::Not(inner) => compile_plane_neg(inner, bounds, words, indexes, offsets, must_be_tight),
         // Bonus consumption (docs/issues/00663-engine-oracle-word-index.md): only
         // when the needle matches exactly one dictionary word total (dense or
         // sparse) and that word is dense — the same "single dense hit, no
@@ -1307,10 +1353,14 @@ pub(crate) fn compile_plane(
         FilterExpr::NumericCmp { lhs, op, rhs } => match (lhs, rhs) {
             (NumExpr::Field(NumField::RarityInt), NumExpr::Const(v)) => compile_rarity_cmp(*op, *v),
             (NumExpr::Const(v), NumExpr::Field(NumField::RarityInt)) => compile_rarity_cmp(flip_op(*op), *v),
-            (NumExpr::Field(NumField::PriceUsd), NumExpr::Const(v)) => compile_price_range(*op, *v, indexes, offsets),
-            (NumExpr::Const(v), NumExpr::Field(NumField::PriceUsd)) => compile_price_range(flip_op(*op), *v, indexes, offsets),
-            (NumExpr::Field(NumField::CollectorNumberInt), NumExpr::Const(v)) => compile_collector_number_range(*op, *v, indexes, offsets),
-            (NumExpr::Const(v), NumExpr::Field(NumField::CollectorNumberInt)) => compile_collector_number_range(flip_op(*op), *v, indexes, offsets),
+            (NumExpr::Field(NumField::PriceUsd), NumExpr::Const(v)) => compile_price_range(*op, *v, indexes, offsets, must_be_tight),
+            (NumExpr::Const(v), NumExpr::Field(NumField::PriceUsd)) => compile_price_range(flip_op(*op), *v, indexes, offsets, must_be_tight),
+            (NumExpr::Field(NumField::CollectorNumberInt), NumExpr::Const(v)) => {
+                compile_collector_number_range(*op, *v, indexes, offsets, must_be_tight)
+            }
+            (NumExpr::Const(v), NumExpr::Field(NumField::CollectorNumberInt)) => {
+                compile_collector_number_range(flip_op(*op), *v, indexes, offsets, must_be_tight)
+            }
             (NumExpr::Field(f), NumExpr::Const(v)) => compile_numeric_cmp(*f, *op, *v, bounds),
             (NumExpr::Const(v), NumExpr::Field(f)) => compile_numeric_cmp(*f, flip_op(*op), *v, bounds),
             _ => None,
@@ -1318,11 +1368,11 @@ pub(crate) fn compile_plane(
         // released_at</X (docs/issues/local-engine-broad-range-fastpath.md):
         // same existential-plane treatment as usd/collector_number, via
         // date_range_narrowed (shared with narrow_rec's own DateCmp arm).
-        FilterExpr::DateCmp { op, value } => compile_date_range(*op, *value, indexes, offsets),
+        FilterExpr::DateCmp { op, value } => compile_date_range(*op, *value, indexes, offsets, must_be_tight),
         // released_at's year(...)</Y: same treatment via year_range_narrowed,
         // which maps the year threshold to a released_at_int range at the
         // year boundary.
-        FilterExpr::YearCmp { op, year } => compile_year_range(*op, *year, indexes, offsets),
+        FilterExpr::YearCmp { op, year } => compile_year_range(*op, *year, indexes, offsets, must_be_tight),
         // f:x / format:x / banned:x / restricted:x (docs/issues/
         // 00667-engine-legality-divergent-carveout.md, generalized by #678 -- see
         // docs/issues/00678-engine-legality-banned-restricted-planes.md): exact for
@@ -1348,20 +1398,31 @@ pub(crate) fn compile_plane(
 /// `range_narrowed` (shared with `narrow_rec`'s own price closure through
 /// `price_range_narrowed`, so the two paths can't drift). Declines (`None`)
 /// exactly when `price_range_narrowed` does (an op `int_range_bounds` doesn't
-/// support for range narrowing).
-fn compile_price_range(op: CmpOp, threshold: f64, indexes: &rkyv::Archived<CardIndexes>, offsets: &AOffsets) -> Option<PlaneExpr> {
+/// support for range narrowing). `must_be_tight` passes straight through to
+/// `price_range_narrowed` -- see `compile_plane`'s own doc for who needs
+/// `true` and who doesn't; `printing_range_bits` also records whatever
+/// `narrowed.tight` came back as into the leaf's `exact` field regardless,
+/// as a defense-in-depth double-check (`plane_expr_is_exact`) independent
+/// of this threading.
+fn compile_price_range(op: CmpOp, threshold: f64, indexes: &rkyv::Archived<CardIndexes>, offsets: &AOffsets, must_be_tight: bool) -> Option<PlaneExpr> {
     let n_cards = offsets.len().saturating_sub(1);
     let n_printings = if n_cards == 0 { 0 } else { u32::from(offsets[n_cards]) as usize };
-    let narrowed = price_range_narrowed(op, threshold, indexes, n_printings, true)?;
+    let narrowed = price_range_narrowed(op, threshold, indexes, n_printings, true, must_be_tight)?;
     Some(printing_range_bits(narrowed, RangePredicateField::PriceUsd, op, threshold, offsets, indexes))
 }
 
 /// Compile `collector_number <op> threshold` to a `PrintingRangeBits` leaf,
 /// same shape as `compile_price_range` (shared via `collector_number_range_narrowed`).
-fn compile_collector_number_range(op: CmpOp, threshold: f64, indexes: &rkyv::Archived<CardIndexes>, offsets: &AOffsets) -> Option<PlaneExpr> {
+fn compile_collector_number_range(
+    op: CmpOp,
+    threshold: f64,
+    indexes: &rkyv::Archived<CardIndexes>,
+    offsets: &AOffsets,
+    must_be_tight: bool,
+) -> Option<PlaneExpr> {
     let n_cards = offsets.len().saturating_sub(1);
     let n_printings = if n_cards == 0 { 0 } else { u32::from(offsets[n_cards]) as usize };
-    let narrowed = collector_number_range_narrowed(op, threshold, indexes, n_printings, true)?;
+    let narrowed = collector_number_range_narrowed(op, threshold, indexes, n_printings, true, must_be_tight)?;
     Some(printing_range_bits(narrowed, RangePredicateField::CollectorNumber, op, threshold, offsets, indexes))
 }
 
@@ -1369,19 +1430,19 @@ fn compile_collector_number_range(op: CmpOp, threshold: f64, indexes: &rkyv::Arc
 /// `PrintingRangeBits` leaf via `date_range_narrowed`. `value` (already a
 /// zero-padded yyyymmdd `u32`) is stored as the leaf's `threshold` directly --
 /// no conversion, exact in `f64`.
-fn compile_date_range(op: CmpOp, value: u32, indexes: &rkyv::Archived<CardIndexes>, offsets: &AOffsets) -> Option<PlaneExpr> {
+fn compile_date_range(op: CmpOp, value: u32, indexes: &rkyv::Archived<CardIndexes>, offsets: &AOffsets, must_be_tight: bool) -> Option<PlaneExpr> {
     let n_cards = offsets.len().saturating_sub(1);
     let n_printings = if n_cards == 0 { 0 } else { u32::from(offsets[n_cards]) as usize };
-    let narrowed = date_range_narrowed(op, value, indexes, n_printings, true)?;
+    let narrowed = date_range_narrowed(op, value, indexes, n_printings, true, must_be_tight)?;
     Some(printing_range_bits(narrowed, RangePredicateField::ReleasedAtDate, op, value as f64, offsets, indexes))
 }
 
 /// Compile `released_at year <op> year` (`FilterExpr::YearCmp`) to a
 /// `PrintingRangeBits` leaf via `year_range_narrowed`.
-fn compile_year_range(op: CmpOp, year: i32, indexes: &rkyv::Archived<CardIndexes>, offsets: &AOffsets) -> Option<PlaneExpr> {
+fn compile_year_range(op: CmpOp, year: i32, indexes: &rkyv::Archived<CardIndexes>, offsets: &AOffsets, must_be_tight: bool) -> Option<PlaneExpr> {
     let n_cards = offsets.len().saturating_sub(1);
     let n_printings = if n_cards == 0 { 0 } else { u32::from(offsets[n_cards]) as usize };
-    let narrowed = year_range_narrowed(op, year, indexes, n_printings, true)?;
+    let narrowed = year_range_narrowed(op, year, indexes, n_printings, true, must_be_tight)?;
     Some(printing_range_bits(narrowed, RangePredicateField::ReleasedAtYear, op, year as f64, offsets, indexes))
 }
 
@@ -1400,8 +1461,14 @@ fn printing_range_bits(
     indexes: &rkyv::Archived<CardIndexes>,
 ) -> PlaneExpr {
     let n_cards = offsets.len().saturating_sub(1);
+    // Capture printing-space tightness *before* into_card_space, which
+    // hardcodes tight:false on its own result unconditionally (card-space
+    // tightness means "all_match" there -- a different contract this
+    // existential leaf doesn't need; what matters here is whether the
+    // printing-space narrowing that fed it had any NULL over-inclusion).
+    let exact = narrowed.tight;
     let card_bits = narrowed.into_card_space(offsets, &indexes.printing_to_card).set.into_bits(n_cards);
-    PlaneExpr::PrintingRangeBits { id: next_range_bits_id(), card_bits, field, op, threshold }
+    PlaneExpr::PrintingRangeBits { id: next_range_bits_id(), card_bits, field, op, threshold, exact }
 }
 
 /// Compile `Not(filter)` directly, pushing negation down to `Legality` and
@@ -1422,6 +1489,7 @@ fn compile_plane_neg(
     words: &rkyv::Archived<OracleWordIndex>,
     indexes: &rkyv::Archived<CardIndexes>,
     offsets: &AOffsets,
+    must_be_tight: bool,
 ) -> Option<PlaneExpr> {
     match filter {
         FilterExpr::Legality { shift: Some(shift), expected } => {
@@ -1437,35 +1505,35 @@ fn compile_plane_neg(
         // (¬∃p: p.usd<X) -- same divergent-printing trap as Legality/rarity's own
         // dedicated negation arms; a card can have some printings under X and some not.
         FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op, rhs: NumExpr::Const(v) } => {
-            compile_price_range(negate_op(*op), *v, indexes, offsets)
+            compile_price_range(negate_op(*op), *v, indexes, offsets, must_be_tight)
         }
         FilterExpr::NumericCmp { lhs: NumExpr::Const(v), op, rhs: NumExpr::Field(NumField::PriceUsd) } => {
-            compile_price_range(negate_op(flip_op(*op)), *v, indexes, offsets)
+            compile_price_range(negate_op(flip_op(*op)), *v, indexes, offsets, must_be_tight)
         }
         // -collector_number<X: same divergent-printing reasoning as -usd<X.
         FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::CollectorNumberInt), op, rhs: NumExpr::Const(v) } => {
-            compile_collector_number_range(negate_op(*op), *v, indexes, offsets)
+            compile_collector_number_range(negate_op(*op), *v, indexes, offsets, must_be_tight)
         }
         FilterExpr::NumericCmp { lhs: NumExpr::Const(v), op, rhs: NumExpr::Field(NumField::CollectorNumberInt) } => {
-            compile_collector_number_range(negate_op(flip_op(*op)), *v, indexes, offsets)
+            compile_collector_number_range(negate_op(flip_op(*op)), *v, indexes, offsets, must_be_tight)
         }
         // -released_at<X / -year(released_at)<Y: same divergent-printing
         // reasoning, recomputed via the negated op rather than bit-complemented.
-        FilterExpr::DateCmp { op, value } => compile_date_range(negate_op(*op), *value, indexes, offsets),
-        FilterExpr::YearCmp { op, year } => compile_year_range(negate_op(*op), *year, indexes, offsets),
+        FilterExpr::DateCmp { op, value } => compile_date_range(negate_op(*op), *value, indexes, offsets, must_be_tight),
+        FilterExpr::YearCmp { op, year } => compile_year_range(negate_op(*op), *year, indexes, offsets, must_be_tight),
         // -border:x: recomputed via compile_border_cmp_neg's Or-of-others,
         // not bit-complemented, same divergent-card reasoning as Legality/rarity.
         FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value } => compile_border_cmp_neg(value),
         // Not(And(cs)) = Or(Not(c) for c in cs) -- existence distributes over
         // Or, so no shared-witness check is needed here regardless of how
         // many legality leaves end up among the children.
-        FilterExpr::And(children) => compile_plane_neg_children(children, bounds, words, indexes, offsets).map(or_of),
+        FilterExpr::And(children) => compile_plane_neg_children(children, bounds, words, indexes, offsets, must_be_tight).map(or_of),
         // Not(Or(cs)) = And(Not(c) for c in cs) -- THIS does have the
         // shared-witness exposure (see and_of_checked_for_shared_witness).
         FilterExpr::Or(children) => {
-            and_of_checked_for_shared_witness(compile_plane_neg_children(children, bounds, words, indexes, offsets)?)
+            and_of_checked_for_shared_witness(compile_plane_neg_children(children, bounds, words, indexes, offsets, must_be_tight)?)
         }
-        FilterExpr::Not(inner) => compile_plane(inner, bounds, words, indexes, offsets), // double negation
+        FilterExpr::Not(inner) => compile_plane(inner, bounds, words, indexes, offsets, must_be_tight), // double negation
         FilterExpr::True => Some(PlaneExpr::Const(false)),
         // Everything else: only Legality has a divergent-card correctness
         // gap, so every other plane-eligible leaf is safe to compile
@@ -1479,7 +1547,7 @@ fn compile_plane_neg(
             if contains_unnegatable_numeric(other) {
                 return None;
             }
-            compile_plane(other, bounds, words, indexes, offsets).map(|p| PlaneExpr::Not(Box::new(p)))
+            compile_plane(other, bounds, words, indexes, offsets, must_be_tight).map(|p| PlaneExpr::Not(Box::new(p)))
         }
     }
 }
@@ -1490,8 +1558,9 @@ fn compile_plane_neg_children(
     words: &rkyv::Archived<OracleWordIndex>,
     indexes: &rkyv::Archived<CardIndexes>,
     offsets: &AOffsets,
+    must_be_tight: bool,
 ) -> Option<Vec<PlaneExpr>> {
-    children.iter().map(|c| compile_plane_neg(c, bounds, words, indexes, offsets)).collect()
+    children.iter().map(|c| compile_plane_neg(c, bounds, words, indexes, offsets, must_be_tight)).collect()
 }
 
 /// Consume the plane-expressible part of a bound filter. Returns the compiled
@@ -1539,9 +1608,16 @@ pub(crate) fn split_planes(
     // buried entirely inside one child (e.g. an Or of two date comparisons)
     // still pays the old cost, same as before this fix existed.
     let range_conflict = has_conflicting_range_families(&filter);
+    // must_be_tight: unique_is_card -- this is exactly the fold that
+    // discards the residual and lets run_query trust card_bits' popcount
+    // with no recheck, so it's the one call site truly willing to pay for
+    // the majority-match direct scatter instead of the (otherwise cheaper)
+    // NULL-over-including complement. plane_expr_is_exact below is a
+    // defense-in-depth double-check, not the primary guarantee -- see
+    // compile_plane's own doc.
     if !range_conflict
-        && let Some(pe) = compile_plane(&filter, bounds, words, indexes, offsets)
-        && (unique_is_card || !plane_expr_is_existential(&pe))
+        && let Some(pe) = compile_plane(&filter, bounds, words, indexes, offsets, unique_is_card)
+        && ((unique_is_card && plane_expr_is_exact(&pe)) || !plane_expr_is_existential(&pe))
     {
         return (Some(pe), FilterExpr::True);
     }
@@ -1570,7 +1646,7 @@ pub(crate) fn split_planes(
                     rest.push(c);
                     continue;
                 }
-                match compile_plane(&c, bounds, words, indexes, offsets) {
+                match compile_plane(&c, bounds, words, indexes, offsets, unique_is_card) {
                     Some(pe) => {
                         let mut fmts = Vec::new();
                         collect_existential_indices(&pe, &mut fmts);
@@ -1587,7 +1663,7 @@ pub(crate) fn split_planes(
             for (_, pe) in &legality_children {
                 collect_existential_indices(pe, &mut all_formats);
             }
-            if unique_is_card && all_formats.len() <= 1 {
+            if unique_is_card && all_formats.len() <= 1 && legality_children.iter().all(|(_, pe)| plane_expr_is_exact(pe)) {
                 for (_, pe) in legality_children {
                     planes.push(pe);
                 }
@@ -1599,9 +1675,12 @@ pub(crate) fn split_planes(
                 // way) can't be ANDed together safely regardless of mode
                 // (shared-witness); a single one is safe for the plane's own
                 // exactness but still deferred for unique=printing/artwork,
-                // same reasoning as the top-level shortcut above. Either way
-                // it falls back to narrow_rec's existing (correct, still
-                // exact as of this issue) Legality narrowing arm instead.
+                // same reasoning as the top-level shortcut above. A range leaf
+                // whose narrowing hit the complement shortcut (not exact) is
+                // the same "can't be trusted for the unique=card fold" story
+                // -- see plane_expr_is_exact's doc. Either way it falls back
+                // to narrow_rec's existing (correct, still exact as of this
+                // issue) narrowing arm instead.
                 for (c, _) in legality_children {
                     rest.push(c);
                 }

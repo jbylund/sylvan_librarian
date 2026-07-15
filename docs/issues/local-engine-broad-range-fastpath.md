@@ -387,6 +387,61 @@ weighted-walk regression above, and now compound existential-leaf queries. Each 
 looked right had a real, different cost profile once tested against realistic query composition,
 not just the query shape that motivated the change.
 
+## A real correctness bug: NULL-over-inclusion in the complement shortcut
+
+Found while re-benchmarking against real `origin/main` (none of this `PrintingRangeBits` work has
+actually merged — see the top of this doc's status line): `usd<50`/`unique=card` on the 97,206-
+printing corpus returned **31,396 on this branch vs. the correct 31,217** (confirmed independently
+against the raw corpus JSONL and against `origin/main`, which has no `PrintingRangeBits` at all).
+Pre-existing since price's original commit (`cd3656e`), inherited automatically by `collector_number`/
+`released_at`.
+
+**Root cause**: `range_narrowed`'s complement branch (used when the matching side is both the
+majority and past `NARROW_FLOOR`) scatters the *non*-matching indexed printings and complements
+over all `n_printings` — which also flips the bit for every printing absent from the index entirely
+(NULL-valued for that field). That's exactly why the result is tagged `Narrowed.tight = false`, and
+the rest of the codebase (`narrow_rec`'s own `Not`-handling) already respects that contract
+carefully. But `compile_price_range`/`compile_collector_number_range`/`compile_date_range`/
+`compile_year_range` (via `printing_range_bits`) never read `narrowed.tight` before treating the
+projected `card_bits` as the definitive existential fact for the plane — and `split_planes`'s
+`unique=card` fold discards the residual entirely, so `run_query` trusts `card_bits`' popcount with
+no recheck at all. `usd<50` is 83% selective (of *priced* printings), so the complement shortcut
+always fires there.
+
+**First fix attempt (reverted): force `must_be_tight` unconditionally.** Made `range_narrowed`
+always take the direct-scatter branch (never the complement) inside the four `compile_*_range`
+functions specifically. Fixed the overcount, verified via a dedicated regression test
+(`price_plane_does_not_overcount_null_priced_printings_when_broad`, a 2,000-printing fixture: 1,800
+priced matches, 200 priceless), but broke performance in two ways once benchmarked: `narrow_rec`'s
+own plane fastpath (unrelated to `split_planes`'s fold, always re-verified downstream regardless)
+paid the expensive scatter for nothing, and — critically — **the broadest queries, exactly the ones
+this whole fastpath exists for, always hit the complement branch**, so forcing tightness everywhere
+sacrificed the win for `usd<50`-shaped queries specifically while "fixing" a bug that only mattered
+at one specific call site.
+
+**Real fix: thread `must_be_tight` through `compile_plane` itself**, defaulting to `false`, set to
+`true` only by `split_planes` for `unique=card` (the one call site that actually discards the
+residual and trusts `card_bits` unverified) and left `false` everywhere else (`narrow_rec`'s own
+fastpath; `split_planes` for `unique=printing`/`artwork`, which never folds an existential leaf away
+regardless of exactness). `PlaneExpr::PrintingRangeBits` also carries an `exact: bool` field
+(mirroring `Narrowed.tight` from the narrowing that produced it) as a second, independent
+defense-in-depth check — `plane_expr_is_exact` — consulted alongside the `must_be_tight` threading
+at `split_planes`'s fold decision. Mutation-tested that this double layer actually holds: breaking
+just the `must_be_tight` threading costs performance but not correctness (the `exact` check declines
+the fold, falling back to the safe path); breaking both simultaneously reproduces the original bug
+exactly, confirming neither layer alone is redundant.
+
+**Verified**: `cargo test`/`cargo clippy` clean throughout; `test_engine_property.py`'s differential
+suite (250 seeded queries against a reference oracle, ≥6,000-card store built specifically to cross
+`NARROW_FLOOR`) confirmed to *actually fail* against the pre-fix code (not just theoretically able
+to) and pass cleanly after — this differential suite existed the whole time but had not actually
+been run against this branch until this investigation.
+
+**Could the Rust fuzzer have caught this?** No — `fuzz_row_identity_matches_reference` generates
+stores with 5-15 cards (~45 printings max), structurally unable to cross `NARROW_FLOOR` (1,000).
+See [local-engine-large-scale-differential-fuzzer.md](local-engine-large-scale-differential-fuzzer.md)
+for a proposed (not yet built) large-scale companion fuzzer that would.
+
 ## Plan
 
 - [x] Ship the price exactness fix standalone (see Prerequisite above) — landed as the
@@ -419,6 +474,12 @@ not just the query shape that motivated the change.
       compile-then-discard before the shared-witness check rejects them) — `has_conflicting_range_
       families`, see "A second broad-testing lesson" above. Also fixed a latent instance of the
       same bug that predates this slice (`f:modern AND usd<50`, present since price's original PR).
+- [x] Found and fixed a real correctness bug (NULL-over-inclusion in `range_narrowed`'s complement
+      shortcut, silently overcounting `usd<50`/`unique=card` by 179 on the real corpus, pre-existing
+      since price's original commit) — see "A real correctness bug" above. `must_be_tight` threaded
+      through `compile_plane`, plus an independent `exact` field on `PrintingRangeBits` as
+      defense-in-depth; confirmed `test_engine_property.py`'s existing differential suite actually
+      catches this (once run), and added a fast Rust-level regression test for day-to-day coverage.
 - [ ] Decide the `Not`-arm/`tight_narrow_space` composition-safety question (deferred from the
       Prerequisite section to here) — either bring it into scope (needed for `-usd>8`-shaped
       queries, a real fragment in `test_engine_property.py`'s own suite) or explicitly defer it

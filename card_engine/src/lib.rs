@@ -2023,7 +2023,24 @@ fn range_candidates(idx: &Archived<PrintingRangeIndex>, lo: u32, hi: u32) -> Opt
 /// widened one position for f32/f64 rounding (see price_bounds) and therefore
 /// produce supersets that must never be marked tight — a Not would complement
 /// away the boundary printings, which are exactly the negation's matches.
-fn range_narrowed(idx: &Archived<PrintingRangeIndex>, lo: u32, hi: u32, n_printings: usize, broad_ok: bool, exact: bool) -> Option<Narrowed> {
+///
+/// `must_be_tight`, when set, refuses the complement shortcut below
+/// regardless of which side is smaller -- needed by any caller that would
+/// otherwise feed a `loose` result into something with no downstream
+/// recheck (`compile_price_range`/`compile_collector_number_range`/
+/// `compile_date_range`/`compile_year_range`, when compiling for
+/// `split_planes`'s `unique=card` fold specifically -- see `compile_plane`'s
+/// own `must_be_tight` threading and `PlaneExpr::PrintingRangeBits`'s `exact`
+/// field). Found via a real bug: the complement branch over-includes
+/// NULL-valued printings (absent from the index entirely), silently
+/// overcounting `usd<50` (83% selective, so the shortcut fired) by 179 --
+/// 31,396 counted vs. the correct 31,217 -- docs/issues/local-engine-broad-
+/// range-fastpath.md. `narrow_rec`'s own per-field closures, and any caller
+/// compiling a plane for a context that always re-verifies downstream
+/// regardless (`narrow_rec`'s own plane fastpath, `unique=printing`/
+/// `artwork`), keep `false`: forcing the majority-side scatter there would
+/// only pay for exactness nothing consumes.
+fn range_narrowed(idx: &Archived<PrintingRangeIndex>, lo: u32, hi: u32, n_printings: usize, broad_ok: bool, exact: bool, must_be_tight: bool) -> Option<Narrowed> {
     let s = idx.partition_point(|p| u32::from(p.0) < lo);
     let e = idx.partition_point(|p| u32::from(p.0) < hi);
     let k = e - s;
@@ -2035,10 +2052,17 @@ fn range_narrowed(idx: &Archived<PrintingRangeIndex>, lo: u32, hi: u32, n_printi
     if !broad_ok {
         return None; // nothing downstream would consume the bitmap — pre-#636 behavior
     }
-    if k <= idx.len() - k {
+    if must_be_tight || k <= idx.len() - k {
         let bits = scatter_bits(idx[s..e].iter().map(|p| u32::from(p.1)), n_printings);
         return Some(Narrowed { set: Candidates::PrintingBits(bits), tight: exact });
     }
+    // Only reached when !must_be_tight: scattering the *minority* side
+    // (idx.len()-k printings) and complementing over all n_printings is
+    // cheaper than directly scattering the k-majority side, but the
+    // complement flips every bit outside the index too -- including every
+    // printing absent from it entirely (NULL-valued for this field), which
+    // is why this branch can only ever produce a `loose` (not `exact`)
+    // result.
     let mut bits = scatter_bits(
         idx[..s].iter().chain(idx[e..].iter()).map(|p| u32::from(p.1)),
         n_printings,
@@ -2055,10 +2079,10 @@ fn range_narrowed(idx: &Archived<PrintingRangeIndex>, lo: u32, hi: u32, n_printi
 /// floating-point operation, not a lossless relabeling (`0.28_f64 * 100.0 ==
 /// 28.000000000000004`), so `snap_to_nearest_cent` guards it before flooring/
 /// ceiling in `int_range_bounds`.
-pub(crate) fn price_range_narrowed(op: CmpOp, v: f64, indexes: &Archived<CardIndexes>, n_printings: usize, broad_ok: bool) -> Option<Narrowed> {
+pub(crate) fn price_range_narrowed(op: CmpOp, v: f64, indexes: &Archived<CardIndexes>, n_printings: usize, broad_ok: bool, must_be_tight: bool) -> Option<Narrowed> {
     match int_range_bounds(op, snap_to_nearest_cent(v * PRICE_CENTS_PER_DOLLAR))? {
         None => Narrowed::tight(Candidates::Printings(Vec::new())),
-        Some((lo, hi)) => range_narrowed(&indexes.price_usd, lo, hi, n_printings, broad_ok, true),
+        Some((lo, hi)) => range_narrowed(&indexes.price_usd, lo, hi, n_printings, broad_ok, true, must_be_tight),
     }
 }
 
@@ -2066,10 +2090,10 @@ pub(crate) fn price_range_narrowed(op: CmpOp, v: f64, indexes: &Archived<CardInd
 /// (`planes.rs`) — same reasoning as `price_range_narrowed`. Already an exact
 /// integer field (no lossy conversion step at all, unlike price pre-#688), so
 /// no `snap_to_nearest_cent`-equivalent is needed here.
-pub(crate) fn collector_number_range_narrowed(op: CmpOp, v: f64, indexes: &Archived<CardIndexes>, n_printings: usize, broad_ok: bool) -> Option<Narrowed> {
+pub(crate) fn collector_number_range_narrowed(op: CmpOp, v: f64, indexes: &Archived<CardIndexes>, n_printings: usize, broad_ok: bool, must_be_tight: bool) -> Option<Narrowed> {
     match int_range_bounds(op, v)? {
         None => Narrowed::tight(Candidates::Printings(Vec::new())),
-        Some((lo, hi)) => range_narrowed(&indexes.collector_number, lo, hi, n_printings, broad_ok, true),
+        Some((lo, hi)) => range_narrowed(&indexes.collector_number, lo, hi, n_printings, broad_ok, true, must_be_tight),
     }
 }
 
@@ -2081,7 +2105,7 @@ pub(crate) fn collector_number_range_narrowed(op: CmpOp, v: f64, indexes: &Archi
 /// can (there is no "definitely empty" case here, only "Ne declines"), so it
 /// returns `Option<Narrowed>` for the decline alone, not the nested-Option
 /// shape `int_range_bounds`-based closures need.
-pub(crate) fn date_range_narrowed(op: CmpOp, value: u32, indexes: &Archived<CardIndexes>, n_printings: usize, broad_ok: bool) -> Option<Narrowed> {
+pub(crate) fn date_range_narrowed(op: CmpOp, value: u32, indexes: &Archived<CardIndexes>, n_printings: usize, broad_ok: bool, must_be_tight: bool) -> Option<Narrowed> {
     let (lo, hi) = match op {
         CmpOp::Ne => return None,
         CmpOp::Eq => (value, value.saturating_add(1)),
@@ -2090,7 +2114,7 @@ pub(crate) fn date_range_narrowed(op: CmpOp, value: u32, indexes: &Archived<Card
         CmpOp::Gt => (value.saturating_add(1), u32::MAX),
         CmpOp::Ge => (value, u32::MAX),
     };
-    range_narrowed(&indexes.released_at, lo, hi, n_printings, broad_ok, true)
+    range_narrowed(&indexes.released_at, lo, hi, n_printings, broad_ok, true, must_be_tight)
 }
 
 /// Shared by `narrow_rec`'s `YearCmp` arm and `compile_plane`'s `YearCmp` arm
@@ -2099,7 +2123,7 @@ pub(crate) fn date_range_narrowed(op: CmpOp, value: u32, indexes: &Archived<Card
 /// `< (y+1)*10_000`, so this is exactly as range-narrowable as `DateCmp`,
 /// despite comparing a *derived* value (`date / 10_000`), not the stored field
 /// directly.
-pub(crate) fn year_range_narrowed(op: CmpOp, year: i32, indexes: &Archived<CardIndexes>, n_printings: usize, broad_ok: bool) -> Option<Narrowed> {
+pub(crate) fn year_range_narrowed(op: CmpOp, year: i32, indexes: &Archived<CardIndexes>, n_printings: usize, broad_ok: bool, must_be_tight: bool) -> Option<Narrowed> {
     if !(0..=9999).contains(&year) {
         return None;
     }
@@ -2112,7 +2136,7 @@ pub(crate) fn year_range_narrowed(op: CmpOp, year: i32, indexes: &Archived<CardI
         CmpOp::Gt => ((y + 1) * 10_000, u32::MAX),
         CmpOp::Ge => (y * 10_000, u32::MAX),
     };
-    range_narrowed(&indexes.released_at, lo, hi, n_printings, broad_ok, true)
+    range_narrowed(&indexes.released_at, lo, hi, n_printings, broad_ok, true, must_be_tight)
 }
 
 // ─── Rarity index ────────────────────────────────────────────────────────────
@@ -2835,7 +2859,7 @@ fn narrow_rec(
         // falling straight to the per-field dispatch below instead.
         && !has_conflicting_range_families(filter)
     {
-        if let Some(pe) = compile_plane(filter, &indexes.planes, &indexes.oracle_trigram.words, indexes, offsets) {
+        if let Some(pe) = compile_plane(filter, &indexes.planes, &indexes.oracle_trigram.words, indexes, offsets, false) {
             let mut bits: Vec<u64> = Vec::new();
             eval_planes(&pe, &indexes.planes, &mut bits);
             // Legality's planes are existence projections, not true-for-
@@ -2964,8 +2988,8 @@ fn narrow_rec(
             // complement would wrongly exclude cards `-rarity:x` matches.
             let numeric = |idx, op, v: &f64| numeric_candidates(idx, op, *v).and_then(|c| Narrowed::tight(Candidates::Cards(c)));
             let rarity = |op, v: &f64| narrow_rarity(indexes, n_cards, op, *v);
-            let price = |op, v: &f64| price_range_narrowed(op, *v, indexes, n_printings, broad_ok);
-            let cn = |op, v: &f64| collector_number_range_narrowed(op, *v, indexes, n_printings, broad_ok);
+            let price = |op, v: &f64| price_range_narrowed(op, *v, indexes, n_printings, broad_ok, false);
+            let cn = |op, v: &f64| collector_number_range_narrowed(op, *v, indexes, n_printings, broad_ok, false);
             match (lhs, rhs) {
                 (NumExpr::Field(NumField::Cmc), NumExpr::Const(v)) => numeric(&indexes.cmc, *op, v),
                 (NumExpr::Const(v), NumExpr::Field(NumField::Cmc)) => numeric(&indexes.cmc, flip_op(*op), v),
@@ -3156,9 +3180,9 @@ fn narrow_rec(
             Narrowed::loose(Candidates::CardBits(bits))
         }
 
-        FilterExpr::DateCmp { op, value } => date_range_narrowed(*op, *value, indexes, n_printings, broad_ok),
+        FilterExpr::DateCmp { op, value } => date_range_narrowed(*op, *value, indexes, n_printings, broad_ok, false),
 
-        FilterExpr::YearCmp { op, year } => year_range_narrowed(*op, *year, indexes, n_printings, broad_ok),
+        FilterExpr::YearCmp { op, year } => year_range_narrowed(*op, *year, indexes, n_printings, broad_ok, false),
 
         FilterExpr::And(children) => {
             // Combine within each id space first (card lists are ~3x shorter),

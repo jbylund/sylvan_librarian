@@ -6,7 +6,7 @@ use super::{
     cards_of_printings, count_common_keywords, count_common_types,
     build_artist_index, build_range_index, price_range_narrowed, range_candidates, narrow_candidates, rarity_candidates,
     range_too_broad_to_narrow, run_query, trigram_candidates, finalize_trigram_index, PrintingRangeIndex, NARROW_FLOOR,
-    bitmap_contains, bitmap_card_ids, compile_plane, eval_planes, has_conflicting_range_families, split_planes,
+    bitmap_contains, bitmap_card_ids, compile_plane, eval_planes, has_conflicting_range_families, plane_expr_is_exact, split_planes,
     ArtistIndex, CardData, CardIndexes, Candidates, ColorField, NumExpr, NumField, RarityIndex,
     CollField, CmpOp, FilterExpr, InlineStr, Interner, ManaCost, OracleCard, Printing, TagIndex,
     TextField, TextSearchField, Tri, SortedTrigramIndex, VocabInterner, ARTIST_NONE, NONE_STR, TYPE_ARTIFACT, TYPE_CREATURE,
@@ -544,10 +544,10 @@ fn rarity_tracked_values_exact_consumed_hi_bucket_declines() {
     let rarity_eq = |v: f64| FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), op: CmpOp::Eq, rhs: NumExpr::Const(v) };
 
     // Tracked values (mythic=3) compile exactly.
-    assert!(compile_plane(&rarity_eq(3.0), bounds, words, &archived.indexes, &archived.offsets).is_some(), "r:mythic must compile to a plane expression");
+    assert!(compile_plane(&rarity_eq(3.0), bounds, words, &archived.indexes, &archived.offsets, false).is_some(), "r:mythic must compile to a plane expression");
     // Special/bonus specifically can't be told apart by the shared hi plane.
-    assert!(compile_plane(&rarity_eq(4.0), bounds, words, &archived.indexes, &archived.offsets).is_none(), "r:special must decline (hi bucket is ambiguous)");
-    assert!(compile_plane(&rarity_eq(5.0), bounds, words, &archived.indexes, &archived.offsets).is_none(), "r:bonus must decline (hi bucket is ambiguous)");
+    assert!(compile_plane(&rarity_eq(4.0), bounds, words, &archived.indexes, &archived.offsets, false).is_none(), "r:special must decline (hi bucket is ambiguous)");
+    assert!(compile_plane(&rarity_eq(5.0), bounds, words, &archived.indexes, &archived.offsets, false).is_none(), "r:bonus must decline (hi bucket is ambiguous)");
 
     // Mixed with an otherwise fully plane-expressible sibling: an ambiguous
     // rarity child must stay in the residual, not get silently dropped or promoted.
@@ -561,7 +561,7 @@ fn rarity_tracked_values_exact_consumed_hi_bucket_declines() {
 
     // A tracked value's negation is exact too.
     let not_mythic = FilterExpr::Not(Box::new(rarity_eq(3.0)));
-    assert!(compile_plane(&not_mythic, bounds, words, &archived.indexes, &archived.offsets).is_some(), "-r:mythic must compile to a plane expression");
+    assert!(compile_plane(&not_mythic, bounds, words, &archived.indexes, &archived.offsets, false).is_some(), "-r:mythic must compile to a plane expression");
 }
 
 /// Y=2 shared-witness decline: two distinct rarity plane indices under one
@@ -584,7 +584,7 @@ fn rarity_shared_witness_declines_same_field_and_cross_field() {
     // rarity>=rare AND rarity<=mythic: two distinct tracked plane indices
     // (rare, mythic) shared between the two Or-trees -- must decline.
     let bounded_range = FilterExpr::And(vec![rarity_ge(2.0), rarity_le(3.0)]);
-    assert!(compile_plane(&bounded_range, bounds, words, &archived.indexes, &archived.offsets).is_none(), "same-field rarity range must decline (shared witness)");
+    assert!(compile_plane(&bounded_range, bounds, words, &archived.indexes, &archived.offsets, false).is_none(), "same-field rarity range must decline (shared witness)");
 
     // format:A AND r:mythic: two distinct fields, still the identical
     // shared-witness problem -- collect_existential_indices doesn't care
@@ -593,7 +593,7 @@ fn rarity_shared_witness_declines_same_field_and_cross_field() {
     let cross_field = FilterExpr::And(vec![format_a, FilterExpr::NumericCmp {
         lhs: NumExpr::Field(NumField::RarityInt), op: CmpOp::Eq, rhs: NumExpr::Const(3.0),
     }]);
-    assert!(compile_plane(&cross_field, bounds, words, &archived.indexes, &archived.offsets).is_none(), "legality+rarity compound must decline (shared witness)");
+    assert!(compile_plane(&cross_field, bounds, words, &archived.indexes, &archived.offsets, false).is_none(), "legality+rarity compound must decline (shared witness)");
 
     // The fallback must still produce the correct (not just declined)
     // result: no printing in this fixture is both format-A-legal and
@@ -1066,11 +1066,11 @@ fn legality_same_format_cross_status_declines_shared_witness() {
     let restricted_c = || FilterExpr::Legality { shift: Some(4), expected: 0b10 };
 
     assert!(
-        compile_plane(&FilterExpr::And(vec![banned_c(), restricted_c()]), bounds, words, &archived.indexes, &archived.offsets).is_none(),
+        compile_plane(&FilterExpr::And(vec![banned_c(), restricted_c()]), bounds, words, &archived.indexes, &archived.offsets, false).is_none(),
         "banned:C AND restricted:C (same format, distinct statuses) must decline (shared-witness)"
     );
     assert!(
-        compile_plane(&FilterExpr::Or(vec![banned_c(), restricted_c()]), bounds, words, &archived.indexes, &archived.offsets).is_some(),
+        compile_plane(&FilterExpr::Or(vec![banned_c(), restricted_c()]), bounds, words, &archived.indexes, &archived.offsets, false).is_some(),
         "OR has no shared-witness problem and must compile"
     );
 }
@@ -1245,10 +1245,10 @@ fn plane_expr_is_existential_identifies_legality_only() {
     let bounds = &archived.indexes.planes;
     let words = &archived.indexes.oracle_trigram.words;
 
-    let legality_pe = compile_plane(&FilterExpr::Legality { shift: Some(0), expected: 0b01 }, bounds, words, &archived.indexes, &archived.offsets).unwrap();
+    let legality_pe = compile_plane(&FilterExpr::Legality { shift: Some(0), expected: 0b01 }, bounds, words, &archived.indexes, &archived.offsets, false).unwrap();
     assert!(super::plane_expr_is_existential(&legality_pe));
 
-    let creature_pe = compile_plane(&FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge }, bounds, words, &archived.indexes, &archived.offsets).unwrap();
+    let creature_pe = compile_plane(&FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge }, bounds, words, &archived.indexes, &archived.offsets, false).unwrap();
     assert!(!super::plane_expr_is_existential(&creature_pe));
 
     let mixed = compile_plane(
@@ -1260,6 +1260,7 @@ fn plane_expr_is_existential_identifies_legality_only() {
         words,
         &archived.indexes,
         &archived.offsets,
+        false,
     )
     .unwrap();
     assert!(super::plane_expr_is_existential(&mixed), "one existential leaf must taint the whole And");
@@ -1872,15 +1873,15 @@ fn legality_and_of_two_formats_declines_but_or_compiles() {
     let b = || FilterExpr::Legality { shift: Some(2), expected: 0b01 };
 
     assert!(
-        compile_plane(&FilterExpr::And(vec![a(), b()]), bounds, words, &archived.indexes, &archived.offsets).is_none(),
+        compile_plane(&FilterExpr::And(vec![a(), b()]), bounds, words, &archived.indexes, &archived.offsets, false).is_none(),
         "two distinct formats ANDed must decline (shared-witness)"
     );
     assert!(
-        compile_plane(&FilterExpr::Or(vec![a(), b()]), bounds, words, &archived.indexes, &archived.offsets).is_some(),
+        compile_plane(&FilterExpr::Or(vec![a(), b()]), bounds, words, &archived.indexes, &archived.offsets, false).is_some(),
         "OR of two formats has no shared-witness problem and must compile"
     );
     assert!(
-        compile_plane(&FilterExpr::And(vec![a(), FilterExpr::Not(Box::new(a()))]), bounds, words, &archived.indexes, &archived.offsets).is_none(),
+        compile_plane(&FilterExpr::And(vec![a(), FilterExpr::Not(Box::new(a()))]), bounds, words, &archived.indexes, &archived.offsets, false).is_none(),
         "format:A AND -format:A (same format, both polarities) is the same contradiction-prone shape and must also decline"
     );
 }
@@ -1942,14 +1943,14 @@ fn legality_de_morgan_not_of_compound() {
     let a = || FilterExpr::Legality { shift: Some(0), expected: 0b01 };
     let creature = || FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
 
-    let and_pe = compile_plane(&FilterExpr::And(vec![a(), creature()]), bounds, words, &archived.indexes, &archived.offsets)
+    let and_pe = compile_plane(&FilterExpr::And(vec![a(), creature()]), bounds, words, &archived.indexes, &archived.offsets, false)
         .expect("format:A AND t:creature must compile (one format, no shared-witness issue)");
     let mut and_bits: Vec<u64> = Vec::new();
     eval_planes(&and_pe, &archived.indexes.planes, &mut and_bits);
     assert!(bitmap_contains(&and_bits, 0), "printing0 is legal in A and a creature, so the positive AND is true for card 0");
 
     let not_and = FilterExpr::Not(Box::new(FilterExpr::And(vec![a(), creature()])));
-    let pe = compile_plane(&not_and, bounds, words, &archived.indexes, &archived.offsets).expect("-(format:A AND t:creature) must still compile via De Morgan");
+    let pe = compile_plane(&not_and, bounds, words, &archived.indexes, &archived.offsets, false).expect("-(format:A AND t:creature) must still compile via De Morgan");
     let mut bits: Vec<u64> = Vec::new();
     eval_planes(&pe, &archived.indexes.planes, &mut bits);
     assert!(bitmap_contains(&bits, 0), "card has a not-legal-in-A printing, so it satisfies the negation despite the positive AND being true");
@@ -1980,7 +1981,7 @@ fn legality_not_still_declines_with_unnegatable_numeric_sibling() {
     // no shared-witness issue, and the un-negated numeric comparison is
     // plane-eligible) -- isolates the failure to the Not/Null interaction.
     assert!(
-        compile_plane(&FilterExpr::And(vec![a(), power_gt3()]), bounds, words, &archived.indexes, &archived.offsets).is_some(),
+        compile_plane(&FilterExpr::And(vec![a(), power_gt3()]), bounds, words, &archived.indexes, &archived.offsets, false).is_some(),
         "format:A AND power>3 must compile without a Not present"
     );
 
@@ -1990,7 +1991,7 @@ fn legality_not_still_declines_with_unnegatable_numeric_sibling() {
     // collapsing the whole compile to None through the `?` propagation.
     let not_and = FilterExpr::Not(Box::new(FilterExpr::And(vec![a(), power_gt3()])));
     assert!(
-        compile_plane(&not_and, bounds, words, &archived.indexes, &archived.offsets).is_none(),
+        compile_plane(&not_and, bounds, words, &archived.indexes, &archived.offsets, false).is_none(),
         "-(format:A AND power>3) must decline: Null doesn't flip to True, even with a legality sibling"
     );
 
@@ -1999,7 +2000,7 @@ fn legality_not_still_declines_with_unnegatable_numeric_sibling() {
     // must decline there too, not just in the And arm.
     let not_or = FilterExpr::Not(Box::new(FilterExpr::Or(vec![a(), power_gt3()])));
     assert!(
-        compile_plane(&not_or, bounds, words, &archived.indexes, &archived.offsets).is_none(),
+        compile_plane(&not_or, bounds, words, &archived.indexes, &archived.offsets, false).is_none(),
         "-(format:A OR power>3) must decline via the Or arm of compile_plane_neg too"
     );
 }
@@ -3018,7 +3019,7 @@ fn price_narrowing_and_verification_are_exact_at_the_boundary() {
 
     // Lt must exclude the boundary printing exactly -- both in narrowing and in verification.
     let lt = cmp(CmpOp::Lt);
-    match price_range_narrowed(CmpOp::Lt, 0.10, &archived.indexes, n_printings, true).map(|n| n.set) {
+    match price_range_narrowed(CmpOp::Lt, 0.10, &archived.indexes, n_printings, true, true).map(|n| n.set) {
         Some(Candidates::Printings(v)) => {
             assert!(v.contains(&0));
             assert!(!v.contains(&1), "Lt must exclude the exact boundary price");
@@ -3034,7 +3035,7 @@ fn price_narrowing_and_verification_are_exact_at_the_boundary() {
     // silently excluded exact matches independent of narrowing).
     for (op, op_name, is_eq) in [(CmpOp::Le, "Le", false), (CmpOp::Ge, "Ge", false), (CmpOp::Eq, "Eq", true)] {
         let f = cmp(op);
-        match price_range_narrowed(op, 0.10, &archived.indexes, n_printings, true).map(|n| n.set) {
+        match price_range_narrowed(op, 0.10, &archived.indexes, n_printings, true, true).map(|n| n.set) {
             Some(Candidates::Printings(v)) => assert!(v.contains(&1), "narrowing must include the boundary price for {op_name}"),
             None if is_eq => {} // narrow_candidates_exact's broadness filter can decline Eq on a tiny store; matches() below is what matters
             _ => panic!("usd must narrow in printing space for {op_name}"),
@@ -3046,7 +3047,7 @@ fn price_narrowing_and_verification_are_exact_at_the_boundary() {
     assert!(!gt.matches(card, &archived.printings[1], &archived.strings));
 
     // Flipped operand order (50.0 < usd, i.e. usd > 50.0): only the $60 printing qualifies.
-    match price_range_narrowed(CmpOp::Gt, 50.0, &archived.indexes, n_printings, true).map(|n| n.set) {
+    match price_range_narrowed(CmpOp::Gt, 50.0, &archived.indexes, n_printings, true, true).map(|n| n.set) {
         Some(Candidates::Printings(v)) => assert_eq!(v, vec![2]),
         _ => panic!("flipped usd comparison must narrow"),
     }
@@ -3199,7 +3200,7 @@ fn plane_parity_color_and_type_ops() {
 
     let mut bitmap: Vec<u64> = Vec::new();
     let mut check = |f: &FilterExpr| {
-        let pe = compile_plane(f, &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets).expect("filter must be plane-expressible");
+        let pe = compile_plane(f, &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets, false).expect("filter must be plane-expressible");
         eval_planes(&pe, &archived.indexes.planes, &mut bitmap);
         for (cid, card) in archived.cards.iter().enumerate() {
             let want = f.eval_card(card, &archived.strings) == Tri::True;
@@ -3254,7 +3255,7 @@ fn color_cmp_ge_empty_mask_is_colorless_only() {
             let want = want_true.contains(&cid);
             assert_eq!(f.eval_card(card, &archived.strings) == Tri::True, want, "eval_card mismatch at card {cid}");
         }
-        let pe = compile_plane(&f, &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets).expect("filter must be plane-expressible");
+        let pe = compile_plane(&f, &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets, false).expect("filter must be plane-expressible");
         let mut bitmap: Vec<u64> = Vec::new();
         eval_planes(&pe, &archived.indexes.planes, &mut bitmap);
         for cid in 0..archived.cards.len() {
@@ -3283,7 +3284,7 @@ fn plane_produces_independent_of_colors_and_identity() {
     let words = &archived.indexes.oracle_trigram.words;
 
     let produces_white = FilterExpr::ColorCmp { field: ColorField::ProducedMana, op: CmpOp::Ge, mask: 1 };
-    let pe = compile_plane(&produces_white, bounds, words, &archived.indexes, &archived.offsets).expect("produces: must be plane-expressible");
+    let pe = compile_plane(&produces_white, bounds, words, &archived.indexes, &archived.offsets, false).expect("produces: must be plane-expressible");
     let mut bitmap: Vec<u64> = Vec::new();
     eval_planes(&pe, bounds, &mut bitmap);
     assert!(bitmap_contains(&bitmap, 0), "colorless artifact produces white (mask 63) despite having no colors of its own");
@@ -3301,7 +3302,7 @@ fn plane_fallaji_colors_not_subset_of_identity() {
     let mut bitmap: Vec<u64> = Vec::new();
     let mut matches = |field: ColorField, op: CmpOp, mask: u8| {
         let f = FilterExpr::ColorCmp { field, op, mask };
-        eval_planes(&compile_plane(&f, &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets).unwrap(), &archived.indexes.planes, &mut bitmap);
+        eval_planes(&compile_plane(&f, &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets, false).unwrap(), &archived.indexes.planes, &mut bitmap);
         bitmap_contains(&bitmap, FALLAJI_CID as u32)
     };
     assert!(matches(ColorField::Colors, CmpOp::Ge, 1)); // c>=W: colors carry W
@@ -3500,7 +3501,7 @@ fn price_plane_path_parity_and_shared_witness() {
     // it declines to (residual card_pass) computes the actually-correct answer.
     let same_field_and = || FilterExpr::And(vec![usd(CmpOp::Lt, 50.0), usd(CmpOp::Gt, 10.0)]);
     assert!(
-        compile_plane(&same_field_and(), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets)
+        compile_plane(&same_field_and(), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets, false)
             .is_none(),
         "same-field usd range AND must decline to compile (shared witness)"
     );
@@ -3587,7 +3588,7 @@ fn collector_number_plane_path_parity_and_shared_witness() {
     // (cn=10 fails cn>20, cn=200 fails cn<50) -- correct total is 0.
     let same_field_and = || FilterExpr::And(vec![cn(CmpOp::Lt, 50.0), cn(CmpOp::Gt, 20.0)]);
     assert!(
-        compile_plane(&same_field_and(), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets)
+        compile_plane(&same_field_and(), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets, false)
             .is_none(),
         "same-field cn range AND must decline to compile (shared witness)"
     );
@@ -3676,7 +3677,7 @@ fn released_at_plane_path_parity_and_shared_witness() {
     // satisfies both (2010 fails >2015-worth-of-date, 2024 fails <2020).
     let same_field_and = || FilterExpr::And(vec![date(CmpOp::Lt, 20_200_101), date(CmpOp::Gt, 20_150_101)]);
     assert!(
-        compile_plane(&same_field_and(), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets)
+        compile_plane(&same_field_and(), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets, false)
             .is_none(),
         "same-field date range AND must decline to compile (shared witness)"
     );
@@ -3691,7 +3692,7 @@ fn released_at_plane_path_parity_and_shared_witness() {
     // sharing the field, just different granularity) -- must also decline.
     let mixed_and = || FilterExpr::And(vec![date(CmpOp::Lt, 20_200_101), year(CmpOp::Gt, 2015)]);
     assert!(
-        compile_plane(&mixed_and(), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets).is_none(),
+        compile_plane(&mixed_and(), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets, false).is_none(),
         "DateCmp and YearCmp on released_at must decline to compile together (shared witness)"
     );
 }
@@ -3734,7 +3735,7 @@ fn cross_field_range_predicates_decline_shared_witness() {
 
     let check = |name: &str, f: FilterExpr| {
         assert!(
-            compile_plane(&f, bounds, words, &archived.indexes, &archived.offsets).is_none(),
+            compile_plane(&f, bounds, words, &archived.indexes, &archived.offsets, false).is_none(),
             "{name}: two distinct existential range facts must decline to compose"
         );
         let (total, _) = run_query(
@@ -3780,6 +3781,82 @@ fn range_conflict_check_does_not_penalize_bare_or() {
         has_conflicting_range_families(&and_containing_or),
         "an And whose child is an Or of range leaves must still see the conflict with its other child"
     );
+}
+
+/// The bug this regresses against: `range_narrowed`'s complement branch (only
+/// reachable once the matching side is both the majority and past
+/// `NARROW_FLOOR`) scatters the *non*-matching indexed printings and
+/// complements over all `n_printings` -- which also flips the bit for every
+/// printing absent from the index entirely (NULL-valued for this field).
+/// `compile_price_range` feeds `card_bits` straight into a `PrintingRangeBits`
+/// plane with no downstream recheck, so that over-inclusion silently
+/// overcounts. 1,800 of 2,000 cards have a single priced printing at $10
+/// (`usd<50` true, matching side is the 90% majority, well past
+/// `NARROW_FLOOR`); the other 200 have a single *priceless* printing, which
+/// must never satisfy any price filter. Found on the real 97k-printing
+/// corpus as `usd<50`/`unique=card` overcounting by 179 (31,396 vs. the
+/// correct 31,217) -- this fixture reproduces the same shape at a size small
+/// enough to run in `cargo test`'s normal (non-`--ignored`) pass.
+#[test]
+fn price_plane_does_not_overcount_null_priced_printings_when_broad() {
+    let mut vocab = VocabInterner::new();
+    const MATCHING: usize = 1_800;
+    const NULL_PRICED: usize = 200;
+    let cards: Vec<OracleCard> = (0..(MATCHING + NULL_PRICED) as u128)
+        .map(|i| stub_card(i + 1, TYPE_CREATURE, &[], &mut vocab))
+        .collect();
+    let counts = vec![1usize; MATCHING + NULL_PRICED];
+    let mut data = store_of(cards, &counts, vocab);
+    for p in &mut data.printings[..MATCHING] {
+        p.price_usd = Some(1_000); // $10.00, satisfies usd<50
+    }
+    for p in &mut data.printings[MATCHING..] {
+        p.price_usd = None; // priceless: must never satisfy usd<50
+    }
+    data.indexes.price_usd = build_range_index(&data.printings, |p| p.price_usd);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let bounds = &archived.indexes.planes;
+    let words = &archived.indexes.oracle_trigram.words;
+
+    let usd_lt_50 = FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op: CmpOp::Lt, rhs: NumExpr::Const(50.0) };
+
+    // compile_plane's own raw output honors whatever must_be_tight the
+    // caller asks for: false (narrow_rec's fastpath / non-card modes) lets
+    // the complement shortcut for this majority-match query fire, producing
+    // an inexact leaf; true (split_planes's unique=card fold, below) forces
+    // the more expensive direct scatter instead, staying exact.
+    let pe_loose = compile_plane(&usd_lt_50, bounds, words, &archived.indexes, &archived.offsets, false).expect("usd<50 must compile here");
+    assert!(!plane_expr_is_exact(&pe_loose), "must_be_tight=false must let the complement shortcut produce an inexact leaf");
+    let pe_tight = compile_plane(&usd_lt_50, bounds, words, &archived.indexes, &archived.offsets, true).expect("usd<50 must compile here");
+    assert!(plane_expr_is_exact(&pe_tight), "must_be_tight=true must force the direct scatter, staying exact");
+
+    // The real entry point (split_planes, unique=card) must thread
+    // must_be_tight=true into its own fold decision, so this majority-match
+    // query still gets folded (the whole point of the fastpath), just via
+    // the exact direct scatter -- and the resulting total must not
+    // overcount priceless printings either way.
+    let (plane, mut residual) = split_planes(usd_lt_50, bounds, words, true, &archived.indexes, &archived.offsets);
+    assert!(plane.is_some(), "unique=card must still fold this majority-match query (must_be_tight makes it safe to)");
+    assert!(plane_expr_is_exact(plane.as_ref().unwrap()), "the folded plane must be exact");
+    let (total, _) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut residual, plane.as_ref(), "card", "default", "edhrec", "asc", 100_000, 0, &archived.indexes,
+    );
+    assert_eq!(total, MATCHING, "unique=card total must not overcount priceless printings as matching usd<50");
+
+    // Compound version, reached through split_planes's per-child And loop
+    // instead of the whole-tree fold above.
+    let compound = FilterExpr::And(vec![
+        FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op: CmpOp::Lt, rhs: NumExpr::Const(50.0) },
+        FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge },
+    ]);
+    let (plane2, mut residual2) = split_planes(compound, bounds, words, true, &archived.indexes, &archived.offsets);
+    let (total2, _) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut residual2, plane2.as_ref(), "card", "default", "edhrec", "asc", 100_000, 0, &archived.indexes,
+    );
+    assert_eq!(total2, MATCHING, "compound (usd<50 AND t:creature) must not overcount priceless printings either");
 }
 
 // ─── Numeric-range planes (#655) ───────────────────────────────────────────────
@@ -3829,7 +3906,7 @@ fn numeric_plane_parity_interior_and_tails() {
 
     let mut bitmap: Vec<u64> = Vec::new();
     let mut check = |f: &FilterExpr, label: &str| {
-        let Some(pe) = compile_plane(f, &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets) else { return };
+        let Some(pe) = compile_plane(f, &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets, false) else { return };
         eval_planes(&pe, &archived.indexes.planes, &mut bitmap);
         for (cid, card) in archived.cards.iter().enumerate() {
             let want = f.eval_card(card, &archived.strings) == Tri::True;
@@ -3885,17 +3962,17 @@ fn numeric_plane_boundary_inclusion_and_decline() {
 
     // Crosses into the high tail, but includes BOTH high-tail values (13, 14)
     // fully — unambiguous, since every possible bucket member qualifies.
-    assert!(compile_plane(&cmp(NumField::Cmc, CmpOp::Le, 14.0), bounds, words, &archived.indexes, &archived.offsets).is_some());
+    assert!(compile_plane(&cmp(NumField::Cmc, CmpOp::Le, 14.0), bounds, words, &archived.indexes, &archived.offsets, false).is_some());
     // Crosses into the low tail: power>=-1 must include the power=-1 card.
-    assert!(compile_plane(&cmp(NumField::Power, CmpOp::Ge, -1.0), bounds, words, &archived.indexes, &archived.offsets).is_some());
+    assert!(compile_plane(&cmp(NumField::Power, CmpOp::Ge, -1.0), bounds, words, &archived.indexes, &archived.offsets, false).is_some());
     // Entirely within the interior: no bucket involved at all.
-    assert!(compile_plane(&cmp(NumField::Toughness, CmpOp::Le, 6.0), bounds, words, &archived.indexes, &archived.offsets).is_some());
+    assert!(compile_plane(&cmp(NumField::Toughness, CmpOp::Le, 6.0), bounds, words, &archived.indexes, &archived.offsets, false).is_some());
 
     // Distinguishing inside the high tail bucket (which now holds two
     // distinct values each) can't be answered by the cumulative plane alone.
-    assert!(compile_plane(&cmp(NumField::Cmc, CmpOp::Eq, 13.0), bounds, words, &archived.indexes, &archived.offsets).is_none());
-    assert!(compile_plane(&cmp(NumField::Toughness, CmpOp::Eq, 20.0), bounds, words, &archived.indexes, &archived.offsets).is_none());
-    assert!(compile_plane(&cmp(NumField::Toughness, CmpOp::Lt, 22.0), bounds, words, &archived.indexes, &archived.offsets).is_none());
+    assert!(compile_plane(&cmp(NumField::Cmc, CmpOp::Eq, 13.0), bounds, words, &archived.indexes, &archived.offsets, false).is_none());
+    assert!(compile_plane(&cmp(NumField::Toughness, CmpOp::Eq, 20.0), bounds, words, &archived.indexes, &archived.offsets, false).is_none());
+    assert!(compile_plane(&cmp(NumField::Toughness, CmpOp::Lt, 22.0), bounds, words, &archived.indexes, &archived.offsets, false).is_none());
 }
 
 // Ne is declined unconditionally, matching numeric_candidates' own choice
@@ -3910,7 +3987,7 @@ fn numeric_plane_declines_ne_unconditionally() {
     let words = &archived.indexes.oracle_trigram.words;
     for field in [NumField::Cmc, NumField::Power, NumField::Toughness] {
         let ne = FilterExpr::NumericCmp { lhs: NumExpr::Field(field), op: CmpOp::Ne, rhs: NumExpr::Const(3.0) };
-        assert!(compile_plane(&ne, bounds, words, &archived.indexes, &archived.offsets).is_none());
+        assert!(compile_plane(&ne, bounds, words, &archived.indexes, &archived.offsets, false).is_none());
     }
 }
 
@@ -3928,19 +4005,19 @@ fn numeric_plane_declines_not_over_numeric_cmp() {
     let words = &archived.indexes.oracle_trigram.words;
 
     let power_gt3 = FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Power), op: CmpOp::Gt, rhs: NumExpr::Const(3.0) };
-    assert!(compile_plane(&power_gt3, bounds, words, &archived.indexes, &archived.offsets).is_some(), "power>3 alone must compile");
+    assert!(compile_plane(&power_gt3, bounds, words, &archived.indexes, &archived.offsets, false).is_some(), "power>3 alone must compile");
     let make_negated = || FilterExpr::Not(Box::new(FilterExpr::NumericCmp {
         lhs: NumExpr::Field(NumField::Power),
         op: CmpOp::Gt,
         rhs: NumExpr::Const(3.0),
     }));
-    assert!(compile_plane(&make_negated(), bounds, words, &archived.indexes, &archived.offsets).is_none(), "Not(power>3) must decline: Null doesn't flip to True");
+    assert!(compile_plane(&make_negated(), bounds, words, &archived.indexes, &archived.offsets, false).is_none(), "Not(power>3) must decline: Null doesn't flip to True");
 
     // Buried under And/Or, not just at the top.
     let buried_and = FilterExpr::And(vec![make_negated(), FilterExpr::True]);
-    assert!(compile_plane(&buried_and, bounds, words, &archived.indexes, &archived.offsets).is_none());
+    assert!(compile_plane(&buried_and, bounds, words, &archived.indexes, &archived.offsets, false).is_none());
     let buried_or = FilterExpr::Or(vec![make_negated(), FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge }]);
-    assert!(compile_plane(&buried_or, bounds, words, &archived.indexes, &archived.offsets).is_none());
+    assert!(compile_plane(&buried_or, bounds, words, &archived.indexes, &archived.offsets, false).is_none());
 
     // cmc is Option<u8> (never negative) but can still be unset on odd data,
     // so the guard applies uniformly across all three fields, not just the
@@ -3950,12 +4027,12 @@ fn numeric_plane_declines_not_over_numeric_cmp() {
         op: CmpOp::Le,
         rhs: NumExpr::Const(6.0),
     }));
-    assert!(compile_plane(&cmc_le6(), bounds, words, &archived.indexes, &archived.offsets).is_none());
+    assert!(compile_plane(&cmc_le6(), bounds, words, &archived.indexes, &archived.offsets, false).is_none());
 
     // A Not over a non-numeric plane child must still compile fine — the
     // guard must not over-decline unrelated Not subtrees.
     let not_creature = FilterExpr::Not(Box::new(FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge }));
-    assert!(compile_plane(&not_creature, bounds, words, &archived.indexes, &archived.offsets).is_some());
+    assert!(compile_plane(&not_creature, bounds, words, &archived.indexes, &archived.offsets, false).is_some());
 }
 
 // End-to-end: run_query through the numeric-plane path (split_planes consumes
@@ -4354,17 +4431,17 @@ fn compile_plane_word_bonus_composes_with_other_planes() {
     let oracle = |w: &str| FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: w.to_string() };
 
     // Single-dense-hit needle: compile_plane must consume it directly.
-    assert!(compile_plane(&oracle("target"), bounds, words, &archived.indexes, &archived.offsets).is_some(), "single dense hit must compile to a plane");
+    assert!(compile_plane(&oracle("target"), bounds, words, &archived.indexes, &archived.offsets, false).is_some(), "single dense hit must compile to a plane");
     // Mixed dense+sparse needle: compile_plane must decline (the dense bitmap
     // alone would miss the sparse "creaturehood" match) — narrow_rec's
     // general dispatch is the only correct path for this shape.
-    assert!(compile_plane(&oracle("creature"), bounds, words, &archived.indexes, &archived.offsets).is_none(), "mixed dense+sparse must not compile: dense bitmap alone would undercount");
+    assert!(compile_plane(&oracle("creature"), bounds, words, &archived.indexes, &archived.offsets, false).is_none(), "mixed dense+sparse must not compile: dense bitmap alone would undercount");
 
     // AND with an unrelated plane-expressible predicate (every card here is a
     // creature, so this is a true tautological AND, just exercising composition).
     let creature_type = FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
     let both = FilterExpr::And(vec![oracle("target"), creature_type]);
-    let pe = compile_plane(&both, bounds, words, &archived.indexes, &archived.offsets).expect("dense word AND a plane predicate must compile whole");
+    let pe = compile_plane(&both, bounds, words, &archived.indexes, &archived.offsets, false).expect("dense word AND a plane predicate must compile whole");
     let mut bitmap: Vec<u64> = Vec::new();
     eval_planes(&pe, bounds, &mut bitmap);
     assert_eq!(bitmap_card_ids(&bitmap), brute_force_oracle_contains(archived, "target"), "every card here is a creature, so the AND changes nothing");
@@ -4516,7 +4593,7 @@ fn border_shared_witness_correctness() {
     let and_both = FilterExpr::And(vec![border("black"), border("borderless")]);
 
     assert!(
-        compile_plane(&and_both, bounds, words, &archived.indexes, &archived.offsets).is_none(),
+        compile_plane(&and_both, bounds, words, &archived.indexes, &archived.offsets, false).is_none(),
         "border:black AND border:borderless must decline to compile exactly (shared witness)"
     );
 
@@ -4555,14 +4632,14 @@ fn border_tracked_values_exact_consumed_other_bucket_declines() {
     let border = |v: &str| FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value: v.to_string() };
 
     for value in ["black", "borderless", "white", "gold"] {
-        assert!(compile_plane(&border(value), bounds, words, &archived.indexes, &archived.offsets).is_some(), "border:{value} must compile to a plane expression");
+        assert!(compile_plane(&border(value), bounds, words, &archived.indexes, &archived.offsets, false).is_some(), "border:{value} must compile to a plane expression");
         let not_value = FilterExpr::Not(Box::new(border(value)));
-        assert!(compile_plane(&not_value, bounds, words, &archived.indexes, &archived.offsets).is_some(), "-border:{value} must compile to a plane expression");
+        assert!(compile_plane(&not_value, bounds, words, &archived.indexes, &archived.offsets, false).is_some(), "-border:{value} must compile to a plane expression");
     }
 
-    assert!(compile_plane(&border("yellow"), bounds, words, &archived.indexes, &archived.offsets).is_none(), "border:yellow must decline (other bucket is ambiguous)");
+    assert!(compile_plane(&border("yellow"), bounds, words, &archived.indexes, &archived.offsets, false).is_none(), "border:yellow must decline (other bucket is ambiguous)");
     let not_yellow = FilterExpr::Not(Box::new(border("yellow")));
-    assert!(compile_plane(&not_yellow, bounds, words, &archived.indexes, &archived.offsets).is_none(), "-border:yellow must decline (other bucket is ambiguous)");
+    assert!(compile_plane(&not_yellow, bounds, words, &archived.indexes, &archived.offsets, false).is_none(), "-border:yellow must decline (other bucket is ambiguous)");
 
     // Mixed with an otherwise fully plane-expressible sibling: the untracked
     // child must stay in the residual, not get silently dropped or promoted.
@@ -4591,7 +4668,7 @@ fn border_other_bucket_closes_domain_for_tracked_negation() {
     let yellow_card = 8u32; // card 8: only printing is yellow (untracked)
 
     let not_black = FilterExpr::Not(Box::new(FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value: "black".to_string() }));
-    let pe = compile_plane(&not_black, bounds, words, &archived.indexes, &archived.offsets).expect("-border:black must compile");
+    let pe = compile_plane(&not_black, bounds, words, &archived.indexes, &archived.offsets, false).expect("-border:black must compile");
     let mut bits = Vec::new();
     eval_planes(&pe, bounds, &mut bits);
     assert!(
@@ -4600,7 +4677,7 @@ fn border_other_bucket_closes_domain_for_tracked_negation() {
     );
 
     let black = FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value: "black".to_string() };
-    let pe2 = compile_plane(&black, bounds, words, &archived.indexes, &archived.offsets).expect("border:black must compile");
+    let pe2 = compile_plane(&black, bounds, words, &archived.indexes, &archived.offsets, false).expect("border:black must compile");
     let mut bits2 = Vec::new();
     eval_planes(&pe2, bounds, &mut bits2);
     assert!(!bitmap_contains(&bits2, yellow_card), "the same card must not satisfy border:black");
@@ -4673,7 +4750,7 @@ fn range_narrowed_representations() {
     // 0..v (v itself excluded).
     // Sparse (160 entries, 3.9%): vec, tight.
     let (lo, hi) = bounds(CmpOp::Lt, 40.0);
-    let nr = super::range_narrowed(archived, lo, hi, n, false, false).expect("sparse ranges narrow in any context");
+    let nr = super::range_narrowed(archived, lo, hi, n, false, false, false).expect("sparse ranges narrow in any context");
     assert!(!nr.tight, "exact param was passed false here to exercise range_narrowed's own branching");
     match nr.set {
         Candidates::Printings(v) => assert_eq!(v.len(), 160),
@@ -4682,8 +4759,8 @@ fn range_narrowed_representations() {
 
     // Broad but at most half (values 0..400 → 1600 entries, 39%): direct scatter, tight.
     let (lo, hi) = bounds(CmpOp::Lt, 400.0);
-    assert!(super::range_narrowed(archived, lo, hi, n, false, true).is_none(), "broad bits need a consumer (broad_ok)");
-    let nr = super::range_narrowed(archived, lo, hi, n, true, true).expect("broad_ok materializes the bitmap");
+    assert!(super::range_narrowed(archived, lo, hi, n, false, true, false).is_none(), "broad bits need a consumer (broad_ok)");
+    let nr = super::range_narrowed(archived, lo, hi, n, true, true, false).expect("broad_ok materializes the bitmap");
     assert!(nr.tight, "integer-exact bounds keep the direct scatter tight");
     match &nr.set {
         Candidates::PrintingBits(b) => {
@@ -4695,7 +4772,7 @@ fn range_narrowed_representations() {
 
     // Beyond half (values 0..900 → 3600 entries, 88%): complement scatter, loose.
     let (lo, hi) = bounds(CmpOp::Lt, 900.0);
-    let nr = super::range_narrowed(archived, lo, hi, n, true, true).expect("broad_ok materializes the complement");
+    let nr = super::range_narrowed(archived, lo, hi, n, true, true, false).expect("broad_ok materializes the complement");
     assert!(!nr.tight, "complement over-includes unindexed printings");
     match &nr.set {
         Candidates::PrintingBits(b) => {
@@ -5182,7 +5259,7 @@ fn devotion_plane_parity_and_boundaries() {
     let dev = |op, pips: &[(&str, u8)]| FilterExpr::Devotion { op, pips: packed_pips(pips) };
     let mut bitmap: Vec<u64> = Vec::new();
     let mut check_exact = |f: &FilterExpr| {
-        let pe = compile_plane(f, &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets).expect("must compile exactly");
+        let pe = compile_plane(f, &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets, false).expect("must compile exactly");
         eval_planes(&pe, &archived.indexes.planes, &mut bitmap);
         for (cid, card) in archived.cards.iter().enumerate() {
             let want = f.eval_card(card, &archived.strings) == Tri::True;
@@ -5200,9 +5277,9 @@ fn devotion_plane_parity_and_boundaries() {
     check_exact(&dev(CmpOp::Ge, &[("R", 3)])); // {R/G}{R/G}{R} card reaches R=3
 
     // Past the saturation boundary the exact compiler declines...
-    assert!(compile_plane(&dev(CmpOp::Ge, &[("U", 4)]), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets).is_none());
-    assert!(compile_plane(&dev(CmpOp::Eq, &[("U", 3)]), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets).is_none());
-    assert!(compile_plane(&dev(CmpOp::Le, &[("U", 3)]), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets).is_none());
+    assert!(compile_plane(&dev(CmpOp::Ge, &[("U", 4)]), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets, false).is_none());
+    assert!(compile_plane(&dev(CmpOp::Eq, &[("U", 3)]), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets, false).is_none());
+    assert!(compile_plane(&dev(CmpOp::Le, &[("U", 3)]), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets, false).is_none());
     // ...and the saturated superset covers every deep match for narrowing.
     let deep = dev(CmpOp::Ge, &[("U", 5)]);
     let n = super::narrow_rec(&deep, &archived.indexes, &archived.offsets, &archived.cards, false).expect("deep-k narrows loosely");
@@ -5226,7 +5303,7 @@ fn hybrid_pip_counts_toward_both_colors() {
     let mut bitmap: Vec<u64> = Vec::new();
     let rg_card = 5; // {R/G}
     for (f, want) in [(dev("R", 1), true), (dev("G", 1), true), (dev("R", 2), false), (dev("U", 1), false)] {
-        eval_planes(&compile_plane(&f, &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets).unwrap(), &archived.indexes.planes, &mut bitmap);
+        eval_planes(&compile_plane(&f, &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets, false).unwrap(), &archived.indexes.planes, &mut bitmap);
         assert_eq!(bitmap_contains(&bitmap, rg_card), want);
     }
 }
