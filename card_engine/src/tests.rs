@@ -4,10 +4,10 @@ use super::{
     build_rarity_index, build_flavor_index, build_thresholded_tag_index, build_sort_permutations,
     assign_artwork_groups, build_bit_planes, build_divergent_ids, build_name_bigram_index, build_printing_to_card, flavor_fingerprint, flavor_match_sets,
     cards_of_printings, count_common_keywords, count_common_types,
-    build_artist_index, build_range_index, price_dollars_to_cents, price_range_narrowed, range_candidates, narrow_candidates, rarity_candidates,
+    build_artist_index, build_range_index, price_range_narrowed, range_candidates, narrow_candidates, rarity_candidates,
     range_too_broad_to_narrow, run_query, trigram_candidates, finalize_trigram_index, PrintingRangeIndex, NARROW_FLOOR,
     bitmap_contains, bitmap_card_ids, compile_plane, eval_planes, has_conflicting_range_families, plane_expr_is_exact, split_planes,
-    ArtistIndex, CardData, CardIndexes, Candidates, ColorField, NumExpr, NumField, RarityIndex,
+    ArithOp, ArtistIndex, CardData, CardIndexes, Candidates, ColorField, NumExpr, NumField, RarityIndex,
     CollField, CmpOp, FilterExpr, InlineStr, Interner, ManaCost, OracleCard, Printing, TagIndex,
     TextField, TextSearchField, Tri, SortedTrigramIndex, VocabInterner, ARTIST_NONE, NONE_STR, TYPE_ARTIFACT, TYPE_CREATURE,
     TYPE_ENCHANTMENT, TYPE_INSTANT, TYPE_LAND, TYPE_LEGENDARY, TYPE_PLANESWALKER, TYPE_SNOW, TYPE_SORCERY,
@@ -206,15 +206,11 @@ fn stub_printing(scryfall_id: u128, illustration_id: u128, prefer_score: Option<
     }
 }
 
-/// A `usd <op> dollars` comparison, already bound (Const rewritten to cents
-/// via `super::price_dollars_to_cents`) -- the shape every real query
-/// reaches through `FilterExpr::bind`, which none of these test fixtures
-/// otherwise call. Written this way (not a raw `NumericCmp` literal with a
-/// hand-converted cents value) so every price test shares the identical
-/// conversion `bind` itself uses, rather than N call sites each doing their
-/// own `* 100.0` that could silently drift from it.
+/// A `usd <op> dollars` comparison. `field_num` divides cents to dollars
+/// unconditionally regardless of shape, so this is just a plain `Const` in
+/// dollars -- no `bind()` step or unit conversion required.
 fn usd_cmp(op: CmpOp, dollars: f64) -> FilterExpr {
-    FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op, rhs: NumExpr::Const(price_dollars_to_cents(dollars)) }
+    FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op, rhs: NumExpr::Const(dollars) }
 }
 
 /// Assemble a CardData where card i owns `printing_counts[i]` printings, in the
@@ -3030,7 +3026,7 @@ fn price_narrowing_and_verification_are_exact_at_the_boundary() {
 
     // Lt must exclude the boundary printing exactly -- both in narrowing and in verification.
     let lt = cmp(CmpOp::Lt);
-    match price_range_narrowed(CmpOp::Lt, price_dollars_to_cents(0.10), &archived.indexes, n_printings, true, true).map(|n| n.set) {
+    match price_range_narrowed(CmpOp::Lt, 0.10, &archived.indexes, n_printings, true, true).map(|n| n.set) {
         Some(Candidates::Printings(v)) => {
             assert!(v.contains(&0));
             assert!(!v.contains(&1), "Lt must exclude the exact boundary price");
@@ -3046,7 +3042,7 @@ fn price_narrowing_and_verification_are_exact_at_the_boundary() {
     // silently excluded exact matches independent of narrowing).
     for (op, op_name, is_eq) in [(CmpOp::Le, "Le", false), (CmpOp::Ge, "Ge", false), (CmpOp::Eq, "Eq", true)] {
         let f = cmp(op);
-        match price_range_narrowed(op, price_dollars_to_cents(0.10), &archived.indexes, n_printings, true, true).map(|n| n.set) {
+        match price_range_narrowed(op, 0.10, &archived.indexes, n_printings, true, true).map(|n| n.set) {
             Some(Candidates::Printings(v)) => assert!(v.contains(&1), "narrowing must include the boundary price for {op_name}"),
             None if is_eq => {} // narrow_candidates_exact's broadness filter can decline Eq on a tiny store; matches() below is what matters
             _ => panic!("usd must narrow in printing space for {op_name}"),
@@ -3058,7 +3054,7 @@ fn price_narrowing_and_verification_are_exact_at_the_boundary() {
     assert!(!gt.matches(card, &archived.printings[1], &archived.strings));
 
     // Flipped operand order (50.0 < usd, i.e. usd > 50.0): only the $60 printing qualifies.
-    match price_range_narrowed(CmpOp::Gt, price_dollars_to_cents(50.0), &archived.indexes, n_printings, true, true).map(|n| n.set) {
+    match price_range_narrowed(CmpOp::Gt, 50.0, &archived.indexes, n_printings, true, true).map(|n| n.set) {
         Some(Candidates::Printings(v)) => assert_eq!(v, vec![2]),
         _ => panic!("flipped usd comparison must narrow"),
     }
@@ -3428,30 +3424,70 @@ fn price_plane_fixture_store() -> CardData {
     data
 }
 
-/// `FilterExpr::bind` rewrites a price `NumericCmp`'s query-side dollar
-/// `Const` to cents exactly once per query (`price_dollars_to_cents`) -- the
-/// step that lets `field_num`'s per-printing evaluation compare raw cents
-/// with no division. Every other test in this file builds already-bound
-/// filters directly via `usd_cmp` (mirroring what `bind` produces, not
-/// exercising `bind` itself), so this is the one place that actually calls
-/// `bind` on a dollar-denominated `NumericCmp` -- the exact shape
-/// `build_filter` produces from a real `usd<50`-style query -- and checks
-/// both the rewritten `Const` value and that evaluation afterward still
-/// agrees with the unbound (dollars) comparison bit-for-bit.
+/// Regression for a real bug that shipped briefly in this area: an earlier
+/// version rewrote a bare price `Field` (compared directly against a
+/// `Const`) into a cents-only fast path at bind time, to avoid dividing on
+/// every printing evaluated. That rewrite only recognized the *exact* bare
+/// shape -- it did not recurse into `NumExpr::Arith`. `usd+1<power` (price
+/// inside an arithmetic expression -- `parser_class=NUMERIC` on
+/// `usd`/`eur`/`tix` admits this grammatically, same as `cmc`/`power`) left
+/// the `1` in dollars while the fast path made `field_num` return cents
+/// unconditionally, silently computing `(cents+1)<power` instead of
+/// `(dollars+1)<power` -- off by a factor of 100. A second, independent
+/// instance of the same bug (`usd<cmc`, a price `Field` compared directly
+/// against *another* `Field`, no `Const` anywhere) confirmed the rewrite
+/// couldn't be patched to cover every shape without either false negatives
+/// or a full scaling transform on both sides of the comparison. Reverted the
+/// whole optimization: `NumExpr::Field(Price*)` always means dollars again
+/// (matching every build before it), for a ~2-3% loss on the one shape the
+/// fast path covered, in exchange for making every shape correct by
+/// construction rather than by rewrite coverage. Kept as a permanent
+/// regression test for exactly this class of bug, in case a similar
+/// shape-specific fast path is tried again later.
 #[test]
-fn bind_rewrites_price_const_to_cents() {
-    let data = price_plane_fixture_store();
+fn usd_inside_arithmetic_evaluates_in_dollars_not_cents() {
+    let mut vocab = VocabInterner::new();
+    let mut card = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
+    card.creature_power = Some(52);
+    let mut data = store_of(vec![card], &[1], vocab);
+    data.printings[0].price_usd = Some(5000); // $50.00
+    data.indexes.price_usd = build_range_index(&data.printings, |p| p.price_usd);
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
     let card = &archived.cards[0];
+    let printing = &archived.printings[0];
 
-    let mut f = FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op: CmpOp::Lt, rhs: NumExpr::Const(50.0) };
+    // usd+1<power: $50.00 + 1 = 51 < power(52) -- must match.
+    let mut f = FilterExpr::NumericCmp {
+        lhs: NumExpr::Arith(Box::new(NumExpr::Field(NumField::PriceUsd)), ArithOp::Add, Box::new(NumExpr::Const(1.0))),
+        op: CmpOp::Lt,
+        rhs: NumExpr::Field(NumField::Power),
+    };
     f.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
-    let FilterExpr::NumericCmp { rhs: NumExpr::Const(v), .. } = &f else { panic!("bind must not change the node shape") };
-    assert_eq!(*v, 5000.0, "bind must rewrite the dollar Const to its exact cents value");
+    assert!(f.matches(card, printing, &archived.strings), "usd+1<power must evaluate in dollars: 50+1=51 < 52");
+}
 
-    assert!(f.matches(card, &archived.printings[0], &archived.strings), "usd<50 (bound) must still match the $5.00 printing");
-    assert!(!f.matches(card, &archived.printings[1], &archived.strings), "usd<50 (bound) must still exclude the $200.00 printing");
+/// The second independent instance referenced in the doc above:
+/// `usd<cmc` -- a price `Field` compared directly against *another* `Field`,
+/// no `Const` anywhere -- which no version of a `Const`-rewriting fast path
+/// could have covered at all, since there's no `Const` to rewrite.
+#[test]
+fn usd_compared_directly_against_another_field_evaluates_in_dollars() {
+    let mut vocab = VocabInterner::new();
+    let mut card = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
+    card.cmc = Some(3);
+    let mut data = store_of(vec![card], &[1], vocab);
+    data.printings[0].price_usd = Some(200); // $2.00
+    data.indexes.price_usd = build_range_index(&data.printings, |p| p.price_usd);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let card = &archived.cards[0];
+    let printing = &archived.printings[0];
+
+    // usd<cmc: $2.00 < cmc(3) -- must match.
+    let mut f = FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op: CmpOp::Lt, rhs: NumExpr::Field(NumField::Cmc) };
+    f.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
+    assert!(f.matches(card, printing, &archived.strings), "usd<cmc must evaluate in dollars: 2.00 < 3");
 }
 
 /// `PlaneExpr::PrintingRangeBits` (docs/issues/local-engine-broad-range-fastpath.md)

@@ -1969,17 +1969,6 @@ fn snap_to_nearest_cent(cents: f64) -> f64 {
     if (cents - rounded).abs() < 1e-6 { rounded } else { cents }
 }
 
-/// Convert a query-side dollar amount to the exact cents value price fields
-/// compare against -- shared by `FilterExpr::bind`'s one-time Const rewrite
-/// (real queries) and by tests constructing a price comparison directly
-/// (bypassing `bind`), so both derive the identical cents value from the
-/// identical dollar input. Two independent encodings of "how many cents is
-/// this dollar amount" quietly disagreeing is exactly Bug B's shape --
-/// this exists so there's only ever the one.
-pub(crate) fn price_dollars_to_cents(dollars: f64) -> f64 {
-    snap_to_nearest_cent(dollars * PRICE_CENTS_PER_DOLLAR)
-}
-
 /// Half-open [lo, hi) bounds for indexes over plain integers (collector
 /// number). Query values are f64 and may be fractional or out of range; bounds
 /// are chosen so the range is exact for every op — `cn<100.5` means
@@ -2086,15 +2075,17 @@ fn range_narrowed(idx: &Archived<PrintingRangeIndex>, lo: u32, hi: u32, n_printi
 /// arm (`planes.rs`) — one encoding of "price predicate -> narrowed
 /// printing-space bounds" so the two paths can't independently drift out of
 /// sync, the exact shape that caused Bug B in the price-cents migration (see
-/// docs/issues/local-engine-broad-range-fastpath.md). `v` is already cents,
-/// not dollars: `FilterExpr::bind` converts the query-side dollar Const to
-/// cents once per query (`price_dollars_to_cents`), so this -- called once
-/// per query, not once per printing -- no longer does its own dollars-to-
-/// cents multiplication. `snap_to_nearest_cent` still runs here (not just at
-/// bind time) so a caller that skips `bind` (tests constructing this call
-/// directly) gets the identical rounding via the same helper.
+/// docs/issues/local-engine-broad-range-fastpath.md). `v` is dollars, same as
+/// the query-side `Const` -- a since-reverted bind-time fast path used to
+/// convert it to cents once per query so `field_num` could skip a division,
+/// but that fast path only covered a bare price `Field` directly against a
+/// `Const`, silently miscomputing `usd+1<power`/`usd<cmc`-shaped queries
+/// that reach this same field through `NumExpr::Arith` or a second `Field`.
+/// Reverted rather than patched further; this function does its own
+/// dollars-to-cents conversion again, matching every build before that fast
+/// path existed.
 pub(crate) fn price_range_narrowed(op: CmpOp, v: f64, indexes: &Archived<CardIndexes>, n_printings: usize, broad_ok: bool, must_be_tight: bool) -> Option<Narrowed> {
-    match int_range_bounds(op, snap_to_nearest_cent(v))? {
+    match int_range_bounds(op, snap_to_nearest_cent(v * PRICE_CENTS_PER_DOLLAR))? {
         None => Narrowed::tight(Candidates::Printings(Vec::new())),
         Some((lo, hi)) => range_narrowed(&indexes.price_usd, lo, hi, n_printings, broad_ok, true, must_be_tight),
     }
