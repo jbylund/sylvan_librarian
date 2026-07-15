@@ -1058,29 +1058,37 @@ impl FilterExpr {
         }
     }
 
-    /// A narrow, byte-identical fast path for the cheap leaf shapes
-    /// (MASK_COMPARE_NS100 tier, see verify_cost_tier) that actually reach
-    /// this code at all. That's the real filter, not raw query frequency:
-    /// compile_plane (planes.rs) already intercepts ColorCmp/TypeCmp/
-    /// Legality/Devotion/rarity-NumericCmp/border-TextExact into a bitmap
-    /// before they ever reach tri() in the common case, so a query like
-    /// `color:g` or `type:creature` alone mostly never calls tri_fast at
-    /// all -- those variants are NOT here despite being high-frequency in
-    /// realistic traffic (client/query_runner.py's weights), because their
-    /// plane path already avoids paying tri()'s cost in the first place.
-    /// NumericCmp (non-rarity fields)/DateCmp/YearCmp have no plane arm --
-    /// every occurrence, however rare, pays the full residual cost, which is
-    /// what justifies them here even though they're a smaller slice of
-    /// real-query volume than color/type. tri() itself can't be
-    /// force-inlined into these call sites without pulling in the other
-    /// ~15 unrelated arms (TextContains, regex, ManaCostCmp, ...) too --
-    /// measured that directly, made every mode slower (code bloat outweighing
-    /// the saved call). This covers just the cheap arms that are also
-    /// un-planed, small enough to actually inline, so the hot
-    /// per-printing/per-card loops skip tri()'s call boundary entirely for
-    /// the common case, falling back to the exact same tri() arm (not a
-    /// second implementation -- no risk of the two drifting apart, unlike
-    /// the reverted price-cents fast path) for anything else.
+    /// A narrow, byte-identical fast path for the one leaf shape that's both
+    /// cheap (MASK_COMPARE_NS100 tier, see verify_cost_tier) and actually
+    /// reaches this code often enough to earn a dedicated arm: numeric range
+    /// compares on non-rarity fields (usd/cn/power/toughness/cmc/...), which
+    /// have no compile_plane arm at all, so every occurrence pays the full
+    /// residual cost -- measured a real ~12-19% win on usd<50 and a compound
+    /// `usd<10 AND year=2024`.
+    ///
+    /// ColorCmp/TypeCmp/Legality/Devotion/rarity-NumericCmp/border-TextExact
+    /// are NOT here despite being high-frequency in realistic traffic
+    /// (client/query_runner.py's weights): compile_plane (planes.rs) already
+    /// intercepts them into a bitmap before they reach tri() in the common
+    /// case -- confirmed directly, profiling a bare `t:creature` shows zero
+    /// samples in tri/card_pass/residual_matches at all. TextExact on
+    /// set_code similarly has its own exact index (indexes.set_codes,
+    /// lib.rs) that narrows before residual, and those queries are already
+    /// ~50us end to end regardless. DateCmp/YearCmp are also NOT here: the
+    /// feature is infrequently used in practice, and narrow date/year
+    /// queries (the common case when it is used, e.g. an exact year) get
+    /// index-narrowed via range_narrowed same as everything else, so the
+    /// residual path for them is rarer still than raw usage would suggest.
+    ///
+    /// tri() itself can't be force-inlined into these call sites without
+    /// pulling in the other ~15 unrelated arms (TextContains, regex,
+    /// ManaCostCmp, ...) too -- measured that directly, made every mode
+    /// slower (code bloat outweighing the saved call). This one arm is
+    /// small enough to actually inline, so the hot per-printing/per-card
+    /// loops skip tri()'s call boundary entirely for the common case,
+    /// falling back to the exact same tri() arm (not a second
+    /// implementation -- no risk of the two drifting apart, unlike the
+    /// reverted price-cents fast path) for anything else.
     #[inline(always)]
     fn tri_fast(&self, card: &AOracleCard, printing: Option<&APrinting>) -> Option<Tri> {
         match self {
@@ -1089,38 +1097,6 @@ impl FilterExpr {
                 (NumVal::PDep, _) | (_, NumVal::PDep) => Tri::PrintingDep,
                 (NumVal::Known(a), NumVal::Known(b)) => tri_bool(cmp(*op, a, b)),
             }),
-            // value is a zero-padded yyyymmdd (see build_binary); zero-padding a
-            // partial date reproduces the old lexicographic-prefix semantics exactly,
-            // since any real day/month (>= 01) compares greater than 00.
-            FilterExpr::DateCmp { op, value } => {
-                let Some(p) = printing else { return Some(Tri::PrintingDep) };
-                let Some(date) = p.released_at_int.as_ref().map(|v| u32::from(*v)) else {
-                    return Some(Tri::Null); // missing date: SQL NULL
-                };
-                Some(tri_bool(match op {
-                    CmpOp::Eq => date == *value,
-                    CmpOp::Ne => date != *value,
-                    CmpOp::Lt => date < *value,
-                    CmpOp::Le => date <= *value,
-                    CmpOp::Gt => date > *value,
-                    CmpOp::Ge => date >= *value,
-                }))
-            }
-            FilterExpr::YearCmp { op, year } => {
-                let Some(p) = printing else { return Some(Tri::PrintingDep) };
-                let Some(date) = p.released_at_int.as_ref().map(|v| u32::from(*v)) else {
-                    return Some(Tri::Null); // missing date: SQL NULL
-                };
-                let card_year = (date / 10_000) as i32;
-                Some(tri_bool(match op {
-                    CmpOp::Eq => card_year == *year,
-                    CmpOp::Ne => card_year != *year,
-                    CmpOp::Gt => card_year > *year,
-                    CmpOp::Lt => card_year < *year,
-                    CmpOp::Ge => card_year >= *year,
-                    CmpOp::Le => card_year <= *year,
-                }))
-            }
             _ => None,
         }
     }
@@ -1336,9 +1312,39 @@ impl FilterExpr {
                 })
             }
 
-            FilterExpr::DateCmp { .. } => self.tri_fast(card, printing).expect("tri_fast always handles DateCmp"),
+            // value is a zero-padded yyyymmdd (see build_binary); zero-padding a
+            // partial date reproduces the old lexicographic-prefix semantics exactly,
+            // since any real day/month (>= 01) compares greater than 00.
+            FilterExpr::DateCmp { op, value } => {
+                let Some(p) = printing else { return Tri::PrintingDep };
+                let Some(date) = p.released_at_int.as_ref().map(|v| u32::from(*v)) else {
+                    return Tri::Null; // missing date: SQL NULL
+                };
+                tri_bool(match op {
+                    CmpOp::Eq => date == *value,
+                    CmpOp::Ne => date != *value,
+                    CmpOp::Lt => date < *value,
+                    CmpOp::Le => date <= *value,
+                    CmpOp::Gt => date > *value,
+                    CmpOp::Ge => date >= *value,
+                })
+            }
 
-            FilterExpr::YearCmp { .. } => self.tri_fast(card, printing).expect("tri_fast always handles YearCmp"),
+            FilterExpr::YearCmp { op, year } => {
+                let Some(p) = printing else { return Tri::PrintingDep };
+                let Some(date) = p.released_at_int.as_ref().map(|v| u32::from(*v)) else {
+                    return Tri::Null; // missing date: SQL NULL
+                };
+                let card_year = (date / 10_000) as i32;
+                tri_bool(match op {
+                    CmpOp::Eq => card_year == *year,
+                    CmpOp::Ne => card_year != *year,
+                    CmpOp::Gt => card_year > *year,
+                    CmpOp::Lt => card_year < *year,
+                    CmpOp::Ge => card_year >= *year,
+                    CmpOp::Le => card_year <= *year,
+                })
+            }
         }
     }
 
