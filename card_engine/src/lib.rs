@@ -1969,6 +1969,17 @@ fn snap_to_nearest_cent(cents: f64) -> f64 {
     if (cents - rounded).abs() < 1e-6 { rounded } else { cents }
 }
 
+/// Convert a query-side dollar amount to the exact cents value price fields
+/// compare against -- shared by `FilterExpr::bind`'s one-time Const rewrite
+/// (real queries) and by tests constructing a price comparison directly
+/// (bypassing `bind`), so both derive the identical cents value from the
+/// identical dollar input. Two independent encodings of "how many cents is
+/// this dollar amount" quietly disagreeing is exactly Bug B's shape --
+/// this exists so there's only ever the one.
+pub(crate) fn price_dollars_to_cents(dollars: f64) -> f64 {
+    snap_to_nearest_cent(dollars * PRICE_CENTS_PER_DOLLAR)
+}
+
 /// Half-open [lo, hi) bounds for indexes over plain integers (collector
 /// number). Query values are f64 and may be fractional or out of range; bounds
 /// are chosen so the range is exact for every op — `cn<100.5` means
@@ -2075,12 +2086,15 @@ fn range_narrowed(idx: &Archived<PrintingRangeIndex>, lo: u32, hi: u32, n_printi
 /// arm (`planes.rs`) — one encoding of "price predicate -> narrowed
 /// printing-space bounds" so the two paths can't independently drift out of
 /// sync, the exact shape that caused Bug B in the price-cents migration (see
-/// docs/issues/local-engine-broad-range-fastpath.md). `*100.0` is itself a new
-/// floating-point operation, not a lossless relabeling (`0.28_f64 * 100.0 ==
-/// 28.000000000000004`), so `snap_to_nearest_cent` guards it before flooring/
-/// ceiling in `int_range_bounds`.
+/// docs/issues/local-engine-broad-range-fastpath.md). `v` is already cents,
+/// not dollars: `FilterExpr::bind` converts the query-side dollar Const to
+/// cents once per query (`price_dollars_to_cents`), so this -- called once
+/// per query, not once per printing -- no longer does its own dollars-to-
+/// cents multiplication. `snap_to_nearest_cent` still runs here (not just at
+/// bind time) so a caller that skips `bind` (tests constructing this call
+/// directly) gets the identical rounding via the same helper.
 pub(crate) fn price_range_narrowed(op: CmpOp, v: f64, indexes: &Archived<CardIndexes>, n_printings: usize, broad_ok: bool, must_be_tight: bool) -> Option<Narrowed> {
-    match int_range_bounds(op, snap_to_nearest_cent(v * PRICE_CENTS_PER_DOLLAR))? {
+    match int_range_bounds(op, snap_to_nearest_cent(v))? {
         None => Narrowed::tight(Candidates::Printings(Vec::new())),
         Some((lo, hi)) => range_narrowed(&indexes.price_usd, lo, hi, n_printings, broad_ok, true, must_be_tight),
     }

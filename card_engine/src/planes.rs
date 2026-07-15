@@ -1805,13 +1805,16 @@ pub(crate) fn eval_plane_expr_for_printing(
         PlaneExpr::Bits(bits) => bitmap_contains(bits, cid),
         // Re-derives the comparison directly from (field, op, threshold) against this
         // specific printing's own field -- mirrors filter.rs's NumericCmp arm exactly
-        // (same known_cents-style dollars conversion), rather than a second precomputed
-        // bitmap, so there's no independent encoding of "does this printing satisfy the
-        // predicate" to drift out of sync with the one filter.rs already trusts.
+        // (raw-cents comparison, no dollars conversion at eval time either), rather
+        // than a second precomputed bitmap, so there's no independent encoding of
+        // "does this printing satisfy the predicate" to drift out of sync with the
+        // one filter.rs already trusts.
         PlaneExpr::PrintingRangeBits { field, op, threshold, .. } => match field {
-            RangePredicateField::PriceUsd => {
-                printing.price_usd.as_ref().is_some_and(|v| cmp(*op, f64::from(u32::from(*v)) / 100.0, *threshold))
-            }
+            // threshold is already cents, not dollars: this PlaneExpr was
+            // compiled from the same (already-bound) FilterExpr the price
+            // closure/field_num read theirs from -- see
+            // price_dollars_to_cents's doc.
+            RangePredicateField::PriceUsd => printing.price_usd.as_ref().is_some_and(|v| cmp(*op, f64::from(u32::from(*v)), *threshold)),
             RangePredicateField::CollectorNumber => {
                 printing.collector_number_int.as_ref().is_some_and(|v| cmp(*op, f64::from(u16::from(*v)), *threshold))
             }

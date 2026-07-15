@@ -89,15 +89,19 @@ fn field_num(card: &AOracleCard, printing: Option<&APrinting>, f: NumField) -> N
     fn known(v: Option<f32>) -> NumVal {
         v.map_or(NumVal::Null, |x| NumVal::Known(x as f64))
     }
-    // Cents -> dollars via exact f64 division, not through f32 -- 722.0 / 100.0 and a
-    // directly-parsed query constant "7.22" round to the identical nearest f64 (both are
-    // single, non-lossy roundings of the same rational number), so this and NumExpr::Const
-    // (untouched) always agree exactly. The old `v as f32 as f64` path widened an
-    // already-lossy f32 approximation, which essentially never matched a full-precision query
-    // constant even at the exact boundary it was supposed to represent -- see
+    // Raw cents, no dollars conversion: `FilterExpr::bind` rewrites a price
+    // NumericCmp's Const from dollars to cents once per query
+    // (`price_dollars_to_cents`), so this per-printing evaluation -- run
+    // once per candidate printing, the actual hot path -- never needs to
+    // divide. Comparing raw cents against a cents-scale Const is exact for
+    // the identical reason the old dollars-vs-dollars comparison was: both
+    // sides are single, non-lossy f64 values derived from the same
+    // rational number, just scaled by 100 instead of by 1. The old `v as
+    // f32 as f64` path (pre-#688) widened an already-lossy f32
+    // approximation, which is a separate, already-fixed bug -- see
     // docs/issues/local-engine-broad-range-fastpath.md.
     fn known_cents(v: Option<u32>) -> NumVal {
-        v.map_or(NumVal::Null, |cents| NumVal::Known(f64::from(cents) / 100.0))
+        v.map_or(NumVal::Null, |cents| NumVal::Known(f64::from(cents)))
     }
     match f {
         NumField::Cmc                => known(card.cmc.as_ref().map(|v| u8::from(*v) as f32)),
@@ -716,6 +720,25 @@ impl FilterExpr {
                 }
             }
             FilterExpr::Not(inner) => inner.bind(vocab, sorted_ids, artist_vocab, mana_vocab, flavor, strings),
+            // usd/eur/tix<op>threshold: rewrite the query-side dollar Const to
+            // the exact cents value once per query (super::price_dollars_to_cents,
+            // shared with narrow_rec/compile_price_range so all three paths derive
+            // the identical cents value), so field_num's per-printing evaluation
+            // -- run once per candidate printing, not once per query -- can
+            // compare raw cents directly with no division. Only the Const
+            // side is rewritten; NumExpr::Field/Arith are left alone (an
+            // arithmetic expression mixing a price field with something
+            // else, e.g. `usd+1<power`, isn't a shape this rewrite covers).
+            // Unlike every other rewrite in this match (TextContains ->
+            // ArtistMatch/FlavorMatch), this one does NOT change the node's
+            // shape, so it is NOT idempotent -- calling bind twice on the
+            // same node would rescale the Const a second time. Callers must
+            // bind each filter exactly once, same as today's single
+            // `filter_expr.bind(...)` call site.
+            FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd | NumField::PriceEur | NumField::PriceTix), rhs: NumExpr::Const(v), .. }
+            | FilterExpr::NumericCmp { lhs: NumExpr::Const(v), rhs: NumExpr::Field(NumField::PriceUsd | NumField::PriceEur | NumField::PriceTix), .. } => {
+                *v = super::price_dollars_to_cents(*v);
+            }
             FilterExpr::ManaCostCmp { hybrids, hybrid_ids, .. } if !hybrids.is_empty() => {
                 *hybrid_ids = bind_mana_hybrids(hybrids, mana_vocab);
             }
