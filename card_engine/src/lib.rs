@@ -3839,6 +3839,7 @@ fn run_query<'a>(
             })
         }
     };
+
     // Resolve indexable text predicates through their indexes once (#624)
     // when the per-card evaluation they'd replace outweighs the bind cost —
     // the gate is per-node and cost-based (see memoize_pays): each predicate
@@ -3878,11 +3879,11 @@ fn run_query<'a>(
     };
 
     let maybe_broad = candidate_cards.as_ref().is_none_or(|v| v.len() > *STREAM_MIN_MATCHES);
-    if let (Some(perm), Some(inv_perm)) = (indexes.sort_perms.get(sort_col, descending), indexes.sort_perms.get_inv(sort_col, descending)) {
+    if let Some(perm) = indexes.sort_perms.get(sort_col, descending) {
         if maybe_broad && perm.len() == cards.len() && !cards.is_empty() {
             return run_query_streamed(
                 cards, printings, offsets, strings, filter, all_match_known, mode, prefer, sort_col, descending, limit,
-                page_offset, perm, inv_perm, card_ids, &indexes.artwork_groups, existential_plane,
+                page_offset, perm, card_ids, &indexes.artwork_groups, existential_plane,
             );
         }
     }
@@ -4070,7 +4071,6 @@ fn run_query_streamed<'a>(
     limit: usize,
     page_offset: usize,
     perm: &Archived<Vec<u32>>,
-    inv_perm: &Archived<Vec<u32>>,
     card_ids: Box<dyn Iterator<Item = u32> + '_>,
     artwork_groups: &Archived<Vec<u16>>,
     existential_plane: Option<(&PlaneExpr, &Archived<BitPlanes>)>,
@@ -4166,65 +4166,40 @@ fn run_query_streamed<'a>(
     // page cards only. Within a card, items order by (sort key, pid) — the
     // same comparator select_page uses; across cards the permutation supplies
     // the order.
-    //
-    // Matching cards are scattered into a permuted bitmap (inv_perm order, same
-    // mechanism run_query_streamed_popcount uses for unique=card) instead of
-    // walking `perm`'s n_cards raw entries directly and checking counts[cid] for
-    // each one -- an all-zero word skips in O(1), and non-zero words are walked
-    // set-bit-by-set-bit via trailing_zeros, visiting only matching cards
-    // regardless of match rate (#656's scoped-out printing/artwork gap: the
-    // match phase above already narrows via the bitmap, but the walk here used
-    // to be O(n_cards) unconditionally, erasing that narrowing's benefit).
-    // Per-card weight (`counts[cid]`, not uniform 1) still varies -- existential
-    // predicates (this variant's PrintingRangeBits included) need the exact
-    // count of *satisfying* printings/groups, not just card-level existence, so
-    // whole words can't be skipped by popcount alone the way the uniform-weight
-    // unique=card path does; only the O(1) all-zero-word check applies here.
-    let wpp = cards.len().div_ceil(64);
-    let mut permuted = vec![0u64; wpp];
-    for cid in 0..cards.len() as u32 {
-        if counts[cid as usize] != 0 {
-            let pos = u32::from(inv_perm[cid as usize]) as usize;
-            permuted[pos / 64] |= 1u64 << (pos % 64);
-        }
-    }
     let mut skip = page_offset;
     let mut page: Vec<(&AOracleCard, &APrinting)> = Vec::with_capacity(limit);
     let mut scratch: Vec<Match> = Vec::new();
-    'walk: for (i, &word) in permuted.iter().enumerate() {
-        let mut w = word;
-        while w != 0 {
-            let pos = (i as u32) << 6 | w.trailing_zeros();
-            w &= w - 1;
-            let cid = u32::from(perm[pos as usize]);
-            let c = counts[cid as usize] as usize;
-            if skip >= c {
-                skip -= c;
-                continue;
-            }
-            let card = &cards[cid as usize];
-            let all_match = all_match_known
-                || match filter.card_pass(card, strings, &mut residual, &mut residual_is_or) {
-                    Tri::True => true,
-                    Tri::PrintingDep => false,
-                    _ => continue,
-                };
-            let start = u32::from(offsets[cid as usize]) as usize;
-            let end   = u32::from(offsets[cid as usize + 1]) as usize;
-            scratch.clear();
-            push_card_matches(
-                card, cid, printings, start, end, all_match, &residual, residual_is_or, mode, prefer,
-                sort_col, descending, strings, existential_plane, &mut scratch, &mut group_best, &mut touched,
-            );
-            scratch.sort_unstable_by(cmp);
-            for m in scratch.iter().skip(skip) {
-                page.push((&cards[m.1 as usize], &printings[m.2 as usize]));
-                if page.len() == limit {
-                    break 'walk;
-                }
-            }
-            skip = 0;
+    'walk: for cid in perm.iter().map(|x| u32::from(*x)) {
+        let c = counts[cid as usize] as usize;
+        if c == 0 {
+            continue;
         }
+        if skip >= c {
+            skip -= c;
+            continue;
+        }
+        let card = &cards[cid as usize];
+        let all_match = all_match_known
+            || match filter.card_pass(card, strings, &mut residual, &mut residual_is_or) {
+                Tri::True => true,
+                Tri::PrintingDep => false,
+                _ => continue,
+            };
+        let start = u32::from(offsets[cid as usize]) as usize;
+        let end   = u32::from(offsets[cid as usize + 1]) as usize;
+        scratch.clear();
+        push_card_matches(
+            card, cid, printings, start, end, all_match, &residual, residual_is_or, mode, prefer,
+            sort_col, descending, strings, existential_plane, &mut scratch, &mut group_best, &mut touched,
+        );
+        scratch.sort_unstable_by(cmp);
+        for m in scratch.iter().skip(skip) {
+            page.push((&cards[m.1 as usize], &printings[m.2 as usize]));
+            if page.len() == limit {
+                break 'walk;
+            }
+        }
+        skip = 0;
     }
     (total, page)
     }) // COUNTS.with

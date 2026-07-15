@@ -1317,24 +1317,10 @@ pub(crate) fn split_planes(
     if matches!(filter, FilterExpr::True) {
         return (None, filter);
     }
-    if let Some(pe) = compile_plane(&filter, bounds, words, indexes, offsets) {
-        if unique_is_card || !plane_expr_is_existential(&pe) {
-            return (Some(pe), FilterExpr::True);
-        }
-        // Existential leaf, wrong mode to fully fold (would discard which printing
-        // matched -- see this function's own doc). Still worth using the compiled
-        // plane for candidate narrowing: run_query's candidate_cards computation
-        // takes a different path when a plane exists (lib.rs, Some(expr) arm) that
-        // uses the bitmap directly, without the broadness-discard-to-full-scan
-        // fallback the plane=None path applies. The residual stays the original,
-        // unchanged filter -- per-printing correctness (row selection, exact count)
-        // still comes from the ordinary card_pass walk over it, not the plane,
-        // avoiding exactly the row-selection/negation traps this variant's eval
-        // machinery exists to solve for unique=card. run_query's own
-        // existential_plane computation stays Mode::Card-only and unaffected by
-        // this -- it would otherwise redundantly re-check the same predicate the
-        // residual already checks, not add a real narrowing benefit for these modes.
-        return (Some(pe), filter);
+    if let Some(pe) = compile_plane(&filter, bounds, words, indexes, offsets)
+        && (unique_is_card || !plane_expr_is_existential(&pe))
+    {
+        return (Some(pe), FilterExpr::True);
     }
     match filter {
         FilterExpr::And(children) => {
