@@ -2062,6 +2062,59 @@ pub(crate) fn price_range_narrowed(op: CmpOp, v: f64, indexes: &Archived<CardInd
     }
 }
 
+/// Shared by `narrow_rec`'s `cn` closure and `compile_plane`'s `NumericCmp` arm
+/// (`planes.rs`) — same reasoning as `price_range_narrowed`. Already an exact
+/// integer field (no lossy conversion step at all, unlike price pre-#688), so
+/// no `snap_to_nearest_cent`-equivalent is needed here.
+pub(crate) fn collector_number_range_narrowed(op: CmpOp, v: f64, indexes: &Archived<CardIndexes>, n_printings: usize, broad_ok: bool) -> Option<Narrowed> {
+    match int_range_bounds(op, v)? {
+        None => Narrowed::tight(Candidates::Printings(Vec::new())),
+        Some((lo, hi)) => range_narrowed(&indexes.collector_number, lo, hi, n_printings, broad_ok, true),
+    }
+}
+
+/// Shared by `narrow_rec`'s `DateCmp` arm and `compile_plane`'s `DateCmp` arm
+/// (`planes.rs`). `value` is already the same zero-padded-yyyymmdd `u32`
+/// `released_at_int` uses, so bounds are computed directly, no unit conversion.
+/// `Ne` declines (not selective, matches every other numeric field's range
+/// narrowing) -- this can never return `None` for the *bounds* the way price's
+/// can (there is no "definitely empty" case here, only "Ne declines"), so it
+/// returns `Option<Narrowed>` for the decline alone, not the nested-Option
+/// shape `int_range_bounds`-based closures need.
+pub(crate) fn date_range_narrowed(op: CmpOp, value: u32, indexes: &Archived<CardIndexes>, n_printings: usize, broad_ok: bool) -> Option<Narrowed> {
+    let (lo, hi) = match op {
+        CmpOp::Ne => return None,
+        CmpOp::Eq => (value, value.saturating_add(1)),
+        CmpOp::Lt => (0, value),
+        CmpOp::Le => (0, value.saturating_add(1)),
+        CmpOp::Gt => (value.saturating_add(1), u32::MAX),
+        CmpOp::Ge => (value, u32::MAX),
+    };
+    range_narrowed(&indexes.released_at, lo, hi, n_printings, broad_ok, true)
+}
+
+/// Shared by `narrow_rec`'s `YearCmp` arm and `compile_plane`'s `YearCmp` arm
+/// (`planes.rs`). A year threshold maps to a `released_at_int` range at the
+/// year boundary (`y*10_000`) -- any real date in year `y` is `>= y*10_000` and
+/// `< (y+1)*10_000`, so this is exactly as range-narrowable as `DateCmp`,
+/// despite comparing a *derived* value (`date / 10_000`), not the stored field
+/// directly.
+pub(crate) fn year_range_narrowed(op: CmpOp, year: i32, indexes: &Archived<CardIndexes>, n_printings: usize, broad_ok: bool) -> Option<Narrowed> {
+    if !(0..=9999).contains(&year) {
+        return None;
+    }
+    let y = year as u32;
+    let (lo, hi) = match op {
+        CmpOp::Ne => return None,
+        CmpOp::Eq => (y * 10_000, (y + 1) * 10_000),
+        CmpOp::Lt => (0, y * 10_000),
+        CmpOp::Le => (0, (y + 1) * 10_000),
+        CmpOp::Gt => ((y + 1) * 10_000, u32::MAX),
+        CmpOp::Ge => (y * 10_000, u32::MAX),
+    };
+    range_narrowed(&indexes.released_at, lo, hi, n_printings, broad_ok, true)
+}
+
 // ─── Rarity index ────────────────────────────────────────────────────────────
 // rarity int (0-5) -> sorted card ids with at least one printing at that
 // rarity. A card printed at several rarities appears in each of its lists
@@ -2773,6 +2826,14 @@ fn narrow_rec(
         && !matches!(filter, FilterExpr::True)
         && u32::from(indexes.planes.n_cards) as usize == n_cards
         && n_cards > 0
+        // 2+ range-predicate leaves (usd/collector_number/released_at) are
+        // doomed to decline composing (and_of_checked_for_shared_witness),
+        // but not before each one's compile_*_range function wastefully
+        // narrows and materializes a full card bitmap -- this structural,
+        // no-narrowing pre-check (docs/issues/local-engine-broad-range-
+        // fastpath.md's compound-query regression) skips that waste,
+        // falling straight to the per-field dispatch below instead.
+        && !has_conflicting_range_families(filter)
     {
         if let Some(pe) = compile_plane(filter, &indexes.planes, &indexes.oracle_trigram.words, indexes, offsets) {
             let mut bits: Vec<u64> = Vec::new();
@@ -2904,10 +2965,7 @@ fn narrow_rec(
             let numeric = |idx, op, v: &f64| numeric_candidates(idx, op, *v).and_then(|c| Narrowed::tight(Candidates::Cards(c)));
             let rarity = |op, v: &f64| narrow_rarity(indexes, n_cards, op, *v);
             let price = |op, v: &f64| price_range_narrowed(op, *v, indexes, n_printings, broad_ok);
-            let cn = |op, v: &f64| match int_range_bounds(op, *v)? {
-                None => Narrowed::tight(Candidates::Printings(Vec::new())),
-                Some((lo, hi)) => range_narrowed(&indexes.collector_number, lo, hi, n_printings, broad_ok, true),
-            };
+            let cn = |op, v: &f64| collector_number_range_narrowed(op, *v, indexes, n_printings, broad_ok);
             match (lhs, rhs) {
                 (NumExpr::Field(NumField::Cmc), NumExpr::Const(v)) => numeric(&indexes.cmc, *op, v),
                 (NumExpr::Const(v), NumExpr::Field(NumField::Cmc)) => numeric(&indexes.cmc, flip_op(*op), v),
@@ -3098,33 +3156,9 @@ fn narrow_rec(
             Narrowed::loose(Candidates::CardBits(bits))
         }
 
-        FilterExpr::DateCmp { op, value } => {
-            let (lo, hi) = match op {
-                CmpOp::Ne => return None,
-                CmpOp::Eq => (*value, value.saturating_add(1)),
-                CmpOp::Lt => (0, *value),
-                CmpOp::Le => (0, value.saturating_add(1)),
-                CmpOp::Gt => (value.saturating_add(1), u32::MAX),
-                CmpOp::Ge => (*value, u32::MAX),
-            };
-            range_narrowed(&indexes.released_at, lo, hi, n_printings, broad_ok, true)
-        }
+        FilterExpr::DateCmp { op, value } => date_range_narrowed(*op, *value, indexes, n_printings, broad_ok),
 
-        FilterExpr::YearCmp { op, year } => {
-            if *year < 0 || *year > 9999 {
-                return None;
-            }
-            let y = *year as u32;
-            let (lo, hi) = match op {
-                CmpOp::Ne => return None,
-                CmpOp::Eq => (y * 10_000, (y + 1) * 10_000),
-                CmpOp::Lt => (0, y * 10_000),
-                CmpOp::Le => (0, (y + 1) * 10_000),
-                CmpOp::Gt => ((y + 1) * 10_000, u32::MAX),
-                CmpOp::Ge => (y * 10_000, u32::MAX),
-            };
-            range_narrowed(&indexes.released_at, lo, hi, n_printings, broad_ok, true)
-        }
+        FilterExpr::YearCmp { op, year } => year_range_narrowed(*op, *year, indexes, n_printings, broad_ok),
 
         FilterExpr::And(children) => {
             // Combine within each id space first (card lists are ~3x shorter),

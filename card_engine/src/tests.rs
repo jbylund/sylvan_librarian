@@ -6,7 +6,7 @@ use super::{
     cards_of_printings, count_common_keywords, count_common_types,
     build_artist_index, build_range_index, price_range_narrowed, range_candidates, narrow_candidates, rarity_candidates,
     range_too_broad_to_narrow, run_query, trigram_candidates, finalize_trigram_index, PrintingRangeIndex, NARROW_FLOOR,
-    bitmap_contains, bitmap_card_ids, compile_plane, eval_planes, split_planes,
+    bitmap_contains, bitmap_card_ids, compile_plane, eval_planes, has_conflicting_range_families, split_planes,
     ArtistIndex, CardData, CardIndexes, Candidates, ColorField, NumExpr, NumField, RarityIndex,
     CollField, CmpOp, FilterExpr, InlineStr, Interner, ManaCost, OracleCard, Printing, TagIndex,
     TextField, TextSearchField, Tri, SortedTrigramIndex, VocabInterner, ARTIST_NONE, NONE_STR, TYPE_ARTIFACT, TYPE_CREATURE,
@@ -1370,16 +1370,77 @@ fn legality_compound_and_respects_row_selection_for_unique_card() {
 }
 
 /// Found in #676's review: a legality leaf ANDed with a genuinely
-/// printing-dependent, non-plane-compilable residual (`DateCmp` here --
+/// printing-dependent, non-plane-compilable residual (`ArtistMatch` here --
 /// never appears in `planes.rs`, so it always stays in the residual after
 /// `split_planes`'s partial extraction) needs *both* checked against the
-/// *same* printing. printing 0 is legal in A but released before the cutoff;
-/// printing 1 is released after the cutoff but not legal in A -- no single
-/// printing satisfies both, so `format:A AND date>cutoff` (unique=card) must
+/// *same* printing. printing 0 is legal in A but by the wrong artist;
+/// printing 1 is by the right artist but not legal in A -- no single
+/// printing satisfies both, so `format:A AND artist:X` (unique=card) must
 /// match 0 times, not pick either printing on the strength of just one half
 /// of the conjunction.
+///
+/// (`DateCmp` filled this role until this fastpath's `collector_number`/
+/// `released_at` extension made it plane-compilable too --
+/// see `legality_and_date_decline_shared_witness` for the coverage that
+/// shift now needs of its own.)
 #[test]
 fn legality_and_date_residual_must_be_checked_together() {
+    let mut vocab = VocabInterner::new();
+    let card = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
+    let mut data = store_of(vec![card], &[2], vocab);
+    data.printings[0].card_legalities = 0b01; // legal in A, but...
+    let mut artists = VocabInterner::new();
+    let wrong_artist = artists.intern("wrong artist".to_string()).unwrap();
+    let right_artist = artists.intern("right artist".to_string()).unwrap();
+    data.printings[0].card_artist_vid = wrong_artist; // ...by the wrong artist
+    data.printings[1].card_legalities = 0; // not legal in A, but...
+    data.printings[1].card_artist_vid = right_artist; // ...by the right artist
+    data.artist_vocab = artists.strings;
+    data.indexes.artists = build_artist_index(&data.printings, data.artist_vocab.len());
+    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let bounds = &archived.indexes.planes;
+    let words = &archived.indexes.oracle_trigram.words;
+
+    let filter = FilterExpr::And(vec![
+        FilterExpr::Legality { shift: Some(0), expected: 0b01 },
+        FilterExpr::ArtistMatch { ids: vec![right_artist] },
+    ]);
+    let (plane, mut residual) = split_planes(filter, bounds, words, true, &archived.indexes, &archived.offsets);
+    assert!(plane.is_some(), "the legality leaf alone must still promote into the plane");
+    assert!(
+        matches!(residual, FilterExpr::ArtistMatch { .. }),
+        "artist match isn't plane-compilable, so it must remain a real residual, not collapse to True"
+    );
+
+    let (total, _) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut residual, plane.as_ref(), "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+    );
+    assert_eq!(total, 0, "no single printing is both legal in A and by the right artist");
+}
+
+/// The `collector_number`/`released_at` extension to `PrintingRangeBits`
+/// (docs/issues/local-engine-broad-range-fastpath.md) makes `DateCmp` itself
+/// plane-compilable, so `format:A AND date>cutoff` now has two *distinct*
+/// existential facts on the table (Legality's plane, DateCmp's
+/// `PrintingRangeBits`) -- `and_of_checked_for_shared_witness`'s
+/// `all_formats.len() <= 1` guard still correctly refuses to fold them into
+/// one combined plane. But composing them isn't the only way to extract
+/// *some* speed here: `has_conflicting_range_families`'s structural
+/// pre-check (added to fix a compound-query regression this same issue
+/// found -- see its doc) steers `split_planes` to skip attempting to
+/// plane-compile the DateCmp leaf at all once it detects the conflict,
+/// leaving Legality to extract on its own with DateCmp as a genuine
+/// residual -- exactly the "one plane leaf + real residual" shape
+/// `legality_and_date_residual_must_be_checked_together` tests with
+/// `ArtistMatch`, and exactly what this compound would have done before
+/// DateCmp was plane-compilable at all. Same fixture/expectation either
+/// way: printing 0 legal-but-early, printing 1 late-but-illegal, no single
+/// witness, so the compound must match 0 times.
+#[test]
+fn legality_and_date_decline_shared_witness() {
     let mut vocab = VocabInterner::new();
     let card = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
     let mut data = store_of(vec![card], &[2], vocab);
@@ -1387,6 +1448,7 @@ fn legality_and_date_residual_must_be_checked_together() {
     data.printings[0].released_at_int = Some(20100101); // ...released before the cutoff
     data.printings[1].card_legalities = 0; // not legal in A, but...
     data.printings[1].released_at_int = Some(20220101); // ...released after the cutoff
+    data.indexes.released_at = build_range_index(&data.printings, |p| p.released_at_int);
     data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
@@ -1401,7 +1463,7 @@ fn legality_and_date_residual_must_be_checked_together() {
     assert!(plane.is_some(), "the legality leaf alone must still promote into the plane");
     assert!(
         matches!(residual, FilterExpr::DateCmp { .. }),
-        "date> isn't plane-compilable, so it must remain a real residual, not collapse to True"
+        "date> must remain a real residual once conflict detection steers around compiling it, not collapse to True"
     );
 
     let (total, _) = run_query(
@@ -2366,6 +2428,20 @@ fn collector_number_narrowing() {
     // printings[3] has no numeric part: absent from the index
     data.indexes.collector_number =
         build_range_index(&data.printings, |p| p.collector_number_int.map(u32::from));
+    // Since this fastpath's collector_number extension to PrintingRangeBits
+    // (docs/issues/local-engine-broad-range-fastpath.md), narrow_rec's own
+    // compile_plane fast path would also compile every cn(...) leaf below on
+    // a store this small, intercepting before the printing-space match arms
+    // this test wants to exercise and returning card-space CardBits instead
+    // (see compile_collector_number_range's plane-path parity test for that
+    // representation's own coverage). Zeroing n_cards on the planes index
+    // defeats the `u32::from(indexes.planes.n_cards) as usize == n_cards`
+    // guard in narrow_rec, keeping this test on the printing-space dispatch
+    // path it's actually about -- same rationale as
+    // price_narrowing_and_verification_are_exact_at_the_boundary's direct
+    // price_range_narrowed calls, just structured to preserve this test's
+    // Or/flipped-operand coverage of narrow_rec's own dispatch instead.
+    data.indexes.planes.n_cards = 0;
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
@@ -2846,6 +2922,13 @@ fn set_code_and_date_narrowing() {
     }
     data.indexes.set_codes = set_codes;
     data.indexes.released_at = build_range_index(&data.printings, |p| p.released_at_int);
+    // Since this fastpath's released_at extension to PrintingRangeBits (docs/issues/
+    // local-engine-broad-range-fastpath.md), narrow_rec's compile_plane fast
+    // path would also compile the DateCmp/YearCmp leaves below on a store
+    // this small, intercepting before the printing-space match arms this
+    // test wants to exercise (same collector_number_narrowing dealt with).
+    // Zeroing n_cards on the planes index defeats that fast path's guard.
+    data.indexes.planes.n_cards = 0;
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
@@ -3426,6 +3509,277 @@ fn price_plane_path_parity_and_shared_witness() {
         &mut same_field_and(), None, "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
     );
     assert_eq!(total, 0, "no single printing satisfies both usd<50 and usd>10");
+}
+
+/// Card 0: two printings, cn=10 (satisfies `cn<50`) and cn=200 (doesn't;
+/// satisfies `cn>=50`) -- same divergent shape as `price_plane_fixture_store`.
+/// Card 1: one printing at cn=500 (never satisfies `cn<50`).
+fn collector_number_plane_fixture_store() -> CardData {
+    let mut vocab = VocabInterner::new();
+    let cards = vec![stub_card(1, TYPE_CREATURE, &[], &mut vocab), stub_card(2, TYPE_CREATURE, &[], &mut vocab)];
+    let mut data = store_of(cards, &[2, 1], vocab);
+    data.printings[0].collector_number_int = Some(10);
+    data.printings[1].collector_number_int = Some(200);
+    data.printings[2].collector_number_int = Some(500);
+    data.indexes.collector_number = build_range_index(&data.printings, |p| p.collector_number_int.map(u32::from));
+    data
+}
+
+/// `PrintingRangeBits`'s `collector_number` extension must reproduce exactly
+/// what the unplaned path computes -- same three failure modes as
+/// `price_plane_path_parity_and_shared_witness` (row selection, negation,
+/// shared witness), now for a second field sharing the same
+/// `RangePredicateField`-tagged machinery.
+#[test]
+fn collector_number_plane_path_parity_and_shared_witness() {
+    let data = collector_number_plane_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let cn = |op, v: f64| FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::CollectorNumberInt), op, rhs: NumExpr::Const(v) };
+
+    let filters: Vec<Box<dyn Fn() -> FilterExpr>> = vec![
+        Box::new(|| cn(CmpOp::Lt, 50.0)),
+        Box::new(|| FilterExpr::Not(Box::new(cn(CmpOp::Lt, 50.0)))),
+        Box::new(|| FilterExpr::And(vec![cn(CmpOp::Lt, 50.0), FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge }])),
+    ];
+    for make in &filters {
+        for unique in ["card", "printing", "artwork"] {
+            let unique_is_card = unique != "printing" && unique != "artwork";
+            let mut plain = make();
+            let (t0, p0) = run_query(
+                &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+                &mut plain, None, unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
+            );
+            let (pe, mut residual) = split_planes(
+                make(), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, unique_is_card, &archived.indexes, &archived.offsets,
+            );
+            let (t1, p1) = run_query(
+                &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+                &mut residual, pe.as_ref(), unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
+            );
+            assert_eq!(t0, t1, "totals must agree (unique={unique})");
+            let ids = |page: &[(&super::AOracleCard, &super::APrinting)]| -> Vec<u128> {
+                page.iter().map(|(_, p)| u128::from(p.scryfall_id)).collect()
+            };
+            assert_eq!(ids(&p0), ids(&p1), "pages must agree (unique={unique})");
+        }
+    }
+
+    // Independent ground truth for -cn<50/unique=card, bypassing run_query's own
+    // internal plane fast path (same reasoning as price's own independent check).
+    let not_cn = FilterExpr::Not(Box::new(cn(CmpOp::Lt, 50.0)));
+    let expected_cards: usize = (0..archived.cards.len() as u32)
+        .filter(|&cid| {
+            let start = u32::from(archived.offsets[cid as usize]) as usize;
+            let end = u32::from(archived.offsets[cid as usize + 1]) as usize;
+            archived.printings[start..end].iter().any(|p| not_cn.matches(&archived.cards[cid as usize], p, &archived.strings))
+        })
+        .count();
+    assert_eq!(expected_cards, 2, "hand-computed ground truth: both cards have a printing satisfying -cn<50");
+    let (total, _) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut FilterExpr::Not(Box::new(cn(CmpOp::Lt, 50.0))), None, "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+    );
+    assert_eq!(total, expected_cards, "-cn<50 unique=card must match the independent per-printing ground truth");
+
+    // Same-field range AND (cn<50 AND cn>20): no printing of card 0 satisfies both
+    // (cn=10 fails cn>20, cn=200 fails cn<50) -- correct total is 0.
+    let same_field_and = || FilterExpr::And(vec![cn(CmpOp::Lt, 50.0), cn(CmpOp::Gt, 20.0)]);
+    assert!(
+        compile_plane(&same_field_and(), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets)
+            .is_none(),
+        "same-field cn range AND must decline to compile (shared witness)"
+    );
+    let (total, _) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut same_field_and(), None, "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+    );
+    assert_eq!(total, 0, "no single printing satisfies both cn<50 and cn>20");
+}
+
+/// Card 0: two printings, released 2010 (satisfies `released_at<2020_0101`)
+/// and 2024 (doesn't; satisfies `released_at>=2020_0101`) -- same divergent
+/// shape as the price/collector_number fixtures. Card 1: one printing
+/// released 2023 (never satisfies the `<2020` threshold).
+fn released_at_plane_fixture_store() -> CardData {
+    let mut vocab = VocabInterner::new();
+    let cards = vec![stub_card(1, TYPE_CREATURE, &[], &mut vocab), stub_card(2, TYPE_CREATURE, &[], &mut vocab)];
+    let mut data = store_of(cards, &[2, 1], vocab);
+    data.printings[0].released_at_int = Some(20100101);
+    data.printings[1].released_at_int = Some(20240101);
+    data.printings[2].released_at_int = Some(20230101);
+    data.indexes.released_at = build_range_index(&data.printings, |p| p.released_at_int);
+    data
+}
+
+/// `PrintingRangeBits`'s `released_at` extension covers two distinct filter
+/// shapes (`DateCmp` directly, `YearCmp` via its derived-value recheck) --
+/// same three failure modes as the price/collector_number parity tests, run
+/// for both.
+#[test]
+fn released_at_plane_path_parity_and_shared_witness() {
+    let data = released_at_plane_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let date = |op, value| FilterExpr::DateCmp { op, value };
+    let year = |op, y| FilterExpr::YearCmp { op, year: y };
+
+    let filters: Vec<Box<dyn Fn() -> FilterExpr>> = vec![
+        Box::new(|| date(CmpOp::Lt, 20_200_101)),
+        Box::new(|| FilterExpr::Not(Box::new(date(CmpOp::Lt, 20_200_101)))),
+        Box::new(|| year(CmpOp::Lt, 2020)),
+        Box::new(|| FilterExpr::Not(Box::new(year(CmpOp::Lt, 2020)))),
+        Box::new(|| FilterExpr::And(vec![date(CmpOp::Lt, 20_200_101), FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge }])),
+    ];
+    for make in &filters {
+        for unique in ["card", "printing", "artwork"] {
+            let unique_is_card = unique != "printing" && unique != "artwork";
+            let mut plain = make();
+            let (t0, p0) = run_query(
+                &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+                &mut plain, None, unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
+            );
+            let (pe, mut residual) = split_planes(
+                make(), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, unique_is_card, &archived.indexes, &archived.offsets,
+            );
+            let (t1, p1) = run_query(
+                &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+                &mut residual, pe.as_ref(), unique, "default", "edhrec", "asc", 100, 0, &archived.indexes,
+            );
+            assert_eq!(t0, t1, "totals must agree (unique={unique})");
+            let ids = |page: &[(&super::AOracleCard, &super::APrinting)]| -> Vec<u128> {
+                page.iter().map(|(_, p)| u128::from(p.scryfall_id)).collect()
+            };
+            assert_eq!(ids(&p0), ids(&p1), "pages must agree (unique={unique})");
+        }
+    }
+
+    // Independent ground truth for -date</unique=card.
+    let not_date = FilterExpr::Not(Box::new(date(CmpOp::Lt, 20_200_101)));
+    let expected_cards: usize = (0..archived.cards.len() as u32)
+        .filter(|&cid| {
+            let start = u32::from(archived.offsets[cid as usize]) as usize;
+            let end = u32::from(archived.offsets[cid as usize + 1]) as usize;
+            archived.printings[start..end].iter().any(|p| not_date.matches(&archived.cards[cid as usize], p, &archived.strings))
+        })
+        .count();
+    assert_eq!(expected_cards, 2, "hand-computed ground truth: both cards have a printing satisfying -date<2020_0101");
+    let (total, _) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut FilterExpr::Not(Box::new(date(CmpOp::Lt, 20_200_101))), None, "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+    );
+    assert_eq!(total, expected_cards, "-date<2020_0101 unique=card must match the independent per-printing ground truth");
+
+    // Same-field range AND (date<2020 AND date>2015): no printing of card 0
+    // satisfies both (2010 fails >2015-worth-of-date, 2024 fails <2020).
+    let same_field_and = || FilterExpr::And(vec![date(CmpOp::Lt, 20_200_101), date(CmpOp::Gt, 20_150_101)]);
+    assert!(
+        compile_plane(&same_field_and(), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets)
+            .is_none(),
+        "same-field date range AND must decline to compile (shared witness)"
+    );
+    let (total, _) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+        &mut same_field_and(), None, "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+    );
+    assert_eq!(total, 0, "no single printing satisfies both date<2020_0101 and date>2015_0101");
+
+    // DateCmp and YearCmp on the same field are the identical shared-witness
+    // shape (both compile to a RangePredicateField::ReleasedAt* PrintingRangeBits
+    // sharing the field, just different granularity) -- must also decline.
+    let mixed_and = || FilterExpr::And(vec![date(CmpOp::Lt, 20_200_101), year(CmpOp::Gt, 2015)]);
+    assert!(
+        compile_plane(&mixed_and(), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, &archived.indexes, &archived.offsets).is_none(),
+        "DateCmp and YearCmp on released_at must decline to compile together (shared witness)"
+    );
+}
+
+/// One card, three printings, each satisfying exactly one of three range
+/// conditions (`usd<50`, `cn<100`, `date<2020_0101`) and failing the other
+/// two -- pairwise divergent by construction, so `And`ing any two conditions
+/// must match 0 times (no single printing witnesses both), the cross-field
+/// analogue of `price_plane_path_parity_and_shared_witness`'s same-field
+/// check. Each field compiles to its own `RangePredicateField`-tagged
+/// `PrintingRangeBits` leaf with its own `next_range_bits_id()`, so any two
+/// of these three are two distinct existential facts regardless of which
+/// pair -- exactly the shape `and_of_checked_for_shared_witness`/
+/// `split_planes`'s `all_formats.len() <= 1` guard exists to catch.
+#[test]
+fn cross_field_range_predicates_decline_shared_witness() {
+    let mut vocab = VocabInterner::new();
+    let card = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
+    let mut data = store_of(vec![card], &[3], vocab);
+    data.printings[0].price_usd = Some(500); // usd<50 true; cn/date false
+    data.printings[0].collector_number_int = Some(500);
+    data.printings[0].released_at_int = Some(20240101);
+    data.printings[1].price_usd = Some(20000); // cn<100 true; usd/date false
+    data.printings[1].collector_number_int = Some(10);
+    data.printings[1].released_at_int = Some(20240101);
+    data.printings[2].price_usd = Some(20000); // date<2020_0101 true; usd/cn false
+    data.printings[2].collector_number_int = Some(500);
+    data.printings[2].released_at_int = Some(20100101);
+    data.indexes.price_usd = build_range_index(&data.printings, |p| p.price_usd);
+    data.indexes.collector_number = build_range_index(&data.printings, |p| p.collector_number_int.map(u32::from));
+    data.indexes.released_at = build_range_index(&data.printings, |p| p.released_at_int);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let bounds = &archived.indexes.planes;
+    let words = &archived.indexes.oracle_trigram.words;
+
+    let usd_lt_50 = || FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op: CmpOp::Lt, rhs: NumExpr::Const(50.0) };
+    let cn_lt_100 = || FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::CollectorNumberInt), op: CmpOp::Lt, rhs: NumExpr::Const(100.0) };
+    let date_lt_2020 = || FilterExpr::DateCmp { op: CmpOp::Lt, value: 20_200_101 };
+
+    let check = |name: &str, f: FilterExpr| {
+        assert!(
+            compile_plane(&f, bounds, words, &archived.indexes, &archived.offsets).is_none(),
+            "{name}: two distinct existential range facts must decline to compose"
+        );
+        let (total, _) = run_query(
+            &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+            &mut { f }, None, "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
+        );
+        assert_eq!(total, 0, "{name}: no single printing satisfies both conditions");
+    };
+    check("usd+cn", FilterExpr::And(vec![usd_lt_50(), cn_lt_100()]));
+    check("usd+date", FilterExpr::And(vec![usd_lt_50(), date_lt_2020()]));
+    check("cn+date", FilterExpr::And(vec![cn_lt_100(), date_lt_2020()]));
+}
+
+/// `has_conflicting_range_families`'s structural pre-check (added to fix the
+/// compound-query regression `cross_field_range_predicates_decline_shared_
+/// witness`'s doc mentions) must not treat a bare `Or` of two
+/// existential-family leaves as a conflict: `∃` distributes over `∨`, so
+/// `r:common or r:uncommon` has no shared-witness problem at all and must
+/// compile exactly as before -- found as a real ~8x regression
+/// (0.07ms -> 0.55ms) during this fix's own benchmarking when the first cut
+/// of the pre-check walked `Or` the same as `And`. Covers both the bare-`Or`
+/// case (no enclosing `And` at all) and the `And`-containing-an-`Or` case
+/// (where the conflict tally legitimately should cross into the `Or`, since
+/// whichever branch is live still combines with the `And`'s other child).
+#[test]
+fn range_conflict_check_does_not_penalize_bare_or() {
+    let bare_or = FilterExpr::Or(vec![
+        FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), op: CmpOp::Eq, rhs: NumExpr::Const(0.0) },
+        FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), op: CmpOp::Eq, rhs: NumExpr::Const(1.0) },
+    ]);
+    assert!(!has_conflicting_range_families(&bare_or), "a bare Or of 2 existential leaves has no shared-witness problem");
+
+    let usd_lt_50 = || FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op: CmpOp::Lt, rhs: NumExpr::Const(50.0) };
+    let usd_gt_50 = || FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op: CmpOp::Gt, rhs: NumExpr::Const(50.0) };
+    let or_of_usd = FilterExpr::Or(vec![usd_lt_50(), usd_gt_50()]);
+    assert!(!has_conflicting_range_families(&or_of_usd), "an Or of 2 usd leaves alone still has no shared-witness problem");
+
+    // format:A AND (usd<50 OR usd>50): the And's tally must cross into the
+    // Or's children (3 distinct facts: legality + 2 usd leaves once
+    // expanded), unlike the bare-Or cases above.
+    let and_containing_or = FilterExpr::And(vec![FilterExpr::Legality { shift: Some(0), expected: 0b01 }, or_of_usd]);
+    assert!(
+        has_conflicting_range_families(&and_containing_or),
+        "an And whose child is an Or of range leaves must still see the conflict with its other child"
+    );
 }
 
 // ─── Numeric-range planes (#655) ───────────────────────────────────────────────

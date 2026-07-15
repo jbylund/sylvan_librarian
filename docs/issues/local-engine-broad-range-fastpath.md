@@ -303,121 +303,89 @@ shared-witness tracking, and removing the dedicated negation arms — all three 
 
 ## `unique=printing`/`artwork`: investigated, both attempted fixes reverted
 
-**Update after broader re-benchmarking: both fixes below were reverted.** They were validated
-only against `usd<X`-shaped queries; re-testing against the engine's *other* existing existential
-fields (legality, rarity, border) — prompted by the reasonable question "do these fixes help any
-other queries?" — surfaced a real regression and a real correctness bug, neither visible in the
-price-only benchmarks. See "What broader testing found" below for what went wrong and why both
-were reverted rather than patched further. The investigation and its conclusions (the match-phase
-floor is inherent, `#656` doesn't cover existential facts) remain valid and are kept below; the
-code changes do not exist on `main`.
+Investigated extending the same idea to `unique=printing`/`artwork`. Two fixes were implemented,
+benchmarked as a real win against `usd<X`, then both reverted after broader re-benchmarking
+against the engine's *other* existential fields (legality, rarity, border) surfaced a real
+regression and a real correctness bug, neither visible in the price-only benchmarks — full story,
+including the two fixes' design and exactly what broader testing found, moved to
+[local-engine-printing-mode-existential-fastpath-attempt.md](local-engine-printing-mode-existential-fastpath-attempt.md)
+(extracted to keep this doc from growing past ~500 lines once the `collector_number`/`released_at`
+section below landed). Bottom line: the match-phase cost is an inherent floor for these two modes
+under an existential predicate — no bitmap/walk cleverness removes it, and `#656` as scoped doesn't
+cover existential facts either. Neither reverted fix's code exists on `main`.
 
-## Original entry (fixes since reverted — kept for the record)
+## `collector_number`/`released_at` extension, and a second broad-testing lesson
 
-Traced why these modes stayed slow, since the original "loosen two gates" framing turned out
-wrong. `run_query`'s speed for `unique=card` doesn't come from a smaller candidate set — for
-`usd<50` (83% selective) the narrowed set gets discarded by the broadness-guard regardless of
-mode. The real mechanism is `run_query_streamed_popcount`: it answers `total` directly from a
-bitmap's popcount and walks only `limit` set bits via a permuted-bitmap word-skip, never
-materializing or iterating a candidate list. That function is hard-gated to `Mode::Card`
-(`lib.rs:3941`), and extending it to `unique=printing`/`artwork` is **issue #656**, still open —
-quoting its own scope note, it needs "a weighted set-bit walk... card weights are O(1) via
-offsets-diff/artwork_groups... Not implemented." The original Legality carve-out
-(`docs/issues/done/00667-...md`) scoped this out identically, stating outright that those two
-modes "need no change: they already... run the existing (correct) per-printing `card_pass` walk."
+Extended `PlaneExpr::PrintingRangeBits` from `price_usd`/`unique=card` (shipped above) to
+`collector_number` (`NumericCmp`/`NumField::CollectorNumberInt`, mechanically the same shape as
+price) and `released_at` (`FilterExpr::DateCmp`/`YearCmp`, separate variants with no `NumField`
+involved at all — `YearCmp` compares a *derived* value, `date / 10_000`, so its per-printing
+recheck needed its own formula, not just a threshold swap). The `field: NumField` tag on
+`PrintingRangeBits` generalized to a new `RangePredicateField` enum (`PriceUsd`, `CollectorNumber`,
+`ReleasedAtDate`, `ReleasedAtYear`) so `eval_plane_expr_for_printing`/`compile_plane`/
+`compile_plane_neg` dispatch on it instead. `price_range_narrowed`/the new
+`collector_number_range_narrowed`/`date_range_narrowed`/`year_range_narrowed` are `pub(crate)` in
+`lib.rs`, shared between `narrow_rec`'s own per-field arms and `planes.rs`'s `compile_*_range`
+functions — same Bug-B-avoidance reasoning as price's own shared-narrowing-function design.
 
-**#656 as scoped doesn't actually cover this case.** Its weighted-walk sketch assumes "under
-`all_match`" — every printing of a matching card counts, an O(1) weight lookup (`offsets`-diff or
-`artwork_groups`). For an *existential* fact like price, the weight is "how many printings/groups
-actually satisfy the predicate," which cannot be read from a count table — it requires visiting
-that card's printings, the same O(matching printings) work `card_match_count` already does. There
-is no way around this for an exact total: unlike `unique=card` (needs only existence, O(1) via the
-bitmap), `unique=printing`/`artwork` inherently need to know *which* printings qualify.
+**Verified**: `collector_number_plane_path_parity_and_shared_witness`/
+`released_at_plane_path_parity_and_shared_witness` mirror `price_plane_path_parity_and_shared_witness`
+exactly (row selection, negation, same-field shared witness, all three `unique` modes), plus
+`cross_field_range_predicates_decline_shared_witness` (usd+cn, usd+date, cn+date pairwise, one card
+with 3 printings each satisfying exactly one condition — confirms cross-field composition declines
+correctly, not just same-field) and `legality_and_date_decline_shared_witness` (legality+date,
+confirming the pre-existing shared-witness machinery generalizes to the new fields without
+modification). Mutation-tested both new fields' negation arms and the shared-witness id uniqueness
+directly (temporarily reintroducing each bug class, confirming the relevant test fails, then
+reverting) — same rigor as price's own verification.
 
-Implemented and empirically verified two real, narrower fixes instead of the (larger, and for this
-case insufficient) full weighted-walk mechanism:
+**Real-corpus benchmark, targeted (`unique=card`)**: `cn<100` 0.75ms → 0.16ms (4.6×), `cn>=100`
+0.64ms → 0.19ms (3.3×), `year>2020` 0.52ms → 0.18ms (2.9×), `date>2023-01-01` 0.54ms → 0.14ms
+(3.7×). `usd<50` unchanged (0.23ms), as expected. Broad sweep (legality/rarity/border) flat.
 
-1. **`split_planes` narrowing-only fold**: when an existential leaf can't safely fold to a bare
-   `True` residual (wrong mode), it now still returns the compiled plane for `candidate_cards`
-   narrowing (avoiding the broadness-discard-to-full-scan fallback `plane=None` takes), while
-   leaving the residual unchanged so per-printing correctness still comes from the ordinary
-   `card_pass` walk, not the plane. `run_query`'s own `existential_plane` (row-selection) gate
-   stays `Mode::Card`-only, deliberately — using it here too would redundantly re-check the same
-   predicate the residual already checks. Verified via debug instrumentation: `candidate_cards`
-   for `usd<0.1`/`unique=printing` narrows correctly from 31,508 to 4,738 cards.
-2. **Weighted permuted-bitmap walk** in `run_query_streamed`'s "large totals" branch, replacing a
-   raw `perm.iter()` scan of all `n_cards` entries with a bitmap-scatter-and-`trailing_zeros` walk
-   (mirroring `run_query_streamed_popcount`'s mechanism, but reading `counts[cid]` as a
-   *variable* per-card weight instead of a uniform 1, since whole words can't be skipped by
-   popcount alone when weights vary). This is the real, generic fix for the adversarial shape
-   `#634`'s own design worried about (`released_at>2026-06-01 order by released_at`-style: low
-   selectivity, order-by uncorrelated with or opposed to the predicate, forcing a walk deep into
-   the permutation) — verified correct via the full test suite (particularly
-   `fuzz_row_identity_matches_reference`'s 96-seed property fuzzer) and via direct timing
-   instrumentation.
+### A second broad-testing lesson: compound queries mixing 2+ existential leaves
 
-**Why neither moved the `usd<50`-shaped benchmark numbers**: instrumented both phases directly.
-For `usd<50`/`usd<0.1` under `unique=printing`, the *match* phase (visiting narrowed candidates,
-checking their printings) costs 200μs–1.1ms and dominates completely; the walk/emission phase
-costs low single-digit microseconds either way, old or new, because `limit`-based early
-termination already made the *old* raw-permutation scan cheap for these specific queries (dense,
-early matches in `edhrec_rank` order) — its O(n_cards) worst case was real but not hit here. The
-weighted-walk fix's value is real but narrower than hoped: it matters for deep pagination /
-adversarial ordering, not for the broad, offset-0 queries this whole project has benchmarked. The
-match-phase cost is the true, inherent floor for these modes under an existential predicate, and
-no bitmap/walk cleverness removes it — only narrowing the candidate set (fix 1, above) helps, and
-only in proportion to selectivity (a small win at `usd<50`'s 83%, a bigger one at low selectivity).
+Benchmarking compound queries (`cn<100 AND usd<50`, `f:modern AND year>2020`) — again, a shape not
+covered by the single-field targeted benchmarks above — found a real regression: up to ~1.8× on
+two-range-field compounds, and (digging further after the user asked "does this affect the
+already-shipped usd<50 too?") a **latent ~3× regression on `f:modern AND usd<50`, present since
+price's original PR** (`cd3656e`) and never specifically benchmarked until now. Root cause in both
+cases: `narrow_rec`'s top-level fastpath and `split_planes` both attempt `compile_plane` before
+knowing whether `and_of_checked_for_shared_witness` will accept the result — each range field's
+`compile_*_range` function does a full binary-search-and-materialize before the shared-witness
+check can reject it, and 2+ existential leaves in one `And` are common enough (any legality/rarity/
+border query paired with any range field, or two range fields together) that this waste shows up
+directly in realistic query shapes, not just contrived ones.
 
-**Real-corpus benchmark, full sweep, both fixes applied**: `unique=printing`/`artwork` unchanged
-from baseline (~1.2ms) across `usd<0.1` through `usd<50`. `unique=card` unaffected by either fix
-(still ~0.18ms). Both fixes passed 118/118 tests with no new clippy warnings at the time — but see
-below.
+**Fix**: `has_conflicting_range_families` (`planes.rs`) — a cheap, purely structural tree walk (no
+narrowing, no materialization) that detects whether some `And` node combines 2+ distinct
+existential-family leaves (legality/rarity/border/usd/collector_number/released_at, coarse-tagged
+via `ExistentialFamily`, deliberately less precise than `collect_existential_indices`' exact dedup
+— a false positive here only costs a missed optimization, never a correctness bug, since the real,
+authoritative shared-witness check downstream is unchanged). Consulted as a bail-out at both call
+sites (`narrow_rec`'s top-level fastpath, `split_planes`'s whole-tree attempt and per-child loop)
+to skip the expensive compile attempt entirely when a conflict is structurally certain, falling
+straight to the always-correct per-field/residual dispatch instead. `Or` is deliberately not a
+conflict site on its own (`∃` distributes over `∨`) — an earlier cut of this fix walked `Or` the
+same as `And` and caused its own ~8× regression on `r:common or r:uncommon` (caught by benchmarking,
+not by any unit test; added `range_conflict_check_does_not_penalize_bare_or` to cover it directly).
 
-## What broader testing found (both fixes reverted)
+**Real-corpus benchmark, compound queries, before → after this fix** (baseline is `41c9fab`, which
+already includes price's shipped fastpath): `cn<100 AND usd<50` 1.03ms → 1.86ms (regressed) → 0.91ms
+(fixed, better than baseline); `cn<100 AND year>2020` 1.06ms → 1.67ms → 0.80ms; `f:modern AND
+usd<50` 1.03ms → (unaffected by the cn/date work directly, but shares the same latent bug) → 0.51ms
+(fixing the pre-existing regression too, a bonus); `f:modern AND cn<100`/`f:modern AND year>2020`
+now 0.44-0.45ms, close to or better than the pre-any-plane-extension baseline (0.65ms/0.48ms on
+`4a4be10`). `r:common or r:uncommon` (the `Or`-safety regression) back to 0.070ms baseline.
+Targeted single-field and broad legality/rarity/border numbers unaffected, re-confirmed after this
+fix (see above).
 
-Asked "do these fixes help any other queries?" — a reasonable question, since both fixes are
-field-agnostic (any existential leaf, not just price). Benchmarking existing legality/rarity/
-border queries under `unique=printing`/`artwork` (`f:commander`, `f:legacy`, `f:modern`,
-`r:common or r:uncommon`, `-border:black`) — none of which this investigation had tested, since
-all prior benchmarking used only `usd<X` — found real problems in both fixes:
-
-- **Fix 2 (weighted walk): a real, reproducible ~10-18% regression** on every one of those
-  queries, confirmed via clean back-to-back A/B against a `git worktree` build of the pre-fix
-  commit. Cause: the walk's bitmap-scatter step is O(n_cards) *unconditionally*, paid even when
-  the old raw-permutation walk would have terminated early (the common case for broad predicates
-  in default `edhrec_rank` order — confirmed by directly timing a simplified reproduction of the
-  old walk logic, which took ~1.3μs for the exact queries this whole project benchmarked,
-  nowhere near its O(n_cards) worst case). Net: pays an unconditional cost to fix a worst case
-  that essentially never triggers for these query shapes.
-- **Fix 1 (narrowing-only fold): its own regression on near-total matches** (`f:commander` at
-  99.8%) for the same reason — `candidate_cards`'s `Some(expr)` branch has no broadness-discard
-  check, unlike the `plane=None` branch, so it unconditionally pays `bitmap_card_ids` materialization
-  for a match rate where there's nothing to narrow.
-- **Attempting to fix *that* regression (adding a discard check to the `Some(expr)` branch)
-  introduced a real correctness bug**, caught by `fuzz_row_identity_matches_reference`: for a
-  compound `And` where `split_planes` partitions one child into the plane and leaves another in
-  the residual (e.g. `rarity>0 AND types!=X`, with `types!=X` folded into the plane and `rarity>0`
-  left as the residual), discarding the plane-derived `candidate_cards` silently drops the
-  plane's constraint entirely — nothing else re-checks it, since the residual only knows about
-  `rarity>0`. This is different from fix 1's own narrowing-only scenario (residual = the *same*
-  predicate the plane represents, so discarding and falling back to the residual is safe) — the
-  two cases reach the same code path and are not distinguishable there without deeper surgery.
-  Confirmed the bug was newly introduced (not pre-existing) by reproducing it against a
-  `git worktree` build of the pre-fix commit, where the fuzzer passed cleanly.
-
-Given fix 2 provides no measured benefit for any tested query and a real regression on several,
-and fix 1 provides no measured benefit for its own target case (`usd<X`) and a real regression on
-near-total matches with no safe way found to fix that within this investigation's scope, both were
-reverted in full — confirmed byte-identical to the pre-investigation commit
-(`git diff <that-commit> -- lib.rs planes.rs tests.rs` is empty) and re-verified clean (118/118
-tests, no new clippy warnings, benchmarks back to baseline for both the `usd<X` sweep and the
-legality/rarity/border queries that exposed the problems).
-
-**Lesson carried forward**: validate performance changes against the engine's existing, varied
-query shapes, not only the query that motivated the change — the same lesson `#667`'s own
-"performance regression caught by the broad survey, not the targeted script" section already
-recorded, re-learned here at a different layer (candidate narrowing and pagination walks, not
-per-candidate dispatch).
+**Lesson carried forward, again**: this is the *third* time in this doc that a targeted benchmark
+looked clean and a broader sweep against compound/mixed-family queries found a real regression —
+`#667`'s original "broad survey, not the targeted script" lesson, `unique=printing`/`artwork`'s
+weighted-walk regression above, and now compound existential-leaf queries. Each time the fix that
+looked right had a real, different cost profile once tested against realistic query composition,
+not just the query shape that motivated the change.
 
 ## Plan
 
@@ -443,21 +411,31 @@ per-candidate dispatch).
       full, confirmed byte-identical to the pre-investigation commit. Closing this gap for real
       would need a different approach than #656's own scoped mechanism, which doesn't cover
       existential facts — not attempted here.
-- [ ] Extend to `collector_number`/`released_at` (`DateCmp`/`YearCmp`, separate `compile_plane`
-      arms from `NumericCmp`'s).
+- [x] Extend to `collector_number`/`released_at` (`DateCmp`/`YearCmp`, separate `compile_plane`
+      arms from `NumericCmp`'s) — see "collector_number/released_at extension" above. Real wins
+      confirmed (2.9-4.6× on targeted single-field queries), broad legality/rarity/border sweep
+      flat.
+- [x] Found and fixed a compound-query regression (2+ existential leaves in one `And` wastefully
+      compile-then-discard before the shared-witness check rejects them) — `has_conflicting_range_
+      families`, see "A second broad-testing lesson" above. Also fixed a latent instance of the
+      same bug that predates this slice (`f:modern AND usd<50`, present since price's original PR).
 - [ ] Decide the `Not`-arm/`tight_narrow_space` composition-safety question (deferred from the
       Prerequisite section to here) — either bring it into scope (needed for `-usd>8`-shaped
       queries, a real fragment in `test_engine_property.py`'s own suite) or explicitly defer it
       again to a third, later piece of work, with a stated reason rather than silently dropping it.
-- [ ] Acceptance: a broad `released_at`/`collector_number` query and `unique=printing`/`artwork`
-      on `usd<50` all improve or stay flat vs. baseline; no regression on the existing #634/#655
-      exact paths; passes (and likely extends, given this exact class of change already produced
-      two independent bugs in the price prerequisite work and one in this slice's own negation
-      handling) `test_engine_property.py`'s differential suite against the reference oracle — a
-      performance delta alone is not sufficient to call this done.
+- [ ] Acceptance: `unique=printing`/`artwork` on `usd<50` (still the one gap left open, see
+      "investigated, both attempted fixes reverted" above) improves or stays flat vs. baseline; no
+      regression on the existing #634/#655 exact paths; passes (and likely extends, given this
+      exact class of change already produced two independent bugs in the price prerequisite work,
+      one in this slice's own negation handling, and one in the compound-query fix's own first cut)
+      `test_engine_property.py`'s differential suite against the reference oracle — a performance
+      delta alone is not sufficient to call this done.
 
 ## Related
 
+- [local-engine-printing-mode-existential-fastpath-attempt.md](local-engine-printing-mode-existential-fastpath-attempt.md)
+  — the `unique=printing`/`artwork` investigation, extracted from this doc: both attempted fixes
+  and why they were reverted.
 - [local-engine-direct-projection-arrays.md](local-engine-direct-projection-arrays.md) —
   prerequisite `printing_to_card` array, load-bearing for idea 1's per-match card check.
 - [00655-engine-numeric-range-planes.md](done/00655-engine-numeric-range-planes.md) — the

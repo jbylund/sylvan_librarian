@@ -34,8 +34,9 @@ use rkyv::{Archive, Deserialize, Serialize};
 use super::filter::{cmp, CmpOp, ColorField, FilterExpr, NumExpr, NumField, TextField, TextSearchField};
 use super::legality::{LEGALITY_BANNED, LEGALITY_LEGAL, LEGALITY_RESTRICTED, MAX_FORMATS};
 use super::{
-    flip_op, lane_get, negate_op, oracle_word_eligible, price_range_narrowed, scan_oracle_words, str_at, AOffsets, AStrings, CardIndexes,
-    OracleCard, OracleWordIndex, Printing, NONE_STR,
+    collector_number_range_narrowed, date_range_narrowed, flip_op, lane_get, negate_op, oracle_word_eligible, price_range_narrowed,
+    scan_oracle_words, str_at, year_range_narrowed, AOffsets, AStrings, CardIndexes, Narrowed, OracleCard, OracleWordIndex, Printing,
+    NONE_STR,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -445,15 +446,14 @@ pub(crate) enum PlaneExpr {
     /// compile-time-known dimensions the other variants index into. A clone
     /// (a few KB) is paid once per query, never per row.
     Bits(Vec<u64>),
-    /// A printing-varying numeric range predicate (`price_usd` today —
-    /// `collector_number`/`released_at` are separate `FilterExpr` variants,
-    /// `DateCmp`/`YearCmp`, not yet wired here), compiled via `range_narrowed`
-    /// at query time (docs/issues/local-engine-broad-range-fastpath.md).
-    /// `card_bits` is the card-level existence answer ("some printing
-    /// satisfies"). The per-printing check re-derives the comparison directly
-    /// from `(field, op, threshold)` against the printing's own field instead
-    /// of a second precomputed bitmap — one fewer independent encoding of the
-    /// same fact to keep in sync (exactly the shape that caused Bug B in the
+    /// A printing-varying range predicate (`price_usd`, `collector_number`,
+    /// `released_at`), compiled via `range_narrowed` at query time
+    /// (docs/issues/local-engine-broad-range-fastpath.md). `card_bits` is the
+    /// card-level existence answer ("some printing satisfies"). The
+    /// per-printing check re-derives the comparison directly from `(field,
+    /// op, threshold)` against the printing's own field instead of a second
+    /// precomputed bitmap — one fewer independent encoding of the same fact
+    /// to keep in sync (exactly the shape that caused Bug B in the
     /// price-cents migration). `id` is a synthetic shared-witness identity
     /// (see `collect_existential_indices`) — distinct per compiled leaf, even
     /// for the same field at a different threshold: two range conditions on
@@ -462,11 +462,155 @@ pub(crate) enum PlaneExpr {
     /// both), so they correctly decline to compose via plain `card_bits`
     /// intersection until same-field interval merging is built (deferred,
     /// not required for correctness — see the design doc).
-    PrintingRangeBits { id: u64, card_bits: Vec<u64>, field: NumField, op: CmpOp, threshold: f64 },
+    PrintingRangeBits { id: u64, card_bits: Vec<u64>, field: RangePredicateField, op: CmpOp, threshold: f64 },
     And(Vec<PlaneExpr>),
     Or(Vec<PlaneExpr>),
     Not(Box<PlaneExpr>),
     Const(bool),
+}
+
+/// Which printing-varying field a `PrintingRangeBits` leaf reads. Not `NumField`
+/// directly: `ReleasedAtDate`/`ReleasedAtYear` compile from `FilterExpr::DateCmp`/
+/// `YearCmp`, separate variants with no `NumField`/`NumExpr` involved at all --
+/// `YearCmp` in particular compares a *derived* value (`date / 10_000`), not the
+/// stored field directly, so its per-printing recheck needs its own formula
+/// (see `eval_plane_expr_for_printing`'s match on this type).
+#[derive(Clone, Copy)]
+pub(crate) enum RangePredicateField {
+    PriceUsd,
+    CollectorNumber,
+    ReleasedAtDate,
+    ReleasedAtYear,
+}
+
+/// Which `RangePredicateField` a leaf would compile to, without doing any of
+/// the narrowing/materialization work actually compiling it requires --
+/// mirrors just the shape of `compile_plane`'s own `NumericCmp`/`DateCmp`/
+/// `YearCmp` arms and `compile_plane_neg`'s equivalents (both compile the
+/// same leaf, just with a negated op, so `Not` doesn't change which family a
+/// leaf belongs to). Used only for the cheap upfront conflict check below --
+/// see its doc for why this needs to exist at all.
+fn range_leaf_family(filter: &FilterExpr) -> Option<RangePredicateField> {
+    match filter {
+        FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), .. }
+        | FilterExpr::NumericCmp { rhs: NumExpr::Field(NumField::PriceUsd), .. } => Some(RangePredicateField::PriceUsd),
+        FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::CollectorNumberInt), .. }
+        | FilterExpr::NumericCmp { rhs: NumExpr::Field(NumField::CollectorNumberInt), .. } => {
+            Some(RangePredicateField::CollectorNumber)
+        }
+        FilterExpr::DateCmp { .. } => Some(RangePredicateField::ReleasedAtDate),
+        FilterExpr::YearCmp { .. } => Some(RangePredicateField::ReleasedAtYear),
+        FilterExpr::Not(inner) => range_leaf_family(inner),
+        _ => None,
+    }
+}
+
+/// Coarse existential-family tag for the structural pre-check below --
+/// deliberately coarser than `collect_existential_indices`' exact-fact
+/// dedup (doesn't distinguish which format/rarity value, just "this
+/// family"), because this only needs to answer "would attempting to compile
+/// this leaf risk being wasted work", not compute the real, precise
+/// shared-witness composition `compile_plane`'s own machinery downstream
+/// already gets right. A false positive here (treating two facts as
+/// conflicting when they'd have composed fine) only costs a missed
+/// optimization, never a correctness bug -- the real, authoritative check is
+/// unaffected either way.
+enum ExistentialFamily {
+    Legality,
+    Rarity,
+    Border,
+    // Doesn't carry which RangePredicateField -- two range leaves on
+    // *different* fields conflict exactly as much as two on the same one
+    // (both are 2 distinct existential facts needing a shared witness), so
+    // this coarse check doesn't need to distinguish them.
+    Range,
+}
+
+/// Which existential family a leaf belongs to, without doing any of the
+/// narrowing/materialization work a `Range` leaf actually compiling would
+/// require -- mirrors just the shape of `compile_plane`'s own `Legality`/
+/// `NumericCmp`/`DateCmp`/`YearCmp`/`Border` arms and `compile_plane_neg`'s
+/// equivalents (both compile the same leaf, just with a negated op, so
+/// `Not` doesn't change which family a leaf belongs to).
+fn existential_leaf_family(filter: &FilterExpr) -> Option<ExistentialFamily> {
+    match filter {
+        FilterExpr::Legality { shift: Some(_), .. } => Some(ExistentialFamily::Legality),
+        FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), .. }
+        | FilterExpr::NumericCmp { rhs: NumExpr::Field(NumField::RarityInt), .. } => Some(ExistentialFamily::Rarity),
+        FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, .. } => Some(ExistentialFamily::Border),
+        FilterExpr::Not(inner) => existential_leaf_family(inner),
+        _ => range_leaf_family(filter).map(|_| ExistentialFamily::Range),
+    }
+}
+
+/// True iff some `And` node in `filter` -- this one or a descendant --
+/// combines 2+ distinct existential-family leaves (any mix of legality/
+/// rarity/border/usd/collector_number/released_at, including two range
+/// leaves on the same field). `compile_plane`'s own `and_of_checked_for_
+/// shared_witness` guard already refuses to *compose* such a pair --
+/// correctly -- but by the time it decides that, every `Range` leaf among
+/// them has already done a full binary-search-and-materialize over its
+/// range index (Legality/Rarity/Border are cheap O(1) plane-index lookups,
+/// so they cost nothing to compile-then-discard), all of that narrowing
+/// wasted, and the query still falls through to the real per-field
+/// narrowing afterward. Found as a real regression on compound queries
+/// mixing 2 range fields (`cn<100 AND usd<50`, ~1.5-1.8x) *and*, on digging
+/// further, on legality/rarity/border paired with a single range field
+/// (`f:modern AND usd<50`, ~3x) -- docs/issues/local-engine-broad-range-
+/// fastpath.md. The latter shape predates this session (present since
+/// price's original PrintingRangeBits PR), just never specifically measured
+/// until this extension's broader benchmarking pass surfaced it via
+/// collector_number/released_at hitting the same pattern. This is a purely
+/// structural, no-narrowing scan, so it's cheap enough to run before
+/// deciding whether the expensive compile attempt is even worth making --
+/// both call sites below use it as a bail-out, not a replacement for the
+/// real (still authoritative) shared-witness check.
+///
+/// `Or` is deliberately NOT a conflict site on its own: `∃` distributes over
+/// `∨` (same reasoning as `and_of_checked_for_shared_witness`'s own doc --
+/// "Or never has this problem"), so `r:common or r:uncommon` must compile
+/// exactly as before, not get flagged just because it has 2 rarity leaves.
+/// An `Or`'s children are still walked (crossing into them, not stopping),
+/// because whichever branch of the `Or` might end up active still needs to
+/// be checked against whatever `And` contains the `Or` -- `format:A AND
+/// (usd<5 OR usd>50)` really does combine 3 distinct facts once expanded --
+/// but the `Or` itself never starts a new tally the way an `And` does.
+pub(crate) fn has_conflicting_range_families(filter: &FilterExpr) -> bool {
+    // Collect every existential family reachable from `filter` without
+    // crossing into a nested `And` (that nested `And` is a separate scope,
+    // checked independently by has_conflicting_range_families' own
+    // recursion below) -- but do cross into `Or`/`Not`, per this function's
+    // own doc.
+    fn collect_in_and_scope(filter: &FilterExpr, out: &mut Vec<ExistentialFamily>) {
+        if out.len() > 1 {
+            return; // already proven a conflict; no need to keep walking
+        }
+        if let Some(fam) = existential_leaf_family(filter) {
+            out.push(fam);
+            return;
+        }
+        match filter {
+            FilterExpr::Or(cs) => {
+                for c in cs {
+                    collect_in_and_scope(c, out);
+                }
+            }
+            FilterExpr::Not(inner) => collect_in_and_scope(inner, out),
+            _ => {} // And: a separate scope, not aggregated here
+        }
+    }
+    match filter {
+        FilterExpr::And(children) => {
+            let mut families = Vec::new();
+            for c in children {
+                collect_in_and_scope(c, &mut families);
+            }
+            families.len() > 1 || children.iter().any(has_conflicting_range_families)
+        }
+        FilterExpr::Or(children) => children.iter().any(has_conflicting_range_families),
+        FilterExpr::Not(inner) => has_conflicting_range_families(inner),
+        _ => false,
+    }
 }
 
 /// Fresh synthetic identity for each compiled `PrintingRangeBits` leaf, used
@@ -1165,10 +1309,20 @@ pub(crate) fn compile_plane(
             (NumExpr::Const(v), NumExpr::Field(NumField::RarityInt)) => compile_rarity_cmp(flip_op(*op), *v),
             (NumExpr::Field(NumField::PriceUsd), NumExpr::Const(v)) => compile_price_range(*op, *v, indexes, offsets),
             (NumExpr::Const(v), NumExpr::Field(NumField::PriceUsd)) => compile_price_range(flip_op(*op), *v, indexes, offsets),
+            (NumExpr::Field(NumField::CollectorNumberInt), NumExpr::Const(v)) => compile_collector_number_range(*op, *v, indexes, offsets),
+            (NumExpr::Const(v), NumExpr::Field(NumField::CollectorNumberInt)) => compile_collector_number_range(flip_op(*op), *v, indexes, offsets),
             (NumExpr::Field(f), NumExpr::Const(v)) => compile_numeric_cmp(*f, *op, *v, bounds),
             (NumExpr::Const(v), NumExpr::Field(f)) => compile_numeric_cmp(*f, flip_op(*op), *v, bounds),
             _ => None,
         },
+        // released_at</X (docs/issues/local-engine-broad-range-fastpath.md):
+        // same existential-plane treatment as usd/collector_number, via
+        // date_range_narrowed (shared with narrow_rec's own DateCmp arm).
+        FilterExpr::DateCmp { op, value } => compile_date_range(*op, *value, indexes, offsets),
+        // released_at's year(...)</Y: same treatment via year_range_narrowed,
+        // which maps the year threshold to a released_at_int range at the
+        // year boundary.
+        FilterExpr::YearCmp { op, year } => compile_year_range(*op, *year, indexes, offsets),
         // f:x / format:x / banned:x / restricted:x (docs/issues/
         // 00667-engine-legality-divergent-carveout.md, generalized by #678 -- see
         // docs/issues/00678-engine-legality-banned-restricted-planes.md): exact for
@@ -1199,8 +1353,55 @@ fn compile_price_range(op: CmpOp, threshold: f64, indexes: &rkyv::Archived<CardI
     let n_cards = offsets.len().saturating_sub(1);
     let n_printings = if n_cards == 0 { 0 } else { u32::from(offsets[n_cards]) as usize };
     let narrowed = price_range_narrowed(op, threshold, indexes, n_printings, true)?;
+    Some(printing_range_bits(narrowed, RangePredicateField::PriceUsd, op, threshold, offsets, indexes))
+}
+
+/// Compile `collector_number <op> threshold` to a `PrintingRangeBits` leaf,
+/// same shape as `compile_price_range` (shared via `collector_number_range_narrowed`).
+fn compile_collector_number_range(op: CmpOp, threshold: f64, indexes: &rkyv::Archived<CardIndexes>, offsets: &AOffsets) -> Option<PlaneExpr> {
+    let n_cards = offsets.len().saturating_sub(1);
+    let n_printings = if n_cards == 0 { 0 } else { u32::from(offsets[n_cards]) as usize };
+    let narrowed = collector_number_range_narrowed(op, threshold, indexes, n_printings, true)?;
+    Some(printing_range_bits(narrowed, RangePredicateField::CollectorNumber, op, threshold, offsets, indexes))
+}
+
+/// Compile `released_at <op> value` (`FilterExpr::DateCmp`) to a
+/// `PrintingRangeBits` leaf via `date_range_narrowed`. `value` (already a
+/// zero-padded yyyymmdd `u32`) is stored as the leaf's `threshold` directly --
+/// no conversion, exact in `f64`.
+fn compile_date_range(op: CmpOp, value: u32, indexes: &rkyv::Archived<CardIndexes>, offsets: &AOffsets) -> Option<PlaneExpr> {
+    let n_cards = offsets.len().saturating_sub(1);
+    let n_printings = if n_cards == 0 { 0 } else { u32::from(offsets[n_cards]) as usize };
+    let narrowed = date_range_narrowed(op, value, indexes, n_printings, true)?;
+    Some(printing_range_bits(narrowed, RangePredicateField::ReleasedAtDate, op, value as f64, offsets, indexes))
+}
+
+/// Compile `released_at year <op> year` (`FilterExpr::YearCmp`) to a
+/// `PrintingRangeBits` leaf via `year_range_narrowed`.
+fn compile_year_range(op: CmpOp, year: i32, indexes: &rkyv::Archived<CardIndexes>, offsets: &AOffsets) -> Option<PlaneExpr> {
+    let n_cards = offsets.len().saturating_sub(1);
+    let n_printings = if n_cards == 0 { 0 } else { u32::from(offsets[n_cards]) as usize };
+    let narrowed = year_range_narrowed(op, year, indexes, n_printings, true)?;
+    Some(printing_range_bits(narrowed, RangePredicateField::ReleasedAtYear, op, year as f64, offsets, indexes))
+}
+
+/// Shared plumbing for all `PrintingRangeBits` compile functions: project a
+/// printing-space narrowing result up to card space and wrap it, tagging the
+/// leaf with a fresh shared-witness id. `threshold` is stored as `f64`
+/// regardless of the field's native type -- cents, collector numbers,
+/// yyyymmdd dates, and years are all well within `f64`'s 52-bit
+/// exact-integer range, so nothing is lost.
+fn printing_range_bits(
+    narrowed: Narrowed,
+    field: RangePredicateField,
+    op: CmpOp,
+    threshold: f64,
+    offsets: &AOffsets,
+    indexes: &rkyv::Archived<CardIndexes>,
+) -> PlaneExpr {
+    let n_cards = offsets.len().saturating_sub(1);
     let card_bits = narrowed.into_card_space(offsets, &indexes.printing_to_card).set.into_bits(n_cards);
-    Some(PlaneExpr::PrintingRangeBits { id: next_range_bits_id(), card_bits, field: NumField::PriceUsd, op, threshold })
+    PlaneExpr::PrintingRangeBits { id: next_range_bits_id(), card_bits, field, op, threshold }
 }
 
 /// Compile `Not(filter)` directly, pushing negation down to `Legality` and
@@ -1241,6 +1442,17 @@ fn compile_plane_neg(
         FilterExpr::NumericCmp { lhs: NumExpr::Const(v), op, rhs: NumExpr::Field(NumField::PriceUsd) } => {
             compile_price_range(negate_op(flip_op(*op)), *v, indexes, offsets)
         }
+        // -collector_number<X: same divergent-printing reasoning as -usd<X.
+        FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::CollectorNumberInt), op, rhs: NumExpr::Const(v) } => {
+            compile_collector_number_range(negate_op(*op), *v, indexes, offsets)
+        }
+        FilterExpr::NumericCmp { lhs: NumExpr::Const(v), op, rhs: NumExpr::Field(NumField::CollectorNumberInt) } => {
+            compile_collector_number_range(negate_op(flip_op(*op)), *v, indexes, offsets)
+        }
+        // -released_at<X / -year(released_at)<Y: same divergent-printing
+        // reasoning, recomputed via the negated op rather than bit-complemented.
+        FilterExpr::DateCmp { op, value } => compile_date_range(negate_op(*op), *value, indexes, offsets),
+        FilterExpr::YearCmp { op, year } => compile_year_range(negate_op(*op), *year, indexes, offsets),
         // -border:x: recomputed via compile_border_cmp_neg's Or-of-others,
         // not bit-complemented, same divergent-card reasoning as Legality/rarity.
         FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value } => compile_border_cmp_neg(value),
@@ -1317,7 +1529,18 @@ pub(crate) fn split_planes(
     if matches!(filter, FilterExpr::True) {
         return (None, filter);
     }
-    if let Some(pe) = compile_plane(&filter, bounds, words, indexes, offsets)
+    // See has_conflicting_range_families' doc: 2+ range-predicate leaves
+    // (usd/collector_number/released_at) anywhere in `filter` are doomed to
+    // decline composing below regardless, so skip both the whole-tree
+    // attempt and (further down) any top-level child that's itself one of
+    // the conflicting leaves, rather than paying for a narrow-then-discard
+    // on each. Only catches the flat, top-level-And shape this was measured
+    // on (docs/issues/local-engine-broad-range-fastpath.md) -- a conflict
+    // buried entirely inside one child (e.g. an Or of two date comparisons)
+    // still pays the old cost, same as before this fix existed.
+    let range_conflict = has_conflicting_range_families(&filter);
+    if !range_conflict
+        && let Some(pe) = compile_plane(&filter, bounds, words, indexes, offsets)
         && (unique_is_card || !plane_expr_is_existential(&pe))
     {
         return (Some(pe), FilterExpr::True);
@@ -1338,6 +1561,15 @@ pub(crate) fn split_planes(
             // there's no tax to avoid paying here anymore.
             let mut legality_children: Vec<(FilterExpr, PlaneExpr)> = Vec::new();
             for c in children {
+                // Same reasoning as the whole-tree skip above: a top-level
+                // child that's itself a range-predicate leaf is going to be
+                // held back into legality_children and then declined anyway
+                // once range_conflict is known -- skip the wasted compile
+                // and go straight to rest.
+                if range_conflict && range_leaf_family(&c).is_some() {
+                    rest.push(c);
+                    continue;
+                }
                 match compile_plane(&c, bounds, words, indexes, offsets) {
                     Some(pe) => {
                         let mut fmts = Vec::new();
@@ -1498,8 +1730,22 @@ pub(crate) fn eval_plane_expr_for_printing(
         // bitmap, so there's no independent encoding of "does this printing satisfy the
         // predicate" to drift out of sync with the one filter.rs already trusts.
         PlaneExpr::PrintingRangeBits { field, op, threshold, .. } => match field {
-            NumField::PriceUsd => printing.price_usd.as_ref().is_some_and(|v| cmp(*op, f64::from(u32::from(*v)) / 100.0, *threshold)),
-            _ => unreachable!("PrintingRangeBits only compiled for price_usd so far"),
+            RangePredicateField::PriceUsd => {
+                printing.price_usd.as_ref().is_some_and(|v| cmp(*op, f64::from(u32::from(*v)) / 100.0, *threshold))
+            }
+            RangePredicateField::CollectorNumber => {
+                printing.collector_number_int.as_ref().is_some_and(|v| cmp(*op, f64::from(u16::from(*v)), *threshold))
+            }
+            RangePredicateField::ReleasedAtDate => {
+                printing.released_at_int.as_ref().is_some_and(|v| cmp(*op, f64::from(u32::from(*v)), *threshold))
+            }
+            // threshold holds the plain year (see compile_year_range); the stored
+            // field is the full yyyymmdd date, so divide down to a year before
+            // comparing -- same derived-value step year_range_narrowed's bounds
+            // encode at the narrowing stage.
+            RangePredicateField::ReleasedAtYear => {
+                printing.released_at_int.as_ref().is_some_and(|v| cmp(*op, f64::from(u32::from(*v) / 10_000), *threshold))
+            }
         },
         PlaneExpr::Const(b) => *b,
         PlaneExpr::And(children) => children.iter().all(|c| eval_plane_expr_for_printing(c, planes, cid, printing, strings)),
