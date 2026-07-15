@@ -267,15 +267,16 @@ PlaneExpr::PrintingRangeBits { id: u64, card_bits: Vec<u64>, field: NumField, op
   (bit-complementing `card_bits`) — a card can satisfy both `usd<X` and `-usd<X` at once via
   different printings, so the two are not logically equivalent. Missing this was caught by the
   new tests before being caught in production.
-- **Currently reachable only for `unique=card`.** `split_planes`'s `unique_is_card` gate (the same
-  one the original Legality carve-out established) declines to fold *any* existential leaf —
-  `PrintingRangeBits` included, since it correctly returns `true` from `plane_expr_is_existential`
-  — for `unique=printing`/`artwork`, and `run_query`'s own `existential_plane` computation
-  separately gates row-selection to `Mode::Card` only. Both are pre-existing, deliberate gates
-  this variant inherits automatically. The row-selection code (`eval_plane_expr_for_printing`'s
-  new arm) is written and verified correct, but isn't reachable via the real dispatch path yet for
-  the other two modes — loosening those two gates for price specifically is real, separate scope,
-  not silently included here.
+- **Row-selection reachable only for `unique=card`; narrowing reachable for all three modes.**
+  `split_planes`'s `unique_is_card` gate (the same one the original Legality carve-out
+  established) declines to fold *any* existential leaf to a bare `True` residual for
+  `unique=printing`/`artwork`, since `PrintingRangeBits` correctly returns `true` from
+  `plane_expr_is_existential`. It now still returns the compiled plane for candidate narrowing in
+  that case (see "`unique=printing`/`artwork`" section below), while `run_query`'s own
+  `existential_plane` computation (feeding `eval_plane_expr_for_printing`'s row-selection check
+  into `card_match_count`) stays gated to `Mode::Card` only, deliberately — the residual already
+  provides correct per-printing verification for the other two modes, so consulting the plane
+  there too would be redundant, not a speed win.
 
 **Verified**: `price_plane_path_parity_and_shared_witness` (`tests.rs`) — differential check
 (`split_planes`-compiled path vs. the unplaned `card_pass` path) across `usd<50`, `-usd<50`, and
@@ -300,6 +301,68 @@ shared-witness tracking, and removing the dedicated negation arms — all three 
   this is just an honest property of the approach, not a tradeoff being weighed against an
   alternative.
 
+## `unique=printing`/`artwork`: investigated, two real fixes shipped, no win on broad queries
+
+Traced why these modes stayed slow, since the original "loosen two gates" framing turned out
+wrong. `run_query`'s speed for `unique=card` doesn't come from a smaller candidate set — for
+`usd<50` (83% selective) the narrowed set gets discarded by the broadness-guard regardless of
+mode. The real mechanism is `run_query_streamed_popcount`: it answers `total` directly from a
+bitmap's popcount and walks only `limit` set bits via a permuted-bitmap word-skip, never
+materializing or iterating a candidate list. That function is hard-gated to `Mode::Card`
+(`lib.rs:3941`), and extending it to `unique=printing`/`artwork` is **issue #656**, still open —
+quoting its own scope note, it needs "a weighted set-bit walk... card weights are O(1) via
+offsets-diff/artwork_groups... Not implemented." The original Legality carve-out
+(`docs/issues/done/00667-...md`) scoped this out identically, stating outright that those two
+modes "need no change: they already... run the existing (correct) per-printing `card_pass` walk."
+
+**#656 as scoped doesn't actually cover this case.** Its weighted-walk sketch assumes "under
+`all_match`" — every printing of a matching card counts, an O(1) weight lookup (`offsets`-diff or
+`artwork_groups`). For an *existential* fact like price, the weight is "how many printings/groups
+actually satisfy the predicate," which cannot be read from a count table — it requires visiting
+that card's printings, the same O(matching printings) work `card_match_count` already does. There
+is no way around this for an exact total: unlike `unique=card` (needs only existence, O(1) via the
+bitmap), `unique=printing`/`artwork` inherently need to know *which* printings qualify.
+
+Implemented and empirically verified two real, narrower fixes instead of the (larger, and for this
+case insufficient) full weighted-walk mechanism:
+
+1. **`split_planes` narrowing-only fold**: when an existential leaf can't safely fold to a bare
+   `True` residual (wrong mode), it now still returns the compiled plane for `candidate_cards`
+   narrowing (avoiding the broadness-discard-to-full-scan fallback `plane=None` takes), while
+   leaving the residual unchanged so per-printing correctness still comes from the ordinary
+   `card_pass` walk, not the plane. `run_query`'s own `existential_plane` (row-selection) gate
+   stays `Mode::Card`-only, deliberately — using it here too would redundantly re-check the same
+   predicate the residual already checks. Verified via debug instrumentation: `candidate_cards`
+   for `usd<0.1`/`unique=printing` narrows correctly from 31,508 to 4,738 cards.
+2. **Weighted permuted-bitmap walk** in `run_query_streamed`'s "large totals" branch, replacing a
+   raw `perm.iter()` scan of all `n_cards` entries with a bitmap-scatter-and-`trailing_zeros` walk
+   (mirroring `run_query_streamed_popcount`'s mechanism, but reading `counts[cid]` as a
+   *variable* per-card weight instead of a uniform 1, since whole words can't be skipped by
+   popcount alone when weights vary). This is the real, generic fix for the adversarial shape
+   `#634`'s own design worried about (`released_at>2026-06-01 order by released_at`-style: low
+   selectivity, order-by uncorrelated with or opposed to the predicate, forcing a walk deep into
+   the permutation) — verified correct via the full test suite (particularly
+   `fuzz_row_identity_matches_reference`'s 96-seed property fuzzer) and via direct timing
+   instrumentation.
+
+**Why neither moved the `usd<50`-shaped benchmark numbers**: instrumented both phases directly.
+For `usd<50`/`usd<0.1` under `unique=printing`, the *match* phase (visiting narrowed candidates,
+checking their printings) costs 200μs–1.1ms and dominates completely; the walk/emission phase
+costs low single-digit microseconds either way, old or new, because `limit`-based early
+termination already made the *old* raw-permutation scan cheap for these specific queries (dense,
+early matches in `edhrec_rank` order) — its O(n_cards) worst case was real but not hit here. The
+weighted-walk fix's value is real but narrower than hoped: it matters for deep pagination /
+adversarial ordering, not for the broad, offset-0 queries this whole project has benchmarked. The
+match-phase cost is the true, inherent floor for these modes under an existential predicate, and
+no bitmap/walk cleverness removes it — only narrowing the candidate set (fix 1, above) helps, and
+only in proportion to selectivity (a small win at `usd<50`'s 83%, a bigger one at low selectivity).
+
+**Real-corpus benchmark, full sweep, both fixes applied**: `unique=printing`/`artwork` unchanged
+from baseline (~1.2ms) across `usd<0.1` through `usd<50`. `unique=card` unaffected by either fix
+(still ~0.18ms). Both fixes are correct, real, and worth keeping (118/118 tests pass, no
+regressions, no new clippy warnings) — they just don't close the gap this investigation originally
+hoped they would for the query shapes benchmarked throughout this project.
+
 ## Plan
 
 - [x] Ship the price exactness fix standalone (see Prerequisite above) — landed as the
@@ -317,11 +380,11 @@ shared-witness tracking, and removing the dedicated negation arms — all three 
       two ways the final shape differs from the original sketch.
 - [x] Benchmark against today's baseline for `unique=card` — real win confirmed (~0.4-1ms → ~0.18ms
       on `usd<50`).
-- [ ] Extend row-selection to `unique=printing`/`artwork`: loosen `split_planes`'s `unique_is_card`
-      gate and `run_query`'s `existential_plane` `Mode::Card` gate for `PrintingRangeBits`
-      specifically (the eval-time correctness is already written and tested; only the dispatch
-      gating needs to change). Benchmark separately — `unique=printing`/`artwork` pay the
-      `cards_of_printings`/dedup cost `unique=card` doesn't, may not win by the same margin.
+- [x] Investigate extending to `unique=printing`/`artwork` — see "investigated, two real fixes
+      shipped, no win on broad queries" above. `split_planes` narrowing fold + weighted permuted-
+      bitmap walk both shipped, both correct, neither closes the gap for broad queries (inherent
+      match-phase floor). Closing that gap for real would need a different approach than #656's
+      own scoped mechanism, which doesn't cover existential facts — not attempted here.
 - [ ] Extend to `collector_number`/`released_at` (`DateCmp`/`YearCmp`, separate `compile_plane`
       arms from `NumericCmp`'s).
 - [ ] Decide the `Not`-arm/`tight_narrow_space` composition-safety question (deferred from the

@@ -1302,7 +1302,12 @@ fn legality_plane_promotion_respects_mode_through_split_planes() {
             assert!(plane.is_some(), "a bare Legality leaf must still fully plane-consume for unique=card");
             assert!(matches!(residual, FilterExpr::True), "split_planes must leave a bare True residual for unique=card");
         } else {
-            assert!(plane.is_none(), "unique=printing/artwork must decline the fold, not just patch around it");
+            // Narrowing-only fold (see split_planes' doc): the plane is still used
+            // for candidate_cards, but the residual stays the original, unchanged
+            // Legality node -- correctness for unique=printing/artwork comes
+            // entirely from the ordinary per-printing card_pass walk over it, not
+            // the plane (run_query's existential_plane stays Mode::Card-only).
+            assert!(plane.is_some(), "the plane is still produced, for narrowing purposes");
             assert!(matches!(residual, FilterExpr::Legality { .. }), "the original Legality node must survive for per-printing verification");
         }
         run_query(
