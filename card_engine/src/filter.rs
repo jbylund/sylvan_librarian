@@ -1058,17 +1058,29 @@ impl FilterExpr {
         }
     }
 
-    /// A narrow, byte-identical fast path for the handful of leaf shapes that
-    /// dominate range-query hot loops (NumericCmp/DateCmp/YearCmp -- the cheap
-    /// MASK_COMPARE_NS100 tier, see verify_cost_tier). tri() itself can't be
-    /// force-inlined into these call sites without pulling in the other ~15
-    /// unrelated arms (TextContains, regex, ManaCostCmp, ...) too -- measured
-    /// that directly, made every mode slower (code bloat outweighing the
-    /// saved call). This covers just the cheap arms, small enough to actually
-    /// inline, so the hot per-printing/per-card loops skip tri()'s call
-    /// boundary entirely for the common case, falling back to the exact same
-    /// tri() arm (not a second implementation -- no risk of the two drifting
-    /// apart, unlike the reverted price-cents fast path) for anything else.
+    /// A narrow, byte-identical fast path for the cheap leaf shapes
+    /// (MASK_COMPARE_NS100 tier, see verify_cost_tier) that actually reach
+    /// this code at all. That's the real filter, not raw query frequency:
+    /// compile_plane (planes.rs) already intercepts ColorCmp/TypeCmp/
+    /// Legality/Devotion/rarity-NumericCmp/border-TextExact into a bitmap
+    /// before they ever reach tri() in the common case, so a query like
+    /// `color:g` or `type:creature` alone mostly never calls tri_fast at
+    /// all -- those variants are NOT here despite being high-frequency in
+    /// realistic traffic (client/query_runner.py's weights), because their
+    /// plane path already avoids paying tri()'s cost in the first place.
+    /// NumericCmp (non-rarity fields)/DateCmp/YearCmp have no plane arm --
+    /// every occurrence, however rare, pays the full residual cost, which is
+    /// what justifies them here even though they're a smaller slice of
+    /// real-query volume than color/type. tri() itself can't be
+    /// force-inlined into these call sites without pulling in the other
+    /// ~15 unrelated arms (TextContains, regex, ManaCostCmp, ...) too --
+    /// measured that directly, made every mode slower (code bloat outweighing
+    /// the saved call). This covers just the cheap arms that are also
+    /// un-planed, small enough to actually inline, so the hot
+    /// per-printing/per-card loops skip tri()'s call boundary entirely for
+    /// the common case, falling back to the exact same tri() arm (not a
+    /// second implementation -- no risk of the two drifting apart, unlike
+    /// the reverted price-cents fast path) for anything else.
     #[inline(always)]
     fn tri_fast(&self, card: &AOracleCard, printing: Option<&APrinting>) -> Option<Tri> {
         match self {
