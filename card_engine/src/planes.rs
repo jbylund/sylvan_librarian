@@ -554,6 +554,37 @@ fn existential_leaf_family(filter: &FilterExpr) -> Option<ExistentialFamily> {
     }
 }
 
+/// True iff `filter` contains, anywhere reachable through And/Or/Not (the
+/// same structural correspondence `compile_plane` and
+/// `plane_expr_is_existential` use), at least one range-family leaf
+/// (usd/eur/tix/collector_number/released_at/year). Every such leaf compiles
+/// to a `PrintingRangeBits` node, which `plane_expr_is_existential` treats as
+/// unconditionally existential and propagates through And/Or/Not -- so for
+/// `unique_is_card=false` (unique=printing/artwork), `split_planes`'s
+/// whole-filter fold (below) can *never* succeed once `compile_plane`
+/// produces one, no matter how the rest of the tree compiles: the fold's own
+/// condition reduces to `!plane_expr_is_existential(&pe)`, which is
+/// guaranteed false. Checked before paying for that `compile_plane` call at
+/// all, mirroring `has_conflicting_range_families`' existing bail-out
+/// pattern -- profiling a bare `usd<50`/unique=printing query found
+/// `compile_price_range` called twice per query (confirmed via a call
+/// counter + backtrace, not guessed): once here, wastefully, computing and
+/// discarding a full `into_card_space` conversion (measured ~40% of total
+/// query time), and once moments later in `narrow_rec`, which actually keeps
+/// the result via `Narrowed::loose`.
+fn contains_range_family_leaf(filter: &FilterExpr) -> bool {
+    match existential_leaf_family(filter) {
+        Some(ExistentialFamily::Range) => return true,
+        Some(_) => return false,
+        None => {}
+    }
+    match filter {
+        FilterExpr::And(cs) | FilterExpr::Or(cs) => cs.iter().any(contains_range_family_leaf),
+        FilterExpr::Not(inner) => contains_range_family_leaf(inner),
+        _ => false,
+    }
+}
+
 /// True iff some `And` node in `filter` -- this one or a descendant --
 /// combines 2+ distinct existential-family leaves (any mix of legality/
 /// rarity/border/usd/collector_number/released_at, including two range
@@ -1615,7 +1646,14 @@ pub(crate) fn split_planes(
     // NULL-over-including complement. plane_expr_is_exact below is a
     // defense-in-depth double-check, not the primary guarantee -- see
     // compile_plane's own doc.
+    //
+    // contains_range_family_leaf's doc: for !unique_is_card, a range leaf
+    // anywhere makes plane_expr_is_existential(&pe) unconditionally true,
+    // so the fold below is doomed before compile_plane is even called --
+    // skip paying for it (narrow_rec picks up the identical leaf moments
+    // later and actually keeps the result).
     if !range_conflict
+        && (unique_is_card || !contains_range_family_leaf(&filter))
         && let Some(pe) = compile_plane(&filter, bounds, words, indexes, offsets, unique_is_card)
         && ((unique_is_card && plane_expr_is_exact(&pe)) || !plane_expr_is_existential(&pe))
     {
