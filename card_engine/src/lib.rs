@@ -1969,6 +1969,17 @@ fn snap_to_nearest_cent(cents: f64) -> f64 {
     if (cents - rounded).abs() < 1e-6 { rounded } else { cents }
 }
 
+/// Convert a query-side dollar amount to the exact cents value price fields
+/// compare against -- shared by `FilterExpr::bind`'s one-time Const rewrite
+/// (real queries) and by tests constructing a price comparison directly
+/// (bypassing `bind`), so both derive the identical cents value from the
+/// identical dollar input. Two independent encodings of "how many cents is
+/// this dollar amount" quietly disagreeing is exactly Bug B's shape --
+/// this exists so there's only ever the one.
+pub(crate) fn price_dollars_to_cents(dollars: f64) -> f64 {
+    snap_to_nearest_cent(dollars * PRICE_CENTS_PER_DOLLAR)
+}
+
 /// Half-open [lo, hi) bounds for indexes over plain integers (collector
 /// number). Query values are f64 and may be fractional or out of range; bounds
 /// are chosen so the range is exact for every op — `cn<100.5` means
@@ -2888,10 +2899,13 @@ fn narrow_rec(
             // complement would wrongly exclude cards `-rarity:x` matches.
             let numeric = |idx, op, v: &f64| numeric_candidates(idx, op, *v).and_then(|c| Narrowed::tight(Candidates::Cards(c)));
             let rarity = |op, v: &f64| narrow_rarity(indexes, n_cards, op, *v);
-            // Same shape as `cn` below now that price is integer cents, not lossy f32 dollars --
-            // the only price-specific step is snapping the *PRICE_CENTS_PER_DOLLAR conversion
-            // against its own floating-point noise before delegating to int_range_bounds.
-            let price = |op, v: &f64| match int_range_bounds(op, snap_to_nearest_cent(*v * PRICE_CENTS_PER_DOLLAR))? {
+            // `v` is already cents, not dollars: `FilterExpr::bind` rewrites a
+            // price `NumericCmp`'s query-side dollar `Const` to cents once
+            // per query (`price_dollars_to_cents`), so this -- called once
+            // per query, not once per printing -- no longer does its own
+            // dollars-to-cents multiplication. `snap_to_nearest_cent` stays
+            // as a defensive re-snap for any caller that skips `bind`.
+            let price = |op, v: &f64| match int_range_bounds(op, snap_to_nearest_cent(*v))? {
                 None => Narrowed::tight(Candidates::Printings(Vec::new())),
                 Some((lo, hi)) => range_narrowed(&indexes.price_usd, lo, hi, n_printings, broad_ok, true),
             };

@@ -4,7 +4,7 @@ use super::{
     build_rarity_index, build_flavor_index, build_thresholded_tag_index, build_sort_permutations,
     assign_artwork_groups, build_bit_planes, build_divergent_ids, build_name_bigram_index, build_printing_to_card, flavor_fingerprint, flavor_match_sets,
     cards_of_printings, count_common_keywords, count_common_types,
-    build_artist_index, build_range_index, range_candidates, narrow_candidates, rarity_candidates,
+    build_artist_index, build_range_index, price_dollars_to_cents, range_candidates, narrow_candidates, rarity_candidates,
     range_too_broad_to_narrow, run_query, trigram_candidates, finalize_trigram_index, PrintingRangeIndex, NARROW_FLOOR,
     bitmap_contains, bitmap_card_ids, compile_plane, eval_planes, split_planes,
     ArtistIndex, CardData, CardIndexes, Candidates, ColorField, NumExpr, NumField, RarityIndex,
@@ -204,6 +204,17 @@ fn stub_printing(scryfall_id: u128, illustration_id: u128, prefer_score: Option<
         card_frame_data: Vec::new(),
         artwork_group_id: 0, // placeholder; store_of overwrites via assign_artwork_groups
     }
+}
+
+/// A `usd <op> dollars` comparison, already bound (Const rewritten to cents
+/// via `super::price_dollars_to_cents`) -- the shape every real query
+/// reaches through `FilterExpr::bind`, which none of these test fixtures
+/// otherwise call. Written this way (not a raw `NumericCmp` literal with a
+/// hand-converted cents value) so every price test shares the identical
+/// conversion `bind` itself uses, rather than N call sites each doing their
+/// own `* 100.0` that could silently drift from it.
+fn usd_cmp(op: CmpOp, dollars: f64) -> FilterExpr {
+    FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op, rhs: NumExpr::Const(price_dollars_to_cents(dollars)) }
 }
 
 /// Assemble a CardData where card i owns `printing_counts[i]` printings, in the
@@ -2794,7 +2805,7 @@ fn artwork_group_ids_handle_more_than_64_groups() {
 
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
-    let mut filter = FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op: CmpOp::Lt, rhs: NumExpr::Const(50.0) };
+    let mut filter = usd_cmp(CmpOp::Lt, 50.0);
     let (total, page) = run_query(
         &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
         &mut filter, None, "artwork", "default", "edhrec", "asc", 100, 0, &archived.indexes,
@@ -2918,7 +2929,7 @@ fn price_narrowing_and_verification_are_exact_at_the_boundary() {
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
     let card = &archived.cards[0];
 
-    let cmp = |op| FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op, rhs: NumExpr::Const(0.10) };
+    let cmp = |op| usd_cmp(op, 0.10);
 
     // Lt must exclude the boundary printing exactly -- both in narrowing and in verification.
     let lt = cmp(CmpOp::Lt);
@@ -2949,21 +2960,18 @@ fn price_narrowing_and_verification_are_exact_at_the_boundary() {
     let gt = cmp(CmpOp::Gt);
     assert!(!gt.matches(card, &archived.printings[1], &archived.strings));
 
+    // Flipped operand order (50.0 < usd, i.e. usd > 50.0): only the $60 printing qualifies.
     let pricey = FilterExpr::NumericCmp {
-        lhs: super::NumExpr::Const(50.0),
+        lhs: NumExpr::Const(price_dollars_to_cents(50.0)),
         op: CmpOp::Lt,
-        rhs: super::NumExpr::Field(super::NumField::PriceUsd),
+        rhs: NumExpr::Field(NumField::PriceUsd),
     };
     match narrow_candidates(&pricey, &archived.indexes, &archived.offsets, &archived.cards) {
         Some(Candidates::Printings(v)) => assert_eq!(v, vec![2]),
         _ => panic!("flipped usd comparison must narrow"),
     }
     // Ne is not selective.
-    let ne = FilterExpr::NumericCmp {
-        lhs: super::NumExpr::Field(super::NumField::PriceUsd),
-        op: CmpOp::Ne,
-        rhs: super::NumExpr::Const(1.0),
-    };
+    let ne = usd_cmp(CmpOp::Ne, 1.0);
     assert!(narrow_candidates(&ne, &archived.indexes, &archived.offsets, &archived.cards).is_none());
 }
 
@@ -2984,7 +2992,7 @@ fn price_comparison_matches_exact_value_not_lossy_f32_widening() {
     let card = &archived.cards[0];
     let p = &archived.printings[0];
 
-    let cmp = |op| FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op, rhs: NumExpr::Const(7.22) };
+    let cmp = |op| usd_cmp(op, 7.22);
     assert!(cmp(CmpOp::Eq).matches(card, p, &archived.strings), "usd=7.22 must match a printing priced at exactly $7.22");
     assert!(cmp(CmpOp::Ge).matches(card, p, &archived.strings), "usd>=7.22 must not drop the exact match");
     assert!(cmp(CmpOp::Le).matches(card, p, &archived.strings));
@@ -3308,6 +3316,50 @@ fn run_query_plane_path_parity() {
             assert_eq!(ids(&p0), ids(&p1), "pages must agree (unique={unique})");
         }
     }
+}
+
+/// Card 0: two printings, $5 (satisfies `usd<50`) and $200 (doesn't; satisfies
+/// `usd>=50`) -- deliberately divergent w.r.t. any single usd threshold, the
+/// shape that catches row-selection and negation bugs (a card can satisfy
+/// `usd<50` via one printing and `-usd<50` via the *other*, at once). Card 1:
+/// one printing at $500 (never satisfies `usd<50`). Distinct illustration ids
+/// throughout (store_of's default), so unique=artwork mirrors unique=printing
+/// here -- no shared-group collapsing to complicate the comparison.
+fn price_plane_fixture_store() -> CardData {
+    let mut vocab = VocabInterner::new();
+    let cards = vec![stub_card(1, TYPE_CREATURE, &[], &mut vocab), stub_card(2, TYPE_CREATURE, &[], &mut vocab)];
+    let mut data = store_of(cards, &[2, 1], vocab);
+    data.printings[0].price_usd = Some(500); // card 0: $5.00
+    data.printings[1].price_usd = Some(20000); // card 0: $200.00
+    data.printings[2].price_usd = Some(50000); // card 1: $500.00
+    data.indexes.price_usd = build_range_index(&data.printings, |p| p.price_usd);
+    data
+}
+
+/// `FilterExpr::bind` rewrites a price `NumericCmp`'s query-side dollar
+/// `Const` to cents exactly once per query (`price_dollars_to_cents`) -- the
+/// step that lets `field_num`'s per-printing evaluation compare raw cents
+/// with no division. Every other test in this file builds already-bound
+/// filters directly via `usd_cmp` (mirroring what `bind` produces, not
+/// exercising `bind` itself), so this is the one place that actually calls
+/// `bind` on a dollar-denominated `NumericCmp` -- the exact shape
+/// `build_filter` produces from a real `usd<50`-style query -- and checks
+/// both the rewritten `Const` value and that evaluation afterward still
+/// agrees with the unbound (dollars) comparison bit-for-bit.
+#[test]
+fn bind_rewrites_price_const_to_cents() {
+    let data = price_plane_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let card = &archived.cards[0];
+
+    let mut f = FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op: CmpOp::Lt, rhs: NumExpr::Const(50.0) };
+    f.bind(&archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
+    let FilterExpr::NumericCmp { rhs: NumExpr::Const(v), .. } = &f else { panic!("bind must not change the node shape") };
+    assert_eq!(*v, 5000.0, "bind must rewrite the dollar Const to its exact cents value");
+
+    assert!(f.matches(card, &archived.printings[0], &archived.strings), "usd<50 (bound) must still match the $5.00 printing");
+    assert!(!f.matches(card, &archived.printings[1], &archived.strings), "usd<50 (bound) must still exclude the $200.00 printing");
 }
 
 // ─── Numeric-range planes (#655) ───────────────────────────────────────────────
@@ -4456,11 +4508,7 @@ fn not_over_price_range_keeps_boundary_matches() {
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
-    let mut f = FilterExpr::Not(Box::new(FilterExpr::NumericCmp {
-        lhs: NumExpr::Field(NumField::PriceUsd),
-        op: CmpOp::Gt,
-        rhs: NumExpr::Const(5.0),
-    }));
+    let mut f = FilterExpr::Not(Box::new(usd_cmp(CmpOp::Gt, 5.0)));
     let (total, _) = run_query(
         &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
         &mut f, None, "card", "default", "edhrec", "asc", 100, 0, &archived.indexes,
@@ -5038,11 +5086,7 @@ fn verify_order_or_keeps_sets_and_scans_in_written_order() {
 // card-level member can still settle at card level, so it stays early.
 #[test]
 fn verify_order_and_defers_printing_dependent_children() {
-    let usd = || FilterExpr::NumericCmp {
-        lhs: NumExpr::Field(NumField::PriceUsd),
-        op: CmpOp::Gt,
-        rhs: NumExpr::Const(20.0),
-    };
+    let usd = || usd_cmp(CmpOp::Gt, 20.0);
     let dragon = || FilterExpr::CollectionCmp { field: CollField::Subtypes, op: CmpOp::Ge, value: "dragon".to_string(), value_id: None };
     let mut f = FilterExpr::And(vec![usd(), dragon()]);
     f.order_children_by_verify_cost();
@@ -5064,11 +5108,7 @@ fn verify_order_and_defers_printing_dependent_children() {
 // `usd>20` must not jump ahead of the contains it can't short-circuit.
 #[test]
 fn verify_order_or_defers_printing_dependent_children() {
-    let usd = || FilterExpr::NumericCmp {
-        lhs: NumExpr::Field(NumField::PriceUsd),
-        op: CmpOp::Gt,
-        rhs: NumExpr::Const(20.0),
-    };
+    let usd = || usd_cmp(CmpOp::Gt, 20.0);
     let mut f = FilterExpr::Or(vec![contains_scan(), usd()]);
     f.order_children_by_verify_cost();
     let FilterExpr::Or(children) = &f else { panic!("still an Or") };
