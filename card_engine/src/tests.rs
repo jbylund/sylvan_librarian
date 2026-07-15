@@ -708,7 +708,7 @@ fn cards_of_printings_maps_and_dedups() {
 }
 
 /// Differential test for the direct-array projection
-/// (docs/issues/local-engine-direct-projection-arrays.md): `cards_of_printings`
+/// (docs/issues/00690-engine-direct-projection-arrays.md): `cards_of_printings`
 /// must agree with an independent reference oracle (a `partition_point` search on
 /// `offsets`, applied uniformly regardless of size -- the mechanism the small-k
 /// path itself used before this change) at every k, spanning both the small-k

@@ -1,6 +1,6 @@
 # Engine: direct printing→card / printing→group projection arrays
 
-Status: **`printing_to_card` shipped** 2026-07-14, no GitHub issue yet. Surfaced investigating
+Status: **`printing_to_card` shipped**, merged via [#690](https://github.com/jbylund/sylvan_librarian/pull/690). Surfaced investigating
 [local-engine-broad-range-fastpath.md](local-engine-broad-range-fastpath.md)'s crossover axis 4
 (does `unique=card`'s exact `total` cost too much to make its fast-path win moot?) — turned into a
 standalone win independent of that project, landed first since it changed the baseline costs that

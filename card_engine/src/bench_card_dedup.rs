@@ -2,7 +2,7 @@
 //!
 //! 1. Regression guard for `cards_of_printings`' direct-array projection
 //!    (`printing_to_card`, shipped — see
-//!    docs/issues/local-engine-direct-projection-arrays.md), benchmarked here
+//!    docs/issues/00690-engine-direct-projection-arrays.md), benchmarked here
 //!    against synthetic offsets at real corpus scale.
 //! 2. Still-open exploration of `groups_of_printings`/`printing_to_global_group`
 //!    for crossover axis 4 of docs/issues/local-engine-broad-range-fastpath.md
@@ -48,7 +48,7 @@ fn groups_of_printings(offsets: &AOffsets, group_offsets: &[u32], local_group_id
 /// Direct `printing_id -> global_group_id` lookup, precomputed once -- the same
 /// mechanism as `build_printing_to_card`, but deferred (not shipped) since nothing
 /// in the current codebase would consume it. See "Finding" in
-/// docs/issues/local-engine-direct-projection-arrays.md for why: `unique=artwork`'s
+/// docs/issues/00690-engine-direct-projection-arrays.md for why: `unique=artwork`'s
 /// real implementation dedupes per-card locally, not via a global projection.
 fn printing_to_global_group(offsets: &[u32], group_offsets: &[u32], local_group_ids: &[u16]) -> Vec<u32> {
     let mut out = vec![0u32; local_group_ids.len()];
