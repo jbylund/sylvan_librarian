@@ -162,3 +162,46 @@ fn bench_verify_cost_clusters() {
     println!("  regex machinery (literal prefix) : {machinery_ns:.3}");
     println!("  regex machinery (no prefix)      : {machinery_noprefix_ns:.3}");
 }
+
+/// Pins the per-card `NumericCmp` cost for usd/collector_number/year --
+/// exactly the fields whose bind-time-cents rewrite (usd) and eval/eval_arith
+/// split (all three) this file's own module docs point at as the thing
+/// being measured. `cmc` above already covers the generic Field<op>Const
+/// leaf; this adds the specific fields the interleaved A/B benchmarks (see
+/// commit history) reported real per-printing wins for, so a future
+/// regression in either optimization shows up here as a real ns/card
+/// number, not just a percentage in a PR description that can't be re-run.
+/// usd goes through `bind()` (same as a real query) rather than a
+/// hand-converted cents `Const`, so this also exercises the bind rewrite
+/// itself, not just field_num's read side.
+#[test]
+#[ignore = "micro-benchmark; needs benchmarks/verify-order/real.store (see module docs)"]
+fn bench_price_and_range_verify_cost() {
+    let Ok(file) = std::fs::File::open(STORE_PATH) else {
+        eprintln!("SKIP: {STORE_PATH} not found (see module docs)");
+        return;
+    };
+    let mmap = unsafe { Mmap::map(&file) }.expect("mmap real.store");
+    if mmap.len() < ARCHIVE_HEADER_LEN || mmap[..ARCHIVE_HEADER_LEN] != archive_header() {
+        eprintln!("SKIP: {STORE_PATH} header mismatch (stale archive — rebuild it, see module docs)");
+        return;
+    }
+    let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
+    let n = data.cards.len();
+    println!("\n{n} oracle cards from {STORE_PATH}");
+
+    let pairs: Vec<(usize, usize)> = (0..n).map(|cid| (cid, u32::from(data.offsets[cid]) as usize)).collect();
+    let run = |name: &str, f: &FilterExpr| -> f64 {
+        time_kernel(name, n, || pairs.iter().filter(|&&(cid, pid)| f.matches(&data.cards[cid], &data.printings[pid], &data.strings)).count() as u32)
+    };
+
+    println!("\n-- price / range NumericCmp (mask/field compare tier) --");
+    let mut usd = FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op: CmpOp::Lt, rhs: NumExpr::Const(50.0) };
+    usd.bind(&data.coll_vocab, &data.coll_vocab_sorted, &data.artist_vocab, &data.mana_vocab, &data.indexes.flavor, &data.strings);
+    run("NumericCmp (usd<50)", &usd);
+    run(
+        "NumericCmp (cn<100)",
+        &FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::CollectorNumberInt), op: CmpOp::Lt, rhs: NumExpr::Const(100.0) },
+    );
+    run("YearCmp (year>2020)", &FilterExpr::YearCmp { op: CmpOp::Gt, year: 2020 });
+}
