@@ -3406,15 +3406,24 @@ fn select_page(mut v: Vec<Match>, offset: usize, limit: usize) -> Vec<(u32, u32)
 #[derive(Clone, Copy)]
 enum Mode { Card, Artwork, Printing }
 
+/// Upper bound on distinct artwork groups for any one card, sized for
+/// `seen_words`'s fixed-size bitmask (below). Checked against the real corpus:
+/// the max is 385 (Mountain; Island/Plains/Forest/Swamp all in the 365-375
+/// range), so 512 bits (8 u64 words) gives ~33% headroom over today's actual
+/// worst case while staying tiny (64 bytes) -- a stack array, not a heap
+/// allocation, and small enough that a full `fill(0)` every card is cheaper
+/// than the growable Vec's per-printing resize-check it replaces. Revisit if
+/// a future card's reprint count actually approaches this (debug_assert
+/// below catches that during development rather than silently
+/// under-counting in production).
+const ARTWORK_GROUP_WORDS: usize = 8;
+
 /// Matches this card contributes: 0/1 for Card mode (existence, short-circuit),
 /// passing printings for Printing mode, distinct illustrations with a passing
 /// printing for Artwork mode. `seen_words` is a reused scratch buffer: a
-/// growable bitmask indexed by each printing's dense `artwork_group_id` (#629),
-/// one bit per group, `word = gid / 64`. Grown on demand (`clear()` keeps the
-/// backing allocation), so the common 1-2-group card never reallocates once
-/// warmed up, and the rare >64-group card (a handful of basic lands in real
-/// data) just grows to a few words -- no separate threshold/fallback path, so
-/// there's no O(k²) tail hiding on exactly the highest-printing-count cards.
+/// fixed-size bitmask indexed by each printing's dense `artwork_group_id`
+/// (#629), one bit per group, `word = gid / 64` -- zeroed in full every card
+/// (cheap: ARTWORK_GROUP_WORDS is tiny), never resized.
 // #676 review: a legality leaf promoted into `plane` alongside a genuinely
 // printing-dependent residual (DateCmp, ArtistMatch, ...) needs *both*
 // checked against the *same* printing -- `all_match`/`residual_matches` alone
@@ -3440,7 +3449,7 @@ fn card_match_count(
     mode: Mode,
     strings: &AStrings,
     existential_plane: Option<(&PlaneExpr, &Archived<BitPlanes>)>,
-    seen_words: &mut Vec<u64>,
+    seen_words: &mut [u64; ARTWORK_GROUP_WORDS],
 ) -> u32 {
     // No existential plane: identical code shape to before #676's
     // existential_plane parameter existed at all -- no closure, no extra
@@ -3480,17 +3489,14 @@ fn card_match_count(
                 n
             }
             Mode::Artwork => {
-                seen_words.clear();
+                seen_words.fill(0);
                 for pid in start..end {
                     if !all_match && !FilterExpr::residual_matches(card, &printings[pid], strings, residual, residual_is_or) {
                         continue;
                     }
                     let gid = u16::from(printings[pid].artwork_group_id) as usize;
-                    let word = gid / 64;
-                    if seen_words.len() <= word {
-                        seen_words.resize(word + 1, 0);
-                    }
-                    seen_words[word] |= 1u64 << (gid % 64);
+                    debug_assert!(gid / 64 < ARTWORK_GROUP_WORDS, "artwork_group_id {gid} exceeds ARTWORK_GROUP_WORDS bound");
+                    seen_words[gid / 64] |= 1u64 << (gid % 64);
                 }
                 seen_words.iter().map(|w| w.count_ones()).sum()
             }
@@ -3522,17 +3528,14 @@ fn card_match_count(
             n
         }
         Mode::Artwork => {
-            seen_words.clear();
+            seen_words.fill(0);
             for pid in start..end {
                 if !satisfies(pid) {
                     continue;
                 }
                 let gid = u16::from(printings[pid].artwork_group_id) as usize;
-                let word = gid / 64;
-                if seen_words.len() <= word {
-                    seen_words.resize(word + 1, 0);
-                }
-                seen_words[word] |= 1u64 << (gid % 64);
+                debug_assert!(gid / 64 < ARTWORK_GROUP_WORDS, "artwork_group_id {gid} exceeds ARTWORK_GROUP_WORDS bound");
+                seen_words[gid / 64] |= 1u64 << (gid % 64);
             }
             seen_words.iter().map(|w| w.count_ones()).sum()
         }
@@ -4068,7 +4071,7 @@ fn run_query_streamed<'a>(
 ) -> (usize, Vec<(&'a AOracleCard, &'a APrinting)>) {
     let mut residual: Vec<&FilterExpr> = Vec::new();
     let mut residual_is_or = false;
-    let mut seen_words: Vec<u64> = Vec::new(); // #629: artwork-mode match-count scratch
+    let mut seen_words = [0u64; ARTWORK_GROUP_WORDS]; // #629: artwork-mode match-count scratch
 
     // Match phase: sequential (candidate-order) evaluation into per-card
     // counts. Exact total = sum of counts, known before emission strategy.
