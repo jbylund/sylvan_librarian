@@ -1885,7 +1885,7 @@ fn assign_artwork_groups(printings: &mut [Printing], offsets: &[u32]) -> Vec<u16
 /// scatter-into-printing-bitmap-then-monotone-cursor path `cards_of_printings`
 /// otherwise pays past 1024 matches, and unconditionally cheaper than the
 /// small-k `partition_point` binary search too — see
-/// docs/issues/local-engine-direct-projection-arrays.md.
+/// docs/issues/00690-engine-direct-projection-arrays.md.
 fn build_printing_to_card(offsets: &[u32]) -> Vec<u32> {
     let n_printings = offsets.last().copied().unwrap_or(0) as usize;
     let mut out = vec![0u32; n_printings];
@@ -2218,7 +2218,7 @@ struct CardIndexes {
     artwork_groups: Vec<u16>,                  // card space: distinct illustration groups
     // printing space: printing_id -> card_id, direct lookup. Replaces a
     // partition_point search on `offsets` in cards_of_printings' hot paths —
-    // see docs/issues/local-engine-direct-projection-arrays.md.
+    // see docs/issues/00690-engine-direct-projection-arrays.md.
     printing_to_card: Vec<u32>,
     planes:         BitPlanes,                 // card space: transposed low-cardinality dims (#630)
     name_bigrams:   NameBigramIndex,           // card space: exact 2-byte name containment (#639)
@@ -2413,7 +2413,7 @@ fn printing_bits_to_card_bits(pbits: &[u64], offsets: &AOffsets, n_cards: usize)
 /// bits is cheaper than repeated pushes (same reasoning as `scatter_bits`
 /// elsewhere). Both branches use the direct array now — benchmarked
 /// unconditionally cheaper than a `partition_point` search on `offsets` at
-/// every k tested, see docs/issues/local-engine-direct-projection-arrays.md.
+/// every k tested, see docs/issues/00690-engine-direct-projection-arrays.md.
 fn cards_of_printings(offsets: &AOffsets, printing_to_card: &AOffsets, printing_ids: &[u32]) -> Vec<u32> {
     if printing_ids.len() > 1024 {
         let n_cards = offsets.len().saturating_sub(1);

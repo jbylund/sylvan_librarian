@@ -131,6 +131,24 @@ composition-safety question (does the `Not`-arm's complement correctly exclude N
 printings, which are simply absent from the index?) deferred to the fastpath work below, not a
 side effect of this fix.
 
+### Tried and reverted: skipping `field_num`'s division by binding price to cents
+
+`field_num` still divides cents to dollars (`/100.0`) on every printing evaluated, since the
+query-side `Const` stays in dollars. Tried removing that division by having `FilterExpr::bind`
+rewrite a bare `usd`/`eur`/`tix` `Field`-vs-`Const` comparison's `Const` to cents once per query,
+so `field_num` could compare raw cents directly. Measured win was small (~2-3%) and narrow (only
+that one exact shape). Shipped, then reverted after code review found a real correctness bug:
+the rewrite only recognized that one shape, so `usd+1<power` (price inside `NumExpr::Arith`) and
+`usd<cmc` (price compared directly against another `Field`, no `Const` at all) left the
+query-side operand in dollars while a modified `field_num` returned cents unconditionally —
+silently off by 100x. A type-level fix was possible (a distinct `NumExpr::PriceCents` variant,
+constructed only for the verified-safe shape) but made two logically identical queries
+(`usd<5.00` vs. `usd+0.01<5.01`) take inconsistently optimized paths depending on phrasing — the
+same shape-dependent fragility that caused the bug, and worth avoiding rather than papering over.
+Not worth re-attempting without a fundamentally different approach (e.g. a real compile-time
+unit-checked representation, not a bind-time rewrite keyed on syntactic shape). Full history in
+[#690](https://github.com/jbylund/sylvan_librarian/pull/690).
+
 ## Problem
 
 `usd<50` matches 80,527 of 97,206 printings (83%) — genuinely broad, same shape as the
@@ -190,12 +208,13 @@ and test each candidate for set membership inline, stopping once `limit` matches
   id and test-and-set a bit (new bit set → a newly-counted distinct card; already set → skip).
   That per-printing card lookup can't use `cards_of_printings`' own broad-k trick
   (`printing_bits_to_card_bits`'s monotone cursor needs ascending printing-id order, which a
-  permutation walk doesn't provide) — it needs the direct-array lookup instead, see
-  [local-engine-direct-projection-arrays.md](local-engine-direct-projection-arrays.md), which is
-  worth landing before committing to idea 1 for this reason specifically, not just its narrower
-  standalone win. Still an open, measurement-shaped question (kernel benchmark, not end-to-end
-  timing) whether this incremental floor is cheap enough to make `unique=card` competitive with
-  `unique=printing` — landing the direct array first is what makes that measurement fair.
+  permutation walk doesn't provide) — it needs the direct-array lookup instead. **Landed** (see
+  [00690-engine-direct-projection-arrays.md](00690-engine-direct-projection-arrays.md), merged via
+  [#690](https://github.com/jbylund/sylvan_librarian/pull/690)), so idea 1's incremental per-match
+  card lookup can use `printing_to_card` directly. Still an open, measurement-shaped question
+  (kernel benchmark, not end-to-end timing) whether this incremental floor is cheap enough to make
+  `unique=card` competitive with `unique=printing` — the direct array being on `main` now is what
+  makes that measurement fair.
 
 ## Idea 2: scatter the exact narrowed set into a bitmap, feed the existing popcount-skip path
 
@@ -280,10 +299,11 @@ fifth (tight/loose) axis to worry about — every field behaves identically ther
 
 - [x] Ship the price exactness fix standalone (see Prerequisite above) — landed as the
       integer-cents migration in [#688](https://github.com/jbylund/sylvan_librarian/pull/688).
-- [ ] Ship `printing_to_card` standalone first (see
-      [local-engine-direct-projection-arrays.md](local-engine-direct-projection-arrays.md)) —
-      load-bearing for idea 1's incremental per-match card check, neutral to idea 2, changes this
-      doc's crossover-axis-4 baseline numbers.
+- [x] Ship `printing_to_card` standalone first (see
+      [00690-engine-direct-projection-arrays.md](00690-engine-direct-projection-arrays.md)) —
+      load-bearing for idea 1's incremental per-match card check, neutral to idea 2. Landed via
+      [#690](https://github.com/jbylund/sylvan_librarian/pull/690); this doc's crossover-axis-4
+      baseline numbers (not yet measured) should be taken against `main` post-#690.
 - [ ] Prove the fast-path mechanism on `unique=printing` for a tight field first (`released_at`
       or `collector_number`) — this is the case that genuinely isolates the crossover question
       from row-selection (no picking-a-printing problem at all when each printing is its own
@@ -317,7 +337,7 @@ fifth (tight/loose) axis to worry about — every field behaves identically ther
 
 ## Related
 
-- [local-engine-direct-projection-arrays.md](local-engine-direct-projection-arrays.md) —
+- [00690-engine-direct-projection-arrays.md](00690-engine-direct-projection-arrays.md) —
   prerequisite `printing_to_card` array, load-bearing for idea 1's per-match card check.
 - [00655-engine-numeric-range-planes.md](done/00655-engine-numeric-range-planes.md) — the
   analogous fix for `cmc`/`power`/`toughness`; doesn't transfer (card-invariant, not existential).
