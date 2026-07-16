@@ -5499,6 +5499,12 @@ fn printing_range_aligned_page_matches_naive_incl_tie_buckets() {
         let e = idx.partition_point(|p| u32::from(p.0) < 5000);
         let k = e - s;
         assert!(k > 100, "seed {seed}: matching set must be broad with big tie buckets, got {k}");
+        // total = k = the true match count (independent count over all printings). The fastpath
+        // reports total = k, so pinning k == count pins the reported total.
+        let naive_count = (0..archived.printings.len())
+            .filter(|&pid| FilterExpr::residual_matches(&archived.cards[u32::from(archived.indexes.printing_to_card[pid]) as usize], &archived.printings[pid], &archived.strings, &[&leaf], false))
+            .count();
+        assert_eq!(k, naive_count, "seed {seed}: binary-search k must equal the true match count");
         for &desc in &[false, true] {
             // offsets at the start, inside each tie bucket, spanning a boundary, and near the end
             for &off in &[0, k / 5, k / 2, (3 * k) / 4, k.saturating_sub(30)] {
@@ -5549,7 +5555,16 @@ fn printing_range_fastpath_gates_card_walk_at_stream_threshold() {
         let leaf = usd_cmp(CmpOp::Lt, 50.0);
         let ix = &archived.indexes;
         let fp = |sc| printing_range_fastpath(&archived.cards, &archived.printings, &archived.offsets, &archived.strings, &leaf, ix, sc, false, 100, 0);
-        assert_eq!(fp(SortCol::EdhrecRank).is_some(), walk_fires, "card-walk gate at n={n} (STREAM_MIN={stream_min})");
-        assert!(fp(SortCol::PriceUsd).is_some(), "aligned exempt from stream gate at n={n}");
+        // Every printing is priced $1 < $50, so the true match count is n; when the fastpath fires
+        // its reported total must equal it (total == k == match count), end to end.
+        match fp(SortCol::EdhrecRank) {
+            Some((total, _)) => {
+                assert!(walk_fires, "card-walk fired below the gate at n={n} (STREAM_MIN={stream_min})");
+                assert_eq!(total, n, "walk total must equal the true match count at n={n}");
+            }
+            None => assert!(!walk_fires, "card-walk should have fired at n={n} (STREAM_MIN={stream_min})"),
+        }
+        let (aligned_total, _) = fp(SortCol::PriceUsd).expect("aligned exempt from stream gate");
+        assert_eq!(aligned_total, n, "aligned total must equal the true match count at n={n}");
     }
 }
