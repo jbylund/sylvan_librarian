@@ -3956,6 +3956,16 @@ fn printing_range_fastpath<'a>(
         return is_price_leaf(filter)
             .then(|| (k, aligned_page(idx, s, e, cards, printings, &indexes.printing_to_card, descending, page_offset, limit)));
     }
+    // The walk reproduces run_query_streamed's *stream* emission (per-card-contiguous), which the
+    // general path only uses above STREAM_MIN_MATCHES; at or below it, run_query_streamed gathers
+    // and sorts globally, ordering full-sort-key ties across cards by pid instead. Bail there so
+    // the fastpath never claims a range the general path would gather. The band is narrow
+    // (NARROW_FLOOR < k <= STREAM_MIN_MATCHES, i.e. 1000 < k <= 1024) and only reachable on a tiny
+    // index (broad needs k > index_len/4, so index_len < ~4096) -- never in production, where broad
+    // means tens of thousands. aligned_page above matches the gathered path directly, so it's exempt.
+    if k <= *STREAM_MIN_MATCHES {
+        return None;
+    }
     let perm = indexes.sort_perms.get(sort_col, descending)?;
     if perm.len() != cards.len() {
         return None;

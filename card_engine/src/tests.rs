@@ -6,7 +6,7 @@ use super::{
     cards_of_printings, count_common_keywords, count_common_types,
     build_artist_index, build_range_index, range_candidates, narrow_candidates, rarity_candidates,
     range_too_broad_to_narrow, run_query, trigram_candidates, finalize_trigram_index, PrintingRangeIndex, NARROW_FLOOR,
-    walk_printing_page, aligned_page, bare_range_bounds, sort_key_bits, SortCol,
+    walk_printing_page, aligned_page, bare_range_bounds, printing_range_fastpath, sort_key_bits, SortCol, STREAM_MIN_MATCHES,
     bitmap_contains, bitmap_card_ids, compile_plane, eval_planes, split_planes,
     ArithOp, ArtistIndex, CardData, CardIndexes, Candidates, ColorField, NumExpr, NumField, RarityIndex,
     CollField, CmpOp, FilterExpr, InlineStr, Interner, ManaCost, OracleCard, Printing, TagIndex,
@@ -5512,5 +5512,44 @@ fn printing_range_aligned_page_matches_naive_incl_tie_buckets() {
                 }
             }
         }
+    }
+}
+
+/// `n` cards, one printing each, all priced $1.00 — so `usd<50` matches every printing and k == n,
+/// exactly dialable across the STREAM_MIN_MATCHES boundary. Distinct edhrec ranks, price index built.
+fn all_priced_fixture(n: usize) -> CardData {
+    let mut vocab = VocabInterner::new();
+    let cards: Vec<OracleCard> = (0..n)
+        .map(|i| {
+            let mut c = stub_card(i as u128, 0, &[], &mut vocab);
+            c.edhrec_rank = Some(i as u32);
+            c
+        })
+        .collect();
+    let mut data = store_of(cards, &vec![1usize; n], vocab);
+    for p in data.printings.iter_mut() {
+        p.price_usd = Some(100);
+    }
+    data.indexes.price_usd = build_range_index(&data.printings, |p| p.price_usd);
+    data
+}
+
+#[test]
+fn printing_range_fastpath_gates_card_walk_at_stream_threshold() {
+    // The card-level walk reproduces run_query_streamed's per-card-contiguous *stream* emission,
+    // which the general path only uses above STREAM_MIN_MATCHES; at or below it the general path
+    // gathers (global sort), ordering full-key ties across cards differently. So the walk must bail
+    // at/below the threshold and fire above it. Aligned (order by usd) matches the gathered path and
+    // is exempt. k == n in this fixture.
+    let stream_min = *STREAM_MIN_MATCHES;
+    for (n, walk_fires) in [(stream_min, false), (stream_min + 16, true)] {
+        let data = all_priced_fixture(n);
+        let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+        let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+        let leaf = usd_cmp(CmpOp::Lt, 50.0);
+        let ix = &archived.indexes;
+        let fp = |sc| printing_range_fastpath(&archived.cards, &archived.printings, &archived.offsets, &archived.strings, &leaf, ix, sc, false, 100, 0);
+        assert_eq!(fp(SortCol::EdhrecRank).is_some(), walk_fires, "card-walk gate at n={n} (STREAM_MIN={stream_min})");
+        assert!(fp(SortCol::PriceUsd).is_some(), "aligned exempt from stream gate at n={n}");
     }
 }
