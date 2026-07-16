@@ -1875,6 +1875,15 @@ fn assign_artwork_groups(printings: &mut [Printing], offsets: &[u32]) -> Vec<u16
             };
             p.artwork_group_id = gid as u16;
         }
+        // Checked once per card at load time, not once per printing per query --
+        // see ARTWORK_GROUP_WORDS' doc for why this bound is expected to hold and
+        // card_match_count's seen_words for the fixed-size bitmask it protects.
+        assert!(
+            ills.len() <= ARTWORK_GROUP_WORDS * 64,
+            "card has {} distinct artwork groups, exceeds ARTWORK_GROUP_WORDS bound ({})",
+            ills.len(),
+            ARTWORK_GROUP_WORDS * 64
+        );
         counts.push(ills.len() as u16);
     }
     counts
@@ -3413,9 +3422,12 @@ enum Mode { Card, Artwork, Printing }
 /// worst case while staying tiny (64 bytes) -- a stack array, not a heap
 /// allocation, and small enough that a full `fill(0)` every card is cheaper
 /// than the growable Vec's per-printing resize-check it replaces. Revisit if
-/// a future card's reprint count actually approaches this (debug_assert
-/// below catches that during development rather than silently
-/// under-counting in production).
+/// a future card's reprint count actually approaches this -- checked once
+/// per card in `assign_artwork_groups` (load time, not the per-query hot
+/// path this bound protects) via a real `assert!`, not `debug_assert!`: the
+/// check is free either way (once per card at load, not once per printing
+/// per query), so there's no reason to let a release build skip it and
+/// silently under-count in production instead of failing loudly on reload.
 const ARTWORK_GROUP_WORDS: usize = 8;
 
 /// Matches this card contributes: 0/1 for Card mode (existence, short-circuit),
@@ -3495,7 +3507,6 @@ fn card_match_count(
                         continue;
                     }
                     let gid = u16::from(printings[pid].artwork_group_id) as usize;
-                    debug_assert!(gid / 64 < ARTWORK_GROUP_WORDS, "artwork_group_id {gid} exceeds ARTWORK_GROUP_WORDS bound");
                     seen_words[gid / 64] |= 1u64 << (gid % 64);
                 }
                 seen_words.iter().map(|w| w.count_ones()).sum()
@@ -3534,7 +3545,6 @@ fn card_match_count(
                     continue;
                 }
                 let gid = u16::from(printings[pid].artwork_group_id) as usize;
-                debug_assert!(gid / 64 < ARTWORK_GROUP_WORDS, "artwork_group_id {gid} exceeds ARTWORK_GROUP_WORDS bound");
                 seen_words[gid / 64] |= 1u64 << (gid % 64);
             }
             seen_words.iter().map(|w| w.count_ones()).sum()
