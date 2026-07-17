@@ -1,5 +1,12 @@
 # Engine: fast path for broad printing-space range queries
 
+> **Superseded for planning (2026-07-16) by
+> [local-engine-sorted-range-fastpath.md](local-engine-sorted-range-fastpath.md).** That doc
+> carries the current plan (the two mechanisms split cleanly by unique mode; printing mode gets
+> `total = k` free from the sorted index — the win PR #689 wrote off as an "inherent floor"). This
+> doc is kept as the **historical record**: the shipped price-exactness prerequisite (below, still
+> accurate) and the full account of what PR #689 tried and reverted.
+
 Status: design drafted 2026-07-14, no GitHub issue yet — file once the crossover is measured
 and a direction is picked. Surfaced investigating why `usd<50` costs ~0.4–1 ms (see
 [00629-engine-artwork-group-id-bitmasks.md](done/00629-engine-artwork-group-id-bitmasks.md)'s
@@ -356,3 +363,16 @@ fifth (tight/loose) axis to worry about — every field behaves identically ther
   "the binary search already gives you `k` for free" observation, in the AND-skip context.
 - #638 — `tix`/`eur` have no range index at all yet; the same fast path (and the prerequisite
   exactness fix) should cover them once they do.
+
+
+## Notes from Previous PR
+
+For usd<50/unique=printing specifically, the cost splits into two phases with real measured numbers:
+
+narrow_candidates_exact: ~217µs, entirely wasted. narrow_rec's own fastpath calls compile_plane → compile_price_range → a full binary search + scatter + card-space conversion, unconditionally (it hardcodes broad_ok=true regardless of the caller's actual intent). The result comes back raw_candidates_is_some=false — discarded immediately by the very next check, because usd<50 matches 31,217 of 31,508 cards (99.1%), which exceeds the cards.len() - cards.len()/8 (87.5%) broadness-discard threshold at lib.rs:3869. The narrowing is computed and thrown away every single query.
+run_query_streamed: ~805-960µs. The actual per-candidate scan, unavoidable once no useful narrowing survives — it walks essentially all cards checking usd<50 against each printing.
+Compare to cn<100/printing: narrow_candidates_exact costs ~110-150µs but raw_candidates_is_some=true — its card total (17,616, 55.9%) is well under the 87.5% threshold, so the narrowing is kept, and run_query_streamed only costs ~640-680µs by scanning the narrowed set instead of everything.
+
+This fully explains the mixed result from the earlier fix attempt: excluding the fastpath saves the ~217µs waste for usd (which is why that query improved), but for cn/year it throws away narrowing that's genuinely paying for itself (which is why those got worse). The real bug isn't "card-space vs printing-space" — it's that narrow_rec's fastpath doesn't know in advance whether its card-space result will survive the discard check, and pays the full computation cost either way.
+
+The next commit's fix should be narrower and more targeted than my last attempt: something that lets narrow_rec's fastpath cheaply bail before paying for the scatter/conversion specifically when the result is predictably going to be discarded — not a blanket exclusion of range leaves.
