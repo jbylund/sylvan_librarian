@@ -1612,6 +1612,14 @@ fn fuzz_targeted(rng: &mut rand::rngs::SmallRng) -> Vec<FuzzSpec> {
     let cmc = fuzz_leaf_cmc(rng);
     let leg1 = fuzz_leaf_legality(rng);
     let leg2 = fuzz_leaf_legality(rng);
+    // The newer fields, so their multi-predicate shapes are guaranteed each run rather than left to
+    // fuzz_gen's random draws across 14 leaf kinds.
+    let pow = fuzz_leaf_power(rng);
+    let tou = fuzz_leaf_toughness(rng);
+    let price = fuzz_leaf_price(rng);
+    let date = fuzz_leaf_date(rng);
+    let cn = fuzz_leaf_collector_number(rng);
+    let arith = fuzz_leaf_arith(rng);
     vec![
         FuzzSpec::And(vec![leg1.clone(), cmc.clone()]),
         FuzzSpec::And(vec![leg1.clone(), col.clone()]),
@@ -1619,8 +1627,18 @@ fn fuzz_targeted(rng: &mut rand::rngs::SmallRng) -> Vec<FuzzSpec> {
         FuzzSpec::And(vec![bor.clone(), cmc.clone()]),
         FuzzSpec::Or(vec![leg2, rar.clone()]),
         FuzzSpec::Not(Box::new(FuzzSpec::And(vec![leg1.clone(), bor.clone()]))),
-        FuzzSpec::And(vec![leg1, rar.clone(), col]),
-        FuzzSpec::Or(vec![FuzzSpec::And(vec![rar, cmc]), FuzzSpec::And(vec![bor, typ])]),
+        FuzzSpec::And(vec![leg1, rar.clone(), col.clone()]),
+        FuzzSpec::Or(vec![FuzzSpec::And(vec![rar.clone(), cmc.clone()]), FuzzSpec::And(vec![bor, typ.clone()])]),
+        // Two card-level numerics (e.g. cmc=2 AND power=3); correlated card-level pair.
+        FuzzSpec::And(vec![cmc.clone(), pow.clone()]),
+        FuzzSpec::And(vec![pow, tou]),
+        // Printing-varying range field AND a card-invariant one -- the #677 wrong-printing shape.
+        FuzzSpec::And(vec![price.clone(), typ]),
+        FuzzSpec::And(vec![date, col.clone()]),
+        FuzzSpec::And(vec![cn, rar]),
+        FuzzSpec::Or(vec![price, cmc]),
+        // Arithmetic leaf inside a compound (its own operands already mix card + printing fields).
+        FuzzSpec::And(vec![arith, col]),
     ]
 }
 
