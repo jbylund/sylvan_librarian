@@ -6,6 +6,7 @@ use super::{
     cards_of_printings, count_common_keywords, count_common_types,
     build_artist_index, build_range_index, range_candidates, narrow_candidates, rarity_candidates,
     range_too_broad_to_narrow, run_query, trigram_candidates, finalize_trigram_index, PrintingRangeIndex, NARROW_FLOOR,
+    walk_printing_page, aligned_page, bare_range_bounds, printing_range_fastpath, sort_key_bits, SortCol, STREAM_MIN_MATCHES,
     bitmap_contains, bitmap_card_ids, compile_plane, eval_planes, split_planes,
     ArithOp, ArtistIndex, CardData, CardIndexes, Candidates, ColorField, NumExpr, NumField, RarityIndex,
     CollField, CmpOp, FilterExpr, InlineStr, Interner, ManaCost, OracleCard, Printing, TagIndex,
@@ -5373,4 +5374,197 @@ fn lanes_ge_matches_scalar_compare() {
     assert_eq!(super::lane_get(big, 2), 127);
     assert_eq!(super::lane_get(big, 1), 0);
     assert_eq!(super::lane_get(big, 3), 0);
+}
+
+// ─── Printing-range fastpath (PR 1, docs/issues/local-engine-sorted-range-fastpath.md) ────────
+// The fastpath produces a page for a bare, broad printing-mode range predicate without the O(n)
+// count pass. These differential-test its page production (the card-permutation walk and the
+// aligned boundary-bucket sort) against a naive full-sort reference that shares only the ordering
+// primitive (sort_key_bits) with it, not its bucket/walk selection logic.
+
+/// `n_cards` cards with populated edhrec/cmc sort keys, 1-4 printings each, prices heavily
+/// clustered onto a few hot values (so the price index has large equal-value tie buckets) plus
+/// ~15% NULL, and a real price range index built over them.
+fn printing_range_fixture(seed: u64, n_cards: usize) -> CardData {
+    use rand::SeedableRng;
+    let mut rng = rand::rngs::SmallRng::seed_from_u64(seed);
+    let mut vocab = VocabInterner::new();
+    // Distinct edhrec ranks (shuffled), as real data has — a rank is unique per card. This keeps
+    // any two cards from sharing a full (primary, edhrec) sort key, so the streamed/walk emission
+    // (per-card-contiguous) and a naive global (key, pid) sort agree; colliding ranks would let
+    // them legitimately differ on cross-card full ties, which never occur in practice.
+    let mut ranks: Vec<u32> = (0..n_cards as u32).collect();
+    for i in (1..n_cards).rev() {
+        ranks.swap(i, rng.random_range(0..=i));
+    }
+    let mut cards = Vec::with_capacity(n_cards);
+    for i in 0..n_cards {
+        let mut c = stub_card(i as u128, 0, &[], &mut vocab);
+        c.edhrec_rank = Some(ranks[i]);
+        c.cmc = Some(rng.random_range(0..8u8));
+        cards.push(c);
+    }
+    let counts: Vec<usize> = (0..n_cards).map(|_| rng.random_range(1..=4)).collect();
+    let mut data = store_of(cards, &counts, vocab);
+    // cents; 5000 == $50.00, which usd<50 excludes (strict). Hot values 15/100 form big buckets.
+    const PRICES: [u32; 6] = [15, 15, 100, 100, 100, 5000];
+    for p in data.printings.iter_mut() {
+        p.price_usd = (rng.random_range(0..100) >= 15).then(|| PRICES[rng.random_range(0..PRICES.len())]);
+    }
+    data.indexes.price_usd = build_range_index(&data.printings, |p| p.price_usd);
+    data
+}
+
+/// Naive reference page for a printing-mode query: filter every printing by `leaf`, sort by
+/// (sort_key_bits, pid) — the exact comparator select_page uses — and window [offset, offset+limit).
+/// Returns the page's scryfall ids in order.
+fn naive_printing_page(
+    archived: &Archived<CardData>, leaf: &FilterExpr, sc: SortCol, desc: bool, offset: usize, limit: usize,
+) -> Vec<u128> {
+    let mut all: Vec<(u128, u32, u32)> = Vec::new();
+    for cid in 0..archived.cards.len() as u32 {
+        let card = &archived.cards[cid as usize];
+        let start = u32::from(archived.offsets[cid as usize]) as usize;
+        let end = u32::from(archived.offsets[cid as usize + 1]) as usize;
+        for pid in start..end {
+            let p = &archived.printings[pid];
+            if FilterExpr::residual_matches(card, p, &archived.strings, &[leaf], false) {
+                all.push((sort_key_bits(card, p, sc, desc), cid, pid as u32));
+            }
+        }
+    }
+    all.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2)));
+    let end = (offset + limit).min(all.len());
+    if offset >= end {
+        return Vec::new();
+    }
+    all[offset..end].iter().map(|&(_, _, pid)| u128::from(archived.printings[pid as usize].scryfall_id)).collect()
+}
+
+fn page_scryfall_ids(page: &[(&Archived<OracleCard>, &Archived<Printing>)]) -> Vec<u128> {
+    page.iter().map(|(_, p)| u128::from(p.scryfall_id)).collect()
+}
+
+#[test]
+fn bare_range_bounds_recognizes_leaves_and_rejects_rest() {
+    let data = printing_range_fixture(0, 10);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let ix = &archived.indexes;
+    let bounds = |f: &FilterExpr| bare_range_bounds(f, ix).map(|(_, lo, hi)| (lo, hi));
+    // usd<50 -> [0, 5000) cents; cn>=100 -> [100, MAX); year>2020 -> [2021*10000, MAX)
+    assert_eq!(bounds(&usd_cmp(CmpOp::Lt, 50.0)), Some((0, 5000)));
+    let cn_ge = FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::CollectorNumberInt), op: CmpOp::Ge, rhs: NumExpr::Const(100.0) };
+    assert_eq!(bounds(&cn_ge), Some((100, u32::MAX)));
+    assert_eq!(bounds(&FilterExpr::YearCmp { op: CmpOp::Gt, year: 2020 }), Some((2021 * 10_000, u32::MAX)));
+    // rejects: Ne, compound, and a non-range numeric field (cmc is card-space)
+    assert!(bounds(&usd_cmp(CmpOp::Ne, 50.0)).is_none());
+    assert!(bounds(&FilterExpr::And(vec![usd_cmp(CmpOp::Lt, 50.0)])).is_none());
+    let cmc_lt = FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Cmc), op: CmpOp::Lt, rhs: NumExpr::Const(3.0) };
+    assert!(bounds(&cmc_lt).is_none());
+}
+
+#[test]
+fn printing_range_walk_matches_naive_page() {
+    let leaf = usd_cmp(CmpOp::Lt, 50.0);
+    for seed in 0..16u64 {
+        let data = printing_range_fixture(seed, 200);
+        let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+        let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+        for &sc in &[SortCol::EdhrecRank, SortCol::Cmc] {
+            for &desc in &[false, true] {
+                let perm = archived.indexes.sort_perms.get(sc, desc).expect("perm exists");
+                for &(off, lim) in &[(0usize, 10usize), (0, 100), (5, 20), (50, 50), (300, 25)] {
+                    let got = walk_printing_page(
+                        &archived.cards, &archived.printings, &archived.offsets, &archived.strings, &leaf, sc, desc, lim, off, perm,
+                    );
+                    let want = naive_printing_page(&archived, &leaf, sc, desc, off, lim);
+                    assert_eq!(page_scryfall_ids(&got), want, "walk seed {seed} desc {desc} off {off} lim {lim}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn printing_range_aligned_page_matches_naive_incl_tie_buckets() {
+    let leaf = usd_cmp(CmpOp::Lt, 50.0);
+    for seed in 0..16u64 {
+        let data = printing_range_fixture(seed, 300);
+        let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+        let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+        let idx = &archived.indexes.price_usd;
+        // usd<50 -> cents [0, 5000)
+        let s = idx.partition_point(|p| u32::from(p.0) < 0);
+        let e = idx.partition_point(|p| u32::from(p.0) < 5000);
+        let k = e - s;
+        assert!(k > 100, "seed {seed}: matching set must be broad with big tie buckets, got {k}");
+        // total = k = the true match count (independent count over all printings). The fastpath
+        // reports total = k, so pinning k == count pins the reported total.
+        let naive_count = (0..archived.printings.len())
+            .filter(|&pid| FilterExpr::residual_matches(&archived.cards[u32::from(archived.indexes.printing_to_card[pid]) as usize], &archived.printings[pid], &archived.strings, &[&leaf], false))
+            .count();
+        assert_eq!(k, naive_count, "seed {seed}: binary-search k must equal the true match count");
+        for &desc in &[false, true] {
+            // offsets at the start, inside each tie bucket, spanning a boundary, and near the end
+            for &off in &[0, k / 5, k / 2, (3 * k) / 4, k.saturating_sub(30)] {
+                for &lim in &[10usize, 40, 175] {
+                    if off >= k {
+                        continue;
+                    }
+                    let got = aligned_page(idx, s, e, &archived.cards, &archived.printings, &archived.indexes.printing_to_card, desc, off, lim);
+                    let want = naive_printing_page(&archived, &leaf, SortCol::PriceUsd, desc, off, lim);
+                    assert_eq!(page_scryfall_ids(&got), want, "aligned seed {seed} desc {desc} off {off} lim {lim} k {k}");
+                }
+            }
+        }
+    }
+}
+
+/// `n` cards, one printing each, all priced $1.00 — so `usd<50` matches every printing and k == n,
+/// exactly dialable across the STREAM_MIN_MATCHES boundary. Distinct edhrec ranks, price index built.
+fn all_priced_fixture(n: usize) -> CardData {
+    let mut vocab = VocabInterner::new();
+    let cards: Vec<OracleCard> = (0..n)
+        .map(|i| {
+            let mut c = stub_card(i as u128, 0, &[], &mut vocab);
+            c.edhrec_rank = Some(i as u32);
+            c
+        })
+        .collect();
+    let mut data = store_of(cards, &vec![1usize; n], vocab);
+    for p in data.printings.iter_mut() {
+        p.price_usd = Some(100);
+    }
+    data.indexes.price_usd = build_range_index(&data.printings, |p| p.price_usd);
+    data
+}
+
+#[test]
+fn printing_range_fastpath_gates_card_walk_at_stream_threshold() {
+    // The card-level walk reproduces run_query_streamed's per-card-contiguous *stream* emission,
+    // which the general path only uses above STREAM_MIN_MATCHES; at or below it the general path
+    // gathers (global sort), ordering full-key ties across cards differently. So the walk must bail
+    // at/below the threshold and fire above it. Aligned (order by usd) matches the gathered path and
+    // is exempt. k == n in this fixture.
+    let stream_min = *STREAM_MIN_MATCHES;
+    for (n, walk_fires) in [(stream_min, false), (stream_min + 16, true)] {
+        let data = all_priced_fixture(n);
+        let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+        let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+        let leaf = usd_cmp(CmpOp::Lt, 50.0);
+        let ix = &archived.indexes;
+        let fp = |sc| printing_range_fastpath(&archived.cards, &archived.printings, &archived.offsets, &archived.strings, &leaf, ix, sc, false, 100, 0);
+        // Every printing is priced $1 < $50, so the true match count is n; when the fastpath fires
+        // its reported total must equal it (total == k == match count), end to end.
+        match fp(SortCol::EdhrecRank) {
+            Some((total, _)) => {
+                assert!(walk_fires, "card-walk fired below the gate at n={n} (STREAM_MIN={stream_min})");
+                assert_eq!(total, n, "walk total must equal the true match count at n={n}");
+            }
+            None => assert!(!walk_fires, "card-walk should have fired at n={n} (STREAM_MIN={stream_min})"),
+        }
+        let (aligned_total, _) = fp(SortCol::PriceUsd).expect("aligned exempt from stream gate");
+        assert_eq!(aligned_total, n, "aligned total must equal the true match count at n={n}");
+    }
 }

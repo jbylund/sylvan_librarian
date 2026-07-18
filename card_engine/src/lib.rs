@@ -2004,6 +2004,38 @@ fn int_range_bounds(op: CmpOp, value: f64) -> Option<Option<(u32, u32)>> {
     Some(Some((lo as u32, hi as u32)))
 }
 
+/// Half-open [lo, hi) bounds over the packed released-at integer for a date
+/// comparison. None = Ne (never narrows). Shared by narrow_rec's `DateCmp` arm
+/// and the printing-range fastpath so the two never drift (see [`bare_range_bounds`]).
+fn date_range_bounds(op: CmpOp, value: u32) -> Option<(u32, u32)> {
+    Some(match op {
+        CmpOp::Ne => return None,
+        CmpOp::Eq => (value, value.saturating_add(1)),
+        CmpOp::Lt => (0, value),
+        CmpOp::Le => (0, value.saturating_add(1)),
+        CmpOp::Gt => (value.saturating_add(1), u32::MAX),
+        CmpOp::Ge => (value, u32::MAX),
+    })
+}
+
+/// Half-open [lo, hi) bounds over the packed released-at integer for a year
+/// comparison (`released_at` packs as `year*10000 + ...`). None = Ne or an
+/// out-of-range year (never narrows). Shared like [`date_range_bounds`].
+fn year_range_bounds(op: CmpOp, year: i32) -> Option<(u32, u32)> {
+    if !(0..=9999).contains(&year) {
+        return None;
+    }
+    let y = year as u32;
+    Some(match op {
+        CmpOp::Ne => return None,
+        CmpOp::Eq => (y * 10_000, (y + 1) * 10_000),
+        CmpOp::Lt => (0, y * 10_000),
+        CmpOp::Le => (0, (y + 1) * 10_000),
+        CmpOp::Gt => ((y + 1) * 10_000, u32::MAX),
+        CmpOp::Ge => (y * 10_000, u32::MAX),
+    })
+}
+
 /// Sorted printing ids with an indexed value in [lo, hi), or None for ranges
 /// too broad to be worth narrowing (see MAX_NARROW_FRACTION). Test-only
 /// reference for the sparse path range_narrowed() shares.
@@ -3099,30 +3131,12 @@ fn narrow_rec(
         }
 
         FilterExpr::DateCmp { op, value } => {
-            let (lo, hi) = match op {
-                CmpOp::Ne => return None,
-                CmpOp::Eq => (*value, value.saturating_add(1)),
-                CmpOp::Lt => (0, *value),
-                CmpOp::Le => (0, value.saturating_add(1)),
-                CmpOp::Gt => (value.saturating_add(1), u32::MAX),
-                CmpOp::Ge => (*value, u32::MAX),
-            };
+            let (lo, hi) = date_range_bounds(*op, *value)?;
             range_narrowed(&indexes.released_at, lo, hi, n_printings, broad_ok, true)
         }
 
         FilterExpr::YearCmp { op, year } => {
-            if *year < 0 || *year > 9999 {
-                return None;
-            }
-            let y = *year as u32;
-            let (lo, hi) = match op {
-                CmpOp::Ne => return None,
-                CmpOp::Eq => (y * 10_000, (y + 1) * 10_000),
-                CmpOp::Lt => (0, y * 10_000),
-                CmpOp::Le => (0, (y + 1) * 10_000),
-                CmpOp::Gt => ((y + 1) * 10_000, u32::MAX),
-                CmpOp::Ge => (y * 10_000, u32::MAX),
-            };
+            let (lo, hi) = year_range_bounds(*op, *year)?;
             range_narrowed(&indexes.released_at, lo, hi, n_printings, broad_ok, true)
         }
 
@@ -3717,6 +3731,248 @@ static STREAM_MIN_MATCHES: LazyLock<usize> = LazyLock::new(|| guard_env("CARD_EN
 /// position exists for benchmarking written-order sensitivity.
 static VERIFY_ORDER: LazyLock<usize> = LazyLock::new(|| guard_env("CARD_ENGINE_VERIFY_ORDER", 1));
 
+/// Kill-switch for the printing-mode bare-range fastpath (`printing_range_fastpath`). Default on;
+/// set to 0 to force every such query back onto the general path (used to A/B correctness and
+/// timing). A binary switch, not a calibrated threshold.
+static PRINTING_RANGE_FASTPATH: LazyLock<usize> = LazyLock::new(|| guard_env("CARD_ENGINE_PRINTING_RANGE_FASTPATH", 1));
+
+/// The range index and half-open `[lo, hi)` a *bare* range-predicate leaf selects, or None for
+/// anything else (compound, `Ne`, a non-range numeric field). Provably-empty predicates return a
+/// zero-width `[v, v)` so the fastpath's `k` resolves to 0. Reuses the exact bound derivations the
+/// narrowing path uses (`int_range_bounds`, [`date_range_bounds`], [`year_range_bounds`]) so the
+/// fastpath and `narrow_rec` can never disagree on which printings a predicate covers.
+fn bare_range_bounds<'i>(
+    filter: &FilterExpr,
+    indexes: &'i Archived<CardIndexes>,
+) -> Option<(&'i Archived<PrintingRangeIndex>, u32, u32)> {
+    match filter {
+        FilterExpr::NumericCmp { lhs, op, rhs } => {
+            // Only price/collector-number are printing-range-indexed; cmc/power/toughness/rarity are
+            // card-space and belong to other paths. Value snapping matches narrow_rec's `price` closure.
+            let (idx, op, value) = match (lhs, rhs) {
+                (NumExpr::Field(NumField::PriceUsd), NumExpr::Const(v)) => (&indexes.price_usd, *op, snap_to_nearest_cent(*v * PRICE_CENTS_PER_DOLLAR)),
+                (NumExpr::Const(v), NumExpr::Field(NumField::PriceUsd)) => (&indexes.price_usd, flip_op(*op), snap_to_nearest_cent(*v * PRICE_CENTS_PER_DOLLAR)),
+                (NumExpr::Field(NumField::CollectorNumberInt), NumExpr::Const(v)) => (&indexes.collector_number, *op, *v),
+                (NumExpr::Const(v), NumExpr::Field(NumField::CollectorNumberInt)) => (&indexes.collector_number, flip_op(*op), *v),
+                _ => return None,
+            };
+            match int_range_bounds(op, value)? {
+                None => Some((idx, 0, 0)),
+                Some((lo, hi)) => Some((idx, lo, hi)),
+            }
+        }
+        FilterExpr::DateCmp { op, value } => {
+            let (lo, hi) = date_range_bounds(*op, *value)?;
+            Some((&indexes.released_at, lo, hi))
+        }
+        FilterExpr::YearCmp { op, year } => {
+            let (lo, hi) = year_range_bounds(*op, *year)?;
+            Some((&indexes.released_at, lo, hi))
+        }
+        _ => None,
+    }
+}
+
+/// Page for a `unique=printing` bare-range query ordered by a *card-level* key: walk that key's
+/// precomputed card permutation, emit each card's matching printings, stop once the page is full.
+/// A card-level sort key is shared by all of a card's printings, so card order is printing order;
+/// within a card, printings order by `sort_key_bits` then pid — byte-identical to the streamed
+/// path's emission (`run_query_streamed`), just without the O(n) count pass, since the caller
+/// already has the exact `total` from the index.
+#[allow(clippy::too_many_arguments)]
+fn walk_printing_page<'a>(
+    cards: &'a [AOracleCard],
+    printings: &'a [APrinting],
+    offsets: &AOffsets,
+    strings: &AStrings,
+    leaf: &FilterExpr,
+    sort_col: SortCol,
+    descending: bool,
+    limit: usize,
+    page_offset: usize,
+    perm: &Archived<Vec<u32>>,
+) -> Vec<(&'a AOracleCard, &'a APrinting)> {
+    let residual: [&FilterExpr; 1] = [leaf];
+    let cmp = |a: &Match, b: &Match| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2));
+    let mut page: Vec<(&AOracleCard, &APrinting)> = Vec::with_capacity(limit);
+    let mut scratch: Vec<Match> = Vec::new();
+    let mut skip = page_offset;
+    for cid in perm.iter().map(|x| u32::from(*x)) {
+        let card = &cards[cid as usize];
+        let start = u32::from(offsets[cid as usize]) as usize;
+        let end   = u32::from(offsets[cid as usize + 1]) as usize;
+        scratch.clear();
+        for pid in start..end {
+            let p = &printings[pid];
+            if FilterExpr::residual_matches(card, p, strings, &residual, false) {
+                scratch.push((sort_key_bits(card, p, sort_col, descending), cid, pid as u32));
+            }
+        }
+        if scratch.is_empty() {
+            continue;
+        }
+        if skip >= scratch.len() {
+            skip -= scratch.len();
+            continue;
+        }
+        scratch.sort_unstable_by(cmp);
+        for m in scratch.iter().skip(skip) {
+            page.push((&cards[m.1 as usize], &printings[m.2 as usize]));
+            if page.len() == limit {
+                return page;
+            }
+        }
+        skip = 0;
+    }
+    page
+}
+
+/// Whether `filter` is a bare price comparison (either operand order) — the only range field that
+/// is also a sort column, so the only one an `order by usd` page can be served aligned.
+fn is_price_leaf(filter: &FilterExpr) -> bool {
+    matches!(
+        filter,
+        FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), .. }
+            | FilterExpr::NumericCmp { rhs: NumExpr::Field(NumField::PriceUsd), .. }
+    )
+}
+
+/// Page for a `unique=printing` price query ordered by `usd` (the aligned case). The price index's
+/// `[s, e)` slice is already value-sorted, so the page's value-buckets are found by count without
+/// touching most of the slice; only the bucket(s) the page overlaps are canonically re-sorted
+/// (their within-value order in the index is by pid, but the sort key ties on
+/// `(edhrec, prefer_score, pid)`, and price ties are large). The tiebreak does not flip with
+/// direction, so `descending` only reverses which buckets are walked first; the same
+/// `sort_key_bits`/`select_page` comparator orders the collected set, so the result is identical to
+/// the gathered path it replaces.
+#[allow(clippy::too_many_arguments)]
+fn aligned_page<'a>(
+    idx: &Archived<PrintingRangeIndex>,
+    s: usize,
+    e: usize,
+    cards: &'a [AOracleCard],
+    printings: &'a [APrinting],
+    printing_to_card: &AOffsets,
+    descending: bool,
+    page_offset: usize,
+    limit: usize,
+) -> Vec<(&'a AOracleCard, &'a APrinting)> {
+    // Walk value-buckets lazily *from the page's starting end* — `s` forward for ascending, `e`
+    // backward for descending — forming only the buckets the page touches and stopping once
+    // offset+limit items are covered. Whole buckets before the page are skipped by count without
+    // collecting them; the untouched remainder of the slice is never scanned at all (so the cost
+    // is O(touched buckets), not O(distinct values in the slice)).
+    let want = page_offset + limit;
+    let mut collected: Vec<u32> = Vec::new();
+    let mut cum = 0usize;
+    let mut first_touched_cum = 0usize;
+    let mut started = false;
+    let (mut lo, mut hi) = (s, e);
+    while lo < hi {
+        // The next value-bucket in page order (a maximal run of equal value).
+        let (bs, be) = if descending {
+            let v = u32::from(idx[hi - 1].0);
+            let mut b = hi - 1;
+            while b > lo && u32::from(idx[b - 1].0) == v {
+                b -= 1;
+            }
+            (b, hi)
+        } else {
+            let v = u32::from(idx[lo].0);
+            let mut b = lo + 1;
+            while b < hi && u32::from(idx[b].0) == v {
+                b += 1;
+            }
+            (lo, b)
+        };
+        if descending { hi = bs } else { lo = be }
+        let sz = be - bs;
+        if !started && cum + sz <= page_offset {
+            cum += sz;
+            continue;
+        }
+        if !started {
+            started = true;
+            first_touched_cum = cum;
+        }
+        collected.extend((bs..be).map(|t| u32::from(idx[t].1)));
+        cum += sz;
+        if cum >= want {
+            break;
+        }
+    }
+    // Canonically sort the collected touched-bucket printings (small: ~one or two buckets) and
+    // window the page — same comparator select_page uses, so ordering matches the gathered path.
+    let mut matches: Vec<Match> = collected
+        .iter()
+        .map(|&pid| {
+            let cid = u32::from(printing_to_card[pid as usize]);
+            (sort_key_bits(&cards[cid as usize], &printings[pid as usize], SortCol::PriceUsd, descending), cid, pid)
+        })
+        .collect();
+    matches.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2)));
+    let start = page_offset - first_touched_cum;
+    let end = (start + limit).min(matches.len());
+    matches[start..end].iter().map(|m| (&cards[m.1 as usize], &printings[m.2 as usize])).collect()
+}
+
+/// Fast path for a *bare, broad* range predicate under `unique=printing`
+/// (docs/issues/local-engine-sorted-range-fastpath.md, PR 1). `total` is `k` from the range
+/// index's binary search — no full per-printing count pass — and the page is produced in order
+/// without materializing all `k` matches. Returns None (fall through to the general path) for
+/// anything it doesn't own: non-printing modes, a plane component, a non-bare/non-range filter, a
+/// selective range (the existing narrowing already wins, and restricting the walk to dense
+/// predicates keeps its worst case bounded), or an order-by without a card permutation (e.g. the
+/// range field itself — deferred).
+#[allow(clippy::too_many_arguments)]
+fn printing_range_fastpath<'a>(
+    cards: &'a [AOracleCard],
+    printings: &'a [APrinting],
+    offsets: &AOffsets,
+    strings: &AStrings,
+    filter: &FilterExpr,
+    indexes: &Archived<CardIndexes>,
+    sort_col: SortCol,
+    descending: bool,
+    limit: usize,
+    page_offset: usize,
+) -> Option<(usize, Vec<(&'a AOracleCard, &'a APrinting)>)> {
+    let (idx, lo, hi) = bare_range_bounds(filter, indexes)?;
+    let s = idx.partition_point(|p| u32::from(p.0) < lo);
+    let e = idx.partition_point(|p| u32::from(p.0) < hi);
+    let k = e - s;
+    if !range_too_broad_to_narrow(k, idx.len()) {
+        return None; // selective: the existing narrowing path narrows tightly and wins
+    }
+    // total = matching printings = k (each priced printing in [lo, hi) is one row; NULL-valued
+    // printings are absent from the index and don't match). Same value the count pass would sum.
+    if k == 0 || page_offset >= k {
+        return Some((k, Vec::new()));
+    }
+    // Aligned: order by the range field itself. `usd` is the only range field that is also a sort
+    // column, and only a price predicate makes `idx` the value-sorted permutation for that sort;
+    // a non-price predicate ordered by usd has no aligned mapping (and no permutation) — bail.
+    if matches!(sort_col, SortCol::PriceUsd) {
+        return is_price_leaf(filter)
+            .then(|| (k, aligned_page(idx, s, e, cards, printings, &indexes.printing_to_card, descending, page_offset, limit)));
+    }
+    // The walk reproduces run_query_streamed's *stream* emission (per-card-contiguous), which the
+    // general path only uses above STREAM_MIN_MATCHES; at or below it, run_query_streamed gathers
+    // and sorts globally, ordering full-sort-key ties across cards by pid instead. Bail there so
+    // the fastpath never claims a range the general path would gather. The band is narrow
+    // (NARROW_FLOOR < k <= STREAM_MIN_MATCHES, i.e. 1000 < k <= 1024) and only reachable on a tiny
+    // index (broad needs k > index_len/4, so index_len < ~4096) -- never in production, where broad
+    // means tens of thousands. aligned_page above matches the gathered path directly, so it's exempt.
+    if k <= *STREAM_MIN_MATCHES {
+        return None;
+    }
+    let perm = indexes.sort_perms.get(sort_col, descending)?;
+    if perm.len() != cards.len() {
+        return None;
+    }
+    Some((k, walk_printing_page(cards, printings, offsets, strings, filter, sort_col, descending, limit, page_offset, perm)))
+}
+
 fn run_query<'a>(
     cards: &'a [AOracleCard],
     printings: &'a [APrinting],
@@ -3741,6 +3997,18 @@ fn run_query<'a>(
         "printing" => Mode::Printing,
         _          => Mode::Card,
     };
+
+    // PR 1 (docs/issues/local-engine-sorted-range-fastpath.md): a bare, broad range predicate
+    // under unique=printing gets its total from the range index's binary search and its page from
+    // an early-stopping permutation walk, skipping the O(n) count pass the general path pays.
+    // Requires no plane component (else the plane's own predicate must also hold, which this
+    // ignores); everything unrecognized returns None and falls through unchanged.
+    if *PRINTING_RANGE_FASTPATH != 0 && matches!(mode, Mode::Printing) && plane.is_none() && !cards.is_empty()
+        && let Some(result) =
+            printing_range_fastpath(cards, printings, offsets, strings, filter, indexes, sort_col, descending, limit, page_offset)
+    {
+        return result;
+    }
 
     // #634 Step 2: when the filter fully consumed to True (split_planes ate
     // the whole thing), the plane bitmap IS the exact match set at any

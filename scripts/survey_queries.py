@@ -62,8 +62,12 @@ _REGEX_FRAGS = ["name:/^gob/", "o:/draw .* cards?/", "name:/dragon$/", "o:/^flyi
 _ANCHOR_P = 0.5  # chance an arith/regex fragment gets a dimension-fragment anchor
 
 WARMUP = 3
-WINDOW_S = 0.15
-MAX_ITERS = 500
+# Per-query timing budget: stop at whichever of WINDOW_S / MAX_ITERS comes first, reporting the
+# min (best) over that many samples. 0.3s/1000 was chosen to get the per-query min's run-to-run
+# noise floor under a few percent (measured: ~±3% on min_ms) without paying more runtime for a
+# tighter floor than the comparison needs; 0.15s/500 left a noisier tail.
+WINDOW_S = 0.3
+MAX_ITERS = 1000
 
 WILD_CORPUS = REPO_ROOT / "benchmarks/wild-queries/wild-corpus.jsonl"
 # Fraction of the wild sample drawn from bare name lookups. They dominate the
