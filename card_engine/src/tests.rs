@@ -1639,6 +1639,19 @@ fn fuzz_targeted(rng: &mut rand::rngs::SmallRng) -> Vec<FuzzSpec> {
         FuzzSpec::Or(vec![price, cmc]),
         // Arithmetic leaf inside a compound (its own operands already mix card + printing fields).
         FuzzSpec::And(vec![arith, col]),
+        // Number of printing-varying predicates in one And drives distinct Y-predicate paths:
+        //   0 -> card-invariant, exact card-level answer (all_match promotes);
+        //   1 -> a single existence projection + witness-printing selection;
+        //   2+ -> the shared-witness path -- ∃p:A(p)∧B(p) != (∃p:A(p))∧(∃p:B(p)), so compile_plane
+        //         must decline to compose and fall back to per-printing residual verification.
+        // fuzz_gen hits all three probabilistically; guarantee 0 and 2+ here across field mixes.
+        FuzzSpec::And(vec![fuzz_leaf_cmc(rng), fuzz_leaf_color(rng)]),                       // 0 printing-varying
+        FuzzSpec::And(vec![fuzz_leaf_legality(rng), fuzz_leaf_border(rng)]),                 // 2 existential (legality+border)
+        FuzzSpec::And(vec![fuzz_leaf_rarity(rng), fuzz_leaf_border(rng)]),                   // 2 existential (rarity+border)
+        FuzzSpec::And(vec![fuzz_leaf_price(rng), fuzz_leaf_date(rng)]),                      // 2 printing-range (price+date)
+        FuzzSpec::And(vec![fuzz_leaf_collector_number(rng), fuzz_leaf_price(rng)]),          // 2 printing-range (cn+price)
+        FuzzSpec::And(vec![fuzz_leaf_rarity(rng), fuzz_leaf_price(rng)]),                    // existential + range
+        FuzzSpec::And(vec![fuzz_leaf_legality(rng), fuzz_leaf_rarity(rng), fuzz_leaf_border(rng)]), // 3 existential
     ]
 }
 
