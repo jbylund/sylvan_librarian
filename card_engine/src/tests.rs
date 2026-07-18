@@ -1459,6 +1459,9 @@ enum FuzzLeaf {
     // one of the fixed operand pairs in `fuzz_arith_pair` (kept as an id, not a stored NumExpr,
     // so FuzzLeaf stays Clone without NumExpr needing to be).
     Arith { shape: u8, op: CmpOp },
+    // Set-containment against a single value (`CollectionCmp`) — subtypes/keywords/tags. `Ge` (`:`)
+    // narrows via the tag index; other ops are residual. `value` resolves to a vocab id via bind.
+    Collection { field: CollField, op: CmpOp, value: String },
 }
 
 /// The `(lhs, rhs)` operand pair for an `Arith` leaf's `shape`, built fresh each call.
@@ -1563,8 +1566,24 @@ fn fuzz_leaf_arith(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
     FuzzSpec::Leaf(FuzzLeaf::Arith { shape: rng.random_range(0..4u8), op: fuzz_op(rng) })
 }
 
+// Creature subtypes with corpus-like frequency bias (human very common, monkey rare). Weights
+// drive how often each is *populated* on a card; queries sample uniformly so rare ones still get
+// exercised.
+const FUZZ_SUBTYPES: [(&str, u32); 14] = [
+    ("human", 30), ("goblin", 12), ("elf", 10), ("soldier", 8), ("wizard", 7), ("zombie", 6),
+    ("beast", 6), ("spirit", 5), ("warrior", 5), ("dragon", 4), ("angel", 3), ("cat", 3),
+    ("monkey", 1), ("octopus", 1),
+];
+fn fuzz_leaf_subtype(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
+    // Bias toward Ge (containment, the indexed path) but include the residual ops (=, >, !=).
+    const OPS: [CmpOp; 6] = [CmpOp::Ge, CmpOp::Ge, CmpOp::Ge, CmpOp::Eq, CmpOp::Gt, CmpOp::Ne];
+    let op = OPS[rng.random_range(0..OPS.len())];
+    let value = FUZZ_SUBTYPES[rng.random_range(0..FUZZ_SUBTYPES.len())].0.to_string();
+    FuzzSpec::Leaf(FuzzLeaf::Collection { field: CollField::Subtypes, op, value })
+}
+
 fn fuzz_leaf(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
-    match rng.random_range(0..14u8) {
+    match rng.random_range(0..15u8) {
         0 => fuzz_leaf_color(rng),
         1 => fuzz_leaf_type(rng),
         2 => fuzz_leaf_cmc(rng),
@@ -1578,6 +1597,7 @@ fn fuzz_leaf(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
         10 => fuzz_leaf_year(rng),
         11 => fuzz_leaf_border(rng),
         12 => fuzz_leaf_legality(rng),
+        13 => fuzz_leaf_subtype(rng),
         _ => fuzz_leaf_arith(rng),
     }
 }
@@ -1672,12 +1692,28 @@ fn fuzz_build_filter(spec: &FuzzSpec) -> FilterExpr {
             let (lhs, rhs) = fuzz_arith_pair(*shape);
             FilterExpr::NumericCmp { lhs, op: *op, rhs }
         }
+        FuzzSpec::Leaf(FuzzLeaf::Collection { field, op, value }) => {
+            FilterExpr::CollectionCmp { field: *field, op: *op, value: value.clone(), value_id: None }
+        }
         FuzzSpec::Leaf(FuzzLeaf::Border { value }) => FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value: value.clone() },
         FuzzSpec::Leaf(FuzzLeaf::Legality { shift, expected }) => FilterExpr::Legality { shift: *shift, expected: *expected },
         FuzzSpec::And(v) => FilterExpr::And(v.iter().map(fuzz_build_filter).collect()),
         FuzzSpec::Or(v) => FilterExpr::Or(v.iter().map(fuzz_build_filter).collect()),
         FuzzSpec::Not(b) => FilterExpr::Not(Box::new(fuzz_build_filter(b))),
     }
+}
+
+/// Build the filter for `spec` and bind it against the store's vocabs -- resolves CollectionCmp
+/// value ids (and ArtistMatch/ManaCostCmp when those land), a no-op for the numeric/card-invariant
+/// leaves. The real query path binds before matching, and both the engine and the reference
+/// evaluator (`FilterExpr::matches`) need the resolved ids, so every built filter goes through here.
+fn fuzz_bound_filter(spec: &FuzzSpec, archived: &Archived<CardData>) -> FilterExpr {
+    let mut f = fuzz_build_filter(spec);
+    f.bind(
+        &archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab,
+        &archived.mana_vocab, &archived.indexes.flavor, &archived.strings,
+    );
+    f
 }
 
 fn fuzz_op_str(op: CmpOp) -> &'static str {
@@ -1718,6 +1754,13 @@ fn fuzz_describe(spec: &FuzzSpec) -> String {
         FuzzSpec::Leaf(FuzzLeaf::Arith { shape, op }) => {
             let (lhs, rhs) = fuzz_arith_pair(*shape);
             format!("{}{}{}", fuzz_num_expr_str(&lhs), fuzz_op_str(*op), fuzz_num_expr_str(&rhs))
+        }
+        FuzzSpec::Leaf(FuzzLeaf::Collection { field, op, value }) => {
+            let f = match field {
+                CollField::Subtypes => "subtypes", CollField::Keywords => "keywords", CollField::OracleTags => "oracle_tags",
+                CollField::ArtTags => "art_tags", CollField::IsTags => "is_tags", CollField::FrameData => "frame_data",
+            };
+            format!("{f}{}{value}", fuzz_op_str(*op))
         }
         FuzzSpec::Leaf(FuzzLeaf::Border { value }) => format!("border=={value}"),
         FuzzSpec::Leaf(FuzzLeaf::Legality { shift, expected }) => format!("legality(shift={shift:?}, expected={expected:#04b})"),
@@ -1782,6 +1825,10 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
                 let toughness = (i32::from(power) + rng.random_range(-1..=2)).clamp(1, 13) as i8;
                 card.creature_power = Some(power);
                 card.creature_toughness = Some(toughness);
+                // Subtypes are a creatures-only collection (like power/toughness), 1-2 with the
+                // biased frequency (human common, monkey rare). Interned into the shared coll vocab.
+                let subs: Vec<&str> = (0..rng.random_range(1..=2)).map(|_| fuzz_weighted(rng, &FUZZ_SUBTYPES)).collect();
+                card.card_subtypes = vocab_ids(&mut vocab, &subs);
             }
             1 => card.planeswalker_loyalty = Some((2 + i32::from(cmc) / 2 + rng.random_range(0..=2)).clamp(2, 8) as u8),
             _ => {}
@@ -1866,6 +1913,7 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
     // for correctness, not just coverage: an empty range index narrows a matching predicate to the
     // empty (tight) set, which would make run_query wrongly return nothing.
     data.indexes.rarity = build_rarity_index(&data.printings, &data.offsets);
+    data.indexes.subtypes = build_tag_index(&data.cards, &data.coll_vocab, |c| &c.card_subtypes);
     data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
     data.indexes.legal_divergent = build_divergent_ids(&data.cards);
     data.indexes.sort_perms = build_sort_permutations(&data.cards, &data.printings, &data.offsets);
@@ -1927,7 +1975,7 @@ fn fuzz_reference_total(archived: &Archived<CardData>, f: &FilterExpr, mode: &st
 fn fuzz_check_case(archived: &Archived<CardData>, spec: &FuzzSpec, ctx: &str, orderby: &str, direction: &str) {
     // >= any possible total, so the offset-0 page is the complete ordered result to slice against.
     let full_limit = archived.printings.len().max(1);
-    let ref_filter = fuzz_build_filter(spec);
+    let ref_filter = fuzz_bound_filter(spec, archived);
     let strings = &archived.strings;
     let ids = |page: &[(&Archived<OracleCard>, &Archived<Printing>)]| -> Vec<u128> {
         page.iter().map(|(_, p)| u128::from(p.scryfall_id)).collect()
@@ -1948,13 +1996,13 @@ fn fuzz_check_case(archived: &Archived<CardData>, spec: &FuzzSpec, ctx: &str, or
 
         // Full page (offset 0): total + every row satisfies. Unplaned = raw filter, plane = None;
         // plane path = split_planes + the promoted plane (unique_is_card matches the real caller).
-        let mut plain = fuzz_build_filter(spec);
+        let mut plain = fuzz_bound_filter(spec, archived);
         let (t0, p0) = run_query(
             &archived.cards, &archived.printings, &archived.offsets, strings,
             &mut plain, None, mode, "default", orderby, direction, full_limit, 0, &archived.indexes,
         );
         let (pe, mut residual) = split_planes(
-            fuzz_build_filter(spec), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, unique_is_card,
+            fuzz_bound_filter(spec, archived), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, unique_is_card,
         );
         let (t1, p1) = run_query(
             &archived.cards, &archived.printings, &archived.offsets, strings,
@@ -1975,7 +2023,7 @@ fn fuzz_check_case(archived: &Archived<CardData>, spec: &FuzzSpec, ctx: &str, or
             let plimit = ((expected - offset) / 2).max(1);
             let (full0, full1) = (ids(&p0), ids(&p1));
 
-            let mut plain_pg = fuzz_build_filter(spec);
+            let mut plain_pg = fuzz_bound_filter(spec, archived);
             let (_, pg0) = run_query(
                 &archived.cards, &archived.printings, &archived.offsets, strings,
                 &mut plain_pg, None, mode, "default", orderby, direction, plimit, offset, &archived.indexes,
@@ -1987,7 +2035,7 @@ fn fuzz_check_case(archived: &Archived<CardData>, spec: &FuzzSpec, ctx: &str, or
             all_satisfy(&pg0, "unplaned paginated", mode);
 
             let (pe_pg, mut residual_pg) = split_planes(
-                fuzz_build_filter(spec), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, unique_is_card,
+                fuzz_bound_filter(spec, archived), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, unique_is_card,
             );
             let (_, pg1) = run_query(
                 &archived.cards, &archived.printings, &archived.offsets, strings,
@@ -2010,7 +2058,7 @@ fn fuzz_check_case(archived: &Archived<CardData>, spec: &FuzzSpec, ctx: &str, or
 fn fuzz_check_row_identity(
     archived: &Archived<CardData>, spec: &FuzzSpec, ctx: &str, orderby: &str, direction: &str, mode: &str, limit: usize, offset: usize,
 ) {
-    let f = fuzz_build_filter(spec);
+    let f = fuzz_bound_filter(spec, archived);
     let strings = &archived.strings;
     let check = |page: &[(&Archived<OracleCard>, &Archived<Printing>)], label: &str| {
         for &(card, p) in page {
@@ -2021,14 +2069,14 @@ fn fuzz_check_row_identity(
             );
         }
     };
-    let mut plain = fuzz_build_filter(spec);
+    let mut plain = fuzz_bound_filter(spec, archived);
     let (_, p0) = run_query(
         &archived.cards, &archived.printings, &archived.offsets, strings,
         &mut plain, None, mode, "default", orderby, direction, limit, offset, &archived.indexes,
     );
     check(&p0, "unplaned");
     let (pe, mut residual) = split_planes(
-        fuzz_build_filter(spec), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, mode == "card",
+        fuzz_bound_filter(spec, archived), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, mode == "card",
     );
     let (_, p1) = run_query(
         &archived.cards, &archived.printings, &archived.offsets, strings,
