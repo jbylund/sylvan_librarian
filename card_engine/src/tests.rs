@@ -1462,6 +1462,9 @@ enum FuzzLeaf {
     // Set-containment against a single value (`CollectionCmp`) — subtypes/keywords/tags. `Ge` (`:`)
     // narrows via the tag index; other ops are residual. `value` resolves to a vocab id via bind.
     Collection { field: CollField, op: CmpOp, value: String },
+    // Artist predicate: `TextContains(ArtistLower)` that bind() rewrites to `ArtistMatch` (printing-
+    // space, CSR-indexed via the artist vocab). `word` is a lowercased artist name.
+    Artist { word: String },
 }
 
 /// The `(lhs, rhs)` operand pair for an `Arith` leaf's `shape`, built fresh each call.
@@ -1566,24 +1569,81 @@ fn fuzz_leaf_arith(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
     FuzzSpec::Leaf(FuzzLeaf::Arith { shape: rng.random_range(0..4u8), op: fuzz_op(rng) })
 }
 
-// Creature subtypes with corpus-like frequency bias (human very common, monkey rare). Weights
-// drive how often each is *populated* on a card; queries sample uniformly so rare ones still get
-// exercised.
+// Collection vocab tables with corpus-like frequency bias (measured from the blue store).
+// Lowercased for a consistent fuzz vocab. Weights drive how often each value is *populated*;
+// queries sample uniformly so rare values still exercise the low-selectivity index postings.
+
+// Creature subtypes (human very common, monkey rare). Card-space, populated only on creatures
+// (which also get the creature type bit set, so `t:creature` and `type:human` correlate).
 const FUZZ_SUBTYPES: [(&str, u32); 14] = [
     ("human", 30), ("goblin", 12), ("elf", 10), ("soldier", 8), ("wizard", 7), ("zombie", 6),
     ("beast", 6), ("spirit", 5), ("warrior", 5), ("dragon", 4), ("angel", 3), ("cat", 3),
     ("monkey", 1), ("octopus", 1),
 ];
-fn fuzz_leaf_subtype(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
-    // Bias toward Ge (containment, the indexed path) but include the residual ops (=, >, !=).
+// Keywords span every card type (Flying dominant; Fateseal a real rare tail). Card-space.
+const FUZZ_KEYWORDS: [(&str, u32); 11] = [
+    ("flying", 30), ("enchant", 11), ("trample", 9), ("vigilance", 6), ("haste", 6),
+    ("equip", 5), ("flash", 5), ("mill", 5), ("scry", 4), ("cycling", 4), ("fateseal", 1),
+];
+// Oracle tags: the corpus's densest collection (avg ~12/card, ~4k distinct). Card-space.
+const FUZZ_ORACLE_TAGS: [(&str, u32); 11] = [
+    ("triggered-ability", 40), ("activated-ability", 34), ("cycle", 31), ("card-names", 27),
+    ("removal", 18), ("card-advantage", 17), ("removal-creature", 15), ("evasion", 13),
+    ("spot-removal", 13), ("draw", 12), ("typal-snail", 1),
+];
+// Art tags: densest of all (~10k distinct); bortuk-bonerattle is a real rare tail. Printing-space.
+const FUZZ_ART_TAGS: [(&str, u32); 11] = [
+    ("plane", 40), ("planar-origin", 20), ("location", 15), ("pose", 15), ("signature", 13),
+    ("artist-signature", 13), ("animal", 12), ("human", 11), ("character", 11), ("weapon", 10),
+    ("bortuk-bonerattle", 1),
+];
+// Is-tags are empty in the current corpus, so a synthetic but realistic Scryfall `is:` vocab keeps
+// the leaf exercised rather than always-empty. Printing-space.
+const FUZZ_IS_TAGS: [(&str, u32); 8] = [
+    ("reprint", 30), ("promo", 12), ("firstprint", 10), ("fullart", 6), ("foil", 6),
+    ("textless", 3), ("oversized", 2), ("funny", 1),
+];
+// Frame data: tiny vocab (~29 distinct); "2015" is dominant and dropped by the thresholded index
+// (exercising that drop path). Printing-space.
+const FUZZ_FRAME_DATA: [(&str, u32); 10] = [
+    ("2015", 50), ("2003", 13), ("1997", 9), ("legendary", 8), ("inverted", 6),
+    ("1993", 5), ("extendedart", 4), ("showcase", 3), ("enchantment", 2), ("etched", 1),
+];
+// Artists: own vocab (~2.2k distinct, no NULLs in corpus). Printing-space, matched via ArtistMatch.
+const FUZZ_ARTISTS: [(&str, u32); 11] = [
+    ("john avon", 13), ("kev walker", 11), ("svetlin velinov", 8), ("greg staples", 7),
+    ("daarken", 7), ("dan frazier", 7), ("mark tedin", 7), ("adam paquette", 7),
+    ("chris rahn", 6), ("rebecca guay", 4), ("yan li", 1),
+];
+
+/// Sample `count` weighted picks from a collection table (duplicates allowed; `vocab_ids` sorts and
+/// dedups them into the id-sorted set the set-like collections expect at load).
+fn fuzz_collection_picks<'a>(rng: &mut rand::rngs::SmallRng, table: &[(&'a str, u32)], count: usize) -> Vec<&'a str> {
+    (0..count).map(|_| fuzz_weighted(rng, table)).collect()
+}
+
+/// A `CollectionCmp` leaf over `field`, its value sampled from `table`. Biases toward Ge (`:`, the
+/// indexed containment path) with the residual ops (=, >, !=) mixed in.
+fn fuzz_leaf_collection(rng: &mut rand::rngs::SmallRng, field: CollField, table: &[(&str, u32)]) -> FuzzSpec {
     const OPS: [CmpOp; 6] = [CmpOp::Ge, CmpOp::Ge, CmpOp::Ge, CmpOp::Eq, CmpOp::Gt, CmpOp::Ne];
     let op = OPS[rng.random_range(0..OPS.len())];
-    let value = FUZZ_SUBTYPES[rng.random_range(0..FUZZ_SUBTYPES.len())].0.to_string();
-    FuzzSpec::Leaf(FuzzLeaf::Collection { field: CollField::Subtypes, op, value })
+    let value = table[rng.random_range(0..table.len())].0.to_string();
+    FuzzSpec::Leaf(FuzzLeaf::Collection { field, op, value })
+}
+
+fn fuzz_leaf_subtype(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
+    fuzz_leaf_collection(rng, CollField::Subtypes, &FUZZ_SUBTYPES)
+}
+
+/// `artist:<name>` — a full lowercased name (the common `a:` substring-contains shape), which
+/// bind() resolves against the artist vocab and rewrites to `ArtistMatch`.
+fn fuzz_leaf_artist(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
+    let word = FUZZ_ARTISTS[rng.random_range(0..FUZZ_ARTISTS.len())].0.to_string();
+    FuzzSpec::Leaf(FuzzLeaf::Artist { word })
 }
 
 fn fuzz_leaf(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
-    match rng.random_range(0..15u8) {
+    match rng.random_range(0..21u8) {
         0 => fuzz_leaf_color(rng),
         1 => fuzz_leaf_type(rng),
         2 => fuzz_leaf_cmc(rng),
@@ -1598,6 +1658,12 @@ fn fuzz_leaf(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
         11 => fuzz_leaf_border(rng),
         12 => fuzz_leaf_legality(rng),
         13 => fuzz_leaf_subtype(rng),
+        14 => fuzz_leaf_collection(rng, CollField::Keywords, &FUZZ_KEYWORDS),
+        15 => fuzz_leaf_collection(rng, CollField::OracleTags, &FUZZ_ORACLE_TAGS),
+        16 => fuzz_leaf_collection(rng, CollField::ArtTags, &FUZZ_ART_TAGS),
+        17 => fuzz_leaf_collection(rng, CollField::IsTags, &FUZZ_IS_TAGS),
+        18 => fuzz_leaf_collection(rng, CollField::FrameData, &FUZZ_FRAME_DATA),
+        19 => fuzz_leaf_artist(rng),
         _ => fuzz_leaf_arith(rng),
     }
 }
@@ -1695,6 +1761,9 @@ fn fuzz_build_filter(spec: &FuzzSpec) -> FilterExpr {
         FuzzSpec::Leaf(FuzzLeaf::Collection { field, op, value }) => {
             FilterExpr::CollectionCmp { field: *field, op: *op, value: value.clone(), value_id: None }
         }
+        FuzzSpec::Leaf(FuzzLeaf::Artist { word }) => {
+            FilterExpr::TextContains { field: TextSearchField::ArtistLower, word: word.clone() }
+        }
         FuzzSpec::Leaf(FuzzLeaf::Border { value }) => FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value: value.clone() },
         FuzzSpec::Leaf(FuzzLeaf::Legality { shift, expected }) => FilterExpr::Legality { shift: *shift, expected: *expected },
         FuzzSpec::And(v) => FilterExpr::And(v.iter().map(fuzz_build_filter).collect()),
@@ -1762,6 +1831,7 @@ fn fuzz_describe(spec: &FuzzSpec) -> String {
             };
             format!("{f}{}{value}", fuzz_op_str(*op))
         }
+        FuzzSpec::Leaf(FuzzLeaf::Artist { word }) => format!("artist:{word}"),
         FuzzSpec::Leaf(FuzzLeaf::Border { value }) => format!("border=={value}"),
         FuzzSpec::Leaf(FuzzLeaf::Legality { shift, expected }) => format!("legality(shift={shift:?}, expected={expected:#04b})"),
         FuzzSpec::And(v) => format!("AND({})", v.iter().map(fuzz_describe).collect::<Vec<_>>().join(", ")),
@@ -1801,12 +1871,20 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
     const BORDERS: [Option<&str>; 6] = [Some("black"), Some("white"), Some("borderless"), Some("gold"), Some("yellow"), None];
 
     let mut vocab = VocabInterner::new();
+    // Artists live in their own vocab (not the shared collection vocab), matched via ArtistMatch.
+    let mut artist_vocab = VocabInterner::new();
     let mut cards: Vec<OracleCard> = Vec::with_capacity(ncards);
     let mut counts: Vec<usize> = Vec::with_capacity(ncards);
     // Per-printing (rarity, border, legality word, collector number, price cents, released_at),
     // flat in card/printing order, applied after store_of lays out the printings.
     type PMeta = (Option<u8>, Option<&'static str>, u64, Option<u16>, Option<u32>, u32);
     let mut pmeta: Vec<PMeta> = Vec::new();
+    // Printing-space collections + artist vid, same flat card/printing order as pmeta. Interned here
+    // (while the vocabs are in scope) but only applied to the printings after store_of returns.
+    let mut art_meta: Vec<Vec<u16>> = Vec::new();
+    let mut is_meta: Vec<Vec<u16>> = Vec::new();
+    let mut frame_meta: Vec<Vec<u16>> = Vec::new();
+    let mut artist_meta: Vec<u16> = Vec::new();
 
     for i in 0..ncards {
         let mut card = stub_card(i as u128 + 1, fuzz_type_bits(rng), &[], &mut vocab);
@@ -1825,14 +1903,22 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
                 let toughness = (i32::from(power) + rng.random_range(-1..=2)).clamp(1, 13) as i8;
                 card.creature_power = Some(power);
                 card.creature_toughness = Some(toughness);
-                // Subtypes are a creatures-only collection (like power/toughness), 1-2 with the
-                // biased frequency (human common, monkey rare). Interned into the shared coll vocab.
-                let subs: Vec<&str> = (0..rng.random_range(1..=2)).map(|_| fuzz_weighted(rng, &FUZZ_SUBTYPES)).collect();
-                card.card_subtypes = vocab_ids(&mut vocab, &subs);
+                // Subtypes correlate with the creature type (real data: creature subtypes only
+                // appear on creatures, modulo the rare kindred/tribal tail we don't model). Set the
+                // bit so `t:creature` and `type:human` co-select. 1-2 subtypes, biased frequency.
+                card.card_types |= TYPE_CREATURE;
+                let n = rng.random_range(1..=2);
+                card.card_subtypes = vocab_ids(&mut vocab, &fuzz_collection_picks(rng, &FUZZ_SUBTYPES, n));
             }
             1 => card.planeswalker_loyalty = Some((2 + i32::from(cmc) / 2 + rng.random_range(0..=2)).clamp(2, 8) as u8),
             _ => {}
         }
+        // Keywords and oracle tags apply across all card types (unlike subtypes). vocab_ids sorts
+        // and dedups into the id-sorted set the engine binary-searches at match time. (Counts are
+        // pulled into locals so the fn call doesn't hold `rng` while `random_range` also needs it.)
+        let (nk, no) = (rng.random_range(0..=3), rng.random_range(0..=4));
+        card.card_keywords = vocab_ids(&mut vocab, &fuzz_collection_picks(rng, &FUZZ_KEYWORDS, nk));
+        card.card_oracle_tags = vocab_ids(&mut vocab, &fuzz_collection_picks(rng, &FUZZ_ORACLE_TAGS, no));
         let divergent = rng.random_bool(0.4);
         card.legality_divergent = divergent;
         // Printings per card is heavily skewed in the corpus (~41% have exactly one, long tail);
@@ -1893,11 +1979,20 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
             let year = fuzz_year_value(rng);
             let released = year * 10_000 + rng.random_range(1..=12u32) * 100 + rng.random_range(1..=28u32);
             pmeta.push((rarity, border, word, cn, price, released));
+            // Printing-space collections (sorted+deduped by vocab_ids) + one artist per printing
+            // (real data has no NULL artists). frame_data keeps "2015" dominant so the corpus-scale
+            // store exercises the thresholded-index drop.
+            let (na, ni, nf) = (rng.random_range(0..=4), rng.random_range(0..=2), rng.random_range(0..=2));
+            art_meta.push(vocab_ids(&mut vocab, &fuzz_collection_picks(rng, &FUZZ_ART_TAGS, na)));
+            is_meta.push(vocab_ids(&mut vocab, &fuzz_collection_picks(rng, &FUZZ_IS_TAGS, ni)));
+            frame_meta.push(vocab_ids(&mut vocab, &fuzz_collection_picks(rng, &FUZZ_FRAME_DATA, nf)));
+            artist_meta.push(artist_vocab.intern(fuzz_weighted(rng, &FUZZ_ARTISTS).to_string()).unwrap());
         }
         cards.push(card);
     }
 
     let mut data = store_of(cards, &counts, vocab);
+    data.artist_vocab = artist_vocab.strings;
     let mut interner = Interner::new();
     for (idx, (rarity, border, word, cn, price, released)) in pmeta.into_iter().enumerate() {
         data.printings[idx].card_rarity_int = rarity;
@@ -1906,6 +2001,10 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
         data.printings[idx].collector_number_int = cn;
         data.printings[idx].price_usd = price;
         data.printings[idx].released_at_int = Some(released);
+        data.printings[idx].card_art_tags = std::mem::take(&mut art_meta[idx]);
+        data.printings[idx].card_is_tags = std::mem::take(&mut is_meta[idx]);
+        data.printings[idx].card_frame_data = std::mem::take(&mut frame_meta[idx]);
+        data.printings[idx].card_artist_vid = artist_meta[idx];
     }
     data.strings = interner.strings;
     // store_of built indexes from the placeholder printings and left the numeric/range indexes at
@@ -1913,7 +2012,16 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
     // for correctness, not just coverage: an empty range index narrows a matching predicate to the
     // empty (tight) set, which would make run_query wrongly return nothing.
     data.indexes.rarity = build_rarity_index(&data.printings, &data.offsets);
+    // Collection narrowing indexes — load-bearing like the range indexes above: an unbuilt index
+    // narrows a populated predicate to the empty set, disagreeing with the residual `matches` path.
+    // frame_data is thresholded (drops the dominant "2015"), matching the engine's build.
     data.indexes.subtypes = build_tag_index(&data.cards, &data.coll_vocab, |c| &c.card_subtypes);
+    data.indexes.keywords = build_tag_index(&data.cards, &data.coll_vocab, |c| &c.card_keywords);
+    data.indexes.oracle_tags = build_tag_index(&data.cards, &data.coll_vocab, |c| &c.card_oracle_tags);
+    data.indexes.art_tags = build_tag_index(&data.printings, &data.coll_vocab, |p| &p.card_art_tags);
+    data.indexes.is_tags = build_tag_index(&data.printings, &data.coll_vocab, |p| &p.card_is_tags);
+    data.indexes.frame_data = build_thresholded_tag_index(&data.printings, &data.coll_vocab, |p| &p.card_frame_data);
+    data.indexes.artists = build_artist_index(&data.printings, data.artist_vocab.len());
     data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
     data.indexes.legal_divergent = build_divergent_ids(&data.cards);
     data.indexes.sort_perms = build_sort_permutations(&data.cards, &data.printings, &data.offsets);
