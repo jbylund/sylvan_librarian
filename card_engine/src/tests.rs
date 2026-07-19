@@ -2343,6 +2343,18 @@ fn fuzz_check_case(archived: &Archived<CardData>, spec: &FuzzSpec, ctx: &str, or
         let expected = fuzz_reference_total(archived, &ref_filter, mode);
         let unique_is_card = mode == "card";
 
+        // #702 PR1: the standalone cardinality estimator's SOUND bounds must
+        // bracket the mode="card" reference count for every query. `ref_filter`
+        // is the full bound filter (no plane split — matches fuzz_reference_total).
+        if mode == "card" {
+            let c = super::estimator::estimate_cardinality(&ref_filter, &archived.indexes, &archived.offsets);
+            assert!(
+                (c.lo as usize) <= expected && expected <= (c.hi as usize),
+                "estimator bounds unsound: mode=card expected={expected} bounds=[{},{}] est={} ({ctx})",
+                c.lo, c.hi, c.est,
+            );
+        }
+
         // Full page (offset 0): total + every row satisfies. Unplaned = raw filter, plane = None;
         // plane path = split_planes + the promoted plane (unique_is_card matches the real caller).
         let mut plain = fuzz_bound_filter(spec, archived);
@@ -2523,6 +2535,77 @@ fn fuzz_row_identity_matches_reference() {
         let ctx = format!("corpus-rowid, filter={}", fuzz_describe(&spec));
         fuzz_check_row_identity(archived, &spec, &ctx, orderby, direction, mode, 100, offset);
     }
+}
+
+/// #702 PR1 estimator accuracy report (NOT an assertion — a reporting tool).
+/// Runs a spread of fuzz queries against a corpus store, comparing the point
+/// estimate and bounds to the mode="card" reference count, and prints the
+/// error distribution. Run with:
+///   cargo test --release estimator_accuracy -- --ignored --nocapture
+#[test]
+#[ignore = "estimator accuracy report; cargo test estimator_accuracy -- --ignored --nocapture"]
+fn estimator_accuracy() {
+    use rand::SeedableRng;
+    const CORPUS_CARDS: usize = 6_000;
+    const QUERIES: usize = 5_000;
+    const MAX_DEPTH: u8 = 3;
+
+    let mut rng = rand::rngs::SmallRng::seed_from_u64(4_242);
+    let data = fuzz_store_n(&mut rng, CORPUS_CARDS);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let n_cards = archived.cards.len();
+
+    let (mut exact, mut within_2x, mut worse) = (0u32, 0u32, 0u32);
+    let mut tight_bounds = 0u32; // bounds narrower than half the universe
+    let mut collapsed_bounds = 0u32; // lo == hi (a fully-pinned answer)
+    let mut unsound = 0u32; // must stay 0
+    let mut total = 0u32;
+
+    for _ in 0..QUERIES {
+        let spec = fuzz_gen(&mut rng, MAX_DEPTH);
+        let f = fuzz_bound_filter(&spec, archived);
+        let truth = fuzz_reference_total(archived, &f, "card");
+        let c = super::estimator::estimate_cardinality(&f, &archived.indexes, &archived.offsets);
+        total += 1;
+
+        if (c.lo as usize) > truth || truth > (c.hi as usize) {
+            unsound += 1;
+            eprintln!("UNSOUND: truth={truth} bounds=[{},{}] filter={}", c.lo, c.hi, fuzz_describe(&spec));
+        }
+
+        // Point-estimate accuracy vs truth.
+        let est = c.est as usize;
+        if est == truth {
+            exact += 1;
+        } else {
+            let (a, b) = (est.max(1), truth.max(1));
+            if a <= 2 * b && b <= 2 * a {
+                within_2x += 1;
+            } else {
+                worse += 1;
+            }
+        }
+
+        // Bounds tightness.
+        let width = (c.hi - c.lo) as usize;
+        if width * 2 < n_cards {
+            tight_bounds += 1;
+        }
+        if c.lo == c.hi {
+            collapsed_bounds += 1;
+        }
+    }
+
+    let pct = |x: u32| 100.0 * f64::from(x) / f64::from(total);
+    eprintln!("\n=== #702 estimator accuracy ({total} queries, {n_cards} cards) ===");
+    eprintln!("unsound bounds violations : {unsound} (MUST be 0)");
+    eprintln!("point est == truth        : {exact} ({:.1}%)", pct(exact));
+    eprintln!("point est within 2x       : {within_2x} ({:.1}%)", pct(within_2x));
+    eprintln!("point est worse than 2x   : {worse} ({:.1}%)", pct(worse));
+    eprintln!("bounds width < N/2        : {tight_bounds} ({:.1}%)", pct(tight_bounds));
+    eprintln!("bounds collapsed (lo==hi) : {collapsed_bounds} ({:.1}%)", pct(collapsed_bounds));
+    assert_eq!(unsound, 0, "estimator produced unsound bounds — see stderr");
 }
 
 /// format:A AND format:B (two distinct formats) can't be answered by ANDing

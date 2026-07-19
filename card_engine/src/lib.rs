@@ -790,6 +790,7 @@ mod filter;
 use filter::*;
 mod planes;
 use planes::*;
+mod estimator;
 
 // ─── Trigram index ────────────────────────────────────────────────────────────
 
