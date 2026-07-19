@@ -1473,6 +1473,12 @@ enum FuzzLeaf {
     TextContains { field: TextSearchField, needle: String },
     // Whole-name comparison (`!name` and ordered variants) — the ExactName path via TextExact.
     NameExact { op: CmpOp, value: String },
+    // Mana cost comparison (`mana <op> <cost>`): query core pips packed into lanes + hybrid symbols
+    // (bind() resolves to mana-vocab ids) + cmc. Card-invariant; SWAR lane arithmetic, no index.
+    ManaCost { op: CmpOp, core: u64, hybrids: Vec<(String, u8)>, cmc: f32 },
+    // Devotion (`devotion <op> <pips>`): queried WUBRGC counts in the low six lanes. Card-invariant;
+    // exercises the devotion planes (built from card.mana_cost.devotion).
+    Devotion { op: CmpOp, pips: u64 },
 }
 
 /// The `(lhs, rhs)` operand pair for an `Arith` leaf's `shape`, built fresh each call.
@@ -1718,8 +1724,76 @@ fn fuzz_leaf_name_exact(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
     FuzzSpec::Leaf(FuzzLeaf::NameExact { op: OPS[rng.random_range(0..OPS.len())], value })
 }
 
+// Hybrid mana symbols (uppercase, matching MANA_LANE_SYMS / mana_lane). Cards and queries draw from
+// the same set so query hybrids resolve against the store's mana vocab instead of always-unknown.
+const FUZZ_HYBRIDS: [&str; 7] = ["W/U", "U/B", "B/R", "R/G", "G/W", "R/W", "2/W"];
+
+/// Sample a small mana cost as (uppercase symbol, count) pips. `colors_mask` limits colored pips to
+/// the card's colors (cost colors ⊆ card colors, the real relationship); a query passes all colors.
+/// Adds occasional {C}/{X} and (rarely) one hybrid. Generic mana isn't a pip — it lives only in cmc.
+fn fuzz_mana_pips(rng: &mut rand::rngs::SmallRng, colors_mask: u8) -> Vec<(&'static str, u8)> {
+    let mut pips: Vec<(&'static str, u8)> = Vec::new();
+    for lane in 0..5usize {
+        if colors_mask & (1 << lane) != 0 {
+            // Mostly 1 pip, sometimes 2-3, rarely 5 — the 5 exercises devotion's >3 plane saturation.
+            let n = fuzz_weighted(rng, &[(1u8, 70), (2, 22), (3, 6), (5, 2)]);
+            pips.push((super::MANA_LANE_SYMS[lane], n));
+        }
+    }
+    if rng.random_bool(0.08) {
+        pips.push(("C", rng.random_range(1..=2)));
+    }
+    if rng.random_bool(0.05) {
+        pips.push(("X", 1));
+    }
+    // Hybrids are on ~3% of real cards; slightly over-represented here for coverage of the bind path.
+    if rng.random_bool(0.06) {
+        pips.push((FUZZ_HYBRIDS[rng.random_range(0..FUZZ_HYBRIDS.len())], 1));
+    }
+    pips
+}
+
+/// `mana <op> <cost>`: core from lane symbols, hybrids kept as strings (bind resolves), cmc = pip
+/// sum (X contributes 0) plus a little generic. Query cost spans all colors, not card-limited.
+fn fuzz_leaf_mana_cost(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
+    let pips = fuzz_mana_pips(rng, 0b1_1111);
+    let mut core = 0u64;
+    let mut hybrids: Vec<(String, u8)> = Vec::new();
+    let mut cmc = 0.0f32;
+    for &(sym, n) in &pips {
+        match super::mana_lane(sym) {
+            Some(lane) => {
+                core = super::lane_add(core, lane, n);
+                if sym != "X" {
+                    cmc += f32::from(n);
+                }
+            }
+            None => {
+                hybrids.push((sym.to_string(), n));
+                cmc += f32::from(n);
+            }
+        }
+    }
+    cmc += f32::from(rng.random_range(0..=2u8)); // generic mana: cmc only, no pip
+    hybrids.sort();
+    let op = FUZZ_OPS[rng.random_range(0..FUZZ_OPS.len())];
+    FuzzSpec::Leaf(FuzzLeaf::ManaCost { op, core, hybrids, cmc })
+}
+
+/// `devotion <op> <pips>`: 1-2 colors (occasionally colorless C), each 1-3 pips, in the low six lanes.
+fn fuzz_leaf_devotion(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
+    let mut pips = 0u64;
+    for _ in 0..rng.random_range(1..=2) {
+        let lane = rng.random_range(0..6usize); // WUBRGC
+        let n = fuzz_weighted(rng, &[(1u8, 50), (2, 35), (3, 15)]);
+        pips = super::lane_add(pips, lane, n);
+    }
+    let op = FUZZ_OPS[rng.random_range(0..FUZZ_OPS.len())];
+    FuzzSpec::Leaf(FuzzLeaf::Devotion { op, pips })
+}
+
 fn fuzz_leaf(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
-    match rng.random_range(0..25u8) {
+    match rng.random_range(0..27u8) {
         0 => fuzz_leaf_color(rng),
         1 => fuzz_leaf_type(rng),
         2 => fuzz_leaf_cmc(rng),
@@ -1744,6 +1818,8 @@ fn fuzz_leaf(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
         21 => fuzz_leaf_text_contains(rng, TextSearchField::OracleTextLower),
         22 => fuzz_leaf_text_contains(rng, TextSearchField::FlavorTextLower),
         23 => fuzz_leaf_name_exact(rng),
+        24 => fuzz_leaf_mana_cost(rng),
+        25 => fuzz_leaf_devotion(rng),
         _ => fuzz_leaf_arith(rng),
     }
 }
@@ -1850,6 +1926,14 @@ fn fuzz_build_filter(spec: &FuzzSpec) -> FilterExpr {
         FuzzSpec::Leaf(FuzzLeaf::NameExact { op, value }) => {
             FilterExpr::TextExact { field: TextField::NameLower, op: *op, value: value.clone() }
         }
+        FuzzSpec::Leaf(FuzzLeaf::ManaCost { op, core, hybrids, cmc }) => FilterExpr::ManaCostCmp {
+            op: *op,
+            core: *core,
+            hybrids: hybrids.clone(),
+            hybrid_ids: Vec::new(), // bind() fills this from `hybrids` when non-empty
+            cmc: *cmc,
+        },
+        FuzzSpec::Leaf(FuzzLeaf::Devotion { op, pips }) => FilterExpr::Devotion { op: *op, pips: *pips },
         FuzzSpec::Leaf(FuzzLeaf::Border { value }) => FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value: value.clone() },
         FuzzSpec::Leaf(FuzzLeaf::Legality { shift, expected }) => FilterExpr::Legality { shift: *shift, expected: *expected },
         FuzzSpec::And(v) => FilterExpr::And(v.iter().map(fuzz_build_filter).collect()),
@@ -1928,6 +2012,10 @@ fn fuzz_describe(spec: &FuzzSpec) -> String {
             format!("{f}:{needle}")
         }
         FuzzSpec::Leaf(FuzzLeaf::NameExact { op, value }) => format!("name{}{value}", fuzz_op_str(*op)),
+        FuzzSpec::Leaf(FuzzLeaf::ManaCost { op, core, hybrids, cmc }) => {
+            format!("mana{}(core={core:#018x}, hyb={hybrids:?}, cmc={cmc})", fuzz_op_str(*op))
+        }
+        FuzzSpec::Leaf(FuzzLeaf::Devotion { op, pips }) => format!("devotion{}{pips:#014x}", fuzz_op_str(*op)),
         FuzzSpec::Leaf(FuzzLeaf::Border { value }) => format!("border=={value}"),
         FuzzSpec::Leaf(FuzzLeaf::Legality { shift, expected }) => format!("legality(shift={shift:?}, expected={expected:#04b})"),
         FuzzSpec::And(v) => format!("AND({})", v.iter().map(fuzz_describe).collect::<Vec<_>>().join(", ")),
@@ -1969,6 +2057,8 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
     let mut vocab = VocabInterner::new();
     // Artists live in their own vocab (not the shared collection vocab), matched via ArtistMatch.
     let mut artist_vocab = VocabInterner::new();
+    // Mana hybrid vocab (id = index), shared across cards; bind() resolves query hybrids against it.
+    let mut mana_vocab: Vec<String> = Vec::new();
     // String table for oracle/flavor text (interned here, in the card/printing loops) and borders
     // (interned in the application loop). Assigned to data.strings after store_of returns.
     let mut interner = Interner::new();
@@ -2037,6 +2127,23 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
             }
         };
         card.oracle_text_lower_id = interner.intern(oracle.to_string());
+        // Mana cost: colored pips only in the card's colors (cost colors ⊆ card colors, the real
+        // relationship) so identity covers them; occasional {C}/{X}/hybrid. Devotion is gated to
+        // permanents (loader rule). The devotion-plane build asserts identity covers every colored
+        // devotion lane, so derive identity from the devotion lanes (C exempt). cmc mirrors card.cmc.
+        let mut mc = mana_cost_of(&fuzz_mana_pips(rng, card.card_colors), &mut mana_vocab);
+        if card.card_types & super::PERMANENT_TYPES == 0 {
+            mc.devotion = 0;
+        }
+        mc.cmc = f32::from(cmc);
+        let mut ident = card.card_colors;
+        for lane in 0..5usize {
+            if super::lane_get(mc.devotion, lane) > 0 {
+                ident |= 1u8 << lane;
+            }
+        }
+        card.card_color_identity = ident;
+        card.mana_cost = mc;
         // Keywords and oracle tags apply across all card types (unlike subtypes). vocab_ids sorts
         // and dedups into the id-sorted set the engine binary-searches at match time. (Counts are
         // pulled into locals so the fn call doesn't hold `rng` while `random_range` also needs it.)
@@ -2120,6 +2227,7 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
 
     let mut data = store_of(cards, &counts, vocab);
     data.artist_vocab = artist_vocab.strings;
+    data.mana_vocab = mana_vocab;
     for (idx, (rarity, border, word, cn, price, released)) in pmeta.into_iter().enumerate() {
         data.printings[idx].card_rarity_int = rarity;
         data.printings[idx].card_border_id = border.map_or(NONE_STR, |b| interner.intern(b.to_string()));
@@ -6188,4 +6296,5 @@ fn printing_range_fastpath_gates_card_walk_at_stream_threshold() {
         assert_eq!(aligned_total, n, "aligned total must equal the true match count at n={n}");
     }
 }
+
 
