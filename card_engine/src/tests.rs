@@ -15,6 +15,7 @@ use super::{
 };
 use rkyv::{rancor::Error, Archived};
 use std::collections::HashMap;
+use std::sync::OnceLock;
 // Trait bringing random_range/random_bool/random into scope for the #677 fuzzer
 // helpers below (SmallRng's inherent methods live on this extension trait).
 use rand::RngExt;
@@ -1459,6 +1460,25 @@ enum FuzzLeaf {
     // one of the fixed operand pairs in `fuzz_arith_pair` (kept as an id, not a stored NumExpr,
     // so FuzzLeaf stays Clone without NumExpr needing to be).
     Arith { shape: u8, op: CmpOp },
+    // Set-containment against a single value (`CollectionCmp`) — subtypes/keywords/tags. `Ge` (`:`)
+    // narrows via the tag index; other ops are residual. `value` resolves to a vocab id via bind.
+    Collection { field: CollField, op: CmpOp, value: String },
+    // Artist predicate: `TextContains(ArtistLower)` that bind() rewrites to `ArtistMatch` (printing-
+    // space, CSR-indexed via the artist vocab). `word` is a lowercased artist name.
+    Artist { word: String },
+    // Text contains (`:`) over name/oracle/flavor. `needle` is a real corpus token so it matches
+    // something. Name/oracle drive the trigram + name-bigram indexes and the full-scan memoization
+    // (NameMatch/OracleMatch); flavor is bind-rewritten to FlavorMatch (fingerprint-prefiltered,
+    // printing-space).
+    TextContains { field: TextSearchField, needle: String },
+    // Whole-name comparison (`!name` and ordered variants) — the ExactName path via TextExact.
+    NameExact { op: CmpOp, value: String },
+    // Mana cost comparison (`mana <op> <cost>`): query core pips packed into lanes + hybrid symbols
+    // (bind() resolves to mana-vocab ids) + cmc. Card-invariant; SWAR lane arithmetic, no index.
+    ManaCost { op: CmpOp, core: u64, hybrids: Vec<(String, u8)>, cmc: f32 },
+    // Devotion (`devotion <op> <pips>`): queried WUBRGC counts in the low six lanes. Card-invariant;
+    // exercises the devotion planes (built from card.mana_cost.devotion).
+    Devotion { op: CmpOp, pips: u64 },
 }
 
 /// The `(lhs, rhs)` operand pair for an `Arith` leaf's `shape`, built fresh each call.
@@ -1563,8 +1583,217 @@ fn fuzz_leaf_arith(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
     FuzzSpec::Leaf(FuzzLeaf::Arith { shape: rng.random_range(0..4u8), op: fuzz_op(rng) })
 }
 
+// Collection vocab tables with corpus-like frequency bias (measured from the blue store).
+// Lowercased for a consistent fuzz vocab. Weights drive how often each value is *populated*;
+// queries sample uniformly so rare values still exercise the low-selectivity index postings.
+
+// Creature subtypes (human very common, monkey rare). Card-space, populated only on creatures
+// (which also get the creature type bit set, so `t:creature` and `type:human` correlate).
+const FUZZ_SUBTYPES: [(&str, u32); 14] = [
+    ("human", 30), ("goblin", 12), ("elf", 10), ("soldier", 8), ("wizard", 7), ("zombie", 6),
+    ("beast", 6), ("spirit", 5), ("warrior", 5), ("dragon", 4), ("angel", 3), ("cat", 3),
+    ("monkey", 1), ("octopus", 1),
+];
+// Keywords span every card type (Flying dominant; Fateseal a real rare tail). Card-space.
+const FUZZ_KEYWORDS: [(&str, u32); 11] = [
+    ("flying", 30), ("enchant", 11), ("trample", 9), ("vigilance", 6), ("haste", 6),
+    ("equip", 5), ("flash", 5), ("mill", 5), ("scry", 4), ("cycling", 4), ("fateseal", 1),
+];
+// Oracle tags: the corpus's densest collection (avg ~12/card, ~4k distinct). Card-space.
+const FUZZ_ORACLE_TAGS: [(&str, u32); 11] = [
+    ("triggered-ability", 40), ("activated-ability", 34), ("cycle", 31), ("card-names", 27),
+    ("removal", 18), ("card-advantage", 17), ("removal-creature", 15), ("evasion", 13),
+    ("spot-removal", 13), ("draw", 12), ("typal-snail", 1),
+];
+// Art tags: densest of all (~10k distinct); bortuk-bonerattle is a real rare tail. Printing-space.
+const FUZZ_ART_TAGS: [(&str, u32); 11] = [
+    ("plane", 40), ("planar-origin", 20), ("location", 15), ("pose", 15), ("signature", 13),
+    ("artist-signature", 13), ("animal", 12), ("human", 11), ("character", 11), ("weapon", 10),
+    ("bortuk-bonerattle", 1),
+];
+// Is-tags are empty in the current corpus, so a synthetic but realistic Scryfall `is:` vocab keeps
+// the leaf exercised rather than always-empty. Printing-space.
+const FUZZ_IS_TAGS: [(&str, u32); 8] = [
+    ("reprint", 30), ("promo", 12), ("firstprint", 10), ("fullart", 6), ("foil", 6),
+    ("textless", 3), ("oversized", 2), ("funny", 1),
+];
+// Frame data: tiny vocab (~29 distinct); "2015" is dominant and dropped by the thresholded index
+// (exercising that drop path). Printing-space.
+const FUZZ_FRAME_DATA: [(&str, u32); 10] = [
+    ("2015", 50), ("2003", 13), ("1997", 9), ("legendary", 8), ("inverted", 6),
+    ("1993", 5), ("extendedart", 4), ("showcase", 3), ("enchantment", 2), ("etched", 1),
+];
+// Artists: own vocab (~2.2k distinct, no NULLs in corpus). Printing-space, matched via ArtistMatch.
+const FUZZ_ARTISTS: [(&str, u32); 11] = [
+    ("john avon", 13), ("kev walker", 11), ("svetlin velinov", 8), ("greg staples", 7),
+    ("daarken", 7), ("dan frazier", 7), ("mark tedin", 7), ("adam paquette", 7),
+    ("chris rahn", 6), ("rebecca guay", 4), ("yan li", 1),
+];
+
+// Fraction of creatures that are vanilla (empty oracle text). In the corpus, empty oracle text is
+// almost exclusively a creature trait: 2.2% of creatures, ~0% of non-creatures. Conditioning on the
+// creature bit reproduces that so the text predicates see a realistic vanilla population.
+const VANILLA_CREATURE_FRAC: f64 = 0.022;
+
+/// Sample `count` weighted picks from a collection table (duplicates allowed; `vocab_ids` sorts and
+/// dedups them into the id-sorted set the set-like collections expect at load).
+fn fuzz_collection_picks<'a>(rng: &mut rand::rngs::SmallRng, table: &[(&'a str, u32)], count: usize) -> Vec<&'a str> {
+    (0..count).map(|_| fuzz_weighted(rng, table)).collect()
+}
+
+/// A `CollectionCmp` leaf over `field`, its value sampled from `table`. Biases toward Ge (`:`, the
+/// indexed containment path) with the residual ops (=, >, !=) mixed in.
+fn fuzz_leaf_collection(rng: &mut rand::rngs::SmallRng, field: CollField, table: &[(&str, u32)]) -> FuzzSpec {
+    const OPS: [CmpOp; 6] = [CmpOp::Ge, CmpOp::Ge, CmpOp::Ge, CmpOp::Eq, CmpOp::Gt, CmpOp::Ne];
+    let op = OPS[rng.random_range(0..OPS.len())];
+    let value = table[rng.random_range(0..table.len())].0.to_string();
+    FuzzSpec::Leaf(FuzzLeaf::Collection { field, op, value })
+}
+
+fn fuzz_leaf_subtype(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
+    fuzz_leaf_collection(rng, CollField::Subtypes, &FUZZ_SUBTYPES)
+}
+
+/// `artist:<name>` — a full lowercased name (the common `a:` substring-contains shape), which
+/// bind() resolves against the artist vocab and rewrites to `ArtistMatch`.
+fn fuzz_leaf_artist(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
+    let word = FUZZ_ARTISTS[rng.random_range(0..FUZZ_ARTISTS.len())].0.to_string();
+    FuzzSpec::Leaf(FuzzLeaf::Artist { word })
+}
+
+/// Frozen (name, oracle, flavor) triples sampled once from the blue store, lowercased. Record
+/// separator \x1e, field separator \x1f — neither appears in card text. Real strings give the
+/// name/oracle trigram, name-bigram, and flavor indexes realistic selectivity (and exercise the
+/// full-scan memoization crossover) that hand-written vocab cannot. Sampled into the store by the
+/// seeded RNG; see docs/issues/00699.
+static TEXT_CORPUS_RAW: &str = include_str!("../testdata/text_corpus.txt");
+fn text_corpus() -> &'static [(&'static str, &'static str, &'static str)] {
+    static CORPUS: OnceLock<Vec<(&str, &str, &str)>> = OnceLock::new();
+    CORPUS.get_or_init(|| {
+        TEXT_CORPUS_RAW
+            .split('\x1e')
+            .filter_map(|rec| {
+                let mut f = rec.split('\x1f');
+                Some((f.next()?, f.next()?, f.next()?))
+            })
+            .collect()
+    })
+}
+
+/// A real search token from the corpus for `field`: a whole word, occasionally trimmed to a 2-3
+/// char fragment to hit the short-needle / name-bigram path (#639). Retries past empty fields (a
+/// card with no flavor); falls back to a common token if the field keeps coming up empty.
+fn fuzz_text_needle(rng: &mut rand::rngs::SmallRng, field: TextSearchField) -> String {
+    let corpus = text_corpus();
+    for _ in 0..8 {
+        let t = corpus[rng.random_range(0..corpus.len())];
+        let text = match field {
+            TextSearchField::NameLower => t.0,
+            TextSearchField::OracleTextLower => t.1,
+            TextSearchField::FlavorTextLower => t.2,
+            TextSearchField::ArtistLower => t.0, // artist has its own leaf; not reached here
+        };
+        let words: Vec<&str> = text
+            .split_whitespace()
+            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+            .filter(|w| w.chars().count() >= 2)
+            .collect();
+        if words.is_empty() {
+            continue;
+        }
+        let w = words[rng.random_range(0..words.len())];
+        // ~20% of the time a short 2-3 char fragment (a prefix of a real word is still a substring
+        // of the text), exercising the bigram / short-needle path.
+        return if rng.random_bool(0.2) {
+            w.chars().take(rng.random_range(2..=3)).collect()
+        } else {
+            w.to_string()
+        };
+    }
+    "the".to_string()
+}
+
+fn fuzz_leaf_text_contains(rng: &mut rand::rngs::SmallRng, field: TextSearchField) -> FuzzSpec {
+    FuzzSpec::Leaf(FuzzLeaf::TextContains { field, needle: fuzz_text_needle(rng, field) })
+}
+
+/// Whole-name comparison (`!name` exact plus ordered variants) — the ExactName path via TextExact.
+fn fuzz_leaf_name_exact(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
+    const OPS: [CmpOp; 4] = [CmpOp::Eq, CmpOp::Eq, CmpOp::Ne, CmpOp::Ge];
+    let value = text_corpus()[rng.random_range(0..text_corpus().len())].0.to_string();
+    FuzzSpec::Leaf(FuzzLeaf::NameExact { op: OPS[rng.random_range(0..OPS.len())], value })
+}
+
+// Hybrid mana symbols (uppercase, matching MANA_LANE_SYMS / mana_lane). Cards and queries draw from
+// the same set so query hybrids resolve against the store's mana vocab instead of always-unknown.
+const FUZZ_HYBRIDS: [&str; 7] = ["W/U", "U/B", "B/R", "R/G", "G/W", "R/W", "2/W"];
+
+/// Sample a small mana cost as (uppercase symbol, count) pips. `colors_mask` limits colored pips to
+/// the card's colors (cost colors ⊆ card colors, the real relationship); a query passes all colors.
+/// Adds occasional {C}/{X} and (rarely) one hybrid. Generic mana isn't a pip — it lives only in cmc.
+fn fuzz_mana_pips(rng: &mut rand::rngs::SmallRng, colors_mask: u8) -> Vec<(&'static str, u8)> {
+    let mut pips: Vec<(&'static str, u8)> = Vec::new();
+    for lane in 0..5usize {
+        if colors_mask & (1 << lane) != 0 {
+            // Mostly 1 pip, sometimes 2-3, rarely 5 — the 5 exercises devotion's >3 plane saturation.
+            let n = fuzz_weighted(rng, &[(1u8, 70), (2, 22), (3, 6), (5, 2)]);
+            pips.push((super::MANA_LANE_SYMS[lane], n));
+        }
+    }
+    if rng.random_bool(0.08) {
+        pips.push(("C", rng.random_range(1..=2)));
+    }
+    if rng.random_bool(0.05) {
+        pips.push(("X", 1));
+    }
+    // Hybrids are on ~3% of real cards; slightly over-represented here for coverage of the bind path.
+    if rng.random_bool(0.06) {
+        pips.push((FUZZ_HYBRIDS[rng.random_range(0..FUZZ_HYBRIDS.len())], 1));
+    }
+    pips
+}
+
+/// `mana <op> <cost>`: core from lane symbols, hybrids kept as strings (bind resolves), cmc = pip
+/// sum (X contributes 0) plus a little generic. Query cost spans all colors, not card-limited.
+fn fuzz_leaf_mana_cost(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
+    let pips = fuzz_mana_pips(rng, 0b1_1111);
+    let mut core = 0u64;
+    let mut hybrids: Vec<(String, u8)> = Vec::new();
+    let mut cmc = 0.0f32;
+    for &(sym, n) in &pips {
+        match super::mana_lane(sym) {
+            Some(lane) => {
+                core = super::lane_add(core, lane, n);
+                if sym != "X" {
+                    cmc += f32::from(n);
+                }
+            }
+            None => {
+                hybrids.push((sym.to_string(), n));
+                cmc += f32::from(n);
+            }
+        }
+    }
+    cmc += f32::from(rng.random_range(0..=2u8)); // generic mana: cmc only, no pip
+    hybrids.sort();
+    let op = FUZZ_OPS[rng.random_range(0..FUZZ_OPS.len())];
+    FuzzSpec::Leaf(FuzzLeaf::ManaCost { op, core, hybrids, cmc })
+}
+
+/// `devotion <op> <pips>`: 1-2 colors (occasionally colorless C), each 1-3 pips, in the low six lanes.
+fn fuzz_leaf_devotion(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
+    let mut pips = 0u64;
+    for _ in 0..rng.random_range(1..=2) {
+        let lane = rng.random_range(0..6usize); // WUBRGC
+        let n = fuzz_weighted(rng, &[(1u8, 50), (2, 35), (3, 15)]);
+        pips = super::lane_add(pips, lane, n);
+    }
+    let op = FUZZ_OPS[rng.random_range(0..FUZZ_OPS.len())];
+    FuzzSpec::Leaf(FuzzLeaf::Devotion { op, pips })
+}
+
 fn fuzz_leaf(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
-    match rng.random_range(0..14u8) {
+    match rng.random_range(0..27u8) {
         0 => fuzz_leaf_color(rng),
         1 => fuzz_leaf_type(rng),
         2 => fuzz_leaf_cmc(rng),
@@ -1578,6 +1807,19 @@ fn fuzz_leaf(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
         10 => fuzz_leaf_year(rng),
         11 => fuzz_leaf_border(rng),
         12 => fuzz_leaf_legality(rng),
+        13 => fuzz_leaf_subtype(rng),
+        14 => fuzz_leaf_collection(rng, CollField::Keywords, &FUZZ_KEYWORDS),
+        15 => fuzz_leaf_collection(rng, CollField::OracleTags, &FUZZ_ORACLE_TAGS),
+        16 => fuzz_leaf_collection(rng, CollField::ArtTags, &FUZZ_ART_TAGS),
+        17 => fuzz_leaf_collection(rng, CollField::IsTags, &FUZZ_IS_TAGS),
+        18 => fuzz_leaf_collection(rng, CollField::FrameData, &FUZZ_FRAME_DATA),
+        19 => fuzz_leaf_artist(rng),
+        20 => fuzz_leaf_text_contains(rng, TextSearchField::NameLower),
+        21 => fuzz_leaf_text_contains(rng, TextSearchField::OracleTextLower),
+        22 => fuzz_leaf_text_contains(rng, TextSearchField::FlavorTextLower),
+        23 => fuzz_leaf_name_exact(rng),
+        24 => fuzz_leaf_mana_cost(rng),
+        25 => fuzz_leaf_devotion(rng),
         _ => fuzz_leaf_arith(rng),
     }
 }
@@ -1672,12 +1914,45 @@ fn fuzz_build_filter(spec: &FuzzSpec) -> FilterExpr {
             let (lhs, rhs) = fuzz_arith_pair(*shape);
             FilterExpr::NumericCmp { lhs, op: *op, rhs }
         }
+        FuzzSpec::Leaf(FuzzLeaf::Collection { field, op, value }) => {
+            FilterExpr::CollectionCmp { field: *field, op: *op, value: value.clone(), value_id: None }
+        }
+        FuzzSpec::Leaf(FuzzLeaf::Artist { word }) => {
+            FilterExpr::TextContains { field: TextSearchField::ArtistLower, word: word.clone() }
+        }
+        FuzzSpec::Leaf(FuzzLeaf::TextContains { field, needle }) => {
+            FilterExpr::TextContains { field: *field, word: needle.clone() }
+        }
+        FuzzSpec::Leaf(FuzzLeaf::NameExact { op, value }) => {
+            FilterExpr::TextExact { field: TextField::NameLower, op: *op, value: value.clone() }
+        }
+        FuzzSpec::Leaf(FuzzLeaf::ManaCost { op, core, hybrids, cmc }) => FilterExpr::ManaCostCmp {
+            op: *op,
+            core: *core,
+            hybrids: hybrids.clone(),
+            hybrid_ids: Vec::new(), // bind() fills this from `hybrids` when non-empty
+            cmc: *cmc,
+        },
+        FuzzSpec::Leaf(FuzzLeaf::Devotion { op, pips }) => FilterExpr::Devotion { op: *op, pips: *pips },
         FuzzSpec::Leaf(FuzzLeaf::Border { value }) => FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value: value.clone() },
         FuzzSpec::Leaf(FuzzLeaf::Legality { shift, expected }) => FilterExpr::Legality { shift: *shift, expected: *expected },
         FuzzSpec::And(v) => FilterExpr::And(v.iter().map(fuzz_build_filter).collect()),
         FuzzSpec::Or(v) => FilterExpr::Or(v.iter().map(fuzz_build_filter).collect()),
         FuzzSpec::Not(b) => FilterExpr::Not(Box::new(fuzz_build_filter(b))),
     }
+}
+
+/// Build the filter for `spec` and bind it against the store's vocabs -- resolves CollectionCmp
+/// value ids (and ArtistMatch/ManaCostCmp when those land), a no-op for the numeric/card-invariant
+/// leaves. The real query path binds before matching, and both the engine and the reference
+/// evaluator (`FilterExpr::matches`) need the resolved ids, so every built filter goes through here.
+fn fuzz_bound_filter(spec: &FuzzSpec, archived: &Archived<CardData>) -> FilterExpr {
+    let mut f = fuzz_build_filter(spec);
+    f.bind(
+        &archived.coll_vocab, &archived.coll_vocab_sorted, &archived.artist_vocab,
+        &archived.mana_vocab, &archived.indexes.flavor, &archived.strings,
+    );
+    f
 }
 
 fn fuzz_op_str(op: CmpOp) -> &'static str {
@@ -1719,6 +1994,28 @@ fn fuzz_describe(spec: &FuzzSpec) -> String {
             let (lhs, rhs) = fuzz_arith_pair(*shape);
             format!("{}{}{}", fuzz_num_expr_str(&lhs), fuzz_op_str(*op), fuzz_num_expr_str(&rhs))
         }
+        FuzzSpec::Leaf(FuzzLeaf::Collection { field, op, value }) => {
+            let f = match field {
+                CollField::Subtypes => "subtypes", CollField::Keywords => "keywords", CollField::OracleTags => "oracle_tags",
+                CollField::ArtTags => "art_tags", CollField::IsTags => "is_tags", CollField::FrameData => "frame_data",
+            };
+            format!("{f}{}{value}", fuzz_op_str(*op))
+        }
+        FuzzSpec::Leaf(FuzzLeaf::Artist { word }) => format!("artist:{word}"),
+        FuzzSpec::Leaf(FuzzLeaf::TextContains { field, needle }) => {
+            let f = match field {
+                TextSearchField::NameLower => "name",
+                TextSearchField::OracleTextLower => "oracle",
+                TextSearchField::FlavorTextLower => "flavor",
+                TextSearchField::ArtistLower => "artist",
+            };
+            format!("{f}:{needle}")
+        }
+        FuzzSpec::Leaf(FuzzLeaf::NameExact { op, value }) => format!("name{}{value}", fuzz_op_str(*op)),
+        FuzzSpec::Leaf(FuzzLeaf::ManaCost { op, core, hybrids, cmc }) => {
+            format!("mana{}(core={core:#018x}, hyb={hybrids:?}, cmc={cmc})", fuzz_op_str(*op))
+        }
+        FuzzSpec::Leaf(FuzzLeaf::Devotion { op, pips }) => format!("devotion{}{pips:#014x}", fuzz_op_str(*op)),
         FuzzSpec::Leaf(FuzzLeaf::Border { value }) => format!("border=={value}"),
         FuzzSpec::Leaf(FuzzLeaf::Legality { shift, expected }) => format!("legality(shift={shift:?}, expected={expected:#04b})"),
         FuzzSpec::And(v) => format!("AND({})", v.iter().map(fuzz_describe).collect::<Vec<_>>().join(", ")),
@@ -1758,12 +2055,28 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
     const BORDERS: [Option<&str>; 6] = [Some("black"), Some("white"), Some("borderless"), Some("gold"), Some("yellow"), None];
 
     let mut vocab = VocabInterner::new();
+    // Artists live in their own vocab (not the shared collection vocab), matched via ArtistMatch.
+    let mut artist_vocab = VocabInterner::new();
+    // Mana hybrid vocab (id = index), shared across cards; bind() resolves query hybrids against it.
+    let mut mana_vocab: Vec<String> = Vec::new();
+    // String table for oracle/flavor text (interned here, in the card/printing loops) and borders
+    // (interned in the application loop). Assigned to data.strings after store_of returns.
+    let mut interner = Interner::new();
+    let corpus = text_corpus();
     let mut cards: Vec<OracleCard> = Vec::with_capacity(ncards);
     let mut counts: Vec<usize> = Vec::with_capacity(ncards);
     // Per-printing (rarity, border, legality word, collector number, price cents, released_at),
     // flat in card/printing order, applied after store_of lays out the printings.
     type PMeta = (Option<u8>, Option<&'static str>, u64, Option<u16>, Option<u32>, u32);
     let mut pmeta: Vec<PMeta> = Vec::new();
+    // Printing-space collections + artist vid + flavor text id, same flat card/printing order as
+    // pmeta. Interned here (while the vocabs/interner are in scope) but only applied to the printings
+    // after store_of returns.
+    let mut art_meta: Vec<Vec<u16>> = Vec::new();
+    let mut is_meta: Vec<Vec<u16>> = Vec::new();
+    let mut frame_meta: Vec<Vec<u16>> = Vec::new();
+    let mut artist_meta: Vec<u16> = Vec::new();
+    let mut flavor_meta: Vec<u32> = Vec::new();
 
     for i in 0..ncards {
         let mut card = stub_card(i as u128 + 1, fuzz_type_bits(rng), &[], &mut vocab);
@@ -1782,10 +2095,61 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
                 let toughness = (i32::from(power) + rng.random_range(-1..=2)).clamp(1, 13) as i8;
                 card.creature_power = Some(power);
                 card.creature_toughness = Some(toughness);
+                // Subtypes correlate with the creature type (real data: creature subtypes only
+                // appear on creatures, modulo the rare kindred/tribal tail we don't model). Set the
+                // bit so `t:creature` and `type:human` co-select. 1-2 subtypes, biased frequency.
+                card.card_types |= TYPE_CREATURE;
+                let n = rng.random_range(1..=2);
+                card.card_subtypes = vocab_ids(&mut vocab, &fuzz_collection_picks(rng, &FUZZ_SUBTYPES, n));
             }
             1 => card.planeswalker_loyalty = Some((2 + i32::from(cmc) / 2 + rng.random_range(0..=2)).clamp(2, 8) as u8),
             _ => {}
         }
+        // Text from a real corpus triple. Name is always present. Empty oracle (vanilla) is
+        // conditioned on the creature bit at the real rate; every other card gets a non-empty oracle
+        // (loop past the ~1% corpus empties). Textless cards intern "" (never NONE_STR), matching the
+        // loader, so an oracle-text search evaluates False on them rather than Null.
+        // Both name fields from one corpus name: card_name_lower (InlineStr) is what contains()
+        // reads; card_name_id is the interned id NameMatch re-keys to after memoization, so it must
+        // distinguish names (leaving it NONE_STR collapses every name to one id and over-matches).
+        let name = corpus[rng.random_range(0..corpus.len())].0;
+        card.card_name_lower = InlineStr::from_str(name);
+        card.card_name_id = interner.intern(name.to_string());
+        let vanilla = card.card_types & TYPE_CREATURE != 0 && rng.random_bool(VANILLA_CREATURE_FRAC);
+        let oracle = if vanilla {
+            ""
+        } else {
+            loop {
+                let o = corpus[rng.random_range(0..corpus.len())].1;
+                if !o.is_empty() {
+                    break o;
+                }
+            }
+        };
+        card.oracle_text_lower_id = interner.intern(oracle.to_string());
+        // Mana cost: colored pips only in the card's colors (cost colors ⊆ card colors, the real
+        // relationship) so identity covers them; occasional {C}/{X}/hybrid. Devotion is gated to
+        // permanents (loader rule). The devotion-plane build asserts identity covers every colored
+        // devotion lane, so derive identity from the devotion lanes (C exempt). cmc mirrors card.cmc.
+        let mut mc = mana_cost_of(&fuzz_mana_pips(rng, card.card_colors), &mut mana_vocab);
+        if card.card_types & super::PERMANENT_TYPES == 0 {
+            mc.devotion = 0;
+        }
+        mc.cmc = f32::from(cmc);
+        let mut ident = card.card_colors;
+        for lane in 0..5usize {
+            if super::lane_get(mc.devotion, lane) > 0 {
+                ident |= 1u8 << lane;
+            }
+        }
+        card.card_color_identity = ident;
+        card.mana_cost = mc;
+        // Keywords and oracle tags apply across all card types (unlike subtypes). vocab_ids sorts
+        // and dedups into the id-sorted set the engine binary-searches at match time. (Counts are
+        // pulled into locals so the fn call doesn't hold `rng` while `random_range` also needs it.)
+        let (nk, no) = (rng.random_range(0..=3), rng.random_range(0..=4));
+        card.card_keywords = vocab_ids(&mut vocab, &fuzz_collection_picks(rng, &FUZZ_KEYWORDS, nk));
+        card.card_oracle_tags = vocab_ids(&mut vocab, &fuzz_collection_picks(rng, &FUZZ_ORACLE_TAGS, no));
         let divergent = rng.random_bool(0.4);
         card.legality_divergent = divergent;
         // Printings per card is heavily skewed in the corpus (~41% have exactly one, long tail);
@@ -1846,12 +2210,24 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
             let year = fuzz_year_value(rng);
             let released = year * 10_000 + rng.random_range(1..=12u32) * 100 + rng.random_range(1..=28u32);
             pmeta.push((rarity, border, word, cn, price, released));
+            // Printing-space collections (sorted+deduped by vocab_ids) + one artist per printing
+            // (real data has no NULL artists). frame_data keeps "2015" dominant so the corpus-scale
+            // store exercises the thresholded-index drop.
+            let (na, ni, nf) = (rng.random_range(0..=4), rng.random_range(0..=2), rng.random_range(0..=2));
+            art_meta.push(vocab_ids(&mut vocab, &fuzz_collection_picks(rng, &FUZZ_ART_TAGS, na)));
+            is_meta.push(vocab_ids(&mut vocab, &fuzz_collection_picks(rng, &FUZZ_IS_TAGS, ni)));
+            frame_meta.push(vocab_ids(&mut vocab, &fuzz_collection_picks(rng, &FUZZ_FRAME_DATA, nf)));
+            artist_meta.push(artist_vocab.intern(fuzz_weighted(rng, &FUZZ_ARTISTS).to_string()).unwrap());
+            // Flavor is printing-varying (a fresh corpus draw per printing, ~half empty like the
+            // corpus) so the printing-space FlavorMatch path selects among differing printings.
+            flavor_meta.push(interner.intern(corpus[rng.random_range(0..corpus.len())].2.to_string()));
         }
         cards.push(card);
     }
 
     let mut data = store_of(cards, &counts, vocab);
-    let mut interner = Interner::new();
+    data.artist_vocab = artist_vocab.strings;
+    data.mana_vocab = mana_vocab;
     for (idx, (rarity, border, word, cn, price, released)) in pmeta.into_iter().enumerate() {
         data.printings[idx].card_rarity_int = rarity;
         data.printings[idx].card_border_id = border.map_or(NONE_STR, |b| interner.intern(b.to_string()));
@@ -1859,6 +2235,11 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
         data.printings[idx].collector_number_int = cn;
         data.printings[idx].price_usd = price;
         data.printings[idx].released_at_int = Some(released);
+        data.printings[idx].card_art_tags = std::mem::take(&mut art_meta[idx]);
+        data.printings[idx].card_is_tags = std::mem::take(&mut is_meta[idx]);
+        data.printings[idx].card_frame_data = std::mem::take(&mut frame_meta[idx]);
+        data.printings[idx].card_artist_vid = artist_meta[idx];
+        data.printings[idx].flavor_text_lower_id = flavor_meta[idx];
     }
     data.strings = interner.strings;
     // store_of built indexes from the placeholder printings and left the numeric/range indexes at
@@ -1866,6 +2247,22 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
     // for correctness, not just coverage: an empty range index narrows a matching predicate to the
     // empty (tight) set, which would make run_query wrongly return nothing.
     data.indexes.rarity = build_rarity_index(&data.printings, &data.offsets);
+    // Collection narrowing indexes — load-bearing like the range indexes above: an unbuilt index
+    // narrows a populated predicate to the empty set, disagreeing with the residual `matches` path.
+    // frame_data is thresholded (drops the dominant "2015"), matching the engine's build.
+    data.indexes.subtypes = build_tag_index(&data.cards, &data.coll_vocab, |c| &c.card_subtypes);
+    data.indexes.keywords = build_tag_index(&data.cards, &data.coll_vocab, |c| &c.card_keywords);
+    data.indexes.oracle_tags = build_tag_index(&data.cards, &data.coll_vocab, |c| &c.card_oracle_tags);
+    data.indexes.art_tags = build_tag_index(&data.printings, &data.coll_vocab, |p| &p.card_art_tags);
+    data.indexes.is_tags = build_tag_index(&data.printings, &data.coll_vocab, |p| &p.card_is_tags);
+    data.indexes.frame_data = build_thresholded_tag_index(&data.printings, &data.coll_vocab, |p| &p.card_frame_data);
+    data.indexes.artists = build_artist_index(&data.printings, data.artist_vocab.len());
+    // Text narrowing indexes — same load-bearing property. name/oracle drive trigram + bigram
+    // narrowing and the full-scan memoization; flavor is the printing-space CSR bind() resolves against.
+    data.indexes.name_trigram = build_trigram_index(&data.cards, |c| c.card_name_lower.as_str());
+    data.indexes.name_bigrams = build_name_bigram_index(&data.cards);
+    data.indexes.oracle_trigram = build_oracle_text_index(&data.cards, &data.strings);
+    data.indexes.flavor = build_flavor_index(&data.printings, &data.strings);
     data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
     data.indexes.legal_divergent = build_divergent_ids(&data.cards);
     data.indexes.sort_perms = build_sort_permutations(&data.cards, &data.printings, &data.offsets);
@@ -1927,7 +2324,7 @@ fn fuzz_reference_total(archived: &Archived<CardData>, f: &FilterExpr, mode: &st
 fn fuzz_check_case(archived: &Archived<CardData>, spec: &FuzzSpec, ctx: &str, orderby: &str, direction: &str) {
     // >= any possible total, so the offset-0 page is the complete ordered result to slice against.
     let full_limit = archived.printings.len().max(1);
-    let ref_filter = fuzz_build_filter(spec);
+    let ref_filter = fuzz_bound_filter(spec, archived);
     let strings = &archived.strings;
     let ids = |page: &[(&Archived<OracleCard>, &Archived<Printing>)]| -> Vec<u128> {
         page.iter().map(|(_, p)| u128::from(p.scryfall_id)).collect()
@@ -1948,13 +2345,13 @@ fn fuzz_check_case(archived: &Archived<CardData>, spec: &FuzzSpec, ctx: &str, or
 
         // Full page (offset 0): total + every row satisfies. Unplaned = raw filter, plane = None;
         // plane path = split_planes + the promoted plane (unique_is_card matches the real caller).
-        let mut plain = fuzz_build_filter(spec);
+        let mut plain = fuzz_bound_filter(spec, archived);
         let (t0, p0) = run_query(
             &archived.cards, &archived.printings, &archived.offsets, strings,
             &mut plain, None, mode, "default", orderby, direction, full_limit, 0, &archived.indexes,
         );
         let (pe, mut residual) = split_planes(
-            fuzz_build_filter(spec), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, unique_is_card,
+            fuzz_bound_filter(spec, archived), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, unique_is_card,
         );
         let (t1, p1) = run_query(
             &archived.cards, &archived.printings, &archived.offsets, strings,
@@ -1975,7 +2372,7 @@ fn fuzz_check_case(archived: &Archived<CardData>, spec: &FuzzSpec, ctx: &str, or
             let plimit = ((expected - offset) / 2).max(1);
             let (full0, full1) = (ids(&p0), ids(&p1));
 
-            let mut plain_pg = fuzz_build_filter(spec);
+            let mut plain_pg = fuzz_bound_filter(spec, archived);
             let (_, pg0) = run_query(
                 &archived.cards, &archived.printings, &archived.offsets, strings,
                 &mut plain_pg, None, mode, "default", orderby, direction, plimit, offset, &archived.indexes,
@@ -1987,7 +2384,7 @@ fn fuzz_check_case(archived: &Archived<CardData>, spec: &FuzzSpec, ctx: &str, or
             all_satisfy(&pg0, "unplaned paginated", mode);
 
             let (pe_pg, mut residual_pg) = split_planes(
-                fuzz_build_filter(spec), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, unique_is_card,
+                fuzz_bound_filter(spec, archived), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, unique_is_card,
             );
             let (_, pg1) = run_query(
                 &archived.cards, &archived.printings, &archived.offsets, strings,
@@ -2010,7 +2407,7 @@ fn fuzz_check_case(archived: &Archived<CardData>, spec: &FuzzSpec, ctx: &str, or
 fn fuzz_check_row_identity(
     archived: &Archived<CardData>, spec: &FuzzSpec, ctx: &str, orderby: &str, direction: &str, mode: &str, limit: usize, offset: usize,
 ) {
-    let f = fuzz_build_filter(spec);
+    let f = fuzz_bound_filter(spec, archived);
     let strings = &archived.strings;
     let check = |page: &[(&Archived<OracleCard>, &Archived<Printing>)], label: &str| {
         for &(card, p) in page {
@@ -2021,14 +2418,14 @@ fn fuzz_check_row_identity(
             );
         }
     };
-    let mut plain = fuzz_build_filter(spec);
+    let mut plain = fuzz_bound_filter(spec, archived);
     let (_, p0) = run_query(
         &archived.cards, &archived.printings, &archived.offsets, strings,
         &mut plain, None, mode, "default", orderby, direction, limit, offset, &archived.indexes,
     );
     check(&p0, "unplaned");
     let (pe, mut residual) = split_planes(
-        fuzz_build_filter(spec), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, mode == "card",
+        fuzz_bound_filter(spec, archived), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, mode == "card",
     );
     let (_, p1) = run_query(
         &archived.cards, &archived.printings, &archived.offsets, strings,
@@ -5899,3 +6296,5 @@ fn printing_range_fastpath_gates_card_walk_at_stream_threshold() {
         assert_eq!(aligned_total, n, "aligned total must equal the true match count at n={n}");
     }
 }
+
+
