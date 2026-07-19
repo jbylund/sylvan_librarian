@@ -1444,9 +1444,47 @@ enum FuzzLeaf {
     Color { op: CmpOp, mask: u8 },      // card-invariant
     Type { op: CmpOp, mask: u16 },      // card-invariant
     Cmc { op: CmpOp, val: f64 },        // card-invariant
+    Power { op: CmpOp, val: f64 },      // card-invariant, nullable (non-creatures)
+    Toughness { op: CmpOp, val: f64 },  // card-invariant, nullable
+    Loyalty { op: CmpOp, val: f64 },    // card-invariant, nullable (planeswalkers only)
     Rarity { op: CmpOp, val: f64 },     // printing-varying
+    CollectorNumber { op: CmpOp, val: f64 }, // printing-varying, nullable
+    Price { op: CmpOp, val: f64 },      // printing-varying, nullable (dollars)
+    Date { op: CmpOp, value: u32 },     // printing-varying (released_at, DateCmp)
+    Year { op: CmpOp, year: i32 },      // printing-varying (released_at, YearCmp)
     Border { value: String },           // printing-varying
     Legality { shift: Option<u8>, expected: u64 }, // printing-dependent for divergent cards
+    // Arithmetic (NumExpr::Arith), mixing a card-level and a printing-level field — exercises
+    // field_num on both operands and PrintingDep propagation through arithmetic. `shape` selects
+    // one of the fixed operand pairs in `fuzz_arith_pair` (kept as an id, not a stored NumExpr,
+    // so FuzzLeaf stays Clone without NumExpr needing to be).
+    Arith { shape: u8, op: CmpOp },
+}
+
+/// The `(lhs, rhs)` operand pair for an `Arith` leaf's `shape`, built fresh each call.
+fn fuzz_arith_pair(shape: u8) -> (NumExpr, NumExpr) {
+    let f = |field| NumExpr::Field(field);
+    let arith = |l, o, r| NumExpr::Arith(Box::new(l), o, Box::new(r));
+    match shape {
+        0 => (arith(f(NumField::Cmc), ArithOp::Add, NumExpr::Const(1.0)), f(NumField::Power)),
+        1 => (arith(f(NumField::PriceUsd), ArithOp::Add, NumExpr::Const(1.0)), f(NumField::Cmc)),
+        2 => (arith(f(NumField::Power), ArithOp::Add, f(NumField::Toughness)), f(NumField::Cmc)),
+        _ => (arith(f(NumField::Cmc), ArithOp::Mul, NumExpr::Const(2.0)), f(NumField::CollectorNumberInt)),
+    }
+}
+
+/// Weighted pick from a small `(value, weight)` table — lets `fuzz_store` sample fields on rough
+/// real-card distributions (measured from the corpus) instead of uniformly.
+fn fuzz_weighted<T: Copy>(rng: &mut rand::rngs::SmallRng, table: &[(T, u32)]) -> T {
+    let total: u32 = table.iter().map(|(_, w)| w).sum();
+    let mut r = rng.random_range(0..total);
+    for &(v, w) in table {
+        if r < w {
+            return v;
+        }
+        r -= w;
+    }
+    table[table.len() - 1].0
 }
 
 #[derive(Clone)]
@@ -1494,14 +1532,53 @@ fn fuzz_leaf_legality(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
     FuzzSpec::Leaf(FuzzLeaf::Legality { shift, expected: FUZZ_STATUSES[rng.random_range(0..FUZZ_STATUSES.len())] })
 }
 
+fn fuzz_leaf_power(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
+    FuzzSpec::Leaf(FuzzLeaf::Power { op: fuzz_op(rng), val: rng.random_range(0..=7u8) as f64 })
+}
+fn fuzz_leaf_toughness(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
+    FuzzSpec::Leaf(FuzzLeaf::Toughness { op: fuzz_op(rng), val: rng.random_range(0..=7u8) as f64 })
+}
+fn fuzz_leaf_loyalty(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
+    FuzzSpec::Leaf(FuzzLeaf::Loyalty { op: fuzz_op(rng), val: rng.random_range(2..=7u8) as f64 })
+}
+fn fuzz_leaf_collector_number(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
+    FuzzSpec::Leaf(FuzzLeaf::CollectorNumber { op: fuzz_op(rng), val: fuzz_weighted(rng, &[(10.0, 2), (50.0, 3), (100.0, 3), (250.0, 2), (500.0, 1)]) })
+}
+fn fuzz_leaf_price(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
+    // Dollars; thresholds straddle the corpus's skew (median ~$0.33, 99th ~$60).
+    FuzzSpec::Leaf(FuzzLeaf::Price { op: fuzz_op(rng), val: fuzz_weighted(rng, &[(0.1, 2), (0.5, 4), (1.0, 4), (2.0, 3), (5.0, 2), (20.0, 1), (60.0, 1)]) })
+}
+/// A release year on the corpus's rough distribution (skewed recent), + a small jitter.
+fn fuzz_year_value(rng: &mut rand::rngs::SmallRng) -> u32 {
+    fuzz_weighted(rng, &[(1995, 7), (2000, 6), (2005, 7), (2010, 8), (2015, 15), (2020, 40), (2025, 11)]) + rng.random_range(0..5)
+}
+fn fuzz_leaf_date(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
+    // Mid-year threshold (YYYYMMDD packed int), straddling the sampled release dates.
+    FuzzSpec::Leaf(FuzzLeaf::Date { op: fuzz_op(rng), value: fuzz_year_value(rng) * 10_000 + 700 })
+}
+fn fuzz_leaf_year(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
+    FuzzSpec::Leaf(FuzzLeaf::Year { op: fuzz_op(rng), year: fuzz_year_value(rng) as i32 })
+}
+fn fuzz_leaf_arith(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
+    FuzzSpec::Leaf(FuzzLeaf::Arith { shape: rng.random_range(0..4u8), op: fuzz_op(rng) })
+}
+
 fn fuzz_leaf(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
-    match rng.random_range(0..6u8) {
+    match rng.random_range(0..14u8) {
         0 => fuzz_leaf_color(rng),
         1 => fuzz_leaf_type(rng),
         2 => fuzz_leaf_cmc(rng),
-        3 => fuzz_leaf_rarity(rng),
-        4 => fuzz_leaf_border(rng),
-        _ => fuzz_leaf_legality(rng),
+        3 => fuzz_leaf_power(rng),
+        4 => fuzz_leaf_toughness(rng),
+        5 => fuzz_leaf_loyalty(rng),
+        6 => fuzz_leaf_rarity(rng),
+        7 => fuzz_leaf_collector_number(rng),
+        8 => fuzz_leaf_price(rng),
+        9 => fuzz_leaf_date(rng),
+        10 => fuzz_leaf_year(rng),
+        11 => fuzz_leaf_border(rng),
+        12 => fuzz_leaf_legality(rng),
+        _ => fuzz_leaf_arith(rng),
     }
 }
 
@@ -1535,6 +1612,14 @@ fn fuzz_targeted(rng: &mut rand::rngs::SmallRng) -> Vec<FuzzSpec> {
     let cmc = fuzz_leaf_cmc(rng);
     let leg1 = fuzz_leaf_legality(rng);
     let leg2 = fuzz_leaf_legality(rng);
+    // The newer fields, so their multi-predicate shapes are guaranteed each run rather than left to
+    // fuzz_gen's random draws across 14 leaf kinds.
+    let pow = fuzz_leaf_power(rng);
+    let tou = fuzz_leaf_toughness(rng);
+    let price = fuzz_leaf_price(rng);
+    let date = fuzz_leaf_date(rng);
+    let cn = fuzz_leaf_collector_number(rng);
+    let arith = fuzz_leaf_arith(rng);
     vec![
         FuzzSpec::And(vec![leg1.clone(), cmc.clone()]),
         FuzzSpec::And(vec![leg1.clone(), col.clone()]),
@@ -1542,8 +1627,31 @@ fn fuzz_targeted(rng: &mut rand::rngs::SmallRng) -> Vec<FuzzSpec> {
         FuzzSpec::And(vec![bor.clone(), cmc.clone()]),
         FuzzSpec::Or(vec![leg2, rar.clone()]),
         FuzzSpec::Not(Box::new(FuzzSpec::And(vec![leg1.clone(), bor.clone()]))),
-        FuzzSpec::And(vec![leg1, rar.clone(), col]),
-        FuzzSpec::Or(vec![FuzzSpec::And(vec![rar, cmc]), FuzzSpec::And(vec![bor, typ])]),
+        FuzzSpec::And(vec![leg1, rar.clone(), col.clone()]),
+        FuzzSpec::Or(vec![FuzzSpec::And(vec![rar.clone(), cmc.clone()]), FuzzSpec::And(vec![bor, typ.clone()])]),
+        // Two card-level numerics (e.g. cmc=2 AND power=3); correlated card-level pair.
+        FuzzSpec::And(vec![cmc.clone(), pow.clone()]),
+        FuzzSpec::And(vec![pow, tou]),
+        // Printing-varying range field AND a card-invariant one -- the #677 wrong-printing shape.
+        FuzzSpec::And(vec![price.clone(), typ]),
+        FuzzSpec::And(vec![date, col.clone()]),
+        FuzzSpec::And(vec![cn, rar]),
+        FuzzSpec::Or(vec![price, cmc]),
+        // Arithmetic leaf inside a compound (its own operands already mix card + printing fields).
+        FuzzSpec::And(vec![arith, col]),
+        // Number of printing-varying predicates in one And drives distinct Y-predicate paths:
+        //   0 -> card-invariant, exact card-level answer (all_match promotes);
+        //   1 -> a single existence projection + witness-printing selection;
+        //   2+ -> the shared-witness path -- ∃p:A(p)∧B(p) != (∃p:A(p))∧(∃p:B(p)), so compile_plane
+        //         must decline to compose and fall back to per-printing residual verification.
+        // fuzz_gen hits all three probabilistically; guarantee 0 and 2+ here across field mixes.
+        FuzzSpec::And(vec![fuzz_leaf_cmc(rng), fuzz_leaf_color(rng)]),                       // 0 printing-varying
+        FuzzSpec::And(vec![fuzz_leaf_legality(rng), fuzz_leaf_border(rng)]),                 // 2 existential (legality+border)
+        FuzzSpec::And(vec![fuzz_leaf_rarity(rng), fuzz_leaf_border(rng)]),                   // 2 existential (rarity+border)
+        FuzzSpec::And(vec![fuzz_leaf_price(rng), fuzz_leaf_date(rng)]),                      // 2 printing-range (price+date)
+        FuzzSpec::And(vec![fuzz_leaf_collector_number(rng), fuzz_leaf_price(rng)]),          // 2 printing-range (cn+price)
+        FuzzSpec::And(vec![fuzz_leaf_rarity(rng), fuzz_leaf_price(rng)]),                    // existential + range
+        FuzzSpec::And(vec![fuzz_leaf_legality(rng), fuzz_leaf_rarity(rng), fuzz_leaf_border(rng)]), // 3 existential
     ]
 }
 
@@ -1552,7 +1660,18 @@ fn fuzz_build_filter(spec: &FuzzSpec) -> FilterExpr {
         FuzzSpec::Leaf(FuzzLeaf::Color { op, mask }) => FilterExpr::ColorCmp { field: ColorField::Colors, op: *op, mask: *mask },
         FuzzSpec::Leaf(FuzzLeaf::Type { op, mask }) => FilterExpr::TypeCmp { mask: *mask, op: *op },
         FuzzSpec::Leaf(FuzzLeaf::Cmc { op, val }) => FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Cmc), op: *op, rhs: NumExpr::Const(*val) },
+        FuzzSpec::Leaf(FuzzLeaf::Power { op, val }) => FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Power), op: *op, rhs: NumExpr::Const(*val) },
+        FuzzSpec::Leaf(FuzzLeaf::Toughness { op, val }) => FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Toughness), op: *op, rhs: NumExpr::Const(*val) },
+        FuzzSpec::Leaf(FuzzLeaf::Loyalty { op, val }) => FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Loyalty), op: *op, rhs: NumExpr::Const(*val) },
         FuzzSpec::Leaf(FuzzLeaf::Rarity { op, val }) => FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), op: *op, rhs: NumExpr::Const(*val) },
+        FuzzSpec::Leaf(FuzzLeaf::CollectorNumber { op, val }) => FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::CollectorNumberInt), op: *op, rhs: NumExpr::Const(*val) },
+        FuzzSpec::Leaf(FuzzLeaf::Price { op, val }) => FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op: *op, rhs: NumExpr::Const(*val) },
+        FuzzSpec::Leaf(FuzzLeaf::Date { op, value }) => FilterExpr::DateCmp { op: *op, value: *value },
+        FuzzSpec::Leaf(FuzzLeaf::Year { op, year }) => FilterExpr::YearCmp { op: *op, year: *year },
+        FuzzSpec::Leaf(FuzzLeaf::Arith { shape, op }) => {
+            let (lhs, rhs) = fuzz_arith_pair(*shape);
+            FilterExpr::NumericCmp { lhs, op: *op, rhs }
+        }
         FuzzSpec::Leaf(FuzzLeaf::Border { value }) => FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value: value.clone() },
         FuzzSpec::Leaf(FuzzLeaf::Legality { shift, expected }) => FilterExpr::Legality { shift: *shift, expected: *expected },
         FuzzSpec::And(v) => FilterExpr::And(v.iter().map(fuzz_build_filter).collect()),
@@ -1566,12 +1685,40 @@ fn fuzz_op_str(op: CmpOp) -> &'static str {
         CmpOp::Eq => "==", CmpOp::Ne => "!=", CmpOp::Lt => "<", CmpOp::Le => "<=", CmpOp::Gt => ">", CmpOp::Ge => ">=",
     }
 }
+fn fuzz_num_field_str(f: NumField) -> &'static str {
+    match f {
+        NumField::Cmc => "cmc", NumField::Power => "power", NumField::Toughness => "toughness", NumField::Loyalty => "loyalty",
+        NumField::RarityInt => "rarity", NumField::CollectorNumberInt => "cn", NumField::EdhrEc => "edhrec",
+        NumField::PriceUsd => "usd", NumField::PriceEur => "eur", NumField::PriceTix => "tix", NumField::PreferScore => "prefer",
+    }
+}
+fn fuzz_num_expr_str(e: &NumExpr) -> String {
+    match e {
+        NumExpr::Const(c) => format!("{c}"),
+        NumExpr::Field(f) => fuzz_num_field_str(*f).to_string(),
+        NumExpr::Arith(l, o, r) => {
+            let os = match o { ArithOp::Add => "+", ArithOp::Sub => "-", ArithOp::Mul => "*", ArithOp::Div => "/" };
+            format!("({} {os} {})", fuzz_num_expr_str(l), fuzz_num_expr_str(r))
+        }
+    }
+}
 fn fuzz_describe(spec: &FuzzSpec) -> String {
     match spec {
         FuzzSpec::Leaf(FuzzLeaf::Color { op, mask }) => format!("colors{}{:#07b}", fuzz_op_str(*op), mask),
         FuzzSpec::Leaf(FuzzLeaf::Type { op, mask }) => format!("types{}{:#018b}", fuzz_op_str(*op), mask),
         FuzzSpec::Leaf(FuzzLeaf::Cmc { op, val }) => format!("cmc{}{val}", fuzz_op_str(*op)),
+        FuzzSpec::Leaf(FuzzLeaf::Power { op, val }) => format!("power{}{val}", fuzz_op_str(*op)),
+        FuzzSpec::Leaf(FuzzLeaf::Toughness { op, val }) => format!("toughness{}{val}", fuzz_op_str(*op)),
+        FuzzSpec::Leaf(FuzzLeaf::Loyalty { op, val }) => format!("loyalty{}{val}", fuzz_op_str(*op)),
         FuzzSpec::Leaf(FuzzLeaf::Rarity { op, val }) => format!("rarity{}{val}", fuzz_op_str(*op)),
+        FuzzSpec::Leaf(FuzzLeaf::CollectorNumber { op, val }) => format!("cn{}{val}", fuzz_op_str(*op)),
+        FuzzSpec::Leaf(FuzzLeaf::Price { op, val }) => format!("usd{}{val}", fuzz_op_str(*op)),
+        FuzzSpec::Leaf(FuzzLeaf::Date { op, value }) => format!("date{}{value}", fuzz_op_str(*op)),
+        FuzzSpec::Leaf(FuzzLeaf::Year { op, year }) => format!("year{}{year}", fuzz_op_str(*op)),
+        FuzzSpec::Leaf(FuzzLeaf::Arith { shape, op }) => {
+            let (lhs, rhs) = fuzz_arith_pair(*shape);
+            format!("{}{}{}", fuzz_num_expr_str(&lhs), fuzz_op_str(*op), fuzz_num_expr_str(&rhs))
+        }
         FuzzSpec::Leaf(FuzzLeaf::Border { value }) => format!("border=={value}"),
         FuzzSpec::Leaf(FuzzLeaf::Legality { shift, expected }) => format!("legality(shift={shift:?}, expected={expected:#04b})"),
         FuzzSpec::And(v) => format!("AND({})", v.iter().map(fuzz_describe).collect::<Vec<_>>().join(", ")),
@@ -1597,28 +1744,60 @@ fn fuzz_type_bits(rng: &mut rand::rngs::SmallRng) -> u16 {
 /// (`legality_divergent = true` plus printings that genuinely disagree on at
 /// least one format).
 fn fuzz_store(rng: &mut rand::rngs::SmallRng) -> CardData {
+    let ncards = rng.random_range(5..=15usize);
+    fuzz_store_n(rng, ncards)
+}
+
+/// `fuzz_store` with an explicit card count — the large-store variant (item 9) passes a few
+/// thousand so `maybe_broad` holds and `run_query_streamed` / `run_query_streamed_popcount` fire.
+fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
     // Concrete legality word: an independent random status per format.
     fn rand_word(rng: &mut rand::rngs::SmallRng) -> u64 {
         FUZZ_SHIFTS.iter().fold(0u64, |w, &s| w | (rng.random_range(0..4u64) << s))
     }
     const BORDERS: [Option<&str>; 6] = [Some("black"), Some("white"), Some("borderless"), Some("gold"), Some("yellow"), None];
 
-    let ncards = rng.random_range(5..=15usize);
     let mut vocab = VocabInterner::new();
     let mut cards: Vec<OracleCard> = Vec::with_capacity(ncards);
     let mut counts: Vec<usize> = Vec::with_capacity(ncards);
-    // Per-printing (rarity, border, legality word), flat in card/printing order,
-    // applied after store_of lays out the printings.
-    let mut pmeta: Vec<(Option<u8>, Option<&'static str>, u64)> = Vec::new();
+    // Per-printing (rarity, border, legality word, collector number, price cents, released_at),
+    // flat in card/printing order, applied after store_of lays out the printings.
+    type PMeta = (Option<u8>, Option<&'static str>, u64, Option<u16>, Option<u32>, u32);
+    let mut pmeta: Vec<PMeta> = Vec::new();
 
     for i in 0..ncards {
         let mut card = stub_card(i as u128 + 1, fuzz_type_bits(rng), &[], &mut vocab);
         card.card_colors = rng.random_range(0..32u8);
-        card.cmc = Some(rng.random_range(0..=8u8));
+        // cmc on the corpus distribution (peaks at 2-3). Power/toughness/loyalty are *derived* from
+        // it so bigger stats cost more and P~T track each other, and are present only on the
+        // matching card kind: creatures have power/toughness, planeswalkers have loyalty.
+        let cmc = fuzz_weighted(rng, &[(0u8, 1), (1, 3), (2, 7), (3, 8), (4, 6), (5, 4), (6, 2), (7, 1), (8, 1)]);
+        card.cmc = Some(cmc);
+        card.edhrec_rank = Some(rng.random_range(1..=30_000u32)); // distinct-ish, gives the sort keys something to order
+        // creature 55% / planeswalker 6% / neither 39%. Planeswalkers are over-represented vs the
+        // corpus's ~1% so loyalty predicates actually match something under the fuzzer's small stores.
+        match fuzz_weighted(rng, &[(0u8, 55), (1, 6), (2, 39)]) {
+            0 => {
+                let power = (i32::from(cmc) - 1 + rng.random_range(-1..=2)).clamp(0, 12) as i8;
+                let toughness = (i32::from(power) + rng.random_range(-1..=2)).clamp(1, 13) as i8;
+                card.creature_power = Some(power);
+                card.creature_toughness = Some(toughness);
+            }
+            1 => card.planeswalker_loyalty = Some((2 + i32::from(cmc) / 2 + rng.random_range(0..=2)).clamp(2, 8) as u8),
+            _ => {}
+        }
         let divergent = rng.random_bool(0.4);
         card.legality_divergent = divergent;
+        // Printings per card is heavily skewed in the corpus (~41% have exactly one, long tail);
+        // sample that shape rather than uniform 1-3. ~1% are basic-land-like with piles of printings
+        // (the corpus tail runs to ~850), exercising long per-card ranges and heavy artwork dedup.
         // Divergent cards need >= 2 printings to actually disagree.
-        let npr = if divergent { rng.random_range(2..=3usize) } else { rng.random_range(1..=3usize) };
+        let npr = if rng.random_bool(0.01) {
+            rng.random_range(30..=200usize)
+        } else {
+            let n = fuzz_weighted(rng, &[(1usize, 41), (2, 22), (3, 11), (4, 9), (5, 5), (6, 3), (7, 2), (8, 1), (10, 1), (15, 1)]);
+            if divergent { n.max(2) } else { n }
+        };
         counts.push(npr);
 
         let mut words: Vec<u64> = (0..npr).map(|_| rand_word(rng)).collect();
@@ -1644,27 +1823,58 @@ fn fuzz_store(rng: &mut rand::rngs::SmallRng) -> CardData {
         }
 
         for &word in &words {
-            let rarity = if rng.random_bool(0.85) { Some(rng.random_range(0..=4u8)) } else { None };
+            // Rarity weighted like the corpus (rare > common > uncommon > mythic); 15% NULL for
+            // Null-propagation coverage. Collector number spread 1-300 (mostly present). Price 16%
+            // NULL, heavy sub-$2 tail. Release date recent-skewed.
+            let rarity = if rng.random_bool(0.85) {
+                Some(fuzz_weighted(rng, &[(0u8, 28), (1, 24), (2, 37), (3, 9), (4, 2)]))
+            } else {
+                None
+            };
             let border = BORDERS[rng.random_range(0..BORDERS.len())];
-            pmeta.push((rarity, border, word));
+            let cn = if rng.random_bool(0.95) { Some(rng.random_range(1..=300u16)) } else { None };
+            let price = if rng.random_bool(0.16) {
+                None
+            } else {
+                Some(match fuzz_weighted(rng, &[(0u8, 50), (1, 25), (2, 15), (3, 10)]) {
+                    0 => rng.random_range(5..=50u32),
+                    1 => rng.random_range(50..=200u32),
+                    2 => rng.random_range(200..=1000u32),
+                    _ => rng.random_range(1000..=6000u32),
+                })
+            };
+            let year = fuzz_year_value(rng);
+            let released = year * 10_000 + rng.random_range(1..=12u32) * 100 + rng.random_range(1..=28u32);
+            pmeta.push((rarity, border, word, cn, price, released));
         }
         cards.push(card);
     }
 
     let mut data = store_of(cards, &counts, vocab);
     let mut interner = Interner::new();
-    for (idx, (rarity, border, word)) in pmeta.into_iter().enumerate() {
+    for (idx, (rarity, border, word, cn, price, released)) in pmeta.into_iter().enumerate() {
         data.printings[idx].card_rarity_int = rarity;
         data.printings[idx].card_border_id = border.map_or(NONE_STR, |b| interner.intern(b.to_string()));
         data.printings[idx].card_legalities = word;
+        data.printings[idx].collector_number_int = cn;
+        data.printings[idx].price_usd = price;
+        data.printings[idx].released_at_int = Some(released);
     }
     data.strings = interner.strings;
-    // store_of built indexes from the placeholder printings; rebuild every index
-    // that depends on the fields mutated above.
+    // store_of built indexes from the placeholder printings and left the numeric/range indexes at
+    // empty defaults; rebuild everything the mutated fields feed. The range indexes are load-bearing
+    // for correctness, not just coverage: an empty range index narrows a matching predicate to the
+    // empty (tight) set, which would make run_query wrongly return nothing.
     data.indexes.rarity = build_rarity_index(&data.printings, &data.offsets);
     data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
     data.indexes.legal_divergent = build_divergent_ids(&data.cards);
     data.indexes.sort_perms = build_sort_permutations(&data.cards, &data.printings, &data.offsets);
+    data.indexes.cmc = build_numeric_index(&data.cards, |c| c.cmc.map(i16::from));
+    data.indexes.power = build_numeric_index(&data.cards, |c| c.creature_power.map(i16::from));
+    data.indexes.toughness = build_numeric_index(&data.cards, |c| c.creature_toughness.map(i16::from));
+    data.indexes.released_at = build_range_index(&data.printings, |p| p.released_at_int);
+    data.indexes.price_usd = build_range_index(&data.printings, |p| p.price_usd);
+    data.indexes.collector_number = build_range_index(&data.printings, |p| p.collector_number_int.map(u32::from));
     data
 }
 
@@ -1709,60 +1919,122 @@ fn fuzz_reference_total(archived: &Archived<CardData>, f: &FilterExpr, mode: &st
     total
 }
 
-/// Run one (store, filter, mode) case through both the unplaned and the plane
-/// paths, and assert (a) the total matches the brute-force reference and (b)
-/// **every emitted row satisfies the filter** per the trusted evaluator. `ctx`
-/// carries the seed + filter description so a failure reproduces exactly.
-fn fuzz_check_case(archived: &Archived<CardData>, spec: &FuzzSpec, ctx: &str) {
-    // Limit far exceeds the largest possible store (15 cards * 3 printings), so
-    // the page is never truncated and its length equals the total.
-    const LIMIT: usize = 1000;
+/// Run one (store, filter, mode) case at the given sort column/direction through both the unplaned
+/// and the plane paths, asserting: (a) total matches the brute-force reference, (b) **every emitted
+/// row satisfies the filter** per the trusted evaluator, and (c) a partial page at a middle offset
+/// equals the ordered full result's corresponding slice (pagination correctness). `ctx` carries the
+/// seed + filter description so a failure reproduces exactly.
+fn fuzz_check_case(archived: &Archived<CardData>, spec: &FuzzSpec, ctx: &str, orderby: &str, direction: &str) {
+    // >= any possible total, so the offset-0 page is the complete ordered result to slice against.
+    let full_limit = archived.printings.len().max(1);
     let ref_filter = fuzz_build_filter(spec);
     let strings = &archived.strings;
+    let ids = |page: &[(&Archived<OracleCard>, &Archived<Printing>)]| -> Vec<u128> {
+        page.iter().map(|(_, p)| u128::from(p.scryfall_id)).collect()
+    };
+    let all_satisfy = |page: &[(&Archived<OracleCard>, &Archived<Printing>)], label: &str, mode: &str| {
+        for &(card, p) in page {
+            assert!(
+                ref_filter.matches(card, p, strings),
+                "{label} emitted a row that does not satisfy the filter (mode={mode}, orderby={orderby}, dir={direction}, scryfall_id={}, {ctx})",
+                u128::from(p.scryfall_id),
+            );
+        }
+    };
 
     for mode in ["card", "printing", "artwork"] {
         let expected = fuzz_reference_total(archived, &ref_filter, mode);
         let unique_is_card = mode == "card";
 
-        // Unplaned path: raw filter, plane = None (mirrors run_query_plane_path_parity).
+        // Full page (offset 0): total + every row satisfies. Unplaned = raw filter, plane = None;
+        // plane path = split_planes + the promoted plane (unique_is_card matches the real caller).
         let mut plain = fuzz_build_filter(spec);
         let (t0, p0) = run_query(
             &archived.cards, &archived.printings, &archived.offsets, strings,
-            &mut plain, None, mode, "default", "edhrec", "asc", LIMIT, 0, &archived.indexes,
+            &mut plain, None, mode, "default", orderby, direction, full_limit, 0, &archived.indexes,
         );
-
-        // Plane path: split_planes + the promoted plane, unique_is_card matching
-        // the real caller (only Mode::Card may fold an existential legality leaf).
         let (pe, mut residual) = split_planes(
             fuzz_build_filter(spec), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, unique_is_card,
         );
         let (t1, p1) = run_query(
             &archived.cards, &archived.printings, &archived.offsets, strings,
-            &mut residual, pe.as_ref(), mode, "default", "edhrec", "asc", LIMIT, 0, &archived.indexes,
+            &mut residual, pe.as_ref(), mode, "default", orderby, direction, full_limit, 0, &archived.indexes,
         );
 
-        assert_eq!(t0, expected, "unplaned total mismatch (mode={mode}, {ctx})");
-        assert_eq!(t1, expected, "plane-path total mismatch (mode={mode}, {ctx})");
+        assert_eq!(t0, expected, "unplaned total mismatch (mode={mode}, orderby={orderby}, dir={direction}, {ctx})");
+        assert_eq!(t1, expected, "plane-path total mismatch (mode={mode}, orderby={orderby}, dir={direction}, {ctx})");
         assert_eq!(p0.len(), t0, "unplaned page truncated unexpectedly (mode={mode}, {ctx})");
         assert_eq!(p1.len(), t1, "plane-path page truncated unexpectedly (mode={mode}, {ctx})");
+        all_satisfy(&p0, "unplaned", mode);
+        all_satisfy(&p1, "plane path", mode);
 
-        // The assertion #676 would have failed: every returned (card, printing)
-        // row must itself satisfy the filter, not merely belong to a matching card.
-        for &(card, p) in &p0 {
-            assert!(
-                ref_filter.matches(card, p, strings),
-                "unplaned emitted a row that does not satisfy the filter (mode={mode}, scryfall_id={}, {ctx})",
-                u128::from(p.scryfall_id),
+        // Pagination: a partial page at a middle offset must be exactly the ordered full result's
+        // [offset, offset+limit) slice (same query, so deterministic), and each row still satisfies.
+        if expected >= 3 {
+            let offset = expected / 3;
+            let plimit = ((expected - offset) / 2).max(1);
+            let (full0, full1) = (ids(&p0), ids(&p1));
+
+            let mut plain_pg = fuzz_build_filter(spec);
+            let (_, pg0) = run_query(
+                &archived.cards, &archived.printings, &archived.offsets, strings,
+                &mut plain_pg, None, mode, "default", orderby, direction, plimit, offset, &archived.indexes,
             );
-        }
-        for &(card, p) in &p1 {
-            assert!(
-                ref_filter.matches(card, p, strings),
-                "plane path emitted a row that does not satisfy the filter (mode={mode}, scryfall_id={}, {ctx})",
-                u128::from(p.scryfall_id),
+            assert_eq!(
+                ids(&pg0), full0[offset..offset + plimit].to_vec(),
+                "unplaned pagination slice mismatch (mode={mode}, orderby={orderby}, dir={direction}, offset={offset}, {ctx})",
             );
+            all_satisfy(&pg0, "unplaned paginated", mode);
+
+            let (pe_pg, mut residual_pg) = split_planes(
+                fuzz_build_filter(spec), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, unique_is_card,
+            );
+            let (_, pg1) = run_query(
+                &archived.cards, &archived.printings, &archived.offsets, strings,
+                &mut residual_pg, pe_pg.as_ref(), mode, "default", orderby, direction, plimit, offset, &archived.indexes,
+            );
+            assert_eq!(
+                ids(&pg1), full1[offset..offset + plimit].to_vec(),
+                "plane pagination slice mismatch (mode={mode}, orderby={orderby}, dir={direction}, offset={offset}, {ctx})",
+            );
+            all_satisfy(&pg1, "plane paginated", mode);
         }
     }
+}
+
+/// Row-identity-only check: assert every emitted page row satisfies the filter, for both the
+/// unplaned and plane paths. O(page), with no O(printings) reference-total pass — cheap enough to
+/// run thousands of times against a corpus-scale fixture. Catches false positives (a returned row
+/// that doesn't match); the O(n) `fuzz_check_case` guards false negatives (missing matches).
+#[allow(clippy::too_many_arguments)]
+fn fuzz_check_row_identity(
+    archived: &Archived<CardData>, spec: &FuzzSpec, ctx: &str, orderby: &str, direction: &str, mode: &str, limit: usize, offset: usize,
+) {
+    let f = fuzz_build_filter(spec);
+    let strings = &archived.strings;
+    let check = |page: &[(&Archived<OracleCard>, &Archived<Printing>)], label: &str| {
+        for &(card, p) in page {
+            assert!(
+                f.matches(card, p, strings),
+                "{label} emitted a non-matching row (mode={mode}, orderby={orderby}, dir={direction}, offset={offset}, scryfall_id={}, {ctx})",
+                u128::from(p.scryfall_id),
+            );
+        }
+    };
+    let mut plain = fuzz_build_filter(spec);
+    let (_, p0) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, strings,
+        &mut plain, None, mode, "default", orderby, direction, limit, offset, &archived.indexes,
+    );
+    check(&p0, "unplaned");
+    let (pe, mut residual) = split_planes(
+        fuzz_build_filter(spec), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, mode == "card",
+    );
+    let (_, p1) = run_query(
+        &archived.cards, &archived.printings, &archived.offsets, strings,
+        &mut residual, pe.as_ref(), mode, "default", orderby, direction, limit, offset, &archived.indexes,
+    );
+    check(&p1, "plane path");
 }
 
 /// #677: differential row-identity fuzzer. Unlike the surrounding `total`-only
@@ -1772,13 +2044,25 @@ fn fuzz_check_case(archived: &Archived<CardData>, spec: &FuzzSpec, ctx: &str) {
 /// pass clean (card-invariant fields are safe by construction; border/rarity/
 /// legality planes are all kept loose or existence-only); it is a regression
 /// guard, not a live-bug finder.
+///
+/// #696 expanded its coverage: numeric/date/price/collector-number and arithmetic
+/// leaves (on rough real-card distributions with the cross-field correlations —
+/// power/toughness only on creatures, loyalty only on planeswalkers, stats
+/// tracking cmc); every sort column and both directions; a paginated slice check
+/// (the page must equal the ordered full result's window); and a large-store pass
+/// so `run_query_streamed` / `run_query_streamed_popcount` fire (`maybe_broad`).
 #[test]
 fn fuzz_row_identity_matches_reference() {
     use rand::SeedableRng;
     const NUM_SEEDS: u64 = 96;
     const RANDOM_FILTERS_PER_STORE: usize = 10;
     const MAX_DEPTH: u8 = 3;
+    // edhrec/name/cmc have sort permutations (streamed path + inverse perms); usd has none, so it
+    // falls to the gathered, printing-keyed path. `desc` exercises the inverse perms / descending key.
+    const SORTS: [&str; 4] = ["edhrec", "name", "cmc", "usd"];
+    let pick_order = |rng: &mut rand::rngs::SmallRng| (SORTS[rng.random_range(0..SORTS.len())], if rng.random_bool(0.5) { "desc" } else { "asc" });
 
+    // Small stores: broad predicate + structural combinatorics through the gather / small-total paths.
     for seed in 0..NUM_SEEDS {
         let mut rng = rand::rngs::SmallRng::seed_from_u64(seed);
         let data = fuzz_store(&mut rng);
@@ -1791,9 +2075,56 @@ fn fuzz_row_identity_matches_reference() {
             specs.push(fuzz_gen(&mut rng, MAX_DEPTH));
         }
         for spec in &specs {
+            let (orderby, direction) = pick_order(&mut rng);
             let ctx = format!("seed={seed}, filter={}", fuzz_describe(spec));
-            fuzz_check_case(archived, spec, &ctx);
+            fuzz_check_case(archived, spec, &ctx, orderby, direction);
         }
+    }
+
+    // Corpus-like fixture on the real distributions, built ONCE and amortized across thousands of
+    // queries. Sized well above the fast-path thresholds (3x STREAM_MIN_MATCHES) so random broad-ish
+    // filters reliably engage the production paths, not just maximally-broad ones: `maybe_broad`
+    // holds (`run_query_streamed`), a pure Color+Type card query folds to `True` and hits
+    // `run_query_streamed_popcount`, and a broad range predicate under unique=printing crosses
+    // k > STREAM_MIN_MATCHES into #695's fastpath.
+    //
+    // Not full 30k/100k scale: `run_query` computes `total` on every call, so its cost is O(cards)
+    // *per query* regardless of `limit` -- thousands of queries at 30k is ~40s in a debug (CI) build.
+    // 6k is the point that keeps every path exercised while thousands of varied queries stay a few
+    // seconds. Split into a modest set of O(cards) full checks (total-parity + pagination -- the
+    // false-negative guard) and a large set of row-identity-only checks (false-positive guard).
+    const CORPUS_CARDS: usize = 6_000;
+    const CORPUS_FULL_CHECKS: usize = 24;
+    const CORPUS_ROWID_CHECKS: usize = 2_500;
+    let mut rng = rand::rngs::SmallRng::seed_from_u64(9_999);
+    let data = fuzz_store_n(&mut rng, CORPUS_CARDS);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let modes = ["card", "printing", "artwork"];
+
+    // Full checks: deliberate fast-path shapes (popcount, #695 broad-range) plus random trees.
+    let mut full_specs = vec![
+        FuzzSpec::And(vec![fuzz_leaf_color(&mut rng), fuzz_leaf_type(&mut rng)]), // -> True (card-mode popcount path)
+        FuzzSpec::Leaf(FuzzLeaf::Price { op: CmpOp::Lt, val: 100_000.0 }),        // matches ~all priced -> #695 fastpath
+        FuzzSpec::Leaf(FuzzLeaf::Date { op: CmpOp::Gt, value: 1990_0000 }),       // broad date -> range fastpath
+    ];
+    while full_specs.len() < CORPUS_FULL_CHECKS {
+        full_specs.push(fuzz_gen(&mut rng, MAX_DEPTH));
+    }
+    for spec in &full_specs {
+        let (orderby, direction) = pick_order(&mut rng);
+        let ctx = format!("corpus-full, filter={}", fuzz_describe(spec));
+        fuzz_check_case(archived, spec, &ctx, orderby, direction);
+    }
+
+    // Thousands of cheap row-identity checks across varied query / sort / direction / offset / mode.
+    for _ in 0..CORPUS_ROWID_CHECKS {
+        let spec = fuzz_gen(&mut rng, MAX_DEPTH);
+        let (orderby, direction) = pick_order(&mut rng);
+        let mode = modes[rng.random_range(0..modes.len())];
+        let offset = if rng.random_bool(0.5) { 0 } else { rng.random_range(0..800) };
+        let ctx = format!("corpus-rowid, filter={}", fuzz_describe(&spec));
+        fuzz_check_row_identity(archived, &spec, &ctx, orderby, direction, mode, 100, offset);
     }
 }
 
@@ -5494,8 +5825,8 @@ fn printing_range_aligned_page_matches_naive_incl_tie_buckets() {
         let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
         let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
         let idx = &archived.indexes.price_usd;
-        // usd<50 -> cents [0, 5000)
-        let s = idx.partition_point(|p| u32::from(p.0) < 0);
+        // usd<50 -> cents [0, 5000); lo is 0 so s is the slice start.
+        let s = 0usize;
         let e = idx.partition_point(|p| u32::from(p.0) < 5000);
         let k = e - s;
         assert!(k > 100, "seed {seed}: matching set must be broad with big tie buckets, got {k}");
