@@ -15,6 +15,7 @@ use super::{
 };
 use rkyv::{rancor::Error, Archived};
 use std::collections::HashMap;
+use std::sync::OnceLock;
 // Trait bringing random_range/random_bool/random into scope for the #677 fuzzer
 // helpers below (SmallRng's inherent methods live on this extension trait).
 use rand::RngExt;
@@ -1465,6 +1466,13 @@ enum FuzzLeaf {
     // Artist predicate: `TextContains(ArtistLower)` that bind() rewrites to `ArtistMatch` (printing-
     // space, CSR-indexed via the artist vocab). `word` is a lowercased artist name.
     Artist { word: String },
+    // Text contains (`:`) over name/oracle/flavor. `needle` is a real corpus token so it matches
+    // something. Name/oracle drive the trigram + name-bigram indexes and the full-scan memoization
+    // (NameMatch/OracleMatch); flavor is bind-rewritten to FlavorMatch (fingerprint-prefiltered,
+    // printing-space).
+    TextContains { field: TextSearchField, needle: String },
+    // Whole-name comparison (`!name` and ordered variants) — the ExactName path via TextExact.
+    NameExact { op: CmpOp, value: String },
 }
 
 /// The `(lhs, rhs)` operand pair for an `Arith` leaf's `shape`, built fresh each call.
@@ -1616,6 +1624,11 @@ const FUZZ_ARTISTS: [(&str, u32); 11] = [
     ("chris rahn", 6), ("rebecca guay", 4), ("yan li", 1),
 ];
 
+// Fraction of creatures that are vanilla (empty oracle text). In the corpus, empty oracle text is
+// almost exclusively a creature trait: 2.2% of creatures, ~0% of non-creatures. Conditioning on the
+// creature bit reproduces that so the text predicates see a realistic vanilla population.
+const VANILLA_CREATURE_FRAC: f64 = 0.022;
+
 /// Sample `count` weighted picks from a collection table (duplicates allowed; `vocab_ids` sorts and
 /// dedups them into the id-sorted set the set-like collections expect at load).
 fn fuzz_collection_picks<'a>(rng: &mut rand::rngs::SmallRng, table: &[(&'a str, u32)], count: usize) -> Vec<&'a str> {
@@ -1642,8 +1655,71 @@ fn fuzz_leaf_artist(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
     FuzzSpec::Leaf(FuzzLeaf::Artist { word })
 }
 
+/// Frozen (name, oracle, flavor) triples sampled once from the blue store, lowercased. Record
+/// separator \x1e, field separator \x1f — neither appears in card text. Real strings give the
+/// name/oracle trigram, name-bigram, and flavor indexes realistic selectivity (and exercise the
+/// full-scan memoization crossover) that hand-written vocab cannot. Sampled into the store by the
+/// seeded RNG; see docs/issues/00699.
+static TEXT_CORPUS_RAW: &str = include_str!("../testdata/text_corpus.txt");
+fn text_corpus() -> &'static [(&'static str, &'static str, &'static str)] {
+    static CORPUS: OnceLock<Vec<(&str, &str, &str)>> = OnceLock::new();
+    CORPUS.get_or_init(|| {
+        TEXT_CORPUS_RAW
+            .split('\x1e')
+            .filter_map(|rec| {
+                let mut f = rec.split('\x1f');
+                Some((f.next()?, f.next()?, f.next()?))
+            })
+            .collect()
+    })
+}
+
+/// A real search token from the corpus for `field`: a whole word, occasionally trimmed to a 2-3
+/// char fragment to hit the short-needle / name-bigram path (#639). Retries past empty fields (a
+/// card with no flavor); falls back to a common token if the field keeps coming up empty.
+fn fuzz_text_needle(rng: &mut rand::rngs::SmallRng, field: TextSearchField) -> String {
+    let corpus = text_corpus();
+    for _ in 0..8 {
+        let t = corpus[rng.random_range(0..corpus.len())];
+        let text = match field {
+            TextSearchField::NameLower => t.0,
+            TextSearchField::OracleTextLower => t.1,
+            TextSearchField::FlavorTextLower => t.2,
+            TextSearchField::ArtistLower => t.0, // artist has its own leaf; not reached here
+        };
+        let words: Vec<&str> = text
+            .split_whitespace()
+            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+            .filter(|w| w.chars().count() >= 2)
+            .collect();
+        if words.is_empty() {
+            continue;
+        }
+        let w = words[rng.random_range(0..words.len())];
+        // ~20% of the time a short 2-3 char fragment (a prefix of a real word is still a substring
+        // of the text), exercising the bigram / short-needle path.
+        return if rng.random_bool(0.2) {
+            w.chars().take(rng.random_range(2..=3)).collect()
+        } else {
+            w.to_string()
+        };
+    }
+    "the".to_string()
+}
+
+fn fuzz_leaf_text_contains(rng: &mut rand::rngs::SmallRng, field: TextSearchField) -> FuzzSpec {
+    FuzzSpec::Leaf(FuzzLeaf::TextContains { field, needle: fuzz_text_needle(rng, field) })
+}
+
+/// Whole-name comparison (`!name` exact plus ordered variants) — the ExactName path via TextExact.
+fn fuzz_leaf_name_exact(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
+    const OPS: [CmpOp; 4] = [CmpOp::Eq, CmpOp::Eq, CmpOp::Ne, CmpOp::Ge];
+    let value = text_corpus()[rng.random_range(0..text_corpus().len())].0.to_string();
+    FuzzSpec::Leaf(FuzzLeaf::NameExact { op: OPS[rng.random_range(0..OPS.len())], value })
+}
+
 fn fuzz_leaf(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
-    match rng.random_range(0..21u8) {
+    match rng.random_range(0..25u8) {
         0 => fuzz_leaf_color(rng),
         1 => fuzz_leaf_type(rng),
         2 => fuzz_leaf_cmc(rng),
@@ -1664,6 +1740,10 @@ fn fuzz_leaf(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
         17 => fuzz_leaf_collection(rng, CollField::IsTags, &FUZZ_IS_TAGS),
         18 => fuzz_leaf_collection(rng, CollField::FrameData, &FUZZ_FRAME_DATA),
         19 => fuzz_leaf_artist(rng),
+        20 => fuzz_leaf_text_contains(rng, TextSearchField::NameLower),
+        21 => fuzz_leaf_text_contains(rng, TextSearchField::OracleTextLower),
+        22 => fuzz_leaf_text_contains(rng, TextSearchField::FlavorTextLower),
+        23 => fuzz_leaf_name_exact(rng),
         _ => fuzz_leaf_arith(rng),
     }
 }
@@ -1764,6 +1844,12 @@ fn fuzz_build_filter(spec: &FuzzSpec) -> FilterExpr {
         FuzzSpec::Leaf(FuzzLeaf::Artist { word }) => {
             FilterExpr::TextContains { field: TextSearchField::ArtistLower, word: word.clone() }
         }
+        FuzzSpec::Leaf(FuzzLeaf::TextContains { field, needle }) => {
+            FilterExpr::TextContains { field: *field, word: needle.clone() }
+        }
+        FuzzSpec::Leaf(FuzzLeaf::NameExact { op, value }) => {
+            FilterExpr::TextExact { field: TextField::NameLower, op: *op, value: value.clone() }
+        }
         FuzzSpec::Leaf(FuzzLeaf::Border { value }) => FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value: value.clone() },
         FuzzSpec::Leaf(FuzzLeaf::Legality { shift, expected }) => FilterExpr::Legality { shift: *shift, expected: *expected },
         FuzzSpec::And(v) => FilterExpr::And(v.iter().map(fuzz_build_filter).collect()),
@@ -1832,6 +1918,16 @@ fn fuzz_describe(spec: &FuzzSpec) -> String {
             format!("{f}{}{value}", fuzz_op_str(*op))
         }
         FuzzSpec::Leaf(FuzzLeaf::Artist { word }) => format!("artist:{word}"),
+        FuzzSpec::Leaf(FuzzLeaf::TextContains { field, needle }) => {
+            let f = match field {
+                TextSearchField::NameLower => "name",
+                TextSearchField::OracleTextLower => "oracle",
+                TextSearchField::FlavorTextLower => "flavor",
+                TextSearchField::ArtistLower => "artist",
+            };
+            format!("{f}:{needle}")
+        }
+        FuzzSpec::Leaf(FuzzLeaf::NameExact { op, value }) => format!("name{}{value}", fuzz_op_str(*op)),
         FuzzSpec::Leaf(FuzzLeaf::Border { value }) => format!("border=={value}"),
         FuzzSpec::Leaf(FuzzLeaf::Legality { shift, expected }) => format!("legality(shift={shift:?}, expected={expected:#04b})"),
         FuzzSpec::And(v) => format!("AND({})", v.iter().map(fuzz_describe).collect::<Vec<_>>().join(", ")),
@@ -1873,18 +1969,24 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
     let mut vocab = VocabInterner::new();
     // Artists live in their own vocab (not the shared collection vocab), matched via ArtistMatch.
     let mut artist_vocab = VocabInterner::new();
+    // String table for oracle/flavor text (interned here, in the card/printing loops) and borders
+    // (interned in the application loop). Assigned to data.strings after store_of returns.
+    let mut interner = Interner::new();
+    let corpus = text_corpus();
     let mut cards: Vec<OracleCard> = Vec::with_capacity(ncards);
     let mut counts: Vec<usize> = Vec::with_capacity(ncards);
     // Per-printing (rarity, border, legality word, collector number, price cents, released_at),
     // flat in card/printing order, applied after store_of lays out the printings.
     type PMeta = (Option<u8>, Option<&'static str>, u64, Option<u16>, Option<u32>, u32);
     let mut pmeta: Vec<PMeta> = Vec::new();
-    // Printing-space collections + artist vid, same flat card/printing order as pmeta. Interned here
-    // (while the vocabs are in scope) but only applied to the printings after store_of returns.
+    // Printing-space collections + artist vid + flavor text id, same flat card/printing order as
+    // pmeta. Interned here (while the vocabs/interner are in scope) but only applied to the printings
+    // after store_of returns.
     let mut art_meta: Vec<Vec<u16>> = Vec::new();
     let mut is_meta: Vec<Vec<u16>> = Vec::new();
     let mut frame_meta: Vec<Vec<u16>> = Vec::new();
     let mut artist_meta: Vec<u16> = Vec::new();
+    let mut flavor_meta: Vec<u32> = Vec::new();
 
     for i in 0..ncards {
         let mut card = stub_card(i as u128 + 1, fuzz_type_bits(rng), &[], &mut vocab);
@@ -1913,6 +2015,28 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
             1 => card.planeswalker_loyalty = Some((2 + i32::from(cmc) / 2 + rng.random_range(0..=2)).clamp(2, 8) as u8),
             _ => {}
         }
+        // Text from a real corpus triple. Name is always present. Empty oracle (vanilla) is
+        // conditioned on the creature bit at the real rate; every other card gets a non-empty oracle
+        // (loop past the ~1% corpus empties). Textless cards intern "" (never NONE_STR), matching the
+        // loader, so an oracle-text search evaluates False on them rather than Null.
+        // Both name fields from one corpus name: card_name_lower (InlineStr) is what contains()
+        // reads; card_name_id is the interned id NameMatch re-keys to after memoization, so it must
+        // distinguish names (leaving it NONE_STR collapses every name to one id and over-matches).
+        let name = corpus[rng.random_range(0..corpus.len())].0;
+        card.card_name_lower = InlineStr::from_str(name);
+        card.card_name_id = interner.intern(name.to_string());
+        let vanilla = card.card_types & TYPE_CREATURE != 0 && rng.random_bool(VANILLA_CREATURE_FRAC);
+        let oracle = if vanilla {
+            ""
+        } else {
+            loop {
+                let o = corpus[rng.random_range(0..corpus.len())].1;
+                if !o.is_empty() {
+                    break o;
+                }
+            }
+        };
+        card.oracle_text_lower_id = interner.intern(oracle.to_string());
         // Keywords and oracle tags apply across all card types (unlike subtypes). vocab_ids sorts
         // and dedups into the id-sorted set the engine binary-searches at match time. (Counts are
         // pulled into locals so the fn call doesn't hold `rng` while `random_range` also needs it.)
@@ -1987,13 +2111,15 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
             is_meta.push(vocab_ids(&mut vocab, &fuzz_collection_picks(rng, &FUZZ_IS_TAGS, ni)));
             frame_meta.push(vocab_ids(&mut vocab, &fuzz_collection_picks(rng, &FUZZ_FRAME_DATA, nf)));
             artist_meta.push(artist_vocab.intern(fuzz_weighted(rng, &FUZZ_ARTISTS).to_string()).unwrap());
+            // Flavor is printing-varying (a fresh corpus draw per printing, ~half empty like the
+            // corpus) so the printing-space FlavorMatch path selects among differing printings.
+            flavor_meta.push(interner.intern(corpus[rng.random_range(0..corpus.len())].2.to_string()));
         }
         cards.push(card);
     }
 
     let mut data = store_of(cards, &counts, vocab);
     data.artist_vocab = artist_vocab.strings;
-    let mut interner = Interner::new();
     for (idx, (rarity, border, word, cn, price, released)) in pmeta.into_iter().enumerate() {
         data.printings[idx].card_rarity_int = rarity;
         data.printings[idx].card_border_id = border.map_or(NONE_STR, |b| interner.intern(b.to_string()));
@@ -2005,6 +2131,7 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
         data.printings[idx].card_is_tags = std::mem::take(&mut is_meta[idx]);
         data.printings[idx].card_frame_data = std::mem::take(&mut frame_meta[idx]);
         data.printings[idx].card_artist_vid = artist_meta[idx];
+        data.printings[idx].flavor_text_lower_id = flavor_meta[idx];
     }
     data.strings = interner.strings;
     // store_of built indexes from the placeholder printings and left the numeric/range indexes at
@@ -2022,6 +2149,12 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
     data.indexes.is_tags = build_tag_index(&data.printings, &data.coll_vocab, |p| &p.card_is_tags);
     data.indexes.frame_data = build_thresholded_tag_index(&data.printings, &data.coll_vocab, |p| &p.card_frame_data);
     data.indexes.artists = build_artist_index(&data.printings, data.artist_vocab.len());
+    // Text narrowing indexes — same load-bearing property. name/oracle drive trigram + bigram
+    // narrowing and the full-scan memoization; flavor is the printing-space CSR bind() resolves against.
+    data.indexes.name_trigram = build_trigram_index(&data.cards, |c| c.card_name_lower.as_str());
+    data.indexes.name_bigrams = build_name_bigram_index(&data.cards);
+    data.indexes.oracle_trigram = build_oracle_text_index(&data.cards, &data.strings);
+    data.indexes.flavor = build_flavor_index(&data.printings, &data.strings);
     data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
     data.indexes.legal_divergent = build_divergent_ids(&data.cards);
     data.indexes.sort_perms = build_sort_permutations(&data.cards, &data.printings, &data.offsets);
@@ -6055,3 +6188,4 @@ fn printing_range_fastpath_gates_card_walk_at_stream_threshold() {
         assert_eq!(aligned_total, n, "aligned total must equal the true match count at n={n}");
     }
 }
+
