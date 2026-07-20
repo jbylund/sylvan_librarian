@@ -791,6 +791,7 @@ use filter::*;
 mod planes;
 use planes::*;
 mod estimator;
+mod cost;
 
 // ─── Trigram index ────────────────────────────────────────────────────────────
 

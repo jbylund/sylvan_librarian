@@ -462,7 +462,7 @@ pub(crate) const REGEX_MACHINERY_NS100: u32 = 5_000;
 /// Per-candidate verification cost of a node in the tri walk. Composites take
 /// the max of their children: their short-circuit may have to evaluate every
 /// child, so the most expensive child bounds the cost.
-fn verify_cost_tier(f: &FilterExpr) -> u32 {
+pub(crate) fn verify_cost_tier(f: &FilterExpr) -> u32 {
     match f {
         FilterExpr::TextRegex { regex, .. } => regex_tier(regex.as_str()),
         FilterExpr::TextContains { .. } => TEXT_SCAN_NS100,
