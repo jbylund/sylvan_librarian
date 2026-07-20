@@ -277,6 +277,20 @@ fn plane_card(f: &FilterExpr, indexes: &Archived<CardIndexes>, n_cards: u32, for
     }
 }
 
+/// Popcount of a single named plane (`PlaneExpr::Plane(idx)`), for leaves whose
+/// value maps to a known plane index directly — even when `compile_plane`
+/// declines to compile the *predicate* exactly (e.g. an untracked border folds
+/// into `PLANE_BORDER_OTHER`, a superset the estimator only needs as a bound).
+/// Guards plane availability like `plane_popcount`.
+fn plane_popcount_at(idx: usize, indexes: &Archived<CardIndexes>, n_cards: u32) -> Option<u32> {
+    if n_cards == 0 || u32::from(indexes.planes.n_cards) != n_cards {
+        return None;
+    }
+    let mut bits: Vec<u64> = Vec::new();
+    eval_planes(&PlaneExpr::Plane(idx as u16), &indexes.planes, &mut bits);
+    Some(bits.iter().map(|w| w.count_ones()).sum())
+}
+
 /// Card count `end - start` from the numeric index's partition_point bounds,
 /// WITHOUT materializing the id vec (mirrors `numeric_candidates`). None for
 /// Ne (not selective).
@@ -439,6 +453,24 @@ fn estimate_leaf(f: &FilterExpr, indexes: &Archived<CardIndexes>, n_cards: u32, 
         FilterExpr::TextExact { field: TextField::SetCode, op: CmpOp::Eq, value } => {
             let k = indexes.set_codes.get(value.as_str()).map_or(0, |v| v.len());
             project(k as u32, n_cards, n_printings)
+        }
+
+        // Border (#664/#680 planes): a tracked value maps to its one-hot plane
+        // (exact existential card count); an untracked value ("yellow", …) folds
+        // into the shared OTHER bucket — a sound superset upper bound, same as
+        // narrow_rec's border narrowing (lib.rs ~3128). compile_plane declines
+        // untracked values for *exact* narrowing, but the estimator only needs a
+        // bound, so read the plane popcount directly.
+        FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value } => {
+            let (idx, tracked) = BORDER_TRACKED_VALUES
+                .iter()
+                .position(|&v| v == value.as_str())
+                .map_or((PLANE_BORDER_OTHER, false), |i| (PLANE_BORDER + i, true));
+            match plane_popcount_at(idx, indexes, n_cards) {
+                Some(c) if tracked => exact(c),                    // one-hot: exact
+                Some(c) => Cardinality { lo: 0, est: c, hi: c },   // OTHER: superset upper bound
+                None => unknown(n),
+            }
         }
 
         // Indexable text contains (#702 step 4 fix): the match set ⊆ the cards/
