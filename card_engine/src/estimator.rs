@@ -295,6 +295,23 @@ fn plane_popcount_at(idx: usize, indexes: &Archived<CardIndexes>, n_cards: u32) 
     plane_expr_popcount(&PlaneExpr::Plane(idx as u16), indexes, n_cards)
 }
 
+/// Exact card count for a 2-byte name needle: containment IS bigram membership
+/// (#639 name-bigram index), card-space with no false positives — the dense
+/// plane's popcount or the sparse posting's length (0 if the bigram is absent).
+/// Mirrors `narrow_rec`'s name-2-byte path. None: archive built without bigrams.
+fn name_bigram_count(indexes: &Archived<CardIndexes>, bg: [u8; 2], n_cards: u32) -> Option<u32> {
+    let idx = &indexes.name_bigrams;
+    if u32::from(idx.n_cards) != n_cards {
+        return None;
+    }
+    if let Some(p) = idx.plane_of.get(&bg) {
+        let wpp = (n_cards as usize).div_ceil(64);
+        let start = u32::from(*p) as usize * wpp;
+        return Some(idx.plane_words[start..start + wpp].iter().map(|w| u64::from(*w).count_ones()).sum());
+    }
+    Some(idx.postings.get(&bg).map_or(0, |v| v.len() as u32))
+}
+
 /// Card count `end - start` from the numeric index's partition_point bounds,
 /// WITHOUT materializing the id vec (mirrors `numeric_candidates`). None for
 /// Ne (not selective).
@@ -496,6 +513,12 @@ fn estimate_leaf(f: &FilterExpr, indexes: &Archived<CardIndexes>, n_cards: u32, 
             // so the min is a sound card-space upper bound: tight hi AND est.
             match trigram_min_posting(&indexes.name_trigram, word) {
                 Some(c) => exact((c as u32).min(n)),
+                // 2-byte needle: no trigram, but containment IS bigram membership
+                // (#639) — exact card count. <2 bytes: no index → unknown.
+                None if word.len() == 2 => {
+                    let bg = [word.as_bytes()[0], word.as_bytes()[1]];
+                    name_bigram_count(indexes, bg, n).map_or_else(|| unknown(n), exact)
+                }
                 None => unknown(n),
             }
         }
