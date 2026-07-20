@@ -7,6 +7,7 @@ use super::{
     build_artist_index, build_range_index, range_candidates, narrow_candidates, rarity_candidates,
     range_too_broad_to_narrow, run_query, run_query_with_plan, PhysicalPlan, trigram_candidates, finalize_trigram_index, PrintingRangeIndex, NARROW_FLOOR,
     walk_printing_page, aligned_page, bare_range_bounds, printing_range_fastpath, sort_key_bits, orderby_to_col, SortCol, STREAM_MIN_MATCHES,
+    prepare_candidates, verify_cost_tier, Mode,
     archive_header, archive_payload, ARCHIVE_HEADER_LEN, Mmap,
     bitmap_contains, bitmap_card_ids, compile_plane, eval_planes, split_planes,
     ArithOp, ArtistIndex, CardData, CardIndexes, Candidates, ColorField, NumExpr, NumField, RarityIndex,
@@ -2920,6 +2921,191 @@ fn plan_cost_calibration() {
             }
         }
     }
+}
+
+/// #702 step 3b (cost-model validation): for each calibration query × mode ×
+/// page, compute the ACTUAL `PlanFeatures` (via `prepare_candidates` +
+/// `verify_cost_tier`, exactly as `run_query` would see them) and check that
+/// `argmin_plan cost::plan_cost` over the *applicable* plans reproduces the
+/// re-measured empirically-fastest ("gold") plan. Uses measured `total` for
+/// `matches` (validating the model given true features — estimator regret is a
+/// later step). A disagreement where the model's pick measured within ~15% of
+/// gold is an indifferent near-tie (counted a pass); a pick measuring >~1.3× gold
+/// is a real miss.
+///
+///     cargo test --release plan_cost_model_matches_gold -- --ignored --nocapture
+///
+/// Same corpus/timing discipline as `plan_cost_calibration` (min-of-N after
+/// warmup, fresh bind+split per iter outside the timer); needs real.store.
+#[test]
+#[ignore = "cost-model validation bench; needs real.store; cargo test --release plan_cost_model_matches_gold -- --ignored --nocapture"]
+fn plan_cost_model_matches_gold() {
+    use std::hint::black_box;
+    use std::time::Instant;
+    use super::cost::{PlanFeatures, plan_cost};
+    const STORE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../benchmarks/verify-order/real.store");
+    const WARMUP: usize = 5;
+    const ITERS: usize = 60;
+    // Near-tie band: a model pick measuring within this factor of gold is
+    // indifferent (a pass); above REAL_MISS it is a genuine misroute.
+    const TIE: f64 = 1.15;
+    const REAL_MISS: f64 = 1.30;
+
+    let Ok(file) = std::fs::File::open(STORE_PATH) else {
+        eprintln!("SKIP: {STORE_PATH} not found (see bench_verify_cost.rs docs to build it)");
+        return;
+    };
+    let mmap = unsafe { Mmap::map(&file) }.expect("mmap real.store");
+    if mmap.len() < ARCHIVE_HEADER_LEN || mmap[..ARCHIVE_HEADER_LEN] != archive_header() {
+        eprintln!("SKIP: {STORE_PATH} header mismatch (stale — rebuild, see bench_verify_cost.rs)");
+        return;
+    }
+    let archived = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
+    let n_cards = archived.cards.len() as u32;
+    let n_printings = archived.printings.len() as u32;
+    eprintln!("real.store: {n_cards} cards, {n_printings} printings\n");
+
+    let color = |op, mask| FuzzSpec::Leaf(FuzzLeaf::Color { op, mask });
+    let typ   = |op, mask| FuzzSpec::Leaf(FuzzLeaf::Type { op, mask });
+    let cmc   = |op, val| FuzzSpec::Leaf(FuzzLeaf::Cmc { op, val });
+    let power = |op, val| FuzzSpec::Leaf(FuzzLeaf::Power { op, val });
+    let price = |op, val| FuzzSpec::Leaf(FuzzLeaf::Price { op, val });
+    let year   = |op, y: i32| FuzzSpec::Leaf(FuzzLeaf::Year { op, year: y });
+    let otext  = |needle: &str| FuzzSpec::Leaf(FuzzLeaf::TextContains { field: TextSearchField::OracleTextLower, needle: needle.to_string() });
+    let ntext  = |needle: &str| FuzzSpec::Leaf(FuzzLeaf::TextContains { field: TextSearchField::NameLower, needle: needle.to_string() });
+    let rarity = |op, val| FuzzSpec::Leaf(FuzzLeaf::Rarity { op, val });
+    let kw     = |value: &str| FuzzSpec::Leaf(FuzzLeaf::Collection { field: CollField::Keywords, op: CmpOp::Ge, value: value.to_string() });
+
+    // Same spread as plan_cost_calibration.
+    let queries: Vec<(&str, FuzzSpec)> = vec![
+        ("cmc>=0 (all)",       cmc(CmpOp::Ge, 0.0)),
+        ("t:creature",         typ(CmpOp::Ge, TYPE_CREATURE)),
+        ("color(bit3)",        color(CmpOp::Ge, 1 << 3)),
+        ("color3 t:creature",  FuzzSpec::And(vec![color(CmpOp::Ge, 1 << 3), typ(CmpOp::Ge, TYPE_CREATURE)])),
+        ("t:creature power>3", FuzzSpec::And(vec![typ(CmpOp::Ge, TYPE_CREATURE), power(CmpOp::Gt, 3.0)])),
+        ("cmc<=2",             cmc(CmpOp::Le, 2.0)),
+        ("cmc==7",             cmc(CmpOp::Eq, 7.0)),
+        ("usd<5",              price(CmpOp::Lt, 5.0)),
+        ("year>=2020",         year(CmpOp::Ge, 2020)),
+        ("r:mythic(=3)",       rarity(CmpOp::Eq, 3.0)),
+        ("o:flying",           otext("flying")),
+        ("o:sacrifice",        otext("sacrifice")),
+        ("o:annihilator",      otext("annihilator")),
+        ("name:dragon",        ntext("dragon")),
+        ("kw:Flying",          kw("Flying")),
+        ("c:g or c:r",         FuzzSpec::Or(vec![color(CmpOp::Ge, 1 << 3), color(CmpOp::Ge, 1 << 2)])),
+        ("t:creature o:flying", FuzzSpec::And(vec![typ(CmpOp::Ge, TYPE_CREATURE), otext("flying")])),
+        ("t:creature usd<5",   FuzzSpec::And(vec![typ(CmpOp::Ge, TYPE_CREATURE), price(CmpOp::Lt, 5.0)])),
+        ("cmc<=3 o:draw",      FuzzSpec::And(vec![cmc(CmpOp::Le, 3.0), otext("draw")])),
+        ("t:cr (c:g or c:r)",  FuzzSpec::And(vec![typ(CmpOp::Ge, TYPE_CREATURE), FuzzSpec::Or(vec![color(CmpOp::Ge, 1 << 3), color(CmpOp::Ge, 1 << 2)])])),
+        ("-t:creature",        FuzzSpec::Not(Box::new(typ(CmpOp::Ge, TYPE_CREATURE)))),
+        ("cmc>=15 (narrow)",   cmc(CmpOp::Ge, 15.0)),
+    ];
+    let modes = ["card", "printing"];
+    let pages = [("shallow", 60usize, 0usize), ("deep", 60usize, 10_000usize)];
+    let all_plans = [
+        PhysicalPlan::PrintingRangeScan,
+        PhysicalPlan::PlanePopcountOrder,
+        PhysicalPlan::StreamedSelect,
+        PhysicalPlan::GatheredScan,
+    ];
+    let labels = ["P1-range", "P2-popcnt", "P3-stream", "P4-gather"];
+
+    println!(
+        "{:<20} {:>7} {:>7} {:>7} {:>8} {:>4}  {:>9} {:>9}  {:>9} {:>9}  result",
+        "query", "mode", "page", "total", "eval_dom", "tier", "gold", "model", "gold_ns", "model_ns",
+    );
+
+    let (mut n_match, mut n_tie, mut n_miss) = (0usize, 0usize, 0usize);
+
+    for (qlabel, spec) in &queries {
+        for &mode in &modes {
+            let unique_is_card = mode == "card";
+            let mode_enum = if unique_is_card { Mode::Card } else { Mode::Printing };
+            for &(plabel, limit, offset) in &pages {
+                // ── Measure each applicable plan (min-of-N), like calibration ──
+                let mut ns = [None::<u64>; 4];
+                let mut total = 0usize;
+                for (pi, plan) in all_plans.iter().enumerate() {
+                    let mut best = u64::MAX;
+                    let mut applicable = false;
+                    for it in 0..(WARMUP + ITERS) {
+                        let (pe, mut res) = split_planes(
+                            fuzz_bound_filter(spec, archived), &archived.indexes.planes,
+                            &archived.indexes.oracle_trigram.words, unique_is_card,
+                        );
+                        let t0 = Instant::now();
+                        let out = black_box(run_query_with_plan(
+                            *plan, &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+                            &mut res, pe.as_ref(), mode, "default", "edhrec", "asc", limit, offset, &archived.indexes,
+                        ));
+                        let dt = t0.elapsed().as_nanos() as u64;
+                        match out {
+                            Some((t, _)) => {
+                                total = t;
+                                applicable = true;
+                                if it >= WARMUP { best = best.min(dt); }
+                            }
+                            None => break,
+                        }
+                    }
+                    if applicable { ns[pi] = Some(best); }
+                }
+
+                // ── Compute the ACTUAL features (once; shared by P3/P4) ──
+                let (pe, mut res) = split_planes(
+                    fuzz_bound_filter(spec, archived), &archived.indexes.planes,
+                    &archived.indexes.oracle_trigram.words, unique_is_card,
+                );
+                let prep = prepare_candidates(
+                    &archived.cards, &archived.offsets, &archived.strings, &mut res, pe.as_ref(), mode_enum, &archived.indexes,
+                );
+                let eval_domain = prep.candidate_cards.as_ref().map_or(n_cards, |v| v.len() as u32);
+                // Tier reflects the residual AFTER memoize (what the walk pays).
+                let residual_tier_ns100 = if prep.all_match_known { 0 } else { verify_cost_tier(&res) };
+                let feats = PlanFeatures {
+                    n_cards, n_printings,
+                    matches: total as u32,
+                    eval_domain,
+                    residual_tier_ns100,
+                    limit: limit as u32,
+                    offset: offset as u32,
+                };
+
+                // ── Model argmin over the applicable plans ──
+                let gold = (0..4).filter_map(|i| ns[i].map(|v| (v, i))).min_by_key(|(v, _)| *v);
+                let model = (0..4)
+                    .filter(|&i| ns[i].is_some())
+                    .map(|i| (plan_cost(all_plans[i], &feats), i))
+                    .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+                let (Some((gold_ns, gi)), Some((_, mi))) = (gold, model) else { continue };
+                let model_ns = ns[mi].unwrap();
+                let ratio = model_ns as f64 / gold_ns as f64;
+                let result = if mi == gi {
+                    n_match += 1; "GOLD"
+                } else if ratio <= TIE {
+                    n_tie += 1; "tie"
+                } else if ratio > REAL_MISS {
+                    n_miss += 1; "MISS"
+                } else {
+                    n_tie += 1; "~tie" // marginal (1.15,1.30]: counted a pass
+                };
+
+                println!(
+                    "{:<20} {:>7} {:>7} {:>7} {:>8} {:>4}  {:>9} {:>9}  {:>9} {:>9}  {} ({:.2}x)",
+                    qlabel, mode, plabel, total, eval_domain, residual_tier_ns100,
+                    labels[gi], labels[mi], gold_ns, model_ns, result, ratio,
+                );
+            }
+        }
+    }
+
+    let n_total = n_match + n_tie + n_miss;
+    println!(
+        "\nagreement: {n_match} gold-match, {n_tie} near-tie(pass), {n_miss} real-miss  of {n_total}  ({:.1}% pass)",
+        100.0 * (n_match + n_tie) as f64 / n_total as f64,
+    );
 }
 
 /// format:A AND format:B (two distinct formats) can't be answered by ANDing
