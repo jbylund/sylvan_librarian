@@ -6,7 +6,7 @@ use super::{
     cards_of_printings, count_common_keywords, count_common_types,
     build_artist_index, build_range_index, range_candidates, narrow_candidates, rarity_candidates,
     range_too_broad_to_narrow, run_query, run_query_with_plan, PhysicalPlan, trigram_candidates, finalize_trigram_index, PrintingRangeIndex, NARROW_FLOOR,
-    walk_printing_page, aligned_page, bare_range_bounds, printing_range_fastpath, sort_key_bits, SortCol, STREAM_MIN_MATCHES,
+    walk_printing_page, aligned_page, bare_range_bounds, printing_range_fastpath, sort_key_bits, orderby_to_col, SortCol, STREAM_MIN_MATCHES,
     bitmap_contains, bitmap_card_ids, compile_plane, eval_planes, split_planes,
     ArithOp, ArtistIndex, CardData, CardIndexes, Candidates, ColorField, NumExpr, NumField, RarityIndex,
     CollField, CmpOp, FilterExpr, InlineStr, Interner, ManaCost, OracleCard, Printing, TagIndex,
@@ -2543,18 +2543,21 @@ fn fuzz_row_identity_matches_reference() {
 /// four individually-callable executors (`run_query_with_plan`) agree, so
 /// swapping which plan runs a query is a pure performance decision.
 ///
-/// For each fuzz query × unique mode × sort: compute the `GatheredScan` result
-/// (always `Some`) as the reference, then for every other plan call
-/// `run_query_with_plan`; if it returns `Some` (it was applicable), assert its
-/// `(total, page-of-scryfall-ids)` equals the reference. The page is the full
-/// result at offset 0 (`full_limit`, offset 0). Row identity is compared as a
-/// sorted multiset of scryfall_ids: the plans provably return the same *rows*,
-/// but their tie-break order can legitimately differ (the sort permutation's
-/// tertiary key is the first printing's prefer score, while the gathered
-/// comparator ties by pid), so comparing the exact sequence would flag benign
-/// ordering differences rather than a missing/extra row. Total equality plus
-/// multiset equality is the row-identity check (per-path ordering is already
-/// self-checked by `fuzz_row_identity_matches_reference`'s pagination slices).
+/// For each fuzz query × prefer × unique mode × sort: compute the `GatheredScan`
+/// result (always `Some`) as the reference, then for every other plan call
+/// `run_query_with_plan`; if it returns `Some` (it was applicable), assert
+/// against the reference on three axes at the full offset-0 page:
+///   - `total` equality,
+///   - `scryfall_id` multiset equality — same *rows*,
+///   - **2-key ordering** equality — the `(primary, edhrec_rank)` value
+///     sequence (top 64 bits of `sort_key_bits`).
+/// The 2-key value sequence is the ordering-parity contract (#702): plans agree
+/// on the two SQL-defined keys they're guaranteed to, and diverge only past
+/// them (key 3, prefer_score, and below — see the `PREFERS` comment below and
+/// docs/issues/00702). Comparing the 2-key *value* sequence, not the row
+/// sequence, is what tolerates that key-3 slop while still catching any real
+/// mis-ordering: tied rows share their (key1, key2) value, so the sequence is
+/// identical even when they interleave.
 ///
 /// Hand-built specs guarantee P1 (`PrintingRangeScan`) and P2
 /// (`PlanePopcountOrder`) coverage — the random generator rarely emits a bare
@@ -2610,53 +2613,80 @@ fn force_plan_differential_agreement() {
     // >= any possible total, so the offset-0 page is the complete ordered result.
     let full_limit = archived.printings.len().max(1);
     let strings = &archived.strings;
-    // Sorted multiset of scryfall_ids — row identity independent of tie-break order.
+    // Same rows regardless of tie order.
     let id_multiset = |page: &[(&Archived<OracleCard>, &Archived<Printing>)]| -> Vec<u128> {
         let mut v: Vec<u128> = page.iter().map(|(_, p)| u128::from(p.scryfall_id)).collect();
         v.sort_unstable();
         v
     };
 
+    // Ordering-parity contract (#702): plans agree on the SQL-defined keys 1-2
+    // (primary sort column, then edhrec_rank) — the top 64 bits of
+    // sort_key_bits. Key 3 (prefer_score) and beyond are unspecified across
+    // plans: the permutation bakes in the *default* representative's
+    // prefer_score, so under a non-default prefer the perm-based plans can order
+    // a key-3 tie differently from the gathered path (a known, pre-existing
+    // divergence — see docs/issues/00702-engine-plan-selection-layer.md).
+    // Comparing the 2-key VALUE sequence is stable across that: tied rows share
+    // their (key1, key2) value, so the sequence is identical even when they
+    // interleave. Exercised under a default AND a non-default prefer — 2-key
+    // parity holds at both (3-key would not, at non-default prefer).
+    const PREFERS: [&str; 2] = ["default", "usd_low"];
+
     for (spec, orderby, direction) in &cases {
-        for &mode in &modes {
-            let unique_is_card = mode == "card";
+        let sort_col = orderby_to_col(orderby);
+        let descending = *direction == "desc";
+        // (key1, key2) = the top 64 bits of sort_key_bits; drop the low 32 (key 3).
+        let key2_seq = |page: &[(&Archived<OracleCard>, &Archived<Printing>)]| -> Vec<u128> {
+            page.iter().map(|&(c, p)| sort_key_bits(c, p, sort_col, descending) >> 32).collect()
+        };
+        for &prefer in &PREFERS {
+            for &mode in &modes {
+                let unique_is_card = mode == "card";
 
-            // Reference: GatheredScan is always applicable. A fresh bound + split
-            // filter per plan call because prepare_candidates mutates the filter.
-            let (ref_pe, mut ref_res) = split_planes(
-                fuzz_bound_filter(spec, archived), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, unique_is_card,
-            );
-            let (ref_total, ref_page) = run_query_with_plan(
-                PhysicalPlan::GatheredScan, &archived.cards, &archived.printings, &archived.offsets, strings,
-                &mut ref_res, ref_pe.as_ref(), mode, "default", orderby, direction, full_limit, 0, &archived.indexes,
-            )
-            .expect("GatheredScan is always applicable");
-            ran[plan_idx(PhysicalPlan::GatheredScan)] += 1;
-            let ref_ids = id_multiset(&ref_page);
-
-            for &plan in &all_plans {
-                if plan == PhysicalPlan::GatheredScan {
-                    continue;
-                }
-                let (pe, mut res) = split_planes(
+                // Reference: GatheredScan is always applicable. A fresh bound + split
+                // filter per plan call because prepare_candidates mutates the filter.
+                let (ref_pe, mut ref_res) = split_planes(
                     fuzz_bound_filter(spec, archived), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, unique_is_card,
                 );
-                let out = run_query_with_plan(
-                    plan, &archived.cards, &archived.printings, &archived.offsets, strings,
-                    &mut res, pe.as_ref(), mode, "default", orderby, direction, full_limit, 0, &archived.indexes,
-                );
-                let Some((total, page)) = out else { continue };
-                ran[plan_idx(plan)] += 1;
-                assert_eq!(
-                    total, ref_total,
-                    "{plan:?} total disagrees with GatheredScan (mode={mode}, orderby={orderby}, dir={direction}, filter={})",
-                    fuzz_describe(spec),
-                );
-                assert_eq!(
-                    id_multiset(&page), ref_ids,
-                    "{plan:?} rows disagree with GatheredScan (mode={mode}, orderby={orderby}, dir={direction}, filter={})",
-                    fuzz_describe(spec),
-                );
+                let (ref_total, ref_page) = run_query_with_plan(
+                    PhysicalPlan::GatheredScan, &archived.cards, &archived.printings, &archived.offsets, strings,
+                    &mut ref_res, ref_pe.as_ref(), mode, prefer, orderby, direction, full_limit, 0, &archived.indexes,
+                )
+                .expect("GatheredScan is always applicable");
+                ran[plan_idx(PhysicalPlan::GatheredScan)] += 1;
+                let ref_ids = id_multiset(&ref_page);
+                let ref_key2 = key2_seq(&ref_page);
+
+                for &plan in &all_plans {
+                    if plan == PhysicalPlan::GatheredScan {
+                        continue;
+                    }
+                    let (pe, mut res) = split_planes(
+                        fuzz_bound_filter(spec, archived), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, unique_is_card,
+                    );
+                    let out = run_query_with_plan(
+                        plan, &archived.cards, &archived.printings, &archived.offsets, strings,
+                        &mut res, pe.as_ref(), mode, prefer, orderby, direction, full_limit, 0, &archived.indexes,
+                    );
+                    let Some((total, page)) = out else { continue };
+                    ran[plan_idx(plan)] += 1;
+                    assert_eq!(
+                        total, ref_total,
+                        "{plan:?} total disagrees with GatheredScan (mode={mode}, prefer={prefer}, orderby={orderby}, dir={direction}, filter={})",
+                        fuzz_describe(spec),
+                    );
+                    assert_eq!(
+                        id_multiset(&page), ref_ids,
+                        "{plan:?} rows disagree with GatheredScan (mode={mode}, prefer={prefer}, orderby={orderby}, dir={direction}, filter={})",
+                        fuzz_describe(spec),
+                    );
+                    assert_eq!(
+                        key2_seq(&page), ref_key2,
+                        "{plan:?} 2-key order disagrees with GatheredScan (mode={mode}, prefer={prefer}, orderby={orderby}, dir={direction}, filter={})",
+                        fuzz_describe(spec),
+                    );
+                }
             }
         }
     }

@@ -238,6 +238,29 @@ how they stay honest. This reuses the discipline the engine already applies to
   regret report; a risen tail means the constants need refitting or the formula
   *shape* is wrong (structured residuals), not just the coefficients.
 
+## Ordering parity across plans
+
+Swapping which plan runs a query must not change the *rows* — and it doesn't
+change the *order* over the keys the product actually defines. SQL's `ORDER BY`
+is three terms — `[sort column] → edhrec_rank → prefer_score` — then arbitrary
+(no unique final key), so there is nothing to be parity-with past key 3. The
+contract we enforce is therefore **2-key parity**: all plans agree on keys 1–2
+(primary sort column, then `edhrec_rank`), both of which are card-level values
+read identically by every plan (the top 64 bits of `sort_key_bits`).
+
+- **Key 3 (`prefer_score`) is deliberately *not* enforced across plans.** The
+  precomputed sort permutation bakes in the *default* representative's
+  prefer_score; under a non-default prefer the perm-based plans can order a
+  key-3 tie differently from the gathered path (and from SQL). Fixing it would
+  cost the streaming fast-path on non-default-prefer broad queries for a tie
+  that is vanishingly rare (`edhrec_rank` is ~unique per card), so it is a
+  known, accepted, pre-existing divergence — not fixed here.
+- **Enforced by** `force_plan_differential_agreement`: every applicable plan's
+  2-key value sequence + scryfall_id multiset must match `GatheredScan`, across
+  modes and a default *and* non-default prefer. (This is Rust plan-vs-plan; a
+  Rust-vs-SQL order check is separate and rides the existing engine/SQL parity
+  suite.)
+
 ## Measurement
 
 Hook the estimator into the `fuzz_row_identity_matches_reference` harness and
