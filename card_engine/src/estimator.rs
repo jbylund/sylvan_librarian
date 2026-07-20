@@ -277,6 +277,41 @@ fn plane_card(f: &FilterExpr, indexes: &Archived<CardIndexes>, n_cards: u32, for
     }
 }
 
+/// Popcount of an arbitrary already-compiled `PlaneExpr`, for leaves the
+/// estimator can bound via a plane the predicate's own `compile_plane` declines
+/// (an untracked border's OTHER bucket, a devotion saturated superset). Guards
+/// plane availability like `plane_popcount`.
+fn plane_expr_popcount(pe: &PlaneExpr, indexes: &Archived<CardIndexes>, n_cards: u32) -> Option<u32> {
+    if n_cards == 0 || u32::from(indexes.planes.n_cards) != n_cards {
+        return None;
+    }
+    let mut bits: Vec<u64> = Vec::new();
+    eval_planes(pe, &indexes.planes, &mut bits);
+    Some(bits.iter().map(|w| w.count_ones()).sum())
+}
+
+/// Popcount of a single named plane (see `plane_expr_popcount`).
+fn plane_popcount_at(idx: usize, indexes: &Archived<CardIndexes>, n_cards: u32) -> Option<u32> {
+    plane_expr_popcount(&PlaneExpr::Plane(idx as u16), indexes, n_cards)
+}
+
+/// Exact card count for a 2-byte name needle: containment IS bigram membership
+/// (#639 name-bigram index), card-space with no false positives — the dense
+/// plane's popcount or the sparse posting's length (0 if the bigram is absent).
+/// Mirrors `narrow_rec`'s name-2-byte path. None: archive built without bigrams.
+fn name_bigram_count(indexes: &Archived<CardIndexes>, bg: [u8; 2], n_cards: u32) -> Option<u32> {
+    let idx = &indexes.name_bigrams;
+    if u32::from(idx.n_cards) != n_cards {
+        return None;
+    }
+    if let Some(p) = idx.plane_of.get(&bg) {
+        let wpp = (n_cards as usize).div_ceil(64);
+        let start = u32::from(*p) as usize * wpp;
+        return Some(idx.plane_words[start..start + wpp].iter().map(|w| u64::from(*w).count_ones()).sum());
+    }
+    Some(idx.postings.get(&bg).map_or(0, |v| v.len() as u32))
+}
+
 /// Card count `end - start` from the numeric index's partition_point bounds,
 /// WITHOUT materializing the id vec (mirrors `numeric_candidates`). None for
 /// Ne (not selective).
@@ -360,10 +395,20 @@ fn estimate_leaf(f: &FilterExpr, indexes: &Archived<CardIndexes>, n_cards: u32, 
         // Existence-projection plane → superset {0, c, c}.
         FilterExpr::Legality { .. } => plane_card(f, indexes, n_cards, true),
 
-        // Devotion Ge/Gt: saturated-bucket plane superset {0, c, c}; other ops
-        // are not plane-narrowable → unknown.
-        FilterExpr::Devotion { op: CmpOp::Ge | CmpOp::Gt, .. } => plane_card(f, indexes, n_cards, true),
-        FilterExpr::Devotion { .. } => unknown(n),
+        // Devotion (card-level, two-valued). The planes give 0/1/2/3+ buckets
+        // per color, so the exact compiler answers any comparison within the
+        // saturation boundary EXACTLY (==0/1/2, ≥1/2/3, and the ≤/≠ it accepts) —
+        // exact card count, tight bounds. When it declines — Ge/Gt past 3, where
+        // "3+" can't be split — the saturated superset (count clamped to 3, the
+        // 3+ bucket ⊇ ≥k for k≥3) is a sound upper bound. Superset is Ge-based,
+        // so it's sound only for Ge/Gt; Le/Lt/Eq/Ne that decline stay unknown.
+        FilterExpr::Devotion { op, pips } => match plane_popcount(f, indexes, n_cards) {
+            Some((c, _)) => exact(c),
+            None if matches!(op, CmpOp::Ge | CmpOp::Gt) => compile_devotion_superset(*pips)
+                .and_then(|pe| plane_expr_popcount(&pe, indexes, n_cards))
+                .map_or_else(|| unknown(n), |c| Cardinality { lo: 0, est: c, hi: c }),
+            None => unknown(n),
+        },
 
         FilterExpr::CollectionCmp { field, op: CmpOp::Ge, value, .. } => {
             // Mirror narrow_rec's field dispatch (lib.rs:3040-3047).
@@ -441,6 +486,24 @@ fn estimate_leaf(f: &FilterExpr, indexes: &Archived<CardIndexes>, n_cards: u32, 
             project(k as u32, n_cards, n_printings)
         }
 
+        // Border (#664/#680 planes): a tracked value maps to its one-hot plane
+        // (exact existential card count); an untracked value ("yellow", …) folds
+        // into the shared OTHER bucket — a sound superset upper bound, same as
+        // narrow_rec's border narrowing (lib.rs ~3128). compile_plane declines
+        // untracked values for *exact* narrowing, but the estimator only needs a
+        // bound, so read the plane popcount directly.
+        FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value } => {
+            let (idx, tracked) = BORDER_TRACKED_VALUES
+                .iter()
+                .position(|&v| v == value.as_str())
+                .map_or((PLANE_BORDER_OTHER, false), |i| (PLANE_BORDER + i, true));
+            match plane_popcount_at(idx, indexes, n_cards) {
+                Some(c) if tracked => exact(c),                    // one-hot: exact
+                Some(c) => Cardinality { lo: 0, est: c, hi: c },   // OTHER: superset upper bound
+                None => unknown(n),
+            }
+        }
+
         // Indexable text contains (#702 step 4 fix): the match set ⊆ the cards/
         // texts carrying the needle's RAREST trigram, so `trigram_min_posting`
         // (min over the needle's trigrams, no intersection) is a cheap bound.
@@ -450,6 +513,12 @@ fn estimate_leaf(f: &FilterExpr, indexes: &Archived<CardIndexes>, n_cards: u32, 
             // so the min is a sound card-space upper bound: tight hi AND est.
             match trigram_min_posting(&indexes.name_trigram, word) {
                 Some(c) => exact((c as u32).min(n)),
+                // 2-byte needle: no trigram, but containment IS bigram membership
+                // (#639) — exact card count. <2 bytes: no index → unknown.
+                None if word.len() == 2 => {
+                    let bg = [word.as_bytes()[0], word.as_bytes()[1]];
+                    name_bigram_count(indexes, bg, n).map_or_else(|| unknown(n), exact)
+                }
                 None => unknown(n),
             }
         }
