@@ -6,6 +6,7 @@ use super::{
     cards_of_printings, count_common_keywords, count_common_types,
     build_artist_index, build_range_index, range_candidates, narrow_candidates, rarity_candidates,
     range_too_broad_to_narrow, run_query, run_query_with_plan, PhysicalPlan, trigram_candidates, finalize_trigram_index, PrintingRangeIndex, NARROW_FLOOR,
+    gathered_scan_applicable, streamed_select_applicable, plane_popcount_order_applicable, printing_range_scan_applicable,
     walk_printing_page, aligned_page, bare_range_bounds, printing_range_fastpath, sort_key_bits, orderby_to_col, SortCol, STREAM_MIN_MATCHES,
     prepare_candidates, verify_cost_tier, Mode,
     archive_header, archive_payload, ARCHIVE_HEADER_LEN, Mmap,
@@ -3250,6 +3251,124 @@ fn plan_regret_report() {
     offenders.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
     println!("worst offenders:");
     for (regret, name) in offenders.iter().take(5) {
+        println!("  {regret:>7.2}x  {name}");
+    }
+}
+
+/// #702 step 4 (breadth): MODELED regret over a large fuzz-generated query set.
+/// No timing, so it scales to thousands of queries where the timed
+/// `plan_regret_report` can't — it catches estimator errors that flip a plan
+/// choice on shapes the hand-picked set doesn't cover. Trustworthy because the
+/// cost model is validated against real timing at 100%
+/// (`plan_cost_model_matches_gold`): for each query we compare the plan the
+/// estimator's `est` would pick against the plan TRUE cardinality would pick,
+/// both scored by the MODELED cost in the true world —
+///
+///     modeled_regret = plan_cost(est_pick | true_feats) / plan_cost(gold_pick | true_feats)  (>= 1.0)
+///
+/// Card mode only (estimator is card-space).
+///
+///     cargo test --release plan_regret_fuzz -- --ignored --nocapture
+///
+/// Needs real.store.
+#[test]
+#[ignore = "modeled-regret fuzz sweep; needs real.store; cargo test --release plan_regret_fuzz -- --ignored --nocapture"]
+fn plan_regret_fuzz() {
+    use rand::SeedableRng;
+    use super::cost::{PlanFeatures, plan_cost};
+    const STORE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../benchmarks/verify-order/real.store");
+    const QUERIES: usize = 3_000;
+    const MAX_DEPTH: u8 = 3;
+    const MINOR: f64 = 1.30;
+
+    let Ok(file) = std::fs::File::open(STORE_PATH) else {
+        eprintln!("SKIP: {STORE_PATH} not found (see bench_verify_cost.rs docs)");
+        return;
+    };
+    let mmap = unsafe { Mmap::map(&file) }.expect("mmap real.store");
+    if mmap.len() < ARCHIVE_HEADER_LEN || mmap[..ARCHIVE_HEADER_LEN] != archive_header() {
+        eprintln!("SKIP: {STORE_PATH} header mismatch (stale — rebuild)");
+        return;
+    }
+    let archived = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
+    let n_cards = archived.cards.len() as u32;
+    let n_printings = archived.printings.len() as u32;
+    eprintln!("real.store: {n_cards} cards, {n_printings} printings; {QUERIES} fuzz queries, card mode\n");
+
+    let sort_col = orderby_to_col("edhrec");
+    let descending = false;
+    let pages = [(60usize, 0usize), (60usize, 10_000usize)];
+    let all_plans = [
+        PhysicalPlan::PrintingRangeScan,
+        PhysicalPlan::PlanePopcountOrder,
+        PhysicalPlan::StreamedSelect,
+        PhysicalPlan::GatheredScan,
+    ];
+
+    let mut rng = rand::rngs::SmallRng::seed_from_u64(90_210);
+    let (mut n_none, mut n_minor, mut n_real, mut n_configs) = (0usize, 0usize, 0usize, 0usize);
+    let mut log_sum = 0.0f64;
+    let mut worst: Vec<(f64, String)> = Vec::new();
+
+    for _ in 0..QUERIES {
+        let spec = fuzz_gen(&mut rng, MAX_DEPTH);
+        let f = fuzz_bound_filter(&spec, archived);
+        let true_total = fuzz_reference_total(archived, &f, "card") as u32;
+        let est = super::estimator::estimate_cardinality(&f, &archived.indexes, &archived.offsets).est;
+
+        // Actual structure/features (the router knows structure; only cardinality is estimated).
+        let (pe, mut res) = split_planes(
+            fuzz_bound_filter(&spec, archived), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, true,
+        );
+        let prep = prepare_candidates(
+            &archived.cards, &archived.offsets, &archived.strings, &mut res, pe.as_ref(), Mode::Card, &archived.indexes,
+        );
+        let eval_domain = prep.candidate_cards.as_ref().map_or(n_cards, |v| v.len() as u32);
+        let tier = if prep.all_match_known { 0 } else { verify_cost_tier(&res) };
+
+        // Applicable plans (card mode) via the predicates — no execution needed.
+        let applicable = [
+            printing_range_scan_applicable(Mode::Card, pe.as_ref(), &archived.cards), // false: card mode
+            plane_popcount_order_applicable(&res, Mode::Card, &archived.cards, pe.as_ref(), sort_col, descending, &archived.indexes),
+            streamed_select_applicable(&archived.cards, sort_col, descending, &archived.indexes),
+            gathered_scan_applicable(),
+        ];
+
+        for &(limit, offset) in &pages {
+            let mk = |matches: u32, evd: u32| PlanFeatures {
+                n_cards, n_printings, matches, eval_domain: evd, residual_tier_ns100: tier,
+                limit: limit as u32, offset: offset as u32,
+            };
+            let feats_true = mk(true_total, eval_domain);
+            let feats_est = mk(est, est.min(n_cards));
+            let pick = |feats: &PlanFeatures| {
+                (0..4)
+                    .filter(|&i| applicable[i])
+                    .map(|i| (plan_cost(all_plans[i], feats), i))
+                    .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap())
+                    .map(|(_, i)| i)
+            };
+            let (Some(gi), Some(ei)) = (pick(&feats_true), pick(&feats_est)) else { continue };
+            // est-pick's cost vs gold-pick's cost, both in the true world (>= 1.0).
+            let regret = plan_cost(all_plans[ei], &feats_true) / plan_cost(all_plans[gi], &feats_true);
+            n_configs += 1;
+            log_sum += regret.ln();
+            if ei == gi {
+                n_none += 1;
+            } else if regret <= MINOR {
+                n_minor += 1;
+            } else {
+                n_real += 1;
+                worst.push((regret, format!("{} [off {offset}] true={true_total} est={est} gold=P{} pick=P{}", fuzz_describe(&spec), gi + 1, ei + 1)));
+            }
+        }
+    }
+
+    let geomean = if n_configs > 0 { (log_sum / n_configs as f64).exp() } else { 1.0 };
+    println!("modeled regret ({n_configs} configs): {n_none} no-regret, {n_minor} minor(<={MINOR}x), {n_real} real(>{MINOR}x)  |  geomean {geomean:.4}x");
+    worst.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+    println!("worst {} real-regret offenders:", worst.len().min(10));
+    for (regret, name) in worst.iter().take(10) {
         println!("  {regret:>7.2}x  {name}");
     }
 }
