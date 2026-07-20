@@ -3974,67 +3974,118 @@ fn printing_range_fastpath<'a>(
     Some((k, walk_printing_page(cards, printings, offsets, strings, filter, sort_col, descending, limit, page_offset, perm)))
 }
 
-fn run_query<'a>(
-    cards: &'a [AOracleCard],
-    printings: &'a [APrinting],
+/// The four physical plans `run_query` can dispatch to (#702 step 2, the
+/// force-plan seam). Each has an applicability predicate (its correctness
+/// preconditions — the future `choose_plan` eligibility gates) and a callable
+/// executor. `run_query`'s default routing is unchanged: it still picks among
+/// these in exactly the same order, on exactly the same conditions; this enum
+/// only makes each plan *individually addressable* via `run_query_with_plan`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // variants only referenced through the (test-facing) force entry point
+enum PhysicalPlan {
+    /// #695 bare-broad-range fast path under `unique=printing` (executor:
+    /// `printing_range_fastpath`).
+    PrintingRangeScan,
+    /// #634 Step 2 plane-bitmap popcount-skip order phase (`run_query_streamed_popcount`).
+    PlanePopcountOrder,
+    /// Streamed selection over the sort permutation (`run_query_streamed`).
+    StreamedSelect,
+    /// The universal fallback: the gathered per-card loop + `select_page`.
+    GatheredScan,
+}
+
+/// The shared P3/P4 preparation product (see `prepare_candidates`): the
+/// materialized candidate card list (or `None` = scan the whole store) and the
+/// #634-Step-1 exactness bit. `existential_plane` is *not* bundled — it is
+/// recomputed cheaply per executor from `(mode, plane, indexes)` via
+/// `existential_plane_for`, keeping this struct free of borrows.
+struct PreparedCandidates {
+    candidate_cards: Option<Vec<u32>>,
+    all_match_known: bool,
+}
+
+/// Row selection (docs/issues/00667-engine-legality-divergent-carveout.md "Row
+/// selection for unique=card"): only Mode::Card can have folded a legality leaf
+/// into `plane` at all (unique_is_card declines the fold otherwise), and only
+/// then does all_match's "the card matches" stop implying "any printing will
+/// do" for picking which one to show. Cheap to recompute, so the executors do
+/// so rather than threading it through `PreparedCandidates`.
+fn existential_plane_for<'a>(
+    mode: Mode,
+    plane: Option<&'a PlaneExpr>,
+    indexes: &'a Archived<CardIndexes>,
+) -> Option<(&'a PlaneExpr, &'a Archived<BitPlanes>)> {
+    match (mode, plane) {
+        (Mode::Card, Some(pe)) if plane_expr_is_existential(pe) => Some((pe, &indexes.planes)),
+        _ => None,
+    }
+}
+
+// ─── Applicability predicates ───────────────────────────────────────────────
+// Each captures a plan's *correctness* preconditions (not its perf gate). These
+// are the future `choose_plan` eligibility gates — real, named, reusable.
+
+/// `GatheredScan` can execute any query.
+#[allow(dead_code)] // trivially true; referenced through the force entry point
+fn gathered_scan_applicable() -> bool {
+    true
+}
+
+/// `StreamedSelect` needs a precomputed sort permutation for `(sort_col,
+/// descending)` whose length matches the card count, over a non-empty store.
+/// `maybe_broad` is deliberately excluded — that is a routing/perf choice, not a
+/// correctness constraint; StreamedSelect returns correct rows at any breadth.
+fn streamed_select_applicable(
+    cards: &[AOracleCard],
+    sort_col: SortCol,
+    descending: bool,
+    indexes: &Archived<CardIndexes>,
+) -> bool {
+    !cards.is_empty() && indexes.sort_perms.get(sort_col, descending).is_some_and(|p| p.len() == cards.len())
+}
+
+/// `PlanePopcountOrder` needs the filter fully consumed to `True`, `Mode::Card`,
+/// a plane component, and both the forward (length-matched) and inverse sort
+/// permutations. Mirrors the #634 Step 2 branch's guard exactly.
+fn plane_popcount_order_applicable(
+    filter: &FilterExpr,
+    mode: Mode,
+    cards: &[AOracleCard],
+    plane: Option<&PlaneExpr>,
+    sort_col: SortCol,
+    descending: bool,
+    indexes: &Archived<CardIndexes>,
+) -> bool {
+    matches!(filter, FilterExpr::True)
+        && matches!(mode, Mode::Card)
+        && !cards.is_empty()
+        && plane.is_some()
+        && indexes.sort_perms.get(sort_col, descending).is_some_and(|p| p.len() == cards.len())
+        && indexes.sort_perms.get_inv(sort_col, descending).is_some()
+}
+
+/// `PrintingRangeScan` structural eligibility only — whether it actually runs is
+/// decided by `printing_range_fastpath` returning `Some` (it declines with
+/// `None` for anything it doesn't own).
+fn printing_range_scan_applicable(mode: Mode, plane: Option<&PlaneExpr>, cards: &[AOracleCard]) -> bool {
+    *PRINTING_RANGE_FASTPATH != 0 && matches!(mode, Mode::Printing) && plane.is_none() && !cards.is_empty()
+}
+
+// ─── Shared P3/P4 candidate preparation ─────────────────────────────────────
+
+/// The candidate materialization + filter rewriting shared by `StreamedSelect`
+/// and `GatheredScan`, extracted verbatim from `run_query`. Mutates `filter` via
+/// `memoize_text_predicates` + `order_children_by_verify_cost` under the same
+/// `!all_match_known` / `*VERIFY_ORDER` guards and in the same order as before.
+fn prepare_candidates(
+    cards: &[AOracleCard],
     offsets: &AOffsets,
     strings: &AStrings,
     filter: &mut FilterExpr,
     plane: Option<&PlaneExpr>,
-    unique: &str,
-    prefer: &str,
-    orderby: &str,
-    direction: &str,
-    limit: usize,
-    page_offset: usize,
+    mode: Mode,
     indexes: &Archived<CardIndexes>,
-) -> (usize, Vec<(&'a AOracleCard, &'a APrinting)>) {
-    let sort_col   = orderby_to_col(orderby);
-    let descending = direction == "desc";
-    let prefer     = prefer_from_str(prefer);
-
-    let mode = match unique {
-        "artwork"  => Mode::Artwork,
-        "printing" => Mode::Printing,
-        _          => Mode::Card,
-    };
-
-    // PR 1 (docs/issues/local-engine-sorted-range-fastpath.md): a bare, broad range predicate
-    // under unique=printing gets its total from the range index's binary search and its page from
-    // an early-stopping permutation walk, skipping the O(n) count pass the general path pays.
-    // Requires no plane component (else the plane's own predicate must also hold, which this
-    // ignores); everything unrecognized returns None and falls through unchanged.
-    if *PRINTING_RANGE_FASTPATH != 0 && matches!(mode, Mode::Printing) && plane.is_none() && !cards.is_empty()
-        && let Some(result) =
-            printing_range_fastpath(cards, printings, offsets, strings, filter, indexes, sort_col, descending, limit, page_offset)
-    {
-        return result;
-    }
-
-    // #634 Step 2: when the filter fully consumed to True (split_planes ate
-    // the whole thing), the plane bitmap IS the exact match set at any
-    // selectivity — no candidate materialization, no card_pass, needed at
-    // all. Scoped to unique=card for now (see run_query_streamed_popcount);
-    // other modes/residuals fall through to the existing path below, which
-    // already handles them correctly (Step 1 already removes the redundant
-    // card_pass there, just not the O(candidates) counts-buffer fill).
-    if matches!(filter, FilterExpr::True) && matches!(mode, Mode::Card) && !cards.is_empty()
-        && let (Some(expr), Some(perm), Some(inv_perm)) =
-            (plane, indexes.sort_perms.get(sort_col, descending), indexes.sort_perms.get_inv(sort_col, descending))
-        && perm.len() == cards.len()
-    {
-        thread_local! {
-            static PLANE_BITMAP_POPCOUNT: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
-        }
-        return PLANE_BITMAP_POPCOUNT.with(|cell| {
-            let mut bitmap = cell.borrow_mut();
-            eval_planes(expr, &indexes.planes, &mut bitmap);
-            run_query_streamed_popcount(
-                cards, printings, offsets, prefer, limit, page_offset, perm, inv_perm, &bitmap, expr, &indexes.planes, strings,
-            )
-        });
-    }
-
+) -> PreparedCandidates {
     // Candidates in either space project to card ids for the walk; the walk's
     // per-printing verification restores exactness for printing-space losses.
     // A list covering nearly the whole corpus narrows nothing — the walk would
@@ -4131,35 +4182,101 @@ fn run_query<'a>(
             filter.order_children_by_verify_cost();
         }
     }
-    let card_ids: Box<dyn Iterator<Item = u32>> = match &candidate_cards {
+
+    PreparedCandidates { candidate_cards, all_match_known }
+}
+
+// ─── Plan executors ─────────────────────────────────────────────────────────
+
+/// P2 executor: evaluate the plane into the popcount thread-local and run the
+/// #634 Step 2 popcount-skip order phase. Caller guarantees applicability
+/// (`plane_popcount_order_applicable`).
+#[allow(clippy::too_many_arguments)]
+fn exec_plane_popcount_order<'a>(
+    cards: &'a [AOracleCard],
+    printings: &'a [APrinting],
+    offsets: &AOffsets,
+    strings: &AStrings,
+    prefer: Prefer,
+    sort_col: SortCol,
+    descending: bool,
+    limit: usize,
+    page_offset: usize,
+    plane_expr: &PlaneExpr,
+    indexes: &Archived<CardIndexes>,
+) -> (usize, Vec<(&'a AOracleCard, &'a APrinting)>) {
+    let perm = indexes.sort_perms.get(sort_col, descending).expect("PlanePopcountOrder applicability guarantees a permutation");
+    let inv_perm =
+        indexes.sort_perms.get_inv(sort_col, descending).expect("PlanePopcountOrder applicability guarantees an inverse permutation");
+    thread_local! {
+        static PLANE_BITMAP_POPCOUNT: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    PLANE_BITMAP_POPCOUNT.with(|cell| {
+        let mut bitmap = cell.borrow_mut();
+        eval_planes(plane_expr, &indexes.planes, &mut bitmap);
+        run_query_streamed_popcount(
+            cards, printings, offsets, prefer, limit, page_offset, perm, inv_perm, &bitmap, plane_expr, &indexes.planes, strings,
+        )
+    })
+}
+
+/// P3 executor: streamed selection over the sort permutation. Caller guarantees
+/// applicability (`streamed_select_applicable`) and has run `prepare_candidates`.
+#[allow(clippy::too_many_arguments)]
+fn exec_streamed_select<'a>(
+    cards: &'a [AOracleCard],
+    printings: &'a [APrinting],
+    offsets: &AOffsets,
+    strings: &AStrings,
+    filter: &FilterExpr,
+    prep: &PreparedCandidates,
+    plane: Option<&PlaneExpr>,
+    mode: Mode,
+    prefer: Prefer,
+    sort_col: SortCol,
+    descending: bool,
+    limit: usize,
+    page_offset: usize,
+    indexes: &Archived<CardIndexes>,
+) -> (usize, Vec<(&'a AOracleCard, &'a APrinting)>) {
+    let perm = indexes.sort_perms.get(sort_col, descending).expect("StreamedSelect applicability guarantees a permutation");
+    let existential_plane = existential_plane_for(mode, plane, indexes);
+    let card_ids: Box<dyn Iterator<Item = u32>> = match &prep.candidate_cards {
         Some(v) => Box::new(v.iter().copied()),
         None    => Box::new(0..cards.len() as u32),
     };
+    run_query_streamed(
+        cards, printings, offsets, strings, filter, prep.all_match_known, mode, prefer, sort_col, descending, limit,
+        page_offset, perm, card_ids, &indexes.artwork_groups, existential_plane,
+    )
+}
 
-    // Streamed selection when the orderby has a precomputed permutation — and
-    // the query is broad enough for the match/emit split to pay: a narrowed
-    // candidate list at or below the gather threshold can't produce more
-    // matches than that, so the fused path is already microseconds and the
-    // match phase would be pure overhead.
-    // Row selection (docs/issues/00667-engine-legality-divergent-carveout.md "Row
-    // selection for unique=card"): only Mode::Card can have folded a legality
-    // leaf into `plane` at all (unique_is_card declines the fold otherwise),
-    // and only then does all_match's "the card matches" stop implying "any
-    // printing will do" for picking which one to show.
-    let existential_plane: Option<(&PlaneExpr, &Archived<BitPlanes>)> = match (mode, plane) {
-        (Mode::Card, Some(pe)) if plane_expr_is_existential(pe) => Some((pe, &indexes.planes)),
-        _ => None,
+/// P4 executor: the universal gathered per-card loop + `select_page`. Runs any
+/// query (printing-keyed orderbys, stores without permutations, or anything the
+/// other plans decline). Caller has run `prepare_candidates`.
+#[allow(clippy::too_many_arguments)]
+fn exec_gathered_scan<'a>(
+    cards: &'a [AOracleCard],
+    printings: &'a [APrinting],
+    offsets: &AOffsets,
+    strings: &AStrings,
+    filter: &FilterExpr,
+    prep: &PreparedCandidates,
+    plane: Option<&PlaneExpr>,
+    mode: Mode,
+    prefer: Prefer,
+    sort_col: SortCol,
+    descending: bool,
+    limit: usize,
+    page_offset: usize,
+    indexes: &Archived<CardIndexes>,
+) -> (usize, Vec<(&'a AOracleCard, &'a APrinting)>) {
+    let all_match_known = prep.all_match_known;
+    let existential_plane = existential_plane_for(mode, plane, indexes);
+    let card_ids: Box<dyn Iterator<Item = u32>> = match &prep.candidate_cards {
+        Some(v) => Box::new(v.iter().copied()),
+        None    => Box::new(0..cards.len() as u32),
     };
-
-    let maybe_broad = candidate_cards.as_ref().is_none_or(|v| v.len() > *STREAM_MIN_MATCHES);
-    if let Some(perm) = indexes.sort_perms.get(sort_col, descending) {
-        if maybe_broad && perm.len() == cards.len() && !cards.is_empty() {
-            return run_query_streamed(
-                cards, printings, offsets, strings, filter, all_match_known, mode, prefer, sort_col, descending, limit,
-                page_offset, perm, card_ids, &indexes.artwork_groups, existential_plane,
-            );
-        }
-    }
 
     // Gathered path (printing-keyed orderbys, or stores without permutations).
     let mut best: Vec<Match> = Vec::new();
@@ -4195,6 +4312,148 @@ fn run_query<'a>(
         .map(|(cid, pid)| (&cards[cid as usize], &printings[pid as usize]))
         .collect();
     (total, page)
+}
+
+fn run_query<'a>(
+    cards: &'a [AOracleCard],
+    printings: &'a [APrinting],
+    offsets: &AOffsets,
+    strings: &AStrings,
+    filter: &mut FilterExpr,
+    plane: Option<&PlaneExpr>,
+    unique: &str,
+    prefer: &str,
+    orderby: &str,
+    direction: &str,
+    limit: usize,
+    page_offset: usize,
+    indexes: &Archived<CardIndexes>,
+) -> (usize, Vec<(&'a AOracleCard, &'a APrinting)>) {
+    let sort_col   = orderby_to_col(orderby);
+    let descending = direction == "desc";
+    let prefer     = prefer_from_str(prefer);
+
+    let mode = match unique {
+        "artwork"  => Mode::Artwork,
+        "printing" => Mode::Printing,
+        _          => Mode::Card,
+    };
+
+    // P1 PrintingRangeScan — PR 1 (docs/issues/local-engine-sorted-range-fastpath.md): a bare,
+    // broad range predicate under unique=printing gets its total from the range index's binary
+    // search and its page from an early-stopping permutation walk, skipping the O(n) count pass the
+    // general path pays. Requires no plane component (else the plane's own predicate must also hold,
+    // which this ignores); everything unrecognized returns None and falls through unchanged.
+    if printing_range_scan_applicable(mode, plane, cards)
+        && let Some(result) =
+            printing_range_fastpath(cards, printings, offsets, strings, filter, indexes, sort_col, descending, limit, page_offset)
+    {
+        return result;
+    }
+
+    // P2 PlanePopcountOrder — #634 Step 2: when the filter fully consumed to True (split_planes ate
+    // the whole thing), the plane bitmap IS the exact match set at any selectivity — no candidate
+    // materialization, no card_pass, needed at all. Scoped to unique=card for now (see
+    // run_query_streamed_popcount); other modes/residuals fall through to the existing path below,
+    // which already handles them correctly (Step 1 already removes the redundant card_pass there,
+    // just not the O(candidates) counts-buffer fill).
+    if plane_popcount_order_applicable(filter, mode, cards, plane, sort_col, descending, indexes) {
+        let plane_expr = plane.expect("PlanePopcountOrder applicability guarantees a plane");
+        return exec_plane_popcount_order(
+            cards, printings, offsets, strings, prefer, sort_col, descending, limit, page_offset, plane_expr, indexes,
+        );
+    }
+
+    // Shared P3/P4 candidate preparation (narrowing, plane-∩-candidates composition, and the
+    // memoize/verify-order filter rewrite). Mutates `filter` exactly as before.
+    let prep = prepare_candidates(cards, offsets, strings, filter, plane, mode, indexes);
+
+    // P3 StreamedSelect vs P4 GatheredScan. Streamed selection when the orderby has a precomputed
+    // permutation — and the query is broad enough for the match/emit split to pay: a narrowed
+    // candidate list at or below the gather threshold can't produce more matches than that, so the
+    // fused path is already microseconds and the match phase would be pure overhead. `maybe_broad`
+    // is the routing/perf choice (not an applicability condition), so it stays here in `run_query`,
+    // not in the applicability predicate.
+    let maybe_broad = prep.candidate_cards.as_ref().is_none_or(|v| v.len() > *STREAM_MIN_MATCHES);
+    if maybe_broad && streamed_select_applicable(cards, sort_col, descending, indexes) {
+        return exec_streamed_select(
+            cards, printings, offsets, strings, filter, &prep, plane, mode, prefer, sort_col, descending, limit, page_offset, indexes,
+        );
+    }
+
+    exec_gathered_scan(
+        cards, printings, offsets, strings, filter, &prep, plane, mode, prefer, sort_col, descending, limit, page_offset, indexes,
+    )
+}
+
+/// In-process force/dispatch entry point (#702 step 2): run `plan` for this
+/// query if it is applicable, else return `None`. This is the prerequisite for
+/// the calibration harness — it makes each physical plan individually
+/// executable without changing `run_query`'s default routing. Returns `None`
+/// when `plan` fails its applicability predicate (or, for `PrintingRangeScan`,
+/// when `printing_range_fastpath` structurally declines with `None`); `Some`
+/// with the result when it ran. `GatheredScan` is always `Some`.
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // force entry point; exercised by force_plan_differential_agreement
+fn run_query_with_plan<'a>(
+    plan: PhysicalPlan,
+    cards: &'a [AOracleCard],
+    printings: &'a [APrinting],
+    offsets: &AOffsets,
+    strings: &AStrings,
+    filter: &mut FilterExpr,
+    plane: Option<&PlaneExpr>,
+    unique: &str,
+    prefer: &str,
+    orderby: &str,
+    direction: &str,
+    limit: usize,
+    page_offset: usize,
+    indexes: &Archived<CardIndexes>,
+) -> Option<(usize, Vec<(&'a AOracleCard, &'a APrinting)>)> {
+    let sort_col   = orderby_to_col(orderby);
+    let descending = direction == "desc";
+    let prefer     = prefer_from_str(prefer);
+    let mode = match unique {
+        "artwork"  => Mode::Artwork,
+        "printing" => Mode::Printing,
+        _          => Mode::Card,
+    };
+
+    match plan {
+        PhysicalPlan::PrintingRangeScan => {
+            if !printing_range_scan_applicable(mode, plane, cards) {
+                return None;
+            }
+            // Structural eligibility passed; the fastpath itself decides (None = declined).
+            printing_range_fastpath(cards, printings, offsets, strings, filter, indexes, sort_col, descending, limit, page_offset)
+        }
+        PhysicalPlan::PlanePopcountOrder => {
+            if !plane_popcount_order_applicable(filter, mode, cards, plane, sort_col, descending, indexes) {
+                return None;
+            }
+            let plane_expr = plane.expect("applicability guarantees a plane");
+            Some(exec_plane_popcount_order(
+                cards, printings, offsets, strings, prefer, sort_col, descending, limit, page_offset, plane_expr, indexes,
+            ))
+        }
+        PhysicalPlan::StreamedSelect => {
+            if !streamed_select_applicable(cards, sort_col, descending, indexes) {
+                return None;
+            }
+            let prep = prepare_candidates(cards, offsets, strings, filter, plane, mode, indexes);
+            Some(exec_streamed_select(
+                cards, printings, offsets, strings, filter, &prep, plane, mode, prefer, sort_col, descending, limit, page_offset, indexes,
+            ))
+        }
+        PhysicalPlan::GatheredScan => {
+            debug_assert!(gathered_scan_applicable());
+            let prep = prepare_candidates(cards, offsets, strings, filter, plane, mode, indexes);
+            Some(exec_gathered_scan(
+                cards, printings, offsets, strings, filter, &prep, plane, mode, prefer, sort_col, descending, limit, page_offset, indexes,
+            ))
+        }
+    }
 }
 
 /// #634 Step 2: popcount-skip order phase. Scoped to `unique=card` queries
