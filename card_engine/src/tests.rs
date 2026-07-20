@@ -2814,11 +2814,17 @@ fn plan_cost_calibration() {
     let cmc   = |op, val| FuzzSpec::Leaf(FuzzLeaf::Cmc { op, val });
     let power = |op, val| FuzzSpec::Leaf(FuzzLeaf::Power { op, val });
     let price = |op, val| FuzzSpec::Leaf(FuzzLeaf::Price { op, val });
-    let year  = |op, y: i32| FuzzSpec::Leaf(FuzzLeaf::Year { op, year: y });
+    let year   = |op, y: i32| FuzzSpec::Leaf(FuzzLeaf::Year { op, year: y });
+    let otext  = |needle: &str| FuzzSpec::Leaf(FuzzLeaf::TextContains { field: TextSearchField::OracleTextLower, needle: needle.to_string() });
+    let ntext  = |needle: &str| FuzzSpec::Leaf(FuzzLeaf::TextContains { field: TextSearchField::NameLower, needle: needle.to_string() });
+    let rarity = |op, val| FuzzSpec::Leaf(FuzzLeaf::Rarity { op, val });
+    let kw     = |value: &str| FuzzSpec::Leaf(FuzzLeaf::Collection { field: CollField::Keywords, op: CmpOp::Ge, value: value.to_string() });
 
-    // A spread from near-whole-corpus down to narrow, plus shapes that make each
-    // plan applicable: pure-plane → True residual (P2); bare range (P1);
-    // residual predicate → P3/P4 only.
+    // A spread from near-whole-corpus down to narrow, covering each plan's
+    // applicability (pure-plane → True residual for P2; bare range for P1;
+    // residual predicate for P3/P4) AND a range of residual verify tiers
+    // (plane/numeric cheap → tag SET_LOOKUP → oracle/name TEXT_SCAN), plus a
+    // sparse postings-narrow (o:annihilator, kw:flying) and an OR union.
     let queries: Vec<(&str, FuzzSpec)> = vec![
         ("cmc>=0 (all)",       cmc(CmpOp::Ge, 0.0)),
         ("t:creature",         typ(CmpOp::Ge, TYPE_CREATURE)),
@@ -2826,8 +2832,23 @@ fn plan_cost_calibration() {
         ("color3 t:creature",  FuzzSpec::And(vec![color(CmpOp::Ge, 1 << 3), typ(CmpOp::Ge, TYPE_CREATURE)])),
         ("t:creature power>3", FuzzSpec::And(vec![typ(CmpOp::Ge, TYPE_CREATURE), power(CmpOp::Gt, 3.0)])),
         ("cmc<=2",             cmc(CmpOp::Le, 2.0)),
+        ("cmc==7",             cmc(CmpOp::Eq, 7.0)),
         ("usd<5",              price(CmpOp::Lt, 5.0)),
         ("year>=2020",         year(CmpOp::Ge, 2020)),
+        ("r:mythic(=3)",       rarity(CmpOp::Eq, 3.0)),
+        ("o:flying",           otext("flying")),
+        ("o:sacrifice",        otext("sacrifice")),
+        ("o:annihilator",      otext("annihilator")),
+        ("name:dragon",        ntext("dragon")),
+        ("kw:Flying",          kw("Flying")),
+        ("c:g or c:r",         FuzzSpec::Or(vec![color(CmpOp::Ge, 1 << 3), color(CmpOp::Ge, 1 << 2)])),
+        // Compounds: plane narrows → expensive residual verify on the CANDIDATE
+        // set (not full N); mixed card/printing-space AND; nested And/Or; a Not.
+        ("t:creature o:flying", FuzzSpec::And(vec![typ(CmpOp::Ge, TYPE_CREATURE), otext("flying")])),
+        ("t:creature usd<5",   FuzzSpec::And(vec![typ(CmpOp::Ge, TYPE_CREATURE), price(CmpOp::Lt, 5.0)])),
+        ("cmc<=3 o:draw",      FuzzSpec::And(vec![cmc(CmpOp::Le, 3.0), otext("draw")])),
+        ("t:cr (c:g or c:r)",  FuzzSpec::And(vec![typ(CmpOp::Ge, TYPE_CREATURE), FuzzSpec::Or(vec![color(CmpOp::Ge, 1 << 3), color(CmpOp::Ge, 1 << 2)])])),
+        ("-t:creature",        FuzzSpec::Not(Box::new(typ(CmpOp::Ge, TYPE_CREATURE)))),
         ("cmc>=15 (narrow)",   cmc(CmpOp::Ge, 15.0)),
     ];
     let modes = ["card", "printing"];
