@@ -69,12 +69,12 @@ pub(crate) struct PlanFeatures {
 /// sort order), so this is a representative middle value — exactness matters
 /// little here because P1, when applicable, wins its rows by 1-2 orders of
 /// magnitude over P3/P4.
-const WALK1: f64 = 4.5;
+const RANGE_WALK_STEP_NS: f64 = 4.5;
 /// Fixed P1 setup (binary searches + walk init). Fit from usd<5 printing shallow
-/// (666ns − 82 steps × WALK1 ≈ 150ns).
-const FIXED1: f64 = 150.0;
+/// (666ns − 82 steps × RANGE_WALK_STEP_NS ≈ 150ns).
+const RANGE_FIXED_COST_NS: f64 = 150.0;
 /// Floor on match_rate so a (near-)empty range can't divide by ~0.
-const MATCH_RATE_TINY: f64 = 1.0 / 1_000_000.0;
+const MATCH_RATE_FLOOR: f64 = 1.0 / 1_000_000.0;
 
 // ─── P2: PlanePopcountOrder ─────────────────────────────────────────────────
 // unique=card, filter fully consumed to True: the plane bitmap IS the exact
@@ -84,16 +84,16 @@ const MATCH_RATE_TINY: f64 = 1.0 / 1_000_000.0;
 /// ns per match scattered through the inverse permutation. ~0.65 observed:
 /// color(bit3) card 6606 matches → 4208ns, t:creature card 17317 → 11375ns both
 /// land near 0.65 ns/match with a small floor.
-const SCATTER2: f64 = 0.65;
+const PLANE_POPCOUNT_SCATTER_PER_MATCH_NS: f64 = 0.65;
 /// ns per 64-card word scanned for the page boundary (N/64 = 492 words on this
 /// corpus). Small — the popcount word scan is cheap next to the scatter; fit as
-/// a modest floor component alongside FIXED2 (color3 t:creature card ≈4250ns at
-/// 4001 matches leaves ~1600ns of floor).
-const WORD2: f64 = 1.0;
+/// a modest floor component alongside PLANE_POPCOUNT_FIXED_COST_NS (color3
+/// t:creature card ≈4250ns at 4001 matches leaves ~1600ns of floor).
+const PLANE_POPCOUNT_PER_WORD_NS: f64 = 1.0;
 /// ns per emitted page card. Small; folded into the floor.
-const EMIT2: f64 = 2.0;
+const PLANE_POPCOUNT_EMIT_PER_CARD_NS: f64 = 2.0;
 /// Fixed P2 setup (plane eval into the bitmap, buffers).
-const FIXED2: f64 = 200.0;
+const PLANE_POPCOUNT_FIXED_COST_NS: f64 = 200.0;
 
 // ─── P3: StreamedSelect ─────────────────────────────────────────────────────
 // Match phase walks eval_domain cards computing per-card counts, then either
@@ -108,41 +108,44 @@ const FIXED2: f64 = 200.0;
 /// count across modes: t:creature card 17317 cards → 53542ns (3.09), printing
 /// 17317 → 52791ns (3.05); cmc>=0 card 31508 → 101541ns (3.22), printing 31508 →
 /// 97000ns (3.08). The residual verify tier adds on top (common-mode with P4).
-const BASE3: f64 = 3.0;
+const STREAM_MATCH_PHASE_PER_CARD_NS: f64 = 3.0;
 /// ns per match, for the permutation-walk emit. Small — P3 measured nearly flat
-/// in match count once eval_domain is fixed (see BASE3), so this is a minor term.
-const EMIT3: f64 = 0.1;
+/// in match count once eval_domain is fixed (see STREAM_MATCH_PHASE_PER_CARD_NS),
+/// so this is a minor term.
+const STREAM_EMIT_PER_MATCH_NS: f64 = 0.1;
 /// ns per card scanned in the small-total gather (`for cid in 0..n_cards`,
 /// counts[cid]==0 check). Cheaper than a match-phase visit (no filter work). Fit
 /// from the narrow-query floor: cmc>=15 / o:annihilator / cmc==7 card SHALLOW all
 /// ~52µs = 31508 × 1.65. Only added when `matches <= STREAM_MIN_MATCHES`, the
 /// exact condition that routes P3 into that gather branch.
-const FLOOR3: f64 = 1.65;
+const STREAM_SMALL_TOTAL_FLOOR_PER_CARD_NS: f64 = 1.65;
 /// Fixed P3 setup (counts buffer resize/clear, thread-local).
-const FIXED3: f64 = 500.0;
+const STREAM_FIXED_COST_NS: f64 = 500.0;
 
 // ─── P4: GatheredScan ───────────────────────────────────────────────────────
 // The universal fallback: per-card loop pushes every match's sort key into a
 // Vec (O(matches)), then select_page quickselects the page. Visits eval_domain
 // cards, each paying the residual verify tier.
 
-/// ns per card visited in the gathered loop (card_pass + push). Fit with BUILD4
-/// from all-match broad card queries where eval_domain==matches and tier=0, which
-/// pin BASE4+BUILD4 ≈ 6.3-6.9 (cmc>=0 31508 → 216667ns = 6.87; t:creature 17317 →
-/// 109834 = 6.34; color3 6606 → 40458 = 6.12). Split so the gathered loop's
-/// per-visit cost (BASE4) exceeds P3's BASE3 — the measured P4/P3 ≈ 2× ratio on
-/// broad queries — with the remainder attributed to the per-match push (BUILD4).
-const BASE4: f64 = 5.5;
+/// ns per card visited in the gathered loop (card_pass + push). Fit with
+/// GATHER_PUSH_PER_MATCH_NS from all-match broad card queries where
+/// eval_domain==matches and tier=0, which pin the sum ≈ 6.3-6.9 (cmc>=0 31508 →
+/// 216667ns = 6.87; t:creature 17317 → 109834 = 6.34; color3 6606 → 40458 =
+/// 6.12). Split so the gathered loop's per-visit cost exceeds P3's
+/// STREAM_MATCH_PHASE_PER_CARD_NS — the measured P4/P3 ≈ 2× ratio on broad
+/// queries — with the remainder attributed to the per-match push.
+const GATHER_VISIT_PER_CARD_NS: f64 = 5.5;
 /// ns per match pushed into the sort-key Vec + quickselected.
-const BUILD4: f64 = 1.0;
+const GATHER_PUSH_PER_MATCH_NS: f64 = 1.0;
 /// ns per page slot materialized. Fit from the deep-vs-shallow gap on broad
 /// queries (cmc>=0 card: 225708−216667 ≈ 9041ns over 10000 extra offset ≈ 0.9),
 /// bounded by matches: narrow deep pages (offset > matches) measured ≈ shallow
 /// (select_page returns early), so the term uses min(offset+limit, matches).
-const SELECT4: f64 = 0.9;
+const GATHER_SELECT_PER_PAGE_SLOT_NS: f64 = 0.9;
 /// Fixed P4 setup. Fit from the narrowest query (cmc>=15 card shallow 208ns at
-/// eval_domain=5: 208 − 5×(BASE4+BUILD4) − 5×SELECT4 ≈ 170).
-const FIXED4: f64 = 200.0;
+/// eval_domain=5: 208 − 5×(GATHER_VISIT_PER_CARD_NS+GATHER_PUSH_PER_MATCH_NS) −
+/// 5×GATHER_SELECT_PER_PAGE_SLOT_NS ≈ 170).
+const GATHER_FIXED_COST_NS: f64 = 200.0;
 
 /// Estimated wall-clock cost of running `plan` on a query with features `f`, in
 /// nanoseconds. Lower is cheaper; the planner routes to `argmin_plan plan_cost`.
@@ -161,21 +164,31 @@ pub(crate) fn plan_cost(plan: PhysicalPlan, f: &PlanFeatures) -> f64 {
 
     match plan {
         PhysicalPlan::PrintingRangeScan => {
-            let match_rate = (matches / n_printings).max(MATCH_RATE_TINY);
-            (page_span / match_rate) * WALK1 + FIXED1
+            let match_rate = (matches / n_printings).max(MATCH_RATE_FLOOR);
+            (page_span / match_rate) * RANGE_WALK_STEP_NS + RANGE_FIXED_COST_NS
         }
         PhysicalPlan::PlanePopcountOrder => {
-            matches * SCATTER2 + (n_cards / 64.0) * WORD2 + limit * EMIT2 + FIXED2
+            matches * PLANE_POPCOUNT_SCATTER_PER_MATCH_NS
+                + (n_cards / 64.0) * PLANE_POPCOUNT_PER_WORD_NS
+                + limit * PLANE_POPCOUNT_EMIT_PER_CARD_NS
+                + PLANE_POPCOUNT_FIXED_COST_NS
         }
         PhysicalPlan::StreamedSelect => {
             // The small-total gather branch (run_query_streamed) scans all
             // n_cards when total <= STREAM_MIN_MATCHES — the O(N) floor that
             // sinks P3 on narrow queries.
-            let floor = if u64::from(f.matches) <= *super::STREAM_MIN_MATCHES as u64 { n_cards * FLOOR3 } else { 0.0 };
-            eval_domain * (BASE3 + tier_ns) + matches * EMIT3 + floor + FIXED3
+            let floor = if u64::from(f.matches) <= *super::STREAM_MIN_MATCHES as u64 {
+                n_cards * STREAM_SMALL_TOTAL_FLOOR_PER_CARD_NS
+            } else {
+                0.0
+            };
+            eval_domain * (STREAM_MATCH_PHASE_PER_CARD_NS + tier_ns) + matches * STREAM_EMIT_PER_MATCH_NS + floor + STREAM_FIXED_COST_NS
         }
         PhysicalPlan::GatheredScan => {
-            eval_domain * (BASE4 + tier_ns) + matches * BUILD4 + page_span * SELECT4 + FIXED4
+            eval_domain * (GATHER_VISIT_PER_CARD_NS + tier_ns)
+                + matches * GATHER_PUSH_PER_MATCH_NS
+                + page_span * GATHER_SELECT_PER_PAGE_SLOT_NS
+                + GATHER_FIXED_COST_NS
         }
     }
 }
