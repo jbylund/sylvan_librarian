@@ -9,6 +9,7 @@ use super::{
     gathered_scan_applicable, streamed_select_applicable, plane_popcount_order_applicable, printing_range_scan_applicable,
     walk_printing_page, aligned_page, bare_range_bounds, printing_range_fastpath, sort_key_bits, orderby_to_col, SortCol, STREAM_MIN_MATCHES,
     prepare_candidates, verify_cost_tier, scan_units, Mode,
+    GatherSelect, select_page, GATHER_PRUNE_CHUNK, Match,
     archive_header, archive_payload, ARCHIVE_HEADER_LEN, Mmap,
     bitmap_contains, bitmap_card_ids, compile_plane, eval_planes, split_planes,
     ArithOp, ArtistIndex, CardData, CardIndexes, Candidates, ColorField, NumExpr, NumField, RarityIndex,
@@ -2537,6 +2538,77 @@ fn fuzz_row_identity_matches_reference() {
         let offset = if rng.random_bool(0.5) { 0 } else { rng.random_range(0..800) };
         let ctx = format!("corpus-rowid, filter={}", fuzz_describe(&spec));
         fuzz_check_row_identity(archived, &spec, &ctx, orderby, direction, mode, 100, offset);
+    }
+}
+
+/// Deterministic pseudo-random / adversarial `Match` keys for `GatherSelect` (pid =
+/// index, so every match is distinct and `page_cmp` is a total order).
+fn build_gather_matches(n: usize, ordering: u32) -> Vec<Match> {
+    (0..n)
+        .map(|i| {
+            let key: u128 = match ordering {
+                // splitmix-style scramble: deterministic, no ordering structure
+                0 => {
+                    let mut x = (i as u128).wrapping_add(0x9E37_79B9_7F4A_7C15);
+                    x ^= x >> 30;
+                    x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                    x ^= x >> 27;
+                    x
+                }
+                1 => i as u128,           // ascending: after the 1st prune every later match is rejected
+                2 => (n - 1 - i) as u128, // descending: every later match beats the cutoff → prune repeatedly
+                3 => 0,                   // all ties: page_cmp must break by pid
+                _ => (i % 8) as u128,     // clustered / heavy ties
+            };
+            (key, i as u32, i as u32) // (sort_key, cid, pid)
+        })
+        .collect()
+}
+
+/// `GatherSelect` (the bounded gather buffer in `exec_gathered_scan`) must, for any
+/// match sequence in any batching, produce the identical `(total, page)` as gathering
+/// every match and calling `select_page` once — the reference the P4 rewrite rests on.
+/// This drives the prune + running-cutoff algorithm (`prune_to_smallest`, `page_cmp`)
+/// directly on adversarial orderings and sizes forced well past `prune_at` (multiple
+/// prune cycles), so it doesn't depend on a fuzz store happening to exceed the
+/// threshold — and it asserts the buffer actually stays bounded.
+#[test]
+fn gather_select_matches_reference() {
+    for &limit in &[1usize, 10, 60] {
+        for &offset in &[0usize, 5, 50, 500] {
+            let k = offset + limit;
+            let prune_at = k + GATHER_PRUNE_CHUNK;
+            // sizes: empty, exactly the page (no prune), either side of prune_at (one
+            // prune), and well past it (several prune cycles + cutoff tightening).
+            for &n in &[0, k, prune_at - 1, prune_at + 1, 2 * GATHER_PRUNE_CHUNK + k] {
+                for ordering in 0..5 {
+                    let matches = build_gather_matches(n, ordering);
+                    let ref_total = matches.len();
+                    let ref_page = select_page(matches.clone(), offset, limit);
+
+                    // Feed the matches in deterministically-varying batches (mimics the
+                    // per-card pushes), so `absorb` fires at buffer fills unaligned with
+                    // prune_at.
+                    let mut sel = GatherSelect::new(offset, limit);
+                    let (mut i, mut step) = (0usize, 0usize);
+                    while i < matches.len() {
+                        let batch = (1 + step % 7).min(matches.len() - i);
+                        let before = sel.buf().len();
+                        sel.buf().extend_from_slice(&matches[i..i + batch]);
+                        sel.absorb(before);
+                        i += batch;
+                        step += 1;
+                    }
+                    let ctx = format!("n={n} off={offset} lim={limit} ord={ordering}");
+                    // The bounded-memory promise: never more than a chunk past the page.
+                    assert!(sel.best.len() <= prune_at, "buffer unbounded: {ctx}");
+
+                    let (total, page) = sel.finish(offset, limit);
+                    assert_eq!(total, ref_total, "total mismatch: {ctx}");
+                    assert_eq!(page, ref_page, "page mismatch: {ctx}");
+                }
+            }
+        }
     }
 }
 
