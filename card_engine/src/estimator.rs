@@ -441,9 +441,33 @@ fn estimate_leaf(f: &FilterExpr, indexes: &Archived<CardIndexes>, n_cards: u32, 
             project(k as u32, n_cards, n_printings)
         }
 
+        // Indexable text contains (#702 step 4 fix): the match set ⊆ the cards/
+        // texts carrying the needle's RAREST trigram, so `trigram_min_posting`
+        // (min over the needle's trigrams, no intersection) is a cheap bound.
+        // `None` = needle < 3 bytes (no trigrams) → unknown.
+        FilterExpr::TextContains { field: TextSearchField::NameLower, word } => {
+            // name_trigram postings are CARD ids (one name per card, no dedup),
+            // so the min is a sound card-space upper bound: tight hi AND est.
+            match trigram_min_posting(&indexes.name_trigram, word) {
+                Some(c) => exact((c as u32).min(n)),
+                None => unknown(n),
+            }
+        }
+        FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word } => {
+            // oracle_trigram.trigrams postings count distinct TEXTS, not cards
+            // (texts are deduped; a text can span several cards), so the min is
+            // NOT a sound card upper bound — use it as the point estimate only
+            // (est has no soundness requirement) and keep hi = N. Under-counting
+            // here biases toward P4, the safe fallback, not P3's O(N) floor.
+            match trigram_min_posting(&indexes.oracle_trigram.trigrams, word) {
+                Some(c) => Cardinality { lo: 0, est: (c as u32).min(n), hi: n },
+                None => unknown(n),
+            }
+        }
+
         FilterExpr::TextExact { .. }
         | FilterExpr::TextRegex { .. }
-        | FilterExpr::TextContains { .. }
+        | FilterExpr::TextContains { .. } // flavor/artist contains (bind usually rewrites these)
         | FilterExpr::ManaCostCmp { .. } => unknown(n),
 
         // Composites are handled in estimate_rec; reaching here is a bug.
