@@ -143,14 +143,24 @@ the right one: a misroute matters only in proportion to the cost gap between
 the plan chosen and the best plan, so a loose estimate is harmless wherever
 the cost curves are flat and only bites where they diverge steeply.
 
-- **Cost model** — `cost(plan | cardinality, N, limit, offset, residual_tier)`
-  in measured per-card units, reusing the `verify_cost_tier` ns/card constants
-  (`bench_verify_cost.rs`) plus a few per-plan terms. Rough shapes:
+- **Cost model** — parametric per-plan formulas whose **constants are fit by
+  regression to the measured data** (below), not hand-set. In measured
+  per-card units, reusing the `verify_cost_tier` ns/card *buckets* directly
+  (don't model per-predicate cost — reuse the one calibrated tiering in
+  `bench_verify_cost.rs`, so recalibration updates verifier ordering and
+  planner together). Rough shapes:
   `GatheredScan ≈ C·verify_tier(residual)`; `StreamedSelect ≈ C·match_cost`;
   `PlanePopcountOrder ≈ (N/64)·word_cost` (flat in match count *and* page
   depth); `PrintingRangeScan`/idea-1 `≈ (limit/match_rate)·walk_cost` (the one
   with a bad tail). Each formula consumes the cardinality in its own operating
   space — which is where the "which space" question (below) gets pinned down.
+  Predicate-cost bucketing is cheap here because the term is largely
+  *common-mode* across the plans being compared (gather/stream both pay
+  per-candidate verify ∝ their C; popcount has an empty residual, no verify
+  term), so it mostly cancels in the argmin — cardinality and plan structure
+  do the deciding. `verify_tier(residual)` (already max-over-tree, ignoring
+  short-circuit/acceptance) is the starting per-card term; refine only if
+  regret demands.
 - **Gold standard** — `plan_gold = argmin cost(plan | TRUE count)`, the best
   achievable with perfect cardinality info. **Only legitimate once the model
   is calibrated against measured runtime** (a cardinality sweep, per the
@@ -166,28 +176,67 @@ the cost curves are flat and only bites where they diverge steeply.
 
 ## Scope / sequencing
 
-Estimator and cost model first, both validated against truth before anything
-reroutes. The estimator (step 1) and the cost model (step 2) are independent —
-the cost model uses TRUE counts, so it branches off `main`, not off the
-estimator PR.
+Everything validated against truth before anything reroutes. The force-plan
+seam (step 2) comes *before* calibration because you can't measure a plan's
+cost without being able to execute that specific plan — making plans
+individually addressable is the prerequisite for the run-all-plans harness.
 
 1. **Estimator** — standalone, sound bounds, fuzz-validated, *unwired*.
    (Shipped: #704.)
-2. **Cost model + calibration harness** — the per-plan cost formulas plus a
-   cardinality-sweep bench that fits/validates the constants against measured
-   runtime, establishing the true-count gold standard. Independent of #704.
-3. **Estimate-regret report** — feed the estimator into the calibrated model;
-   report the regret distribution. Depends on 1 + 2.
-4. **The `choose_plan` seam** — single-layer, routes on `argmin cost(·|est)`;
-   toggle-gated A/B via `CARD_ENGINE_PLAN_SELECT` (temporary legacy `run_query`
-   duplicate, deleted once parity holds). The toggle's measured runtime
-   confirms the model in production, closing the loop.
-5. **Retire thresholds** — the 7/8 cutoff, `STREAM_MIN_MATCHES`, the memoize
+2. **Force-plan seam** — extract the four plan bodies into individually
+   callable executors, each with a **applicability predicate** (which plans
+   can correctly run this query; these predicates *are* the future
+   `choose_plan` eligibility gates — not throwaway). Add an in-process
+   force/dispatch entry point. Default routing behavior unchanged; add a
+   differential test that every *applicable* plan returns rows identical to
+   `GatheredScan` (the universal fallback / reference). Branches off `main`,
+   independent of the estimator.
+3. **Cost model + calibration harness** — run each applicable plan n× (min-of-n,
+   quiesced machine — benchmark-artifacts protocol) via the force hook across a
+   cardinality sweep, record `(true counts/features → measured per-plan cost)`,
+   **fit the formula constants** by regression, and establish empirical gold =
+   the plan actually fastest. Uses TRUE counts, so independent of the estimator.
+4. **Estimate-regret report** — feed the estimator into the calibrated model;
+   report the regret distribution (§Cost model). Depends on 1 + 3.
+5. **Route on `argmin cost(·|est)`** — `choose_plan` wires the force/dispatch
+   to the model; toggle-gated A/B via `CARD_ENGINE_PLAN_SELECT` (temporary
+   legacy `run_query` duplicate, deleted once parity holds). The toggle's
+   measured runtime confirms the model in production, closing the loop.
+6. **Retire thresholds** — the 7/8 cutoff, `STREAM_MIN_MATCHES`, the memoize
    gate fall out of the cost comparison, one measured A/B at a time. Do not
    change plan choices and restructure in the same commit.
 
 Filter trees are tiny, so `choose_plan`, the estimator, and the cost model are
 all per-query noise; they run once per query, not per card.
+
+## Keeping costs/plans current as the engine changes
+
+The constants are fit to a point-in-time measurement, so the design has to say
+how they stay honest. This reuses the discipline the engine already applies to
+`verify_cost_tier` and the calibrated guards (#647) — not a new burden:
+
+- **What's robust vs fragile.** Constants are in consistent units (ns/card,
+  ns/word), and `argmin` cares about *ratios* between plans, not absolutes — so
+  a uniform hardware speed change mostly preserves the choice. Recalibration is
+  needed for **non-uniform** changes: a plan reimplemented, a new index shifting
+  a predicate class's cost, a new plan added. Those are code changes, and the
+  process attaches to them.
+- **Adding/changing a plan** is compile-time-forced to be complete, like
+  `FilterExpr` variants force a `verify_cost_tier` arm: a new plan needs an
+  executor + applicability predicate + cost formula + inclusion in the harness.
+  The differential test (all applicable plans agree) then guards correctness
+  automatically.
+- **Recalibration is deliberate and off-CI.** CI machines are too noisy for
+  timing (violates the benchmark-artifacts protocol), so CI runs *correctness*
+  (differential agreement) and at most a coarse **drift tripwire** — assert the
+  model's predicted-cheapest matches empirical-cheapest on a small committed set
+  within tolerance, failing when constants drift enough to *flip* a decision.
+  Re-fitting itself is a manual `--ignored` bench run on a quiesced machine that
+  commits new constants **with provenance** (corpus size, date, machine — the
+  style `verify_cost_tier`'s doc-comments already use).
+- **Regret is the health metric.** After any plan/cost change, re-run the
+  regret report; a risen tail means the constants need refitting or the formula
+  *shape* is wrong (structured residuals), not just the coefficients.
 
 ## Measurement
 
