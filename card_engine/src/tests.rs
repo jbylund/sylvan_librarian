@@ -7,6 +7,7 @@ use super::{
     build_artist_index, build_range_index, range_candidates, narrow_candidates, rarity_candidates,
     range_too_broad_to_narrow, run_query, run_query_with_plan, PhysicalPlan, trigram_candidates, finalize_trigram_index, PrintingRangeIndex, NARROW_FLOOR,
     walk_printing_page, aligned_page, bare_range_bounds, printing_range_fastpath, sort_key_bits, orderby_to_col, SortCol, STREAM_MIN_MATCHES,
+    archive_header, archive_payload, ARCHIVE_HEADER_LEN, Mmap,
     bitmap_contains, bitmap_card_ids, compile_plane, eval_planes, split_planes,
     ArithOp, ArtistIndex, CardData, CardIndexes, Candidates, ColorField, NumExpr, NumField, RarityIndex,
     CollField, CmpOp, FilterExpr, InlineStr, Interner, ManaCost, OracleCard, Printing, TagIndex,
@@ -2768,6 +2769,136 @@ fn estimator_accuracy() {
     eprintln!("bounds width < N/2        : {tight_bounds} ({:.1}%)", pct(tight_bounds));
     eprintln!("bounds collapsed (lo==hi) : {collapsed_bounds} ({:.1}%)", pct(collapsed_bounds));
     assert_eq!(unsound, 0, "estimator produced unsound bounds — see stderr");
+}
+
+/// #702 step 3 (cost calibration): time each *applicable* physical plan on the
+/// REAL corpus archive, across a spread of query selectivities × unique modes ×
+/// page depths, so the per-plan cost formulas can be fit to measured runtime and
+/// the empirical gold (fastest plan) established. Reporting tool, not an
+/// assertion.
+///
+///     cargo test --release plan_cost_calibration -- --ignored --nocapture
+///
+/// Needs benchmarks/verify-order/real.store (see bench_verify_cost.rs to (re)build
+/// it); skips cleanly if absent or stale. Min-of-N after warmup, binding a fresh
+/// filter per iteration OUTSIDE the timer (FilterExpr isn't Clone, and
+/// prepare_candidates mutates it via memoize). For calibration-grade numbers run
+/// on a quiesced machine (benchmark-artifacts protocol) — otherwise directional.
+/// The `est` column is the estimator's card-space point estimate (meaningful vs
+/// `total` in card mode; printing-mode totals count printings).
+#[test]
+#[ignore = "plan-cost calibration bench; needs real.store; cargo test --release plan_cost_calibration -- --ignored --nocapture"]
+fn plan_cost_calibration() {
+    use std::hint::black_box;
+    use std::time::Instant;
+    const STORE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../benchmarks/verify-order/real.store");
+    const WARMUP: usize = 3;
+    const ITERS: usize = 30;
+
+    let Ok(file) = std::fs::File::open(STORE_PATH) else {
+        eprintln!("SKIP: {STORE_PATH} not found (see bench_verify_cost.rs docs to build it)");
+        return;
+    };
+    // Safety: same contract as bench_verify_cost / get_mmap — header re-validated below.
+    let mmap = unsafe { Mmap::map(&file) }.expect("mmap real.store");
+    if mmap.len() < ARCHIVE_HEADER_LEN || mmap[..ARCHIVE_HEADER_LEN] != archive_header() {
+        eprintln!("SKIP: {STORE_PATH} header mismatch (stale — rebuild, see bench_verify_cost.rs)");
+        return;
+    }
+    let archived = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
+    eprintln!("real.store: {} cards, {} printings\n", archived.cards.len(), archived.printings.len());
+
+    // Colors are the low 5 bits (WUBRG); TYPE_CREATURE is 1<<4. Ge (`:`) = contains.
+    let color = |op, mask| FuzzSpec::Leaf(FuzzLeaf::Color { op, mask });
+    let typ   = |op, mask| FuzzSpec::Leaf(FuzzLeaf::Type { op, mask });
+    let cmc   = |op, val| FuzzSpec::Leaf(FuzzLeaf::Cmc { op, val });
+    let power = |op, val| FuzzSpec::Leaf(FuzzLeaf::Power { op, val });
+    let price = |op, val| FuzzSpec::Leaf(FuzzLeaf::Price { op, val });
+    let year  = |op, y: i32| FuzzSpec::Leaf(FuzzLeaf::Year { op, year: y });
+
+    // A spread from near-whole-corpus down to narrow, plus shapes that make each
+    // plan applicable: pure-plane → True residual (P2); bare range (P1);
+    // residual predicate → P3/P4 only.
+    let queries: Vec<(&str, FuzzSpec)> = vec![
+        ("cmc>=0 (all)",       cmc(CmpOp::Ge, 0.0)),
+        ("t:creature",         typ(CmpOp::Ge, TYPE_CREATURE)),
+        ("color(bit3)",        color(CmpOp::Ge, 1 << 3)),
+        ("color3 t:creature",  FuzzSpec::And(vec![color(CmpOp::Ge, 1 << 3), typ(CmpOp::Ge, TYPE_CREATURE)])),
+        ("t:creature power>3", FuzzSpec::And(vec![typ(CmpOp::Ge, TYPE_CREATURE), power(CmpOp::Gt, 3.0)])),
+        ("cmc<=2",             cmc(CmpOp::Le, 2.0)),
+        ("usd<5",              price(CmpOp::Lt, 5.0)),
+        ("year>=2020",         year(CmpOp::Ge, 2020)),
+        ("cmc>=15 (narrow)",   cmc(CmpOp::Ge, 15.0)),
+    ];
+    let modes = ["card", "printing"];
+    // (label, limit, offset): shallow first page vs a deep page (broad queries only reach it).
+    let pages = [("shallow", 60usize, 0usize), ("deep", 60usize, 10_000usize)];
+    let all_plans = [
+        PhysicalPlan::PrintingRangeScan,
+        PhysicalPlan::PlanePopcountOrder,
+        PhysicalPlan::StreamedSelect,
+        PhysicalPlan::GatheredScan,
+    ];
+    let labels = ["P1-range", "P2-popcnt", "P3-stream", "P4-gather"];
+
+    println!(
+        "{:<20} {:>7} {:>7} {:>7} {:>6}  {:>9} {:>9} {:>9} {:>9}  gold",
+        "query", "mode", "page", "total", "est", labels[0], labels[1], labels[2], labels[3],
+    );
+
+    for (qlabel, spec) in &queries {
+        // Estimator's card-space point estimate (full unsplit filter, as validated).
+        let est = super::estimator::estimate_cardinality(
+            &fuzz_bound_filter(spec, archived), &archived.indexes, &archived.offsets,
+        ).est;
+        for &mode in &modes {
+            let unique_is_card = mode == "card";
+            for &(plabel, limit, offset) in &pages {
+                let mut ns = [None::<u64>; 4];
+                let mut total = 0usize;
+                for (pi, plan) in all_plans.iter().enumerate() {
+                    let mut best = u64::MAX;
+                    let mut applicable = false;
+                    for it in 0..(WARMUP + ITERS) {
+                        // Fresh bind+split per iteration (outside the timer): memoize
+                        // mutates the residual, so reusing it would drift the cost.
+                        let (pe, mut res) = split_planes(
+                            fuzz_bound_filter(spec, archived), &archived.indexes.planes,
+                            &archived.indexes.oracle_trigram.words, unique_is_card,
+                        );
+                        let t0 = Instant::now();
+                        let out = black_box(run_query_with_plan(
+                            *plan, &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+                            &mut res, pe.as_ref(), mode, "default", "edhrec", "asc", limit, offset, &archived.indexes,
+                        ));
+                        let dt = t0.elapsed().as_nanos() as u64;
+                        match out {
+                            Some((t, _)) => {
+                                total = t;
+                                applicable = true;
+                                if it >= WARMUP {
+                                    best = best.min(dt);
+                                }
+                            }
+                            None => break, // inapplicable for this query/mode
+                        }
+                    }
+                    if applicable {
+                        ns[pi] = Some(best);
+                    }
+                }
+                let gold = (0..4)
+                    .filter_map(|i| ns[i].map(|v| (v, labels[i])))
+                    .min_by_key(|(v, _)| *v)
+                    .map_or("-", |(_, l)| l);
+                let cell = |o: Option<u64>| o.map_or_else(|| "-".to_string(), |v| v.to_string());
+                println!(
+                    "{:<20} {:>7} {:>7} {:>7} {:>6}  {:>9} {:>9} {:>9} {:>9}  {}",
+                    qlabel, mode, plabel, total, est, cell(ns[0]), cell(ns[1]), cell(ns[2]), cell(ns[3]), gold,
+                );
+            }
+        }
+    }
 }
 
 /// format:A AND format:B (two distinct formats) can't be answered by ANDing
