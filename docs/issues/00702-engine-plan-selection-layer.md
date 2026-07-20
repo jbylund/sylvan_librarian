@@ -133,24 +133,61 @@ Still **not** a classical cost-based optimizer:
   domain, not by predicted acceptance. A build-time per-field selectivity
   table is a separate future item, not part of this.
 
+## Cost model & gold-standard validation
+
+The routing decision is `plan = argmin_plan cost(plan | cardinality)`, not a
+pile of hand-tuned thresholds — the estimator supplies the cardinality, a
+**cost model** turns it into a predicted cost, and the cheapest plan wins.
+This reframes "is the estimate good enough" as a *cost* question, which is
+the right one: a misroute matters only in proportion to the cost gap between
+the plan chosen and the best plan, so a loose estimate is harmless wherever
+the cost curves are flat and only bites where they diverge steeply.
+
+- **Cost model** — `cost(plan | cardinality, N, limit, offset, residual_tier)`
+  in measured per-card units, reusing the `verify_cost_tier` ns/card constants
+  (`bench_verify_cost.rs`) plus a few per-plan terms. Rough shapes:
+  `GatheredScan ≈ C·verify_tier(residual)`; `StreamedSelect ≈ C·match_cost`;
+  `PlanePopcountOrder ≈ (N/64)·word_cost` (flat in match count *and* page
+  depth); `PrintingRangeScan`/idea-1 `≈ (limit/match_rate)·walk_cost` (the one
+  with a bad tail). Each formula consumes the cardinality in its own operating
+  space — which is where the "which space" question (below) gets pinned down.
+- **Gold standard** — `plan_gold = argmin cost(plan | TRUE count)`, the best
+  achievable with perfect cardinality info. **Only legitimate once the model
+  is calibrated against measured runtime** (a cardinality sweep, per the
+  benchmark-artifacts protocol) — otherwise argmin-over-the-model just picks
+  what the model *believes*, and "gold" is circular. This calibration is the
+  load-bearing work.
+- **Estimate regret** — `regret = cost(argmin cost(·|est) | true) −
+  cost(plan_gold | true)`. The regret distribution is the single figure of
+  merit: near-zero → the estimate is good enough to route on as-is; a fat tail
+  → tighten the specific leaf/plan that drives it (the projection tiers).
+  Estimate tightness is thus a *derived* requirement, not a goal — the global
+  "est == truth %" is the wrong target.
+
 ## Scope / sequencing
 
-Estimator first, so the accuracy is measured before anything reroutes:
+Estimator and cost model first, both validated against truth before anything
+reroutes. The estimator (step 1) and the cost model (step 2) are independent —
+the cost model uses TRUE counts, so it branches off `main`, not off the
+estimator PR.
 
-1. **Estimator as a standalone, validated component** — leaf counts + bounds
-   algebra + adaptive card projection, *not yet wired into routing*. Pure
-   addition, zero behavior change.
-2. **The `choose_plan` seam** — now genuinely single-layer (routing keys off
-   the estimate, so it precedes materialization). Behavior-preserving where
-   it can be, toggle-gated A/B via `CARD_ENGINE_PLAN_SELECT` (same LazyLock
-   pattern; temporary legacy duplicate of `run_query`, deleted in a
-   follow-up once parity holds).
-3. **Threshold → cost-comparison, one at a time** — the 7/8 cutoff,
-   `STREAM_MIN_MATCHES`, the memoize gate — each its own measured A/B. Do not
+1. **Estimator** — standalone, sound bounds, fuzz-validated, *unwired*.
+   (Shipped: #704.)
+2. **Cost model + calibration harness** — the per-plan cost formulas plus a
+   cardinality-sweep bench that fits/validates the constants against measured
+   runtime, establishing the true-count gold standard. Independent of #704.
+3. **Estimate-regret report** — feed the estimator into the calibrated model;
+   report the regret distribution. Depends on 1 + 2.
+4. **The `choose_plan` seam** — single-layer, routes on `argmin cost(·|est)`;
+   toggle-gated A/B via `CARD_ENGINE_PLAN_SELECT` (temporary legacy `run_query`
+   duplicate, deleted once parity holds). The toggle's measured runtime
+   confirms the model in production, closing the loop.
+5. **Retire thresholds** — the 7/8 cutoff, `STREAM_MIN_MATCHES`, the memoize
+   gate fall out of the cost comparison, one measured A/B at a time. Do not
    change plan choices and restructure in the same commit.
 
-Filter trees are tiny, so `choose_plan` and the estimator cost is noise;
-they run once per query, not per card.
+Filter trees are tiny, so `choose_plan`, the estimator, and the cost model are
+all per-query noise; they run once per query, not per card.
 
 ## Measurement
 
@@ -173,9 +210,12 @@ family: no geomean regression, no new tail.
 
 ## Open questions
 
-- **Which space drives routing** — card, printing, or both per-decision. The
-  estimator produces both; late projection keeps ranges exact longer but
-  complicates the algebra. Deferred to the wiring PR.
+- **Which space drives routing** — now largely determined by the cost model:
+  each plan's cost formula consumes the cardinality in its own operating space
+  (card-space for card-mode gather/popcount, printing-space for a printing
+  walk), so "which space" is answered per-plan rather than globally. Remaining
+  question is only how tightly the estimator must project between them, which
+  regret (above) decides.
 - **Estimator return shape** — recursion composes a single-space
   `Cardinality { lo, est, hi }`; a both-spaces container (card + printing
   triples) is assembled only at the *root* for the decision site, never
