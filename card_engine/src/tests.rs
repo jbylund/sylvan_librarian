@@ -8,7 +8,7 @@ use super::{
     range_too_broad_to_narrow, run_query, run_query_with_plan, PhysicalPlan, trigram_candidates, finalize_trigram_index, PrintingRangeIndex, NARROW_FLOOR,
     gathered_scan_applicable, streamed_select_applicable, plane_popcount_order_applicable, printing_range_scan_applicable,
     walk_printing_page, aligned_page, bare_range_bounds, printing_range_fastpath, sort_key_bits, orderby_to_col, SortCol, STREAM_MIN_MATCHES,
-    prepare_candidates, verify_cost_tier, Mode,
+    prepare_candidates, verify_cost_tier, scan_units, Mode,
     archive_header, archive_payload, ARCHIVE_HEADER_LEN, Mmap,
     bitmap_contains, bitmap_card_ids, compile_plane, eval_planes, split_planes,
     ArithOp, ArtistIndex, CardData, CardIndexes, Candidates, ColorField, NumExpr, NumField, RarityIndex,
@@ -2822,6 +2822,31 @@ fn calibration_queries() -> Vec<(&'static str, FuzzSpec)> {
     ]
 }
 
+/// A large, diverse calibration corpus generated via the #677 fuzzer — for the
+/// cost-model FIT/validation benches, where 22 hand-picked queries were too few
+/// and too collinear (`scan_units`/`matches`/`page_span` all rose together) to
+/// identify the per-plan constants. Random `fuzz_gen` spans predicate types,
+/// selectivities, and compounds (plane∧expensive-residual shapes decouple scan
+/// from match count), deduped by description. NOT used by the fast correctness
+/// test (`cost_route_matches_legacy` keeps the small hand set).
+fn generate_calibration_corpus(n: usize, seed: u64) -> Vec<(String, FuzzSpec)> {
+    use rand::SeedableRng;
+    let mut rng = rand::rngs::SmallRng::seed_from_u64(seed);
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(n);
+    let mut guard = 0usize;
+    while out.len() < n && guard < n * 50 {
+        guard += 1;
+        let depth = rng.random_range(1..=3u8);
+        let spec = fuzz_gen(&mut rng, depth);
+        let desc = fuzz_describe(&spec);
+        if seen.insert(desc.clone()) {
+            out.push((desc, spec));
+        }
+    }
+    out
+}
+
 /// #702 step 3 (cost calibration): time each *applicable* physical plan on the
 /// REAL corpus archive, across a spread of query selectivities × unique modes ×
 /// page depths, so the per-plan cost formulas can be fit to measured runtime and
@@ -2952,12 +2977,17 @@ fn plan_cost_model_matches_gold() {
     use std::time::Instant;
     use super::cost::{PlanFeatures, plan_cost};
     const STORE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../benchmarks/verify-order/real.store");
-    const WARMUP: usize = 5;
-    const ITERS: usize = 60;
+    const WARMUP: usize = 10;
+    const ITERS: usize = 150;
     // Near-tie band: a model pick measuring within this factor of gold is
     // indifferent (a pass); above REAL_MISS it is a genuine misroute.
     const TIE: f64 = 1.15;
     const REAL_MISS: f64 = 1.30;
+    // Fidelity floor: below this measured ns, a plan's runtime is dominated by
+    // timing jitter (a 200ns query ±50ns reads as 1.25× off with a PERFECT model),
+    // so fit error and noise are inseparable. Reporting fidelity split at this
+    // floor isolates the model error we can actually reduce by re-fitting.
+    const FIDELITY_FLOOR_NS: u64 = 2_000;
 
     let Ok(file) = std::fs::File::open(STORE_PATH) else {
         eprintln!("SKIP: {STORE_PATH} not found (see bench_verify_cost.rs docs to build it)");
@@ -2990,6 +3020,13 @@ fn plan_cost_model_matches_gold() {
     );
 
     let (mut n_match, mut n_tie, mut n_miss) = (0usize, 0usize, 0usize);
+    // Per-mode ABSOLUTE fidelity of plan_cost vs measured ns: geomean of
+    // |ln(model/measured)| over every applicable plan measurement, plus the count
+    // beyond 2×. Routing only needs ordering, but a model whose numbers *mean*
+    // something is the maintainability goal — this quantifies how far off it is.
+    // Indexed [mode 0=card 1=printing][bucket 0=fast(<floor) 1=slow(≥floor)] so the
+    // re-fittable model error (slow) is separated from irreducible jitter (fast).
+    let (mut fid_ln, mut fid_n, mut fid_2x) = ([[0.0f64; 2]; 2], [[0usize; 2]; 2], [[0usize; 2]; 2]);
 
     for (qlabel, spec) in &queries {
         for &mode in &modes {
@@ -3040,6 +3077,7 @@ fn plan_cost_model_matches_gold() {
                     n_cards, n_printings,
                     matches: total as u32,
                     eval_domain,
+                    scan_units: scan_units(mode_enum, prep.candidate_cards.as_deref(), &archived.offsets, n_printings, eval_domain),
                     residual_tier_ns100,
                     limit: limit as u32,
                     offset: offset as u32,
@@ -3051,6 +3089,19 @@ fn plan_cost_model_matches_gold() {
                     .filter(|&i| ns[i].is_some())
                     .map(|i| (plan_cost(all_plans[i], &feats), i))
                     .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+                // Absolute fidelity: model cost vs measured, per applicable plan,
+                // bucketed fast/slow at FIDELITY_FLOOR_NS.
+                let mode_ix = if unique_is_card { 0 } else { 1 };
+                for i in 0..4 {
+                    if let Some(meas) = ns[i] {
+                        let r = plan_cost(all_plans[i], &feats) / meas as f64;
+                        let b = (meas >= FIDELITY_FLOOR_NS) as usize;
+                        fid_ln[mode_ix][b] += r.ln().abs();
+                        fid_n[mode_ix][b] += 1;
+                        if !(0.5..=2.0).contains(&r) { fid_2x[mode_ix][b] += 1; }
+                    }
+                }
 
                 let (Some((gold_ns, gi)), Some((_, mi))) = (gold, model) else { continue };
                 let model_ns = ns[mi].unwrap();
@@ -3079,6 +3130,591 @@ fn plan_cost_model_matches_gold() {
         "\nagreement: {n_match} gold-match, {n_tie} near-tie(pass), {n_miss} real-miss  of {n_total}  ({:.1}% pass)",
         100.0 * (n_match + n_tie) as f64 / n_total as f64,
     );
+    let geo = |m: usize, b: usize| (fid_ln[m][b] / fid_n[m][b].max(1) as f64).exp();
+    println!("\ncost-model fidelity (geomean |model/measured|, want ~1.0), split at {FIDELITY_FLOOR_NS}ns:");
+    for (m, name) in [(0, "card"), (1, "printing")] {
+        println!(
+            "  {name:<9} slow(≥floor, re-fittable) {:.2}× ({}/{} beyond 2×)   fast(<floor, jitter) {:.2}× ({}/{} beyond 2×)",
+            geo(m, 1), fid_2x[m][1], fid_n[m][1], geo(m, 0), fid_2x[m][0], fid_n[m][0],
+        );
+    }
+    println!("(slow-bucket geomean is the real model error; fast-bucket is dominated by sub-µs timing floor, not re-fittable)");
+}
+
+/// Solve `A c = b` (A is n×n, row-major) by Gaussian elimination with partial
+/// pivoting. `None` if singular (rank-deficient — collinear features). Small n.
+fn solve_normal_eqs(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
+    let n = b.len();
+    for col in 0..n {
+        let piv = (col..n).max_by(|&r1, &r2| a[r1][col].abs().partial_cmp(&a[r2][col].abs()).unwrap())?;
+        if a[piv][col].abs() < 1e-9 {
+            return None;
+        }
+        a.swap(col, piv);
+        b.swap(col, piv);
+        for r in 0..n {
+            if r == col {
+                continue;
+            }
+            let f = a[r][col] / a[col][col];
+            for c in col..n {
+                a[r][c] -= f * a[col][c];
+            }
+            b[r] -= f * b[col];
+        }
+    }
+    Some((0..n).map(|i| b[i] / a[i][i]).collect())
+}
+
+/// The cost formula's terms for `plan`, as `(free-param term vector, known offset)`
+/// — EXACTLY mirroring `cost::plan_cost` so a weighted least-squares fit of the
+/// term vector yields drop-in constants. Free params per plan (order = printed
+/// labels in `plan_cost_refit`):
+///   P1 [STEP, FIXED]; P2 [SCATTER, WORD, EMIT, FIXED];
+///   P3 [CARD_PASS, SCAN, EMIT, FLOOR/card, FIXED]; P4 [CARD_PASS, SCAN, PUSH, SELECT, FIXED].
+/// The verify `tier` rides `scan_units` with a fixed coefficient (1), so it is a
+/// known offset, not a fitted param.
+fn cost_terms(plan: PhysicalPlan, f: &super::cost::PlanFeatures) -> (Vec<f64>, f64) {
+    let n_cards = f64::from(f.n_cards);
+    let matches = f64::from(f.matches);
+    let eval_domain = f64::from(f.eval_domain);
+    let scan_units = f64::from(f.scan_units);
+    let tier_ns = f64::from(f.residual_tier_ns100) / 100.0;
+    let limit = f64::from(f.limit);
+    let page_span = f64::from((f.offset.saturating_add(f.limit)).min(f.matches));
+    let match_rate = (matches / f64::from(f.n_printings)).max(1.0e-6);
+    match plan {
+        PhysicalPlan::PrintingRangeScan => (vec![page_span / match_rate, 1.0], 0.0),
+        PhysicalPlan::PlanePopcountOrder => (vec![matches, n_cards / 64.0, limit, 1.0], 0.0),
+        PhysicalPlan::StreamedSelect => {
+            let floor = if u64::from(f.matches) <= *STREAM_MIN_MATCHES as u64 { n_cards } else { 0.0 };
+            (vec![eval_domain, scan_units, matches, floor, 1.0], scan_units * tier_ns)
+        }
+        PhysicalPlan::GatheredScan => (vec![eval_domain, scan_units, matches, page_span, 1.0], scan_units * tier_ns),
+    }
+}
+
+/// #702 (cost-model re-fit): the formulas are LINEAR in their constants, so fit
+/// them by weighted least squares (weight 1/measured² → minimizes *relative*
+/// error, what a ratio-based model wants) on the slow bucket (≥ floor, where model
+/// error is separable from timing jitter), across card+printing jointly (so the
+/// card_pass/scan split is identifiable — collinear within card alone). Prints the
+/// fitted constants + before/after slow-bucket fidelity so a human can adopt them
+/// into cost.rs with provenance. Reporting tool, not an assertion.
+///
+///     cargo test --release plan_cost_refit -- --ignored --nocapture
+///
+/// Same corpus/timing discipline as `plan_cost_model_matches_gold`; needs real.store.
+#[test]
+#[ignore = "cost-model re-fit; needs real.store; cargo test --release plan_cost_refit -- --ignored --nocapture"]
+fn plan_cost_refit() {
+    use std::hint::black_box;
+    use std::time::Instant;
+    use super::cost::PlanFeatures;
+    const STORE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../benchmarks/verify-order/real.store");
+    const FLOOR_NS: u64 = 2_000; // fit only where model error > timing jitter
+    // Env-tunable (defaults sized for ~5-10 min of CPU on the real corpus). More
+    // queries beats more iters for identifiability: the fit averages timing noise
+    // across queries, so a big corpus with modest iters de-correlates features
+    // better than a small corpus hammered many times.
+    let corpus_n: usize = std::env::var("REFIT_CORPUS_N").ok().and_then(|s| s.parse().ok()).unwrap_or(1200);
+    let iters: usize = std::env::var("REFIT_ITERS").ok().and_then(|s| s.parse().ok()).unwrap_or(30);
+    let seed: u64 = std::env::var("REFIT_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(0xC057);
+    const WARMUP: usize = 5;
+
+    let Ok(file) = std::fs::File::open(STORE_PATH) else {
+        eprintln!("SKIP: {STORE_PATH} not found (see bench_verify_cost.rs docs to build it)");
+        return;
+    };
+    let mmap = unsafe { Mmap::map(&file) }.expect("mmap real.store");
+    if mmap.len() < ARCHIVE_HEADER_LEN || mmap[..ARCHIVE_HEADER_LEN] != archive_header() {
+        eprintln!("SKIP: {STORE_PATH} header mismatch (stale — rebuild, see bench_verify_cost.rs)");
+        return;
+    }
+    let archived = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
+    let n_cards = archived.cards.len() as u32;
+    let n_printings = archived.printings.len() as u32;
+
+    let queries = generate_calibration_corpus(corpus_n, seed);
+    eprintln!(
+        "real.store: {n_cards} cards, {n_printings} printings | corpus {} queries × 2 modes × 2 pages, {iters} iters, fit slow(≥{FLOOR_NS}ns)\n",
+        queries.len(),
+    );
+    let modes = ["card", "printing"];
+    let pages = [("shallow", 60usize, 0usize), ("deep", 60usize, 10_000usize)];
+    let all_plans = [PhysicalPlan::PrintingRangeScan, PhysicalPlan::PlanePopcountOrder, PhysicalPlan::StreamedSelect, PhysicalPlan::GatheredScan];
+    let plan_labels = ["P1-range", "P2-popcnt", "P3-stream", "P4-gather"];
+    let param_labels: [&[&str]; 4] = [
+        &["STEP", "FIXED"],
+        &["SCATTER", "WORD", "EMIT", "FIXED"],
+        &["CARD_PASS", "SCAN", "EMIT", "FLOOR/card", "FIXED"],
+        &["CARD_PASS", "SCAN", "PUSH", "SELECT", "FIXED"],
+    ];
+    // Per-plan fit rows: (terms, y_minus_offset, y, is_train). 70/30 train/test by
+    // query index so held-out fidelity reveals overfitting (the 22-query trap).
+    let mut rows: [Vec<(Vec<f64>, f64, f64, bool)>; 4] = Default::default();
+    let t_start = Instant::now();
+
+    for (qi, (_qlabel, spec)) in queries.iter().enumerate() {
+        let is_train = qi % 10 < 7;
+        for &mode in &modes {
+            let unique_is_card = mode == "card";
+            let mode_enum = if unique_is_card { Mode::Card } else { Mode::Printing };
+            for &(_plabel, limit, offset) in &pages {
+                let mut ns = [None::<u64>; 4];
+                let mut total = 0usize;
+                for (pi, plan) in all_plans.iter().enumerate() {
+                    let mut best = u64::MAX;
+                    let mut applicable = false;
+                    for it in 0..(WARMUP + iters) {
+                        let (pe, mut res) = split_planes(
+                            fuzz_bound_filter(spec, archived), &archived.indexes.planes,
+                            &archived.indexes.oracle_trigram.words, unique_is_card,
+                        );
+                        let t0 = Instant::now();
+                        let out = black_box(run_query_with_plan(
+                            *plan, &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+                            &mut res, pe.as_ref(), mode, "default", "edhrec", "asc", limit, offset, &archived.indexes,
+                        ));
+                        let dt = t0.elapsed().as_nanos() as u64;
+                        match out { Some((t, _)) => { total = t; applicable = true; if it >= WARMUP { best = best.min(dt); } } None => break }
+                    }
+                    if applicable { ns[pi] = Some(best); }
+                }
+
+                let (pe, mut res) = split_planes(
+                    fuzz_bound_filter(spec, archived), &archived.indexes.planes,
+                    &archived.indexes.oracle_trigram.words, unique_is_card,
+                );
+                let prep = prepare_candidates(&archived.cards, &archived.offsets, &archived.strings, &mut res, pe.as_ref(), mode_enum, &archived.indexes);
+                let eval_domain = prep.candidate_cards.as_ref().map_or(n_cards, |v| v.len() as u32);
+                let feats = PlanFeatures {
+                    n_cards, n_printings, matches: total as u32, eval_domain,
+                    scan_units: scan_units(mode_enum, prep.candidate_cards.as_deref(), &archived.offsets, n_printings, eval_domain),
+                    residual_tier_ns100: if prep.all_match_known { 0 } else { verify_cost_tier(&res) },
+                    limit: limit as u32, offset: offset as u32,
+                };
+                for (pi, plan) in all_plans.iter().enumerate() {
+                    if let Some(meas) = ns[pi] {
+                        if meas < FLOOR_NS { continue; }
+                        let (terms, offset_ns) = cost_terms(*plan, &feats);
+                        rows[pi].push((terms, meas as f64 - offset_ns, meas as f64, is_train));
+                    }
+                }
+            }
+        }
+        if qi % 100 == 99 {
+            eprintln!("  measured {}/{} queries ({:.0}s elapsed)", qi + 1, queries.len(), t_start.elapsed().as_secs_f64());
+        }
+    }
+
+    eprintln!("\nmeasurement done in {:.0}s\n", t_start.elapsed().as_secs_f64());
+    // Geomean |ln(model/measured)| over a row subset for a given constant vector.
+    let fidelity = |plan_rows: &[(Vec<f64>, f64, f64, bool)], fit: &[f64], train: bool| -> (f64, usize) {
+        let mut ln = 0.0;
+        let mut n = 0usize;
+        for (terms, y_adj, y, is_train) in plan_rows {
+            if *is_train != train { continue; }
+            let fitted = terms.iter().zip(fit).map(|(t, c)| t * c).sum::<f64>() + (y - y_adj);
+            ln += (fitted / y).ln().abs();
+            n += 1;
+        }
+        (if n > 0 { (ln / n as f64).exp() } else { f64::NAN }, n)
+    };
+
+    // Per plan: weighted normal equations (w = 1/y²) on TRAIN rows; report fitted
+    // constants + train AND held-out-test fidelity (test ≈ train ⇒ genuine fit).
+    for (pi, plan_rows) in rows.iter().enumerate() {
+        let p = param_labels[pi].len();
+        let n_train = plan_rows.iter().filter(|r| r.3).count();
+        if n_train < p * 3 {
+            println!("{:<10}: only {n_train} train rows for {p} params — skip\n", plan_labels[pi]);
+            continue;
+        }
+        let mut a = vec![vec![0.0f64; p]; p];
+        let mut b = vec![0.0f64; p];
+        for (terms, y_adj, y, is_train) in plan_rows {
+            if !is_train { continue; }
+            let w = 1.0 / (y * y);
+            for i in 0..p {
+                for j in 0..p { a[i][j] += w * terms[i] * terms[j]; }
+                b[i] += w * terms[i] * y_adj;
+            }
+        }
+        let Some(fit) = solve_normal_eqs(a, b) else {
+            println!("{:<10}: normal equations singular (collinear) — keep current\n", plan_labels[pi]);
+            continue;
+        };
+        let (train_fid, ntr) = fidelity(plan_rows, &fit, true);
+        let (test_fid, nte) = fidelity(plan_rows, &fit, false);
+        let neg = fit.iter().any(|&c| c < 0.0);
+        println!(
+            "{:<10}  fit on {ntr} train rows{}:",
+            plan_labels[pi],
+            if neg { "  [!] has NEGATIVE (unphysical) constants — overfit/collinear" } else { "" },
+        );
+        for (lbl, c) in param_labels[pi].iter().zip(&fit) {
+            println!("    {lbl:<11} = {c:>10.3}");
+        }
+        println!("    fidelity: train {train_fid:.2}× ({ntr} rows)   TEST(held-out) {test_fid:.2}× ({nte} rows)\n");
+    }
+    println!("(adopt only constants that are NON-NEGATIVE and whose TEST fidelity ≈ train and beats the current ~1.4×; then re-run plan_cost_model_matches_gold + plan_routing_ab to validate)");
+}
+
+/// #702 (printing-mode routing probe): does cost-based routing beat the LEGACY
+/// TREE on `unique=printing` bare-range queries? Card-mode routing only tied the
+/// tree (`plan_routing_ab`), so before building printing routing we test the
+/// hypothesis that the tree's P1 gate — `range_too_broad_to_narrow`, a fixed
+/// `k/index_len > 0.25` ratio that IGNORES page depth and sort alignment — misroutes
+/// where the true P1-vs-P4 crossover moves. P1's misaligned walk costs
+/// `(offset+limit)/match_rate`, so a *moderately*-broad range at a *deep* page is
+/// where a depth-blind ratio should mispredict.
+///
+/// For each range query × page depth (printing mode, edhrec sort = MISALIGNED, the
+/// case the walk pays for), measure P1/P3/P4 (min-of-N), then compare two pickers
+/// against empirical gold:
+///   - TREE: what `run_query` dispatches — P1 iff the fastpath fired
+///     (`run_query_with_plan(P1)` is `Some`), else P3/P4 via the `maybe_broad` gate.
+///   - MODEL: `argmin cost::plan_cost` on the TRUE features (matches = measured
+///     printing total; for a range query this is the index's exact `k`, so there is
+///     no estimation error to muddy the plan-choice question).
+/// Reports per-row regret (picked_ns/gold_ns) and geomean regret for each. A model
+/// geomean below the tree's — with the gap on deep+moderate rows — is the win that
+/// justifies printing routing; parity means printing ties too (report, don't build).
+///
+///     cargo test --release printing_range_route_probe -- --ignored --nocapture
+///
+/// Same corpus/timing discipline as `plan_cost_model_matches_gold`; needs real.store.
+#[test]
+#[ignore = "printing-route probe; needs real.store; cargo test --release printing_range_route_probe -- --ignored --nocapture"]
+fn printing_range_route_probe() {
+    use std::hint::black_box;
+    use std::time::Instant;
+    use super::cost::{PlanFeatures, plan_cost};
+    const STORE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../benchmarks/verify-order/real.store");
+    const WARMUP: usize = 5;
+    const ITERS: usize = 60;
+    const LIMIT: usize = 60;
+
+    let Ok(file) = std::fs::File::open(STORE_PATH) else {
+        eprintln!("SKIP: {STORE_PATH} not found (see bench_verify_cost.rs docs to build it)");
+        return;
+    };
+    let mmap = unsafe { Mmap::map(&file) }.expect("mmap real.store");
+    if mmap.len() < ARCHIVE_HEADER_LEN || mmap[..ARCHIVE_HEADER_LEN] != archive_header() {
+        eprintln!("SKIP: {STORE_PATH} header mismatch (stale — rebuild, see bench_verify_cost.rs)");
+        return;
+    }
+    let archived = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
+    let n_cards = archived.cards.len() as u32;
+    let n_printings = archived.printings.len() as u32;
+    eprintln!("real.store: {n_cards} cards, {n_printings} printings (printing mode, edhrec sort = misaligned)\n");
+
+    // Bare price/year ranges spanning the broad/narrow margin; `total` reveals each
+    // one's true match_rate (of the priced/dated index) at run time.
+    let price = |op, val: f64| FuzzSpec::Leaf(FuzzLeaf::Price { op, val });
+    let year  = |op, y: i32|   FuzzSpec::Leaf(FuzzLeaf::Year { op, year: y });
+    let queries: Vec<(&str, FuzzSpec)> = vec![
+        ("usd<0.25", price(CmpOp::Lt, 0.25)),
+        ("usd<0.5",  price(CmpOp::Lt, 0.5)),
+        ("usd<1",    price(CmpOp::Lt, 1.0)),
+        ("usd<2",    price(CmpOp::Lt, 2.0)),
+        ("usd<5",    price(CmpOp::Lt, 5.0)),
+        ("usd<20",   price(CmpOp::Lt, 20.0)),
+        ("usd>=1",   price(CmpOp::Ge, 1.0)),
+        ("usd>=5",   price(CmpOp::Ge, 5.0)),
+        ("year>=2020", year(CmpOp::Ge, 2020)),
+        ("year>=2010", year(CmpOp::Ge, 2010)),
+        ("year>=2000", year(CmpOp::Ge, 2000)),
+    ];
+    // Shallow → progressively deeper: the depth axis the tree's ratio ignores.
+    let offsets = [0usize, 1_000, 5_000, 10_000, 20_000];
+    let all_plans = [PhysicalPlan::PrintingRangeScan, PhysicalPlan::PlanePopcountOrder, PhysicalPlan::StreamedSelect, PhysicalPlan::GatheredScan];
+    let labels = ["P1", "P2", "P3", "P4"];
+    let sort_col = orderby_to_col("edhrec");
+    let descending = false;
+
+    println!(
+        "{:<12} {:>7} {:>7}  {:>4} {:>9} {:>7}  {:>4} {:>9} {:>7}",
+        "query", "total", "offset", "gold", "gold_ns", "", "tree", "tree_ns", "t/g", // header spacing
+    );
+    println!(
+        "{:<12} {:>7} {:>7}  {:>4} {:>9} {:>7}  {:>4} {:>9} {:>7}",
+        "", "", "", "", "", "", "model", "model_ns", "m/g",
+    );
+
+    // geomean accumulators (sum of ln regret) over scored rows.
+    let (mut tree_ln, mut model_ln, mut n_scored, mut n_model_wins) = (0.0f64, 0.0f64, 0usize, 0usize);
+
+    for (qlabel, spec) in &queries {
+        for &offset in &offsets {
+            // ── Measure each applicable plan (min-of-N) ──
+            let mut ns = [None::<u64>; 4];
+            let mut total = 0usize;
+            for (pi, plan) in all_plans.iter().enumerate() {
+                let mut best = u64::MAX;
+                let mut applicable = false;
+                for it in 0..(WARMUP + ITERS) {
+                    let (pe, mut res) = split_planes(
+                        fuzz_bound_filter(spec, archived), &archived.indexes.planes,
+                        &archived.indexes.oracle_trigram.words, false, // unique_is_card=false (printing)
+                    );
+                    let t0 = Instant::now();
+                    let out = black_box(run_query_with_plan(
+                        *plan, &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+                        &mut res, pe.as_ref(), "printing", "default", "edhrec", "asc", LIMIT, offset, &archived.indexes,
+                    ));
+                    let dt = t0.elapsed().as_nanos() as u64;
+                    match out {
+                        Some((t, _)) => { total = t; applicable = true; if it >= WARMUP { best = best.min(dt); } }
+                        None => break,
+                    }
+                }
+                if applicable { ns[pi] = Some(best); }
+            }
+
+            // Only score rows the page can actually reach — else every plan returns an
+            // empty page early and the comparison is meaningless.
+            if total <= offset + LIMIT { continue; }
+
+            // ── Features (true count = measured printing total = the index's k) ──
+            let (pe, mut res) = split_planes(
+                fuzz_bound_filter(spec, archived), &archived.indexes.planes,
+                &archived.indexes.oracle_trigram.words, false,
+            );
+            let prep = prepare_candidates(&archived.cards, &archived.offsets, &archived.strings, &mut res, pe.as_ref(), Mode::Printing, &archived.indexes);
+            let eval_domain = prep.candidate_cards.as_ref().map_or(n_cards, |v| v.len() as u32);
+            let residual_tier_ns100 = if prep.all_match_known { 0 } else { verify_cost_tier(&res) };
+            let feats = PlanFeatures {
+                n_cards, n_printings, matches: total as u32, eval_domain,
+                scan_units: scan_units(Mode::Printing, prep.candidate_cards.as_deref(), &archived.offsets, n_printings as u32, eval_domain),
+                residual_tier_ns100,
+                limit: LIMIT as u32, offset: offset as u32,
+            };
+
+            // ── Three pickers ──
+            let gold = (0..4).filter_map(|i| ns[i].map(|v| (v, i))).min_by_key(|(v, _)| *v);
+            let model = (0..4).filter(|&i| ns[i].is_some())
+                .map(|i| (plan_cost(all_plans[i], &feats), i))
+                .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            // TREE: P1 iff the fastpath fired (force-seam Some), else the P3/P4 maybe_broad gate.
+            let tree_i = if ns[0].is_some() {
+                0
+            } else {
+                let maybe_broad = prep.candidate_cards.as_ref().is_none_or(|v| v.len() > *STREAM_MIN_MATCHES);
+                if maybe_broad && streamed_select_applicable(&archived.cards, sort_col, descending, &archived.indexes) { 2 } else { 3 }
+            };
+
+            let (Some((gold_ns, gi)), Some((_, mi))) = (gold, model) else { continue };
+            let tree_ns = ns[tree_i].expect("tree pick was measured");
+            let model_ns = ns[mi].unwrap();
+            let tree_reg = tree_ns as f64 / gold_ns as f64;
+            let model_reg = model_ns as f64 / gold_ns as f64;
+            tree_ln += tree_reg.ln();
+            model_ln += model_reg.ln();
+            n_scored += 1;
+            if model_ns < tree_ns { n_model_wins += 1; }
+
+            // Per-plan FIDELITY: modeled cost vs measured ns (model_ns/meas_ns).
+            // A faithful cost model has this ~constant across plans (argmin then
+            // reproduces gold); ratios that differ *by plan* are what flip picks.
+            let fid = |i: usize| ns[i].map(|meas| {
+                let mc = plan_cost(all_plans[i], &feats);
+                format!("{}:{:>7}/{:<7}={:.2}", labels[i], meas, mc as u64, mc / meas as f64)
+            }).unwrap_or_default();
+
+            println!(
+                "{:<12} {:>7} {:>7}  gold={:<3} tree={:<3}({:.2}x) model={:<3}({:.2}x)  | {}  {}  {}  {}",
+                qlabel, total, offset,
+                labels[gi], labels[tree_i], tree_reg, labels[mi], model_reg,
+                fid(0), fid(1), fid(2), fid(3),
+            );
+        }
+    }
+
+    let g = |ln: f64| (ln / n_scored.max(1) as f64).exp();
+    println!(
+        "\n{n_scored} scored rows | geomean regret  tree {:.3}x  model {:.3}x  | model strictly faster on {n_model_wins}/{n_scored}",
+        g(tree_ln), g(model_ln),
+    );
+    println!("(model geomean below tree, gap on deep+moderate rows => printing routing is a real win; parity => printing ties too)");
+}
+
+/// Cost-representative idea-2 kernel (see docs/issues/local-engine-sorted-range-fastpath.md):
+/// range binary-search → scatter the `k` matching printings into a printing-space existence
+/// bitmap → popcount-skip to `page_offset` → emit `limit` printings (resolving pid→card, the
+/// representative emit work). This times idea-2's WORK so it can be compared to idea-1's
+/// measured walk WITHOUT first building the deferred #656 printing-space pager — the whole
+/// point of the probe is to decide whether that build is worth funding.
+///
+/// The emitted page is deliberately NOT sort-correct: bits are scattered in pid order, not
+/// sort order. That does not affect the COST being measured — scatter is O(k), the popcount-skip
+/// scans the same number of words to reach the offset-th set bit, and emit touches `limit`
+/// printings — all independent of which bits are set where. A shipping idea-2 would need a
+/// printing permutation to make the page correct (that is #656); its cost is what this measures.
+/// Returns `(k, checksum)` (checksum defeats dead-code elimination of the emit) or `None` when
+/// `filter` is not a bare range.
+fn idea2_printing_cost_kernel(
+    filter: &FilterExpr,
+    archived: &Archived<CardData>,
+    page_offset: usize,
+    limit: usize,
+) -> Option<(usize, u64)> {
+    let (idx, lo, hi) = bare_range_bounds(filter, &archived.indexes)?;
+    let s = idx.partition_point(|p| u32::from(p.0) < lo);
+    let e = idx.partition_point(|p| u32::from(p.0) < hi);
+    let k = e - s;
+    let n_printings = archived.printings.len();
+    thread_local! {
+        static I2_BITS: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    I2_BITS.with(|cell| {
+        let mut bits = cell.borrow_mut();
+        bits.clear();
+        bits.resize(n_printings.div_ceil(64), 0);
+        // Scatter: O(k), one bit set per matching printing.
+        for t in s..e {
+            let pid = u32::from(idx[t].1);
+            bits[(pid >> 6) as usize] |= 1u64 << (pid & 63);
+        }
+        if k == 0 || page_offset >= k {
+            return Some((k, 0));
+        }
+        // Popcount-skip: accumulate word popcounts to the offset-th set bit — cheap
+        // O(words-to-offset) word ops, vs idea-1's per-card printing rescan.
+        let mut skip = page_offset;
+        let mut wi = 0usize;
+        while wi < bits.len() {
+            let wc = bits[wi].count_ones() as usize;
+            if skip < wc {
+                break;
+            }
+            skip -= wc;
+            wi += 1;
+        }
+        // Emit: walk `limit` set bits from the boundary word, resolving pid→card
+        // (printing_to_card) and touching the printing — representative emit work.
+        let ptc = &archived.indexes.printing_to_card;
+        let mut checksum = 0u64;
+        let mut emitted = 0usize;
+        'walk: while wi < bits.len() {
+            let mut w = bits[wi];
+            while w != 0 {
+                let bit = w.trailing_zeros();
+                w &= w - 1;
+                if skip > 0 {
+                    skip -= 1;
+                    continue;
+                }
+                let pid = (wi as u32) << 6 | bit;
+                let cid = u32::from(ptc[pid as usize]);
+                // The printing_to_card lookup is the emit's dominant per-row cost; fold
+                // cid+pid into a checksum so the walk isn't optimized away.
+                checksum ^= u64::from(cid).wrapping_mul(0x9E3779B9) ^ u64::from(pid);
+                emitted += 1;
+                if emitted == limit {
+                    break 'walk;
+                }
+            }
+            wi += 1;
+        }
+        Some((k, checksum))
+    })
+}
+
+/// #702 (idea-1 vs idea-2 probe): the ONE cell the design doc says the two mechanisms
+/// genuinely compete — `unique=printing`, broad range, unrelated (card-level) order-by —
+/// swept across page depth. idea-1 (P1, built) walks the card permutation at cost
+/// `(offset+limit)/match_rate`; idea-2 (range→printing bitmap→popcount-skip, NOT built —
+/// needs #656) is offset-independent-ish. This measures BOTH (idea-2 via the cost kernel
+/// above, so no #656 build is needed to decide whether #656 is worth building) and reports
+/// the crossover offset per query. A crossover at a realistic depth for realistic match-rates
+/// ⇒ idea-2 is worth building; a crossover only at extreme depth ⇒ leave it deferred.
+///
+///     cargo test --release idea1_vs_idea2_probe -- --ignored --nocapture
+///
+/// Same corpus/timing discipline as the other probes; needs real.store.
+#[test]
+#[ignore = "idea-1 vs idea-2 crossover probe; needs real.store; cargo test --release idea1_vs_idea2_probe -- --ignored --nocapture"]
+fn idea1_vs_idea2_probe() {
+    use std::hint::black_box;
+    use std::time::Instant;
+    const STORE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../benchmarks/verify-order/real.store");
+    const WARMUP: usize = 5;
+    const ITERS: usize = 60;
+    const LIMIT: usize = 60;
+
+    let Ok(file) = std::fs::File::open(STORE_PATH) else {
+        eprintln!("SKIP: {STORE_PATH} not found (see bench_verify_cost.rs docs to build it)");
+        return;
+    };
+    let mmap = unsafe { Mmap::map(&file) }.expect("mmap real.store");
+    if mmap.len() < ARCHIVE_HEADER_LEN || mmap[..ARCHIVE_HEADER_LEN] != archive_header() {
+        eprintln!("SKIP: {STORE_PATH} header mismatch (stale — rebuild, see bench_verify_cost.rs)");
+        return;
+    }
+    let archived = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
+    let n_printings = archived.printings.len();
+    eprintln!("real.store: {} cards, {n_printings} printings (printing mode, edhrec sort = unrelated order-by)\n", archived.cards.len());
+
+    let price = |op, val: f64| FuzzSpec::Leaf(FuzzLeaf::Price { op, val });
+    let year  = |op, y: i32|   FuzzSpec::Leaf(FuzzLeaf::Year { op, year: y });
+    let queries: Vec<(&str, FuzzSpec)> = vec![
+        ("usd<0.25", price(CmpOp::Lt, 0.25)), ("usd<0.5", price(CmpOp::Lt, 0.5)),
+        ("usd<1", price(CmpOp::Lt, 1.0)), ("usd<2", price(CmpOp::Lt, 2.0)),
+        ("usd<5", price(CmpOp::Lt, 5.0)), ("usd<20", price(CmpOp::Lt, 20.0)),
+        ("usd>=1", price(CmpOp::Ge, 1.0)),
+        ("year>=2020", year(CmpOp::Ge, 2020)), ("year>=2010", year(CmpOp::Ge, 2010)),
+        ("year>=2000", year(CmpOp::Ge, 2000)),
+    ];
+    let offsets = [0usize, 500, 1_000, 2_000, 5_000, 10_000, 20_000];
+
+    println!("{:<12} {:>7} {:>7} {:>6}  {:>9} {:>9} {:>7}", "query", "total", "rate%", "offset", "i1(P1)_ns", "i2_ns", "i1/i2");
+
+    for (qlabel, spec) in &queries {
+        let mut crossover: Option<usize> = None;
+        for &offset in &offsets {
+            // idea-1: force P1 (min-of-N).
+            let mut i1 = u64::MAX;
+            let mut total = 0usize;
+            let mut applicable = false;
+            for it in 0..(WARMUP + ITERS) {
+                let (pe, mut res) = split_planes(fuzz_bound_filter(spec, archived), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, false);
+                let t0 = Instant::now();
+                let out = black_box(run_query_with_plan(
+                    PhysicalPlan::PrintingRangeScan, &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+                    &mut res, pe.as_ref(), "printing", "default", "edhrec", "asc", LIMIT, offset, &archived.indexes,
+                ));
+                let dt = t0.elapsed().as_nanos() as u64;
+                match out { Some((t, _)) => { total = t; applicable = true; if it >= WARMUP { i1 = i1.min(dt); } } None => break }
+            }
+            if !applicable || total <= offset + LIMIT { continue; }
+
+            // idea-2: the cost kernel (min-of-N).
+            let mut i2 = u64::MAX;
+            for it in 0..(WARMUP + ITERS) {
+                let (_pe, res) = split_planes(fuzz_bound_filter(spec, archived), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, false);
+                let t0 = Instant::now();
+                let out = black_box(idea2_printing_cost_kernel(&res, archived, offset, LIMIT));
+                let dt = t0.elapsed().as_nanos() as u64;
+                if out.is_some() && it >= WARMUP { i2 = i2.min(dt); }
+            }
+
+            let rate = 100.0 * total as f64 / n_printings as f64;
+            let ratio = i1 as f64 / i2 as f64;
+            if ratio > 1.0 && crossover.is_none() { crossover = Some(offset); }
+            println!(
+                "{:<12} {:>7} {:>6.1} {:>6}  {:>9} {:>9} {:.2}x  {}",
+                qlabel, total, rate, offset, i1, i2, ratio,
+                if ratio > 1.0 { "<-- idea-2 faster" } else { "" },
+            );
+        }
+        match crossover {
+            Some(off) => println!("  => {qlabel}: idea-2 wins from offset ~{off}\n"),
+            None => println!("  => {qlabel}: idea-1 wins at every tested depth\n"),
+        }
+    }
+    println!("(crossover at a realistic depth for realistic match-rates => #656 idea-2 is worth building; only-extreme-depth => leave deferred)");
 }
 
 /// #702 step 4 (estimate-regret report): the payoff of the whole plan-selection
@@ -3210,6 +3846,7 @@ fn plan_regret_report() {
                 n_cards, n_printings,
                 matches: est,
                 eval_domain: est.min(n_cards),
+                scan_units: est.min(n_cards), // card-mode regret report ⇒ scan_units == eval_domain
                 residual_tier_ns100: tier,
                 limit: limit as u32,
                 offset: offset as u32,
@@ -3336,7 +3973,8 @@ fn plan_regret_fuzz() {
 
         for &(limit, offset) in &pages {
             let mk = |matches: u32, evd: u32| PlanFeatures {
-                n_cards, n_printings, matches, eval_domain: evd, residual_tier_ns100: tier,
+                n_cards, n_printings, matches, eval_domain: evd, scan_units: evd, // card mode ⇒ scan_units == eval_domain
+                residual_tier_ns100: tier,
                 limit: limit as u32, offset: offset as u32,
             };
             let feats_true = mk(true_total, eval_domain);
@@ -7143,6 +7781,68 @@ fn printing_range_fastpath_gates_card_walk_at_stream_threshold() {
         let (aligned_total, _) = fp(SortCol::PriceUsd).expect("aligned exempt from stream gate");
         assert_eq!(aligned_total, n, "aligned total must equal the true match count at n={n}");
     }
+}
+
+/// #702 router timing: absolute `run_query` (the cost router) latency over the
+/// calibration set × modes × pages, min-of-N, on the real corpus. Used to A/B two
+/// versions of `run_query_routed` against each other (git-stash one, run, restore,
+/// run) since the tree-vs-router bench retired with the tree. Prints per-config ns
+/// and per-mode + grand totals (sum of the min times).
+///
+///     cargo test --release router_timing -- --ignored --nocapture
+#[test]
+#[ignore = "router timing; needs real.store; cargo test --release router_timing -- --ignored --nocapture"]
+fn router_timing() {
+    use std::hint::black_box;
+    use std::time::Instant;
+    const STORE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../benchmarks/verify-order/real.store");
+    const WARMUP: usize = 5;
+    const ITERS: usize = 50;
+
+    let Ok(file) = std::fs::File::open(STORE_PATH) else {
+        eprintln!("SKIP: {STORE_PATH} not found");
+        return;
+    };
+    let mmap = unsafe { Mmap::map(&file) }.expect("mmap real.store");
+    if mmap.len() < ARCHIVE_HEADER_LEN || mmap[..ARCHIVE_HEADER_LEN] != archive_header() {
+        eprintln!("SKIP: {STORE_PATH} header mismatch");
+        return;
+    }
+    let archived = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
+    let planes = &archived.indexes.planes;
+    let words = &archived.indexes.oracle_trigram.words;
+    let pages = [("shallow", 60usize, 0usize), ("deep", 60usize, 10_000usize)];
+    let modes = ["card", "printing", "artwork"];
+
+    let mut grand: u64 = 0;
+    for &mode in &modes {
+        let uic = mode == "card";
+        let mut mode_total: u64 = 0;
+        for (qlabel, spec) in &calibration_queries() {
+            for &(plabel, limit, offset) in &pages {
+                let mut best = u64::MAX;
+                for it in 0..(WARMUP + ITERS) {
+                    let full = fuzz_bound_filter(spec, archived);
+                    let t0 = Instant::now();
+                    let (_pe, mut res) = split_planes(full, planes, words, uic);
+                    let out = run_query(
+                        &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+                        &mut res, _pe.as_ref(), mode, "default", "edhrec", "asc", limit, offset, &archived.indexes,
+                    );
+                    let dt = t0.elapsed().as_nanos() as u64;
+                    black_box(&out.1);
+                    if it >= WARMUP {
+                        best = best.min(dt);
+                    }
+                }
+                mode_total += best;
+                println!("{qlabel:<22} {mode:>8} {plabel:>7} {best:>10}ns");
+            }
+        }
+        println!("  -> {mode} total: {mode_total}ns\n");
+        grand += mode_total;
+    }
+    println!("GRAND TOTAL (sum of per-config min ns): {grand}");
 }
 
 
