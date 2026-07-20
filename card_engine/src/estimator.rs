@@ -277,18 +277,22 @@ fn plane_card(f: &FilterExpr, indexes: &Archived<CardIndexes>, n_cards: u32, for
     }
 }
 
-/// Popcount of a single named plane (`PlaneExpr::Plane(idx)`), for leaves whose
-/// value maps to a known plane index directly — even when `compile_plane`
-/// declines to compile the *predicate* exactly (e.g. an untracked border folds
-/// into `PLANE_BORDER_OTHER`, a superset the estimator only needs as a bound).
-/// Guards plane availability like `plane_popcount`.
-fn plane_popcount_at(idx: usize, indexes: &Archived<CardIndexes>, n_cards: u32) -> Option<u32> {
+/// Popcount of an arbitrary already-compiled `PlaneExpr`, for leaves the
+/// estimator can bound via a plane the predicate's own `compile_plane` declines
+/// (an untracked border's OTHER bucket, a devotion saturated superset). Guards
+/// plane availability like `plane_popcount`.
+fn plane_expr_popcount(pe: &PlaneExpr, indexes: &Archived<CardIndexes>, n_cards: u32) -> Option<u32> {
     if n_cards == 0 || u32::from(indexes.planes.n_cards) != n_cards {
         return None;
     }
     let mut bits: Vec<u64> = Vec::new();
-    eval_planes(&PlaneExpr::Plane(idx as u16), &indexes.planes, &mut bits);
+    eval_planes(pe, &indexes.planes, &mut bits);
     Some(bits.iter().map(|w| w.count_ones()).sum())
+}
+
+/// Popcount of a single named plane (see `plane_expr_popcount`).
+fn plane_popcount_at(idx: usize, indexes: &Archived<CardIndexes>, n_cards: u32) -> Option<u32> {
+    plane_expr_popcount(&PlaneExpr::Plane(idx as u16), indexes, n_cards)
 }
 
 /// Card count `end - start` from the numeric index's partition_point bounds,
@@ -374,10 +378,20 @@ fn estimate_leaf(f: &FilterExpr, indexes: &Archived<CardIndexes>, n_cards: u32, 
         // Existence-projection plane → superset {0, c, c}.
         FilterExpr::Legality { .. } => plane_card(f, indexes, n_cards, true),
 
-        // Devotion Ge/Gt: saturated-bucket plane superset {0, c, c}; other ops
-        // are not plane-narrowable → unknown.
-        FilterExpr::Devotion { op: CmpOp::Ge | CmpOp::Gt, .. } => plane_card(f, indexes, n_cards, true),
-        FilterExpr::Devotion { .. } => unknown(n),
+        // Devotion (card-level, two-valued). The planes give 0/1/2/3+ buckets
+        // per color, so the exact compiler answers any comparison within the
+        // saturation boundary EXACTLY (==0/1/2, ≥1/2/3, and the ≤/≠ it accepts) —
+        // exact card count, tight bounds. When it declines — Ge/Gt past 3, where
+        // "3+" can't be split — the saturated superset (count clamped to 3, the
+        // 3+ bucket ⊇ ≥k for k≥3) is a sound upper bound. Superset is Ge-based,
+        // so it's sound only for Ge/Gt; Le/Lt/Eq/Ne that decline stay unknown.
+        FilterExpr::Devotion { op, pips } => match plane_popcount(f, indexes, n_cards) {
+            Some((c, _)) => exact(c),
+            None if matches!(op, CmpOp::Ge | CmpOp::Gt) => compile_devotion_superset(*pips)
+                .and_then(|pe| plane_expr_popcount(&pe, indexes, n_cards))
+                .map_or_else(|| unknown(n), |c| Cardinality { lo: 0, est: c, hi: c }),
+            None => unknown(n),
+        },
 
         FilterExpr::CollectionCmp { field, op: CmpOp::Ge, value, .. } => {
             // Mirror narrow_rec's field dispatch (lib.rs:3040-3047).
