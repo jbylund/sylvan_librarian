@@ -3384,6 +3384,38 @@ fn sort_key_bits(card: &AOracleCard, p: &APrinting, sort_col: SortCol, descendin
 /// pre-split pointer comparison produced.
 type Match = (u128, u32, u32);
 
+/// The page comparator (`select_page`'s order): sort key, then pid. pid is unique,
+/// so this is a total order over `Match`.
+fn page_cmp(a: &Match, b: &Match) -> std::cmp::Ordering {
+    a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2))
+}
+
+/// Number of matches the gather buffer may grow *past* the page (`offset+limit`)
+/// before it is pruned back down (see `exec_gathered_scan`). Bounds the buffer at
+/// ~`page + CHUNK` ≈ 128KB of `Match` (32 B each — `u128`'s 16-byte alignment pads
+/// the trailing two `u32`s) — L2-resident — on whole-corpus results, while leaving
+/// any gather that never reaches this size byte-for-byte the un-pruned path.
+/// Amortized O(1)/match (a prune every CHUNK matches costs O(page+CHUNK)).
+const GATHER_PRUNE_CHUNK: usize = 4096;
+
+/// Discard all but the `k` smallest matches (by `page_cmp`) in place, and return a
+/// **cutoff**: the `(k+1)`-th smallest, i.e. a value every kept match is `<`. Those
+/// dropped are `>=` the cutoff, so they can never enter a page of size `<= k` —
+/// pruning preserves the true k-smallest of everything seen so far. The cutoff lets
+/// the caller reject later matches `>= cutoff` before they bloat the buffer; it only
+/// tightens across prunes (the k-th smallest is monotone non-increasing). Returns
+/// `None` when there was nothing to prune (`len <= k`), i.e. no cutoff yet exists.
+fn prune_to_smallest(v: &mut Vec<Match>, k: usize) -> Option<Match> {
+    if v.len() > k {
+        v.select_nth_unstable_by(k, page_cmp);
+        let cutoff = v[k];
+        v.truncate(k);
+        Some(cutoff)
+    } else {
+        None
+    }
+}
+
 /// Quickselect the page `[offset, offset+limit)` into position and sort only that
 /// segment. The first select bounds the page from above (everything past it stays
 /// unsorted); the second bounds it from below and is skipped in the common
@@ -4372,7 +4404,20 @@ fn exec_gathered_scan<'a>(
     };
 
     // Gathered path (printing-keyed orderbys, or stores without permutations).
+    // Push matches directly into `best` — the fast, un-pruned path a gather that
+    // stays small never leaves. Once `best` first grows a CHUNK past the page size,
+    // prune it to the page's `k` smallest and take a `cutoff` (the k-th smallest);
+    // thereafter any match `>= cutoff` can't reach the page, so we drop it right
+    // after it's produced (compacting each card's tail in place). The cutoff only
+    // tightens, so the buffer stays ~`k` for the rest of the scan — the win on
+    // whole-corpus results, where the un-pruned buffer is large and cache-hostile,
+    // without changing the result. `total` counts every match (pre-drop), since
+    // dropped/pruned matches are still results, just not on this page.
+    let k = page_offset.saturating_add(limit);
+    let prune_at = k.saturating_add(GATHER_PRUNE_CHUNK);
     let mut best: Vec<Match> = Vec::new();
+    let mut total = 0usize;
+    let mut cutoff: Option<Match> = None;
     // artwork-mode scratch, reused per card (#629: group-id-indexed, not illustration_id-keyed)
     let mut group_best: Vec<Option<(u32, f64)>> = Vec::new();
     let mut touched: Vec<u16> = Vec::new();
@@ -4393,13 +4438,31 @@ fn exec_gathered_scan<'a>(
             };
         let start = u32::from(offsets[cid as usize]) as usize;
         let end   = u32::from(offsets[cid as usize + 1]) as usize;
+        let before = best.len();
         push_card_matches(
             card, cid, printings, start, end, all_match, &residual, residual_is_or, mode, prefer,
             sort_col, descending, strings, existential_plane, &mut best, &mut group_best, &mut touched,
         );
+        total += best.len() - before;
+        // Once a cutoff exists, drop this card's matches that can't reach the page
+        // (>= cutoff) — compact the just-appended tail in place so the buffer stays ~k.
+        if let Some(c) = cutoff {
+            let mut w = before;
+            for r in before..best.len() {
+                if page_cmp(&best[r], &c) == std::cmp::Ordering::Less {
+                    best[w] = best[r];
+                    w += 1;
+                }
+            }
+            best.truncate(w);
+        }
+        if best.len() >= prune_at {
+            cutoff = prune_to_smallest(&mut best, k);
+        }
     }
 
-    let total = best.len();
+    // `best` now holds the true k smallest (pruned) or every match (never pruned);
+    // either way it contains the page. `total` is the exact count.
     let page = select_page(best, page_offset, limit)
         .into_iter()
         .map(|(cid, pid)| (&cards[cid as usize], &printings[pid as usize]))
