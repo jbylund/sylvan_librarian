@@ -2792,8 +2792,8 @@ fn plan_cost_calibration() {
     use std::hint::black_box;
     use std::time::Instant;
     const STORE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../benchmarks/verify-order/real.store");
-    const WARMUP: usize = 3;
-    const ITERS: usize = 30;
+    const WARMUP: usize = 5;
+    const ITERS: usize = 60;
 
     let Ok(file) = std::fs::File::open(STORE_PATH) else {
         eprintln!("SKIP: {STORE_PATH} not found (see bench_verify_cost.rs docs to build it)");
