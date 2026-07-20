@@ -2772,6 +2772,55 @@ fn estimator_accuracy() {
     assert_eq!(unsound, 0, "estimator produced unsound bounds — see stderr");
 }
 
+/// The shared 22-query calibration set used by `plan_cost_calibration`,
+/// `plan_cost_model_matches_gold`, and `plan_regret_report`. A spread from
+/// near-whole-corpus down to narrow, covering each plan's applicability
+/// (pure-plane → True residual for P2; bare range for P1; residual predicate for
+/// P3/P4) AND a range of residual verify tiers (plane/numeric cheap → tag
+/// SET_LOOKUP → oracle/name TEXT_SCAN), plus a sparse postings-narrow
+/// (`o:annihilator`, `kw:Flying`) and an OR union. The closures capture nothing,
+/// so they live here rather than being copy-pasted into each bench.
+fn calibration_queries() -> Vec<(&'static str, FuzzSpec)> {
+    // Colors are the low 5 bits (WUBRG); TYPE_CREATURE is 1<<4. Ge (`:`) = contains.
+    let color = |op, mask| FuzzSpec::Leaf(FuzzLeaf::Color { op, mask });
+    let typ   = |op, mask| FuzzSpec::Leaf(FuzzLeaf::Type { op, mask });
+    let cmc   = |op, val| FuzzSpec::Leaf(FuzzLeaf::Cmc { op, val });
+    let power = |op, val| FuzzSpec::Leaf(FuzzLeaf::Power { op, val });
+    let price = |op, val| FuzzSpec::Leaf(FuzzLeaf::Price { op, val });
+    let year   = |op, y: i32| FuzzSpec::Leaf(FuzzLeaf::Year { op, year: y });
+    let otext  = |needle: &str| FuzzSpec::Leaf(FuzzLeaf::TextContains { field: TextSearchField::OracleTextLower, needle: needle.to_string() });
+    let ntext  = |needle: &str| FuzzSpec::Leaf(FuzzLeaf::TextContains { field: TextSearchField::NameLower, needle: needle.to_string() });
+    let rarity = |op, val| FuzzSpec::Leaf(FuzzLeaf::Rarity { op, val });
+    let kw     = |value: &str| FuzzSpec::Leaf(FuzzLeaf::Collection { field: CollField::Keywords, op: CmpOp::Ge, value: value.to_string() });
+
+    vec![
+        ("cmc>=0 (all)",       cmc(CmpOp::Ge, 0.0)),
+        ("t:creature",         typ(CmpOp::Ge, TYPE_CREATURE)),
+        ("color(bit3)",        color(CmpOp::Ge, 1 << 3)),
+        ("color3 t:creature",  FuzzSpec::And(vec![color(CmpOp::Ge, 1 << 3), typ(CmpOp::Ge, TYPE_CREATURE)])),
+        ("t:creature power>3", FuzzSpec::And(vec![typ(CmpOp::Ge, TYPE_CREATURE), power(CmpOp::Gt, 3.0)])),
+        ("cmc<=2",             cmc(CmpOp::Le, 2.0)),
+        ("cmc==7",             cmc(CmpOp::Eq, 7.0)),
+        ("usd<5",              price(CmpOp::Lt, 5.0)),
+        ("year>=2020",         year(CmpOp::Ge, 2020)),
+        ("r:mythic(=3)",       rarity(CmpOp::Eq, 3.0)),
+        ("o:flying",           otext("flying")),
+        ("o:sacrifice",        otext("sacrifice")),
+        ("o:annihilator",      otext("annihilator")),
+        ("name:dragon",        ntext("dragon")),
+        ("kw:Flying",          kw("Flying")),
+        ("c:g or c:r",         FuzzSpec::Or(vec![color(CmpOp::Ge, 1 << 3), color(CmpOp::Ge, 1 << 2)])),
+        // Compounds: plane narrows → expensive residual verify on the CANDIDATE
+        // set (not full N); mixed card/printing-space AND; nested And/Or; a Not.
+        ("t:creature o:flying", FuzzSpec::And(vec![typ(CmpOp::Ge, TYPE_CREATURE), otext("flying")])),
+        ("t:creature usd<5",   FuzzSpec::And(vec![typ(CmpOp::Ge, TYPE_CREATURE), price(CmpOp::Lt, 5.0)])),
+        ("cmc<=3 o:draw",      FuzzSpec::And(vec![cmc(CmpOp::Le, 3.0), otext("draw")])),
+        ("t:cr (c:g or c:r)",  FuzzSpec::And(vec![typ(CmpOp::Ge, TYPE_CREATURE), FuzzSpec::Or(vec![color(CmpOp::Ge, 1 << 3), color(CmpOp::Ge, 1 << 2)])])),
+        ("-t:creature",        FuzzSpec::Not(Box::new(typ(CmpOp::Ge, TYPE_CREATURE)))),
+        ("cmc>=15 (narrow)",   cmc(CmpOp::Ge, 15.0)),
+    ]
+}
+
 /// #702 step 3 (cost calibration): time each *applicable* physical plan on the
 /// REAL corpus archive, across a spread of query selectivities × unique modes ×
 /// page depths, so the per-plan cost formulas can be fit to measured runtime and
@@ -2809,49 +2858,7 @@ fn plan_cost_calibration() {
     let archived = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
     eprintln!("real.store: {} cards, {} printings\n", archived.cards.len(), archived.printings.len());
 
-    // Colors are the low 5 bits (WUBRG); TYPE_CREATURE is 1<<4. Ge (`:`) = contains.
-    let color = |op, mask| FuzzSpec::Leaf(FuzzLeaf::Color { op, mask });
-    let typ   = |op, mask| FuzzSpec::Leaf(FuzzLeaf::Type { op, mask });
-    let cmc   = |op, val| FuzzSpec::Leaf(FuzzLeaf::Cmc { op, val });
-    let power = |op, val| FuzzSpec::Leaf(FuzzLeaf::Power { op, val });
-    let price = |op, val| FuzzSpec::Leaf(FuzzLeaf::Price { op, val });
-    let year   = |op, y: i32| FuzzSpec::Leaf(FuzzLeaf::Year { op, year: y });
-    let otext  = |needle: &str| FuzzSpec::Leaf(FuzzLeaf::TextContains { field: TextSearchField::OracleTextLower, needle: needle.to_string() });
-    let ntext  = |needle: &str| FuzzSpec::Leaf(FuzzLeaf::TextContains { field: TextSearchField::NameLower, needle: needle.to_string() });
-    let rarity = |op, val| FuzzSpec::Leaf(FuzzLeaf::Rarity { op, val });
-    let kw     = |value: &str| FuzzSpec::Leaf(FuzzLeaf::Collection { field: CollField::Keywords, op: CmpOp::Ge, value: value.to_string() });
-
-    // A spread from near-whole-corpus down to narrow, covering each plan's
-    // applicability (pure-plane → True residual for P2; bare range for P1;
-    // residual predicate for P3/P4) AND a range of residual verify tiers
-    // (plane/numeric cheap → tag SET_LOOKUP → oracle/name TEXT_SCAN), plus a
-    // sparse postings-narrow (o:annihilator, kw:flying) and an OR union.
-    let queries: Vec<(&str, FuzzSpec)> = vec![
-        ("cmc>=0 (all)",       cmc(CmpOp::Ge, 0.0)),
-        ("t:creature",         typ(CmpOp::Ge, TYPE_CREATURE)),
-        ("color(bit3)",        color(CmpOp::Ge, 1 << 3)),
-        ("color3 t:creature",  FuzzSpec::And(vec![color(CmpOp::Ge, 1 << 3), typ(CmpOp::Ge, TYPE_CREATURE)])),
-        ("t:creature power>3", FuzzSpec::And(vec![typ(CmpOp::Ge, TYPE_CREATURE), power(CmpOp::Gt, 3.0)])),
-        ("cmc<=2",             cmc(CmpOp::Le, 2.0)),
-        ("cmc==7",             cmc(CmpOp::Eq, 7.0)),
-        ("usd<5",              price(CmpOp::Lt, 5.0)),
-        ("year>=2020",         year(CmpOp::Ge, 2020)),
-        ("r:mythic(=3)",       rarity(CmpOp::Eq, 3.0)),
-        ("o:flying",           otext("flying")),
-        ("o:sacrifice",        otext("sacrifice")),
-        ("o:annihilator",      otext("annihilator")),
-        ("name:dragon",        ntext("dragon")),
-        ("kw:Flying",          kw("Flying")),
-        ("c:g or c:r",         FuzzSpec::Or(vec![color(CmpOp::Ge, 1 << 3), color(CmpOp::Ge, 1 << 2)])),
-        // Compounds: plane narrows → expensive residual verify on the CANDIDATE
-        // set (not full N); mixed card/printing-space AND; nested And/Or; a Not.
-        ("t:creature o:flying", FuzzSpec::And(vec![typ(CmpOp::Ge, TYPE_CREATURE), otext("flying")])),
-        ("t:creature usd<5",   FuzzSpec::And(vec![typ(CmpOp::Ge, TYPE_CREATURE), price(CmpOp::Lt, 5.0)])),
-        ("cmc<=3 o:draw",      FuzzSpec::And(vec![cmc(CmpOp::Le, 3.0), otext("draw")])),
-        ("t:cr (c:g or c:r)",  FuzzSpec::And(vec![typ(CmpOp::Ge, TYPE_CREATURE), FuzzSpec::Or(vec![color(CmpOp::Ge, 1 << 3), color(CmpOp::Ge, 1 << 2)])])),
-        ("-t:creature",        FuzzSpec::Not(Box::new(typ(CmpOp::Ge, TYPE_CREATURE)))),
-        ("cmc>=15 (narrow)",   cmc(CmpOp::Ge, 15.0)),
-    ];
+    let queries = calibration_queries();
     let modes = ["card", "printing"];
     // (label, limit, offset): shallow first page vs a deep page (broad queries only reach it).
     let pages = [("shallow", 60usize, 0usize), ("deep", 60usize, 10_000usize)];
@@ -2965,42 +2972,7 @@ fn plan_cost_model_matches_gold() {
     let n_printings = archived.printings.len() as u32;
     eprintln!("real.store: {n_cards} cards, {n_printings} printings\n");
 
-    let color = |op, mask| FuzzSpec::Leaf(FuzzLeaf::Color { op, mask });
-    let typ   = |op, mask| FuzzSpec::Leaf(FuzzLeaf::Type { op, mask });
-    let cmc   = |op, val| FuzzSpec::Leaf(FuzzLeaf::Cmc { op, val });
-    let power = |op, val| FuzzSpec::Leaf(FuzzLeaf::Power { op, val });
-    let price = |op, val| FuzzSpec::Leaf(FuzzLeaf::Price { op, val });
-    let year   = |op, y: i32| FuzzSpec::Leaf(FuzzLeaf::Year { op, year: y });
-    let otext  = |needle: &str| FuzzSpec::Leaf(FuzzLeaf::TextContains { field: TextSearchField::OracleTextLower, needle: needle.to_string() });
-    let ntext  = |needle: &str| FuzzSpec::Leaf(FuzzLeaf::TextContains { field: TextSearchField::NameLower, needle: needle.to_string() });
-    let rarity = |op, val| FuzzSpec::Leaf(FuzzLeaf::Rarity { op, val });
-    let kw     = |value: &str| FuzzSpec::Leaf(FuzzLeaf::Collection { field: CollField::Keywords, op: CmpOp::Ge, value: value.to_string() });
-
-    // Same spread as plan_cost_calibration.
-    let queries: Vec<(&str, FuzzSpec)> = vec![
-        ("cmc>=0 (all)",       cmc(CmpOp::Ge, 0.0)),
-        ("t:creature",         typ(CmpOp::Ge, TYPE_CREATURE)),
-        ("color(bit3)",        color(CmpOp::Ge, 1 << 3)),
-        ("color3 t:creature",  FuzzSpec::And(vec![color(CmpOp::Ge, 1 << 3), typ(CmpOp::Ge, TYPE_CREATURE)])),
-        ("t:creature power>3", FuzzSpec::And(vec![typ(CmpOp::Ge, TYPE_CREATURE), power(CmpOp::Gt, 3.0)])),
-        ("cmc<=2",             cmc(CmpOp::Le, 2.0)),
-        ("cmc==7",             cmc(CmpOp::Eq, 7.0)),
-        ("usd<5",              price(CmpOp::Lt, 5.0)),
-        ("year>=2020",         year(CmpOp::Ge, 2020)),
-        ("r:mythic(=3)",       rarity(CmpOp::Eq, 3.0)),
-        ("o:flying",           otext("flying")),
-        ("o:sacrifice",        otext("sacrifice")),
-        ("o:annihilator",      otext("annihilator")),
-        ("name:dragon",        ntext("dragon")),
-        ("kw:Flying",          kw("Flying")),
-        ("c:g or c:r",         FuzzSpec::Or(vec![color(CmpOp::Ge, 1 << 3), color(CmpOp::Ge, 1 << 2)])),
-        ("t:creature o:flying", FuzzSpec::And(vec![typ(CmpOp::Ge, TYPE_CREATURE), otext("flying")])),
-        ("t:creature usd<5",   FuzzSpec::And(vec![typ(CmpOp::Ge, TYPE_CREATURE), price(CmpOp::Lt, 5.0)])),
-        ("cmc<=3 o:draw",      FuzzSpec::And(vec![cmc(CmpOp::Le, 3.0), otext("draw")])),
-        ("t:cr (c:g or c:r)",  FuzzSpec::And(vec![typ(CmpOp::Ge, TYPE_CREATURE), FuzzSpec::Or(vec![color(CmpOp::Ge, 1 << 3), color(CmpOp::Ge, 1 << 2)])])),
-        ("-t:creature",        FuzzSpec::Not(Box::new(typ(CmpOp::Ge, TYPE_CREATURE)))),
-        ("cmc>=15 (narrow)",   cmc(CmpOp::Ge, 15.0)),
-    ];
+    let queries = calibration_queries();
     let modes = ["card", "printing"];
     let pages = [("shallow", 60usize, 0usize), ("deep", 60usize, 10_000usize)];
     let all_plans = [
@@ -3106,6 +3078,180 @@ fn plan_cost_model_matches_gold() {
         "\nagreement: {n_match} gold-match, {n_tie} near-tie(pass), {n_miss} real-miss  of {n_total}  ({:.1}% pass)",
         100.0 * (n_match + n_tie) as f64 / n_total as f64,
     );
+}
+
+/// #702 step 4 (estimate-regret report): the payoff of the whole plan-selection
+/// sequence. Steps 1+3 give us a calibrated cost model and an estimator; this
+/// asks the load-bearing question directly — *if the router picked plans by
+/// `argmin cost(·|est)` using the ESTIMATOR's cardinality instead of the true
+/// count, how much latency would its mistakes cost?* — measured against the
+/// empirical gold (the plan actually fastest).
+///
+/// Per query × page (card mode): measure every applicable plan (min-of-N, same
+/// discipline as `plan_cost_model_matches_gold`), take `gold` = the fastest.
+/// Then build the router's *consistent belief*: the plan STRUCTURE it knows
+/// exactly (`prepare_candidates`'s `all_match_known`, hence the residual verify
+/// tier), but the CARDINALITY only from `estimate_cardinality(...).est`. Feed
+/// that into the calibrated `plan_cost`, take `est_pick` = its argmin over the
+/// applicable plans, and report
+///
+///     regret = measured_ns[est_pick] / measured_ns[gold]   (1.0× when est_pick == gold)
+///
+/// so a wrong estimate is scored only by the latency it actually costs — the
+/// #702 "estimate regret" figure of merit. Near-1.0× everywhere → the estimator
+/// is good enough to route on as-is; a fat tail → tighten the leaf/plan driving
+/// it (§Cost model, §Estimate regret).
+///
+/// **Card mode only.** The estimator is card-space (`estimate_cardinality`
+/// returns a card-space `Cardinality`), so P1/printing-mode regret would need a
+/// printing-space estimate that doesn't exist yet — out of scope here.
+///
+///     cargo test --release plan_regret_report -- --ignored --nocapture
+///
+/// Same corpus/timing discipline as the other two benches; needs real.store.
+#[test]
+#[ignore = "estimate-regret report; needs real.store; cargo test --release plan_regret_report -- --ignored --nocapture"]
+fn plan_regret_report() {
+    use std::hint::black_box;
+    use std::time::Instant;
+    use super::cost::{PlanFeatures, plan_cost};
+    const STORE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../benchmarks/verify-order/real.store");
+    const WARMUP: usize = 5;
+    const ITERS: usize = 60;
+    // A pick measuring above this factor of gold is "real" regret; (1.0, MINOR]
+    // is minor (the estimate cost the router a slightly slower but comparable plan).
+    const MINOR: f64 = 1.30;
+
+    let Ok(file) = std::fs::File::open(STORE_PATH) else {
+        eprintln!("SKIP: {STORE_PATH} not found (see bench_verify_cost.rs docs to build it)");
+        return;
+    };
+    let mmap = unsafe { Mmap::map(&file) }.expect("mmap real.store");
+    if mmap.len() < ARCHIVE_HEADER_LEN || mmap[..ARCHIVE_HEADER_LEN] != archive_header() {
+        eprintln!("SKIP: {STORE_PATH} header mismatch (stale — rebuild, see bench_verify_cost.rs)");
+        return;
+    }
+    let archived = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
+    let n_cards = archived.cards.len() as u32;
+    let n_printings = archived.printings.len() as u32;
+    eprintln!("real.store: {n_cards} cards, {n_printings} printings (card mode only)\n");
+
+    let queries = calibration_queries();
+    // Card mode only (estimator is card-space); shallow first page vs a deep page.
+    let pages = [("shallow", 60usize, 0usize), ("deep", 60usize, 10_000usize)];
+    let all_plans = [
+        PhysicalPlan::PrintingRangeScan,
+        PhysicalPlan::PlanePopcountOrder,
+        PhysicalPlan::StreamedSelect,
+        PhysicalPlan::GatheredScan,
+    ];
+    let labels = ["P1-range", "P2-popcnt", "P3-stream", "P4-gather"];
+
+    println!(
+        "{:<20} {:>7} {:>8} {:>8} {:>10} {:>10} {:>10} {:>10} {:>8}",
+        "query", "page", "true_tot", "est", "gold", "est_pick", "gold_ns", "est_ns", "regret",
+    );
+
+    let (mut n_none, mut n_minor, mut n_real) = (0usize, 0usize, 0usize);
+    let mut log_sum = 0.0f64; // Σ ln(regret) for the geomean
+    let mut n_configs = 0usize;
+    let mut offenders: Vec<(f64, String)> = Vec::new(); // (regret, "query [page]")
+
+    for (qlabel, spec) in &queries {
+        // Estimator's card-space point estimate (full unsplit filter, as validated).
+        let est = super::estimator::estimate_cardinality(
+            &fuzz_bound_filter(spec, archived), &archived.indexes, &archived.offsets,
+        ).est;
+        for &(plabel, limit, offset) in &pages {
+            // ── Measure each applicable plan (min-of-N), like the other benches ──
+            let mut ns = [None::<u64>; 4];
+            let mut total = 0usize;
+            for (pi, plan) in all_plans.iter().enumerate() {
+                let mut best = u64::MAX;
+                let mut applicable = false;
+                for it in 0..(WARMUP + ITERS) {
+                    // Fresh bind+split per iteration OUTSIDE the timer (memoize mutates res).
+                    let (pe, mut res) = split_planes(
+                        fuzz_bound_filter(spec, archived), &archived.indexes.planes,
+                        &archived.indexes.oracle_trigram.words, true, // unique_is_card
+                    );
+                    let t0 = Instant::now();
+                    let out = black_box(run_query_with_plan(
+                        *plan, &archived.cards, &archived.printings, &archived.offsets, &archived.strings,
+                        &mut res, pe.as_ref(), "card", "default", "edhrec", "asc", limit, offset, &archived.indexes,
+                    ));
+                    let dt = t0.elapsed().as_nanos() as u64;
+                    match out {
+                        Some((t, _)) => {
+                            total = t;
+                            applicable = true;
+                            if it >= WARMUP { best = best.min(dt); }
+                        }
+                        None => break,
+                    }
+                }
+                if applicable { ns[pi] = Some(best); }
+            }
+
+            // ── Actual plan STRUCTURE (the router knows this exactly; only
+            //    cardinality is estimated): all_match_known → residual tier. ──
+            let (pe, mut res) = split_planes(
+                fuzz_bound_filter(spec, archived), &archived.indexes.planes,
+                &archived.indexes.oracle_trigram.words, true,
+            );
+            let prep = prepare_candidates(
+                &archived.cards, &archived.offsets, &archived.strings, &mut res, pe.as_ref(), Mode::Card, &archived.indexes,
+            );
+            let tier = if prep.all_match_known { 0 } else { verify_cost_tier(&res) };
+
+            // ── Router's belief: cardinality from `est`, structure `tier` actual. ──
+            let feats_est = PlanFeatures {
+                n_cards, n_printings,
+                matches: est,
+                eval_domain: est.min(n_cards),
+                residual_tier_ns100: tier,
+                limit: limit as u32,
+                offset: offset as u32,
+            };
+
+            let gold = (0..4).filter_map(|i| ns[i].map(|v| (v, i))).min_by_key(|(v, _)| *v);
+            let est_pick = (0..4)
+                .filter(|&i| ns[i].is_some())
+                .map(|i| (plan_cost(all_plans[i], &feats_est), i))
+                .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+            let (Some((gold_ns, gi)), Some((_, ei))) = (gold, est_pick) else { continue };
+            let est_ns = ns[ei].unwrap();
+            let regret = est_ns as f64 / gold_ns as f64;
+
+            n_configs += 1;
+            log_sum += regret.ln();
+            if ei == gi {
+                n_none += 1;
+            } else if regret <= MINOR {
+                n_minor += 1;
+            } else {
+                n_real += 1;
+            }
+            offenders.push((regret, format!("{qlabel} [{plabel}]")));
+
+            println!(
+                "{:<20} {:>7} {:>8} {:>8} {:>10} {:>10} {:>10} {:>10} {:>7.2}x",
+                qlabel, plabel, total, est, labels[gi], labels[ei], gold_ns, est_ns, regret,
+            );
+        }
+    }
+
+    let geomean = if n_configs > 0 { (log_sum / n_configs as f64).exp() } else { 1.0 };
+    println!(
+        "\nregret summary ({n_configs} configs): {n_none} no-regret(est_pick==gold), \
+         {n_minor} minor(1.0,{MINOR}x], {n_real} real(>{MINOR}x)  |  geomean {geomean:.3}x",
+    );
+    offenders.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+    println!("worst offenders:");
+    for (regret, name) in offenders.iter().take(5) {
+        println!("  {regret:>7.2}x  {name}");
+    }
 }
 
 /// format:A AND format:B (two distinct formats) can't be answered by ANDing
