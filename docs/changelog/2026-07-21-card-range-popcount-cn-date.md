@@ -10,12 +10,12 @@ correctness surface — cn/date are printing-varying integer ranges exactly like
 Measured on the 97,206-printing corpus (`limit=100`, min of an 8 s window, same build, kill-switch
 off vs on):
 
-| query | before | after | speedup |
+| query | before (μs) | after (μs) | speedup |
 |---|---:|---:|---:|
-| `cn<100` / card | 0.589 ms | 0.088 ms | 6.66× |
-| `cn<100` / card, offset 700 | 0.595 ms | 0.092 ms | 6.47× |
-| `year>=2015` / card | 0.416 ms | 0.124 ms | 3.36× |
-| `year<2005` / card | 0.280 ms | 0.064 ms | 4.40× |
+| `cn<100` / card | 589 | 88 | 6.66× |
+| `cn<100` / card, offset 700 | 595 | 92 | 6.47× |
+| `year>=2015` / card | 416 | 124 | 3.36× |
+| `year<2005` / card | 280 | 64 | 4.40× |
 
 Offset-flat, same as usd. Totals byte-identical off vs on; the usd rows and every control are
 unchanged; calibration stays 88/88 gold.
