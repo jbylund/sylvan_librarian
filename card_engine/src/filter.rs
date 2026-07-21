@@ -5,7 +5,7 @@ use super::legality::{LEGALITY_LEGAL, LEGALITY_BANNED, LEGALITY_RESTRICTED, form
 
 // ─── Comparison / arithmetic operators ───────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum CmpOp {
     Eq,
     Ne,
