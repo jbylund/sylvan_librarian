@@ -86,7 +86,6 @@ Confidence: ✓ = definition doc-confirmed / measured; ~ = approximate, **valida
 | `is:outlaw` | `(t:assassin or t:mercenary or t:pirate or t:rogue or t:warlock or kw:changeling)` — **no** `t:creature` (unlike party: includes Kindred non-creatures) | ✓ **exact** (1334) |
 | `is:dfc` | `layout:transform or layout:modal_dfc` (double-faced union; verify) | ~ |
 | `is:bear` | `t:creature pow=2 tou=2 cmc=2` — the intuitive "2/2 for 2"; deliberately *not* Scryfall-exact (+~14 DFC creatures, −4 Vehicles/Spacecraft; their exact count isn't cross-verifiable) | ~ |
-| `is:hybrid` / `is:phyrexian` | mana-cost symbol test (`mana_cost_jsonb`) | ~ |
 | `is:colorshifted` | `frame:colorshifted` (frame-effect in `card_frame_data`) | ~ |
 | `is:vanilla` | our engine: `t:creature o=""` (empty-string equality — clean; the `o:/^$/` empty-match regex is a Scryfall-only trap that matches *all* creatures); −11 subset vs 359 = Adventure/DFC textless faces + Dryad Arbor | ~ |
 | `has:watermark` | `card_watermark` present | ✓ |
@@ -102,6 +101,7 @@ Not cleanly rewritable (text-pattern / fuzzy — defer or approximate): `is:fren
 | `prints`/`sets`/`papersets` comparisons | count per `oracle_id` at build | ✓ |
 | `is:commander` | legendary creature ∨ "can be your commander" text | ~ |
 | `is:newinpauper` | first pauper-rarity printing per card | ~ |
+| `is:hybrid` / `is:phyrexian` | ingest flag: any hybrid / Phyrexian symbol in the raw mana cost. *Not* a rewrite — the DSL only does exact-symbol containment (`m:{g/w}`), so a rewrite would be a brittle ~15-term OR over an open, growing symbol set; trivial to set at ingest instead | ✓ |
 
 `is:reprint` is the priority here — common (pairs with `f:modern` workflows), currently silently
 empty, and cleanly derivable.
@@ -144,9 +144,9 @@ none touching the #702 engine-routing branch:
    seam (applies to both parsers; parity-tested; rebuilds only when a synonym actually fires), with
    `frame:modern/old/new`, `is:old`/`is:new`, `is:historic`/`is:permanent`/`is:party`/`is:outlaw`/
    `is:vanilla`/`is:bear`, and the layout family (`is:split/flip/transform/mdfc/meld/leveler`), plus
-   `test_rewrite.py`. Remaining A: the quick-validate candidates (`is:colorshifted`, `is:dfc`,
-   `is:hybrid`, `is:phyrexian`) and the deferred/fuzzy ones (`is:spell`, `is:modal`,
-   `is:frenchvanilla`, `is:default`/`is:atypical`, `is:manland`).
+   `test_rewrite.py`. Remaining A: the quick-validate candidates (`is:colorshifted`, `is:dfc`) and
+   the deferred/fuzzy ones (`is:spell`, `is:modal`, `is:frenchvanilla`, `is:default`/`is:atypical`,
+   `is:manland`). `is:hybrid`/`is:phyrexian` moved to B (ingest flag — no clean rewrite).
 2. **`is:reprint` build-time bit** (B) — one derivation, common predicate, currently broken.
 3. **Ingest the dropped boolean fields** (C) — recovers promo/reserved/digital/foil/etc. as normal
    lookups.
