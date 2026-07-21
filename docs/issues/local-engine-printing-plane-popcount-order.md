@@ -20,15 +20,26 @@ The match bitmap has a few sources, and they share this one paging plan:
 - a **precomputed existential printing bitplane** for a printing-varying value (legality, frame,
   border) — e.g. a bit-per-printing "modern-legal" plane;
 - **a postings list scattered into a bitmap on demand** — O(matches) to build, for any value that
-  has printing-space postings.
+  has printing-space postings;
+- **a card-space bitplane broadcast into printing space on demand** — a card-invariant predicate
+  (`c:green`, `t:creature`, `cmc`) is naturally a *card* plane; give each printing its card's bit via
+  `printing_to_card`, O(n_printings). This is the **cheap, exact** direction — unlike the
+  `printing→card` projection (§ caveats), `card→printing` broadcast needs no distinct-count, because
+  the predicate does not vary by printing.
 
 Once a bitmap exists the total is a `popcount` — **O(words) (~1,500 words here ≈ microseconds),
 independent of match density** — and the page is read off the sort order. So density gates which
 *representation you store* (postings for sparse, a plane for broad/mid, complement for saturated),
 **not the cost of the count**. This is the key reason even a *broad* predicate is fine, and why a
-broad **compound** is the real win: build each leaf's bitmap (from a range, postings, or a plane),
-`AND` them in O(words), and `popcount` the result — far cheaper than intersecting two broad postings
-lists (`f:modern` ∩ `usd<50` = a 76k list against an 80k list). It's also why a broad
+broad **compound** is the real win: build each leaf's bitmap (from a range, postings, a plane, or a
+broadcast card-plane), `AND` them in O(words), and `popcount` the result.
+
+The card→printing broadcast is what makes a **mixed compound** — a card-invariant leaf AND a
+printing-varying one — computable entirely in printing space: `f:modern c:green` becomes
+"`c:green` card-plane broadcast to printings, AND `f:modern` printing-plane, `popcount`, page,"
+versus today's per-printing legality scan over the green-narrowed set. Same for `border:black
+t:creature`, `c:g usd<50`, etc. It also beats intersecting two broad postings lists (`f:modern` ∩
+`usd<50` = a 76k list against an 80k list). It's also why a broad
 printing-varying value like `f:modern` is a target here, not the non-target the range-only framing
 would suggest (see below).
 
@@ -67,6 +78,7 @@ exactly what an `argmin` over two cost curves expresses and a fixed threshold ca
 | query shape | mode | today | with this plan |
 |---|---|---|---|
 | `cn<100 usd<50` (range + range, both broad) | printing / artwork | **~1.07 ms** (full scan, two residuals — the uncovered gap) | ~2×, offset-independent |
+| mixed compound: card-invariant × printing-varying (`f:modern c:green`, `c:g usd<50`) | printing / artwork | per-printing scan over the card-narrowed set | broadcast the card-plane in, `AND` the printing bitmap, `popcount`, page |
 | bare broad range at deep offset (`usd<50` @ offset 5000) | printing | flat already | marginal (value #1) |
 | broad existential printing values — `f:modern` (**76% of printings legal**), `border:black` | printing / artwork | full scan + per-printing existence check; the #667 *card-space* legality plane makes `f:modern`/**card** fast, but printing mode has no such plane | a precomputed existential **printing** bitplane → `popcount` total + O(words) page |
 
