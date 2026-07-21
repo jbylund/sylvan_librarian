@@ -87,6 +87,7 @@ is slow **iff it is broad printing-varying with no narrowing leaf**.
 | `f:modern r:rare` | 2 | no | 0.38 ms | modest |
 | `f:modern` (bare, 76%) | 1 | no | 0.20 ms | modest |
 | `f:modern c:green` | 1 | **yes** (`c:green`) | 0.082 ms | modest (all-plane) |
+| `f:modern border:black c:green` | 2 | **yes** (`c:green`) | 0.224 ms | modest (all-plane, ~5–7× → ~0.04 ms) |
 | `f:modern c:green r:rare` | 2 | **yes** (`c:green`) | 0.116 ms | modest (all-plane) |
 
 **Narrowing sets the priority, but is not a hard non-target.** Whenever a card-invariant leaf narrows
@@ -95,7 +96,10 @@ verify runs over a tiny candidate set. Those queries are lower-priority. But the
 *improvable* by the same all-plane path: plane-AND + `popcount` is O(words) regardless of the
 candidate-set size, so it beats the per-printing verify (O(candidates)) even after narrowing — you
 broadcast the card leaf into printing space (cheap), `AND` the printing planes, `popcount`, page.
-That would take the 0.224 ms `f:modern border:black c:green` well under 0.1 ms.
+The cost that grows in a narrowed compound is the *multi*-printing-varying verify: `f:modern c:green`
+(one printing-varying leaf) is 0.082 ms, and adding a second (`border:black`) triples it to 0.224 ms,
+because the per-candidate verify now checks two conditions each; the plane AND collapses that to
+O(words), taking `f:modern border:black c:green` to ~0.04 ms (~5–7×).
 
 So the target set is: **big wins** on broad printing-varying with *no* narrowing leaf
 (`cn<100 usd<50` 1.18 ms, `border:black` 0.99 ms, `f:modern border:black` 0.83 ms — a minority of
