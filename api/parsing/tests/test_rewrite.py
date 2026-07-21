@@ -23,6 +23,7 @@ EQUIVALENCES = [
     ("is:party", "t:creature (t:cleric or t:rogue or t:warrior or t:wizard or kw:changeling)"),
     ("is:outlaw", "t:assassin or t:mercenary or t:pirate or t:rogue or t:warlock or kw:changeling"),
     ("is:vanilla", 't:creature o=""'),
+    ("is:bear", "t:creature pow=2 tou=2 cmc=2"),
     # layout family
     ("is:split", "layout:split"),
     ("is:flip", "layout:flip"),

@@ -44,6 +44,11 @@ _DERIVED_EXPANSIONS: dict[tuple[str, str], str] = {
     ("is", "party"): "t:creature (t:cleric or t:rogue or t:warrior or t:wizard or kw:changeling)",  # exact
     ("is", "outlaw"): "t:assassin or t:mercenary or t:pirate or t:rogue or t:warlock or kw:changeling",  # exact
     ("is", "vanilla"): 't:creature o=""',  # empty-oracle equality; -11 subset (Adventure/DFC textless faces + Dryad Arbor)
+    # The intuitive "2/2 for 2" bear. Deliberately NOT exactly Scryfall's is:bear (which is
+    # single-faced and includes Vehicles/Spacecraft): vs Scryfall this is +~14 DFC creatures
+    # and -4 Vehicles/Spacecraft. Scryfall's exact count isn't cross-verifiable anyway (their
+    # DFC/unique face-counting quirk), and this is what people mean by "bear".
+    ("is", "bear"): "t:creature pow=2 tou=2 cmc=2",
     # Layout, exact by direct card_layout field correspondence.
     ("is", "split"): "layout:split",
     ("is", "flip"): "layout:flip",
