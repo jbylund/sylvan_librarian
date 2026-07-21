@@ -1,0 +1,36 @@
+# Card-mode fast path for bare `usd` range queries (#725)
+
+A bare price range under `unique=card` (e.g. `usd<50`, the default unique mode) is now answered by a
+new `CardRangePopcount` plan instead of a full scan with a per-card count pass. The range's exact
+printing slice is projected to a card-existence bitmap whose **popcount is the exact total** (no count
+pass), and the page is read off the existing sort permutation — the same popcount-skip order phase the
+plane plan (#634) already uses, fed a range-derived bitmap rather than a precomputed plane.
+
+Measured on the 97,206-printing corpus (`limit=100`, min of an 8 s window, same build, kill-switch
+off vs on):
+
+| query | before | after | speedup |
+|---|---:|---:|---:|
+| `usd<50` / card | 0.339 ms | 0.214 ms | 1.58× |
+| `usd<50` / card, offset 700 | 0.348 ms | 0.218 ms | 1.60× |
+| `usd<2` / card | 0.463 ms | 0.185 ms | 2.51× |
+
+Offset-flat, because the cost was always the count pass, not the paging. Totals are byte-identical
+off vs on across the targeted set (the parity guard), and the broad 520-query survey and the 88-query
+cost calibration are unchanged.
+
+## Scope
+
+The plan fires only for a **bare** `usd` range in card mode — deliberately narrow:
+
+- **Compounds with a card-invariant plane** (`usd<50 c:g`, `usd<50 t:creature`) stay on the existing
+  narrowed-verify path: the plane already narrows the query hard, so that path is faster than paying to
+  build the whole range bitmap.
+- **Existential-legality compounds** (`usd<50 f:modern`) are excluded on correctness grounds — a
+  card-existence AND is exact only when legality never diverges across a card's printings, which the
+  engine refuses to assume (#667). Those belong in printing space.
+- **Range+range** (`usd<50 cn<100`) is excluded — it is a shared-witness case (one printing must satisfy
+  both), which a card-space existence AND cannot express.
+
+`cn` / `date` share the machinery and are a follow-on (PR 3). Gated by `CARD_ENGINE_RANGE_BITS_CARD`
+(default on) as an A/B kill-switch. Design notes: `docs/issues/local-engine-sorted-range-fastpath.md`.
