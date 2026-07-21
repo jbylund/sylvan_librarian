@@ -180,12 +180,25 @@ printing-space subset, in dependency order:
    bitmap to `AND` (ranges via PR 2a/3; existential values via their planes, below). A **printing-level**
    orderby (usd, rarity — printing-varying) additionally needs a printing-space sort order — *that* is
    the one archive-bump piece, and it is arguably beyond #656 as currently scoped.
-5. **The `PrintingPlanePopcountOrder` plan itself.** Build + AND + `popcount` the range bitmap(s) in
-   printing space, page off the #656 permutation. Register as a new `PhysicalPlan` with its
-   `applicable` / `materializing` / `cost::plan_cost` / executor arms — the #702 router makes this a
-   *declaration*, not a tree edit.
+5. **The `PrintingPlanePopcountOrder` plan itself — validated on the range leaf source.** Build + AND
+   + `popcount` the range bitmap(s) in printing space, page off the #656 permutation. Register as a
+   new `PhysicalPlan` with its `applicable` / `materializing` / `cost::plan_cost` / executor arms —
+   the #702 router makes this a *declaration*, not a tree edit. Prove the whole plan on **ranges
+   only** (`cn<100 usd<50`/printing, the confirmed 1.18 ms target, **zero** existential planes): a
+   range leaf yields a printing bitmap with no new precomputed structure (the `partition_point` slice
+   scattered, PR 2a's `printing_bits`) and is **exact**, so the AND / `popcount` / bit-walk / router
+   machinery is validated against the #702 brute-force reference on a clean source before any
+   existential plane exists.
 6. **Cost-route idea 1 vs this.** The `argmin` already exists; add this plan's cost formula and let
    the offset×selectivity crossover (validated today by `idea1_vs_idea2_probe`) pick between them.
+7. **Printing-space existential planes — separate track ([#724](https://github.com/jbylund/sylvan_librarian/issues/724)).**
+   The legality/border **leaf source** that unlocks the existential targets (`f:modern`,
+   `border:black`). Sequenced **last, deliberately**: these planes give *no* speedup until steps 1–6
+   exist to consume them via `popcount` + AND + bit-walk (the current verify path doesn't `popcount`,
+   so a plane with no consumer is just a bigger archive). They carry their own correctness surface
+   (the existential projection — a card satisfying both `∃ legal` and `∃ not-legal`) validated in
+   isolation on the build side, and their own archive-format bump. Once landed they plug straight into
+   this plan as another leaf bitmap — the machinery from step 5 is unchanged.
 
 ## #656 assembly
 
@@ -206,13 +219,15 @@ range+range gap proves worth closing.
 
 ## Prerequisites & caveats
 
-- **Existential targets need precomputed *printing-space* existential planes.** The `f:modern` /
-  `border:black` wins all assume a bit-per-printing legality / border plane to `AND` and `popcount`.
-  Neither exists: legality's #667 plane and border's #664 plane are **card-space** (they answer "some
-  printing legal," not which). Building the printing-space versions is a separate track from the
-  range idea-2 parts above — a build-time computation + storage + archive bump — and its own per-value
-  density call (`f:modern` broad → plane; a sparse legality value → postings). The range parts (1–6)
-  do not deliver the existential wins; that is a parallel piece.
+- **Existential targets need precomputed *printing-space* existential planes** — now tracked as
+  [#724](https://github.com/jbylund/sylvan_librarian/issues/724) (see ship-order step 7). The
+  `f:modern` / `border:black` wins all assume a bit-per-printing legality / border plane to `AND` and
+  `popcount`. Neither exists: legality's #667 plane and border's #664 plane are **card-space** (they
+  answer "some printing legal," not which). Building the printing-space versions is a separate track
+  from the range idea-2 parts above — a build-time computation + storage + archive bump — and its own
+  per-value density call (`f:modern` broad → plane; a sparse legality value → postings). The range
+  parts (1–6) do not deliver the existential wins; that is a parallel piece, sequenced last because it
+  is inert without this plan as its consumer.
 - **#656 is a partial blocker** (the popcount-order extension; see part 4). Printing-level-orderby
   paging is the one archive-format bump.
 - **NULL over-inclusion — the #689 lesson.** A range bitmap's `popcount` **over-counts** the moment
@@ -247,5 +262,8 @@ range+range gap proves worth closing.
   [00664 border planes](done/00664-engine-border-planes.md) — the existential-plane framework the
   *precomputed* bitmap source extends; #667's planes are **card-space**, which is why
   `f:modern`/printing still needs a printing-space one.
+- [00724-engine-printing-existential-planes.md](00724-engine-printing-existential-planes.md)
+  ([#724](https://github.com/jbylund/sylvan_librarian/issues/724)) — the printing-space existential
+  planes track: this plan's legality/border leaf source, sequenced last.
 - #656 (pager/permutation), #690 (`printing_to_card`, shipped), #689 (reverted attempt / NULL
   lesson), #634 (card-mode `PlanePopcountOrder`).
