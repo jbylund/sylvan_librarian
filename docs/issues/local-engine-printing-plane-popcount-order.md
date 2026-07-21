@@ -14,6 +14,16 @@ in **card** mode ([#634](done/00634-engine-permuted-bitmap-order-phase.md)). For
 predicate under `unique=printing`/`artwork`, build a printing-existence bitmap, take its `popcount`
 as the **exact total**, then read the page directly off the bitmap in printing sort order.
 
+The match bitmap has two sources, and they share this one paging plan:
+
+- a **query-time range narrowing** (`usd`/`cn`/`date`) — the original idea 2, this doc's main focus;
+- a **precomputed existential printing bitplane** for a printing-varying value (legality, frame,
+  border) — e.g. a bit-per-printing "modern-legal" plane.
+
+Only the source differs; the `popcount` total and the sort-order page-off are identical. The
+existential source is why a broad printing-varying value like `f:modern` is a target here, not the
+non-target the range-only framing would suggest (see below).
+
 Contrast with the two plans that ship today for these queries:
 
 - `PrintingRangeScan` (idea 1, shipped [#695](https://github.com/jbylund/sylvan_librarian/pull/695)):
@@ -50,11 +60,20 @@ exactly what an `argmin` over two cost curves expresses and a fixed threshold ca
 |---|---|---|---|
 | `cn<100 usd<50` (range + range, both broad) | printing / artwork | **~1.07 ms** (full scan, two residuals — the uncovered gap) | ~2×, offset-independent |
 | bare broad range at deep offset (`usd<50` @ offset 5000) | printing | flat already | marginal (value #1) |
-| broad existential (`border:black`) | printing | ~3× the card total | ~3× via the existential-total path (PR 5) |
+| broad existential printing values — `f:modern` (**76% of printings legal**), `border:black` | printing / artwork | full scan + per-printing existence check; the #667 *card-space* legality plane makes `f:modern`/**card** fast, but printing mode has no such plane | a precomputed existential **printing** bitplane → `popcount` total + O(words) page |
 
-Explicit non-targets: **selective** values (`r:rare`, `f:modern`) already narrow and are fast
-(0.18–0.36 ms) — they don't need this. Card-mode compounds are covered by the already-planned
-card-space idea-2 (PR 2a/3), not this.
+`f:modern` is broad (76% legal), so it does *not* narrow — the earlier "selective, already fast"
+framing was measuring card mode, where the #667 card-space plane does the work. Printing mode pays
+a per-printing existence check over that broad set, which a printing-space legality bitplane
+collapses to a `popcount`.
+
+Explicit non-targets: genuinely **sparse** values (`r:rare`, `is:promo`) narrow cheaply to postings —
+no plane earns its keep. **Card mode** broadly is served elsewhere (the #667 card-space legality
+planes; card-space idea 2 for ranges, PR 2a/3). Which representation a printing-varying value gets —
+plane vs positive-postings vs complement-postings — is a per-value density call (mid-band/broad →
+plane, sparse → postings, saturated → complement-count); the printing-mode existential-total
+mechanism is sketched under
+[sorted-range-fastpath § Existential fields](local-engine-sorted-range-fastpath.md#existential-fields-a-second-cheap-total-mechanism).
 
 ## Parts, in ship order
 
@@ -120,9 +139,14 @@ range+range gap proves worth closing.
 
 - [done/00702-engine-plan-selection-layer.md](done/00702-engine-plan-selection-layer.md) — the cost
   router; where this was the deferred "one real win."
-- [local-engine-broad-range-fastpath.md](local-engine-broad-range-fastpath.md) — idea-1/idea-2
-  crossover analysis + the "#656 assembly from PR 1 + PR 2a" note.
+- [local-engine-broad-range-fastpath.md](local-engine-broad-range-fastpath.md) — historical
+  idea-1/idea-2 crossover analysis (the range-narrowing bitmap source).
 - [local-engine-sorted-range-fastpath.md](local-engine-sorted-range-fastpath.md) — the full
-  PR-ordered roadmap; idea 1 shipped as #695.
+  PR-ordered roadmap; idea 1 shipped as #695; the printing-mode existential-total mechanism (PR 5).
+- [00680-engine-existential-plane-generalization.md](done/00680-engine-existential-plane-generalization.md),
+  [00667 legality](done/00667-engine-legality-divergent-carveout.md),
+  [00664 border planes](done/00664-engine-border-planes.md) — the existential-plane framework the
+  *precomputed* bitmap source extends; #667's planes are **card-space**, which is why
+  `f:modern`/printing still needs a printing-space one.
 - #656 (pager/permutation), #690 (`printing_to_card`, shipped), #689 (reverted attempt / NULL
   lesson), #634 (card-mode `PlanePopcountOrder`).
