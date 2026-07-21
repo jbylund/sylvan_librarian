@@ -37,6 +37,13 @@ Two distinct values, only one of them strong (see
 2. **A printing-space popcount total** that removes the count pass for **compound range+range
    printing/artwork** — the real target, and the slowest uncovered gap in the store.
 
+The crossover is real and depth-scaled (measured via `idea1_vs_idea2_probe`, edhrec sort): the
+popcount plan wins from offset **~500–2000** at 30% match rate, ~5000 at mid-density, ~10–20k at
+high density, and the ratio reaches **35× at offset 20,000**. Those deep ratios are on
+already-sub-millisecond queries (~50–170µs of absolute savings at realistic depth), which is why
+value #1 alone is weak — but the winner-flips-on-two-variables shape (offset *and* selectivity) is
+exactly what an `argmin` over two cost curves expresses and a fixed threshold cannot.
+
 ## Target queries
 
 | query shape | mode | today | with this plan |
@@ -60,8 +67,8 @@ printing-space subset, in dependency order:
    projection; load-bearing for both ideas.
 2. **`PrintingRangeScan` (idea 1) — shipped**
    ([#695](https://github.com/jbylund/sylvan_librarian/pull/695)). Bare broad printing ranges. Most
-   of #656's pieces fall out of it plus card-mode idea-2 — see the "#656 assembly" note in
-   [broad-range-fastpath](local-engine-broad-range-fastpath.md).
+   of #656's pieces fall out of it plus the card-mode idea-2 core — see [#656 assembly](#656-assembly)
+   below.
 3. **Card-space idea-2 (`PrintingRangeBits`) — planned, not printing-space** (PR 2a/3 in the
    roadmap). Lands the range-bitmap→popcount machinery + the `must_be_tight` correctness fix in
    `unique=card` first, where the bitmap composes. This is the reusable core.
@@ -74,6 +81,23 @@ printing-space subset, in dependency order:
    *declaration*, not a tree edit.
 6. **Cost-route idea 1 vs this.** The `argmin` already exists; add this plan's cost formula and let
    the offset×selectivity crossover (validated today by `idea1_vs_idea2_probe`) pick between them.
+
+## #656 assembly
+
+#656 is not a from-scratch build once idea-1 (#695) and the card-space idea-2 core (PR 2a) land —
+it is mostly assembly:
+
+| #656 needs | built by | notes |
+|---|---|---|
+| range → **printing** existence bitmap | PR 2a/3 | `PrintingRangeBits` already carries `printing_bits` (card-mode row selection tests it via `eval_plane_expr_for_printing`), so it is built regardless. |
+| **popcount total** | PR 2a | PR 2a popcounts *card* bits; the identical step over printing bits is a trivial transfer. |
+| **printing-space paging** | #695 | idea-1's permutation walk (expand to printings, test membership, early-stop) *is* the printing pager — swap the membership test from "in `[lo, hi)`" to "in the intersected printing bitmap." |
+
+So **#656 ≈ PR 2a's printing bitmaps + #695's walk + an AND.** The only net-new work is
+intersecting ≥2 printing bitmaps and routing the popcount total into the printing path; the
+`Mode::Card`-only `run_query_streamed_popcount` is *not* reused (idea-1's walk is the printing-mode
+pager). This is why landing both #695 and PR 2a first reduces #656 to a small follow-up, if the
+range+range gap proves worth closing.
 
 ## Prerequisites & caveats
 
