@@ -75,25 +75,44 @@ exactly what an `argmin` over two cost curves expresses and a fixed threshold ca
 
 ## Target queries
 
-| query shape | mode | today | with this plan |
-|---|---|---|---|
-| `cn<100 usd<50` (range + range, both broad) | printing / artwork | **~1.07 ms** (full scan, two residuals — the uncovered gap) | ~2×, offset-independent |
-| mixed compound: card-invariant × printing-varying (`f:modern c:green`, `c:g usd<50`) | printing / artwork | per-printing scan over the card-narrowed set | broadcast the card-plane in, `AND` the printing bitmap, `popcount`, page |
-| bare broad range at deep offset (`usd<50` @ offset 5000) | printing | flat already | marginal (value #1) |
-| broad existential printing values — `f:modern` (**76% of printings legal**), `border:black` | printing / artwork | full scan + per-printing existence check; the #667 *card-space* legality plane makes `f:modern`/**card** fast, but printing mode has no such plane | a precomputed existential **printing** bitplane → `popcount` total + O(words) page |
+Measured on `main` (corpus.jsonl, `limit=100`, min of a timed window). The rule is clean: a query
+is slow **iff it is broad printing-varying with no narrowing leaf**.
 
-`f:modern` is broad (76% legal), so it does *not* narrow — the earlier "selective, already fast"
-framing was measuring card mode, where the #667 card-space plane does the work. Printing mode pays
-a per-printing existence check over that broad set, which a printing-space legality bitplane
-collapses to a `popcount`.
+| query | printing-varying leaves | narrowing leaf? | min | target? |
+|---|---|---|---|---|
+| `cn<100 usd<50` | 2 (ranges, both broad) | no | **1.18 ms** | **yes** |
+| `border:black` (bare) | 1 (87%, saturated) | no | **0.99 ms** | **yes** |
+| `f:modern border:black` | 2 (both broad) | no | **0.83 ms** | **yes** (shared-witness) |
+| `r:rare` (bare) | 1 (38%) | no | 0.42 ms | modest |
+| `f:modern r:rare` | 2 | no | 0.38 ms | modest |
+| `f:modern` (bare, 76%) | 1 | no | 0.20 ms | modest |
+| `f:modern c:green` | 1 | **yes** (`c:green`) | 0.082 ms | modest (all-plane) |
+| `f:modern c:green r:rare` | 2 | **yes** (`c:green`) | 0.116 ms | modest (all-plane) |
 
-Explicit non-targets: genuinely **sparse** values (`r:rare`, `is:promo`) narrow cheaply to postings —
-no plane earns its keep. **Card mode** broadly is served elsewhere (the #667 card-space legality
-planes; card-space idea 2 for ranges, PR 2a/3). Which representation a printing-varying value gets —
-plane vs positive-postings vs complement-postings — is a per-value density call (mid-band/broad →
-plane, sparse → postings, saturated → complement-count); the printing-mode existential-total
-mechanism is sketched under
-[sorted-range-fastpath § Existential fields](local-engine-sorted-range-fastpath.md#existential-fields-a-second-cheap-total-mechanism).
+**Narrowing sets the priority, but is not a hard non-target.** Whenever a card-invariant leaf narrows
+(`c:green` → ~18k printings), the current path is already fast (0.08–0.12 ms) — the per-printing
+verify runs over a tiny candidate set. Those queries are lower-priority. But they are still
+*improvable* by the same all-plane path: plane-AND + `popcount` is O(words) regardless of the
+candidate-set size, so it beats the per-printing verify (O(candidates)) even after narrowing — you
+broadcast the card leaf into printing space (cheap), `AND` the printing planes, `popcount`, page.
+That would take the 0.224 ms `f:modern border:black c:green` well under 0.1 ms.
+
+So the target set is: **big wins** on broad printing-varying with *no* narrowing leaf
+(`cn<100 usd<50` 1.18 ms, `border:black` 0.99 ms, `f:modern border:black` 0.83 ms — a minority of
+traffic, since real queries usually carry a filter); **modest wins** on the common narrowed
+compounds (already sub-ms, ~2–4× via the all-plane path). The gating cost either way is the same
+(next section).
+
+**Shared witness — a correctness reason, not just speed.** With 2+ printing-varying leaves
+(`f:modern border:black`), a match needs *one printing* satisfying **both** (`∃p: modern(p) ∧
+black(p)`) — not "some printing modern" and "some printing black." AND-ing the per-printing bitmaps
+enforces that by construction (a printing bit survives only if set in every leaf's bitmap); composing
+card-level existence projections would false-positive (a card with a modern printing and a *separate*
+black-bordered one). So for multi-leaf printing-varying compounds this plan is the *correct*
+composition, not merely the faster one.
+
+Non-target: **card mode** (served by the #667 card-space legality planes + card-space idea 2,
+PR 2a/3) — this plan is a printing/artwork thing.
 
 ## Parts, in ship order
 
@@ -111,9 +130,14 @@ printing-space subset, in dependency order:
 3. **Card-space idea-2 (`PrintingRangeBits`) — planned, not printing-space** (PR 2a/3 in the
    roadmap). Lands the range-bitmap→popcount machinery + the `must_be_tight` correctness fix in
    `unique=card` first, where the bitmap composes. This is the reusable core.
-4. **#656 — printing-space pager + per-sort-column printing permutation.** The gating build: a
-   printing-space sort order to page off, an **archive-format bump**. Without it there is nowhere to
-   read the page from in printing mode.
+4. **#656 — extend the popcount-order phase to compound residuals + printing/artwork.** As filed,
+   #656 is a follow-on to #634 (design in [00634](done/00634-engine-permuted-bitmap-order-phase.md)):
+   for a **card-level** orderby (edhrec, cmc…) the printing/artwork page is a *weighted set-bit walk*
+   over #634's **existing** card permutation (card weights via `offsets`-diff / artwork groups) — no
+   new permutation, no archive bump. Its compound-residual path needs each residual to expose a
+   bitmap to `AND` (ranges via PR 2a/3; existential values via their planes, below). A **printing-level**
+   orderby (usd, rarity — printing-varying) additionally needs a printing-space sort order — *that* is
+   the one archive-bump piece, and it is arguably beyond #656 as currently scoped.
 5. **The `PrintingPlanePopcountOrder` plan itself.** Build + AND + `popcount` the range bitmap(s) in
    printing space, page off the #656 permutation. Register as a new `PhysicalPlan` with its
    `applicable` / `materializing` / `cost::plan_cost` / executor arms — the #702 router makes this a
@@ -140,7 +164,15 @@ range+range gap proves worth closing.
 
 ## Prerequisites & caveats
 
-- **#656 is the blocker** (pager + permutation; archive-format bump).
+- **Existential targets need precomputed *printing-space* existential planes.** The `f:modern` /
+  `border:black` wins all assume a bit-per-printing legality / border plane to `AND` and `popcount`.
+  Neither exists: legality's #667 plane and border's #664 plane are **card-space** (they answer "some
+  printing legal," not which). Building the printing-space versions is a separate track from the
+  range idea-2 parts above — a build-time computation + storage + archive bump — and its own per-value
+  density call (`f:modern` broad → plane; a sparse legality value → postings). The range parts (1–6)
+  do not deliver the existential wins; that is a parallel piece.
+- **#656 is a partial blocker** (the popcount-order extension; see part 4). Printing-level-orderby
+  paging is the one archive-format bump.
 - **NULL over-inclusion — the #689 lesson.** A range bitmap's `popcount` **over-counts** the moment
   an existential/NULL predicate is trusted directly; this is precisely what
   [PR #689 got wrong and reverted](local-engine-sorted-range-fastpath.md). The `must_be_tight`
