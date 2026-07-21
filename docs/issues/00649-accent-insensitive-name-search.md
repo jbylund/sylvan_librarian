@@ -53,14 +53,30 @@ inline), which is more surface than this issue asks for.
 `InlineStr<61>` per card (~61 bytes × ~31.5k cards ≈ 2MB), populated once at reload, not computed
 per query.
 
-## Known limitation (not fixed here)
+## Bare (unquoted) accented words
 
-The hand-rolled parser's tokenizer only accepts ASCII in *unquoted* bare words — `name:éowyn`
-(no quotes) fails to lex at all (`Unexpected character 'é'`). Quoting works today:
-`name:"éowyn"` parses and folds correctly. This is a pre-existing lexer restriction
-(`_WORD_START`/`_WORD_CONT` in `hand_parser.py`) affecting all bare non-ASCII tokens, not specific
-to this fix, and out of scope here — the reported issue (typing the *unaccented* form) doesn't
-require it, since "Eowyn" is plain ASCII.
+Both parsers originally only accepted ASCII in *unquoted* bare words — `name:éowyn` (no quotes)
+failed to lex at all (hand parser: `Unexpected character 'é'`; pyparsing: no matching token).
+Quoting already worked (`name:"éowyn"`), since quoted-string lexing never restricted its character
+set — only the bare-word grammars did.
+
+Fixed by widening both parsers' word-character classification to any Unicode letter (not just the
+Latin diacritics `fold_accents()` folds — this is a lexer-acceptance question, independent of what
+folding later does with the text):
+
+- **Hand parser** (`hand_parser.py`): `_is_word_start`/`_is_word_cont` replace the old
+  `_WORD_START`/`_WORD_CONT` frozenset membership checks with `c in <frozenset> or c.isalpha()` —
+  the ASCII fast path is unchanged, non-ASCII letters fall through to `str.isalpha()` (Unicode-aware
+  in Python 3).
+- **pyparsing parser** (`pyparsing_based.py`): the three bare-word regexes (`word`,
+  `string_value_word`, `hyphenated_condition`'s value, and the separate implicit-AND tokenizer's
+  `string_value_tok`) swap ASCII classes for `\w`/`[^\W\d]` — Python's `re` treats `\w`/`\W` as
+  Unicode-aware by default for `str` patterns, and `[^\W\d]` is the standard idiom for "word
+  character that isn't a digit," i.e. a letter or underscore, so bare words still can't start with
+  a digit.
+
+Both parsers were verified to agree via the shared `TESTCASES` parity fixture
+(`implicit_and_cases.py`), which now includes bare accented words.
 
 ## Validation
 
@@ -72,6 +88,10 @@ require it, since "Eowyn" is plain ASCII.
 - `test_integration_testcontainers.py::test_card_search_by_name_folds_accents` — real Postgres,
   real migration, asserts `name:eowyn` finds "Éowyn, Fearless Knight" and only it, and that exact
   match distinguishes the two spellings.
+- `implicit_and_cases.py` — bare accented word cases, exercised by both the hand/pyparsing parity
+  test and the implicit-AND preprocessing test.
+- `test_sql_gen.py` / `test_exact_name_search.py` — bare (unquoted) accented `name:`/`!` cases
+  alongside the quoted ones.
 
 ## Status
 

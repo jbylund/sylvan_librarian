@@ -26,9 +26,12 @@ re-implementing it:
 Exact-match (`!"..."`, `name=`) and regex (`name:/.../`) are untouched and stay accent-sensitive —
 typing the accent still gets you exact-accent matching.
 
+Both parsers' bare-word tokenizers were also widened to accept any Unicode letter (previously
+ASCII-only), so `name:Éowyn` now lexes without quotes — the hand parser via `str.isalpha()`, the
+pyparsing grammar via `\w`/`[^\W\d]`.
+
 See [docs/issues/00649-accent-insensitive-name-search.md](../issues/00649-accent-insensitive-name-search.md)
-for the full design writeup, corpus findings, and a known pre-existing lexer limitation
-(unquoted-bare-word accents) left out of scope.
+for the full design writeup and corpus findings.
 
 ## Trade-offs
 

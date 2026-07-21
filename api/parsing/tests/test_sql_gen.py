@@ -49,9 +49,15 @@ from api.parsing.card_query_nodes import (
             r"(lower(card.card_name_folded) LIKE %(p_str_JWVvd3luJQ)s)",
             {"p_str_JWVvd3luJQ": r"%eowyn%"},
         ),
-        # ...and typing the accent folds to the exact same SQL/parameters.
+        # ...and typing the accent folds to the exact same SQL/parameters, whether quoted...
         (
             'name:"éowyn"',
+            r"(lower(card.card_name_folded) LIKE %(p_str_JWVvd3luJQ)s)",
+            {"p_str_JWVvd3luJQ": r"%eowyn%"},
+        ),
+        # ...or bare/unquoted (both parsers' tokenizers accept non-ASCII bare words, #649).
+        (
+            "name:éowyn",
             r"(lower(card.card_name_folded) LIKE %(p_str_JWVvd3luJQ)s)",
             {"p_str_JWVvd3luJQ": r"%eowyn%"},
         ),
