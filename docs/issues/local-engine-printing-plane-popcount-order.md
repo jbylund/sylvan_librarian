@@ -14,15 +14,23 @@ in **card** mode ([#634](done/00634-engine-permuted-bitmap-order-phase.md)). For
 predicate under `unique=printing`/`artwork`, build a printing-existence bitmap, take its `popcount`
 as the **exact total**, then read the page directly off the bitmap in printing sort order.
 
-The match bitmap has two sources, and they share this one paging plan:
+The match bitmap has a few sources, and they share this one paging plan:
 
 - a **query-time range narrowing** (`usd`/`cn`/`date`) — the original idea 2, this doc's main focus;
 - a **precomputed existential printing bitplane** for a printing-varying value (legality, frame,
-  border) — e.g. a bit-per-printing "modern-legal" plane.
+  border) — e.g. a bit-per-printing "modern-legal" plane;
+- **a postings list scattered into a bitmap on demand** — O(matches) to build, for any value that
+  has printing-space postings.
 
-Only the source differs; the `popcount` total and the sort-order page-off are identical. The
-existential source is why a broad printing-varying value like `f:modern` is a target here, not the
-non-target the range-only framing would suggest (see below).
+Once a bitmap exists the total is a `popcount` — **O(words) (~1,500 words here ≈ microseconds),
+independent of match density** — and the page is read off the sort order. So density gates which
+*representation you store* (postings for sparse, a plane for broad/mid, complement for saturated),
+**not the cost of the count**. This is the key reason even a *broad* predicate is fine, and why a
+broad **compound** is the real win: build each leaf's bitmap (from a range, postings, or a plane),
+`AND` them in O(words), and `popcount` the result — far cheaper than intersecting two broad postings
+lists (`f:modern` ∩ `usd<50` = a 76k list against an 80k list). It's also why a broad
+printing-varying value like `f:modern` is a target here, not the non-target the range-only framing
+would suggest (see below).
 
 Contrast with the two plans that ship today for these queries:
 
