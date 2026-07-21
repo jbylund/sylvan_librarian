@@ -22,6 +22,7 @@ import csv
 import pathlib
 import sys
 import time
+from typing import TYPE_CHECKING
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -29,7 +30,8 @@ sys.path.insert(0, str(REPO_ROOT))
 from api.parsing import parse_scryfall_query  # noqa: E402
 from scripts.bench_bitplanes import load_engine  # noqa: E402
 
-import card_engine  # noqa: E402
+if TYPE_CHECKING:
+    import card_engine
 
 WARMUP = 50
 DEFAULT_WINDOW_S = 8.0
@@ -57,7 +59,7 @@ CONFIGS: list[tuple[str, str, str, str, int]] = [
     ("control-invariant", "c:g", "card", "edhrec", 0),
     # --- controls: selective / name lookup ---
     ("control-selective", "r:rare", "card", "edhrec", 0),
-    ('control-selective', '!"Sol Ring"', "card", "edhrec", 0),
+    ("control-selective", '!"Sol Ring"', "card", "edhrec", 0),
     # --- correctness: range+range card (shared-witness); total is the guard ---
     ("correctness-rr", "usd<50 cn<100", "card", "edhrec", 0),
 ]
@@ -94,6 +96,7 @@ def bench_one(engine: card_engine.QueryEngine, config: tuple[str, str, str, int]
 
 
 def main() -> None:
+    """Load the corpus once, then time each config over a window and write the CSV."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--corpus", type=pathlib.Path, default=REPO_ROOT / "benchmarks/bitplanes/corpus.jsonl")
     parser.add_argument("--out", type=pathlib.Path, required=True)
@@ -116,7 +119,9 @@ def main() -> None:
             total, n, avg_ms, min_ms = bench_one(engine, (query, unique, orderby, offset), args.window)
             writer.writerow([rev, group, query, unique, orderby, offset, total, n, f"{avg_ms:.4f}", f"{min_ms:.4f}"])
             fh.flush()
-            print(f"{group:<18} {query:<20} {unique:<9} {orderby:<8} {offset:>6} {total:>7} {avg_ms:>8.3f} {min_ms:>8.3f}", flush=True)
+            print(
+                f"{group:<18} {query:<20} {unique:<9} {orderby:<8} {offset:>6} {total:>7} {avg_ms:>8.3f} {min_ms:>8.3f}", flush=True
+            )
 
     print(f"\nWrote {args.out}")
 
