@@ -86,6 +86,10 @@ pub(crate) struct PlanFeatures {
     pub limit: u32,
     /// Page offset.
     pub offset: u32,
+    /// `CardRangePopcount` only: printings in the range slice it scatters+projects into the
+    /// card-existence bitmap at query time (`e - s`). Drives that plan's build term; `0` for every
+    /// other plan (their bitmaps are precomputed or they don't build one).
+    pub range_build_printings: u32,
 }
 
 // ─── P1: PrintingRangeScan ──────────────────────────────────────────────────
@@ -131,6 +135,15 @@ const PLANE_POPCOUNT_PER_WORD_NS: f64 = 1.0;
 const PLANE_POPCOUNT_EMIT_PER_CARD_NS: f64 = 2.0;
 /// Fixed P2 setup (plane eval into the bitmap, buffers).
 const PLANE_POPCOUNT_FIXED_COST_NS: f64 = 200.0;
+
+// ─── CardRangePopcount: PlanePopcountOrder's terms + a query-time build ──────
+// Unlike the plane plan's precomputed bitmap, this one builds its card-existence bitmap at query
+// time in a single fused scatter+project pass over the in-range printing slice. That build is the
+// plan's dominant cost, so it gets its own per-slice-printing term; without it the model
+// under-predicts this plan ~3x and could route a narrow bare range here when the candidate path is
+// cheaper. ~1.3 ns/printing, from card_range_build_cost_split on the real corpus (~104us for the
+// 80,527-printing usd<50 slice).
+pub(crate) const CARD_RANGE_BUILD_PER_PRINTING_NS: f64 = 1.3;
 
 // ─── P3: StreamedSelect ─────────────────────────────────────────────────────
 // Match phase walks eval_domain cards computing per-card counts, then either
@@ -219,6 +232,16 @@ pub(crate) fn plan_cost(plan: PhysicalPlan, f: &PlanFeatures) -> f64 {
                 + (n_cards / 64.0) * PLANE_POPCOUNT_PER_WORD_NS
                 + limit * PLANE_POPCOUNT_EMIT_PER_CARD_NS
                 + PLANE_POPCOUNT_FIXED_COST_NS
+        }
+        // Same popcount-skip order phase as PlanePopcountOrder (`matches` is the card-existence
+        // popcount), plus the query-time build over the range slice — the dominant term (see the
+        // CARD_RANGE_BUILD_PER_PRINTING_NS note).
+        PhysicalPlan::CardRangePopcount => {
+            f64::from(f.range_build_printings) * CARD_RANGE_BUILD_PER_PRINTING_NS  // query-time build: k in-range printings -> card-existence bitmap (+ printing membership); the plane plan gets this precomputed
+                + matches * PLANE_POPCOUNT_SCATTER_PER_MATCH_NS  // scatter the match (card) bits through the inverse permutation
+                + (n_cards / 64.0) * PLANE_POPCOUNT_PER_WORD_NS  // popcount total + word-scan skip to the page offset
+                + limit * PLANE_POPCOUNT_EMIT_PER_CARD_NS  // emit one page of cards
+                + PLANE_POPCOUNT_FIXED_COST_NS  // fixed per-query overhead
         }
         PhysicalPlan::StreamedSelect => {
             // The small-total gather branch (run_query_streamed) scans all

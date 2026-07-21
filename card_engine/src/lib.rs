@@ -3874,6 +3874,11 @@ static VERIFY_ORDER: LazyLock<usize> = LazyLock::new(|| guard_env("CARD_ENGINE_V
 /// timing). A binary switch, not a calibrated threshold.
 static PRINTING_RANGE_FASTPATH: LazyLock<usize> = LazyLock::new(|| guard_env("CARD_ENGINE_PRINTING_RANGE_FASTPATH", 1));
 
+/// Card-mode range→card-existence popcount fast path (PR 2a / card-space idea 2). Same kind of
+/// binary A/B kill-switch as `PRINTING_RANGE_FASTPATH`, not a calibrated threshold: `0` routes these
+/// queries exactly as before (the general candidate path), `1` (default) enables `CardRangePopcount`.
+static RANGE_BITS_CARD: LazyLock<usize> = LazyLock::new(|| guard_env("CARD_ENGINE_RANGE_BITS_CARD", 1));
+
 /// The range index and half-open `[lo, hi)` a *bare* range-predicate leaf selects, or None for
 /// anything else (compound, `Ne`, a non-range numeric field). Provably-empty predicates return a
 /// zero-width `[v, v)` so the fastpath's `k` resolves to 0. Reuses the exact bound derivations the
@@ -3909,6 +3914,56 @@ fn bare_range_bounds<'i>(
         }
         _ => None,
     }
+}
+
+/// The exact half-open `[lo, hi)` a *bare* `usd` range leaf selects over the price index, or None
+/// for anything else. PR 2a's `CardRangePopcount` is deliberately scoped to price only; `cn`/`date`
+/// share the machinery and are a trivial follow-on (PR 3) — widen this to delegate to
+/// `bare_range_bounds` then. Value snapping matches `narrow_rec`'s `price` closure so the fast path
+/// and the general path can never disagree on which printings the predicate covers. Bounds are
+/// exact (price is integer cents, #688), so the direct slice `idx[lo..hi)` is a *tight* set — the
+/// property that lets its card-existence popcount stand in for the count pass without re-verifying.
+fn usd_bare_range_bounds(filter: &FilterExpr) -> Option<(u32, u32)> {
+    let FilterExpr::NumericCmp { lhs, op, rhs } = filter else { return None };
+    let (op, value) = match (lhs, rhs) {
+        (NumExpr::Field(NumField::PriceUsd), NumExpr::Const(v)) => (*op, snap_to_nearest_cent(*v * PRICE_CENTS_PER_DOLLAR)),
+        (NumExpr::Const(v), NumExpr::Field(NumField::PriceUsd)) => (flip_op(*op), snap_to_nearest_cent(*v * PRICE_CENTS_PER_DOLLAR)),
+        _ => return None,
+    };
+    match int_range_bounds(op, value)? {
+        None => Some((0, 0)), // provably empty: zero-width slice, popcount resolves to 0
+        Some((lo, hi)) => Some((lo, hi)),
+    }
+}
+
+/// Build `CardRangePopcount`'s two bitmaps from an exact `usd` range slice, in a single pass: the
+/// tight printing-space membership set (`range_pbits`, set directly from the value-sorted slice —
+/// never the loose complement `range_narrowed` would pick for a broad range, which over-includes
+/// NULL-priced printings) and its card-existence projection (`card_bits`, each printing's card via
+/// the `printing_to_card` direct array, #690). The card bitmap's popcount is the exact `unique=card`
+/// total; the printing bitmap is the per-printing residual emission re-checks so the representative
+/// printing it shows genuinely satisfies the range.
+///
+/// One fused pass rather than scatter-then-`printing_bits_to_card_bits`: the projection over the
+/// scattered bitmap is the expensive half (a `trailing_zeros` extraction per set bit plus a cursor
+/// branch across every word), and folding it into the scatter loop via a direct `printing_to_card`
+/// lookup measured ~40% cheaper on `usd<50` (~174µs → ~104µs; see `card_range_build_cost_split`),
+/// even though the price-ordered slice makes those lookups random. Bare range only
+/// (`card_range_popcount_applicable` requires no plane), so there is nothing to AND.
+fn build_card_range_bits(lo: u32, hi: u32, indexes: &Archived<CardIndexes>, n_cards: usize, n_printings: usize) -> (Vec<u64>, Vec<u64>) {
+    let idx = &indexes.price_usd;
+    let ptc = &indexes.printing_to_card;
+    let s = idx.partition_point(|p| u32::from(p.0) < lo);
+    let e = idx.partition_point(|p| u32::from(p.0) < hi);
+    let mut range_pbits = vec![0u64; n_printings.div_ceil(64)];
+    let mut card_bits = vec![0u64; n_cards.div_ceil(64)];
+    for p in idx[s..e].iter() {
+        let pid = u32::from(p.1) as usize;
+        range_pbits[pid >> 6] |= 1u64 << (pid & 63);
+        let cid = u32::from(ptc[pid]) as usize;
+        card_bits[cid >> 6] |= 1u64 << (cid & 63);
+    }
+    (card_bits, range_pbits)
 }
 
 /// Page for a `unique=printing` bare-range query ordered by a *card-level* key: walk that key's
@@ -4125,6 +4180,9 @@ enum PhysicalPlan {
     PrintingRangeScan,
     /// #634 Step 2 plane-bitmap popcount-skip order phase (`run_query_streamed_popcount`).
     PlanePopcountOrder,
+    /// PR 2a card-space idea 2: a bare `usd` range under `unique=card`, answered as the same
+    /// popcount-skip order phase over the range's card-existence bitmap (`exec_card_range_popcount`).
+    CardRangePopcount,
     /// Streamed selection over the sort permutation (`run_query_streamed`).
     StreamedSelect,
     /// The universal fallback: the gathered per-card loop + `select_page`.
@@ -4134,9 +4192,10 @@ enum PhysicalPlan {
 impl PhysicalPlan {
     /// All plans, argmin-ordered so ties resolve deterministically toward the
     /// cheaper-fixed-cost plan. The router filters this by `applicable`.
-    const ALL: [PhysicalPlan; 4] = [
+    const ALL: [PhysicalPlan; 5] = [
         PhysicalPlan::PrintingRangeScan,
         PhysicalPlan::PlanePopcountOrder,
+        PhysicalPlan::CardRangePopcount,
         PhysicalPlan::StreamedSelect,
         PhysicalPlan::GatheredScan,
     ];
@@ -4164,6 +4223,9 @@ impl PhysicalPlan {
             }
             PhysicalPlan::PlanePopcountOrder => {
                 plane_popcount_order_applicable(filter, mode, cards, plane, sort_col, descending, indexes)
+            }
+            PhysicalPlan::CardRangePopcount => {
+                card_range_popcount_applicable(filter, mode, cards, plane, sort_col, descending, indexes)
             }
             PhysicalPlan::StreamedSelect => streamed_select_applicable(cards, sort_col, descending, indexes),
             PhysicalPlan::GatheredScan => gathered_scan_applicable(),
@@ -4204,6 +4266,10 @@ enum Prep {
     /// `run_query_routed`'s local `plane_bits` and passed by reference.
     /// `PlanePopcountOrder` reads it directly; P3/P4 read it as a candidate list.
     Plane,
+    /// Bare `usd` range (card): the range's card-existence bitmap (its popcount is the exact total)
+    /// and printing-space membership set (emission's per-printing residual). `CardRangePopcount`
+    /// reads both; a materializing winner reads the card bitmap as a candidate list.
+    RangeCardBits { card_bits: Vec<u64>, range_pbits: Vec<u64> },
     /// The general residual path: a materialized candidate list.
     Candidates(PreparedCandidates),
 }
@@ -4273,6 +4339,37 @@ fn plane_popcount_order_applicable(
 /// `None` for anything it doesn't own).
 fn printing_range_scan_applicable(mode: Mode, plane: Option<&PlaneExpr>, cards: &[AOracleCard]) -> bool {
     *PRINTING_RANGE_FASTPATH != 0 && matches!(mode, Mode::Printing) && plane.is_none() && !cards.is_empty()
+}
+
+/// `CardRangePopcount` needs `Mode::Card`, a **bare** `usd` range as the whole filter (no plane), and
+/// both sort permutations. `plane.is_none()` is deliberate and load-bearing, on both correctness and
+/// perf grounds:
+/// - *correctness:* an existential legality plane (`usd<50 f:modern`) would make the card-existence
+///   AND exact only when the attribute never diverges across a card's printings — a data coincidence
+///   the engine refuses to bank on (docs/issues/00667-engine-legality-divergent-carveout.md); those
+///   printing-varying compounds are the printing-space plane's job.
+/// - *perf:* a card-invariant plane (`usd<50 c:g`) already narrows the query hard, so the existing
+///   narrowed-verify path is fast, whereas this plan pays an O(k) build over the whole range slice
+///   regardless — measured a net loss. So a narrowing plane means don't bother; only the bare range,
+///   where the alternative is a full scan of a ~99%-broad set, is worth the build.
+///
+/// The bare-`usd`-leaf shape also excludes range+range (`usd<50 cn<100` is an `And`, not a bare leaf).
+fn card_range_popcount_applicable(
+    filter: &FilterExpr,
+    mode: Mode,
+    cards: &[AOracleCard],
+    plane: Option<&PlaneExpr>,
+    sort_col: SortCol,
+    descending: bool,
+    indexes: &Archived<CardIndexes>,
+) -> bool {
+    *RANGE_BITS_CARD != 0
+        && matches!(mode, Mode::Card)
+        && !cards.is_empty()
+        && plane.is_none()
+        && usd_bare_range_bounds(filter).is_some()
+        && indexes.sort_perms.get(sort_col, descending).is_some_and(|p| p.len() == cards.len())
+        && indexes.sort_perms.get_inv(sort_col, descending).is_some()
 }
 
 // ─── Shared P3/P4 candidate preparation ─────────────────────────────────────
@@ -4446,7 +4543,35 @@ fn exec_plane_popcount_order_with_bitmap<'a>(
     let inv_perm =
         indexes.sort_perms.get_inv(sort_col, descending).expect("PlanePopcountOrder applicability guarantees an inverse permutation");
     run_query_streamed_popcount(
-        cards, printings, offsets, prefer, limit, page_offset, perm, inv_perm, bitmap, plane_expr, &indexes.planes, strings,
+        cards, printings, offsets, prefer, limit, page_offset, perm, inv_perm, bitmap, Some(plane_expr), &indexes.planes, strings, None,
+    )
+}
+
+/// `CardRangePopcount` executor: the same popcount-skip order phase as P2, but its match bitmap is a
+/// range's card-existence projection (built in `acquire`) rather than a plane, and it threads the
+/// range's printing-space membership set so emission shows an in-range printing. Caller guarantees
+/// `card_range_popcount_applicable` (permutations exist; the shown-printing plane, if any, is
+/// non-existential so it needs no per-printing re-check here).
+#[allow(clippy::too_many_arguments)]
+fn exec_card_range_popcount<'a>(
+    cards: &'a [AOracleCard],
+    printings: &'a [APrinting],
+    offsets: &AOffsets,
+    strings: &AStrings,
+    prefer: Prefer,
+    sort_col: SortCol,
+    descending: bool,
+    limit: usize,
+    page_offset: usize,
+    indexes: &Archived<CardIndexes>,
+    card_bits: &[u64],
+    range_pbits: &[u64],
+) -> (usize, Vec<(&'a AOracleCard, &'a APrinting)>) {
+    let perm = indexes.sort_perms.get(sort_col, descending).expect("CardRangePopcount applicability guarantees a permutation");
+    let inv_perm =
+        indexes.sort_perms.get_inv(sort_col, descending).expect("CardRangePopcount applicability guarantees an inverse permutation");
+    run_query_streamed_popcount(
+        cards, printings, offsets, prefer, limit, page_offset, perm, inv_perm, card_bits, None, &indexes.planes, strings, Some(range_pbits),
     )
 }
 
@@ -4700,6 +4825,7 @@ fn run_query_routed<'a>(
         residual_tier_ns100,
         limit: limit as u32,
         offset: page_offset as u32,
+        range_build_printings: 0, // CardRangePopcount overrides this in its acquire branch
     };
     // Features for the general candidate path (shared by the acquire branch and the
     // lazy-materialize dispatch). `matches`/`eval_domain` = candidate CARD count, the
@@ -4727,6 +4853,25 @@ fn run_query_routed<'a>(
         eval_planes(plane.expect("PlanePopcountOrder ⇒ plane"), &indexes.planes, &mut plane_bits);
         let count: u32 = plane_bits.iter().map(|w| w.count_ones()).sum();
         (mk_feats(count, count, count, 0), Prep::Plane)
+    } else if PhysicalPlan::CardRangePopcount.applicable(filter, mode, cards, plane, sort_col, descending, indexes) {
+        // Build the range's card-existence bitmap now; its popcount is the exact count (like the
+        // plane branch above, scan_units == count, all_match ⇒ tier 0). The build is O(k) over the
+        // range slice — the plan's dominant cost — but for a bare range the alternative is a full
+        // scan of a near-total set, which reliably loses, so the eager build is rarely wasted: only a
+        // narrow range routes elsewhere, and there k (hence the build) is small. If a materializing
+        // plan does win, dispatch reads the same bitmap back as a candidate list.
+        let (lo, hi) = usd_bare_range_bounds(filter).expect("applicable ⇒ bare usd range");
+        let (card_bits, range_pbits) = build_card_range_bits(lo, hi, indexes, n_cards as usize, n_printings as usize);
+        let count: u32 = card_bits.iter().map(|w| w.count_ones()).sum();
+        // Slice size (in-range printings) drives the build term — the plan's dominant cost.
+        let slice_printings: u32 = range_pbits.iter().map(|w| w.count_ones()).sum();
+        // Unlike the plane branch, the residual here is the range, not True: CardRangePopcount's exact
+        // bitmap needs no re-verify (its formula ignores tier), but the materializing alternatives in
+        // dispatch DO re-verify the range per candidate, so they must be costed with its verify tier —
+        // `0` would under-cost them and let a mis-cheap StreamedSelect beat the plan that actually wins.
+        let mut feats = mk_feats(count, count, count, verify_cost_tier(filter));
+        feats.range_build_printings = slice_printings;
+        (feats, Prep::RangeCardBits { card_bits, range_pbits })
     } else if PhysicalPlan::PrintingRangeScan.applicable(filter, mode, cards, plane, sort_col, descending, indexes) {
         // Bare range: exact k from the index (no scan). P3/P4 estimated unnarrowed
         // (their broad regime — a narrow range makes P1 lose, and dispatch materializes).
@@ -4754,6 +4899,22 @@ fn run_query_routed<'a>(
             &PreparedCandidates { candidate_cards: Some(bitmap_card_ids(&plane_bits)), all_match_known: true },
             plane, mode, prefer, sort_col, descending, limit, page_offset, indexes,
         ),
+        (PhysicalPlan::CardRangePopcount, Prep::RangeCardBits { card_bits, range_pbits }) => exec_card_range_popcount(
+            cards, printings, offsets, strings, prefer, sort_col, descending, limit, page_offset, indexes, card_bits, range_pbits,
+        ),
+        // A materializing plan beat CardRangePopcount on the estimate: reuse the already-built
+        // card-existence bitmap as a candidate list (dropped when >7/8, matching prepare_candidates)
+        // and re-verify the range residual per card (all_match_known: false) so the range still gates
+        // which printing is shown.
+        (p, Prep::RangeCardBits { card_bits, .. }) => {
+            let ids = bitmap_card_ids(card_bits);
+            let candidate_cards = (ids.len() < cards.len() - cards.len() / 8).then_some(ids);
+            exec_from_candidates(
+                p, cards, printings, offsets, strings, filter,
+                &PreparedCandidates { candidate_cards, all_match_known: false },
+                plane, mode, prefer, sort_col, descending, limit, page_offset, indexes,
+            )
+        }
         (p, Prep::Candidates(prep)) => exec_from_candidates(
             p, cards, printings, offsets, strings, filter, prep, plane, mode, prefer, sort_col, descending, limit, page_offset, indexes,
         ),
@@ -4829,6 +4990,16 @@ fn run_query_with_plan<'a>(
                 cards, printings, offsets, strings, prefer, sort_col, descending, limit, page_offset, plane_expr, indexes,
             ))
         }
+        PhysicalPlan::CardRangePopcount => {
+            if !card_range_popcount_applicable(filter, mode, cards, plane, sort_col, descending, indexes) {
+                return None;
+            }
+            let (lo, hi) = usd_bare_range_bounds(filter).expect("applicability guarantees a bare usd range");
+            let (card_bits, range_pbits) = build_card_range_bits(lo, hi, indexes, cards.len(), printings.len());
+            Some(exec_card_range_popcount(
+                cards, printings, offsets, strings, prefer, sort_col, descending, limit, page_offset, indexes, &card_bits, &range_pbits,
+            ))
+        }
         PhysicalPlan::StreamedSelect => {
             if !streamed_select_applicable(cards, sort_col, descending, indexes) {
                 return None;
@@ -4872,9 +5043,10 @@ fn run_query_streamed_popcount<'a>(
     perm: &Archived<Vec<u32>>,
     inv_perm: &Archived<Vec<u32>>,
     bitmap: &[u64],
-    plane: &PlaneExpr,
+    plane: Option<&PlaneExpr>,
     planes: &Archived<BitPlanes>,
     strings: &AStrings,
+    range_bits: Option<&[u64]>,
 ) -> (usize, Vec<(&'a AOracleCard, &'a APrinting)>) {
     let n_cards = cards.len();
     let total: usize = bitmap.iter().map(|w| w.count_ones() as usize).sum();
@@ -4930,7 +5102,7 @@ fn run_query_streamed_popcount<'a>(
         // blindly -- verify against `eval_plane_expr_for_printing` too. Cheap
         // even then: bounded by `limit` emitted cards, not the candidate set,
         // and only pays the extra check at all for legality-touching planes.
-        let existential = plane_expr_is_existential(plane);
+        let existential = plane.is_some_and(plane_expr_is_existential);
         let mut page: Vec<(&AOracleCard, &APrinting)> = Vec::with_capacity(limit);
         'walk: while word_idx < permuted.len() {
             let mut w = permuted[word_idx];
@@ -4946,7 +5118,16 @@ fn run_query_streamed_popcount<'a>(
                 let card = &cards[cid as usize];
                 let start = u32::from(offsets[cid as usize]) as usize;
                 let end = u32::from(offsets[cid as usize + 1]) as usize;
-                let satisfies = |pid: usize| !existential || eval_plane_expr_for_printing(plane, planes, cid, &printings[pid], strings);
+                // Two per-printing residuals the card-existence bitmap can't encode: an existential
+                // plane (legality — the card matching doesn't pin which printing is legal) and the
+                // range membership (CardRangePopcount — the shown printing must actually be in range,
+                // not just belong to a card that has some in-range printing). Both are cheap: bounded
+                // by `limit` emitted cards, an O(1) bit test for the range, checked only when present.
+                let satisfies = |pid: usize| {
+                    (!existential
+                        || eval_plane_expr_for_printing(plane.expect("existential ⇒ plane"), planes, cid, &printings[pid], strings))
+                        && range_bits.is_none_or(|rb| bitmap_contains(rb, pid as u32))
+                };
                 let chosen: Option<u32> = if matches!(prefer, Prefer::Default) {
                     (start..end).find(|&pid| satisfies(pid)).map(|pid| pid as u32)
                 } else {

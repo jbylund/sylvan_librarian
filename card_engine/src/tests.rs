@@ -2729,6 +2729,13 @@ fn force_plan_differential_agreement() {
         (FuzzSpec::Leaf(FuzzLeaf::Date { op: CmpOp::Gt, value: 1990_0000 }), "edhrec", "desc"),
         (FuzzSpec::Leaf(FuzzLeaf::Price { op: CmpOp::Lt, val: 100_000.0 }), "usd", "asc"),
         (FuzzSpec::Leaf(FuzzLeaf::Price { op: CmpOp::Lt, val: 100_000.0 }), "usd", "desc"),
+        // Bare broad price over a card-level perm -> CardRangePopcount (PR 2a) in card mode; a narrow
+        // price at low density -> its argmin fallback to the candidate path. price AND a color plane
+        // stays on the general path (CardRangePopcount is bare-range-only) — kept as a plain
+        // agreement case covering the non-applicable branch.
+        (FuzzSpec::Leaf(FuzzLeaf::Price { op: CmpOp::Lt, val: 100_000.0 }), "edhrec", "asc"),
+        (FuzzSpec::Leaf(FuzzLeaf::Price { op: CmpOp::Lt, val: 2.0 }), "edhrec", "desc"),
+        (FuzzSpec::And(vec![FuzzSpec::Leaf(FuzzLeaf::Price { op: CmpOp::Lt, val: 100_000.0 }), fuzz_leaf_color(&mut rng)]), "edhrec", "asc"),
     ];
     for _ in 0..RANDOM_QUERIES {
         let orderby = SORTS[rng.random_range(0..SORTS.len())];
@@ -2740,16 +2747,18 @@ fn force_plan_differential_agreement() {
     let all_plans = [
         PhysicalPlan::PrintingRangeScan,
         PhysicalPlan::PlanePopcountOrder,
+        PhysicalPlan::CardRangePopcount,
         PhysicalPlan::StreamedSelect,
         PhysicalPlan::GatheredScan,
     ];
     let plan_idx = |p: PhysicalPlan| match p {
         PhysicalPlan::PrintingRangeScan => 0,
         PhysicalPlan::PlanePopcountOrder => 1,
-        PhysicalPlan::StreamedSelect => 2,
-        PhysicalPlan::GatheredScan => 3,
+        PhysicalPlan::CardRangePopcount => 2,
+        PhysicalPlan::StreamedSelect => 3,
+        PhysicalPlan::GatheredScan => 4,
     };
-    let mut ran = [0u32; 4];
+    let mut ran = [0u32; 5];
 
     // >= any possible total, so the offset-0 page is the complete ordered result.
     let full_limit = archived.printings.len().max(1);
@@ -3219,6 +3228,7 @@ fn plan_cost_model_matches_gold() {
                     residual_tier_ns100,
                     limit: limit as u32,
                     offset: offset as u32,
+                    range_build_printings: 0,
                 };
 
                 // ── Model argmin over the applicable plans ──
@@ -3324,6 +3334,11 @@ fn cost_terms(plan: PhysicalPlan, f: &super::cost::PlanFeatures) -> (Vec<f64>, f
     match plan {
         PhysicalPlan::PrintingRangeScan => (vec![page_span / match_rate, 1.0], 0.0),
         PhysicalPlan::PlanePopcountOrder => (vec![matches, n_cards / 64.0, limit, 1.0], 0.0),
+        // Same term vector as P2; the build term is a fixed (hand-set) offset, not a refit param.
+        PhysicalPlan::CardRangePopcount => (
+            vec![matches, n_cards / 64.0, limit, 1.0],
+            f64::from(f.range_build_printings) * super::cost::CARD_RANGE_BUILD_PER_PRINTING_NS,
+        ),
         PhysicalPlan::StreamedSelect => {
             let floor = if u64::from(f.matches) <= *STREAM_MIN_MATCHES as u64 { n_cards } else { 0.0 };
             (vec![eval_domain, scan_units, matches, floor, 1.0], scan_units * tier_ns)
@@ -3431,6 +3446,7 @@ fn plan_cost_refit() {
                     scan_units: scan_units(mode_enum, prep.candidate_cards.as_deref(), &archived.offsets, n_printings, eval_domain),
                     residual_tier_ns100: if prep.all_match_known { 0 } else { verify_cost_tier(&res) },
                     limit: limit as u32, offset: offset as u32,
+                    range_build_printings: 0,
                 };
                 for (pi, plan) in all_plans.iter().enumerate() {
                     if let Some(meas) = ns[pi] {
@@ -3628,6 +3644,7 @@ fn printing_range_route_probe() {
                 scan_units: scan_units(Mode::Printing, prep.candidate_cards.as_deref(), &archived.offsets, n_printings as u32, eval_domain),
                 residual_tier_ns100,
                 limit: LIMIT as u32, offset: offset as u32,
+                range_build_printings: 0,
             };
 
             // ── Three pickers ──
@@ -3988,6 +4005,7 @@ fn plan_regret_report() {
                 residual_tier_ns100: tier,
                 limit: limit as u32,
                 offset: offset as u32,
+                range_build_printings: 0,
             };
 
             let gold = (0..4).filter_map(|i| ns[i].map(|v| (v, i))).min_by_key(|(v, _)| *v);
@@ -4114,6 +4132,7 @@ fn plan_regret_fuzz() {
                 n_cards, n_printings, matches, eval_domain: evd, scan_units: evd, // card mode ⇒ scan_units == eval_domain
                 residual_tier_ns100: tier,
                 limit: limit as u32, offset: offset as u32,
+                range_build_printings: 0,
             };
             let feats_true = mk(true_total, eval_domain);
             let feats_est = mk(est, est.min(n_cards));
@@ -7860,6 +7879,110 @@ fn bare_range_bounds_recognizes_leaves_and_rejects_rest() {
     assert!(bounds(&FilterExpr::And(vec![usd_cmp(CmpOp::Lt, 50.0)])).is_none());
     let cmc_lt = FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Cmc), op: CmpOp::Lt, rhs: NumExpr::Const(3.0) };
     assert!(bounds(&cmc_lt).is_none());
+}
+
+/// PR 2a's `CardRangePopcount` is scoped to a single bare `usd` range leaf; `usd_bare_range_bounds`
+/// is the gate that enforces it. It accepts a bare price leaf (either operand order) and rejects
+/// everything the conservative scope excludes: `Ne`, non-price numeric fields, `cn`/`date` (PR 3,
+/// not 2a), and any compound residual — notably the `usd<50 cn<100` range+range shared-witness case,
+/// which is an `And`, not a bare leaf. (Existential-plane exclusion is enforced separately in
+/// `card_range_popcount_applicable` via `plane_expr_is_existential` — see
+/// `plane_expr_is_existential_identifies_legality_only`.)
+#[test]
+fn usd_bare_range_bounds_gates_pr2a_scope() {
+    let cn_lt = || FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::CollectorNumberInt), op: CmpOp::Lt, rhs: NumExpr::Const(100.0) };
+    // accepts a bare usd leaf; const-on-left flips the op to the same [0, 5000) cents extent.
+    assert_eq!(super::usd_bare_range_bounds(&usd_cmp(CmpOp::Lt, 50.0)), Some((0, 5000)));
+    assert_eq!(
+        super::usd_bare_range_bounds(&FilterExpr::NumericCmp { lhs: NumExpr::Const(50.0), op: CmpOp::Gt, rhs: NumExpr::Field(NumField::PriceUsd) }),
+        Some((0, 5000)),
+    );
+    // rejects: Ne (never narrows), cmc (card-space), cn (PR 3), and the range+range compound.
+    assert!(super::usd_bare_range_bounds(&usd_cmp(CmpOp::Ne, 50.0)).is_none());
+    assert!(super::usd_bare_range_bounds(&FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Cmc), op: CmpOp::Lt, rhs: NumExpr::Const(3.0) }).is_none());
+    assert!(super::usd_bare_range_bounds(&cn_lt()).is_none());
+    assert!(super::usd_bare_range_bounds(&FilterExpr::And(vec![usd_cmp(CmpOp::Lt, 50.0), cn_lt()])).is_none());
+}
+
+/// PR 2a build-cost split: for `usd<50`, which half of `CardRangePopcount`'s build dominates —
+/// scattering the price slice into a printing bitmap, or projecting that to a card-existence bitmap
+/// — and does building the card bitmap *directly* (`printing_to_card[pid]`, one pass, skipping the
+/// intermediate) help? The slice is in price order, so the direct path's `printing_to_card` reads
+/// are random (vs the projection's sequential `offsets` cursor), so it is not obviously a win —
+/// hence measured. Kernel timing over the real slice; same discipline as the other probes.
+#[test]
+#[ignore = "CardRangePopcount build-cost split; needs real.store; cargo test --release card_range_build_cost_split -- --ignored --nocapture"]
+fn card_range_build_cost_split() {
+    use std::hint::black_box;
+    use std::time::Instant;
+    const STORE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../benchmarks/verify-order/real.store");
+    const WARMUP: usize = 30;
+    const ITERS: usize = 300;
+
+    let Ok(file) = std::fs::File::open(STORE_PATH) else {
+        eprintln!("SKIP: {STORE_PATH} not found (see bench_verify_cost.rs docs)");
+        return;
+    };
+    let mmap = unsafe { Mmap::map(&file) }.expect("mmap real.store");
+    if mmap.len() < ARCHIVE_HEADER_LEN || mmap[..ARCHIVE_HEADER_LEN] != archive_header() {
+        eprintln!("SKIP: {STORE_PATH} header mismatch (stale — rebuild)");
+        return;
+    }
+    let archived = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
+    let n_cards = archived.cards.len();
+    let n_printings = archived.printings.len();
+    let idx = &archived.indexes.price_usd;
+    let ptc = &archived.indexes.printing_to_card;
+    let offsets = &archived.offsets;
+    let s = idx.partition_point(|p| u32::from(p.0) < 0); // usd<50 -> [0, 5000) cents
+    let e = idx.partition_point(|p| u32::from(p.0) < 5000);
+    let k = e - s;
+
+    // A: scatter the price slice into a printing bitmap.
+    let mut a = u128::MAX;
+    for it in 0..(WARMUP + ITERS) {
+        let t0 = Instant::now();
+        let pb = super::scatter_bits(idx[s..e].iter().map(|p| u32::from(p.1)), n_printings);
+        black_box(&pb);
+        if it >= WARMUP {
+            a = a.min(t0.elapsed().as_nanos());
+        }
+    }
+    // B: project that printing bitmap to a card-existence bitmap (pbits built once, reused).
+    let pbits = super::scatter_bits(idx[s..e].iter().map(|p| u32::from(p.1)), n_printings);
+    let mut b = u128::MAX;
+    for it in 0..(WARMUP + ITERS) {
+        let t0 = Instant::now();
+        let cb = super::printing_bits_to_card_bits(&pbits, offsets, n_cards);
+        black_box(&cb);
+        if it >= WARMUP {
+            b = b.min(t0.elapsed().as_nanos());
+        }
+    }
+    // C: build both bitmaps in one pass via printing_to_card (the "direct card bitmap" idea).
+    let mut c = u128::MAX;
+    for it in 0..(WARMUP + ITERS) {
+        let t0 = Instant::now();
+        let mut rp = vec![0u64; n_printings.div_ceil(64)];
+        let mut cb = vec![0u64; n_cards.div_ceil(64)];
+        for p in idx[s..e].iter() {
+            let pid = u32::from(p.1) as usize;
+            rp[pid >> 6] |= 1u64 << (pid & 63);
+            let cid = u32::from(ptc[pid]) as usize;
+            cb[cid >> 6] |= 1u64 << (cid & 63);
+        }
+        black_box(&rp);
+        black_box(&cb);
+        if it >= WARMUP {
+            c = c.min(t0.elapsed().as_nanos());
+        }
+    }
+
+    println!("\nusd<50 build cost (k={k} printings, n_cards={n_cards}, min of {ITERS}):");
+    println!("  A scatter -> printing bitmap : {a:>7} ns");
+    println!("  B project -> card bitmap     : {b:>7} ns");
+    println!("  current total (A + B)        : {:>7} ns", a + b);
+    println!("  C direct both, one pass      : {c:>7} ns");
 }
 
 #[test]
