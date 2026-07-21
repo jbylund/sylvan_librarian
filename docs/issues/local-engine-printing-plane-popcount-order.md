@@ -111,6 +111,14 @@ card-level existence projections would false-positive (a card with a modern prin
 black-bordered one). So for multi-leaf printing-varying compounds this plan is the *correct*
 composition, not merely the faster one.
 
+**Both halves are cheap off the intersected plane, and the cost today is the count, not the page.**
+The total is one `popcount` (O(words)); the page walks the sort order testing membership bits and
+early-stops — for a broad result (~67% pass for `f:modern border:black`) that is ~150 O(1) bit-tests
+to fill a 100-row page. Measured, `f:modern border:black` is **offset-flat** (0.755 / 0.746 / 0.763 ms
+at offset 0 / 5k / 20k), and so is `cn<100 usd<50` (1.09 / 1.11 ms) — confirming today's cost is the
+O(n) count-and-verify pass, not the paging. The `popcount` replaces the count and the bit-test walk
+replaces the verify, so `f:modern border:black` should go from 0.75 ms to microseconds.
+
 Non-target: **card mode** (served by the #667 card-space legality planes + card-space idea 2,
 PR 2a/3) — this plan is a printing/artwork thing.
 
