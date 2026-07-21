@@ -2736,6 +2736,10 @@ fn force_plan_differential_agreement() {
         (FuzzSpec::Leaf(FuzzLeaf::Price { op: CmpOp::Lt, val: 100_000.0 }), "edhrec", "asc"),
         (FuzzSpec::Leaf(FuzzLeaf::Price { op: CmpOp::Lt, val: 2.0 }), "edhrec", "desc"),
         (FuzzSpec::And(vec![FuzzSpec::Leaf(FuzzLeaf::Price { op: CmpOp::Lt, val: 100_000.0 }), fuzz_leaf_color(&mut rng)]), "edhrec", "asc"),
+        // PR 3: cn/date bare ranges also route through CardRangePopcount in card mode (the Date cases
+        // above already exercise it; add collector_number + year over card-level perms too).
+        (FuzzSpec::Leaf(FuzzLeaf::CollectorNumber { op: CmpOp::Lt, val: 100.0 }), "edhrec", "asc"),
+        (FuzzSpec::Leaf(FuzzLeaf::Year { op: CmpOp::Ge, year: 2015 }), "edhrec", "desc"),
     ];
     for _ in 0..RANDOM_QUERIES {
         let orderby = SORTS[rng.random_range(0..SORTS.len())];
@@ -7879,29 +7883,6 @@ fn bare_range_bounds_recognizes_leaves_and_rejects_rest() {
     assert!(bounds(&FilterExpr::And(vec![usd_cmp(CmpOp::Lt, 50.0)])).is_none());
     let cmc_lt = FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Cmc), op: CmpOp::Lt, rhs: NumExpr::Const(3.0) };
     assert!(bounds(&cmc_lt).is_none());
-}
-
-/// PR 2a's `CardRangePopcount` is scoped to a single bare `usd` range leaf; `usd_bare_range_bounds`
-/// is the gate that enforces it. It accepts a bare price leaf (either operand order) and rejects
-/// everything the conservative scope excludes: `Ne`, non-price numeric fields, `cn`/`date` (PR 3,
-/// not 2a), and any compound residual — notably the `usd<50 cn<100` range+range shared-witness case,
-/// which is an `And`, not a bare leaf. (Existential-plane exclusion is enforced separately in
-/// `card_range_popcount_applicable` via `plane_expr_is_existential` — see
-/// `plane_expr_is_existential_identifies_legality_only`.)
-#[test]
-fn usd_bare_range_bounds_gates_pr2a_scope() {
-    let cn_lt = || FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::CollectorNumberInt), op: CmpOp::Lt, rhs: NumExpr::Const(100.0) };
-    // accepts a bare usd leaf; const-on-left flips the op to the same [0, 5000) cents extent.
-    assert_eq!(super::usd_bare_range_bounds(&usd_cmp(CmpOp::Lt, 50.0)), Some((0, 5000)));
-    assert_eq!(
-        super::usd_bare_range_bounds(&FilterExpr::NumericCmp { lhs: NumExpr::Const(50.0), op: CmpOp::Gt, rhs: NumExpr::Field(NumField::PriceUsd) }),
-        Some((0, 5000)),
-    );
-    // rejects: Ne (never narrows), cmc (card-space), cn (PR 3), and the range+range compound.
-    assert!(super::usd_bare_range_bounds(&usd_cmp(CmpOp::Ne, 50.0)).is_none());
-    assert!(super::usd_bare_range_bounds(&FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Cmc), op: CmpOp::Lt, rhs: NumExpr::Const(3.0) }).is_none());
-    assert!(super::usd_bare_range_bounds(&cn_lt()).is_none());
-    assert!(super::usd_bare_range_bounds(&FilterExpr::And(vec![usd_cmp(CmpOp::Lt, 50.0), cn_lt()])).is_none());
 }
 
 /// PR 2a build-cost split: for `usd<50`, which half of `CardRangePopcount`'s build dominates —

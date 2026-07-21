@@ -3916,42 +3916,30 @@ fn bare_range_bounds<'i>(
     }
 }
 
-/// The exact half-open `[lo, hi)` a *bare* `usd` range leaf selects over the price index, or None
-/// for anything else. PR 2a's `CardRangePopcount` is deliberately scoped to price only; `cn`/`date`
-/// share the machinery and are a trivial follow-on (PR 3) — widen this to delegate to
-/// `bare_range_bounds` then. Value snapping matches `narrow_rec`'s `price` closure so the fast path
-/// and the general path can never disagree on which printings the predicate covers. Bounds are
-/// exact (price is integer cents, #688), so the direct slice `idx[lo..hi)` is a *tight* set — the
-/// property that lets its card-existence popcount stand in for the count pass without re-verifying.
-fn usd_bare_range_bounds(filter: &FilterExpr) -> Option<(u32, u32)> {
-    let FilterExpr::NumericCmp { lhs, op, rhs } = filter else { return None };
-    let (op, value) = match (lhs, rhs) {
-        (NumExpr::Field(NumField::PriceUsd), NumExpr::Const(v)) => (*op, snap_to_nearest_cent(*v * PRICE_CENTS_PER_DOLLAR)),
-        (NumExpr::Const(v), NumExpr::Field(NumField::PriceUsd)) => (flip_op(*op), snap_to_nearest_cent(*v * PRICE_CENTS_PER_DOLLAR)),
-        _ => return None,
-    };
-    match int_range_bounds(op, value)? {
-        None => Some((0, 0)), // provably empty: zero-width slice, popcount resolves to 0
-        Some((lo, hi)) => Some((lo, hi)),
-    }
-}
-
-/// Build `CardRangePopcount`'s two bitmaps from an exact `usd` range slice, in a single pass: the
-/// tight printing-space membership set (`range_pbits`, set directly from the value-sorted slice —
-/// never the loose complement `range_narrowed` would pick for a broad range, which over-includes
-/// NULL-priced printings) and its card-existence projection (`card_bits`, each printing's card via
-/// the `printing_to_card` direct array, #690). The card bitmap's popcount is the exact `unique=card`
-/// total; the printing bitmap is the per-printing residual emission re-checks so the representative
-/// printing it shows genuinely satisfies the range.
+/// Build `CardRangePopcount`'s two bitmaps from an exact range slice — `bare_range_bounds` supplies
+/// the index + half-open `[lo, hi)` for whichever range family the leaf is (usd/cn/date) — in a
+/// single pass: the tight printing-space membership set (`range_pbits`, set directly from the
+/// value-sorted slice — never the loose complement `range_narrowed` would pick for a broad range,
+/// which over-includes index-absent printings) and its card-existence projection (`card_bits`, each
+/// printing's card via the `printing_to_card` direct array, #690). The card bitmap's popcount is the
+/// exact `unique=card` total; the printing bitmap is the per-printing residual emission re-checks so
+/// the representative printing it shows genuinely satisfies the range. All three indexes are exact
+/// (price is integer cents #688; cn/date are natively integer), so the slice is tight.
 ///
 /// One fused pass rather than scatter-then-`printing_bits_to_card_bits`: the projection over the
 /// scattered bitmap is the expensive half (a `trailing_zeros` extraction per set bit plus a cursor
 /// branch across every word), and folding it into the scatter loop via a direct `printing_to_card`
 /// lookup measured ~40% cheaper on `usd<50` (~174µs → ~104µs; see `card_range_build_cost_split`),
-/// even though the price-ordered slice makes those lookups random. Bare range only
+/// even though the value-ordered slice makes those lookups random. Bare range only
 /// (`card_range_popcount_applicable` requires no plane), so there is nothing to AND.
-fn build_card_range_bits(lo: u32, hi: u32, indexes: &Archived<CardIndexes>, n_cards: usize, n_printings: usize) -> (Vec<u64>, Vec<u64>) {
-    let idx = &indexes.price_usd;
+fn build_card_range_bits(
+    idx: &Archived<PrintingRangeIndex>,
+    lo: u32,
+    hi: u32,
+    indexes: &Archived<CardIndexes>,
+    n_cards: usize,
+    n_printings: usize,
+) -> (Vec<u64>, Vec<u64>) {
     let ptc = &indexes.printing_to_card;
     let s = idx.partition_point(|p| u32::from(p.0) < lo);
     let e = idx.partition_point(|p| u32::from(p.0) < hi);
@@ -4341,9 +4329,9 @@ fn printing_range_scan_applicable(mode: Mode, plane: Option<&PlaneExpr>, cards: 
     *PRINTING_RANGE_FASTPATH != 0 && matches!(mode, Mode::Printing) && plane.is_none() && !cards.is_empty()
 }
 
-/// `CardRangePopcount` needs `Mode::Card`, a **bare** `usd` range as the whole filter (no plane), and
-/// both sort permutations. `plane.is_none()` is deliberate and load-bearing, on both correctness and
-/// perf grounds:
+/// `CardRangePopcount` needs `Mode::Card`, a **bare** range leaf as the whole filter — usd/cn/date,
+/// whatever `bare_range_bounds` recognizes (no plane) — and both sort permutations. `plane.is_none()`
+/// is deliberate and load-bearing, on both correctness and perf grounds:
 /// - *correctness:* an existential legality plane (`usd<50 f:modern`) would make the card-existence
 ///   AND exact only when the attribute never diverges across a card's printings — a data coincidence
 ///   the engine refuses to bank on (docs/issues/00667-engine-legality-divergent-carveout.md); those
@@ -4353,7 +4341,9 @@ fn printing_range_scan_applicable(mode: Mode, plane: Option<&PlaneExpr>, cards: 
 ///   regardless — measured a net loss. So a narrowing plane means don't bother; only the bare range,
 ///   where the alternative is a full scan of a ~99%-broad set, is worth the build.
 ///
-/// The bare-`usd`-leaf shape also excludes range+range (`usd<50 cn<100` is an `And`, not a bare leaf).
+/// The bare-leaf shape also excludes range+range (`usd<50 cn<100` is an `And`, not a bare leaf):
+/// composing two printing-varying ranges is a shared-witness case (`∃p: usd(p) ∧ cn(p)`) that must
+/// AND in *printing* space and project once — the printing-space plane's structure, not this one's.
 fn card_range_popcount_applicable(
     filter: &FilterExpr,
     mode: Mode,
@@ -4367,7 +4357,7 @@ fn card_range_popcount_applicable(
         && matches!(mode, Mode::Card)
         && !cards.is_empty()
         && plane.is_none()
-        && usd_bare_range_bounds(filter).is_some()
+        && bare_range_bounds(filter, indexes).is_some()
         && indexes.sort_perms.get(sort_col, descending).is_some_and(|p| p.len() == cards.len())
         && indexes.sort_perms.get_inv(sort_col, descending).is_some()
 }
@@ -4860,8 +4850,8 @@ fn run_query_routed<'a>(
         // scan of a near-total set, which reliably loses, so the eager build is rarely wasted: only a
         // narrow range routes elsewhere, and there k (hence the build) is small. If a materializing
         // plan does win, dispatch reads the same bitmap back as a candidate list.
-        let (lo, hi) = usd_bare_range_bounds(filter).expect("applicable ⇒ bare usd range");
-        let (card_bits, range_pbits) = build_card_range_bits(lo, hi, indexes, n_cards as usize, n_printings as usize);
+        let (idx, lo, hi) = bare_range_bounds(filter, indexes).expect("applicable ⇒ bare range");
+        let (card_bits, range_pbits) = build_card_range_bits(idx, lo, hi, indexes, n_cards as usize, n_printings as usize);
         let count: u32 = card_bits.iter().map(|w| w.count_ones()).sum();
         // Slice size (in-range printings) drives the build term — the plan's dominant cost.
         let slice_printings: u32 = range_pbits.iter().map(|w| w.count_ones()).sum();
@@ -4994,8 +4984,8 @@ fn run_query_with_plan<'a>(
             if !card_range_popcount_applicable(filter, mode, cards, plane, sort_col, descending, indexes) {
                 return None;
             }
-            let (lo, hi) = usd_bare_range_bounds(filter).expect("applicability guarantees a bare usd range");
-            let (card_bits, range_pbits) = build_card_range_bits(lo, hi, indexes, cards.len(), printings.len());
+            let (idx, lo, hi) = bare_range_bounds(filter, indexes).expect("applicability guarantees a bare range");
+            let (card_bits, range_pbits) = build_card_range_bits(idx, lo, hi, indexes, cards.len(), printings.len());
             Some(exec_card_range_popcount(
                 cards, printings, offsets, strings, prefer, sort_col, descending, limit, page_offset, indexes, &card_bits, &range_pbits,
             ))
