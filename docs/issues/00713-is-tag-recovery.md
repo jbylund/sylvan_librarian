@@ -78,13 +78,17 @@ Confidence: ✓ = definition doc-confirmed / measured; ~ = approximate, **valida
 | `is:old` / `frame:old` | `(frame:1993 or frame:1997)` | ✓ |
 | `is:new` | `frame:2015` | ✓ |
 | `frame:new` | `frame:2003 or frame:2015 or frame:future` (undocumented alias; positive union — matches the validated Scryfall count and is safe against any frameless printing, unlike a `-(old)` complement) | ✓ |
-| `is:split`/`is:flip`/`is:transform`/`is:dfc`/`is:mdfc`/`is:meld`/`is:leveler` | `card_layout` value | ✓ |
-| `is:spell` / `is:permanent` / `is:historic` | type-line predicate | ✓ |
-| `is:party` / `is:outlaw` | subtype set | ✓ |
+| `is:historic` | `t:legendary or t:artifact or t:saga` | ✓ **exact** (7881=7881) |
+| `is:permanent` | `t:creature or t:artifact or t:enchantment or t:land or t:planeswalker or t:battle` | ✓ near-exact (+2 / 25954) |
+| `is:split`/`is:flip`/`is:transform`/`is:mdfc`/`is:meld`/`is:leveler` | `layout:<value>` (`card_layout` is ingested + `layout:` is queryable; exact by field correspondence) | ✓ |
+| `is:spell` | `-t:land` | ~ (+85 / 32069 — not every non-land is castable) |
+| `is:party` | `t:creature (t:cleric or t:rogue or t:warrior or t:wizard or kw:changeling)` | ✓ **exact** (3820) — `kw:changeling` (→ `card_keywords`) recovers the all-type creatures |
+| `is:outlaw` | `(t:assassin or t:mercenary or t:pirate or t:rogue or t:warlock or kw:changeling)` — **no** `t:creature` (unlike party: includes Kindred non-creatures) | ✓ **exact** (1334) |
+| `is:dfc` | `layout:transform or layout:modal_dfc` (double-faced union; verify) | ~ |
 | `is:bear` | `t:creature pow=2 tou=2 mv=2` (~10-card residual, see above) | ~ |
 | `is:hybrid` / `is:phyrexian` | mana-cost symbol test (`mana_cost_jsonb`) | ~ |
 | `is:colorshifted` | `frame:colorshifted` (frame-effect in `card_frame_data`) | ~ |
-| `is:vanilla` | `t:creature -o:/./` (NOT `o:""`/`o:/^$/` — the empty-match regex matches *all* creatures); 348 vs 359, residual = Adventure/DFC faces + Dryad Arbor | ~ |
+| `is:vanilla` | our engine: `t:creature o=""` (empty-string equality — clean; the `o:/^$/` empty-match regex is a Scryfall-only trap that matches *all* creatures); −11 subset vs 359 = Adventure/DFC textless faces + Dryad Arbor | ~ |
 | `has:watermark` | `card_watermark` present | ✓ |
 
 Not cleanly rewritable (text-pattern / fuzzy — defer or approximate): `is:frenchvanilla`,
