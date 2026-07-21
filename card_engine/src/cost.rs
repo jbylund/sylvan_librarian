@@ -214,7 +214,11 @@ pub(crate) fn plan_cost(plan: PhysicalPlan, f: &PlanFeatures) -> f64 {
             let match_rate = (matches / n_printings).max(MATCH_RATE_FLOOR);
             (page_span / match_rate) * RANGE_WALK_STEP_NS + RANGE_FIXED_COST_NS
         }
-        PhysicalPlan::PlanePopcountOrder => {
+        // CardRangePopcount runs the identical popcount-skip order phase as PlanePopcountOrder; its
+        // only extra work is building the range's card-existence bitmap in acquire (O(n_printings),
+        // small and paid before this cost is consulted), so it shares the formula. `matches` is the
+        // card-existence popcount either way.
+        PhysicalPlan::PlanePopcountOrder | PhysicalPlan::CardRangePopcount => {
             matches * PLANE_POPCOUNT_SCATTER_PER_MATCH_NS
                 + (n_cards / 64.0) * PLANE_POPCOUNT_PER_WORD_NS
                 + limit * PLANE_POPCOUNT_EMIT_PER_CARD_NS

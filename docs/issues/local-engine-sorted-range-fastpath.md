@@ -260,11 +260,21 @@ Ordered by dependency and risk; magnitudes are from PR #689's interleaved-A/B me
   *Measured* (same-build off vs on, 97,206-printing corpus, min ms): `usd<50` 0.75→0.04,
   `cn<100` 0.87→0.04, `year>2020` 0.74→0.04, aligned `usd<50 order by usd` 1.06→0.05
   (−90 to −95%); card/artwork/compound/selective controls flat; broad survey unchanged.
-- [ ] **PR 2a — Idea 2, `PrintingRangeBits` for `usd`, `unique=card`.** Project via
-  `printing_to_card` → card existence bitmap → popcount total → streamed-popcount page. Bundles the
-  `must_be_tight` correctness fix (inseparable — the bug is created by this path).
-  *Impacts:* `usd<50`/card, `usd` AND a composable plane (`usd<50 f:modern`), deep-page card.
-  *Magnitude:* −43%. *Depends:* —. *Risk:* med — new plane variant + a bundled correctness fix.
+- [x] **PR 2a — Idea 2, `usd`, `unique=card`** — shipped as the `CardRangePopcount` plan. A bare
+  `usd` range projects its exact direct-slice printings → card-existence bitmap → popcount total →
+  the #634 streamed-popcount page (range membership threaded into emission so the shown printing is
+  in range). The `must_be_tight` idea landed as *building the direct slice ourselves* (always tight)
+  rather than trusting `range_narrowed`'s loose broad complement.
+  *Measured* (97,206-printing corpus, `limit=100`, min ms, kill-switch off→on): `usd<50`/card
+  0.339→0.214 (1.58×), offset 700 0.348→0.218 (1.60×), `usd<2` 0.463→0.185 (2.51×), and up to 5.9×
+  on the broad survey (`usd<0.25` 0.730→0.123). 0 total-parity mismatches across the targeted set and
+  the 520-query survey; calibration 88/88 gold; no control regressions.
+  **Scope narrowed from the original plan, on measurement:** *bare* range only. Composable-plane
+  compounds (`usd<50 c:g`) were dropped — the plane already narrows them, so the existing path is
+  faster than building the whole range bitmap (measured a regression when forced). Existential
+  (`usd<50 f:modern`) and range+range (`usd<50 cn<100`) are excluded on **correctness** grounds
+  (shared-witness / legality divergence — printing-space's job, not card-space). *Depends:* —.
+  *Gate:* `CARD_ENGINE_RANGE_BITS_CARD` A/B.
 - [ ] **PR 3 — extend Idea 2 to `collector_number` + `released_at`.** Same machinery as 2a, new
   `DateCmp`/`YearCmp`/`cn` arms.
   *Impacts:* `cn`/`year`/`date` under `unique=card` (+ their compounds). *Magnitude:* −46% to −78%.
