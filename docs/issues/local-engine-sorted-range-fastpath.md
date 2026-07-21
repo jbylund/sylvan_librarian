@@ -279,10 +279,14 @@ Ordered by dependency and risk; magnitudes are from PR #689's interleaved-A/B me
   (`usd<50 f:modern`) and range+range (`usd<50 cn<100`) are excluded on **correctness** grounds
   (shared-witness / legality divergence — printing-space's job, not card-space). *Depends:* —.
   *Gate:* `CARD_ENGINE_RANGE_BITS_CARD` A/B.
-- [ ] **PR 3 — extend Idea 2 to `collector_number` + `released_at`.** Same machinery as 2a, new
-  `DateCmp`/`YearCmp`/`cn` arms.
-  *Impacts:* `cn`/`year`/`date` under `unique=card` (+ their compounds). *Magnitude:* −46% to −78%.
-  *Depends:* 2a. *Risk:* low.
+- [x] **PR 3 — extend `CardRangePopcount` to `collector_number` + `released_at`** — shipped. The
+  gate became `bare_range_bounds` (already returns index + `[lo,hi)` for usd/cn/date), and
+  `build_card_range_bits` takes the index rather than hardcoding `price_usd`; `usd_bare_range_bounds`
+  removed. No new plan, no new correctness surface (cn/date are printing-varying integer ranges like
+  usd). *Measured* (off→on): `cn<100`/card 0.589→0.088 (**6.66×**), offset 700 6.47×, `year>=2015`
+  0.416→0.124 (3.36×), `year<2005` 0.280→0.064 (4.40×); usd unchanged; 0 parity mismatches;
+  calibration 88/88 gold. *Compounds still excluded* (bare-leaf gate) — they're the printing-space
+  plane's job (compose in printing space, project once).
 - [ ] **PR 4 — compound-query structural pre-checks** (`has_conflicting_range_families`,
   `contains_range_family_leaf`): skip a `compile_plane` fold that will be discarded, for 2+
   existential leaves in one `And` and for range leaves under `unique=printing`/`artwork`.

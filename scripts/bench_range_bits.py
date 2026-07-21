@@ -47,6 +47,11 @@ CONFIGS: list[tuple[str, str, str, str, int]] = [
     ("target-usd-card", "usd<50", "card", "edhrec", 0),
     ("target-usd-card", "usd<50", "card", "edhrec", 700),
     ("target-usd-card", "usd<2", "card", "edhrec", 0),
+    # PR 3: cn/date bare ranges, same plan
+    ("target-cn-date", "cn<100", "card", "edhrec", 0),
+    ("target-cn-date", "cn<100", "card", "edhrec", 700),
+    ("target-cn-date", "year>=2015", "card", "edhrec", 0),
+    ("target-cn-date", "year<2005", "card", "edhrec", 0),
     ("target-usd-plane", "usd<50 f:modern", "card", "edhrec", 0),
     ("target-usd-plane", "usd<50 t:creature", "card", "edhrec", 0),
     ("target-usd-plane", "usd<50 c:g", "card", "edhrec", 0),
