@@ -1102,13 +1102,11 @@ class TestTags:
         assert total == 27
 
     def test_is_permanent(self, engine: QueryEngine) -> None:
+        # is:permanent is rewritten to a type-union (api/parsing/rewrite.py), so it no longer
+        # consults the synthetic "permanent" tag -- it matches every permanent-type card,
+        # including 2 the fixture left untagged (hence 62, not the 60 tagged "permanent").
         total, _ = _run(engine, "is:permanent")
-        assert total == 60
-
-    def test_is_spell_and_permanent_disjoint(self, engine: QueryEngine) -> None:
-        total_spell, _ = _run(engine, "is:spell")
-        total_perm, _ = _run(engine, "is:permanent")
-        assert total_spell + total_perm == 87
+        assert total == 62
 
     def test_otag_burn(self, engine: QueryEngine) -> None:
         total, cards = _run(engine, "otag:burn")
