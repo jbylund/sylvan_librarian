@@ -62,6 +62,12 @@ _DERIVED_EXPANSIONS: dict[tuple[str, str], str] = {
     ("is", "dfc"): "layout:transform or layout:modal_dfc or layout:meld",
     # Frame-effect (stored in card_frame_data). is:colorshifted == frame:colorshifted exactly (45).
     ("is", "colorshifted"): "frame:colorshifted",
+    # Oracle-text heuristic for creature-lands: 48/49 vs Scryfall, 0 false positives (clean
+    # subset). Its one Scryfall miss (Rising Chicane) is Alchemy-only and absent from our corpus,
+    # so this is effectively exact on our data. `o:become` (substring), NOT `o:becomes` -- the
+    # looser form also catches Crawling Barrens ("they become a 0/0 ..."). The "still a land"
+    # clause is what keeps false positives at zero.
+    ("is", "manland"): "t:land o:become o:creature o:/still a.* land/",
 }
 
 

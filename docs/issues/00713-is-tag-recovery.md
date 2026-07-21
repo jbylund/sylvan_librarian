@@ -88,10 +88,11 @@ Confidence: ✓ = definition doc-confirmed / measured; ~ = approximate, **valida
 | `is:bear` | `t:creature pow=2 tou=2 cmc=2` — the intuitive "2/2 for 2"; deliberately *not* Scryfall-exact (+~14 DFC creatures, −4 Vehicles/Spacecraft; their exact count isn't cross-verifiable) | ~ |
 | `is:colorshifted` | `frame:colorshifted` (frame-effect in `card_frame_data`) | ✓ **exact** (45) |
 | `is:vanilla` | our engine: `t:creature o=""` (empty-string equality — clean; the `o:/^$/` empty-match regex is a Scryfall-only trap that matches *all* creatures); −11 subset vs 359 = Adventure/DFC textless faces + Dryad Arbor | ~ |
+| `is:manland` | `t:land o:become o:creature o:/still a.* land/` — creature-land oracle-text heuristic; 48/49 vs Scryfall, 0 false positives, and its only miss (Alchemy-only Rising Chicane) is absent from our corpus → effectively exact here | ~ |
 | `has:watermark` | `card_watermark` present | ✓ |
 
 Not cleanly rewritable (text-pattern / fuzzy — defer or approximate): `is:frenchvanilla`,
-`is:manland`, `is:modal`, `is:default`/`is:atypical`.
+`is:modal`, `is:default`/`is:atypical`.
 
 ### B — Build-time bit (derive from ingested data, no external source)
 
@@ -144,9 +145,9 @@ none touching the #702 engine-routing branch:
    seam (applies to both parsers; parity-tested; rebuilds only when a synonym actually fires), with
    `frame:modern/old/new`, `is:old`/`is:new`, `is:historic`/`is:permanent`/`is:party`/`is:outlaw`/
    `is:vanilla`/`is:bear`, the layout family (`is:split/flip/transform/mdfc/meld/leveler`),
-   `is:dfc`, and `is:colorshifted`, plus `test_rewrite.py`. **Bucket A is now complete** except the
-   inherently-unsuitable ones, left deferred: `is:spell` (false positives), `is:modal`,
-   `is:frenchvanilla`, `is:default`/`is:atypical`, `is:manland`. `is:hybrid`/`is:phyrexian` moved to
+   `is:dfc`, `is:colorshifted`, and `is:manland`, plus `test_rewrite.py`. **Bucket A is now complete**
+   except the inherently-unsuitable ones, left deferred: `is:spell` (false positives), `is:modal`,
+   `is:frenchvanilla`, `is:default`/`is:atypical`. `is:hybrid`/`is:phyrexian` moved to
    B (ingest flag — no clean rewrite).
 2. **`is:reprint` build-time bit** (B) — one derivation, common predicate, currently broken.
 3. **Ingest the dropped boolean fields** (C) — recovers promo/reserved/digital/foil/etc. as normal

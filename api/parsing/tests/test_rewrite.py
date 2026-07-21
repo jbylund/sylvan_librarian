@@ -33,6 +33,7 @@ EQUIVALENCES = [
     ("is:leveler", "layout:leveler"),
     ("is:dfc", "layout:transform or layout:modal_dfc or layout:meld"),
     ("is:colorshifted", "frame:colorshifted"),
+    ("is:manland", "t:land o:become o:creature o:/still a.* land/"),
     # composes under negation and inside compounds
     ("-frame:old", "-(frame:1993 or frame:1997)"),
     ("t:goblin frame:modern", "t:goblin frame:2003"),
@@ -40,13 +41,21 @@ EQUIVALENCES = [
 ]
 
 
-@pytest.mark.parametrize(("synonym", "expansion"), EQUIVALENCES, ids=[s for s, _ in EQUIVALENCES])
+@pytest.mark.parametrize(
+    argnames=["synonym", "expansion"],
+    argvalues=EQUIVALENCES,
+    ids=[s for s, _ in EQUIVALENCES],
+)
 def test_synonym_expands_to_canonical(parse_query, synonym: str, expansion: str) -> None:
     """Each synonym parses to the same AST as its hand-written expansion (both parsers)."""
     assert parse_query(synonym) == parse_query(expansion)
 
 
-@pytest.mark.parametrize(("synonym", "expansion"), EQUIVALENCES, ids=[s for s, _ in EQUIVALENCES])
+@pytest.mark.parametrize(
+    argnames=["synonym", "expansion"],
+    argvalues=EQUIVALENCES,
+    ids=[s for s, _ in EQUIVALENCES],
+)
 def test_synonym_generates_same_sql(synonym: str, expansion: str) -> None:
     """The rewrite is real end-to-end: synonym and expansion emit identical SQL + params."""
     assert generate_sql_query(parse_scryfall_query(synonym)) == generate_sql_query(parse_scryfall_query(expansion))
