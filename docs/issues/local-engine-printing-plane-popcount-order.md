@@ -151,9 +151,14 @@ range+range gap proves worth closing.
   of [done/00702](done/00702-engine-plan-selection-layer.md).
 - **`unique=artwork` needs a global artwork id** (`printing_to_artwork`/`artwork_to_card`, PR 2b —
   another archive bump) before the plane can popcount over artwork ids.
-- **Frequency, not feasibility.** Deep-paged broad-range printing is a cold corner (the #702 survey
-  confirmed); the compound range+range gap is a real but rare ~1.07 ms. This is deferred on
-  cost/benefit, and it is the kind of latent win the planner exists to make cheap to add later.
+- **Frequency — and the generalization changes the calculus.** Feasibility was never the question;
+  this was deferred on cost/benefit. But that estimate was made against the *range-only* framing,
+  where deep-paged broad ranges and compound range+range are a cold corner the #702 survey confirmed.
+  The existential (`f:modern`/printing) and especially the **mixed-compound** (`f:modern c:green`)
+  targets are *common* query shapes — `f:modern` + other filters is a heavily-used pattern in
+  practice — not a rare corner. So the broadened plan is worth materially more than the deferred
+  range-only idea-2 was; the re-estimate, not any new feasibility question, is the reason to revisit
+  the deferral. Still gated on #656.
 
 ## Related
 
