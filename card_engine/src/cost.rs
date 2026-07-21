@@ -66,7 +66,7 @@ pub(crate) struct PlanFeatures {
     /// Distinct printings in the corpus (printing-space universe).
     pub n_printings: u32,
     /// Result cardinality in the plan's operating space (card total for card
-    /// mode, printing total for printing mode). Use measured truth here.
+    /// mode, printing total for printing/artwork mode). Use measured truth here.
     pub matches: u32,
     /// Candidate CARDS the loop iterates (one `card_pass` each): the narrowed
     /// candidate count when `prepare_candidates` produced a list, else `n_cards`.

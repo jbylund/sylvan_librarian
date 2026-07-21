@@ -4157,10 +4157,11 @@ enum Prep {
     /// Bare printing range: features come from the range index's exact `k` (a
     /// binary search, no scan). Nothing is materialized — `PrintingRangeScan`
     /// walks; a materializing winner materializes for itself in dispatch. `Plane`
-    /// carries no bitmap because it lives in the caller's reused thread-local
-    /// (`ROUTED_PLANE_BITMAP`), which dispatch reads directly.
+    /// carries no bitmap here because `run_query_routed` owns it locally
+    /// (`plane_bits: Vec<u64>`), passed by reference into dispatch.
     Range,
-    /// True-residual plane (card): the exact match bitmap (in the thread-local).
+    /// True-residual plane (card): the exact match bitmap, owned by
+    /// `run_query_routed`'s local `plane_bits` and passed by reference.
     /// `PlanePopcountOrder` reads it directly; P3/P4 read it as a candidate list.
     Plane,
     /// The general residual path: a materialized candidate list.
