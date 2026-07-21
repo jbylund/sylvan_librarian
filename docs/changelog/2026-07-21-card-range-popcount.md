@@ -1,23 +1,27 @@
 # Card-mode fast path for bare `usd` range queries (#725)
 
 A bare price range under `unique=card` (e.g. `usd<50`, the default unique mode) is now answered by a
-new `CardRangePopcount` plan instead of a full scan with a per-card count pass. The range's exact
-printing slice is projected to a card-existence bitmap whose **popcount is the exact total** (no count
-pass), and the page is read off the existing sort permutation — the same popcount-skip order phase the
-plane plan (#634) already uses, fed a range-derived bitmap rather than a precomputed plane.
+new `CardRangePopcount` plan instead of a full scan with a per-card count pass. In one pass over the
+range's exact printing slice it builds a card-existence bitmap (each printing's card via the
+`printing_to_card` direct array) whose **popcount is the exact total** (no count pass), and the page
+is read off the existing sort permutation — the same popcount-skip order phase the plane plan (#634)
+already uses, fed a range-derived bitmap rather than a precomputed plane.
 
 Measured on the 97,206-printing corpus (`limit=100`, min of an 8 s window, same build, kill-switch
 off vs on):
 
 | query | before | after | speedup |
 |---|---:|---:|---:|
-| `usd<50` / card | 0.339 ms | 0.214 ms | 1.58× |
-| `usd<50` / card, offset 700 | 0.348 ms | 0.218 ms | 1.60× |
-| `usd<2` / card | 0.463 ms | 0.185 ms | 2.51× |
+| `usd<50` / card | 0.340 ms | 0.143 ms | 2.38× |
+| `usd<50` / card, offset 700 | 0.345 ms | 0.144 ms | 2.38× |
+| `usd<2` / card | 0.457 ms | 0.131 ms | 3.48× |
 
 Offset-flat, because the cost was always the count pass, not the paging. Totals are byte-identical
 off vs on across the targeted set (the parity guard), and the broad 520-query survey and the 88-query
-cost calibration are unchanged.
+cost calibration are unchanged. The build is a single fused pass (scatter the printing bitmap and set
+the card bit together) rather than scatter-then-project — a kernel bench showed the projection was
+the expensive half, and fusing it is ~40% cheaper (it's most of the query cost, since there is no
+precomputed structure — a persisted printing bitplane would be the next step, cf. #724).
 
 ## Scope
 

@@ -266,9 +266,13 @@ Ordered by dependency and risk; magnitudes are from PR #689's interleaved-A/B me
   in range). The `must_be_tight` idea landed as *building the direct slice ourselves* (always tight)
   rather than trusting `range_narrowed`'s loose broad complement.
   *Measured* (97,206-printing corpus, `limit=100`, min ms, kill-switch off→on): `usd<50`/card
-  0.339→0.214 (1.58×), offset 700 0.348→0.218 (1.60×), `usd<2` 0.463→0.185 (2.51×), and up to 5.9×
-  on the broad survey (`usd<0.25` 0.730→0.123). 0 total-parity mismatches across the targeted set and
-  the 520-query survey; calibration 88/88 gold; no control regressions.
+  0.340→0.143 (2.38×), offset 700 0.345→0.144 (2.38×), `usd<2` 0.457→0.131 (3.48×). 0 total-parity
+  mismatches across the targeted set and the 520-query survey; calibration 88/88 gold; no control
+  regressions. The build is a single fused pass (scatter printing bit + set card bit via
+  `printing_to_card` together): a kernel bench (`card_range_build_cost_split`) found the
+  scatter-then-project's *projection* was the expensive half (143µs vs 30µs on `usd<50`), and fusing
+  it is ~40% cheaper (174µs→104µs) — that build is most of the query cost, so a persisted printing
+  bitplane (#724) would be the next lever.
   **Scope narrowed from the original plan, on measurement:** *bare* range only. Composable-plane
   compounds (`usd<50 c:g`) were dropped — the plane already narrows them, so the existing path is
   faster than building the whole range bitmap (measured a regression when forced). Existential
