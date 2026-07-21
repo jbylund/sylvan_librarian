@@ -2340,6 +2340,7 @@ struct CardData {
 /// whose word-wise ops cost O(n/64) regardless of density. Narrowing is
 /// advisory (the driver re-verifies), so converting between spaces or
 /// representations can only loosen or tighten candidates, never change results.
+#[derive(Debug)]
 enum Candidates {
     Cards(Vec<u32>),
     Printings(Vec<u32>),
@@ -2640,6 +2641,13 @@ fn tight_narrow_space(f: &FilterExpr) -> Option<bool> {
         FilterExpr::ExactName(_) => Some(false),
         // 2-byte name needles resolve exactly through the bigram index.
         FilterExpr::TextContains { field: TextSearchField::NameLower, word } if word.len() == 2 => Some(false),
+        // Ge-only guard is deliberate (#700): narrow_rec's CollectionCmp arm
+        // now also narrows Eq/Gt through the same containment postings, but
+        // only loosely — the postings prove `contains(value)`, not the
+        // length condition Eq/Gt additionally require — so they must stay
+        // out of this classifier. Falling through to `None` below for them is
+        // correct: Not's complement trick is only sound over tight sets, and
+        // Eq/Gt never produce one.
         FilterExpr::CollectionCmp { field, op: CmpOp::Ge, .. } => {
             Some(matches!(field, CollField::ArtTags | CollField::IsTags | CollField::FrameData))
         }
@@ -3034,7 +3042,22 @@ fn narrow_rec(
             }
         }
 
-        FilterExpr::CollectionCmp { field, op, value, .. } if matches!(op, CmpOp::Ge) => {
+        // Ge/Eq/Gt all resolve `matches()` through the same `contains(value)`
+        // test on the collection, per its `coll == {value}` (Eq) and proper-
+        // superset (Gt) definitions — Eq and Gt are strict *subsets* of what
+        // Ge (plain containment) matches, since both additionally require a
+        // length condition (`len == 1` / `len > 1`) that containment alone
+        // doesn't decide. So the same postings this arm already gathers for
+        // `:` are a valid — if not exact — candidate superset for `=`/`>`
+        // too: every Eq/Gt match is also a Ge match, so it's guaranteed to
+        // show up in these postings, just alongside cards the length check
+        // will still need to reject. `narrow_rec`'s driver always re-verifies
+        // with `matches()` regardless of tightness (see `Candidates`'/
+        // `Narrowed`'s doc comments), so declaring the postings loose for
+        // Eq/Gt is enough to stay correct — no separate index for the length
+        // condition is needed. (#700; Le/Lt/Ne genuinely can't reuse this —
+        // they're not expressible as `contains` plus a length check.)
+        FilterExpr::CollectionCmp { field, op, value, .. } if matches!(op, CmpOp::Ge | CmpOp::Eq | CmpOp::Gt) => {
             // `complete` marks indexes that post every occurrence of every
             // value — all of them except frame_data, whose dense values are
             // deliberately dropped at build (#628), so absence proves nothing
@@ -3047,11 +3070,18 @@ fn narrow_rec(
                 CollField::IsTags     => (&indexes.is_tags,     false, true),
                 CollField::FrameData  => (&indexes.frame_data,  false, false),
             };
+            // Ge's postings are exact for Ge itself; for Eq/Gt they're only a
+            // loose superset (they prove `contains(value)` but not the length
+            // condition), so the residual `matches()` check the driver always
+            // runs is load-bearing for those two ops.
+            let mk = |set| if matches!(op, CmpOp::Ge) { Narrowed::tight(set) } else { Narrowed::loose(set) };
             match idx.get(value.as_str()) {
-                // Ge is containment, so a value with no postings in a complete
-                // index matches no row: an exact empty narrowing, not "cannot
-                // narrow" — `is:permanent` spent 0.6 ms full-scanning to
-                // return zero results.
+                // A value with no postings in a complete index proves
+                // `contains(value)` false for every row, which makes Ge, Eq,
+                // and Gt all provably empty alike — no row can satisfy any of
+                // them without first satisfying containment. Exact for all
+                // three ops, not just Ge: `is:permanent` spent 0.6 ms
+                // full-scanning to return zero results.
                 None if complete => {
                     Narrowed::tight(if card_space { Candidates::Cards(Vec::new()) } else { Candidates::Printings(Vec::new()) })
                 }
@@ -3061,7 +3091,8 @@ fn narrow_rec(
                     // the range indexes guard against (is:spell is ~60k ids);
                     // past the fraction they scatter to a bitmap when
                     // something will consume it and decline otherwise. Every
-                    // posted row carries the tag, so both paths stay tight.
+                    // posted row carries the tag (Ge tight); Eq/Gt still need
+                    // the length check downstream (loose either way).
                     // Card-space lists need no guard — same argument as
                     // numeric_candidates.
                     if !card_space && range_too_broad_to_narrow(v.len(), n_printings) {
@@ -3069,10 +3100,10 @@ fn narrow_rec(
                             return None;
                         }
                         let bits = scatter_bits(v.iter().map(|x| u32::from(*x)), n_printings);
-                        return Narrowed::tight(Candidates::PrintingBits(bits));
+                        return mk(Candidates::PrintingBits(bits));
                     }
                     let ids: Vec<u32> = v.iter().map(|x| u32::from(*x)).collect();
-                    Narrowed::tight(if card_space { Candidates::Cards(ids) } else { Candidates::Printings(ids) })
+                    mk(if card_space { Candidates::Cards(ids) } else { Candidates::Printings(ids) })
                 }
             }
         }

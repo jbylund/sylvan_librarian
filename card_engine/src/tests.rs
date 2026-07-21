@@ -4,7 +4,7 @@ use super::{
     build_rarity_index, build_flavor_index, build_thresholded_tag_index, build_sort_permutations,
     assign_artwork_groups, build_bit_planes, build_divergent_ids, build_name_bigram_index, build_printing_to_card, flavor_fingerprint, flavor_match_sets,
     cards_of_printings, count_common_keywords, count_common_types,
-    build_artist_index, build_range_index, range_candidates, narrow_candidates, rarity_candidates,
+    build_artist_index, build_range_index, range_candidates, narrow_candidates, narrow_candidates_exact, rarity_candidates,
     range_too_broad_to_narrow, run_query, run_query_with_plan, PhysicalPlan, trigram_candidates, finalize_trigram_index, PrintingRangeIndex, NARROW_FLOOR,
     gathered_scan_applicable, streamed_select_applicable, plane_popcount_order_applicable, printing_range_scan_applicable,
     walk_printing_page, aligned_page, bare_range_bounds, printing_range_fastpath, sort_key_bits, orderby_to_col, SortCol, STREAM_MIN_MATCHES,
@@ -322,6 +322,64 @@ fn narrow_candidates_spaces() {
     match narrow_candidates(&and, archived, offsets, &[]) {
         Some(Candidates::Cards(v)) => assert_eq!(v, vec![1]),
         _ => panic!("mixed And must produce card-space candidates"),
+    }
+}
+
+// #700: Eq/Gt reuse the same containment postings Ge narrows through, but
+// loosely — narrow_candidates_exact must report the identical postings for
+// all three ops, tight only for Ge. Uses Keywords (card-space, complete) so
+// the exactness bit narrow_candidates_exact returns isn't itself masked by
+// the printing-space projection (that projection always reports loose,
+// which would hide the Ge-vs-Eq/Gt distinction this test is checking).
+#[test]
+fn narrow_candidates_eq_gt_reuse_ge_postings_loosely() {
+    let mut keywords: TagIndex = HashMap::new();
+    keywords.insert("Flying".to_string(), vec![1]);
+
+    // offsets for 2 cards with 2 printings each: printings 0-1 → card 0, 2-3 → card 1
+    let raw_offsets = vec![0u32, 2, 4];
+    let printing_to_card = build_printing_to_card(&raw_offsets);
+    let indexes = CardIndexes { keywords, printing_to_card, ..Default::default() };
+    let bytes = rkyv::to_bytes::<Error>(&indexes).expect("serialize");
+    let archived = rkyv::access::<Archived<CardIndexes>, Error>(&bytes).expect("access");
+    let offsets_bytes = rkyv::to_bytes::<Error>(&raw_offsets).expect("serialize offsets");
+    let offsets = rkyv::access::<Archived<Vec<u32>>, Error>(&offsets_bytes).expect("access offsets");
+
+    let coll = |op, value: &str| FilterExpr::CollectionCmp { field: CollField::Keywords, op, value: value.to_string(), value_id: None };
+
+    for op in [CmpOp::Eq, CmpOp::Gt] {
+        match narrow_candidates_exact(&coll(op, "Flying"), archived, offsets, &[]) {
+            (Some(Candidates::Cards(v)), tight) => {
+                assert_eq!(v, vec![1], "{op:?} must reuse Ge's exact postings as a candidate superset");
+                assert!(!tight, "{op:?} postings only prove containment, not the length condition — must narrow loose");
+            }
+            other => panic!("{op:?} must narrow via the containment index, got {other:?}"),
+        }
+    }
+    // Ge itself stays tight over the same postings.
+    match narrow_candidates_exact(&coll(CmpOp::Ge, "Flying"), archived, offsets, &[]) {
+        (Some(Candidates::Cards(v)), tight) => {
+            assert_eq!(v, vec![1]);
+            assert!(tight, "Ge's postings are exact containment, must stay tight");
+        }
+        other => panic!("Ge must narrow via the containment index, got {other:?}"),
+    }
+    // A value absent from a complete index proves the empty set for Eq/Gt
+    // too — no row can satisfy either without first satisfying containment.
+    for op in [CmpOp::Eq, CmpOp::Gt, CmpOp::Ge] {
+        match narrow_candidates_exact(&coll(op, "Trample"), archived, offsets, &[]) {
+            (Some(Candidates::Cards(v)), tight) => {
+                assert!(v.is_empty(), "{op:?} over an absent value narrows to the exact empty set");
+                assert!(tight, "{op:?} empty-postings narrowing is exact, not just advisory");
+            }
+            other => panic!("{op:?} over an absent value must narrow to empty, not decline, got {other:?}"),
+        }
+    }
+    // frame_data stays excluded for Eq/Gt too (#628: incomplete index, absence
+    // proves nothing), same as it already is for Ge.
+    let frame = |op| FilterExpr::CollectionCmp { field: CollField::FrameData, op, value: "zombie".to_string(), value_id: None };
+    for op in [CmpOp::Eq, CmpOp::Gt, CmpOp::Ge] {
+        assert!(narrow_candidates(&frame(op), archived, offsets, &[]).is_none(), "{op:?} over frame_data must decline, not narrow");
     }
 }
 
@@ -1464,8 +1522,12 @@ enum FuzzLeaf {
     // one of the fixed operand pairs in `fuzz_arith_pair` (kept as an id, not a stored NumExpr,
     // so FuzzLeaf stays Clone without NumExpr needing to be).
     Arith { shape: u8, op: CmpOp },
-    // Set-containment against a single value (`CollectionCmp`) — subtypes/keywords/tags. `Ge` (`:`)
-    // narrows via the tag index; other ops are residual. `value` resolves to a vocab id via bind.
+    // Set-containment against a single value (`CollectionCmp`) — subtypes/keywords/tags. `Ge` (`:`),
+    // `Eq` (`=`), and `Gt` (`>`) all narrow via the tag index (#700): all three require
+    // `contains(value)`, so the same postings serve as an exact candidate set for `Ge` and a loose
+    // superset for `Eq`/`Gt`, which still need a residual `matches()` check for the length condition
+    // (`len == 1` / `len > 1`) the postings alone don't decide. `Le`/`Lt`/`Ne` stay fully residual —
+    // not expressible as containment plus a length check. `value` resolves to a vocab id via bind.
     Collection { field: CollField, op: CmpOp, value: String },
     // Artist predicate: `TextContains(ArtistLower)` that bind() rewrites to `ArtistMatch` (printing-
     // space, CSR-indexed via the artist vocab). `word` is a lowercased artist name.
