@@ -78,6 +78,13 @@ folding later does with the text):
 Both parsers were verified to agree via the shared `TESTCASES` parity fixture
 (`implicit_and_cases.py`), which now includes bare accented words.
 
+## Known asymmetry (follow-up filed separately)
+
+Folding is currently symmetric: an accented query (`name:Éowyn`) folds to the same term as its
+unaccented spelling and would match an unaccented card too, if one existed with the same base
+name. See [00718-accent-sensitive-literal-recheck.md](00718-accent-sensitive-literal-recheck.md)
+(#718) for the planned fix — deliberately a separate follow-up PR rather than amending this one.
+
 ## Validation
 
 - `card_engine` unit test `accent_folded_name_search_matches_unaccented_query` (cargo test, debug +
