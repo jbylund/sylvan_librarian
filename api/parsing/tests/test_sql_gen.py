@@ -34,13 +34,33 @@ from api.parsing.card_query_nodes import (
         # Test field-specific : operator behavior
         (
             "name:lightning",
-            r"(lower(card.card_name) LIKE %(p_str_JWxpZ2h0bmluZyU)s)",
+            r"(lower(card.card_name_folded) LIKE %(p_str_JWxpZ2h0bmluZyU)s)",
             {"p_str_JWxpZ2h0bmluZyU": r"%lightning%"},
         ),
         (
             "name:'lightning bolt'",
-            r"(lower(card.card_name) LIKE %(p_str_JWxpZ2h0bmluZyVib2x0JQ)s)",
+            r"(lower(card.card_name_folded) LIKE %(p_str_JWxpZ2h0bmluZyVib2x0JQ)s)",
             {"p_str_JWxpZ2h0bmluZyVib2x0JQ": r"%lightning%bolt%"},
+        ),
+        # #649: fuzzy name: search folds diacritics and matches against card_name_folded,
+        # so an unaccented query still finds the accented card...
+        (
+            "name:eowyn",
+            r"(lower(card.card_name_folded) LIKE %(p_str_JWVvd3luJQ)s)",
+            {"p_str_JWVvd3luJQ": r"%eowyn%"},
+        ),
+        # ...and typing the accent folds to the exact same SQL/parameters.
+        (
+            'name:"éowyn"',
+            r"(lower(card.card_name_folded) LIKE %(p_str_JWVvd3luJQ)s)",
+            {"p_str_JWVvd3luJQ": r"%eowyn%"},
+        ),
+        # Exact match (!"...") deliberately stays accent-sensitive: it compares against
+        # the unfolded card_name, not card_name_folded.
+        (
+            '!"Éowyn"',
+            r"(lower(card.card_name) LIKE %(p_str_w6lvd3lu)s)",
+            {"p_str_w6lvd3lu": "éowyn"},
         ),
         ("cmc:3", "(card.cmc = %(p_int_Mw)s)", {"p_int_Mw": 3}),  # Numeric field uses exact equality
         ("power:5", "(card.creature_power = %(p_int_NQ)s)", {"p_int_NQ": 5}),  # Numeric field uses exact equality
