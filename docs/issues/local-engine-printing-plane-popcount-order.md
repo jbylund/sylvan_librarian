@@ -126,6 +126,36 @@ replaces the verify, so `f:modern border:black` should go from 0.75 ms to micros
 Non-target: **card mode** (served by the #667 card-space legality planes + card-space idea 2,
 PR 2a/3) — this plan is a printing/artwork thing.
 
+## Cost, and routing against today's plan
+
+This is a **new `PhysicalPlan`**, not a replacement. For `c:green border:black f:modern` the router
+has (at least) two applicable plans, and the #702 `argmin` picks the cheaper per query:
+
+- **narrow-and-verify (today):** narrow by the card-plane leaf(s), then verify the printing-varying
+  residual per candidate. Cost ≈ `candidates × (verify-tier × #printing-varying leaves)` — grows with
+  both the candidate count *and* the number of printing-varying conditions (which is why
+  `f:modern c:green` 0.082 ms → `f:modern border:black c:green` 0.224 ms).
+- **all-plane popcount (this plan):** project each card-plane leaf into printing space, `AND` all the
+  printing bitmaps, `popcount` the total, bit-walk the page. Cost ≈
+  - `Σ(printings of each projected card-plane)` — **projection, the distinguishing term** (∝ how many
+    card-planes must be broadcast, each O(its matching printings));
+  - `#planes × words` — the ANDs;
+  - `words` — the `popcount`;
+  - `(offset+limit)/match_rate` — the page bit-walk (idea-1's walk term).
+
+The point: the all-plane cost is **independent of the candidate count and of the number of
+printing-varying leaves** (each is just one more O(words) AND), whereas narrow-and-verify scales with
+both. So the `argmin` flips to the all-plane plan exactly as printing-varying leaves multiply or the
+candidate set stays large — the crossover the measured 0.082 → 0.224 ms jump previews, expressed as a
+cost comparison rather than a hand-tuned threshold. Adding the plan is declaring its `applicable`,
+this `plan_cost`, and an executor arm; the #702 router does the selection.
+
+This is one plan across the whole target set, not several: `f:modern border:black` is simply the
+**zero-projection** instance (both leaves are already printing planes, nothing to broadcast), and
+`c:green border:black f:modern` is the same plan with one projection. There is no separate
+"existential-total" plan versus "mixed-compound" plan — just this plan at projection count 0, 1,
+2, …, its projection cost term falling to zero when no card-plane leaf is present.
+
 ## Parts, in ship order
 
 Most pieces already exist or are planned in
