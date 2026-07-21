@@ -174,12 +174,55 @@ the cost curves are flat and only bites where they diverge steeply.
   Estimate tightness is thus a *derived* requirement, not a goal — the global
   "est == truth %" is the wrong target.
 
+### Is the cost model correct? Card mode yes, printing/artwork no (2026-07-20)
+
+A routing cost model needs correct *ordering* between plans, not accurate
+absolute predictions. The model achieves that **only in card mode** — where its
+constants were fit and where `plan_cost_model_matches_gold` validated the argmin.
+`printing_range_route_probe` exposed that in **printing mode it under-predicts
+P3/P4 by ~3×** (model/measured ≈ 0.3–0.5; P1 fidelity swings 0.1×–2.2×). The
+under-prediction factor is `n_printings/n_cards` (≈3.09): `eval_domain` counts
+CARDS, but a printing-mode P3/P4 visits every card *and scans all its printings*
+(~`n_printings` units) and emits printing rows, neither of which the card-fit
+formula prices. It survived validation only because P1's dominance on the broad
+printing ranges kept the misestimate from flipping the argmin — until the probe's
+deep pages, where it did (2 rows routed off gold-P1).
+
+**Design conclusion — enrich features, don't branch on mode.** The fix is not a
+`mode` argument to `plan_cost` (that hard-codes the mode→work mapping and every
+new plan/mode must be threaded through it). Mode is a *proxy* for two work
+quantities the features should state directly: units *scanned* and units *emitted*,
+each in the plan's operating space. The caller — which knows the mode — populates
+`eval_domain`/emit in that space, and one mode-agnostic formula then prices card,
+printing, and artwork alike (artwork's illustration-groups are just another count).
+An explicit `mode`/executor argument is warranted only if a genuinely different
+code path has a different *per-unit constant*, and even then a work-term is
+cleaner than a categorical switch. This is prerequisite work for a unified
+all-mode router — which, since card and printing both TIE the legacy tree, is a
+structural-unification goal, not a speed one.
+
 ## Scope / sequencing
 
 Everything validated against truth before anything reroutes. The force-plan
 seam (step 2) comes *before* calibration because you can't measure a plan's
 cost without being able to execute that specific plan — making plans
 individually addressable is the prerequisite for the run-all-plans harness.
+
+The target these steps converge on — the single router, in pseudocode — is
+[local-engine-unified-router-target.md](./local-engine-unified-router-target.md).
+
+**Status (2026-07-20): LANDED.** Steps 1–5 done and, past the A/B, step 6's
+structural half too: `run_query` is now a 4-line string→enum adapter delegating to
+the one cost-based router `run_query_routed` (all modes); the legacy decision tree,
+the `CARD_ENGINE_PLAN_SELECT` toggle, and the `maybe_broad` routing threshold are
+deleted (377 LOC net). What step 6 did NOT retire, because they aren't tree-routing
+thresholds: `STREAM_MIN_MATCHES` (now the cost model's P3 small-total floor) and the
+7/8 narrowing cutoff + memoize gate (inside `prepare_candidates`, shared by the
+router). Correctness rests on the tree-independent durable tests
+(`force_plan_differential_agreement`, `fuzz_row_identity_matches_reference`). The
+value delivered is structural (one principled layer, extensible) at performance
+parity — not a speed win (see Results below); the one real speed win, idea-1/idea-2,
+remains deferred.
 
 1. **Estimator** — standalone, sound bounds, fuzz-validated, *unwired*.
    (Shipped: #704.)
@@ -208,6 +251,91 @@ individually addressable is the prerequisite for the run-all-plans harness.
 
 Filter trees are tiny, so `choose_plan`, the estimator, and the cost model are
 all per-query noise; they run once per query, not per card.
+
+## Results so far — and where the win actually is (2026-07-20)
+
+Steps 1–4 shipped (#704/#708/#709/#710). The router (`run_query_routed`, all modes)
+materializes candidates once (single plane eval / one `prepare_candidates`, no
+double-eval) — or, for printing bare-ranges, takes the exact range-`k` without
+materializing — and routes `argmin plan_cost` on the *actual* count. It is now the
+default and only path (the legacy tree, toggle, and the tree-vs-router A/B benches
+were deleted with the landing above); the findings below were measured during the
+toggle-gated A/B and hold.
+
+**Card-mode routing is a tie, not a win.** A/B on the real corpus
+(then-`plan_routing_ab`, min-of-n): geomean routed/legacy **1.010×**, 41 tie / 3
+marginally-slower / 0 faster. Cost-routing *reproduces* the hand-tuned tree's
+plan choices — the tree's thresholds already sit at the cost crossovers — so
+there is no card-mode speed to win. The residual ~1% is the argmin's own f64
+evals on sub-µs queries. An earlier estimate-*before*-materialize prototype was
+~15% slower (double plane eval + lo-cliff pessimism) and was abandoned for the
+materialize-then-route shape above.
+
+**This intermediate state is a deliberate structural *downgrade*.** The toggle,
+the routed path, and the legacy tree now coexist — strictly *more* branching
+than before. That is only justified as time-boxed scaffolding for the A/B, and
+is debt to be repaid per steps 5–6: the routed path is the seed of the single
+`route()`; the tree and thresholds get *deleted*, not accumulated. Landing
+card-mode routing on its own buys parity-for-principle only, so it should ship
+bundled with — or just before — the first frontier win below, never as "we
+replaced the tree with an equal-speed cost model."
+
+**The printing-mode P1 win was hypothesized — and measurement falsified it.**
+The hypothesis: the tree's P1 gate (`range_too_broad_to_narrow`, a fixed
+`k/index_len > 0.25` ratio) ignores page depth and sort alignment, while P1's
+misaligned walk costs `(offset+limit)/match_rate`, so a *moderately*-broad range
+at a *deep* page should misroute onto P1's blind walk where the ratio can't see
+it. The `printing_range_route_probe` bench (src/tests.rs) tested exactly that —
+11 bare price/year ranges across the broad/narrow margin × offsets to 20000,
+printing mode, misaligned edhrec sort — comparing the tree's pick and the cost
+model's pick to empirical gold:
+
+> **54 scored rows: tree geomean regret 1.000× (gold on every row); model
+> 1.015×, strictly faster on 0.** P1 wins broad ranges at *every* depth tested,
+> including offset 20000 — because P3/P4 in printing mode both pay the full
+> O(n_cards) match phase, which dominates P1's blind-but-early-stopping walk. So
+> `range_too_broad_to_narrow` already sits at the P1/P4 crossover; depth doesn't
+> move it. The naive cost model was slightly *worse* — 2 deep rows (offset 20000)
+> where its `(offset+limit)/match_rate` walk term over-penalizes P1 and it routes
+> away at 1.32×/1.70×.
+
+So printing ranges tie too (the tree marginally ahead). Combined with the
+card-mode tie, **cost-based routing has now matched-or-slightly-lost to the
+hand-tuned tree everywhere measured** — the thresholds are genuinely well-placed.
+This is the load-bearing finding: #702 as a *speed* play has no evidence behind
+it on today's plans. What remains is (a) the purely structural argument (one cost
+rule vs scattered thresholds — but the cost model carries its own calibration
+burden, so this is not obviously a net simplification), and (b) whether a
+genuinely *unexpressed* decision exists that the tree cannot make at all — the
+place to look before spending more, not another mode of the same P1/P3/P4 menu.
+
+**Artwork not separately probed** — only P3/P4 apply (the same crossover the tree
+sits on in card mode), so absent a new signal it is expected to tie as well.
+
+**The one real win found: idea-1 vs idea-2 at depth (a genuinely *unexpressed*
+decision).** `idea1_vs_idea2_probe` (src/tests.rs) measured idea-1 (P1, built) against
+a cost-representative idea-2 kernel (range → printing existence bitmap → popcount-skip
+→ emit; the deferred #656 mechanism, timed without building it) on `unique=printing`
+broad ranges × page depth, edhrec (unrelated) sort — the one cell the sorted-range doc
+says the two genuinely compete. idea-2 is **flat in offset** (~19–54µs, scaling with `k`
+not depth); idea-1 grows ~`(offset+limit)/match_rate`. So there is a real crossover, and
+its depth scales inversely with match-rate:
+
+> `usd<0.25` (30%) & `usd>=1` (24%): idea-2 wins from offset **~500–2000**; mid-rate
+> (~50–65%) ~5000; high-rate (73–90%) ~10–20k. Ratios reach 35× at offset 20000.
+
+This is the first evidence *for* the cost-routing thesis: the idea-1/idea-2 winner is an
+offset×match_rate crossover — exactly what a cost comparison expresses and a fixed
+threshold cannot — and the tree cannot pick idea-2 at all because idea-2 does not exist.
+Caveats keeping this honest: (1) the kernel is an **optimistic lower bound** — a correct
+idea-2 needs bits in sort order (#656's printing permutation), adding scatter cost, so
+real crossovers land somewhat deeper; (2) absolute savings at *realistic* depth (offset
+500–2000) are ~50–170µs on already-sub-ms queries — the 35× ratios are all at offset
+20000, which nobody pages to; (3) deep-paged broad-range printing queries are a rare
+corner (though #656 flags it as a known ~1.07ms gap). **Decision pending:** build idea-2
+(#656 printing-space pager + permutation, with the NULL over-inclusion care that reverted
+#689) and cost-route idea-1/idea-2 — real work for a rare-but-known-gap win — vs leave it
+deferred. This is a prioritization call, not a technical unknown.
 
 ## Keeping costs/plans current as the engine changes
 
