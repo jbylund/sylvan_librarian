@@ -162,6 +162,7 @@ def _make_cards(rng: random.Random) -> list[dict[str, Any]]:
             "oracle_id": f"00000000-0000-0000-0000-{i + 1:012d}",
             "mana_cost_jsonb": mana_cost_jsonb,
             "card_name": name,
+            "card_name_folded": name.lower(),
             "oracle_text": oracle,
             "card_colors": dict.fromkeys(colors, True),
             "card_color_identity": dict.fromkeys(identity, True),

@@ -245,7 +245,9 @@ fn text_search_field_value<'a>(
     field: TextSearchField,
 ) -> StrVal<'a> {
     match field {
-        TextSearchField::NameLower       => StrVal::Known(card.card_name_lower.as_str()),
+        // Accent-folded (#649): the query word is folded the same way in Python
+        // before it reaches TextContains/NameMatch, so this must match.
+        TextSearchField::NameLower       => StrVal::Known(card.card_name_folded.as_str()),
         TextSearchField::OracleTextLower => opt_sv(str_at(strings, u32::from(card.oracle_text_lower_id))),
         TextSearchField::FlavorTextLower => printing.map_or(StrVal::PDep, |p| opt_sv(str_at(strings, u32::from(p.flavor_text_lower_id)))),
         // Rewritten to ArtistMatch by bind(); printings carry no artist strings.
@@ -890,7 +892,7 @@ impl FilterExpr {
                 let Some(cand) = trigram_candidates(name_trigram, word) else { return };
                 let mut ids: Vec<u32> = cand
                     .into_iter()
-                    .filter(|&cid| cards[cid as usize].card_name_lower.as_str().contains(word.as_str()))
+                    .filter(|&cid| cards[cid as usize].card_name_folded.as_str().contains(word.as_str()))
                     .map(|cid| u32::from(cards[cid as usize].card_name_id))
                     .collect();
                 ids.sort_unstable();

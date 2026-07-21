@@ -182,4 +182,9 @@ TESTCASES = [
     # Empty and single-space (edge cases)
     {"query": "", "expected": "", "id": "empty"},
     {"query": "   ", "expected": "", "id": "only_spaces"},
+    # Bare (unquoted) accented words — #649
+    {"query": "Éowyn", "expected": "Éowyn", "id": "bare_accented_word"},
+    {"query": "name:Éowyn", "expected": "name:Éowyn", "id": "attr_bare_accented_value"},
+    {"query": "name:Éowyn type:creature", "expected": "name:Éowyn AND type:creature", "id": "bare_accented_value_with_attr"},
+    {"query": "Éowyn Dúnedain", "expected": "Éowyn AND Dúnedain", "id": "two_bare_accented_words"},
 ]

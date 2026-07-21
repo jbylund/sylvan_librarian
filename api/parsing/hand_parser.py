@@ -102,6 +102,16 @@ _DIGIT = frozenset("0123456789")
 _SPACE = frozenset(" \t\r\n")
 
 
+def _is_word_start(c: str) -> bool:
+    """ASCII identifier start, or any Unicode letter — accented card names, e.g. Éowyn (#649)."""
+    return c in _WORD_START or c.isalpha()
+
+
+def _is_word_cont(c: str) -> bool:
+    """ASCII identifier continuation, or any Unicode letter (#649)."""
+    return c in _WORD_CONT or c.isalpha()
+
+
 # ── Lexer ─────────────────────────────────────────────────────────────────────
 
 
@@ -244,8 +254,8 @@ def tokenize(src: str) -> list[Token]:  # noqa: C901, PLR0912, PLR0915
                 j += 1
                 while j < n and src[j] in _DIGIT:
                     j += 1
-            if j < n and src[j] in _WORD_CONT:
-                while j < n and src[j] in _WORD_CONT:
+            if j < n and _is_word_cont(src[j]):
+                while j < n and _is_word_cont(src[j]):
                     j += 1
                 tokens.append(Token(TT.WORD, src[pos:j], start, sb))
             elif "." in src[pos:j]:
@@ -256,9 +266,9 @@ def tokenize(src: str) -> list[Token]:  # noqa: C901, PLR0912, PLR0915
             continue
 
         # Word
-        if c in _WORD_START:
+        if _is_word_start(c):
             j = pos + 1
-            while j < n and src[j] in _WORD_CONT:
+            while j < n and _is_word_cont(src[j]):
                 j += 1
             tokens.append(Token(TT.WORD, src[pos:j], start, sb))
             pos = j

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 
 from titlecase import titlecase
 
@@ -479,6 +480,20 @@ def _escape_like_pattern(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
 
 
+def fold_accents(value: str) -> str:
+    """Strip Latin diacritics so accented and unaccented spellings compare equal.
+
+    NFKD-decomposes each character into base letter + combining marks, then drops
+    the marks (unicodedata.combining(c) != 0). This is the single source of truth
+    for accent folding: it's used to precompute card_name_folded at import time
+    (see preprocess_card()) and to fold the search term for fuzzy card_name:
+    queries in both the SQL and Rust engine paths, so the two sides never diverge
+    on what counts as "the same" name (#649).
+    """
+    decomposed = unicodedata.normalize("NFKD", value)
+    return "".join(c for c in decomposed if not unicodedata.combining(c))
+
+
 class ExactNameNode(QueryNode):
     """Represents an exact card name search using the ! prefix syntax from Scryfall.
 
@@ -553,7 +568,7 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
 
         return {"lhs": self.lhs.to_json(), "op": self.operator, "rhs": self._rhs_to_json()}
 
-    def _rhs_to_json(self) -> object:
+    def _rhs_to_json(self) -> object:  # noqa: PLR0912
         """Compute the JSON-serializable rhs for non-JSONB_ARRAY CardAttributeNode LHS."""
         if not self.lhs.field_infos:
             return _node_to_json(self.rhs)
@@ -585,7 +600,13 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
             return NumericValueNode(get_rarity_number(self.rhs.value)).to_json()
 
         if attr in ("card_name", "card_artist") and isinstance(self.rhs, StringValueNode):
-            return {"node_type": "StringValueNode", "kwargs": {"value": titlecase(self.rhs.value)}}
+            value = titlecase(self.rhs.value)
+            # Fold diacritics for fuzzy card_name: search so the Rust engine's
+            # TextContains matches the same way the SQL path does via card_name_folded
+            # (#649); exact/comparison ops keep the literal value, accent-sensitive.
+            if attr == "card_name" and self.operator == ":":
+                value = fold_accents(value)
+            return {"node_type": "StringValueNode", "kwargs": {"value": value}}
 
         return _node_to_json(self.rhs)
 
@@ -789,7 +810,7 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
                 return super().to_sql(context)
 
             # Regular text field handling with pattern matching
-            return self._handle_text_field_pattern_matching(context, lhs_sql)
+            return self._handle_text_field_pattern_matching(context, lhs_sql, attr)
 
         msg = f"Unknown field type: {field_type}"
         raise NotImplementedError(msg)
@@ -932,7 +953,7 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         msg = f"Unsupported operator for year search: {operator}"
         raise ValueError(msg)
 
-    def _handle_text_field_pattern_matching(self, context: QueryContext, lhs_sql: str) -> str:
+    def _handle_text_field_pattern_matching(self, context: QueryContext, lhs_sql: str, attr: str) -> str:
         """Handle pattern matching for regular text fields."""
         # Check if RHS is a regex pattern
         if isinstance(self.rhs, RegexValueNode):
@@ -946,6 +967,15 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         else:
             msg = f"Unknown type: {type(self.rhs)}, {locals()}"
             raise TypeError(msg)
+
+        # card_name fuzzy search is accent-folded so "eowyn" matches "Éowyn" (#649);
+        # card_name_folded is precomputed at import time from the same fold_accents().
+        # Exact-match paths (ExactNameNode, name=) deliberately keep using card_name/
+        # card_name_lower so typing the accent still finds only the accented spelling.
+        if attr == "card_name":
+            lhs_sql = "card.card_name_folded"
+            txt_val = fold_accents(txt_val)
+
         words = ["", *(_escape_like_pattern(w) for w in txt_val.lower().split()), ""]
         pattern = "%".join(words)
         return f"(lower({lhs_sql}) LIKE {context.add(pattern)})"

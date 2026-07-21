@@ -77,6 +77,19 @@ def test_exact_name_combined_with_other_conditions(parse_query, query: str) -> N
             "NOT ((lower(card.card_name) LIKE %(p_str_bGlnaHRuaW5nIGJvbHQ)s))",
             {"p_str_bGlnaHRuaW5nIGJvbHQ": "lightning bolt"},
         ),
+        # #649: exact name search stays accent-sensitive (compares against the
+        # unfolded card_name, not card_name_folded) so typing the accent is required.
+        # Both quoted and bare/unquoted accented spellings parse and produce the same SQL.
+        (
+            '!"Éowyn"',
+            "(lower(card.card_name) LIKE %(p_str_w6lvd3lu)s)",
+            {"p_str_w6lvd3lu": "éowyn"},
+        ),
+        (
+            "!Éowyn",
+            "(lower(card.card_name) LIKE %(p_str_w6lvd3lu)s)",
+            {"p_str_w6lvd3lu": "éowyn"},
+        ),
     ],
 )
 def test_exact_name_sql_generation(parse_query, query: str, expected_sql: str, expected_parameters: dict) -> None:

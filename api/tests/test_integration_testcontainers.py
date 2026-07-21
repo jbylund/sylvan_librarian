@@ -148,9 +148,15 @@ class TestContainerIntegration:
         assert "cards" in result
 
         # Should find every creature in test data (Serra Angel, Boggart
-        # Ram-Gang, and the Artifact Creature Cathedral Membrane)
+        # Ram-Gang, the Artifact Creature Cathedral Membrane, and the
+        # Legendary Creature Éowyn, Fearless Knight)
         cards = result["cards"]
-        assert {c["name"] for c in cards} == {"Serra Angel", "Boggart Ram-Gang", "Cathedral Membrane"}
+        assert {c["name"] for c in cards} == {
+            "Serra Angel",
+            "Boggart Ram-Gang",
+            "Cathedral Membrane",
+            "Éowyn, Fearless Knight",
+        }
 
     def test_card_search_by_name(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """Test searching for cards by name."""
@@ -164,6 +170,21 @@ class TestContainerIntegration:
 
         card = cards[0]
         assert card["name"] == "Lightning Bolt"
+
+    def test_card_search_by_name_folds_accents(self: TestContainerIntegration, api_resource: APIResource) -> None:
+        """#649: an unaccented name: query must find the accented card, and only it."""
+        result = api_resource._search_sql(**search_kwargs("name:eowyn", limit=10))
+
+        cards = result["cards"]
+        assert {c["name"] for c in cards} == {"Éowyn, Fearless Knight"}
+
+        # Exact match stays accent-sensitive: typing the accent finds it...
+        exact_accented = api_resource._search_sql(**search_kwargs('!"Éowyn, Fearless Knight"', limit=10))
+        assert {c["name"] for c in exact_accented["cards"]} == {"Éowyn, Fearless Knight"}
+
+        # ...typing without the accent does not.
+        exact_unaccented = api_resource._search_sql(**search_kwargs('!"Eowyn, Fearless Knight"', limit=10))
+        assert exact_unaccented["cards"] == []
 
     def test_color_search(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """Test searching for cards by color."""
@@ -227,9 +248,10 @@ class TestContainerIntegration:
     def test_devotion_search(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """devotion: counts a permanent's colored pips, hybrids (incl. Phyrexian) split."""
         result = api_resource._search_sql(**search_kwargs("devotion:{W}", limit=10))
-        # Serra Angel {W}{W} and Cathedral Membrane {1}{W/P} (Phyrexian W
-        # counts toward W devotion, same as a plain hybrid would)
-        assert {c["name"] for c in result["cards"]} == {"Serra Angel", "Cathedral Membrane"}
+        # Serra Angel {W}{W}, Cathedral Membrane {1}{W/P} (Phyrexian W counts
+        # toward W devotion, same as a plain hybrid would), and Éowyn,
+        # Fearless Knight {1}{W}{W}
+        assert {c["name"] for c in result["cards"]} == {"Serra Angel", "Cathedral Membrane", "Éowyn, Fearless Knight"}
 
     def test_devotion_hybrid_search(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """A color/color hybrid contributes to BOTH colors' devotion."""
@@ -283,9 +305,17 @@ class TestContainerIntegration:
 
         # Should only have our test cards
         cards = result["cards"]
-        assert len(cards) == 6
+        assert len(cards) == 7
         card_names = {card["name"] for card in cards}
-        expected_names = {"Lightning Bolt", "Serra Angel", "Black Lotus", "Boggart Ram-Gang", "Cathedral Membrane", "Fireball"}
+        expected_names = {
+            "Lightning Bolt",
+            "Serra Angel",
+            "Black Lotus",
+            "Boggart Ram-Gang",
+            "Cathedral Membrane",
+            "Fireball",
+            "Éowyn, Fearless Knight",
+        }
         assert card_names == expected_names
 
     def test_random_search_shape_matches_search(self: TestContainerIntegration, api_resource: APIResource) -> None:

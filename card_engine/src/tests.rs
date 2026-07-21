@@ -155,6 +155,7 @@ fn test_tag_index_str_lookup() {
 fn stub_card(oracle_id: u128, card_types: u16, subtypes: &[&str], vocab: &mut VocabInterner) -> OracleCard {
     OracleCard {
         card_name_lower: InlineStr::from_str(""),
+        card_name_folded: InlineStr::from_str(""),
         card_colors: 0,
         card_color_identity: 0,
         produced_mana: 0,
@@ -2113,11 +2114,14 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
         // conditioned on the creature bit at the real rate; every other card gets a non-empty oracle
         // (loop past the ~1% corpus empties). Textless cards intern "" (never NONE_STR), matching the
         // loader, so an oracle-text search evaluates False on them rather than Null.
-        // Both name fields from one corpus name: card_name_lower (InlineStr) is what contains()
+        // Both name fields from one corpus name: card_name_folded (InlineStr) is what contains()
         // reads; card_name_id is the interned id NameMatch re-keys to after memoization, so it must
         // distinguish names (leaving it NONE_STR collapses every name to one id and over-matches).
+        // card_name_folded is a raw copy here (not actually diacritic-folded) since this fuzzer
+        // tests indexing/algebra parity, not fold_accents() semantics (#649 covers that directly).
         let name = corpus[rng.random_range(0..corpus.len())].0;
         card.card_name_lower = InlineStr::from_str(name);
+        card.card_name_folded = card.card_name_lower;
         card.card_name_id = interner.intern(name.to_string());
         let vanilla = card.card_types & TYPE_CREATURE != 0 && rng.random_bool(VANILLA_CREATURE_FRAC);
         let oracle = if vanilla {
@@ -2263,7 +2267,7 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
     data.indexes.artists = build_artist_index(&data.printings, data.artist_vocab.len());
     // Text narrowing indexes — same load-bearing property. name/oracle drive trigram + bigram
     // narrowing and the full-scan memoization; flavor is the printing-space CSR bind() resolves against.
-    data.indexes.name_trigram = build_trigram_index(&data.cards, |c| c.card_name_lower.as_str());
+    data.indexes.name_trigram = build_trigram_index(&data.cards, |c| c.card_name_folded.as_str());
     data.indexes.name_bigrams = build_name_bigram_index(&data.cards);
     data.indexes.oracle_trigram = build_oracle_text_index(&data.cards, &data.strings);
     data.indexes.flavor = build_flavor_index(&data.printings, &data.strings);
@@ -4334,6 +4338,7 @@ fn bench_checked_vs_unchecked_access() {
         );
         let mut card = stub_card((i + 1) as u128, TYPE_CREATURE, &["Benchmark", words[i % 10]], &mut vocab);
         card.card_name_lower = InlineStr::from_str(&name.to_lowercase());
+        card.card_name_folded = card.card_name_lower;
         card.card_name_id = interner.intern(name.clone());
         card.oracle_text_id = interner.intern(oracle.clone());
         card.oracle_text_lower_id = interner.intern(oracle.to_lowercase());
@@ -4356,7 +4361,7 @@ fn bench_checked_vs_unchecked_access() {
     let artwork_groups = assign_artwork_groups(&mut printings, &offsets);
 
     let indexes = CardIndexes {
-        name_trigram:   build_trigram_index(&cards, |c| c.card_name_lower.as_str()),
+        name_trigram:   build_trigram_index(&cards, |c| c.card_name_folded.as_str()),
         oracle_trigram: build_oracle_text_index(&cards, &strings),
         cmc:            build_numeric_index(&cards, |c| c.cmc.map(|v| v as i16)),
         power:          build_numeric_index(&cards, |c| c.creature_power.map(|v| v as i16)),
@@ -5920,6 +5925,7 @@ fn text_fixture_store() -> CardData {
         .map(|(i, &(name, text))| {
             let mut c = stub_card(i as u128 + 1, TYPE_CREATURE, &[], &mut vocab);
             c.card_name_lower = InlineStr::from_str(name);
+            c.card_name_folded = c.card_name_lower;
             c.card_name_id = interner.intern(name.to_string());
             c.oracle_text_lower_id = interner.intern(text.unwrap_or_default().to_string());
             c
@@ -5927,7 +5933,7 @@ fn text_fixture_store() -> CardData {
         .collect();
     let mut data = store_of(cards, &[1usize; 6], vocab);
     data.strings = interner.strings;
-    data.indexes.name_trigram = build_trigram_index(&data.cards, |c| c.card_name_lower.as_str());
+    data.indexes.name_trigram = build_trigram_index(&data.cards, |c| c.card_name_folded.as_str());
     data.indexes.oracle_trigram = build_oracle_text_index(&data.cards, &data.strings);
     data
 }
@@ -6831,6 +6837,7 @@ fn name_bigrams_tiers_and_exactness() {
         let mut c = stub_card(u128::from(i) + 1, TYPE_CREATURE, &[], &mut vocab);
         let name = if i % 64 == 0 { format!("azz qx{i}") } else { format!("azz b{i}") };
         c.card_name_lower = InlineStr::from_str(&name);
+        c.card_name_folded = c.card_name_lower;
         c
     }).collect();
     let data = store_of(cards, &vec![1usize; 4096], vocab);
@@ -6855,7 +6862,7 @@ fn name_bigrams_tiers_and_exactness() {
     assert!(n.tight);
     let cand = n.set.into_cards(&archived.offsets, &archived.indexes.printing_to_card);
     let brute: Vec<u32> = archived.cards.iter().enumerate()
-        .filter(|(_, c)| c.card_name_lower.as_str().contains("qx"))
+        .filter(|(_, c)| c.card_name_folded.as_str().contains("qx"))
         .map(|(i, _)| i as u32)
         .collect();
     assert_eq!(cand, brute, "bigram membership IS containment for 2-byte needles");
@@ -6879,6 +6886,7 @@ fn name_bigrams_compose_and_memoize() {
     let cards: Vec<OracleCard> = names.iter().enumerate().map(|(i, name)| {
         let mut c = stub_card(i as u128 + 1, TYPE_CREATURE, &[], &mut vocab);
         c.card_name_lower = InlineStr::from_str(name);
+        c.card_name_folded = c.card_name_lower;
         c.card_name_id = interner.intern(name.to_string());
         c
     }).collect();
@@ -6919,7 +6927,7 @@ fn name_bigrams_compose_and_memoize() {
         _ => panic!("2-byte needle must memoize via bigrams"),
     }
     for (cid, card) in archived.cards.iter().enumerate() {
-        let want = card.card_name_lower.as_str().contains("fi");
+        let want = card.card_name_folded.as_str().contains("fi");
         assert!((f.eval_card(card, &archived.strings) == Tri::True) == want, "NameMatch parity at card {cid}");
     }
 }
@@ -7140,6 +7148,7 @@ fn named_store() -> CardData {
         .map(|(i, name)| {
             let mut c = stub_card((i + 1) as u128, TYPE_CREATURE, &[], &mut vocab);
             c.card_name_lower = InlineStr::from_str(name);
+            c.card_name_folded = c.card_name_lower;
             // Distinct, deliberately store-order-scrambled edhrec ranks: the
             // second "sol ring" (card 3) outranks the first (card 1).
             c.edhrec_rank = Some([40, 60, 10, 20, 30, 50][i]);
@@ -7214,6 +7223,47 @@ fn exact_name_narrows_tight() {
         );
         assert_eq!(total, brute, "totals parity for shape {i}");
     }
+}
+
+// #649: fuzzy name: search is accent-folded. card_name_folded is precomputed in
+// Python (fold_accents(), NFKD strip-combining-marks) and the query word is folded
+// the same way before crossing into Rust, so a user typing "eowyn" (no diacritic)
+// finds "Éowyn" — and typing the accent doesn't change the fuzzy result, since both
+// spellings fold to the same word by the time Rust sees them. ExactName deliberately
+// keeps comparing the unfolded card_name_lower, so only the literal accented
+// spelling narrows to an exact match.
+#[test]
+fn accent_folded_name_search_matches_unaccented_query() {
+    let mut vocab = VocabInterner::new();
+    let rows: [(&str, &str); 2] = [
+        ("éowyn, fearless knight", "eowyn, fearless knight"),
+        ("ferocious knight", "ferocious knight"),
+    ];
+    let cards: Vec<OracleCard> = rows.iter().enumerate().map(|(i, (lower, folded))| {
+        let mut c = stub_card(i as u128 + 1, TYPE_CREATURE, &[], &mut vocab);
+        c.card_name_lower = InlineStr::from_str(lower);
+        c.card_name_folded = InlineStr::from_str(folded);
+        c
+    }).collect();
+    let data = store_of(cards, &[1usize; 2], vocab);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    // A query word already folded by Python (whether the user typed "eowyn" or
+    // "Éowyn") must find the accented card and only it.
+    let contains_eowyn = FilterExpr::TextContains { field: TextSearchField::NameLower, word: "eowyn".to_string() };
+    let matches: Vec<u32> = archived.cards.iter().enumerate()
+        .filter(|(_, c)| contains_eowyn.eval_card(c, &archived.strings) == Tri::True)
+        .map(|(i, _)| i as u32)
+        .collect();
+    assert_eq!(matches, vec![0], "unaccented fuzzy query must find only the accented card");
+
+    // Exact match stays accent-sensitive: typing the accent finds it; typing
+    // without the accent does not.
+    let exact_accented = FilterExpr::ExactName("éowyn, fearless knight".to_string());
+    let exact_unaccented = FilterExpr::ExactName("eowyn, fearless knight".to_string());
+    assert!(exact_accented.eval_card(&archived.cards[0], &archived.strings) == Tri::True);
+    assert!(exact_unaccented.eval_card(&archived.cards[0], &archived.strings) == Tri::False);
 }
 
 // order:name sorts pages by name in both directions, breaks the duplicate-name

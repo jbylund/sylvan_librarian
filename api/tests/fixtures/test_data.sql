@@ -9,7 +9,7 @@
 
 -- Insert some test cards
 INSERT INTO magic.cards (
-    scryfall_id, oracle_id, card_name, cmc, mana_cost_text, mana_cost_jsonb, devotion, raw_card_blob,
+    scryfall_id, oracle_id, card_name, card_name_folded, cmc, mana_cost_text, mana_cost_jsonb, devotion, raw_card_blob,
     card_types, card_subtypes, card_colors, card_color_identity, card_keywords,
     oracle_text, creature_power, creature_toughness, card_oracle_tags, collector_number, collector_number_int,
     released_at
@@ -18,6 +18,7 @@ INSERT INTO magic.cards (
     '00000000-0000-0000-0000-000000000001',
     '52b91fa6-7562-501c-a1b7-5d41f0c00020',
     'Lightning Bolt',
+    'lightning bolt',
     1,
     '{R}',
     '{"R": [1]}',
@@ -40,6 +41,7 @@ INSERT INTO magic.cards (
     '00000000-0000-0000-0000-000000000002',
     'f2b54404-af3c-529a-b50b-ac1e1214fddd',
     'Serra Angel',
+    'serra angel',
     5,
     '{3}{W}{W}',
     '{"W": [1, 2]}', -- pure-generic braces like {3} are dropped, never a key
@@ -62,6 +64,7 @@ INSERT INTO magic.cards (
     '00000000-0000-0000-0000-000000000003',
     '288bc0d8-1ee9-5af5-b226-38aec9cc1c5d',
     'Black Lotus',
+    'black lotus',
     0,
     '{0}',
     '{}',
@@ -87,6 +90,7 @@ INSERT INTO magic.cards (
     '00000000-0000-0000-0000-000000000004',
     '30d2437a-87c9-4f88-8fb8-b686d6522677',
     'Boggart Ram-Gang',
+    'boggart ram-gang',
     3,
     '{R/G}{R/G}{R/G}',
     '{"R/G": [1, 2, 3]}',
@@ -112,6 +116,7 @@ INSERT INTO magic.cards (
     '00000000-0000-0000-0000-000000000005',
     '0297eeb2-47ec-4f9a-b1ad-4e7286994f00',
     'Cathedral Membrane',
+    'cathedral membrane',
     2,
     '{1}{W/P}',
     '{"W/P": [1]}',
@@ -138,6 +143,7 @@ INSERT INTO magic.cards (
     '00000000-0000-0000-0000-000000000006',
     'aa7714b0-2bfb-458a-8ebf-37ec2c53383e',
     'Fireball',
+    'fireball',
     1,
     '{X}{R}',
     '{"X": [1], "R": [1]}',
@@ -155,6 +161,32 @@ INSERT INTO magic.cards (
     '175',
     175,
     '2022-06-10'
+),
+(
+    -- Éowyn, Fearless Knight (real card, ltr #23): card_name_folded drops the
+    -- diacritic so fuzzy name:eowyn matches this accented name (#649); card_name
+    -- keeps the accent so exact match (!"...") stays accent-sensitive.
+    '00000000-0000-0000-0000-000000000007',
+    '4c9f1a5e-2b3d-4e6f-8a1b-9c0d2e3f4a5b',
+    'Éowyn, Fearless Knight',
+    'eowyn, fearless knight',
+    3,
+    '{1}{W}{W}',
+    '{"W": [1, 2]}',
+    '{"W": [1, 2]}',
+    '{"name": "Éowyn, Fearless Knight", "type": "Legendary Creature", "collector_number": "23"}',
+    '["Legendary", "Creature"]',
+    '["Human", "Noble"]',
+    '{"W": true}',
+    '{"W": true}',
+    '{}',
+    'First strike\nWhenever Éowyn, Fearless Knight attacks, if it''s your turn, another target attacking creature you control gains first strike until end of turn.',
+    3,
+    2,
+    '{}',
+    '23',
+    23,
+    '2023-06-23'
 ) ON CONFLICT (scryfall_id) DO NOTHING;
 
 -- Insert test tags

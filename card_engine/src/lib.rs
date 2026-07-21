@@ -235,6 +235,10 @@ struct ManaCost {
 struct OracleCard {
     // Hot fields first — fits in the first cache lines for fast filter short-circuiting.
     card_name_lower: InlineStr<61>, // 61 bytes covers every card name in the Scryfall dataset
+    // Accent-folded card_name_lower (e.g. "éowyn" -> "eowyn"), precomputed in Python via
+    // fold_accents() (#649). Backs fuzzy name: search (name_trigram/name_bigrams/TextContains)
+    // so "eowyn" matches "Éowyn"; exact-match paths deliberately keep using card_name_lower.
+    card_name_folded: InlineStr<61>,
     card_colors: u8,
     card_color_identity: u8,
     produced_mana: u8,
@@ -341,6 +345,7 @@ struct Printing {
 /// Printing. Never archived.
 struct CardRow {
     card_name_lower: InlineStr<61>,
+    card_name_folded: InlineStr<61>,
     card_colors: u8,
     card_color_identity: u8,
     produced_mana: u8,
@@ -719,6 +724,8 @@ fn card_from_pydict(d: &Bound<PyDict>, it: &mut Interner, vocab: &mut VocabInter
     // Raw strings from the dict; interned to ids as the struct is built below.
     let card_name = opt_str(d, "card_name").unwrap_or_default();
     let card_name_lower = InlineStr::<61>::from_str(&card_name.to_lowercase());
+    // Already lowercased + accent-folded in Python (fold_accents(), #649); read as-is.
+    let card_name_folded = InlineStr::<61>::from_str(&opt_str(d, "card_name_folded").unwrap_or_default());
     let oracle_text = opt_str(d, "oracle_text").unwrap_or_default();
     let oracle_text_lower_id = it.intern(oracle_text.to_lowercase());
     let flavor_text = opt_str(d, "flavor_text").unwrap_or_default();
@@ -735,6 +742,7 @@ fn card_from_pydict(d: &Bound<PyDict>, it: &mut Interner, vocab: &mut VocabInter
         illustration_id: opt_uuid(d, "illustration_id"),
 
         card_name_lower,
+        card_name_folded,
         card_name_id: it.intern(card_name),
         oracle_text_lower_id,
         oracle_text_id: it.intern(oracle_text),
@@ -1185,7 +1193,8 @@ struct NameBigramIndex {
 fn build_name_bigram_index(cards: &[OracleCard]) -> NameBigramIndex {
     let mut lists: HashMap<[u8; 2], Vec<u32>> = HashMap::new();
     for (i, card) in cards.iter().enumerate() {
-        let bytes = card.card_name_lower.as_str().as_bytes();
+        // Folded (#649) — this index backs the same fuzzy name: path as name_trigram.
+        let bytes = card.card_name_folded.as_str().as_bytes();
         let mut seen: Vec<[u8; 2]> = Vec::new(); // names are short; a vec beats a set
         for w in bytes.windows(2) {
             let bg = [w[0], w[1]];
@@ -5198,7 +5207,7 @@ const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 /// catch (e.g. reordering same-size fields, changing an index type) — and on
 /// any FLAVOR_FP_FEATURES change: archived fingerprints are built with that
 /// table, so a new table reading old fingerprints breaks the superset test.
-const ARCHIVE_FORMAT_VERSION: u32 = 20260726;
+const ARCHIVE_FORMAT_VERSION: u32 = 20260720;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -5490,6 +5499,7 @@ impl QueryEngine {
                 offsets.push(printings.len() as u32);
                 cards.push(OracleCard {
                     card_name_lower: row.card_name_lower,
+                    card_name_folded: row.card_name_folded,
                     card_colors: row.card_colors,
                     card_color_identity: row.card_color_identity,
                     produced_mana: row.produced_mana,
@@ -5569,7 +5579,7 @@ impl QueryEngine {
         // borrowed by the builders in the CardIndexes literal.
         let artwork_group_counts = assign_artwork_groups(&mut printings, &offsets);
         let indexes = CardIndexes {
-            name_trigram:   build_trigram_index(&cards, |c| c.card_name_lower.as_str()),
+            name_trigram:   build_trigram_index(&cards, |c| c.card_name_folded.as_str()),
             oracle_trigram: build_oracle_text_index(&cards, &strings),
             cmc:            build_numeric_index(&cards, |c| c.cmc.map(|v| v as i16)),
             power:          build_numeric_index(&cards, |c| c.creature_power.map(|v| v as i16)),

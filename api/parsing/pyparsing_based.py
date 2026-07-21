@@ -223,10 +223,14 @@ def create_basic_parsers() -> dict[str, ParserElement]:
             raise ValueError(msg)
         return word_str
 
-    word = Regex(r"[a-zA-Z_][a-zA-Z0-9_-]*[a-zA-Z0-9_]|[a-zA-Z_]").set_parse_action(make_word)
+    # [^\W\d] is "word char that's not a digit" — i.e. any Unicode letter or underscore
+    # (Python 3 `re` treats `\w`/`\W` as Unicode-aware by default for str patterns), so
+    # bare words can start with accented letters like "Éowyn" (#649) without also
+    # allowing a leading digit.
+    word = Regex(r"[^\W\d][\w-]*\w|[^\W\d]").set_parse_action(make_word)
 
     literal_number = float_number | integer
-    string_value_word = Regex(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]*")
+    string_value_word = Regex(r"\w[\w.-]*")
 
     return {
         "attrop": attrop,
@@ -364,7 +368,7 @@ def create_all_condition_parsers(basic_parsers: dict, mana_parsers: dict, color_
         | attr_attr_condition
     )
 
-    hyphenated_condition = text_attr_word + Literal(":") + Regex(r"[a-zA-Z0-9_][a-zA-Z0-9_-]*")
+    hyphenated_condition = text_attr_word + Literal(":") + Regex(r"\w[\w-]*")
     hyphenated_condition.set_parse_action(make_binary_operator_node)
 
     return {
@@ -579,7 +583,7 @@ def _get_implicit_and_tokenizer() -> ParserElement:
 
     float_tok = Regex(r"\b\d+\.\d*\b").set_parse_action(lambda t: t[0])
 
-    string_value_tok = Regex(r"[a-zA-Z0-9_]([a-zA-Z0-9_.-]*[a-zA-Z0-9_.])?").set_parse_action(lambda t: t[0])
+    string_value_tok = Regex(r"\w([\w.-]*[\w.])?").set_parse_action(lambda t: t[0])
 
     curly_mana_symbol = Regex(r"\{[^}]+\}")
     simple_mana_symbol = Regex(r"[0-9WUBRGCXYZwubrgcxyz]")

@@ -7,7 +7,7 @@ import functools
 import re
 from typing import TYPE_CHECKING, Any
 
-from api.parsing.card_query_nodes import calculate_devotion, mana_cost_str_to_dict
+from api.parsing.card_query_nodes import calculate_devotion, fold_accents, mana_cost_str_to_dict
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -238,6 +238,9 @@ def preprocess_card(card: dict[str, Any]) -> list[dict[str, Any]]:  # noqa: PLR0
     # Don't overwrite card_name if already set (for DFCs, it's set before processing faces)
     if "card_name" not in card:
         card["card_name"] = card.get("name")
+    # Accent-folded lowercase name, precomputed once at import so fuzzy name: search can
+    # match "eowyn" against "Éowyn" without folding diacritics on every query (#649).
+    card["card_name_folded"] = fold_accents(card["card_name"].lower())
     card["mana_cost_text"] = card.get("mana_cost")
     card["planeswalker_loyalty_text"] = card.get("loyalty")
     card["card_artist"] = card.get("artist")
