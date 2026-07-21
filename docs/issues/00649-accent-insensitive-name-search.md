@@ -75,4 +75,6 @@ require it, since "Eowyn" is plain ASCII.
 
 ## Status
 
-**Resolved** — see [PR description](../prs/accent-insensitive-name-search.md).
+**Resolved — [PR #716](https://github.com/jbylund/sylvan_librarian/pull/716).**
+
+See [PR description](../prs/accent-insensitive-name-search.md) for full details of what shipped.

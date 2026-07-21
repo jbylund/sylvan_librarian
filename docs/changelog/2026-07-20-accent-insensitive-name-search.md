@@ -40,6 +40,6 @@ for the full design writeup, corpus findings, and a known pre-existing lexer lim
 
 ## Status
 
-**Resolved — merged to main as [PR TBD](https://github.com/jbylund/sylvan_librarian/pull/649).**
+**Resolved — [PR #716](https://github.com/jbylund/sylvan_librarian/pull/716).**
 
 See [PR description](../prs/accent-insensitive-name-search.md) for full details of what shipped.
