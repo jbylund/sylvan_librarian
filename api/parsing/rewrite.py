@@ -56,6 +56,12 @@ _DERIVED_EXPANSIONS: dict[tuple[str, str], str] = {
     ("is", "mdfc"): "layout:modal_dfc",
     ("is", "meld"): "layout:meld",
     ("is", "leveler"): "layout:leveler",
+    # is:dfc = gameplay double-faced cards. Scryfall's is:dfc additionally counts art_series /
+    # reversible_card / double_faced_token (~2394 art & token entries) that aren't gameplay cards
+    # and aren't in our corpus, so the layout union is the correct set for our data.
+    ("is", "dfc"): "layout:transform or layout:modal_dfc or layout:meld",
+    # Frame-effect (stored in card_frame_data). is:colorshifted == frame:colorshifted exactly (45).
+    ("is", "colorshifted"): "frame:colorshifted",
 }
 
 

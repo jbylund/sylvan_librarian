@@ -31,6 +31,8 @@ EQUIVALENCES = [
     ("is:mdfc", "layout:modal_dfc"),
     ("is:meld", "layout:meld"),
     ("is:leveler", "layout:leveler"),
+    ("is:dfc", "layout:transform or layout:modal_dfc or layout:meld"),
+    ("is:colorshifted", "frame:colorshifted"),
     # composes under negation and inside compounds
     ("-frame:old", "-(frame:1993 or frame:1997)"),
     ("t:goblin frame:modern", "t:goblin frame:2003"),
