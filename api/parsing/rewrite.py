@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from api.parsing.hand_parser import parse_query as _parse_query
-from api.parsing.nodes import AndNode, BinaryOperatorNode, NotNode, OrNode, Query
+from api.parsing.nodes import AndNode, BinaryOperatorNode, NotNode, OrNode, Query, flatten_nested_operations
 
 if TYPE_CHECKING:
     from api.parsing.nodes import QueryNode
@@ -36,6 +36,21 @@ _DERIVED_EXPANSIONS: dict[tuple[str, str], str] = {
     ("frame", "new"): "frame:2003 or frame:2015 or frame:future",
     ("is", "old"): "frame:1993 or frame:1997",
     ("is", "new"): "frame:2015",
+    # Type / subtype based. `kw:changeling` (an ability keyword, subtype is Shapeshifter) picks up
+    # the all-creature-type cards Scryfall counts. Note party IS creature-restricted while outlaw is
+    # NOT (it also matches Kindred non-creature cards carrying an outlaw subtype).
+    ("is", "historic"): "t:legendary or t:artifact or t:saga",  # exact
+    ("is", "permanent"): "t:creature or t:artifact or t:enchantment or t:land or t:planeswalker or t:battle",  # +2 / 25954
+    ("is", "party"): "t:creature (t:cleric or t:rogue or t:warrior or t:wizard or kw:changeling)",  # exact
+    ("is", "outlaw"): "t:assassin or t:mercenary or t:pirate or t:rogue or t:warlock or kw:changeling",  # exact
+    ("is", "vanilla"): 't:creature o=""',  # empty-oracle equality; -11 subset (Adventure/DFC textless faces + Dryad Arbor)
+    # Layout, exact by direct card_layout field correspondence.
+    ("is", "split"): "layout:split",
+    ("is", "flip"): "layout:flip",
+    ("is", "transform"): "layout:transform",
+    ("is", "mdfc"): "layout:modal_dfc",
+    ("is", "meld"): "layout:meld",
+    ("is", "leveler"): "layout:leveler",
 }
 
 
@@ -60,23 +75,43 @@ def _parse_expansion(dsl: str) -> QueryNode:
     return _parse_query(dsl).root
 
 
-def _expand(node: QueryNode, in_progress: frozenset[tuple[str, str]]) -> QueryNode:
+def _expand(node: QueryNode, in_progress: frozenset[tuple[str, str]]) -> tuple[QueryNode, bool]:
+    """Expand derived-predicate leaves in `node`; return `(node, changed)`.
+
+    Returns the *original* node object (and `changed=False`) when no descendant was
+    rewritten, so a query containing no synonym — the overwhelming majority — is walked
+    once but never rebuilt or re-flattened.
+    """
     cls = node.__class__
-    if cls is AndNode:
-        return AndNode([_expand(op, in_progress) for op in node.operands])
-    if cls is OrNode:
-        return OrNode([_expand(op, in_progress) for op in node.operands])
+    if cls is AndNode or cls is OrNode:
+        changed = False
+        operands = []
+        for op in node.operands:
+            new_op, op_changed = _expand(op, in_progress)
+            operands.append(new_op)
+            changed |= op_changed
+        return (cls(operands), True) if changed else (node, False)
     if cls is NotNode:
-        return NotNode(_expand(node.operand, in_progress))
+        new_op, changed = _expand(node.operand, in_progress)
+        return (NotNode(new_op), True) if changed else (node, False)
     key = _leaf_key(node)
     if key is not None and key in _DERIVED_EXPANSIONS and key not in in_progress:
         # Recurse into the expansion so a definition may itself reference another derived
         # predicate; `in_progress` breaks any (mis)configured cycle (a -> ... -> a).
-        subtree = _parse_expansion(_DERIVED_EXPANSIONS[key])
-        return _expand(subtree, in_progress | {key})
-    return node
+        subtree, _ = _expand(_parse_expansion(_DERIVED_EXPANSIONS[key]), in_progress | {key})
+        return subtree, True
+    return node, False
 
 
 def expand_derived_predicates(query: Query) -> Query:
-    """Rewrite derived-predicate leaves (frame synonyms, derivable `is:`) into primitive subtrees."""
-    return Query(_expand(query.root, frozenset()))
+    """Rewrite derived-predicate leaves (frame synonyms, derivable `is:`) into primitive subtrees.
+
+    Only rebuilds when a synonym was actually present; otherwise the query is returned
+    untouched. When something was rewritten, re-flatten — a synonym expanding to an And/Or
+    subtree inside a compound would otherwise leave non-canonical nesting (`(A AND (B)) AND C`),
+    so the result matches the canonical tree of the equivalent hand-written query.
+    """
+    root, changed = _expand(query.root, frozenset())
+    if not changed:
+        return query
+    return flatten_nested_operations(Query(root))

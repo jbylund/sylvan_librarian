@@ -17,9 +17,23 @@ EQUIVALENCES = [
     ("frame:new", "frame:2003 or frame:2015 or frame:future"),
     ("is:old", "frame:1993 or frame:1997"),
     ("is:new", "frame:2015"),
+    # type / subtype based
+    ("is:historic", "t:legendary or t:artifact or t:saga"),
+    ("is:permanent", "t:creature or t:artifact or t:enchantment or t:land or t:planeswalker or t:battle"),
+    ("is:party", "t:creature (t:cleric or t:rogue or t:warrior or t:wizard or kw:changeling)"),
+    ("is:outlaw", "t:assassin or t:mercenary or t:pirate or t:rogue or t:warlock or kw:changeling"),
+    ("is:vanilla", 't:creature o=""'),
+    # layout family
+    ("is:split", "layout:split"),
+    ("is:flip", "layout:flip"),
+    ("is:transform", "layout:transform"),
+    ("is:mdfc", "layout:modal_dfc"),
+    ("is:meld", "layout:meld"),
+    ("is:leveler", "layout:leveler"),
     # composes under negation and inside compounds
     ("-frame:old", "-(frame:1993 or frame:1997)"),
     ("t:goblin frame:modern", "t:goblin frame:2003"),
+    ("t:goblin is:party", "t:goblin t:creature (t:cleric or t:rogue or t:warrior or t:wizard or kw:changeling)"),
 ]
 
 

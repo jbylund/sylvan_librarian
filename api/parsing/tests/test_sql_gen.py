@@ -603,16 +603,13 @@ def test_art_tag_sql_translation(parse_query, input_query: str, expected_sql: st
             r"(card.card_is_tags @> %(p_dict_eydtb2RhbC1kZmMnOiBUcnVlfQ)s)",
             {"p_dict_eydtb2RhbC1kZmMnOiBUcnVlfQ": {"modal-dfc": True}},
         ),
-        # Common is: tags
+        # Generic is: fallback for tags with no rewrite (is:spell is deferred, so still
+        # lowers to a raw card_is_tags lookup). Rewritten tags (is:permanent, is:party,
+        # the layout family, …) are covered by test_rewrite.py.
         (
             "is:spell",
             r"(card.card_is_tags @> %(p_dict_eydzcGVsbCc6IFRydWV9)s)",
             {"p_dict_eydzcGVsbCc6IFRydWV9": {"spell": True}},
-        ),
-        (
-            "is:permanent",
-            r"(card.card_is_tags @> %(p_dict_eydwZXJtYW5lbnQnOiBUcnVlfQ)s)",
-            {"p_dict_eydwZXJtYW5lbnQnOiBUcnVlfQ": {"permanent": True}},
         ),
     ],
 )
