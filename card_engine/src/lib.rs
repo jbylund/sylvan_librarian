@@ -3936,26 +3936,33 @@ fn usd_bare_range_bounds(filter: &FilterExpr) -> Option<(u32, u32)> {
     }
 }
 
-/// Build `CardRangePopcount`'s two bitmaps from an exact `usd` range slice: the tight printing-space
-/// membership set (scattered directly from the value-sorted slice — never the loose complement
-/// `range_narrowed` would pick for a broad range, which over-includes NULL-priced printings), and
-/// its card-existence projection. The card bitmap's popcount is the exact `unique=card` total; the
-/// printing bitmap is the per-printing residual emission re-checks so the representative printing it
-/// shows genuinely satisfies the range. Bare range only (`card_range_popcount_applicable` requires no
-/// plane), so there is nothing to AND — see that predicate for why compounds are excluded.
-fn build_card_range_bits(
-    lo: u32,
-    hi: u32,
-    indexes: &Archived<CardIndexes>,
-    offsets: &AOffsets,
-    n_cards: usize,
-    n_printings: usize,
-) -> (Vec<u64>, Vec<u64>) {
+/// Build `CardRangePopcount`'s two bitmaps from an exact `usd` range slice, in a single pass: the
+/// tight printing-space membership set (`range_pbits`, set directly from the value-sorted slice —
+/// never the loose complement `range_narrowed` would pick for a broad range, which over-includes
+/// NULL-priced printings) and its card-existence projection (`card_bits`, each printing's card via
+/// the `printing_to_card` direct array, #690). The card bitmap's popcount is the exact `unique=card`
+/// total; the printing bitmap is the per-printing residual emission re-checks so the representative
+/// printing it shows genuinely satisfies the range.
+///
+/// One fused pass rather than scatter-then-`printing_bits_to_card_bits`: the projection over the
+/// scattered bitmap is the expensive half (a `trailing_zeros` extraction per set bit plus a cursor
+/// branch across every word), and folding it into the scatter loop via a direct `printing_to_card`
+/// lookup measured ~40% cheaper on `usd<50` (~174µs → ~104µs; see `card_range_build_cost_split`),
+/// even though the price-ordered slice makes those lookups random. Bare range only
+/// (`card_range_popcount_applicable` requires no plane), so there is nothing to AND.
+fn build_card_range_bits(lo: u32, hi: u32, indexes: &Archived<CardIndexes>, n_cards: usize, n_printings: usize) -> (Vec<u64>, Vec<u64>) {
     let idx = &indexes.price_usd;
+    let ptc = &indexes.printing_to_card;
     let s = idx.partition_point(|p| u32::from(p.0) < lo);
     let e = idx.partition_point(|p| u32::from(p.0) < hi);
-    let range_pbits = scatter_bits(idx[s..e].iter().map(|p| u32::from(p.1)), n_printings);
-    let card_bits = printing_bits_to_card_bits(&range_pbits, offsets, n_cards);
+    let mut range_pbits = vec![0u64; n_printings.div_ceil(64)];
+    let mut card_bits = vec![0u64; n_cards.div_ceil(64)];
+    for p in idx[s..e].iter() {
+        let pid = u32::from(p.1) as usize;
+        range_pbits[pid >> 6] |= 1u64 << (pid & 63);
+        let cid = u32::from(ptc[pid]) as usize;
+        card_bits[cid >> 6] |= 1u64 << (cid & 63);
+    }
     (card_bits, range_pbits)
 }
 
@@ -4853,8 +4860,7 @@ fn run_query_routed<'a>(
         // narrow range routes elsewhere, and there k (hence the build) is small. If a materializing
         // plan does win, dispatch reads the same bitmap back as a candidate list.
         let (lo, hi) = usd_bare_range_bounds(filter).expect("applicable ⇒ bare usd range");
-        let (card_bits, range_pbits) =
-            build_card_range_bits(lo, hi, indexes, offsets, n_cards as usize, n_printings as usize);
+        let (card_bits, range_pbits) = build_card_range_bits(lo, hi, indexes, n_cards as usize, n_printings as usize);
         let count: u32 = card_bits.iter().map(|w| w.count_ones()).sum();
         (mk_feats(count, count, count, 0), Prep::RangeCardBits { card_bits, range_pbits })
     } else if PhysicalPlan::PrintingRangeScan.applicable(filter, mode, cards, plane, sort_col, descending, indexes) {
@@ -4980,8 +4986,7 @@ fn run_query_with_plan<'a>(
                 return None;
             }
             let (lo, hi) = usd_bare_range_bounds(filter).expect("applicability guarantees a bare usd range");
-            let (card_bits, range_pbits) =
-                build_card_range_bits(lo, hi, indexes, offsets, cards.len(), printings.len());
+            let (card_bits, range_pbits) = build_card_range_bits(lo, hi, indexes, cards.len(), printings.len());
             Some(exec_card_range_popcount(
                 cards, printings, offsets, strings, prefer, sort_col, descending, limit, page_offset, indexes, &card_bits, &range_pbits,
             ))

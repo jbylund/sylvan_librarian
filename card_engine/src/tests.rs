@@ -7894,6 +7894,87 @@ fn usd_bare_range_bounds_gates_pr2a_scope() {
     assert!(super::usd_bare_range_bounds(&FilterExpr::And(vec![usd_cmp(CmpOp::Lt, 50.0), cn_lt()])).is_none());
 }
 
+/// PR 2a build-cost split: for `usd<50`, which half of `CardRangePopcount`'s build dominates —
+/// scattering the price slice into a printing bitmap, or projecting that to a card-existence bitmap
+/// — and does building the card bitmap *directly* (`printing_to_card[pid]`, one pass, skipping the
+/// intermediate) help? The slice is in price order, so the direct path's `printing_to_card` reads
+/// are random (vs the projection's sequential `offsets` cursor), so it is not obviously a win —
+/// hence measured. Kernel timing over the real slice; same discipline as the other probes.
+#[test]
+#[ignore = "CardRangePopcount build-cost split; needs real.store; cargo test --release card_range_build_cost_split -- --ignored --nocapture"]
+fn card_range_build_cost_split() {
+    use std::hint::black_box;
+    use std::time::Instant;
+    const STORE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../benchmarks/verify-order/real.store");
+    const WARMUP: usize = 30;
+    const ITERS: usize = 300;
+
+    let Ok(file) = std::fs::File::open(STORE_PATH) else {
+        eprintln!("SKIP: {STORE_PATH} not found (see bench_verify_cost.rs docs)");
+        return;
+    };
+    let mmap = unsafe { Mmap::map(&file) }.expect("mmap real.store");
+    if mmap.len() < ARCHIVE_HEADER_LEN || mmap[..ARCHIVE_HEADER_LEN] != archive_header() {
+        eprintln!("SKIP: {STORE_PATH} header mismatch (stale — rebuild)");
+        return;
+    }
+    let archived = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
+    let n_cards = archived.cards.len();
+    let n_printings = archived.printings.len();
+    let idx = &archived.indexes.price_usd;
+    let ptc = &archived.indexes.printing_to_card;
+    let offsets = &archived.offsets;
+    let s = idx.partition_point(|p| u32::from(p.0) < 0); // usd<50 -> [0, 5000) cents
+    let e = idx.partition_point(|p| u32::from(p.0) < 5000);
+    let k = e - s;
+
+    // A: scatter the price slice into a printing bitmap.
+    let mut a = u128::MAX;
+    for it in 0..(WARMUP + ITERS) {
+        let t0 = Instant::now();
+        let pb = super::scatter_bits(idx[s..e].iter().map(|p| u32::from(p.1)), n_printings);
+        black_box(&pb);
+        if it >= WARMUP {
+            a = a.min(t0.elapsed().as_nanos());
+        }
+    }
+    // B: project that printing bitmap to a card-existence bitmap (pbits built once, reused).
+    let pbits = super::scatter_bits(idx[s..e].iter().map(|p| u32::from(p.1)), n_printings);
+    let mut b = u128::MAX;
+    for it in 0..(WARMUP + ITERS) {
+        let t0 = Instant::now();
+        let cb = super::printing_bits_to_card_bits(&pbits, offsets, n_cards);
+        black_box(&cb);
+        if it >= WARMUP {
+            b = b.min(t0.elapsed().as_nanos());
+        }
+    }
+    // C: build both bitmaps in one pass via printing_to_card (the "direct card bitmap" idea).
+    let mut c = u128::MAX;
+    for it in 0..(WARMUP + ITERS) {
+        let t0 = Instant::now();
+        let mut rp = vec![0u64; n_printings.div_ceil(64)];
+        let mut cb = vec![0u64; n_cards.div_ceil(64)];
+        for p in idx[s..e].iter() {
+            let pid = u32::from(p.1) as usize;
+            rp[pid >> 6] |= 1u64 << (pid & 63);
+            let cid = u32::from(ptc[pid]) as usize;
+            cb[cid >> 6] |= 1u64 << (cid & 63);
+        }
+        black_box(&rp);
+        black_box(&cb);
+        if it >= WARMUP {
+            c = c.min(t0.elapsed().as_nanos());
+        }
+    }
+
+    println!("\nusd<50 build cost (k={k} printings, n_cards={n_cards}, min of {ITERS}):");
+    println!("  A scatter -> printing bitmap : {a:>7} ns");
+    println!("  B project -> card bitmap     : {b:>7} ns");
+    println!("  current total (A + B)        : {:>7} ns", a + b);
+    println!("  C direct both, one pass      : {c:>7} ns");
+}
+
 #[test]
 fn printing_range_walk_matches_naive_page() {
     let leaf = usd_cmp(CmpOp::Lt, 50.0);
