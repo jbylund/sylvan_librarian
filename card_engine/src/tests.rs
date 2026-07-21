@@ -3228,6 +3228,7 @@ fn plan_cost_model_matches_gold() {
                     residual_tier_ns100,
                     limit: limit as u32,
                     offset: offset as u32,
+                    range_build_printings: 0,
                 };
 
                 // ── Model argmin over the applicable plans ──
@@ -3332,7 +3333,12 @@ fn cost_terms(plan: PhysicalPlan, f: &super::cost::PlanFeatures) -> (Vec<f64>, f
     let match_rate = (matches / f64::from(f.n_printings)).max(1.0e-6);
     match plan {
         PhysicalPlan::PrintingRangeScan => (vec![page_span / match_rate, 1.0], 0.0),
-        PhysicalPlan::PlanePopcountOrder | PhysicalPlan::CardRangePopcount => (vec![matches, n_cards / 64.0, limit, 1.0], 0.0),
+        PhysicalPlan::PlanePopcountOrder => (vec![matches, n_cards / 64.0, limit, 1.0], 0.0),
+        // Same term vector as P2; the build term is a fixed (hand-set) offset, not a refit param.
+        PhysicalPlan::CardRangePopcount => (
+            vec![matches, n_cards / 64.0, limit, 1.0],
+            f64::from(f.range_build_printings) * super::cost::CARD_RANGE_BUILD_PER_PRINTING_NS,
+        ),
         PhysicalPlan::StreamedSelect => {
             let floor = if u64::from(f.matches) <= *STREAM_MIN_MATCHES as u64 { n_cards } else { 0.0 };
             (vec![eval_domain, scan_units, matches, floor, 1.0], scan_units * tier_ns)
@@ -3440,6 +3446,7 @@ fn plan_cost_refit() {
                     scan_units: scan_units(mode_enum, prep.candidate_cards.as_deref(), &archived.offsets, n_printings, eval_domain),
                     residual_tier_ns100: if prep.all_match_known { 0 } else { verify_cost_tier(&res) },
                     limit: limit as u32, offset: offset as u32,
+                    range_build_printings: 0,
                 };
                 for (pi, plan) in all_plans.iter().enumerate() {
                     if let Some(meas) = ns[pi] {
@@ -3637,6 +3644,7 @@ fn printing_range_route_probe() {
                 scan_units: scan_units(Mode::Printing, prep.candidate_cards.as_deref(), &archived.offsets, n_printings as u32, eval_domain),
                 residual_tier_ns100,
                 limit: LIMIT as u32, offset: offset as u32,
+                range_build_printings: 0,
             };
 
             // ── Three pickers ──
@@ -3997,6 +4005,7 @@ fn plan_regret_report() {
                 residual_tier_ns100: tier,
                 limit: limit as u32,
                 offset: offset as u32,
+                range_build_printings: 0,
             };
 
             let gold = (0..4).filter_map(|i| ns[i].map(|v| (v, i))).min_by_key(|(v, _)| *v);
@@ -4123,6 +4132,7 @@ fn plan_regret_fuzz() {
                 n_cards, n_printings, matches, eval_domain: evd, scan_units: evd, // card mode ⇒ scan_units == eval_domain
                 residual_tier_ns100: tier,
                 limit: limit as u32, offset: offset as u32,
+                range_build_printings: 0,
             };
             let feats_true = mk(true_total, eval_domain);
             let feats_est = mk(est, est.min(n_cards));

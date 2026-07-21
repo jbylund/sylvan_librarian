@@ -4825,6 +4825,7 @@ fn run_query_routed<'a>(
         residual_tier_ns100,
         limit: limit as u32,
         offset: page_offset as u32,
+        range_build_printings: 0, // CardRangePopcount overrides this in its acquire branch
     };
     // Features for the general candidate path (shared by the acquire branch and the
     // lazy-materialize dispatch). `matches`/`eval_domain` = candidate CARD count, the
@@ -4862,7 +4863,15 @@ fn run_query_routed<'a>(
         let (lo, hi) = usd_bare_range_bounds(filter).expect("applicable ⇒ bare usd range");
         let (card_bits, range_pbits) = build_card_range_bits(lo, hi, indexes, n_cards as usize, n_printings as usize);
         let count: u32 = card_bits.iter().map(|w| w.count_ones()).sum();
-        (mk_feats(count, count, count, 0), Prep::RangeCardBits { card_bits, range_pbits })
+        // Slice size (in-range printings) drives the build term — the plan's dominant cost.
+        let slice_printings: u32 = range_pbits.iter().map(|w| w.count_ones()).sum();
+        // Unlike the plane branch, the residual here is the range, not True: CardRangePopcount's exact
+        // bitmap needs no re-verify (its formula ignores tier), but the materializing alternatives in
+        // dispatch DO re-verify the range per candidate, so they must be costed with its verify tier —
+        // `0` would under-cost them and let a mis-cheap StreamedSelect beat the plan that actually wins.
+        let mut feats = mk_feats(count, count, count, verify_cost_tier(filter));
+        feats.range_build_printings = slice_printings;
+        (feats, Prep::RangeCardBits { card_bits, range_pbits })
     } else if PhysicalPlan::PrintingRangeScan.applicable(filter, mode, cards, plane, sort_col, descending, indexes) {
         // Bare range: exact k from the index (no scan). P3/P4 estimated unnarrowed
         // (their broad regime — a narrow range makes P1 lose, and dispatch materializes).
