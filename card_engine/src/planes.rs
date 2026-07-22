@@ -167,6 +167,14 @@ pub(crate) const PLANE_BORDER_OTHER: usize = PLANE_BORDER + BORDER_TRACKED;
 
 pub(crate) const PLANE_COUNT: usize = PLANE_BORDER + BORDER_PLANES;
 
+/// #724: which border values get a *printing-space* one-hot plane (bit per printing, exact). The
+/// density-chosen broad head only — distinct from #664's card-space `BORDER_TRACKED_VALUES`, which
+/// also tracks `gold`: gold (1,238 printings) is below the printing-space plane/postings crossover
+/// (~3,000 = plane bytes / 4 per posting), so it — and sparser `yellow` — stay on the existing
+/// card-space path until they earn postings (a follow-on); negation is `complement`, which covers
+/// them regardless. See docs/issues/00724-engine-printing-existential-planes.md.
+pub(crate) const BORDER_PRINTING_PLANE_VALUES: [&str; 3] = ["black", "borderless", "white"];
+
 /// The observed [min,max] of whatever cards landed in one bucket plane,
 /// recomputed on every build/reload (never hardcoded from a one-time data
 /// snapshot — a future card outside today's observed range must still
@@ -405,6 +413,54 @@ pub(crate) fn build_bit_planes(cards: &[OracleCard], printings: &[Printing], off
         );
     }
     BitPlanes { n_cards: cards.len() as u32, words, cmc_hi, power_lo, power_hi, toughness_lo, toughness_hi }
+}
+
+/// #724: printing-space border planes — bit per printing, **exact** (unlike #664's card-space
+/// *existential* border plane, whose card bit only means "some printing has this border"). One
+/// one-hot plane per `BORDER_PRINTING_PLANE_VALUES` entry, plane-major, `words_per_plane(n_printings)`
+/// each; printing `p`'s bit is set iff that printing's border is the value. Negation is `complement`
+/// (each printing is or isn't the value — no "other" plane needed). Consumed by the printing-space
+/// popcount-order plan; project up via `printing_bits_to_card_bits` for card/artwork modes.
+#[derive(Archive, Serialize, Deserialize, Default)]
+pub(crate) struct BorderPrintingPlanes {
+    pub(crate) n_printings: u32,
+    /// `BORDER_PRINTING_PLANE_VALUES.len()` planes, plane-major: bit `p` of plane `k` is
+    /// `words[k * words_per_plane(n_printings) + p/64] >> (p%64) & 1`.
+    pub(crate) words: Vec<u64>,
+}
+
+/// Build the #724 printing-space border planes: one pass over printings, setting each planed value's
+/// bit. A `debug_assert` flags density drift — a planed value below the ~3k plane/postings crossover
+/// (it should have been reclassified to postings; see the doc's "fixed plane set + drift-assert").
+pub(crate) fn build_border_printing_planes(printings: &[Printing], strings: &[String]) -> BorderPrintingPlanes {
+    let n = printings.len();
+    let wpp = words_per_plane(n);
+    let mut words = vec![0u64; BORDER_PRINTING_PLANE_VALUES.len() * wpp];
+    for (p, printing) in printings.iter().enumerate() {
+        if printing.card_border_id == NONE_STR {
+            continue;
+        }
+        let s = strings[printing.card_border_id as usize].as_str();
+        if let Some(k) = BORDER_PRINTING_PLANE_VALUES.iter().position(|&v| v == s) {
+            words[k * wpp + p / 64] |= 1u64 << (p % 64);
+        }
+    }
+    // Drift check (see #724): a planed value should stay dense enough to earn a plane — postings win
+    // below ~3,000 printings (plane bytes / 4 per posting). If one drops below, reclassify it.
+    // Only meaningful at production scale: in a small store a "tracked" value is legitimately sparse,
+    // so gate on a corpus large enough that a genuinely-broad value must clear the crossover.
+    const PLANE_POSTINGS_CROSSOVER: usize = 3_000;
+    const DRIFT_CHECK_MIN_PRINTINGS: usize = 50_000;
+    if n >= DRIFT_CHECK_MIN_PRINTINGS {
+        for (k, value) in BORDER_PRINTING_PLANE_VALUES.iter().enumerate() {
+            let popcount: usize = words[k * wpp..(k + 1) * wpp].iter().map(|w| w.count_ones() as usize).sum();
+            debug_assert!(
+                popcount == 0 || popcount >= PLANE_POSTINGS_CROSSOVER,
+                "border printing plane '{value}' has {popcount} printings, below the ~{PLANE_POSTINGS_CROSSOVER} plane/postings crossover — reclassify to postings (#724)",
+            );
+        }
+    }
+    BorderPrintingPlanes { n_printings: n as u32, words }
 }
 
 /// Ascending card ids with divergent legality (~556 of 31,508 in production —

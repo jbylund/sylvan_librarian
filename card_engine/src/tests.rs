@@ -2,7 +2,7 @@ use super::{
     assign_name_ranks,
     build_numeric_index, build_oracle_text_index, build_tag_index, build_trigram_index,
     build_rarity_index, build_flavor_index, build_thresholded_tag_index, build_sort_permutations,
-    assign_artwork_groups, build_bit_planes, build_divergent_ids, build_name_bigram_index, build_printing_to_card, flavor_fingerprint, flavor_match_sets,
+    assign_artwork_groups, build_bit_planes, build_border_printing_planes, build_divergent_ids, build_name_bigram_index, build_printing_to_card, flavor_fingerprint, flavor_match_sets,
     cards_of_printings, count_common_keywords, count_common_types,
     build_artist_index, build_range_index, range_candidates, narrow_candidates, narrow_candidates_exact, rarity_candidates,
     range_too_broad_to_narrow, run_query, run_query_with_plan, PhysicalPlan, trigram_candidates, finalize_trigram_index, PrintingRangeIndex, NARROW_FLOOR,
@@ -4468,6 +4468,7 @@ fn bench_checked_vs_unchecked_access() {
         artwork_groups,
         printing_to_card: build_printing_to_card(&offsets),
         planes:         build_bit_planes(&cards, &printings, &offsets, &strings),
+        border_printing: build_border_printing_planes(&printings, &strings),
         name_bigrams:   build_name_bigram_index(&cards),
         legal_divergent: build_divergent_ids(&cards),
     };
@@ -7957,6 +7958,42 @@ fn border_plane_query_kernel() {
     println!("  matching printings: {matches}");
     println!("  popcount + edhrec walk to fill {LIMIT}: {best} ns   (checksum total={sink})");
     println!("  today's per-printing scan (bench_printing_planes): ~869,000 ns");
+}
+
+/// #724 build-side correctness oracle: projecting a printing-space border plane up to card-existence
+/// (`printing_bits_to_card_bits`) must equal #664's card-space border plane for the same value —
+/// both mean "this card has a printing with border=value" (existence projection). Diffed for the
+/// three shared tracked values (black/borderless/white, same plane-index order). Needs a
+/// freshly-built real.store (new archive format). `cargo test --release
+/// border_printing_plane_matches_card_plane_projected -- --ignored --nocapture`
+#[test]
+#[ignore = "#724 border-plane oracle diff; needs a freshly-built real.store"]
+fn border_printing_plane_matches_card_plane_projected() {
+    const STORE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../benchmarks/verify-order/real.store");
+    let Ok(file) = std::fs::File::open(STORE_PATH) else {
+        eprintln!("SKIP: {STORE_PATH} not found (rebuild after the #724 build-side change)");
+        return;
+    };
+    let mmap = unsafe { Mmap::map(&file) }.expect("mmap real.store");
+    if mmap.len() < ARCHIVE_HEADER_LEN || mmap[..ARCHIVE_HEADER_LEN] != archive_header() {
+        eprintln!("SKIP: {STORE_PATH} header mismatch — rebuild for the bumped ARCHIVE_FORMAT_VERSION");
+        return;
+    }
+    let archived = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
+    let n_cards = archived.cards.len();
+    let n_printings = archived.printings.len();
+    let bp = &archived.indexes.border_printing; // printing-space (#724)
+    let cp = &archived.indexes.planes; // card-space (#664)
+    let wpp_p = super::words_per_plane(n_printings);
+    let wpp_c = super::words_per_plane(n_cards);
+    for (k, value) in super::BORDER_PRINTING_PLANE_VALUES.iter().enumerate() {
+        let printing_bits: Vec<u64> = bp.words[k * wpp_p..(k + 1) * wpp_p].iter().map(|w| u64::from(*w)).collect();
+        let projected = super::printing_bits_to_card_bits(&printing_bits, &archived.offsets, n_cards);
+        let start = (super::PLANE_BORDER + k) * wpp_c;
+        let card_bits: Vec<u64> = cp.words[start..start + wpp_c].iter().map(|w| u64::from(*w)).collect();
+        assert_eq!(projected, card_bits, "border '{value}' (plane {k}): projected-up printing plane != #664 card plane");
+    }
+    eprintln!("OK: {} border printing planes project up to match #664's card planes", super::BORDER_PRINTING_PLANE_VALUES.len());
 }
 
 /// PR 2a build-cost split: for `usd<50`, which half of `CardRangePopcount`'s build dominates —

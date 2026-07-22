@@ -2273,6 +2273,7 @@ struct CardIndexes {
     // see docs/issues/00690-engine-direct-projection-arrays.md.
     printing_to_card: Vec<u32>,
     planes:         BitPlanes,                 // card space: transposed low-cardinality dims (#630)
+    border_printing: BorderPrintingPlanes,     // printing space: exact bit-per-printing border (#724)
     name_bigrams:   NameBigramIndex,           // card space: exact 2-byte name containment (#639)
     legal_divergent: Vec<u16>,                // card space: ids with divergent legality (#630 phase 2), postings not a plane — see build_divergent_ids
 }
@@ -2302,6 +2303,7 @@ impl Default for CardIndexes {
             artwork_groups: Vec::new(),
             printing_to_card: Vec::new(),
             planes:         BitPlanes::default(),
+            border_printing: BorderPrintingPlanes::default(),
             name_bigrams:   NameBigramIndex::default(),
             legal_divergent: Vec::new(),
         }
@@ -5409,7 +5411,7 @@ const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 /// catch (e.g. reordering same-size fields, changing an index type) — and on
 /// any FLAVOR_FP_FEATURES change: archived fingerprints are built with that
 /// table, so a new table reading old fingerprints breaks the superset test.
-const ARCHIVE_FORMAT_VERSION: u32 = 20260720;
+const ARCHIVE_FORMAT_VERSION: u32 = 20260721;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -5812,6 +5814,7 @@ impl QueryEngine {
             artwork_groups: artwork_group_counts,
             printing_to_card: build_printing_to_card(&offsets),
             planes:         build_bit_planes(&cards, &printings, &offsets, &strings),
+            border_printing: build_border_printing_planes(&printings, &strings),
             name_bigrams:   build_name_bigram_index(&cards),
             legal_divergent: build_divergent_ids(&cards),
         };
