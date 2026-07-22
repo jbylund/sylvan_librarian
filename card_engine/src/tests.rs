@@ -2,7 +2,7 @@ use super::{
     assign_name_ranks,
     build_numeric_index, build_oracle_text_index, build_tag_index, build_trigram_index,
     build_rarity_index, build_flavor_index, build_thresholded_tag_index, build_sort_permutations,
-    assign_artwork_groups, build_bit_planes, build_divergent_ids, build_name_bigram_index, build_printing_to_card, flavor_fingerprint, flavor_match_sets,
+    assign_artwork_groups, build_bit_planes, build_border_printing_planes, build_divergent_ids, build_name_bigram_index, build_printing_to_card, flavor_fingerprint, flavor_match_sets,
     cards_of_printings, count_common_keywords, count_common_types,
     build_artist_index, build_range_index, range_candidates, narrow_candidates, narrow_candidates_exact, rarity_candidates,
     range_too_broad_to_narrow, run_query, run_query_with_plan, PhysicalPlan, trigram_candidates, finalize_trigram_index, PrintingRangeIndex, NARROW_FLOOR,
@@ -2342,6 +2342,7 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
     data.indexes.released_at = build_range_index(&data.printings, |p| p.released_at_int);
     data.indexes.price_usd = build_range_index(&data.printings, |p| p.price_usd);
     data.indexes.collector_number = build_range_index(&data.printings, |p| p.collector_number_int.map(u32::from));
+    data.indexes.border_printing = build_border_printing_planes(&data.printings, &data.strings);
     data
 }
 
@@ -2740,6 +2741,9 @@ fn force_plan_differential_agreement() {
         // above already exercise it; add collector_number + year over card-level perms too).
         (FuzzSpec::Leaf(FuzzLeaf::CollectorNumber { op: CmpOp::Lt, val: 100.0 }), "edhrec", "asc"),
         (FuzzSpec::Leaf(FuzzLeaf::Year { op: CmpOp::Ge, year: 2015 }), "edhrec", "desc"),
+        // #724: a bare border leaf routes through PrintingPlaneScan in printing mode (black is ~1/6
+        // of printings, above STREAM_MIN in this corpus → the walk; agreement vs GatheredScan checked).
+        (FuzzSpec::Leaf(FuzzLeaf::Border { value: "black".to_string() }), "edhrec", "asc"),
     ];
     for _ in 0..RANDOM_QUERIES {
         let orderby = SORTS[rng.random_range(0..SORTS.len())];
@@ -2750,6 +2754,7 @@ fn force_plan_differential_agreement() {
     let modes = ["card", "printing", "artwork"];
     let all_plans = [
         PhysicalPlan::PrintingRangeScan,
+        PhysicalPlan::PrintingPlaneScan,
         PhysicalPlan::PlanePopcountOrder,
         PhysicalPlan::CardRangePopcount,
         PhysicalPlan::StreamedSelect,
@@ -2757,12 +2762,13 @@ fn force_plan_differential_agreement() {
     ];
     let plan_idx = |p: PhysicalPlan| match p {
         PhysicalPlan::PrintingRangeScan => 0,
-        PhysicalPlan::PlanePopcountOrder => 1,
-        PhysicalPlan::CardRangePopcount => 2,
-        PhysicalPlan::StreamedSelect => 3,
-        PhysicalPlan::GatheredScan => 4,
+        PhysicalPlan::PrintingPlaneScan => 1,
+        PhysicalPlan::PlanePopcountOrder => 2,
+        PhysicalPlan::CardRangePopcount => 3,
+        PhysicalPlan::StreamedSelect => 4,
+        PhysicalPlan::GatheredScan => 5,
     };
-    let mut ran = [0u32; 5];
+    let mut ran = [0u32; 6];
 
     // >= any possible total, so the offset-0 page is the complete ordered result.
     let full_limit = archived.printings.len().max(1);
@@ -3336,7 +3342,7 @@ fn cost_terms(plan: PhysicalPlan, f: &super::cost::PlanFeatures) -> (Vec<f64>, f
     let page_span = f64::from((f.offset.saturating_add(f.limit)).min(f.matches));
     let match_rate = (matches / f64::from(f.n_printings)).max(1.0e-6);
     match plan {
-        PhysicalPlan::PrintingRangeScan => (vec![page_span / match_rate, 1.0], 0.0),
+        PhysicalPlan::PrintingRangeScan | PhysicalPlan::PrintingPlaneScan => (vec![page_span / match_rate, 1.0], 0.0),
         PhysicalPlan::PlanePopcountOrder => (vec![matches, n_cards / 64.0, limit, 1.0], 0.0),
         // Same term vector as P2; the build term is a fixed (hand-set) offset, not a refit param.
         PhysicalPlan::CardRangePopcount => (
@@ -4468,6 +4474,7 @@ fn bench_checked_vs_unchecked_access() {
         artwork_groups,
         printing_to_card: build_printing_to_card(&offsets),
         planes:         build_bit_planes(&cards, &printings, &offsets, &strings),
+        border_printing: build_border_printing_planes(&printings, &strings),
         name_bigrams:   build_name_bigram_index(&cards),
         legal_divergent: build_divergent_ids(&cards),
     };
@@ -7883,6 +7890,116 @@ fn bare_range_bounds_recognizes_leaves_and_rejects_rest() {
     assert!(bounds(&FilterExpr::And(vec![usd_cmp(CmpOp::Lt, 50.0)])).is_none());
     let cmc_lt = FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Cmc), op: CmpOp::Lt, rhs: NumExpr::Const(3.0) };
     assert!(bounds(&cmc_lt).is_none());
+}
+
+/// #724 de-risk: does `popcount` + a printing walk over a *precomputed* border plane beat today's
+/// per-printing scan for `border:black`/printing (~0.87 ms)? A precomputed plane has no per-query
+/// build (unlike CardRangePopcount's ~105µs), so this should land near #634's ~0.06 ms bare-plane
+/// popcount. Builds the border:black printing bitmap once (simulating the persisted plane), then
+/// times `popcount` (the total) + an edhrec-perm membership walk (the page).
+/// `cargo test --release border_plane_query_kernel -- --ignored --nocapture`
+#[test]
+#[ignore = "#724 border-plane query kernel; needs real.store"]
+fn border_plane_query_kernel() {
+    use std::hint::black_box;
+    use std::time::Instant;
+    const STORE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../benchmarks/verify-order/real.store");
+    const WARMUP: usize = 30;
+    const ITERS: usize = 300;
+    const LIMIT: usize = 100;
+
+    let Ok(file) = std::fs::File::open(STORE_PATH) else {
+        eprintln!("SKIP: {STORE_PATH} not found (see bench_verify_cost.rs docs)");
+        return;
+    };
+    let mmap = unsafe { Mmap::map(&file) }.expect("mmap real.store");
+    if mmap.len() < ARCHIVE_HEADER_LEN || mmap[..ARCHIVE_HEADER_LEN] != archive_header() {
+        eprintln!("SKIP: {STORE_PATH} header mismatch (stale — rebuild)");
+        return;
+    }
+    let archived = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
+    let n_printings = archived.printings.len();
+    let strings = &archived.strings;
+    let offsets = &archived.offsets;
+
+    // Build the border:black printing bitmap once — simulates the persisted #724 plane (no per-query build).
+    let mut plane = vec![0u64; n_printings.div_ceil(64)];
+    for (pid, p) in archived.printings.iter().enumerate() {
+        if super::str_at(strings, u32::from(p.card_border_id)) == Some("black") {
+            plane[pid >> 6] |= 1u64 << (pid & 63);
+        }
+    }
+    let matches: usize = plane.iter().map(|w| w.count_ones() as usize).sum();
+    let perm = archived.indexes.sort_perms.get(SortCol::EdhrecRank, false).expect("edhrec perm");
+
+    let mut best = u128::MAX;
+    let mut sink = 0usize;
+    for it in 0..(WARMUP + ITERS) {
+        let t0 = Instant::now();
+        // total = popcount (replaces the O(n) count pass)
+        let total: usize = plane.iter().map(|w| w.count_ones() as usize).sum();
+        // page = walk cards in edhrec order, expand to printings, test the plane bit, early-stop
+        let mut page: Vec<u32> = Vec::with_capacity(LIMIT);
+        'walk: for c in perm.iter() {
+            let cid = u32::from(*c) as usize;
+            let start = u32::from(offsets[cid]) as usize;
+            let end = u32::from(offsets[cid + 1]) as usize;
+            for pid in start..end {
+                if (plane[pid >> 6] >> (pid & 63)) & 1 == 1 {
+                    page.push(pid as u32);
+                    if page.len() == LIMIT {
+                        break 'walk;
+                    }
+                }
+            }
+        }
+        black_box(&page);
+        sink = total;
+        let dt = t0.elapsed().as_nanos();
+        if it >= WARMUP {
+            best = best.min(dt);
+        }
+    }
+    println!("\nborder:black/printing via a PRECOMPUTED plane (real.store):");
+    println!("  matching printings: {matches}");
+    println!("  popcount + edhrec walk to fill {LIMIT}: {best} ns   (checksum total={sink})");
+    println!("  today's per-printing scan (bench_printing_planes): ~869,000 ns");
+}
+
+/// #724 build-side correctness oracle: projecting a printing-space border plane up to card-existence
+/// (`printing_bits_to_card_bits`) must equal #664's card-space border plane for the same value —
+/// both mean "this card has a printing with border=value" (existence projection). Diffed for the
+/// three shared tracked values (black/borderless/white, same plane-index order). Needs a
+/// freshly-built real.store (new archive format). `cargo test --release
+/// border_printing_plane_matches_card_plane_projected -- --ignored --nocapture`
+#[test]
+#[ignore = "#724 border-plane oracle diff; needs a freshly-built real.store"]
+fn border_printing_plane_matches_card_plane_projected() {
+    const STORE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../benchmarks/verify-order/real.store");
+    let Ok(file) = std::fs::File::open(STORE_PATH) else {
+        eprintln!("SKIP: {STORE_PATH} not found (rebuild after the #724 build-side change)");
+        return;
+    };
+    let mmap = unsafe { Mmap::map(&file) }.expect("mmap real.store");
+    if mmap.len() < ARCHIVE_HEADER_LEN || mmap[..ARCHIVE_HEADER_LEN] != archive_header() {
+        eprintln!("SKIP: {STORE_PATH} header mismatch — rebuild for the bumped ARCHIVE_FORMAT_VERSION");
+        return;
+    }
+    let archived = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
+    let n_cards = archived.cards.len();
+    let n_printings = archived.printings.len();
+    let bp = &archived.indexes.border_printing; // printing-space (#724)
+    let cp = &archived.indexes.planes; // card-space (#664)
+    let wpp_p = super::words_per_plane(n_printings);
+    let wpp_c = super::words_per_plane(n_cards);
+    for (k, value) in super::BORDER_PRINTING_PLANE_VALUES.iter().enumerate() {
+        let printing_bits: Vec<u64> = bp.words[k * wpp_p..(k + 1) * wpp_p].iter().map(|w| u64::from(*w)).collect();
+        let projected = super::printing_bits_to_card_bits(&printing_bits, &archived.offsets, n_cards);
+        let start = (super::PLANE_BORDER + k) * wpp_c;
+        let card_bits: Vec<u64> = cp.words[start..start + wpp_c].iter().map(|w| u64::from(*w)).collect();
+        assert_eq!(projected, card_bits, "border '{value}' (plane {k}): projected-up printing plane != #664 card plane");
+    }
+    eprintln!("OK: {} border printing planes project up to match #664's card planes", super::BORDER_PRINTING_PLANE_VALUES.len());
 }
 
 /// PR 2a build-cost split: for `usd<50`, which half of `CardRangePopcount`'s build dominates —

@@ -2273,6 +2273,7 @@ struct CardIndexes {
     // see docs/issues/00690-engine-direct-projection-arrays.md.
     printing_to_card: Vec<u32>,
     planes:         BitPlanes,                 // card space: transposed low-cardinality dims (#630)
+    border_printing: BorderPrintingPlanes,     // printing space: exact bit-per-printing border (#724)
     name_bigrams:   NameBigramIndex,           // card space: exact 2-byte name containment (#639)
     legal_divergent: Vec<u16>,                // card space: ids with divergent legality (#630 phase 2), postings not a plane — see build_divergent_ids
 }
@@ -2302,6 +2303,7 @@ impl Default for CardIndexes {
             artwork_groups: Vec::new(),
             printing_to_card: Vec::new(),
             planes:         BitPlanes::default(),
+            border_printing: BorderPrintingPlanes::default(),
             name_bigrams:   NameBigramIndex::default(),
             legal_divergent: Vec::new(),
         }
@@ -3879,6 +3881,11 @@ static PRINTING_RANGE_FASTPATH: LazyLock<usize> = LazyLock::new(|| guard_env("CA
 /// queries exactly as before (the general candidate path), `1` (default) enables `CardRangePopcount`.
 static RANGE_BITS_CARD: LazyLock<usize> = LazyLock::new(|| guard_env("CARD_ENGINE_RANGE_BITS_CARD", 1));
 
+/// #724 printing-space border-plane fast path (`PrintingPlaneScan`). Binary A/B kill-switch, same
+/// kind as `PRINTING_RANGE_FASTPATH`: `0` routes `border:VALUE`/printing as before (general path),
+/// `1` (default) uses the plane `popcount`/postings total + the printing walk.
+static BORDER_PRINTING_PLANE: LazyLock<usize> = LazyLock::new(|| guard_env("CARD_ENGINE_BORDER_PRINTING_PLANE", 1));
+
 /// The range index and half-open `[lo, hi)` a *bare* range-predicate leaf selects, or None for
 /// anything else (compound, `Ne`, a non-range numeric field). Provably-empty predicates return a
 /// zero-width `[v, v)` so the fastpath's `k` resolves to 0. Reuses the exact bound derivations the
@@ -4154,6 +4161,54 @@ fn printing_range_fastpath<'a>(
     Some((k, walk_printing_page(cards, printings, offsets, strings, filter, sort_col, descending, limit, page_offset, perm)))
 }
 
+/// The exact `unique=printing` total for a bare `border:VALUE` leaf, from the #724 printing planes:
+/// `popcount` of the value's plane (black/borderless/white), or its postings length (gold/yellow/
+/// untracked). `None` for anything that isn't a bare `border ==` leaf, or an unknown border value.
+/// This replaces the O(n) count pass — the whole cost of `border:black`/printing today.
+fn border_printing_total(filter: &FilterExpr, bp: &Archived<BorderPrintingPlanes>) -> Option<usize> {
+    let FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value } = filter else {
+        return None;
+    };
+    let wpp = words_per_plane(u32::from(bp.n_printings) as usize);
+    if let Some(k) = BORDER_PRINTING_PLANE_VALUES.iter().position(|&v| v == value.as_str()) {
+        return Some(bp.words[k * wpp..(k + 1) * wpp].iter().map(|w| u64::from(*w).count_ones() as usize).sum());
+    }
+    bp.postings.iter().find(|e| e.0.as_str() == value.as_str()).map(|e| e.1.len())
+}
+
+/// `unique=printing` fast path for a bare `border:VALUE` leaf — the plane analogue of
+/// `printing_range_fastpath`: `total` is the plane `popcount`/postings length (no count pass), and
+/// the page is the same `walk_printing_page` (its residual test already handles the border compare,
+/// and early-stops). Returns `None` (declines) for a non-border leaf, an unknown value, or a total
+/// at/below the stream threshold — where the general path gathers/orders differently (same guard as
+/// `printing_range_fastpath`; a genuinely sparse value like `yellow` falls through here).
+#[allow(clippy::too_many_arguments)]
+fn printing_border_fastpath<'a>(
+    cards: &'a [AOracleCard],
+    printings: &'a [APrinting],
+    offsets: &AOffsets,
+    strings: &AStrings,
+    filter: &FilterExpr,
+    indexes: &Archived<CardIndexes>,
+    sort_col: SortCol,
+    descending: bool,
+    limit: usize,
+    page_offset: usize,
+) -> Option<(usize, Vec<(&'a AOracleCard, &'a APrinting)>)> {
+    let total = border_printing_total(filter, &indexes.border_printing)?;
+    if total == 0 || page_offset >= total {
+        return Some((total, Vec::new()));
+    }
+    if total <= *STREAM_MIN_MATCHES {
+        return None; // sparse: the general path gathers + globally sorts, ordering ties differently
+    }
+    let perm = indexes.sort_perms.get(sort_col, descending)?;
+    if perm.len() != cards.len() {
+        return None;
+    }
+    Some((total, walk_printing_page(cards, printings, offsets, strings, filter, sort_col, descending, limit, page_offset, perm)))
+}
+
 /// The physical plans the cost router (`run_query_routed`) chooses among. Each
 /// carries three declared properties — `applicable` (its correctness precondition),
 /// `cost::plan_cost` (its predicted runtime), and an executor — so the router is a
@@ -4164,8 +4219,11 @@ fn printing_range_fastpath<'a>(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PhysicalPlan {
     /// #695 bare-broad-range fast path under `unique=printing` (executor:
-    /// `printing_range_fastpath`). The one non-materializing plan.
+    /// `printing_range_fastpath`). Non-materializing.
     PrintingRangeScan,
+    /// #724 bare border leaf under `unique=printing`: total from the printing border plane's
+    /// `popcount`/postings, page from the same walk (`printing_border_fastpath`). Non-materializing.
+    PrintingPlaneScan,
     /// #634 Step 2 plane-bitmap popcount-skip order phase (`run_query_streamed_popcount`).
     PlanePopcountOrder,
     /// PR 2a card-space idea 2: a bare `usd` range under `unique=card`, answered as the same
@@ -4180,8 +4238,9 @@ enum PhysicalPlan {
 impl PhysicalPlan {
     /// All plans, argmin-ordered so ties resolve deterministically toward the
     /// cheaper-fixed-cost plan. The router filters this by `applicable`.
-    const ALL: [PhysicalPlan; 5] = [
+    const ALL: [PhysicalPlan; 6] = [
         PhysicalPlan::PrintingRangeScan,
+        PhysicalPlan::PrintingPlaneScan,
         PhysicalPlan::PlanePopcountOrder,
         PhysicalPlan::CardRangePopcount,
         PhysicalPlan::StreamedSelect,
@@ -4209,6 +4268,10 @@ impl PhysicalPlan {
             PhysicalPlan::PrintingRangeScan => {
                 printing_range_scan_applicable(mode, plane, cards) && bare_range_bounds(filter, indexes).is_some()
             }
+            PhysicalPlan::PrintingPlaneScan => {
+                printing_plane_scan_applicable(mode, plane, cards)
+                    && border_printing_total(filter, &indexes.border_printing).is_some()
+            }
             PhysicalPlan::PlanePopcountOrder => {
                 plane_popcount_order_applicable(filter, mode, cards, plane, sort_col, descending, indexes)
             }
@@ -4221,12 +4284,13 @@ impl PhysicalPlan {
     }
 
     /// Whether the plan runs off the shared materialized prep (plane bitmap /
-    /// candidate list) — true for all but `PrintingRangeScan`, whose whole benefit
-    /// is answering *without* materializing. The router costs non-materializing
-    /// plans from a cheap estimate first (phase 1) and only materializes (phase 2)
-    /// when a materializing plan wins or the non-materializing one declines.
+    /// candidate list) — true for all but the printing bare-leaf fast paths
+    /// (`PrintingRangeScan`/`PrintingPlaneScan`), whose whole benefit is answering
+    /// *without* materializing. The router costs non-materializing plans from a
+    /// cheap estimate first (phase 1) and only materializes (phase 2) when a
+    /// materializing plan wins or the non-materializing one declines.
     fn materializing(self) -> bool {
-        !matches!(self, PhysicalPlan::PrintingRangeScan)
+        !matches!(self, PhysicalPlan::PrintingRangeScan | PhysicalPlan::PrintingPlaneScan)
     }
 }
 
@@ -4327,6 +4391,13 @@ fn plane_popcount_order_applicable(
 /// `None` for anything it doesn't own).
 fn printing_range_scan_applicable(mode: Mode, plane: Option<&PlaneExpr>, cards: &[AOracleCard]) -> bool {
     *PRINTING_RANGE_FASTPATH != 0 && matches!(mode, Mode::Printing) && plane.is_none() && !cards.is_empty()
+}
+
+/// `PrintingPlaneScan` structural eligibility (#724): `unique=printing`, no plane, non-empty store,
+/// flag on. The border-leaf check (`border_printing_total().is_some()`) is applied on top by the
+/// plan's `applicable` arm; `printing_border_fastpath` makes the final accept/decline.
+fn printing_plane_scan_applicable(mode: Mode, plane: Option<&PlaneExpr>, cards: &[AOracleCard]) -> bool {
+    *BORDER_PRINTING_PLANE != 0 && matches!(mode, Mode::Printing) && plane.is_none() && !cards.is_empty()
 }
 
 /// `CardRangePopcount` needs `Mode::Card`, a **bare** range leaf as the whole filter — usd/cn/date,
@@ -4868,6 +4939,11 @@ fn run_query_routed<'a>(
         let (idx, lo, hi) = bare_range_bounds(filter, indexes).expect("applicable ⇒ bare range");
         let k = (idx.partition_point(|p| u32::from(p.0) < hi) - idx.partition_point(|p| u32::from(p.0) < lo)) as u32;
         (mk_feats(k, n_cards, n_printings, verify_cost_tier(filter)), Prep::Range)
+    } else if PhysicalPlan::PrintingPlaneScan.applicable(filter, mode, cards, plane, sort_col, descending, indexes) {
+        // Bare border leaf: exact total from the #724 printing plane popcount / postings len (no
+        // count pass, no materialization). P3/P4 estimated unnarrowed, same as PrintingRangeScan.
+        let total = border_printing_total(filter, &indexes.border_printing).expect("applicable ⇒ border leaf") as u32;
+        (mk_feats(total, n_cards, n_printings, verify_cost_tier(filter)), Prep::Range)
     } else {
         let prep = prepare_candidates(cards, offsets, strings, filter, plane, mode, indexes);
         (candidate_feats(&prep, filter), Prep::Candidates(prep))
@@ -4909,14 +4985,20 @@ fn run_query_routed<'a>(
             p, cards, printings, offsets, strings, filter, prep, plane, mode, prefer, sort_col, descending, limit, page_offset, indexes,
         ),
         (plan, Prep::Range) => {
-            // P1 walks if it won and its fastpath accepts. Otherwise (a materializing
-            // plan won the estimate, or P1's fastpath declined — rare, since cost
-            // seldom picks P1 when narrow) materialize now and run the best
-            // materializing plan on EXACT features.
-            let p1_page = (plan == PhysicalPlan::PrintingRangeScan)
-                .then(|| printing_range_fastpath(cards, printings, offsets, strings, filter, indexes, sort_col, descending, limit, page_offset))
-                .flatten();
-            match p1_page {
+            // A printing bare-leaf fast path walks if it won and its fastpath accepts. Otherwise (a
+            // materializing plan won the estimate, or the fastpath declined — rare, since cost seldom
+            // picks these when narrow) materialize now and run the best materializing plan on EXACT
+            // features. `Prep::Range` is shared by the range (#695) and border (#724) fast paths.
+            let fast_page = match plan {
+                PhysicalPlan::PrintingRangeScan => {
+                    printing_range_fastpath(cards, printings, offsets, strings, filter, indexes, sort_col, descending, limit, page_offset)
+                }
+                PhysicalPlan::PrintingPlaneScan => {
+                    printing_border_fastpath(cards, printings, offsets, strings, filter, indexes, sort_col, descending, limit, page_offset)
+                }
+                _ => None,
+            };
+            match fast_page {
                 Some(page) => page,
                 None => {
                     let prep = prepare_candidates(cards, offsets, strings, filter, plane, mode, indexes);
@@ -4970,6 +5052,12 @@ fn run_query_with_plan<'a>(
             }
             // Structural eligibility passed; the fastpath itself decides (None = declined).
             printing_range_fastpath(cards, printings, offsets, strings, filter, indexes, sort_col, descending, limit, page_offset)
+        }
+        PhysicalPlan::PrintingPlaneScan => {
+            if !printing_plane_scan_applicable(mode, plane, cards) {
+                return None;
+            }
+            printing_border_fastpath(cards, printings, offsets, strings, filter, indexes, sort_col, descending, limit, page_offset)
         }
         PhysicalPlan::PlanePopcountOrder => {
             if !plane_popcount_order_applicable(filter, mode, cards, plane, sort_col, descending, indexes) {
@@ -5409,7 +5497,7 @@ const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 /// catch (e.g. reordering same-size fields, changing an index type) — and on
 /// any FLAVOR_FP_FEATURES change: archived fingerprints are built with that
 /// table, so a new table reading old fingerprints breaks the superset test.
-const ARCHIVE_FORMAT_VERSION: u32 = 20260720;
+const ARCHIVE_FORMAT_VERSION: u32 = 20260721;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -5812,6 +5900,7 @@ impl QueryEngine {
             artwork_groups: artwork_group_counts,
             printing_to_card: build_printing_to_card(&offsets),
             planes:         build_bit_planes(&cards, &printings, &offsets, &strings),
+            border_printing: build_border_printing_planes(&printings, &strings),
             name_bigrams:   build_name_bigram_index(&cards),
             legal_divergent: build_divergent_ids(&cards),
         };

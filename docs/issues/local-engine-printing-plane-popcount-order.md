@@ -248,13 +248,15 @@ printing-space subset, in dependency order:
 6. **Cost-route idea 1 vs this.** The `argmin` already exists; add this plan's cost formula and let
    the offset×selectivity crossover (validated today by `idea1_vs_idea2_probe`) pick between them.
 7. **Printing-space bitplanes — separate track ([#724](https://github.com/jbylund/sylvan_librarian/issues/724)).**
-   The legality/border **leaf source** that unlocks the existential targets (`f:modern`,
-   `border:black`). Sequenced **last, deliberately**: these planes give *no* speedup until steps 1–6
-   exist to consume them via `popcount` + AND + bit-walk (the current verify path doesn't `popcount`,
-   so a plane with no consumer is just a bigger archive). They carry their own correctness surface
-   (the existential projection — a card satisfying both `∃ legal` and `∃ not-legal`) validated in
-   isolation on the build side, and their own archive-format bump. Once landed they plug straight into
-   this plan as another leaf bitmap — the machinery from step 5 is unchanged.
+   The legality/border/rarity **leaf source** for the printing-varying targets (`f:modern`,
+   `border:black`). **Not sequenced last / not inert** — #724 folds in the `popcount` + a reused page
+   walk to answer *bare* printing-mode plane queries **itself** (a standalone ~3×, subsuming PR 5), so
+   it can ship early and independently. What it defers to *this* plan is the **compound** case:
+   composing multiple printing-varying leaves (and broadcasting card-planes) then projecting once —
+   which is where steps 4–6 add value on top. #724 carries its own build cost (per-printing bits +
+   an archive-format bump) and the divergent-legality build correctness, validated in isolation.
+   Once landed, the same planes plug into this plan as leaf bitmaps for compounds — the machinery from
+   step 5 is unchanged.
 
 ## #656 assembly
 

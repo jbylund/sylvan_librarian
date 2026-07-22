@@ -299,13 +299,17 @@ Ordered by dependency and risk; magnitudes are from PR #689's interleaved-A/B me
   *Impacts:* `usd`/`cn`/`date` under `unique=artwork` (turns PR #689's +7-8% regression into a
   win). *Magnitude:* regression → win. *Depends:* 2a (+3 for cn/date). *Risk:* med — new persisted
   arrays + a format-version bump.
-- [ ] **PR 5 — existential-plane printing-mode total** (legality/rarity/border). Start with the
-  O(1) precomputed per-value count for the bare query; add the `has_V`/`has_notV` classification
-  for the card-mask case if warranted. See
-  [Existential fields](#existential-fields-a-second-cheap-total-mechanism).
-  *Impacts:* bare `r:`/`f:`/`border:` under `unique=printing`. *Magnitude:* ~3× (matches the 3.09
-  printings/card corpus average). *Depends:* Step 0 (gated on it being a real bottleneck).
-  *Risk:* med — independent of the sorted-range PRs.
+- [ ] **PR 5 — printing-mode total for legality/rarity/border** — a precomputed O(1) per-value count
+  answering a **bare** query's total (`border:black`/printing). See
+  [Existential fields](#existential-fields-a-second-cheap-total-mechanism). *Impacts:* bare
+  `r:`/`f:`/`border:` under `unique=printing`. *Magnitude:* ~3× (removes the count pass). *Depends:*
+  Step 0 (gated on it being a real bottleneck).
+  **Largely subsumed by [#724](https://github.com/jbylund/sylvan_librarian/issues/724)** (printing
+  bitplanes): a bitplane's `popcount` *is* this count, and #724 also does composition/membership/paging.
+  So build PR 5 standalone **only** as a cheaper pre-#724 shortcut (a scalar count table, no
+  per-printing bits, no archive bump) if the bare printing-mode total is hot before the bitplanes
+  land; otherwise it falls out of #724. (These are printing-*exact* planes, not "existential" — that
+  term describes the card-space projection; renamed here to match #724.)
 
 **Why this order:** PR 1 first keeps the "small, independent, separable" principle — lowest risk,
 printing-only, validates the walk + harness (contingent on Step 0; else swap with 2a). `2a → 3`
