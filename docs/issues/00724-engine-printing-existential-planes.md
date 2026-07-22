@@ -1,21 +1,34 @@
-# Engine: Printing-Space Existential Bitplanes (Legality / Border / Frame)
+# Engine: Printing-Space Bitplanes (Legality / Border / Rarity, Bit-per-Printing)
 
 Status: todo, filed as [#724](https://github.com/jbylund/sylvan_librarian/issues/724). Sequenced
 **last**, behind the [printing-space popcount-order plan](local-engine-printing-plane-popcount-order.md)
 that consumes them (see that doc's ship-order step 7).
 
-## What
+## What — exact, not existential
 
-Bit-per-**printing** planes for printing-varying categorical/existential values — legality (per
-format), border, frame. Today these live only in **card space**: legality's `legal_x` plane
+Bit-per-**printing** planes for printing-varying values — legality (per format), border, rarity.
+Today these live only in **card space**, as existence *projections*: legality's `legal_x` plane
 ([#667](done/00667-engine-legality-divergent-carveout.md)) and border's plane
-([#664](done/00664-engine-border-planes.md)) are existence *projections* — a card's bit means
-"*some* printing satisfies," not *which* printing. That answers `unique=card` but can neither answer
-per-printing membership nor feed a printing-space `popcount`.
+([#664](done/00664-engine-border-planes.md)) set a card's bit to mean "*some* printing satisfies,"
+not *which*. That projection is why they're called "existential" and why they can't be ANDed safely
+(shared witness) — but it's a **card-space artifact**, not a property of the attribute.
 
-A printing-space plane (one bit per printing) gives, for a printing-varying value: the exact
-per-printing match set, its total as a `popcount` (O(words), density-independent), and O(1)
-membership tests.
+A **printing-space** plane is the opposite: one bit per printing, set iff *that printing* satisfies —
+**exact, not existential**. That changes everything about how they compose and get used:
+
+- **AND / OR / NOT compose exactly in printing space.** `border:black AND r:rare` is the printings
+  that are *both* — the shared witness holds bit-by-bit, no projection ambiguity.
+- **Two ways to use the composed result:** (a) answer a `unique=printing` query **directly** — the
+  surviving bits *are* the rows; or (b) project **once** to card or artwork space (the single `∃`:
+  "does this card/artwork have any surviving printing?") and finish the query there. Composing first
+  and projecting once is what stays exact — unlike card-space existence-AND, which projects per-leaf
+  *before* the AND and false-positives.
+- **The divergent-carveout complexity disappears.** #667's dual `has_legal`/`has_notlegal` planes
+  exist only because per-printing legality was projected to a card bit and could diverge; in printing
+  space each printing's legality is just its own bit — exact, no carveout. So these are not only
+  exact but *simpler* than the card-space planes they extend.
+
+They also give the total as a `popcount` (O(words), density-independent) and O(1) membership tests.
 
 ## Why — and why there is no benefit yet
 
