@@ -17,7 +17,7 @@ class TestRegexPatternParsing:
     @pytest.mark.parametrize(
         ("query", "expected_pattern"),
         [
-            ("name:/izzet/", "izzet"),
+            ("name:/izz.t/", "izz.t"),
             ("o:/^{T}:/", "^{T}:"),
             (r"name:/\bizzet\b/", r"\bizzet\b"),
             ("o:/exile|destroy/", "exile|destroy"),
@@ -35,13 +35,14 @@ class TestRegexPatternParsing:
 
     def test_parse_regex_with_escaped_forward_slash(self, parse_query) -> None:
         """Test that escaped forward slashes are handled correctly in regex patterns."""
-        # Test pattern with escaped forward slash: /a\/b/
-        query = "name:/a\\/b/"
+        # Test pattern with escaped forward slash: /a\/b.*/  (the `.*` keeps it a genuine regex, so
+        # the escaped-delimiter handling is what's under test, not the literal-lowering pass).
+        query = "name:/a\\/b.*/"
         result = parse_query(query)
         assert isinstance(result.root, BinaryOperatorNode)
         assert isinstance(result.root.rhs, RegexValueNode)
         # The escaped forward slash should be preserved
-        assert result.root.rhs.value == "a/b"
+        assert result.root.rhs.value == "a/b.*"
 
     def test_combined_regex_and_regular_search(self, parse_query) -> None:
         """Test combining regex searches with regular text searches."""
@@ -68,7 +69,7 @@ class TestRegexSQLGeneration:
     @pytest.mark.parametrize(
         ("query", "expected_operator", "expected_pattern"),
         [
-            ("name:/izzet/", "~*", "izzet"),
+            ("name:/izz.t/", "~*", "izz.t"),
             ("o:/^{T}:/", "~*", "^{T}:"),
             (r"name:/\bizzet\b/", "~*", r"\bizzet\b"),
             ("flavor:/.*flavor.*/", "~*", ".*flavor.*"),
@@ -109,12 +110,12 @@ class TestRegexSQLGeneration:
 
     def test_regex_on_flavor_attribute(self, parse_query) -> None:
         """Test regex on flavor text attribute generates correct SQL."""
-        result = parse_query("flavor:/magic/")
+        result = parse_query("flavor:/mag.c/")
         sql, params = generate_sql_query(result)
 
         assert "card.flavor_text ~*" in sql
         assert len(params) == 1
-        assert "magic" in params.values()
+        assert "mag.c" in params.values()
 
     def test_combined_regex_and_text_search_sql(self, parse_query) -> None:
         """Test SQL generation for combined regex and text searches."""
@@ -213,10 +214,10 @@ class TestRegexSupportedAttributes:
     @pytest.mark.parametrize(
         ("query", "expected_attribute"),
         [
-            ("name:/test/", "card_name"),
-            ("oracle:/test/", "oracle_text"),
-            ("o:/test/", "oracle_text"),
-            ("flavor:/test/", "flavor_text"),
+            ("name:/te.t/", "card_name"),
+            ("oracle:/te.t/", "oracle_text"),
+            ("o:/te.t/", "oracle_text"),
+            ("flavor:/te.t/", "flavor_text"),
         ],
     )
     def test_regex_supported_on_text_attributes(self, parse_query, query: str, expected_attribute: str) -> None:

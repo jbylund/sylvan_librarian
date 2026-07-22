@@ -31,12 +31,13 @@
 use std::hint::black_box;
 use std::time::Instant;
 
+use memchr::memmem;
 use regex::Regex;
 use rkyv::Archived;
 
 use super::{
-    archive_header, archive_payload, CardData, CmpOp, ColorField, CollField, FilterExpr, Mmap, NumExpr, NumField, TextField,
-    TextSearchField, TYPE_CREATURE, ARCHIVE_HEADER_LEN,
+    archive_header, archive_payload, expand_text_ids, str_at, trigram_candidates, CardData, CmpOp, ColorField, CollField, FilterExpr,
+    Mmap, NumExpr, NumField, TextField, TextSearchField, TYPE_CREATURE, ARCHIVE_HEADER_LEN,
 };
 
 const ITERS: usize = 50;
@@ -161,6 +162,75 @@ fn bench_verify_cost_clusters() {
     println!("  regex bare literal : {bare_ns:.3}");
     println!("  regex machinery (literal prefix) : {machinery_ns:.3}");
     println!("  regex machinery (no prefix)      : {machinery_noprefix_ns:.3}");
+}
+
+/// Three ways to answer the same metacharacter-free substring query
+/// (`o:/sacrifice a/` ≡ `o:"sacrifice a"`), all scanning the per-card
+/// `oracle_text_lower` strings so the ns/card numbers are directly comparable:
+///
+///   1. **regex** — `Regex::new("(?i)sacrifice a")` built once, `is_match` per
+///      card: what `o:/sacrifice a/` compiles to today (a bare unanchored
+///      literal → REGEX_MACHINERY tier, `regex_tier`).
+///   2. **str::contains** — `s.contains(needle)`: what `TextContains`'s
+///      unmemoized scan runs.
+///   3. **memmem::Finder** — built once, `find(...).is_some()` per card: a
+///      SIMD substring finder with its Two-Way/prefilter setup amortized over
+///      the whole corpus (the same trick `sparse_blob` already uses).
+///
+/// Motivates lowering metacharacter-free `TextRegex` to `TextContains` (and
+/// then to a memmem finder). `cargo test --release bench_substring_finders --
+/// --ignored --nocapture`
+#[test]
+#[ignore = "micro-benchmark; needs benchmarks/verify-order/real.store (see module docs)"]
+fn bench_substring_finders() {
+    let Ok(file) = std::fs::File::open(STORE_PATH) else {
+        eprintln!("SKIP: {STORE_PATH} not found (see module docs)");
+        return;
+    };
+    let mmap = unsafe { Mmap::map(&file) }.expect("mmap real.store");
+    if mmap.len() < ARCHIVE_HEADER_LEN || mmap[..ARCHIVE_HEADER_LEN] != archive_header() {
+        eprintln!("SKIP: {STORE_PATH} header mismatch (stale archive — rebuild it, see module docs)");
+        return;
+    }
+    let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
+    let n = data.cards.len();
+
+    // Pre-resolve each card's lowercased oracle text once (outside the timed
+    // loop): all three kernels scan this identical &str slice, so the numbers
+    // isolate the substring test itself, not the interned-id lookup.
+    let texts: Vec<&str> = (0..n)
+        .map(|cid| str_at(&data.strings, u32::from(data.cards[cid].oracle_text_lower_id)).unwrap_or(""))
+        .collect();
+    let needle = "sacrifice a"; // already lowercase — matches oracle_text_lower
+
+    println!("\n{n} oracle cards — substring finder shootout for {needle:?}");
+
+    let re = Regex::new(&format!("(?i){needle}")).unwrap();
+    let regex_ns = time_kernel("regex (?i) is_match", n, || texts.iter().filter(|s| re.is_match(s)).count() as u32);
+
+    let contains_ns = time_kernel("str::contains", n, || texts.iter().filter(|s| s.contains(needle)).count() as u32);
+
+    let finder = memmem::Finder::new(needle.as_bytes());
+    let memmem_ns = time_kernel("memmem::Finder (built once)", n, || {
+        texts.iter().filter(|s| finder.find(s.as_bytes()).is_some()).count() as u32
+    });
+
+    println!("\n  regex / contains  = {:.2}x", regex_ns / contains_ns);
+    println!("  regex / memmem    = {:.2}x", regex_ns / memmem_ns);
+    println!("  contains / memmem = {:.2}x", contains_ns / memmem_ns);
+
+    // The bigger win is the access path, not the per-row constant. A `TextRegex` node has no
+    // `narrow_rec` arm, so the plan scans all n cards; the equivalent `TextContains` narrows via the
+    // trigram index to a candidate superset (then verifies). Report that superset size — the rows the
+    // rewritten query actually visits — against the full corpus the regex must scan.
+    let cand = trigram_candidates(&data.indexes.oracle_trigram.trigrams, needle)
+        .map(|tids| expand_text_ids(&data.indexes.oracle_trigram, &tids).len())
+        .unwrap_or(n);
+    println!("\n  rows visited: regex {n} (full scan) vs contains {cand} trigram-candidates ({:.1}% of corpus)", 100.0 * cand as f64 / n as f64);
+    println!("  end-to-end match-phase estimate:");
+    println!("    regex    {n} rows x {regex_ns:.1} ns   = {:>8.0} ns", n as f64 * regex_ns);
+    println!("    contains {cand} rows x {contains_ns:.1} ns = {:>8.0} ns  ({:.1}x)", cand as f64 * contains_ns, (n as f64 * regex_ns) / (cand as f64 * contains_ns).max(1.0));
+    println!("    memmem   {cand} rows x {memmem_ns:.1} ns = {:>8.0} ns  ({:.1}x)", cand as f64 * memmem_ns, (n as f64 * regex_ns) / (cand as f64 * memmem_ns).max(1.0));
 }
 
 /// Pins the per-card `NumericCmp` cost for usd/collector_number/year --

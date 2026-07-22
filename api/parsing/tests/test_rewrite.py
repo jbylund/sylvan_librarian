@@ -9,6 +9,8 @@ docs/issues/00713-is-tag-recovery.md.
 import pytest
 
 from api.parsing import generate_sql_query, parse_scryfall_query
+from api.parsing.nodes import RegexValueNode
+from api.parsing.rewrite import _regex_plain_literal
 
 # (synonym query, canonical expansion) — the two must produce identical ASTs.
 EQUIVALENCES = [
@@ -75,3 +77,80 @@ def test_real_frame_value_not_rewritten(parse_query) -> None:
     assert root.operator == ":"
     assert root.lhs.original_attribute == "frame"
     assert root.rhs.value == "2003"
+
+
+# ── #734: plain-literal regex -> substring lowering ──────────────────────────
+# A metacharacter-free, unanchored regex is a substring search, so it must parse to exactly the same
+# AST as its quoted-substring form (which is index-backed, where an arbitrary regex is a full scan).
+LOWERED_EQUIVALENCES = [
+    ("o:/sacrifice a/", 'o:"sacrifice a"'),
+    ("name:/lightning bolt/", 'name:"lightning bolt"'),
+    (r"o:/foo\.bar/", 'o:"foo.bar"'),  # escaped punctuation unescapes to its literal
+    (r"o:/\{t\}/", 'o:"{t}"'),  # escaped braces
+    ("ft:/dragon/", "ft:dragon"),
+    ("a:/guay/", "a:guay"),  # artist field
+]
+
+
+@pytest.mark.parametrize(
+    argnames=["regex_query", "substring_query"],
+    argvalues=LOWERED_EQUIVALENCES,
+    ids=[r for r, _ in LOWERED_EQUIVALENCES],
+)
+def test_plain_literal_regex_lowers_to_substring(parse_query, regex_query: str, substring_query: str) -> None:
+    """A plain-literal regex parses to the same AST as the equivalent substring query (both parsers)."""
+    assert parse_query(regex_query) == parse_query(substring_query)
+
+
+@pytest.mark.parametrize(
+    argnames=["regex_query", "substring_query"],
+    argvalues=LOWERED_EQUIVALENCES,
+    ids=[r for r, _ in LOWERED_EQUIVALENCES],
+)
+def test_lowered_regex_generates_same_sql(regex_query: str, substring_query: str) -> None:
+    """The lowering is real end-to-end: the regex and the substring form emit identical SQL + params."""
+    assert generate_sql_query(parse_scryfall_query(regex_query)) == generate_sql_query(parse_scryfall_query(substring_query))
+
+
+@pytest.mark.parametrize(
+    argnames=["query"],
+    argvalues=[
+        ("o:/^flying$/",),  # anchors
+        ("o:/^flying/",),
+        ("o:/flying$/",),
+        ("o:/draw .* cards/",),  # live metacharacters
+        ("o:/[aeiou]/",),  # character class
+        (r"o:/\d+/",),  # class escape
+        ("o:/a|b/",),  # alternation
+    ],
+    ids=["anchored-both", "anchored-start", "anchored-end", "metachar", "char-class", "class-escape", "alternation"],
+)
+def test_nonliteral_regex_stays_regex(parse_query, query: str) -> None:
+    """Anchors, metacharacters, and character classes are NOT substrings — keep them as a regex leaf."""
+    assert isinstance(parse_query(query).root.rhs, RegexValueNode)
+
+
+_PLAIN_LITERAL_CASES = {
+    "bare_literal": {"pattern": "sacrifice a", "expected": "sacrifice a"},
+    "escaped_dot": {"pattern": r"foo\.bar", "expected": "foo.bar"},
+    "escaped_braces": {"pattern": r"\{t\}: add", "expected": "{t}: add"},
+    "start_anchor": {"pattern": "^flying", "expected": None},
+    "end_anchor": {"pattern": "flying$", "expected": None},
+    "star": {"pattern": "a*b", "expected": None},
+    "alternation": {"pattern": "a|b", "expected": None},
+    "char_class": {"pattern": "[aeiou]", "expected": None},
+    "digit_class": {"pattern": r"\d+", "expected": None},
+    "word_boundary": {"pattern": r"\bfoo", "expected": None},
+    "dangling_backslash": {"pattern": "foo\\", "expected": None},
+    "empty": {"pattern": "", "expected": None},
+}
+
+
+@pytest.mark.parametrize(
+    argnames=sorted(next(iter(_PLAIN_LITERAL_CASES.values()))),
+    argvalues=[[v for _, v in sorted(_PLAIN_LITERAL_CASES[name].items())] for name in sorted(_PLAIN_LITERAL_CASES)],
+    ids=sorted(_PLAIN_LITERAL_CASES),
+)
+def test_regex_plain_literal(expected: str | None, pattern: str) -> None:
+    """`_regex_plain_literal` extracts the literal for metachar-free patterns, else None."""
+    assert _regex_plain_literal(pattern) == expected

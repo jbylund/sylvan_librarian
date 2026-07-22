@@ -1,3 +1,4 @@
+use memchr::memmem;
 use regex::Regex;
 use serde_json::Value;
 use super::{AOracleCard, APrinting, AStrings, str_at, mana_lane, lane_add, lanes_ge, LANES6_HI, LANES8_HI, mana_pip_counts, mana_cmc, color_list_to_mask, card_type_str_to_bit, trigram_candidates, trigram_min_posting, ARTIST_NONE, NONE_STR, FlavorIndex, NameBigramIndex, OracleTextIndex, SortedTrigramIndex, flavor_fingerprint, flavor_match_sets};
@@ -751,7 +752,10 @@ impl FilterExpr {
                     .filter(|&id| vocab[id as usize].as_str() == value.as_str());
             }
             FilterExpr::TextContains { field: TextSearchField::ArtistLower, word } => {
-                let ids = artist_match_ids(artist_vocab, |s| s.contains(word.as_str()));
+                // memmem::Finder built once, reused across the vocab scan — its SIMD prefilter beats
+                // rebuilding str::contains's searcher per entry (~1.3x, bench_substring_finders). #734.
+                let finder = memmem::Finder::new(word.as_bytes());
+                let ids = artist_match_ids(artist_vocab, |s| finder.find(s.as_bytes()).is_some());
                 *self = FilterExpr::ArtistMatch { ids };
             }
             FilterExpr::TextExact { field: TextField::ArtistLower, op, value } => {
@@ -772,7 +776,8 @@ impl FilterExpr {
             }
             FilterExpr::TextContains { field: TextSearchField::FlavorTextLower, word } => {
                 let mask = flavor_fingerprint(word.as_str());
-                let (gids, dense_ids) = flavor_match_sets(flavor, strings, mask, |s| s.contains(word.as_str()));
+                let finder = memmem::Finder::new(word.as_bytes()); // built once, reused (see ArtistLower)
+                let (gids, dense_ids) = flavor_match_sets(flavor, strings, mask, |s| finder.find(s.as_bytes()).is_some());
                 *self = FilterExpr::FlavorMatch { gids, dense_ids };
             }
             FilterExpr::TextExact { field: TextField::FlavorTextLower, op, value } => {
@@ -894,9 +899,10 @@ impl FilterExpr {
                     _ => return,
                 }
                 let Some(cand) = trigram_candidates(name_trigram, word) else { return };
+                let finder = memmem::Finder::new(word.as_bytes()); // built once, reused across the verify scan
                 let mut ids: Vec<u32> = cand
                     .into_iter()
-                    .filter(|&cid| cards[cid as usize].card_name_folded.as_str().contains(word.as_str()))
+                    .filter(|&cid| finder.find(cards[cid as usize].card_name_folded.as_str().as_bytes()).is_some())
                     .map(|cid| u32::from(cards[cid as usize].card_name_id))
                     .collect();
                 ids.sort_unstable();
@@ -909,10 +915,11 @@ impl FilterExpr {
                     _ => return,
                 }
                 let Some(dense) = trigram_candidates(&oracle.trigrams, word) else { return };
+                let finder = memmem::Finder::new(word.as_bytes()); // built once, reused across the verify scan
                 let mut gids: Vec<u32> = Vec::with_capacity(dense.len());
                 for d in dense {
                     let gid = u32::from(oracle.gids[d as usize]);
-                    if str_at(strings, gid).is_some_and(|s| s.contains(word.as_str())) {
+                    if str_at(strings, gid).is_some_and(|s| finder.find(s.as_bytes()).is_some()) {
                         gids.push(gid);
                     }
                 }

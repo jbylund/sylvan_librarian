@@ -43,7 +43,7 @@ from api.parsing.nodes import (
     TrueNode,
     flatten_nested_operations,
 )
-from api.parsing.rewrite import expand_derived_predicates
+from api.parsing.rewrite import rewrite_query
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -546,11 +546,11 @@ def parse_search_query(query: str | None) -> Query:
 
     try:
         parsed = expr.parse_string(query, parse_all=True)
-        # parse => transform => rest, mirroring parse_scryfall_query so the derived-predicate
-        # rewrite applies identically to both parsers (kept in lockstep by test_parser_parity).
+        # parse => transform => rest, mirroring parse_scryfall_query so the whole rewrite pipeline
+        # applies identically to both parsers (kept in lockstep by test_parser_parity).
         if parsed:
-            return expand_derived_predicates(to_card_query_ast(flatten_nested_operations(Query(parsed[0]))))
-        return expand_derived_predicates(to_card_query_ast(Query(BinaryOperatorNode("name", ":", ""))))
+            return rewrite_query(to_card_query_ast(flatten_nested_operations(Query(parsed[0]))))
+        return rewrite_query(to_card_query_ast(Query(BinaryOperatorNode("name", ":", ""))))
     except (ValueError, TypeError, IndexError) as e:
         msg = "main query parsing"
         raise create_parsing_error(msg, e, query) from e
