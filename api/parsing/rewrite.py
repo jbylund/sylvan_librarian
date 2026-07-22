@@ -178,7 +178,7 @@ def lower_literal_regexes(query: Query) -> Query:
     A metacharacter-free, unanchored regex is exactly a substring search, so this is
     behavior-preserving — but the substring form is index-backed (postgres ``gin_trgm_ops`` on the
     SQL path; the engine's trigram / oracle-word narrow) where an arbitrary regex has no index path
-    and forces a full scan. Measured ~32× end-to-end on real needles (see
+    and forces a full scan. Measured ~32x end-to-end on real needles (see
     docs/issues/00734-engine-string-operator-optimizations.md). Runs after
     ``expand_derived_predicates`` so any regex a synonym introduces is lowered too.
     """

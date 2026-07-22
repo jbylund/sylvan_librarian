@@ -115,13 +115,13 @@ def test_lowered_regex_generates_same_sql(regex_query: str, substring_query: str
 @pytest.mark.parametrize(
     argnames=["query"],
     argvalues=[
-        ["o:/^flying$/"],  # anchors
-        ["o:/^flying/"],
-        ["o:/flying$/"],
-        ["o:/draw .* cards/"],  # live metacharacters
-        ["o:/[aeiou]/"],  # character class
-        [r"o:/\d+/"],  # class escape
-        ["o:/a|b/"],  # alternation
+        ("o:/^flying$/",),  # anchors
+        ("o:/^flying/",),
+        ("o:/flying$/",),
+        ("o:/draw .* cards/",),  # live metacharacters
+        ("o:/[aeiou]/",),  # character class
+        (r"o:/\d+/",),  # class escape
+        ("o:/a|b/",),  # alternation
     ],
     ids=["anchored-both", "anchored-start", "anchored-end", "metachar", "char-class", "class-escape", "alternation"],
 )
