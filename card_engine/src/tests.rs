@@ -7885,6 +7885,80 @@ fn bare_range_bounds_recognizes_leaves_and_rejects_rest() {
     assert!(bounds(&cmc_lt).is_none());
 }
 
+/// #724 de-risk: does `popcount` + a printing walk over a *precomputed* border plane beat today's
+/// per-printing scan for `border:black`/printing (~0.87 ms)? A precomputed plane has no per-query
+/// build (unlike CardRangePopcount's ~105µs), so this should land near #634's ~0.06 ms bare-plane
+/// popcount. Builds the border:black printing bitmap once (simulating the persisted plane), then
+/// times `popcount` (the total) + an edhrec-perm membership walk (the page).
+/// `cargo test --release border_plane_query_kernel -- --ignored --nocapture`
+#[test]
+#[ignore = "#724 border-plane query kernel; needs real.store"]
+fn border_plane_query_kernel() {
+    use std::hint::black_box;
+    use std::time::Instant;
+    const STORE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../benchmarks/verify-order/real.store");
+    const WARMUP: usize = 30;
+    const ITERS: usize = 300;
+    const LIMIT: usize = 100;
+
+    let Ok(file) = std::fs::File::open(STORE_PATH) else {
+        eprintln!("SKIP: {STORE_PATH} not found (see bench_verify_cost.rs docs)");
+        return;
+    };
+    let mmap = unsafe { Mmap::map(&file) }.expect("mmap real.store");
+    if mmap.len() < ARCHIVE_HEADER_LEN || mmap[..ARCHIVE_HEADER_LEN] != archive_header() {
+        eprintln!("SKIP: {STORE_PATH} header mismatch (stale — rebuild)");
+        return;
+    }
+    let archived = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
+    let n_printings = archived.printings.len();
+    let strings = &archived.strings;
+    let offsets = &archived.offsets;
+
+    // Build the border:black printing bitmap once — simulates the persisted #724 plane (no per-query build).
+    let mut plane = vec![0u64; n_printings.div_ceil(64)];
+    for (pid, p) in archived.printings.iter().enumerate() {
+        if super::str_at(strings, u32::from(p.card_border_id)) == Some("black") {
+            plane[pid >> 6] |= 1u64 << (pid & 63);
+        }
+    }
+    let matches: usize = plane.iter().map(|w| w.count_ones() as usize).sum();
+    let perm = archived.indexes.sort_perms.get(SortCol::EdhrecRank, false).expect("edhrec perm");
+
+    let mut best = u128::MAX;
+    let mut sink = 0usize;
+    for it in 0..(WARMUP + ITERS) {
+        let t0 = Instant::now();
+        // total = popcount (replaces the O(n) count pass)
+        let total: usize = plane.iter().map(|w| w.count_ones() as usize).sum();
+        // page = walk cards in edhrec order, expand to printings, test the plane bit, early-stop
+        let mut page: Vec<u32> = Vec::with_capacity(LIMIT);
+        'walk: for c in perm.iter() {
+            let cid = u32::from(*c) as usize;
+            let start = u32::from(offsets[cid]) as usize;
+            let end = u32::from(offsets[cid + 1]) as usize;
+            for pid in start..end {
+                if (plane[pid >> 6] >> (pid & 63)) & 1 == 1 {
+                    page.push(pid as u32);
+                    if page.len() == LIMIT {
+                        break 'walk;
+                    }
+                }
+            }
+        }
+        black_box(&page);
+        sink = total;
+        let dt = t0.elapsed().as_nanos();
+        if it >= WARMUP {
+            best = best.min(dt);
+        }
+    }
+    println!("\nborder:black/printing via a PRECOMPUTED plane (real.store):");
+    println!("  matching printings: {matches}");
+    println!("  popcount + edhrec walk to fill {LIMIT}: {best} ns   (checksum total={sink})");
+    println!("  today's per-printing scan (bench_printing_planes): ~869,000 ns");
+}
+
 /// PR 2a build-cost split: for `usd<50`, which half of `CardRangePopcount`'s build dominates —
 /// scattering the price slice into a printing bitmap, or projecting that to a card-existence bitmap
 /// — and does building the card bitmap *directly* (`printing_to_card[pid]`, one pass, skipping the
