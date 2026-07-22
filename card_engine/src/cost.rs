@@ -86,12 +86,21 @@ pub(crate) struct PlanFeatures {
     pub limit: u32,
     /// Page offset.
     pub offset: u32,
-    /// Printings **scattered into a bitmap at query time** (one term per plan that synthesizes rather
-    /// than reads a precomputed bitmap): the range slice `CardRangePopcount` builds, and the legality
-    /// broadcast-down + card/artwork projection-up `PrintingCompose` does (border/rarity are precomputed
-    /// planes → contribute `0`). `0` for plans that read a precomputed bitmap or build nothing. Costed
-    /// at `SCATTER_PER_PRINTING_NS` — one physical op (write a bit into a word), so one constant.
-    pub synth_printings: u32,
+    /// Printings the legality **broadcast-down** synthesizes (card ∃-plane → printing bitmap) in
+    /// `PrintingCompose`. `0` for border/rarity (precomputed planes) and for bare ranges (no broadcast).
+    /// Costed at `LINEAR_PASS_PER_PRINTING_NS`.
+    pub broadcast_printings: u32,
+    /// The range index's in-range slice `k` — the printings a range leaf contributes. Charged at a
+    /// DIFFERENT rate per plan (same `k`, different physical op): `PrintingCompose` scatters it into a
+    /// printing bitmap (`RANGE_SCATTER_PER_PRINTING_NS`, cheap, then a separate `project_printings` pass),
+    /// while `CardRangePopcount` fuses scatter+project in one pass (`CARD_RANGE_BUILD_PER_PRINTING_NS`).
+    /// Set by both range-plan acquire branches so the shared feats cost either winner honestly — the
+    /// fused op being cheaper than compose's two passes is why a bare range routes to CardRangePopcount.
+    pub scatter_printings: u32,
+    /// Printings scattered in `PrintingCompose`'s **projection pass** — printing bitmap → card/artwork
+    /// existence, a second O(set) pass on top of the build. `0` for printing mode (no projection) and
+    /// for non-compose plans. Costed at `LINEAR_PASS_PER_PRINTING_NS`.
+    pub project_printings: u32,
     /// 64-bit words of the **result-space** bitmap the total popcount + skip-scan touches — the field
     /// that keeps the popcount term honest across distinct-ons: `n_printings/64` (printing),
     /// `n_cards/64` (card), `n_artworks/64` (artwork). Set by `PrintingCompose`; `0` elsewhere.
@@ -142,13 +151,27 @@ const PLANE_POPCOUNT_EMIT_PER_CARD_NS: f64 = 2.0;
 /// Fixed P2 setup (plane eval into the bitmap, buffers).
 const PLANE_POPCOUNT_FIXED_COST_NS: f64 = 200.0;
 
-/// Per-printing cost of scattering one printing into a bitmap at query time — the single physical op
-/// (write a bit into a word) behind every `synth_printings`: `CardRangePopcount`'s range-slice build,
-/// and `PrintingCompose`'s legality broadcast-down + card/artwork projection-up. Measured ~1.3 ns/printing
-/// (`card_range_build_cost_split`, the ~80.5k-printing `usd<50` slice) and ~1.5 ns/printing
-/// (`legality_compose_kernel_costs`, the broad formats) — the same kernel from two probes, so one
-/// constant at the midpoint. Load-bearing: without it the model under-predicts these plans and mis-routes.
-pub(crate) const SCATTER_PER_PRINTING_NS: f64 = 1.4;
+/// Per-printing cost of a **linear offset-walk** over set printings — the two passes that share this
+/// rate: `PrintingCompose`'s legality broadcast-DOWN (card ∃-plane → printing bitmap) and its
+/// projection-UP (printing bitmap → card/artwork existence, `printing_bits_to_card_bits`, which walks
+/// the set bits advancing a card cursor). Measured ~1.5 ns/printing: `legality_compose_kernel_costs`
+/// broad formats (~1.49), and `card_range_build_cost_split`'s B pass (122125ns / 80527 = 1.52).
+/// Carries `broadcast_printings` and `project_printings` — the midpoint of the two probes.
+pub(crate) const LINEAR_PASS_PER_PRINTING_NS: f64 = 1.50;
+
+/// Per-printing cost of `PrintingCompose`'s range **scatter** — `range_leaf_bits` reads the value-sorted
+/// index's contiguous in-range slice and scatters each pid into a printing bitmap (sequential read +
+/// random-write). Measured ~0.4 ns/printing (`card_range_build_cost_split`'s A pass 28583ns / 80527 =
+/// 0.355; `range_compose_kernel_costs` 0.36 at broad density) — far cheaper than a linear pass because
+/// there is no per-card cursor and the writes are the only work. Carries `scatter_printings` in compose.
+pub(crate) const RANGE_SCATTER_PER_PRINTING_NS: f64 = 0.36;
+
+/// Per-printing cost of `CardRangePopcount`'s **fused build** — `build_card_range_bits` sets the printing
+/// bit AND the card bit (via `printing_to_card`) in one pass over the range slice, fusing compose's
+/// scatter+project (0.4 + 1.5 = 1.9) into a single ~1.2 ns/printing pass (`card_range_build_cost_split`'s
+/// C 98333ns / 80527 = 1.22). Carries `scatter_printings` in CardRangePopcount's arm — the same `k` as
+/// compose's scatter but a cheaper op, which is exactly why a bare range routes here, not to compose.
+pub(crate) const CARD_RANGE_BUILD_PER_PRINTING_NS: f64 = 1.22;
 
 // ─── P3: StreamedSelect ─────────────────────────────────────────────────────
 // Match phase walks eval_domain cards computing per-card counts, then either
@@ -240,7 +263,9 @@ pub(crate) fn plan_cost(plan: PhysicalPlan, f: &PlanFeatures) -> f64 {
         }
         // #724 unified compose, any distinct-on. One term per operation it performs:
         PhysicalPlan::PrintingCompose => {
-            f64::from(f.synth_printings) * SCATTER_PER_PRINTING_NS  // synthesize: legality broadcast-down + card/artwork projection-up (border/rarity + printing mode contribute 0)
+            f64::from(f.broadcast_printings) * LINEAR_PASS_PER_PRINTING_NS  // legality broadcast-down into the printing bitmap (border/rarity read a plane → 0)
+                + f64::from(f.scatter_printings) * RANGE_SCATTER_PER_PRINTING_NS  // range-slice scatter into the printing bitmap (cheap: no card cursor)
+                + f64::from(f.project_printings) * LINEAR_PASS_PER_PRINTING_NS  // second pass: project printing→card/artwork (0 for printing mode) — the pass CardRangePopcount fuses away
                 + f64::from(f.popcount_words) * PLANE_POPCOUNT_PER_WORD_NS  // popcount the result-space bitmap for the total (printing/card/artwork words)
                 + printings_walked * RANGE_WALK_STEP_NS  // forward grouped walk to fill the page
                 + limit * PLANE_POPCOUNT_EMIT_PER_CARD_NS  // emit one page of rows
@@ -256,7 +281,7 @@ pub(crate) fn plan_cost(plan: PhysicalPlan, f: &PlanFeatures) -> f64 {
         // #725 bare range, unique=card: PlanePopcountOrder's popcount-skip walk over a card bitmap
         // *built at query time* from the range slice — same walk terms, plus the build synth.
         PhysicalPlan::CardRangePopcount => {
-            f64::from(f.synth_printings) * SCATTER_PER_PRINTING_NS  // build the card-existence bitmap from the range slice
+            f64::from(f.scatter_printings) * CARD_RANGE_BUILD_PER_PRINTING_NS  // fused one-pass build: scatter+project the range slice straight into card bits
                 + matches * PLANE_POPCOUNT_SCATTER_PER_MATCH_NS  // scatter matches through the inverse permutation
                 + (n_cards / 64.0) * PLANE_POPCOUNT_PER_WORD_NS  // popcount the card bitmap + skip-scan to the offset
                 + limit * PLANE_POPCOUNT_EMIT_PER_CARD_NS  // emit one page of cards
