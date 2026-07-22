@@ -2342,6 +2342,7 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
     data.indexes.released_at = build_range_index(&data.printings, |p| p.released_at_int);
     data.indexes.price_usd = build_range_index(&data.printings, |p| p.price_usd);
     data.indexes.collector_number = build_range_index(&data.printings, |p| p.collector_number_int.map(u32::from));
+    data.indexes.border_printing = build_border_printing_planes(&data.printings, &data.strings);
     data
 }
 
@@ -2740,6 +2741,9 @@ fn force_plan_differential_agreement() {
         // above already exercise it; add collector_number + year over card-level perms too).
         (FuzzSpec::Leaf(FuzzLeaf::CollectorNumber { op: CmpOp::Lt, val: 100.0 }), "edhrec", "asc"),
         (FuzzSpec::Leaf(FuzzLeaf::Year { op: CmpOp::Ge, year: 2015 }), "edhrec", "desc"),
+        // #724: a bare border leaf routes through PrintingPlaneScan in printing mode (black is ~1/6
+        // of printings, above STREAM_MIN in this corpus → the walk; agreement vs GatheredScan checked).
+        (FuzzSpec::Leaf(FuzzLeaf::Border { value: "black".to_string() }), "edhrec", "asc"),
     ];
     for _ in 0..RANDOM_QUERIES {
         let orderby = SORTS[rng.random_range(0..SORTS.len())];
@@ -2750,6 +2754,7 @@ fn force_plan_differential_agreement() {
     let modes = ["card", "printing", "artwork"];
     let all_plans = [
         PhysicalPlan::PrintingRangeScan,
+        PhysicalPlan::PrintingPlaneScan,
         PhysicalPlan::PlanePopcountOrder,
         PhysicalPlan::CardRangePopcount,
         PhysicalPlan::StreamedSelect,
@@ -2757,12 +2762,13 @@ fn force_plan_differential_agreement() {
     ];
     let plan_idx = |p: PhysicalPlan| match p {
         PhysicalPlan::PrintingRangeScan => 0,
-        PhysicalPlan::PlanePopcountOrder => 1,
-        PhysicalPlan::CardRangePopcount => 2,
-        PhysicalPlan::StreamedSelect => 3,
-        PhysicalPlan::GatheredScan => 4,
+        PhysicalPlan::PrintingPlaneScan => 1,
+        PhysicalPlan::PlanePopcountOrder => 2,
+        PhysicalPlan::CardRangePopcount => 3,
+        PhysicalPlan::StreamedSelect => 4,
+        PhysicalPlan::GatheredScan => 5,
     };
-    let mut ran = [0u32; 5];
+    let mut ran = [0u32; 6];
 
     // >= any possible total, so the offset-0 page is the complete ordered result.
     let full_limit = archived.printings.len().max(1);
@@ -3336,7 +3342,7 @@ fn cost_terms(plan: PhysicalPlan, f: &super::cost::PlanFeatures) -> (Vec<f64>, f
     let page_span = f64::from((f.offset.saturating_add(f.limit)).min(f.matches));
     let match_rate = (matches / f64::from(f.n_printings)).max(1.0e-6);
     match plan {
-        PhysicalPlan::PrintingRangeScan => (vec![page_span / match_rate, 1.0], 0.0),
+        PhysicalPlan::PrintingRangeScan | PhysicalPlan::PrintingPlaneScan => (vec![page_span / match_rate, 1.0], 0.0),
         PhysicalPlan::PlanePopcountOrder => (vec![matches, n_cards / 64.0, limit, 1.0], 0.0),
         // Same term vector as P2; the build term is a fixed (hand-set) offset, not a refit param.
         PhysicalPlan::CardRangePopcount => (

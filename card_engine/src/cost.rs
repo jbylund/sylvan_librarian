@@ -223,7 +223,10 @@ pub(crate) fn plan_cost(plan: PhysicalPlan, f: &PlanFeatures) -> f64 {
     let page_span = f64::from((f.offset.saturating_add(f.limit)).min(f.matches));
 
     match plan {
-        PhysicalPlan::PrintingRangeScan => {
+        // Both printing bare-leaf fast paths walk `walk_printing_page` (page cost ∝ how far the walk
+        // goes to fill the page at `match_rate`); the border total is a popcount/postings-len rather
+        // than a range `k`, but the paging cost — the only cost either carries — is identical.
+        PhysicalPlan::PrintingRangeScan | PhysicalPlan::PrintingPlaneScan => {
             let match_rate = (matches / n_printings).max(MATCH_RATE_FLOOR);
             (page_span / match_rate) * RANGE_WALK_STEP_NS + RANGE_FIXED_COST_NS
         }

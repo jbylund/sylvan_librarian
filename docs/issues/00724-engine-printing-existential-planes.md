@@ -115,6 +115,30 @@ min ms):
 | `border:black r:rare` | card | 0.316 | card compound (substrate) |
 | `border:black` | artwork | 0.905 | slow — needs PR 2b |
 
+## Result: border slice measured (this PR)
+
+`PrintingPlaneScan` (popcount + reused printing walk) shipped for the bare border/printing case.
+A/B on the same 97,206-printing corpus (`CARD_ENGINE_BORDER_PRINTING_PLANE=0` vs `=1`, min µs, totals
+identical between arms so row identity is preserved):
+
+| query | mode | off µs | on µs | speedup | rows |
+|---|---|---:|---:|---:|---:|
+| `border:black` | printing | 884 | 44 | **20.2×** | 85,046 |
+| `border:borderless` | printing | 222 | 47 | **4.8×** | 5,701 |
+| `f:modern` | printing | 192 | 190 | 1.0× | 73,783 |
+| `f:commander` | printing | 223 | 219 | 1.0× | 96,898 |
+| `r:rare` | printing | 365 | 358 | 1.0× | 36,764 |
+| `border:black r:rare` | printing | 610 | 627 | 1.0× | 31,879 |
+| `f:modern border:black` | printing | 744 | 749 | 1.0× | 65,507 |
+| `border:black` | card | 64 | 64 | 1.0× | 31,169 |
+| `border:black` | artwork | 904 | 929 | 1.0× | 40,956 |
+
+Only the bare-border planed values (`black`, `borderless`) move — the plane is a fixed ~36.5 KB
+(3 planes × ⌈97,206/64⌉ words × 8 B) on top of the archive. Everything else is flat within noise:
+the plan is gated to bare border under `unique=printing`, so no other query path can change (that
+gating *is* the no-regression guarantee, and the flat rows confirm it). Compounds and the card/artwork
+projections are the next slices (the printing-space plan + PR 2b), not this PR.
+
 The load-bearing finding: **legality is ~4× cheaper than border in printing mode at the same
 breadth, because legality settles at the *card* level** (`printing_dependent(Legality) => false`,
 [filter.rs](../../card_engine/src/filter.rs)) — it evaluates once per card (~31.5k) and emits all of
