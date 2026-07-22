@@ -1,8 +1,13 @@
 # Engine: fast path for broad sorted-range predicates, split by unique mode
 
-Status: plan drafted 2026-07-16; PR 1 (printing-mode slice) is up for review as [#695] (open, not
-merged), gated at the 25% veto boundary. Remaining slices (card/artwork planes, existential-plane
-total) and the crossover guard are unstarted. Supersedes the *planning* half of
+Status: plan drafted 2026-07-16. **Shipped:** PR 1 (printing-mode Idea 1, [#695]), PR 2a (`usd`,
+`unique=card`, [#725]), PR 3 (`cn`/`date`, `unique=card`, [#726]) — the card-mode range fast path
+(`CardRangePopcount`) now covers all three range families, and Idea 1 covers bare printing ranges.
+**Remaining:** PR 2b (artwork, archive bump), PR 5 (existential-plane printing-mode total), the
+crossover guard, and the printing-space popcount plan
+([local-engine-printing-plane-popcount-order.md](local-engine-printing-plane-popcount-order.md)),
+which is where the compound and existential-printing wins converge. PR 4 was dropped (see *Considered
+and dropped*). Supersedes the *planning* half of
 [local-engine-broad-range-fastpath.md](local-engine-broad-range-fastpath.md), which is kept as the
 historical record (the shipped price-exactness prerequisite, and the full account of what PR #689
 tried, muddled, and reverted). This doc restates the plan with what we learned since.
