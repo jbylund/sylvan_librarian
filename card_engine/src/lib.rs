@@ -5333,16 +5333,32 @@ fn run_query_routed<'a>(
         // then discarded would be pure waste). `synth_printings` = broadcast down (legality) + projection
         // up (card/artwork; 0 for printing). `popcount_words` = the result-space bitmap the total scans.
         let (printing_matches, broadcast) = compose_printing_estimate(filter, indexes, offsets, n_printings as usize);
-        let (result_total, synth, popcount_words) = match mode {
-            // printing: no projection; total popcount over the printing bitmap.
-            Mode::Printing => (printing_matches, broadcast, (n_printings as usize).div_ceil(64)),
-            // card: project every matching printing up (~printing_matches scatters), popcount card bitmap.
-            Mode::Card => (printing_matches.min(n_cards as usize), broadcast + printing_matches, (n_cards as usize).div_ceil(64)),
-            // artwork: same projection; popcount the artwork bitmap (n_artworks ≤ n_printings — use that
-            // upper bound for the estimate; the tiny popcount term makes the difference immaterial).
-            Mode::Artwork => (printing_matches, broadcast + printing_matches, (n_printings as usize).div_ceil(64)),
+        // `eval_domain`/`scan_units` here cost the *materializing alternatives* (StreamedSelect/
+        // GatheredScan) should this plan lose — so they must reflect the narrowed reality those plans
+        // see, not the unnarrowed universe. A composable filter narrows via its indices (#667 legality,
+        // border/rarity), so the alternatives iterate ~`matches` candidates; in card mode they also
+        // break at the first matching printing (`scan_units()` ⇒ `eval_domain`). Passing n_cards/
+        // n_printings instead over-costs them ~3-4× and spuriously wins broad-but-narrowable legality
+        // compounds for compose (measured: `format:X format:Y`/card regressed).
+        let (result_total, synth, popcount_words, eval_domain, scan_units) = match mode {
+            // printing: no projection; total popcount over the printing bitmap. The alternatives scan
+            // every printing (no early break), so the unnarrowed universe is the right estimate.
+            Mode::Printing => (printing_matches, broadcast, (n_printings as usize).div_ceil(64), n_cards as usize, n_printings as usize),
+            // card: project every matching printing up, popcount card bitmap. Alternatives narrow to
+            // ~matches candidates and break at the first match ⇒ eval_domain = scan_units = matches.
+            Mode::Card => {
+                let rt = printing_matches.min(n_cards as usize);
+                (rt, broadcast + printing_matches, (n_cards as usize).div_ceil(64), rt, rt)
+            }
+            // artwork: same projection; popcount the artwork bitmap (n_artworks ≤ n_printings — upper
+            // bound for the estimate). Alternatives group all printings per candidate (no early break),
+            // so scan_units is the matching printings under the ~matches candidate cards.
+            Mode::Artwork => {
+                let rt = printing_matches.min(n_cards as usize);
+                (printing_matches, broadcast + printing_matches, (n_printings as usize).div_ceil(64), rt, printing_matches)
+            }
         };
-        let mut feats = mk_feats(result_total as u32, n_cards, n_printings, verify_cost_tier(filter));
+        let mut feats = mk_feats(result_total as u32, eval_domain as u32, scan_units as u32, verify_cost_tier(filter));
         feats.synth_printings = synth as u32;
         feats.popcount_words = popcount_words as u32;
         (feats, Prep::Range)
