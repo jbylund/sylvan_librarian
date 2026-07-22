@@ -4190,6 +4190,10 @@ fn is_printing_composable(filter: &FilterExpr) -> bool {
         FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, .. } => true,
         FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), op: CmpOp::Eq, rhs: NumExpr::Const(_) }
         | FilterExpr::NumericCmp { lhs: NumExpr::Const(_), op: CmpOp::Eq, rhs: NumExpr::Field(NumField::RarityInt) } => true,
+        // Legality via #667's card `_EXISTS` plane + a divergent repair (see `legality_leaf_bits`).
+        // Only a plane-backed status (legal/banned/restricted) with a present format; an absent format
+        // (`shift: None`) matches nothing and stays on the general path.
+        FilterExpr::Legality { shift: Some(_), expected } => status_plane_bases(*expected).is_some(),
         _ => false,
     }
 }
@@ -4242,12 +4246,75 @@ fn rarity_leaf_bits(c: f64, rp: &Archived<RarityPrintingPlanes>, n_printings: us
     }
 }
 
+/// Broadcast a card-space bitmap **down** to printing space: set every printing of each set card. The
+/// inverse of `printing_bits_to_card_bits`, used to lift a card-settled fact (a legality that doesn't
+/// diverge across the card's printings) into the printing domain for composition. Iterates set cards
+/// only, so it is O(set cards + their printings), not O(n_cards).
+fn broadcast_card_bits_to_printings(card_bits: &[u64], offsets: &AOffsets, n_printings: usize) -> Vec<u64> {
+    let mut pbits = vec![0u64; words_per_plane(n_printings)];
+    for (i, &word) in card_bits.iter().enumerate() {
+        let mut w = word;
+        while w != 0 {
+            let c = (((i as u32) << 6) | w.trailing_zeros()) as usize;
+            w &= w - 1;
+            for p in u32::from(offsets[c]) as usize..u32::from(offsets[c + 1]) as usize {
+                pbits[p >> 6] |= 1u64 << (p & 63);
+            }
+        }
+    }
+    pbits
+}
+
+/// The exact printing-space bitmap for a bare legality leaf (`f:modern` etc.), built the #724 way from
+/// #667's card-space `_EXISTS` plane plus a divergent repair, rather than a full per-printing legality
+/// plane — legality is only ~1.8% divergent (`legal_divergent`), so the card plane broadcast is exact
+/// for the other 98.2% and only the divergent cards need per-printing fix-up. `∃-legal` over-sets a
+/// divergent card (it sets every printing, but only some are legal), so the repair is **authoritative**:
+/// it *overwrites* each divergent printing's bit to its true value (set and clear, re-derived from the
+/// printing's own `card_legalities` word — no stored postings), which is why the broadcast needs no
+/// pre-masking. Empty if the planes aren't built for this store.
+fn legality_leaf_bits(
+    shift: u8,
+    expected: u64,
+    indexes: &Archived<CardIndexes>,
+    offsets: &AOffsets,
+    printings: &[APrinting],
+    n_printings: usize,
+) -> Vec<u64> {
+    let n_cards = offsets.len() - 1;
+    let Some(card_bits) = legality_candidate_bits(indexes, n_cards, shift, expected, false) else {
+        return vec![0u64; words_per_plane(n_printings)];
+    };
+    let mut pbits = broadcast_card_bits_to_printings(&card_bits, offsets, n_printings);
+    // Repair the divergent cards' printings authoritatively — overwrite each bit with the per-printing
+    // truth (`(word >> shift) & 0b11 == expected`, the same test filter.rs:1253 applies). Overwriting
+    // both directions is what lets the broadcast above over-set them without a pre-clear pass.
+    for cid in indexes.legal_divergent.iter() {
+        let c = u16::from(*cid) as usize;
+        for p in u32::from(offsets[c]) as usize..u32::from(offsets[c + 1]) as usize {
+            let legal = (u64::from(printings[p].card_legalities) >> shift) & 0b11 == expected;
+            if legal {
+                pbits[p >> 6] |= 1u64 << (p & 63);
+            } else {
+                pbits[p >> 6] &= !(1u64 << (p & 63));
+            }
+        }
+    }
+    pbits
+}
+
 /// #724: materialize `filter`'s **exact** printing-space membership bitmap (`n_printings` bits, tail
-/// masked to 0), composing planes/postings with `AND`/`OR`/`NOT`. Assumes `is_printing_composable`
-/// (the caller gates it) — `unreachable!()` on any other shape. The surviving bits *are* the matching
+/// masked to 0), composing planes/postings with `AND`/`OR`. Assumes `is_printing_composable` (the
+/// caller gates it) — `unreachable!()` on any other shape. The surviving bits *are* the matching
 /// printings: for `unique=printing` `popcount` is the total; for `unique=card` project up with
 /// `printing_bits_to_card_bits`. This is the substrate the printing-space popcount-order plan consumes.
-fn compose_printing_bits(filter: &FilterExpr, indexes: &Archived<CardIndexes>, n_printings: usize) -> Vec<u64> {
+fn compose_printing_bits(
+    filter: &FilterExpr,
+    indexes: &Archived<CardIndexes>,
+    offsets: &AOffsets,
+    printings: &[APrinting],
+    n_printings: usize,
+) -> Vec<u64> {
     let wpp = words_per_plane(n_printings);
     match filter {
         FilterExpr::True => all_printing_bits(n_printings),
@@ -4255,14 +4322,14 @@ fn compose_printing_bits(filter: &FilterExpr, indexes: &Archived<CardIndexes>, n
             // empty And is vacuously true; start all-ones (tail masked) and intersect each child.
             let mut acc = all_printing_bits(n_printings);
             for child in v.iter() {
-                and_bits_into(&mut acc, &compose_printing_bits(child, indexes, n_printings));
+                and_bits_into(&mut acc, &compose_printing_bits(child, indexes, offsets, printings, n_printings));
             }
             acc
         }
         FilterExpr::Or(v) => {
             let mut acc = vec![0u64; wpp];
             for child in v.iter() {
-                or_bits_into(&mut acc, &compose_printing_bits(child, indexes, n_printings));
+                or_bits_into(&mut acc, &compose_printing_bits(child, indexes, offsets, printings, n_printings));
             }
             acc
         }
@@ -4273,14 +4340,71 @@ fn compose_printing_bits(filter: &FilterExpr, indexes: &Archived<CardIndexes>, n
         | FilterExpr::NumericCmp { lhs: NumExpr::Const(c), op: CmpOp::Eq, rhs: NumExpr::Field(NumField::RarityInt) } => {
             rarity_leaf_bits(*c, &indexes.rarity_printing, n_printings)
         }
+        FilterExpr::Legality { shift: Some(shift), expected } => {
+            legality_leaf_bits(*shift, *expected, indexes, offsets, printings, n_printings)
+        }
         _ => unreachable!("compose_printing_bits on a non-composable filter — gated by is_printing_composable"),
     }
 }
 
 /// `popcount` of the composed printing-space bitmap — the `unique=printing` total, replacing the O(n)
 /// count pass. Caller guarantees `is_printing_composable(filter)`.
-fn compose_printing_total(filter: &FilterExpr, indexes: &Archived<CardIndexes>, n_printings: usize) -> usize {
-    compose_printing_bits(filter, indexes, n_printings).iter().map(|w| w.count_ones() as usize).sum()
+fn compose_printing_total(
+    filter: &FilterExpr,
+    indexes: &Archived<CardIndexes>,
+    offsets: &AOffsets,
+    printings: &[APrinting],
+    n_printings: usize,
+) -> usize {
+    compose_printing_bits(filter, indexes, offsets, printings, n_printings).iter().map(|w| w.count_ones() as usize).sum()
+}
+
+/// Cheap cost-model estimate for a composable filter: `(matches, build_printings)` **without** paying
+/// legality's broadcast. Border/rarity leaves are precomputed planes — their exact `popcount` is a
+/// cheap slice read and they synthesize nothing (`build 0`). A legality leaf is *synthesized* at query
+/// time (broadcast + repair), so its cost is estimated from the cheap card `_EXISTS` `popcount` scaled
+/// to printings, and that same count is charged as `build_printings` — the broadcast the fast path pays
+/// **only if this plan wins** (this is why acquire estimates rather than composing: it avoids a second,
+/// throwaway broadcast). `AND` takes the min (intersection upper bound); `OR` the capped sum. Used only
+/// for plan choice — the fast path recomputes the exact total. Measured build cost ≈ 1.5 ns/printing
+/// (`legality_compose_kernel_costs`), ~the range-scatter rate, so `range_build_printings` carries it.
+fn compose_printing_estimate(
+    filter: &FilterExpr,
+    indexes: &Archived<CardIndexes>,
+    offsets: &AOffsets,
+    n_printings: usize,
+) -> (usize, usize) {
+    let popcount = |bits: &[u64]| bits.iter().map(|w| w.count_ones() as usize).sum::<usize>();
+    match filter {
+        FilterExpr::True => (n_printings, 0),
+        FilterExpr::And(v) => v
+            .iter()
+            .map(|c| compose_printing_estimate(c, indexes, offsets, n_printings))
+            .fold((n_printings, 0), |(m, b), (cm, cb)| (m.min(cm), b + cb)),
+        FilterExpr::Or(v) => {
+            let (m, b) = v
+                .iter()
+                .map(|c| compose_printing_estimate(c, indexes, offsets, n_printings))
+                .fold((0usize, 0usize), |(m, b), (cm, cb)| (m + cm, b + cb));
+            (m.min(n_printings), b)
+        }
+        // Precomputed planes: exact cheap popcount, nothing synthesized.
+        FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value } => {
+            (popcount(&border_leaf_bits(value.as_str(), &indexes.border_printing, n_printings)), 0)
+        }
+        FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), op: CmpOp::Eq, rhs: NumExpr::Const(c) }
+        | FilterExpr::NumericCmp { lhs: NumExpr::Const(c), op: CmpOp::Eq, rhs: NumExpr::Field(NumField::RarityInt) } => {
+            (popcount(&rarity_leaf_bits(*c, &indexes.rarity_printing, n_printings)), 0)
+        }
+        // Legality: estimate from the cheap card ∃-plane popcount scaled to printings — no broadcast.
+        FilterExpr::Legality { shift: Some(shift), expected } => {
+            let n_cards = offsets.len() - 1;
+            let card_exists = legality_candidate_bits(indexes, n_cards, *shift, *expected, false).map_or(0, |b| popcount(&b));
+            let est = if n_cards == 0 { 0 } else { card_exists * n_printings / n_cards };
+            (est, est)
+        }
+        _ => unreachable!("compose_printing_estimate on a non-composable filter — gated by is_printing_composable"),
+    }
 }
 
 /// `unique=printing` fast path for a composable printing-space expression (bare `border:`/`r:` or an
@@ -4306,7 +4430,7 @@ fn printing_compose_fastpath<'a>(
     if !is_printing_composable(filter) {
         return None;
     }
-    let total = compose_printing_total(filter, indexes, printings.len());
+    let total = compose_printing_total(filter, indexes, offsets, printings, printings.len());
     if total == 0 || page_offset >= total {
         return Some((total, Vec::new()));
     }
@@ -5085,7 +5209,7 @@ fn run_query_routed<'a>(
         // are the shown-printing membership — exact, no re-verify). The projection is O(composed
         // popcount); that count rides `range_build_printings`, the same projection cost term the walk
         // pays — and it is 0 for the printing-mode plan, which never projects.
-        let pbits = compose_printing_bits(filter, indexes, n_printings as usize);
+        let pbits = compose_printing_bits(filter, indexes, offsets, printings, n_printings as usize);
         let projected_printings: u32 = pbits.iter().map(|w| w.count_ones()).sum();
         let card_bits = printing_bits_to_card_bits(&pbits, offsets, n_cards as usize);
         let count: u32 = card_bits.iter().map(|w| w.count_ones()).sum();
@@ -5101,10 +5225,14 @@ fn run_query_routed<'a>(
         let k = (idx.partition_point(|p| u32::from(p.0) < hi) - idx.partition_point(|p| u32::from(p.0) < lo)) as u32;
         (mk_feats(k, n_cards, n_printings, verify_cost_tier(filter)), Prep::Range)
     } else if PhysicalPlan::PrintingPlaneScan.applicable(filter, mode, cards, plane, sort_col, descending, indexes) {
-        // Composable printing-space expr (border/rarity, AND/OR/NOT): exact total from the #724
-        // composed popcount (no count pass). P3/P4 estimated unnarrowed, same as PrintingRangeScan.
-        let total = compose_printing_total(filter, indexes, n_printings as usize) as u32;
-        (mk_feats(total, n_cards, n_printings, verify_cost_tier(filter)), Prep::Range)
+        // Composable printing-space expr (border/rarity/legality, AND/OR): estimate the total and the
+        // synthesis cost cheaply — border/rarity are free plane reads, but legality is a query-time
+        // broadcast, so acquire must NOT compose here (that would pay the broadcast twice; the fast path
+        // pays it once, only if this plan wins). `range_build_printings` charges the broadcast.
+        let (matches, build_printings) = compose_printing_estimate(filter, indexes, offsets, n_printings as usize);
+        let mut feats = mk_feats(matches as u32, n_cards, n_printings, verify_cost_tier(filter));
+        feats.range_build_printings = build_printings as u32;
+        (feats, Prep::Range)
     } else {
         let prep = prepare_candidates(cards, offsets, strings, filter, plane, mode, indexes);
         (candidate_feats(&prep, filter), Prep::Candidates(prep))
@@ -5250,7 +5378,7 @@ fn run_query_with_plan<'a>(
             if !printing_compose_popcount_applicable(filter, mode, cards, plane, sort_col, descending, indexes) {
                 return None;
             }
-            let pbits = compose_printing_bits(filter, indexes, printings.len());
+            let pbits = compose_printing_bits(filter, indexes, offsets, printings, printings.len());
             let card_bits = printing_bits_to_card_bits(&pbits, offsets, cards.len());
             Some(exec_card_range_popcount(
                 cards, printings, offsets, strings, prefer, sort_col, descending, limit, page_offset, indexes, &card_bits, &pbits,
