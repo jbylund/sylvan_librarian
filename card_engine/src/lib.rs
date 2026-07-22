@@ -4178,10 +4178,10 @@ fn printing_range_fastpath<'a>(
 /// where the residual applies the correct trivalent semantics. Anything else (a text search, a range,
 /// an arithmetic compare) is likewise non-composable. A composable expression's bits are **exact** (a
 /// set bit *is* a matching printing), so no per-printing re-check is needed.
-fn is_printing_composable(filter: &FilterExpr) -> bool {
+fn is_printing_composable(filter: &FilterExpr, indexes: &Archived<CardIndexes>) -> bool {
     match filter {
         FilterExpr::True => true,
-        FilterExpr::And(v) | FilterExpr::Or(v) => v.iter().all(is_printing_composable),
+        FilterExpr::And(v) | FilterExpr::Or(v) => v.iter().all(|c| is_printing_composable(c, indexes)),
         FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, .. } => true,
         FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), op: CmpOp::Eq, rhs: NumExpr::Const(_) }
         | FilterExpr::NumericCmp { lhs: NumExpr::Const(_), op: CmpOp::Eq, rhs: NumExpr::Field(NumField::RarityInt) } => true,
@@ -4189,6 +4189,14 @@ fn is_printing_composable(filter: &FilterExpr) -> bool {
         // Only a plane-backed status (legal/banned/restricted) with a present format; an absent format
         // (`shift: None`) matches nothing and stays on the general path.
         FilterExpr::Legality { shift: Some(_), expected } => status_plane_bases(*expected).is_some(),
+        // #731: usd/cn/date range leaves — the in-range index slice scatters into an exact printing
+        // bitmap (`range_leaf_bits`). `bare_range_bounds` recognizes the printing-range-indexed shape
+        // (and the `[lo,hi)` bounds); a non-range op (`Eq`/`Ne`), a negation, or a card-space field
+        // (cmc/power/rarity) yields `None` → stays on the general path. This is what lets a range
+        // compose with border/rarity/legality — and range∧range — exactly, in any distinct-on.
+        FilterExpr::NumericCmp { .. } | FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. } => {
+            bare_range_bounds(filter, indexes).is_some()
+        }
         _ => false,
     }
 }
@@ -4239,6 +4247,22 @@ fn rarity_leaf_bits(c: f64, rp: &Archived<RarityPrintingPlanes>, n_printings: us
         Some(e) => scatter_bits(e.1.iter().map(|p| u32::from(*p)), n_printings),
         None => vec![0u64; wpp],
     }
+}
+
+/// #731: the exact printing bitmap for a usd/cn/date range leaf — scatter the value-sorted index
+/// slice `[lo, hi)` (the same slice `build_card_range_bits` walks). Index-absent printings (no
+/// price/collector-number/date) aren't in the index at all, so they're excluded by construction —
+/// this is an intersection with the in-range set, never a complement, so the trivalent-NULL trap that
+/// keeps `Not` off the compose path doesn't apply here.
+fn range_leaf_bits(idx: &Archived<PrintingRangeIndex>, lo: u32, hi: u32, n_printings: usize) -> Vec<u64> {
+    let s = idx.partition_point(|p| u32::from(p.0) < lo);
+    let e = idx.partition_point(|p| u32::from(p.0) < hi);
+    let mut bits = vec![0u64; n_printings.div_ceil(64)];
+    for p in idx[s..e].iter() {
+        let pid = u32::from(p.1) as usize;
+        bits[pid >> 6] |= 1u64 << (pid & 63);
+    }
+    bits
 }
 
 /// Broadcast a card-space bitmap **down** to printing space: set every printing of each set card. The
@@ -4338,6 +4362,12 @@ fn compose_printing_bits(
         FilterExpr::Legality { shift: Some(shift), expected } => {
             legality_leaf_bits(*shift, *expected, indexes, offsets, printings, n_printings)
         }
+        FilterExpr::NumericCmp { .. } | FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. }
+            if bare_range_bounds(filter, indexes).is_some() =>
+        {
+            let (idx, lo, hi) = bare_range_bounds(filter, indexes).expect("guarded by bare_range_bounds");
+            range_leaf_bits(idx, lo, hi, n_printings)
+        }
         _ => unreachable!("compose_printing_bits on a non-composable filter — gated by is_printing_composable"),
     }
 }
@@ -4386,6 +4416,15 @@ fn compose_printing_estimate(
             let est = if n_cards == 0 { 0 } else { card_exists * n_printings / n_cards };
             (est, est)
         }
+        // Range: `k` in-range printings from the index partition points (O(log n), no scatter here);
+        // matches ≈ k, and k rides `build` — the scatter the fast path pays into the printing bitmap.
+        FilterExpr::NumericCmp { .. } | FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. }
+            if bare_range_bounds(filter, indexes).is_some() =>
+        {
+            let (idx, lo, hi) = bare_range_bounds(filter, indexes).expect("guarded by bare_range_bounds");
+            let k = idx.partition_point(|p| u32::from(p.0) < hi) - idx.partition_point(|p| u32::from(p.0) < lo);
+            (k, k)
+        }
         _ => unreachable!("compose_printing_estimate on a non-composable filter — gated by is_printing_composable"),
     }
 }
@@ -4412,7 +4451,7 @@ fn printing_compose_fastpath<'a>(
     limit: usize,
     page_offset: usize,
 ) -> Option<(usize, Vec<(&'a AOracleCard, &'a APrinting)>)> {
-    if !is_printing_composable(filter) || !printing_compose_indexes_built(indexes) {
+    if !is_printing_composable(filter, indexes) || !printing_compose_indexes_built(indexes) {
         return None;
     }
     // Compose once, here (never in acquire) — that single build is the only synthesis, and it is paid
@@ -4527,7 +4566,10 @@ impl PhysicalPlan {
     /// estimate first (phase 1) and only materializes (phase 2) when a materializing plan wins or the
     /// non-materializing one declines.
     fn materializing(self) -> bool {
-        !matches!(self, PhysicalPlan::PrintingRangeScan | PhysicalPlan::PrintingCompose)
+        !matches!(
+            self,
+            PhysicalPlan::PrintingRangeScan | PhysicalPlan::PrintingCompose | PhysicalPlan::CardRangePopcount
+        )
     }
 }
 
@@ -4555,10 +4597,6 @@ enum Prep {
     /// `run_query_routed`'s local `plane_bits` and passed by reference.
     /// `PlanePopcountOrder` reads it directly; P3/P4 read it as a candidate list.
     Plane,
-    /// Bare `usd` range (card): the range's card-existence bitmap (its popcount is the exact total)
-    /// and printing-space membership set (emission's per-printing residual). `CardRangePopcount`
-    /// reads both; a materializing winner reads the card bitmap as a candidate list.
-    RangeCardBits { card_bits: Vec<u64>, range_pbits: Vec<u64> },
     /// The general residual path: a materialized candidate list.
     Candidates(PreparedCandidates),
 }
@@ -4646,10 +4684,13 @@ fn printing_compose_applicable(
     descending: bool,
     indexes: &Archived<CardIndexes>,
 ) -> bool {
+    // Mode-agnostic: the cost model arbitrates overlap with the specialized range plans. All three
+    // range/compose plans are non-materializing (estimate-in-acquire), so nothing is eagerly built —
+    // a losing plan costs only a binary search, never a wasted scatter.
     *PRINTING_COMPOSE != 0
         && !cards.is_empty()
         && plane.is_none()
-        && is_printing_composable(filter)
+        && is_printing_composable(filter, indexes)
         && printing_compose_indexes_built(indexes)
         && indexes.sort_perms.get(sort_col, descending).is_some_and(|p| p.len() == cards.len())
 }
@@ -5274,6 +5315,7 @@ fn run_query_routed<'a>(
         limit: limit as u32,
         offset: page_offset as u32,
         synth_printings: 0,  // CardRangePopcount / PrintingCompose override this in their acquire branches
+        project_printings: 0, // PrintingCompose's card/artwork projection pass; CardRangePopcount sets it too (for costing compose)
         popcount_words: 0,   // PrintingCompose overrides this (result-space bitmap words)
     };
     // Features for the general candidate path (shared by the acquire branch and the
@@ -5303,63 +5345,57 @@ fn run_query_routed<'a>(
         let count: u32 = plane_bits.iter().map(|w| w.count_ones()).sum();
         (mk_feats(count, count, count, 0), Prep::Plane)
     } else if PhysicalPlan::CardRangePopcount.applicable(filter, mode, cards, plane, sort_col, descending, indexes) {
-        // Build the range's card-existence bitmap now; its popcount is the exact count (like the
-        // plane branch above, scan_units == count, all_match ⇒ tier 0). The build is O(k) over the
-        // range slice — the plan's dominant cost — but for a bare range the alternative is a full
-        // scan of a near-total set, which reliably loses, so the eager build is rarely wasted: only a
-        // narrow range routes elsewhere, and there k (hence the build) is small. If a materializing
-        // plan does win, dispatch reads the same bitmap back as a candidate list.
+        // Exact in-range printing count `k` from the index partition points (two binary searches, no
+        // scan, no scatter). The O(k) card-bitmap build is deferred to dispatch and paid only if this
+        // plan wins — so a competing winner never eats a wasted build (re-deriving the bounds there is
+        // another ~free binary search). `k` rides `synth_printings` (the deferred scatter); `matches`
+        // uses the card-count proxy `min(k, n_cards)` (card total ≤ both). The materializing
+        // alternatives are costed with the range's verify tier (a `0` would under-cost them).
         let (idx, lo, hi) = bare_range_bounds(filter, indexes).expect("applicable ⇒ bare range");
-        let (card_bits, range_pbits) = build_card_range_bits(idx, lo, hi, indexes, n_cards as usize, n_printings as usize);
-        let count: u32 = card_bits.iter().map(|w| w.count_ones()).sum();
-        // Slice size (in-range printings) drives the build term — the plan's dominant cost.
-        let slice_printings: u32 = range_pbits.iter().map(|w| w.count_ones()).sum();
-        // Unlike the plane branch, the residual here is the range, not True: CardRangePopcount's exact
-        // bitmap needs no re-verify (its formula ignores tier), but the materializing alternatives in
-        // dispatch DO re-verify the range per candidate, so they must be costed with its verify tier —
-        // `0` would under-cost them and let a mis-cheap StreamedSelect beat the plan that actually wins.
-        let mut feats = mk_feats(count, count, count, verify_cost_tier(filter));
-        feats.synth_printings = slice_printings;
-        (feats, Prep::RangeCardBits { card_bits, range_pbits })
+        let k = (idx.partition_point(|p| u32::from(p.0) < hi) - idx.partition_point(|p| u32::from(p.0) < lo)) as u32;
+        let card_est = k.min(n_cards);
+        let mut feats = mk_feats(card_est, card_est, card_est, verify_cost_tier(filter));
+        // Fused build+project in one pass (`synth`); `project` is set to what PrintingCompose would do
+        // as a *separate* pass, so costing compose off these shared feats reflects its extra scatter and
+        // a bare range doesn't mis-route to it.
+        feats.synth_printings = k;
+        feats.project_printings = k;
+        (feats, Prep::Range)
     } else if PhysicalPlan::PrintingRangeScan.applicable(filter, mode, cards, plane, sort_col, descending, indexes) {
         // Bare range: exact k from the index (no scan). P3/P4 estimated unnarrowed
         // (their broad regime — a narrow range makes P1 lose, and dispatch materializes).
         let (idx, lo, hi) = bare_range_bounds(filter, indexes).expect("applicable ⇒ bare range");
         let k = (idx.partition_point(|p| u32::from(p.0) < hi) - idx.partition_point(|p| u32::from(p.0) < lo)) as u32;
-        (mk_feats(k, n_cards, n_printings, verify_cost_tier(filter)), Prep::Range)
+        let mut feats = mk_feats(k, n_cards, n_printings, verify_cost_tier(filter));
+        feats.synth_printings = k; // for costing a competing PrintingCompose (which would scatter k); P1 itself walks, so its own cost ignores synth
+        (feats, Prep::Range)
     } else if PhysicalPlan::PrintingCompose.applicable(filter, mode, cards, plane, sort_col, descending, indexes) {
         // Composable printing-space expr, any distinct-on. Estimate the counts cheaply — the fast path
         // composes once, only if this plan wins (never in acquire; a legality broadcast paid here and
         // then discarded would be pure waste). `synth_printings` = broadcast down (legality) + projection
         // up (card/artwork; 0 for printing). `popcount_words` = the result-space bitmap the total scans.
         let (printing_matches, broadcast) = compose_printing_estimate(filter, indexes, offsets, n_printings as usize);
-        // `eval_domain`/`scan_units` here cost the *materializing alternatives* (StreamedSelect/
-        // GatheredScan) should this plan lose — so they must reflect the narrowed reality those plans
-        // see, not the unnarrowed universe. A composable filter narrows via its indices (#667 legality,
-        // border/rarity), so the alternatives iterate ~`matches` candidates; in card mode they also
-        // break at the first matching printing (`scan_units()` ⇒ `eval_domain`). Passing n_cards/
-        // n_printings instead over-costs them ~3-4× and spuriously wins broad-but-narrowable legality
-        // compounds for compose (measured: `format:X format:Y`/card regressed).
-        let (result_total, synth, popcount_words, eval_domain, scan_units) = match mode {
-            // printing: no projection; total popcount over the printing bitmap. The alternatives scan
-            // every printing (no early break), so the unnarrowed universe is the right estimate.
-            Mode::Printing => (printing_matches, broadcast, (n_printings as usize).div_ceil(64), n_cards as usize, n_printings as usize),
-            // card: project every matching printing up, popcount card bitmap. Alternatives narrow to
-            // ~matches candidates and break at the first match ⇒ eval_domain = scan_units = matches.
+        // `synth` = the first pass (build the printing bitmap: legality broadcast / range scatter);
+        // `project` = the second pass (printing→card/artwork), 0 for printing mode. Keeping them
+        // separate is what lets a bare range's CardRangePopcount acquire (which sets `project` too) cost
+        // this plan's extra projection honestly. `eval_domain`/`scan_units` cost the *materializing
+        // alternatives* should compose lose: a composable filter narrows via its indices, so they see
+        // ~`matches` candidates (card mode also breaks at the first match ⇒ scan_units = eval_domain) —
+        // the unnarrowed universe would over-cost them and mis-route (measured: `format:X format:Y`/card).
+        let (result_total, project, popcount_words, eval_domain, scan_units) = match mode {
+            Mode::Printing => (printing_matches, 0, (n_printings as usize).div_ceil(64), n_cards as usize, n_printings as usize),
             Mode::Card => {
                 let rt = printing_matches.min(n_cards as usize);
-                (rt, broadcast + printing_matches, (n_cards as usize).div_ceil(64), rt, rt)
+                (rt, printing_matches, (n_cards as usize).div_ceil(64), rt, rt)
             }
-            // artwork: same projection; popcount the artwork bitmap (n_artworks ≤ n_printings — upper
-            // bound for the estimate). Alternatives group all printings per candidate (no early break),
-            // so scan_units is the matching printings under the ~matches candidate cards.
             Mode::Artwork => {
                 let rt = printing_matches.min(n_cards as usize);
-                (printing_matches, broadcast + printing_matches, (n_printings as usize).div_ceil(64), rt, printing_matches)
+                (printing_matches, printing_matches, (n_printings as usize).div_ceil(64), rt, printing_matches)
             }
         };
         let mut feats = mk_feats(result_total as u32, eval_domain as u32, scan_units as u32, verify_cost_tier(filter));
-        feats.synth_printings = synth as u32;
+        feats.synth_printings = broadcast as u32;
+        feats.project_printings = project as u32;
         feats.popcount_words = popcount_words as u32;
         (feats, Prep::Range)
     } else {
@@ -5383,30 +5419,23 @@ fn run_query_routed<'a>(
             &PreparedCandidates { candidate_cards: Some(bitmap_card_ids(&plane_bits)), all_match_known: true },
             plane, mode, prefer, sort_col, descending, limit, page_offset, indexes,
         ),
-        (PhysicalPlan::CardRangePopcount, Prep::RangeCardBits { card_bits, range_pbits }) => exec_card_range_popcount(
-            cards, printings, offsets, strings, prefer, sort_col, descending, limit, page_offset, indexes, card_bits, range_pbits,
-        ),
-        // A materializing plan beat CardRangePopcount on the estimate: reuse the already-built
-        // card-existence bitmap as a candidate list (dropped when >7/8, matching prepare_candidates)
-        // and re-verify the range residual per card (all_match_known: false) so the range still gates
-        // which printing is shown.
-        (p, Prep::RangeCardBits { card_bits, .. }) => {
-            let ids = bitmap_card_ids(card_bits);
-            let candidate_cards = (ids.len() < cards.len() - cards.len() / 8).then_some(ids);
-            exec_from_candidates(
-                p, cards, printings, offsets, strings, filter,
-                &PreparedCandidates { candidate_cards, all_match_known: false },
-                plane, mode, prefer, sort_col, descending, limit, page_offset, indexes,
-            )
-        }
         (p, Prep::Candidates(prep)) => exec_from_candidates(
             p, cards, printings, offsets, strings, filter, prep, plane, mode, prefer, sort_col, descending, limit, page_offset, indexes,
         ),
+        // `Prep::Range` = "cheap estimate acquired, nothing materialized" — shared by CardRangePopcount
+        // (#725), PrintingRangeScan (#695), and PrintingCompose (#724). Each winner does its own O(k)
+        // work here, so no plan eats a build for a competing winner:
+        //   - CardRangePopcount builds its card bitmap from the (re-derived, ~free) range bounds now.
+        //   - the printing-space fast paths walk (or, if they decline — sparse total — materialize).
+        //   - a materializing plan (StreamedSelect/GatheredScan) that beat them narrows + runs.
+        (PhysicalPlan::CardRangePopcount, Prep::Range) => {
+            let (idx, lo, hi) = bare_range_bounds(filter, indexes).expect("applicable ⇒ bare range");
+            let (card_bits, range_pbits) = build_card_range_bits(idx, lo, hi, indexes, cards.len(), printings.len());
+            exec_card_range_popcount(
+                cards, printings, offsets, strings, prefer, sort_col, descending, limit, page_offset, indexes, &card_bits, &range_pbits,
+            )
+        }
         (plan, Prep::Range) => {
-            // A printing-space fast path walks if it won and its fastpath accepts. Otherwise (a
-            // materializing plan won the estimate, or the fastpath declined — rare, since cost seldom
-            // picks these when narrow) materialize now and run the best materializing plan on EXACT
-            // features. `Prep::Range` is shared by the range (#695) and compose (#724) fast paths.
             let fast_page = match plan {
                 PhysicalPlan::PrintingRangeScan => {
                     printing_range_fastpath(cards, printings, offsets, strings, filter, indexes, sort_col, descending, limit, page_offset)
@@ -5414,7 +5443,7 @@ fn run_query_routed<'a>(
                 PhysicalPlan::PrintingCompose => {
                     printing_compose_fastpath(cards, printings, offsets, filter, indexes, mode, prefer, sort_col, descending, limit, page_offset)
                 }
-                _ => None,
+                _ => None, // a materializing plan won the estimate — materialize + run it below
             };
             match fast_page {
                 Some(page) => page,

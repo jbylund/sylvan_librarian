@@ -2768,6 +2768,18 @@ fn force_plan_differential_agreement() {
             "edhrec",
             "asc",
         ),
+        // #731 range compose: a range AND border compound. The collector-number range scatters its
+        // in-range index slice into a printing bitmap (`range_leaf_bits`), AND'd with the border plane,
+        // projected once per mode — the shared-witness case `CardRangePopcount` explicitly declined.
+        // Forced in all three modes (incl. artwork, the #694 gap) and checked against GatheredScan.
+        (
+            FuzzSpec::And(vec![
+                FuzzSpec::Leaf(FuzzLeaf::CollectorNumber { op: CmpOp::Lt, val: 100.0 }),
+                FuzzSpec::Leaf(FuzzLeaf::Border { value: "black".to_string() }),
+            ]),
+            "edhrec",
+            "asc",
+        ),
     ];
     for _ in 0..RANDOM_QUERIES {
         let orderby = SORTS[rng.random_range(0..SORTS.len())];
@@ -3262,7 +3274,7 @@ fn plan_cost_model_matches_gold() {
                     residual_tier_ns100,
                     limit: limit as u32,
                     offset: offset as u32,
-                    synth_printings: 0, popcount_words: 0,
+                    synth_printings: 0, project_printings: 0, popcount_words: 0,
                 };
 
                 // ── Model argmin over the applicable plans ──
@@ -3372,7 +3384,7 @@ fn cost_terms(plan: PhysicalPlan, f: &super::cost::PlanFeatures) -> (Vec<f64>, f
         // offset, not a refit param.
         PhysicalPlan::PrintingCompose => (
             vec![f64::from(f.popcount_words), page_span / match_rate, limit, 1.0],
-            f64::from(f.synth_printings) * super::cost::SCATTER_PER_PRINTING_NS,
+            (f64::from(f.synth_printings) + f64::from(f.project_printings)) * super::cost::SCATTER_PER_PRINTING_NS,
         ),
         // [PERM_SCATTER, POPCOUNT(card words), EMIT, FIXED].
         PhysicalPlan::PlanePopcountOrder => (vec![matches, n_cards / 64.0, limit, 1.0], 0.0),
@@ -3488,7 +3500,7 @@ fn plan_cost_refit() {
                     scan_units: scan_units(mode_enum, prep.candidate_cards.as_deref(), &archived.offsets, n_printings, eval_domain),
                     residual_tier_ns100: if prep.all_match_known { 0 } else { verify_cost_tier(&res) },
                     limit: limit as u32, offset: offset as u32,
-                    synth_printings: 0, popcount_words: 0,
+                    synth_printings: 0, project_printings: 0, popcount_words: 0,
                 };
                 for (pi, plan) in all_plans.iter().enumerate() {
                     if let Some(meas) = ns[pi] {
@@ -3686,7 +3698,7 @@ fn printing_range_route_probe() {
                 scan_units: scan_units(Mode::Printing, prep.candidate_cards.as_deref(), &archived.offsets, n_printings as u32, eval_domain),
                 residual_tier_ns100,
                 limit: LIMIT as u32, offset: offset as u32,
-                synth_printings: 0, popcount_words: 0,
+                synth_printings: 0, project_printings: 0, popcount_words: 0,
             };
 
             // ── Three pickers ──
@@ -4047,7 +4059,7 @@ fn plan_regret_report() {
                 residual_tier_ns100: tier,
                 limit: limit as u32,
                 offset: offset as u32,
-                synth_printings: 0, popcount_words: 0,
+                synth_printings: 0, project_printings: 0, popcount_words: 0,
             };
 
             let gold = (0..4).filter_map(|i| ns[i].map(|v| (v, i))).min_by_key(|(v, _)| *v);
@@ -4174,7 +4186,7 @@ fn plan_regret_fuzz() {
                 n_cards, n_printings, matches, eval_domain: evd, scan_units: evd, // card mode ⇒ scan_units == eval_domain
                 residual_tier_ns100: tier,
                 limit: limit as u32, offset: offset as u32,
-                synth_printings: 0, popcount_words: 0,
+                synth_printings: 0, project_printings: 0, popcount_words: 0,
             };
             let feats_true = mk(true_total, eval_domain);
             let feats_est = mk(est, est.min(n_cards));
