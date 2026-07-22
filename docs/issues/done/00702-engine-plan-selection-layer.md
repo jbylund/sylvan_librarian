@@ -337,6 +337,9 @@ corner (though #656 flags it as a known ~1.07ms gap). **Decision pending:** buil
 #689) and cost-route idea-1/idea-2 — real work for a rare-but-known-gap win — vs leave it
 deferred. This is a prioritization call, not a technical unknown.
 
+→ Extracted to an active plan (parts, ship order, target queries):
+[local-engine-printing-plane-popcount-order.md](../local-engine-printing-plane-popcount-order.md).
+
 ## Keeping costs/plans current as the engine changes
 
 The constants are fit to a point-in-time measurement, so the design has to say

@@ -320,7 +320,8 @@ confirmed hot.
 - [ ] **Idea-2 printing-space pager** ([#656]) — the mechanism for **compound printing/artwork** (a
   printing-space popcount total; `cn<100 usd<50`/printing ~1.07 ms is the uncovered gap). Deferred
   for frequency/effort, *not* deep-offset (measured flat). PR 1 covers bare printing without it.
-  See [#656 assembly](#656-assembly-from-pr-1--pr-2a) — most of its pieces fall out of PR 1 + PR 2a.
+  **Full plan (parts, ship order, target queries, #656 assembly):**
+  [local-engine-printing-plane-popcount-order.md](local-engine-printing-plane-popcount-order.md).
 - [ ] **Idea-1 crossover guard** — widen the fastpath below the 25% veto boundary it shipped at
   ([#695]) into the moderate band, per the [#647] calibrate-from-measurement precedent. The two
   plans have *opposite* cost curves in `k`: narrow-and-scan rises ~O(k); the fastpath walk falls
@@ -367,22 +368,12 @@ deep pages fall back to narrowing exactly where the walk would lose.
 
 ### #656 assembly (from PR 1 + PR 2a)
 
-#656 is not a from-scratch build once PR 1 and PR 2a land — it's mostly assembly. It needs three
-things, and PR 1/PR 2a build all but the glue:
-
-| #656 needs | Built by | Notes |
-|---|---|---|
-| range → **printing** existence bitmap | **PR 2a/3** | `PrintingRangeBits` already carries `printing_bits` (card-mode row selection needs it — `eval_plane_expr_for_printing` tests it), so it's built regardless. |
-| **popcount total** | **PR 2a** | PR 2a popcounts *card* bits; the identical step over printing bits is a trivial transfer. |
-| **printing-space paging** | **PR 1** | PR 1's card-permutation walk (expand to printings, test membership, early-stop) *is* the printing pager — swap the test from "in `[lo, hi)`" to "in the intersected printing bitmap." |
-
-So `#656 ≈ PR 2a's printing bitmaps + PR 1's walk + an AND`. The only net-new work is intersecting
-≥2 printing bitmaps and routing the popcount total into the printing path; the `Mode::Card`-only
-`run_query_streamed_popcount` is *not* reused (PR 1's walk is the printing-mode pager instead).
-**Assembly plan:** (1) intersect the per-leaf `printing_bits` for the compound; (2) `total =
-popcount` of the result; (3) page via PR 1's walk with membership against the intersected bitmap.
-This is the argument for landing *both* PR 1 and PR 2a rather than treating them as either/or —
-together they reduce #656 to a small follow-up, if the range+range gap proves worth closing.
+Consolidated into the printing-space plan doc:
+[local-engine-printing-plane-popcount-order.md § #656 assembly](local-engine-printing-plane-popcount-order.md#656-assembly).
+In short: **#656 ≈ PR 2a's printing bitmaps + PR 1's walk + an AND** — the range→printing bitmap
+(PR 2a/3) and printing-space paging (PR 1's walk) fall out of those two, leaving only the
+bitmap intersection + routing the popcount total into the printing path as net-new work. Landing
+both PR 1 and PR 2a is what reduces #656 to a small follow-up.
 
 ### Acceptance (every PR)
 
@@ -404,6 +395,9 @@ together they reduce #656 to a small follow-up, if the range+range gap proves wo
 
 ## Related
 
+- [local-engine-printing-plane-popcount-order.md](local-engine-printing-plane-popcount-order.md) —
+  the consolidated plan for the deferred Idea-2 printing-space popcount plan (#656): parts, ship
+  order, target queries, and the #656 assembly.
 - [local-engine-broad-range-fastpath.md](local-engine-broad-range-fastpath.md) — history:
   price-exactness prerequisite (shipped) and the full PR #689 account.
 - [00690-engine-direct-projection-arrays.md](00690-engine-direct-projection-arrays.md) —
