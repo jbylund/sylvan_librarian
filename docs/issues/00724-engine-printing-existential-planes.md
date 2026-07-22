@@ -98,6 +98,35 @@ So the split is: **#724 delivers bare printing-mode queries standalone** (popcou
 compound pager (#656). #724 is no longer "sequenced last, inert" — it's a near-term win that is *also*
 the substrate for the rest.
 
+## Step-0 measurement: border/rarity are the real targets, not legality
+
+Measured on the current build (no #724; `scripts/bench_printing_planes.py`, 97,206-printing corpus,
+min ms):
+
+| query | mode | min ms | note |
+|---|---|---:|---|
+| `border:black` | printing | 0.869 | the standout bare target |
+| `r:rare` | printing | 0.360 | moderate bare target |
+| `f:modern` | printing | 0.190 | already cheap |
+| `f:commander` (97k) | printing | 0.216 | already cheap despite broad |
+| `f:modern border:black` | printing | 0.741 | compound (substrate) |
+| `border:black r:rare` | printing | 0.608 | compound (substrate) |
+| `border:black` | card | 0.064 | already fast (#667+#634) — *not* a target |
+| `border:black r:rare` | card | 0.316 | card compound (substrate) |
+| `border:black` | artwork | 0.905 | slow — needs PR 2b |
+
+The load-bearing finding: **legality is ~4× cheaper than border in printing mode at the same
+breadth, because legality settles at the *card* level** (`printing_dependent(Legality) => false`,
+[filter.rs](../../card_engine/src/filter.rs)) — it evaluates once per card (~31.5k) and emits all of
+a matching card's printings, dropping to per-printing only for the rare divergent-legality cards.
+**Border and rarity are genuinely per-printing** (`TextField::Border => StrVal::PDep`), so they
+evaluate per printing (~97k) — that scan is the cost.
+
+So #724's *bare*-query win is concentrated on **border and rarity** (per-printing, no card-level
+shortcut); bare legality is already fine. **Start with border** (biggest bare win, `Eq`-only, #664's
+card-space border plane to diff against). Legality's #724 value is for **compounds** (AND'd with
+border/rarity in printing space) and the divergent carveout — lower priority.
+
 ## Which values get a plane
 
 Per-value density crossover — the same one [#713](00713-is-tag-recovery.md) bucket-C uses:
