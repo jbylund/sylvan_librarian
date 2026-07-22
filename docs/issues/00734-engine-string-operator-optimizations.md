@@ -1,7 +1,8 @@
 # Engine: String Operator Optimizations (regex→contains, memmem)
 
-Status: todo, filed as [#734](https://github.com/jbylund/sylvan_librarian/issues/734). Two independent,
-behavior-preserving speedups for substring search over text fields (`oracle`/`name`/`flavor`/`artist`).
+Status: **step 1 done** (`ec7d26b`), step 2 todo. Filed as
+[#734](https://github.com/jbylund/sylvan_librarian/issues/734). Two independent, behavior-preserving
+speedups for substring search over text fields (`oracle`/`name`/`flavor`/`artist`).
 
 ## Motivation
 
@@ -42,19 +43,28 @@ for `"flying"`). The ordering is robust; the absolute multiples are not. `o:/sac
 ## Optimization 1 — lower metacharacter-free regex to `TextContains`
 
 A slashed regex with no anchors and no metacharacters is a substring search: `o:/sacrifice a/` ≡
-`o:"sacrifice a"`. A parser/normalization rewrite (`TextRegex → TextContains`), no engine change.
-The win is primarily the access path — the rewritten leaf now narrows through the trigram/oracle-word
-index instead of forcing a full scan (~**32×** end-to-end above, of which ~2.7× is the per-row scan).
+`o:"sacrifice a"`. The win is primarily the access path — the rewritten leaf now narrows through the
+trigram/oracle-word index instead of forcing a full scan (~**32×** end-to-end above, of which ~2.7× is
+the per-row scan). Measured end-to-end, `o:/sacrifice a/` / card dropped to the substring form's
+**117 µs** (1,391 results, byte-identical) from a full regex scan.
 
-Caveats:
+**Shipped** as a **Python post-parse AST pass** (`lower_literal_regexes` in
+[`api/parsing/rewrite.py`](../../api/parsing/rewrite.py)), *not* an engine change — the equivalence is a
+property of the regex, so doing it once at the shared parse seam serves **both** consumers of the AST:
+the SQL path (postgres `gin_trgm_ops`) and the Rust engine (trigram narrow). It rewrites a plain-literal
+`RegexValueNode` → `StringValueNode`, making the AST identical to the substring query. `regex_plain_literal`
+mirrors the engine's `regex_tier` classification so the two never disagree. All post-parse rewrites now
+compose through one `rewrite_query` pipeline (`_REWRITE_PASSES`) that both parsers call.
 
-- **Case folding.** Query regexes carry `(?i)`; `TextContains` runs against the pre-lowercased
-  `*_lower` column with a lowercased needle — exactly equivalent for ASCII. Guard/note the Unicode
-  fold edge (ß, Turkish İ) where `(?i)` and ASCII-lowercase diverge.
-- **Escaped punctuation.** `\.` `\$` are literal characters — unescape into the needle rather than
-  bailing to machinery. `regex_tier` already distinguishes these (`\d`/`\w` are classes → machinery).
-- **Anchored variants.** `^foo$` → `TextExact`, `^foo` → prefix match: a separate, lower-value
-  mapping. The unanchored bare-literal → `TextContains` case is where the win is; do it first.
+Caveats (handled):
+
+- **Case folding.** Query regexes carry `(?i)`; the substring `:` path lowercases its needle against the
+  pre-lowercased `*_lower` column — exactly equivalent for ASCII (Unicode fold edge ß/İ noted, negligible
+  for oracle text).
+- **Escaped punctuation.** `\.` `\$` unescape into the literal needle; an alphanumeric escape
+  (`\d`/`\w`/`\b`) is a class → keep the regex.
+- **Anchored variants.** `^foo$` → `TextExact`, `^foo` → prefix match: a separate, lower-value mapping,
+  deferred. Anchored patterns stay a real regex today.
 
 ## Optimization 2 — `memmem::Finder` for the `TextContains` scan
 
@@ -64,15 +74,16 @@ index. **1.26×** over `str::contains`, **3.36×** over regex stacked with (1).
 
 ## Sequencing
 
-1. Regex→contains lowering (parser) — the bigger, structurally-clean win; unlocks the memoized
-   `OracleMatch`/`NameMatch` set paths for what were regexes.
+1. ✅ Regex→contains lowering (Python AST pass, `ec7d26b`) — the bigger, structurally-clean win;
+   unlocks the memoized `OracleMatch`/`NameMatch` set paths and trigram narrowing for what were regexes.
 2. memmem finder for the residual `TextContains` scan.
 
 ## Cost model
 
-`regex_tier` (REGEX_MACHINERY 5000 ns×100) and the `TextContains` scan tier (`TEXT_SCAN_NS100` 2300)
-already price these apart; a rewrite that changes a leaf's kind gets the cheaper tier automatically.
-Re-fit `TEXT_SCAN_NS100` if memmem lands (it drops ~1.3 ns/card, ~200 of the 2300).
+Because the lowering happens in Python before serialization, the engine now receives a `TextContains`
+(and prices it at the `TEXT_SCAN_NS100` 2300 scan tier / narrows it), never the `REGEX_MACHINERY`
+5000-tier regex — so no engine cost-model change was needed for step 1. Re-fit `TEXT_SCAN_NS100` if
+memmem (step 2) lands (it drops ~1.3 ns/card, ~200 of the 2300).
 
 ## Related
 
