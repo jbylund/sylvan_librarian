@@ -31,11 +31,12 @@
 use std::hint::black_box;
 use std::time::Instant;
 
+use memchr::memmem;
 use regex::Regex;
 use rkyv::Archived;
 
 use super::{
-    archive_header, archive_payload, CardData, CmpOp, ColorField, CollField, FilterExpr, Mmap, NumExpr, NumField, TextField,
+    archive_header, archive_payload, str_at, CardData, CmpOp, ColorField, CollField, FilterExpr, Mmap, NumExpr, NumField, TextField,
     TextSearchField, TYPE_CREATURE, ARCHIVE_HEADER_LEN,
 };
 
@@ -161,6 +162,62 @@ fn bench_verify_cost_clusters() {
     println!("  regex bare literal : {bare_ns:.3}");
     println!("  regex machinery (literal prefix) : {machinery_ns:.3}");
     println!("  regex machinery (no prefix)      : {machinery_noprefix_ns:.3}");
+}
+
+/// Three ways to answer the same metacharacter-free substring query
+/// (`o:/sacrifice a/` ≡ `o:"sacrifice a"`), all scanning the per-card
+/// `oracle_text_lower` strings so the ns/card numbers are directly comparable:
+///
+///   1. **regex** — `Regex::new("(?i)sacrifice a")` built once, `is_match` per
+///      card: what `o:/sacrifice a/` compiles to today (a bare unanchored
+///      literal → REGEX_MACHINERY tier, `regex_tier`).
+///   2. **str::contains** — `s.contains(needle)`: what `TextContains`'s
+///      unmemoized scan runs.
+///   3. **memmem::Finder** — built once, `find(...).is_some()` per card: a
+///      SIMD substring finder with its Two-Way/prefilter setup amortized over
+///      the whole corpus (the same trick `sparse_blob` already uses).
+///
+/// Motivates lowering metacharacter-free `TextRegex` to `TextContains` (and
+/// then to a memmem finder). `cargo test --release bench_substring_finders --
+/// --ignored --nocapture`
+#[test]
+#[ignore = "micro-benchmark; needs benchmarks/verify-order/real.store (see module docs)"]
+fn bench_substring_finders() {
+    let Ok(file) = std::fs::File::open(STORE_PATH) else {
+        eprintln!("SKIP: {STORE_PATH} not found (see module docs)");
+        return;
+    };
+    let mmap = unsafe { Mmap::map(&file) }.expect("mmap real.store");
+    if mmap.len() < ARCHIVE_HEADER_LEN || mmap[..ARCHIVE_HEADER_LEN] != archive_header() {
+        eprintln!("SKIP: {STORE_PATH} header mismatch (stale archive — rebuild it, see module docs)");
+        return;
+    }
+    let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
+    let n = data.cards.len();
+
+    // Pre-resolve each card's lowercased oracle text once (outside the timed
+    // loop): all three kernels scan this identical &str slice, so the numbers
+    // isolate the substring test itself, not the interned-id lookup.
+    let texts: Vec<&str> = (0..n)
+        .map(|cid| str_at(&data.strings, u32::from(data.cards[cid].oracle_text_lower_id)).unwrap_or(""))
+        .collect();
+    let needle = "sacrifice a"; // already lowercase — matches oracle_text_lower
+
+    println!("\n{n} oracle cards — substring finder shootout for {needle:?}");
+
+    let re = Regex::new(&format!("(?i){needle}")).unwrap();
+    let regex_ns = time_kernel("regex (?i) is_match", n, || texts.iter().filter(|s| re.is_match(s)).count() as u32);
+
+    let contains_ns = time_kernel("str::contains", n, || texts.iter().filter(|s| s.contains(needle)).count() as u32);
+
+    let finder = memmem::Finder::new(needle.as_bytes());
+    let memmem_ns = time_kernel("memmem::Finder (built once)", n, || {
+        texts.iter().filter(|s| finder.find(s.as_bytes()).is_some()).count() as u32
+    });
+
+    println!("\n  regex / contains  = {:.2}x", regex_ns / contains_ns);
+    println!("  regex / memmem    = {:.2}x", regex_ns / memmem_ns);
+    println!("  contains / memmem = {:.2}x", contains_ns / memmem_ns);
 }
 
 /// Pins the per-card `NumericCmp` cost for usd/collector_number/year --
