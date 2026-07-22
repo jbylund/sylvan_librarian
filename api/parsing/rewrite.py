@@ -17,7 +17,16 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from api.parsing.hand_parser import parse_query as _parse_query
-from api.parsing.nodes import AndNode, BinaryOperatorNode, NotNode, OrNode, Query, flatten_nested_operations
+from api.parsing.nodes import (
+    AndNode,
+    BinaryOperatorNode,
+    NotNode,
+    OrNode,
+    Query,
+    RegexValueNode,
+    StringValueNode,
+    flatten_nested_operations,
+)
 
 if TYPE_CHECKING:
     from api.parsing.nodes import QueryNode
@@ -120,6 +129,63 @@ def _expand(node: QueryNode, in_progress: frozenset[tuple[str, str]]) -> tuple[Q
     return node, False
 
 
+def _regex_plain_literal(pattern: str) -> str | None:
+    r"""The exact substring an unanchored, metacharacter-free regex matches, else None.
+
+    A regex made only of literal characters (and escaped punctuation like ``\.``) is a plain
+    substring search, so ``o:/sacrifice a/`` == ``o:"sacrifice a"``. Escaped punctuation unescapes
+    to its literal; an alphanumeric escape (``\d`` / ``\w`` / ``\b``) is a character class -> None;
+    any anchor (``^`` / ``$``) or live metacharacter -> None. Mirrors the engine's ``regex_tier``
+    classification (card_engine/src/filter.rs) so the two never disagree about "plain literal".
+    """
+    out: list[str] = []
+    it = iter(pattern)
+    for c in it:
+        if c == "\\":
+            nxt = next(it, None)
+            if nxt is None or (nxt.isascii() and nxt.isalnum()):
+                return None  # class escape (\d \w \b …) or a dangling backslash
+            out.append(nxt)
+        elif c in ".*+?()[]{}|^$":
+            return None
+        else:
+            out.append(c)
+    return "".join(out) or None  # empty pattern matches everything -> leave it a regex
+
+
+def _lower_regex_leaves(node: QueryNode) -> None:
+    """Rewrite plain-literal regex leaves to substring leaves, in place.
+
+    Only the leaf's ``rhs`` node changes (``RegexValueNode`` -> ``StringValueNode``); the tree
+    shape is untouched, so — unlike ``expand_derived_predicates`` — no re-flatten is needed, and
+    mutating in place preserves the leaf's concrete class (a card-specific ``BinaryOperatorNode``
+    subclass) that rebuilding would drop.
+    """
+    if isinstance(node, (AndNode, OrNode)):
+        for op in node.operands:
+            _lower_regex_leaves(op)
+    elif isinstance(node, NotNode):
+        _lower_regex_leaves(node.operand)
+    elif isinstance(node, BinaryOperatorNode) and node.operator == ":" and isinstance(node.rhs, RegexValueNode):
+        literal = _regex_plain_literal(node.rhs.value)
+        if literal is not None:
+            node.rhs = StringValueNode(literal)
+
+
+def lower_literal_regexes(query: Query) -> Query:
+    r"""Rewrite plain-literal regex leaves (``o:/foo/`` -> ``o:foo``) to substring leaves.
+
+    A metacharacter-free, unanchored regex is exactly a substring search, so this is
+    behavior-preserving — but the substring form is index-backed (postgres ``gin_trgm_ops`` on the
+    SQL path; the engine's trigram / oracle-word narrow) where an arbitrary regex has no index path
+    and forces a full scan. Measured ~32× end-to-end on real needles (see
+    docs/issues/00734-engine-string-operator-optimizations.md). Runs after
+    ``expand_derived_predicates`` so any regex a synonym introduces is lowered too.
+    """
+    _lower_regex_leaves(query.root)
+    return query
+
+
 def expand_derived_predicates(query: Query) -> Query:
     """Rewrite derived-predicate leaves (frame synonyms, derivable `is:`) into primitive subtrees.
 
@@ -132,3 +198,21 @@ def expand_derived_predicates(query: Query) -> Query:
     if not changed:
         return query
     return flatten_nested_operations(Query(root))
+
+
+# The post-parse rewrite pipeline, applied in order at the shared parse seam. Add future AST
+# rewrites to this tuple — both parsers call `rewrite_query`, so a new pass lands in exactly one
+# place and is guaranteed identical treatment across parsers (enforced by test_parser_parity).
+_REWRITE_PASSES = (expand_derived_predicates, lower_literal_regexes)
+
+
+def rewrite_query(query: Query) -> Query:
+    """Apply every post-parse AST rewrite, in order. The single seam both parsers call.
+
+    Order is significant: `expand_derived_predicates` runs first (a synonym may expand into a subtree
+    that itself contains a regex or other rewritable leaf), then `lower_literal_regexes`, then any
+    future pass appended to `_REWRITE_PASSES`.
+    """
+    for rewrite_pass in _REWRITE_PASSES:
+        query = rewrite_pass(query)
+    return query
