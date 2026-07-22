@@ -2776,6 +2776,10 @@ static AND_SKIP_THRESHOLD: LazyLock<usize> = LazyLock::new(|| guard_env("CARD_EN
 fn and_child_rank(f: &FilterExpr) -> u8 {
     match f {
         FilterExpr::Not(_) => 2,
+        // Regex trigram-narrow (#734 step 3) is second-tier: its literal factor may be broad (`flying`),
+        // so pay for it only after cheap plane/posting sources — the And early-stop then skips it when a
+        // selective sibling (`type:dragon`) already narrowed below the threshold.
+        FilterExpr::TextRegex { .. } => 1,
         FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. } => 1,
         FilterExpr::NumericCmp { lhs, rhs, .. } => {
             let field = |e: &NumExpr| matches!(e, NumExpr::Field(NumField::PriceUsd | NumField::CollectorNumberInt));
