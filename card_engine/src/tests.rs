@@ -2,7 +2,7 @@ use super::{
     assign_name_ranks,
     build_numeric_index, build_oracle_text_index, build_tag_index, build_trigram_index,
     build_rarity_index, build_flavor_index, build_thresholded_tag_index, build_sort_permutations,
-    assign_artwork_groups, build_bit_planes, build_border_printing_planes, build_divergent_ids, build_name_bigram_index, build_printing_to_card, flavor_fingerprint, flavor_match_sets,
+    assign_artwork_groups, build_bit_planes, build_border_printing_planes, build_rarity_printing_planes, build_divergent_ids, build_name_bigram_index, build_printing_to_card, flavor_fingerprint, flavor_match_sets,
     cards_of_printings, count_common_keywords, count_common_types,
     build_artist_index, build_range_index, range_candidates, narrow_candidates, narrow_candidates_exact, rarity_candidates,
     range_too_broad_to_narrow, run_query, run_query_with_plan, PhysicalPlan, trigram_candidates, finalize_trigram_index, PrintingRangeIndex, NARROW_FLOOR,
@@ -2343,6 +2343,7 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
     data.indexes.price_usd = build_range_index(&data.printings, |p| p.price_usd);
     data.indexes.collector_number = build_range_index(&data.printings, |p| p.collector_number_int.map(u32::from));
     data.indexes.border_printing = build_border_printing_planes(&data.printings, &data.strings);
+    data.indexes.rarity_printing = build_rarity_printing_planes(&data.printings);
     data
 }
 
@@ -2744,6 +2745,17 @@ fn force_plan_differential_agreement() {
         // #724: a bare border leaf routes through PrintingPlaneScan in printing mode (black is ~1/6
         // of printings, above STREAM_MIN in this corpus → the walk; agreement vs GatheredScan checked).
         (FuzzSpec::Leaf(FuzzLeaf::Border { value: "black".to_string() }), "edhrec", "asc"),
+        // #724 compose: a border AND rarity compound is composable in printing space (both are exact
+        // planes) — PrintingPlaneScan AND's the two bitmaps, popcounts the total, and walks the
+        // composed filter. Forces the plane-on-plane AND path and checks agreement vs GatheredScan.
+        (
+            FuzzSpec::And(vec![
+                FuzzSpec::Leaf(FuzzLeaf::Border { value: "black".to_string() }),
+                FuzzSpec::Leaf(FuzzLeaf::Rarity { op: CmpOp::Eq, val: 2.0 }),
+            ]),
+            "edhrec",
+            "asc",
+        ),
     ];
     for _ in 0..RANDOM_QUERIES {
         let orderby = SORTS[rng.random_range(0..SORTS.len())];
@@ -2757,6 +2769,7 @@ fn force_plan_differential_agreement() {
         PhysicalPlan::PrintingPlaneScan,
         PhysicalPlan::PlanePopcountOrder,
         PhysicalPlan::CardRangePopcount,
+        PhysicalPlan::PrintingComposePopcount,
         PhysicalPlan::StreamedSelect,
         PhysicalPlan::GatheredScan,
     ];
@@ -2765,10 +2778,11 @@ fn force_plan_differential_agreement() {
         PhysicalPlan::PrintingPlaneScan => 1,
         PhysicalPlan::PlanePopcountOrder => 2,
         PhysicalPlan::CardRangePopcount => 3,
-        PhysicalPlan::StreamedSelect => 4,
-        PhysicalPlan::GatheredScan => 5,
+        PhysicalPlan::PrintingComposePopcount => 4,
+        PhysicalPlan::StreamedSelect => 5,
+        PhysicalPlan::GatheredScan => 6,
     };
-    let mut ran = [0u32; 6];
+    let mut ran = [0u32; 7];
 
     // >= any possible total, so the offset-0 page is the complete ordered result.
     let full_limit = archived.printings.len().max(1);
@@ -3344,8 +3358,9 @@ fn cost_terms(plan: PhysicalPlan, f: &super::cost::PlanFeatures) -> (Vec<f64>, f
     match plan {
         PhysicalPlan::PrintingRangeScan | PhysicalPlan::PrintingPlaneScan => (vec![page_span / match_rate, 1.0], 0.0),
         PhysicalPlan::PlanePopcountOrder => (vec![matches, n_cards / 64.0, limit, 1.0], 0.0),
-        // Same term vector as P2; the build term is a fixed (hand-set) offset, not a refit param.
-        PhysicalPlan::CardRangePopcount => (
+        // Same term vector as P2; the build/projection term is a fixed (hand-set) offset, not a refit
+        // param. PrintingComposePopcount shares the formula (same executor + projection cost term).
+        PhysicalPlan::CardRangePopcount | PhysicalPlan::PrintingComposePopcount => (
             vec![matches, n_cards / 64.0, limit, 1.0],
             f64::from(f.range_build_printings) * super::cost::CARD_RANGE_BUILD_PER_PRINTING_NS,
         ),
@@ -4475,6 +4490,7 @@ fn bench_checked_vs_unchecked_access() {
         printing_to_card: build_printing_to_card(&offsets),
         planes:         build_bit_planes(&cards, &printings, &offsets, &strings),
         border_printing: build_border_printing_planes(&printings, &strings),
+        rarity_printing: build_rarity_printing_planes(&printings),
         name_bigrams:   build_name_bigram_index(&cards),
         legal_divergent: build_divergent_ids(&cards),
     };
@@ -8000,6 +8016,42 @@ fn border_printing_plane_matches_card_plane_projected() {
         assert_eq!(projected, card_bits, "border '{value}' (plane {k}): projected-up printing plane != #664 card plane");
     }
     eprintln!("OK: {} border printing planes project up to match #664's card planes", super::BORDER_PRINTING_PLANE_VALUES.len());
+}
+
+/// #724 build-side correctness oracle (rarity): projecting a printing-space rarity plane up to
+/// card-existence must equal #670's card-space rarity plane for the same int — both mean "this card
+/// has a printing at this rarity." The printing plane for `RARITY_PRINTING_PLANE_INTS[k]` (= k, the
+/// interior rarities 0..4) projects to card plane `PLANE_RARITY + k`. Same real.store + format guard
+/// as the border oracle. `cargo test --release rarity_printing_plane_matches_card_plane_projected --
+/// --ignored --nocapture`
+#[test]
+#[ignore = "#724 rarity-plane oracle diff; needs a freshly-built real.store"]
+fn rarity_printing_plane_matches_card_plane_projected() {
+    const STORE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../benchmarks/verify-order/real.store");
+    let Ok(file) = std::fs::File::open(STORE_PATH) else {
+        eprintln!("SKIP: {STORE_PATH} not found (rebuild after the #724 rarity build-side change)");
+        return;
+    };
+    let mmap = unsafe { Mmap::map(&file) }.expect("mmap real.store");
+    if mmap.len() < ARCHIVE_HEADER_LEN || mmap[..ARCHIVE_HEADER_LEN] != archive_header() {
+        eprintln!("SKIP: {STORE_PATH} header mismatch — rebuild for the bumped ARCHIVE_FORMAT_VERSION");
+        return;
+    }
+    let archived = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
+    let n_cards = archived.cards.len();
+    let n_printings = archived.printings.len();
+    let rp = &archived.indexes.rarity_printing; // printing-space (#724)
+    let cp = &archived.indexes.planes; // card-space (#670)
+    let wpp_p = super::words_per_plane(n_printings);
+    let wpp_c = super::words_per_plane(n_cards);
+    for (k, int) in super::RARITY_PRINTING_PLANE_INTS.iter().enumerate() {
+        let printing_bits: Vec<u64> = rp.words[k * wpp_p..(k + 1) * wpp_p].iter().map(|w| u64::from(*w)).collect();
+        let projected = super::printing_bits_to_card_bits(&printing_bits, &archived.offsets, n_cards);
+        let start = (super::PLANE_RARITY + k) * wpp_c;
+        let card_bits: Vec<u64> = cp.words[start..start + wpp_c].iter().map(|w| u64::from(*w)).collect();
+        assert_eq!(projected, card_bits, "rarity int {int} (plane {k}): projected-up printing plane != #670 card plane");
+    }
+    eprintln!("OK: {} rarity printing planes project up to match #670's card planes", super::RARITY_PRINTING_PLANE_INTS.len());
 }
 
 /// PR 2a build-cost split: for `usd<50`, which half of `CardRangePopcount`'s build dominates —

@@ -139,6 +139,41 @@ the plan is gated to bare border under `unique=printing`, so no other query path
 gating *is* the no-regression guarantee, and the flat rows confirm it). Compounds and the card/artwork
 projections are the next slices (the printing-space plan + PR 2b), not this PR.
 
+## Result: rarity planes + printing-space compose + card projection (follow-on PR)
+
+The follow-on adds rarity printing planes (common/uncommon/rare/mythic; special/bonus in postings),
+printing-space `AND`/`OR` composition, and the printing→card projection with its cost term. A/B on the
+same corpus (`CARD_ENGINE_BORDER_PRINTING_PLANE` + `CARD_ENGINE_PRINTING_COMPOSE_CARD`, min µs, totals
+identical between arms):
+
+| query | mode | off µs | on µs | speedup | what |
+|---|---|---:|---:|---:|---|
+| `r:rare` | printing | 356 | 44 | **8.0×** | rarity plane (bare) |
+| `r:mythic` | printing | 141 | 51 | **2.8×** | rarity plane (bare) |
+| `border:black r:rare` | printing | 621 | 53 | **11.7×** | compose (AND two planes) |
+| `border:black r:rare` | card | 326 | 102 | **3.2×** | compose + project up |
+| `border:black` | printing | 864 | 44 | 19.5× | border (from the first slice) |
+| `f:modern border:black` | printing | 752 | 739 | 1.0× | legality not yet composable → flat |
+| `f:modern r:rare` | printing | 298 | 296 | 1.0× | ditto |
+| `border:black` | card | 66 | 64 | 1.0× | bare card defers to #664+#634 plane |
+| `border:black` | artwork | 907 | 910 | 1.0× | needs PR 2b |
+
+Two things this validates directly:
+
+- **Composition is exact and fast.** `border:black r:rare`/printing ANDs the two exact printing planes
+  and popcounts — 11.7×, matching `GatheredScan` on total + rows + order (the forced-plan differential).
+- **The projection cost term is real and mode-gated.** The *same* compound costs 53 µs in printing mode
+  and 102 µs in card mode; the ~49 µs delta *is* the printing→card scatter (`printing_bits_to_card_bits`),
+  which is exactly **0 in printing mode** (`range_build_printings = 0`) — the cost term does what the
+  model says. Card is still 3.2× over the general narrowed path it replaces.
+
+Scope honesty: `NOT` is deliberately **not** composable — over a nullable field the plane `complement`
+isn't the trivalent negation (a null-border printing satisfies neither `border:black` nor
+`-border:black`), so `-border:black` stays on the general path. Legality is not yet a printing plane, so
+`f:modern …` compounds stay flat (a later slice). Bare `unique=card` border/rarity correctly defer to the
+existing #664/#670 card planes (`compile_plane` exact-consumes them), so this plan fires only where
+`compile_plane` **declines** — the shared-witness compounds. `unique=artwork` awaits PR 2b.
+
 The load-bearing finding: **legality is ~4× cheaper than border in printing mode at the same
 breadth, because legality settles at the *card* level** (`printing_dependent(Legality) => false`,
 [filter.rs](../../card_engine/src/filter.rs)) — it evaluates once per card (~31.5k) and emits all of
