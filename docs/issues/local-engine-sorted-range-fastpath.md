@@ -1,8 +1,13 @@
 # Engine: fast path for broad sorted-range predicates, split by unique mode
 
-Status: plan drafted 2026-07-16; PR 1 (printing-mode slice) is up for review as [#695] (open, not
-merged), gated at the 25% veto boundary. Remaining slices (card/artwork planes, existential-plane
-total) and the crossover guard are unstarted. Supersedes the *planning* half of
+Status: plan drafted 2026-07-16. **Shipped:** PR 1 (printing-mode Idea 1, [#695]), PR 2a (`usd`,
+`unique=card`, [#725]), PR 3 (`cn`/`date`, `unique=card`, [#726]) — the card-mode range fast path
+(`CardRangePopcount`) now covers all three range families, and Idea 1 covers bare printing ranges.
+**Remaining:** PR 2b (artwork, archive bump), PR 5 (existential-plane printing-mode total), the
+crossover guard, and the printing-space popcount plan
+([local-engine-printing-plane-popcount-order.md](local-engine-printing-plane-popcount-order.md)),
+which is where the compound and existential-printing wins converge. PR 4 was dropped (see *Considered
+and dropped*). Supersedes the *planning* half of
 [local-engine-broad-range-fastpath.md](local-engine-broad-range-fastpath.md), which is kept as the
 historical record (the shipped price-exactness prerequisite, and the full account of what PR #689
 tried, muddled, and reverted). This doc restates the plan with what we learned since.
@@ -287,12 +292,6 @@ Ordered by dependency and risk; magnitudes are from PR #689's interleaved-A/B me
   0.416→0.124 (3.36×), `year<2005` 0.280→0.064 (4.40×); usd unchanged; 0 parity mismatches;
   calibration 88/88 gold. *Compounds still excluded* (bare-leaf gate) — they're the printing-space
   plane's job (compose in printing space, project once).
-- [ ] **PR 4 — compound-query structural pre-checks** (`has_conflicting_range_families`,
-  `contains_range_family_leaf`): skip a `compile_plane` fold that will be discarded, for 2+
-  existential leaves in one `And` and for range leaves under `unique=printing`/`artwork`.
-  *Impacts:* 2+ existential-leaf compounds (`usd<50 f:modern`, `r:rare border:black`); removes
-  narrow-and-discard waste. *Magnitude:* small but broad. *Depends:* 2a's range-family concept.
-  *Risk:* low — pure "skip doomed work."
 - [ ] **PR 2b — global artwork id groundwork + `unique=artwork`.** Land `printing_to_artwork` /
   `artwork_to_card` (build-time enumeration of `(card, local_group)`, persisted, archive format
   bump) — the [#690] analogue for artwork — then extend the plane to artwork space (popcount over
@@ -309,11 +308,37 @@ Ordered by dependency and risk; magnitudes are from PR #689's interleaved-A/B me
   *Risk:* med — independent of the sorted-range PRs.
 
 **Why this order:** PR 1 first keeps the "small, independent, separable" principle — lowest risk,
-printing-only, validates the walk + harness (contingent on Step 0; else swap with 2a). `2a → 3 → 4`
+printing-only, validates the walk + harness (contingent on Step 0; else swap with 2a). `2a → 3`
 is the core value block on the default `unique=card` path in dependency order (2a lays the plane, 3
-reuses it, 4 cleans up the compound waste 2a introduces). `2b` follows 3 so the artwork plane
-inherits all three fields at once. `5` last and gated — real but modest, on a combo not yet
-confirmed hot.
+reuses it). `2b` follows 3 so the artwork plane inherits all three fields at once. `5` last and
+gated — real but modest, on a combo not yet confirmed hot. (PR 4 was dropped — see below.)
+
+### Considered and dropped
+
+- **PR 4 — compound structural pre-checks** (`has_conflicting_range_families` /
+  `contains_range_family_leaf`, to skip a `compile_plane` fold that would be discarded). **Dropped as
+  not worth a PR**, once we looked at what it would actually save (established while sequencing after
+  PR 3 merged):
+  - The `compile_plane`-then-discard it targeted is **cheap**. `compile_plane` only builds a
+    `PlaneExpr` — references into *precomputed* plane indices (`cmp_expr`, `compile_border_cmp`,
+    `compile_rarity_cmp`); no evaluation, no scan (except the narrow oracle-word-bonus arm, which
+    copies a `Bits` slice). The discard happens in `split_planes` for an existential plane
+    (legality/rarity/border) under a shared-witness `And` or a printing/artwork existential leaf, but
+    what's thrown away is a small AST + a few index lookups. Skipping it saves ~nothing.
+  - The range side is cheaper still: `usd`/`cn`/`date` never `compile_plane` (it returns `None` for
+    them); a bare range's whole cost is two `partition_point`s, and the bare-range fast paths (PR 1 /
+    `CardRangePopcount`) are already lazy (printing) or reuse-the-build-on-fallback (card) — no
+    materialize-then-discard to skip.
+  - The *only* O(k) waste that could exist is a **broad range in a compound** scattered into a bitmap
+    (`range_narrowed`'s `broad_ok` branch, ~tens of µs on the smaller/complement side) and then
+    dropped by `narrow_candidates_exact`'s >¾-domain cutoff. But that lives in `narrow_rec`, not
+    `compile_plane`; it's small; and its firing conditions (`broad_ok` threaded true *and* the result
+    exceeding ¾) are unconfirmed.
+
+  So the original bullet conflated a cheap AST discard with a hypothetical O(k) narrow-discard, and
+  neither justifies a PR. Revisit only if a measurement (instrument `range_narrowed` /
+  `narrow_candidates_exact` to count scatter-then-discard events and their µs) turns up real waste —
+  as a standalone "skip doomed `compile_plane`" it's dead.
 
 ### Deferred (explicitly)
 

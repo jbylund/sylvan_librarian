@@ -1,11 +1,14 @@
 # Engine: Printing-Space PlanePopcountOrder (the deferred "idea 2")
 
-Status: todo, not yet a filed issue. Extracted from the #702 planner writeup
-([done/00702](done/00702-engine-plan-selection-layer.md)), where this was "the one real speed win
-found" but deferred. The gating prerequisite is the printing-space pager/permutation,
-[#656](https://github.com/jbylund/sylvan_librarian/issues/656). This doc is the entry point; the
-mechanism detail and measurements live in the two range-fastpath docs linked throughout — it does
-not duplicate them.
+Status: the printing-space plan itself is **todo** (gated on the printing-space pager/permutation,
+[#656](https://github.com/jbylund/sylvan_librarian/issues/656)), but its **card-space groundwork has
+shipped**: `CardRangePopcount` ([#725](https://github.com/jbylund/sylvan_librarian/pull/725),
+[#726](https://github.com/jbylund/sylvan_librarian/pull/726)) proved the range→bitmap→`popcount`→bit-walk
+machinery on the `unique=card` range leaf source (usd/cn/date), and the kernel bench there **measured
+the build cost** this plan's whole value hinges on (see § Cost). Extracted from the #702 planner
+writeup ([done/00702](done/00702-engine-plan-selection-layer.md)), where this was "the one real speed
+win found" but deferred. This doc is the entry point; the mechanism detail and measurements live in
+the two range-fastpath docs linked throughout — it does not duplicate them.
 
 ## What it is
 
@@ -17,7 +20,7 @@ as the **exact total**, then read the page directly off the bitmap in printing s
 The match bitmap has a few sources, and they share this one paging plan:
 
 - a **query-time range narrowing** (`usd`/`cn`/`date`) — the original idea 2, this doc's main focus;
-- a **precomputed existential printing bitplane** for a printing-varying value (legality, frame,
+- a **precomputed printing bitplane** for a printing-varying value (legality, frame,
   border) — e.g. a bit-per-printing "modern-legal" plane;
 - **a postings list scattered into a bitmap on demand** — O(matches) to build, for any value that
   has printing-space postings;
@@ -156,6 +159,53 @@ This is one plan across the whole target set, not several: `f:modern border:blac
 "existential-total" plan versus "mixed-compound" plan — just this plan at projection count 0, 1,
 2, …, its projection cost term falling to zero when no card-plane leaf is present.
 
+### Compose-space is a cost choice, not a fixed direction
+
+"Project the card-plane *into* printing space" above is only **one** of two exact orders when a query
+mixes card-invariant and printing-varying leaves. Projection runs **both ways**, and only one
+direction is lossy:
+
+- **`card→printing` (broadcast)** is *exact* — a card-invariant value (`c:green`) is identical across
+  all of a card's printings, so broadcasting its bit down loses nothing.
+- **`printing→card` (`∃`)** is the *existential* projection — lossy, so it must be the **last** step
+  and done **once**.
+
+So for one printing-varying leaf plus card-invariant leaves (`c:green border:black`/card), **both
+orders are exact** and it's purely a cost decision:
+
+- *compose in printing:* broadcast `c:green` down, AND with `border:black`, project up once — cost in
+  printing-space words (~1,519) plus the broadcast;
+- *compose in card:* project `border:black` up to card-existence (the one `∃`), AND with the
+  `c:green` card plane — cost in card-space words (~492) plus that projection.
+
+Neither dominates; it depends on the plane sizes, the answer mode (`unique=printing` needs no
+up-projection at all), and which projection is cheaper. The router picks per query — a `min` over the
+two orders, the same shape as its choice among plans. The bitplanes serve all of this: answer a
+`unique=printing` query from the surviving bits directly, or project once to card/artwork to finish
+there.
+
+The **one hard constraint is correctness, not cost:** **2+ printing-varying leaves must compose in
+printing space** (`border:black r:rare` — AND the two printing planes, *then* project up once); a
+card-space existence-AND of two `∃`-projected leaves false-positives (a card with a black printing
+and a *separate* rare one). With ≤1 printing-varying leaf, either order is exact and cost decides.
+
+### The build term, now measured — and why #724 is the lever
+
+`CardRangePopcount` (#725/#726) shipped the range leaf source of exactly this shape and **measured
+the build** — the query-time scatter+project that turns a range into a bitmap, i.e. the projection
+term above at projection-count-1. On `usd<50`'s ~80k-printing slice it is ~**105 µs** (a single fused
+scatter+`printing_to_card` pass; ~40% cheaper than scatter-then-project — see `card_range_build_cost_split`),
+and it **dominates** the query: `usd<50`/card lands at ~0.143 ms, of which the build is ~105 µs and
+the popcount+walk is only ~40 µs.
+
+That gap is the whole argument for persistent bitplanes: a **precomputed** printing bitplane has *no*
+build — the #634 card-plane popcount plan runs a bare plane in ~0.06 ms. So [#724](https://github.com/jbylund/sylvan_librarian/issues/724)
+(the printing bitplanes) don't just *enable* the printing-varying targets (`f:modern`,
+`border:black`, which have no cheap query-time build at all) — for the range targets it **deletes the
+~105 µs build term**, taking `usd`/card from ~0.143 ms toward that ~0.06 ms plane floor. The build
+being the dominant, measurable cost is what makes "persist the bitplane" a quantified win rather than
+a hunch.
+
 ## Parts, in ship order
 
 Most pieces already exist or are planned in
@@ -169,9 +219,15 @@ printing-space subset, in dependency order:
    ([#695](https://github.com/jbylund/sylvan_librarian/pull/695)). Bare broad printing ranges. Most
    of #656's pieces fall out of it plus the card-mode idea-2 core — see [#656 assembly](#656-assembly)
    below.
-3. **Card-space idea-2 (`PrintingRangeBits`) — planned, not printing-space** (PR 2a/3 in the
-   roadmap). Lands the range-bitmap→popcount machinery + the `must_be_tight` correctness fix in
-   `unique=card` first, where the bitmap composes. This is the reusable core.
+3. **Card-space range popcount (`CardRangePopcount`) — shipped**
+   ([#725](https://github.com/jbylund/sylvan_librarian/pull/725) usd,
+   [#726](https://github.com/jbylund/sylvan_librarian/pull/726) cn/date). The `unique=card` reusable
+   core: a bare range's exact direct slice is, in one fused pass, scattered into a printing membership
+   bitmap *and* projected to a card-existence bitmap (via `printing_to_card`); `popcount` = exact
+   total; page off the #634 permutation. The "`must_be_tight`" idea landed as **building the direct
+   slice ourselves** (always tight) rather than trusting `range_narrowed`'s loose broad complement —
+   not a `PrintingRangeBits`/`printing_bits` struct as this doc first guessed. Bare leaf only;
+   compounds and existential planes deliberately excluded (that's this printing-space plan's job).
 4. **#656 — extend the popcount-order phase to compound residuals + printing/artwork.** As filed,
    #656 is a follow-on to #634 (design in [00634](done/00634-engine-permuted-bitmap-order-phase.md)):
    for a **card-level** orderby (edhrec, cmc…) the printing/artwork page is a *weighted set-bit walk*
@@ -184,14 +240,14 @@ printing-space subset, in dependency order:
    + `popcount` the range bitmap(s) in printing space, page off the #656 permutation. Register as a
    new `PhysicalPlan` with its `applicable` / `materializing` / `cost::plan_cost` / executor arms —
    the #702 router makes this a *declaration*, not a tree edit. Prove the whole plan on **ranges
-   only** (`cn<100 usd<50`/printing, the confirmed 1.18 ms target, **zero** existential planes): a
-   range leaf yields a printing bitmap with no new precomputed structure (the `partition_point` slice
-   scattered, PR 2a's `printing_bits`) and is **exact**, so the AND / `popcount` / bit-walk / router
-   machinery is validated against the #702 brute-force reference on a clean source before any
-   existential plane exists.
+   only** (`cn<100 usd<50`/printing, the confirmed 1.18 ms target, **zero** printing bitplanes): a
+   range leaf yields a printing bitmap with no new precomputed structure — the `partition_point`
+   slice scattered directly, exactly the `range_pbits` `CardRangePopcount` already builds — and is
+   **exact**, so the AND / `popcount` / bit-walk / router machinery is validated against the #702
+   brute-force reference on a clean source before any printing bitplane exists.
 6. **Cost-route idea 1 vs this.** The `argmin` already exists; add this plan's cost formula and let
    the offset×selectivity crossover (validated today by `idea1_vs_idea2_probe`) pick between them.
-7. **Printing-space existential planes — separate track ([#724](https://github.com/jbylund/sylvan_librarian/issues/724)).**
+7. **Printing-space bitplanes — separate track ([#724](https://github.com/jbylund/sylvan_librarian/issues/724)).**
    The legality/border **leaf source** that unlocks the existential targets (`f:modern`,
    `border:black`). Sequenced **last, deliberately**: these planes give *no* speedup until steps 1–6
    exist to consume them via `popcount` + AND + bit-walk (the current verify path doesn't `popcount`,
@@ -202,24 +258,24 @@ printing-space subset, in dependency order:
 
 ## #656 assembly
 
-#656 is not a from-scratch build once idea-1 (#695) and the card-space idea-2 core (PR 2a) land —
-it is mostly assembly:
+#656 is not a from-scratch build now that idea-1 (#695) and `CardRangePopcount` (#725/#726) have
+landed — it is mostly assembly:
 
 | #656 needs | built by | notes |
 |---|---|---|
-| range → **printing** existence bitmap | PR 2a/3 | `PrintingRangeBits` already carries `printing_bits` (card-mode row selection tests it via `eval_plane_expr_for_printing`), so it is built regardless. |
-| **popcount total** | PR 2a | PR 2a popcounts *card* bits; the identical step over printing bits is a trivial transfer. |
+| range → **printing** membership bitmap | #725/#726 | `CardRangePopcount`'s fused build already produces exactly this (`range_pbits`, the tight direct-slice scatter) alongside the card bitmap; it's the same artifact #656 would AND. |
+| **popcount total** | #725/#726 | `CardRangePopcount` popcounts the *card* bitmap; the identical step over the *printing* bitmap (`range_pbits`) is a trivial transfer. |
 | **printing-space paging** | #695 | idea-1's permutation walk (expand to printings, test membership, early-stop) *is* the printing pager — swap the membership test from "in `[lo, hi)`" to "in the intersected printing bitmap." |
 
-So **#656 ≈ PR 2a's printing bitmaps + #695's walk + an AND.** The only net-new work is
+So **#656 ≈ `CardRangePopcount`'s `range_pbits` + #695's walk + an AND.** The only net-new work is
 intersecting ≥2 printing bitmaps and routing the popcount total into the printing path; the
 `Mode::Card`-only `run_query_streamed_popcount` is *not* reused (idea-1's walk is the printing-mode
-pager). This is why landing both #695 and PR 2a first reduces #656 to a small follow-up, if the
+pager). Landing #695 and `CardRangePopcount` first is what reduces #656 to a small follow-up, if the
 range+range gap proves worth closing.
 
 ## Prerequisites & caveats
 
-- **Existential targets need precomputed *printing-space* existential planes** — now tracked as
+- **Printing-varying targets need precomputed *printing-space* bitplanes** — now tracked as
   [#724](https://github.com/jbylund/sylvan_librarian/issues/724) (see ship-order step 7). The
   `f:modern` / `border:black` wins all assume a bit-per-printing legality / border plane to `AND` and
   `popcount`. Neither exists: legality's #667 plane and border's #664 plane are **card-space** (they
@@ -263,7 +319,7 @@ range+range gap proves worth closing.
   *precomputed* bitmap source extends; #667's planes are **card-space**, which is why
   `f:modern`/printing still needs a printing-space one.
 - [00724-engine-printing-existential-planes.md](00724-engine-printing-existential-planes.md)
-  ([#724](https://github.com/jbylund/sylvan_librarian/issues/724)) — the printing-space existential
-  planes track: this plan's legality/border leaf source, sequenced last.
+  ([#724](https://github.com/jbylund/sylvan_librarian/issues/724)) — the printing-space bitplanes
+  track: this plan's legality/border leaf source, sequenced last.
 - #656 (pager/permutation), #690 (`printing_to_card`, shipped), #689 (reverted attempt / NULL
   lesson), #634 (card-mode `PlanePopcountOrder`).
