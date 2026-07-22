@@ -169,10 +169,47 @@ Two things this validates directly:
 
 Scope honesty: `NOT` is deliberately **not** composable — over a nullable field the plane `complement`
 isn't the trivalent negation (a null-border printing satisfies neither `border:black` nor
-`-border:black`), so `-border:black` stays on the general path. Legality is not yet a printing plane, so
-`f:modern …` compounds stay flat (a later slice). Bare `unique=card` border/rarity correctly defer to the
-existing #664/#670 card planes (`compile_plane` exact-consumes them), so this plan fires only where
-`compile_plane` **declines** — the shared-witness compounds. `unique=artwork` awaits PR 2b.
+`-border:black`), so `-border:black` stays on the general path. Bare `unique=card` border/rarity
+correctly defer to the existing #664/#670 card planes (`compile_plane` exact-consumes them), so this
+plan fires only where `compile_plane` **declines** — the shared-witness compounds. `unique=artwork`
+awaits PR 2b.
+
+## Result: legality via broadcast + divergent repair (no new plane)
+
+Legality composes without a per-printing plane at all — reusing #667's card-space `_EXISTS` plane. A
+legality leaf's printing bitmap is `broadcast(∃-legal) | authoritative-repair(divergent)`: legality is
+only ~1.8% divergent (`legal_divergent`), so the card plane broadcast down is exact for 98.2% of cards
+and only the ~556 divergent cards' printings are overwritten from their own `card_legalities` word (no
+stored postings). Kernel costs (`legality_compose_kernel_costs`, real corpus):
+
+| op | cost | scaling |
+|---|---|---|
+| broadcast (card ∃ → printing) | 22–145 µs | ~1.5 ns/printing |
+| projection (printing → card) | 26–145 µs | ~1.5 ns/printing |
+| **repair** (divergent overwrite) | **5.5 µs** | negligible (~11k printings) |
+
+The repair is free; the broadcast is the whole cost, at ~1.5 ns/printing (≈ the range-scatter rate).
+So the cost model charges the broadcast as a build term (`range_build_printings ×
+COMPOSE_BROADCAST_PER_PRINTING_NS`), and — crucially — **acquire estimates rather than composing** (the
+`_EXISTS` popcount scaled to printings), so the broadcast is paid once, in the fast path, only if the
+plan wins. That removed a latent *double* broadcast (acquire + fast path both composing) that had been
+inflating every legality query. A/B (min µs, both flags):
+
+| query | mode | off | on | speedup |
+|---|---|---:|---:|---:|
+| `f:modern border:black` | printing | 754 | 174 | **4.3×** |
+| `f:modern r:rare` | printing | 297 | 174 | **1.7×** |
+| `f:modern border:black` | card | 341 | 290 | 1.2× |
+| `f:modern` (bare) | printing | 190 | 167 | 1.1× (no regression) |
+| `border:black r:rare` | printing | 638 | 54 | 11.8× |
+
+No hand-exclusion: the cost model routes bare legality to the general path or a single-broadcast compose
+(whichever the term says is cheaper) and reserves the broadcast for compounds that replace a full scan.
+
+**Partial vote for planes.** The broadcast is ~1.5 ns/printing but ~100–145 µs for *broad* formats
+(modern/commander/…), which a precomputed legality *printing* plane (≈12 KB, a free slice read) would
+erase. So the end state is a per-format frequency×breadth crossover — planes for the hot broad formats,
+broadcast+repair for the long tail — the same plane-vs-postings decision one level up. Not this PR.
 
 The load-bearing finding: **legality is ~4× cheaper than border in printing mode at the same
 breadth, because legality settles at the *card* level** (`printing_dependent(Legality) => false`,

@@ -2756,6 +2756,18 @@ fn force_plan_differential_agreement() {
             "edhrec",
             "asc",
         ),
+        // #724 legality compose: a legality AND border compound. Legality's printing bitmap is built
+        // from #667's card `_EXISTS` plane + the authoritative divergent repair (legality_leaf_bits),
+        // then AND'd with border in printing space. The fuzz corpus is 40% divergent-legality, so this
+        // forces the repair path; agreement vs GatheredScan is checked in both printing and card modes.
+        (
+            FuzzSpec::And(vec![
+                FuzzSpec::Leaf(FuzzLeaf::Legality { shift: Some(FUZZ_SHIFTS[0]), expected: FUZZ_STATUSES[0] }),
+                FuzzSpec::Leaf(FuzzLeaf::Border { value: "black".to_string() }),
+            ]),
+            "edhrec",
+            "asc",
+        ),
     ];
     for _ in 0..RANDOM_QUERIES {
         let orderby = SORTS[rng.random_range(0..SORTS.len())];
@@ -3356,7 +3368,13 @@ fn cost_terms(plan: PhysicalPlan, f: &super::cost::PlanFeatures) -> (Vec<f64>, f
     let page_span = f64::from((f.offset.saturating_add(f.limit)).min(f.matches));
     let match_rate = (matches / f64::from(f.n_printings)).max(1.0e-6);
     match plan {
-        PhysicalPlan::PrintingRangeScan | PhysicalPlan::PrintingPlaneScan => (vec![page_span / match_rate, 1.0], 0.0),
+        PhysicalPlan::PrintingRangeScan => (vec![page_span / match_rate, 1.0], 0.0),
+        // Same walk terms as the range fast path, plus the legality broadcast as a fixed offset
+        // (range_build_printings is 0 for border/rarity, so this matches PrintingRangeScan there).
+        PhysicalPlan::PrintingPlaneScan => (
+            vec![page_span / match_rate, 1.0],
+            f64::from(f.range_build_printings) * super::cost::COMPOSE_BROADCAST_PER_PRINTING_NS,
+        ),
         PhysicalPlan::PlanePopcountOrder => (vec![matches, n_cards / 64.0, limit, 1.0], 0.0),
         // Same term vector as P2; the build/projection term is a fixed (hand-set) offset, not a refit
         // param. PrintingComposePopcount shares the formula (same executor + projection cost term).
@@ -7980,6 +7998,108 @@ fn border_plane_query_kernel() {
     println!("  matching printings: {matches}");
     println!("  popcount + edhrec walk to fill {LIMIT}: {best} ns   (checksum total={sink})");
     println!("  today's per-printing scan (bench_printing_planes): ~869,000 ns");
+}
+
+/// #724 legality-compose kernel costs (real.store): the three query-time operations the broadcast +
+/// divergent-repair legality leaf pays, which a precomputed legality *printing* plane would avoid. This
+/// quantifies the plane-vs-broadcast tradeoff and calibrates the cost model's build term instead of
+/// hand-picking it. Reports, per real legality format (`_EXISTS` plane density varies), the broadcast
+/// (card→printing) and projection (printing→card) kernels, plus the divergent repair once (~format
+/// -independent, driven by the divergent-card printing count).
+/// `cargo test --release legality_compose_kernel_costs -- --ignored --nocapture`
+#[test]
+#[ignore = "#724 legality-compose kernel costs; needs real.store"]
+fn legality_compose_kernel_costs() {
+    use std::hint::black_box;
+    use std::time::Instant;
+    const STORE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../benchmarks/verify-order/real.store");
+    const WARMUP: usize = 20;
+    const ITERS: usize = 200;
+    let Ok(file) = std::fs::File::open(STORE_PATH) else {
+        eprintln!("SKIP: {STORE_PATH} not found");
+        return;
+    };
+    let mmap = unsafe { Mmap::map(&file) }.expect("mmap real.store");
+    if mmap.len() < ARCHIVE_HEADER_LEN || mmap[..ARCHIVE_HEADER_LEN] != archive_header() {
+        eprintln!("SKIP: {STORE_PATH} header mismatch — rebuild");
+        return;
+    }
+    let archived = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
+    let n_cards = archived.cards.len();
+    let n_printings = archived.printings.len();
+    let offsets = &archived.offsets;
+    let wpp_c = super::words_per_plane(n_cards);
+    let planes = &archived.indexes.planes;
+    let divergent = &archived.indexes.legal_divergent;
+
+    // Time a closure to its minimum over ITERS (min = least-contended, matches the other kernels).
+    let bench = |f: &mut dyn FnMut() -> u64| -> (u128, u64) {
+        let mut best = u128::MAX;
+        let mut sink = 0u64;
+        for it in 0..ITERS {
+            let t0 = Instant::now();
+            sink = sink.wrapping_add(black_box(f()));
+            let dt = t0.elapsed().as_nanos();
+            if it >= WARMUP {
+                best = best.min(dt);
+            }
+        }
+        (best, sink)
+    };
+
+    println!("\n#724 legality-compose kernel costs (real.store: {n_cards} cards, {n_printings} printings)");
+    println!("divergent-legality cards: {} ({:.1}%)", divergent.len(), 100.0 * divergent.len() as f64 / n_cards as f64);
+    println!("{:>6}  {:>10}  {:>11}  {:>12}  {:>13}  {:>12}", "fmt", "∃cards", "bcast-prtg", "bcast ns", "project ns", "ns/prtg");
+
+    for f in 0..super::MAX_FORMATS {
+        let base = (super::PLANE_LEGAL_EXISTS + f) * wpp_c;
+        let card_bits: Vec<u64> = planes.words[base..base + wpp_c].iter().map(|w| u64::from(*w)).collect();
+        let set_cards: u64 = card_bits.iter().map(|w| w.count_ones() as u64).sum();
+        if set_cards == 0 {
+            continue; // format not loaded / no legal cards
+        }
+        // (1) broadcast: card ∃-legal bits → printing bits.
+        let (bcast_ns, _) = bench(&mut || {
+            let pb = super::broadcast_card_bits_to_printings(&card_bits, offsets, n_printings);
+            pb.iter().map(|w| w.count_ones() as u64).sum()
+        });
+        let pbits = super::broadcast_card_bits_to_printings(&card_bits, offsets, n_printings);
+        let bcast_printings: u64 = pbits.iter().map(|w| w.count_ones() as u64).sum();
+        // (2) projection: printing bits → card bits.
+        let (proj_ns, _) = bench(&mut || {
+            let cb = super::printing_bits_to_card_bits(&pbits, offsets, n_cards);
+            cb.iter().map(|w| w.count_ones() as u64).sum()
+        });
+        let per_prtg = bcast_ns as f64 / bcast_printings.max(1) as f64;
+        println!("{f:>6}  {set_cards:>10}  {bcast_printings:>11}  {bcast_ns:>12}  {proj_ns:>13}  {per_prtg:>12.3}");
+    }
+
+    // (3) repair: overwrite each divergent card's printings from the per-printing legality word, for
+    // one representative shift (0). Format-independent — driven by the divergent printing count.
+    let shift = 0u8;
+    let expected = super::status_plane_bases(0b01).map(|_| 0b01u64).unwrap_or(0b01);
+    let mut div_printings = 0u64;
+    for cid in divergent.iter() {
+        let c = u16::from(*cid) as usize;
+        div_printings += (u32::from(offsets[c + 1]) - u32::from(offsets[c])) as u64;
+    }
+    let (repair_ns, sink) = bench(&mut || {
+        let mut hits = 0u64;
+        for cid in divergent.iter() {
+            let c = u16::from(*cid) as usize;
+            for p in u32::from(offsets[c]) as usize..u32::from(offsets[c + 1]) as usize {
+                if (u64::from(archived.printings[p].card_legalities) >> shift) & 0b11 == expected {
+                    hits += 1;
+                }
+            }
+        }
+        hits
+    });
+    println!(
+        "repair: {} divergent cards, {div_printings} printings, {repair_ns} ns ({:.3} ns/printing)  (sink={sink})",
+        divergent.len(),
+        repair_ns as f64 / div_printings.max(1) as f64,
+    );
 }
 
 /// #724 build-side correctness oracle: projecting a printing-space border plane up to card-existence

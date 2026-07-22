@@ -86,9 +86,11 @@ pub(crate) struct PlanFeatures {
     pub limit: u32,
     /// Page offset.
     pub offset: u32,
-    /// `CardRangePopcount` only: printings in the range slice it scatters+projects into the
-    /// card-existence bitmap at query time (`e - s`). Drives that plan's build term; `0` for every
-    /// other plan (their bitmaps are precomputed or they don't build one).
+    /// Printings **synthesized at query time** — the query-time-build cost shared by the plans that
+    /// don't read a precomputed bitmap: the range slice `CardRangePopcount` scatters+projects, the
+    /// composed printings `PrintingComposePopcount` projects, and the legality **broadcast** a
+    /// `PrintingPlaneScan` composes (border/rarity are precomputed planes → `0`; legality is not). `0`
+    /// for plans that read a precomputed bitmap or build nothing. Measured ≈ 1.3–1.5 ns/printing.
     pub range_build_printings: u32,
 }
 
@@ -144,6 +146,12 @@ const PLANE_POPCOUNT_FIXED_COST_NS: f64 = 200.0;
 // cheaper. ~1.3 ns/printing, from card_range_build_cost_split on the real corpus (~104us for the
 // 80,527-printing usd<50 slice).
 pub(crate) const CARD_RANGE_BUILD_PER_PRINTING_NS: f64 = 1.3;
+
+/// Per-printing cost of a `PrintingPlaneScan`'s legality **broadcast** (card ∃-legal plane → printing
+/// bits) — the query-time synthesis a legality leaf pays that a border/rarity plane read does not.
+/// ~1.5 ns/printing, measured on the real corpus by `legality_compose_kernel_costs` (~90–145 µs for the
+/// broad formats). Same scatter kernel as the range build, calibrated independently to its own probe.
+pub(crate) const COMPOSE_BROADCAST_PER_PRINTING_NS: f64 = 1.5;
 
 // ─── P3: StreamedSelect ─────────────────────────────────────────────────────
 // Match phase walks eval_domain cards computing per-card counts, then either
@@ -228,7 +236,13 @@ pub(crate) fn plan_cost(plan: PhysicalPlan, f: &PlanFeatures) -> f64 {
         // than a range `k`, but the paging cost — the only cost either carries — is identical.
         PhysicalPlan::PrintingRangeScan | PhysicalPlan::PrintingPlaneScan => {
             let match_rate = (matches / n_printings).max(MATCH_RATE_FLOOR);
-            (page_span / match_rate) * RANGE_WALK_STEP_NS + RANGE_FIXED_COST_NS
+            // Walk cost + the query-time synthesis both share: 0 for a range or a border/rarity plane
+            // read, the legality broadcast (≈1.5 ns/printing, `legality_compose_kernel_costs`) otherwise.
+            // This is what makes the router reject compose for a bare legality query (broadcast > the
+            // existing streamed path) while still choosing it for a compound that replaces a full scan.
+            (page_span / match_rate) * RANGE_WALK_STEP_NS
+                + RANGE_FIXED_COST_NS
+                + f64::from(f.range_build_printings) * COMPOSE_BROADCAST_PER_PRINTING_NS
         }
         PhysicalPlan::PlanePopcountOrder => {
             matches * PLANE_POPCOUNT_SCATTER_PER_MATCH_NS
