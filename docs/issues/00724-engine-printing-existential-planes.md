@@ -211,6 +211,29 @@ No hand-exclusion: the cost model routes bare legality to the general path or a 
 erase. So the end state is a per-format frequency×breadth crossover — planes for the hot broad formats,
 broadcast+repair for the long tail — the same plane-vs-postings decision one level up. Not this PR.
 
+## Result: artwork projection (the third unique mode)
+
+`unique=artwork` now composes too, via the same substrate. The dense global artwork id is **derived at
+query time** (no stored array, no archive change): `global_id = artwork_base[card] + artwork_group_id`,
+where `artwork_base` is the prefix-sum of the per-card distinct-artwork counts already in
+`artwork_groups`. So the printing bits project up to an artwork-existence bitmap, and — the key win —
+the artwork **total is `popcount(artwork_bits)`**, replacing the O(candidates × printings) count pass
+that made artwork mode ~14× slower than card. The page walk (`walk_artwork_page`) collapses each card's
+matching printings to distinct artworks (best-`prefer_score` representative per group, exactly the
+general path's semantics) and pages in sort order. A/B (min µs, totals identical between arms):
+
+| query | mode | off | on | speedup |
+|---|---|---:|---:|---:|
+| `border:black` | artwork | 925 | 190 | **4.9×** |
+| `border:black r:rare` | artwork | 648 | 110 | **5.9×** |
+| `f:modern border:black` | artwork | 792 | 286 | 2.8× |
+| `r:mythic` | artwork | 153 | 70 | 2.2× |
+
+Folded into `PrintingComposePopcount` (now `Mode::Card | Mode::Artwork`): bare border/rarity/legality
+also route here under `unique=artwork` (nothing folds to a card plane there), so the count-pass →
+popcount win applies broadly, not just to compounds. All three unique modes — printing (walk), card
+(↑ card-existence), artwork (↑ artwork-existence) — are now the one compose-then-project model.
+
 The load-bearing finding: **legality is ~4× cheaper than border in printing mode at the same
 breadth, because legality settles at the *card* level** (`printing_dependent(Legality) => false`,
 [filter.rs](../../card_engine/src/filter.rs)) — it evaluates once per card (~31.5k) and emits all of
