@@ -134,6 +134,44 @@ Per-value density crossover — the same one [#713](00713-is-tag-recovery.md) bu
 printings legal) → plane; a rarely-legal format → postings. Not "a plane per value" — the crossover
 applied per value, overlapping #713's printing-varying categorical work.
 
+## Border: the first slice (concrete design)
+
+Border is the first slice: the biggest bare win (`border:black`/printing 0.87 ms → µs), genuinely
+per-printing (no card-level shortcut, unlike legality), a small closed value set, and #664's
+card-space border plane is there as a correctness oracle to diff against.
+
+**A plane, not a divergent-bit carveout.** We *could* copy legality's trick — a card-level border +
+a "divergent" bit, per-printing only for divergent cards. But border is **16.3% divergent** (vs
+legality's 0%, measured), so the carveout would settle only ~84% of cards at card level and still
+scan the divergent 16% per-printing — a partial win, capped exactly where border is hard, and
+bare-only (no per-printing bits for compounds). The printing plane gives the full win regardless of
+divergence.
+
+**Representation — density-chosen, no "other" plane.** Per-value by the storage crossover (a plane is
+a fixed ~12 KB = 1 bit × n_printings; postings are 4 B/printing, so postings win below ~3,000):
+
+| value | printings | rep |
+|---|---:|---|
+| `black` | 85,046 | plane |
+| `borderless` | 5,701 | plane (just above the line — confirm vs query cost) |
+| `white` | 5,131 | plane (ditto) |
+| `gold` | 1,238 | **postings** (below crossover; and for a positive sparse query the postings list *is* the answer) |
+| `yellow` | 90 | **postings** |
+
+- **No "other" plane.** It was a *card-space existence* artifact: card-mode `-border:black` means
+  "∃ a non-black printing," which `complement(∃black)` gets wrong, so #664 needed an `∃`-untracked
+  term. In **printing space, negation is plain `complement`** (each printing is or isn't black) —
+  exact, no "other." This is even *more* exact than #664: `-border:yellow` (which #664 declines) is
+  just `complement(yellow postings)`.
+- **Fixed plane set, dynamic postings, drift-assert.** The *decision* of which values get planes is
+  hardcoded (`black`/`borderless`/`white`), chosen from measurement — a **dynamic** per-reload
+  decision would make the archive layout data-dependent (variable plane count/indices, a runtime
+  "which values are planed" map for every consumer, non-deterministic across stores) for a decision
+  that essentially never changes, since the distribution is stable. The *postings* side is already
+  dynamic (post whatever non-planed values exist, so a new border color lands in postings with no
+  code change). A build-time assertion flags drift — a planed value shrinking below ~3k or a posted
+  value growing above — so "re-measure and update the constant" surfaces as a failing check.
+
 ## Correctness surface (validated in isolation)
 
 The existential projection: a card can satisfy *both* `∃ legal` and `∃ not-legal` at once (its
