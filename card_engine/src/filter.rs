@@ -434,11 +434,15 @@ pub(crate) enum FilterExpr {
 /// per kernel, 3 repeated runs — see that file for the per-op numbers):
 ///
 /// - field loads and integer/float/mask compares (TypeCmp, ColorCmp,
-///   NumericCmp, ExactName, TextExact, Legality, DateCmp, YearCmp): 1.8-5.6 ns
-///   measured; NumericCmp is the priciest member (NumExpr::eval() indirection
-///   on both sides costs more than a direct field load), so the constant sits
-///   above it.
-pub(crate) const MASK_COMPARE_NS100: u32 = 600;
+///   NumericCmp, ExactName, TextExact, Legality, DateCmp, YearCmp): 2.0-3.8 ns
+///   measured (2026-07 re-run: Legality 2.05, YearCmp/DateCmp 2.3-2.6,
+///   ColorCmp 2.20, ExactName/TextExact 2.57, NumericCmp 3.16-3.83). NumericCmp
+///   is the priciest member (NumExpr::eval() indirection on both sides costs
+///   more than a direct field load), so the constant sits just above it.
+///   Was 600 — pinned to a stale 5.6 ns NumericCmp measurement; the recalibrated
+///   ceiling (~3.8) fixes StreamedSelect over-pricing a mask-compare residual
+///   ~1.6x (e.g. `f:legacy or year:2020` mis-routing to compose, #731).
+pub(crate) const MASK_COMPARE_NS100: u32 = 400;
 /// - bounded lookups: a binary search over a bind/memoize-resolved id set
 ///   (ArtistMatch/FlavorMatch/NameMatch/OracleMatch), a card collection
 ///   (CollectionCmp), and anchored-literal regexes (a memcmp at a known

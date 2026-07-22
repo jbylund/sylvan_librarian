@@ -3274,7 +3274,7 @@ fn plan_cost_model_matches_gold() {
                     residual_tier_ns100,
                     limit: limit as u32,
                     offset: offset as u32,
-                    synth_printings: 0, project_printings: 0, popcount_words: 0,
+                    broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0,
                 };
 
                 // ── Model argmin over the applicable plans ──
@@ -3380,18 +3380,19 @@ fn cost_terms(plan: PhysicalPlan, f: &super::cost::PlanFeatures) -> (Vec<f64>, f
     match plan {
         // [WALK, FIXED].
         PhysicalPlan::PrintingRangeScan => (vec![page_span / match_rate, 1.0], 0.0),
-        // [POPCOUNT(result words), WALK(printings walked), EMIT, FIXED]; synth (SCATTER) is a hand-set
-        // offset, not a refit param.
+        // [POPCOUNT(result words), WALK(printings walked), EMIT, FIXED]; the build passes (broadcast +
+        // scatter + project) are hand-set offsets, not refit params.
         PhysicalPlan::PrintingCompose => (
             vec![f64::from(f.popcount_words), page_span / match_rate, limit, 1.0],
-            (f64::from(f.synth_printings) + f64::from(f.project_printings)) * super::cost::SCATTER_PER_PRINTING_NS,
+            (f64::from(f.broadcast_printings) + f64::from(f.project_printings)) * super::cost::LINEAR_PASS_PER_PRINTING_NS
+                + f64::from(f.scatter_printings) * super::cost::RANGE_SCATTER_PER_PRINTING_NS,
         ),
         // [PERM_SCATTER, POPCOUNT(card words), EMIT, FIXED].
         PhysicalPlan::PlanePopcountOrder => (vec![matches, n_cards / 64.0, limit, 1.0], 0.0),
-        // Same term vector as PlanePopcountOrder; synth (SCATTER) is a hand-set offset, not a refit param.
+        // Same term vector as PlanePopcountOrder; the fused build (CARD_RANGE_BUILD) is a hand-set offset.
         PhysicalPlan::CardRangePopcount => (
             vec![matches, n_cards / 64.0, limit, 1.0],
-            f64::from(f.synth_printings) * super::cost::SCATTER_PER_PRINTING_NS,
+            f64::from(f.scatter_printings) * super::cost::CARD_RANGE_BUILD_PER_PRINTING_NS,
         ),
         PhysicalPlan::StreamedSelect => {
             let floor = if u64::from(f.matches) <= *STREAM_MIN_MATCHES as u64 { n_cards } else { 0.0 };
@@ -3500,7 +3501,7 @@ fn plan_cost_refit() {
                     scan_units: scan_units(mode_enum, prep.candidate_cards.as_deref(), &archived.offsets, n_printings, eval_domain),
                     residual_tier_ns100: if prep.all_match_known { 0 } else { verify_cost_tier(&res) },
                     limit: limit as u32, offset: offset as u32,
-                    synth_printings: 0, project_printings: 0, popcount_words: 0,
+                    broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0,
                 };
                 for (pi, plan) in all_plans.iter().enumerate() {
                     if let Some(meas) = ns[pi] {
@@ -3698,7 +3699,7 @@ fn printing_range_route_probe() {
                 scan_units: scan_units(Mode::Printing, prep.candidate_cards.as_deref(), &archived.offsets, n_printings as u32, eval_domain),
                 residual_tier_ns100,
                 limit: LIMIT as u32, offset: offset as u32,
-                synth_printings: 0, project_printings: 0, popcount_words: 0,
+                broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0,
             };
 
             // ── Three pickers ──
@@ -4059,7 +4060,7 @@ fn plan_regret_report() {
                 residual_tier_ns100: tier,
                 limit: limit as u32,
                 offset: offset as u32,
-                synth_printings: 0, project_printings: 0, popcount_words: 0,
+                broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0,
             };
 
             let gold = (0..4).filter_map(|i| ns[i].map(|v| (v, i))).min_by_key(|(v, _)| *v);
@@ -4186,7 +4187,7 @@ fn plan_regret_fuzz() {
                 n_cards, n_printings, matches, eval_domain: evd, scan_units: evd, // card mode ⇒ scan_units == eval_domain
                 residual_tier_ns100: tier,
                 limit: limit as u32, offset: offset as u32,
-                synth_printings: 0, project_printings: 0, popcount_words: 0,
+                broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0,
             };
             let feats_true = mk(true_total, eval_domain);
             let feats_est = mk(est, est.min(n_cards));
@@ -8111,6 +8112,89 @@ fn legality_compose_kernel_costs() {
         divergent.len(),
         repair_ns as f64 / div_printings.max(1) as f64,
     );
+}
+
+/// #731 range-compose kernel costs (real.store): the two operations a range compose leaf adds — the
+/// **range scatter** (`range_leaf_bits`: gather the value-sorted index's in-range slice into a printing
+/// bitmap, a random-write scatter) and the **card projection + grouped walk** it feeds. Reports each at
+/// several densities so the `SCATTER_PER_PRINTING_NS` and `RANGE_WALK_STEP_NS` cost constants are fit
+/// from measurement, not guessed. Companion to `legality_compose_kernel_costs` (which covers the
+/// broadcast + projection kernels). `cargo test --release range_compose_kernel_costs -- --ignored --nocapture`
+#[test]
+#[ignore = "#731 range-compose kernel costs; needs real.store"]
+fn range_compose_kernel_costs() {
+    use std::hint::black_box;
+    use std::time::Instant;
+    const STORE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../benchmarks/verify-order/real.store");
+    const WARMUP: usize = 20;
+    const ITERS: usize = 200;
+    const LIMIT: usize = 100; // one page — matches the default result page the grouped walk fills
+    let Ok(file) = std::fs::File::open(STORE_PATH) else {
+        eprintln!("SKIP: {STORE_PATH} not found");
+        return;
+    };
+    let mmap = unsafe { Mmap::map(&file) }.expect("mmap real.store");
+    if mmap.len() < ARCHIVE_HEADER_LEN || mmap[..ARCHIVE_HEADER_LEN] != archive_header() {
+        eprintln!("SKIP: {STORE_PATH} header mismatch — rebuild");
+        return;
+    }
+    let archived = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
+    let n_cards = archived.cards.len();
+    let n_printings = archived.printings.len();
+    let offsets = &archived.offsets;
+    let idx = &archived.indexes.price_usd; // printing-space range index (integer cents), value-sorted
+    let perm = archived.indexes.sort_perms.get(super::SortCol::EdhrecRank, false).expect("edhrec perm");
+
+    let bench = |f: &mut dyn FnMut() -> u64| -> (u128, u64) {
+        let mut best = u128::MAX;
+        let mut sink = 0u64;
+        for it in 0..ITERS {
+            let t0 = Instant::now();
+            sink = sink.wrapping_add(black_box(f()));
+            let dt = t0.elapsed().as_nanos();
+            if it >= WARMUP {
+                best = best.min(dt);
+            }
+        }
+        (best, sink)
+    };
+
+    println!("\n#731 range-compose kernel costs (real.store: {n_cards} cards, {n_printings} printings, {} priced)", idx.len());
+    println!(
+        "{:>8}  {:>10}  {:>10}  {:>11}  {:>10}  {:>10}  {:>9}",
+        "hi(cents)", "set-prtg", "scatter", "ns/prtg", "project", "∃cards", "card-walk"
+    );
+    // Density sweep: hi at percentiles of the value-sorted index (0 = min value).
+    for pct in [5usize, 25, 50, 75, 90, 100] {
+        let k = (idx.len() * pct / 100).min(idx.len().saturating_sub(1));
+        let hi = u32::from(idx[k].0).saturating_add(1);
+        // (1) range scatter: in-range slice [0, hi) → printing bitmap.
+        let (scatter_ns, _) = bench(&mut || {
+            let pb = super::range_leaf_bits(idx, 0, hi, n_printings);
+            pb.iter().map(|w| w.count_ones() as u64).sum()
+        });
+        let pbits = super::range_leaf_bits(idx, 0, hi, n_printings);
+        let set_prtg: u64 = pbits.iter().map(|w| w.count_ones() as u64).sum();
+        // (2) projection: printing bits → card bits (the total-computing pass for unique=card).
+        let (proj_ns, _) = bench(&mut || {
+            let cb = super::printing_bits_to_card_bits(&pbits, offsets, n_cards);
+            cb.iter().map(|w| w.count_ones() as u64).sum()
+        });
+        let card_bits = super::printing_bits_to_card_bits(&pbits, offsets, n_cards);
+        let exists_cards: u64 = card_bits.iter().map(|w| w.count_ones() as u64).sum();
+        // (3) grouped card walk: fill one page of best-representative rows in edhrec order.
+        let (walk_ns, _) = bench(&mut || {
+            let page = super::walk_grouped_page(
+                super::Mode::Card, &archived.cards, &archived.printings, offsets, &pbits,
+                super::Prefer::Default, super::SortCol::EdhrecRank, false, LIMIT, 0, perm,
+            );
+            page.len() as u64
+        });
+        let per_prtg = scatter_ns as f64 / set_prtg.max(1) as f64;
+        println!(
+            "{hi:>8}  {set_prtg:>10}  {scatter_ns:>10}  {per_prtg:>11.3}  {proj_ns:>10}  {exists_cards:>10}  {walk_ns:>9}"
+        );
+    }
 }
 
 /// #724 build-side correctness oracle: projecting a printing-space border plane up to card-existence

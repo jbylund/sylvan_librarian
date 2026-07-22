@@ -4372,58 +4372,59 @@ fn compose_printing_bits(
     }
 }
 
-/// Cheap cost-model estimate for a composable filter: `(matches, build_printings)` **without** paying
-/// legality's broadcast. Border/rarity leaves are precomputed planes — their exact `popcount` is a
-/// cheap slice read and they synthesize nothing (`build 0`). A legality leaf is *synthesized* at query
-/// time (broadcast + repair), so its cost is estimated from the cheap card `_EXISTS` `popcount` scaled
-/// to printings, and that same count is charged as `build_printings` — the broadcast the fast path pays
-/// **only if this plan wins** (this is why acquire estimates rather than composing: it avoids a second,
-/// throwaway broadcast). `AND` takes the min (intersection upper bound); `OR` the capped sum. Used only
-/// for plan choice — the fast path recomputes the exact total. Measured build cost ≈ 1.5 ns/printing
-/// (`legality_compose_kernel_costs`), ~the range-scatter rate, so `synth_printings` carries it.
+/// Cheap cost-model estimate for a composable filter: `(matches, broadcast_printings, scatter_printings)`
+/// **without** paying legality's broadcast. The two synthesis kinds are returned separately because they
+/// cost different rates (`LINEAR_PASS_PER_PRINTING_NS` vs `RANGE_SCATTER_PER_PRINTING_NS`): a legality
+/// leaf is *broadcast* at query time (card `_EXISTS` popcount scaled to printings → `broadcast`), while a
+/// range leaf *scatters* its index slice `k` (→ `scatter`). Border/rarity are precomputed planes — a
+/// cheap `popcount` slice read, synthesizing nothing (both `0`). The fast path pays the broadcast/scatter
+/// **only if this plan wins** (why acquire estimates rather than composing — it avoids a throwaway pass).
+/// `AND` takes the min matches (intersection upper bound) and sums each build kind; `OR` the capped sum.
+/// Used only for plan choice — the fast path recomputes the exact total.
 fn compose_printing_estimate(
     filter: &FilterExpr,
     indexes: &Archived<CardIndexes>,
     offsets: &AOffsets,
     n_printings: usize,
-) -> (usize, usize) {
+) -> (usize, usize, usize) {
     let popcount = |bits: &[u64]| bits.iter().map(|w| w.count_ones() as usize).sum::<usize>();
     match filter {
-        FilterExpr::True => (n_printings, 0),
+        FilterExpr::True => (n_printings, 0, 0),
         FilterExpr::And(v) => v
             .iter()
             .map(|c| compose_printing_estimate(c, indexes, offsets, n_printings))
-            .fold((n_printings, 0), |(m, b), (cm, cb)| (m.min(cm), b + cb)),
+            .fold((n_printings, 0, 0), |(m, bc, sc), (cm, cbc, csc)| (m.min(cm), bc + cbc, sc + csc)),
         FilterExpr::Or(v) => {
-            let (m, b) = v
+            let (m, bc, sc) = v
                 .iter()
                 .map(|c| compose_printing_estimate(c, indexes, offsets, n_printings))
-                .fold((0usize, 0usize), |(m, b), (cm, cb)| (m + cm, b + cb));
-            (m.min(n_printings), b)
+                .fold((0usize, 0usize, 0usize), |(m, bc, sc), (cm, cbc, csc)| (m + cm, bc + cbc, sc + csc));
+            (m.min(n_printings), bc, sc)
         }
         // Precomputed planes: exact cheap popcount, nothing synthesized.
         FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value } => {
-            (popcount(&border_leaf_bits(value.as_str(), &indexes.border_printing, n_printings)), 0)
+            (popcount(&border_leaf_bits(value.as_str(), &indexes.border_printing, n_printings)), 0, 0)
         }
         FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), op: CmpOp::Eq, rhs: NumExpr::Const(c) }
         | FilterExpr::NumericCmp { lhs: NumExpr::Const(c), op: CmpOp::Eq, rhs: NumExpr::Field(NumField::RarityInt) } => {
-            (popcount(&rarity_leaf_bits(*c, &indexes.rarity_printing, n_printings)), 0)
+            (popcount(&rarity_leaf_bits(*c, &indexes.rarity_printing, n_printings)), 0, 0)
         }
-        // Legality: estimate from the cheap card ∃-plane popcount scaled to printings — no broadcast.
+        // Legality: estimate from the cheap card ∃-plane popcount scaled to printings; that count is the
+        // broadcast-down the fast path pays (a linear pass) → rides `broadcast`.
         FilterExpr::Legality { shift: Some(shift), expected } => {
             let n_cards = offsets.len() - 1;
             let card_exists = legality_candidate_bits(indexes, n_cards, *shift, *expected, false).map_or(0, |b| popcount(&b));
             let est = if n_cards == 0 { 0 } else { card_exists * n_printings / n_cards };
-            (est, est)
+            (est, est, 0)
         }
         // Range: `k` in-range printings from the index partition points (O(log n), no scatter here);
-        // matches ≈ k, and k rides `build` — the scatter the fast path pays into the printing bitmap.
+        // matches ≈ k, and k rides `scatter` — the cheap range-slice scatter into the printing bitmap.
         FilterExpr::NumericCmp { .. } | FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. }
             if bare_range_bounds(filter, indexes).is_some() =>
         {
             let (idx, lo, hi) = bare_range_bounds(filter, indexes).expect("guarded by bare_range_bounds");
             let k = idx.partition_point(|p| u32::from(p.0) < hi) - idx.partition_point(|p| u32::from(p.0) < lo);
-            (k, k)
+            (k, 0, k)
         }
         _ => unreachable!("compose_printing_estimate on a non-composable filter — gated by is_printing_composable"),
     }
@@ -5314,9 +5315,10 @@ fn run_query_routed<'a>(
         residual_tier_ns100,
         limit: limit as u32,
         offset: page_offset as u32,
-        synth_printings: 0,  // CardRangePopcount / PrintingCompose override this in their acquire branches
-        project_printings: 0, // PrintingCompose's card/artwork projection pass; CardRangePopcount sets it too (for costing compose)
-        popcount_words: 0,   // PrintingCompose overrides this (result-space bitmap words)
+        broadcast_printings: 0, // PrintingCompose's legality broadcast-down (0 for ranges / precomputed planes)
+        scatter_printings: 0,  // range-slice k — set by both range-plan acquire branches (costed per-plan)
+        project_printings: 0,  // PrintingCompose's card/artwork projection pass; CardRangePopcount sets it too (for costing compose)
+        popcount_words: 0,     // PrintingCompose overrides this (result-space bitmap words)
     };
     // Features for the general candidate path (shared by the acquire branch and the
     // lazy-materialize dispatch). `matches`/`eval_domain` = candidate CARD count, the
@@ -5355,10 +5357,11 @@ fn run_query_routed<'a>(
         let k = (idx.partition_point(|p| u32::from(p.0) < hi) - idx.partition_point(|p| u32::from(p.0) < lo)) as u32;
         let card_est = k.min(n_cards);
         let mut feats = mk_feats(card_est, card_est, card_est, verify_cost_tier(filter));
-        // Fused build+project in one pass (`synth`); `project` is set to what PrintingCompose would do
-        // as a *separate* pass, so costing compose off these shared feats reflects its extra scatter and
-        // a bare range doesn't mis-route to it.
-        feats.synth_printings = k;
+        // `k` rides `scatter_printings`: this plan's arm charges it as its FUSED one-pass build
+        // (`CARD_RANGE_BUILD_PER_PRINTING_NS`), while a competing PrintingCompose costed off these shared
+        // feats charges the same `k` as its cheaper scatter (`RANGE_SCATTER_…`) plus a separate
+        // `project` pass — so the fused op wins the argmin and a bare range doesn't mis-route to compose.
+        feats.scatter_printings = k;
         feats.project_printings = k;
         (feats, Prep::Range)
     } else if PhysicalPlan::PrintingRangeScan.applicable(filter, mode, cards, plane, sort_col, descending, indexes) {
@@ -5367,18 +5370,19 @@ fn run_query_routed<'a>(
         let (idx, lo, hi) = bare_range_bounds(filter, indexes).expect("applicable ⇒ bare range");
         let k = (idx.partition_point(|p| u32::from(p.0) < hi) - idx.partition_point(|p| u32::from(p.0) < lo)) as u32;
         let mut feats = mk_feats(k, n_cards, n_printings, verify_cost_tier(filter));
-        feats.synth_printings = k; // for costing a competing PrintingCompose (which would scatter k); P1 itself walks, so its own cost ignores synth
+        feats.scatter_printings = k; // for costing a competing PrintingCompose (which would scatter k); P1 itself walks, so its own cost ignores this
         (feats, Prep::Range)
     } else if PhysicalPlan::PrintingCompose.applicable(filter, mode, cards, plane, sort_col, descending, indexes) {
         // Composable printing-space expr, any distinct-on. Estimate the counts cheaply — the fast path
         // composes once, only if this plan wins (never in acquire; a legality broadcast paid here and
         // then discarded would be pure waste). `synth_printings` = broadcast down (legality) + projection
         // up (card/artwork; 0 for printing). `popcount_words` = the result-space bitmap the total scans.
-        let (printing_matches, broadcast) = compose_printing_estimate(filter, indexes, offsets, n_printings as usize);
-        // `synth` = the first pass (build the printing bitmap: legality broadcast / range scatter);
-        // `project` = the second pass (printing→card/artwork), 0 for printing mode. Keeping them
-        // separate is what lets a bare range's CardRangePopcount acquire (which sets `project` too) cost
-        // this plan's extra projection honestly. `eval_domain`/`scan_units` cost the *materializing
+        let (printing_matches, broadcast, scatter) = compose_printing_estimate(filter, indexes, offsets, n_printings as usize);
+        // Two build kinds, charged at different rates: `broadcast` = legality broadcast-down (linear
+        // pass), `scatter` = range-slice scatter (cheap). `project` = the second pass (printing→
+        // card/artwork), 0 for printing mode. Keeping all three separate is what lets a bare range's
+        // CardRangePopcount acquire (which sets `scatter`/`project` too) cost this plan's passes
+        // honestly against the fused build. `eval_domain`/`scan_units` cost the *materializing
         // alternatives* should compose lose: a composable filter narrows via its indices, so they see
         // ~`matches` candidates (card mode also breaks at the first match ⇒ scan_units = eval_domain) —
         // the unnarrowed universe would over-cost them and mis-route (measured: `format:X format:Y`/card).
@@ -5394,7 +5398,8 @@ fn run_query_routed<'a>(
             }
         };
         let mut feats = mk_feats(result_total as u32, eval_domain as u32, scan_units as u32, verify_cost_tier(filter));
-        feats.synth_printings = broadcast as u32;
+        feats.broadcast_printings = broadcast as u32;
+        feats.scatter_printings = scatter as u32;
         feats.project_printings = project as u32;
         feats.popcount_words = popcount_words as u32;
         (feats, Prep::Range)
