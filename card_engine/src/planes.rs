@@ -427,6 +427,11 @@ pub(crate) struct BorderPrintingPlanes {
     /// `BORDER_PRINTING_PLANE_VALUES.len()` planes, plane-major: bit `p` of plane `k` is
     /// `words[k * words_per_plane(n_printings) + p/64] >> (p%64) & 1`.
     pub(crate) words: Vec<u64>,
+    /// Sparse border values below the plane crossover (gold/yellow + any untracked) → ascending
+    /// printing ids. Scattered into a bitmap at query time — the sparse analogue of a range index
+    /// slice — then fed the *same* popcount+walk as the planes, so every known border value gets the
+    /// exact fast path. Empty for planed and NULL borders.
+    pub(crate) postings: Vec<(String, Vec<u32>)>,
 }
 
 /// Build the #724 printing-space border planes: one pass over printings, setting each planed value's
@@ -436,13 +441,15 @@ pub(crate) fn build_border_printing_planes(printings: &[Printing], strings: &[St
     let n = printings.len();
     let wpp = words_per_plane(n);
     let mut words = vec![0u64; BORDER_PRINTING_PLANE_VALUES.len() * wpp];
+    let mut postings: std::collections::BTreeMap<&str, Vec<u32>> = std::collections::BTreeMap::new();
     for (p, printing) in printings.iter().enumerate() {
         if printing.card_border_id == NONE_STR {
             continue;
         }
         let s = strings[printing.card_border_id as usize].as_str();
-        if let Some(k) = BORDER_PRINTING_PLANE_VALUES.iter().position(|&v| v == s) {
-            words[k * wpp + p / 64] |= 1u64 << (p % 64);
+        match BORDER_PRINTING_PLANE_VALUES.iter().position(|&v| v == s) {
+            Some(k) => words[k * wpp + p / 64] |= 1u64 << (p % 64), // planed value → its one-hot plane
+            None => postings.entry(s).or_default().push(p as u32),  // sparse value → postings (ascending p)
         }
     }
     // Drift check (see #724): a planed value should stay dense enough to earn a plane — postings win
@@ -460,7 +467,8 @@ pub(crate) fn build_border_printing_planes(printings: &[Printing], strings: &[St
             );
         }
     }
-    BorderPrintingPlanes { n_printings: n as u32, words }
+    let postings = postings.into_iter().map(|(v, ids)| (v.to_string(), ids)).collect();
+    BorderPrintingPlanes { n_printings: n as u32, words, postings }
 }
 
 /// Ascending card ids with divergent legality (~556 of 31,508 in production —
