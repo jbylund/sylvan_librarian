@@ -2790,6 +2790,49 @@ fn and_child_rank(f: &FilterExpr) -> u8 {
 /// trick needs it), false where nothing would — a lone broad set at the root
 /// or in a candidate-less And is discarded anyway, so the scatter would be
 /// pure waste (the 10x And regressions of the first benchmark round).
+/// Guaranteed literal factors of a regex pattern — substrings present in **every** match, each ≥3
+/// bytes (so each has at least one trigram). Used to trigram-narrow a `TextRegex` to a loose candidate
+/// set that the walk then re-verifies with the real regex (#734 step 3). Extracted from the RAW pattern
+/// (strip the `(?i)` we add; a case-folded HIR would be classes, not literals) and lowercased to match
+/// the `*_lower` trigram index.
+///
+/// Pass one — concatenations of literals only. Anything a match can *skip over* ends the current run:
+/// a min=0 repetition (`s?`, `.*`), a character class (`.`, `[..]`, `\d`), a zero-width look (`^`, `$`,
+/// `\b`), or an alternation (`a|b`). A min≥1 repetition of a literal keeps it (`a+` still requires one
+/// `a`). Conservative by construction: a factor is emitted only where every match must contain those
+/// exact bytes, so narrowing on them can never drop a real match. `exile|destroy` yields no factor here
+/// (deferred: union the branches' candidates); `^flying$` still yields `flying` (the looks just bound a
+/// run they don't sit inside).
+fn regex_required_factors(pattern: &str) -> Vec<String> {
+    use regex_syntax::hir::{Hir, HirKind, Literal};
+    fn flush(run: &mut Vec<u8>, out: &mut Vec<Vec<u8>>) {
+        if run.len() >= 3 {
+            out.push(std::mem::take(run));
+        } else {
+            run.clear();
+        }
+    }
+    fn walk(hir: &Hir, run: &mut Vec<u8>, out: &mut Vec<Vec<u8>>) {
+        match hir.kind() {
+            HirKind::Literal(Literal(bytes)) => run.extend_from_slice(bytes),
+            HirKind::Capture(c) => walk(&c.sub, run, out),
+            HirKind::Concat(subs) => subs.iter().for_each(|s| walk(s, run, out)),
+            // min≥1 repetition of a literal is still guaranteed (`a+` ⇒ ≥1 `a`); anything else the match can skip.
+            HirKind::Repetition(r) if r.min >= 1 => match r.sub.kind() {
+                HirKind::Literal(Literal(bytes)) => run.extend_from_slice(bytes),
+                _ => flush(run, out),
+            },
+            _ => flush(run, out), // Empty | Class | Look | Alternation | Repetition{min:0}
+        }
+    }
+    let raw = pattern.strip_prefix("(?i)").unwrap_or(pattern);
+    let Ok(hir) = regex_syntax::parse(raw) else { return Vec::new() };
+    let (mut run, mut out) = (Vec::new(), Vec::new());
+    walk(&hir, &mut run, &mut out);
+    flush(&mut run, &mut out);
+    out.iter().map(|b| String::from_utf8_lossy(b).to_lowercase()).collect()
+}
+
 fn narrow_rec(
     filter: &FilterExpr,
     indexes: &Archived<CardIndexes>,
@@ -2942,6 +2985,42 @@ fn narrow_rec(
                 _ => trigram_candidates(&indexes.oracle_trigram.trigrams, word)
                     .and_then(|text_ids| Narrowed::loose(Candidates::Cards(expand_text_ids(&indexes.oracle_trigram, &text_ids)))),
             }
+        }
+
+        // #734 step 3: trigram-narrow a regex by its guaranteed literal factors, then let the walk
+        // re-verify with the real regex. Concatenation ⇒ every factor must appear ⇒ intersect their
+        // (loose) candidate sets. No usable factor (bare alternation / class-only) ⇒ None (full scan).
+        // Only name/oracle carry trigram indexes; artist/flavor regexes are already bound to `*Match`.
+        FilterExpr::TextRegex { field, regex } if matches!(field, TextField::NameLower | TextField::OracleTextLower) => {
+            let is_name = matches!(field, TextField::NameLower);
+            // Only narrow when the trigram index is actually built for this store — fixtures (and any
+            // store without it) leave it `Default`, where `trigram_candidates` returns empty rather
+            // than None and would wrongly narrow to zero. Fall back to the general full-scan path.
+            let built = if is_name {
+                u32::from(indexes.name_trigram.domain) as usize == n_cards
+            } else {
+                u32::from(indexes.oracle_trigram.words.n_cards) as usize == n_cards
+            };
+            if !built {
+                return None;
+            }
+            let factors = regex_required_factors(regex.as_str());
+            if factors.is_empty() {
+                return None;
+            }
+            let mut acc: Option<Vec<u32>> = None;
+            for f in &factors {
+                let cand = if is_name {
+                    trigram_candidates(&indexes.name_trigram, f)
+                } else {
+                    trigram_candidates(&indexes.oracle_trigram.trigrams, f)
+                };
+                let Some(cand) = cand else { continue }; // factor not trigram-indexable: skip, keep the rest
+                acc = Some(acc.map_or(cand.clone(), |prev| intersect_sorted(&prev, &cand)));
+            }
+            let acc = acc?; // no factor produced candidates ⇒ general path (full scan)
+            let ids = if is_name { acc } else { expand_text_ids(&indexes.oracle_trigram, &acc) };
+            Narrowed::loose(Candidates::Cards(ids))
         }
 
         FilterExpr::NumericCmp { lhs, op, rhs } => {

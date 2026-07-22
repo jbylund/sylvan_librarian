@@ -56,6 +56,7 @@ dependencies = [
  "pyo3",
  "rand",
  "regex",
+ "regex-syntax",
  "rkyv",
  "serde_json",
  "uuid",

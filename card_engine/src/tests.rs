@@ -8518,3 +8518,30 @@ fn router_timing() {
 }
 
 
+/// #734 step 3: the regex literal-factor extractor must emit ONLY guaranteed factors — a factor absent
+/// from some match would wrongly narrow it away (the walk re-verifies, so over-emitting = false
+/// negatives). Optional/`*`/class/alternation/look boundaries must all cut the run.
+#[test]
+fn regex_required_factors_extracts_only_guaranteed() {
+    use super::regex_required_factors as f;
+    // concatenation with a `.*` gap: both surrounding literals are required (the spaces around the gap
+    // are literal too), the optional `s` is dropped
+    assert_eq!(f("draw .* cards?"), vec!["draw ".to_string(), " card".to_string()]);
+    // anchors are zero-width — the literal between them survives
+    assert_eq!(f("^flying$"), vec!["flying".to_string()]);
+    assert_eq!(f("dragon$"), vec!["dragon".to_string()]);
+    assert_eq!(f("^gob"), vec!["gob".to_string()]);
+    // the `(?i)` we prepend is stripped; factors come back lowercased
+    assert_eq!(f("(?i)Dragon"), vec!["dragon".to_string()]);
+    // optional tail char drops below the ≥3 threshold on its own but keeps the mandatory stem
+    assert_eq!(f("colou?r"), vec!["colo".to_string()]); // "r" alone is <3 → dropped
+    // escaped punctuation is a literal
+    assert_eq!(f(r"\{t\}: add"), vec!["{t}: add".to_string()]);
+    // no guaranteed factor ≥3 → empty (full scan): bare alternation, class-only, short, digit class
+    assert!(f("exile|destroy").is_empty(), "alternation has no OUTER guaranteed factor in pass one");
+    assert!(f("^[aeiou]").is_empty());
+    assert!(f(r"\d+").is_empty());
+    assert!(f("a.b").is_empty(), "no run reaches 3 literal bytes");
+    // a min≥1 repetition of a literal is still guaranteed
+    assert_eq!(f("(?i)aaa+"), vec!["aaa".to_string()]);
+}
