@@ -4191,9 +4191,10 @@ fn is_printing_composable(filter: &FilterExpr, indexes: &Archived<CardIndexes>) 
         FilterExpr::Legality { shift: Some(_), expected } => status_plane_bases(*expected).is_some(),
         // #731: usd/cn/date range leaves — the in-range index slice scatters into an exact printing
         // bitmap (`range_leaf_bits`). `bare_range_bounds` recognizes the printing-range-indexed shape
-        // (and the `[lo,hi)` bounds); a non-range op (`Eq`/`Ne`), a negation, or a card-space field
-        // (cmc/power/rarity) yields `None` → stays on the general path. This is what lets a range
-        // compose with border/rarity/legality — and range∧range — exactly, in any distinct-on.
+        // and returns its `[lo,hi)` bounds: the ordered ops, and `Eq` too (a narrow `[v, v+1)`). Only
+        // `Ne`, a negation, or a card-space field (cmc/power/rarity) yields `None` → stays on the
+        // general path. This is what lets a range compose with border/rarity/legality — and
+        // range∧range — exactly, in any distinct-on.
         FilterExpr::NumericCmp { .. } | FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. } => {
             bare_range_bounds(filter, indexes).is_some()
         }
