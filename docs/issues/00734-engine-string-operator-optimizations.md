@@ -1,6 +1,6 @@
 # Engine: String Operator Optimizations (regex→contains, memmem)
 
-Status: **step 1 done** (`ec7d26b`), step 2 todo. Filed as
+Status: **steps 1+2 done** (`ec7d26b`, `84a9ca9`). Filed as
 [#734](https://github.com/jbylund/sylvan_librarian/issues/734). Two independent, behavior-preserving
 speedups for substring search over text fields (`oracle`/`name`/`flavor`/`artist`).
 
@@ -68,15 +68,25 @@ Caveats (handled):
 
 ## Optimization 2 — `memmem::Finder` for the `TextContains` scan
 
-Build a `memchr::memmem::Finder` once, reuse per card — amortizes the Two-Way/prefilter setup across
-the corpus, the same trick [`sparse_blob`](../../card_engine/src/lib.rs) uses for the oracle-word
-index. **1.26×** over `str::contains`, **3.36×** over regex stacked with (1).
+Build a `memchr::memmem::Finder` once, reuse per candidate — amortizes the Two-Way/prefilter setup,
+the same trick [`sparse_blob`](../../card_engine/src/lib.rs) uses for the oracle-word index. **1.26×**
+over `str::contains` (bench_substring_finders).
+
+**Shipped** (`84a9ca9`) on the four once-per-query **verify/bind scans** in
+[`filter.rs`](../../card_engine/src/filter.rs) that build `OracleMatch`/`NameMatch`/`ArtistMatch`/
+`FlavorMatch` from a substring needle — the `contains` path a memoized substring (or lowered regex)
+query actually hits. A small incremental on top of step 1's access-path win.
+
+Deliberately **not** applied to the per-row `matches()` scan (the path taken only when memoize
+*declines* — broad/short needles): `str::contains` is already Two-Way there, the path is uncommon, and
+a `Finder`-once would need a field on the `TextContains` node (~20 construction sites) out of scale
+with a 1.26× on a rare case. Left as a noted follow-up if a decline-heavy workload ever justifies it.
 
 ## Sequencing
 
 1. ✅ Regex→contains lowering (Python AST pass, `ec7d26b`) — the bigger, structurally-clean win;
    unlocks the memoized `OracleMatch`/`NameMatch` set paths and trigram narrowing for what were regexes.
-2. memmem finder for the residual `TextContains` scan.
+2. ✅ memmem finder for the residual `TextContains` verify/bind scans (`84a9ca9`).
 
 ## Cost model
 
