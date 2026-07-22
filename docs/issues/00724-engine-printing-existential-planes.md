@@ -30,6 +30,36 @@ A **printing-space** plane is the opposite: one bit per printing, set iff *that 
 
 They also give the total as a `popcount` (O(words), density-independent) and O(1) membership tests.
 
+## Composing a mixed query: two exact strategies (the planner picks by cost)
+
+Take `pX pY cZ` — two printing-varying leaves (`pX`, `pY`: legality/border/rarity, or a range) and
+one card-invariant leaf (`cZ`: color/type). Under `unique=card` the answer is `{card : ∃p, pX(p) ∧
+pY(p) ∧ cZ(card)}`. Because these planes are **exact**, there are two exact ways to evaluate it,
+differing only in cost:
+
+- **A — everything in printing space, project once.** Broadcast `cZ` **down** to printing space
+  (exact — `cZ` is identical across a card's printings), `AND` all three printing bitmaps, then
+  project the survivors to the answer space (card `∃`, or artwork; nothing for `unique=printing`).
+- **B — compose the printing leaves, project up, finish in card space.** `AND` `pX pY` in printing
+  space first — **every surviving bit is, by construction, one printing satisfying both**, so the
+  shared-witness problem is resolved *right there* (a set bit *is* the shared witness). Project that
+  result **up** to card-existence (one `∃`), then `AND` with the `cZ` card plane in card space.
+
+Both are exact. B stays exact because the *only* multi-printing-varying composition (`pX ∧ pY`)
+happens in printing space **before** any projection, and ANDing the projected result with a
+card-invariant plane can't reintroduce shared-witness (`cZ` is constant over a card's printings). The
+load-bearing rule both obey: **two printing-varying leaves must be `AND`'d in printing space** — a
+card-space existence-AND of two separately-`∃`-projected leaves false-positives (a card with a
+`pX` printing and a *separate* `pY` printing).
+
+Where they differ is pure cost: A does the `cZ` step in printing-space words (~1,519) after a
+broadcast; B does it in card-space words (~492) after projecting `pX ∧ pY` up (cheap when that set is
+selective). Neither dominates — so **which strategy runs is a planner cost decision**, the same
+`argmin` that chooses among plans (whether these surface as distinct `PhysicalPlan`s or as one plan
+that costs its projection order internally is an implementation choice). `unique=printing` skips the
+up-projection entirely; `unique=artwork` projects to artwork ids. The exactness of the planes is what
+makes the choice purely about cost rather than correctness.
+
 ## Why — and why there is no benefit yet
 
 These are **prerequisite infrastructure** for the printing-space popcount-order plan, which is where
@@ -61,6 +91,15 @@ query-time correctness so a failure localizes to one side.
 ## Cost
 
 Build-time computation + storage + an **archive-format bump**.
+
+## Subsumes the count-only "PR 5" idea
+
+The sorted-range roadmap's PR 5 ("printing-mode total for legality/rarity/border") is a precomputed
+*scalar* per-value count that answers only a **bare** query's total (`border:black`/printing →
+lookup a number). A printing bitplane's `popcount` **is** that count — plus composition (AND/OR),
+membership, and paging. So #724 subsumes PR 5. PR 5 is worth building standalone only as a *cheaper
+pre-#724 shortcut* (a count table, no per-printing bits, no archive bump) if the bare printing-mode
+total turns out hot before these planes land.
 
 ## Related
 
