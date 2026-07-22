@@ -36,8 +36,8 @@ use regex::Regex;
 use rkyv::Archived;
 
 use super::{
-    archive_header, archive_payload, str_at, CardData, CmpOp, ColorField, CollField, FilterExpr, Mmap, NumExpr, NumField, TextField,
-    TextSearchField, TYPE_CREATURE, ARCHIVE_HEADER_LEN,
+    archive_header, archive_payload, expand_text_ids, str_at, trigram_candidates, CardData, CmpOp, ColorField, CollField, FilterExpr,
+    Mmap, NumExpr, NumField, TextField, TextSearchField, TYPE_CREATURE, ARCHIVE_HEADER_LEN,
 };
 
 const ITERS: usize = 50;
@@ -218,6 +218,19 @@ fn bench_substring_finders() {
     println!("\n  regex / contains  = {:.2}x", regex_ns / contains_ns);
     println!("  regex / memmem    = {:.2}x", regex_ns / memmem_ns);
     println!("  contains / memmem = {:.2}x", contains_ns / memmem_ns);
+
+    // The bigger win is the access path, not the per-row constant. A `TextRegex` node has no
+    // `narrow_rec` arm, so the plan scans all n cards; the equivalent `TextContains` narrows via the
+    // trigram index to a candidate superset (then verifies). Report that superset size — the rows the
+    // rewritten query actually visits — against the full corpus the regex must scan.
+    let cand = trigram_candidates(&data.indexes.oracle_trigram.trigrams, needle)
+        .map(|tids| expand_text_ids(&data.indexes.oracle_trigram, &tids).len())
+        .unwrap_or(n);
+    println!("\n  rows visited: regex {n} (full scan) vs contains {cand} trigram-candidates ({:.1}% of corpus)", 100.0 * cand as f64 / n as f64);
+    println!("  end-to-end match-phase estimate:");
+    println!("    regex    {n} rows x {regex_ns:.1} ns   = {:>8.0} ns", n as f64 * regex_ns);
+    println!("    contains {cand} rows x {contains_ns:.1} ns = {:>8.0} ns  ({:.1}x)", cand as f64 * contains_ns, (n as f64 * regex_ns) / (cand as f64 * contains_ns).max(1.0));
+    println!("    memmem   {cand} rows x {memmem_ns:.1} ns = {:>8.0} ns  ({:.1}x)", cand as f64 * memmem_ns, (n as f64 * regex_ns) / (cand as f64 * memmem_ns).max(1.0));
 }
 
 /// Pins the per-card `NumericCmp` cost for usd/collector_number/year --
