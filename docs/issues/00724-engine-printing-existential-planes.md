@@ -139,6 +139,101 @@ the plan is gated to bare border under `unique=printing`, so no other query path
 gating *is* the no-regression guarantee, and the flat rows confirm it). Compounds and the card/artwork
 projections are the next slices (the printing-space plan + PR 2b), not this PR.
 
+## Result: rarity planes + printing-space compose + card projection (follow-on PR)
+
+The follow-on adds rarity printing planes (common/uncommon/rare/mythic; special/bonus in postings),
+printing-space `AND`/`OR` composition, and the printing→card projection with its cost term. A/B on the
+same corpus (`CARD_ENGINE_BORDER_PRINTING_PLANE` + `CARD_ENGINE_PRINTING_COMPOSE_CARD`, min µs, totals
+identical between arms):
+
+| query | mode | off µs | on µs | speedup | what |
+|---|---|---:|---:|---:|---|
+| `r:rare` | printing | 356 | 44 | **8.0×** | rarity plane (bare) |
+| `r:mythic` | printing | 141 | 51 | **2.8×** | rarity plane (bare) |
+| `border:black r:rare` | printing | 621 | 53 | **11.7×** | compose (AND two planes) |
+| `border:black r:rare` | card | 326 | 102 | **3.2×** | compose + project up |
+| `border:black` | printing | 864 | 44 | 19.5× | border (from the first slice) |
+| `f:modern border:black` | printing | 752 | 739 | 1.0× | legality not yet composable → flat |
+| `f:modern r:rare` | printing | 298 | 296 | 1.0× | ditto |
+| `border:black` | card | 66 | 64 | 1.0× | bare card defers to #664+#634 plane |
+| `border:black` | artwork | 907 | 910 | 1.0× | needs PR 2b |
+
+Two things this validates directly:
+
+- **Composition is exact and fast.** `border:black r:rare`/printing ANDs the two exact printing planes
+  and popcounts — 11.7×, matching `GatheredScan` on total + rows + order (the forced-plan differential).
+- **The projection cost term is real and mode-gated.** The *same* compound costs 53 µs in printing mode
+  and 102 µs in card mode; the ~49 µs delta *is* the printing→card scatter (`printing_bits_to_card_bits`),
+  which is exactly **0 in printing mode** (`range_build_printings = 0`) — the cost term does what the
+  model says. Card is still 3.2× over the general narrowed path it replaces.
+
+Scope honesty: `NOT` is deliberately **not** composable — over a nullable field the plane `complement`
+isn't the trivalent negation (a null-border printing satisfies neither `border:black` nor
+`-border:black`), so `-border:black` stays on the general path. Bare `unique=card` border/rarity
+correctly defer to the existing #664/#670 card planes (`compile_plane` exact-consumes them), so this
+plan fires only where `compile_plane` **declines** — the shared-witness compounds. `unique=artwork`
+awaits PR 2b.
+
+## Result: legality via broadcast + divergent repair (no new plane)
+
+Legality composes without a per-printing plane at all — reusing #667's card-space `_EXISTS` plane. A
+legality leaf's printing bitmap is `broadcast(∃-legal) | authoritative-repair(divergent)`: legality is
+only ~1.8% divergent (`legal_divergent`), so the card plane broadcast down is exact for 98.2% of cards
+and only the ~556 divergent cards' printings are overwritten from their own `card_legalities` word (no
+stored postings). Kernel costs (`legality_compose_kernel_costs`, real corpus):
+
+| op | cost | scaling |
+|---|---|---|
+| broadcast (card ∃ → printing) | 22–145 µs | ~1.5 ns/printing |
+| projection (printing → card) | 26–145 µs | ~1.5 ns/printing |
+| **repair** (divergent overwrite) | **5.5 µs** | negligible (~11k printings) |
+
+The repair is free; the broadcast is the whole cost, at ~1.5 ns/printing (≈ the range-scatter rate).
+So the cost model charges the broadcast as a build term (`range_build_printings ×
+COMPOSE_BROADCAST_PER_PRINTING_NS`), and — crucially — **acquire estimates rather than composing** (the
+`_EXISTS` popcount scaled to printings), so the broadcast is paid once, in the fast path, only if the
+plan wins. That removed a latent *double* broadcast (acquire + fast path both composing) that had been
+inflating every legality query. A/B (min µs, both flags):
+
+| query | mode | off | on | speedup |
+|---|---|---:|---:|---:|
+| `f:modern border:black` | printing | 754 | 174 | **4.3×** |
+| `f:modern r:rare` | printing | 297 | 174 | **1.7×** |
+| `f:modern border:black` | card | 341 | 290 | 1.2× |
+| `f:modern` (bare) | printing | 190 | 167 | 1.1× (no regression) |
+| `border:black r:rare` | printing | 638 | 54 | 11.8× |
+
+No hand-exclusion: the cost model routes bare legality to the general path or a single-broadcast compose
+(whichever the term says is cheaper) and reserves the broadcast for compounds that replace a full scan.
+
+**Partial vote for planes.** The broadcast is ~1.5 ns/printing but ~100–145 µs for *broad* formats
+(modern/commander/…), which a precomputed legality *printing* plane (≈12 KB, a free slice read) would
+erase. So the end state is a per-format frequency×breadth crossover — planes for the hot broad formats,
+broadcast+repair for the long tail — the same plane-vs-postings decision one level up. Not this PR.
+
+## Result: artwork projection (the third unique mode)
+
+`unique=artwork` now composes too, via the same substrate. The dense global artwork id is **derived at
+query time** (no stored array, no archive change): `global_id = artwork_base[card] + artwork_group_id`,
+where `artwork_base` is the prefix-sum of the per-card distinct-artwork counts already in
+`artwork_groups`. So the printing bits project up to an artwork-existence bitmap, and — the key win —
+the artwork **total is `popcount(artwork_bits)`**, replacing the O(candidates × printings) count pass
+that made artwork mode ~14× slower than card. The page walk (`walk_artwork_page`) collapses each card's
+matching printings to distinct artworks (best-`prefer_score` representative per group, exactly the
+general path's semantics) and pages in sort order. A/B (min µs, totals identical between arms):
+
+| query | mode | off | on | speedup |
+|---|---|---:|---:|---:|
+| `border:black` | artwork | 925 | 190 | **4.9×** |
+| `border:black r:rare` | artwork | 648 | 110 | **5.9×** |
+| `f:modern border:black` | artwork | 792 | 286 | 2.8× |
+| `r:mythic` | artwork | 153 | 70 | 2.2× |
+
+Folded into `PrintingComposePopcount` (now `Mode::Card | Mode::Artwork`): bare border/rarity/legality
+also route here under `unique=artwork` (nothing folds to a card plane there), so the count-pass →
+popcount win applies broadly, not just to compounds. All three unique modes — printing (walk), card
+(↑ card-existence), artwork (↑ artwork-existence) — are now the one compose-then-project model.
+
 The load-bearing finding: **legality is ~4× cheaper than border in printing mode at the same
 breadth, because legality settles at the *card* level** (`printing_dependent(Legality) => false`,
 [filter.rs](../../card_engine/src/filter.rs)) — it evaluates once per card (~31.5k) and emits all of

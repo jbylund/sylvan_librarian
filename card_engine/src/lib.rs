@@ -2274,6 +2274,7 @@ struct CardIndexes {
     printing_to_card: Vec<u32>,
     planes:         BitPlanes,                 // card space: transposed low-cardinality dims (#630)
     border_printing: BorderPrintingPlanes,     // printing space: exact bit-per-printing border (#724)
+    rarity_printing: RarityPrintingPlanes,     // printing space: exact bit-per-printing rarity (#724)
     name_bigrams:   NameBigramIndex,           // card space: exact 2-byte name containment (#639)
     legal_divergent: Vec<u16>,                // card space: ids with divergent legality (#630 phase 2), postings not a plane — see build_divergent_ids
 }
@@ -2304,6 +2305,7 @@ impl Default for CardIndexes {
             printing_to_card: Vec::new(),
             planes:         BitPlanes::default(),
             border_printing: BorderPrintingPlanes::default(),
+            rarity_printing: RarityPrintingPlanes::default(),
             name_bigrams:   NameBigramIndex::default(),
             legal_divergent: Vec::new(),
         }
@@ -3881,10 +3883,11 @@ static PRINTING_RANGE_FASTPATH: LazyLock<usize> = LazyLock::new(|| guard_env("CA
 /// queries exactly as before (the general candidate path), `1` (default) enables `CardRangePopcount`.
 static RANGE_BITS_CARD: LazyLock<usize> = LazyLock::new(|| guard_env("CARD_ENGINE_RANGE_BITS_CARD", 1));
 
-/// #724 printing-space border-plane fast path (`PrintingPlaneScan`). Binary A/B kill-switch, same
-/// kind as `PRINTING_RANGE_FASTPATH`: `0` routes `border:VALUE`/printing as before (general path),
-/// `1` (default) uses the plane `popcount`/postings total + the printing walk.
-static BORDER_PRINTING_PLANE: LazyLock<usize> = LazyLock::new(|| guard_env("CARD_ENGINE_BORDER_PRINTING_PLANE", 1));
+/// #724 unified printing-space compose plan (`PrintingCompose`). Binary A/B kill-switch, same kind as
+/// `PRINTING_RANGE_FASTPATH`: `0` routes every composable printing-space query (border/rarity/legality,
+/// `AND`/`OR`, any distinct-on) as before (general path), `1` (default) composes in printing space,
+/// projects to the result space, and pages with the grouped walk.
+static PRINTING_COMPOSE: LazyLock<usize> = LazyLock::new(|| guard_env("CARD_ENGINE_PRINTING_COMPOSE", 1));
 
 /// The range index and half-open `[lo, hi)` a *bare* range-predicate leaf selects, or None for
 /// anything else (compound, `Ne`, a non-range numeric field). Provably-empty predicates return a
@@ -4165,37 +4168,269 @@ fn printing_range_fastpath<'a>(
 /// `popcount` of the value's plane (black/borderless/white), or its postings length (gold/yellow/
 /// untracked). `None` for anything that isn't a bare `border ==` leaf, or an unknown border value.
 /// This replaces the O(n) count pass — the whole cost of `border:black`/printing today.
-fn border_printing_total(filter: &FilterExpr, bp: &Archived<BorderPrintingPlanes>) -> Option<usize> {
-    let FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value } = filter else {
-        return None;
-    };
-    let wpp = words_per_plane(u32::from(bp.n_printings) as usize);
-    if let Some(k) = BORDER_PRINTING_PLANE_VALUES.iter().position(|&v| v == value.as_str()) {
-        return Some(bp.words[k * wpp..(k + 1) * wpp].iter().map(|w| u64::from(*w).count_ones() as usize).sum());
+/// #724: structural check — is `filter` composable **entirely** from printing-space planes/postings?
+/// Cheap (no materialization); this is what plan applicability gates on. Composable leaves: a bare
+/// `border ==` value ([`BorderPrintingPlanes`]) and a bare rarity `== const` ([`RarityPrintingPlanes`],
+/// equality only — ordinal `r>=rare` still takes the general path); composable interior: `And`/`Or`/
+/// `True`. `Not` is deliberately **excluded**: over a nullable field, negation is not the plane's
+/// `complement` (a null-border printing satisfies neither `border:black` nor `-border:black` under
+/// three-valued logic, but `complement` would count it), so `-border:black` stays on the general path
+/// where the residual applies the correct trivalent semantics. Anything else (a text search, a range,
+/// an arithmetic compare) is likewise non-composable. A composable expression's bits are **exact** (a
+/// set bit *is* a matching printing), so no per-printing re-check is needed.
+fn is_printing_composable(filter: &FilterExpr) -> bool {
+    match filter {
+        FilterExpr::True => true,
+        FilterExpr::And(v) | FilterExpr::Or(v) => v.iter().all(is_printing_composable),
+        FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, .. } => true,
+        FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), op: CmpOp::Eq, rhs: NumExpr::Const(_) }
+        | FilterExpr::NumericCmp { lhs: NumExpr::Const(_), op: CmpOp::Eq, rhs: NumExpr::Field(NumField::RarityInt) } => true,
+        // Legality via #667's card `_EXISTS` plane + a divergent repair (see `legality_leaf_bits`).
+        // Only a plane-backed status (legal/banned/restricted) with a present format; an absent format
+        // (`shift: None`) matches nothing and stays on the general path.
+        FilterExpr::Legality { shift: Some(_), expected } => status_plane_bases(*expected).is_some(),
+        _ => false,
     }
-    bp.postings.iter().find(|e| e.0.as_str() == value.as_str()).map(|e| e.1.len())
 }
 
-/// `unique=printing` fast path for a bare `border:VALUE` leaf — the plane analogue of
-/// `printing_range_fastpath`: `total` is the plane `popcount`/postings length (no count pass), and
-/// the page is the same `walk_printing_page` (its residual test already handles the border compare,
-/// and early-stops). Returns `None` (declines) for a non-border leaf, an unknown value, or a total
-/// at/below the stream threshold — where the general path gathers/orders differently (same guard as
-/// `printing_range_fastpath`; a genuinely sparse value like `yellow` falls through here).
+/// Whether the printing-space plane indexes are actually built for this store (production always
+/// builds them; some unit-test fixture stores don't). A built index reports its store's printing count
+/// in `n_printings`; a `Default` (unbuilt) index reports 0. Gating applicability on this lets the plan
+/// decline cleanly (→ general path) rather than index into an empty word array.
+fn printing_compose_indexes_built(indexes: &Archived<CardIndexes>) -> bool {
+    u32::from(indexes.border_printing.n_printings) > 0 && u32::from(indexes.rarity_printing.n_printings) > 0
+}
+
+/// All-ones printing-space bitmap over the `n_printings` domain (tail bits masked to 0). Built by
+/// complementing a zero vec, so the tail-clear contract is `complement_bits`'s single source of truth.
+fn all_printing_bits(n_printings: usize) -> Vec<u64> {
+    let mut bits = vec![0u64; words_per_plane(n_printings)];
+    complement_bits(&mut bits, n_printings);
+    bits
+}
+
+/// The exact printing-space bitmap for a bare `border == value` leaf: a copy of the value's plane
+/// slice, its scattered postings, or all-zero for an unknown value (exactly "no printing").
+fn border_leaf_bits(value: &str, bp: &Archived<BorderPrintingPlanes>, n_printings: usize) -> Vec<u64> {
+    let wpp = words_per_plane(n_printings);
+    if let Some(k) = BORDER_PRINTING_PLANE_VALUES.iter().position(|&v| v == value) {
+        return bp.words[k * wpp..(k + 1) * wpp].iter().map(|w| u64::from(*w)).collect();
+    }
+    match bp.postings.iter().find(|e| e.0.as_str() == value) {
+        Some(e) => scatter_bits(e.1.iter().map(|p| u32::from(*p)), n_printings),
+        None => vec![0u64; wpp],
+    }
+}
+
+/// The exact printing-space bitmap for a bare rarity `== c` leaf. `c` is the rarity int as a float;
+/// a non-integer or out-of-range value matches nothing (all-zero). Interior ints (common..mythic)
+/// read their plane slice; the sparse tail (special/bonus) scatters its postings.
+fn rarity_leaf_bits(c: f64, rp: &Archived<RarityPrintingPlanes>, n_printings: usize) -> Vec<u64> {
+    let wpp = words_per_plane(n_printings);
+    // Only an exact non-negative integer can equal a stored rarity int; anything else matches nothing.
+    if c < 0.0 || c.fract() != 0.0 || c > f64::from(u8::MAX) {
+        return vec![0u64; wpp];
+    }
+    let int = c as u8;
+    if let Some(k) = RARITY_PRINTING_PLANE_INTS.iter().position(|&v| v == int) {
+        return rp.words[k * wpp..(k + 1) * wpp].iter().map(|w| u64::from(*w)).collect();
+    }
+    match rp.postings.iter().find(|e| e.0 == int) {
+        Some(e) => scatter_bits(e.1.iter().map(|p| u32::from(*p)), n_printings),
+        None => vec![0u64; wpp],
+    }
+}
+
+/// Broadcast a card-space bitmap **down** to printing space: set every printing of each set card. The
+/// inverse of `printing_bits_to_card_bits`, used to lift a card-settled fact (a legality that doesn't
+/// diverge across the card's printings) into the printing domain for composition. Iterates set cards
+/// only, so it is O(set cards + their printings), not O(n_cards).
+fn broadcast_card_bits_to_printings(card_bits: &[u64], offsets: &AOffsets, n_printings: usize) -> Vec<u64> {
+    let mut pbits = vec![0u64; words_per_plane(n_printings)];
+    for (i, &word) in card_bits.iter().enumerate() {
+        let mut w = word;
+        while w != 0 {
+            let c = (((i as u32) << 6) | w.trailing_zeros()) as usize;
+            w &= w - 1;
+            for p in u32::from(offsets[c]) as usize..u32::from(offsets[c + 1]) as usize {
+                pbits[p >> 6] |= 1u64 << (p & 63);
+            }
+        }
+    }
+    pbits
+}
+
+/// The exact printing-space bitmap for a bare legality leaf (`f:modern` etc.), built the #724 way from
+/// #667's card-space `_EXISTS` plane plus a divergent repair, rather than a full per-printing legality
+/// plane — legality is only ~1.8% divergent (`legal_divergent`), so the card plane broadcast is exact
+/// for the other 98.2% and only the divergent cards need per-printing fix-up. `∃-legal` over-sets a
+/// divergent card (it sets every printing, but only some are legal), so the repair is **authoritative**:
+/// it *overwrites* each divergent printing's bit to its true value (set and clear, re-derived from the
+/// printing's own `card_legalities` word — no stored postings), which is why the broadcast needs no
+/// pre-masking. Empty if the planes aren't built for this store.
+fn legality_leaf_bits(
+    shift: u8,
+    expected: u64,
+    indexes: &Archived<CardIndexes>,
+    offsets: &AOffsets,
+    printings: &[APrinting],
+    n_printings: usize,
+) -> Vec<u64> {
+    let n_cards = offsets.len() - 1;
+    let Some(card_bits) = legality_candidate_bits(indexes, n_cards, shift, expected, false) else {
+        return vec![0u64; words_per_plane(n_printings)];
+    };
+    let mut pbits = broadcast_card_bits_to_printings(&card_bits, offsets, n_printings);
+    // Repair the divergent cards' printings authoritatively — overwrite each bit with the per-printing
+    // truth (`(word >> shift) & 0b11 == expected`, the same test filter.rs:1253 applies). Overwriting
+    // both directions is what lets the broadcast above over-set them without a pre-clear pass.
+    for cid in indexes.legal_divergent.iter() {
+        let c = u16::from(*cid) as usize;
+        for p in u32::from(offsets[c]) as usize..u32::from(offsets[c + 1]) as usize {
+            let legal = (u64::from(printings[p].card_legalities) >> shift) & 0b11 == expected;
+            if legal {
+                pbits[p >> 6] |= 1u64 << (p & 63);
+            } else {
+                pbits[p >> 6] &= !(1u64 << (p & 63));
+            }
+        }
+    }
+    pbits
+}
+
+/// #724: materialize `filter`'s **exact** printing-space membership bitmap (`n_printings` bits, tail
+/// masked to 0), composing planes/postings with `AND`/`OR`. Assumes `is_printing_composable` (the
+/// caller gates it) — `unreachable!()` on any other shape. The surviving bits *are* the matching
+/// printings: for `unique=printing` `popcount` is the total; for `unique=card` project up with
+/// `printing_bits_to_card_bits`. This is the substrate the printing-space popcount-order plan consumes.
+fn compose_printing_bits(
+    filter: &FilterExpr,
+    indexes: &Archived<CardIndexes>,
+    offsets: &AOffsets,
+    printings: &[APrinting],
+    n_printings: usize,
+) -> Vec<u64> {
+    let wpp = words_per_plane(n_printings);
+    match filter {
+        FilterExpr::True => all_printing_bits(n_printings),
+        FilterExpr::And(v) => {
+            // empty And is vacuously true; start all-ones (tail masked) and intersect each child.
+            let mut acc = all_printing_bits(n_printings);
+            for child in v.iter() {
+                and_bits_into(&mut acc, &compose_printing_bits(child, indexes, offsets, printings, n_printings));
+            }
+            acc
+        }
+        FilterExpr::Or(v) => {
+            let mut acc = vec![0u64; wpp];
+            for child in v.iter() {
+                or_bits_into(&mut acc, &compose_printing_bits(child, indexes, offsets, printings, n_printings));
+            }
+            acc
+        }
+        FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value } => {
+            border_leaf_bits(value.as_str(), &indexes.border_printing, n_printings)
+        }
+        FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), op: CmpOp::Eq, rhs: NumExpr::Const(c) }
+        | FilterExpr::NumericCmp { lhs: NumExpr::Const(c), op: CmpOp::Eq, rhs: NumExpr::Field(NumField::RarityInt) } => {
+            rarity_leaf_bits(*c, &indexes.rarity_printing, n_printings)
+        }
+        FilterExpr::Legality { shift: Some(shift), expected } => {
+            legality_leaf_bits(*shift, *expected, indexes, offsets, printings, n_printings)
+        }
+        _ => unreachable!("compose_printing_bits on a non-composable filter — gated by is_printing_composable"),
+    }
+}
+
+/// Cheap cost-model estimate for a composable filter: `(matches, build_printings)` **without** paying
+/// legality's broadcast. Border/rarity leaves are precomputed planes — their exact `popcount` is a
+/// cheap slice read and they synthesize nothing (`build 0`). A legality leaf is *synthesized* at query
+/// time (broadcast + repair), so its cost is estimated from the cheap card `_EXISTS` `popcount` scaled
+/// to printings, and that same count is charged as `build_printings` — the broadcast the fast path pays
+/// **only if this plan wins** (this is why acquire estimates rather than composing: it avoids a second,
+/// throwaway broadcast). `AND` takes the min (intersection upper bound); `OR` the capped sum. Used only
+/// for plan choice — the fast path recomputes the exact total. Measured build cost ≈ 1.5 ns/printing
+/// (`legality_compose_kernel_costs`), ~the range-scatter rate, so `synth_printings` carries it.
+fn compose_printing_estimate(
+    filter: &FilterExpr,
+    indexes: &Archived<CardIndexes>,
+    offsets: &AOffsets,
+    n_printings: usize,
+) -> (usize, usize) {
+    let popcount = |bits: &[u64]| bits.iter().map(|w| w.count_ones() as usize).sum::<usize>();
+    match filter {
+        FilterExpr::True => (n_printings, 0),
+        FilterExpr::And(v) => v
+            .iter()
+            .map(|c| compose_printing_estimate(c, indexes, offsets, n_printings))
+            .fold((n_printings, 0), |(m, b), (cm, cb)| (m.min(cm), b + cb)),
+        FilterExpr::Or(v) => {
+            let (m, b) = v
+                .iter()
+                .map(|c| compose_printing_estimate(c, indexes, offsets, n_printings))
+                .fold((0usize, 0usize), |(m, b), (cm, cb)| (m + cm, b + cb));
+            (m.min(n_printings), b)
+        }
+        // Precomputed planes: exact cheap popcount, nothing synthesized.
+        FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value } => {
+            (popcount(&border_leaf_bits(value.as_str(), &indexes.border_printing, n_printings)), 0)
+        }
+        FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), op: CmpOp::Eq, rhs: NumExpr::Const(c) }
+        | FilterExpr::NumericCmp { lhs: NumExpr::Const(c), op: CmpOp::Eq, rhs: NumExpr::Field(NumField::RarityInt) } => {
+            (popcount(&rarity_leaf_bits(*c, &indexes.rarity_printing, n_printings)), 0)
+        }
+        // Legality: estimate from the cheap card ∃-plane popcount scaled to printings — no broadcast.
+        FilterExpr::Legality { shift: Some(shift), expected } => {
+            let n_cards = offsets.len() - 1;
+            let card_exists = legality_candidate_bits(indexes, n_cards, *shift, *expected, false).map_or(0, |b| popcount(&b));
+            let est = if n_cards == 0 { 0 } else { card_exists * n_printings / n_cards };
+            (est, est)
+        }
+        _ => unreachable!("compose_printing_estimate on a non-composable filter — gated by is_printing_composable"),
+    }
+}
+
+/// `unique=printing` fast path for a composable printing-space expression (bare `border:`/`r:` or an
+/// `AND`/`OR`/`NOT` of them, #724) — the plane analogue of `printing_range_fastpath`: `total` is the
+/// composed bitmap's `popcount` (no count pass), and the page is the same `walk_printing_page` (its
+/// residual test evaluates the full composed filter, and early-stops). Returns `None` (declines) for
+/// a non-composable filter, or a total at/below the stream threshold — where the general path gathers
+/// and globally sorts, ordering ties differently (same guard as `printing_range_fastpath`; a sparse
+/// value like `border:yellow` falls through here).
 #[allow(clippy::too_many_arguments)]
-fn printing_border_fastpath<'a>(
+#[allow(clippy::too_many_arguments)]
+fn printing_compose_fastpath<'a>(
     cards: &'a [AOracleCard],
     printings: &'a [APrinting],
     offsets: &AOffsets,
-    strings: &AStrings,
     filter: &FilterExpr,
     indexes: &Archived<CardIndexes>,
+    mode: Mode,
+    prefer: Prefer,
     sort_col: SortCol,
     descending: bool,
     limit: usize,
     page_offset: usize,
 ) -> Option<(usize, Vec<(&'a AOracleCard, &'a APrinting)>)> {
-    let total = border_printing_total(filter, &indexes.border_printing)?;
+    if !is_printing_composable(filter) || !printing_compose_indexes_built(indexes) {
+        return None;
+    }
+    // Compose once, here (never in acquire) — that single build is the only synthesis, and it is paid
+    // only because this plan won. The total is the popcount in the query's result space; the page is
+    // the one grouped walk at the mode's granularity, using the composed bits as exact membership.
+    let pbits = compose_printing_bits(filter, indexes, offsets, printings, printings.len());
+    let total: usize = match mode {
+        Mode::Printing => pbits.iter().map(|w| w.count_ones() as usize).sum(),
+        Mode::Card => printing_bits_to_card_bits(&pbits, offsets, cards.len()).iter().map(|w| w.count_ones() as usize).sum(),
+        Mode::Artwork => {
+            let base = build_artwork_base(&indexes.artwork_groups);
+            let n_artworks = *base.last().expect("artwork_base has n_cards+1 entries") as usize;
+            printing_bits_to_artwork_bits(&pbits, printings, &indexes.printing_to_card, &base, n_artworks)
+                .iter()
+                .map(|w| w.count_ones() as usize)
+                .sum()
+        }
+    };
     if total == 0 || page_offset >= total {
         return Some((total, Vec::new()));
     }
@@ -4206,7 +4441,7 @@ fn printing_border_fastpath<'a>(
     if perm.len() != cards.len() {
         return None;
     }
-    Some((total, walk_printing_page(cards, printings, offsets, strings, filter, sort_col, descending, limit, page_offset, perm)))
+    Some((total, walk_grouped_page(mode, cards, printings, offsets, &pbits, prefer, sort_col, descending, limit, page_offset, perm)))
 }
 
 /// The physical plans the cost router (`run_query_routed`) chooses among. Each
@@ -4221,9 +4456,12 @@ enum PhysicalPlan {
     /// #695 bare-broad-range fast path under `unique=printing` (executor:
     /// `printing_range_fastpath`). Non-materializing.
     PrintingRangeScan,
-    /// #724 bare border leaf under `unique=printing`: total from the printing border plane's
-    /// `popcount`/postings, page from the same walk (`printing_border_fastpath`). Non-materializing.
-    PrintingPlaneScan,
+    /// #724 unified compose plan: a composable printing-space expr (border/rarity/legality, AND/OR)
+    /// under **any** distinct-on. Composes once in printing space, projects to the query's result space
+    /// (printing = none, card / artwork = existence bitmap), and pages with the one grouped walk
+    /// (`printing_compose_fastpath` → `walk_grouped_page`). Non-materializing (composes in the fast
+    /// path, only if it wins). Deep-offset popcount-skip is deferred ([#730]).
+    PrintingCompose,
     /// #634 Step 2 plane-bitmap popcount-skip order phase (`run_query_streamed_popcount`).
     PlanePopcountOrder,
     /// PR 2a card-space idea 2: a bare `usd` range under `unique=card`, answered as the same
@@ -4240,7 +4478,7 @@ impl PhysicalPlan {
     /// cheaper-fixed-cost plan. The router filters this by `applicable`.
     const ALL: [PhysicalPlan; 6] = [
         PhysicalPlan::PrintingRangeScan,
-        PhysicalPlan::PrintingPlaneScan,
+        PhysicalPlan::PrintingCompose,
         PhysicalPlan::PlanePopcountOrder,
         PhysicalPlan::CardRangePopcount,
         PhysicalPlan::StreamedSelect,
@@ -4268,9 +4506,8 @@ impl PhysicalPlan {
             PhysicalPlan::PrintingRangeScan => {
                 printing_range_scan_applicable(mode, plane, cards) && bare_range_bounds(filter, indexes).is_some()
             }
-            PhysicalPlan::PrintingPlaneScan => {
-                printing_plane_scan_applicable(mode, plane, cards)
-                    && border_printing_total(filter, &indexes.border_printing).is_some()
+            PhysicalPlan::PrintingCompose => {
+                printing_compose_applicable(filter, mode, cards, plane, sort_col, descending, indexes)
             }
             PhysicalPlan::PlanePopcountOrder => {
                 plane_popcount_order_applicable(filter, mode, cards, plane, sort_col, descending, indexes)
@@ -4284,13 +4521,13 @@ impl PhysicalPlan {
     }
 
     /// Whether the plan runs off the shared materialized prep (plane bitmap /
-    /// candidate list) — true for all but the printing bare-leaf fast paths
-    /// (`PrintingRangeScan`/`PrintingPlaneScan`), whose whole benefit is answering
-    /// *without* materializing. The router costs non-materializing plans from a
-    /// cheap estimate first (phase 1) and only materializes (phase 2) when a
-    /// materializing plan wins or the non-materializing one declines.
+    /// candidate list) — true for all but the printing-space fast paths
+    /// (`PrintingRangeScan`/`PrintingCompose`), whose whole benefit is answering from a cheap estimate
+    /// and composing/walking only if they win. The router costs non-materializing plans from a cheap
+    /// estimate first (phase 1) and only materializes (phase 2) when a materializing plan wins or the
+    /// non-materializing one declines.
     fn materializing(self) -> bool {
-        !matches!(self, PhysicalPlan::PrintingRangeScan | PhysicalPlan::PrintingPlaneScan)
+        !matches!(self, PhysicalPlan::PrintingRangeScan | PhysicalPlan::PrintingCompose)
     }
 }
 
@@ -4393,11 +4630,28 @@ fn printing_range_scan_applicable(mode: Mode, plane: Option<&PlaneExpr>, cards: 
     *PRINTING_RANGE_FASTPATH != 0 && matches!(mode, Mode::Printing) && plane.is_none() && !cards.is_empty()
 }
 
-/// `PrintingPlaneScan` structural eligibility (#724): `unique=printing`, no plane, non-empty store,
-/// flag on. The border-leaf check (`border_printing_total().is_some()`) is applied on top by the
-/// plan's `applicable` arm; `printing_border_fastpath` makes the final accept/decline.
-fn printing_plane_scan_applicable(mode: Mode, plane: Option<&PlaneExpr>, cards: &[AOracleCard]) -> bool {
-    *BORDER_PRINTING_PLANE != 0 && matches!(mode, Mode::Printing) && plane.is_none() && !cards.is_empty()
+/// `PrintingCompose` applicability (#724), all three distinct-ons: a composable printing-space `filter`
+/// (border/rarity/legality, `AND`/`OR`), the planes built, no folded plane, the forward sort permutation
+/// present, flag on. `plane.is_none()` is load-bearing: under `unique=card` a *bare* border/rarity is
+/// `compile_plane`-consumed into an existential plane (`plane.is_some()`) → the faster #634 card-plane
+/// path handles it, so this plan declines there; under `unique=printing`/`artwork` nothing folds to a
+/// plane, so it picks up bare leaves too. Only the forward permutation is needed — the unified grouped
+/// walk never uses the inverse (that was the popcount-skip walk's, deferred to [#730]).
+fn printing_compose_applicable(
+    filter: &FilterExpr,
+    _mode: Mode,
+    cards: &[AOracleCard],
+    plane: Option<&PlaneExpr>,
+    sort_col: SortCol,
+    descending: bool,
+    indexes: &Archived<CardIndexes>,
+) -> bool {
+    *PRINTING_COMPOSE != 0
+        && !cards.is_empty()
+        && plane.is_none()
+        && is_printing_composable(filter)
+        && printing_compose_indexes_built(indexes)
+        && indexes.sort_perms.get(sort_col, descending).is_some_and(|p| p.len() == cards.len())
 }
 
 /// `CardRangePopcount` needs `Mode::Card`, a **bare** range leaf as the whole filter — usd/cn/date,
@@ -4634,6 +4888,139 @@ fn exec_card_range_popcount<'a>(
     run_query_streamed_popcount(
         cards, printings, offsets, prefer, limit, page_offset, perm, inv_perm, card_bits, None, &indexes.planes, strings, Some(range_pbits),
     )
+}
+
+/// Prefix-sum the per-card distinct-artwork counts (`artwork_groups`) into artwork-space offsets: a
+/// card `c`'s distinct artworks are the contiguous global ids `[artwork_base[c], artwork_base[c+1])`,
+/// so global artwork id = `artwork_base[c] + artwork_group_id`. `artwork_base.last()` is `n_artworks`.
+/// Derived at query time from data already in the store — no stored global-id array (#724 PR 2b).
+fn build_artwork_base(artwork_groups: &Archived<Vec<u16>>) -> Vec<u32> {
+    let mut base = Vec::with_capacity(artwork_groups.len() + 1);
+    let mut acc = 0u32;
+    base.push(0);
+    for c in artwork_groups.iter() {
+        acc += u32::from(u16::from(*c));
+        base.push(acc);
+    }
+    base
+}
+
+/// Project composed printing bits up to **artwork** space: set the global artwork id
+/// (`artwork_base[card] + artwork_group_id`) of every matching printing. `popcount` of the result is
+/// the `unique=artwork` total — the distinct matching illustrations — replacing the O(candidates ×
+/// printings) count pass the general path pays.
+fn printing_bits_to_artwork_bits(
+    pbits: &[u64],
+    printings: &[APrinting],
+    printing_to_card: &AOffsets,
+    artwork_base: &[u32],
+    n_artworks: usize,
+) -> Vec<u64> {
+    let mut abits = vec![0u64; n_artworks.div_ceil(64)];
+    for (i, &word) in pbits.iter().enumerate() {
+        let mut w = word;
+        while w != 0 {
+            let pid = (((i as u32) << 6) | w.trailing_zeros()) as usize;
+            w &= w - 1;
+            let card = u32::from(printing_to_card[pid]) as usize;
+            let gid = u16::from(printings[pid].artwork_group_id) as usize;
+            let aid = artwork_base[card] as usize + gid;
+            abits[aid >> 6] |= 1u64 << (aid & 63);
+        }
+    }
+    abits
+}
+
+/// The #724 unified compose page walk (all three distinct-ons): walk the sort permutation from the
+/// front and, per card, collapse the matching (set) printings to the mode's **granularity** —
+/// `Printing` emits every set printing, `Card` one best-`prefer_score` representative for the card,
+/// `Artwork` one best-`prefer_score` representative per `artwork_group_id` (exactly the general path's
+/// Artwork semantics). Membership is the exact composed `pbits`, so there is no residual re-evaluation.
+/// The total is a separate `popcount` over the mode's result bitmap; this only builds the requested
+/// page. Forward walk (no popcount-skip) — deep-offset skip is the deferred [#730] optimization.
+#[allow(clippy::too_many_arguments)]
+fn walk_grouped_page<'a>(
+    mode: Mode,
+    cards: &'a [AOracleCard],
+    printings: &'a [APrinting],
+    offsets: &AOffsets,
+    pbits: &[u64],
+    prefer: Prefer,
+    sort_col: SortCol,
+    descending: bool,
+    limit: usize,
+    page_offset: usize,
+    perm: &Archived<Vec<u32>>,
+) -> Vec<(&'a AOracleCard, &'a APrinting)> {
+    let is_set = |pid: usize| pbits[pid >> 6] & (1u64 << (pid & 63)) != 0;
+    let cmp = |a: &Match, b: &Match| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2));
+    let mut page: Vec<(&AOracleCard, &APrinting)> = Vec::with_capacity(limit);
+    let mut group_best: Vec<Option<(u32, f64)>> = Vec::new(); // per group key: (best matching pid, its prefer score)
+    let mut touched: Vec<u16> = Vec::new();
+    let mut scratch: Vec<Match> = Vec::new();
+    let mut skip = page_offset;
+    for cid in perm.iter().map(|x| u32::from(*x)) {
+        let card = &cards[cid as usize];
+        let start = u32::from(offsets[cid as usize]) as usize;
+        let end = u32::from(offsets[cid as usize + 1]) as usize;
+        scratch.clear();
+        match mode {
+            // Printing: every set printing is its own row (no grouping).
+            Mode::Printing => {
+                for pid in start..end {
+                    if is_set(pid) {
+                        scratch.push((sort_key_bits(card, &printings[pid], sort_col, descending), cid, pid as u32));
+                    }
+                }
+            }
+            // Card / Artwork: one best-prefer representative per group — a single group for Card, one
+            // per `artwork_group_id` for Artwork.
+            Mode::Card | Mode::Artwork => {
+                touched.clear();
+                for pid in start..end {
+                    if !is_set(pid) {
+                        continue;
+                    }
+                    let gid = match mode {
+                        Mode::Artwork => u16::from(printings[pid].artwork_group_id) as usize,
+                        _ => 0, // Card: everything collapses into one group
+                    };
+                    if group_best.len() <= gid {
+                        group_best.resize(gid + 1, None);
+                    }
+                    let score = prefer_score(card, &printings[pid], prefer);
+                    match &group_best[gid] {
+                        None => {
+                            group_best[gid] = Some((pid as u32, score));
+                            touched.push(gid as u16);
+                        }
+                        Some((_, best)) if score > *best => group_best[gid] = Some((pid as u32, score)),
+                        _ => {}
+                    }
+                }
+                for &gid in &touched {
+                    let (bp, _) = group_best[gid as usize].take().unwrap(); // take: resets group_best for the next card
+                    scratch.push((sort_key_bits(card, &printings[bp as usize], sort_col, descending), cid, bp));
+                }
+            }
+        }
+        if scratch.is_empty() {
+            continue;
+        }
+        if skip >= scratch.len() {
+            skip -= scratch.len();
+            continue;
+        }
+        scratch.sort_unstable_by(cmp);
+        for m in scratch.iter().skip(skip) {
+            page.push((&cards[m.1 as usize], &printings[m.2 as usize]));
+            if page.len() == limit {
+                return page;
+            }
+        }
+        skip = 0;
+    }
+    page
 }
 
 /// P3 executor: streamed selection over the sort permutation. Caller guarantees
@@ -4886,7 +5273,8 @@ fn run_query_routed<'a>(
         residual_tier_ns100,
         limit: limit as u32,
         offset: page_offset as u32,
-        range_build_printings: 0, // CardRangePopcount overrides this in its acquire branch
+        synth_printings: 0,  // CardRangePopcount / PrintingCompose override this in their acquire branches
+        popcount_words: 0,   // PrintingCompose overrides this (result-space bitmap words)
     };
     // Features for the general candidate path (shared by the acquire branch and the
     // lazy-materialize dispatch). `matches`/`eval_domain` = candidate CARD count, the
@@ -4931,7 +5319,7 @@ fn run_query_routed<'a>(
         // dispatch DO re-verify the range per candidate, so they must be costed with its verify tier —
         // `0` would under-cost them and let a mis-cheap StreamedSelect beat the plan that actually wins.
         let mut feats = mk_feats(count, count, count, verify_cost_tier(filter));
-        feats.range_build_printings = slice_printings;
+        feats.synth_printings = slice_printings;
         (feats, Prep::RangeCardBits { card_bits, range_pbits })
     } else if PhysicalPlan::PrintingRangeScan.applicable(filter, mode, cards, plane, sort_col, descending, indexes) {
         // Bare range: exact k from the index (no scan). P3/P4 estimated unnarrowed
@@ -4939,11 +5327,41 @@ fn run_query_routed<'a>(
         let (idx, lo, hi) = bare_range_bounds(filter, indexes).expect("applicable ⇒ bare range");
         let k = (idx.partition_point(|p| u32::from(p.0) < hi) - idx.partition_point(|p| u32::from(p.0) < lo)) as u32;
         (mk_feats(k, n_cards, n_printings, verify_cost_tier(filter)), Prep::Range)
-    } else if PhysicalPlan::PrintingPlaneScan.applicable(filter, mode, cards, plane, sort_col, descending, indexes) {
-        // Bare border leaf: exact total from the #724 printing plane popcount / postings len (no
-        // count pass, no materialization). P3/P4 estimated unnarrowed, same as PrintingRangeScan.
-        let total = border_printing_total(filter, &indexes.border_printing).expect("applicable ⇒ border leaf") as u32;
-        (mk_feats(total, n_cards, n_printings, verify_cost_tier(filter)), Prep::Range)
+    } else if PhysicalPlan::PrintingCompose.applicable(filter, mode, cards, plane, sort_col, descending, indexes) {
+        // Composable printing-space expr, any distinct-on. Estimate the counts cheaply — the fast path
+        // composes once, only if this plan wins (never in acquire; a legality broadcast paid here and
+        // then discarded would be pure waste). `synth_printings` = broadcast down (legality) + projection
+        // up (card/artwork; 0 for printing). `popcount_words` = the result-space bitmap the total scans.
+        let (printing_matches, broadcast) = compose_printing_estimate(filter, indexes, offsets, n_printings as usize);
+        // `eval_domain`/`scan_units` here cost the *materializing alternatives* (StreamedSelect/
+        // GatheredScan) should this plan lose — so they must reflect the narrowed reality those plans
+        // see, not the unnarrowed universe. A composable filter narrows via its indices (#667 legality,
+        // border/rarity), so the alternatives iterate ~`matches` candidates; in card mode they also
+        // break at the first matching printing (`scan_units()` ⇒ `eval_domain`). Passing n_cards/
+        // n_printings instead over-costs them ~3-4× and spuriously wins broad-but-narrowable legality
+        // compounds for compose (measured: `format:X format:Y`/card regressed).
+        let (result_total, synth, popcount_words, eval_domain, scan_units) = match mode {
+            // printing: no projection; total popcount over the printing bitmap. The alternatives scan
+            // every printing (no early break), so the unnarrowed universe is the right estimate.
+            Mode::Printing => (printing_matches, broadcast, (n_printings as usize).div_ceil(64), n_cards as usize, n_printings as usize),
+            // card: project every matching printing up, popcount card bitmap. Alternatives narrow to
+            // ~matches candidates and break at the first match ⇒ eval_domain = scan_units = matches.
+            Mode::Card => {
+                let rt = printing_matches.min(n_cards as usize);
+                (rt, broadcast + printing_matches, (n_cards as usize).div_ceil(64), rt, rt)
+            }
+            // artwork: same projection; popcount the artwork bitmap (n_artworks ≤ n_printings — upper
+            // bound for the estimate). Alternatives group all printings per candidate (no early break),
+            // so scan_units is the matching printings under the ~matches candidate cards.
+            Mode::Artwork => {
+                let rt = printing_matches.min(n_cards as usize);
+                (printing_matches, broadcast + printing_matches, (n_printings as usize).div_ceil(64), rt, printing_matches)
+            }
+        };
+        let mut feats = mk_feats(result_total as u32, eval_domain as u32, scan_units as u32, verify_cost_tier(filter));
+        feats.synth_printings = synth as u32;
+        feats.popcount_words = popcount_words as u32;
+        (feats, Prep::Range)
     } else {
         let prep = prepare_candidates(cards, offsets, strings, filter, plane, mode, indexes);
         (candidate_feats(&prep, filter), Prep::Candidates(prep))
@@ -4985,16 +5403,16 @@ fn run_query_routed<'a>(
             p, cards, printings, offsets, strings, filter, prep, plane, mode, prefer, sort_col, descending, limit, page_offset, indexes,
         ),
         (plan, Prep::Range) => {
-            // A printing bare-leaf fast path walks if it won and its fastpath accepts. Otherwise (a
+            // A printing-space fast path walks if it won and its fastpath accepts. Otherwise (a
             // materializing plan won the estimate, or the fastpath declined — rare, since cost seldom
             // picks these when narrow) materialize now and run the best materializing plan on EXACT
-            // features. `Prep::Range` is shared by the range (#695) and border (#724) fast paths.
+            // features. `Prep::Range` is shared by the range (#695) and compose (#724) fast paths.
             let fast_page = match plan {
                 PhysicalPlan::PrintingRangeScan => {
                     printing_range_fastpath(cards, printings, offsets, strings, filter, indexes, sort_col, descending, limit, page_offset)
                 }
-                PhysicalPlan::PrintingPlaneScan => {
-                    printing_border_fastpath(cards, printings, offsets, strings, filter, indexes, sort_col, descending, limit, page_offset)
+                PhysicalPlan::PrintingCompose => {
+                    printing_compose_fastpath(cards, printings, offsets, filter, indexes, mode, prefer, sort_col, descending, limit, page_offset)
                 }
                 _ => None,
             };
@@ -5053,11 +5471,13 @@ fn run_query_with_plan<'a>(
             // Structural eligibility passed; the fastpath itself decides (None = declined).
             printing_range_fastpath(cards, printings, offsets, strings, filter, indexes, sort_col, descending, limit, page_offset)
         }
-        PhysicalPlan::PrintingPlaneScan => {
-            if !printing_plane_scan_applicable(mode, plane, cards) {
+        PhysicalPlan::PrintingCompose => {
+            if !printing_compose_applicable(filter, mode, cards, plane, sort_col, descending, indexes) {
                 return None;
             }
-            printing_border_fastpath(cards, printings, offsets, strings, filter, indexes, sort_col, descending, limit, page_offset)
+            // The fastpath composes, projects per mode, and walks — or declines (None) on a sparse
+            // total, exactly as under the router.
+            printing_compose_fastpath(cards, printings, offsets, filter, indexes, mode, prefer, sort_col, descending, limit, page_offset)
         }
         PhysicalPlan::PlanePopcountOrder => {
             if !plane_popcount_order_applicable(filter, mode, cards, plane, sort_col, descending, indexes) {
@@ -5497,7 +5917,7 @@ const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 /// catch (e.g. reordering same-size fields, changing an index type) — and on
 /// any FLAVOR_FP_FEATURES change: archived fingerprints are built with that
 /// table, so a new table reading old fingerprints breaks the superset test.
-const ARCHIVE_FORMAT_VERSION: u32 = 20260721;
+const ARCHIVE_FORMAT_VERSION: u32 = 20260722;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -5901,6 +6321,7 @@ impl QueryEngine {
             printing_to_card: build_printing_to_card(&offsets),
             planes:         build_bit_planes(&cards, &printings, &offsets, &strings),
             border_printing: build_border_printing_planes(&printings, &strings),
+            rarity_printing: build_rarity_printing_planes(&printings),
             name_bigrams:   build_name_bigram_index(&cards),
             legal_divergent: build_divergent_ids(&cards),
         };

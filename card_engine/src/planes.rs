@@ -175,6 +175,14 @@ pub(crate) const PLANE_COUNT: usize = PLANE_BORDER + BORDER_PLANES;
 /// them regardless. See docs/issues/00724-engine-printing-existential-planes.md.
 pub(crate) const BORDER_PRINTING_PLANE_VALUES: [&str; 3] = ["black", "borderless", "white"];
 
+/// #724: which rarity ints get a *printing-space* one-hot plane (bit per printing, exact). The four
+/// interior rarities (`common`=0, `uncommon`=1, `rare`=2, `mythic`=3, matching `rarity_text_to_int`)
+/// — all broad enough to earn a plane. The sparse tail (`special`=4, `bonus`=5) stays in postings,
+/// the density analogue of border's gold/yellow. Only the equality case (`r:rare`) is planed here;
+/// ordinal comparisons (`r>=rare`) still take the existing rarity path. Parallels
+/// `BORDER_PRINTING_PLANE_VALUES` — see docs/issues/00724-engine-printing-existential-planes.md.
+pub(crate) const RARITY_PRINTING_PLANE_INTS: [u8; RARITY_INTERIOR] = [0, 1, 2, 3];
+
 /// The observed [min,max] of whatever cards landed in one bucket plane,
 /// recomputed on every build/reload (never hardcoded from a one-time data
 /// snapshot — a future card outside today's observed range must still
@@ -469,6 +477,53 @@ pub(crate) fn build_border_printing_planes(printings: &[Printing], strings: &[St
     }
     let postings = postings.into_iter().map(|(v, ids)| (v.to_string(), ids)).collect();
     BorderPrintingPlanes { n_printings: n as u32, words, postings }
+}
+
+/// #724: printing-space rarity planes — bit per printing, **exact** (unlike #670's card-space
+/// *existential* rarity planes, whose card bit means "some printing has this rarity"). One one-hot
+/// plane per `RARITY_PRINTING_PLANE_INTS` entry (common/uncommon/rare/mythic), plane-major,
+/// `words_per_plane(n_printings)` each; printing `p`'s bit is set iff that printing's rarity int is
+/// the value. The sparse tail (special/bonus) lands in `postings`, keyed by int. Composed and
+/// projected exactly the same way as `BorderPrintingPlanes`.
+#[derive(Archive, Serialize, Deserialize, Default)]
+pub(crate) struct RarityPrintingPlanes {
+    pub(crate) n_printings: u32,
+    /// `RARITY_PRINTING_PLANE_INTS.len()` planes, plane-major: bit `p` of plane `k` is
+    /// `words[k * words_per_plane(n_printings) + p/64] >> (p%64) & 1`.
+    pub(crate) words: Vec<u64>,
+    /// Sparse rarity ints below the plane crossover (special=4/bonus=5) → ascending printing ids,
+    /// keyed by rarity int. Scattered into a bitmap at query time, same as border's postings.
+    pub(crate) postings: Vec<(u8, Vec<u32>)>,
+}
+
+/// Build the #724 printing-space rarity planes: one pass over printings, setting each interior
+/// rarity's bit and posting the sparse tail. Mirrors `build_border_printing_planes` (see its
+/// drift-assert rationale); rarity's four interior values are all far above the crossover.
+pub(crate) fn build_rarity_printing_planes(printings: &[Printing]) -> RarityPrintingPlanes {
+    let n = printings.len();
+    let wpp = words_per_plane(n);
+    let mut words = vec![0u64; RARITY_PRINTING_PLANE_INTS.len() * wpp];
+    let mut postings: std::collections::BTreeMap<u8, Vec<u32>> = std::collections::BTreeMap::new();
+    for (p, printing) in printings.iter().enumerate() {
+        let Some(r) = printing.card_rarity_int else { continue }; // null rarity contributes no bit
+        match RARITY_PRINTING_PLANE_INTS.iter().position(|&v| v == r) {
+            Some(k) => words[k * wpp + p / 64] |= 1u64 << (p % 64), // interior rarity → its one-hot plane
+            None => postings.entry(r).or_default().push(p as u32),  // special/bonus → postings (ascending p)
+        }
+    }
+    const PLANE_POSTINGS_CROSSOVER: usize = 3_000;
+    const DRIFT_CHECK_MIN_PRINTINGS: usize = 50_000;
+    if n >= DRIFT_CHECK_MIN_PRINTINGS {
+        for (k, int) in RARITY_PRINTING_PLANE_INTS.iter().enumerate() {
+            let popcount: usize = words[k * wpp..(k + 1) * wpp].iter().map(|w| w.count_ones() as usize).sum();
+            debug_assert!(
+                popcount == 0 || popcount >= PLANE_POSTINGS_CROSSOVER,
+                "rarity printing plane int {int} has {popcount} printings, below the ~{PLANE_POSTINGS_CROSSOVER} plane/postings crossover — reclassify to postings (#724)",
+            );
+        }
+    }
+    let postings = postings.into_iter().collect();
+    RarityPrintingPlanes { n_printings: n as u32, words, postings }
 }
 
 /// Ascending card ids with divergent legality (~556 of 31,508 in production —
