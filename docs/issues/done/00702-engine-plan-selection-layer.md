@@ -46,6 +46,12 @@ fast path that can't be added without re-reading the prior N−1.
 
 ## The key realization: routing on cheap estimates, not materialized counts
 
+> **What landed (see Status below):** this section is the original design aspiration.
+> The estimator shipped **unwired** — routing uses *exact* counts (a plane's popcount, a
+> range's `k`) where they are cheap and *materializes* (`prepare_candidates`) otherwise. An
+> O(1) estimate was deliberately not swapped in, to keep the cost model's inputs exact. The
+> "route on cheap estimates" vision here is a deferred step, not the mechanism that shipped.
+
 The reason today's decisions are staged (fast path 2 must return *before*
 candidate materialization — the general path handles that query correctly
 but pays an O(candidates) counts-buffer fill it skips, lib.rs ~4013) is that

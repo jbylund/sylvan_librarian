@@ -3,7 +3,7 @@ title: "We Replaced Our Query Planner's Decision Tree with a Cost Model, and It 
 date: 2027-03-02
 publishDate: 2027-03-02
 tags: ["rust", "query-engine", "performance", "planner"]
-summary: "We deleted the decision tree that picked execution plans and replaced it with argmin over per-plan cost estimates. On a 520-query survey it came out 0.996x — a hair slower. We shipped it anyway, because one cost rule is more extensible than four hand-disjoint preconditions, and a cost model can express an offset-by-selectivity crossover no fixed threshold can."
+summary: "We deleted the decision tree that picked execution plans and replaced it with argmin over a per-plan cost model fed exact counts. On a 520-query survey it came out 0.996x — a hair slower. We shipped it anyway, because one cost rule is more extensible than four hand-disjoint preconditions, and a cost model can express an offset-by-selectivity crossover no fixed threshold can."
 ---
 
 Our Rust card-search engine chose how to execute a query with a decision tree over four execution plans in `run_query`, each branch guarded by a hand-maintained conjunction of preconditions and tried in order.
@@ -35,11 +35,15 @@ Two of the branches both wanted "a sort permutation exists" but diverged on the 
 Nothing was broken.
 The problem was that the *next* plan you wanted to add would have to reason about its interaction with the previous three, and the one after that with four.
 
-## Routing on Estimates, Not Materialized Counts
+## Routing on Cheap Counts
 
 The reason the tree was staged is that its branches keyed off the *materialized* candidate count — you had to build the set before you could measure it.
-But the cardinality of most leaf predicates is available far more cheaply than the set itself: a postings list knows its `len()`, a range predicate's two `partition_point` searches already compute `k = end − start`, a plane is a popcount.
-If routing keys off a cheap estimate instead of a materialized count, every plan decision moves ahead of materialization, and the staging constraint that forced the tree dissolves.
+But for two of the plans the count is available far more cheaply than the set, and *exactly*: a bare range predicate's two `partition_point` searches already compute `k = end − start`, and a True-residual plane's match count is a `popcount` over its bitmap.
+For those queries the decision moves ahead of materialization and the staging constraint dissolves; for an un-countable text or regex residual, where no cheap count exists, the router materializes the candidate list (`prepare_candidates`) and routes on its real size.
+
+One thing this is deliberately *not*: the counts the cost model consumes are exact, not estimates.
+We built a cardinality estimator with fuzz-validated sound bounds — the intent was to route even un-countable residuals off a cheap guess — but left it unwired.
+An O(1) estimate would trade the model's honesty for a couple percent on queries that were about to materialize anyway.
 
 So the [`PhysicalPlan`](https://github.com/jbylund/sylvan_librarian/blob/bf6f788e212072f7e5d64e397213d7f32c0a344d/card_engine/src/lib.rs#L4082) enum owns its own knowledge — whether it's applicable, whether it materializes, and its cost — and [selection](https://github.com/jbylund/sylvan_librarian/blob/bf6f788e212072f7e5d64e397213d7f32c0a344d/card_engine/src/lib.rs#L4642) is a generic argmin, not a tree:
 
@@ -49,7 +53,7 @@ PhysicalPlan::ALL
     .min_by(|a, b| cost::plan_cost(a, feats).total_cmp(&cost::plan_cost(b, feats)))
 ```
 
-The whole [router](https://github.com/jbylund/sylvan_librarian/blob/bf6f788e212072f7e5d64e397213d7f32c0a344d/card_engine/src/lib.rs#L4620) is three linear steps: **acquire** the query's cheap count source (a plane's popcount, a range's index-`k`, or a narrowed candidate list), **choose** the argmin, **dispatch** the winner.
+The whole [router](https://github.com/jbylund/sylvan_librarian/blob/bf6f788e212072f7e5d64e397213d7f32c0a344d/card_engine/src/lib.rs#L4620) is three linear steps: **acquire** the count source (a plane's exact popcount, a range's exact `k`, or a materialized candidate list), **choose** the argmin, **dispatch** the winner.
 Adding a plan is declaring four things about it — applicable, materializing, cost, executor — not editing a decision tree.
 This is deliberately *not* a Selinger-style optimizer: the plan space is a fixed handful, enumerable by hand, with no join-order search.
 
@@ -75,7 +79,7 @@ End to end, against the tree it replaced (survey of 400 generated + 120 wild que
 
 The geomean across all 520 queries is **0.996×**: taken as a whole, the cost-based router is a hair *slower* than the tree.
 The p99 improvement is real but comes from a separate change in the same PR — a bounded top-k in the gather executor — not from routing.
-Routing itself is, if anything, a small tax: the argmin adds about 1% to the default-sorted (`edhrec`) queries that dominate the survey — the cost of computing estimates the tree never bothered with, visible in the p95 and geomean — and it buys nothing back, because on today's plans it makes the same choices the tree did.
+Routing itself is, if anything, a small tax: the argmin adds about 1% to the default-sorted (`edhrec`) queries that dominate the survey — the extra counting and cost arithmetic the tree never bothered with, visible in the p95 and geomean — and it buys nothing back, because on today's plans it makes the same choices the tree did.
 Replacing the decision tree was not a speed play, and the survey says so plainly: it made nothing faster, and by a rounding error it made the typical query about 1% slower.
 
 ## Why Ship a Tie
