@@ -21,6 +21,7 @@ border/rarity/legality under `AND`/`OR`; this is the generalization to *all* lea
 | plane read | border, rarity, legality | plane slice (legality: broadcast card `∃`-plane + divergent repair) | built (#724) |
 | range materialize | `usd`, `cn`, `date` | scatter the range index's in-range slice into a bitmap | **shipped** (#733) |
 | broadcast down | card-invariant `color`/`type`/`cmc` | broadcast the card plane to printing space; **no repair** (never diverges) | `broadcast_card_bits_to_printings` exists |
+| postings scatter | `set`, `watermark` | `TagIndex` postings scattered into a bitmap (or cleared from all-ones for `NOT` — cheap on *both* polarities since cost rides the small positive postings, not the complement) | proposed, [local-engine-tag-postings-compose.md](local-engine-tag-postings-compose.md) |
 | per-survivor residual | text (`name`/`oracle`/`flavor`), or any leaf | verify on the composed survivors, not as a bitmap | existing residual machinery |
 
 ## Materialize vs. verify — one cost axis, both exact

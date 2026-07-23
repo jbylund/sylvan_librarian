@@ -80,6 +80,36 @@ when broad, since there's no cheaper alternative once committed to the field). M
 choice for the new arm (force `true` unconditionally, not the caller's `broad_ok`) fixed it —
 `-cn<100` now matches or slightly beats the original baseline instead of regressing.
 
+## A fourth issue found via code review: `and_child_rank`'s guard was still too broad
+
+Bug 1's fix (delegate to the inner shape's own rank instead of hardcoding 2) used the same
+overly-broad shape check the rest of this PR had to tighten elsewhere: `Not(inner) if
+matches!(inner.as_ref(), NumericCmp{..}|DateCmp{..}|YearCmp{..})`. That fires for *any* field and
+*any* op, but the real dispatch in `narrow_rec`/`bare_range_bounds` only takes the cheap path for
+`PriceUsd`/`CollectorNumberInt` with the four ordered ops (`Lt`/`Le`/`Gt`/`Ge`), or `RarityInt` at any
+op (its own dedicated `-r:x` arm). Everything else — `-cmc:c`/`-power:c`/`-toughness:c` (card-space,
+any op) and negated equality on price/cn/date/year (`Ne` isn't a representable range) — actually
+resolves via the generic bit-complement arm, or declines outright. `and_child_rank` has no `indexes`
+parameter, so unlike `is_printing_composable`/`compose_printing_bits`/`compose_printing_estimate` (all
+of which call `bare_range_bounds(filter, indexes)` directly to double-check), it couldn't reuse that
+function and instead re-approximated its shape check — too loosely.
+
+Concretely: `-cmc:3` inside an `And` got ranked as if it were the cheap re-narrow path (tier 0, via
+the recursive `and_child_rank(inner)` call landing on `NumericCmp`'s "not price/cn" fallback branch),
+when execution actually runs the generic complement (a real but comparatively costly card-space
+bit-complement) — same rank/execution mismatch as bugs 1 and 2, just a *narrower* recurrence of bug 1
+that its own fix didn't fully close. Not a correctness bug (same reasoning as bugs 1 and 2: residual
+verification catches whatever the mismatch skips or wastes) — the `And` arm would still evaluate
+these children, just in the wrong order relative to their actual cost.
+
+Fixed by extracting `not_child_is_cheap_renarrow` — a small, `indexes`-free field/op classifier
+mirroring `bare_range_bounds`'s `Not` arm plus the pre-existing `-r:x` carve-out (verified this
+doesn't regress `-r:x`'s own ranking, which the old, broader guard got right only by accident) — and
+using it as the guard instead of the bare shape `matches!`. Caught in review, not by the differential
+test: rank/execution mismatches are a cost question, not a correctness one, so nothing about a wrong
+final answer would ever surface it. Added a direct unit test (`and_child_rank_matches_narrow_rec_dispatch`)
+asserting the ranks this class of bug can't be caught any other way.
+
 ## Measured (`scripts/bench_negated_range_narrowing.py`, 97,206-printing corpus, min ms)
 
 | query | unique | orderby | before | after | change |
@@ -109,7 +139,11 @@ before this fix — no longer appears in the top 10; no new slow patterns introd
   not something this feature needed to defeat), `is_printing_composable`/`compose_printing_bits`
   agreement, `-cn<100`, and the `-year:1993`/`-date>=c` cases (including confirming the `Ne`-shaped
   negation correctly declines rather than computing a wrong answer).
-- `cargo test` (debug + release): 129/129 passed.
+- New Rust test `and_child_rank_matches_narrow_rec_dispatch` (bug 4): directly asserts the rank
+  values for `-usd<c` (matches its un-negated form), `-usd:c`/`-cmc:c` (must fall to the generic
+  tier, not the cheap one), and `-r:x` (must keep its pre-existing cheap rank at any op) — the only
+  way to cover a rank/execution mismatch, since it can't be observed through a correctness check.
+- `cargo test` (debug + release): 131/131 passed.
 - `pytest api/tests/test_engine_property.py api/tests/test_engine_unit.py`: 158/158 passed.
 - `cargo clippy`: unchanged from baseline (42 warnings).
 

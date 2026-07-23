@@ -143,7 +143,8 @@ ensure_ruff: ensure_uv
 
 ensure_uv:
 	@python -m uv --version > /dev/null || \
-	python -m pip install uv
+	python -m pip install uv || \
+	uv pip install --python "$$(command -v python)" uv
 
 lint: ruff_lint prettier_lint # @doc lint all python files
 	true

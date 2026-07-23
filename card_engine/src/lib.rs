@@ -2804,6 +2804,36 @@ fn narrow_candidates(
 /// real traffic argues for moving it.
 static AND_SKIP_THRESHOLD: LazyLock<usize> = LazyLock::new(|| guard_env("CARD_ENGINE_AND_SKIP_THRESHOLD", 2_048));
 
+/// Whether `narrow_rec` resolves `Not(inner)` via a fresh, cheap re-narrow (`-r:x`'s dedicated arm,
+/// or `bare_range_bounds`'s `Not` handling for `-usd<c`/`-cn<c`/`-date`/`-year`) rather than falling
+/// through to the generic bit-complement arm (or, for `Eq`/`Ne`, declining outright). `and_child_rank`
+/// has no `indexes` parameter, so — unlike `is_printing_composable`/`compose_printing_bits`/
+/// `compose_printing_estimate`, which all call `bare_range_bounds(filter, indexes)` directly to
+/// double-check — this reimplements the same field/op classification without an index lookup: the
+/// eligibility question ("is this field printing-range-indexed, is this op one of the four ordered
+/// ones") never actually depends on the runtime `indexes` value, only `resolve_numeric_range_leaf`'s
+/// *use* of it (fetching the index reference) does. Must stay in sync with `bare_range_bounds`'s
+/// `Not` arm and `narrow_rec`'s `-r:x` arm — a field/op this says yes to but either of those declines
+/// on reintroduces the same rank/execution mismatch this replaces.
+fn not_child_is_cheap_renarrow(f: &FilterExpr) -> bool {
+    let ordered = |op: CmpOp| matches!(op, CmpOp::Lt | CmpOp::Le | CmpOp::Gt | CmpOp::Ge);
+    let is_range_field = |e: &NumExpr| matches!(e, NumExpr::Field(NumField::PriceUsd | NumField::CollectorNumberInt));
+    match f {
+        // `-r:x`: rarity's own dedicated arm re-narrows for *any* op (`narrow_rarity` isn't limited
+        // to the four ordered ones the printing-range path needs — see that arm's doc).
+        FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), .. }
+        | FilterExpr::NumericCmp { rhs: NumExpr::Field(NumField::RarityInt), .. } => true,
+        // `-usd<c` / `-cn<c`: only the four ordered ops reduce (`Eq`'s negation, `Ne`, isn't a single
+        // range — see `bare_range_bounds`'s doc); only price/collector-number are printing-range-
+        // indexed (cmc/power/toughness are card-space and fall through to the generic complement,
+        // which is a different, correctly-rank-2 cost shape).
+        FilterExpr::NumericCmp { lhs, op, rhs } => ordered(*op) && (is_range_field(lhs) || is_range_field(rhs)),
+        // `-date>c` / `-year>=c`: same ordered-ops-only reduction, no field question (there's only one).
+        FilterExpr::DateCmp { op, .. } | FilterExpr::YearCmp { op, .. } => ordered(*op),
+        _ => false,
+    }
+}
+
 /// Evaluation-cost rank for And children: cheap sources first (postings,
 /// planes, card numerics, trigram lookups), printing-space ranges second
 /// (their broad form pays an O(k) scatter), complements last (broad by
@@ -2817,10 +2847,13 @@ fn and_child_rank(f: &FilterExpr) -> u8 {
         // these cheap shapes was wrongly deprioritized and skipped by the And early-stop as soon as
         // a sibling child had already narrowed — silently losing the negated child's own narrowing,
         // not a correctness bug (the driver's residual verification still catches it) but a real,
-        // avoidable cost regression for `-usd<c` mixed with any other And child).
-        FilterExpr::Not(inner) if matches!(inner.as_ref(), FilterExpr::NumericCmp { .. } | FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. }) => {
-            and_child_rank(inner)
-        }
+        // avoidable cost regression for `-usd<c` mixed with any other And child). Guarded on
+        // `not_child_is_cheap_renarrow` rather than the broader `NumericCmp{..}|DateCmp{..}|YearCmp{..}`
+        // shape check this replaces: that broader check fired for e.g. `-cmc:3` or `-usd:5` (negated
+        // equality) too, which `narrow_rec` actually resolves via the generic complement (or declines
+        // outright for `Eq`/`Ne`) — a rank/execution mismatch, same class of bug as the two above it,
+        // caught in review rather than by the differential test.
+        FilterExpr::Not(inner) if not_child_is_cheap_renarrow(inner) => and_child_rank(inner),
         FilterExpr::Not(_) => 2,
         // Regex trigram-narrow (#734 step 3) is second-tier: its literal factor may be broad (`flying`),
         // so pay for it only after cheap plane/posting sources — the And early-stop then skips it when a

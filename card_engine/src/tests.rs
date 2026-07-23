@@ -1,5 +1,5 @@
 use super::{
-    assign_name_ranks,
+    and_child_rank, assign_name_ranks,
     build_numeric_index, build_oracle_text_index, build_tag_index, build_trigram_index,
     build_rarity_index, build_flavor_index, build_thresholded_tag_index, build_sort_permutations,
     assign_artwork_groups, build_bit_planes, build_border_printing_planes, build_rarity_printing_planes, build_divergent_ids, build_name_bigram_index, build_printing_to_card, flavor_fingerprint, flavor_match_sets,
@@ -5662,6 +5662,38 @@ fn negated_range_narrowing() {
         Some(Candidates::Printings(v)) => assert_eq!(v, vec![0]),
         other => panic!("expected tight printing narrowing, got {other:?}"),
     }
+}
+
+#[test]
+fn and_child_rank_matches_narrow_rec_dispatch() {
+    // Review catch (not caught by the differential test: rank/execution mismatches are a cost
+    // question, not a correctness one, so they can't surface as a wrong final answer). Each case
+    // here mirrors a `narrow_rec`/`bare_range_bounds` dispatch decision `and_child_rank` has no
+    // `indexes` to double-check directly, per `not_child_is_cheap_renarrow`'s doc.
+    let usd = |op: CmpOp, v: f64| FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op, rhs: NumExpr::Const(v) };
+    let cmc = |op: CmpOp, v: f64| FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Cmc), op, rhs: NumExpr::Const(v) };
+    let rarity = |op: CmpOp, v: f64| FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), op, rhs: NumExpr::Const(v) };
+
+    // -usd<c: reduces to usd>=c via bare_range_bounds's Not handling -- same cheap tier (1) as its
+    // un-negated form, not the generic complement's rank 2.
+    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(usd(CmpOp::Lt, 50.0)))), and_child_rank(&usd(CmpOp::Lt, 50.0)));
+    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(usd(CmpOp::Lt, 50.0)))), 1);
+
+    // -usd:c (negated equality): Ne isn't a representable range, so bare_range_bounds declines and
+    // narrow_rec falls through to the generic Not-arm (which itself declines via tight_narrow_space,
+    // per docs/issues/local-engine-negated-range-narrowing.md) -- must NOT get the cheap-tier rank.
+    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(usd(CmpOp::Eq, 5.0)))), 2);
+
+    // -cmc:c (any op): cmc/power/toughness aren't printing-range-indexed, so bare_range_bounds never
+    // matches this field -- narrow_rec falls through to the generic bit-complement arm (tight in card
+    // space, unrelated to this feature), which is the same cost shape as any other Not-complement.
+    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(cmc(CmpOp::Lt, 3.0)))), 2);
+    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(cmc(CmpOp::Eq, 3.0)))), 2);
+
+    // -r:x (any op): rarity's own dedicated narrow_rec arm re-narrows regardless of op -- must keep
+    // its pre-existing cheap-tier rank (0), matching the un-negated bare rarity comparison's rank.
+    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(rarity(CmpOp::Eq, 2.0)))), and_child_rank(&rarity(CmpOp::Eq, 2.0)));
+    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(rarity(CmpOp::Eq, 2.0)))), 0);
 }
 
 // ─── Bitplanes (#630) ─────────────────────────────────────────────────────────

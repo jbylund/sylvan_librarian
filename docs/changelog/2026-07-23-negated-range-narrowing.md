@@ -23,12 +23,26 @@ to a full scan (regressing 0.545ms → 0.661ms) because the new arm passed the c
 through, unlike the pre-existing generic Not-arm, which always forces `broad_ok: true` for its inner
 check. Matching that choice fixed it.
 
+A fourth issue found via code review, another cost-only mismatch: bug 1's fix for `and_child_rank`
+reused the same overly-broad shape check (`Not(inner)` where `inner` merely *looks like* a
+`NumericCmp`/`DateCmp`/`YearCmp`, regardless of field or op) rather than the actual dispatch condition
+(`PriceUsd`/`CollectorNumberInt` with the four ordered ops, or `RarityInt` at any op) —
+`and_child_rank` has no `indexes` to call `bare_range_bounds` directly and double-check the way the
+other three consumers do. `-cmc:3` and negated-equality forms (`-usd:5`, `Ne` isn't a representable
+range) were getting ranked as the cheap re-narrow tier when they actually run the generic
+bit-complement or decline outright — never a wrong answer, just eager evaluation in the wrong order.
+Fixed with a small `indexes`-free classifier (`not_child_is_cheap_renarrow`) mirroring the real
+dispatch, verified not to regress the pre-existing `-r:x` ranking, plus a direct unit test asserting
+the rank values themselves (this class of bug can't be caught any other way — it's invisible to
+correctness checks).
+
 Measured (97,206-printing corpus): `-usd<0.25 usd<5` (the survey's #1 slowest query before this fix)
 0.901ms → 0.165ms (edhrec, 5.5×), 0.933ms → 0.353ms (rarity, 2.6×); `-usd<50` 0.896ms → 0.080ms
 (11.2×); `-cn<100` back to baseline after the `broad_ok` fix. `total` parity held everywhere; broad
 survey shows the motivating query no longer in the top 10 slowest, no new regressions.
 
-New Rust test `negated_range_narrowing`. `cargo test` (debug + release) 129/129;
-`test_engine_property.py` + `test_engine_unit.py` 158/158; clippy unchanged from baseline.
+New Rust tests `negated_range_narrowing` and `and_child_rank_matches_narrow_rec_dispatch`. `cargo
+test` (debug + release) 131/131; `test_engine_property.py` + `test_engine_unit.py` 158/158; clippy
+unchanged from baseline.
 
 Design doc: `docs/issues/local-engine-negated-range-narrowing.md`.
