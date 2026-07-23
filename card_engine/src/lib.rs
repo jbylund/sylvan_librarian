@@ -2263,6 +2263,7 @@ struct CardIndexes {
     artists:        ArtistIndex,     // printing space (CSR by artist vocab id)
     flavor:         FlavorIndex,     // printing space (CSR by dense flavor text id)
     set_codes:      TagIndex,        // printing space
+    watermarks:     TagIndex,        // printing space
     released_at:    PrintingRangeIndex,       // printing space
     price_usd:      PrintingRangeIndex,       // printing space (integer cents, already order-preserving)
     collector_number: PrintingRangeIndex,     // printing space (extracted int)
@@ -2299,6 +2300,7 @@ impl Default for CardIndexes {
             artists:        ArtistIndex::default(),
             flavor:         FlavorIndex::default(),
             set_codes:      HashMap::new(),
+            watermarks:     HashMap::new(),
             released_at:    Vec::new(),
             price_usd:      Vec::new(),
             collector_number: Vec::new(),
@@ -3238,6 +3240,17 @@ fn narrow_rec(
             // be None, but unlike tags the index covers every non-empty code.
             Narrowed::tight(Candidates::Printings(
                 indexes.set_codes.get(value.as_str()).map_or_else(Vec::new, |v| v.iter().map(|x| u32::from(*x)).collect()),
+            ))
+        }
+
+        // watermark: (93% null, 67 distinct values, largest ~0.8% of printings —
+        // sparse enough that postings is the only representation that makes
+        // sense; see docs/issues/done/local-engine-watermark-postings.md). A value
+        // absent from the index appears on no printing, same empty-is-exact
+        // reasoning as SetCode above.
+        FilterExpr::TextExact { field: TextField::Watermark, op: CmpOp::Eq, value } => {
+            Narrowed::tight(Candidates::Printings(
+                indexes.watermarks.get(value.as_str()).map_or_else(Vec::new, |v| v.iter().map(|x| u32::from(*x)).collect()),
             ))
         }
 
@@ -6075,7 +6088,11 @@ const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 /// catch (e.g. reordering same-size fields, changing an index type) — and on
 /// any FLAVOR_FP_FEATURES change: archived fingerprints are built with that
 /// table, so a new table reading old fingerprints breaks the superset test.
-const ARCHIVE_FORMAT_VERSION: u32 = 20260723;
+// 20260724, not 20260723: #737 already used today's date for its own archive
+// change (columnar artwork_group_id) earlier today, so this bump (adding
+// CardIndexes.watermarks) needs a distinct value to invalidate stores built
+// under that layout — see ARCHIVE_FORMAT_VERSION's doc above.
+const ARCHIVE_FORMAT_VERSION: u32 = 20260724;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -6467,6 +6484,16 @@ impl QueryEngine {
                     let code = p.card_set_code.as_str();
                     if !code.is_empty() {
                         idx.entry(code.to_string()).or_default().push(i as u32);
+                    }
+                }
+                idx
+            },
+            watermarks:     {
+                let mut idx: TagIndex = HashMap::new();
+                for (i, p) in printings.iter().enumerate() {
+                    if p.card_watermark_id != NONE_STR {
+                        let wm = strings[p.card_watermark_id as usize].as_str();
+                        idx.entry(wm.to_string()).or_default().push(i as u32);
                     }
                 }
                 idx
