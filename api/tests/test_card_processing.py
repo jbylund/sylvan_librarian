@@ -15,7 +15,7 @@ _PROJECT_ROOT = pathlib.Path(__file__).parent.parent.parent
 _SAMPLE_DATA_DIR = _PROJECT_ROOT / "docs" / "sample_data"
 
 
-def create_test_card(  # noqa: PLR0913
+def create_test_card(  # noqa: PLR0913, PLR0917
     card_id: str | None = None,
     name: str = "Test Card",
     legalities: dict | None = None,

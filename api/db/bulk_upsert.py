@@ -101,7 +101,7 @@ def _dedupe_rows(rows: list[dict[str, Any]], key_cols: list[str]) -> list[dict[s
     return list(unique.values())
 
 
-def bulk_upsert(  # noqa: PLR0913
+def bulk_upsert(  # noqa: PLR0913, PLR0917
     conn: psycopg.Connection,
     table: str,
     rows: list[dict[str, Any]],

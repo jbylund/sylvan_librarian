@@ -21,7 +21,7 @@ from api.enums import ResponseShape
 from api.settings import settings
 
 
-def create_test_card(  # noqa: PLR0913
+def create_test_card(  # noqa: PLR0913, PLR0917
     card_id: str | None = None,
     name: str = "Test Card",
     legalities: dict | None = None,

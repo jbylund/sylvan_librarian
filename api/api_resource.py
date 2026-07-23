@@ -1320,7 +1320,7 @@ class APIResource:
                     timer=timer,
                     fields=resolved_fields,
                 )
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.warning("Engine query failed for %r, falling back to SQL: %s", query, e, exc_info=True)
             else:
                 if settings.enable_cache:
