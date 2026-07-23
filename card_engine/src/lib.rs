@@ -2269,6 +2269,7 @@ struct CardIndexes {
     sort_perms:     SortPermutations,          // card space (streamed selection)
     artwork_groups: Vec<u16>,                  // card space: distinct illustration groups
     artwork_group_col: Vec<u16>,               // printing space: pid -> artwork_group_id (columnar; lets the gather skip read gid without touching the wide struct)
+    max_artwork_groups: u16,                   // max distinct artwork groups of any single card; group_best is pre-sized to this so the hot loop needs no bounds/resize check
     // printing space: printing_id -> card_id, direct lookup. Replaces a
     // partition_point search on `offsets` in cards_of_printings' hot paths —
     // see docs/issues/00690-engine-direct-projection-arrays.md.
@@ -2304,6 +2305,7 @@ impl Default for CardIndexes {
             sort_perms:     SortPermutations::default(),
             artwork_groups: Vec::new(),
             artwork_group_col: Vec::new(),
+            max_artwork_groups: 0,
             printing_to_card: Vec::new(),
             planes:         BitPlanes::default(),
             border_printing: BorderPrintingPlanes::default(),
@@ -3920,11 +3922,10 @@ fn push_card_matches(
                 // struct read) again, and no score comparison is needed (first qualifying wins).
                 for pid in start..end {
                     // Read gid from the columnar side array, not the wide struct: repped-group
-                    // printings (the majority) then never touch the struct at all.
+                    // printings (the majority) then never touch the struct at all. `group_best` is
+                    // pre-sized by the caller to max_artwork_groups, so no per-printing resize check.
                     let gid = u16::from(artwork_group_col[pid]) as usize;
-                    if group_best.len() <= gid {
-                        group_best.resize(gid + 1, None);
-                    }
+                    debug_assert!(gid < group_best.len(), "group_best must be pre-sized to max_artwork_groups");
                     if group_best[gid].is_some() {
                         continue;
                     }
@@ -3940,9 +3941,7 @@ fn push_card_matches(
                     let p = &printings[pid];
                     if !all_match && !FilterExpr::residual_matches(card, p, strings, residual, residual_is_or) { continue; }
                     let gid = u16::from(p.artwork_group_id) as usize;
-                    if group_best.len() <= gid {
-                        group_best.resize(gid + 1, None);
-                    }
+                    debug_assert!(gid < group_best.len(), "group_best must be pre-sized to max_artwork_groups");
                     let score = prefer_score(card, p, prefer);
                     match &group_best[gid] {
                         None => {
@@ -4592,7 +4591,7 @@ fn printing_compose_fastpath<'a>(
     if perm.len() != cards.len() {
         return None;
     }
-    Some((total, walk_grouped_page(mode, cards, printings, offsets, &pbits, prefer, sort_col, descending, limit, page_offset, perm)))
+    Some((total, walk_grouped_page(mode, cards, printings, offsets, &pbits, prefer, sort_col, descending, limit, page_offset, perm, u16::from(indexes.max_artwork_groups))))
 }
 
 /// The physical plans the cost router (`run_query_routed`) chooses among. Each
@@ -5104,11 +5103,15 @@ fn walk_grouped_page<'a>(
     limit: usize,
     page_offset: usize,
     perm: &Archived<Vec<u32>>,
+    max_artwork_groups: u16,
 ) -> Vec<(&'a AOracleCard, &'a APrinting)> {
     let is_set = |pid: usize| pbits[pid >> 6] & (1u64 << (pid & 63)) != 0;
     let cmp = |a: &Match, b: &Match| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2));
     let mut page: Vec<(&AOracleCard, &APrinting)> = Vec::with_capacity(limit);
-    let mut group_best: Vec<Option<(u32, f64)>> = Vec::new(); // per group key: (best matching pid, its prefer score)
+    // per group key: (best matching pid, its prefer score). Pre-sized to max_artwork_groups so the
+    // grouping loop needs no per-printing resize check (Card mode collapses to index 0).
+    let mut group_best: Vec<Option<(u32, f64)>> =
+        if matches!(mode, Mode::Card | Mode::Artwork) { vec![None; usize::from(max_artwork_groups)] } else { Vec::new() };
     let mut touched: Vec<u16> = Vec::new();
     let mut scratch: Vec<Match> = Vec::new();
     let mut skip = page_offset;
@@ -5138,9 +5141,7 @@ fn walk_grouped_page<'a>(
                         Mode::Artwork => u16::from(printings[pid].artwork_group_id) as usize,
                         _ => 0, // Card: everything collapses into one group
                     };
-                    if group_best.len() <= gid {
-                        group_best.resize(gid + 1, None);
-                    }
+                    debug_assert!(gid < group_best.len(), "group_best must be pre-sized to max_artwork_groups");
                     let score = prefer_score(card, &printings[pid], prefer);
                     match &group_best[gid] {
                         None => {
@@ -5203,7 +5204,7 @@ fn exec_streamed_select<'a>(
     };
     run_query_streamed(
         cards, printings, offsets, strings, filter, prep.all_match_known, mode, prefer, sort_col, descending, limit,
-        page_offset, perm, card_ids, &indexes.artwork_groups, &indexes.artwork_group_col, existential_plane,
+        page_offset, perm, card_ids, &indexes.artwork_groups, &indexes.artwork_group_col, u16::from(indexes.max_artwork_groups), existential_plane,
     )
 }
 
@@ -5239,8 +5240,10 @@ fn exec_gathered_scan<'a>(
     // at ~k via prune + running cutoff (see GatherSelect) rather than gathering every
     // match. `total` counts every match; the page is the k smallest.
     let mut sel = GatherSelect::new(page_offset, limit);
-    // artwork-mode scratch, reused per card (#629: group-id-indexed, not illustration_id-keyed)
-    let mut group_best: Vec<Option<(u32, f64)>> = Vec::new();
+    // artwork-mode scratch, reused per card (#629: group-id-indexed, not illustration_id-keyed).
+    // Pre-sized to max_artwork_groups so the grouping loop needs no per-printing resize check.
+    let mut group_best: Vec<Option<(u32, f64)>> =
+        if matches!(mode, Mode::Artwork) { vec![None; usize::from(u16::from(indexes.max_artwork_groups))] } else { Vec::new() };
     let mut touched: Vec<u16> = Vec::new();
     // card_pass residual: the top-level children still printing-dependent for
     // the current card (reused buffer; see FilterExpr::card_pass).
@@ -5822,6 +5825,7 @@ fn run_query_streamed<'a>(
     card_ids: Box<dyn Iterator<Item = u32> + '_>,
     artwork_groups: &Archived<Vec<u16>>,
     artwork_group_col: &Archived<Vec<u16>>,
+    max_artwork_groups: u16,
     existential_plane: Option<(&PlaneExpr, &Archived<BitPlanes>)>,
 ) -> (usize, Vec<(&'a AOracleCard, &'a APrinting)>) {
     let mut residual: Vec<&FilterExpr> = Vec::new();
@@ -5878,8 +5882,10 @@ fn run_query_streamed<'a>(
         return (total, Vec::new());
     }
 
-    // artwork-mode emission scratch (#629), reused across cards below
-    let mut group_best: Vec<Option<(u32, f64)>> = Vec::new();
+    // artwork-mode emission scratch (#629), reused across cards below. Pre-sized to
+    // max_artwork_groups so the grouping loop needs no per-printing resize check.
+    let mut group_best: Vec<Option<(u32, f64)>> =
+        if matches!(mode, Mode::Artwork) { vec![None; usize::from(max_artwork_groups)] } else { Vec::new() };
     let mut touched: Vec<u16> = Vec::new();
     let cmp = |a: &Match, b: &Match| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2));
 
@@ -6463,6 +6469,7 @@ impl QueryEngine {
             price_usd:      build_range_index(&printings, |p| p.price_usd),
             collector_number: build_range_index(&printings, |p| p.collector_number_int.map(u32::from)),
             sort_perms:     build_sort_permutations(&cards, &printings, &offsets),
+            max_artwork_groups: artwork_group_counts.iter().copied().max().unwrap_or(0),
             artwork_groups: artwork_group_counts,
             // Columnar copy of each printing's assigned artwork_group_id, derived here — the single
             // production spot where assign_artwork_groups (above) has just filled it. Archived with

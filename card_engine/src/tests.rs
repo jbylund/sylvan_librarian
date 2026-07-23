@@ -256,6 +256,7 @@ fn store_of(cards: Vec<OracleCard>, printing_counts: &[usize], vocab: VocabInter
         name_bigrams: build_name_bigram_index(&cards),
         legal_divergent: build_divergent_ids(&cards),
         sort_perms: build_sort_permutations(&cards, &printings, &offsets),
+        max_artwork_groups: artwork_groups.iter().copied().max().unwrap_or(0),
         artwork_groups,
         artwork_group_col: printings.iter().map(|p| p.artwork_group_id).collect(),
         printing_to_card: build_printing_to_card(&offsets),
@@ -281,6 +282,7 @@ fn store_of(cards: Vec<OracleCard>, printing_counts: &[usize], vocab: VocabInter
 /// single production build spot in `reload_commit`. Returns the per-card counts (for asserts).
 fn reassign_artwork_grouping(data: &mut CardData) -> Vec<u16> {
     let counts = assign_artwork_groups(&mut data.printings, &data.offsets);
+    data.indexes.max_artwork_groups = counts.iter().copied().max().unwrap_or(0);
     data.indexes.artwork_groups = counts.clone();
     data.indexes.artwork_group_col = data.printings.iter().map(|p| p.artwork_group_id).collect();
     counts
@@ -4528,6 +4530,7 @@ fn bench_checked_vs_unchecked_access() {
         price_usd:      Vec::new(),
         collector_number: Vec::new(),
         sort_perms:     build_sort_permutations(&cards, &printings, &offsets),
+        max_artwork_groups: artwork_groups.iter().copied().max().unwrap_or(0),
         artwork_groups,
         artwork_group_col: printings.iter().map(|p| p.artwork_group_id).collect(),
         printing_to_card: build_printing_to_card(&offsets),
@@ -8200,6 +8203,7 @@ fn range_compose_kernel_costs() {
             let page = super::walk_grouped_page(
                 super::Mode::Card, &archived.cards, &archived.printings, offsets, &pbits,
                 super::Prefer::Default, super::SortCol::EdhrecRank, false, LIMIT, 0, perm,
+                u16::from(archived.indexes.max_artwork_groups),
             );
             page.len() as u64
         });
