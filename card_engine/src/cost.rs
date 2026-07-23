@@ -105,6 +105,13 @@ pub(crate) struct PlanFeatures {
     /// that keeps the popcount term honest across distinct-ons: `n_printings/64` (printing),
     /// `n_cards/64` (card), `n_artworks/64` (artwork). Set by `PrintingCompose`; `0` elsewhere.
     pub popcount_words: u32,
+    /// Whether `PrintingCompose` will page via the real permutation walk (`true`) or the
+    /// permutation-free bounded-gather fallback (`false`) — decided by whether `orderby` has a
+    /// card-space permutation (`rarity`/`usd` don't; see
+    /// `docs/issues/local-engine-compose-permutation-fallback.md`). The two strategies have
+    /// different cost shapes (offset-dependent walk vs. visit-every-match gather), so the formula
+    /// branches on this rather than assuming the walk. Ignored by every other plan.
+    pub compose_has_perm: bool,
 }
 
 // ─── P1: PrintingRangeScan ──────────────────────────────────────────────────
@@ -261,15 +268,31 @@ pub(crate) fn plan_cost(plan: PhysicalPlan, f: &PlanFeatures) -> f64 {
             printings_walked * RANGE_WALK_STEP_NS  // forward-perm walk to fill the page
                 + RANGE_FIXED_COST_NS              // per-query setup
         }
-        // #724 unified compose, any distinct-on. One term per operation it performs:
+        // #724 unified compose, any distinct-on. One term per build operation, plus a paging term
+        // that depends on which strategy `printing_compose_fastpath` will actually use (see
+        // `compose_has_perm`'s doc) — the permutation walk and the permutation-free gather fallback
+        // have different cost shapes, so this must not just assume the walk.
         PhysicalPlan::PrintingCompose => {
-            f64::from(f.broadcast_printings) * LINEAR_PASS_PER_PRINTING_NS  // legality broadcast-down into the printing bitmap (border/rarity read a plane → 0)
+            let build = f64::from(f.broadcast_printings) * LINEAR_PASS_PER_PRINTING_NS  // legality broadcast-down into the printing bitmap (border/rarity read a plane → 0)
                 + f64::from(f.scatter_printings) * RANGE_SCATTER_PER_PRINTING_NS  // range-slice scatter into the printing bitmap (cheap: no card cursor)
                 + f64::from(f.project_printings) * LINEAR_PASS_PER_PRINTING_NS  // second pass: project printing→card/artwork (0 for printing mode) — the pass CardRangePopcount fuses away
-                + f64::from(f.popcount_words) * PLANE_POPCOUNT_PER_WORD_NS  // popcount the result-space bitmap for the total (printing/card/artwork words)
-                + printings_walked * RANGE_WALK_STEP_NS  // forward grouped walk to fill the page
-                + limit * PLANE_POPCOUNT_EMIT_PER_CARD_NS  // emit one page of rows
-                + RANGE_FIXED_COST_NS  // per-query setup
+                + f64::from(f.popcount_words) * PLANE_POPCOUNT_PER_WORD_NS; // popcount the result-space bitmap for the total (printing/card/artwork words)
+            let page = if f.compose_has_perm {
+                printings_walked * RANGE_WALK_STEP_NS  // forward grouped walk to fill the page
+                    + limit * PLANE_POPCOUNT_EMIT_PER_CARD_NS  // emit one page of rows
+            } else {
+                // gather_composed_page: visits every candidate (eval_domain, same rate GatheredScan's
+                // own permutation-free walk pays per card), tests `pbits` membership per printing
+                // (scan_units — a cheap bit test, not a real residual scan, so the cheap
+                // RANGE_SCATTER_PER_PRINTING_NS rate applies, not GATHER_SCAN_PER_ROW_NS + tier_ns),
+                // and pushes each surviving match into the bounded GatherSelect accumulator (matches,
+                // same per-match rate GatheredScan pays for the same operation). Offset-independent —
+                // unlike the walk above, it costs the same regardless of how deep the page is.
+                eval_domain * GATHER_CARD_PASS_NS
+                    + scan_units * RANGE_SCATTER_PER_PRINTING_NS
+                    + matches * GATHER_PUSH_PER_MATCH_NS
+            };
+            build + page + RANGE_FIXED_COST_NS // per-query setup
         }
         // #634 plane popcount-skip order walk (precomputed bitmap ⇒ no synth):
         PhysicalPlan::PlanePopcountOrder => {
