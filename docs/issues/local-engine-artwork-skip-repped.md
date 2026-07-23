@@ -1,6 +1,7 @@
 # Artwork gather: skip already-repped groups (default prefer)
 
-**Status:** implemented, measured, byte-identical. Branch `engine-artwork-skip-repped`.
+**Status:** implemented, measured, byte-identical. Branch `engine-artwork-skip-repped`. Two changes:
+the skip-repped reorder (below) and a columnar `artwork_group_id` (further down).
 
 ## The lever
 
@@ -33,15 +34,27 @@ returned-row-id fingerprint)
 
 Zero archive-format change. All engine tests pass (128).
 
-## Rejected: columnar `artwork_group_id` (V2)
+## Also landed: columnar `artwork_group_id` (V2)
 
-Prototyped a pid-indexed `artwork_group_col: Vec<u16>` so repped-group printings read the group id from
-a compact side array instead of the struct. **Flat on the target query** (`border` residual, not the
-gid read, is the remaining cost) — it only helped `all_match=true` artwork scans (`t:creature`
-320→280 µs, `c:r` 156→125 µs), where the gid read *is* the only per-printing work. And it introduced a
-sync hazard: `artwork_group_id` is a placeholder in the store and **recomputed post-load** (via
-`assign_artwork_groups` at 4+ sites), so a duplicated column goes stale on reload unless every recompute
-site also rebuilds it. Marginal, localized gain + an archive bump + reload-sync fragility → dropped.
+A pid-indexed `artwork_group_col: Vec<u16>` so the gather reads the group id from a compact contiguous
+side array instead of the wide struct — repped-group printings (the majority) then never touch the
+struct at all. **Flat on the target `border` query** (the residual, not the gid read, is the remaining
+cost there), but a real win on `all_match=true` artwork scans, where the gid read *is* the only
+per-printing work:
+
+| query [artwork/usd] | skip-repped only | + columnar |
+|---|---:|---:|
+| `t:creature` | ~306 µs | ~281 µs (**1.14× vs main**) |
+| `c:r` | ~149 µs | ~124 µs (**1.26× vs main**) |
+
+**No drift hazard.** An earlier prototype panicked in four test fixtures and I mistakenly concluded the
+column was unsafe on production reload. It isn't: `assign_artwork_groups` runs *exactly once* in
+production (`reload_commit`, before archiving), so `artwork_group_id` — and the column derived from it
+right there — is stored in the archive and never recomputed post-load. The drift was test-fixture-only:
+four fixtures mutate `illustration_id` after `store_of` and re-derive grouping by hand. They now go
+through one helper (`reassign_artwork_grouping`) that rebuilds *both* the per-card counts and the
+column together, so no site can update one and forget the other. Costs one archive-format bump
+(`ARCHIVE_FORMAT_VERSION`) and ~190 KB. Byte-identical output; all 128 tests pass.
 
 ## Remaining cost / possible next levers (not pursued)
 
