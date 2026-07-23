@@ -256,7 +256,9 @@ fn store_of(cards: Vec<OracleCard>, printing_counts: &[usize], vocab: VocabInter
         name_bigrams: build_name_bigram_index(&cards),
         legal_divergent: build_divergent_ids(&cards),
         sort_perms: build_sort_permutations(&cards, &printings, &offsets),
+        max_artwork_groups: artwork_groups.iter().copied().max().unwrap_or(0),
         artwork_groups,
+        artwork_group_col: printings.iter().map(|p| p.artwork_group_id).collect(),
         printing_to_card: build_printing_to_card(&offsets),
         ..Default::default()
     };
@@ -272,6 +274,18 @@ fn store_of(cards: Vec<OracleCard>, printing_counts: &[usize], vocab: VocabInter
         indexes,
         format_shifts: HashMap::new(),
     }
+}
+
+/// Recompute both artwork-grouping-derived index fields (per-card counts and the per-printing
+/// columnar copy) from the current printings, keeping them in sync. Call after a fixture mutates
+/// `illustration_id` post-`store_of` so no site can update one and forget the other — mirrors the
+/// single production build spot in `reload_commit`. Returns the per-card counts (for asserts).
+fn reassign_artwork_grouping(data: &mut CardData) -> Vec<u16> {
+    let counts = assign_artwork_groups(&mut data.printings, &data.offsets);
+    data.indexes.max_artwork_groups = counts.iter().copied().max().unwrap_or(0);
+    data.indexes.artwork_groups = counts.clone();
+    data.indexes.artwork_group_col = data.printings.iter().map(|p| p.artwork_group_id).collect();
+    counts
 }
 
 // Verify that narrow_candidates returns printing-space candidates for art tags
@@ -4431,7 +4445,7 @@ fn run_query_artwork_groups_shared_illustrations() {
     // store_of already assigned artwork_group_id from the original (all-distinct)
     // illustration_ids, so it must be recomputed after this mutation.
     data.printings[2].illustration_id = 1;
-    data.indexes.artwork_groups = assign_artwork_groups(&mut data.printings, &data.offsets);
+    reassign_artwork_grouping(&mut data);
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
@@ -4516,7 +4530,9 @@ fn bench_checked_vs_unchecked_access() {
         price_usd:      Vec::new(),
         collector_number: Vec::new(),
         sort_perms:     build_sort_permutations(&cards, &printings, &offsets),
+        max_artwork_groups: artwork_groups.iter().copied().max().unwrap_or(0),
         artwork_groups,
+        artwork_group_col: printings.iter().map(|p| p.artwork_group_id).collect(),
         printing_to_card: build_printing_to_card(&offsets),
         planes:         build_bit_planes(&cards, &printings, &offsets, &strings),
         border_printing: build_border_printing_planes(&printings, &strings),
@@ -5141,7 +5157,7 @@ fn streamed_selection_matches_gathered() {
         }
         if with_perms {
             data.indexes.sort_perms = build_sort_permutations(&data.cards, &data.printings, &data.offsets);
-            data.indexes.artwork_groups = assign_artwork_groups(&mut data.printings, &data.offsets);
+            reassign_artwork_grouping(&mut data);
         }
         rkyv::to_bytes::<Error>(&data).expect("serialize")
     };
@@ -5194,7 +5210,7 @@ fn artwork_group_counts_dedup_illustrations() {
     data.printings[1].illustration_id = 7; // same art, different printing
     data.printings[2].illustration_id = 9;
     data.printings[3].illustration_id = 7;
-    let counts = assign_artwork_groups(&mut data.printings, &data.offsets);
+    let counts = reassign_artwork_grouping(&mut data);
     assert_eq!(counts, vec![2]);
     // 0 = first-seen (printing 0's illustration 7), 1 = next distinct (printing 2's
     // illustration 9); printings 1 and 3 share illustration 7's group.
@@ -5217,7 +5233,7 @@ fn artwork_group_ids_handle_more_than_64_groups() {
     // keep their distinct store_of-assigned illustration -- 69 distinct
     // groups total, past the 64-bit single-word threshold.
     data.printings[1].illustration_id = data.printings[0].illustration_id;
-    data.indexes.artwork_groups = assign_artwork_groups(&mut data.printings, &data.offsets);
+    reassign_artwork_grouping(&mut data);
     assert_eq!(data.indexes.artwork_groups, vec![69]);
 
     // Printing 0 has the higher prefer_score (store_of orders descending) but
@@ -8187,6 +8203,7 @@ fn range_compose_kernel_costs() {
             let page = super::walk_grouped_page(
                 super::Mode::Card, &archived.cards, &archived.printings, offsets, &pbits,
                 super::Prefer::Default, super::SortCol::EdhrecRank, false, LIMIT, 0, perm,
+                u16::from(archived.indexes.max_artwork_groups),
             );
             page.len() as u64
         });
