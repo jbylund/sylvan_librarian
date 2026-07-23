@@ -4526,6 +4526,7 @@ fn bench_checked_vs_unchecked_access() {
         artists:        ArtistIndex::default(),
         flavor:         build_flavor_index(&printings, &strings),
         set_codes:      HashMap::new(),
+        watermarks:     HashMap::new(),
         released_at:    Vec::new(),
         price_usd:      Vec::new(),
         collector_number: Vec::new(),
@@ -5331,6 +5332,56 @@ fn set_code_and_date_narrowing() {
     }
     // Ne is not selective and must not narrow.
     assert!(narrow_candidates(&FilterExpr::DateCmp { op: CmpOp::Ne, value: 19930805 }, &archived.indexes, &archived.offsets, &archived.cards).is_none());
+}
+
+#[test]
+fn watermark_narrowing() {
+    // Sparse field (93% null, 67 distinct values in real data, largest ~0.8% of
+    // printings) — postings, same shape as SetCode, not a plane. See
+    // docs/issues/done/local-engine-watermark-postings.md.
+    let mut vocab = VocabInterner::new();
+    let cards = vec![stub_card(1, TYPE_CREATURE, &[], &mut vocab), stub_card(2, TYPE_CREATURE, &[], &mut vocab)];
+    let mut data = store_of(cards, &[2, 1], vocab);
+    let mut interner = Interner::new();
+    data.printings[0].card_watermark_id = interner.intern("wotc".to_string());
+    data.printings[1].card_watermark_id = interner.intern("set".to_string());
+    data.printings[2].card_watermark_id = NONE_STR; // no watermark — must not appear in any postings list
+    data.strings = interner.strings;
+    let mut watermarks: TagIndex = HashMap::new();
+    for (i, p) in data.printings.iter().enumerate() {
+        if p.card_watermark_id != NONE_STR {
+            watermarks.entry(data.strings[p.card_watermark_id as usize].clone()).or_default().push(i as u32);
+        }
+    }
+    data.indexes.watermarks = watermarks;
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let wotc = FilterExpr::TextExact { field: super::TextField::Watermark, op: CmpOp::Eq, value: "wotc".to_string() };
+    match narrow_candidates(&wotc, &archived.indexes, &archived.offsets, &archived.cards) {
+        Some(Candidates::Printings(v)) => assert_eq!(v, vec![0]),
+        _ => panic!("watermark must narrow in printing space"),
+    }
+
+    // Unknown watermark: exact empty narrowing, same as an unknown set code —
+    // and the short-circuit this doc's timing (~3us) relies on.
+    let unknown = FilterExpr::TextExact { field: super::TextField::Watermark, op: CmpOp::Eq, value: "notarealvalue".to_string() };
+    match narrow_candidates(&unknown, &archived.indexes, &archived.offsets, &archived.cards) {
+        Some(Candidates::Printings(v)) => assert!(v.is_empty()),
+        _ => panic!("unknown watermark must narrow to the empty set"),
+    }
+
+    // The bug this fixes: before this arm existed, Watermark had no narrow_rec
+    // case at all, so `Or([Watermark(..), <anything narrowable>])` vetoed the
+    // whole Or to None (every child must narrow). Confirm the Or now composes.
+    let set = FilterExpr::TextExact { field: super::TextField::Watermark, op: CmpOp::Eq, value: "set".to_string() };
+    match narrow_candidates(&FilterExpr::Or(vec![wotc, set]), &archived.indexes, &archived.offsets, &archived.cards) {
+        Some(Candidates::Printings(mut v)) => {
+            v.sort_unstable();
+            assert_eq!(v, vec![0, 1]);
+        }
+        _ => panic!("watermark Or must narrow now that both children narrow"),
+    }
 }
 
 #[test]
