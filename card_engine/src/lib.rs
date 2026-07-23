@@ -2804,21 +2804,29 @@ fn narrow_candidates(
 /// real traffic argues for moving it.
 static AND_SKIP_THRESHOLD: LazyLock<usize> = LazyLock::new(|| guard_env("CARD_ENGINE_AND_SKIP_THRESHOLD", 2_048));
 
-/// Whether `narrow_rec` resolves `Not(inner)` via a fresh, cheap re-narrow (`-r:x`'s dedicated arm,
-/// or `bare_range_bounds`'s `Not` handling for `-usd<c`/`-cn<c`/`-date`/`-year`) rather than falling
-/// through to the generic bit-complement arm (or, for `Eq`/`Ne`, declining outright). `and_child_rank`
-/// has no `indexes` parameter, so — unlike `is_printing_composable`/`compose_printing_bits`/
-/// `compose_printing_estimate`, which all call `bare_range_bounds(filter, indexes)` directly to
-/// double-check — this reimplements the same field/op classification without an index lookup: the
-/// eligibility question ("is this field printing-range-indexed, is this op one of the four ordered
-/// ones") never actually depends on the runtime `indexes` value, only `resolve_numeric_range_leaf`'s
-/// *use* of it (fetching the index reference) does. Must stay in sync with `bare_range_bounds`'s
-/// `Not` arm and `narrow_rec`'s `-r:x` arm — a field/op this says yes to but either of those declines
-/// on reintroduces the same rank/execution mismatch this replaces.
+/// Whether `narrow_rec` resolves `Not(inner)` via a fresh, cheap re-narrow — `-f:x`'s or `-r:x`'s own
+/// dedicated arm (reads a status/rarity plane directly), or `bare_range_bounds`'s `Not` handling for
+/// `-usd<c`/`-cn<c`/`-date`/`-year` — rather than falling through to the generic bit-complement arm
+/// (or, for `Eq`/`Ne`, declining outright). `and_child_rank` has no `indexes` parameter, so — unlike
+/// `is_printing_composable`/`compose_printing_bits`/`compose_printing_estimate`, which all call
+/// `bare_range_bounds(filter, indexes)` directly to double-check — this reimplements the same
+/// field/op classification without an index lookup: none of these three arms' eligibility questions
+/// ("is this format's plane tracked," "is this field printing-range-indexed," "is this op one of the
+/// four ordered ones") actually depend on the runtime `indexes` *value* — only their actual narrowing
+/// work does. Must stay in sync with all three dedicated arms (`narrow_rec`'s `-f:x`/`-r:x` arms and
+/// `bare_range_bounds`'s `Not` handling) — a shape this says yes to but any of those declines on
+/// reintroduces the same rank/execution mismatch this replaces.
 fn not_child_is_cheap_renarrow(f: &FilterExpr) -> bool {
     let ordered = |op: CmpOp| matches!(op, CmpOp::Lt | CmpOp::Le | CmpOp::Gt | CmpOp::Ge);
     let is_range_field = |e: &NumExpr| matches!(e, NumExpr::Field(NumField::PriceUsd | NumField::CollectorNumberInt));
     match f {
+        // `-f:x` / `-banned:x` / `-restricted:x`: reads the status's own `_ABSENT`/`_ILLEGAL` plane
+        // directly (`legality_candidate_bits(..., true)`), not a complement of the positive plane —
+        // same "dedicated re-narrow, not a complement" shape as `-r:x` below, so it shares its bare
+        // form's rank rather than the generic Not-complement's. `status_plane_bases(*expected).is_some()`
+        // mirrors the dedicated arm's own guard exactly: an untracked format (no indexed plane) isn't
+        // this shape and correctly falls through to the generic tier instead.
+        FilterExpr::Legality { shift: Some(_), expected } if status_plane_bases(*expected).is_some() => true,
         // `-r:x`: rarity's own dedicated arm re-narrows for *any* op (`narrow_rarity` isn't limited
         // to the four ordered ones the printing-range path needs — see that arm's doc).
         FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), .. }
@@ -2840,9 +2848,10 @@ fn not_child_is_cheap_renarrow(f: &FilterExpr) -> bool {
 /// construction, useful only when nothing else narrowed).
 fn and_child_rank(f: &FilterExpr) -> u8 {
     match f {
-        // `-usd<c` / `-cn<c` / `-date>c` / `-year>=c` / `-r:x` all reduce to a fresh, cheap re-narrow
-        // via `negate_op` (see `bare_range_bounds`'s doc, and the `-r:x` arm in `narrow_rec`) — not a
-        // broad complement. Rank them exactly like their un-negated inner form, not the generic
+        // `-usd<c` / `-cn<c` / `-date>c` / `-year>=c` / `-r:x` / `-f:x` all reduce to a fresh, cheap
+        // re-narrow (`negate_op` for the first four, see `bare_range_bounds`'s doc; a dedicated plane
+        // read for `-r:x`/`-f:x`, see their `narrow_rec` arms) — not a broad complement. Rank them
+        // exactly like their un-negated inner form, not the generic
         // Not-complement's rank 2 below (which used to catch these too: any `Not` wrapping one of
         // these cheap shapes was wrongly deprioritized and skipped by the And early-stop as soon as
         // a sibling child had already narrowed — silently losing the negated child's own narrowing,

@@ -110,6 +110,20 @@ test: rank/execution mismatches are a cost question, not a correctness one, so n
 final answer would ever surface it. Added a direct unit test (`and_child_rank_matches_narrow_rec_dispatch`)
 asserting the ranks this class of bug can't be caught any other way.
 
+A follow-up question during the same review ("is `-r:x` the only other field?") caught one more gap
+in the same fix: `narrow_rec` has a *third* dedicated re-narrow arm besides `-r:x` and the new range
+arm — `-f:x`/`-banned:x`/`-restricted:x` (a negated `Legality` with a tracked format), which reads the
+status's `_ABSENT`/`_ILLEGAL` plane directly rather than complementing (the comment on that arm
+explains why: complementing the positive plane would wrongly drop real matches for a divergent card
+that can satisfy both the status and its negation across different printings). `not_child_is_cheap_renarrow`
+didn't check for this shape either, so `-f:modern` inside an `And` was *still* falling to the generic
+tier (rank 2) instead of sharing bare `Legality`'s rank (0) — this predates the whole PR (it was part
+of the original blanket `Not(_) => 2`, bug 1 never actually reached it). Fixed the same way: added a
+`Legality { shift: Some(_), expected } if status_plane_bases(*expected).is_some()` case to the
+classifier (mirroring the dedicated arm's own guard exactly — `status_plane_bases` needs no `indexes`
+either, so the same `indexes`-free reasoning applies), plus two more unit test assertions (tracked and
+untracked format).
+
 ## Measured (`scripts/bench_negated_range_narrowing.py`, 97,206-printing corpus, min ms)
 
 | query | unique | orderby | before | after | change |

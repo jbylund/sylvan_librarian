@@ -34,7 +34,11 @@ bit-complement or decline outright — never a wrong answer, just eager evaluati
 Fixed with a small `indexes`-free classifier (`not_child_is_cheap_renarrow`) mirroring the real
 dispatch, verified not to regress the pre-existing `-r:x` ranking, plus a direct unit test asserting
 the rank values themselves (this class of bug can't be caught any other way — it's invisible to
-correctness checks).
+correctness checks). A follow-up question caught one more gap in the same fix: `-f:x`/`-banned:x`/
+`-restricted:x` (negated `Legality`, a tracked format) has its own dedicated plane-read arm too — a
+third "not a complement" shape alongside `-r:x` and the range arm, still missing from the classifier
+and still falling to the generic tier (predates this PR entirely; bug 1 never reached it). Added the
+same way, plus two more unit test assertions.
 
 Measured (97,206-printing corpus): `-usd<0.25 usd<5` (the survey's #1 slowest query before this fix)
 0.901ms → 0.165ms (edhrec, 5.5×), 0.933ms → 0.353ms (rarity, 2.6×); `-usd<50` 0.896ms → 0.080ms

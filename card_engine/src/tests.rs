@@ -5694,6 +5694,18 @@ fn and_child_rank_matches_narrow_rec_dispatch() {
     // its pre-existing cheap-tier rank (0), matching the un-negated bare rarity comparison's rank.
     assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(rarity(CmpOp::Eq, 2.0)))), and_child_rank(&rarity(CmpOp::Eq, 2.0)));
     assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(rarity(CmpOp::Eq, 2.0)))), 0);
+
+    // -f:x (a tracked format, expected=LEGALITY_LEGAL=0b01): reads the status's own _ABSENT plane
+    // directly (narrow_rec's dedicated -f:x arm), the same "not a complement" shape as -r:x above --
+    // must also keep its bare form's cheap-tier rank (0), not the generic complement's rank 2.
+    let legal_fmt = || FilterExpr::Legality { shift: Some(0), expected: 0b01 };
+    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(legal_fmt()))), and_child_rank(&legal_fmt()));
+    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(legal_fmt()))), 0);
+
+    // -f:x for an untracked format (no shift resolved, i.e. absent from loaded data): status_plane_bases
+    // is irrelevant here (shift: None doesn't even reach it) -- must fall to the generic tier, same as
+    // any other Not this classifier doesn't recognize.
+    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(FilterExpr::Legality { shift: None, expected: 0b01 }))), 2);
 }
 
 // ─── Bitplanes (#630) ─────────────────────────────────────────────────────────
