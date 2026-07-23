@@ -1,7 +1,16 @@
 # Artwork gather: skip already-repped groups (default prefer)
 
-**Status:** implemented, measured, byte-identical. Branch `engine-artwork-skip-repped`. Two changes:
-the skip-repped reorder (below) and a columnar `artwork_group_id` (further down).
+**Status:** implemented, measured, byte-identical. Branch `engine-artwork-skip-repped`. Three changes:
+the skip-repped reorder, a columnar `artwork_group_id`, and pre-sizing `group_best` (all below).
+
+Cumulative vs `main` (97,206-printing corpus, artwork/usd, byte-identical output):
+
+| query | main | branch | speedup |
+|---|---:|---:|---:|
+| `border:black -(name:storm or name:dragon)` | ~1543 µs | ~1245 µs | **1.24×** |
+| `border:black` | ~1166 µs | ~845 µs | **1.38×** |
+| `t:creature` | ~320 µs | ~244 µs | **1.31×** |
+| `c:r` | ~156 µs | ~122 µs | **1.28×** |
 
 ## The lever
 
@@ -55,6 +64,17 @@ four fixtures mutate `illustration_id` after `store_of` and re-derive grouping b
 through one helper (`reassign_artwork_grouping`) that rebuilds *both* the per-card counts and the
 column together, so no site can update one and forget the other. Costs one archive-format bump
 (`ARCHIVE_FORMAT_VERSION`) and ~190 KB. Byte-identical output; all 128 tests pass.
+
+## Also: pre-size `group_best`, drop the per-printing resize check
+
+`group_best` (the per-group best-rep scratch) is indexed only by `artwork_group_id` — Card mode
+collapses to index 0 — so its maximum index is a fixed property of the store: the largest
+distinct-artwork count of any single card (**385** in the corpus; p50 is 1, p99 is 6). Stored as
+`CardIndexes.max_artwork_groups` and used to pre-size the scratch once per query, so the three artwork
+grouping loops (`push_card_matches` ×2, `walk_grouped_page`) no longer run a `len() <= gid`
+bounds/resize check on every printing (the check only ever fired during warmup, then never again). A
+`debug_assert` guards the invariant. Biggest effect where the loop iterates the most printings
+(`t:creature` ~281→244 µs); flat where the residual dominates. Byte-identical.
 
 ## Remaining cost / possible next levers (not pursued)
 
