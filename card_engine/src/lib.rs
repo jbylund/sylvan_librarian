@@ -3910,23 +3910,45 @@ fn push_card_matches(
             // lands, up to ~385 distinct illustrations) at O(printings) instead
             // of the O(printings²) a linear per-printing scan would cost.
             touched.clear();
-            for pid in start..end {
-                let p = &printings[pid];
-                if !all_match && !FilterExpr::residual_matches(card, p, strings, residual, residual_is_or) { continue; }
-                let gid = u16::from(p.artwork_group_id) as usize;
-                if group_best.len() <= gid {
-                    group_best.resize(gid + 1, None);
+            if matches!(prefer, Prefer::Default) {
+                // Printings are stored prefer-desc, so the first residual-qualifying printing of
+                // each group is its best-prefer rep. Read `gid` first and skip any printing whose
+                // group is already repped: repped groups never pay the residual verification (a
+                // struct read) again, and no score comparison is needed (first qualifying wins).
+                for pid in start..end {
+                    let gid = u16::from(printings[pid].artwork_group_id) as usize;
+                    if group_best.len() <= gid {
+                        group_best.resize(gid + 1, None);
+                    }
+                    if group_best[gid].is_some() {
+                        continue;
+                    }
+                    let p = &printings[pid];
+                    if !all_match && !FilterExpr::residual_matches(card, p, strings, residual, residual_is_or) { continue; }
+                    group_best[gid] = Some((pid as u32, 0.0));
+                    touched.push(gid as u16);
                 }
-                let score = prefer_score(card, p, prefer);
-                match &group_best[gid] {
-                    None => {
-                        group_best[gid] = Some((pid as u32, score));
-                        touched.push(gid as u16);
+            } else {
+                // Custom prefer: iteration order != prefer order, so every printing must be
+                // considered and the max-prefer rep kept per group.
+                for pid in start..end {
+                    let p = &printings[pid];
+                    if !all_match && !FilterExpr::residual_matches(card, p, strings, residual, residual_is_or) { continue; }
+                    let gid = u16::from(p.artwork_group_id) as usize;
+                    if group_best.len() <= gid {
+                        group_best.resize(gid + 1, None);
                     }
-                    Some((_, best_score)) if score > *best_score => {
-                        group_best[gid] = Some((pid as u32, score));
+                    let score = prefer_score(card, p, prefer);
+                    match &group_best[gid] {
+                        None => {
+                            group_best[gid] = Some((pid as u32, score));
+                            touched.push(gid as u16);
+                        }
+                        Some((_, best_score)) if score > *best_score => {
+                            group_best[gid] = Some((pid as u32, score));
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
             for &gid in touched.iter() {
