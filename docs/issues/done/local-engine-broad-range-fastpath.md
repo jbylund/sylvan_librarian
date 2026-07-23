@@ -9,7 +9,7 @@
 
 Status: design drafted 2026-07-14, no GitHub issue yet — file once the crossover is measured
 and a direction is picked. Surfaced investigating why `usd<50` costs ~0.4–1 ms (see
-[00629-engine-artwork-group-id-bitmasks.md](done/00629-engine-artwork-group-id-bitmasks.md)'s
+[00629-engine-artwork-group-id-bitmasks.md](00629-engine-artwork-group-id-bitmasks.md)'s
 "Expected (honest)" section: "the ~97k price compares still dominate") — but the mechanism
 isn't price-specific. Every `PrintingRangeIndex`-backed field shares it.
 
@@ -159,15 +159,15 @@ unit-checked representation, not a bind-time rewrite keyed on syntactic shape). 
 ## Problem
 
 `usd<50` matches 80,527 of 97,206 printings (83%) — genuinely broad, same shape as the
-`cmc`/`power`/`toughness` queries [00655-engine-numeric-range-planes.md](done/00655-engine-numeric-range-planes.md)
+`cmc`/`power`/`toughness` queries [local-engine-numeric-range-planes.md](local-engine-numeric-range-planes.md)
 fixed with one-hot-interior + cumulative-boundary bitplanes (`cmc<=6`: 0.405 → 0.067 ms, 6.1×).
 That technique doesn't transfer: it needs a small, enumerable value space (~13–17 for
 `cmc`/`power`/`toughness`; price has 4,133 distinct values), *and*, more fundamentally, `cmc`/
 `power`/`toughness` are card-invariant (one value per card, so a plain per-card plane bit is
 exact), while price is printing-varying — `usd<50` for `unique=card` means "*some* printing is
 under $50," an existential predicate over printings, the same shape legality's `∃p: satisfies(p)`
-problem is ([00680-engine-existential-plane-generalization.md](done/00680-engine-existential-plane-generalization.md)).
-[local-engine-printing-varying-plane-repair-pattern.md](local-engine-printing-varying-plane-repair-pattern.md)
+problem is ([00680-engine-existential-plane-generalization.md](00680-engine-existential-plane-generalization.md)).
+[local-engine-printing-varying-plane-repair-pattern.md](../local-engine-printing-varying-plane-repair-pattern.md)
 names this as the case the plane escape hatch can't cover: an unbounded parameterized threshold
 has no finite set of precomputable existence projections. The prerequisite fix above doesn't
 change that — it makes the *narrowing* exact, not the *existence* projection precomputable.
@@ -283,7 +283,7 @@ it's simpler than it first looked, now that narrowing is exact:
 
 Every existing adaptive guard in this engine (`AND_SKIP_THRESHOLD`, `MAX_NARROW_FRACTION`/
 `NARROW_FLOOR`, `MAX_UNION_FRACTION`) was derived from a benchmark sweep, not analysis — see
-[00647-engine-cost-guard-calibration.md](done/00647-engine-cost-guard-calibration.md). This
+[00647-engine-cost-guard-calibration.md](00647-engine-cost-guard-calibration.md). This
 decision needs three axes:
 
 1. **Match rate** (`k/n`).
@@ -344,25 +344,25 @@ fifth (tight/loose) axis to worry about — every field behaves identically ther
 
 ## Related
 
-- [local-engine-printing-plane-popcount-order.md](local-engine-printing-plane-popcount-order.md) —
+- [local-engine-printing-plane-popcount-order.md](../local-engine-printing-plane-popcount-order.md) —
   the consolidated forward plan for idea 2 (the printing-space popcount plan, #656): parts, ship
   order, target queries, and the #656 assembly. This doc is history; that one is the plan.
 - [00690-engine-direct-projection-arrays.md](00690-engine-direct-projection-arrays.md) —
   prerequisite `printing_to_card` array, load-bearing for idea 1's per-match card check.
-- [00655-engine-numeric-range-planes.md](done/00655-engine-numeric-range-planes.md) — the
+- [local-engine-numeric-range-planes.md](local-engine-numeric-range-planes.md) — the
   analogous fix for `cmc`/`power`/`toughness`; doesn't transfer (card-invariant, not existential).
-- [00629-engine-artwork-group-id-bitmasks.md](done/00629-engine-artwork-group-id-bitmasks.md) —
+- [00629-engine-artwork-group-id-bitmasks.md](00629-engine-artwork-group-id-bitmasks.md) —
   where the `usd<50` cost was first flagged as a floor, not fixed.
-- [00634-engine-permuted-bitmap-order-phase.md](done/00634-engine-permuted-bitmap-order-phase.md)
+- [00634-engine-permuted-bitmap-order-phase.md](00634-engine-permuted-bitmap-order-phase.md)
   — the popcount-skip machinery idea 2 would extend.
-- [00680-engine-existential-plane-generalization.md](done/00680-engine-existential-plane-generalization.md)
+- [00680-engine-existential-plane-generalization.md](00680-engine-existential-plane-generalization.md)
   — the existential-predicate framework `PrintingRangeBits` extends to numeric printing fields.
-- [00647-engine-cost-guard-calibration.md](done/00647-engine-cost-guard-calibration.md) — the
+- [00647-engine-cost-guard-calibration.md](00647-engine-cost-guard-calibration.md) — the
   calibration-from-measurement precedent this crossover should follow.
-- [local-engine-printing-varying-plane-repair-pattern.md](local-engine-printing-varying-plane-repair-pattern.md)
+- [local-engine-printing-varying-plane-repair-pattern.md](../local-engine-printing-varying-plane-repair-pattern.md)
   — names price's exact disqualifying shape ("a hypothetical printing-varying numeric field...
   `> 3.7` and `> 3.71` are different, un-precomputable existence projections").
-- [local-engine-probe-before-and-skip.md](local-engine-probe-before-and-skip.md) — the same
+- [local-engine-probe-before-and-skip.md](../local-engine-probe-before-and-skip.md) — the same
   "the binary search already gives you `k` for free" observation, in the AND-skip context.
 - #638 — `tix`/`eur` have no range index at all yet; the same fast path (and the prerequisite
   exactness fix) should cover them once they do.

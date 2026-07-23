@@ -40,6 +40,6 @@ total-count mismatches, no regressions** (only sub-10 μs exact-name lookups var
 where the loop isn't the bottleneck. Archive grows +190 KB (+0.27%): the columnar id array
 (97,206 × 2 bytes). `ARCHIVE_FORMAT_VERSION` bumped for the layout change.
 
-Design notes: [`docs/issues/local-engine-artwork-skip-repped.md`](../issues/local-engine-artwork-skip-repped.md)
+Design notes: [`docs/issues/local-engine-artwork-skip-repped.md`](../issues/done/local-engine-artwork-skip-repped.md)
 and the [`APrinting` layout investigation](../issues/local-engine-aprinting-layout.md) it resolves —
 which established (after a corrected profile) that the lever is the residual, not the struct footprint.

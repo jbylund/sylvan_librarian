@@ -2,7 +2,7 @@
 
 Status: todo, filed as [#730](https://github.com/jbylund/sylvan_librarian/issues/730). Deferred
 optimization split out of the #724 printing-space compose work
-([00724](00724-engine-printing-existential-planes.md)).
+([00724](done/00724-engine-printing-existential-planes.md)).
 
 ## Two ways to page a match bitmap
 
@@ -51,7 +51,7 @@ distribution of real traffic before spending the complexity.
 
 ## Related
 
-- [00724](00724-engine-printing-existential-planes.md) — the printing-space compose plan whose
+- [00724](done/00724-engine-printing-existential-planes.md) — the printing-space compose plan whose
   unification this splits off from.
 - `run_query_streamed_popcount` (`card_engine/src/lib.rs`) — the existing card-space popcount-skip walk
   to generalize.

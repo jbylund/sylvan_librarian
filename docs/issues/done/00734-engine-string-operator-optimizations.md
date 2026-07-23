@@ -1,6 +1,6 @@
 # Engine: String Operator Optimizations (regex→contains, memmem)
 
-Status: **steps 1+2 done** (`ec7d26b`, `84a9ca9`). Filed as
+Status: **done** — both steps shipped (`ec7d26b`, `84a9ca9`), filed as
 [#734](https://github.com/jbylund/sylvan_librarian/issues/734). Two independent, behavior-preserving
 speedups for substring search over text fields (`oracle`/`name`/`flavor`/`artist`).
 
@@ -49,7 +49,7 @@ the per-row scan). Measured end-to-end, `o:/sacrifice a/` / card dropped to the 
 **117 µs** (1,391 results, byte-identical) from a full regex scan.
 
 **Shipped** as a **Python post-parse AST pass** (`lower_literal_regexes` in
-[`api/parsing/rewrite.py`](../../api/parsing/rewrite.py)), *not* an engine change — the equivalence is a
+[`api/parsing/rewrite.py`](../../../api/parsing/rewrite.py)), *not* an engine change — the equivalence is a
 property of the regex, so doing it once at the shared parse seam serves **both** consumers of the AST:
 the SQL path (postgres `gin_trgm_ops`) and the Rust engine (trigram narrow). It rewrites a plain-literal
 `RegexValueNode` → `StringValueNode`, making the AST identical to the substring query. `regex_plain_literal`
@@ -69,11 +69,11 @@ Caveats (handled):
 ## Optimization 2 — `memmem::Finder` for the `TextContains` scan
 
 Build a `memchr::memmem::Finder` once, reuse per candidate — amortizes the Two-Way/prefilter setup,
-the same trick [`sparse_blob`](../../card_engine/src/lib.rs) uses for the oracle-word index. **1.26×**
+the same trick [`sparse_blob`](../../../card_engine/src/lib.rs) uses for the oracle-word index. **1.26×**
 over `str::contains` (bench_substring_finders).
 
 **Shipped** (`84a9ca9`) on the four once-per-query **verify/bind scans** in
-[`filter.rs`](../../card_engine/src/filter.rs) that build `OracleMatch`/`NameMatch`/`ArtistMatch`/
+[`filter.rs`](../../../card_engine/src/filter.rs) that build `OracleMatch`/`NameMatch`/`ArtistMatch`/
 `FlavorMatch` from a substring needle — the `contains` path a memoized substring (or lowered regex)
 query actually hits. A small incremental on top of step 1's access-path win.
 
@@ -99,4 +99,4 @@ memmem (step 2) lands (it drops ~1.3 ns/card, ~200 of the 2300).
 
 - Seed bench + branch `engine-regex-to-contains` (commit b46fdcb).
 - Verify-cost tiers: `card_engine/src/filter.rs` (`verify_cost_tier`, `regex_tier`).
-- [#694/#731](00731-engine-compose-universal-evaluator.md) — the range-compose PR that surfaced these.
+- [#694/#731](../00731-engine-compose-universal-evaluator.md) — the range-compose PR that surfaced these.

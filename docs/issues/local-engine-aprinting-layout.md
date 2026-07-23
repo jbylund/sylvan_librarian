@@ -249,7 +249,7 @@ matters, the real question is reducing per-printing residual verification (e.g. 
 for the artwork-rep pick, or a corrected re-profile to find the true hot field per query shape) — a
 different investigation from struct layout. **Resolution:** that different investigation paid off —
 the residual *is* reducible without any layout change. See
-[artwork skip-repped](./local-engine-artwork-skip-repped.md): skipping already-repped artwork groups
+[artwork skip-repped](./done/local-engine-artwork-skip-repped.md): skipping already-repped artwork groups
 before the residual gives 1.23–1.35× on the `border:black` / artwork / usd path, byte-identical, zero
 archive change.
 
