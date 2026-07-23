@@ -8,14 +8,15 @@ ordered comparisons (`Lt/Le/Gt/Ge`) by flipping the op via the already-existing 
 falling through to the same bounds computation — `is_printing_composable`, `compose_printing_estimate`,
 `compose_printing_bits`, and `narrow_rec` each needed one new guard clause, no logic duplicated.
 
-Two real bugs found via the differential test for this, not by guessing: `and_child_rank` blanket-
-classified every `Not(_)` as the cheapest-last "complement" rank, silently dropping a negated range's
-narrowing contribution whenever `And`'s early-stop had already narrowed via a sibling (a cost
-regression, not a correctness one — residual verification still caught what narrowing skipped); and
-`tight_narrow_space` unconditionally claimed `DateCmp`/`YearCmp` were safe to bit-complement despite
-`released_at` being nullable — the same trap `price` was already excluded from, just never extended
-to dates, meaning `-year:1993`-shaped queries were silently over-including NULL-dated printings via
-the pre-existing generic complement path. Both fixed.
+Two bugs found via the differential test for this, not by guessing — both cost regressions, not
+correctness bugs, since residual verification caught what each one over-included or skipped:
+`and_child_rank` blanket-classified every `Not(_)` as the cheapest-last "complement" rank, silently
+dropping a negated range's narrowing contribution whenever `And`'s early-stop had already narrowed
+via a sibling; and `tight_narrow_space` unconditionally claimed `DateCmp`/`YearCmp` were safe to
+bit-complement despite `released_at` being nullable — the same trap `price` was already excluded
+from, just never extended to dates, meaning `-year:1993`-shaped queries built and fully re-verified
+an over-inclusive (NULL-dated-printing-including) candidate set via the pre-existing generic
+complement path, rather than ever returning a wrong answer. Both fixed.
 
 A third issue surfaced via benchmarking: a broad negated range (`-cn<100`, ~64% of printings) declined
 to a full scan (regressing 0.545ms → 0.661ms) because the new arm passed the caller's own `broad_ok`

@@ -54,14 +54,19 @@ Both surfaced by the differential test for this feature, not guessed at up front
    (`Some(true)`, no null check) — but `released_at` is nullable, and the generic Not-arm's
    complement doesn't exclude NULL-dated printings the way `bare_range_bounds`'s direct approach
    does. This is the *same* trap `price` was already excluded from years ago (see the comment right
-   above it), just never extended to dates. This was a **real, silent correctness bug**: `-year:1993`
-   (or any negated `DateCmp`/`YearCmp` equality) would have wrongly included every NULL-release-date
-   printing as a match, via the pre-existing generic complement path — nothing about *this* feature
+   above it), just never extended to dates. Like bug 1, this was **not a correctness bug** — the
+   over-inclusive complement it builds is always marked `Narrowed::loose`, and
+   `narrow_candidates_exact`'s exactness check (`all_match_known`) reads that concrete `.tight` field,
+   not this classifier, so residual `card_pass` verification still ran and dropped every NULL-dated
+   printing before any total/page was returned. The real cost was purely wasted work: `-year:1993`
+   (or any negated `DateCmp`/`YearCmp` equality) built and then fully re-verified an unnecessarily
+   broad candidate set, via the pre-existing generic complement path — nothing about *this* feature
    introduced it, my test's `Ne` case just exercised a corner the existing suite hadn't covered
    before. Fixed by excluding `DateCmp`/`YearCmp` from `tight_narrow_space`, mirroring `price`'s
    exclusion exactly. The four ordered ops don't lose anything (they now narrow through the new,
-   correct arm instead); only the previously-silently-wrong `Eq`/`Ne` negation is affected, and it
-   now correctly declines instead of computing a wrong answer.
+   correct arm instead, with no wasted verification); the previously-mislabeled `Eq`/`Ne` negation is
+   the only shape affected, and it now correctly declines up front instead of paying for a doomed
+   complement.
 
 ## A third issue found via benchmarking, not testing
 

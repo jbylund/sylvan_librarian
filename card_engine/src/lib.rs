@@ -2709,12 +2709,16 @@ fn tight_narrow_space(f: &FilterExpr) -> Option<bool> {
         // nullable, and this classifier previously claimed `Some(true)` unconditionally, which the
         // generic Not-arm below would have trusted to bit-complement a tight DateCmp/YearCmp
         // set — wrongly pulling in every NULL-dated printing (absent from the index, not failing a
-        // bound check) as a false match for e.g. `-year:1993`. The four ordered ops now narrow
-        // exactly through `bare_range_bounds`'s own `Not` handling instead (no complement, no NULL
-        // risk); `Eq`'s negation (`Ne`) isn't a representable range either way and correctly
+        // bound check) into the *candidate* set for e.g. `-year:1993`. Not a wrong final answer —
+        // `narrow_candidates_exact`'s exactness check reads the complement's own (always-loose)
+        // `.tight` field, not this classifier, so residual `card_pass` verification still ran and
+        // dropped the NULL-dated printings before any total/page was returned — but a real,
+        // avoidable cost regression (an unnecessary complement built and then fully re-verified) for
+        // any negated `DateCmp`/`YearCmp` query. The four ordered ops now narrow exactly through
+        // `bare_range_bounds`'s own `Not` handling instead (no complement, no NULL risk, no wasted
+        // verification); `Eq`'s negation (`Ne`) isn't a representable range either way and correctly
         // declines via that path already — so nothing is lost by removing this from the "safe to
-        // complement" list, and a real bug (silently wrong `-date`/`-year` results whenever a NULL
-        // release date exists in the corpus) is fixed by it.
+        // complement" list.
         FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. } => None,
         FilterExpr::TextExact { field: TextField::SetCode, op: CmpOp::Eq, .. } => Some(true),
         FilterExpr::ArtistMatch { .. } | FilterExpr::FlavorMatch { .. } => Some(true),
