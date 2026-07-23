@@ -37,4 +37,4 @@ The plan fires only for a **bare** `usd` range in card mode — deliberately nar
   both), which a card-space existence AND cannot express.
 
 `cn` / `date` share the machinery and are a follow-on (PR 3). Gated by `CARD_ENGINE_RANGE_BITS_CARD`
-(default on) as an A/B kill-switch. Design notes: `docs/issues/local-engine-sorted-range-fastpath.md`.
+(default on) as an A/B kill-switch. Design notes: `docs/issues/done/local-engine-sorted-range-fastpath.md`.

@@ -1,13 +1,31 @@
 # Engine: fast path for broad sorted-range predicates, split by unique mode
 
-Status: plan drafted 2026-07-16. **Shipped:** PR 1 (printing-mode Idea 1, [#695]), PR 2a (`usd`,
-`unique=card`, [#725]), PR 3 (`cn`/`date`, `unique=card`, [#726]) — the card-mode range fast path
-(`CardRangePopcount`) now covers all three range families, and Idea 1 covers bare printing ranges.
-**Remaining:** PR 2b (artwork, archive bump), PR 5 (existential-plane printing-mode total), the
-crossover guard, and the printing-space popcount plan
-([local-engine-printing-plane-popcount-order.md](local-engine-printing-plane-popcount-order.md)),
-which is where the compound and existential-printing wins converge. PR 4 was dropped (see *Considered
-and dropped*). Supersedes the *planning* half of
+**Status: done.** Plan drafted 2026-07-16. **Shipped:** PR 1 (printing-mode Idea 1, [#695]), PR 2a
+(`usd`, `unique=card`, [#725]), PR 3 (`cn`/`date`, `unique=card`, [#726]) — the card-mode range fast
+path (`CardRangePopcount`) now covers all three range families, and Idea 1 covers bare printing
+ranges. PR 4 was dropped (see *Considered and dropped*). Everything else this doc left open has
+since resolved, not by building it as originally scoped, but by later work landing the same outcome
+through a different mechanism:
+
+- **PR 2b** (artwork range support) and **#656** (the deferred Idea-2 printing-space pager for
+  compounds like `cn<100 usd<50`) — both resolved by
+  [#724](00724-engine-printing-existential-planes.md) (printing-space compose, all three unique
+  modes, no archive bump — a query-time-derived global artwork id instead of the persisted array this
+  doc proposed) and [#733](https://github.com/jbylund/sylvan_librarian/pull/733) (range leaves as
+  compose sources, closing #694 and enabling `cn<100 usd<50`/printing — measured 1271→90µs, the exact
+  gap this doc flagged as "the slowest compound of all... an uncovered gap").
+- **PR 5** (existential printing-mode total for border/rarity) — subsumed by #724's printing
+  bitplanes, exactly as this doc predicted ("Largely subsumed by #724" below): a bitplane's `popcount`
+  *is* the count PR 5 would have computed.
+- **The Idea-1 crossover guard** — resolved as a non-issue: the #702 cost-based router's own
+  `printing_range_route_probe` ([00702](00702-engine-plan-selection-layer.md), lines 289-310)
+  swept the fixed 25% veto boundary against a real cost model across offsets to 20,000 and found the
+  veto already sits at the crossover (model 1.015× vs. tree gold, no regret) — this doc's prediction
+  of a reclaimable moderate band didn't hold up under measurement. Closing this out surfaced a further
+  simplification (the veto is now redundant with the cost model and could be deleted outright):
+  [local-engine-range-veto-redundancy.md](../local-engine-range-veto-redundancy.md).
+
+Supersedes the *planning* half of
 [local-engine-broad-range-fastpath.md](local-engine-broad-range-fastpath.md), which is kept as the
 historical record (the shipped price-exactness prerequisite, and the full account of what PR #689
 tried, muddled, and reverted). This doc restates the plan with what we learned since.
@@ -17,11 +35,11 @@ tried, muddled, and reverted). This doc restates the plan with what we learned s
 Broad range predicates over the `PrintingRangeIndex`-backed fields — `usd<50` (83% of printings),
 `cn<100`, `year>2020`, `date>2023-01-01`, and `tix`/`eur` once [#638] indexes them — cost ~0.4–1 ms.
 On `main` a bare broad range leaf has its narrowing **vetoed** (`broad_ok=false` at the root call
-of `narrow_rec`, [lib.rs:2676](../../card_engine/src/lib.rs#L2676) → `range_narrowed`'s
-`!broad_ok` return, [lib.rs:2044](../../card_engine/src/lib.rs#L2044)), so *all three unique modes*
+of `narrow_rec`, [lib.rs:2676](../../../card_engine/src/lib.rs#L2676) → `range_narrowed`'s
+`!broad_ok` return, [lib.rs:2044](../../../card_engine/src/lib.rs#L2044)), so *all three unique modes*
 fall into the same full scan: `run_query_streamed` walks **every card**, expands each to its
 printings, and evaluates the price predicate per printing to accumulate `total`
-([lib.rs:4099-4131](../../card_engine/src/lib.rs#L4099-L4131)). That whole-corpus predicate scan is
+([lib.rs:4099-4131](../../../card_engine/src/lib.rs#L4099-L4131)). That whole-corpus predicate scan is
 the cost floor. It is identical across modes — the tell that we're discarding mode-specific
 structure.
 
@@ -54,14 +72,14 @@ every matching printing is its own row: `total` is exactly `k` from the binary s
 card space *ever*. Only the page remains, and how it's produced depends on the order-by:
 
 - **Card-level order (`edhrec`/`name`, the default).** The [#634] sort permutations are *card-space*
-  (`SortCol::PriceUsd`/`Rarity` return `None`, [lib.rs:1763](../../card_engine/src/lib.rs#L1763)) —
+  (`SortCol::PriceUsd`/`Rarity` return `None`, [lib.rs:1763](../../../card_engine/src/lib.rs#L1763)) —
   there is no printing permutation. But a card-level key is shared by all of a card's printings, so
   card order *is* printing order: walk the existing card permutation in rank order, expand each card
   to its matching printings, early-stop at `offset + limit`. Cost ≈ `(offset + limit) / match_rate`.
 - **Order by the range field itself (`usd<50 order by usd`).** The range index *is* the printing
   permutation for that field — its `[s, e)` slice is already value-sorted. But its within-value
   tiebreak is `pid`, while the canonical key is `(price[dir], edhrec asc, prefer_score asc, pid)`
-  ([`sort_key_bits`](../../card_engine/src/lib.rs#L3355)), and price ties are large (top buckets
+  ([`sort_key_bits`](../../../card_engine/src/lib.rs#L3355)), and price ties are large (top buckets
   ~1,600 printings; `order by usd asc` page 1 is chosen entirely from one bucket). So the index
   serves the *value* order but not the *tie* order. Fix at query time, no new structure: walk
   value-bucket boundaries by count to find which buckets the page `[offset, offset+limit)` overlaps
@@ -80,10 +98,10 @@ card space *ever*. Only the page remains, and how it's produced depends on the o
 **Idea 2 — project the narrowed set to an existence bitmap, feed the popcount-skip pager.** For
 `unique=card`: binary-search → matching printing slice → for each, `printing_to_card[p]`
 ([the #690 direct array](00690-engine-direct-projection-arrays.md)) sets that card's bit; `total` =
-**popcount**; page via `run_query_streamed_popcount` ([lib.rs:3945](../../card_engine/src/lib.rs#L3945)).
+**popcount**; page via `run_query_streamed_popcount` ([lib.rs:3945](../../../card_engine/src/lib.rs#L3945)).
 No predicate evaluation, only a bit-scatter over the `k` matches. This is `PrintingRangeBits`, the
 core of PR #689. `unique=artwork` is the same shape *once a global artwork id exists*: today the
-group id is per-card-local ([lib.rs:1851](../../card_engine/src/lib.rs#L1851)), so the uniqueness key
+group id is per-card-local ([lib.rs:1851](../../../card_engine/src/lib.rs#L1851)), so the uniqueness key
 is the pair `(card, artwork_group_id)` and there is no single integer to scatter — which is why
 [#693] needed a per-query dedup bitmask. Assigning each distinct `(card, local_group)` a stable
 **global artwork id** at build time (a `printing_to_artwork` array plus its `artwork_to_card`
@@ -121,7 +139,7 @@ total = Σ_{has_V && !has_notV}  pcount(c)         # pure-V card: all printings 
 ```
 
 The plane pairs already exist on `main`: legality has `PLANE_LEGAL_EXISTS` + `PLANE_LEGAL_ILLEGAL`
-directly ([planes.rs:72](../../card_engine/src/planes.rs#L72)); border/rarity are one-hot, so
+directly ([planes.rs:72](../../../card_engine/src/planes.rs#L72)); border/rarity are one-hot, so
 `has_notV` is an OR of the other value planes (~5 words per 64 cards). Correctness rests on
 "pure-V ⇒ all printings match V," which holds by construction.
 
@@ -146,7 +164,7 @@ Two refinements:
 
 `border:black`/printing is slow (0.853 ms baseline) because its card-space candidate covers
 ≥87.5% of cards and is discarded to a full scan
-([lib.rs:3815](../../card_engine/src/lib.rs#L3815)) — but the discard is *correct*, not a bug to
+([lib.rs:3815](../../../card_engine/src/lib.rs#L3815)) — but the discard is *correct*, not a bug to
 undo. Keeping a ~90%-card candidate would iterate ~90% of cards instead of 100% while still
 re-checking `border` per printing (the candidate is a loose card-existence set, so no per-printing
 work is skipped), and the card-id materialization overhead roughly cancels the ~10% iteration
@@ -162,7 +180,7 @@ which is why the slowness is printing-specific. Fix the mechanism (PR 5), not th
   three fields; nothing to verify after narrowing.
 - **`printing_to_card` direct array** + `eval` inlining ([#690]) — powers Idea 2's O(k) projection.
 - **`range_narrowed` / `Narrowed.tight` / `broad_ok` / `exact`** plumbing and the binary search
-  that yields `k` for free already exist ([lib.rs:2035](../../card_engine/src/lib.rs#L2035)).
+  that yields `k` for free already exist ([lib.rs:2035](../../../card_engine/src/lib.rs#L2035)).
 
 Confirmed absent from `main`: `PrintingRangeBits`, `must_be_tight`, and any range-family check —
 so nothing is half-landed. PR #689's `printing_to_card` and `eval`-split commits were the ones
@@ -170,7 +188,7 @@ extracted and shipped as [#690]; the rest of that branch is unmerged.
 
 ## Correctness: the NULL over-inclusion trap (Idea 2 only)
 
-`range_narrowed`'s broad **complement** branch ([lib.rs:2051-2056](../../card_engine/src/lib.rs#L2051))
+`range_narrowed`'s broad **complement** branch ([lib.rs:2051-2056](../../../card_engine/src/lib.rs#L2051))
 over-includes printings absent from the index (NULL value), so it is `loose`, not `tight`. This is
 harmless on `main` (broad lone ranges are vetoed, never reaching a card-space existence answer). It
 becomes a real overcount the moment Idea 2 trusts a card bitmap's popcount directly — PR #689
@@ -292,24 +310,18 @@ Ordered by dependency and risk; magnitudes are from PR #689's interleaved-A/B me
   0.416→0.124 (3.36×), `year<2005` 0.280→0.064 (4.40×); usd unchanged; 0 parity mismatches;
   calibration 88/88 gold. *Compounds still excluded* (bare-leaf gate) — they're the printing-space
   plane's job (compose in printing space, project once).
-- [ ] **PR 2b — global artwork id groundwork + `unique=artwork`.** Land `printing_to_artwork` /
-  `artwork_to_card` (build-time enumeration of `(card, local_group)`, persisted, archive format
-  bump) — the [#690] analogue for artwork — then extend the plane to artwork space (popcount over
-  artwork ids).
-  *Impacts:* `usd`/`cn`/`date` under `unique=artwork` (turns PR #689's +7-8% regression into a
-  win). *Magnitude:* regression → win. *Depends:* 2a (+3 for cn/date). *Risk:* med — new persisted
-  arrays + a format-version bump.
-- [ ] **PR 5 — printing-mode total for legality/rarity/border** — a precomputed O(1) per-value count
-  answering a **bare** query's total (`border:black`/printing). See
-  [Existential fields](#existential-fields-a-second-cheap-total-mechanism). *Impacts:* bare
-  `r:`/`f:`/`border:` under `unique=printing`. *Magnitude:* ~3× (removes the count pass). *Depends:*
-  Step 0 (gated on it being a real bottleneck).
-  **Largely subsumed by [#724](https://github.com/jbylund/sylvan_librarian/issues/724)** (printing
-  bitplanes): a bitplane's `popcount` *is* this count, and #724 also does composition/membership/paging.
-  So build PR 5 standalone **only** as a cheaper pre-#724 shortcut (a scalar count table, no
-  per-printing bits, no archive bump) if the bare printing-mode total is hot before the bitplanes
-  land; otherwise it falls out of #724. (These are printing-*exact* planes, not "existential" — that
-  term describes the card-space projection; renamed here to match #724.)
+- [x] **PR 2b — global artwork id groundwork + `unique=artwork`.** Resolved by
+  [#724](00724-engine-printing-existential-planes.md) + [#733], but not as originally scoped:
+  instead of a persisted `printing_to_artwork`/`artwork_to_card` pair (archive format bump), #724
+  derives the global artwork id at query time (`artwork_base[card] + artwork_group_id`, a prefix-sum
+  of the existing `artwork_groups` counts) — no archive change. #733 then made range leaves
+  (`usd`/`cn`/`date`) compose sources under that projection. *Measured* (#733): `cn<100`/artwork
+  910→124µs (7.3×), `usd<50 border:black`/artwork 1291→200µs (6.5×), `usd<50`/artwork 824→211µs
+  (3.9×).
+- [x] **PR 5 — printing-mode total for legality/rarity/border** — subsumed by
+  [#724](00724-engine-printing-existential-planes.md) exactly as predicted below: a printing
+  bitplane's `popcount` *is* this count, plus composition/membership/paging for free. No standalone
+  PR was needed.
 
 **Why this order:** PR 1 first keeps the "small, independent, separable" principle — lowest risk,
 printing-only, validates the walk + harness (contingent on Step 0; else swap with 2a). `2a → 3`
@@ -344,29 +356,26 @@ gated — real but modest, on a combo not yet confirmed hot. (PR 4 was dropped �
   `narrow_candidates_exact` to count scatter-then-discard events and their µs) turns up real waste —
   as a standalone "skip doomed `compile_plane`" it's dead.
 
-### Deferred (explicitly)
+### Deferred, now resolved
 
-- [ ] **Idea-2 printing-space pager** ([#656]) — the mechanism for **compound printing/artwork** (a
-  printing-space popcount total; `cn<100 usd<50`/printing ~1.07 ms is the uncovered gap). Deferred
-  for frequency/effort, *not* deep-offset (measured flat). PR 1 covers bare printing without it.
-  **Full plan (parts, ship order, target queries, #656 assembly):**
-  [local-engine-printing-plane-popcount-order.md](local-engine-printing-plane-popcount-order.md).
-- [ ] **Idea-1 crossover guard** — widen the fastpath below the 25% veto boundary it shipped at
-  ([#695]) into the moderate band, per the [#647] calibrate-from-measurement precedent. The two
-  plans have *opposite* cost curves in `k`: narrow-and-scan rises ~O(k); the fastpath walk falls
-  ~O((offset+limit)·n_cards / k) (denser matches ⇒ shorter walk). Their min-envelope is a **hump**
-  (rise along narrowing, peak at the crossover, fall along the fastpath) — *not* monotonic;
-  calibration lowers and left-shifts the peak, it doesn't remove it. Today's peak sits in the
-  moderate band (`year<2010`, k≈22k, ~0.45 ms) because the gate is stuck at the veto boundary
-  (~20–24k), far above the real first-page crossover **k ≈ √(n_cards · limit) ≈ 1,800**. So the
-  reclaimable band is ~1.8k–20k.
-  **Why it needs a sweep, not a moved constant:** the walk cost carries `offset`, so the crossover
-  is `(k, offset)`-dependent — deep pages flip it (at offset 5,000, k≈1,800 the walk touches
-  ~280k printings, far worse than a scan). A single `k`-threshold would fix page 1 and regress deep
-  pages; the guard must be offset-aware (and ideally order-by-alignment-aware). Strictly additive to
-  [#695]: it only widens where the fastpath applies, never changes the sub-25% plans.
+- [x] **Idea-2 printing-space pager** ([#656]) — the mechanism for **compound printing/artwork** (a
+  printing-space popcount total; `cn<100 usd<50`/printing ~1.07 ms was the uncovered gap). Resolved
+  by [#724](00724-engine-printing-existential-planes.md) (printing-space compose) +
+  [#733](https://github.com/jbylund/sylvan_librarian/pull/733) (range leaves as compose sources) —
+  see [#656 assembly](#656-assembly-from-pr-1--pr-2a) below. Not the mechanism originally sketched
+  here (a dedicated printing-bitmap popcount-skip pager), but the same outcome.
+- [x] **Idea-1 crossover guard** — resolved as a **non-issue**, not by widening the gate. The #702
+  cost-based router's `printing_range_route_probe`
+  ([00702](00702-engine-plan-selection-layer.md), lines 289-310) swept the fixed 25% veto
+  boundary against a real `(k, offset)`-aware cost model across offsets to 20,000 and found the veto
+  already sits at the crossover (model 1.015× vs. tree gold, no regret) — the reclaimable ~1.8k–20k
+  band predicted below didn't hold up under measurement, so there was nothing to widen into. This did
+  surface a further finding — the veto is now redundant with the cost model and could be deleted
+  outright — split out to
+  [local-engine-range-veto-redundancy.md](../local-engine-range-veto-redundancy.md). The sweep design
+  below is kept as the historical record of the (superseded) plan.
 
-### Crossover guard: sweep design
+### Crossover guard: sweep design (superseded — see above)
 
 Goal: replace the walk branch's veto-boundary gate (`range_too_broad_to_narrow && k > STREAM_MIN_MATCHES`)
 with a calibrated `(k, offset)` predicate that picks the cheaper of narrow-and-scan vs. fastpath-walk.
@@ -397,12 +406,11 @@ deep pages fall back to narrowing exactly where the walk would lose.
 
 ### #656 assembly (from PR 1 + PR 2a)
 
-Consolidated into the printing-space plan doc:
-[local-engine-printing-plane-popcount-order.md § #656 assembly](local-engine-printing-plane-popcount-order.md#656-assembly).
-In short: **#656 ≈ PR 2a's printing bitmaps + PR 1's walk + an AND** — the range→printing bitmap
-(PR 2a/3) and printing-space paging (PR 1's walk) fall out of those two, leaving only the
-bitmap intersection + routing the popcount total into the printing path as net-new work. Landing
-both PR 1 and PR 2a is what reduces #656 to a small follow-up.
+Originally planned to consolidate into the printing-space plan doc as **#656 ≈ PR 2a's printing
+bitmaps + PR 1's walk + an AND**. Landed differently: [#724](00724-engine-printing-existential-planes.md)
+built printing-space compose (AND/OR across border/rarity/legality, projected once to any unique
+mode) directly, and [#733](https://github.com/jbylund/sylvan_librarian/pull/733) made range leaves a
+compose source on top of it — reaching the same compound wins without a dedicated #656 PR.
 
 ### Acceptance (every PR)
 
@@ -418,26 +426,25 @@ both PR 1 and PR 2a is what reduces #656 to a small follow-up.
   (price/rarity return `None`); PR 1 rides the card permutation for card-level orderings and slices
   the range index (boundary-bucket re-sort) for order-by-the-range-field. A *different*
   printing-varying order-by stays on the gathered path.
-- **Global artwork id sizing.** Count of distinct `(card, local_group)` pairs (bounds the
-  `artwork_to_card` array between n_cards and n_printings), and whether the #634 artwork order
-  permutation already keys on a representative printing the global id can align to.
+- **Global artwork id sizing** — *moot:* #724 never persists `artwork_to_card`; it derives the global
+  id at query time from the existing `artwork_groups` prefix sum, so there was no array to size.
 
 ## Related
 
-- [local-engine-printing-plane-popcount-order.md](local-engine-printing-plane-popcount-order.md) —
+- [local-engine-printing-plane-popcount-order.md](../local-engine-printing-plane-popcount-order.md) —
   the consolidated plan for the deferred Idea-2 printing-space popcount plan (#656): parts, ship
   order, target queries, and the #656 assembly.
 - [local-engine-broad-range-fastpath.md](local-engine-broad-range-fastpath.md) — history:
   price-exactness prerequisite (shipped) and the full PR #689 account.
 - [00690-engine-direct-projection-arrays.md](00690-engine-direct-projection-arrays.md) —
   `printing_to_card`, load-bearing for Idea 2.
-- [00680-engine-existential-plane-generalization.md](done/00680-engine-existential-plane-generalization.md)
+- [00680-engine-existential-plane-generalization.md](00680-engine-existential-plane-generalization.md)
   — the existential-plane framework Idea 2 extends.
-- [00634-engine-permuted-bitmap-order-phase.md](done/00634-engine-permuted-bitmap-order-phase.md) —
+- [00634-engine-permuted-bitmap-order-phase.md](00634-engine-permuted-bitmap-order-phase.md) —
   the order permutation Idea 1 walks and the popcount pager Idea 2 feeds.
-- [00655-engine-numeric-range-planes.md](done/00655-engine-numeric-range-planes.md) — the
+- [local-engine-numeric-range-planes.md](local-engine-numeric-range-planes.md) — the
   card-invariant `cmc`/`power`/`toughness` analogue; does not transfer (no existential dimension).
-- [00647-engine-cost-guard-calibration.md](done/00647-engine-cost-guard-calibration.md) — the
+- [00647-engine-cost-guard-calibration.md](00647-engine-cost-guard-calibration.md) — the
   guard-from-measurement precedent for Idea 1's crossover.
 - [#638] `tix`/`eur` range index; [#656] printing-space popcount pager; [#693] artwork dedup bitmask.
 

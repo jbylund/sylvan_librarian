@@ -60,8 +60,8 @@ is the "decision a threshold can't make" from the planner writeup).
 ## Why — and the honest scope
 
 Two distinct values, only one of them strong (see
-[broad-range-fastpath](local-engine-broad-range-fastpath.md) and the "three findings" in
-[sorted-range-fastpath](local-engine-sorted-range-fastpath.md)):
+[broad-range-fastpath](done/local-engine-broad-range-fastpath.md) and the "three findings" in
+[sorted-range-fastpath](done/local-engine-sorted-range-fastpath.md)):
 
 1. **Offset-independence** for a bare broad printing range. *Weak on its own* — today's O(n) count
    pass is already offset-independent (measured flat, offset 0 vs 5000). #656 is deferred for
@@ -209,7 +209,7 @@ a hunch.
 ## Parts, in ship order
 
 Most pieces already exist or are planned in
-[sorted-range-fastpath's roadmap](local-engine-sorted-range-fastpath.md#pr-order) — this is the
+[sorted-range-fastpath's roadmap](done/local-engine-sorted-range-fastpath.md#pr-order) — this is the
 printing-space subset, in dependency order:
 
 1. **`printing_to_card` direct array — shipped**
@@ -290,7 +290,7 @@ range+range gap proves worth closing.
   paging is the one archive-format bump.
 - **NULL over-inclusion — the #689 lesson.** A range bitmap's `popcount` **over-counts** the moment
   an existential/NULL predicate is trusted directly; this is precisely what
-  [PR #689 got wrong and reverted](local-engine-sorted-range-fastpath.md). The `must_be_tight`
+  [PR #689 got wrong and reverted](done/local-engine-sorted-range-fastpath.md). The `must_be_tight`
   correctness fix is inseparable from the bitmap path and must land with it (PR 2a bundles it).
 - **Two-spaces projection.** Postings/ranges are printing-space; the `unique=card` answer is
   card-space, and projection does **not** distribute over AND/OR. Compose the residual in
@@ -311,16 +311,16 @@ range+range gap proves worth closing.
 
 - [done/00702-engine-plan-selection-layer.md](done/00702-engine-plan-selection-layer.md) — the cost
   router; where this was the deferred "one real win."
-- [local-engine-broad-range-fastpath.md](local-engine-broad-range-fastpath.md) — historical
+- [local-engine-broad-range-fastpath.md](done/local-engine-broad-range-fastpath.md) — historical
   idea-1/idea-2 crossover analysis (the range-narrowing bitmap source).
-- [local-engine-sorted-range-fastpath.md](local-engine-sorted-range-fastpath.md) — the full
+- [local-engine-sorted-range-fastpath.md](done/local-engine-sorted-range-fastpath.md) — the full
   PR-ordered roadmap; idea 1 shipped as #695; the printing-mode existential-total mechanism (PR 5).
 - [00680-engine-existential-plane-generalization.md](done/00680-engine-existential-plane-generalization.md),
   [00667 legality](done/00667-engine-legality-divergent-carveout.md),
   [00664 border planes](done/00664-engine-border-planes.md) — the existential-plane framework the
   *precomputed* bitmap source extends; #667's planes are **card-space**, which is why
   `f:modern`/printing still needs a printing-space one.
-- [00724-engine-printing-existential-planes.md](00724-engine-printing-existential-planes.md)
+- [00724-engine-printing-existential-planes.md](done/00724-engine-printing-existential-planes.md)
   ([#724](https://github.com/jbylund/sylvan_librarian/issues/724)) — the printing-space bitplanes
   track: this plan's legality/border leaf source, sequenced last.
 - #656 (pager/permutation), #690 (`printing_to_card`, shipped), #689 (reverted attempt / NULL

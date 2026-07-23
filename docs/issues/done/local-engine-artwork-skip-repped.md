@@ -1,7 +1,8 @@
 # Artwork gather: skip already-repped groups (default prefer)
 
-**Status:** implemented, measured, byte-identical. Branch `engine-artwork-skip-repped`. Three changes:
-the skip-repped reorder, a columnar `artwork_group_id`, and pre-sizing `group_best` (all below).
+**Status:** done, shipped in [#737](https://github.com/jbylund/sylvan_librarian/pull/737). Three
+changes: the skip-repped reorder, a columnar `artwork_group_id`, and pre-sizing `group_best` (all
+below).
 
 Cumulative vs `main` (97,206-printing corpus, artwork/usd, byte-identical output):
 

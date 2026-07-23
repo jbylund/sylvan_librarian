@@ -1,9 +1,10 @@
 # Engine: Printing-Space Compose as the Universal Exact Evaluator
 
-Status: todo, filed as [#731](https://github.com/jbylund/sylvan_librarian/issues/731). The
-generalization of [#724](00724-engine-printing-existential-planes.md)'s printing-space compose from
-"whole filter composable" into the query engine's general evaluation model. Deferred until #724 (the
-substrate) merges.
+Status: **step 1 done** ([#733](https://github.com/jbylund/sylvan_librarian/pull/733) — range leaves
+as compose sources), steps 2-3 todo. Filed as
+[#731](https://github.com/jbylund/sylvan_librarian/issues/731). The generalization of
+[#724](done/00724-engine-printing-existential-planes.md)'s printing-space compose from "whole filter
+composable" into the query engine's general evaluation model. #724 (the substrate) has merged.
 
 ## The model
 
@@ -18,7 +19,7 @@ border/rarity/legality under `AND`/`OR`; this is the generalization to *all* lea
 | kind | leaves | how | status |
 |---|---|---|---|
 | plane read | border, rarity, legality | plane slice (legality: broadcast card `∃`-plane + divergent repair) | built (#724) |
-| range materialize | `usd`, `cn`, `date` | scatter the range index's in-range slice into a bitmap | tooling exists (`build_card_range_bits`/`scatter_bits`) |
+| range materialize | `usd`, `cn`, `date` | scatter the range index's in-range slice into a bitmap | **shipped** (#733) |
 | broadcast down | card-invariant `color`/`type`/`cmc` | broadcast the card plane to printing space; **no repair** (never diverges) | `broadcast_card_bits_to_printings` exists |
 | per-survivor residual | text (`name`/`oracle`/`flavor`), or any leaf | verify on the composed survivors, not as a bitmap | existing residual machinery |
 
@@ -40,7 +41,7 @@ dissolves the "compose leaf vs residual" distinction into a cost decision rather
 card-space existence-`AND` of separately-`∃`-projected leaves false-positives on the shared witness — a
 card with a black printing and a *separate* rare printing satisfies `∃black ∧ ∃rare` but has no single
 black-and-rare printing. Composing in printing space and projecting once is exactly what avoids that
-(see [#724](00724-engine-printing-existential-planes.md)). Card-invariant leaves and card-level
+(see [#724](done/00724-engine-printing-existential-planes.md)). Card-invariant leaves and card-level
 residuals are witness-independent, so they apply *after* the projection.
 
 ## Correctness caveats (both the trivalent-NULL issue)
@@ -65,7 +66,8 @@ wins didn't move the broad survey": the addressable slice was structurally tiny,
 
 Build order (each its own PR, gated by the cost model that already prices synthesis):
 
-1. **Range leaves** (`usd`/`cn`/`date`) as compose sources — reuses `build_card_range_bits`.
+1. **Range leaves** (`usd`/`cn`/`date`) as compose sources — reuses `build_card_range_bits`. **Shipped**
+   ([#733](https://github.com/jbylund/sylvan_librarian/pull/733), also closed #694).
 2. **Card-invariant broadcast leaves** (`color`/`type`/`cmc`) — reuses `broadcast_card_bits_to_printings`.
 3. **Per-survivor residual** for the non-composable remainder (text) — feed compose's exact narrowing
    into the existing residual-verify path (printing-varying residual before the projection, card-invariant
@@ -73,5 +75,5 @@ Build order (each its own PR, gated by the cost model that already prices synthe
 
 ## Related
 
-- [#724](00724-engine-printing-existential-planes.md) — printing-space compose, the substrate.
+- [#724](done/00724-engine-printing-existential-planes.md) — printing-space compose, the substrate.
 - [#730](00730-engine-popcount-skip-walk.md) — deep-pagination popcount-skip walk (orthogonal).

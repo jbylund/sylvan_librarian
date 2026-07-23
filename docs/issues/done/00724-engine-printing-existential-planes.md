@@ -1,17 +1,20 @@
 # Engine: Printing-Space Bitplanes (Legality / Border / Rarity, Bit-per-Printing)
 
-Status: todo, filed as [#724](https://github.com/jbylund/sylvan_librarian/issues/724). **Not deferred
-infrastructure** — it ships a standalone win (bare printing-mode plane queries via `popcount` + a
-reused page walk, ~3×) *and* is the substrate the
-[printing-space popcount-order plan](local-engine-printing-plane-popcount-order.md) needs for
+Status: **done**, filed as [#724](https://github.com/jbylund/sylvan_librarian/issues/724), shipped
+across [#728](https://github.com/jbylund/sylvan_librarian/pull/728) (border slice) and
+[#732](https://github.com/jbylund/sylvan_librarian/pull/732) (rarity + legality + AND/OR compose,
+projected to card & artwork) — see the "Result" sections below for each phase. It shipped a
+standalone win (bare printing-mode plane queries via `popcount` + a reused page walk, ~3×) *and* is
+the substrate the
+[printing-space popcount-order plan](../local-engine-printing-plane-popcount-order.md) needs for
 compounds. See "The standalone win" below.
 
 ## What — exact, not existential
 
 Bit-per-**printing** planes for printing-varying values — legality (per format), border, rarity.
 Today these live only in **card space**, as existence *projections*: legality's `legal_x` plane
-([#667](done/00667-engine-legality-divergent-carveout.md)) and border's plane
-([#664](done/00664-engine-border-planes.md)) set a card's bit to mean "*some* printing satisfies,"
+([#667](00667-engine-legality-divergent-carveout.md)) and border's plane
+([#664](00664-engine-border-planes.md)) set a card's bit to mean "*some* printing satisfies,"
 not *which*. That projection is why they're called "existential" and why they can't be ANDed safely
 (shared witness) — but it's a **card-space artifact**, not a property of the attribute.
 
@@ -79,7 +82,7 @@ in the query's unique space by projecting *once* at the end — a mode-dependent
 | unique mode | final projection | cost term |
 |---|---|---|
 | `printing` | none — the surviving bits *are* the rows | 0 |
-| `card` | ↑ to card-existence via `printing_to_card` ([#690](done/00690-engine-direct-projection-arrays.md)) | O(surviving printings) |
+| `card` | ↑ to card-existence via `printing_to_card` ([#690](00690-engine-direct-projection-arrays.md)) | O(surviving printings) |
 | `artwork` | ↑ to artwork ids via `printing_to_artwork` | O(surviving printings), **+ needs PR 2b** (global artwork id) |
 
 Two honest scope notes:
@@ -90,7 +93,7 @@ Two honest scope notes:
 - Where #724 is the **only** exact option across all three modes is **compounds** (`border:black
   r:rare`, `usd<50 f:modern`): card-space existence-AND can't compose them, so they must be AND'd in
   printing space and projected once (see the two strategies above) — that's the full printing-space
-  plan ([local-engine-printing-plane-popcount-order.md](local-engine-printing-plane-popcount-order.md)),
+  plan ([local-engine-printing-plane-popcount-order.md](../local-engine-printing-plane-popcount-order.md)),
   built on these planes.
 
 So the split is: **#724 delivers bare printing-mode queries standalone** (popcount + walk, ~3×); the
@@ -236,7 +239,7 @@ popcount win applies broadly, not just to compounds. All three unique modes — 
 
 The load-bearing finding: **legality is ~4× cheaper than border in printing mode at the same
 breadth, because legality settles at the *card* level** (`printing_dependent(Legality) => false`,
-[filter.rs](../../card_engine/src/filter.rs)) — it evaluates once per card (~31.5k) and emits all of
+[filter.rs](../../../card_engine/src/filter.rs)) — it evaluates once per card (~31.5k) and emits all of
 a matching card's printings, dropping to per-printing only for the rare divergent-legality cards.
 **Border and rarity are genuinely per-printing** (`TextField::Border => StrVal::PDep`), so they
 evaluate per printing (~97k) — that scan is the cost.
@@ -314,10 +317,10 @@ total turns out hot before these planes land.
 
 ## Related
 
-- [local-engine-printing-plane-popcount-order.md](local-engine-printing-plane-popcount-order.md) —
+- [local-engine-printing-plane-popcount-order.md](../local-engine-printing-plane-popcount-order.md) —
   the consumer plan; this is its existential leaf source.
-- [00667 legality](done/00667-engine-legality-divergent-carveout.md),
-  [00664 border planes](done/00664-engine-border-planes.md) — the card-space versions this extends
+- [00667 legality](00667-engine-legality-divergent-carveout.md),
+  [00664 border planes](00664-engine-border-planes.md) — the card-space versions this extends
   into printing space.
 - [00713 is-tag recovery](00713-is-tag-recovery.md) — bucket-C; same per-value crossover.
 - #656 — the popcount-order phase extension.
