@@ -5108,10 +5108,16 @@ fn walk_grouped_page<'a>(
     let is_set = |pid: usize| pbits[pid >> 6] & (1u64 << (pid & 63)) != 0;
     let cmp = |a: &Match, b: &Match| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2));
     let mut page: Vec<(&AOracleCard, &APrinting)> = Vec::with_capacity(limit);
-    // per group key: (best matching pid, its prefer score). Pre-sized to max_artwork_groups so the
-    // grouping loop needs no per-printing resize check (Card mode collapses to index 0).
-    let mut group_best: Vec<Option<(u32, f64)>> =
-        if matches!(mode, Mode::Card | Mode::Artwork) { vec![None; usize::from(max_artwork_groups)] } else { Vec::new() };
+    // per group key: (best matching pid, its prefer score). Pre-sized so the grouping loop needs no
+    // per-printing resize check: Artwork needs one slot per group, Card collapses to a single group
+    // (gid 0), Printing does no grouping. Card's fixed len 1 also keeps the loop safe if a
+    // degenerate store leaves max_artwork_groups at 0.
+    let n = match mode {
+        Mode::Artwork => usize::from(max_artwork_groups),
+        Mode::Card => 1,
+        Mode::Printing => 0,
+    };
+    let mut group_best: Vec<Option<(u32, f64)>> = vec![None; n];
     let mut touched: Vec<u16> = Vec::new();
     let mut scratch: Vec<Match> = Vec::new();
     let mut skip = page_offset;
