@@ -1950,6 +1950,20 @@ fn guard_env<T: std::str::FromStr>(name: &str, default: T) -> T {
 // still wins ~1.06-1.15× there).
 static MAX_NARROW_FRACTION: LazyLock<f64> = LazyLock::new(|| guard_env("CARD_ENGINE_MAX_NARROW_FRACTION", 0.25));
 
+/// A different crossover from `MAX_NARROW_FRACTION` above, for a different decision: whether
+/// `printing_compose_fastpath`'s permutation-free `gather_composed_page` fallback is worth its
+/// build cost (see that function's doc). `MAX_NARROW_FRACTION` answers "does narrowing shrink the
+/// candidate set enough to beat a full scan" — this answers "does skipping per-candidate residual
+/// re-verification (compose's whole benefit here, since the fallback still visits every mode-space
+/// candidate regardless of build) beat the cost of building the composed bitmap at all." Those are
+/// different tradeoffs with different crossovers: calibrated directly (`usd<N` swept 15%-98% of
+/// *cards* — the domain this must be checked in, not raw matching printings, see the call site —
+/// card/rarity, interleaved A/B compose on/off), the gather fallback wins clearly below ~82% and
+/// loses above ~93%, both noisy in between; 0.85 sits inside that band, erring toward the general
+/// path (this engine's default lean whenever a crossover region is uncertain, same reasoning
+/// `MAX_NARROW_FRACTION`'s own calibration used).
+static COMPOSE_GATHER_MAX_CARD_FRACTION: LazyLock<f64> = LazyLock::new(|| guard_env("CARD_ENGINE_COMPOSE_GATHER_MAX_CARD_FRACTION", 0.85));
+
 /// Below this many matched ids narrowing always wins regardless of fraction —
 /// gathering a handful of ids is microseconds. Also keeps tiny stores (tests,
 /// partial imports) narrowing, where any match trips the fraction. Not
@@ -4565,6 +4579,43 @@ fn printing_compose_fastpath<'a>(
     if !is_printing_composable(filter, indexes) || !printing_compose_indexes_built(indexes) {
         return None;
     }
+    let perm = indexes.sort_perms.get(sort_col, descending).filter(|p| p.len() == cards.len());
+    // No permutation (rarity/usd): before paying for the real build, check whether it's worth it at
+    // all using the same estimate `compose_printing_estimate` already computes cheaply in acquire
+    // (O(log n) partition points / plane popcounts, no scatter) — see `COMPOSE_GATHER_MAX_CARD_FRACTION`'s
+    // doc for why this needs its own threshold, not `MAX_NARROW_FRACTION`. The check must be in
+    // **mode space** (cards for `Card`, artworks for `Artwork`), not raw matching printings: a bare
+    // range's printing-space match count is a poor proxy for how many *candidates*
+    // `gather_composed_page` will actually visit (a card can have several qualifying printings). A
+    // plain `.min(domain)` cap is *not* enough to project it down, though — it saturates to exactly
+    // `domain` for every query whose printing-space count exceeds it (`cn<100`: 35,021 printings vs
+    // 31,508 cards, and `usd<50`: 80,527 vs 31,508 both saturate to the *identical* 31,508, even
+    // though their true card counts are 17,616 vs 31,217 — miles apart), which loses exactly the
+    // signal this check needs. A balls-into-bins estimate — `k` matching printings landing on
+    // `domain` cards, expected distinct cards touched `≈ domain·(1 − e^(−k/domain))` — doesn't
+    // saturate the same way and tracks the true count much better (checked against real totals:
+    // `cn<100` estimate 21,140 vs true 17,616; `usd<50` estimate 29,062 vs true 31,217; clearly
+    // separated, unlike the capped estimate's identical 31,508 for both).
+    if perm.is_none() {
+        let (printing_matches, _, _) = compose_printing_estimate(filter, indexes, offsets, printings.len());
+        // Artwork's true domain is n_artworks (>= n_cards), but getting it exactly means building
+        // artwork_base here — real O(n_cards) work paid just to maybe decline. `cards.len()` is a
+        // cheap, conservative stand-in (n_artworks is always >= it, so this only ever makes the
+        // fraction look *more* broad than reality — errs toward declining, same conservative lean
+        // `COMPOSE_GATHER_MAX_CARD_FRACTION` itself was calibrated with).
+        let domain = match mode {
+            Mode::Printing => printings.len(),
+            Mode::Card | Mode::Artwork => cards.len(),
+        };
+        let est = if matches!(mode, Mode::Printing) {
+            printing_matches as f64 // exact in printing space already, no projection needed
+        } else {
+            domain as f64 * (-(printing_matches as f64) / domain as f64).exp().mul_add(-1.0, 1.0)
+        };
+        if est > domain as f64 * *COMPOSE_GATHER_MAX_CARD_FRACTION {
+            return None;
+        }
+    }
     // Compose once, here (never in acquire) — that single build is the only synthesis, and it is paid
     // only because this plan won. The total is the popcount in the query's result space; the page is
     // the one grouped walk at the mode's granularity, using the composed bits as exact membership.
@@ -4584,14 +4635,20 @@ fn printing_compose_fastpath<'a>(
     if total == 0 || page_offset >= total {
         return Some((total, Vec::new()));
     }
-    if total <= *STREAM_MIN_MATCHES {
-        return None; // sparse: the general path gathers + globally sorts, ordering ties differently
-    }
-    let perm = indexes.sort_perms.get(sort_col, descending)?;
-    if perm.len() != cards.len() {
-        return None;
-    }
-    Some((total, walk_grouped_page(mode, cards, printings, offsets, &pbits, prefer, sort_col, descending, limit, page_offset, perm, u16::from(indexes.max_artwork_groups))))
+    let page = match perm {
+        Some(perm) => {
+            if total <= *STREAM_MIN_MATCHES {
+                return None; // sparse: the general path gathers + globally sorts, ordering ties differently
+            }
+            walk_grouped_page(mode, cards, printings, offsets, &pbits, prefer, sort_col, descending, limit, page_offset, perm, u16::from(indexes.max_artwork_groups))
+        }
+        // No permutation: already confirmed above (via the cheap estimate) that this composed set is
+        // selective enough to be worth building — page via the bounded GatherSelect fallback, whose
+        // tie-break matches the general path exactly (same GatherSelect, same comparator), so unlike
+        // the branch above there's no separate small-total decline needed here.
+        None => gather_composed_page(mode, cards, printings, offsets, &pbits, prefer, sort_col, descending, limit, page_offset, u16::from(indexes.max_artwork_groups)),
+    };
+    Some((total, page))
 }
 
 /// The physical plans the cost router (`run_query_routed`) chooses among. Each
@@ -4656,9 +4713,7 @@ impl PhysicalPlan {
             PhysicalPlan::PrintingRangeScan => {
                 printing_range_scan_applicable(mode, plane, cards) && bare_range_bounds(filter, indexes).is_some()
             }
-            PhysicalPlan::PrintingCompose => {
-                printing_compose_applicable(filter, mode, cards, plane, sort_col, descending, indexes)
-            }
+            PhysicalPlan::PrintingCompose => printing_compose_applicable(filter, cards, plane, indexes),
             PhysicalPlan::PlanePopcountOrder => {
                 plane_popcount_order_applicable(filter, mode, cards, plane, sort_col, descending, indexes)
             }
@@ -4780,30 +4835,22 @@ fn printing_range_scan_applicable(mode: Mode, plane: Option<&PlaneExpr>, cards: 
 }
 
 /// `PrintingCompose` applicability (#724), all three distinct-ons: a composable printing-space `filter`
-/// (border/rarity/legality, `AND`/`OR`), the planes built, no folded plane, the forward sort permutation
-/// present, flag on. `plane.is_none()` is load-bearing: under `unique=card` a *bare* border/rarity is
-/// `compile_plane`-consumed into an existential plane (`plane.is_some()`) → the faster #634 card-plane
-/// path handles it, so this plan declines there; under `unique=printing`/`artwork` nothing folds to a
-/// plane, so it picks up bare leaves too. Only the forward permutation is needed — the unified grouped
-/// walk never uses the inverse (that was the popcount-skip walk's, deferred to [#730]).
-fn printing_compose_applicable(
-    filter: &FilterExpr,
-    _mode: Mode,
-    cards: &[AOracleCard],
-    plane: Option<&PlaneExpr>,
-    sort_col: SortCol,
-    descending: bool,
-    indexes: &Archived<CardIndexes>,
-) -> bool {
+/// (border/rarity/legality, `AND`/`OR`), the planes built, no folded plane, flag on. `plane.is_none()`
+/// is load-bearing: under `unique=card` a *bare* border/rarity is `compile_plane`-consumed into an
+/// existential plane (`plane.is_some()`) → the faster #634 card-plane path handles it, so this plan
+/// declines there; under `unique=printing`/`artwork` nothing folds to a plane, so it picks up bare
+/// leaves too. **No longer requires a sort permutation** (dropped `sort_col`/`descending` params to
+/// match): `printing_compose_fastpath` pages via the forward grouped walk (`walk_grouped_page`) when
+/// one exists for the query's `sort_col`, or via a permutation-free bounded-gather fallback
+/// (`gather_composed_page`) when it doesn't (`rarity`/`usd` —
+/// docs/issues/local-engine-compose-permutation-fallback.md) — either way the total (a popcount over
+/// the already-exact composed bits) and the page are both correct; only *which* paging strategy runs
+/// depends on the permutation's presence, decided inside the fastpath itself.
+fn printing_compose_applicable(filter: &FilterExpr, cards: &[AOracleCard], plane: Option<&PlaneExpr>, indexes: &Archived<CardIndexes>) -> bool {
     // Mode-agnostic: the cost model arbitrates overlap with the specialized range plans. All three
     // range/compose plans are non-materializing (estimate-in-acquire), so nothing is eagerly built —
     // a losing plan costs only a binary search, never a wasted scatter.
-    *PRINTING_COMPOSE != 0
-        && !cards.is_empty()
-        && plane.is_none()
-        && is_printing_composable(filter, indexes)
-        && printing_compose_indexes_built(indexes)
-        && indexes.sort_perms.get(sort_col, descending).is_some_and(|p| p.len() == cards.len())
+    *PRINTING_COMPOSE != 0 && !cards.is_empty() && plane.is_none() && is_printing_composable(filter, indexes) && printing_compose_indexes_built(indexes)
 }
 
 /// `CardRangePopcount` needs `Mode::Card`, a **bare** range leaf as the whole filter — usd/cn/date,
@@ -5183,6 +5230,102 @@ fn walk_grouped_page<'a>(
     page
 }
 
+/// Permutation-free counterpart to `walk_grouped_page`, for when `orderby` has no card-space
+/// permutation (`rarity`/`usd` — the representative printing depends on `prefer` and can't be
+/// precomputed, see `ArchivedSortPermutations::get`'s doc). Same per-card grouping logic (`pbits`
+/// membership, best-`prefer_score` representative per group) and same exactness (`pbits` already
+/// consumed the whole filter — no residual, no `card_pass`), but instead of walking a permutation
+/// front-to-back with an early stop, it visits only the candidate cards (`bitmap_card_ids` over the
+/// card-projected `pbits` — cards with zero surviving printings are skipped entirely, an
+/// optimization the rank-order permutation walk can't make) and pushes into the same bounded
+/// `GatherSelect` accumulator `GatheredScan` uses for its own permutation-less case — so tie-break
+/// order matches the general path exactly (same comparator, same struct), unlike the permutation
+/// walk (which is why that one still declines below `STREAM_MIN_MATCHES`; this one doesn't need to).
+#[allow(clippy::too_many_arguments, clippy::needless_range_loop)] // `pid` also drives `is_set`/`printings[pid]` together, same shape as `walk_grouped_page`
+fn gather_composed_page<'a>(
+    mode: Mode,
+    cards: &'a [AOracleCard],
+    printings: &'a [APrinting],
+    offsets: &AOffsets,
+    pbits: &[u64],
+    prefer: Prefer,
+    sort_col: SortCol,
+    descending: bool,
+    limit: usize,
+    page_offset: usize,
+    max_artwork_groups: u16,
+) -> Vec<(&'a AOracleCard, &'a APrinting)> {
+    let is_set = |pid: usize| pbits[pid >> 6] & (1u64 << (pid & 63)) != 0;
+    let candidate_cards = bitmap_card_ids(&printing_bits_to_card_bits(pbits, offsets, cards.len()));
+    let n = match mode {
+        Mode::Artwork => usize::from(max_artwork_groups),
+        Mode::Card => 1,
+        Mode::Printing => 0,
+    };
+    let mut group_best: Vec<Option<(u32, f64)>> = vec![None; n];
+    let mut touched: Vec<u16> = Vec::new();
+    let mut sel = GatherSelect::new(page_offset, limit);
+    for cid in candidate_cards {
+        let card = &cards[cid as usize];
+        let start = u32::from(offsets[cid as usize]) as usize;
+        let end = u32::from(offsets[cid as usize + 1]) as usize;
+        let before = sel.buf().len();
+        match mode {
+            // Printing: every set printing is its own row (no grouping).
+            Mode::Printing => {
+                for pid in start..end {
+                    if is_set(pid) {
+                        sel.buf().push((sort_key_bits(card, &printings[pid], sort_col, descending), cid, pid as u32));
+                    }
+                }
+            }
+            // Card, default prefer: printings are stored prefer-desc within a card (same invariant
+            // `push_card_matches` relies on), so the first *set* printing in range is already the
+            // chosen one — no score to compute, no `touched`/`group_best` bookkeeping, an O(1) early
+            // break instead of scanning the rest of the card's printings. This matters here (unlike
+            // `walk_grouped_page`, which pays the same unconditional score-every-candidate cost) since
+            // this loop isn't bounded by page size — it visits every candidate card, so a per-printing
+            // cost that scales with total matches rather than `limit` is the dominant term for a broad
+            // composed set.
+            Mode::Card if matches!(prefer, Prefer::Default) => {
+                if let Some(pid) = (start..end).find(|&pid| is_set(pid)) {
+                    sel.buf().push((sort_key_bits(card, &printings[pid], sort_col, descending), cid, pid as u32));
+                }
+            }
+            // Card (non-default prefer) / Artwork: one best-prefer representative per group.
+            Mode::Card | Mode::Artwork => {
+                touched.clear();
+                for pid in start..end {
+                    if !is_set(pid) {
+                        continue;
+                    }
+                    let gid = match mode {
+                        Mode::Artwork => u16::from(printings[pid].artwork_group_id) as usize,
+                        _ => 0, // Card: everything collapses into one group
+                    };
+                    debug_assert!(gid < group_best.len(), "group_best must be pre-sized to max_artwork_groups");
+                    let score = prefer_score(card, &printings[pid], prefer);
+                    match &group_best[gid] {
+                        None => {
+                            group_best[gid] = Some((pid as u32, score));
+                            touched.push(gid as u16);
+                        }
+                        Some((_, best)) if score > *best => group_best[gid] = Some((pid as u32, score)),
+                        _ => {}
+                    }
+                }
+                for &gid in &touched {
+                    let (bp, _) = group_best[gid as usize].take().unwrap(); // take: resets group_best for the next card
+                    sel.buf().push((sort_key_bits(card, &printings[bp as usize], sort_col, descending), cid, bp));
+                }
+            }
+        }
+        sel.absorb(before);
+    }
+    let (_total, page_ids) = sel.finish(page_offset, limit); // total already known exactly via popcount; only the page is wanted here
+    page_ids.into_iter().map(|(cid, pid)| (&cards[cid as usize], &printings[pid as usize])).collect()
+}
+
 /// P3 executor: streamed selection over the sort permutation. Caller guarantees
 /// applicability (`streamed_select_applicable`) and has run `prepare_candidates`.
 #[allow(clippy::too_many_arguments)]
@@ -5439,6 +5582,7 @@ fn run_query_routed<'a>(
         scatter_printings: 0,  // range-slice k — set by both range-plan acquire branches (costed per-plan)
         project_printings: 0,  // PrintingCompose's card/artwork projection pass; CardRangePopcount sets it too (for costing compose)
         popcount_words: 0,     // PrintingCompose overrides this (result-space bitmap words)
+        compose_has_perm: false, // PrintingCompose overrides this (which paging strategy it'll actually use)
     };
     // Features for the general candidate path (shared by the acquire branch and the
     // lazy-materialize dispatch). `matches`/`eval_domain` = candidate CARD count, the
@@ -5522,6 +5666,10 @@ fn run_query_routed<'a>(
         feats.scatter_printings = scatter as u32;
         feats.project_printings = project as u32;
         feats.popcount_words = popcount_words as u32;
+        // Which paging strategy the fastpath will actually use — a real permutation walk (cheap,
+        // offset-dependent) or the permutation-free bounded-gather fallback (visits every match,
+        // offset-independent cost). Decided the same way the fastpath itself decides.
+        feats.compose_has_perm = indexes.sort_perms.get(sort_col, descending).is_some_and(|p| p.len() == cards.len());
         (feats, Prep::Range)
     } else {
         let prep = prepare_candidates(cards, offsets, strings, filter, plane, mode, indexes);
@@ -5626,7 +5774,7 @@ fn run_query_with_plan<'a>(
             printing_range_fastpath(cards, printings, offsets, strings, filter, indexes, sort_col, descending, limit, page_offset)
         }
         PhysicalPlan::PrintingCompose => {
-            if !printing_compose_applicable(filter, mode, cards, plane, sort_col, descending, indexes) {
+            if !printing_compose_applicable(filter, cards, plane, indexes) {
                 return None;
             }
             // The fastpath composes, projects per mode, and walks — or declines (None) on a sparse

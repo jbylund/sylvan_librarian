@@ -2552,9 +2552,12 @@ fn fuzz_row_identity_matches_reference() {
     const NUM_SEEDS: u64 = 96;
     const RANDOM_FILTERS_PER_STORE: usize = 10;
     const MAX_DEPTH: u8 = 3;
-    // edhrec/name/cmc have sort permutations (streamed path + inverse perms); usd has none, so it
-    // falls to the gathered, printing-keyed path. `desc` exercises the inverse perms / descending key.
-    const SORTS: [&str; 4] = ["edhrec", "name", "cmc", "usd"];
+    // edhrec/name/cmc have sort permutations (streamed path + inverse perms); usd/rarity have
+    // none, so they fall to the gathered, printing-keyed path (and, for a composable filter,
+    // PrintingCompose's own gather_composed_page fallback — see
+    // docs/issues/local-engine-compose-permutation-fallback.md). `desc` exercises the inverse
+    // perms / descending key.
+    const SORTS: [&str; 5] = ["edhrec", "name", "cmc", "usd", "rarity"];
     let pick_order = |rng: &mut rand::rngs::SmallRng| (SORTS[rng.random_range(0..SORTS.len())], if rng.random_bool(0.5) { "desc" } else { "asc" });
 
     // Small stores: broad predicate + structural combinatorics through the gather / small-total paths.
@@ -2726,7 +2729,7 @@ fn force_plan_differential_agreement() {
     const CORPUS_CARDS: usize = 6_000;
     const MAX_DEPTH: u8 = 3;
     const RANDOM_QUERIES: usize = 150;
-    const SORTS: [&str; 4] = ["edhrec", "name", "cmc", "usd"];
+    const SORTS: [&str; 5] = ["edhrec", "name", "cmc", "usd", "rarity"];
 
     let mut rng = rand::rngs::SmallRng::seed_from_u64(70_202);
     let data = fuzz_store_n(&mut rng, CORPUS_CARDS);
@@ -3288,7 +3291,7 @@ fn plan_cost_model_matches_gold() {
                     residual_tier_ns100,
                     limit: limit as u32,
                     offset: offset as u32,
-                    broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0,
+                    broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0, compose_has_perm: false,
                 };
 
                 // ── Model argmin over the applicable plans ──
@@ -3515,7 +3518,7 @@ fn plan_cost_refit() {
                     scan_units: scan_units(mode_enum, prep.candidate_cards.as_deref(), &archived.offsets, n_printings, eval_domain),
                     residual_tier_ns100: if prep.all_match_known { 0 } else { verify_cost_tier(&res) },
                     limit: limit as u32, offset: offset as u32,
-                    broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0,
+                    broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0, compose_has_perm: false,
                 };
                 for (pi, plan) in all_plans.iter().enumerate() {
                     if let Some(meas) = ns[pi] {
@@ -3713,7 +3716,7 @@ fn printing_range_route_probe() {
                 scan_units: scan_units(Mode::Printing, prep.candidate_cards.as_deref(), &archived.offsets, n_printings as u32, eval_domain),
                 residual_tier_ns100,
                 limit: LIMIT as u32, offset: offset as u32,
-                broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0,
+                broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0, compose_has_perm: false,
             };
 
             // ── Three pickers ──
@@ -4074,7 +4077,7 @@ fn plan_regret_report() {
                 residual_tier_ns100: tier,
                 limit: limit as u32,
                 offset: offset as u32,
-                broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0,
+                broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0, compose_has_perm: false,
             };
 
             let gold = (0..4).filter_map(|i| ns[i].map(|v| (v, i))).min_by_key(|(v, _)| *v);
@@ -4201,7 +4204,7 @@ fn plan_regret_fuzz() {
                 n_cards, n_printings, matches, eval_domain: evd, scan_units: evd, // card mode ⇒ scan_units == eval_domain
                 residual_tier_ns100: tier,
                 limit: limit as u32, offset: offset as u32,
-                broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0,
+                broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0, compose_has_perm: false,
             };
             let feats_true = mk(true_total, eval_domain);
             let feats_est = mk(est, est.min(n_cards));
