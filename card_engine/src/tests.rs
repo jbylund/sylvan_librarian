@@ -5555,6 +5555,115 @@ fn price_narrowing_bound_matches_direct_comparison_on_and_off_grid() {
     }
 }
 
+#[test]
+fn negated_range_narrowing() {
+    // docs/issues/local-engine-negated-range-narrowing.md: NOT(x op c) == x negate_op(op) c is
+    // exact under this engine's null semantics, so -usd<0.25 narrows identically to usd>=0.25 --
+    // including on the no-price printing, which must fail *both* forms, not just the direct one.
+    let mut vocab = VocabInterner::new();
+    let cards = vec![stub_card(1, TYPE_CREATURE, &[], &mut vocab), stub_card(2, TYPE_CREATURE, &[], &mut vocab)];
+    let mut data = store_of(cards, &[2, 2], vocab); // card 0: pids 0,1; card 1: pids 2,3
+    data.printings[0].price_usd = Some(10); // $0.10
+    data.printings[1].price_usd = Some(30); // $0.30
+    data.printings[2].price_usd = None; // no price -- must fail both usd<0.25 and -usd<0.25
+    data.printings[3].price_usd = Some(1000); // $10.00
+    data.printings[0].collector_number_int = Some(5);
+    data.printings[1].collector_number_int = Some(150);
+    data.printings[2].collector_number_int = None;
+    data.printings[3].collector_number_int = Some(200);
+    data.printings[0].released_at_int = Some(19_930_805);
+    data.printings[1].released_at_int = Some(20_241_115);
+    data.printings[2].released_at_int = None;
+    data.printings[3].released_at_int = Some(20_200_101);
+    data.indexes.price_usd = build_range_index(&data.printings, |p| p.price_usd);
+    data.indexes.collector_number = build_range_index(&data.printings, |p| p.collector_number_int.map(u32::from));
+    data.indexes.released_at = build_range_index(&data.printings, |p| p.released_at_int);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let not_usd_lt_25 = FilterExpr::Not(Box::new(FilterExpr::NumericCmp {
+        lhs: NumExpr::Field(NumField::PriceUsd),
+        op: CmpOp::Lt,
+        rhs: NumExpr::Const(0.25),
+    }));
+    let usd_ge_25 = FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op: CmpOp::Ge, rhs: NumExpr::Const(0.25) };
+    // pid1 ($0.30) and pid3 ($10.00) satisfy both forms; pid0 ($0.10) fails both directly; pid2
+    // (no price) fails both -- the trivalent guarantee, not just the ordinary in-range cases.
+    for (i, f) in [&not_usd_lt_25, &usd_ge_25].into_iter().enumerate() {
+        match narrow_candidates(f, &archived.indexes, &archived.offsets, &archived.cards) {
+            Some(Candidates::Printings(v)) => assert_eq!(v, vec![1, 3], "form {i}"),
+            other => panic!("expected tight printing narrowing, got {other:?}"),
+        }
+    }
+
+    // The motivating example: -usd<0.25 usd<5 -- only pid1 ($0.30) survives both halves (pid3 at
+    // $10.00 fails usd<5; pid0/pid2 already fail the first half above). Checked end-to-end via
+    // run_query, not narrow_candidates directly: with only 4 printings, the first child alone
+    // already narrows below AND_SKIP_THRESHOLD, so the And arm's (separate, pre-existing, correct)
+    // early-stop skips evaluating the second child as a *narrowing* source -- residual verification
+    // still catches it, so the final answer is exact either way, just not through narrow_candidates
+    // alone on a corpus this tiny.
+    let usd_lt_5 = FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op: CmpOp::Lt, rhs: NumExpr::Const(5.0) };
+    let mut compound = FilterExpr::And(vec![not_usd_lt_25, usd_lt_5]);
+    let (total, page) = super::run_query(
+        &archived.cards,
+        &archived.printings,
+        &archived.offsets,
+        &archived.strings,
+        &mut compound,
+        None,
+        "printing",
+        "default",
+        "edhrec",
+        "asc",
+        100,
+        0,
+        &archived.indexes,
+    );
+    assert_eq!(total, 1);
+    assert_eq!(page.len(), 1);
+    let got_cents = page[0].1.price_usd.as_ref().map(|v| u32::from(*v));
+    assert_eq!(got_cents, Some(30), "must be pid1 ($0.30), the only printing satisfying both halves");
+
+    // Same compound is printing-composable (#731/#724's PrintingCompose), and its composed bits
+    // agree with narrow_candidates -- the compose path (is_printing_composable /
+    // compose_printing_bits) shares bare_range_bounds with narrow_rec, not a second implementation.
+    assert!(super::is_printing_composable(&compound, &archived.indexes));
+    let n_printings = archived.printings.len();
+    let pbits = super::compose_printing_bits(&compound, &archived.indexes, &archived.offsets, &archived.printings, n_printings);
+    let set_bits: Vec<u32> = (0..n_printings as u32).filter(|&p| pbits[p as usize >> 6] & (1u64 << (p & 63)) != 0).collect();
+    assert_eq!(set_bits, vec![1]);
+
+    // -cn<50 -> cn>=50: pid1 (150) and pid3 (200); not pid0 (5) or pid2 (no collector number).
+    let not_cn_lt_50 = FilterExpr::Not(Box::new(FilterExpr::NumericCmp {
+        lhs: NumExpr::Field(NumField::CollectorNumberInt),
+        op: CmpOp::Lt,
+        rhs: NumExpr::Const(50.0),
+    }));
+    match narrow_candidates(&not_cn_lt_50, &archived.indexes, &archived.offsets, &archived.cards) {
+        Some(Candidates::Printings(v)) => assert_eq!(v, vec![1, 3]),
+        other => panic!("expected tight printing narrowing, got {other:?}"),
+    }
+
+    // -year:1993 doesn't reduce (negate_op(Eq) == Ne, and Ne isn't a single half-open range) --
+    // must decline cleanly, not silently narrow to something wrong.
+    assert!(
+        narrow_candidates(
+            &FilterExpr::Not(Box::new(FilterExpr::YearCmp { op: CmpOp::Eq, year: 1993 })),
+            &archived.indexes,
+            &archived.offsets,
+            &archived.cards,
+        )
+        .is_none()
+    );
+    // -date>=20200101 -> date<20200101: only pid0 (1993-08-05); pid2 (no date) fails both forms.
+    let not_date_ge = FilterExpr::Not(Box::new(FilterExpr::DateCmp { op: CmpOp::Ge, value: 20_200_101 }));
+    match narrow_candidates(&not_date_ge, &archived.indexes, &archived.offsets, &archived.cards) {
+        Some(Candidates::Printings(v)) => assert_eq!(v, vec![0]),
+        other => panic!("expected tight printing narrowing, got {other:?}"),
+    }
+}
+
 // ─── Bitplanes (#630) ─────────────────────────────────────────────────────────
 
 /// A color/type-diverse store for plane parity: colorless, mono, guild pairs,
