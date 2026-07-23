@@ -41,7 +41,9 @@ returned-row-id fingerprint)
 | `border:black` | ~1166 µs | ~861 µs | **1.35×** |
 | `t:creature` | ~320 µs | ~306 µs | 1.05× |
 
-Zero archive-format change. All engine tests pass (128).
+This change alone needs **no** archive-format change (it only reorders the existing loop). The
+columnar `artwork_group_id` added below *does* change the layout and bumps `ARCHIVE_FORMAT_VERSION` —
+so the PR as a whole is not format-neutral. All engine tests pass (128).
 
 ## Also landed: columnar `artwork_group_id` (V2)
 
