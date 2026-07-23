@@ -2268,6 +2268,7 @@ struct CardIndexes {
     collector_number: PrintingRangeIndex,     // printing space (extracted int)
     sort_perms:     SortPermutations,          // card space (streamed selection)
     artwork_groups: Vec<u16>,                  // card space: distinct illustration groups
+    artwork_group_col: Vec<u16>,               // printing space: pid -> artwork_group_id (columnar; lets the gather skip read gid without touching the wide struct)
     // printing space: printing_id -> card_id, direct lookup. Replaces a
     // partition_point search on `offsets` in cards_of_printings' hot paths —
     // see docs/issues/00690-engine-direct-projection-arrays.md.
@@ -2302,6 +2303,7 @@ impl Default for CardIndexes {
             collector_number: Vec::new(),
             sort_perms:     SortPermutations::default(),
             artwork_groups: Vec::new(),
+            artwork_group_col: Vec::new(),
             printing_to_card: Vec::new(),
             planes:         BitPlanes::default(),
             border_printing: BorderPrintingPlanes::default(),
@@ -3813,6 +3815,7 @@ fn push_card_matches(
     card: &AOracleCard,
     cid: u32,
     printings: &[APrinting],
+    artwork_group_col: &Archived<Vec<u16>>,
     start: usize,
     end: usize,
     all_match: bool,
@@ -3916,7 +3919,9 @@ fn push_card_matches(
                 // group is already repped: repped groups never pay the residual verification (a
                 // struct read) again, and no score comparison is needed (first qualifying wins).
                 for pid in start..end {
-                    let gid = u16::from(printings[pid].artwork_group_id) as usize;
+                    // Read gid from the columnar side array, not the wide struct: repped-group
+                    // printings (the majority) then never touch the struct at all.
+                    let gid = u16::from(artwork_group_col[pid]) as usize;
                     if group_best.len() <= gid {
                         group_best.resize(gid + 1, None);
                     }
@@ -5198,7 +5203,7 @@ fn exec_streamed_select<'a>(
     };
     run_query_streamed(
         cards, printings, offsets, strings, filter, prep.all_match_known, mode, prefer, sort_col, descending, limit,
-        page_offset, perm, card_ids, &indexes.artwork_groups, existential_plane,
+        page_offset, perm, card_ids, &indexes.artwork_groups, &indexes.artwork_group_col, existential_plane,
     )
 }
 
@@ -5256,7 +5261,7 @@ fn exec_gathered_scan<'a>(
         let end   = u32::from(offsets[cid as usize + 1]) as usize;
         let before = sel.buf().len();
         push_card_matches(
-            card, cid, printings, start, end, all_match, &residual, residual_is_or, mode, prefer,
+            card, cid, printings, &indexes.artwork_group_col, start, end, all_match, &residual, residual_is_or, mode, prefer,
             sort_col, descending, strings, existential_plane, sel.buf(), &mut group_best, &mut touched,
         );
         sel.absorb(before);
@@ -5816,6 +5821,7 @@ fn run_query_streamed<'a>(
     perm: &Archived<Vec<u32>>,
     card_ids: Box<dyn Iterator<Item = u32> + '_>,
     artwork_groups: &Archived<Vec<u16>>,
+    artwork_group_col: &Archived<Vec<u16>>,
     existential_plane: Option<(&PlaneExpr, &Archived<BitPlanes>)>,
 ) -> (usize, Vec<(&'a AOracleCard, &'a APrinting)>) {
     let mut residual: Vec<&FilterExpr> = Vec::new();
@@ -5894,7 +5900,7 @@ fn run_query_streamed<'a>(
             let start = u32::from(offsets[cid as usize]) as usize;
             let end   = u32::from(offsets[cid as usize + 1]) as usize;
             push_card_matches(
-                card, cid, printings, start, end, all_match, &residual, residual_is_or, mode, prefer,
+                card, cid, printings, artwork_group_col, start, end, all_match, &residual, residual_is_or, mode, prefer,
                 sort_col, descending, strings, existential_plane, &mut best, &mut group_best, &mut touched,
             );
         }
@@ -5932,7 +5938,7 @@ fn run_query_streamed<'a>(
         let end   = u32::from(offsets[cid as usize + 1]) as usize;
         scratch.clear();
         push_card_matches(
-            card, cid, printings, start, end, all_match, &residual, residual_is_or, mode, prefer,
+            card, cid, printings, artwork_group_col, start, end, all_match, &residual, residual_is_or, mode, prefer,
             sort_col, descending, strings, existential_plane, &mut scratch, &mut group_best, &mut touched,
         );
         scratch.sort_unstable_by(cmp);
@@ -6057,7 +6063,7 @@ const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 /// catch (e.g. reordering same-size fields, changing an index type) — and on
 /// any FLAVOR_FP_FEATURES change: archived fingerprints are built with that
 /// table, so a new table reading old fingerprints breaks the superset test.
-const ARCHIVE_FORMAT_VERSION: u32 = 20260722;
+const ARCHIVE_FORMAT_VERSION: u32 = 20260723;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -6458,6 +6464,10 @@ impl QueryEngine {
             collector_number: build_range_index(&printings, |p| p.collector_number_int.map(u32::from)),
             sort_perms:     build_sort_permutations(&cards, &printings, &offsets),
             artwork_groups: artwork_group_counts,
+            // Columnar copy of each printing's assigned artwork_group_id, derived here — the single
+            // production spot where assign_artwork_groups (above) has just filled it. Archived with
+            // the store, so it is never recomputed post-load and cannot drift from the struct field.
+            artwork_group_col: printings.iter().map(|p| p.artwork_group_id).collect(),
             printing_to_card: build_printing_to_card(&offsets),
             planes:         build_bit_planes(&cards, &printings, &offsets, &strings),
             border_printing: build_border_printing_planes(&printings, &strings),
