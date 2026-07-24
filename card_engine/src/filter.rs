@@ -80,7 +80,7 @@ fn attr_to_num_field(attr: &str) -> Option<NumField> {
 /// Numeric operand during evaluation. PDep occurs only in the card-level pass
 /// (printing = None) for printing-level fields.
 #[derive(Clone, Copy)]
-enum NumVal {
+pub(crate) enum NumVal {
     Known(f64),
     Null,
     PDep,
@@ -131,25 +131,35 @@ impl NumExpr {
     // still-self-recursive eval() left both `bl NumExpr::eval` calls in
     // FilterExpr::tri's NumericCmp arm untouched. Splitting the Arith case
     // into its own (separately named, not force-inlined) function makes
-    // eval() itself non-recursive, so the attribute now actually applies:
+    // eval_with() itself non-recursive, so the attribute now actually applies:
     // for the common Const/Field leaf case (e.g. `usd<50`, no arithmetic),
-    // eval()'s whole body -- including field_num, already small enough to
-    // inline on its own -- folds directly into tri(), eliminating both
-    // calls' prologue/epilogue/jump-table tax. Arith (`cmc+1<power`) is
-    // colder and still recurses through eval_arith, unaffected either way.
+    // eval_with()'s whole body -- including the fetch closure (field_num,
+    // already small enough to inline on its own) -- folds directly into tri(),
+    // eliminating both calls' prologue/epilogue/jump-table tax. Arith
+    // (`cmc+1<power`) is colder and still recurses through eval_arith_with,
+    // unaffected either way.
+    //
+    // Generic over the field-fetch (#743) so the real per-card path (fetch =
+    // field_num) and the tuple-scan path (fetch = one tuple key's four fields)
+    // share this one evaluator — no second copy of the recursion /
+    // NULL-propagation / div-by-zero logic to drift (the
+    // and_child_rank/narrow_rec single-source-of-truth lesson from #741). The
+    // per-card call site (tri's NumericCmp arm) passes a concrete closure, so
+    // monomorphization + #[inline(always)] reproduce the pre-#743 hand-written
+    // match exactly.
     #[inline(always)]
-    fn eval(&self, card: &AOracleCard, printing: Option<&APrinting>) -> NumVal {
+    fn eval_with<F: Fn(NumField) -> NumVal>(&self, fetch: &F) -> NumVal {
         match self {
             NumExpr::Const(v) => NumVal::Known(*v),
-            NumExpr::Field(f) => field_num(card, printing, *f),
-            NumExpr::Arith(lhs, op, rhs) => Self::eval_arith(lhs, *op, rhs, card, printing),
+            NumExpr::Field(f) => fetch(*f),
+            NumExpr::Arith(lhs, op, rhs) => Self::eval_arith_with(lhs, *op, rhs, fetch),
         }
     }
 
-    fn eval_arith(lhs: &NumExpr, op: ArithOp, rhs: &NumExpr, card: &AOracleCard, printing: Option<&APrinting>) -> NumVal {
+    fn eval_arith_with<F: Fn(NumField) -> NumVal>(lhs: &NumExpr, op: ArithOp, rhs: &NumExpr, fetch: &F) -> NumVal {
         // Null dominates PDep: Null op anything is Null for every
         // printing, so the card-level result is already exact.
-        match (lhs.eval(card, printing), rhs.eval(card, printing)) {
+        match (lhs.eval_with(fetch), rhs.eval_with(fetch)) {
             (NumVal::Null, _) | (_, NumVal::Null) => NumVal::Null,
             (NumVal::PDep, _) | (_, NumVal::PDep) => NumVal::PDep,
             (NumVal::Known(l), NumVal::Known(r)) => match op {
@@ -162,6 +172,100 @@ impl NumExpr {
             },
         }
     }
+}
+
+/// The trivalent result of a `lhs op rhs` numeric comparison, over any field-fetch.
+/// Shared by `FilterExpr::tri`'s `NumericCmp` arm (fetch = `field_num`) and the #743
+/// arith-tuple scan (fetch = the four card-level fields of one tuple key) so both go
+/// through the exact same Null/PDep handling. `#[inline(always)]` + monomorphization
+/// keeps the hot `tri` arm byte-for-byte with its former inline match.
+#[inline(always)]
+pub(crate) fn numeric_cmp_tri<F: Fn(NumField) -> NumVal>(lhs: &NumExpr, op: CmpOp, rhs: &NumExpr, fetch: &F) -> Tri {
+    match (lhs.eval_with(fetch), rhs.eval_with(fetch)) {
+        (NumVal::Null, _) | (_, NumVal::Null) => Tri::Null, // missing field: SQL NULL
+        (NumVal::PDep, _) | (_, NumVal::PDep) => Tri::PrintingDep,
+        (NumVal::Known(a), NumVal::Known(b)) => tri_bool(cmp(op, a, b)),
+    }
+}
+
+/// Card-level numeric fields the #743 joint-tuple index covers: all card-scoped (not
+/// printing-dependent), all small bounded integer domains, confirmed low joint
+/// cardinality (531-564 distinct combinations — see docs/issues/00743). A numeric
+/// expression is tuple-evaluable iff every `NumField` it references (recursively
+/// through `Arith`) is one of these; any other field (edhrec, price*, rarity, cn,
+/// prefer) disqualifies the whole expression.
+pub(crate) fn num_field_in_arith_tuple_scope(f: NumField) -> bool {
+    matches!(f, NumField::Cmc | NumField::Power | NumField::Toughness | NumField::Loyalty)
+}
+
+fn num_expr_all_in_tuple_scope(e: &NumExpr) -> bool {
+    match e {
+        NumExpr::Const(_) => true,
+        NumExpr::Field(f) => num_field_in_arith_tuple_scope(*f),
+        NumExpr::Arith(l, _, r) => num_expr_all_in_tuple_scope(l) && num_expr_all_in_tuple_scope(r),
+    }
+}
+
+/// A bare single-field `{cmc,power,toughness} op const` comparison — already handled
+/// exactly by `narrow_rec`'s dedicated single-field numeric-index arms. The tuple route
+/// must decline these (the direct index is at least as good, and re-routing their
+/// negation would desync `and_child_rank`'s ranking from `narrow_rec`'s dispatch — the
+/// exact mismatch class #741 fought). Loyalty is intentionally excluded: it has no
+/// dedicated numeric index, so the tuple route is its only narrowing.
+fn is_bare_dedicated_numeric(f: &FilterExpr) -> bool {
+    matches!(
+        f,
+        FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Cmc | NumField::Power | NumField::Toughness), rhs: NumExpr::Const(_), .. }
+            | FilterExpr::NumericCmp { lhs: NumExpr::Const(_), rhs: NumExpr::Field(NumField::Cmc | NumField::Power | NumField::Toughness), .. }
+    )
+}
+
+/// Single source of truth (#741 precedent) for "does this filter take the #743 arith-tuple
+/// route": a `NumericCmp` whose every referenced field is in `num_field_in_arith_tuple_scope`,
+/// and which is *not* one of the bare single-field shapes the dedicated numeric-index arms
+/// already own. Both `narrow_rec` (positive fallback and the negated arm) and `and_child_rank`
+/// gate on this one function, so the narrowing dispatch and its cost ranking cannot drift.
+/// A mixed expression (e.g. `usd+1<power`, an in-scope field with a printing-level one) fails
+/// the scope check and declines here entirely — it is never partially narrowed.
+pub(crate) fn is_arith_tuple_route(f: &FilterExpr) -> bool {
+    match f {
+        FilterExpr::NumericCmp { lhs, rhs, .. } => {
+            num_expr_all_in_tuple_scope(lhs) && num_expr_all_in_tuple_scope(rhs) && !is_bare_dedicated_numeric(f)
+        }
+        _ => false,
+    }
+}
+
+/// Evaluate a tuple-routed `NumericCmp` against one joint tuple key's four field values
+/// (each `None` = the card has no value for that field, i.e. SQL NULL). Reuses
+/// `numeric_cmp_tri`/`NumExpr::eval_with` — the identical evaluator the per-card path
+/// uses — so the differential test's exact-agreement claim holds by construction, not by
+/// a parallel reimplementation. Returns `Tri::True`/`Tri::False`/`Tri::Null`; `PrintingDep`
+/// cannot occur (all four fields are card-level), and any out-of-scope field would be an
+/// `is_arith_tuple_route` bug, caught by the debug_assert (CI runs debug).
+pub(crate) fn eval_arith_tuple_tri(
+    lhs: &NumExpr,
+    op: CmpOp,
+    rhs: &NumExpr,
+    cmc: Option<f64>,
+    power: Option<f64>,
+    toughness: Option<f64>,
+    loyalty: Option<f64>,
+) -> Tri {
+    let fetch = |f: NumField| -> NumVal {
+        let v = match f {
+            NumField::Cmc => cmc,
+            NumField::Power => power,
+            NumField::Toughness => toughness,
+            NumField::Loyalty => loyalty,
+            _ => {
+                debug_assert!(false, "out-of-scope field reached arith-tuple eval; is_arith_tuple_route is wrong");
+                None
+            }
+        };
+        v.map_or(NumVal::Null, NumVal::Known)
+    };
+    numeric_cmp_tri(lhs, op, rhs, &fetch)
 }
 
 fn cmp(op: CmpOp, a: f64, b: f64) -> bool {
@@ -1123,11 +1227,7 @@ impl FilterExpr {
             FilterExpr::ExactName(lower) => tri_bool(card.card_name_lower.as_str() == lower.as_str()),
 
             FilterExpr::NumericCmp { lhs, op, rhs } => {
-                match (lhs.eval(card, printing), rhs.eval(card, printing)) {
-                    (NumVal::Null, _) | (_, NumVal::Null) => Tri::Null, // missing field: SQL NULL
-                    (NumVal::PDep, _) | (_, NumVal::PDep) => Tri::PrintingDep,
-                    (NumVal::Known(a), NumVal::Known(b)) => tri_bool(cmp(*op, a, b)),
-                }
+                numeric_cmp_tri(lhs, *op, rhs, &|f| field_num(card, printing, f))
             }
 
             FilterExpr::TextContains { field, word } => {

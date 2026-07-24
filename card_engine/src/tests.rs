@@ -4,7 +4,7 @@ use super::{
     build_rarity_index, build_flavor_index, build_thresholded_tag_index, build_sort_permutations,
     assign_artwork_groups, build_bit_planes, build_border_printing_planes, build_rarity_printing_planes, build_divergent_ids, build_name_bigram_index, build_printing_to_card, flavor_fingerprint, flavor_match_sets,
     cards_of_printings, count_common_keywords, count_common_types,
-    build_artist_index, build_range_index, range_candidates, narrow_candidates, narrow_candidates_exact, rarity_candidates,
+    build_artist_index, build_range_index, build_arith_tuple_index, is_arith_tuple_route, range_candidates, narrow_candidates, narrow_candidates_exact, rarity_candidates,
     range_too_broad_to_narrow, run_query, run_query_with_plan, PhysicalPlan, trigram_candidates, finalize_trigram_index, PrintingRangeIndex, NARROW_FLOOR,
     gathered_scan_applicable, streamed_select_applicable, plane_popcount_order_applicable, printing_range_scan_applicable,
     walk_printing_page, aligned_page, bare_range_bounds, probe_range_k, printing_range_fastpath, sort_key_bits, orderby_to_col, SortCol, STREAM_MIN_MATCHES,
@@ -2353,6 +2353,10 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
     data.indexes.cmc = build_numeric_index(&data.cards, |c| c.cmc.map(i16::from));
     data.indexes.power = build_numeric_index(&data.cards, |c| c.creature_power.map(i16::from));
     data.indexes.toughness = build_numeric_index(&data.cards, |c| c.creature_toughness.map(i16::from));
+    // #743 arith-tuple postings — load-bearing like the numeric indexes above: an unbuilt index
+    // (n_cards mismatch) makes arith_tuple_narrow decline, so building it here is what actually
+    // exercises the new positive/negated narrowing through run_query in fuzz_row_identity_matches_reference.
+    data.indexes.arith_tuple = build_arith_tuple_index(&data.cards);
     data.indexes.released_at = build_range_index(&data.printings, |p| p.released_at_int);
     data.indexes.price_usd = build_range_index(&data.printings, |p| p.price_usd);
     data.indexes.collector_number = build_range_index(&data.printings, |p| p.collector_number_int.map(u32::from));
@@ -2623,6 +2627,106 @@ fn fuzz_row_identity_matches_reference() {
         let offset = if rng.random_bool(0.5) { 0 } else { rng.random_range(0..800) };
         let ctx = format!("corpus-rowid, filter={}", fuzz_describe(&spec));
         fuzz_check_row_identity(archived, &spec, &ctx, orderby, direction, mode, 100, offset);
+    }
+}
+
+/// #743: the arith-tuple narrowing must return *exactly* the per-card scan + `tri`/`eval` reference,
+/// in both polarities (bare and negated), for the in-scope shapes `is_arith_tuple_route` routes to
+/// the joint tuple index (arith expressions, field-vs-field, bare loyalty), over every comparison op.
+/// This is the direct check `fuzz_row_identity_matches_reference` only exercises through full
+/// `run_query`: it inspects the candidate set itself and asserts it is tight and byte-identical to the
+/// reference — the exactness guarantee `tight` rests on. The reference is `FilterExpr::matches` (which
+/// evaluates through the same `tri`/`eval` the driver's residual uses); a card's verdict is
+/// printing-independent for these card-level fields, so any printing witnesses it.
+#[test]
+fn arith_tuple_narrowing_matches_reference() {
+    use rand::SeedableRng;
+
+    let field = |f| NumExpr::Field(f);
+    let konst = NumExpr::Const;
+    let arith = |l, o, r| NumExpr::Arith(Box::new(l), o, Box::new(r));
+    let cmp = |lhs, op, rhs| FilterExpr::NumericCmp { lhs, op, rhs };
+
+    // The result of a filter over one archived store, as a sorted card-id vec, via the per-card
+    // reference scan (matches == tri==True; for a `Not`, matches == tri(inner)==False — exactly the
+    // Tri::False set the negated arm builds).
+    let reference = |archived: &Archived<CardData>, filter: &FilterExpr| -> Vec<u32> {
+        let strings = &archived.strings;
+        (0..archived.cards.len() as u32)
+            .filter(|&cid| {
+                let card = &archived.cards[cid as usize];
+                let p0 = u32::from(archived.offsets[cid as usize]) as usize;
+                filter.matches(card, &archived.printings[p0], strings)
+            })
+            .collect()
+    };
+
+    // Corpus-like fixtures (real null/value distributions for cmc/power/toughness/loyalty) across a
+    // few seeds, so both selective and broad predicates and their negations are covered.
+    for seed in [1u64, 7, 42, 100] {
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(seed);
+        let data = fuzz_store_n(&mut rng, 1_500);
+        let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+        let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+        let indexes = &archived.indexes;
+        let offsets = &archived.offsets;
+        let cards = &archived.cards[..];
+        let n_cards = cards.len();
+        // narrow_candidates_exact declines (None) above this breadth — the >75%-of-domain cap. A
+        // decline for an in-scope filter is only ever this cap, never a narrowing failure.
+        let broad_cap = n_cards - n_cards / 4;
+
+        // Builder closures — each returns a fresh NumericCmp (FilterExpr isn't Clone), parameterized
+        // by op, so the same predicate can be built bare and again inside a `Not`.
+        for op in [CmpOp::Lt, CmpOp::Le, CmpOp::Gt, CmpOp::Ge, CmpOp::Eq, CmpOp::Ne] {
+            let builders: [(&str, &dyn Fn() -> FilterExpr); 6] = [
+                ("loyalty op 4", &|| cmp(field(NumField::Loyalty), op, konst(4.0))),
+                ("power op toughness", &|| cmp(field(NumField::Power), op, field(NumField::Toughness))),
+                ("cmc+1 op power", &|| cmp(arith(field(NumField::Cmc), ArithOp::Add, konst(1.0)), op, field(NumField::Power))),
+                ("power+toughness op 4", &|| cmp(arith(field(NumField::Power), ArithOp::Add, field(NumField::Toughness)), op, konst(4.0))),
+                ("cmc*2 op toughness", &|| cmp(arith(field(NumField::Cmc), ArithOp::Mul, konst(2.0)), op, field(NumField::Toughness))),
+                ("toughness-power op 0", &|| cmp(arith(field(NumField::Toughness), ArithOp::Sub, field(NumField::Power)), op, konst(0.0))),
+            ];
+            for (label, mk) in builders {
+                assert!(is_arith_tuple_route(&mk()), "seed={seed} {label} {op:?}: must route to the tuple index");
+                for negated in [false, true] {
+                    let filter = if negated { FilterExpr::Not(Box::new(mk())) } else { mk() };
+                    let ref_set = reference(&archived, &filter);
+                    let ctx = format!("seed={seed} {label} {op:?} negated={negated}");
+                    match narrow_candidates_exact(&filter, indexes, offsets, cards) {
+                        (Some(Candidates::Cards(v)), tight) => {
+                            assert!(tight, "{ctx}: card-level in-scope narrowing must be tight (exact)");
+                            assert_eq!(v, ref_set, "{ctx}: tuple narrowing must equal the per-card reference");
+                        }
+                        (Some(other), _) => panic!("{ctx}: expected card-space candidates, got {other:?}"),
+                        (None, _) => assert!(
+                            ref_set.len() > broad_cap,
+                            "{ctx}: declined but the reference isn't broad ({} of {n_cards}) — a narrowing failure, not the breadth cap",
+                            ref_set.len()
+                        ),
+                    }
+                }
+            }
+        }
+
+        // Out-of-scope: `usd+1<power` mixes a printing-level field (usd) with a card-level one — it must
+        // NOT route to the tuple index and must decline to the existing full-scan path, in either
+        // polarity, never partially narrowed. A pure out-of-scope arith (`usd*2<cmc`) likewise.
+        let mixed = || cmp(arith(field(NumField::PriceUsd), ArithOp::Add, konst(1.0)), CmpOp::Lt, field(NumField::Power));
+        let pure_oos = || cmp(arith(field(NumField::PriceUsd), ArithOp::Mul, konst(2.0)), CmpOp::Lt, field(NumField::Cmc));
+        assert!(!is_arith_tuple_route(&mixed()), "seed={seed}: mixed in/out-of-scope arith must not route to the tuple index");
+        assert!(!is_arith_tuple_route(&pure_oos()), "seed={seed}: pure out-of-scope arith must not route to the tuple index");
+        assert!(narrow_candidates(&mixed(), indexes, offsets, cards).is_none(), "seed={seed}: mixed-field arith must decline (full scan)");
+        assert!(narrow_candidates(&pure_oos(), indexes, offsets, cards).is_none(), "seed={seed}: out-of-scope arith must decline (full scan)");
+        // The negated arm gates on is_arith_tuple_route(inner) too, so a negated mixed expression also
+        // stays off the tuple path.
+        assert!(!is_arith_tuple_route(&mixed()), "seed={seed}: -(mixed) inner must not route either");
+
+        // Bare single-field cmc/power/toughness vs const stay on their dedicated numeric-index arms
+        // (not the tuple route), so their negation ranking can't drift; loyalty (no dedicated arm) does route.
+        assert!(!is_arith_tuple_route(&cmp(field(NumField::Cmc), CmpOp::Lt, konst(3.0))), "bare cmc<c is owned by the dedicated numeric arm");
+        assert!(!is_arith_tuple_route(&cmp(field(NumField::Power), CmpOp::Ge, konst(2.0))), "bare power>=c is owned by the dedicated numeric arm");
+        assert!(is_arith_tuple_route(&cmp(field(NumField::Loyalty), CmpOp::Lt, konst(3.0))), "bare loyalty<c has no dedicated arm -> tuple route");
     }
 }
 
@@ -4543,6 +4647,7 @@ fn bench_checked_vs_unchecked_access() {
         rarity_printing: build_rarity_printing_planes(&printings),
         name_bigrams:   build_name_bigram_index(&cards),
         legal_divergent: build_divergent_ids(&cards),
+        arith_tuple:    build_arith_tuple_index(&cards),
     };
     let data = CardData {
         cards,
