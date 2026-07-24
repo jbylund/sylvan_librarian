@@ -1,7 +1,8 @@
 # Engine: `PrintingCompose` Permutation-Free Paging Fallback
 
-**Status: done.** No GitHub issue filed. Found while investigating a broad-survey slow query
-(`docs/issues/done/local-engine-watermark-postings.md`'s companion investigation).
+**Status: done**, shipped as [#740](https://github.com/jbylund/sylvan_librarian/pull/740). Found
+while investigating a broad-survey slow query (`docs/issues/done/00739-engine-watermark-postings.md`'s
+companion investigation).
 
 ## Measured problem
 
@@ -101,10 +102,10 @@ regressions; `rarity`/`usd`-orderby groups' p90 improved, everything else flat w
 
 ## Related
 
-- [done/local-engine-watermark-postings.md](done/local-engine-watermark-postings.md) — the sibling
+- [00739-engine-watermark-postings.md](00739-engine-watermark-postings.md) — the sibling
   investigation this was found alongside.
-- [done/00724-engine-printing-existential-planes.md](done/00724-engine-printing-existential-planes.md)
+- [00724-engine-printing-existential-planes.md](00724-engine-printing-existential-planes.md)
   — `PrintingCompose`'s substrate.
-- [00731-engine-compose-universal-evaluator.md](00731-engine-compose-universal-evaluator.md) — the
-  compose leaf-source generalization this builds on top of.
+- [../00731-engine-compose-universal-evaluator.md](../00731-engine-compose-universal-evaluator.md) —
+  the compose leaf-source generalization this builds on top of.
 - `docs/workflows/performance-pr-workflow.md` — the measure-first process this followed.

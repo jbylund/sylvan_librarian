@@ -27,4 +27,4 @@ Measured (97,206-printing corpus, `unique=card`, interleaved same build):
 Totals unchanged (correctness preserved). New Rust test `watermark_narrowing`; `cargo test`
 (debug + release) 129/129; `test_engine_property.py` and `test_engine_unit.py` pass.
 
-Design doc: `docs/issues/done/local-engine-watermark-postings.md`.
+Design doc: `docs/issues/done/00739-engine-watermark-postings.md`.

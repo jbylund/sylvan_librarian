@@ -1,8 +1,8 @@
 # Engine: Negated-Range Narrowing (`-usd<c`, `-cn<c`, `-date`/`-year`)
 
-**Status: done.** No GitHub issue filed. Found investigating `-usd<0.25 usd<5`, the slowest query
-in a broad realistic-traffic survey (1.131ms) after the watermark and compose-permutation-fallback
-fixes landed.
+**Status: done**, shipped as [#741](https://github.com/jbylund/sylvan_librarian/pull/741). Found
+investigating `-usd<0.25 usd<5`, the slowest query in a broad realistic-traffic survey (1.131ms)
+after the watermark and compose-permutation-fallback fixes landed.
 
 ## The idea
 
@@ -202,8 +202,8 @@ before this fix — no longer appears in the top 10; no new slow patterns introd
 
 ## Related
 
-- [local-engine-compose-permutation-fallback.md](local-engine-compose-permutation-fallback.md) —
+- [00740-engine-compose-permutation-fallback.md](00740-engine-compose-permutation-fallback.md) —
   the sibling investigation this branches from; both found while chasing the same broad-survey
   slow-query list.
-- [done/local-engine-watermark-postings.md](done/local-engine-watermark-postings.md) — the first
+- [00739-engine-watermark-postings.md](00739-engine-watermark-postings.md) — the first
   fix in this same investigation thread.
