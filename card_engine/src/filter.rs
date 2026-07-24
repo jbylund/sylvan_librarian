@@ -117,6 +117,7 @@ fn field_num(card: &AOracleCard, printing: Option<&APrinting>, f: NumField) -> N
     }
 }
 
+#[derive(Clone)]
 pub(crate) enum NumExpr {
     Const(f64),
     Field(NumField),
@@ -402,6 +403,14 @@ fn text_field_value<'a>(
 /// exhaustively (no `_` arm), so adding a variant is a compile error until
 /// it's classified in both — deliberately, since a silent default there
 /// would misorder the verifier walk without failing any test.
+///
+/// `Clone` (#745): `explain_analyze` needs a fresh, unmutated tree for every
+/// `run_query_with_plan` call — its own `prepare_candidates` mutates via
+/// `memoize_text_predicates` — so it clones from a pristine snapshot per call
+/// rather than reusing one filter across plans/rounds. Every field here is
+/// cheaply `Clone` already (small `Vec`s, `String`, `regex::Regex` is
+/// internally `Arc`-based); this is a plain derive, not a deep-copy concern.
+#[derive(Clone)]
 pub(crate) enum FilterExpr {
     True,
     And(Vec<FilterExpr>),

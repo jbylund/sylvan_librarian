@@ -6238,6 +6238,174 @@ fn exec_from_candidates<'a>(
     }
 }
 
+/// Cost features: the query-invariant fields filled once; the four that vary by
+/// count source passed in. Collapses each acquire branch's 8-field literal to one call.
+#[allow(clippy::too_many_arguments)]
+fn mk_plan_feats(
+    n_cards: u32,
+    n_printings: u32,
+    limit: usize,
+    page_offset: usize,
+    matches: u32,
+    eval_domain: u32,
+    scan_units: u32,
+    residual_tier_ns100: u32,
+) -> cost::PlanFeatures {
+    cost::PlanFeatures {
+        n_cards,
+        n_printings,
+        matches,
+        eval_domain,
+        scan_units,
+        residual_tier_ns100,
+        limit: limit as u32,
+        offset: page_offset as u32,
+        broadcast_printings: 0, // PrintingCompose's legality broadcast-down (0 for ranges / precomputed planes)
+        scatter_printings: 0,  // range-slice k — set by both range-plan acquire branches (costed per-plan)
+        project_printings: 0,  // PrintingCompose's card/artwork projection pass; CardRangePopcount sets it too (for costing compose)
+        popcount_words: 0,     // PrintingCompose overrides this (result-space bitmap words)
+        compose_paging: ComposePaging::Gather, // PrintingCompose overrides this (which paging strategy it'll actually use)
+    }
+}
+
+/// Features for the general candidate path (shared by `acquire_plan_features`'s
+/// fallback branch and `run_query_routed`'s lazy-materialize dispatch fallback).
+/// `matches`/`eval_domain` = candidate CARD count, the broad/narrow proxy the P3/P4
+/// crossover keys on. `scan_units` sums printing counts over the candidate cards
+/// (O(candidates) for narrowed printing/artwork — the ~1-2% overhead in
+/// plan_routing_ab), kept EXACT on purpose: an O(1) estimate would trade the
+/// model's honesty for a couple percent on already-fast queries — do not swap it
+/// for `eval_domain·n_printings/n_cards` without re-justifying.
+#[allow(clippy::too_many_arguments)]
+fn candidate_feats(
+    prep: &PreparedCandidates,
+    filter: &FilterExpr,
+    mode: Mode,
+    offsets: &AOffsets,
+    n_cards: u32,
+    n_printings: u32,
+    limit: usize,
+    page_offset: usize,
+) -> cost::PlanFeatures {
+    let count = prep.candidate_cards.as_ref().map_or(n_cards, |v| v.len() as u32);
+    let scan = scan_units(mode, prep.candidate_cards.as_deref(), offsets, n_printings, count);
+    mk_plan_feats(n_cards, n_printings, limit, page_offset, count, count, scan, if prep.all_match_known { 0 } else { verify_cost_tier(filter) })
+}
+
+/// The acquire step of `run_query_routed`'s three-step algorithm (see its doc
+/// comment), factored out so `explain`/`explain_analyze` (#745) compute cost
+/// features via this exact same code path — never a second copy that can
+/// silently drift from what the real router would pick. Picks the query's count
+/// source (one of three, by structure) and builds the cost features,
+/// materializing the shared artifact it implies: a True-residual plane's popcount
+/// (`Prep::Plane`), a bare range's index-`k` (`Prep::Range`, nothing materialized),
+/// or `prepare_candidates` (`Prep::Candidates`). Returns the plane popcount bitmap
+/// alongside `Prep::Plane` (empty otherwise) — `run_query_routed`'s dispatch needs
+/// it to execute the winner; a caller that only wants `feats` (`explain`) drops it.
+#[allow(clippy::too_many_arguments)]
+fn acquire_plan_features(
+    cards: &[AOracleCard],
+    printings: &[APrinting],
+    offsets: &AOffsets,
+    strings: &AStrings,
+    filter: &mut FilterExpr,
+    plane: Option<&PlaneExpr>,
+    mode: Mode,
+    sort_col: SortCol,
+    descending: bool,
+    limit: usize,
+    page_offset: usize,
+    indexes: &Archived<CardIndexes>,
+) -> (cost::PlanFeatures, Prep, Vec<u64>) {
+    let n_cards = cards.len() as u32;
+    let n_printings = printings.len() as u32;
+
+    // Scratch for the plane bitmap (`Prep::Plane` only). A fresh `Vec` allocates
+    // just once, on the plane branch's `eval_planes`; non-plane queries leave it
+    // empty (no alloc).
+    let mut plane_bits: Vec<u64> = Vec::new();
+
+    let (feats, prep) = if PhysicalPlan::PlanePopcountOrder.applicable(filter, mode, cards, plane, sort_col, descending, indexes) {
+        // The ONE plane eval; its popcount IS the exact count. scan_units == count
+        // (Mode::Card breaks at first match); True residual ⇒ tier 0.
+        eval_planes(plane.expect("PlanePopcountOrder ⇒ plane"), &indexes.planes, &mut plane_bits);
+        let count: u32 = plane_bits.iter().map(|w| w.count_ones()).sum();
+        (mk_plan_feats(n_cards, n_printings, limit, page_offset, count, count, count, 0), Prep::Plane)
+    } else if PhysicalPlan::CardRangePopcount.applicable(filter, mode, cards, plane, sort_col, descending, indexes) {
+        // Exact in-range printing count `k` from the index partition points (two binary searches, no
+        // scan, no scatter). The O(k) card-bitmap build is deferred to dispatch and paid only if this
+        // plan wins — so a competing winner never eats a wasted build (re-deriving the bounds there is
+        // another ~free binary search). `k` rides `synth_printings` (the deferred scatter); `matches`
+        // uses the card-count proxy `min(k, n_cards)` (card total ≤ both). The materializing
+        // alternatives are costed with the range's verify tier (a `0` would under-cost them).
+        let (idx, lo, hi) = bare_range_bounds(filter, indexes).expect("applicable ⇒ bare range");
+        let k = (idx.partition_point(|p| u32::from(p.0) < hi) - idx.partition_point(|p| u32::from(p.0) < lo)) as u32;
+        let card_est = k.min(n_cards);
+        let mut feats = mk_plan_feats(n_cards, n_printings, limit, page_offset, card_est, card_est, card_est, verify_cost_tier(filter));
+        // `k` rides `scatter_printings`: this plan's arm charges it as its FUSED one-pass build
+        // (`CARD_RANGE_BUILD_PER_PRINTING_NS`), while a competing PrintingCompose costed off these shared
+        // feats charges the same `k` as its cheaper scatter (`RANGE_SCATTER_…`) plus a separate
+        // `project` pass — so the fused op wins the argmin and a bare range doesn't mis-route to compose.
+        feats.scatter_printings = k;
+        feats.project_printings = k;
+        (feats, Prep::Range)
+    } else if PhysicalPlan::PrintingRangeScan.applicable(filter, mode, cards, plane, sort_col, descending, indexes) {
+        // Bare range: exact k from the index (no scan). P3/P4 estimated unnarrowed
+        // (their broad regime — a narrow range makes P1 lose, and dispatch materializes).
+        let (idx, lo, hi) = bare_range_bounds(filter, indexes).expect("applicable ⇒ bare range");
+        let k = (idx.partition_point(|p| u32::from(p.0) < hi) - idx.partition_point(|p| u32::from(p.0) < lo)) as u32;
+        let mut feats = mk_plan_feats(n_cards, n_printings, limit, page_offset, k, n_cards, n_printings, verify_cost_tier(filter));
+        feats.scatter_printings = k; // for costing a competing PrintingCompose (which would scatter k); P1 itself walks, so its own cost ignores this
+        (feats, Prep::Range)
+    } else if PhysicalPlan::PrintingCompose.applicable(filter, mode, cards, plane, sort_col, descending, indexes) {
+        // Composable printing-space expr, any distinct-on. Estimate the counts cheaply — the fast path
+        // composes once, only if this plan wins (never in acquire; a legality broadcast paid here and
+        // then discarded would be pure waste). `synth_printings` = broadcast down (legality) + projection
+        // up (card/artwork; 0 for printing). `popcount_words` = the result-space bitmap the total scans.
+        let (printing_matches, broadcast, scatter) = compose_printing_estimate(filter, indexes, offsets, n_printings as usize);
+        // Two build kinds, charged at different rates: `broadcast` = legality broadcast-down (linear
+        // pass), `scatter` = range-slice scatter (cheap). `project` = the second pass (printing→
+        // card/artwork), 0 for printing mode. Keeping all three separate is what lets a bare range's
+        // CardRangePopcount acquire (which sets `scatter`/`project` too) cost this plan's passes
+        // honestly against the fused build. `eval_domain`/`scan_units` cost the *materializing
+        // alternatives* should compose lose: a composable filter narrows via its indices, so they see
+        // ~`matches` candidates (card mode also breaks at the first match ⇒ scan_units = eval_domain) —
+        // the unnarrowed universe would over-cost them and mis-route (measured: `format:X format:Y`/card).
+        let (result_total, project, popcount_words, eval_domain, scan_units) = match mode {
+            Mode::Printing => (printing_matches, 0, (n_printings as usize).div_ceil(64), n_cards as usize, n_printings as usize),
+            Mode::Card => {
+                let rt = printing_matches.min(n_cards as usize);
+                (rt, printing_matches, (n_cards as usize).div_ceil(64), rt, rt)
+            }
+            Mode::Artwork => {
+                let rt = printing_matches.min(n_cards as usize);
+                (printing_matches, printing_matches, (n_printings as usize).div_ceil(64), rt, printing_matches)
+            }
+        };
+        let mut feats = mk_plan_feats(n_cards, n_printings, limit, page_offset, result_total as u32, eval_domain as u32, scan_units as u32, verify_cost_tier(filter));
+        feats.broadcast_printings = broadcast as u32;
+        feats.scatter_printings = scatter as u32;
+        feats.project_printings = project as u32;
+        feats.popcount_words = popcount_words as u32;
+        // Which paging strategy the fastpath will actually use — decided the same way the fastpath
+        // itself decides (permutation walk / #744 orderby walk / gather fallback).
+        feats.compose_paging = if indexes.sort_perms.get(sort_col, descending).is_some_and(|p| p.len() == cards.len()) {
+            ComposePaging::Perm
+        } else if matches!(mode, Mode::Printing) && orderby_walk_available(sort_col) {
+            ComposePaging::OrderbyWalk
+        } else {
+            ComposePaging::Gather
+        };
+        (feats, Prep::Range)
+    } else {
+        let prep = prepare_candidates(cards, offsets, strings, filter, plane, mode, indexes);
+        let feats = candidate_feats(&prep, filter, mode, offsets, n_cards, n_printings, limit, page_offset);
+        (feats, Prep::Candidates(prep))
+    };
+
+    (feats, prep, plane_bits)
+}
+
 /// #702: the single cost-based plan-selection layer for ALL unique modes — the
 /// whole of `run_query`'s dispatch (the hand-tuned decision tree it replaced is
 /// gone). Three linear steps, no early returns:
@@ -6293,119 +6461,10 @@ fn run_query_routed<'a>(
             .expect("GatheredScan is always applicable and materializing")
     };
 
-    // Cost features: the query-invariant fields filled once; the four that vary by
-    // count source passed in. Collapses each acquire branch's 8-field literal to one call.
-    let mk_feats = |matches: u32, eval_domain: u32, scan_units: u32, residual_tier_ns100: u32| cost::PlanFeatures {
-        n_cards,
-        n_printings,
-        matches,
-        eval_domain,
-        scan_units,
-        residual_tier_ns100,
-        limit: limit as u32,
-        offset: page_offset as u32,
-        broadcast_printings: 0, // PrintingCompose's legality broadcast-down (0 for ranges / precomputed planes)
-        scatter_printings: 0,  // range-slice k — set by both range-plan acquire branches (costed per-plan)
-        project_printings: 0,  // PrintingCompose's card/artwork projection pass; CardRangePopcount sets it too (for costing compose)
-        popcount_words: 0,     // PrintingCompose overrides this (result-space bitmap words)
-        compose_paging: ComposePaging::Gather, // PrintingCompose overrides this (which paging strategy it'll actually use)
-    };
-    // Features for the general candidate path (shared by the acquire branch and the
-    // lazy-materialize dispatch). `matches`/`eval_domain` = candidate CARD count, the
-    // broad/narrow proxy the P3/P4 crossover keys on. `scan_units` sums printing counts
-    // over the candidate cards (O(candidates) for narrowed printing/artwork — the ~1-2%
-    // overhead in plan_routing_ab), kept EXACT on purpose: an O(1) estimate would trade
-    // the model's honesty for a couple percent on already-fast queries — do not swap it
-    // for `eval_domain·n_printings/n_cards` without re-justifying.
-    let candidate_feats = |prep: &PreparedCandidates, filter: &FilterExpr| -> cost::PlanFeatures {
-        let count = prep.candidate_cards.as_ref().map_or(n_cards, |v| v.len() as u32);
-        let scan = scan_units(mode, prep.candidate_cards.as_deref(), offsets, n_printings, count);
-        mk_feats(count, count, scan, if prep.all_match_known { 0 } else { verify_cost_tier(filter) })
-    };
-
-    // Scratch for the plane bitmap (`Prep::Plane` only). A fresh `Vec` allocates
-    // just once, on the plane branch's `eval_planes`; non-plane queries leave it
-    // empty (no alloc). Owned locally so the router body stays flat statements —
-    // no thread-local / `.with` closure wrapping the whole function.
-    let mut plane_bits: Vec<u64> = Vec::new();
-
     // ── acquire: pick the count source, build features, materialize its artifact ──
-    let (feats, prep) = if PhysicalPlan::PlanePopcountOrder.applicable(filter, mode, cards, plane, sort_col, descending, indexes) {
-        // The ONE plane eval; its popcount IS the exact count. scan_units == count
-        // (Mode::Card breaks at first match); True residual ⇒ tier 0.
-        eval_planes(plane.expect("PlanePopcountOrder ⇒ plane"), &indexes.planes, &mut plane_bits);
-        let count: u32 = plane_bits.iter().map(|w| w.count_ones()).sum();
-        (mk_feats(count, count, count, 0), Prep::Plane)
-    } else if PhysicalPlan::CardRangePopcount.applicable(filter, mode, cards, plane, sort_col, descending, indexes) {
-        // Exact in-range printing count `k` from the index partition points (two binary searches, no
-        // scan, no scatter). The O(k) card-bitmap build is deferred to dispatch and paid only if this
-        // plan wins — so a competing winner never eats a wasted build (re-deriving the bounds there is
-        // another ~free binary search). `k` rides `synth_printings` (the deferred scatter); `matches`
-        // uses the card-count proxy `min(k, n_cards)` (card total ≤ both). The materializing
-        // alternatives are costed with the range's verify tier (a `0` would under-cost them).
-        let (idx, lo, hi) = bare_range_bounds(filter, indexes).expect("applicable ⇒ bare range");
-        let k = (idx.partition_point(|p| u32::from(p.0) < hi) - idx.partition_point(|p| u32::from(p.0) < lo)) as u32;
-        let card_est = k.min(n_cards);
-        let mut feats = mk_feats(card_est, card_est, card_est, verify_cost_tier(filter));
-        // `k` rides `scatter_printings`: this plan's arm charges it as its FUSED one-pass build
-        // (`CARD_RANGE_BUILD_PER_PRINTING_NS`), while a competing PrintingCompose costed off these shared
-        // feats charges the same `k` as its cheaper scatter (`RANGE_SCATTER_…`) plus a separate
-        // `project` pass — so the fused op wins the argmin and a bare range doesn't mis-route to compose.
-        feats.scatter_printings = k;
-        feats.project_printings = k;
-        (feats, Prep::Range)
-    } else if PhysicalPlan::PrintingRangeScan.applicable(filter, mode, cards, plane, sort_col, descending, indexes) {
-        // Bare range: exact k from the index (no scan). P3/P4 estimated unnarrowed
-        // (their broad regime — a narrow range makes P1 lose, and dispatch materializes).
-        let (idx, lo, hi) = bare_range_bounds(filter, indexes).expect("applicable ⇒ bare range");
-        let k = (idx.partition_point(|p| u32::from(p.0) < hi) - idx.partition_point(|p| u32::from(p.0) < lo)) as u32;
-        let mut feats = mk_feats(k, n_cards, n_printings, verify_cost_tier(filter));
-        feats.scatter_printings = k; // for costing a competing PrintingCompose (which would scatter k); P1 itself walks, so its own cost ignores this
-        (feats, Prep::Range)
-    } else if PhysicalPlan::PrintingCompose.applicable(filter, mode, cards, plane, sort_col, descending, indexes) {
-        // Composable printing-space expr, any distinct-on. Estimate the counts cheaply — the fast path
-        // composes once, only if this plan wins (never in acquire; a legality broadcast paid here and
-        // then discarded would be pure waste). `synth_printings` = broadcast down (legality) + projection
-        // up (card/artwork; 0 for printing). `popcount_words` = the result-space bitmap the total scans.
-        let (printing_matches, broadcast, scatter) = compose_printing_estimate(filter, indexes, offsets, n_printings as usize);
-        // Two build kinds, charged at different rates: `broadcast` = legality broadcast-down (linear
-        // pass), `scatter` = range-slice scatter (cheap). `project` = the second pass (printing→
-        // card/artwork), 0 for printing mode. Keeping all three separate is what lets a bare range's
-        // CardRangePopcount acquire (which sets `scatter`/`project` too) cost this plan's passes
-        // honestly against the fused build. `eval_domain`/`scan_units` cost the *materializing
-        // alternatives* should compose lose: a composable filter narrows via its indices, so they see
-        // ~`matches` candidates (card mode also breaks at the first match ⇒ scan_units = eval_domain) —
-        // the unnarrowed universe would over-cost them and mis-route (measured: `format:X format:Y`/card).
-        let (result_total, project, popcount_words, eval_domain, scan_units) = match mode {
-            Mode::Printing => (printing_matches, 0, (n_printings as usize).div_ceil(64), n_cards as usize, n_printings as usize),
-            Mode::Card => {
-                let rt = printing_matches.min(n_cards as usize);
-                (rt, printing_matches, (n_cards as usize).div_ceil(64), rt, rt)
-            }
-            Mode::Artwork => {
-                let rt = printing_matches.min(n_cards as usize);
-                (printing_matches, printing_matches, (n_printings as usize).div_ceil(64), rt, printing_matches)
-            }
-        };
-        let mut feats = mk_feats(result_total as u32, eval_domain as u32, scan_units as u32, verify_cost_tier(filter));
-        feats.broadcast_printings = broadcast as u32;
-        feats.scatter_printings = scatter as u32;
-        feats.project_printings = project as u32;
-        feats.popcount_words = popcount_words as u32;
-        // Which paging strategy the fastpath will actually use — decided the same way the fastpath
-        // itself decides (permutation walk / #744 orderby walk / gather fallback).
-        feats.compose_paging = if indexes.sort_perms.get(sort_col, descending).is_some_and(|p| p.len() == cards.len()) {
-            ComposePaging::Perm
-        } else if matches!(mode, Mode::Printing) && orderby_walk_available(sort_col) {
-            ComposePaging::OrderbyWalk
-        } else {
-            ComposePaging::Gather
-        };
-        (feats, Prep::Range)
-    } else {
-        let prep = prepare_candidates(cards, offsets, strings, filter, plane, mode, indexes);
-        (candidate_feats(&prep, filter), Prep::Candidates(prep))
-    };
+    let (feats, prep, plane_bits) = acquire_plan_features(
+        cards, printings, offsets, strings, filter, plane, mode, sort_col, descending, limit, page_offset, indexes,
+    );
 
     // ── choose: cheapest applicable plan ──
     let plan = choose(filter, &feats, false);
@@ -6453,7 +6512,7 @@ fn run_query_routed<'a>(
                 Some(page) => page,
                 None => {
                     let prep = prepare_candidates(cards, offsets, strings, filter, plane, mode, indexes);
-                    let feats = candidate_feats(&prep, filter);
+                    let feats = candidate_feats(&prep, filter, mode, offsets, n_cards, n_printings, limit, page_offset);
                     let plan = choose(filter, &feats, true);
                     exec_from_candidates(plan, cards, printings, offsets, strings, filter, &prep, plane, mode, prefer, sort_col, descending, limit, page_offset, indexes)
                 }
@@ -6468,9 +6527,9 @@ fn run_query_routed<'a>(
 /// executable without changing `run_query`'s default routing. Returns `None`
 /// when `plan` fails its applicability predicate (or, for `PrintingRangeScan`,
 /// when `printing_range_fastpath` structurally declines with `None`); `Some`
-/// with the result when it ran. `GatheredScan` is always `Some`.
+/// with the result when it ran. `GatheredScan` is always `Some`. Also the
+/// executor `explain_analyze` (#745) drives per plan per timing round.
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)] // force entry point; exercised by force_plan_differential_agreement
 fn run_query_with_plan<'a>(
     plan: PhysicalPlan,
     cards: &'a [AOracleCard],
@@ -6548,6 +6607,142 @@ fn run_query_with_plan<'a>(
             ))
         }
     }
+}
+
+/// One applicable plan's predicted cost, as `explain` (#745) reports it — exposing
+/// the numbers `run_query_routed`'s `choose` step already computes and discards,
+/// via the identical `acquire_plan_features` acquire step so this can never
+/// silently drift from what the real router would pick.
+pub(crate) struct PlanEstimate {
+    pub(crate) plan: PhysicalPlan,
+    pub(crate) predicted_ns: f64,
+}
+
+/// #745 primitive 1: every applicable plan's predicted cost for this query, ranked
+/// cheapest first (index 0 is `run_query_routed`'s actual pick). Diagnostic only —
+/// this is exactly the acquire+argmin the router runs on every query, just with
+/// every candidate kept instead of only the winner, so it costs nothing beyond
+/// what a normal query already pays and is safe to call constantly. Note: for a
+/// `Prep::Range`-acquired query, the reported cost for a materializing plan
+/// (StreamedSelect/GatheredScan) is the same coarse "broad regime" estimate
+/// `run_query_routed`'s top-level choose uses — not the more precise number its
+/// dispatch would compute if that plan actually won and got lazily re-costed
+/// against a materialized candidate list (see `acquire_plan_features`'s
+/// `PrintingRangeScan`/`PrintingCompose` branches).
+#[allow(clippy::too_many_arguments)]
+fn explain(
+    cards: &[AOracleCard],
+    printings: &[APrinting],
+    offsets: &AOffsets,
+    strings: &AStrings,
+    filter: &mut FilterExpr,
+    plane: Option<&PlaneExpr>,
+    mode: Mode,
+    sort_col: SortCol,
+    descending: bool,
+    limit: usize,
+    page_offset: usize,
+    indexes: &Archived<CardIndexes>,
+) -> Vec<PlanEstimate> {
+    let (feats, _prep, _plane_bits) = acquire_plan_features(
+        cards, printings, offsets, strings, filter, plane, mode, sort_col, descending, limit, page_offset, indexes,
+    );
+    let mut estimates: Vec<PlanEstimate> = PhysicalPlan::ALL
+        .into_iter()
+        .filter(|p| p.applicable(filter, mode, cards, plane, sort_col, descending, indexes))
+        .map(|plan| PlanEstimate { plan, predicted_ns: cost::plan_cost(plan, &feats) })
+        .collect();
+    estimates.sort_by(|a, b| a.predicted_ns.partial_cmp(&b.predicted_ns).expect("plan_cost is finite"));
+    estimates
+}
+
+/// One applicable plan's `explain_analyze` (#745) result: the same predicted cost
+/// `explain` reports for this plan, plus raw per-trial timings — deliberately not
+/// pre-reduced (no median/mean here), so a caller can see whether a plan's timing
+/// is bimodal, which this engine has measured happening on identical work before
+/// (00648-engine-verifier-cost-ordering.md's measurement-traps section).
+pub(crate) struct PlanTrial {
+    pub(crate) plan: PhysicalPlan,
+    pub(crate) predicted_ns: f64,
+    pub(crate) trials_ns: Vec<u64>,
+}
+
+/// #745 primitive 2: actually run every applicable plan via `run_query_with_plan`,
+/// `num_warmups` discarded rounds then `num_trials` recorded rounds, returning the
+/// raw per-trial timings alongside each plan's predicted cost (from `explain`, so a
+/// caller never has to zip two separate lists by plan to compare predicted vs
+/// actual).
+///
+/// `filter` is a shared reference and is never mutated in place here — every
+/// `run_query_with_plan` call gets a fresh `.clone()` off this same pristine
+/// snapshot instead. This is the resolution to the correctness question
+/// `docs/issues/00745-engine-explain-analyze.md` raises: `run_query_with_plan`'s
+/// `StreamedSelect`/`GatheredScan` arms each call `prepare_candidates` themselves,
+/// which mutates the filter it's given (`memoize_text_predicates`) — reusing one
+/// `&mut FilterExpr` across calls would let whichever plan happens to run first pay
+/// the one-time memoize cost while every later call (any plan) gets it for free, a
+/// systematic bias the round-rotation below can't fix on its own. Cloning fresh
+/// from the same pristine snapshot for every single call means every call pays the
+/// identical cost every time — the same discipline `plan_cost_calibration`/
+/// `plan_cost_model_matches_gold` already use (tests.rs), just via `Clone` instead
+/// of re-deriving from a `FuzzSpec`, since a real caller only has the bound tree.
+///
+/// Rotates which plan runs first/last each round (`(i + round) % n`) rather than a
+/// fixed order, so no plan systematically benefits from whatever accumulates
+/// round-over-round (allocator state, cache residency).
+#[allow(clippy::too_many_arguments)]
+fn explain_analyze(
+    cards: &[AOracleCard],
+    printings: &[APrinting],
+    offsets: &AOffsets,
+    strings: &AStrings,
+    filter: &FilterExpr,
+    plane: Option<&PlaneExpr>,
+    unique: &str,
+    prefer: &str,
+    orderby: &str,
+    direction: &str,
+    limit: usize,
+    page_offset: usize,
+    indexes: &Archived<CardIndexes>,
+    num_warmups: usize,
+    num_trials: usize,
+) -> Vec<PlanTrial> {
+    let sort_col = orderby_to_col(orderby);
+    let descending = direction == "desc";
+    let mode = match unique {
+        "artwork"  => Mode::Artwork,
+        "printing" => Mode::Printing,
+        _          => Mode::Card,
+    };
+
+    // explain() needs `&mut` for its own (one-time) acquire-step mutation; clone so
+    // the timing loop below starts from `filter`'s untouched, pristine state.
+    let estimates = explain(cards, printings, offsets, strings, &mut filter.clone(), plane, mode, sort_col, descending, limit, page_offset, indexes);
+
+    let n = estimates.len();
+    let mut trials_ns: Vec<Vec<u64>> = vec![Vec::with_capacity(num_trials); n];
+    for round in 0..(num_warmups + num_trials) {
+        for i in 0..n {
+            let idx = (i + round) % n;
+            let plan = estimates[idx].plan;
+            let mut round_filter = filter.clone();
+            let t0 = std::time::Instant::now();
+            let ran = run_query_with_plan(
+                plan, cards, printings, offsets, strings, &mut round_filter, plane,
+                unique, prefer, orderby, direction, limit, page_offset, indexes,
+            );
+            let dt = t0.elapsed().as_nanos() as u64;
+            // A structurally-applicable plan's fastpath can still decline at runtime
+            // (e.g. PrintingCompose on a sparse total) — deterministic for this
+            // query/data, so a decliner simply never accumulates trials.
+            if ran.is_some() && round >= num_warmups {
+                trials_ns[idx].push(dt);
+            }
+        }
+    }
+
+    estimates.into_iter().zip(trials_ns).map(|(e, trials_ns)| PlanTrial { plan: e.plan, predicted_ns: e.predicted_ns, trials_ns }).collect()
 }
 
 /// #634 Step 2: popcount-skip order phase. Scoped to `unique=card` queries
@@ -7053,6 +7248,51 @@ pub(crate) fn count_common_keywords(data: &Archived<CardData>) -> HashMap<String
         .collect()
 }
 
+/// Shared `explain`/`explain_analyze` (#745) filter resolution: parse `filters`'
+/// `to_json()`, bind against `data`'s vocabs, and split off the plane-expressible
+/// part — the same three steps `query()` runs inline. Kept as a private duplicate
+/// rather than a refactor of `query()` itself, so the existing hot search path is
+/// untouched by this change.
+fn bind_and_split_filter(py: Python<'_>, filters: &Bound<PyAny>, unique: &str, data: &Archived<CardData>) -> PyResult<(Option<PlaneExpr>, FilterExpr)> {
+    let to_json = filters.call_method0("to_json")?;
+    let json_bytes: Vec<u8> = py
+        .import("orjson")?
+        .call_method1("dumps", (to_json,))?
+        .extract()?;
+    let json_str = std::str::from_utf8(&json_bytes)
+        .map_err(|e| QueryError::new_err(format!("bad UTF-8 from orjson: {e}")))?;
+    let json_val: Value = serde_json::from_str(json_str)
+        .map_err(|e| QueryError::new_err(format!("bad query JSON: {e}")))?;
+
+    // Must run before build_filter so legality shifts resolve in workers that
+    // never executed the load path themselves.
+    sync_format_shifts(&data.format_shifts);
+    let mut filter_expr = build_filter(&json_val)
+        .map_err(|e| QueryError::new_err(format!("build_filter: {e}")))?;
+    filter_expr.bind(&data.coll_vocab, &data.coll_vocab_sorted, &data.artist_vocab, &data.mana_vocab, &data.indexes.flavor, &data.strings);
+
+    Ok(if u32::from(data.indexes.planes.n_cards) as usize == data.cards.len() && !data.cards.is_empty() {
+        split_planes(filter_expr, &data.indexes.planes, &data.indexes.oracle_trigram.words, !matches!(unique, "artwork" | "printing"))
+    } else {
+        (None, filter_expr)
+    })
+}
+
+fn plan_estimate_to_pydict<'py>(py: Python<'py>, e: &PlanEstimate) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("plan", format!("{:?}", e.plan))?;
+    d.set_item("predicted_ns", e.predicted_ns)?;
+    Ok(d)
+}
+
+fn plan_trial_to_pydict<'py>(py: Python<'py>, t: &PlanTrial) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("plan", format!("{:?}", t.plan))?;
+    d.set_item("predicted_ns", t.predicted_ns)?;
+    d.set_item("trials_ns", t.trials_ns.clone())?;
+    Ok(d)
+}
+
 #[pyclass]
 struct QueryEngine {
     shm_path: PathBuf,
@@ -7546,6 +7786,78 @@ impl QueryEngine {
             .collect::<PyResult<Vec<_>>>()?;
         let matches_list = PyList::new(py, matches)?;
         PyTuple::new(py, [total.into_pyobject(py)?.into_any(), matches_list.into_any()])
+    }
+
+    /// #745 primitive 1: every applicable plan's predicted cost for this query,
+    /// ranked cheapest first (`result[0]` is what `query()` would actually run) —
+    /// the numbers the router already computes on every query, just exposed
+    /// instead of thrown away. Diagnostic only; safe to call constantly.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (*, filters, unique="card", orderby="edhrec", direction="asc", limit=100, offset=0))]
+    fn explain<'py>(
+        &self,
+        py: Python<'py>,
+        filters: &Bound<PyAny>,
+        unique: &str,
+        orderby: &str,
+        direction: &str,
+        limit: usize,
+        offset: usize,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let mmap = self.get_mmap()?;
+        // Safety: see query()'s access_unchecked justification.
+        let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
+        let (plane_expr, mut filter_expr) = bind_and_split_filter(py, filters, unique, data)?;
+
+        let sort_col = orderby_to_col(orderby);
+        let descending = direction == "desc";
+        let mode = match unique {
+            "artwork"  => Mode::Artwork,
+            "printing" => Mode::Printing,
+            _          => Mode::Card,
+        };
+        let estimates = explain(
+            &data.cards, &data.printings, &data.offsets, &data.strings, &mut filter_expr, plane_expr.as_ref(),
+            mode, sort_col, descending, limit, offset, &data.indexes,
+        );
+
+        let rows: Vec<Bound<PyDict>> = estimates.iter().map(|e| plan_estimate_to_pydict(py, e)).collect::<PyResult<Vec<_>>>()?;
+        PyList::new(py, rows)
+    }
+
+    /// #745 primitive 2: run every applicable plan `num_warmups + num_trials`
+    /// times each (raw per-trial nanoseconds, not pre-reduced — see `explain_analyze`'s
+    /// doc comment for why), alongside the predicted cost `explain` would report
+    /// for the same plan. Not on the default query path: this multiplies work by
+    /// the number of applicable plans, so it's for ad hoc/interactive diagnosis,
+    /// not every request.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (*, filters, unique="card", prefer="default", orderby="edhrec", direction="asc", limit=100, offset=0, num_warmups=3, num_trials=10))]
+    fn explain_analyze<'py>(
+        &self,
+        py: Python<'py>,
+        filters: &Bound<PyAny>,
+        unique: &str,
+        prefer: &str,
+        orderby: &str,
+        direction: &str,
+        limit: usize,
+        offset: usize,
+        num_warmups: usize,
+        num_trials: usize,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let mmap = self.get_mmap()?;
+        // Safety: see query()'s access_unchecked justification.
+        let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
+        let (plane_expr, filter_expr) = bind_and_split_filter(py, filters, unique, data)?;
+
+        let trials = explain_analyze(
+            &data.cards, &data.printings, &data.offsets, &data.strings, &filter_expr, plane_expr.as_ref(),
+            unique, prefer, orderby, direction, limit, offset, &data.indexes, num_warmups, num_trials,
+        );
+
+        let rows: Vec<Bound<PyDict>> = trials.iter().map(|t| plan_trial_to_pydict(py, t)).collect::<PyResult<Vec<_>>>()?;
+        PyList::new(py, rows)
     }
 
     fn size(&self) -> PyResult<usize> {

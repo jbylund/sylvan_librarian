@@ -1248,3 +1248,47 @@ class TestFieldSelection:
     def test_unknown_field_raises(self, engine: QueryEngine) -> None:
         with pytest.raises(UnknownFieldError):
             _run(engine, unique="printing", fields=["not_a_real_field"])
+
+
+class TestExplain:
+    """explain()/explain_analyze() (#745): the router's own cost model as an on-demand diagnostic.
+
+    Not a search result — see docs/issues/00745-engine-explain-analyze.md.
+    """
+
+    def test_explain_ranks_applicable_plans_ascending(self, engine: QueryEngine) -> None:
+        filters = parse_scryfall_query("t:creature")
+        rows = engine.explain(filters=filters, unique="card", orderby="edhrec", direction="asc", limit=50, offset=0)
+
+        assert rows, "GatheredScan is always applicable"
+        assert {"plan", "predicted_ns"} <= rows[0].keys()
+        predicted_ns = [row["predicted_ns"] for row in rows]
+        assert predicted_ns == sorted(predicted_ns)
+        assert any(row["plan"] == "GatheredScan" for row in rows)
+
+    def test_explain_analyze_matches_explain_and_times_every_plan(self, engine: QueryEngine) -> None:
+        filters = parse_scryfall_query("t:creature")
+        explained = engine.explain(filters=filters, unique="card", orderby="edhrec", direction="asc", limit=50, offset=0)
+        analyzed = engine.explain_analyze(
+            filters=filters,
+            unique="card",
+            prefer="default",
+            orderby="edhrec",
+            direction="asc",
+            limit=50,
+            offset=0,
+            num_warmups=1,
+            num_trials=3,
+        )
+
+        # Same plans, same order, same predicted_ns -- explain_analyze must never
+        # diverge from explain (they share the engine's acquire_plan_features step).
+        assert [row["plan"] for row in analyzed] == [row["plan"] for row in explained]
+        assert [row["predicted_ns"] for row in analyzed] == [row["predicted_ns"] for row in explained]
+        for row in analyzed:
+            # A structurally-applicable plan's fastpath can still decline at runtime
+            # (empty trials_ns); otherwise warmups are discarded and exactly
+            # num_trials recorded.
+            assert row["trials_ns"] == [] or len(row["trials_ns"]) == 3
+            assert all(t >= 0 for t in row["trials_ns"])
+        assert any(row["plan"] == "GatheredScan" and len(row["trials_ns"]) == 3 for row in analyzed)

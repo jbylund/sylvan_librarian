@@ -5,7 +5,8 @@ use super::{
     assign_artwork_groups, build_bit_planes, build_border_printing_planes, build_rarity_printing_planes, build_divergent_ids, build_name_bigram_index, build_printing_to_card, flavor_fingerprint, flavor_match_sets,
     cards_of_printings, count_common_keywords, count_common_types,
     build_artist_index, build_range_index, build_arith_tuple_index, is_arith_tuple_route, range_candidates, narrow_candidates, narrow_candidates_exact, rarity_candidates,
-    range_too_broad_to_narrow, run_query, run_query_with_plan, PhysicalPlan, ComposePaging, trigram_candidates, finalize_trigram_index, PrintingRangeIndex, NARROW_FLOOR,
+    range_too_broad_to_narrow, run_query, run_query_with_plan, explain, explain_analyze, PlanEstimate, PlanTrial,
+    PhysicalPlan, ComposePaging, trigram_candidates, finalize_trigram_index, PrintingRangeIndex, NARROW_FLOOR,
     gathered_scan_applicable, streamed_select_applicable, plane_popcount_order_applicable, printing_range_scan_applicable,
     walk_printing_page, aligned_page, bare_range_bounds, probe_range_k, printing_range_fastpath, sort_key_bits, orderby_to_col, SortCol, STREAM_MIN_MATCHES,
     prepare_candidates, verify_cost_tier, scan_units, Mode,
@@ -3014,6 +3015,105 @@ fn force_plan_differential_agreement() {
             "plan {plan:?} was never exercised by the differential corpus — add coverage",
         );
     }
+}
+
+/// #745: `explain` reports a nonempty, cheapest-first ranked list for every mode,
+/// always including `GatheredScan` (universally applicable), and its predicted
+/// costs are exactly what `PhysicalPlan::ALL.filter(applicable)` + `cost::plan_cost`
+/// would compute directly — i.e. `explain` cannot silently diverge from
+/// `run_query_routed`'s own argmin (they share `acquire_plan_features`).
+#[test]
+fn explain_reports_ranked_applicable_plans() {
+    use rand::SeedableRng;
+    let mut rng = rand::rngs::SmallRng::seed_from_u64(745_001);
+    let data = fuzz_store_n(&mut rng, 2_000);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let specs = [
+        FuzzSpec::And(vec![fuzz_leaf_color(&mut rng), fuzz_leaf_type(&mut rng)]),
+        FuzzSpec::Leaf(FuzzLeaf::Price { op: CmpOp::Lt, val: 100_000.0 }),
+        FuzzSpec::Leaf(FuzzLeaf::Border { value: "black".to_string() }),
+    ];
+    let modes = [("card", Mode::Card), ("printing", Mode::Printing), ("artwork", Mode::Artwork)];
+
+    for spec in &specs {
+        for &(mode_label, mode) in &modes {
+            let (pe, mut filter) = split_planes(
+                fuzz_bound_filter(spec, archived), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, matches!(mode, Mode::Card),
+            );
+            let estimates: Vec<PlanEstimate> = explain(
+                &archived.cards, &archived.printings, &archived.offsets, &archived.strings, &mut filter, pe.as_ref(),
+                mode, SortCol::EdhrecRank, false, 60, 0, &archived.indexes,
+            );
+
+            assert!(!estimates.is_empty(), "GatheredScan is always applicable ({mode_label}, {})", fuzz_describe(spec));
+            assert!(
+                estimates.iter().any(|e| e.plan == PhysicalPlan::GatheredScan),
+                "GatheredScan missing from explain() output ({mode_label}, {})", fuzz_describe(spec),
+            );
+            assert!(
+                estimates.windows(2).all(|w| w[0].predicted_ns <= w[1].predicted_ns),
+                "explain() not sorted ascending ({mode_label}, {})", fuzz_describe(spec),
+            );
+            for e in &estimates {
+                assert!(e.predicted_ns.is_finite() && e.predicted_ns >= 0.0, "non-finite/negative predicted_ns for {:?}", e.plan);
+            }
+        }
+    }
+}
+
+/// #745: `explain_analyze` times every plan `explain` reports, carrying the same
+/// `predicted_ns` alongside real per-trial timings — so a caller never has to zip
+/// two separate calls' results by plan to compare predicted vs actual. Warmups are
+/// small here (test speed, not a calibration run); the assertions are about wiring
+/// (same plan set, matching predicted cost, right trial counts, non-negative
+/// timings), not about the model's accuracy.
+#[test]
+fn explain_analyze_matches_explain_and_times_every_plan() {
+    use rand::SeedableRng;
+    let mut rng = rand::rngs::SmallRng::seed_from_u64(745_002);
+    let data = fuzz_store_n(&mut rng, 2_000);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    const NUM_WARMUPS: usize = 1;
+    const NUM_TRIALS: usize = 3;
+
+    let spec = FuzzSpec::And(vec![fuzz_leaf_color(&mut rng), fuzz_leaf_type(&mut rng)]);
+    let bound = fuzz_bound_filter(&spec, archived);
+
+    // Reference: what explain() alone reports for this same query.
+    let (ref_pe, mut ref_filter) = split_planes(
+        bound.clone(), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, true,
+    );
+    let reference: Vec<PlanEstimate> = explain(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings, &mut ref_filter, ref_pe.as_ref(),
+        Mode::Card, SortCol::EdhrecRank, false, 60, 0, &archived.indexes,
+    );
+
+    let (pe, filter) = split_planes(bound, &archived.indexes.planes, &archived.indexes.oracle_trigram.words, true);
+    let trials: Vec<PlanTrial> = explain_analyze(
+        &archived.cards, &archived.printings, &archived.offsets, &archived.strings, &filter, pe.as_ref(),
+        "card", "default", "edhrec", "asc", 60, 0, &archived.indexes, NUM_WARMUPS, NUM_TRIALS,
+    );
+
+    assert_eq!(trials.len(), reference.len(), "explain_analyze must cover exactly the plans explain() reports");
+    for (t, r) in trials.iter().zip(&reference) {
+        assert_eq!(t.plan, r.plan, "plan order must match explain()'s ranking");
+        assert_eq!(t.predicted_ns, r.predicted_ns, "predicted_ns must be identical to explain()'s for {:?}", t.plan);
+        // A structurally-applicable plan's fastpath can legitimately decline at
+        // runtime (empty trials_ns); when it doesn't decline, it must have run
+        // exactly NUM_TRIALS times (warmups are discarded, never recorded).
+        assert!(
+            t.trials_ns.is_empty() || t.trials_ns.len() == NUM_TRIALS,
+            "{:?}: expected 0 or {NUM_TRIALS} trials, got {}", t.plan, t.trials_ns.len(),
+        );
+    }
+    assert!(
+        trials.iter().any(|t| t.plan == PhysicalPlan::GatheredScan && t.trials_ns.len() == NUM_TRIALS),
+        "GatheredScan is always applicable and never declines",
+    );
 }
 
 /// #702 PR1 estimator accuracy report (NOT an assertion — a reporting tool).
