@@ -362,7 +362,7 @@ fifth (tight/loose) axis to worry about — every field behaves identically ther
 - [local-engine-printing-varying-plane-repair-pattern.md](../local-engine-printing-varying-plane-repair-pattern.md)
   — names price's exact disqualifying shape ("a hypothetical printing-varying numeric field...
   `> 3.7` and `> 3.71` are different, un-precomputable existence projections").
-- [local-engine-probe-before-and-skip.md](../local-engine-probe-before-and-skip.md) — the same
+- [00749-engine-probe-before-and-skip.md](./00749-engine-probe-before-and-skip.md) — the same
   "the binary search already gives you `k` for free" observation, in the AND-skip context.
 - #638 — `tix`/`eur` have no range index at all yet; the same fast path (and the prerequisite
   exactness fix) should cover them once they do.

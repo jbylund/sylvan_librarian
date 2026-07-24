@@ -3,7 +3,7 @@
 **Status: done**, shipped for [#743](https://github.com/jbylund/sylvan_librarian/issues/743). Found
 via `scripts/survey_queries.py` while checking the survey's remaining slowest queries after #739–#741
 landed (same pass as the sibling
-[00744-engine-compose-orderby-range-walk.md](../00744-engine-compose-orderby-range-walk.md), which
+[00744-engine-compose-orderby-range-walk.md](./00744-engine-compose-orderby-range-walk.md), which
 covers the other half of that list).
 
 ## Measured problem
@@ -183,7 +183,7 @@ component, `reload_peak` unchanged.
 
 ## Related
 
-- [00744-engine-compose-orderby-range-walk.md](../00744-engine-compose-orderby-range-walk.md) — sibling
+- [00744-engine-compose-orderby-range-walk.md](./00744-engine-compose-orderby-range-walk.md) — sibling
   doc from the same survey pass, covering the `format:commander`/`format:legacy` cluster (#3–6)
   instead of the arith cluster (#8/#15 in `branch-c6484a3.csv`).
 - [00741-engine-negated-range-narrowing.md](00741-engine-negated-range-narrowing.md) —
