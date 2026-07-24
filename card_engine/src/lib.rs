@@ -4798,31 +4798,21 @@ fn broadcast_card_bits_to_printings(card_bits: &[u64], offsets: &AOffsets, n_pri
     pbits
 }
 
-/// The exact printing-space bitmap for a bare legality leaf (`f:modern` etc.), built the #724 way from
-/// #667's card-space `_EXISTS` plane plus a divergent repair, rather than a full per-printing legality
-/// plane — legality is only ~1.8% divergent (`legal_divergent`), so the card plane broadcast is exact
-/// for the other 98.2% and only the divergent cards need per-printing fix-up. `∃-legal` over-sets a
-/// divergent card (it sets every printing, but only some are legal), so the repair is **authoritative**:
-/// it *overwrites* each divergent printing's bit to its true value (set and clear, re-derived from the
-/// printing's own `card_legalities` word — no stored postings), which is why the broadcast needs no
-/// pre-masking. Empty if the planes aren't built for this store.
-fn legality_leaf_bits(
+/// Repair the divergent cards' printings authoritatively — overwrite each bit with the per-printing
+/// truth (`(word >> shift) & 0b11 == expected`, the same test filter.rs:1253 applies). Authoritative
+/// (set AND clear) so either build direction can over-set/over-clear a divergent card without a
+/// pre-mask pass. Iterates the global `legal_divergent` list (a superset of the per-format divergent
+/// set); a card divergent in another format but not this one has all its printings agree here, so its
+/// repair is a no-op. Callers gate this on there being any per-format divergence at all (#744).
+fn repair_divergent_printings(
+    pbits: &mut [u64],
     shift: u8,
     expected: u64,
-    indexes: &Archived<CardIndexes>,
+    legal_divergent: &Archived<Vec<u16>>,
     offsets: &AOffsets,
     printings: &[APrinting],
-    n_printings: usize,
-) -> Vec<u64> {
-    let n_cards = offsets.len() - 1;
-    let Some(card_bits) = legality_candidate_bits(indexes, n_cards, shift, expected, false) else {
-        return vec![0u64; words_per_plane(n_printings)];
-    };
-    let mut pbits = broadcast_card_bits_to_printings(&card_bits, offsets, n_printings);
-    // Repair the divergent cards' printings authoritatively — overwrite each bit with the per-printing
-    // truth (`(word >> shift) & 0b11 == expected`, the same test filter.rs:1253 applies). Overwriting
-    // both directions is what lets the broadcast above over-set them without a pre-clear pass.
-    for cid in indexes.legal_divergent.iter() {
+) {
+    for cid in legal_divergent.iter() {
         let c = u16::from(*cid) as usize;
         for p in u32::from(offsets[c]) as usize..u32::from(offsets[c + 1]) as usize {
             let legal = (u64::from(printings[p].card_legalities) >> shift) & 0b11 == expected;
@@ -4833,7 +4823,86 @@ fn legality_leaf_bits(
             }
         }
     }
+}
+
+/// #724 build: broadcast the *legal* (`_EXISTS`) card plane down and repair. Cheapest when the legal
+/// set is the *minority* (e.g. `oldschool`, ~3% legal) — the broadcast touches only set (legal) cards.
+fn legality_leaf_bits_from_exists(
+    shift: u8,
+    expected: u64,
+    exists: &[u64],
+    legal_divergent: &Archived<Vec<u16>>,
+    offsets: &AOffsets,
+    printings: &[APrinting],
+    n_printings: usize,
+) -> Vec<u64> {
+    let mut pbits = broadcast_card_bits_to_printings(exists, offsets, n_printings);
+    repair_divergent_printings(&mut pbits, shift, expected, legal_divergent, offsets, printings);
     pbits
+}
+
+/// #744 build: start printing-space all-ones and clear each *illegal* (`_ABSENT`) card's printing
+/// range. Cheapest when the legal set is the *majority* (a near-universal format like `commander`,
+/// ~99.7% legal): the clear touches only the tiny illegal set + its printings, not the ~99.7% of cards
+/// a legal-side broadcast would. Skips the repair pass entirely when this format has zero divergent
+/// cards (`exists ∧ absent` empty — true for `commander` in the real corpus). Produces bit-for-bit the
+/// same bitmap as `legality_leaf_bits_from_exists` — the authoritative repair overwrites every
+/// divergent printing to its per-printing truth regardless of the starting side.
+#[allow(clippy::too_many_arguments)]
+fn legality_leaf_bits_from_absent(
+    shift: u8,
+    expected: u64,
+    exists: &[u64],
+    absent: &[u64],
+    legal_divergent: &Archived<Vec<u16>>,
+    offsets: &AOffsets,
+    printings: &[APrinting],
+    n_printings: usize,
+) -> Vec<u64> {
+    let mut pbits = all_printing_bits(n_printings);
+    for cid in bitmap_card_ids(absent) {
+        let c = cid as usize;
+        for p in u32::from(offsets[c]) as usize..u32::from(offsets[c + 1]) as usize {
+            pbits[p >> 6] &= !(1u64 << (p & 63));
+        }
+    }
+    // Divergent-in-this-format cards (∃ legal ∧ ∃ illegal printing) are exactly `exists ∧ absent`;
+    // repair only if there are any (skip the whole pass for a format with none, e.g. commander).
+    let divergent = exists.iter().zip(absent.iter()).map(|(&a, &b)| (a & b).count_ones()).sum::<u32>();
+    if divergent > 0 {
+        repair_divergent_printings(&mut pbits, shift, expected, legal_divergent, offsets, printings);
+    }
+    pbits
+}
+
+/// The exact printing-space bitmap for a bare legality leaf (`f:modern` etc.), built the #724 way from
+/// #667's card-space `_EXISTS`/`_ABSENT` planes plus a divergent repair, rather than a full per-printing
+/// legality plane. **Builds from whichever side is sparser** (#744): the legal-card popcount decides —
+/// majority-legal (`commander`) clears the tiny illegal set from an all-ones start; minority-legal
+/// (`oldschool`) broadcasts the small legal set. Same "pick the cheaper side" shape `range_narrowed`
+/// uses (`if k <= idx.len() - k`), and both directions yield the identical bitmap (the repair is
+/// authoritative). Empty if the planes aren't built for this store.
+fn legality_leaf_bits(
+    shift: u8,
+    expected: u64,
+    indexes: &Archived<CardIndexes>,
+    offsets: &AOffsets,
+    printings: &[APrinting],
+    n_printings: usize,
+) -> Vec<u64> {
+    let n_cards = offsets.len() - 1;
+    let Some(exists) = legality_candidate_bits(indexes, n_cards, shift, expected, false) else {
+        return vec![0u64; words_per_plane(n_printings)];
+    };
+    let legal_cards = exists.iter().map(|w| w.count_ones() as usize).sum::<usize>();
+    if legal_cards * 2 > n_cards {
+        // Majority legal: the *illegal* set is the sparse side — build from `_ABSENT`.
+        let absent =
+            legality_candidate_bits(indexes, n_cards, shift, expected, true).expect("exists resolved ⇒ absent resolves");
+        legality_leaf_bits_from_absent(shift, expected, &exists, &absent, &indexes.legal_divergent, offsets, printings, n_printings)
+    } else {
+        legality_leaf_bits_from_exists(shift, expected, &exists, &indexes.legal_divergent, offsets, printings, n_printings)
+    }
 }
 
 /// #724: materialize `filter`'s **exact** printing-space membership bitmap (`n_printings` bits, tail
@@ -4961,13 +5030,17 @@ fn compose_printing_estimate(
         | FilterExpr::NumericCmp { lhs: NumExpr::Const(c), op: CmpOp::Eq, rhs: NumExpr::Field(NumField::RarityInt) } => {
             (popcount(&rarity_leaf_bits(*c, &indexes.rarity_printing, n_printings)), 0, 0)
         }
-        // Legality: estimate from the cheap card ∃-plane popcount scaled to printings; that count is the
-        // broadcast-down the fast path pays (a linear pass) → rides `broadcast`.
+        // Legality: matches ≈ the legal-∃ cards' printings (existence-scaled from the cheap card
+        // ∃-plane popcount). The build cost rides the *sparser* side (#744): a majority-legal format
+        // clears its tiny illegal set instead of broadcasting the ~all legal one, so `broadcast` is
+        // scaled from `min(legal, illegal)` cards, not `legal` — otherwise the model would keep costing
+        // the pre-#744 full broadcast a near-universal format no longer pays.
         FilterExpr::Legality { shift: Some(shift), expected } => {
             let n_cards = offsets.len() - 1;
-            let card_exists = legality_candidate_bits(indexes, n_cards, *shift, *expected, false).map_or(0, |b| popcount(&b));
-            let est = if n_cards == 0 { 0 } else { card_exists * n_printings / n_cards };
-            (est, est, 0)
+            let legal = legality_candidate_bits(indexes, n_cards, *shift, *expected, false).map_or(0, |b| popcount(&b));
+            let illegal = legality_candidate_bits(indexes, n_cards, *shift, *expected, true).map_or(0, |b| popcount(&b));
+            let scale = |c: usize| (c * n_printings).checked_div(n_cards).unwrap_or(0);
+            (scale(legal), scale(legal.min(illegal)), 0)
         }
         // Range (bare or negated — `-usd<50` etc., see `bare_range_bounds`'s doc): `k` in-range
         // printings from the index partition points (O(log n), no scatter here); matches ≈ k, and k
@@ -4983,6 +5056,188 @@ fn compose_printing_estimate(
     }
 }
 
+/// The two `orderby` values with no card-space sort permutation (`SortCol::PriceUsd`/`Rarity` — see
+/// `ArchivedSortPermutations::get`, which returns `None` for both because the representative printing's
+/// key can't be precomputed). Each nonetheless has a printing-space value-ordered structure a
+/// `unique=printing` page can be walked directly: price cents in the `price_usd` `PrintingRangeIndex`,
+/// rarity ints in the `rarity_printing` planes/postings. #744's walk uses one to emit a page in sort
+/// order without visiting every candidate — the opposite shape from `gather_composed_page`. Any other
+/// `orderby` either has a permutation (`walk_grouped_page`) or falls to the gather fallback.
+fn orderby_walk_available(sort_col: SortCol) -> bool {
+    matches!(sort_col, SortCol::PriceUsd | SortCol::Rarity)
+}
+
+/// Assemble a `unique=printing` page from value-buckets yielded by `next_bucket` in page (sort-key)
+/// order, each already filtered to its `pbits`-matching pids. Skips whole buckets by match count up to
+/// `page_offset`, collects the complete buckets the page window overlaps, then sorts that (small)
+/// collected set by the full sort key and windows it — byte-identical order to
+/// `select_page`/`gather_composed_page`, because a value-bucket shares one primary sort key so no
+/// cross-bucket tie is possible (the primary dominates the top 64 bits of `sort_key_bits`).
+///
+/// Returns `None` when the buckets are exhausted before `page_offset+limit` matches were collected AND
+/// fewer than `total` matches were seen — i.e. the remaining rows are *null-value* matches (present in
+/// `pbits`, absent from the value structure, and sorting last since a missing primary maps to
+/// `u32::MAX`), which this walk can't order — so the caller falls back to `gather_composed_page`. When
+/// every match lives in the buckets (`collected` reaches `total`, no null tail), a short last page is
+/// windowed normally.
+#[allow(clippy::too_many_arguments)]
+fn collect_orderby_page<'a>(
+    mut next_bucket: impl FnMut() -> Option<Vec<u32>>,
+    cards: &'a [AOracleCard],
+    printings: &'a [APrinting],
+    printing_to_card: &AOffsets,
+    sort_col: SortCol,
+    descending: bool,
+    total: usize,
+    limit: usize,
+    page_offset: usize,
+) -> Option<Vec<(&'a AOracleCard, &'a APrinting)>> {
+    let want = page_offset + limit;
+    let mut collected: Vec<u32> = Vec::new();
+    let mut cum = 0usize; // matches seen (skipped + collected) so far
+    let mut first_touched = 0usize; // matches before the first collected bucket (the offset skip)
+    let mut started = false;
+    while cum < want {
+        let Some(bucket) = next_bucket() else { break };
+        let m = bucket.len();
+        if m == 0 {
+            continue;
+        }
+        // Whole buckets entirely before the page window are skipped by count (not collected).
+        if !started && cum + m <= page_offset {
+            cum += m;
+            continue;
+        }
+        if !started {
+            started = true;
+            first_touched = cum;
+        }
+        collected.extend(bucket);
+        cum += m;
+    }
+    // Exhausted the value structure short of the page, with matches still unaccounted for → those are
+    // null-value matches (sort last); decline so gather handles them. A short last page with the whole
+    // match set already collected (`cum == total`) is fine — window it.
+    if cum < want && cum < total {
+        return None;
+    }
+    let matches: Vec<Match> = collected
+        .iter()
+        .map(|&pid| {
+            let cid = u32::from(printing_to_card[pid as usize]);
+            (sort_key_bits(&cards[cid as usize], &printings[pid as usize], sort_col, descending), cid, pid)
+        })
+        .collect();
+    // Quickselect the page rather than a full sort: a rarity bucket (common) can be tens of thousands
+    // of matches, so the `O(n log n)` sort's log factor is the dominant cost there — `select_page`
+    // (same `page_cmp` comparator) is `O(collected + limit·log limit)`. `page_offset - first_touched`
+    // rebases the offset onto the collected touched buckets.
+    Some(
+        select_page(matches, page_offset - first_touched, limit)
+            .into_iter()
+            .map(|(cid, pid)| (&cards[cid as usize], &printings[pid as usize]))
+            .collect(),
+    )
+}
+
+/// #744 orderby walk for a range-indexed sort column (`usd` — the only such `SortCol`; cn/date are
+/// range-indexed but never an `orderby`). Walks the value-sorted `(value, pid)` index as value-buckets
+/// in page order — forward from the low end ascending, backward from the high end descending, the same
+/// directional bucket formation `aligned_page` uses — but tests `pbits` per entry (the index covers
+/// *every* printing with the value, not just this filter's matches). See `collect_orderby_page`.
+#[allow(clippy::too_many_arguments)]
+fn walk_range_orderby_page<'a>(
+    idx: &Archived<PrintingRangeIndex>,
+    pbits: &[u64],
+    cards: &'a [AOracleCard],
+    printings: &'a [APrinting],
+    printing_to_card: &AOffsets,
+    sort_col: SortCol,
+    descending: bool,
+    total: usize,
+    limit: usize,
+    page_offset: usize,
+) -> Option<Vec<(&'a AOracleCard, &'a APrinting)>> {
+    let is_set = |pid: usize| pbits[pid >> 6] & (1u64 << (pid & 63)) != 0;
+    let (mut lo, mut hi) = (0usize, idx.len());
+    let next = move || -> Option<Vec<u32>> {
+        if lo >= hi {
+            return None;
+        }
+        let (bs, be) = if descending {
+            let v = u32::from(idx[hi - 1].0);
+            let mut b = hi - 1;
+            while b > lo && u32::from(idx[b - 1].0) == v {
+                b -= 1;
+            }
+            (b, hi)
+        } else {
+            let v = u32::from(idx[lo].0);
+            let mut b = lo + 1;
+            while b < hi && u32::from(idx[b].0) == v {
+                b += 1;
+            }
+            (lo, b)
+        };
+        if descending { hi = bs } else { lo = be }
+        Some((bs..be).map(|t| u32::from(idx[t].1)).filter(|&pid| is_set(pid as usize)).collect())
+    };
+    collect_orderby_page(next, cards, printings, printing_to_card, sort_col, descending, total, limit, page_offset)
+}
+
+/// #744 orderby walk for `orderby=rarity`. Rarity has no `PrintingRangeIndex`, but the exact
+/// `rarity_printing` planes/postings *are* a printing-space value-bucketed structure: one bucket per
+/// rarity int (interior values read their one-hot plane, the sparse tail its postings). Walks those
+/// buckets in rarity-value page order (ascending value ascending, descending value descending), each
+/// intersected with `pbits`. Null-rarity matches (in `pbits`, in no bucket) sort last and are handled
+/// by `collect_orderby_page`'s null-tail decline. See `collect_orderby_page`.
+#[allow(clippy::too_many_arguments)]
+fn walk_rarity_orderby_page<'a>(
+    rp: &Archived<RarityPrintingPlanes>,
+    pbits: &[u64],
+    cards: &'a [AOracleCard],
+    printings: &'a [APrinting],
+    printing_to_card: &AOffsets,
+    descending: bool,
+    total: usize,
+    limit: usize,
+    page_offset: usize,
+    n_printings: usize,
+) -> Option<Vec<(&'a AOracleCard, &'a APrinting)>> {
+    // Every rarity int present: interior [0..3] (planes, always laid out) + the postings' ints.
+    let mut values: Vec<u8> = RARITY_PRINTING_PLANE_INTS.to_vec();
+    values.extend(rp.postings.iter().map(|e| e.0));
+    values.sort_unstable();
+    if descending {
+        values.reverse();
+    }
+    let wpp = words_per_plane(n_printings);
+    let mut vi = 0usize;
+    let next = move || -> Option<Vec<u32>> {
+        let int = *values.get(vi)?;
+        vi += 1;
+        let pids: Vec<u32> = if let Some(k) = RARITY_PRINTING_PLANE_INTS.iter().position(|&v| v == int) {
+            let plane = &rp.words[k * wpp..(k + 1) * wpp];
+            let mut out = Vec::new();
+            for (wi, (pw, bw)) in plane.iter().zip(pbits.iter()).enumerate() {
+                let mut w = u64::from(*pw) & bw;
+                while w != 0 {
+                    out.push(((wi as u32) << 6) | w.trailing_zeros());
+                    w &= w - 1;
+                }
+            }
+            out
+        } else {
+            match rp.postings.iter().find(|e| e.0 == int) {
+                Some(e) => e.1.iter().map(|p| u32::from(*p)).filter(|&pid| pbits[pid as usize >> 6] & (1u64 << (pid & 63)) != 0).collect(),
+                None => Vec::new(),
+            }
+        };
+        Some(pids)
+    };
+    collect_orderby_page(next, cards, printings, printing_to_card, SortCol::Rarity, descending, total, limit, page_offset)
+}
+
 /// `unique=printing` fast path for a composable printing-space expression (bare `border:`/`r:` or an
 /// `AND`/`OR`/`NOT` of them, #724) — the plane analogue of `printing_range_fastpath`: `total` is the
 /// composed bitmap's `popcount` (no count pass), and the page is the same `walk_printing_page` (its
@@ -4990,7 +5245,6 @@ fn compose_printing_estimate(
 /// a non-composable filter, or a total at/below the stream threshold — where the general path gathers
 /// and globally sorts, ordering ties differently (same guard as `printing_range_fastpath`; a sparse
 /// value like `border:yellow` falls through here).
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn printing_compose_fastpath<'a>(
     cards: &'a [AOracleCard],
@@ -5009,23 +5263,29 @@ fn printing_compose_fastpath<'a>(
         return None;
     }
     let perm = indexes.sort_perms.get(sort_col, descending).filter(|p| p.len() == cards.len());
-    // No permutation (rarity/usd): before paying for the real build, check whether it's worth it at
-    // all using the same estimate `compose_printing_estimate` already computes cheaply in acquire
-    // (O(log n) partition points / plane popcounts, no scatter) — see `COMPOSE_GATHER_MAX_CARD_FRACTION`'s
-    // doc for why this needs its own threshold, not `MAX_NARROW_FRACTION`. The check must be in
-    // **mode space** (cards for `Card`, artworks for `Artwork`), not raw matching printings: a bare
-    // range's printing-space match count is a poor proxy for how many *candidates*
-    // `gather_composed_page` will actually visit (a card can have several qualifying printings). A
-    // plain `.min(domain)` cap is *not* enough to project it down, though — it saturates to exactly
-    // `domain` for every query whose printing-space count exceeds it (`cn<100`: 35,021 printings vs
-    // 31,508 cards, and `usd<50`: 80,527 vs 31,508 both saturate to the *identical* 31,508, even
-    // though their true card counts are 17,616 vs 31,217 — miles apart), which loses exactly the
-    // signal this check needs. A balls-into-bins estimate — `k` matching printings landing on
-    // `domain` cards, expected distinct cards touched `≈ domain·(1 − e^(−k/domain))` — doesn't
-    // saturate the same way and tracks the true count much better (checked against real totals:
-    // `cn<100` estimate 21,140 vs true 17,616; `usd<50` estimate 29,062 vs true 31,217; clearly
-    // separated, unlike the capped estimate's identical 31,508 for both).
-    if perm.is_none() {
+    // #744: a printing-mode page ordered by a permutation-less orderby with a printing-space
+    // value structure (`usd`/`rarity`) is walked directly (below), terminating at page_offset+limit
+    // — cost O((offset+limit)/selectivity), the *opposite* shape from `gather_composed_page`. The
+    // `COMPOSE_GATHER_MAX_CARD_FRACTION` gate must NOT apply to that branch: its premise ("broad ⇒ not
+    // worth composing") is backwards here, where a broad predicate is the walk's *best* case.
+    let walk_col = perm.is_none() && matches!(mode, Mode::Printing) && orderby_walk_available(sort_col);
+    // No permutation (rarity/usd) AND no orderby walk (card/artwork mode): before paying for the real
+    // build, check whether the gather is worth it at all using the same estimate
+    // `compose_printing_estimate` already computes cheaply in acquire (O(log n) partition points /
+    // plane popcounts, no scatter) — see `COMPOSE_GATHER_MAX_CARD_FRACTION`'s doc for why this needs
+    // its own threshold, not `MAX_NARROW_FRACTION`. The check must be in **mode space** (cards for
+    // `Card`, artworks for `Artwork`), not raw matching printings: a bare range's printing-space match
+    // count is a poor proxy for how many *candidates* `gather_composed_page` will actually visit (a
+    // card can have several qualifying printings). A plain `.min(domain)` cap is *not* enough to
+    // project it down, though — it saturates to exactly `domain` for every query whose printing-space
+    // count exceeds it (`cn<100`: 35,021 printings vs 31,508 cards, and `usd<50`: 80,527 vs 31,508
+    // both saturate to the *identical* 31,508, even though their true card counts are 17,616 vs 31,217
+    // — miles apart), which loses exactly the signal this check needs. A balls-into-bins estimate —
+    // `k` matching printings landing on `domain` cards, expected distinct cards touched
+    // `≈ domain·(1 − e^(−k/domain))` — doesn't saturate the same way and tracks the true count much
+    // better (checked against real totals: `cn<100` estimate 21,140 vs true 17,616; `usd<50` estimate
+    // 29,062 vs true 31,217; clearly separated, unlike the capped estimate's identical 31,508 for both).
+    if perm.is_none() && !walk_col {
         let (printing_matches, _, _) = compose_printing_estimate(filter, indexes, offsets, printings.len());
         // Artwork's true domain is n_artworks (>= n_cards), but getting it exactly means building
         // artwork_base here — real O(n_cards) work paid just to maybe decline. `cards.len()` is a
@@ -5071,11 +5331,30 @@ fn printing_compose_fastpath<'a>(
             }
             walk_grouped_page(mode, cards, printings, offsets, &pbits, prefer, sort_col, descending, limit, page_offset, perm, u16::from(indexes.max_artwork_groups))
         }
-        // No permutation: already confirmed above (via the cheap estimate) that this composed set is
-        // selective enough to be worth building — page via the bounded GatherSelect fallback, whose
-        // tie-break matches the general path exactly (same GatherSelect, same comparator), so unlike
-        // the branch above there's no separate small-total decline needed here.
-        None => gather_composed_page(mode, cards, printings, offsets, &pbits, prefer, sort_col, descending, limit, page_offset, u16::from(indexes.max_artwork_groups)),
+        // No permutation. #744: if the orderby has a printing-space value structure (usd/rarity,
+        // printing mode), walk it directly — terminating at page_offset+limit rather than visiting
+        // every candidate. Falls back to the gather below when the walk declines (the null-value tail,
+        // or a page past the value structure). Otherwise (card/artwork, or any other orderby), the
+        // gather fallback pages via the bounded GatherSelect, whose tie-break matches the general path
+        // exactly (same GatherSelect, same comparator) — so no separate small-total decline is needed.
+        None => {
+            let walked = if walk_col {
+                match sort_col {
+                    SortCol::PriceUsd => walk_range_orderby_page(
+                        &indexes.price_usd, &pbits, cards, printings, &indexes.printing_to_card, sort_col, descending, total, limit, page_offset,
+                    ),
+                    SortCol::Rarity => walk_rarity_orderby_page(
+                        &indexes.rarity_printing, &pbits, cards, printings, &indexes.printing_to_card, descending, total, limit, page_offset, printings.len(),
+                    ),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            walked.unwrap_or_else(|| {
+                gather_composed_page(mode, cards, printings, offsets, &pbits, prefer, sort_col, descending, limit, page_offset, u16::from(indexes.max_artwork_groups))
+            })
+        }
     };
     Some((total, page))
 }
@@ -5107,6 +5386,24 @@ enum PhysicalPlan {
     StreamedSelect,
     /// The universal fallback: the gathered per-card loop + `select_page`.
     GatheredScan,
+}
+
+/// Which paging strategy `PrintingCompose` (`printing_compose_fastpath`) runs for a query — a 3-way
+/// distinction the cost model (`cost::plan_cost`'s `PrintingCompose` arm) needs because the three have
+/// different cost shapes. `run_query_routed` picks the same variant the fastpath will.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ComposePaging {
+    /// A card-space sort permutation exists → the forward grouped walk (`walk_grouped_page`).
+    /// Offset-dependent: fills the page in ~`page_span/selectivity` steps.
+    Perm,
+    /// No permutation, but the orderby has a printing-space value structure and mode is Printing
+    /// (`usd`/`rarity`, #744) → the direct orderby walk (`walk_range_orderby_page`/
+    /// `walk_rarity_orderby_page`). Offset-dependent, same shape as `Perm`; the COMPOSE_GATHER breadth
+    /// gate is bypassed for it (broad is its best case).
+    OrderbyWalk,
+    /// No permutation and no orderby walk → the permutation-free bounded gather
+    /// (`gather_composed_page`), which visits every match (offset-independent cost).
+    Gather,
 }
 
 impl PhysicalPlan {
@@ -6011,7 +6308,7 @@ fn run_query_routed<'a>(
         scatter_printings: 0,  // range-slice k — set by both range-plan acquire branches (costed per-plan)
         project_printings: 0,  // PrintingCompose's card/artwork projection pass; CardRangePopcount sets it too (for costing compose)
         popcount_words: 0,     // PrintingCompose overrides this (result-space bitmap words)
-        compose_has_perm: false, // PrintingCompose overrides this (which paging strategy it'll actually use)
+        compose_paging: ComposePaging::Gather, // PrintingCompose overrides this (which paging strategy it'll actually use)
     };
     // Features for the general candidate path (shared by the acquire branch and the
     // lazy-materialize dispatch). `matches`/`eval_domain` = candidate CARD count, the
@@ -6095,10 +6392,15 @@ fn run_query_routed<'a>(
         feats.scatter_printings = scatter as u32;
         feats.project_printings = project as u32;
         feats.popcount_words = popcount_words as u32;
-        // Which paging strategy the fastpath will actually use — a real permutation walk (cheap,
-        // offset-dependent) or the permutation-free bounded-gather fallback (visits every match,
-        // offset-independent cost). Decided the same way the fastpath itself decides.
-        feats.compose_has_perm = indexes.sort_perms.get(sort_col, descending).is_some_and(|p| p.len() == cards.len());
+        // Which paging strategy the fastpath will actually use — decided the same way the fastpath
+        // itself decides (permutation walk / #744 orderby walk / gather fallback).
+        feats.compose_paging = if indexes.sort_perms.get(sort_col, descending).is_some_and(|p| p.len() == cards.len()) {
+            ComposePaging::Perm
+        } else if matches!(mode, Mode::Printing) && orderby_walk_available(sort_col) {
+            ComposePaging::OrderbyWalk
+        } else {
+            ComposePaging::Gather
+        };
         (feats, Prep::Range)
     } else {
         let prep = prepare_candidates(cards, offsets, strings, filter, plane, mode, indexes);
