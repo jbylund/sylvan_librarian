@@ -119,6 +119,22 @@ just link to it.
 
 **Naming:** `#####-slug.md`, 5-digit zero-padded GitHub issue (or PR, if no issue exists)
 number, e.g. `00623-engine-flavor-absent-gram-bitmap.md` for #623. Prefer the issue number over its
-merging PR's number when both exist. A doc with no GitHub issue of its own — a design note, or
-work not yet filed — uses `local-slug.md` instead (e.g. `local-engine-union-summary-planes.md`).
-When a `local-` doc later gets a GitHub issue filed for it, rename it to the assigned number.
+merging PR's number when both exist. Docs with no GitHub issue of their own use a prefix that signals
+intent, so a reader can tell backlog from background at a glance:
+
+- `local-slug.md` — **proposed / not-yet-filed work**: a design or fix meant to happen but not yet
+  filed as an issue (e.g. `local-engine-range-veto-redundancy.md`). When a `local-` doc later gets a
+  GitHub issue, rename it to the assigned number.
+- `reference-slug.md` — **reference material that is deliberately not scheduled**: a general pattern,
+  design study, or rejected-but-preserved approach that is *not* todo work and shouldn't be read as a
+  backlog item (e.g. `reference-engine-printing-varying-plane-repair-pattern.md`). Promote to `local-`
+  or a number only if it actually becomes planned work.
+
+**Length and scope:** issue docs are not subject to the ~100-line length ideal in the global markdown
+rules — they are the deep source of truth, so length should match the material (measurements, rejected
+alternatives, iteration history). What governs instead is **one shippable idea per doc**: the split
+signal is not line count but whether the doc holds multiple *independent* ideas that would land as
+separate PRs. When it does, extract each into its own doc and cross-link. In practice docs cluster
+around 100–300 lines; treat ~500 as the prompt to check for an independent idea hiding inside. The
+other global conventions still apply in full — cross-link rather than duplicate, and prefer a
+well-linked narrative over bare index docs.

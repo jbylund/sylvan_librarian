@@ -1,19 +1,51 @@
 # Engine: Printing-Space PlanePopcountOrder (the deferred "idea 2")
 
-Status: the printing-space plan itself is **todo** (gated on the printing-space pager/permutation,
-[#656](https://github.com/jbylund/sylvan_librarian/issues/656)), but its **card-space groundwork has
-shipped**: `CardRangePopcount` ([#725](https://github.com/jbylund/sylvan_librarian/pull/725),
-[#726](https://github.com/jbylund/sylvan_librarian/pull/726)) proved the range→bitmap→`popcount`→bit-walk
-machinery on the `unique=card` range leaf source (usd/cn/date), and the kernel bench there **measured
-the build cost** this plan's whole value hinges on (see § Cost). Extracted from the #702 planner
-writeup ([done/00702](done/00702-engine-plan-selection-layer.md)), where this was "the one real speed
-win found" but deferred. This doc is the entry point; the mechanism detail and measurements live in
-the two range-fastpath docs linked throughout — it does not duplicate them.
+**Status: DONE — shipped as the unified `PrintingCompose` plan.** What this doc proposed as a fifth
+physical plan (`PrintingPlanePopcountOrder`) landed generalized: a single `PrintingCompose`
+`PhysicalPlan` that builds each leaf's printing-space bitmap (range scatter, precomputed
+plane, postings, or card→printing broadcast), composes with AND/OR in printing space, `popcount`s the
+total, projects once to the query's result space, and pages the result — routed by the #702 cost
+router's `argmin`. The design record below is preserved as-is; this header maps it to what actually
+shipped and tracks the remnant.
+
+### Shipped as
+
+| doc part | shipped as | PR(s) |
+|---|---|---|
+| `printing_to_card` direct projection array | #690 | [#690](00690-engine-direct-projection-arrays.md) |
+| idea 1 — `PrintingRangeScan` (bare broad printing ranges) | #695 | [#695](https://github.com/jbylund/sylvan_librarian/pull/695) |
+| card-space range popcount core (`CardRangePopcount`, usd/cn/date) | #725/#726 | [#725](https://github.com/jbylund/sylvan_librarian/pull/725), [#726](https://github.com/jbylund/sylvan_librarian/pull/726) |
+| printing-space bitplanes (border) — popcount + walk, standalone 20× | #724 | [#728](https://github.com/jbylund/sylvan_librarian/pull/728) |
+| the plan itself: rarity + legality + AND/OR compose, projected to card & artwork | #724 | [#732](https://github.com/jbylund/sylvan_librarian/pull/732) |
+| range leaves as compose sources (artwork ranges + compounds) | #694/#731 | [#733](https://github.com/jbylund/sylvan_librarian/pull/733) |
+| #656 pager — the three `ComposePaging` strategies (Perm / OrderbyWalk / Gather) | — | [#740](00740-engine-compose-permutation-fallback.md) (Gather), [#751](00744-engine-compose-orderby-range-walk.md) (OrderbyWalk) |
+| postings leaves (set:/watermark:, tags, type:/kw:/otag:) as compose sources | — | [#739](00739-engine-watermark-postings.md), [#748](00746-engine-tag-postings-compose.md), [#753](00753-engine-collection-compose-leaves.md), #749, #750 |
+| cost-route this vs idea 1 | #702 | folded into the #702 router (`cost::plan_cost`'s `PrintingCompose` arm) |
+
+Engine anchors: `PhysicalPlan::PrintingCompose` and `enum ComposePaging` in `card_engine/src/lib.rs`;
+the cost arm in `card_engine/src/cost.rs`.
+
+### Still todo (the remnant of "idea 2")
+
+- **Deep-offset popcount-skip walk** — [#730](../00730-engine-popcount-skip-walk.md). This is the
+  literal "PopcountOrder" piece of the title: `PrintingCompose` today pages offset-*dependently*
+  (Perm/OrderbyWalk), not with the flat-in-offset popcount-skip this doc emphasized. Generalized to
+  all distinct-ons.
+- **Compose as the universal exact evaluator** — [#731](../00731-engine-compose-universal-evaluator.md),
+  steps 2–3 (step 1, range leaves, shipped in #733).
+- **Plane-subtree compose leaf + general `Not(composable)` arm** — [#754](../00754-engine-plane-compose-and-not-arm.md).
+
+---
+
+Extracted from the #702 planner writeup ([done/00702](00702-engine-plan-selection-layer.md)), where
+this was "the one real speed win found" but deferred. This doc is the entry point; the mechanism
+detail and measurements live in the two range-fastpath docs linked throughout — it does not duplicate
+them.
 
 ## What it is
 
 A fifth physical plan: the printing-space analogue of `PlanePopcountOrder`, which today runs only
-in **card** mode ([#634](done/00634-engine-permuted-bitmap-order-phase.md)). For a broad
+in **card** mode ([#634](00634-engine-permuted-bitmap-order-phase.md)). For a broad
 predicate under `unique=printing`/`artwork`, build a printing-existence bitmap, take its `popcount`
 as the **exact total**, then read the page directly off the bitmap in printing sort order.
 
@@ -60,8 +92,8 @@ is the "decision a threshold can't make" from the planner writeup).
 ## Why — and the honest scope
 
 Two distinct values, only one of them strong (see
-[broad-range-fastpath](done/local-engine-broad-range-fastpath.md) and the "three findings" in
-[sorted-range-fastpath](done/local-engine-sorted-range-fastpath.md)):
+[broad-range-fastpath](local-engine-broad-range-fastpath.md) and the "three findings" in
+[sorted-range-fastpath](local-engine-sorted-range-fastpath.md)):
 
 1. **Offset-independence** for a bare broad printing range. *Weak on its own* — today's O(n) count
    pass is already offset-independent (measured flat, offset 0 vs 5000). #656 is deferred for
@@ -209,11 +241,11 @@ a hunch.
 ## Parts, in ship order
 
 Most pieces already exist or are planned in
-[sorted-range-fastpath's roadmap](done/local-engine-sorted-range-fastpath.md#pr-order) — this is the
+[sorted-range-fastpath's roadmap](local-engine-sorted-range-fastpath.md#pr-order) — this is the
 printing-space subset, in dependency order:
 
 1. **`printing_to_card` direct array — shipped**
-   ([#690](done/00690-engine-direct-projection-arrays.md)). Powers the one-shot
+   ([#690](00690-engine-direct-projection-arrays.md)). Powers the one-shot
    projection; load-bearing for both ideas.
 2. **`PrintingRangeScan` (idea 1) — shipped**
    ([#695](https://github.com/jbylund/sylvan_librarian/pull/695)). Bare broad printing ranges. Most
@@ -229,7 +261,7 @@ printing-space subset, in dependency order:
    not a `PrintingRangeBits`/`printing_bits` struct as this doc first guessed. Bare leaf only;
    compounds and existential planes deliberately excluded (that's this printing-space plan's job).
 4. **#656 — extend the popcount-order phase to compound residuals + printing/artwork.** As filed,
-   #656 is a follow-on to #634 (design in [00634](done/00634-engine-permuted-bitmap-order-phase.md)):
+   #656 is a follow-on to #634 (design in [00634](00634-engine-permuted-bitmap-order-phase.md)):
    for a **card-level** orderby (edhrec, cmc…) the printing/artwork page is a *weighted set-bit walk*
    over #634's **existing** card permutation (card weights via `offsets`-diff / artwork groups) — no
    new permutation, no archive bump. Its compound-residual path needs each residual to expose a
@@ -290,12 +322,12 @@ range+range gap proves worth closing.
   paging is the one archive-format bump.
 - **NULL over-inclusion — the #689 lesson.** A range bitmap's `popcount` **over-counts** the moment
   an existential/NULL predicate is trusted directly; this is precisely what
-  [PR #689 got wrong and reverted](done/local-engine-sorted-range-fastpath.md). The `must_be_tight`
+  [PR #689 got wrong and reverted](local-engine-sorted-range-fastpath.md). The `must_be_tight`
   correctness fix is inseparable from the bitmap path and must land with it (PR 2a bundles it).
 - **Two-spaces projection.** Postings/ranges are printing-space; the `unique=card` answer is
   card-space, and projection does **not** distribute over AND/OR. Compose the residual in
   printing-space (exact, cheap), project once via `printing_to_card`. See the "Two spaces" section
-  of [done/00702](done/00702-engine-plan-selection-layer.md).
+  of [done/00702](00702-engine-plan-selection-layer.md).
 - **`unique=artwork` needs a global artwork id** (`printing_to_artwork`/`artwork_to_card`, PR 2b —
   another archive bump) before the plane can popcount over artwork ids.
 - **Frequency — and the generalization changes the calculus.** Feasibility was never the question;
@@ -309,18 +341,18 @@ range+range gap proves worth closing.
 
 ## Related
 
-- [done/00702-engine-plan-selection-layer.md](done/00702-engine-plan-selection-layer.md) — the cost
+- [done/00702-engine-plan-selection-layer.md](00702-engine-plan-selection-layer.md) — the cost
   router; where this was the deferred "one real win."
-- [local-engine-broad-range-fastpath.md](done/local-engine-broad-range-fastpath.md) — historical
+- [local-engine-broad-range-fastpath.md](local-engine-broad-range-fastpath.md) — historical
   idea-1/idea-2 crossover analysis (the range-narrowing bitmap source).
-- [local-engine-sorted-range-fastpath.md](done/local-engine-sorted-range-fastpath.md) — the full
+- [local-engine-sorted-range-fastpath.md](local-engine-sorted-range-fastpath.md) — the full
   PR-ordered roadmap; idea 1 shipped as #695; the printing-mode existential-total mechanism (PR 5).
-- [00680-engine-existential-plane-generalization.md](done/00680-engine-existential-plane-generalization.md),
-  [00667 legality](done/00667-engine-legality-divergent-carveout.md),
-  [00664 border planes](done/00664-engine-border-planes.md) — the existential-plane framework the
+- [00680-engine-existential-plane-generalization.md](00680-engine-existential-plane-generalization.md),
+  [00667 legality](00667-engine-legality-divergent-carveout.md),
+  [00664 border planes](00664-engine-border-planes.md) — the existential-plane framework the
   *precomputed* bitmap source extends; #667's planes are **card-space**, which is why
   `f:modern`/printing still needs a printing-space one.
-- [00724-engine-printing-existential-planes.md](done/00724-engine-printing-existential-planes.md)
+- [00724-engine-printing-existential-planes.md](00724-engine-printing-existential-planes.md)
   ([#724](https://github.com/jbylund/sylvan_librarian/issues/724)) — the printing-space bitplanes
   track: this plan's legality/border leaf source, sequenced last.
 - #656 (pager/permutation), #690 (`printing_to_card`, shipped), #689 (reverted attempt / NULL

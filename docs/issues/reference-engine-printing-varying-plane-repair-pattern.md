@@ -1,12 +1,18 @@
 # Engine: repairing plane-promoted printing-varying fields (general pattern)
 
 Status: reference only — not an active issue, nothing here is scheduled. Developed while designing
-#667 (legality divergent-card carve-out), then **superseded for legality itself** by a cleaner
-dual-exact-representation design (see
-[docs/issues/00667-engine-legality-divergent-carveout.md](00667-engine-legality-divergent-carveout.md)) that
-needs none of this. Captured here because the reasoning generalizes to a *future* printing-varying
-field that might not have legality's escape hatch available. If nothing ever needs this, that's
-fine — the design work isn't wasted, it's just not costing anything sitting in a doc either.
+#667 (legality divergent-card carve-out), then **superseded for legality itself** at the *card* level
+by a cleaner dual-exact-representation design (see
+[done/00667-engine-legality-divergent-carveout.md](done/00667-engine-legality-divergent-carveout.md))
+that needs no card-level repair. Captured here because the reasoning generalizes to a *future*
+printing-varying field that might not have legality's escape hatch available.
+
+**Update (2026-07):** part of this toolkit did resurface — the #724/#744 printing-space compose build
+materializes legality's *printing* bitmap with exactly this doc's **Part 1** shape (a best-effort card
+plane broadcast down + a fixed divergent correction set), shipped as `repair_divergent_printings`
+(`card_engine/src/lib.rs`). What remains unbuilt is the doc's original subject — repairing a
+printing-varying field promoted into a *card-level* plane — and the Part 3 joint per-printing
+evaluator. See § What shipped, and what didn't.
 
 ## The general problem
 
@@ -84,18 +90,44 @@ though promotion is *correct* and *usually* faster. This needs actual selectivit
 benchmark-sweep process this codebase's other guards (`MAX_UNION_FRACTION`, `STREAM_MIN_MATCHES`,
 `AND_SKIP_THRESHOLD`) were derived from, not something to guess analytically.
 
-## Why none of this shipped
+## What shipped, and what didn't
 
-Legality turned out to satisfy the escape hatch's condition — a fixed, small, fully-enumerable
-query space (format × LEGAL) — so building two exact, independently-density-thresholded
-representations per format solves the whole problem at build time with no runtime tax and no
-cardinality guard needed at all. The repair toolkit above is real, working, tested code as of this
-writing (the divergent-carve-out PR's first two rounds), just not the shape that landed. Worth
-revisiting this doc, not reinventing it, the next time a printing-varying field's query space turns
-out not to be enumerable ahead of time.
+At the **card** level, legality took the escape hatch — a fixed, small, fully-enumerable query space
+(format × LEGAL) — so two exact, independently-density-thresholded `_EXISTS`/`_ABSENT` representations
+per format answer `format:X`/`-format:X` at build time with no runtime tax and no cardinality guard.
+That is why no *card-level* promotion repair was ever needed, and it is still true.
+
+But the pattern above was not wasted — it came back one space over, in the **printing**-space compose
+build (#724/#744):
+
+- **Part 1 (best-effort plane + fixed correction set) — shipped.** `legality_leaf_bits_from_exists` /
+  `_from_absent` broadcast the card `_EXISTS`/`_ABSENT` plane **down to printings** (best-effort), then
+  `repair_divergent_printings` (`card_engine/src/lib.rs`) overwrites the divergent cards' printings
+  from the fixed `legal_divergent` list (~556 cards, `build_divergent_ids` in `planes.rs`). Cost rides
+  the disagreement set, and the repair pass is skipped entirely for a format with no divergence
+  (`commander`) — exactly this doc's "only worth it if the disagreement rate stays small." The one
+  difference from the framing above: it repairs *printing* bits (where per-printing truth matters), not
+  a *card*-level plane bit.
+- **Part 3 (shared-witness) — the hazard is handled, this doc's mechanism is not.** Two production
+  paths cover it without `eval_plane_expr_for_divergent_card`: the card-plane path **declines** on 2+
+  existence facts (`and_of_checked_for_shared_witness` in `planes.rs`, which names this doc as the
+  joint-eval design if it is ever needed), and printing-space compose **solves** it structurally by
+  ANDing printing bitmaps before the ∃-projection (#724/#731). The joint per-printing evaluator itself
+  remains unbuilt.
+- **Part 4 (cardinality/selectivity guard) — subsumed** by the #702 cost router's general
+  selectivity-aware plan choice, rather than a field-specific calibrated threshold.
+- **Part 2 (extraction gate) — not shipped, not needed:** nothing promotes a printing-varying field
+  into a card-level plane, so the `split_planes` deferral never had to exist.
+
+So the doc's actual subject — repair-based promotion into a **card-level** plane — remains unbuilt and
+unneeded, as predicted. Revisit this doc (don't reinvent it) the next time a printing-varying field's
+query space turns out *not* to be enumerable ahead of time; `repair_divergent_printings` is now a
+working reference implementation of the Part 1 mechanism to crib from.
 
 ## Related
 
-- [00667-engine-legality-divergent-carveout.md](00667-engine-legality-divergent-carveout.md) — where this was
-  developed, and the dual-representation design that replaced it
+- [done/00667-engine-legality-divergent-carveout.md](done/00667-engine-legality-divergent-carveout.md) —
+  where this was developed, and the card-level dual-representation design that replaced it
+- [done/00724-engine-printing-existential-planes.md](done/00724-engine-printing-existential-planes.md) —
+  the printing-space compose build where Part 1's repair (`repair_divergent_printings`) resurfaced
 - #667, #634, #654, #656 — same as that doc's Related section

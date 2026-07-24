@@ -1155,7 +1155,7 @@ pub(crate) fn plane_expr_is_existential(expr: &PlaneExpr) -> bool {
 /// (falling back to `narrow_rec`'s existing, correct `Legality` narrowing) is
 /// deliberately simpler than building a shared-witness-safe joint check for a
 /// shape nobody realistically writes --
-/// docs/issues/local-engine-printing-varying-plane-repair-pattern.md has the joint
+/// docs/issues/reference-engine-printing-varying-plane-repair-pattern.md has the joint
 /// per-printing evaluation this would need if it ever mattered enough to build.
 fn and_of_checked_for_shared_witness(children: Vec<PlaneExpr>) -> Option<PlaneExpr> {
     let mut formats = Vec::new();

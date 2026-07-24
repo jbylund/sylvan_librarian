@@ -78,7 +78,7 @@ The GitHub issue's own framing offers two branches depending on what the invaria
 "simpler than #667" (ordinary tight narrowing) if card-invariant, or "follow #667's pattern" if
 printing-varying. Since `restricted` is printing-varying (for `oldschool`) and `banned` is not, a
 design that special-cases per status would need *two different mechanisms* for what's otherwise
-the same field. `docs/issues/local-engine-printing-varying-plane-repair-pattern.md`'s escape-hatch
+the same field. `docs/issues/reference-engine-printing-varying-plane-repair-pattern.md`'s escape-hatch
 condition — "the field's entire query space is finite and known at build time" — doesn't care
 which `expected` value is being asked about; `expected == LEGALITY_BANNED` against 22 formats is
 exactly as finite and precomputable as `expected == LEGALITY_LEGAL` was. So: reuse the *identical*
@@ -212,7 +212,7 @@ Total-row-count parity: identical across builds for every targeted config.
 
 - #667/#676 — the two-exact-plane design this generalizes; explicitly scoped banned/restricted out
 - `docs/issues/local-engine-legality-postings.md` — superseded proposal (postings-based), kept for history
-- `docs/issues/local-engine-printing-varying-plane-repair-pattern.md` — the escape-hatch condition this
+- `docs/issues/reference-engine-printing-varying-plane-repair-pattern.md` — the escape-hatch condition this
   reuses (finite, enumerable, build-time-precomputable query space)
 - `docs/issues/done/00603-engine-card-printing-split.md` — origin of the 556-card `legality_divergent`
   flag and the 30A/CE/gold-border divergent-printing pattern this issue's `oldschool` case matches
