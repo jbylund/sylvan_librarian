@@ -4638,6 +4638,21 @@ fn is_printing_composable(filter: &FilterExpr, indexes: &Archived<CardIndexes>) 
         FilterExpr::True => true,
         FilterExpr::And(v) | FilterExpr::Or(v) => v.iter().all(|c| is_printing_composable(c, indexes)),
         FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, .. } => true,
+        // #746: `set:`/`watermark:` postings leaves. `scatter_bits(indexes.set_codes[value])` /
+        // `indexes.watermarks[value]` is the exact printing bitmap (`tag_postings_leaf_bits`) — a
+        // value-membership intersection, so it's exact for both the non-null `set_code` and the
+        // nullable `watermark` alike (the positive form never complements). An unknown value scatters
+        // nothing (all-zero, exactly "no printing").
+        FilterExpr::TextExact { field: TextField::SetCode | TextField::Watermark, op: CmpOp::Eq, .. } => true,
+        // #746: `-set:VALUE` — all-ones minus the value's postings (`set_code_negated_leaf_bits`),
+        // exact because `set_code` is non-nullable. Guarded on the inner shape (not a bare `Not(_)`)
+        // and deliberately NOT extended to `-watermark:` (nullable — its complement would need a
+        // "has any watermark" known-mask this leaf doesn't build; stays on the general path).
+        FilterExpr::Not(inner)
+            if matches!(inner.as_ref(), FilterExpr::TextExact { field: TextField::SetCode, op: CmpOp::Eq, .. }) =>
+        {
+            true
+        }
         FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), op: CmpOp::Eq, rhs: NumExpr::Const(_) }
         | FilterExpr::NumericCmp { lhs: NumExpr::Const(_), op: CmpOp::Eq, rhs: NumExpr::Field(NumField::RarityInt) } => true,
         // Legality via #667's card `_EXISTS` plane + a divergent repair (see `legality_leaf_bits`).
@@ -4711,6 +4726,41 @@ fn rarity_leaf_bits(c: f64, rp: &Archived<RarityPrintingPlanes>, n_printings: us
         Some(e) => scatter_bits(e.1.iter().map(|p| u32::from(*p)), n_printings),
         None => vec![0u64; wpp],
     }
+}
+
+/// #746: the exact printing-space bitmap for a bare tag-postings leaf (`set:VALUE`/`watermark:VALUE`)
+/// — scatter the value's sorted postings (`indexes.set_codes`/`indexes.watermarks`) into a fresh
+/// bitmap, or all-zero for a value absent from the index (exactly "no printing", matching
+/// `narrow_rec`'s empty-is-exact treatment of an unknown code). This is an intersection with the
+/// postings set, never a complement, so it is exact for the non-nullable `set_code` field and the
+/// nullable `watermark` field alike — the trivalent-NULL trap that keeps negation off the compose
+/// path for a nullable field (see `set_code_negated_leaf_bits`) does not apply to a positive leaf.
+fn tag_postings_leaf_bits(index: &Archived<TagIndex>, value: &str, n_printings: usize) -> Vec<u64> {
+    match index.get(value) {
+        Some(v) => scatter_bits(v.iter().map(|p| u32::from(*p)), n_printings),
+        None => vec![0u64; words_per_plane(n_printings)],
+    }
+}
+
+/// #746: the exact printing-space bitmap for a negated set leaf (`-set:VALUE`) — all-ones with the
+/// value's postings cleared. Exact **only because `set_code` is non-nullable**: every printing
+/// belongs to exactly one set, so "every printing except those in VALUE" is precisely the printings
+/// matching `-set:VALUE`, with no null-valued printing to wrongly include. Cost rides the *positive*
+/// postings size (the bits cleared), never the complement, which is why this is a strictly cheaper
+/// shape than the generic `Not` complement. Deliberately **not** reused for `watermark:` (nullable):
+/// a no-watermark printing satisfies neither `watermark:x` nor `-watermark:x`, so all-ones-minus-
+/// postings would wrongly count it as a `-watermark:x` match — the same trivalent trap dates hit in
+/// docs/issues/done/00741-engine-negated-range-narrowing.md; negating a nullable field would need an
+/// explicit "has any watermark" known-mask, which this leaf does not build.
+fn set_code_negated_leaf_bits(index: &Archived<TagIndex>, value: &str, n_printings: usize) -> Vec<u64> {
+    let mut bits = all_printing_bits(n_printings);
+    if let Some(v) = index.get(value) {
+        for p in v.iter() {
+            let pid = u32::from(*p) as usize;
+            bits[pid >> 6] &= !(1u64 << (pid & 63));
+        }
+    }
+    bits
 }
 
 /// #731: the exact printing bitmap for a usd/cn/date range leaf — scatter the value-sorted index
@@ -4819,6 +4869,22 @@ fn compose_printing_bits(
         FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value } => {
             border_leaf_bits(value.as_str(), &indexes.border_printing, n_printings)
         }
+        // #746: `set:VALUE`/`watermark:VALUE` postings leaves — scatter the value's printing ids.
+        FilterExpr::TextExact { field: TextField::SetCode, op: CmpOp::Eq, value } => {
+            tag_postings_leaf_bits(&indexes.set_codes, value.as_str(), n_printings)
+        }
+        FilterExpr::TextExact { field: TextField::Watermark, op: CmpOp::Eq, value } => {
+            tag_postings_leaf_bits(&indexes.watermarks, value.as_str(), n_printings)
+        }
+        // #746: `-set:VALUE` — all-ones minus the value's postings (exact; `set_code` is non-null).
+        FilterExpr::Not(inner)
+            if matches!(inner.as_ref(), FilterExpr::TextExact { field: TextField::SetCode, op: CmpOp::Eq, .. }) =>
+        {
+            let FilterExpr::TextExact { value, .. } = inner.as_ref() else {
+                unreachable!("guarded by the matches! above")
+            };
+            set_code_negated_leaf_bits(&indexes.set_codes, value.as_str(), n_printings)
+        }
         FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), op: CmpOp::Eq, rhs: NumExpr::Const(c) }
         | FilterExpr::NumericCmp { lhs: NumExpr::Const(c), op: CmpOp::Eq, rhs: NumExpr::Field(NumField::RarityInt) } => {
             rarity_leaf_bits(*c, &indexes.rarity_printing, n_printings)
@@ -4868,6 +4934,28 @@ fn compose_printing_estimate(
         // Precomputed planes: exact cheap popcount, nothing synthesized.
         FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value } => {
             (popcount(&border_leaf_bits(value.as_str(), &indexes.border_printing, n_printings)), 0, 0)
+        }
+        // #746: `set:`/`watermark:` postings — matches = the value's postings length `k` (each
+        // posting is one distinct printing), synthesized by scattering `k` ids → rides `scatter`
+        // (the same cheap range-slice scatter rate). O(1) here: the length, no bitmap built.
+        FilterExpr::TextExact { field: TextField::SetCode, op: CmpOp::Eq, value } => {
+            let k = indexes.set_codes.get(value.as_str()).map_or(0, |v| v.len());
+            (k, 0, k)
+        }
+        FilterExpr::TextExact { field: TextField::Watermark, op: CmpOp::Eq, value } => {
+            let k = indexes.watermarks.get(value.as_str()).map_or(0, |v| v.len());
+            (k, 0, k)
+        }
+        // #746: `-set:VALUE` — matches = all printings minus the value's postings; the scatter cost
+        // rides the (small) positive postings size cleared, not the (large) complement it produces.
+        FilterExpr::Not(inner)
+            if matches!(inner.as_ref(), FilterExpr::TextExact { field: TextField::SetCode, op: CmpOp::Eq, .. }) =>
+        {
+            let FilterExpr::TextExact { value, .. } = inner.as_ref() else {
+                unreachable!("guarded by the matches! above")
+            };
+            let k = indexes.set_codes.get(value.as_str()).map_or(0, |v| v.len());
+            (n_printings.saturating_sub(k), 0, k)
         }
         FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), op: CmpOp::Eq, rhs: NumExpr::Const(c) }
         | FilterExpr::NumericCmp { lhs: NumExpr::Const(c), op: CmpOp::Eq, rhs: NumExpr::Field(NumField::RarityInt) } => {
