@@ -4666,6 +4666,22 @@ fn is_printing_composable(filter: &FilterExpr, indexes: &Archived<CardIndexes>) 
         {
             true
         }
+        // Card-space collection containment leaves (`type:`/`kw:`/`otag:`) and their already-printing-
+        // space siblings (`art:`/`is:`). `Ge` only — the postings are tight for containment but a loose
+        // superset for `Eq`/`Gt` (they prove `contains(value)`, not the collection-length condition,
+        // ~lib.rs:3441), and the compose path has no residual re-check, so `Eq`/`Gt` stay on the general
+        // path. `FrameData` is excluded (`collection_compose_index` → `None`): it is the one non-
+        // `complete` collection index, so absence there proves nothing and it can't be an exact leaf.
+        FilterExpr::CollectionCmp { field, op: CmpOp::Ge, .. } => collection_compose_index(indexes, *field).is_some(),
+        // `-type:`/`-kw:`/`-otag:`/`-art:`/`-is:` — the exact complement of the positive leaf (a
+        // collection is never NULL, so no trivalent-NULL trap; see `collection_negated_leaf_bits`).
+        // Guarded on the inner shape (not a bare `Not(_)`) and on `Ge` so a loose `Eq`/`Gt` inner can't
+        // reach it.
+        FilterExpr::Not(inner)
+            if matches!(inner.as_ref(), FilterExpr::CollectionCmp { field, op: CmpOp::Ge, .. } if collection_compose_index(indexes, *field).is_some()) =>
+        {
+            true
+        }
         FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), op: CmpOp::Eq, rhs: NumExpr::Const(_) }
         | FilterExpr::NumericCmp { lhs: NumExpr::Const(_), op: CmpOp::Eq, rhs: NumExpr::Field(NumField::RarityInt) } => true,
         // Legality via #667's card `_EXISTS` plane + a divergent repair (see `legality_leaf_bits`).
@@ -4809,6 +4825,91 @@ fn broadcast_card_bits_to_printings(card_bits: &[u64], offsets: &AOffsets, n_pri
         }
     }
     pbits
+}
+
+/// Scatter each card id's whole printing range (`offsets[c]..offsets[c+1]`) into a fresh printing
+/// bitmap — the card-**id-list** analogue of `broadcast_card_bits_to_printings` (which takes a card
+/// *bitmap*). Used to lift a card-space collection posting list (`subtypes`/`keywords`/`oracle_tags`,
+/// whose postings are card ids) up into the printing domain for composition. O(card ids + their
+/// printings), independent of `n_cards`.
+fn broadcast_card_ids_to_printings(card_ids: impl Iterator<Item = u32>, offsets: &AOffsets, n_printings: usize) -> Vec<u64> {
+    let mut pbits = vec![0u64; words_per_plane(n_printings)];
+    for c in card_ids {
+        let c = c as usize;
+        for p in u32::from(offsets[c]) as usize..u32::from(offsets[c + 1]) as usize {
+            pbits[p >> 6] |= 1u64 << (p & 63);
+        }
+    }
+    pbits
+}
+
+/// Maps a `CollectionCmp` field to its compose backing: the postings index and whether it is
+/// **card-space** (postings are card ids → project each card's printing range up with
+/// `broadcast_card_ids_to_printings`) or **printing-space** (postings are printing ids → scatter
+/// directly, like `set:`/`watermark:`). Returns `None` for `FrameData` — the only non-`complete`
+/// collection index (its dense values are dropped at build, #628, so absence proves nothing there and
+/// it cannot be an exact compose leaf); it stays on the general path. This is the single source of
+/// truth `is_printing_composable`/`compose_printing_bits`/`compose_printing_estimate` share so their
+/// field tables can't drift apart.
+fn collection_compose_index(indexes: &Archived<CardIndexes>, field: CollField) -> Option<(&Archived<TagIndex>, bool)> {
+    match field {
+        CollField::Subtypes   => Some((&indexes.subtypes,    true)),
+        CollField::Keywords   => Some((&indexes.keywords,    true)),
+        CollField::OracleTags => Some((&indexes.oracle_tags, true)),
+        CollField::ArtTags    => Some((&indexes.art_tags,    false)),
+        CollField::IsTags     => Some((&indexes.is_tags,     false)),
+        CollField::FrameData  => None,
+    }
+}
+
+/// The exact printing-space bitmap for a bare containment collection leaf (`type:`/`kw:`/`otag:`/
+/// `art:`/`is:`, i.e. `CollectionCmp { op: Ge }`) over a `complete` index. For a card-space field the
+/// value's card-id postings are projected up (every printing of a matching card — subtype/keyword/
+/// oracle-tag are pure **card** properties, so this projection is exact, no per-printing divergence
+/// like legality); for a printing-space field the printing-id postings scatter directly. A value
+/// absent from a complete index matches no row (all-zero) — the same empty-is-exact treatment
+/// `narrow_rec` gives an unknown value. **Ge/containment only** (the caller gates it): the postings
+/// are tight for `Ge`, but only a loose superset for `Eq`/`Gt` (they prove `contains(value)`, not the
+/// collection-length condition, ~lib.rs:3441), and the compose path has no residual re-check, so
+/// `Eq`/`Gt` stay on the general path.
+fn collection_leaf_bits(idx: &Archived<TagIndex>, value: &str, card_space: bool, offsets: &AOffsets, n_printings: usize) -> Vec<u64> {
+    match idx.get(value) {
+        None => vec![0u64; words_per_plane(n_printings)],
+        Some(v) if card_space => broadcast_card_ids_to_printings(v.iter().map(|x| u32::from(*x)), offsets, n_printings),
+        Some(v) => scatter_bits(v.iter().map(|x| u32::from(*x)), n_printings),
+    }
+}
+
+/// The number of printings a containment collection leaf matches (its exact `unique=printing` total),
+/// for the cost-model estimate. Card-space: sum each matching card's printing-range length; printing-
+/// space: the postings length (one posting = one printing). Exact (a valid upper bound and then some),
+/// so the estimate for a bare collection leaf is exact, matching set/watermark. O(card postings) — the
+/// same order as the eventual scatter, cheap for the sparse subtype/keyword/oracle-tag posting lists.
+fn collection_leaf_printing_count(idx: &Archived<TagIndex>, value: &str, card_space: bool, offsets: &AOffsets) -> usize {
+    match idx.get(value) {
+        None => 0,
+        Some(v) if card_space => v
+            .iter()
+            .map(|c| {
+                let c = u32::from(*c) as usize;
+                (u32::from(offsets[c + 1]) - u32::from(offsets[c])) as usize
+            })
+            .sum(),
+        Some(v) => v.len(),
+    }
+}
+
+/// The exact printing-space bitmap for a **negated** containment collection leaf (`-type:`/`-kw:`/
+/// `-otag:`/`-art:`/`-is:`) over a `complete` index — the positive leaf's bits, complemented. Exact
+/// for all these fields (unlike a nullable scalar like `watermark`): a collection is never NULL — a
+/// card/printing that lacks the value has a definite `contains(value) == false`, so the complement of
+/// the (exact, `Ge`) positive set is precisely the negated match set, with no trivalent-NULL printing
+/// wrongly swept in. Ge only, same reason as the positive leaf (a loose positive set would give a
+/// loose complement).
+fn collection_negated_leaf_bits(idx: &Archived<TagIndex>, value: &str, card_space: bool, offsets: &AOffsets, n_printings: usize) -> Vec<u64> {
+    let mut bits = collection_leaf_bits(idx, value, card_space, offsets, n_printings);
+    complement_bits(&mut bits, n_printings);
+    bits
 }
 
 /// Repair the divergent cards' printings authoritatively — overwrite each bit with the per-printing
@@ -4967,6 +5068,24 @@ fn compose_printing_bits(
             };
             set_code_negated_leaf_bits(&indexes.set_codes, value.as_str(), n_printings)
         }
+        // Collection containment leaf (`type:`/`kw:`/`otag:`/`art:`/`is:`, `Ge`) — card-space postings
+        // projected up / printing-space postings scattered (see `collection_leaf_bits`).
+        FilterExpr::CollectionCmp { field, op: CmpOp::Ge, value, .. }
+            if collection_compose_index(indexes, *field).is_some() =>
+        {
+            let (idx, card_space) = collection_compose_index(indexes, *field).expect("guarded by the if");
+            collection_leaf_bits(idx, value.as_str(), card_space, offsets, n_printings)
+        }
+        // Negated collection leaf — the exact complement of the positive leaf.
+        FilterExpr::Not(inner)
+            if matches!(inner.as_ref(), FilterExpr::CollectionCmp { field, op: CmpOp::Ge, .. } if collection_compose_index(indexes, *field).is_some()) =>
+        {
+            let FilterExpr::CollectionCmp { field, value, .. } = inner.as_ref() else {
+                unreachable!("guarded by the matches! above")
+            };
+            let (idx, card_space) = collection_compose_index(indexes, *field).expect("guarded by the matches!");
+            collection_negated_leaf_bits(idx, value.as_str(), card_space, offsets, n_printings)
+        }
         FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), op: CmpOp::Eq, rhs: NumExpr::Const(c) }
         | FilterExpr::NumericCmp { lhs: NumExpr::Const(c), op: CmpOp::Eq, rhs: NumExpr::Field(NumField::RarityInt) } => {
             rarity_leaf_bits(*c, &indexes.rarity_printing, n_printings)
@@ -5037,6 +5156,29 @@ fn compose_printing_estimate(
                 unreachable!("guarded by the matches! above")
             };
             let k = indexes.set_codes.get(value.as_str()).map_or(0, |v| v.len());
+            (n_printings.saturating_sub(k), 0, k)
+        }
+        // Collection containment leaf (`type:`/`kw:`/`otag:`/`art:`/`is:`, `Ge`): `k` = the exact
+        // printing count the leaf matches (card-space sums the matching cards' printing ranges,
+        // printing-space is the postings length). The build scatters `k` printings → rides `scatter`,
+        // the cheap range-slice rate.
+        FilterExpr::CollectionCmp { field, op: CmpOp::Ge, value, .. }
+            if collection_compose_index(indexes, *field).is_some() =>
+        {
+            let (idx, card_space) = collection_compose_index(indexes, *field).expect("guarded by the if");
+            let k = collection_leaf_printing_count(idx, value.as_str(), card_space, offsets);
+            (k, 0, k)
+        }
+        // Negated collection leaf: all printings minus the positive `k`; the scatter cost rides the
+        // (small) positive `k` cleared, not the (large) complement it produces — same shape as `-set:`.
+        FilterExpr::Not(inner)
+            if matches!(inner.as_ref(), FilterExpr::CollectionCmp { field, op: CmpOp::Ge, .. } if collection_compose_index(indexes, *field).is_some()) =>
+        {
+            let FilterExpr::CollectionCmp { field, value, .. } = inner.as_ref() else {
+                unreachable!("guarded by the matches! above")
+            };
+            let (idx, card_space) = collection_compose_index(indexes, *field).expect("guarded by the matches!");
+            let k = collection_leaf_printing_count(idx, value.as_str(), card_space, offsets);
             (n_printings.saturating_sub(k), 0, k)
         }
         FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), op: CmpOp::Eq, rhs: NumExpr::Const(c) }
@@ -5315,6 +5457,19 @@ fn printing_compose_fastpath<'a>(
             domain as f64 * (-(printing_matches as f64) / domain as f64).exp().mul_add(-1.0, 1.0)
         };
         if est > domain as f64 * *COMPOSE_GATHER_MAX_CARD_FRACTION {
+            return None;
+        }
+        // Small-total decline (mirrors the `Perm` branch's `total <= STREAM_MIN_MATCHES` below): in the
+        // permutation-free gather regime PrintingCompose has no paging edge over GatheredScan — it just
+        // composes the full printing bitmap and projects it back down, two O(n_cards) passes on top of
+        // the same gather. For a filter that narrows to few candidate cards the residual-eval saving is
+        // tiny while that build/projection dominates, so the candidate/narrowing path wins; decline to
+        // it. The SOUND card-space cardinality upper bound decides — exact for a collection leaf, unlike
+        // the balls-into-bins `est` above which overestimates a clustered predicate's distinct-card
+        // count (goblin: 501 cards but ~1471 `est`) and so can't make this call. This is what keeps a
+        // sparse `type:angel`/`type:goblin` card/usd (newly composable) from regressing onto this path:
+        // the collection compose leaves are a printing-mode orderby-walk win, not a card-mode gather win.
+        if (estimator::estimate_cardinality(filter, indexes, offsets).hi as usize) <= *STREAM_MIN_MATCHES {
             return None;
         }
     }
@@ -7987,3 +8142,5 @@ mod bench_posting_intersect;
 mod bench_word_dict_scan;
 #[cfg(test)]
 mod bench_card_dedup;
+#[cfg(test)]
+mod bench_compose_paging;
