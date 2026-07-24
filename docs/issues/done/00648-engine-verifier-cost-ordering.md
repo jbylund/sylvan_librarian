@@ -1,6 +1,6 @@
 # Order Verifier Children by Evaluation Cost
 
-Companion to [engine-probe-before-and-skip](./local-engine-probe-before-and-skip.md),
+Companion to [engine-probe-before-and-skip](./00749-engine-probe-before-and-skip.md),
 from the same 2026-07-08 discussion. Unlike that issue, this one's
 beneficiaries are the *slow* queries: broad drivers and full scans, where
 verification IS the query cost.
