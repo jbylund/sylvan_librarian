@@ -1016,7 +1016,7 @@ impl FilterExpr {
         match self {
             FilterExpr::And(children) => {
                 for c in children {
-                    match c.tri(card, None, strings) {
+                    match c.tri_fast(card, None).unwrap_or_else(|| c.tri(card, None, strings)) {
                         // And(Null, x) is Null or False for every printing —
                         // never True — so the card cannot match.
                         Tri::False | Tri::Null => return Tri::False,
@@ -1029,7 +1029,7 @@ impl FilterExpr {
             FilterExpr::Or(children) => {
                 *residual_is_or = true;
                 for c in children {
-                    match c.tri(card, None, strings) {
+                    match c.tri_fast(card, None).unwrap_or_else(|| c.tri(card, None, strings)) {
                         Tri::True => {
                             residual.clear();
                             return Tri::True;
@@ -1042,7 +1042,7 @@ impl FilterExpr {
                 }
                 if residual.is_empty() { Tri::False } else { Tri::PrintingDep }
             }
-            other => match other.tri(card, None, strings) {
+            other => match other.tri_fast(card, None).unwrap_or_else(|| other.tri(card, None, strings)) {
                 Tri::PrintingDep => {
                     residual.push(self);
                     Tri::PrintingDep
@@ -1063,10 +1063,54 @@ impl FilterExpr {
         residual: &[&FilterExpr],
         residual_is_or: bool,
     ) -> bool {
+        let eval_one = |c: &FilterExpr| c.tri_fast(card, Some(printing)).unwrap_or_else(|| c.tri(card, Some(printing), strings));
         if residual_is_or {
-            residual.iter().any(|c| c.tri(card, Some(printing), strings) == Tri::True)
+            residual.iter().any(|c| eval_one(c) == Tri::True)
         } else {
-            residual.iter().all(|c| c.tri(card, Some(printing), strings) == Tri::True)
+            residual.iter().all(|c| eval_one(c) == Tri::True)
+        }
+    }
+
+    /// A narrow, byte-identical fast path for the one leaf shape that's both
+    /// cheap (MASK_COMPARE_NS100 tier, see verify_cost_tier) and actually
+    /// reaches this code often enough to earn a dedicated arm: numeric range
+    /// compares on non-rarity fields (usd/cn/power/toughness/cmc/...), which
+    /// have no compile_plane arm at all, so every occurrence pays the full
+    /// residual cost -- measured a real ~12-19% win on usd<50 and a compound
+    /// `usd<10 AND year=2024`.
+    ///
+    /// ColorCmp/TypeCmp/Legality/Devotion/rarity-NumericCmp/border-TextExact
+    /// are NOT here despite being high-frequency in realistic traffic
+    /// (client/query_runner.py's weights): compile_plane (planes.rs) already
+    /// intercepts them into a bitmap before they reach tri() in the common
+    /// case -- confirmed directly, profiling a bare `t:creature` shows zero
+    /// samples in tri/card_pass/residual_matches at all. TextExact on
+    /// set_code similarly has its own exact index (indexes.set_codes,
+    /// lib.rs) that narrows before residual, and those queries are already
+    /// ~50us end to end regardless. DateCmp/YearCmp are also NOT here: the
+    /// feature is infrequently used in practice, and narrow date/year
+    /// queries (the common case when it is used, e.g. an exact year) get
+    /// index-narrowed via range_narrowed same as everything else, so the
+    /// residual path for them is rarer still than raw usage would suggest.
+    ///
+    /// tri() itself can't be force-inlined into these call sites without
+    /// pulling in the other ~15 unrelated arms (TextContains, regex,
+    /// ManaCostCmp, ...) too -- measured that directly, made every mode
+    /// slower (code bloat outweighing the saved call). This one arm is
+    /// small enough to actually inline, so the hot per-printing/per-card
+    /// loops skip tri()'s call boundary entirely for the common case,
+    /// falling back to the exact same tri() arm (not a second
+    /// implementation -- no risk of the two drifting apart, unlike the
+    /// reverted price-cents fast path) for anything else.
+    #[inline(always)]
+    fn tri_fast(&self, card: &AOracleCard, printing: Option<&APrinting>) -> Option<Tri> {
+        match self {
+            FilterExpr::NumericCmp { lhs, op, rhs } => Some(match (lhs.eval(card, printing), rhs.eval(card, printing)) {
+                (NumVal::Null, _) | (_, NumVal::Null) => Tri::Null,
+                (NumVal::PDep, _) | (_, NumVal::PDep) => Tri::PrintingDep,
+                (NumVal::Known(a), NumVal::Known(b)) => tri_bool(cmp(*op, a, b)),
+            }),
+            _ => None,
         }
     }
 
@@ -1087,48 +1131,11 @@ impl FilterExpr {
         match self {
             FilterExpr::True => Tri::True,
 
-            FilterExpr::And(children) => {
-                let mut null = false;
-                let mut pdep = false;
-                for c in children {
-                    match c.tri(card, printing, strings) {
-                        Tri::False => return Tri::False,
-                        Tri::Null => null = true,
-                        Tri::PrintingDep => pdep = true,
-                        Tri::True => {}
-                    }
-                }
-                if pdep { Tri::PrintingDep } else if null { Tri::Null } else { Tri::True }
-            }
-            FilterExpr::Or(children) => {
-                let mut null = false;
-                let mut pdep = false;
-                for c in children {
-                    match c.tri(card, printing, strings) {
-                        Tri::True => return Tri::True,
-                        Tri::Null => null = true,
-                        Tri::PrintingDep => pdep = true,
-                        Tri::False => {}
-                    }
-                }
-                if pdep { Tri::PrintingDep } else if null { Tri::Null } else { Tri::False }
-            }
-            FilterExpr::Not(inner) => match inner.tri(card, printing, strings) {
-                Tri::True => Tri::False,
-                Tri::False => Tri::True,
-                Tri::Null => Tri::Null,
-                Tri::PrintingDep => Tri::PrintingDep,
-            },
+            FilterExpr::And(_) | FilterExpr::Or(_) | FilterExpr::Not(_) => self.tri_composite(card, printing, strings),
 
             FilterExpr::ExactName(lower) => tri_bool(card.card_name_lower.as_str() == lower.as_str()),
 
-            FilterExpr::NumericCmp { lhs, op, rhs } => {
-                match (lhs.eval(card, printing), rhs.eval(card, printing)) {
-                    (NumVal::Null, _) | (_, NumVal::Null) => Tri::Null, // missing field: SQL NULL
-                    (NumVal::PDep, _) | (_, NumVal::PDep) => Tri::PrintingDep,
-                    (NumVal::Known(a), NumVal::Known(b)) => tri_bool(cmp(*op, a, b)),
-                }
-            }
+            FilterExpr::NumericCmp { .. } => self.tri_fast(card, printing).expect("tri_fast always handles NumericCmp"),
 
             FilterExpr::TextContains { field, word } => {
                 match text_search_field_value(card, printing, strings, *field) {
@@ -1318,10 +1325,10 @@ impl FilterExpr {
                 })
             }
 
+            // value is a zero-padded yyyymmdd (see build_binary); zero-padding a
+            // partial date reproduces the old lexicographic-prefix semantics exactly,
+            // since any real day/month (>= 01) compares greater than 00.
             FilterExpr::DateCmp { op, value } => {
-                // value is a zero-padded yyyymmdd (see build_binary); zero-padding a
-                // partial date reproduces the old lexicographic-prefix semantics exactly,
-                // since any real day/month (>= 01) compares greater than 00.
                 let Some(p) = printing else { return Tri::PrintingDep };
                 let Some(date) = p.released_at_int.as_ref().map(|v| u32::from(*v)) else {
                     return Tri::Null; // missing date: SQL NULL
@@ -1351,6 +1358,49 @@ impl FilterExpr {
                     CmpOp::Le => card_year <= *year,
                 })
             }
+        }
+    }
+
+    /// The self-recursive rest of tri(): boolean composition over children.
+    /// Kept out of tri() itself so tri()'s leaf dispatch can be force-inlined
+    /// (see the comment on tri()) -- this one stays a real call, which is
+    /// fine since a composite node's own cost is dominated by its children,
+    /// not by the one extra call to get here.
+    fn tri_composite(&self, card: &AOracleCard, printing: Option<&APrinting>, strings: &AStrings) -> Tri {
+        match self {
+            FilterExpr::And(children) => {
+                let mut null = false;
+                let mut pdep = false;
+                for c in children {
+                    match c.tri(card, printing, strings) {
+                        Tri::False => return Tri::False,
+                        Tri::Null => null = true,
+                        Tri::PrintingDep => pdep = true,
+                        Tri::True => {}
+                    }
+                }
+                if pdep { Tri::PrintingDep } else if null { Tri::Null } else { Tri::True }
+            }
+            FilterExpr::Or(children) => {
+                let mut null = false;
+                let mut pdep = false;
+                for c in children {
+                    match c.tri(card, printing, strings) {
+                        Tri::True => return Tri::True,
+                        Tri::Null => null = true,
+                        Tri::PrintingDep => pdep = true,
+                        Tri::False => {}
+                    }
+                }
+                if pdep { Tri::PrintingDep } else if null { Tri::Null } else { Tri::False }
+            }
+            FilterExpr::Not(inner) => match inner.tri(card, printing, strings) {
+                Tri::True => Tri::False,
+                Tri::False => Tri::True,
+                Tri::Null => Tri::Null,
+                Tri::PrintingDep => Tri::PrintingDep,
+            },
+            _ => unreachable!("tri_composite only called for And/Or/Not"),
         }
     }
 }
