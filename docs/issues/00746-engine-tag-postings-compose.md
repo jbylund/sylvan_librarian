@@ -1,8 +1,8 @@
 # Engine: Exact-Postings Fields (`set:`/`watermark:`) as Compose Leaves
 
-**Status: proposed**, filed as [#746](https://github.com/jbylund/sylvan_librarian/issues/746), not
-yet implemented or measured. Filed investigating why `-set:dmu year:2023`
-(0.450ms, printing/edhrec) costs noticeably more than `year:2023` alone (0.259ms) despite excluding
+**Status: implemented**, filed as [#746](https://github.com/jbylund/sylvan_librarian/issues/746).
+Filed investigating why `-set:dmu year:2023`
+(0.451ms, printing/edhrec) costs noticeably more than `year:2023` alone (0.268ms) despite excluding
 only 2 of its 9,234 matches. A step 4 for
 [#731](00731-engine-compose-universal-evaluator.md)'s leaf-source table, alongside step 1 (range
 leaves, shipped) and the sibling work this session added:
@@ -61,6 +61,66 @@ measured for scattering an index/postings slice into a bitmap, so it's the right
 Total materialization: roughly 5-10μs, against the current path's ~190μs gap over `year:2023` alone
 — potentially close to an order of magnitude on this shape. Not measured yet; this is a napkin
 estimate from calibrated per-op constants, not a benchmark.
+
+## Measured (`scripts/bench_tag_postings_compose.py`, 97,206-printing corpus, min ms)
+
+| query | unique | orderby | total | before (μs) | after (μs) | change |
+|---|---|---|---:|---:|---:|---|
+| `-set:dmu year:2023` (motivating) | printing | edhrec | 9,232 | 451 | 57 | **7.9×** |
+| `-set:dmu year:2023` | card | edhrec | 4,325 | 266 | 80 | **3.3×** |
+| `-set:dmu year:2023` | printing | rarity | 9,232 | 471 | 126 | **3.7×** |
+| `-set:dmu year:2023` | artwork | edhrec | 5,577 | 457 | 86 | **5.3×** |
+| `-set:dmu` (bare — was the generic complement) | printing | edhrec | 96,770 | 1,077 | 44 | **24.5×** |
+| `set:dmu year:2023` (positive, selective) | printing | edhrec | 2 | 37 | 47 | 0.79× |
+| `set:dmu year:2023` | card | edhrec | 1 | 36 | 38 | flat |
+| `year:2023` (range control) | printing | edhrec | 9,234 | 268 | 271 | flat |
+| `set:dmu` (bare) | printing | edhrec | 436 | 86 | 82 | flat |
+| `set:dmu r:mythic` | printing | edhrec | 49 | 35 | 35 | flat |
+| `-set:dmu border:black` (broad) | card | edhrec | 31,055 | 629 | 595 | flat |
+| `watermark:wotc` (bare) | printing | edhrec | 797 | 110 | 104 | flat |
+| `watermark:wotc year:2023` | printing | edhrec | 22 | 76 | 77 | flat |
+| `border:black` (control) | card | rarity | 31,169 | 398 | 346 | flat |
+| `t:creature` (control) | card | edhrec | 17,317 | 66 | 62 | flat |
+| `usd<50` (control) | card | rarity | 31,217 | 447 | 417 | flat |
+| `f:modern` (control) | card | edhrec | 22,264 | 63 | 61 | flat |
+
+`total` parity held on every row. Geometric mean over the five clearly-improved rows: **6.6×**.
+
+The one regression is the positive selective intersection `set:dmu year:2023` (printing), +10μs at
+the ~40μs floor: the compound now qualifies for `PrintingCompose`, so it builds the full composed
+printing bitmap instead of narrowing to `set:dmu`'s 436 postings and residual-checking the year.
+This is the same tradeoff step 1 (range leaves) already makes for any selective positive
+intersection — the shape becoming composable is exactly the point, and the negated form it's paired
+with wins 8×. The broad realistic-traffic survey (`scripts/survey_queries.py`, 520 queries, seed 42)
+shows the real `set:` traffic in it (`set:stx`, `set:ltr`, `set:otj`) improving and no new slow
+pattern; nothing outside this shape moves beyond the noise floor.
+
+`-set:dmu border:black` (broad, 31k matches, card mode) stays flat rather than improving — a broad
+card-space result is roughly as expensive to project up from the composed bitmap as it is to narrow,
+so the planner sees no clear win either way. The gains are on shapes where a small, exact leaf can
+gate a materializing path down to a compose one, not on ones already dominated by their broad side.
+
+## Testing
+
+- New Rust test `set_watermark_compose_leaves` (`tests.rs`): the differential check — for both `set:`
+  polarities, `watermark:` positive, and mixes with a year range (`And`/`Or`), the exact
+  `compose_printing_bits` bitmap must agree printing-for-printing with the general per-candidate
+  residual-check path (`card_pass` + `residual_matches`), on a store whose set codes straddle card
+  boundaries (so `set:`/`-set:` is genuinely printing-dependent) and whose watermark is nullable.
+  Also asserts `compose_printing_estimate` is a valid match-count upper bound (exact for bare
+  leaves), that `-watermark:` (nullable) is **not** composable, and that a `-watermark:` inside an
+  `And` keeps the whole `And` off the compose path.
+- `cargo test` (debug + release): 132/132 passed.
+- `pytest api/tests/test_engine_property.py api/tests/test_engine_unit.py`: 158/158 passed.
+- `cargo clippy`: no new warnings (the ones at `lib.rs:4773`/`4797`/`4798` predate this change).
+
+## Scope shipped
+
+`set:` (positive and negated) and `watermark:`'s **positive** form. Negated `watermark:` is
+deliberately not a compose leaf: `watermark` is nullable, so "all-ones minus postings" would wrongly
+count no-watermark printings as matching `-watermark:x` — it stays on the general path (its
+`tight_narrow_space` classifier already declines it) until an explicit "has any watermark"
+known-mask is built. See the correctness caveat below.
 
 ## Correctness caveat — must not apply uniformly to both fields
 

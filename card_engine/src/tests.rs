@@ -5492,6 +5492,135 @@ fn watermark_narrowing() {
     }
 }
 
+// #746: `set:`/`watermark:` postings leaves join the PrintingCompose leaf table. This is the
+// differential test the design doc calls for: for every filter shape (both `set:` polarities,
+// `watermark:` positive, and mixes with a year range) the exact `compose_printing_bits` bitmap must
+// agree — printing for printing — with the general per-candidate residual-check path (`card_pass` +
+// `residual_matches`, the same two functions the materializing plan verifies with). A compose leaf
+// that's fast because it's *wrong* fails here, not just slow.
+#[test]
+fn set_watermark_compose_leaves() {
+    let mut vocab = VocabInterner::new();
+    let cards = vec![
+        stub_card(1, TYPE_CREATURE, &[], &mut vocab),
+        stub_card(2, TYPE_CREATURE, &[], &mut vocab),
+        stub_card(3, TYPE_CREATURE, &[], &mut vocab),
+    ];
+    let mut data = store_of(cards, &[2, 2, 2], vocab); // pids 0,1 | 2,3 | 4,5
+    let mut interner = Interner::new();
+    // Set codes span card boundaries (card 1 owns pid2=dmu and pid3=dmu; card 0 owns pid0=dmu,
+    // pid1=lea — a card whose printings straddle a set, so `set:`/`-set:` is genuinely
+    // printing-dependent, not card-invariant).
+    let set_codes_by_pid = ["dmu", "lea", "dmu", "dmu", "lea", "neo"];
+    for (p, code) in data.printings.iter_mut().zip(set_codes_by_pid) {
+        p.card_set_code = InlineStr::from_str(code);
+    }
+    // Watermark is nullable: pid1/pid4/pid5 have none (must satisfy neither `watermark:x` nor its
+    // negation — but we only compose the positive form, so this just tests they're excluded).
+    let watermark_by_pid = [Some("wotc"), None, Some("set"), Some("wotc"), None, None];
+    for (p, wm) in data.printings.iter_mut().zip(watermark_by_pid) {
+        p.card_watermark_id = wm.map_or(NONE_STR, |s| interner.intern(s.to_string()));
+    }
+    data.strings = interner.strings;
+    // Released dates give a mix of years for the range-leaf mixes (pid4 dateless — fails any year).
+    let year_by_pid = [Some(20200101), Some(20230101), Some(20200101), Some(20230101), None, Some(20240101)];
+    for (p, y) in data.printings.iter_mut().zip(year_by_pid) {
+        p.released_at_int = y;
+    }
+    // set_codes / watermarks / released_at built the way reload_commit builds them.
+    let mut set_codes: TagIndex = HashMap::new();
+    let mut watermarks: TagIndex = HashMap::new();
+    for (i, p) in data.printings.iter().enumerate() {
+        set_codes.entry(p.card_set_code.as_str().to_string()).or_default().push(i as u32);
+        if p.card_watermark_id != NONE_STR {
+            watermarks.entry(data.strings[p.card_watermark_id as usize].clone()).or_default().push(i as u32);
+        }
+    }
+    data.indexes.set_codes = set_codes;
+    data.indexes.watermarks = watermarks;
+    data.indexes.released_at = build_range_index(&data.printings, |p| p.released_at_int);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let n_printings = archived.printings.len();
+
+    let set = |code: &str| FilterExpr::TextExact { field: super::TextField::SetCode, op: CmpOp::Eq, value: code.to_string() };
+    let not_set = |code: &str| FilterExpr::Not(Box::new(set(code)));
+    let wm = |v: &str| FilterExpr::TextExact { field: super::TextField::Watermark, op: CmpOp::Eq, value: v.to_string() };
+    let year = |y: i32| FilterExpr::YearCmp { op: CmpOp::Eq, year: y };
+
+    // Ground truth: the general per-candidate residual-check path. `card_pass` settles the
+    // card-invariant part; `residual_matches` settles the per-printing residual — exactly what the
+    // materializing plan runs, and independent of anything the compose path touches.
+    let brute = |f: &FilterExpr| -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut residual: Vec<&FilterExpr> = Vec::new();
+        let mut is_or = false;
+        for c in 0..archived.cards.len() {
+            let card = &archived.cards[c];
+            let tri = f.card_pass(card, &archived.strings, &mut residual, &mut is_or);
+            let (lo, hi) = (u32::from(archived.offsets[c]), u32::from(archived.offsets[c + 1]));
+            for pid in lo..hi {
+                let matched = match tri {
+                    Tri::True => true,
+                    Tri::False => false,
+                    Tri::PrintingDep => {
+                        FilterExpr::residual_matches(card, &archived.printings[pid as usize], &archived.strings, &residual, is_or)
+                    }
+                    Tri::Null => false,
+                };
+                if matched {
+                    out.push(pid);
+                }
+            }
+        }
+        out
+    };
+    let composed = |f: &FilterExpr| -> Vec<u32> {
+        let bits = super::compose_printing_bits(f, &archived.indexes, &archived.offsets, &archived.printings, n_printings);
+        (0..n_printings as u32).filter(|&p| bits[p as usize >> 6] & (1u64 << (p & 63)) != 0).collect()
+    };
+
+    // Every shape must be composable, and its composed bits must equal the brute-force truth.
+    let cases: Vec<(&str, FilterExpr)> = vec![
+        ("set:dmu", set("dmu")),
+        ("-set:dmu", not_set("dmu")),
+        ("set:zzz (absent)", set("zzz")),
+        ("-set:zzz (absent -> all)", not_set("zzz")),
+        ("watermark:wotc", wm("wotc")),
+        ("watermark:set", wm("set")),
+        ("watermark:nope (absent)", wm("nope")),
+        ("set:dmu year:2023", FilterExpr::And(vec![set("dmu"), year(2023)])),
+        ("-set:dmu year:2023", FilterExpr::And(vec![not_set("dmu"), year(2023)])),
+        ("watermark:wotc year:2020", FilterExpr::And(vec![wm("wotc"), year(2020)])),
+        ("set:dmu or watermark:set", FilterExpr::Or(vec![set("dmu"), wm("set")])),
+        ("-set:dmu or watermark:wotc", FilterExpr::Or(vec![not_set("dmu"), wm("wotc")])),
+    ];
+    for (label, f) in &cases {
+        assert!(super::is_printing_composable(f, &archived.indexes), "{label} must be printing-composable");
+        let mut got = composed(f);
+        got.sort_unstable();
+        let mut want = brute(f);
+        want.sort_unstable();
+        assert_eq!(got, want, "compose_printing_bits disagrees with the residual path for {label}");
+        // The estimate feeds plan choice and must be a valid upper bound on the true match count
+        // (AND takes the min-of-children intersection bound, OR the capped sum — never an
+        // undercount, which would misprice the plan). For a bare leaf it's exact (postings length).
+        let (est_matches, _, _) = super::compose_printing_estimate(f, &archived.indexes, &archived.offsets, n_printings);
+        assert!(est_matches >= want.len(), "compose_printing_estimate undercounts for {label}: {est_matches} < {}", want.len());
+        if matches!(f, FilterExpr::TextExact { .. } | FilterExpr::Not(_)) {
+            assert_eq!(est_matches, want.len(), "bare-leaf estimate must be exact for {label}");
+        }
+    }
+
+    // The negated form of the NULLABLE field must NOT be a compose leaf (its all-ones-minus-postings
+    // complement would wrongly include no-watermark printings — the trivalent trap the doc flags).
+    let not_wm = FilterExpr::Not(Box::new(wm("wotc")));
+    assert!(!super::is_printing_composable(&not_wm, &archived.indexes), "-watermark: must stay off the compose path (nullable field)");
+    // And a positive watermark mixed with an unsupported leaf still declines as a whole.
+    let unsupported = FilterExpr::And(vec![wm("wotc"), FilterExpr::Not(Box::new(wm("set")))]);
+    assert!(!super::is_printing_composable(&unsupported, &archived.indexes), "-watermark inside an And keeps the whole And off the compose path");
+}
+
 #[test]
 fn broad_ranges_decline_to_narrow() {
     // Fraction rule: past MAX_NARROW_FRACTION of the index, gathering candidates
