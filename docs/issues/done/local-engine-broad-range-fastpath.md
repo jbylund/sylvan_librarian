@@ -167,7 +167,7 @@ That technique doesn't transfer: it needs a small, enumerable value space (~13�
 exact), while price is printing-varying — `usd<50` for `unique=card` means "*some* printing is
 under $50," an existential predicate over printings, the same shape legality's `∃p: satisfies(p)`
 problem is ([00680-engine-existential-plane-generalization.md](00680-engine-existential-plane-generalization.md)).
-[local-engine-printing-varying-plane-repair-pattern.md](../local-engine-printing-varying-plane-repair-pattern.md)
+[reference-engine-printing-varying-plane-repair-pattern.md](../reference-engine-printing-varying-plane-repair-pattern.md)
 names this as the case the plane escape hatch can't cover: an unbounded parameterized threshold
 has no finite set of precomputable existence projections. The prerequisite fix above doesn't
 change that — it makes the *narrowing* exact, not the *existence* projection precomputable.
@@ -359,7 +359,7 @@ fifth (tight/loose) axis to worry about — every field behaves identically ther
   — the existential-predicate framework `PrintingRangeBits` extends to numeric printing fields.
 - [00647-engine-cost-guard-calibration.md](00647-engine-cost-guard-calibration.md) — the
   calibration-from-measurement precedent this crossover should follow.
-- [local-engine-printing-varying-plane-repair-pattern.md](../local-engine-printing-varying-plane-repair-pattern.md)
+- [reference-engine-printing-varying-plane-repair-pattern.md](../reference-engine-printing-varying-plane-repair-pattern.md)
   — names price's exact disqualifying shape ("a hypothetical printing-varying numeric field...
   `> 3.7` and `> 3.71` are different, un-precomputable existence projections").
 - [00749-engine-probe-before-and-skip.md](./00749-engine-probe-before-and-skip.md) — the same

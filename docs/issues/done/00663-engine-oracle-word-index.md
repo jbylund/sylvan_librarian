@@ -354,7 +354,7 @@ itself and won't be evidence for this anymore.
   #639's crossover rule directly (`words_per_plane(n)*8` vs. `2 bytes/entry`,
   ~6.26%); this doc reuses the identical formula unchanged for both words and
   trigrams (see the decision above for why trigrams don't get a separate one)
-- [local-engine-union-summary-planes.md](local-engine-union-summary-planes.md) — the
+- [reference-engine-union-summary-planes.md](../reference-engine-union-summary-planes.md) — the
   "membership-only vs. ops-read-many-values" distinction that explains *why*
   trigram intersection is expensive for common words in the first place (even
   though the fix here is routing those words away from trigram, not

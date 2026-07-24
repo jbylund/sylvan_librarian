@@ -34,7 +34,7 @@ a much cleaner design was found before landing it: see the analysis below. The r
 extraction-gate principle, the shared-witness invariant, and the cardinality-guard problem it ran
 into are real, generalizable engineering, captured separately for the next field that doesn't have
 this issue's escape hatch:
-[docs/issues/local-engine-printing-varying-plane-repair-pattern.md](local-engine-printing-varying-plane-repair-pattern.md).
+[docs/issues/reference-engine-printing-varying-plane-repair-pattern.md](../reference-engine-printing-varying-plane-repair-pattern.md).
 
 ## Second design: two exact planes per format, no repair, no runtime tax
 
@@ -429,6 +429,6 @@ doc's own acceptance criteria asked for. Trivial regardless, against a ~68MB arc
   infrastructure rather than bundled into this PR; the row-selection bug here is its motivating case
 - #678 — indexing `banned:`/`restricted:` (currently unindexed full scan, deliberately out of scope
   here — this issue's planes only cover `expected == LEGALITY_LEGAL`)
-- [local-engine-printing-varying-plane-repair-pattern.md](local-engine-printing-varying-plane-repair-pattern.md)
+- [reference-engine-printing-varying-plane-repair-pattern.md](../reference-engine-printing-varying-plane-repair-pattern.md)
   — the repair-based first design, preserved for a future field that can't use this issue's escape
   hatch (query space not finite/enumerable at build time)

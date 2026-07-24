@@ -149,7 +149,7 @@ selection needs a `printing.card_border_id` accessor in `eval_plane_expr_for_pri
 legality's and rarity's, same conjunction-fix shape.
 
 **5. Y≥2 stays declined, not solved.** The joint per-printing evaluator
-(`docs/issues/local-engine-printing-varying-plane-repair-pattern.md`'s `eval_plane_expr_for_divergent_card`
+(`docs/issues/reference-engine-printing-varying-plane-repair-pattern.md`'s `eval_plane_expr_for_divergent_card`
 design, prototyped for legality and never shipped) is *not* part of this issue. Once rarity and
 border are second and third fields, `r:special AND f:modern` and `border:gold AND r:mythic` become
 real, plausible Y=2 query shapes — more plausible than `format:A AND format:B` ever was — worth
@@ -252,5 +252,5 @@ bucket, border's `+5` unified planes, `-3` for the removed struct, at ~3.9KB/pla
   planes this extends to 4 exact + 1 loose catch-all; its shared-witness correctness test
   (`border_shared_witness_correctness`) is the regression this issue's exact-plane version must
   keep passing, not just the loose-narrowing version
-- `docs/issues/local-engine-printing-varying-plane-repair-pattern.md` — the joint per-printing evaluator
+- `docs/issues/reference-engine-printing-varying-plane-repair-pattern.md` — the joint per-printing evaluator
   this issue deliberately does not build (Y≥2 stays declined)
