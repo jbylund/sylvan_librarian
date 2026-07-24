@@ -31,14 +31,30 @@ reused the same overly-broad shape check (`Not(inner)` where `inner` merely *loo
 other three consumers do. `-cmc:3` and negated-equality forms (`-usd:5`, `Ne` isn't a representable
 range) were getting ranked as the cheap re-narrow tier when they actually run the generic
 bit-complement or decline outright — never a wrong answer, just eager evaluation in the wrong order.
-Fixed with a small `indexes`-free classifier (`not_child_is_cheap_renarrow`) mirroring the real
-dispatch, verified not to regress the pre-existing `-r:x` ranking, plus a direct unit test asserting
-the rank values themselves (this class of bug can't be caught any other way — it's invisible to
-correctness checks). A follow-up question caught one more gap in the same fix: `-f:x`/`-banned:x`/
-`-restricted:x` (negated `Legality`, a tracked format) has its own dedicated plane-read arm too — a
-third "not a complement" shape alongside `-r:x` and the range arm, still missing from the classifier
-and still falling to the generic tier (predates this PR entirely; bug 1 never reached it). Added the
-same way, plus two more unit test assertions.
+Fixed with a small `indexes`-free classifier mirroring the real dispatch, verified not to regress the
+pre-existing `-r:x` ranking, plus a direct unit test asserting the rank values themselves (this class
+of bug can't be caught any other way — it's invisible to correctness checks). A follow-up question
+caught one more gap in the same fix: `-f:x`/`-banned:x`/`-restricted:x` (negated `Legality`, a tracked
+format) has its own dedicated plane-read arm too — a third "not a complement" shape alongside `-r:x`
+and the range arm, still missing from the classifier and still falling to the generic tier (predates
+this PR entirely; bug 1 never reached it). Added the same way, plus two more unit test assertions.
+
+Two rounds of the same class of bug in one PR was a signal, not a coincidence: the classifier and
+`narrow_rec`'s own dedicated arms were independent implementations of "which shapes are cheap," kept
+in sync only by a comment. Refactored to close the drift risk structurally instead: extracted
+`is_rarity_negation_shape`/`is_legality_negation_shape` as the *single* implementation each shape
+check has — `narrow_rec`'s own `-r:x`/`-f:x` arms now gate on these functions directly (replacing
+their inline `matches!` guards), and `and_child_rank` calls the same two. The range case can't go
+fully index-free the same way (`resolve_numeric_range_leaf` genuinely needs `indexes`), so
+`and_child_rank` now takes `indexes: &Archived<CardIndexes>` and calls `bare_range_bounds` directly —
+the same function `narrow_rec`'s own `Not` handling and the three other compose-path consumers
+already call, rather than keeping a second reimplementation around to drift again. (Must be called on
+the `Not` node itself, not the unwrapped inner — `bare_range_bounds`'s `Not` arm is what applies
+`negate_op` before checking representability.) Caught one more latent issue while unifying the rarity
+predicate: the inline check being replaced matched any `rhs` for a `RarityInt` `lhs` (should require
+`Const`, matching the real arm) — never exercised in practice, tightened while merging the two copies
+into one. A fourth dedicated `Not` arm added to `narrow_rec` in the future can no longer drift from
+`and_child_rank` silently.
 
 Measured (97,206-printing corpus): `-usd<0.25 usd<5` (the survey's #1 slowest query before this fix)
 0.901ms → 0.165ms (edhrec, 5.5×), 0.933ms → 0.353ms (rarity, 2.6×); `-usd<50` 0.896ms → 0.080ms

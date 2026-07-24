@@ -5668,44 +5668,55 @@ fn negated_range_narrowing() {
 fn and_child_rank_matches_narrow_rec_dispatch() {
     // Review catch (not caught by the differential test: rank/execution mismatches are a cost
     // question, not a correctness one, so they can't surface as a wrong final answer). Each case
-    // here mirrors a `narrow_rec`/`bare_range_bounds` dispatch decision `and_child_rank` has no
-    // `indexes` to double-check directly, per `not_child_is_cheap_renarrow`'s doc.
+    // here mirrors a real `narrow_rec` dispatch decision -- `and_child_rank` now gates its Not-arms
+    // on the *same* predicates (`is_rarity_negation_shape`/`is_legality_negation_shape`) and the
+    // *same* function (`bare_range_bounds`) narrow_rec's own dedicated arms use, so this is really
+    // testing that consistency held, not reimplementing a second copy to compare against.
+    //
+    // An empty store's indexes suffice: `bare_range_bounds`'s Not-arm resolves purely from field/op
+    // (`int_range_bounds` et al. are closed-form, no index contents inspected), and the two shape
+    // predicates are index-free by construction (see their docs).
+    let data = store_of(vec![], &[], VocabInterner::new());
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let indexes = &archived.indexes;
+
     let usd = |op: CmpOp, v: f64| FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op, rhs: NumExpr::Const(v) };
     let cmc = |op: CmpOp, v: f64| FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Cmc), op, rhs: NumExpr::Const(v) };
     let rarity = |op: CmpOp, v: f64| FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), op, rhs: NumExpr::Const(v) };
 
     // -usd<c: reduces to usd>=c via bare_range_bounds's Not handling -- same cheap tier (1) as its
     // un-negated form, not the generic complement's rank 2.
-    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(usd(CmpOp::Lt, 50.0)))), and_child_rank(&usd(CmpOp::Lt, 50.0)));
-    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(usd(CmpOp::Lt, 50.0)))), 1);
+    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(usd(CmpOp::Lt, 50.0))), indexes), and_child_rank(&usd(CmpOp::Lt, 50.0), indexes));
+    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(usd(CmpOp::Lt, 50.0))), indexes), 1);
 
     // -usd:c (negated equality): Ne isn't a representable range, so bare_range_bounds declines and
     // narrow_rec falls through to the generic Not-arm (which itself declines via tight_narrow_space,
     // per docs/issues/local-engine-negated-range-narrowing.md) -- must NOT get the cheap-tier rank.
-    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(usd(CmpOp::Eq, 5.0)))), 2);
+    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(usd(CmpOp::Eq, 5.0))), indexes), 2);
 
     // -cmc:c (any op): cmc/power/toughness aren't printing-range-indexed, so bare_range_bounds never
     // matches this field -- narrow_rec falls through to the generic bit-complement arm (tight in card
     // space, unrelated to this feature), which is the same cost shape as any other Not-complement.
-    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(cmc(CmpOp::Lt, 3.0)))), 2);
-    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(cmc(CmpOp::Eq, 3.0)))), 2);
+    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(cmc(CmpOp::Lt, 3.0))), indexes), 2);
+    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(cmc(CmpOp::Eq, 3.0))), indexes), 2);
 
     // -r:x (any op): rarity's own dedicated narrow_rec arm re-narrows regardless of op -- must keep
     // its pre-existing cheap-tier rank (0), matching the un-negated bare rarity comparison's rank.
-    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(rarity(CmpOp::Eq, 2.0)))), and_child_rank(&rarity(CmpOp::Eq, 2.0)));
-    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(rarity(CmpOp::Eq, 2.0)))), 0);
+    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(rarity(CmpOp::Eq, 2.0))), indexes), and_child_rank(&rarity(CmpOp::Eq, 2.0), indexes));
+    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(rarity(CmpOp::Eq, 2.0))), indexes), 0);
 
     // -f:x (a tracked format, expected=LEGALITY_LEGAL=0b01): reads the status's own _ABSENT plane
     // directly (narrow_rec's dedicated -f:x arm), the same "not a complement" shape as -r:x above --
     // must also keep its bare form's cheap-tier rank (0), not the generic complement's rank 2.
     let legal_fmt = || FilterExpr::Legality { shift: Some(0), expected: 0b01 };
-    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(legal_fmt()))), and_child_rank(&legal_fmt()));
-    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(legal_fmt()))), 0);
+    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(legal_fmt())), indexes), and_child_rank(&legal_fmt(), indexes));
+    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(legal_fmt())), indexes), 0);
 
     // -f:x for an untracked format (no shift resolved, i.e. absent from loaded data): status_plane_bases
     // is irrelevant here (shift: None doesn't even reach it) -- must fall to the generic tier, same as
     // any other Not this classifier doesn't recognize.
-    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(FilterExpr::Legality { shift: None, expected: 0b01 }))), 2);
+    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(FilterExpr::Legality { shift: None, expected: 0b01 })), indexes), 2);
 }
 
 // ─── Bitplanes (#630) ─────────────────────────────────────────────────────────

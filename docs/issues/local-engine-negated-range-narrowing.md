@@ -115,14 +115,50 @@ in the same fix: `narrow_rec` has a *third* dedicated re-narrow arm besides `-r:
 arm — `-f:x`/`-banned:x`/`-restricted:x` (a negated `Legality` with a tracked format), which reads the
 status's `_ABSENT`/`_ILLEGAL` plane directly rather than complementing (the comment on that arm
 explains why: complementing the positive plane would wrongly drop real matches for a divergent card
-that can satisfy both the status and its negation across different printings). `not_child_is_cheap_renarrow`
-didn't check for this shape either, so `-f:modern` inside an `And` was *still* falling to the generic
-tier (rank 2) instead of sharing bare `Legality`'s rank (0) — this predates the whole PR (it was part
-of the original blanket `Not(_) => 2`, bug 1 never actually reached it). Fixed the same way: added a
-`Legality { shift: Some(_), expected } if status_plane_bases(*expected).is_some()` case to the
-classifier (mirroring the dedicated arm's own guard exactly — `status_plane_bases` needs no `indexes`
-either, so the same `indexes`-free reasoning applies), plus two more unit test assertions (tracked and
-untracked format).
+that can satisfy both the status and its negation across different printings). The classifier didn't
+check for this shape either, so `-f:modern` inside an `And` was *still* falling to the generic tier
+(rank 2) instead of sharing bare `Legality`'s rank (0) — this predates the whole PR (it was part of
+the original blanket `Not(_) => 2`, bug 1 never actually reached it). Fixed the same way at the time:
+added a `Legality { shift: Some(_), expected } if status_plane_bases(*expected).is_some()` case to the
+classifier, plus two more unit test assertions (tracked and untracked format).
+
+## Closing the drift risk structurally, not just documenting it
+
+Two rounds of the same bug in one PR (bug 4, then its `-f:x` follow-up) is a pattern, not a
+coincidence: the classifier and `narrow_rec`'s own dedicated arms were two independent
+implementations of "which `Not(inner)` shapes are cheap," kept in sync only by a comment saying so.
+That's exactly the shape of hazard this codebase's "one shared function, every consumer goes through
+it" convention (`bare_range_bounds` itself, `resolve_numeric_range_leaf`) exists to prevent — it just
+hadn't been applied to this specific classification yet.
+
+Refactored so there is no second implementation left to drift:
+
+- **`is_rarity_negation_shape(f)`** and **`is_legality_negation_shape(f)`** — extracted, `indexes`-free
+  predicates (eligibility for both never depended on `indexes`, only the actual re-narrow work does).
+  `narrow_rec`'s own `-r:x` and `-f:x` arms now gate on these functions directly, replacing their
+  former inline `matches!` guards. `and_child_rank` calls the *same* functions. A shape either
+  recognizes, the other now does too, by construction — there is only one definition of each shape,
+  not two that happen to agree today.
+- **The range case (`-usd<c`/`-cn<c`/`-date`/`-year`)** can't be made fully index-free the same way —
+  its real implementation (`resolve_numeric_range_leaf`) genuinely needs `indexes` to fetch the index
+  reference. Rather than keep a second, index-free reimplementation of its eligibility logic (the
+  previous fix's approach, and the thing that could still drift), `and_child_rank` now takes
+  `indexes: &Archived<CardIndexes>` and calls `bare_range_bounds(f, indexes)` directly — the exact
+  function `narrow_rec`'s own `Not` handling, `is_printing_composable`, `compose_printing_bits`, and
+  `compose_printing_estimate` already call. One caveat worth noting explicitly: this must be called on
+  the `Not` node itself, not the unwrapped inner expression — `bare_range_bounds`'s own `Not` arm is
+  what applies `negate_op` before checking representability, so calling it on the bare inner would
+  wrongly accept `Eq` (whose negation, `Ne`, isn't representable), silently reintroducing bug 4.
+- Along the way, caught a latent over-broad pattern in the rarity predicate itself while extracting it:
+  the inline check being replaced used `NumericCmp { lhs: Field(RarityInt), .. }` (matching *any*
+  `rhs`, including another field), but the real `-r:x` arm requires the other side to be `Const` —
+  tightened to match exactly. Never exercised in practice (the parser doesn't appear to produce
+  field-vs-field numeric comparisons), but worth fixing while unifying the two copies into one.
+
+Net effect: adding a fourth dedicated `Not` arm to `narrow_rec` in the future is no longer something
+`and_child_rank` can silently miss — either it's expressed as a predicate `and_child_rank` already
+calls, or (for a future index-dependent case) it's a direct call to the real function, following the
+range case's pattern.
 
 ## Measured (`scripts/bench_negated_range_narrowing.py`, 97,206-printing corpus, min ms)
 
@@ -153,10 +189,13 @@ before this fix — no longer appears in the top 10; no new slow patterns introd
   not something this feature needed to defeat), `is_printing_composable`/`compose_printing_bits`
   agreement, `-cn<100`, and the `-year:1993`/`-date>=c` cases (including confirming the `Ne`-shaped
   negation correctly declines rather than computing a wrong answer).
-- New Rust test `and_child_rank_matches_narrow_rec_dispatch` (bug 4): directly asserts the rank
-  values for `-usd<c` (matches its un-negated form), `-usd:c`/`-cmc:c` (must fall to the generic
-  tier, not the cheap one), and `-r:x` (must keep its pre-existing cheap rank at any op) — the only
-  way to cover a rank/execution mismatch, since it can't be observed through a correctness check.
+- New Rust test `and_child_rank_matches_narrow_rec_dispatch` (bug 4 and its refactor): directly
+  asserts the rank values for `-usd<c` (matches its un-negated form), `-usd:c`/`-cmc:c` (must fall
+  to the generic tier, not the cheap one), `-r:x`, and `-f:x` (both must keep their pre-existing
+  cheap rank, tracked and untracked format) — the only way to cover a rank/execution mismatch, since
+  it can't be observed through a correctness check. Threads a minimal empty-store `&Archived<CardIndexes>`
+  through now that `and_child_rank` takes one (an empty store suffices: `bare_range_bounds`'s `Not`
+  handling resolves purely from field/op, never index contents).
 - `cargo test` (debug + release): 131/131 passed.
 - `pytest api/tests/test_engine_property.py api/tests/test_engine_unit.py`: 158/158 passed.
 - `cargo clippy`: unchanged from baseline (42 warnings).
