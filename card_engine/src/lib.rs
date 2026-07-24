@@ -2804,6 +2804,24 @@ fn narrow_candidates(
 /// real traffic argues for moving it.
 static AND_SKIP_THRESHOLD: LazyLock<usize> = LazyLock::new(|| guard_env("CARD_ENGINE_AND_SKIP_THRESHOLD", 2_048));
 
+/// Selectivity floor below which a probed rank-1 range child is included in the
+/// And narrowing even when it would NOT beat the current driver (`k >= best`).
+/// The `AND_SKIP_THRESHOLD` guard classifies range children by worst-case cost
+/// *class*, so it skips a highly selective range (`usd<0.02`) as readily as a
+/// near-total one (`usd<50`) once any driver is selective — but `range_narrowed`'s
+/// two `partition_point` searches yield the real match count `k` for free before
+/// that decision (see `probe_range_k` / `narrow_rec`'s And arm). A child with
+/// `k < best` becomes the new, strictly-smaller driver (fewer residual
+/// verifications, never a regression). This floor additionally admits a range so
+/// small that materializing its sorted vec is below the timing-noise floor even
+/// when it can't lower the driver: bounded well under `AND_SKIP_THRESHOLD` so it
+/// can never re-admit the broad children that guard protects, and deliberately
+/// tiny (64) so it stays clear of the `!"name" set:SLD cn:N` tail — those `cn:N`
+/// sets are far larger than 64 in the common (small collector-number) case, so
+/// they still skip under a tiny exact-name driver, avoiding the 8,192-experiment
+/// regression (docs/issues/local-engine-probe-before-and-skip.md).
+static AND_PROBE_FLOOR: LazyLock<usize> = LazyLock::new(|| guard_env("CARD_ENGINE_AND_PROBE_FLOOR", 64));
+
 /// `-r:x`'s dedicated shape: a rarity comparison, any op (`narrow_rarity` isn't limited to the four
 /// ordered ones the printing-range path needs — see that arm's doc). Index-free — eligibility never
 /// depends on `indexes`, only the actual re-narrow work does. The single source of truth for this
@@ -2866,6 +2884,24 @@ fn and_child_rank(f: &FilterExpr, indexes: &Archived<CardIndexes>) -> u8 {
         }
         _ => 0,
     }
+}
+
+/// The exact match count `k` of a printing-range And child (`usd`/`cn`/`date`/`year`
+/// and their negations — whatever `bare_range_bounds` recognizes), computed with the
+/// same two `partition_point` binary searches `range_narrowed` runs before it
+/// materializes anything, so this probe is (log n, log n) and adds nothing a later
+/// materialization wouldn't already pay. Returns `None` for a non-range child (a
+/// `TextRegex` rank-1 sibling, say), whose selectivity can't be read this cheaply.
+/// The And arm uses `k` to decide inclusion per-query instead of by cost class, and
+/// to order equal-rank range children most-selective-first (removing the old
+/// written-order sensitivity). An empty range yields `k = 0` (lo == hi == 0 from
+/// `bare_range_bounds`), the most selective possible — exactly what a materialized
+/// empty `Printings` vec would report.
+fn probe_range_k(filter: &FilterExpr, indexes: &Archived<CardIndexes>) -> Option<usize> {
+    let (idx, lo, hi) = bare_range_bounds(filter, indexes)?;
+    let s = idx.partition_point(|p| u32::from(p.0) < lo);
+    let e = idx.partition_point(|p| u32::from(p.0) < hi);
+    Some(e - s)
 }
 
 /// `broad_ok` says whether a broad printing-range child may materialize its
@@ -3393,8 +3429,21 @@ fn narrow_rec(
             // range bitmaps only materialize when a printing-space partner
             // exists to intersect them with; complements only when nothing
             // else narrowed at all.
-            let mut ranked: Vec<(u8, &FilterExpr)> = children.iter().map(|c| (and_child_rank(c, indexes), c)).collect();
-            ranked.sort_by_key(|(r, _)| *r);
+            // Rank children by evaluation cost, and within a rank order the
+            // probeable range children most-selective-first (smallest k). The
+            // probe is two binary searches (probe_range_k), nearly free, and it
+            // both shrinks the driver as fast as possible and removes the old
+            // sensitivity to the order same-rank children happened to be written
+            // in. Non-range children (no probe) sort after the ranges in-rank.
+            let mut ranked: Vec<(u8, Option<usize>, &FilterExpr)> = children
+                .iter()
+                .map(|c| {
+                    let rank = and_child_rank(c, indexes);
+                    let probe = if rank == 1 { probe_range_k(c, indexes) } else { None };
+                    (rank, probe, c)
+                })
+                .collect();
+            ranked.sort_by_key(|(r, probe, _)| (*r, probe.unwrap_or(usize::MAX)));
             let mut card_sets: Vec<Narrowed> = Vec::new();
             let mut printing_sets: Vec<Narrowed> = Vec::new();
             // Tightness of the And requires every child to be represented in
@@ -3402,11 +3451,24 @@ fn narrow_rec(
             // satisfy the skipped children, and a complement taken over a
             // falsely-tight set would drop real matches of the negation.
             let mut every_child_included = true;
-            for (rank, c) in ranked {
+            for (rank, probe, c) in ranked {
                 let best = card_sets.iter().chain(printing_sets.iter()).map(|n| n.set.len()).min();
-                if rank > 0 && best.is_some_and(|b| b <= *AND_SKIP_THRESHOLD) {
-                    every_child_included = false;
-                    break;
+                // A driver this selective already bounds the candidate set the
+                // residual re-verifies, so a costlier (rank>0) child usually
+                // narrows nothing the driver's verification doesn't already do
+                // — skip it. The exception the probe buys: a range child whose
+                // *actual* match count k (already computed, free) beats the
+                // driver (k < best ⇒ it becomes the new, strictly smaller
+                // driver — never a regression) or is under AND_PROBE_FLOOR
+                // (materializing its sorted vec is timing noise). Such a child
+                // is always sparse under a selective driver, so it only ever
+                // takes range_narrowed's cheap vec path. `continue`, not
+                // `break`: a later, smaller-k range child may still qualify.
+                if let Some(b) = best.filter(|&b| rank > 0 && b <= *AND_SKIP_THRESHOLD) {
+                    if !probe.is_some_and(|k| k < b || k <= *AND_PROBE_FLOOR) {
+                        every_child_included = false;
+                        continue;
+                    }
                 }
                 if rank == 2 && !(card_sets.is_empty() && printing_sets.is_empty()) {
                     every_child_included = false;
