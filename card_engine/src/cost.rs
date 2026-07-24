@@ -105,13 +105,12 @@ pub(crate) struct PlanFeatures {
     /// that keeps the popcount term honest across distinct-ons: `n_printings/64` (printing),
     /// `n_cards/64` (card), `n_artworks/64` (artwork). Set by `PrintingCompose`; `0` elsewhere.
     pub popcount_words: u32,
-    /// Whether `PrintingCompose` will page via the real permutation walk (`true`) or the
-    /// permutation-free bounded-gather fallback (`false`) — decided by whether `orderby` has a
-    /// card-space permutation (`rarity`/`usd` don't; see
-    /// `docs/issues/local-engine-compose-permutation-fallback.md`). The two strategies have
-    /// different cost shapes (offset-dependent walk vs. visit-every-match gather), so the formula
-    /// branches on this rather than assuming the walk. Ignored by every other plan.
-    pub compose_has_perm: bool,
+    /// Which of `PrintingCompose`'s three paging strategies will actually run (see `ComposePaging`),
+    /// decided the same way `printing_compose_fastpath` decides. The three have different cost shapes
+    /// — the permutation walk and the #744 orderby-index walk are both offset-dependent (fill the page
+    /// in ~`page_span/selectivity` steps), while the permutation-free gather visits every match — so
+    /// the formula branches on this rather than assuming one. Ignored by every other plan.
+    pub compose_paging: super::ComposePaging,
 }
 
 // ─── P1: PrintingRangeScan ──────────────────────────────────────────────────
@@ -277,10 +276,16 @@ pub(crate) fn plan_cost(plan: PhysicalPlan, f: &PlanFeatures) -> f64 {
                 + f64::from(f.scatter_printings) * RANGE_SCATTER_PER_PRINTING_NS  // range-slice scatter into the printing bitmap (cheap: no card cursor)
                 + f64::from(f.project_printings) * LINEAR_PASS_PER_PRINTING_NS  // second pass: project printing→card/artwork (0 for printing mode) — the pass CardRangePopcount fuses away
                 + f64::from(f.popcount_words) * PLANE_POPCOUNT_PER_WORD_NS; // popcount the result-space bitmap for the total (printing/card/artwork words)
-            let page = if f.compose_has_perm {
-                printings_walked * RANGE_WALK_STEP_NS  // forward grouped walk to fill the page
-                    + limit * PLANE_POPCOUNT_EMIT_PER_CARD_NS  // emit one page of rows
-            } else {
+            let page = match f.compose_paging {
+                // Perm (forward grouped walk) and OrderbyWalk (#744 value-index/plane walk) share the
+                // offset-dependent walk shape: fill the page in ~page_span/selectivity steps, then emit
+                // one page. OrderbyWalk terminates at page_offset+limit just like the permutation walk,
+                // which is exactly why the COMPOSE_GATHER breadth gate is bypassed for it — broad is its
+                // best case, not its worst.
+                super::ComposePaging::Perm | super::ComposePaging::OrderbyWalk => {
+                    printings_walked * RANGE_WALK_STEP_NS  // walk to fill the page
+                        + limit * PLANE_POPCOUNT_EMIT_PER_CARD_NS  // emit one page of rows
+                }
                 // gather_composed_page: visits every candidate (eval_domain, same rate GatheredScan's
                 // own permutation-free walk pays per card), tests `pbits` membership per printing
                 // (scan_units — a cheap bit test, not a real residual scan, so the cheap
@@ -288,9 +293,11 @@ pub(crate) fn plan_cost(plan: PhysicalPlan, f: &PlanFeatures) -> f64 {
                 // and pushes each surviving match into the bounded GatherSelect accumulator (matches,
                 // same per-match rate GatheredScan pays for the same operation). Offset-independent —
                 // unlike the walk above, it costs the same regardless of how deep the page is.
-                eval_domain * GATHER_CARD_PASS_NS
-                    + scan_units * RANGE_SCATTER_PER_PRINTING_NS
-                    + matches * GATHER_PUSH_PER_MATCH_NS
+                super::ComposePaging::Gather => {
+                    eval_domain * GATHER_CARD_PASS_NS
+                        + scan_units * RANGE_SCATTER_PER_PRINTING_NS
+                        + matches * GATHER_PUSH_PER_MATCH_NS
+                }
             };
             build + page + RANGE_FIXED_COST_NS // per-query setup
         }

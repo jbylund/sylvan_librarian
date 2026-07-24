@@ -5,7 +5,7 @@ use super::{
     assign_artwork_groups, build_bit_planes, build_border_printing_planes, build_rarity_printing_planes, build_divergent_ids, build_name_bigram_index, build_printing_to_card, flavor_fingerprint, flavor_match_sets,
     cards_of_printings, count_common_keywords, count_common_types,
     build_artist_index, build_range_index, build_arith_tuple_index, is_arith_tuple_route, range_candidates, narrow_candidates, narrow_candidates_exact, rarity_candidates,
-    range_too_broad_to_narrow, run_query, run_query_with_plan, PhysicalPlan, trigram_candidates, finalize_trigram_index, PrintingRangeIndex, NARROW_FLOOR,
+    range_too_broad_to_narrow, run_query, run_query_with_plan, PhysicalPlan, ComposePaging, trigram_candidates, finalize_trigram_index, PrintingRangeIndex, NARROW_FLOOR,
     gathered_scan_applicable, streamed_select_applicable, plane_popcount_order_applicable, printing_range_scan_applicable,
     walk_printing_page, aligned_page, bare_range_bounds, probe_range_k, printing_range_fastpath, sort_key_bits, orderby_to_col, SortCol, STREAM_MIN_MATCHES,
     prepare_candidates, verify_cost_tier, scan_units, Mode,
@@ -3395,7 +3395,7 @@ fn plan_cost_model_matches_gold() {
                     residual_tier_ns100,
                     limit: limit as u32,
                     offset: offset as u32,
-                    broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0, compose_has_perm: false,
+                    broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0, compose_paging: ComposePaging::Gather,
                 };
 
                 // ── Model argmin over the applicable plans ──
@@ -3622,7 +3622,7 @@ fn plan_cost_refit() {
                     scan_units: scan_units(mode_enum, prep.candidate_cards.as_deref(), &archived.offsets, n_printings, eval_domain),
                     residual_tier_ns100: if prep.all_match_known { 0 } else { verify_cost_tier(&res) },
                     limit: limit as u32, offset: offset as u32,
-                    broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0, compose_has_perm: false,
+                    broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0, compose_paging: ComposePaging::Gather,
                 };
                 for (pi, plan) in all_plans.iter().enumerate() {
                     if let Some(meas) = ns[pi] {
@@ -3820,7 +3820,7 @@ fn printing_range_route_probe() {
                 scan_units: scan_units(Mode::Printing, prep.candidate_cards.as_deref(), &archived.offsets, n_printings as u32, eval_domain),
                 residual_tier_ns100,
                 limit: LIMIT as u32, offset: offset as u32,
-                broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0, compose_has_perm: false,
+                broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0, compose_paging: ComposePaging::Gather,
             };
 
             // ── Three pickers ──
@@ -4181,7 +4181,7 @@ fn plan_regret_report() {
                 residual_tier_ns100: tier,
                 limit: limit as u32,
                 offset: offset as u32,
-                broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0, compose_has_perm: false,
+                broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0, compose_paging: ComposePaging::Gather,
             };
 
             let gold = (0..4).filter_map(|i| ns[i].map(|v| (v, i))).min_by_key(|(v, _)| *v);
@@ -4308,7 +4308,7 @@ fn plan_regret_fuzz() {
                 n_cards, n_printings, matches, eval_domain: evd, scan_units: evd, // card mode ⇒ scan_units == eval_domain
                 residual_tier_ns100: tier,
                 limit: limit as u32, offset: offset as u32,
-                broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0, compose_has_perm: false,
+                broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0, compose_paging: ComposePaging::Gather,
             };
             let feats_true = mk(true_total, eval_domain);
             let feats_est = mk(est, est.min(n_cards));
@@ -6019,6 +6019,121 @@ fn and_skip_probes_range_selectivity() {
     assert_eq!(probe_range_k(&usd_cmp(CmpOp::Lt, 0.71), indexes), Some(70));
     assert_eq!(len(&FilterExpr::And(vec![legendary(), usd_cmp(CmpOp::Lt, 0.51)])), Some(2));
     assert_eq!(len(&FilterExpr::And(vec![legendary(), usd_cmp(CmpOp::Lt, 0.71)])), Some(10));
+}
+
+// ─── #744: PrintingCompose orderby-range-index walk ─────────────────────────────
+
+/// Part 1 differential: the #744 sparse-side (`_ABSENT`) legality build must produce **bit-for-bit**
+/// the same printing bitmap as the pre-#744 broadcast-from-`_EXISTS` build, on stores with a real
+/// illegal/divergent card mix (fuzz stores are ~40% divergent). Also cross-checks both against the
+/// direct per-printing truth (`(word >> shift) & 0b11 == expected`), so this proves the bits are
+/// *correct*, not merely that the two builds happen to agree. Mirrors
+/// `and_child_rank_matches_narrow_rec_dispatch`'s "test the two sources produce the same thing" spirit.
+#[test]
+fn legality_sparse_side_build_matches_broadcast() {
+    use rand::SeedableRng;
+    for seed in 0..48u64 {
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(seed);
+        let data = fuzz_store(&mut rng);
+        let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+        let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+        let n_cards = archived.cards.len();
+        let n_printings = archived.printings.len();
+        for shift in [0u8, 2, 4] {
+            for expected in [0b01u64, 0b10, 0b11] {
+                let Some(exists) = super::legality_candidate_bits(&archived.indexes, n_cards, shift, expected, false) else {
+                    continue;
+                };
+                let absent = super::legality_candidate_bits(&archived.indexes, n_cards, shift, expected, true).expect("absent side resolves");
+                let from_exists = super::legality_leaf_bits_from_exists(
+                    shift, expected, &exists, &archived.indexes.legal_divergent, &archived.offsets, &archived.printings, n_printings,
+                );
+                let from_absent = super::legality_leaf_bits_from_absent(
+                    shift, expected, &exists, &absent, &archived.indexes.legal_divergent, &archived.offsets, &archived.printings, n_printings,
+                );
+                assert_eq!(
+                    from_exists, from_absent,
+                    "sparse-side (_ABSENT) build disagrees with broadcast (_EXISTS) build (seed={seed}, shift={shift}, expected={expected:#04b})"
+                );
+                let adaptive =
+                    super::legality_leaf_bits(shift, expected, &archived.indexes, &archived.offsets, &archived.printings, n_printings);
+                assert_eq!(adaptive, from_exists, "adaptive legality_leaf_bits picked a differing build (seed={seed}, shift={shift})");
+                // Direct per-printing truth: the build must equal it on every printing.
+                for p in 0..n_printings {
+                    let want = (u64::from(archived.printings[p].card_legalities) >> shift) & 0b11 == expected;
+                    let got = from_exists[p >> 6] & (1u64 << (p & 63)) != 0;
+                    assert_eq!(got, want, "bit {p} wrong vs per-printing truth (seed={seed}, shift={shift}, expected={expected:#04b})");
+                }
+            }
+        }
+    }
+}
+
+/// Part 2 differential: the #744 orderby walk (`walk_range_orderby_page` for `usd`,
+/// `walk_rarity_orderby_page` for `rarity`) must produce the **identical** printing-mode page — same
+/// rows, same order — as `gather_composed_page` (the #740 reference the walk replaces on the fast
+/// path), across composable filters, both orderbys, both directions, and several offsets. Same
+/// differential-vs-reference pattern `fuzz_row_identity_matches_reference` uses. A larger store keeps
+/// enough non-null-valued matches that the walk actually fires (rather than declining to the
+/// null-value tail); `walked_any` guards against the test going vacuous if that ever stops holding.
+#[test]
+fn orderby_walk_matches_gather_composed() {
+    use rand::SeedableRng;
+    let mut rng = rand::rngs::SmallRng::seed_from_u64(4242);
+    let data = fuzz_store_n(&mut rng, 4_000);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let n_printings = archived.printings.len();
+    let mga = u16::from(archived.indexes.max_artwork_groups);
+
+    let border = |v: &str| FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value: v.to_string() };
+    let leg = || FilterExpr::Legality { shift: Some(0), expected: 0b01 };
+    let filters: [(&str, FilterExpr); 3] = [
+        ("legality", leg()),
+        ("border:black", border("black")),
+        ("legality∧border", FilterExpr::And(vec![leg(), border("black")])),
+    ];
+    let ids = |page: &[(&Archived<OracleCard>, &Archived<Printing>)]| -> Vec<u128> {
+        page.iter().map(|(_, p)| u128::from(p.scryfall_id)).collect()
+    };
+
+    let mut walked_any = false;
+    for (name, filter) in &filters {
+        assert!(super::is_printing_composable(filter, &archived.indexes), "{name} must be composable");
+        let pbits = super::compose_printing_bits(filter, &archived.indexes, &archived.offsets, &archived.printings, n_printings);
+        let total: usize = pbits.iter().map(|w| w.count_ones() as usize).sum();
+        for orderby in ["usd", "rarity"] {
+            let sort_col = orderby_to_col(orderby);
+            for &descending in &[false, true] {
+                for &offset in &[0usize, 50, 200] {
+                    let limit = 100usize;
+                    let gather = super::gather_composed_page(
+                        Mode::Printing, &archived.cards, &archived.printings, &archived.offsets, &pbits,
+                        super::Prefer::Default, sort_col, descending, limit, offset, mga,
+                    );
+                    let walk = match sort_col {
+                        SortCol::PriceUsd => super::walk_range_orderby_page(
+                            &archived.indexes.price_usd, &pbits, &archived.cards, &archived.printings,
+                            &archived.indexes.printing_to_card, sort_col, descending, total, limit, offset,
+                        ),
+                        SortCol::Rarity => super::walk_rarity_orderby_page(
+                            &archived.indexes.rarity_printing, &pbits, &archived.cards, &archived.printings,
+                            &archived.indexes.printing_to_card, descending, total, limit, offset, n_printings,
+                        ),
+                        _ => None,
+                    };
+                    if let Some(walk) = walk {
+                        walked_any = true;
+                        assert_eq!(
+                            ids(&walk), ids(&gather),
+                            "walk vs gather_composed_page page differs ({name}, orderby={orderby}, desc={descending}, offset={offset})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert!(walked_any, "the orderby walk never fired on this fixture — the differential would be vacuous");
 }
 
 // ─── Bitplanes (#630) ─────────────────────────────────────────────────────────
