@@ -7,7 +7,7 @@ use super::{
     build_artist_index, build_range_index, range_candidates, narrow_candidates, narrow_candidates_exact, rarity_candidates,
     range_too_broad_to_narrow, run_query, run_query_with_plan, PhysicalPlan, trigram_candidates, finalize_trigram_index, PrintingRangeIndex, NARROW_FLOOR,
     gathered_scan_applicable, streamed_select_applicable, plane_popcount_order_applicable, printing_range_scan_applicable,
-    walk_printing_page, aligned_page, bare_range_bounds, printing_range_fastpath, sort_key_bits, orderby_to_col, SortCol, STREAM_MIN_MATCHES,
+    walk_printing_page, aligned_page, bare_range_bounds, probe_range_k, printing_range_fastpath, sort_key_bits, orderby_to_col, SortCol, STREAM_MIN_MATCHES,
     prepare_candidates, verify_cost_tier, scan_units, Mode,
     GatherSelect, select_page, GATHER_PRUNE_CHUNK, Match,
     archive_header, archive_payload, ARCHIVE_HEADER_LEN, Mmap,
@@ -5717,6 +5717,74 @@ fn and_child_rank_matches_narrow_rec_dispatch() {
     // is irrelevant here (shift: None doesn't even reach it) -- must fall to the generic tier, same as
     // any other Not this classifier doesn't recognize.
     assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(FilterExpr::Legality { shift: None, expected: 0b01 })), indexes), 2);
+}
+
+#[test]
+fn and_skip_probes_range_selectivity() {
+    // The probe-before-and-skip rule (docs/issues/local-engine-probe-before-and-skip.md): once a
+    // driver is selective (`best <= AND_SKIP_THRESHOLD`), a rank-1 printing-range child is no longer
+    // skipped by its worst-case cost *class*. Its real match count `k` (probe_range_k, two binary
+    // searches) decides: include when it would beat the driver (`k < best`) or is under
+    // AND_PROBE_FLOOR; skip when broad. The old rule skipped every range child here identically -- a
+    // wrong-cost decision the differential fuzzer can't catch (both choices return the *same rows*
+    // via residual verification; only the narrowed candidate-set size differs, which is what we
+    // assert on here).
+    const N: usize = 400;
+    let mut vocab = VocabInterner::new();
+    // Card i owns one printing (printing i). Even i are creatures (a 200-card driver); every 40th
+    // card is additionally legendary (a 10-card driver); the rest are instants. Price(printing i) =
+    // i+1 cents, a gradient so `usd<x` selects an exactly dialable prefix of the cards.
+    let cards: Vec<OracleCard> = (0..N)
+        .map(|i| {
+            let types = if i % 40 == 0 {
+                TYPE_CREATURE | TYPE_LEGENDARY
+            } else if i % 2 == 0 {
+                TYPE_CREATURE
+            } else {
+                TYPE_INSTANT
+            };
+            stub_card(i as u128 + 1, types, &[], &mut vocab)
+        })
+        .collect();
+    let mut data = store_of(cards, &[1; N], vocab);
+    for (i, p) in data.printings.iter_mut().enumerate() {
+        p.price_usd = Some(i as u32 + 1); // 1..=400 cents
+    }
+    data.indexes.price_usd = build_range_index(&data.printings, |p| p.price_usd);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let (indexes, offsets, cards) = (&archived.indexes, &archived.offsets, &archived.cards);
+
+    // FilterExpr isn't Clone, so build fresh nodes per use.
+    let creature = || FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
+    let legendary = || FilterExpr::TypeCmp { mask: TYPE_LEGENDARY, op: CmpOp::Ge };
+    let cmc_lt = FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Cmc), op: CmpOp::Lt, rhs: NumExpr::Const(3.0) };
+    let len = |f: &FilterExpr| narrow_candidates(f, indexes, offsets, cards).map(|c| c.len());
+
+    // probe_range_k reads a range child's exact selectivity; None for a non-range sibling.
+    assert_eq!(probe_range_k(&usd_cmp(CmpOp::Lt, 0.21), indexes), Some(20)); // <21c -> printings 0..=19
+    assert_eq!(probe_range_k(&usd_cmp(CmpOp::Lt, 2.51), indexes), Some(250)); // <251c -> printings 0..=249
+    assert_eq!(probe_range_k(&creature(), indexes), None); // a card-space plane, not a range
+    assert_eq!(probe_range_k(&cmc_lt, indexes), None); // cmc is card-space numeric, not printing-range-indexed
+
+    // Drivers alone.
+    assert_eq!(len(&creature()), Some(200));
+    assert_eq!(len(&legendary()), Some(10));
+
+    // k < best: a selective range (k=20) beats the 200-card driver, so it is included and the And
+    // narrows to the true intersection (even cards among printings 0..=19 = {0,2,..,18} = 10),
+    // rather than being skipped back to the 200-card driver as the cost-class rule would have.
+    assert_eq!(len(&FilterExpr::And(vec![creature(), usd_cmp(CmpOp::Lt, 0.21)])), Some(10));
+    // Broad range (k=250 > best=200 and > floor): skipped -- the candidate set stays the driver.
+    assert_eq!(len(&FilterExpr::And(vec![creature(), usd_cmp(CmpOp::Lt, 2.51)])), Some(200));
+
+    // Floor: under the tiny 10-card driver, a range with best(10) < k <= AND_PROBE_FLOOR(64) is
+    // still included though it cannot lower the driver -- usd<0.51 (k=50) keeps only the legendary
+    // cards priced <51c ({0,40} = 2). One printing past the floor (k=70) is skipped (stays 10).
+    assert_eq!(probe_range_k(&usd_cmp(CmpOp::Lt, 0.51), indexes), Some(50));
+    assert_eq!(probe_range_k(&usd_cmp(CmpOp::Lt, 0.71), indexes), Some(70));
+    assert_eq!(len(&FilterExpr::And(vec![legendary(), usd_cmp(CmpOp::Lt, 0.51)])), Some(2));
+    assert_eq!(len(&FilterExpr::And(vec![legendary(), usd_cmp(CmpOp::Lt, 0.71)])), Some(10));
 }
 
 // ─── Bitplanes (#630) ─────────────────────────────────────────────────────────
