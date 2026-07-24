@@ -3750,6 +3750,19 @@ fn prefer_from_str(s: &str) -> Prefer {
     }
 }
 
+/// The `unique` string → `Mode` mapping, in one place. Anything other than the
+/// literal `"artwork"`/`"printing"` is `Mode::Card` (not just the literal
+/// `"card"`) — see `split_planes`'s `unique_is_card` doc. Shared by `run_query`,
+/// `run_query_with_plan`, `explain_analyze`, and the PyO3 `explain` method so
+/// they can never drift.
+fn mode_from_unique(unique: &str) -> Mode {
+    match unique {
+        "artwork"  => Mode::Artwork,
+        "printing" => Mode::Printing,
+        _          => Mode::Card,
+    }
+}
+
 /// Prefer score for one printing of a card; higher wins, and selection uses a
 /// strict > so the first-in-store-order printing wins ties (matching the tie
 /// behavior of the dedup paths this replaced).
@@ -6171,12 +6184,7 @@ fn run_query<'a>(
     let sort_col   = orderby_to_col(orderby);
     let descending = direction == "desc";
     let prefer     = prefer_from_str(prefer);
-
-    let mode = match unique {
-        "artwork"  => Mode::Artwork,
-        "printing" => Mode::Printing,
-        _          => Mode::Card,
-    };
+    let mode       = mode_from_unique(unique);
 
     // #702: plan selection is one cost-based routing layer (`run_query_routed`,
     // `argmin cost::plan_cost` over the applicable plans), not a hand-tuned decision
@@ -6549,11 +6557,7 @@ fn run_query_with_plan<'a>(
     let sort_col   = orderby_to_col(orderby);
     let descending = direction == "desc";
     let prefer     = prefer_from_str(prefer);
-    let mode = match unique {
-        "artwork"  => Mode::Artwork,
-        "printing" => Mode::Printing,
-        _          => Mode::Card,
-    };
+    let mode       = mode_from_unique(unique);
 
     match plan {
         PhysicalPlan::PrintingRangeScan => {
@@ -6690,6 +6694,12 @@ pub(crate) struct PlanTrial {
 /// Rotates which plan runs first/last each round (`(i + round) % n`) rather than a
 /// fixed order, so no plan systematically benefits from whatever accumulates
 /// round-over-round (allocator state, cache residency).
+///
+/// `trials_ns` is a fair head-to-head *between plans*, not a reproduction of a real
+/// query's wall time: each `run_query_with_plan` call re-runs its own
+/// `prepare_candidates`, whereas `run_query_routed` acquires the shared artifact
+/// once and reuses it. So compare `trials_ns` across plans, not against an
+/// end-to-end `query()` latency for the winner.
 #[allow(clippy::too_many_arguments)]
 fn explain_analyze(
     cards: &[AOracleCard],
@@ -6710,11 +6720,7 @@ fn explain_analyze(
 ) -> Vec<PlanTrial> {
     let sort_col = orderby_to_col(orderby);
     let descending = direction == "desc";
-    let mode = match unique {
-        "artwork"  => Mode::Artwork,
-        "printing" => Mode::Printing,
-        _          => Mode::Card,
-    };
+    let mode = mode_from_unique(unique);
 
     // explain() needs `&mut` for its own (one-time) acquire-step mutation; clone so
     // the timing loop below starts from `filter`'s untouched, pristine state.
@@ -7248,11 +7254,20 @@ pub(crate) fn count_common_keywords(data: &Archived<CardData>) -> HashMap<String
         .collect()
 }
 
-/// Shared `explain`/`explain_analyze` (#745) filter resolution: parse `filters`'
-/// `to_json()`, bind against `data`'s vocabs, and split off the plane-expressible
-/// part — the same three steps `query()` runs inline. Kept as a private duplicate
-/// rather than a refactor of `query()` itself, so the existing hot search path is
-/// untouched by this change.
+/// Shared filter resolution for `query`/`explain`/`explain_analyze` (#745): parse
+/// `filters`' `to_json()`, bind against `data`'s vocabs, and split off the
+/// plane-expressible part (colors/identity/types) into a bitmap expression. The
+/// single source of truth for these steps — `query`'s hot path calls this too, so
+/// the diagnostics can never route a query differently than a real search would.
+///
+/// The plane split is guarded on the archive carrying planes for this card count;
+/// the format-version bump already rejects pre-plane archives, so this is defense
+/// in depth. `unique_is_card` follows `mode_from_unique` exactly (anything but
+/// `"artwork"`/`"printing"` is card mode) — see `split_planes`'s doc.
+///
+/// No `#[inline]`: this shares a crate with its only hot-path caller (`query`), so
+/// the compiler already inlines at its discretion, and the body is dominated by
+/// Python FFI (`to_json`, `orjson.dumps`) — a call boundary here is unmeasurable.
 fn bind_and_split_filter(py: Python<'_>, filters: &Bound<PyAny>, unique: &str, data: &Archived<CardData>) -> PyResult<(Option<PlaneExpr>, FilterExpr)> {
     let to_json = filters.call_method0("to_json")?;
     let json_bytes: Vec<u8> = py
@@ -7714,15 +7729,6 @@ impl QueryEngine {
         fields: Option<Vec<String>>,
     ) -> PyResult<Bound<'py, PyTuple>> {
         let resolved_fields = resolve_fields(fields)?;
-        let to_json    = filters.call_method0("to_json")?;
-        let json_bytes: Vec<u8> = py
-            .import("orjson")?
-            .call_method1("dumps", (to_json,))?
-            .extract()?;
-        let json_str = std::str::from_utf8(&json_bytes)
-            .map_err(|e| QueryError::new_err(format!("bad UTF-8 from orjson: {e}")))?;
-        let json_val: Value = serde_json::from_str(json_str)
-            .map_err(|e| QueryError::new_err(format!("bad query JSON: {e}")))?;
         // get_mmap() remaps automatically if the on-disk inode has changed since
         // the last reload, keeping workers off stale (deleted) mappings.
         let mmap = self.get_mmap()?;
@@ -7752,28 +7758,12 @@ impl QueryEngine {
         // validation cannot be the safety boundary; the trusted write path is.
         let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
 
-        // Must run before build_filter so legality shifts resolve in workers
-        // that never executed the load path themselves.
-        sync_format_shifts(&data.format_shifts);
-        let mut filter_expr = build_filter(&json_val)
-            .map_err(|e| QueryError::new_err(format!("build_filter: {e}")))?;
-        filter_expr.bind(&data.coll_vocab, &data.coll_vocab_sorted, &data.artist_vocab, &data.mana_vocab, &data.indexes.flavor, &data.strings);
-
-        // Consume the plane-expressible part of the filter (colors/identity/
-        // types) into a bitmap expression; run_query evaluates it in a few
-        // hundred word ops instead of per-card dispatch. Guarded on the archive
-        // carrying planes for this card count — the format-version bump already
-        // rejects pre-plane archives, this is defense in depth.
-        let (plane_expr, mut filter_expr) =
-            if u32::from(data.indexes.planes.n_cards) as usize == data.cards.len() && !data.cards.is_empty() {
-                // Matches run_query's own unique -> Mode mapping exactly
-                // (anything other than "artwork"/"printing" is Mode::Card,
-                // not just the literal string "card") -- see split_planes's
-                // unique_is_card doc.
-                split_planes(filter_expr, &data.indexes.planes, &data.indexes.oracle_trigram.words, !matches!(unique, "artwork" | "printing"))
-            } else {
-                (None, filter_expr)
-            };
+        // Parse the query, bind it against this archive's vocabs, and consume the
+        // plane-expressible part (colors/identity/types) into a bitmap expression
+        // run_query evaluates in a few hundred word ops instead of per-card
+        // dispatch. Shared verbatim with explain()/explain_analyze() — see
+        // bind_and_split_filter.
+        let (plane_expr, mut filter_expr) = bind_and_split_filter(py, filters, unique, data)?;
 
         let (total, page) = run_query(
             &data.cards, &data.printings, &data.offsets, &data.strings, &mut filter_expr, plane_expr.as_ref(),
@@ -7789,9 +7779,15 @@ impl QueryEngine {
     }
 
     /// #745 primitive 1: every applicable plan's predicted cost for this query,
-    /// ranked cheapest first (`result[0]` is what `query()` would actually run) —
-    /// the numbers the router already computes on every query, just exposed
-    /// instead of thrown away. Diagnostic only; safe to call constantly.
+    /// ranked cheapest first — the numbers the router already computes on every
+    /// query, just exposed instead of thrown away. Diagnostic only; safe to call
+    /// constantly.
+    ///
+    /// `result[0]` is what `query()` runs in the common case, with one exception:
+    /// for a bare-range query (`Prep::Range` acquire), a materializing plan's cost
+    /// here is the router's coarse pre-materialize estimate, and the router may
+    /// lazily re-materialize and re-choose on exact features at dispatch — so the
+    /// executed plan can differ from `result[0]`. See the free `explain` fn's doc.
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (*, filters, unique="card", orderby="edhrec", direction="asc", limit=100, offset=0))]
     fn explain<'py>(
@@ -7811,11 +7807,7 @@ impl QueryEngine {
 
         let sort_col = orderby_to_col(orderby);
         let descending = direction == "desc";
-        let mode = match unique {
-            "artwork"  => Mode::Artwork,
-            "printing" => Mode::Printing,
-            _          => Mode::Card,
-        };
+        let mode = mode_from_unique(unique);
         let estimates = explain(
             &data.cards, &data.printings, &data.offsets, &data.strings, &mut filter_expr, plane_expr.as_ref(),
             mode, sort_col, descending, limit, offset, &data.indexes,
@@ -7851,10 +7843,16 @@ impl QueryEngine {
         let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
         let (plane_expr, filter_expr) = bind_and_split_filter(py, filters, unique, data)?;
 
-        let trials = explain_analyze(
-            &data.cards, &data.printings, &data.offsets, &data.strings, &filter_expr, plane_expr.as_ref(),
-            unique, prefer, orderby, direction, limit, offset, &data.indexes, num_warmups, num_trials,
-        );
+        // Release the GIL for the timing loop: it's pure Rust (no Python calls) and
+        // runs plans × (warmups + trials) executions, so a long explain_analyze
+        // shouldn't block other Python threads. The bind above and the PyDict
+        // conversion below stay on the GIL.
+        let trials = py.detach(|| {
+            explain_analyze(
+                &data.cards, &data.printings, &data.offsets, &data.strings, &filter_expr, plane_expr.as_ref(),
+                unique, prefer, orderby, direction, limit, offset, &data.indexes, num_warmups, num_trials,
+            )
+        });
 
         let rows: Vec<Bound<PyDict>> = trials.iter().map(|t| plan_trial_to_pydict(py, t)).collect::<PyResult<Vec<_>>>()?;
         PyList::new(py, rows)
