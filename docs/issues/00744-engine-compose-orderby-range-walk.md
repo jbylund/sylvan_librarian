@@ -23,7 +23,7 @@ Root cause has two independent parts, both avoidable:
    97,206 printings) — for a predicate whose *true* information content is "308 printings are
    excluded," not "96,898 are included."
 2. **The paging is expensive because there's no permutation for `orderby=usd`.** Per
-   `local-engine-compose-permutation-fallback.md`, `usd`/`rarity` have no card-space sort
+   `done/00740-engine-compose-permutation-fallback.md`, `usd`/`rarity` have no card-space sort
    permutation, so `printing_compose_fastpath` either walks via `gather_composed_page` (visit every
    candidate card, compute a sort key, quickselect — `O(n_cards)` regardless of selectivity) or
    declines composing outright via `COMPOSE_GATHER_MAX_CARD_FRACTION` when the predicate is this
@@ -135,7 +135,7 @@ as every other doc in this thread.
 
 ## Related
 
-- [local-engine-compose-permutation-fallback.md](local-engine-compose-permutation-fallback.md) —
+- [done/00740-engine-compose-permutation-fallback.md](done/00740-engine-compose-permutation-fallback.md) —
   where `gather_composed_page` and `COMPOSE_GATHER_MAX_CARD_FRACTION` came from; this doc's paging
   fix is the case that guard was never meant to cover.
 - [local-engine-negated-range-narrowing.md](local-engine-negated-range-narrowing.md) — sibling

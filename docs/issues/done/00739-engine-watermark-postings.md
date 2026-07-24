@@ -1,7 +1,7 @@
 # Engine: Watermark Postings Index
 
-**Status: done.** No GitHub issue filed — small, mechanical, found while investigating the
-slowest query in a broad realistic-traffic survey.
+**Status: done**, shipped as [#739](https://github.com/jbylund/sylvan_librarian/pull/739) — small,
+mechanical, found while investigating the slowest query in a broad realistic-traffic survey.
 
 ## Why
 

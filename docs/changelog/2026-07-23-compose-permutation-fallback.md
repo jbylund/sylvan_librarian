@@ -28,4 +28,4 @@ Every `edhrec`-orderby and plane-only control held flat; `total` parity held eve
 `usd` exercised the no-permutation path). `cargo test` (debug + release) 128/128;
 `test_engine_property.py` + `test_engine_unit.py` 158/158.
 
-Design doc: `docs/issues/local-engine-compose-permutation-fallback.md`.
+Design doc: `docs/issues/done/00740-engine-compose-permutation-fallback.md`.

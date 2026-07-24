@@ -6,8 +6,8 @@ yet implemented or measured. Filed investigating why `-set:dmu year:2023`
 only 2 of its 9,234 matches. A step 4 for
 [#731](00731-engine-compose-universal-evaluator.md)'s leaf-source table, alongside step 1 (range
 leaves, shipped) and the sibling work this session added:
-[local-engine-compose-permutation-fallback.md](local-engine-compose-permutation-fallback.md) and
-[local-engine-negated-range-narrowing.md](local-engine-negated-range-narrowing.md).
+[done/00740-engine-compose-permutation-fallback.md](done/00740-engine-compose-permutation-fallback.md)
+and [local-engine-negated-range-narrowing.md](local-engine-negated-range-narrowing.md).
 
 ## The finding
 
@@ -70,7 +70,7 @@ null-valued printing satisfies neither the direct predicate nor its negation (th
 [local-engine-negated-range-narrowing.md](local-engine-negated-range-narrowing.md)). `set_code` has
 no null case (every printing belongs to exactly one set) — "all-ones minus postings" is exact.
 `watermark` **is** nullable (`card_watermark_id != NONE_STR` gates the postings build in
-`reload_commit`, see [local-engine-watermark-postings.md](done/local-engine-watermark-postings.md)) —
+`reload_commit`, see [00739-engine-watermark-postings.md](done/00739-engine-watermark-postings.md)) —
 "all-ones minus postings" would wrongly count no-watermark printings as matching `-watermark:x`. The
 negated compose leaf should therefore cover `set:` only, or `watermark:` needs an explicit
 known-mask subtraction (a third small postings-derived bitmap of "has any watermark") before its
@@ -98,10 +98,10 @@ known-mask question.
 
 - [#731](00731-engine-compose-universal-evaluator.md) — the parent plan; this is a step-4 leaf kind
   its table doesn't yet enumerate.
-- [local-engine-compose-permutation-fallback.md](local-engine-compose-permutation-fallback.md) —
+- [done/00740-engine-compose-permutation-fallback.md](done/00740-engine-compose-permutation-fallback.md) —
   sibling fix from the same broad-survey investigation.
 - [local-engine-negated-range-narrowing.md](local-engine-negated-range-narrowing.md) — where the
   nullable-field `NOT` trap was found and fixed for dates; the same discipline applies to watermark
   here.
-- [done/local-engine-watermark-postings.md](done/local-engine-watermark-postings.md) — the
+- [done/00739-engine-watermark-postings.md](done/00739-engine-watermark-postings.md) — the
   `set_codes`/`watermarks` `TagIndex` this reuses.
