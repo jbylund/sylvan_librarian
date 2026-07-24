@@ -65,4 +65,4 @@ New Rust tests `negated_range_narrowing` and `and_child_rank_matches_narrow_rec_
 test` (debug + release) 131/131; `test_engine_property.py` + `test_engine_unit.py` 158/158; clippy
 unchanged from baseline.
 
-Design doc: `docs/issues/local-engine-negated-range-narrowing.md`.
+Design doc: `docs/issues/done/00741-engine-negated-range-narrowing.md`.

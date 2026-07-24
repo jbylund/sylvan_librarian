@@ -64,7 +64,7 @@ resolved to cards via postings — the same dictionary-encode-then-postings shap
    part at all.
 4. **Negation is free**: re-run the same tiny scan checking for `Tri::False` (or negate the
    comparison op before evaluating) instead of complementing a candidate set. No NULL-inclusion risk
-   at all — this shape sidesteps the entire class of problem `local-engine-negated-range-narrowing.md`
+   at all — this shape sidesteps the entire class of problem `00741-engine-negated-range-narrowing.md`
    spent three fixes on, structurally, by recomputing from scratch instead of complementing.
 
 ### The one real implementation decision: shared evaluator, or a second one?
@@ -125,7 +125,7 @@ holds — measure once built, not asserted here.
 - [00744-engine-compose-orderby-range-walk.md](00744-engine-compose-orderby-range-walk.md) — sibling
   doc from the same survey pass, covering the `format:commander`/`format:legacy` cluster (#3–6)
   instead of the arith cluster (#8/#15 in `branch-c6484a3.csv`).
-- [local-engine-negated-range-narrowing.md](local-engine-negated-range-narrowing.md) — where the
-  `and_child_rank`/`narrow_rec` single-source-of-truth precedent (relevant to the shared-evaluator
-  decision above) came from.
+- [done/00741-engine-negated-range-narrowing.md](done/00741-engine-negated-range-narrowing.md) —
+  where the `and_child_rank`/`narrow_rec` single-source-of-truth precedent (relevant to the
+  shared-evaluator decision above) came from.
 - `docs/workflows/performance-pr-workflow.md` — the process this doc follows.

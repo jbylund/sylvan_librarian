@@ -7,7 +7,7 @@ only 2 of its 9,234 matches. A step 4 for
 [#731](00731-engine-compose-universal-evaluator.md)'s leaf-source table, alongside step 1 (range
 leaves, shipped) and the sibling work this session added:
 [done/00740-engine-compose-permutation-fallback.md](done/00740-engine-compose-permutation-fallback.md)
-and [local-engine-negated-range-narrowing.md](local-engine-negated-range-narrowing.md).
+and [done/00741-engine-negated-range-narrowing.md](done/00741-engine-negated-range-narrowing.md).
 
 ## The finding
 
@@ -67,7 +67,7 @@ estimate from calibrated per-op constants, not a benchmark.
 `#731`'s own caveat applies here directly: **`NOT` over a nullable field needs a "known" mask** — a
 null-valued printing satisfies neither the direct predicate nor its negation (the same trivalent trap
 `tight_narrow_space` had for `DateCmp`/`YearCmp`, fixed this session in
-[local-engine-negated-range-narrowing.md](local-engine-negated-range-narrowing.md)). `set_code` has
+[done/00741-engine-negated-range-narrowing.md](done/00741-engine-negated-range-narrowing.md)). `set_code` has
 no null case (every printing belongs to exactly one set) — "all-ones minus postings" is exact.
 `watermark` **is** nullable (`card_watermark_id != NONE_STR` gates the postings build in
 `reload_commit`, see [00739-engine-watermark-postings.md](done/00739-engine-watermark-postings.md)) —
@@ -100,7 +100,7 @@ known-mask question.
   its table doesn't yet enumerate.
 - [done/00740-engine-compose-permutation-fallback.md](done/00740-engine-compose-permutation-fallback.md) —
   sibling fix from the same broad-survey investigation.
-- [local-engine-negated-range-narrowing.md](local-engine-negated-range-narrowing.md) — where the
+- [done/00741-engine-negated-range-narrowing.md](done/00741-engine-negated-range-narrowing.md) — where the
   nullable-field `NOT` trap was found and fixed for dates; the same discipline applies to watermark
   here.
 - [done/00739-engine-watermark-postings.md](done/00739-engine-watermark-postings.md) — the
