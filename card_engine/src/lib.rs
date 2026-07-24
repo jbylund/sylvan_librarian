@@ -2704,7 +2704,22 @@ fn tight_narrow_space(f: &FilterExpr) -> Option<bool> {
                 _ => None,
             }
         }
-        FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. } => Some(true),
+        // Absent deliberately, same reasoning as price above (found while adding negated-range
+        // narrowing, docs/issues/local-engine-negated-range-narrowing.md): `released_at` is
+        // nullable, and this classifier previously claimed `Some(true)` unconditionally, which the
+        // generic Not-arm below would have trusted to bit-complement a tight DateCmp/YearCmp
+        // set — wrongly pulling in every NULL-dated printing (absent from the index, not failing a
+        // bound check) into the *candidate* set for e.g. `-year:1993`. Not a wrong final answer —
+        // `narrow_candidates_exact`'s exactness check reads the complement's own (always-loose)
+        // `.tight` field, not this classifier, so residual `card_pass` verification still ran and
+        // dropped the NULL-dated printings before any total/page was returned — but a real,
+        // avoidable cost regression (an unnecessary complement built and then fully re-verified) for
+        // any negated `DateCmp`/`YearCmp` query. The four ordered ops now narrow exactly through
+        // `bare_range_bounds`'s own `Not` handling instead (no complement, no NULL risk, no wasted
+        // verification); `Eq`'s negation (`Ne`) isn't a representable range either way and correctly
+        // declines via that path already — so nothing is lost by removing this from the "safe to
+        // complement" list.
+        FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. } => None,
         FilterExpr::TextExact { field: TextField::SetCode, op: CmpOp::Eq, .. } => Some(true),
         FilterExpr::ArtistMatch { .. } | FilterExpr::FlavorMatch { .. } => Some(true),
         FilterExpr::And(children) | FilterExpr::Or(children) => {
@@ -2789,12 +2804,56 @@ fn narrow_candidates(
 /// real traffic argues for moving it.
 static AND_SKIP_THRESHOLD: LazyLock<usize> = LazyLock::new(|| guard_env("CARD_ENGINE_AND_SKIP_THRESHOLD", 2_048));
 
+/// `-r:x`'s dedicated shape: a rarity comparison, any op (`narrow_rarity` isn't limited to the four
+/// ordered ones the printing-range path needs — see that arm's doc). Index-free — eligibility never
+/// depends on `indexes`, only the actual re-narrow work does. The single source of truth for this
+/// shape: `narrow_rec`'s own `-r:x` arm gates on this function directly (not a separate inline
+/// `matches!`), and so does `and_child_rank` — the two can no longer drift apart.
+fn is_rarity_negation_shape(f: &FilterExpr) -> bool {
+    matches!(
+        f,
+        FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), rhs: NumExpr::Const(_), .. }
+            | FilterExpr::NumericCmp { lhs: NumExpr::Const(_), rhs: NumExpr::Field(NumField::RarityInt), .. }
+    )
+}
+
+/// `-f:x`/`-banned:x`/`-restricted:x`'s dedicated shape: a tracked-format `Legality` leaf.
+/// Index-free (`status_plane_bases` takes only `expected`). The single source of truth for this
+/// shape: `narrow_rec`'s own `-f:x` arm gates on this function directly, and so does `and_child_rank`.
+fn is_legality_negation_shape(f: &FilterExpr) -> bool {
+    matches!(f, FilterExpr::Legality { shift: Some(_), expected } if status_plane_bases(*expected).is_some())
+}
+
 /// Evaluation-cost rank for And children: cheap sources first (postings,
 /// planes, card numerics, trigram lookups), printing-space ranges second
 /// (their broad form pays an O(k) scatter), complements last (broad by
 /// construction, useful only when nothing else narrowed).
-fn and_child_rank(f: &FilterExpr) -> u8 {
+fn and_child_rank(f: &FilterExpr, indexes: &Archived<CardIndexes>) -> u8 {
     match f {
+        // `-r:x` / `-f:x`: dedicated re-narrows, not a broad complement — rank them exactly like
+        // their un-negated inner form. Guarded on the same index-free predicates `narrow_rec`'s own
+        // `-r:x`/`-f:x` arms gate on (not a separate shape check), so a shape either function
+        // recognizes, the other does too, by construction.
+        FilterExpr::Not(inner) if is_rarity_negation_shape(inner) || is_legality_negation_shape(inner) => and_child_rank(inner, indexes),
+        // `-usd<c` / `-cn<c` / `-date>c` / `-year>=c`: same "cheap re-narrow, not a complement"
+        // reasoning, but delegated to `bare_range_bounds` itself (called on the `Not` node `f`, not
+        // the unwrapped `inner` — its own `Not` arm is what applies `negate_op` before checking
+        // representability, so calling it on `inner` directly would wrongly accept `Eq`, whose
+        // negation `Ne` isn't a representable range). `and_child_rank` now takes `indexes` for
+        // exactly this: unlike the index-free rarity/legality shapes, this is the one dedicated arm
+        // whose real implementation (`resolve_numeric_range_leaf`'s index lookup) already needs it,
+        // so there's no way to mirror it index-free without a second, driftable implementation — call
+        // the real thing directly instead, the same way `is_printing_composable`/`compose_printing_bits`/
+        // `compose_printing_estimate` already do.
+        FilterExpr::Not(inner) if bare_range_bounds(f, indexes).is_some() => and_child_rank(inner, indexes),
+        // Any other `Not` (a card-space numeric like `-cmc:3`, negated equality on price/cn/date/year,
+        // or a plain generic complement) falls to the broad-complement-or-decline tier — this used to
+        // be the *only* arm here, silently catching every negated cheap shape above too (bug 1), then
+        // (after that fix) still catching `-cmc:3`/negated-equality because the guard was too broad
+        // (bug 4), then still catching `-f:x` because the guard didn't know about it at all (bug 4
+        // follow-up) — each found because a shape recognized here disagreed with what `narrow_rec`
+        // actually dispatched to. The three guards above are now `narrow_rec`'s own guards, not
+        // reimplementations, so a future fourth dedicated arm can't drift from this one silently.
         FilterExpr::Not(_) => 2,
         // Regex trigram-narrow (#734 step 3) is second-tier: its literal factor may be broad (`flying`),
         // so pay for it only after cheap plane/posting sources — the And early-stop then skips it when a
@@ -3126,9 +3185,10 @@ fn narrow_rec(
         // both `∃p: status(p)` and `∃p: ¬status(p)` at once) instead of
         // reading the status's `_ABSENT`/`_ILLEGAL` plane directly, which is
         // what this arm does.
-        FilterExpr::Not(inner)
-            if matches!(inner.as_ref(), FilterExpr::Legality { shift: Some(_), expected } if status_plane_bases(*expected).is_some()) =>
-        {
+        // Gated on `is_legality_negation_shape` (also `and_child_rank`'s guard for this shape) rather
+        // than an inline `matches!` — one definition of "is this the -f:x shape," not two that could
+        // silently disagree (see that function's doc).
+        FilterExpr::Not(inner) if is_legality_negation_shape(inner) => {
             let FilterExpr::Legality { shift: Some(shift), expected } = inner.as_ref() else { unreachable!() };
             Narrowed::loose(Candidates::CardBits(legality_candidate_bits(indexes, n_cards, *shift, *expected, true)?))
         }
@@ -3143,18 +3203,40 @@ fn narrow_rec(
         // the logically-negated operator (Not(Eq(v)) == Ne(v), verified
         // against tri()'s actual Null handling in negate_op's doc comment),
         // which is a different and correct operation.
-        FilterExpr::Not(inner)
-            if matches!(
-                inner.as_ref(),
-                FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), rhs: NumExpr::Const(_), .. }
-                    | FilterExpr::NumericCmp { lhs: NumExpr::Const(_), rhs: NumExpr::Field(NumField::RarityInt), .. }
-            ) =>
-        {
+        // Gated on `is_rarity_negation_shape` (also `and_child_rank`'s guard for this shape) rather
+        // than an inline `matches!` — same single-source-of-truth reasoning as `-f:x` above.
+        FilterExpr::Not(inner) if is_rarity_negation_shape(inner) => {
             let FilterExpr::NumericCmp { lhs, op, rhs } = inner.as_ref() else { unreachable!() };
             match (lhs, rhs) {
                 (NumExpr::Field(NumField::RarityInt), NumExpr::Const(v)) => narrow_rarity(indexes, n_cards, negate_op(*op), *v),
                 (NumExpr::Const(v), NumExpr::Field(NumField::RarityInt)) => narrow_rarity(indexes, n_cards, negate_op(flip_op(*op)), *v),
                 _ => unreachable!(),
+            }
+        }
+
+        // -usd<c / -cn<c / -date>c / -year>=c: same reasoning as -r:x above (NOT(x op c) ==
+        // x negate_op(op) c, exact per negate_op's doc), but for the printing-range-indexed fields
+        // instead of rarity's card-space postings — `bare_range_bounds` already resolves both the
+        // field dispatch and the negation (see its doc), so this arm is just "ask it, then narrow or
+        // prove empty," not a second implementation of the field-matching logic above. Guarded on
+        // the inner shape so cmc/power/toughness (tight card-space, correctly handled by the
+        // generic Not-complement below) and -r:x (the arm just above) aren't intercepted here.
+        // `broad_ok` is forced `true` regardless of the caller's own value — same choice the
+        // generic Not-arm below already makes for its inner check (always narrows with
+        // `broad_ok: true`): negating a predicate is exactly the shape where the flipped bounds are
+        // worth computing even when broad, since there's no cheaper alternative once we're already
+        // committed to this field (measured: without forcing this, a broad negated range like
+        // `-cn<100` — `cn>=100`, ~64% of printings — declined to a full scan and *regressed* 0.545ms
+        // → 0.661ms vs. before this arm existed at all).
+        FilterExpr::Not(inner)
+            if matches!(inner.as_ref(), FilterExpr::NumericCmp { .. } | FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. })
+                && bare_range_bounds(filter, indexes).is_some() =>
+        {
+            let (idx, lo, hi) = bare_range_bounds(filter, indexes).expect("guarded by bare_range_bounds");
+            if lo >= hi {
+                Narrowed::tight(Candidates::Printings(Vec::new()))
+            } else {
+                range_narrowed(idx, lo, hi, n_printings, true, true)
             }
         }
 
@@ -3311,7 +3393,7 @@ fn narrow_rec(
             // range bitmaps only materialize when a printing-space partner
             // exists to intersect them with; complements only when nothing
             // else narrowed at all.
-            let mut ranked: Vec<(u8, &FilterExpr)> = children.iter().map(|c| (and_child_rank(c), c)).collect();
+            let mut ranked: Vec<(u8, &FilterExpr)> = children.iter().map(|c| (and_child_rank(c, indexes), c)).collect();
             ranked.sort_by_key(|(r, _)| *r);
             let mut card_sets: Vec<Narrowed> = Vec::new();
             let mut printing_sets: Vec<Narrowed> = Vec::new();
@@ -4030,21 +4112,44 @@ static PRINTING_COMPOSE: LazyLock<usize> = LazyLock::new(|| guard_env("CARD_ENGI
 /// zero-width `[v, v)` so the fastpath's `k` resolves to 0. Reuses the exact bound derivations the
 /// narrowing path uses (`int_range_bounds`, [`date_range_bounds`], [`year_range_bounds`]) so the
 /// fastpath and `narrow_rec` can never disagree on which printings a predicate covers.
+/// Which printing-range index a bare `NumericCmp` targets, plus its op normalized to `field op
+/// const` order (`flip_op` undoes a `const op field` parse) — shared by `bare_range_bounds`'s direct
+/// and negated (`Not`) cases so the field/operand-order dispatch is written once. Only
+/// price/collector-number are printing-range-indexed; cmc/power/toughness/rarity are card-space and
+/// belong to other paths.
+fn resolve_numeric_range_leaf<'i>(
+    lhs: &NumExpr,
+    op: CmpOp,
+    rhs: &NumExpr,
+    indexes: &'i Archived<CardIndexes>,
+) -> Option<(&'i Archived<PrintingRangeIndex>, CmpOp, f64)> {
+    match (lhs, rhs) {
+        (NumExpr::Field(NumField::PriceUsd), NumExpr::Const(v)) => Some((&indexes.price_usd, op, snap_to_nearest_cent(*v * PRICE_CENTS_PER_DOLLAR))),
+        (NumExpr::Const(v), NumExpr::Field(NumField::PriceUsd)) => Some((&indexes.price_usd, flip_op(op), snap_to_nearest_cent(*v * PRICE_CENTS_PER_DOLLAR))),
+        (NumExpr::Field(NumField::CollectorNumberInt), NumExpr::Const(v)) => Some((&indexes.collector_number, op, *v)),
+        (NumExpr::Const(v), NumExpr::Field(NumField::CollectorNumberInt)) => Some((&indexes.collector_number, flip_op(op), *v)),
+        _ => None,
+    }
+}
+
+/// Bare bounds for a printing-range-indexed comparison — `usd`/`cn`/`date`/`year` — and, since
+/// `NOT(x op c) == x negate_op(op) c` is exact under this engine's null semantics (`negate_op`'s own
+/// doc: verified against `tri()`'s actual `NumVal::Null` short-circuit, the same guarantee
+/// `narrow_rec`'s `-r:x` arm already relies on), a `Not` wrapping one of these four shapes too —
+/// `-usd<50` becomes `usd>=50`'s bounds directly, no complement, no residual. `Eq`/`Ne` don't reduce
+/// this way (`Ne` isn't a single half-open range), but nothing needs to special-case that:
+/// `int_range_bounds`/`date_range_bounds`/`year_range_bounds` already return `None` for `Ne`
+/// (`negate_op(Eq) == Ne`), so a negated equality falls out on its own. Every caller of this function
+/// — `narrow_rec`'s own range narrowing, `is_printing_composable`, `compose_printing_estimate`,
+/// `compose_printing_bits` — gets the negated shape for free; none of them special-case `Not`
+/// themselves (docs/issues/local-engine-negated-range-narrowing.md).
 fn bare_range_bounds<'i>(
     filter: &FilterExpr,
     indexes: &'i Archived<CardIndexes>,
 ) -> Option<(&'i Archived<PrintingRangeIndex>, u32, u32)> {
     match filter {
         FilterExpr::NumericCmp { lhs, op, rhs } => {
-            // Only price/collector-number are printing-range-indexed; cmc/power/toughness/rarity are
-            // card-space and belong to other paths. Value snapping matches narrow_rec's `price` closure.
-            let (idx, op, value) = match (lhs, rhs) {
-                (NumExpr::Field(NumField::PriceUsd), NumExpr::Const(v)) => (&indexes.price_usd, *op, snap_to_nearest_cent(*v * PRICE_CENTS_PER_DOLLAR)),
-                (NumExpr::Const(v), NumExpr::Field(NumField::PriceUsd)) => (&indexes.price_usd, flip_op(*op), snap_to_nearest_cent(*v * PRICE_CENTS_PER_DOLLAR)),
-                (NumExpr::Field(NumField::CollectorNumberInt), NumExpr::Const(v)) => (&indexes.collector_number, *op, *v),
-                (NumExpr::Const(v), NumExpr::Field(NumField::CollectorNumberInt)) => (&indexes.collector_number, flip_op(*op), *v),
-                _ => return None,
-            };
+            let (idx, op, value) = resolve_numeric_range_leaf(lhs, *op, rhs, indexes)?;
             match int_range_bounds(op, value)? {
                 None => Some((idx, 0, 0)),
                 Some((lo, hi)) => Some((idx, lo, hi)),
@@ -4058,6 +4163,24 @@ fn bare_range_bounds<'i>(
             let (lo, hi) = year_range_bounds(*op, *year)?;
             Some((&indexes.released_at, lo, hi))
         }
+        FilterExpr::Not(inner) => match inner.as_ref() {
+            FilterExpr::NumericCmp { lhs, op, rhs } => {
+                let (idx, op, value) = resolve_numeric_range_leaf(lhs, negate_op(*op), rhs, indexes)?;
+                match int_range_bounds(op, value)? {
+                    None => Some((idx, 0, 0)),
+                    Some((lo, hi)) => Some((idx, lo, hi)),
+                }
+            }
+            FilterExpr::DateCmp { op, value } => {
+                let (lo, hi) = date_range_bounds(negate_op(*op), *value)?;
+                Some((&indexes.released_at, lo, hi))
+            }
+            FilterExpr::YearCmp { op, year } => {
+                let (lo, hi) = year_range_bounds(negate_op(*op), *year)?;
+                Some((&indexes.released_at, lo, hi))
+            }
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -4328,10 +4451,18 @@ fn is_printing_composable(filter: &FilterExpr, indexes: &Archived<CardIndexes>) 
         // #731: usd/cn/date range leaves — the in-range index slice scatters into an exact printing
         // bitmap (`range_leaf_bits`). `bare_range_bounds` recognizes the printing-range-indexed shape
         // and returns its `[lo,hi)` bounds: the ordered ops, and `Eq` too (a narrow `[v, v+1)`). Only
-        // `Ne`, a negation, or a card-space field (cmc/power/rarity) yields `None` → stays on the
-        // general path. This is what lets a range compose with border/rarity/legality — and
-        // range∧range — exactly, in any distinct-on.
+        // `Ne` or a card-space field (cmc/power/rarity) yields `None` → stays on the general path.
+        // This is what lets a range compose with border/rarity/legality — and range∧range — exactly,
+        // in any distinct-on.
         FilterExpr::NumericCmp { .. } | FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. } => {
+            bare_range_bounds(filter, indexes).is_some()
+        }
+        // `-usd<50` etc.: `bare_range_bounds` reduces this to the flipped comparison's bounds
+        // directly (see its doc) — composable exactly like the bare case above. Guarded on the
+        // inner shape (not a bare `Not(_)` catch-all) so this doesn't also try to claim
+        // `-border:`/`-r:`/`-f:`, which have their own dedicated (non-range) Not handling elsewhere
+        // and stay non-composable here, same as before this arm existed.
+        FilterExpr::Not(inner) if matches!(inner.as_ref(), FilterExpr::NumericCmp { .. } | FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. }) => {
             bare_range_bounds(filter, indexes).is_some()
         }
         _ => false,
@@ -4499,7 +4630,7 @@ fn compose_printing_bits(
         FilterExpr::Legality { shift: Some(shift), expected } => {
             legality_leaf_bits(*shift, *expected, indexes, offsets, printings, n_printings)
         }
-        FilterExpr::NumericCmp { .. } | FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. }
+        FilterExpr::NumericCmp { .. } | FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. } | FilterExpr::Not(_)
             if bare_range_bounds(filter, indexes).is_some() =>
         {
             let (idx, lo, hi) = bare_range_bounds(filter, indexes).expect("guarded by bare_range_bounds");
@@ -4554,9 +4685,10 @@ fn compose_printing_estimate(
             let est = if n_cards == 0 { 0 } else { card_exists * n_printings / n_cards };
             (est, est, 0)
         }
-        // Range: `k` in-range printings from the index partition points (O(log n), no scatter here);
-        // matches ≈ k, and k rides `scatter` — the cheap range-slice scatter into the printing bitmap.
-        FilterExpr::NumericCmp { .. } | FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. }
+        // Range (bare or negated — `-usd<50` etc., see `bare_range_bounds`'s doc): `k` in-range
+        // printings from the index partition points (O(log n), no scatter here); matches ≈ k, and k
+        // rides `scatter` — the cheap range-slice scatter into the printing bitmap.
+        FilterExpr::NumericCmp { .. } | FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. } | FilterExpr::Not(_)
             if bare_range_bounds(filter, indexes).is_some() =>
         {
             let (idx, lo, hi) = bare_range_bounds(filter, indexes).expect("guarded by bare_range_bounds");

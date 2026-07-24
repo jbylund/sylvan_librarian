@@ -1,5 +1,5 @@
 use super::{
-    assign_name_ranks,
+    and_child_rank, assign_name_ranks,
     build_numeric_index, build_oracle_text_index, build_tag_index, build_trigram_index,
     build_rarity_index, build_flavor_index, build_thresholded_tag_index, build_sort_permutations,
     assign_artwork_groups, build_bit_planes, build_border_printing_planes, build_rarity_printing_planes, build_divergent_ids, build_name_bigram_index, build_printing_to_card, flavor_fingerprint, flavor_match_sets,
@@ -5553,6 +5553,170 @@ fn price_narrowing_bound_matches_direct_comparison_on_and_off_grid() {
             }
         }
     }
+}
+
+#[test]
+fn negated_range_narrowing() {
+    // docs/issues/local-engine-negated-range-narrowing.md: NOT(x op c) == x negate_op(op) c is
+    // exact under this engine's null semantics, so -usd<0.25 narrows identically to usd>=0.25 --
+    // including on the no-price printing, which must fail *both* forms, not just the direct one.
+    let mut vocab = VocabInterner::new();
+    let cards = vec![stub_card(1, TYPE_CREATURE, &[], &mut vocab), stub_card(2, TYPE_CREATURE, &[], &mut vocab)];
+    let mut data = store_of(cards, &[2, 2], vocab); // card 0: pids 0,1; card 1: pids 2,3
+    data.printings[0].price_usd = Some(10); // $0.10
+    data.printings[1].price_usd = Some(30); // $0.30
+    data.printings[2].price_usd = None; // no price -- must fail both usd<0.25 and -usd<0.25
+    data.printings[3].price_usd = Some(1000); // $10.00
+    data.printings[0].collector_number_int = Some(5);
+    data.printings[1].collector_number_int = Some(150);
+    data.printings[2].collector_number_int = None;
+    data.printings[3].collector_number_int = Some(200);
+    data.printings[0].released_at_int = Some(19_930_805);
+    data.printings[1].released_at_int = Some(20_241_115);
+    data.printings[2].released_at_int = None;
+    data.printings[3].released_at_int = Some(20_200_101);
+    data.indexes.price_usd = build_range_index(&data.printings, |p| p.price_usd);
+    data.indexes.collector_number = build_range_index(&data.printings, |p| p.collector_number_int.map(u32::from));
+    data.indexes.released_at = build_range_index(&data.printings, |p| p.released_at_int);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let not_usd_lt_25 = FilterExpr::Not(Box::new(FilterExpr::NumericCmp {
+        lhs: NumExpr::Field(NumField::PriceUsd),
+        op: CmpOp::Lt,
+        rhs: NumExpr::Const(0.25),
+    }));
+    let usd_ge_25 = FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op: CmpOp::Ge, rhs: NumExpr::Const(0.25) };
+    // pid1 ($0.30) and pid3 ($10.00) satisfy both forms; pid0 ($0.10) fails both directly; pid2
+    // (no price) fails both -- the trivalent guarantee, not just the ordinary in-range cases.
+    for (i, f) in [&not_usd_lt_25, &usd_ge_25].into_iter().enumerate() {
+        match narrow_candidates(f, &archived.indexes, &archived.offsets, &archived.cards) {
+            Some(Candidates::Printings(v)) => assert_eq!(v, vec![1, 3], "form {i}"),
+            other => panic!("expected tight printing narrowing, got {other:?}"),
+        }
+    }
+
+    // The motivating example: -usd<0.25 usd<5 -- only pid1 ($0.30) survives both halves (pid3 at
+    // $10.00 fails usd<5; pid0/pid2 already fail the first half above). Checked end-to-end via
+    // run_query, not narrow_candidates directly: with only 4 printings, the first child alone
+    // already narrows below AND_SKIP_THRESHOLD, so the And arm's (separate, pre-existing, correct)
+    // early-stop skips evaluating the second child as a *narrowing* source -- residual verification
+    // still catches it, so the final answer is exact either way, just not through narrow_candidates
+    // alone on a corpus this tiny.
+    let usd_lt_5 = FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op: CmpOp::Lt, rhs: NumExpr::Const(5.0) };
+    let mut compound = FilterExpr::And(vec![not_usd_lt_25, usd_lt_5]);
+    let (total, page) = super::run_query(
+        &archived.cards,
+        &archived.printings,
+        &archived.offsets,
+        &archived.strings,
+        &mut compound,
+        None,
+        "printing",
+        "default",
+        "edhrec",
+        "asc",
+        100,
+        0,
+        &archived.indexes,
+    );
+    assert_eq!(total, 1);
+    assert_eq!(page.len(), 1);
+    let got_cents = page[0].1.price_usd.as_ref().map(|v| u32::from(*v));
+    assert_eq!(got_cents, Some(30), "must be pid1 ($0.30), the only printing satisfying both halves");
+
+    // Same compound is printing-composable (#731/#724's PrintingCompose), and its composed bits
+    // agree with narrow_candidates -- the compose path (is_printing_composable /
+    // compose_printing_bits) shares bare_range_bounds with narrow_rec, not a second implementation.
+    assert!(super::is_printing_composable(&compound, &archived.indexes));
+    let n_printings = archived.printings.len();
+    let pbits = super::compose_printing_bits(&compound, &archived.indexes, &archived.offsets, &archived.printings, n_printings);
+    let set_bits: Vec<u32> = (0..n_printings as u32).filter(|&p| pbits[p as usize >> 6] & (1u64 << (p & 63)) != 0).collect();
+    assert_eq!(set_bits, vec![1]);
+
+    // -cn<50 -> cn>=50: pid1 (150) and pid3 (200); not pid0 (5) or pid2 (no collector number).
+    let not_cn_lt_50 = FilterExpr::Not(Box::new(FilterExpr::NumericCmp {
+        lhs: NumExpr::Field(NumField::CollectorNumberInt),
+        op: CmpOp::Lt,
+        rhs: NumExpr::Const(50.0),
+    }));
+    match narrow_candidates(&not_cn_lt_50, &archived.indexes, &archived.offsets, &archived.cards) {
+        Some(Candidates::Printings(v)) => assert_eq!(v, vec![1, 3]),
+        other => panic!("expected tight printing narrowing, got {other:?}"),
+    }
+
+    // -year:1993 doesn't reduce (negate_op(Eq) == Ne, and Ne isn't a single half-open range) --
+    // must decline cleanly, not silently narrow to something wrong.
+    assert!(
+        narrow_candidates(
+            &FilterExpr::Not(Box::new(FilterExpr::YearCmp { op: CmpOp::Eq, year: 1993 })),
+            &archived.indexes,
+            &archived.offsets,
+            &archived.cards,
+        )
+        .is_none()
+    );
+    // -date>=20200101 -> date<20200101: only pid0 (1993-08-05); pid2 (no date) fails both forms.
+    let not_date_ge = FilterExpr::Not(Box::new(FilterExpr::DateCmp { op: CmpOp::Ge, value: 20_200_101 }));
+    match narrow_candidates(&not_date_ge, &archived.indexes, &archived.offsets, &archived.cards) {
+        Some(Candidates::Printings(v)) => assert_eq!(v, vec![0]),
+        other => panic!("expected tight printing narrowing, got {other:?}"),
+    }
+}
+
+#[test]
+fn and_child_rank_matches_narrow_rec_dispatch() {
+    // Review catch (not caught by the differential test: rank/execution mismatches are a cost
+    // question, not a correctness one, so they can't surface as a wrong final answer). Each case
+    // here mirrors a real `narrow_rec` dispatch decision -- `and_child_rank` now gates its Not-arms
+    // on the *same* predicates (`is_rarity_negation_shape`/`is_legality_negation_shape`) and the
+    // *same* function (`bare_range_bounds`) narrow_rec's own dedicated arms use, so this is really
+    // testing that consistency held, not reimplementing a second copy to compare against.
+    //
+    // An empty store's indexes suffice: `bare_range_bounds`'s Not-arm resolves purely from field/op
+    // (`int_range_bounds` et al. are closed-form, no index contents inspected), and the two shape
+    // predicates are index-free by construction (see their docs).
+    let data = store_of(vec![], &[], VocabInterner::new());
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let indexes = &archived.indexes;
+
+    let usd = |op: CmpOp, v: f64| FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op, rhs: NumExpr::Const(v) };
+    let cmc = |op: CmpOp, v: f64| FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Cmc), op, rhs: NumExpr::Const(v) };
+    let rarity = |op: CmpOp, v: f64| FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), op, rhs: NumExpr::Const(v) };
+
+    // -usd<c: reduces to usd>=c via bare_range_bounds's Not handling -- same cheap tier (1) as its
+    // un-negated form, not the generic complement's rank 2.
+    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(usd(CmpOp::Lt, 50.0))), indexes), and_child_rank(&usd(CmpOp::Lt, 50.0), indexes));
+    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(usd(CmpOp::Lt, 50.0))), indexes), 1);
+
+    // -usd:c (negated equality): Ne isn't a representable range, so bare_range_bounds declines and
+    // narrow_rec falls through to the generic Not-arm (which itself declines via tight_narrow_space,
+    // per docs/issues/local-engine-negated-range-narrowing.md) -- must NOT get the cheap-tier rank.
+    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(usd(CmpOp::Eq, 5.0))), indexes), 2);
+
+    // -cmc:c (any op): cmc/power/toughness aren't printing-range-indexed, so bare_range_bounds never
+    // matches this field -- narrow_rec falls through to the generic bit-complement arm (tight in card
+    // space, unrelated to this feature), which is the same cost shape as any other Not-complement.
+    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(cmc(CmpOp::Lt, 3.0))), indexes), 2);
+    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(cmc(CmpOp::Eq, 3.0))), indexes), 2);
+
+    // -r:x (any op): rarity's own dedicated narrow_rec arm re-narrows regardless of op -- must keep
+    // its pre-existing cheap-tier rank (0), matching the un-negated bare rarity comparison's rank.
+    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(rarity(CmpOp::Eq, 2.0))), indexes), and_child_rank(&rarity(CmpOp::Eq, 2.0), indexes));
+    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(rarity(CmpOp::Eq, 2.0))), indexes), 0);
+
+    // -f:x (a tracked format, expected=LEGALITY_LEGAL=0b01): reads the status's own _ABSENT plane
+    // directly (narrow_rec's dedicated -f:x arm), the same "not a complement" shape as -r:x above --
+    // must also keep its bare form's cheap-tier rank (0), not the generic complement's rank 2.
+    let legal_fmt = || FilterExpr::Legality { shift: Some(0), expected: 0b01 };
+    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(legal_fmt())), indexes), and_child_rank(&legal_fmt(), indexes));
+    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(legal_fmt())), indexes), 0);
+
+    // -f:x for an untracked format (no shift resolved, i.e. absent from loaded data): status_plane_bases
+    // is irrelevant here (shift: None doesn't even reach it) -- must fall to the generic tier, same as
+    // any other Not this classifier doesn't recognize.
+    assert_eq!(and_child_rank(&FilterExpr::Not(Box::new(FilterExpr::Legality { shift: None, expected: 0b01 })), indexes), 2);
 }
 
 // ─── Bitplanes (#630) ─────────────────────────────────────────────────────────
