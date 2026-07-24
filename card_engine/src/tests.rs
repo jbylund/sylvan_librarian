@@ -2902,6 +2902,37 @@ fn force_plan_differential_agreement() {
             "edhrec",
             "asc",
         ),
+        // Card-space collection compose leaf (subtype) OR'd with a near-total legality — the
+        // motivating `type:goblin or format:legacy` shape (#752-followup): the subtype's card-id
+        // postings are projected up to printings and OR'd with legality's printing bitmap, then paged
+        // by the #744 orderby walk under `usd`/printing (no card permutation for usd). Checked vs
+        // GatheredScan in every mode.
+        (
+            FuzzSpec::Or(vec![
+                FuzzSpec::Leaf(FuzzLeaf::Collection { field: CollField::Subtypes, op: CmpOp::Ge, value: "human".to_string() }),
+                FuzzSpec::Leaf(FuzzLeaf::Legality { shift: Some(FUZZ_SHIFTS[0]), expected: FUZZ_STATUSES[0] }),
+            ]),
+            "usd",
+            "asc",
+        ),
+        (
+            FuzzSpec::Or(vec![
+                FuzzSpec::Leaf(FuzzLeaf::Collection { field: CollField::Subtypes, op: CmpOp::Ge, value: "goblin".to_string() }),
+                FuzzSpec::Leaf(FuzzLeaf::Legality { shift: Some(FUZZ_SHIFTS[0]), expected: FUZZ_STATUSES[0] }),
+            ]),
+            "rarity",
+            "desc",
+        ),
+        // Negated card-space collection leaf (exact complement) mixed with a border plane in printing
+        // space — forces the `Not(CollectionCmp)` compose arm through the walk.
+        (
+            FuzzSpec::And(vec![
+                FuzzSpec::Leaf(FuzzLeaf::Border { value: "black".to_string() }),
+                FuzzSpec::Not(Box::new(FuzzSpec::Leaf(FuzzLeaf::Collection { field: CollField::Subtypes, op: CmpOp::Ge, value: "goblin".to_string() }))),
+            ]),
+            "usd",
+            "asc",
+        ),
     ];
     for _ in 0..RANDOM_QUERIES {
         let orderby = SORTS[rng.random_range(0..SORTS.len())];
@@ -5719,6 +5750,153 @@ fn set_watermark_compose_leaves() {
     // And a positive watermark mixed with an unsupported leaf still declines as a whole.
     let unsupported = FilterExpr::And(vec![wm("wotc"), FilterExpr::Not(Box::new(wm("set")))]);
     assert!(!super::is_printing_composable(&unsupported, &archived.indexes), "-watermark inside an And keeps the whole And off the compose path");
+}
+
+/// Card-space collection containment fields (`type:`/`kw:`/`otag:`) and their printing-space siblings
+/// (`art:`/`is:`) as PrintingCompose leaves: `compose_printing_bits` must be bit-for-bit the residual
+/// path's truth for the positive `Ge` leaf, its negation, mixes with a range, and absent values —
+/// while `Eq`/`Gt` (loose) and `FrameData` (non-complete) must stay OFF the compose path.
+#[test]
+fn collection_compose_leaves() {
+    let mut vocab = VocabInterner::new();
+    // Register every collection value up front so it lands in coll_vocab before store_of consumes
+    // vocab; capture the ids for the printing-space fields (set after store_of builds the printings).
+    let commander = vocab.intern("commander".to_string()).unwrap();
+    let showcase = vocab.intern("showcase".to_string()).unwrap();
+    // card0 subtypes [goblin]; card1 [goblin, warrior]; card2 [elf].
+    let mut cards = vec![
+        stub_card(1, TYPE_CREATURE, &["goblin"], &mut vocab),
+        stub_card(2, TYPE_CREATURE, &["goblin", "warrior"], &mut vocab),
+        stub_card(3, TYPE_CREATURE, &["elf"], &mut vocab),
+    ];
+    // keywords (card-space): card0 [Flying]; card2 [Flying, Haste]; card1 none.
+    cards[0].card_keywords = vec![vocab.intern("Flying".to_string()).unwrap()];
+    cards[2].card_keywords = vec![vocab.intern("Flying".to_string()).unwrap(), vocab.intern("Haste".to_string()).unwrap()];
+    // oracle_tags (card-space): card0 [removal]; card1 [ramp]; card2 none.
+    cards[0].card_oracle_tags = vec![vocab.intern("removal".to_string()).unwrap()];
+    cards[1].card_oracle_tags = vec![vocab.intern("ramp".to_string()).unwrap()];
+
+    let mut data = store_of(cards, &[2, 2, 2], vocab); // pids 0,1 | 2,3 | 4,5
+    // is_tags (printing-space) — card0's two printings DIVERGE (pid0 has commander, pid1 doesn't), so
+    // `is:commander` is genuinely printing-dependent, not card-invariant. art_tags (printing-space):
+    // pid2/pid5 showcase.
+    let is_tags_by_pid: [&[u16]; 6] = [&[commander], &[], &[commander], &[], &[], &[commander]];
+    let art_tags_by_pid: [&[u16]; 6] = [&[], &[], &[showcase], &[], &[], &[showcase]];
+    for (p, (is_t, art_t)) in data.printings.iter_mut().zip(is_tags_by_pid.iter().zip(art_tags_by_pid.iter())) {
+        p.card_is_tags = is_t.to_vec();
+        p.card_art_tags = art_t.to_vec();
+    }
+    // Released years for the range-leaf mixes: pid4 dateless (fails any year).
+    let year_by_pid = [Some(20200101), Some(20230101), Some(20200101), Some(20230101), None, Some(20240101)];
+    for (p, y) in data.printings.iter_mut().zip(year_by_pid) {
+        p.released_at_int = y;
+    }
+    // Build the collection indexes the way reload_commit does (card-space over cards, printing-space
+    // over printings), plus the released_at range for the mixes.
+    data.indexes.subtypes = build_tag_index(&data.cards, &data.coll_vocab, |c| &c.card_subtypes);
+    data.indexes.keywords = build_tag_index(&data.cards, &data.coll_vocab, |c| &c.card_keywords);
+    data.indexes.oracle_tags = build_tag_index(&data.cards, &data.coll_vocab, |c| &c.card_oracle_tags);
+    data.indexes.art_tags = build_tag_index(&data.printings, &data.coll_vocab, |p| &p.card_art_tags);
+    data.indexes.is_tags = build_tag_index(&data.printings, &data.coll_vocab, |p| &p.card_is_tags);
+    data.indexes.released_at = build_range_index(&data.printings, |p| p.released_at_int);
+
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let n_printings = archived.printings.len();
+
+    // The compose path keys the TagIndex on the value *string*, but the brute `matches()` reference
+    // compares the bound vocab *id* — so resolve `value_id` (the same partition_point `bind` runs), or
+    // the reference would treat every value as unknown and match nothing.
+    let coll = |field, op, value: &str| -> FilterExpr {
+        let (vocab, sorted) = (&archived.coll_vocab, &archived.coll_vocab_sorted);
+        let i = sorted.partition_point(|id| vocab[u16::from(*id) as usize].as_str() < value);
+        let value_id = sorted.get(i).map(|id| u16::from(*id)).filter(|&id| vocab[id as usize].as_str() == value);
+        FilterExpr::CollectionCmp { field, op, value: value.to_string(), value_id }
+    };
+    let ge = |field, v: &str| coll(field, CmpOp::Ge, v);
+    let not = |f: FilterExpr| FilterExpr::Not(Box::new(f));
+    let year = |y: i32| FilterExpr::YearCmp { op: CmpOp::Eq, year: y };
+
+    // Ground truth: the general per-candidate residual path (card_pass settles the card-invariant
+    // part, residual_matches the per-printing part) — exactly what the materializing plan runs,
+    // independent of anything the compose path touches.
+    let brute = |f: &FilterExpr| -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut residual: Vec<&FilterExpr> = Vec::new();
+        let mut is_or = false;
+        for c in 0..archived.cards.len() {
+            let card = &archived.cards[c];
+            let tri = f.card_pass(card, &archived.strings, &mut residual, &mut is_or);
+            let (lo, hi) = (u32::from(archived.offsets[c]), u32::from(archived.offsets[c + 1]));
+            for pid in lo..hi {
+                let matched = match tri {
+                    Tri::True => true,
+                    Tri::False | Tri::Null => false,
+                    Tri::PrintingDep => FilterExpr::residual_matches(card, &archived.printings[pid as usize], &archived.strings, &residual, is_or),
+                };
+                if matched {
+                    out.push(pid);
+                }
+            }
+        }
+        out
+    };
+    let composed = |f: &FilterExpr| -> Vec<u32> {
+        let bits = super::compose_printing_bits(f, &archived.indexes, &archived.offsets, &archived.printings, n_printings);
+        (0..n_printings as u32).filter(|&p| bits[p as usize >> 6] & (1u64 << (p & 63)) != 0).collect()
+    };
+
+    let cases: Vec<(&str, FilterExpr)> = vec![
+        // Card-space positive containment — every printing of a matching card (exact card property).
+        ("type:goblin", ge(CollField::Subtypes, "goblin")),
+        ("type:elf", ge(CollField::Subtypes, "elf")),
+        ("type:absent", ge(CollField::Subtypes, "sliver")),
+        ("kw:Flying", ge(CollField::Keywords, "Flying")),
+        ("otag:ramp", ge(CollField::OracleTags, "ramp")),
+        // Card-space negation — exact complement (collection is never NULL).
+        ("-type:goblin", not(ge(CollField::Subtypes, "goblin"))),
+        ("-type:absent (-> all)", not(ge(CollField::Subtypes, "sliver"))),
+        ("-kw:Flying", not(ge(CollField::Keywords, "Flying"))),
+        // Printing-space positive/negation (scatter directly; the divergent is:commander printings).
+        ("is:commander", ge(CollField::IsTags, "commander")),
+        ("-is:commander", not(ge(CollField::IsTags, "commander"))),
+        ("art:showcase", ge(CollField::ArtTags, "showcase")),
+        // Mixes with a range, both And and Or, card-space × printing-space × range.
+        ("type:goblin year:2023", FilterExpr::And(vec![ge(CollField::Subtypes, "goblin"), year(2023)])),
+        ("type:goblin or year:2023", FilterExpr::Or(vec![ge(CollField::Subtypes, "goblin"), year(2023)])),
+        ("kw:Flying and is:commander", FilterExpr::And(vec![ge(CollField::Keywords, "Flying"), ge(CollField::IsTags, "commander")])),
+        ("type:goblin or is:commander", FilterExpr::Or(vec![ge(CollField::Subtypes, "goblin"), ge(CollField::IsTags, "commander")])),
+        ("-type:elf and year:2020", FilterExpr::And(vec![not(ge(CollField::Subtypes, "elf")), year(2020)])),
+    ];
+    for (label, f) in &cases {
+        assert!(super::is_printing_composable(f, &archived.indexes), "{label} must be printing-composable");
+        let mut got = composed(f);
+        got.sort_unstable();
+        let mut want = brute(f);
+        want.sort_unstable();
+        assert_eq!(got, want, "compose_printing_bits disagrees with the residual path for {label}");
+        // The estimate feeds plan choice: a valid upper bound at minimum, and exact for a bare leaf.
+        let (est_matches, _, _) = super::compose_printing_estimate(f, &archived.indexes, &archived.offsets, n_printings);
+        assert!(est_matches >= want.len(), "compose_printing_estimate undercounts for {label}: {est_matches} < {}", want.len());
+        if matches!(f, FilterExpr::CollectionCmp { .. } | FilterExpr::Not(_)) {
+            assert_eq!(est_matches, want.len(), "bare collection-leaf estimate must be exact for {label}");
+        }
+    }
+
+    // Loose ops (`Eq`/`Gt`) must NOT compose — the postings prove containment, not the length
+    // condition, and the compose path has no residual re-check. FrameData (non-complete) must not
+    // compose in ANY op. A negated loose/FrameData inner must not sneak on via the Not arm either.
+    for op in [CmpOp::Eq, CmpOp::Gt] {
+        let f = coll(CollField::Subtypes, op, "goblin");
+        assert!(!super::is_printing_composable(&f, &archived.indexes), "type:goblin op={op:?} (loose) must stay off the compose path");
+        assert!(!super::is_printing_composable(&not(f), &archived.indexes), "-(loose collection) must stay off the compose path");
+    }
+    let frame = coll(CollField::FrameData, CmpOp::Ge, "showcase");
+    assert!(!super::is_printing_composable(&frame, &archived.indexes), "frame: (non-complete) must stay off the compose path");
+    assert!(!super::is_printing_composable(&not(frame), &archived.indexes), "-frame: must stay off the compose path");
+    // A loose Eq inside an And keeps the whole And off the compose path.
+    let mixed = FilterExpr::And(vec![ge(CollField::Subtypes, "goblin"), coll(CollField::Keywords, CmpOp::Eq, "Flying")]);
+    assert!(!super::is_printing_composable(&mixed, &archived.indexes), "a loose Eq collection inside an And keeps the whole And off the compose path");
 }
 
 #[test]
