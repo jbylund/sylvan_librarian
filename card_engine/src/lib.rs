@@ -1465,6 +1465,114 @@ fn numeric_candidates(idx: &Archived<NumericIndex>, op: CmpOp, val: f64) -> Opti
     Some(result)
 }
 
+// ─── Arith-expression tuple postings (#743) ──────────────────────────────────
+// cmc/power/toughness/loyalty are all card-level and draw from a small bounded
+// joint domain (531 distinct (power,toughness,cmc) triples, 564 with loyalty,
+// across ~31.5k cards — checked against the corpus). Any numeric predicate that
+// is a pure function of only these four fields (an Arith expression, a
+// field-vs-field compare, or a bare loyalty compare — see is_arith_tuple_route)
+// can be evaluated once per distinct combination instead of once per card, then
+// resolved to cards via postings: the same dictionary-encode-then-postings shape
+// set_codes/watermarks/rarity use for a single low-cardinality field, extended to
+// a joint tuple.
+
+/// One card's joint numeric key. Derived Hash/Eq handle the NULL (`None`) cases
+/// natively at build-time interning — no sentinel encoding. `f64::from` on the
+/// stored ints is lossless (all four domains fit exactly in f32, so also f64) and
+/// matches field_num's own widening exactly (the differential test asserts this).
+#[derive(Archive, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash)]
+struct ArithTupleKey {
+    cmc: Option<u8>,
+    power: Option<i8>,
+    toughness: Option<i8>,
+    loyalty: Option<u8>,
+}
+
+/// Joint (cmc,power,toughness,loyalty) postings. `keys[t]` is combination `t`'s field
+/// values (for query-time re-evaluation) and `postings[t]` its sorted card ids; the two
+/// are parallel. `n_cards` gates applicability (0 = unbuilt, e.g. a test fixture store),
+/// like every other index's domain check.
+#[derive(Archive, Serialize, Deserialize, Default)]
+struct ArithTupleIndex {
+    keys: Vec<ArithTupleKey>,
+    postings: Vec<Vec<u32>>,
+    n_cards: u32,
+}
+
+/// Intern each card's (cmc,power,toughness,loyalty) into a dense combination id and
+/// accumulate card postings under it. Cards are visited in ascending index order, so
+/// every postings row is naturally sorted. The id space is the number of distinct
+/// combinations (~564), far below any width concern — EdhrEc is excluded from the key
+/// precisely because it would blow this up to ~card-count distinct values (#743).
+fn build_arith_tuple_index(cards: &[OracleCard]) -> ArithTupleIndex {
+    let mut interner: HashMap<ArithTupleKey, usize> = HashMap::new();
+    let mut keys: Vec<ArithTupleKey> = Vec::new();
+    let mut postings: Vec<Vec<u32>> = Vec::new();
+    for (i, c) in cards.iter().enumerate() {
+        let key = ArithTupleKey {
+            cmc: c.cmc,
+            power: c.creature_power,
+            toughness: c.creature_toughness,
+            loyalty: c.planeswalker_loyalty,
+        };
+        let id = *interner.entry(key).or_insert_with(|| {
+            keys.push(key);
+            postings.push(Vec::new());
+            keys.len() - 1
+        });
+        postings[id].push(i as u32);
+    }
+    ArithTupleIndex { keys, postings, n_cards: cards.len() as u32 }
+}
+
+/// Narrow a tuple-routed `NumericCmp` (`is_arith_tuple_route`) to a card-space candidate
+/// set: evaluate the predicate against each of the ~564 distinct combinations and union
+/// the postings of those whose result equals `want`. `want = Tri::True` for the positive
+/// arm; `Tri::False` for the negation (`Not(cmp)`) — recomputing from scratch rather than
+/// complementing sidesteps the NULL-inclusion trap (a NULL-valued combination is `Tri::Null`,
+/// excluded from *both* polarities, exactly as tri()'s three-valued logic requires). Every
+/// field is card-level, so a combination's verdict holds for all of a card's printings: the
+/// result is exact and `tight` in both polarities. Returns None (→ existing scan) when the
+/// index isn't built for this store.
+fn arith_tuple_narrow(filter: &FilterExpr, idx: &Archived<ArithTupleIndex>, n_cards: usize, want: Tri) -> Option<Narrowed> {
+    if u32::from(idx.n_cards) as usize != n_cards || n_cards == 0 {
+        return None; // store without this index (fixture) — fall back to the general path
+    }
+    let FilterExpr::NumericCmp { lhs, op, rhs } = filter else { return None };
+    // First pass: evaluate the predicate against each of the ~564 distinct combinations, collecting
+    // the matching combination ids and the total card count they cover. This is the whole per-value
+    // cost of the narrowing (arithmetic on four small ints, no indirection past the key array).
+    let mut matched: Vec<usize> = Vec::new();
+    let mut count: usize = 0;
+    for (t, key) in idx.keys.iter().enumerate() {
+        // Widen exactly as field_num does (see ArithTupleKey's doc): u8/i8 → f64 is lossless and
+        // matches field_num's `_ as f32 as f64` for these domains. The archived Option<u8>/<i8>
+        // store their scalars natively (no endian wrapper), so `f64::from(*v)` reads them directly.
+        let cmc = key.cmc.as_ref().map(|v| f64::from(*v));
+        let power = key.power.as_ref().map(|v| f64::from(*v));
+        let toughness = key.toughness.as_ref().map(|v| f64::from(*v));
+        let loyalty = key.loyalty.as_ref().map(|v| f64::from(*v));
+        if eval_arith_tuple_tri(lhs, *op, rhs, cmc, power, toughness, loyalty) == want {
+            matched.push(t);
+            count += idx.postings[t].len();
+        }
+    }
+    let post_ids = || matched.iter().flat_map(|&t| idx.postings[t].iter().map(|x| u32::from(*x)));
+    // Representation split (#636 convention, BITS_PROMOTE): a broad result becomes a card bitmap via
+    // an O(count) scatter — no sort, and the word-wise form And/Or actually want for a broad set —
+    // while a sparse result keeps the sorted-vec merge path. Each card belongs to exactly one
+    // combination, so the selected postings rows are disjoint; the vec is sorted (combination order
+    // isn't card order) to restore the sorted-Cards invariant, reserving `count` up front to avoid
+    // the realloc churn that made the broad gather ~3× a bare numeric slice before this split.
+    if count > *BITS_PROMOTE {
+        return Narrowed::tight(Candidates::CardBits(scatter_bits(post_ids(), n_cards)));
+    }
+    let mut result: Vec<u32> = Vec::with_capacity(count);
+    result.extend(post_ids());
+    result.sort_unstable();
+    Narrowed::tight(Candidates::Cards(result))
+}
+
 // ─── Tag index ───────────────────────────────────────────────────────────────
 // tag name -> sorted list of store indices that have that tag. Card-level
 // collections (subtypes/keywords/oracle_tags) post card ids; printing-level ones
@@ -2294,6 +2402,7 @@ struct CardIndexes {
     rarity_printing: RarityPrintingPlanes,     // printing space: exact bit-per-printing rarity (#724)
     name_bigrams:   NameBigramIndex,           // card space: exact 2-byte name containment (#639)
     legal_divergent: Vec<u16>,                // card space: ids with divergent legality (#630 phase 2), postings not a plane — see build_divergent_ids
+    arith_tuple:    ArithTupleIndex,           // card space: joint (cmc,power,toughness,loyalty) postings for arith predicates (#743)
 }
 
 impl Default for CardIndexes {
@@ -2328,6 +2437,7 @@ impl Default for CardIndexes {
             rarity_printing: RarityPrintingPlanes::default(),
             name_bigrams:   NameBigramIndex::default(),
             legal_divergent: Vec::new(),
+            arith_tuple:    ArithTupleIndex::default(),
         }
     }
 }
@@ -2864,6 +2974,11 @@ fn and_child_rank(f: &FilterExpr, indexes: &Archived<CardIndexes>) -> u8 {
         // the real thing directly instead, the same way `is_printing_composable`/`compose_printing_bits`/
         // `compose_printing_estimate` already do.
         FilterExpr::Not(inner) if bare_range_bounds(f, indexes).is_some() => and_child_rank(inner, indexes),
+        // `-(arith tuple predicate)`: a cheap exact re-narrow (#743 negated arm), not a broad
+        // complement — rank it like its positive inner form, gated on the same `is_arith_tuple_route`
+        // predicate `narrow_rec`'s own negated arm dispatches on (not a second shape check), so the
+        // ranking can't drift from what actually executes (the #741 rank/execution-mismatch lesson).
+        FilterExpr::Not(inner) if is_arith_tuple_route(inner) => and_child_rank(inner, indexes),
         // Any other `Not` (a card-space numeric like `-cmc:3`, negated equality on price/cn/date/year,
         // or a plain generic complement) falls to the broad-complement-or-decline tier — this used to
         // be the *only* arm here, silently catching every negated cheap shape above too (bug 1), then
@@ -3174,6 +3289,12 @@ fn narrow_rec(
                 (NumExpr::Const(v), NumExpr::Field(NumField::PriceUsd)) => price(flip_op(*op), v),
                 (NumExpr::Field(NumField::CollectorNumberInt), NumExpr::Const(v)) => cn(*op, v),
                 (NumExpr::Const(v), NumExpr::Field(NumField::CollectorNumberInt)) => cn(flip_op(*op), v),
+                // Everything the dedicated single-field arms above didn't consume: arith expressions
+                // (`cmc+1<power`), field-vs-field (`power<toughness`), and bare loyalty compares — all
+                // over only card-level fields. `is_arith_tuple_route` is the shared gate (also used by
+                // the negated arm and `and_child_rank`); a mixed/out-of-scope expression (`usd+1<power`)
+                // fails it and declines here, falling to the existing full scan (#743).
+                _ if is_arith_tuple_route(filter) => arith_tuple_narrow(filter, &indexes.arith_tuple, n_cards, Tri::True),
                 _ => None,
             }
         }
@@ -3274,6 +3395,19 @@ fn narrow_rec(
             } else {
                 range_narrowed(idx, lo, hi, n_printings, true, true)
             }
+        }
+
+        // -(arith tuple predicate), e.g. `-power+toughness<4` / `-cmc+1<power`. Same "recompute, don't
+        // complement" reasoning as -r:x/-usd<c above, but for the #743 card-space joint-tuple index:
+        // re-run the tiny per-combination scan collecting `Tri::False` instead of `Tri::True`, so
+        // NULL-valued combinations (Tri::Null) are excluded from the negation exactly as three-valued
+        // logic requires — no complement, hence none of the NULL-inclusion trap the generic Not arm
+        // (below) handles by staying loose. The four fields are card-level, so a False verdict holds for
+        // every printing: exact and tight. Gated on `is_arith_tuple_route(inner)` — the same single
+        // source of truth the positive arm and `and_child_rank` use, so a bare `-cmc:3` (dedicated arm,
+        // routes through the generic complement) is deliberately not intercepted here.
+        FilterExpr::Not(inner) if is_arith_tuple_route(inner) => {
+            arith_tuple_narrow(inner, &indexes.arith_tuple, n_cards, Tri::False)
         }
 
         // Ge/Eq/Gt all resolve `matches()` through the same `contains(value)`
@@ -6430,11 +6564,12 @@ const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 /// catch (e.g. reordering same-size fields, changing an index type) — and on
 /// any FLAVOR_FP_FEATURES change: archived fingerprints are built with that
 /// table, so a new table reading old fingerprints breaks the superset test.
-// 20260724, not 20260723: #737 already used today's date for its own archive
-// change (columnar artwork_group_id) earlier today, so this bump (adding
-// CardIndexes.watermarks) needs a distinct value to invalidate stores built
-// under that layout — see ARCHIVE_FORMAT_VERSION's doc above.
-const ARCHIVE_FORMAT_VERSION: u32 = 20260724;
+// 20260725: adding CardIndexes.arith_tuple (#743) changes the archived layout, so
+// stores built under the previous version must be invalidated and rebuilt. The
+// current calendar date (20260723) and 20260724 were both already consumed by
+// earlier same-window archive changes (#737 columnar artwork_group_id, #741
+// watermark postings), so this takes the next distinct value — see the doc above.
+const ARCHIVE_FORMAT_VERSION: u32 = 20260725;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -6856,6 +6991,7 @@ impl QueryEngine {
             rarity_printing: build_rarity_printing_planes(&printings),
             name_bigrams:   build_name_bigram_index(&cards),
             legal_divergent: build_divergent_ids(&cards),
+            arith_tuple:    build_arith_tuple_index(&cards),
         };
 
         #[cfg(feature = "alloc-counter")]
