@@ -1,0 +1,41 @@
+{
+  "README": [
+    "Single source of truth for card image constants: the size ladder, the",
+    "full-resolution dimensions, and the grid <img sizes> clause tables.",
+    "ladder: widths (px) the CDN serves for every card face; also the S3 key names",
+    "(str(width) + '.webp'). grid_src_default is the plain src= fallback width.",
+    "full: dimensions of the largest webp (matches Scryfall's source PNGs) -",
+    "the modal/card-page width/height attrs and the CSS aspect-ratio derive from it.",
+    "The sizes string is one clause per (density tier x layout breakpoint), and the",
+    "browser uses the first matching clause, so density tiers are ordered densest",
+    "first and each list ends with a null-condition default.",
+    "layout: [media condition, slot-width formula]. Formulas are the CSS grid slot",
+    "widths (body padding 1em x2, card padding 0.8em x2, gap 15px); each max-width",
+    "is one below the corresponding grid min-width threshold in styles.css.",
+    "density: [media condition, multiplier]. Multipliers implement the fidelity",
+    "budget - an effective-DPR cap of ~1.5 for grid thumbnails, computed as",
+    "1.5 / assumed tier DPR (3x, 2x). Grid cells don't earn full retina fidelity;",
+    "the modal is the 1:1 surface. Multipliers are strings so Python and JS emit",
+    "byte-identical text. See docs/issues/homepage-lcp.md for the design.",
+    "Consumers: api/noscript_helpers.py and scripts/copy_images_to_s3.py load this",
+    "file; api/static/app.js embeds a mirrored copy (app.test.js asserts it matches",
+    "this file, and the shared card-HTML parity fixture keeps both renderers'",
+    "output identical); card.js and styles.css can't read JSON, so app.test.js and",
+    "api/tests/test_noscript_parity.py assert their literals against this file."
+  ],
+  "ladder": [280, 388, 538, 745],
+  "grid_src_default": 388,
+  "full": { "width": 745, "height": 1040 },
+  "layout": [
+    ["(max-width: 409px)", "100vw - 3.6em"],
+    ["(max-width: 749px)", "50vw - 2.6em - 7.5px"],
+    ["(max-width: 1369px)", "33.33vw - 2.27em - 10px"],
+    ["(max-width: 2499px)", "25vw - 2.1em - 11.25px"],
+    [null, "20vw - 2em - 12px"]
+  ],
+  "density": [
+    ["(min-resolution: 2.9dppx)", "0.5"],
+    ["(min-resolution: 1.9dppx)", "0.75"],
+    [null, null]
+  ]
+}

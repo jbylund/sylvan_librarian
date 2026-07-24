@@ -1,3 +1,7 @@
+// Mirrors api/static/card_images.json (source of truth; app.test.js asserts parity).
+const CARD_IMAGE_FULL = { width: 745, height: 1040 };
+const CARD_IMAGE_THUMB_WIDTH = 280; // smallest ladder width
+
 const HTML_ESCAPE_RE = /[&<>"]/g;
 const HTML_ESCAPE_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
 const INITIAL_PAGE_TITLE = document.title;
@@ -94,8 +98,8 @@ function formatOracleText(text) {
 }
 
 function renderCardFace(card) {
-  const imageLarge = buildImageUrl(card, '745');
-  const imgTag = `<img class="modal-image" src="${escapeHtml(imageLarge)}" width="745" height="1040" alt="${escapeHtml(card.name || '')}" />`;
+  const imageLarge = buildImageUrl(card, String(CARD_IMAGE_FULL.width));
+  const imgTag = `<img class="modal-image" src="${escapeHtml(imageLarge)}" width="${CARD_IMAGE_FULL.width}" height="${CARD_IMAGE_FULL.height}" alt="${escapeHtml(card.name || '')}" />`;
   let imageHtml;
   if (card.set_code && card.collector_number) {
     // Build manapool.com referral URL — set codes and collector numbers from our database are safe for URLs
@@ -166,7 +170,7 @@ function groupPrintingsByArt(cards) {
 function renderPrintingsStrip(groups) {
   return groups
     .map(({ representative: card, count }) => {
-      const thumb = buildImageUrl(card, '280');
+      const thumb = buildImageUrl(card, String(CARD_IMAGE_THUMB_WIDTH));
       const url = `/card/${card.set_code}/${card.collector_number}`;
       const label = escapeHtml(`${card.set_name || card.set_code || ''}${formatUsd(card.price_usd)}`);
       const badge = count > 1 ? `<span class="printing-thumb-count">+${count - 1}</span>` : '';
