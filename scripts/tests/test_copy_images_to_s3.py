@@ -7,9 +7,15 @@ from unittest.mock import Mock, patch
 import requests
 
 from scripts.copy_images_to_s3 import (
+    CardProcessorPool,
     download_image,
     fetch_cards_from_db,
+    get_args,
+    get_s3_cards,
+    get_s3_client_kwargs,
 )
+
+TEST_S3_COMPATIBLE_ENDPOINT = "https://s3-compatible.example.com"
 
 
 def test_download_image_success() -> None:
@@ -75,3 +81,82 @@ def test_fetch_cards_from_db() -> None:
     assert cards[0]["card_set_code"] == "iko"
     assert cards[0]["collector_number"] == "123"
     assert cards[1]["card_set_code"] == "thb"
+
+
+def test_get_args_accepts_s3_compatible_endpoint_options() -> None:
+    """Test parsing S3-compatible endpoint CLI options."""
+    with patch(
+        "sys.argv",
+        [
+            "copy_images_to_s3.py",
+            "--bucket",
+            "wasabi-bucket",
+            "--endpoint-url",
+            TEST_S3_COMPATIBLE_ENDPOINT,
+            "--region-name",
+            "us-east-1",
+        ],
+    ):
+        args = get_args()
+
+    assert args.bucket == "wasabi-bucket"
+    assert args.endpoint_url == TEST_S3_COMPATIBLE_ENDPOINT
+    assert args.region_name == "us-east-1"
+
+
+def test_get_s3_client_kwargs_only_includes_explicit_overrides() -> None:
+    """Test boto3 kwargs only include configured endpoint overrides."""
+    args = Mock(endpoint_url=TEST_S3_COMPATIBLE_ENDPOINT, region_name="us-east-1")
+
+    assert get_s3_client_kwargs(args) == {
+        "endpoint_url": TEST_S3_COMPATIBLE_ENDPOINT,
+        "region_name": "us-east-1",
+    }
+
+    args = Mock(endpoint_url=None, region_name=None)
+
+    assert get_s3_client_kwargs(args) == {}
+
+
+def test_get_s3_cards_uses_s3_compatible_overrides() -> None:
+    """Test listing existing images uses the configured S3-compatible endpoint."""
+    args = Mock(
+        bucket="biblioplex",
+        endpoint_url=TEST_S3_COMPATIBLE_ENDPOINT,
+        region_name="us-east-1",
+        skip_existing=True,
+        set_code=None,
+    )
+    mock_bucket = Mock()
+    mock_bucket.objects.filter.return_value = []
+    mock_resource = Mock()
+    mock_resource.Bucket.return_value = mock_bucket
+
+    with patch("scripts.copy_images_to_s3.boto3.resource", return_value=mock_resource) as mock_resource_factory:
+        result = get_s3_cards(args)
+
+    assert result == set()
+    mock_resource_factory.assert_called_once_with(
+        "s3",
+        endpoint_url=TEST_S3_COMPATIBLE_ENDPOINT,
+        region_name="us-east-1",
+    )
+    mock_resource.Bucket.assert_called_once_with("biblioplex")
+
+
+def test_init_worker_uses_s3_compatible_overrides() -> None:
+    """Test worker initialization passes custom S3-compatible kwargs to boto3."""
+    with patch("scripts.copy_images_to_s3.boto3.client") as mock_client_factory:
+        CardProcessorPool.init_worker(
+            {
+                "endpoint_url": TEST_S3_COMPATIBLE_ENDPOINT,
+                "region_name": "us-east-1",
+            }
+        )
+
+    mock_client_factory.assert_called_once_with(
+        "s3",
+        endpoint_url=TEST_S3_COMPATIBLE_ENDPOINT,
+        region_name="us-east-1",
+    )
+    assert CardProcessorPool.s3_client is mock_client_factory.return_value

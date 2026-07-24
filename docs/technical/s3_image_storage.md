@@ -2,12 +2,12 @@
 
 ## Overview
 
-Sylvan Librarian stores card images in Amazon S3 with a CloudFront distribution in front of it for fast global delivery. Images are processed from Scryfall's PNG format into optimized WebP format at multiple resolutions.
+Sylvan Librarian stores card images in an S3-compatible object store with a CDN in front of it for fast global delivery. Images are processed from Scryfall's PNG format into optimized WebP format at multiple resolutions.
 
 ## Architecture
 
 ```
-Scryfall PNG → Processing Script → S3 Bucket → CloudFront CDN → Application
+Scryfall PNG → Processing Script → S3-Compatible Bucket → CDN → Application
 ```
 
 ## S3 Storage Structure
@@ -112,27 +112,31 @@ The `face` parameter defaults to `"1"` for single-faced cards and is set to `"1"
 
 ### Primary Script
 - **File**: `scripts/copy_images_to_s3.py`
-- **Purpose**: Download, convert, and upload card images
+- **Purpose**: Download, convert, and upload card images to S3-compatible storage
 - **Features**:
   - Parallel processing
   - Skip existing images
   - Dry run mode
   - Set-specific filtering
   - Progress tracking
+  - Optional custom `--endpoint-url` and `--region-name` settings for Wasabi and other S3-compatible providers
 
 ### Usage Examples
 ```bash
 # Process all cards
-python scripts/copy_images_to_s3.py
+python -m scripts.copy_images_to_s3
 
 # Process specific set
-python scripts/copy_images_to_s3.py --set iko
+python -m scripts.copy_images_to_s3 --set iko
+
+# Process using a Wasabi endpoint
+python -m scripts.copy_images_to_s3 --bucket biblioplex --endpoint-url https://s3.us-east-1.wasabisys.com --region-name us-east-1
 
 # Dry run (no actual uploads)
-python scripts/copy_images_to_s3.py --dry-run
+python -m scripts.copy_images_to_s3 --dry-run
 
 # Limit number of cards
-python scripts/copy_images_to_s3.py --limit 100
+python -m scripts.copy_images_to_s3 --limit 100
 ```
 
 ## Performance Characteristics
