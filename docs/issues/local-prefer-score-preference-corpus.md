@@ -54,6 +54,11 @@ The existing 202 grid picks give a second, coarser view: agreement with a direct
 rose from 79.2% to 83.2% with #766. Keep both — the pairwise measure is sensitive, the grid measure is
 interpretable.
 
+Grid picks are also a lossy way to collect this. Preferences arrive in bands rather than as a single
+winner, and sorting a card's artworks into four bands yields the complete pairwise matrix instead of
+N−1 observations sharing one item — plus within-band ties, which the grid cannot produce at all. See
+[local-prefer-score-tier-labelling.md](local-prefer-score-tier-labelling.md).
+
 ## Choosing the ~30
 
 A batch should reduce uncertainty, not confirm what is already known. Candidates, cheapest first:
