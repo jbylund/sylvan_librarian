@@ -178,6 +178,29 @@ def fetch_cards_from_db(
 SCRYFALL_USER_AGENT = "sylvan-librarian/1.0 (+https://github.com/jbylund/sylvan_librarian)"
 
 
+# Connections are pooled per process rather than per request. The sync makes one request
+# per image over tens of thousands of images, and without a Session each one pays a fresh
+# TCP handshake plus a TLS negotiation to the same host.
+#
+# Guarded by pid because the worker pool forks: a Session created in the parent would hand
+# every child a copy of the same open sockets, and concurrent use of a shared TLS connection
+# corrupts the stream. Recreating when the pid changes gives each worker its own pool without
+# depending on how the pool is started.
+_SESSION: requests.Session | None = None
+_SESSION_PID: int | None = None
+
+
+def get_session() -> requests.Session:
+    """Return this process's requests Session, creating it on first use."""
+    global _SESSION, _SESSION_PID  # per-process singleton, rebuilt after fork
+    pid = os.getpid()
+    if _SESSION is None or pid != _SESSION_PID:
+        session = requests.Session()
+        session.headers["User-Agent"] = SCRYFALL_USER_AGENT
+        _SESSION, _SESSION_PID = session, pid
+    return _SESSION
+
+
 def download_image(url: str, output_path: Path) -> bool:
     """Download an image from a URL.
 
@@ -189,12 +212,7 @@ def download_image(url: str, output_path: Path) -> bool:
         True if successful, False otherwise
     """
     try:
-        response = requests.get(
-            url,
-            timeout=30,
-            stream=True,
-            headers={"User-Agent": SCRYFALL_USER_AGENT},
-        )
+        response = get_session().get(url, timeout=30, stream=True)
         response.raise_for_status()
 
         with output_path.open("wb") as f:
