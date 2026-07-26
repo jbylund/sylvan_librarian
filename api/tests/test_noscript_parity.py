@@ -74,7 +74,11 @@ def test_sizes_clause_structure() -> None:
     spec = CARD_IMAGES_SPEC
     clauses = CARD_IMAGE_SIZES.split(", ")
     assert len(clauses) == len(spec["density"]) * len(spec["layout"])
-    assert clauses[0] == "(min-resolution: 2.9dppx) and (max-width: 409px) calc((100vw - 3.6em) * 0.5)"
+    # Composed independently of build_card_image_sizes, so format drift still fails, but
+    # retuning the budget multiplier doesn't require editing this assertion.
+    densest_condition, densest_multiplier = spec["density"][0]
+    narrowest_condition, narrowest_formula = spec["layout"][0]
+    assert clauses[0] == (f"{densest_condition} and {narrowest_condition} calc(({narrowest_formula}) * {densest_multiplier})")
     # last clause is the bare default — no media condition, no budget multiplier
     assert clauses[-1] == "calc(20vw - 2em - 12px)"
     # first-match-wins: density conditions must be ordered densest to sparsest

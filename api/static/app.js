@@ -22,8 +22,7 @@ const CARD_GRID_SIZES_SPEC = {
     [null, '20vw - 2em - 12px'],
   ],
   density: [
-    ['(min-resolution: 2.9dppx)', '0.5'],
-    ['(min-resolution: 1.9dppx)', '0.75'],
+    ['(min-resolution: 1.9dppx)', '0.667'],
     [null, null],
   ],
 };
