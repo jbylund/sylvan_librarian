@@ -22,6 +22,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -178,27 +179,29 @@ def fetch_cards_from_db(
 SCRYFALL_USER_AGENT = "sylvan-librarian/1.0 (+https://github.com/jbylund/sylvan_librarian)"
 
 
-# Connections are pooled per process rather than per request. The sync makes one request
-# per image over tens of thousands of images, and without a Session each one pays a fresh
-# TCP handshake plus a TLS negotiation to the same host.
-#
-# Guarded by pid because the worker pool forks: a Session created in the parent would hand
-# every child a copy of the same open sockets, and concurrent use of a shared TLS connection
-# corrupts the stream. Recreating when the pid changes gives each worker its own pool without
-# depending on how the pool is started.
-_SESSION: requests.Session | None = None
-_SESSION_PID: int | None = None
+@lru_cache(maxsize=1)
+def get_session(_pid: int) -> requests.Session:
+    """Return the requests Session for the calling process, creating it on first use.
 
+    Connections are pooled per process rather than per request. The sync makes one request
+    per image over tens of thousands of images, and without a Session each one pays a fresh
+    TCP handshake plus a TLS negotiation to the same host.
 
-def get_session() -> requests.Session:
-    """Return this process's requests Session, creating it on first use."""
-    global _SESSION, _SESSION_PID  # per-process singleton, rebuilt after fork
-    pid = os.getpid()
-    if _SESSION is None or pid != _SESSION_PID:
-        session = requests.Session()
-        session.headers["User-Agent"] = SCRYFALL_USER_AGENT
-        _SESSION, _SESSION_PID = session, pid
-    return _SESSION
+    Keyed on pid because the worker pool forks: a Session created in the parent would hand
+    every child a copy of the same open sockets, and concurrent use of a shared TLS connection
+    corrupts the stream. A child's first call misses on its own pid and builds its own pool,
+    without depending on how the pool is started. maxsize=1 keeps only the current process's
+    session, so the inherited parent entry is evicted rather than held for the whole run.
+
+    Args:
+        _pid: The calling process's id, from os.getpid(). Used only as the cache key.
+
+    Returns:
+        A Session identifying itself to Scryfall, reused for the life of the process.
+    """
+    session = requests.Session()
+    session.headers["User-Agent"] = SCRYFALL_USER_AGENT
+    return session
 
 
 def download_image(url: str, output_path: Path) -> bool:
@@ -212,7 +215,7 @@ def download_image(url: str, output_path: Path) -> bool:
         True if successful, False otherwise
     """
     try:
-        response = get_session().get(url, timeout=30, stream=True)
+        response = get_session(os.getpid()).get(url, timeout=30, stream=True)
         response.raise_for_status()
 
         with output_path.open("wb") as f:
