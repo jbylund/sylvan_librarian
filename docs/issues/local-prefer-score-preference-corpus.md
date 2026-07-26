@@ -65,18 +65,35 @@ A batch should reduce uncertainty, not confirm what is already known. Candidates
 - **Under-covered regions.** Corpus coverage by frame era, set type and artwork age, with sampling
   toward the thin cells. The controlled foil population was 162 pairs corpus-wide and unrepresented
   until deliberately sought.
-- **Never repeat a pair.** Re-asking wastes a slot and risks a contradiction; the corpus already knows
-  what was asked.
+- **Repeat a small fraction deliberately.** Roughly 10% of each batch should be pairs already graded,
+  unmarked. Agreement means a stable preference the model should be confident about; disagreement means
+  the two printings sit below the grader's discrimination threshold, which is a property of the
+  comparison rather than noise. This is intra-rater reliability, scored with Cohen's kappa (agreement
+  corrected for chance), and the psychophysical analogue is a just-noticeable difference. Pairs that
+  flip on re-presentation should be down-weighted in fitting or treated as ties — a model driven to
+  separate them is being asked to reproduce a coin flip. Outside that fraction, do not re-ask.
 
 30 is a reasonable sitting: 47 and 89-card batches were fine, 378 was too long to stay attentive
 through, and the 20-card batch was mostly cards already answered.
 
 ## Fitting, not just accepting
 
-Enough pairwise data makes this a ranking problem rather than a search over hand-set weights: logistic
-regression on feature differences, which is Bradley-Terry with covariates. `fit_artwork_score.py`
-prototyped this with a softplus reparameterisation to keep declared signs, and 5-fold CV. It was
-abandoned because the corpus was too small and confounded — not because the approach was wrong.
+Enough pairwise data makes this a ranking problem rather than a search over hand-set weights. The named
+methods, and where each applies:
+
+| method | what it gives us |
+| --- | --- |
+| **Bradley-Terry with covariates** | strength `exp(β·x)` from component levels, so `P(A>B) = logistic(β·(x_A − x_B))` — plain logistic regression on feature *differences*, and `β` is component contribution. Equivalently **conditional logit** / McFadden choice model; **Thurstone-Mosteller** is the probit-link variant. |
+| **Rao-Kupper** or **Davidson** | an explicit indifference threshold, so the 481 ties are modelled rather than discarded |
+| **Plackett-Luce** | the grid picks, where one of N artworks is chosen. Expanding a pick into N−1 pairwise rows (what #720 did) overstates the effective sample size, because they share the chosen item |
+| **Elo / Glicko / TrueSkill** | sequential updating; Glicko and TrueSkill carry a per-item variance, which is where preference stability naturally lives. Rates items, not features, so it does not give component contributions directly |
+| **uncertainty sampling**, **query-by-committee** | which pairs to show next. Query-by-committee is the formal version of "show pairs where live candidates disagree"; **expected information gain** / **BALD** is the information-theoretic form |
+| **SPRT** (Wald) | accept/reject on a running batch, in place of fixed count thresholds |
+| **Cohen's kappa** | intra-rater agreement on the repeated fraction |
+
+`fit_artwork_score.py` prototyped the first of these with a softplus reparameterisation to keep declared
+signs, plus 5-fold CV. It was abandoned because the corpus was too small and confounded — not because
+the approach was wrong.
 
 Two cautions carried from #720. Collinear features produce meaningless individual coefficients: illustration
 count and artist prominence correlated at 0.986, so their split was noise. And declared monotonic signs
@@ -115,7 +132,9 @@ CREATE TABLE labels.printing_preference (
     what_varied   text[]  NOT NULL,          -- artwork / frame / border / finish / scan / set_type
     batch_id      text    NOT NULL,
     graded_at     timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (printing_a, printing_b, shown_as)
+    -- One row per grading, not per pair: repeated presentations are the reliability signal, so
+    -- the key admits several verdicts for the same pair and they are aggregated when fitting.
+    PRIMARY KEY (printing_a, printing_b, shown_as, graded_at)
 );
 ```
 
