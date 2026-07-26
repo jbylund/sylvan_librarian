@@ -94,12 +94,47 @@ cannot represent a preference with an interior peak, which is what artwork age t
 - **Positional bias.** With randomised sides it is measurable — test against the actual side split, not
   50%. A run reported as significant at p=0.032 was p=0.192 once the null was right.
 
-## Storage
+## Storage: Postgres as the working store, git as the record
 
-The corpus belongs in the repo, not in `~/Downloads`. Ten files there share filenames across batches,
-and one session's verdicts were recorded against the wrong batch because two runs produced the same
-download name. A single append-only JSONL under `docs/data/` or a `magic.preferences` table, keyed by
-printing pair, with the generator recording `what_varied` and `shown_as` at write time.
+Anywhere is better than `~/Downloads`, where ten files share filenames across batches — one session's
+verdicts were graded against a contaminated batch and nearly analysed as a clean one because two runs
+produced the same download name.
+
+Postgres is the right working store. Votes join directly against `magic.cards`, so feature extraction
+and coverage analysis become queries instead of Python that re-reads CSV; a uniqueness constraint on
+the printing pair makes re-asking impossible rather than merely discouraged; and the labelling page can
+write as it goes, removing the download-and-rename step that lost a session's work.
+
+```sql
+CREATE TABLE labels.printing_preference (
+    card_name     text    NOT NULL,
+    printing_a    uuid    NOT NULL,          -- scryfall_id, ordered so (a,b) is canonical
+    printing_b    uuid    NOT NULL,
+    verdict       text    NOT NULL CHECK (verdict IN ('a', 'b', 'tie')),
+    shown_as      text    NOT NULL CHECK (shown_as IN ('whole_card', 'art_crop')),
+    what_varied   text[]  NOT NULL,          -- artwork / frame / border / finish / scan / set_type
+    batch_id      text    NOT NULL,
+    graded_at     timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (printing_a, printing_b, shown_as)
+);
+```
+
+**Not in the `magic` schema.** `2025-09-29-great-reset.sql` opens with
+`DROP SCHEMA IF EXISTS magic CASCADE`, and `magic.query_log` sits inside it — the established pattern
+for DB-resident data here is expendable telemetry, rebuildable from Scryfall. Preferences are the
+opposite: hours of human judgement that cannot be regenerated at any price. A separate `labels` schema
+keeps them outside the blast radius.
+
+Even so, the durable record should be a git-tracked export, with the table as the working copy. The
+database is rebuildable by design and exists twice (blue and green); the corpus is neither. An export
+also makes the evidence in #720 and #766 reproducible by someone who does not have this machine's
+containers, which it currently is not.
+
+**Incremental path.** Direct writes need an endpoint, and the review pages open over `file://`, so
+that means either serving them from the API or a CORS allowance. Neither is required to start: add an
+`import-votes` command that loads a downloaded JSONL into the table idempotently, keyed on the pair.
+That captures the 1,070 preferences already collected — which is the pressing part, since they are
+currently one `rm` away from gone — and direct writes can follow.
 
 ## Related
 
