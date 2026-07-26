@@ -171,6 +171,13 @@ def fetch_cards_from_db(
     return cards
 
 
+# Scryfall's CDN rejects the requests library's default User-Agent with HTTP 400 -- not a
+# rate limit and not specific to any image, so every download fails while the same URL opens
+# fine in a browser. Any descriptive UA is accepted; their API guidelines ask for one that
+# identifies the client.
+SCRYFALL_USER_AGENT = "sylvan-librarian/1.0 (+https://github.com/jbylund/sylvan_librarian)"
+
+
 def download_image(url: str, output_path: Path) -> bool:
     """Download an image from a URL.
 
@@ -182,7 +189,12 @@ def download_image(url: str, output_path: Path) -> bool:
         True if successful, False otherwise
     """
     try:
-        response = requests.get(url, timeout=30, stream=True)
+        response = requests.get(
+            url,
+            timeout=30,
+            stream=True,
+            headers={"User-Agent": SCRYFALL_USER_AGENT},
+        )
         response.raise_for_status()
 
         with output_path.open("wb") as f:
@@ -478,7 +490,11 @@ def configure_env() -> None:
     """Load environment variables from env.json file."""
     with Path("env.json").open("r") as f:
         env = json.load(f)
-    os.environ.update(env)
+    # setdefault, not update: env.json supplies defaults, so an explicitly exported PGHOST or
+    # PGPORT still wins. `update` silently discarded them, which made the standard libpq
+    # variables look broken and left editing env.json as the only way to point at a database.
+    for key, value in env.items():
+        os.environ.setdefault(key, str(value))
 
 
 def check_cwebp() -> None:
