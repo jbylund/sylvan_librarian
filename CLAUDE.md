@@ -60,7 +60,11 @@ Browser → GET /search?q=<query>
 ### Key Directories
 
 - **`api/parsing/`** — Core query parser (~2,500 lines). `parsing_f.py` drives the pyparsing grammar; `nodes.py` defines AST node types; `card_query_nodes.py` has card-specific nodes; `db_info.py` maps query fields to DB columns.
-- **`api/api_resource.py`** — All HTTP routing (Falcon sink), search logic, SQL generation from AST, and bulk import endpoints.
+- **`api/api_resource.py`** — Dispatch (Falcon sink), search logic, SQL generation from AST, and the public routes.
+- **`api/admin_resource.py`** — Data-management handlers (import, backfill, tagging), mounted by `APIResource` under a path prefix rather than sharing the public namespace. Holds a reference to its parent for the handful of methods and handles they share.
+- **`api/utils/routing.py`** — The `@route` marker, route-table construction, and the 404 listing. A handler is reachable only if marked; the listing skips anything registered `advertise=False`, which is what makes the mount a boundary rather than a URL prefix.
+- **`api/utils/param_binding.py`** — Resolves each handler's annotations once at registration and binds request parameters against a fixed plan.
+- **`api/utils/page_rendering.py`**, **`api/utils/css_utils.py`**, **`api/utils/site_name.py`**, **`api/utils/caching.py`** — Page assembly, critical-CSS extraction, Host-header display names, and the settings-aware cache decorator.
 - **`api/entrypoint.py`** + **`api/api_worker.py`** — Multi-process Bjoern WSGI server startup.
 - **`api/db/`** — PostgreSQL schema SQL (`2025-09-29-great-reset.sql`). The `magic.cards` table has 22 specialized indices (trigram GIN for text, GIN for JSONB arrays, B-tree for numerics).
 - **`api/tests/`** — Integration tests using `testcontainers` (spins up a real PostgreSQL instance).
