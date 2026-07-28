@@ -171,7 +171,8 @@ class TestAPIResourceInitializationNewStyle(TestBaseAPIResourceTest):
 
         # Check that caches are initialized
         assert hasattr(api_resource, "_query_cache")
-        assert hasattr(api_resource, "_session")
+        # _session moved to the admin child, which owns the outbound Scryfall/CubeCobra calls.
+        assert hasattr(api_resource.admin, "_session")
 
     def test_initialization_with_custom_import_guard(self) -> None:
         """Test APIResource initialization with custom import guard."""
@@ -181,7 +182,7 @@ class TestAPIResourceInitializationNewStyle(TestBaseAPIResourceTest):
             last_import_time=multiprocessing.Value("d", time.time(), lock=True),
         )
 
-        assert api_resource._import_guard == custom_guard
+        assert api_resource.admin._import_guard == custom_guard
 
     def test_every_public_method_is_still_registered(self) -> None:
         """Test the marker migration left no previously-routed method behind.
@@ -779,18 +780,18 @@ class TestAPIResourceErrorHandling(unittest.TestCase):
     def test_import_card_by_name_validates_card_name_parameter(self) -> None:
         """Test import_card_by_name validates card_name parameter."""
         with pytest.raises(ValueError, match="card_name parameter is required"):
-            self.api_resource.import_card_by_name(card_name="")
+            self.api_resource.admin.import_card_by_name(card_name="")
 
         with pytest.raises(ValueError, match="card_name parameter is required"):
-            self.api_resource.import_card_by_name(card_name=None)
+            self.api_resource.admin.import_card_by_name(card_name=None)
 
     def test_import_cards_by_search_validates_search_query_parameter(self) -> None:
         """Test import_cards_by_search validates search_query parameter."""
         with pytest.raises(ValueError, match="search_query parameter is required"):
-            self.api_resource.import_cards_by_search(search_query="")
+            self.api_resource.admin.import_cards_by_search(search_query="")
 
         with pytest.raises(ValueError, match="search_query parameter is required"):
-            self.api_resource.import_cards_by_search(search_query=None)
+            self.api_resource.admin.import_cards_by_search(search_query=None)
 
 
 class TestAPIResourceCaching(unittest.TestCase):
@@ -822,7 +823,7 @@ class TestAPIResourceCaching(unittest.TestCase):
         with (
             patch.object(self.api_resource, "_conn_pool") as mock_pool,
             patch(
-                "api.api_resource._bulk_upsert",
+                "api.admin_resource._bulk_upsert",
                 return_value={"inserted": 1, "updated": 0, "unchanged": 0},
             ),
         ):
@@ -845,7 +846,7 @@ class TestAPIResourceCaching(unittest.TestCase):
             )
 
             # Call _upsert_cards directly to test cache clearing
-            self.api_resource._upsert_cards([valid_card])
+            self.api_resource.admin._upsert_cards([valid_card])
 
             # Cache should be cleared after successful load
             assert "test_key" not in self.api_resource._query_cache
@@ -860,7 +861,7 @@ class TestAPIResourceCaching(unittest.TestCase):
             )
 
             gen_before = self.api_resource._cache_generation.value
-            self.api_resource._upsert_cards([valid_card])
+            self.api_resource.admin._upsert_cards([valid_card])
             # Generation increment is the cross-worker invalidation signal
             assert self.api_resource._cache_generation.value > gen_before
 
@@ -989,7 +990,7 @@ class TestAPIResourceCaching(unittest.TestCase):
 
         # Test that generation increment invalidates the search gen cache
         gen_before = self.api_resource._cache_generation.value
-        self.api_resource._clear_caches()
+        self.api_resource.admin._clear_caches()
         assert self.api_resource._cache_generation.value == gen_before + 1
 
 

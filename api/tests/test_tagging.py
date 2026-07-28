@@ -59,14 +59,6 @@ class TestBuildUuidToSlug:
 
 
 class TestAPIResourceEndpoints:
-    def test_import_oracle_tags_registered(self) -> None:
-        assert hasattr(APIResource, "import_oracle_tags")
-        assert callable(APIResource.import_oracle_tags)
-
-    def test_import_art_tags_registered(self) -> None:
-        assert hasattr(APIResource, "import_art_tags")
-        assert callable(APIResource.import_art_tags)
-
     def test_old_graphql_methods_removed(self) -> None:
         assert not hasattr(APIResource, "discover_tags_from_scryfall")
         assert not hasattr(APIResource, "discover_tags_from_graphql")

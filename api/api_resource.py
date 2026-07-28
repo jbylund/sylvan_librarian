@@ -3,17 +3,13 @@
 from __future__ import annotations
 
 import copy
-import datetime
 import inspect
-import itertools
 import logging
 import multiprocessing
 import os
 import pathlib
-import re
 import threading
 import time
-import uuid
 
 # Imported at runtime, not under TYPE_CHECKING, because route handlers annotate parameters with it and
 # ParamBinder resolves those annotations to real types at registration. Under TYPE_CHECKING the name is
@@ -29,25 +25,19 @@ import falcon
 import orjson
 import psycopg
 import psycopg_pool
-import requests
 from cachebox import LRUCache, TTLCache
 from psycopg import Connection, Cursor
 
-from api.card_processing import preprocess_card
-from api.db.bulk_upsert import bulk_upsert as _bulk_upsert
+from api.admin_resource import ADMIN_MOUNT_PREFIX, AdminResource
 from api.enums import CardOrdering, PreferOrder, ResponseShape, SortDirection, UniqueOn
 from api.middlewares.timing import record_span
 from api.noscript_helpers import generate_results_count_html, generate_results_html
 from api.parsing import generate_sql_query, parse_scryfall_query
-from api.scryfall_bulk_data_fetcher import BulkDataKey, ScryfallBulkDataFetcher
 from api.settings import settings
-from api.tag_import import import_art_tags as _import_art_tags
-from api.tag_import import import_oracle_tags as _import_oracle_tags
 from api.utils import db_utils, error_monitoring, multiprocessing_utils
 from api.utils.caching import cached
 from api.utils.css_utils import build_critical_css
 from api.utils.generation_cache import GenerationCache
-from api.utils.http_utils import make_user_agent
 from api.utils.page_rendering import SITE_NAME_PLACEHOLDER, STATIC_DIR, build_base_html, build_card_html
 from api.utils.param_binding import ParamCoercionError
 from api.utils.routing import build_route_table, build_routes_listing, route
@@ -58,7 +48,6 @@ from card_engine import QueryEngine as _QueryEngine
 from card_engine import QueryError as _QueryError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator
     from multiprocessing.sharedctypes import Synchronized
     from multiprocessing.synchronize import Event as EventType
     from multiprocessing.synchronize import RLock as LockType
@@ -91,19 +80,7 @@ DISALLOWED_QUERY_ARGS: frozenset[str] = frozenset(["falcon_response", "request_h
 # more. Callers must not append exception detail to it.
 INTERNAL_ERROR_DESCRIPTION = "An internal error occurred."
 
-# pylint: disable=c-extension-no-member
-NOT_FOUND = 404
-MIN_IMPORT_INTERVAL = 300
-IMPORT_LOCK_TIMEOUT = 2
 MIN_IMPORT_CARDS = 90_000
-# Cards per bulk_upsert call during an import. The whole batch becomes ONE bind parameter: a JSON
-# array that Postgres must receive, cast to jsonb, expand with jsonb_array_elements, and join against
-# magic.cards. So this value sets the server-side peak for the statement, and the corpus grows over
-# time — a size that fit once does not stay fitting. Lowered from 6000 to 3000 after backends were
-# lost mid-statement during import; the extra round trips are not measurable against the import's
-# total, and it halves the logged parameter too (see log_parameter_max_length in the pg config).
-_UPSERT_PAGE_SIZE = 3_000
-
 # Rows per batch streamed into the engine during a reload. The reload's memory
 # floor is the Rust-side build (~305 MB), so the batch only needs to be small
 # relative to that: ~2k rows ≈ 18 MB of dicts. Smaller adds round trips for no
@@ -145,59 +122,9 @@ DEFAULT_RESULT_FIELDS: tuple[str, ...] = (
     "type_line",
 )
 
-CUSTOM_IS_TAGS = [
-    "historic",  # artifact, legendary, saga
-    "pathway",  # land and name contains pathway
-    "permanent",  # ...
-    "reprint",
-    "spell",  # ...
-    "unique",  # has exactly one printing
-    "old",  # 93/97 frame
-    "new",  # newer frames
-    "foil",  # foil version of a card
-    "nonfoil",  # non-foil version of a card
-    "datestamped",  # can get from the json promo_types array
-    "universesbeyond",  # can get from the json promo_types array
-    # I don't know how to do this, I just don't want to make the normal requests
-    "booster",
-    "default",
-]
-
 # default/atypical are complementary and disjoint
 # so in theory we could query for one and build the other by
 # querying and inverting
-
-LAND_IS_TAGS = [
-    "bikeland",
-    "bondland",
-    "bounceland",
-    "canopyland",
-    "checkland",
-    "creatureland",
-    "fastland",
-    "fetchland",
-    "filterland",
-    "gainland",
-    "manland",
-    "painland",
-    "scryland",
-    "shadowland",
-    "shockland",
-    "slowland",
-    "storageland",
-    "surveilland",
-    "tangoland",
-    "tricycleland",
-    "triland",
-]
-CARD_IS_TAGS = LAND_IS_TAGS + [  # noqa: RUF005
-    "bear",  # easy to make custom, but also small
-    "commander",
-    "outlaw",  # based on creature type
-    "party",  # based on creature type
-    "reserved",
-    "vanilla",
-]
 
 
 def set_cache_header(falcon_response: falcon.Response | None, duration: timedelta) -> None:
@@ -280,7 +207,6 @@ class APIResource:
 
         Sets up the database connection pool and action mapping for the API.
         """
-        self._bulk_data_fetcher = ScryfallBulkDataFetcher()
         self._critical_css: str = build_critical_css(STATIC_DIR / "styles.css")
         self._conn_pool: psycopg_pool.ConnectionPool = db_utils.make_pool()
         # Build the route table from methods marked with @route, scanning the class rather than this
@@ -289,29 +215,29 @@ class APIResource:
         # what it declared — computed once here rather than per-request in _handle.
         self.routes = build_route_table(self)
 
-        # Static once the route table is fully populated — see build_routes_listing.
-        self._not_found_routes = build_routes_listing(self.routes)
-
         self._cache_generation: Synchronized = cache_generation or multiprocessing.Value("i", 0)
         self._query_cache: GenerationCache = GenerationCache(
             factory=lambda: LRUCache(maxsize=1_000 if settings.enable_cache else 1),
             generation=self._cache_generation,
         )
         self._search_gen_cache: LRUCache = LRUCache(maxsize=1)  # generation → TTLCache
-        self._session = requests.Session()
-        self._import_guard: LockType = import_guard
         self._last_import_time: Synchronized = last_import_time or multiprocessing.Value("d", 0.0, lock=True)
-        self._schema_setup_event: EventType = schema_setup_event
-
-        self._session.headers.update({"User-Agent": make_user_agent()})
         self._engine = _QueryEngine()
         self._engine_reload_lock = threading.Lock()
         # Cross-worker guard: the full-table fetch in _reload_engine is memory-hungry,
         # so only one worker process should run it at a time (see _reload_engine).
         self._engine_reload_guard: LockType = engine_reload_guard or multiprocessing.Lock()
         logger.info("Worker with pid %d has conn pool %s", os.getpid(), self._conn_pool)
-        self.setup_schema()
-        self.import_data()  # ensures that database is setup
+
+        # Mounted after the parent's own state exists, since the child reaches back for the handles
+        # they share. advertise=False is set here rather than on each handler: forgetting it is then
+        # a property of this one call, not a hole in one route.
+        self.admin = AdminResource(self, import_guard=import_guard, schema_setup_event=schema_setup_event)
+        self.routes.update(build_route_table(self.admin, prefix=ADMIN_MOUNT_PREFIX, advertise=False))
+        self._not_found_routes = build_routes_listing(self.routes)
+
+        self.admin.setup_schema()
+        self.admin.import_data()  # ensures that database is setup
 
     def _get_timer(self, req: falcon.Request) -> Timer:
         """Get the timer for the request."""
@@ -533,69 +459,6 @@ class APIResource:
         set_no_store_header(falcon_response)
         return os.getpid()
 
-    @route()
-    def setup_schema(self, *_: object, **__: object) -> None:
-        """Set up the database schema and apply migrations as needed."""
-        if self._schema_setup_event.is_set():
-            logger.info("Schema already setup (fastpath) in pid %d", os.getpid())
-            return
-
-        filesystem_migrations = db_utils.get_migrations()
-
-        with self._import_guard:
-            if self._schema_setup_event.is_set():
-                logger.info("Schema already setup (slowpath) in pid %d", os.getpid())
-                return
-            logger.info("Setting up schema in pid %d", os.getpid())
-            # read migrations from the db dir...
-            # if any already applied migrations differ from what we want
-            # to apply then drop everything
-            with self._conn_pool.connection() as conn, conn.cursor() as cursor:
-                cursor.execute(
-                    """CREATE TABLE IF NOT EXISTS migrations (
-                        file_name text not null,
-                        file_sha256 text not null,
-                        date_applied timestamp default now(),
-                        file_contents text not null
-                    )""",
-                )
-                cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_migrations_filename ON migrations (file_name)")
-                cursor.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_migrations_file_sha256 ON migrations USING HASH (file_sha256)",
-                )
-
-                cursor.execute("SELECT file_name, file_sha256 FROM migrations ORDER BY date_applied")
-                applied_migrations = [dict(r) for r in cursor]
-
-                already_applied = set()
-                for applied_migration, fs_migration in zip(applied_migrations, filesystem_migrations, strict=False):
-                    if applied_migration.items() <= fs_migration.items():
-                        already_applied.add(applied_migration["file_sha256"])
-                    else:
-                        already_applied.clear()
-                        cursor.execute("DELETE FROM migrations")
-                        cursor.execute("DROP SCHEMA IF EXISTS magic CASCADE")
-                        conn.commit()
-
-                for imigration in filesystem_migrations:
-                    file_sha256 = imigration["file_sha256"]
-                    if file_sha256 in already_applied:
-                        logger.info("%s was already applied...", imigration["file_name"])
-                        continue
-                    logger.info("Applying %s ...", imigration["file_name"])
-                    cursor.execute(imigration["file_contents"])
-                    cursor.execute(
-                        """
-                            INSERT INTO migrations
-                                (  file_name  ,   file_sha256  ,   file_contents  ) VALUES
-                                (%(file_name)s, %(file_sha256)s, %(file_contents)s)""",
-                        imigration,
-                    )
-                    conn.commit()
-
-            self._schema_setup_event.set()
-            logger.info("Schema setup complete in pid %d", os.getpid())
-
     _SETUP_COMPLETE_TTL = 60 * 60  # 1 hour; also invalidated when _last_import_time changes
     _setup_complete_cache: tuple[bool, float, float] | None = None  # (result, expires_at, import_time)
 
@@ -649,20 +512,6 @@ class APIResource:
                 title="Service Unavailable",
                 description="Setup is not complete, please try again later.",
             ) from None
-
-    def _import_recent(self) -> bool:
-        """Return True if a bulk import completed in the last 5 minutes (or setup is complete when no shared timestamp)."""
-        if self._last_import_time is None:
-            return self._setup_complete()
-        # Unlocked read: c_double is atomic on typical platforms; avoids lock contention on fast path
-        t = self._last_import_time.get_obj().value
-        if not t:
-            logger.info("No import recorded...")
-            return False
-        time_since_import = time.time() - t
-        retval = time_since_import < MIN_IMPORT_INTERVAL
-        logger.info("Last import was %d seconds ago, %s", time_since_import, retval)
-        return retval
 
     def _trigger_background_reload_if_needed(self) -> None:
         if self._engine.size() == 0 and self._engine_reload_lock.acquire(blocking=False):
@@ -735,79 +584,6 @@ class APIResource:
             logger.info("Engine reloaded with %d cards (pid=%d, rss=%s)", self._engine.size(), os.getpid(), _rss_mb())
         finally:
             self._engine_reload_guard.release()
-
-    def _run_import_under_lock(self) -> None:
-        """Run the import flow; caller must hold the import lock."""
-        if self._import_recent():
-            logger.info("Import recent slowpath...")
-            return
-        self.setup_schema()
-
-        before = time.monotonic()
-
-        result = self._upsert_cards(self._bulk_data_fetcher.stream_data_for_key(BulkDataKey.DEFAULT_CARDS))
-
-        after_transfer = time.monotonic()
-
-        if result["status"] == "success":
-            if self._last_import_time is not None:
-                self._last_import_time.value = time.time()
-            total_time = after_transfer - before
-            cards_sent = result.get("cards_sent", result["cards_loaded"])
-            rate = cards_sent / total_time if total_time > 0 else 0
-            logger.info(
-                "Loaded %d cards (%d new, %d updated) in %.2f seconds, rate: %.2f cards/s...",
-                result["cards_loaded"],
-                result.get("cards_inserted", 0),
-                result.get("cards_updated", 0),
-                total_time,
-                rate,
-            )
-            self.backfill_prefer_scores()
-            self.backfill_cubecobra_scores()
-            _import_oracle_tags(self._conn_pool, self._bulk_data_fetcher)
-            _import_art_tags(self._conn_pool, self._bulk_data_fetcher)
-            self._reload_engine(force=True)
-            self._clear_caches()
-            self._last_import_time.value = time.time()
-            self._setup_complete_cache = None
-            return
-        logger.error("Failed to import data: %s", result["message"])
-        return
-
-    @cached(
-        cache=TTLCache(maxsize=1, global_ttl=MIN_IMPORT_INTERVAL),
-    )
-    @route()
-    def import_data(self, **_: object) -> None:
-        """Import data from Scryfall and insert into the database."""
-        before = time.monotonic()
-        if self._import_recent():
-            after = time.monotonic()
-            total_time = after - before
-            logger.info("Import recent fastpath took %.2f seconds in pid %d", total_time, os.getpid())
-            # check without taking the lock so the majority of the time we never take the lock
-            return None
-
-        logger.info("Hitting slowpath in pid %d", os.getpid())
-
-        import_lock = self._last_import_time.get_lock()
-
-        acquired = import_lock.acquire(timeout=IMPORT_LOCK_TIMEOUT)
-        if not acquired:
-            if self._setup_complete():
-                logger.info(
-                    "Timed out waiting %.0fs for import lock; setup complete, skipping in pid %d",
-                    IMPORT_LOCK_TIMEOUT,
-                    os.getpid(),
-                )
-                return None
-            # acquire with no timeout...
-            import_lock.acquire()
-        try:
-            return self._run_import_under_lock()
-        finally:
-            import_lock.release()
 
     def _resolve_result_fields(self, fields: Sequence[str] | None) -> list[str]:
         """Validate a `fields=` request against RESULT_FIELD_COLUMNS, deduping repeats.
@@ -1310,18 +1086,6 @@ class APIResource:
         falcon_response.text = html_content
         falcon_response.content_type = "text/html"
 
-    @route()
-    def prefer_score_tuner(self, *, falcon_response: falcon.Response | None = None, **_: object) -> None:
-        """Return the prefer score tuner page.
-
-        Args:
-        ----
-            falcon_response (falcon.Response): The Falcon response to write to.
-
-        """
-        self._serve_static_file(filename="prefer_score_tuner.html", falcon_response=falcon_response)
-        falcon_response.content_type = "text/html"
-
     @route(paths=("favicon.ico", "static/favicon.ico"))
     def favicon_ico(self, *, falcon_response: falcon.Response | None = None, **_: object) -> None:
         """Return the favicon.ico file.
@@ -1472,17 +1236,6 @@ class APIResource:
             falcon_response.text = f"Error reading file {filename}: {e}"
 
     @route()
-    def get_migrations(self, **_: object) -> list[dict[str, str]]:
-        """Get the migrations from the filesystem.
-
-        Returns:
-        -------
-            List[Dict[str, str]]: List of migration metadata dictionaries.
-
-        """
-        return db_utils.get_migrations()
-
-    @route()
     def get_catalog(
         self,
         *,
@@ -1518,760 +1271,6 @@ class APIResource:
         return self._run_query(
             query=db_utils.read_sql("get_common_keywords"),
         )["result"]
-
-    @route()
-    def backfill_prefer_scores(self, **_: object) -> dict[str, Any]:
-        """Backfill prefer_score and prefer_score_components for all cards.
-
-        This endpoint recalculates the prefer score for all existing cards based on:
-        - Border color (black: 14, white: 0)
-        - Frame version (2015: 42, 2003: 30)
-        - Artwork popularity (logarithmic scaling: 23 * ln(count) / ln(40))
-        - Rarity (common: 16, uncommon: 16, rare: 11, mythic: 0)
-        - Extended art (12 points if present)
-        - Highres scan (8 points if image_status='highres_scan')
-        - Has paper (6 points if 'paper' in games array)
-        - Language (English: 40 points)
-        - Legendary frame (5 points if 'legendary' in frame_effects)
-        - Non-showcase (10 points if 'showcase' not in frame_effects)
-        - Finish (nonfoil: 10, foil: 5, etched: 0)
-        - Artwork set (full-color: 20, black/white: 0)
-
-        Returns:
-            Dict with status and count of cards updated
-        """
-        logger.info("Starting prefer score backfill")
-
-        backfill_sql = db_utils.read_sql("backfill_prefer_scores")
-        with self._conn_pool.connection() as conn, conn.cursor() as cursor:
-            statement_timeout = 120_000
-            # Validate and set statement timeout
-            self._set_statement_timeout(cursor, statement_timeout)
-            cursor.execute(backfill_sql)
-            updated_count = cursor.rowcount
-
-            # Get count of updated cards
-            cursor.execute("SELECT COUNT(*) as count FROM magic.cards WHERE prefer_score IS NOT NULL")
-            result = cursor.fetchone()
-            total_cards = result["count"] if result else 0
-
-            conn.commit()
-
-        logger.info("Prefer score backfill complete: %d of %d cards updated", updated_count, total_cards)
-
-        return {
-            "status": "success",
-            "cards_updated": updated_count,
-            "message": f"Successfully backfilled prefer scores for {updated_count} of {total_cards} cards",
-        }
-
-    def _fetch_cubecobra_data(self, db_oracle_ids: set[uuid.UUID]) -> dict[uuid.UUID, dict[str, Any]]:
-        """Paginate the CubeCobra top-cards API and return data keyed by oracle_id.
-
-        Returns:
-            Mapping of oracle_id -> {elo, cube_count, pick_count, popularity}.
-        """
-        cubecobra_url = "https://cubecobra.com/tool/api/topcards/"
-        page = 1
-
-        while True:
-            time.sleep(0.5)
-            logger.info("Fetching CubeCobra page %d", page)
-            response = self._session.get(
-                cubecobra_url,
-                params={"p": page, "f": "", "s": "Elo", "d": "descending"},
-                timeout=30,
-            )
-            response.raise_for_status()
-            cards = response.json().get("data") or []
-
-            if not cards:
-                logger.info("Empty page %d - done paginating CubeCobra", page)
-                break
-
-            results: dict[uuid.UUID, dict[str, Any]] = {}
-            for card in cards:
-                oracle_id_str = card.get("oracle_id")
-                if not oracle_id_str:
-                    continue
-                try:
-                    oracle_id = uuid.UUID(oracle_id_str)
-                except ValueError:
-                    logger.warning("CubeCobra returned malformed oracle_id %r on page %d", oracle_id_str, page)
-                    continue
-                if oracle_id in db_oracle_ids:
-                    results[oracle_id] = {
-                        "elo": card.get("elo"),
-                        "cube_count": card.get("cubeCount"),
-                        "pick_count": card.get("pickCount"),
-                    }
-
-            logger.info("CubeCobra page %d: %d cards (total: %d)", page, len(cards), len(results))
-            page += 1
-            yield results
-
-    def _insert_cubecobra_data(self, cubecobra_data: dict[uuid.UUID, dict[str, Any]]) -> int:
-        """Write CubeCobra data into magic.cards, matching on oracle_id.
-
-        Args:
-            cubecobra_data: Mapping of oracle_id -> data dict from _fetch_cubecobra_data().
-
-        Returns:
-            Total number of card rows updated.
-        """
-        records = db_utils.maybe_json(
-            [
-                {
-                    "elo": data["elo"],
-                    "cube_count": data["cube_count"],
-                    "pick_count": data["pick_count"],
-                    "oracle_id": oracle_id,
-                }
-                for oracle_id, data in cubecobra_data.items()
-            ]
-        )
-
-        with self._conn_pool.connection() as conn, conn.cursor() as cursor:
-            cursor.execute(
-                """
-                WITH incoming AS (
-                    SELECT * FROM jsonb_to_recordset(%(records)s) AS t(
-                        elo real, cube_count integer, pick_count integer, oracle_id uuid
-                    )
-                )
-                UPDATE magic.cards
-                SET
-                    cubecobra_elo        = incoming.elo,
-                    cubecobra_cube_count = incoming.cube_count,
-                    cubecobra_pick_count = incoming.pick_count
-                FROM incoming
-                WHERE magic.cards.oracle_id = incoming.oracle_id
-                """,
-                {"records": records},
-            )
-            total_updated = cursor.rowcount
-            conn.commit()
-
-        return total_updated
-
-    @route()
-    def backfill_cubecobra_scores(self, **_: object) -> dict[str, Any]:
-        """Backfill cubecobra_score for all cards.
-
-        Computes a weighted average of per-dimension PERCENT_RANK values (each in the 0-1
-        range, where 0 is best and 1 is worst) and scales the result to a 0-100 score
-        (0 = best, 100 = worst).
-
-        The per-dimension weights are treated as relative and are internally normalized so
-        that their sum is 100. Callers may supply any non-negative weights; they do not need
-        to sum to 1.0.
-
-        One score per distinct card_name is computed and then propagated to all printings.
-
-        Returns:
-            Dict with status and count of cards updated.
-        """
-        weights = {
-            "w_cube_count": 1,
-            "w_edhrec": 1,
-            "w_elo": 1,
-            "w_pick_count": 1,
-        }
-        scale_factor = sum(weights.values()) / 100.0
-        weights = {k: v / scale_factor for k, v in weights.items()}
-        logger.info("Starting CubeCobra score backfill with weights: %s", weights)
-
-        backfill_sql = db_utils.read_sql("backfill_cubecobra_scores")
-        with self._conn_pool.connection() as conn, conn.cursor() as cursor:
-            self._set_statement_timeout(cursor, 600_000)
-            cursor.execute(backfill_sql, weights)
-            updated_count = cursor.rowcount
-            conn.commit()
-
-        logger.info("CubeCobra score backfill complete: %d cards updated", updated_count)
-        return {
-            "status": "success",
-            "cards_updated": updated_count,
-            "weights": weights,
-        }
-
-    @route()
-    def ingest_cubecobra(self, **_: object) -> dict[str, Any]:
-        """Fetch card data from CubeCobra and store it in magic.cards.
-
-        Paginates the CubeCobra top-cards API, then updates all matching rows
-        in magic.cards (matched on oracle_id). Cards not present in CubeCobra
-        are left with NULL values for the cubecobra_* columns.
-
-        Returns:
-            Dict with status and count of rows updated.
-        """
-        logger.info("Starting CubeCobra ingest")
-        # fetch the distinct, non-null oracle ids that are in the db
-        with self._conn_pool.connection() as conn, conn.cursor() as cursor:
-            cursor.execute(
-                "SELECT DISTINCT oracle_id FROM magic.cards WHERE oracle_id IS NOT NULL",
-            )
-            db_oracle_ids = {r["oracle_id"] for r in cursor.fetchall()}
-
-        for cubecobra_page in self._fetch_cubecobra_data(db_oracle_ids):
-            logger.info("Fetched %d oracle_ids from CubeCobra", len(cubecobra_page))
-            cards_updated = self._insert_cubecobra_data(cubecobra_page)
-        logger.info("CubeCobra ingest complete: %d card rows updated", cards_updated)
-
-        backfill_result = self.backfill_cubecobra_scores()
-        self._clear_caches()
-
-        return {
-            "status": "success",
-            "cards_updated": cards_updated,
-            "scores_backfilled": backfill_result["cards_updated"],
-        }
-
-    def _add_is_tag_to_cards_or_printings(self, *, is_tag: str) -> dict[str, Any]:
-        """Add a specific is: tag to all cards or printings matching that tag using Scryfall search.
-
-        Args:
-        ----
-            is_tag (str): The is: tag to fetch and apply to cards (e.g., 'creature', 'spell').
-
-        Returns:
-        -------
-            Dict[str, Any]: Result summary with updated card count and tag info.
-
-        """
-        # TODO: is tags are not based on card name, but rather specific printing
-        # meaning this needs to not use unique on cards, but instead do unique printing
-        # which means it's gonna be hella slow
-
-        if not is_tag:
-            msg = "is_tag parameter is required"
-            raise ValueError(msg)
-
-        if is_tag in CUSTOM_IS_TAGS:
-            return self._add_is_tag_to_custom(is_tag=is_tag)
-        if is_tag in CARD_IS_TAGS:
-            return self._add_is_tag_to_cards(is_tag=is_tag)
-        return self._add_is_tag_to_printings(is_tag=is_tag)
-
-    def _add_is_tag_to_custom(self, *, is_tag: str) -> dict[str, Any]:
-        """Add a specific is: tag to all custom cards matching that tag using Scryfall search."""
-        # these are special cases where you can phrase the tag as a query over other properties
-        logger.info("Adding is:%s to custom cards", is_tag)
-        return {
-            "cards_updated": 0,
-            "is_tag": is_tag,
-            "message": f"Custom is: tag {is_tag} is not supported",
-            "total_cards_found": 0,
-        }
-
-    def _add_is_tag_to_cards(self, *, is_tag: str) -> dict[str, Any]:
-        """Add a specific is: tag to all cards matching that tag using Scryfall search.
-
-        Args:
-        ----
-            is_tag (str): The is: tag to fetch and apply to cards (e.g., 'creature', 'spell').
-
-        Returns:
-        -------
-            Dict[str, Any]: Result summary with updated card count and tag info.
-
-        """
-        # Fetch cards with this is: tag from Scryfall API (handles pagination)
-        cards = self._scryfall_search(query=f"is:{is_tag}", unique="cards")
-        card_names = {c["name"] for c in cards}
-
-        if not cards:
-            logger.warning("No cards found with is:%s in Scryfall API", is_tag)
-            return {
-                "is_tag": is_tag,
-                "cards_updated": 0,
-                "total_cards_found": 0,
-                "message": f"No cards found with is:{is_tag} in Scryfall API",
-            }
-
-        logger.info("Updating %d cards with is:%s", len(card_names), is_tag)
-        # Update cards in database with the new is: tag
-        updated_count = 0
-        new_tag = orjson.dumps({is_tag: True}).decode("utf-8")
-        with self._conn_pool.connection() as conn, conn.cursor() as cursor:
-            # Use SQL update with jsonb concatenation to add the is: tag
-            for card_name_batch in itertools.batched(sorted(card_names), 500):
-                cursor.execute(
-                    """
-                    UPDATE
-                        magic.cards
-                    SET
-                        card_is_tags = card_is_tags || %(new_tag)s::jsonb
-                    WHERE
-                        card_name = ANY(%(card_names)s) AND
-                        not(card_is_tags @> %(new_tag)s::jsonb)
-                    """,
-                    {
-                        "card_names": list(card_name_batch),
-                        "new_tag": new_tag,
-                    },
-                )
-                updated_count += cursor.rowcount
-                conn.commit()
-
-        return {
-            "is_tag": is_tag,
-            "cards_updated": updated_count,
-            "total_cards_found": len(card_names),
-            "message": f"Successfully updated {updated_count} cards with is:{is_tag}",
-        }
-
-    def _add_is_tag_to_printings(self, *, is_tag: str) -> dict[str, Any]:
-        """Add a specific is: tag to all printings matching that tag using Scryfall search.
-
-        Args:
-        ----
-            is_tag (str): The is: tag to fetch and apply to printings (e.g., 'creature', 'spell').
-
-        Returns:
-        -------
-            Dict[str, Any]: Result summary with updated card count and tag info.
-
-        """
-        # Fetch cards with this is: tag from Scryfall API (handles pagination)
-        printings = self._scryfall_search(query=f"is:{is_tag}", unique="printings")
-
-        if not printings:
-            logger.warning("No printings found with is:%s in Scryfall API", is_tag)
-            return {
-                "is_tag": is_tag,
-                "cards_updated": 0,
-                "total_cards_found": 0,
-                "message": f"No cards found with is:{is_tag} in Scryfall API",
-            }
-
-        logger.info("Updating %d printings with is:%s", len(printings), is_tag)
-        # Update cards in database with the new is: tag
-        updated_count = 0
-        new_tag = orjson.dumps({is_tag: True}).decode("utf-8")
-        scryfall_ids = {p["id"] for p in printings}
-        with self._conn_pool.connection() as conn, conn.cursor() as cursor:
-            # Use SQL update with jsonb concatenation to add the is: tag
-            for scryfall_id_batch in itertools.batched(sorted(scryfall_ids), 500):
-                cursor.execute(
-                    """
-                    UPDATE
-                        magic.cards
-                    SET
-                        card_is_tags = card_is_tags || %(new_tag)s::jsonb
-                    WHERE
-                        scryfall_id = ANY(%(scryfall_ids)s) AND
-                        not(card_is_tags @> %(new_tag)s::jsonb)
-                    """,
-                    {
-                        "scryfall_ids": list(scryfall_id_batch),
-                        "new_tag": new_tag,
-                    },
-                )
-                updated_count += cursor.rowcount
-                conn.commit()
-
-        return {
-            "is_tag": is_tag,
-            "cards_updated": updated_count,
-            "total_cards_found": len(scryfall_ids),
-            "message": f"Successfully updated {updated_count} printings with is:{is_tag}",
-        }
-
-    @route()
-    def discover_is_tags_from_syntax(self, **_: object) -> list[str]:
-        """Discover all available is: tags from Scryfall syntax documentation.
-
-        Returns:
-        -------
-            List[str]: List of all available is: tag names.
-
-        Raises:
-        ------
-            ValueError: If API request fails or returns invalid data.
-
-        """
-        try:
-            response = self._session.get("https://scryfall.com/docs/syntax", timeout=30)
-            response.raise_for_status()
-        except requests.RequestException as e:
-            msg = f"Failed to fetch is: tags from Scryfall syntax: {e}"
-            raise ValueError(msg) from e
-
-        # Extract is: tag names from the documentation
-        # Look for patterns like "is:permanent", "is:spell", etc.
-        is_tag_pattern = r"is:([a-zA-Z_-]+)"
-        matches = re.findall(is_tag_pattern, response.text)
-
-        # Remove duplicates and sort
-        unique_is_tags = sorted({match.lower() for match in matches})
-
-        logger.info("Discovered %d unique is: tags from Scryfall syntax", len(unique_is_tags))
-        return unique_is_tags
-
-    @route()
-    def import_oracle_tags(self, **_: object) -> dict[str, Any]:
-        """Import oracle tags from Scryfall bulk data into oracle_tags, oracle_tag_relationships, and card_oracle_tags."""
-        return _import_oracle_tags(self._conn_pool, self._bulk_data_fetcher)
-
-    @route()
-    def import_art_tags(self, **_: object) -> dict[str, Any]:
-        """Import art tags from Scryfall bulk data into art_tags, art_tag_relationships, and card_art_tags."""
-        return _import_art_tags(self._conn_pool, self._bulk_data_fetcher)
-
-    @route()
-    def import_all_is_tags(self, **_: object) -> dict[str, Any]:
-        """Discover and import all is: tags from Scryfall syntax documentation.
-
-        Returns:
-        -------
-            Dict[str, Any]: Summary of the bulk is: tag import operation.
-
-        """
-        result: dict[str, Any] = {
-            "success": True,
-        }
-        logger.info("Starting bulk is: tag discovery and import")
-
-        try:
-            all_is_tags = self.discover_is_tags_from_syntax()
-        except ValueError as e:
-            result.update(
-                {
-                    "success": False,
-                    "error": str(e),
-                    "message": "Failed to discover is: tags from Scryfall syntax",
-                },
-            )
-            return result
-
-        if not all_is_tags:
-            return {
-                "success": False,
-                "message": "No is: tags discovered from Scryfall syntax",
-            }
-
-        # Import card associations for each is: tag
-        start_time = time.monotonic()
-        imported_tags = []
-        failed_tags = []
-        total_cards_updated = 0
-
-        for idx, is_tag in enumerate(all_is_tags):
-            try:
-                if idx > 0:
-                    elapsed_time = time.monotonic() - start_time
-                    fraction_complete = idx / len(all_is_tags)
-                    estimated_time_remaining = (elapsed_time / fraction_complete) - elapsed_time
-                    estimated_duration = datetime.timedelta(seconds=round(estimated_time_remaining, 1))
-                    logger.info(
-                        "Importing is: tag %d of %d: %20s (ETA: %s)",
-                        idx + 1,
-                        len(all_is_tags),
-                        is_tag,
-                        estimated_duration,
-                    )
-
-                tag_result = self._add_is_tag_to_cards_or_printings(is_tag=is_tag)
-                imported_tags.append(
-                    {
-                        "is_tag": is_tag,
-                        "cards_updated": tag_result["cards_updated"],
-                        "total_cards_found": tag_result["total_cards_found"],
-                    },
-                )
-                total_cards_updated += tag_result["cards_updated"]
-
-            except ValueError as e:
-                logger.warning("Failed to import is: tag '%s': %s", is_tag, e)
-                failed_tags.append({"is_tag": is_tag, "error": str(e)})
-
-        result.update(
-            {
-                "duration": time.monotonic() - start_time,
-                "discovered_is_tags": len(all_is_tags),
-                "imported_is_tags": len(imported_tags),
-                "failed_is_tags": len(failed_tags),
-                "total_cards_updated": total_cards_updated,
-                "imported_tags": imported_tags,
-                "failed_tags": failed_tags,
-                "message": f"Successfully imported {len(imported_tags)} is: tags, {len(failed_tags)} failed",
-            },
-        )
-
-        return result
-
-    @route()
-    def import_card_by_name(
-        self,
-        *,
-        card_name: str,
-        **_: object,
-    ) -> dict[str, Any]:
-        """Import a single card by name from Scryfall API.
-
-        Args:
-        ----
-            card_name (str): The exact name of the card to import.
-
-        Returns:
-        -------
-            Dict[str, Any]: Result summary with import status and card info.
-
-        """
-        if not card_name:
-            msg = "card_name parameter is required"
-            raise ValueError(msg)
-
-        logger.info("Importing card by name: '%s'", card_name)
-
-        # Check if card already exists in database for backward compatibility
-        existing_check = self._run_query(
-            query="SELECT card_name FROM magic.cards WHERE card_name = %(card_name)s",
-            params={"card_name": card_name},
-            explain=False,
-        )
-
-        if existing_check["result"]:
-            return {
-                "card_name": card_name,
-                "status": "already_exists",
-                "message": f"Card '{card_name}' already exists in database",
-            }
-
-        # Use import_cards_by_search with exact name query
-        return self.import_cards_by_search(search_query=f'!"{card_name}"')
-
-    @route()
-    def import_cards_by_search(
-        self,
-        *,
-        search_query: str,
-        **_: object,
-    ) -> dict[str, Any]:
-        """Import cards from Scryfall API using any search query.
-
-        Args:
-        ----
-            search_query (str): The Scryfall search query to execute.
-
-        Returns:
-        -------
-            Dict[str, Any]: Result summary with import status and card info.
-
-        """
-        if not search_query:
-            msg = "search_query parameter is required"
-            raise ValueError(msg)
-
-        logger.info("Importing cards by search: '%s'", search_query)
-
-        # Fetch card data from Scryfall API using the provided search query
-        try:
-            cards = self._scryfall_search(query=search_query)
-            if not cards:
-                return {
-                    "search_query": search_query,
-                    "status": "not_found",
-                    "message": f"No cards found for search query '{search_query}' in Scryfall API",
-                    "cards_loaded": 0,
-                }
-
-        except (requests.RequestException, ValueError, KeyError) as e:
-            logger.error("Error fetching cards for search '%s' from Scryfall: %s", search_query, e)
-            return {
-                "search_query": search_query,
-                "status": "error",
-                "message": f"Error fetching cards from Scryfall: {e}",
-                "cards_loaded": 0,
-            }
-
-        # Insert the cards into the database using the consolidated method
-        load_result = self._upsert_cards(cards)
-
-        if load_result["status"] == "success":
-            self._reload_engine(force=True)
-
-        # Add search_query to the result for consistency
-        load_result["search_query"] = search_query
-
-        return load_result
-
-    def _scryfall_search(self, *, query: str, unique: str = "prints") -> list[dict[str, Any]]:
-        """Search Scryfall API for cards matching the given query.
-
-        This method handles pagination to get the complete list of cards and
-        automatically applies filters for paper format and format legality.
-
-        Args:
-        ----
-            query (str): The search query string for Scryfall.
-            unique (str): The unique parameter to pass to the Scryfall API.
-
-        Returns:
-        -------
-            List[Dict[str, Any]]: List of card data from Scryfall API.
-
-        Raises:
-        ------
-            ValueError: If API request fails or returns invalid data.
-
-        """
-        # Add standard filters for paper format and format legality
-        # Wrap original query in parentheses to ensure proper filter application
-        filters = [
-            "(f:m or f:l or f:c or f:v)",
-            "game:paper",
-            f"unique:{unique}",
-        ]
-        full_query = f"({query}) {' '.join(filters)}"
-
-        base_url = "https://api.scryfall.com/cards/search"
-        params = {"q": full_query, "format": "json"}
-        all_cards = []
-
-        total_cards = "?"
-        try:
-            while True:
-                time.sleep(1 / 10)  # Rate limiting - 10 requests per second max
-                logger.info(
-                    "Making request to Scryfall API: %s %s (have %d of %s total cards)",
-                    base_url,
-                    params,
-                    len(all_cards),
-                    total_cards,
-                )
-                response = self._session.get(base_url, params=params, timeout=30)
-                response.raise_for_status()
-                data = orjson.loads(response.content)
-
-                total_cards = data.get("total_cards", 1) or 1
-
-                if "data" not in data:
-                    break
-
-                # Extract card data from current page
-                page_cards = [card for card in data["data"] if card]
-                all_cards.extend(page_cards)
-
-                # Check if there are more pages
-                if not data.get("has_more", False):
-                    break
-
-                # Get next page URL
-                next_page = data.get("next_page")
-                if not next_page:
-                    break
-
-                # Update base_url and clear params for next page
-                base_url = next_page
-                params = {}
-
-        except requests.RequestException as oops:
-            # Check if it's a 404 error - return empty list
-            if (hasattr(oops, "response") and oops.response and oops.response.status_code == NOT_FOUND) or "404" in str(oops):
-                return all_cards
-            msg = f"Failed to fetch data from Scryfall API: {oops}"
-            raise ValueError(msg) from oops
-
-        return all_cards
-
-    def _upsert_cards(
-        self,
-        cards: Iterable[dict[str, Any]],
-        page_size: int = _UPSERT_PAGE_SIZE,
-    ) -> dict[str, Any]:
-        """Preprocess and upsert an iterable of raw card dicts into magic.cards.
-
-        Preprocessing is applied lazily as cards flow through, so the full dataset
-        is never held in memory. Each batch is upserted via bulk_upsert: new rows
-        are inserted, changed rows are updated, and unchanged rows are skipped.
-
-        Returns a dict with:
-            - cards_inserted: new cards added
-            - cards_updated: existing cards with changed data
-            - cards_loaded: cards_inserted + cards_updated
-            - cards_sent: rows attempted (after preprocessing)
-            - status: "success", "no_cards_before_preprocessing", "no_cards_after_preprocessing", "database_error"
-            - message: descriptive message
-        """
-        self.setup_schema()
-
-        try:
-            with self._conn_pool.connection() as conn:
-                with conn.cursor() as cursor:
-                    self._set_statement_timeout(cursor, 30_000)
-
-                class _CardStream:
-                    """Preprocesses raw cards lazily, tracking stage counts."""
-
-                    def __init__(self) -> None:
-                        self.raw = 0
-                        self.preprocessed = 0
-
-                    def __iter__(self) -> Iterator[dict[str, Any]]:
-                        for card in cards:
-                            self.raw += 1
-                            for processed in preprocess_card(card):
-                                self.preprocessed += 1
-                                yield processed
-
-                stream = _CardStream()
-                cards_inserted = cards_updated = cards_sent = 0
-
-                for page in itertools.batched(stream, page_size):
-                    batch = _bulk_upsert(
-                        conn,
-                        "cards",
-                        list(page),
-                        schema="magic",
-                        conflict_target=["scryfall_id"],
-                        skip_columns=["card_oracle_tags", "card_art_tags", "card_is_tags"],
-                    )
-                    cards_sent += len(page)
-                    cards_inserted += batch["inserted"]
-                    cards_updated += batch["updated"]
-                    logger.info(
-                        "%d inserted, %d updated, %d sent so far",
-                        cards_inserted,
-                        cards_updated,
-                        cards_sent,
-                    )
-
-                conn.commit()
-
-                if cards_sent == 0:
-                    if stream.raw == 0:
-                        status, message = "no_cards_before_preprocessing", "No cards provided for loading"
-                    else:
-                        status, message = "no_cards_after_preprocessing", "No cards remaining after preprocessing"
-                    logger.info("No cards imported: %s (raw=%d preprocessed=%d)", message, stream.raw, stream.preprocessed)
-                    return {"status": status, "cards_loaded": 0, "cards_sent": 0, "message": message}
-
-                cards_loaded = cards_inserted + cards_updated
-                self._clear_caches()
-                return {
-                    "status": "success",
-                    "cards_inserted": cards_inserted,
-                    "cards_updated": cards_updated,
-                    "cards_loaded": cards_loaded,
-                    "cards_sent": cards_sent,
-                    "message": f"Successfully loaded {cards_loaded} cards ({cards_inserted} new, {cards_updated} updated)",
-                }
-
-        except (psycopg.Error, ValueError, KeyError) as e:
-            logger.exception("Error loading cards")
-            return {
-                "status": "database_error",
-                "cards_loaded": 0,
-                "cards_sent": 0,
-                "message": f"Error loading cards: {type(e).__name__}: {e}",
-            }
-
-    def _clear_caches(self) -> None:
-        with self._cache_generation.get_lock():
-            self._cache_generation.value += 1
 
     @route()
     def random_search(

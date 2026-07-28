@@ -113,18 +113,18 @@ class TestTypeConversion:
         """Test that APIResource action map uses type converting wrappers."""
         with (
             patch("api.api_resource.db_utils.make_pool"),
-            patch("api.api_resource.requests.Session"),
+            patch("api.admin_resource.requests.Session"),
         ):
             api_resource = APIResource(
                 last_import_time=multiprocessing.Value("d", time.time(), lock=True),
             )
 
             # Check that import_oracle_tags is wrapped
-            assert "import_oracle_tags" in api_resource.routes
+            assert "_admin/import_oracle_tags" in api_resource.routes
 
             # The wrapped function should be different from the original
-            original_method = api_resource.import_oracle_tags
-            wrapped_method = api_resource.routes["import_oracle_tags"].action
+            original_method = api_resource.admin.import_oracle_tags
+            wrapped_method = api_resource.routes["_admin/import_oracle_tags"].action
 
             # They should not be the same function object
             assert wrapped_method is not original_method
