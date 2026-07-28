@@ -19,59 +19,49 @@ from cachebox import LRUCache
 
 from api.utils.caching import cached
 
+# api/utils/page_rendering.py -> api/static. Anchored on the package directory rather than counting
+# parents from __file__, so moving this module within the package does not silently repoint it.
+STATIC_DIR = pathlib.Path(__file__).resolve().parents[1] / "static"
+_FRAGMENTS_DIR = STATIC_DIR / "fragments"
+_INDEX_HTML_PATH = STATIC_DIR / "index.html"
+_CARD_HTML_PATH = STATIC_DIR / "card.html"
+
 # Placeholder written into index.html/card.html wherever the site name belongs, so the substitution
 # below can't accidentally match unrelated copy that happens to contain "MTG Search".
 SITE_NAME_PLACEHOLDER = "%%%SITENAME%%%"
 
-
-# api/utils/page_rendering.py -> api/static. Anchored on the package directory rather than counting
-# parents from __file__, so moving this module within the package does not silently repoint it.
-STATIC_DIR = pathlib.Path(__file__).resolve().parents[1] / "static"
-
-
-_INDEX_HTML_PATH = STATIC_DIR / "index.html"
-
-
-_CARD_HTML_PATH = STATIC_DIR / "card.html"
-
-
-_FRAGMENTS_DIR = STATIC_DIR / "fragments"
+# Markup identical across index.html and card.html — read once at import time and spliced into each
+# template's own placeholder comment (<!-- FAVICON --> etc.) by build_base_html / build_card_html.
+# Fragments live in fragments/ rather than static/ directly since they are not complete documents and
+# are never served on their own (only files with a route entry are reachable over HTTP).
+_FAVICON_HTML = (_FRAGMENTS_DIR / "favicon.html").read_text()
+_PRECONNECTS_HTML = (_FRAGMENTS_DIR / "preconnects.html").read_text()
+_FONTS_HTML = (_FRAGMENTS_DIR / "fonts.html").read_text()
+_CSS_HTML = (_FRAGMENTS_DIR / "css.html").read_text()
+_FOOTER_HTML = (_FRAGMENTS_DIR / "footer.html").read_text()
 
 
 def _static_hash(filename: str) -> str | None:
+    """Return a short content hash for a static file, or None if it is not built yet.
+
+    Args:
+        filename: Name of the file under STATIC_DIR.
+
+    Returns:
+        The first 12 hex characters of its sha256, or None. app.min.js is generated, so a checkout
+        that has not run the minifier legitimately has no hash for it.
+    """
     try:
         return hashlib.sha256((STATIC_DIR / filename).read_bytes()).hexdigest()[:12]
     except FileNotFoundError:
         return None
 
 
+# Feed the cache-busting ?v= query strings. Computed once at import, so a file replaced underneath a
+# running process keeps its old hash — which is correct, since the process serves the old bytes too.
 _STYLES_CSS_HASH = _static_hash("styles.css")
-
-
 _APP_MIN_JS_HASH = _static_hash("app.min.js")
-
-
 _CARD_JS_HASH = _static_hash("card.js")
-
-
-# Markup identical across index.html and card.html — read once at import time and spliced into
-# each template's own placeholder comment (<!-- FAVICON --> etc.) by build_base_html /
-# build_card_html. Fragments live in fragments/ rather than static/ directly since they are not
-# complete documents and are never served on their own (only files with an action_map entry are
-# reachable over HTTP).
-_FAVICON_HTML = (_FRAGMENTS_DIR / "favicon.html").read_text()
-
-
-_PRECONNECTS_HTML = (_FRAGMENTS_DIR / "preconnects.html").read_text()
-
-
-_FONTS_HTML = (_FRAGMENTS_DIR / "fonts.html").read_text()
-
-
-_CSS_HTML = (_FRAGMENTS_DIR / "css.html").read_text()
-
-
-_FOOTER_HTML = (_FRAGMENTS_DIR / "footer.html").read_text()
 
 
 def _inject_shared_fragments(html: str) -> str:

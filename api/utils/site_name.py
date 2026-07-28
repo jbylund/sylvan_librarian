@@ -30,9 +30,7 @@ _STRIP_TLDS = frozenset(["app", "biz", "co", "com", "dev", "edu", "gov", "info",
 # Allowlist: only valid hostname characters (letters, digits, hyphens, dots) after urlparse extracts the host.
 _SAFE_HOSTNAME_RE = re.compile(r"^[a-z0-9.\-]+$")
 
-
 _IP_RE = re.compile(r"^\d+\.\d+\.\d+\.\d+$")
-
 
 _MIN_WORD_LEN = 3
 

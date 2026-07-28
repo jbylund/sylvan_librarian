@@ -66,9 +66,7 @@ logger = logging.getLogger(__name__)
 # pylint: disable=c-extension-no-member
 NOT_FOUND = 404
 
-
 MIN_IMPORT_INTERVAL = 300
-
 
 IMPORT_LOCK_TIMEOUT = 2
 
@@ -80,7 +78,6 @@ IMPORT_LOCK_TIMEOUT = 2
 # lost mid-statement during import; the extra round trips are not measurable against the import's
 # total, and it halves the logged parameter too (see log_parameter_max_length in the pg config).
 _UPSERT_PAGE_SIZE = 3_000
-
 
 CUSTOM_IS_TAGS = [
     "historic",  # artifact, legendary, saga
@@ -99,7 +96,6 @@ CUSTOM_IS_TAGS = [
     "booster",
     "default",
 ]
-
 
 LAND_IS_TAGS = [
     "bikeland",
@@ -124,7 +120,6 @@ LAND_IS_TAGS = [
     "tricycleland",
     "triland",
 ]
-
 
 CARD_IS_TAGS = LAND_IS_TAGS + [  # noqa: RUF005
     "bear",  # easy to make custom, but also small
