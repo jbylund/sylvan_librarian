@@ -53,10 +53,9 @@ from api.utils import db_utils, error_monitoring, multiprocessing_utils
 from api.utils.css_utils import build_critical_css
 from api.utils.generation_cache import GenerationCache
 from api.utils.http_utils import make_user_agent
-from api.utils.param_binding import ParamCoercionError, bind_params
-from api.utils.routing import BoundRoute, iter_marked_routes, route
+from api.utils.param_binding import ParamCoercionError
+from api.utils.routing import build_route_table, build_routes_listing, route
 from api.utils.timer import Timer
-from api.utils.type_conversions import _get_type_name
 from card_engine import ENGINE_COLUMNS as _ENGINE_COLUMNS_FROM_MODULE
 from card_engine import QueryEngine as _QueryEngine
 from card_engine import QueryError as _QueryError
@@ -68,6 +67,7 @@ if TYPE_CHECKING:
     from multiprocessing.synchronize import RLock as LockType
 
     from api.parsing.nodes import Query
+    from api.utils.routing import BoundRoute
 
 
 logger = logging.getLogger(__name__)
@@ -446,73 +446,6 @@ def rewrap(query: str) -> str:
     return " ".join(query.strip().split())
 
 
-def _max_positional_args(func: Any) -> float:  # noqa: ANN401
-    """Return how many positional args `func` accepts; inf if it takes *args.
-
-    Computed once per registered action at APIResource.__init__ time (not per-request):
-    inspect.signature() follows a bind_params wrapper's __wrapped__ link
-    (set by functools.update_wrapper), so this sees the real underlying handler's signature.
-    """
-    try:
-        params = inspect.signature(func).parameters.values()
-    except (TypeError, ValueError):
-        return 0.0
-    if any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params):
-        return float("inf")
-    return float(sum(1 for p in params if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)))
-
-
-def _build_routes_listing(route_table: dict[str, BoundRoute]) -> dict[str, dict[str, Any]]:
-    """Build the {route: {doc, args, kwargs}} listing served in 404 responses.
-
-    Depends only on the route table's contents, which are fixed once APIResource.__init__ finishes —
-    computed once there rather than on every 404 (inspect.signature() per route isn't free).
-    """
-    routes = {}
-    for endpoint_name, entry in route_table.items():
-        wrapped_func = entry.action
-        # Get the original function from the wrapper
-        original_func = wrapped_func.__wrapped__ if hasattr(wrapped_func, "__wrapped__") else wrapped_func
-
-        # Get function signature
-        sig = inspect.signature(original_func)
-
-        # Extract docstring
-        doc = original_func.__doc__ or ""
-
-        # Parse arguments
-        args = []
-        kwargs = {}
-
-        for param_name, param in sig.parameters.items():
-            if param_name.startswith("_"):
-                continue
-            if param_name in ("self", "falcon_response"):
-                continue
-
-            param_info = {
-                "name": param_name,
-                "type": _get_type_name(param.annotation),
-            }
-
-            if param.default != inspect.Parameter.empty:
-                # It's a keyword argument with default
-                kwargs[param_name] = {
-                    "type": _get_type_name(param.annotation),
-                    "default": param.default,
-                }
-            else:
-                # It's a positional argument
-                args.append(param_info)
-
-        routes[endpoint_name] = {
-            "doc": doc,
-            "args": args,
-            "kwargs": kwargs,
-        }
-    return routes
-
-
 def _columnarize_cards(cards: list[dict[str, Any]]) -> dict[str, list[Any]]:
     """Convert a list of card dicts into a dict of per-field value lists.
 
@@ -554,22 +487,10 @@ class APIResource:
         # instance so nothing assigned below can become a route. Each entry carries everything
         # dispatch needs — the wrapped handler, how many positional path segments it absorbs, and
         # what it declared — computed once here rather than per-request in _handle.
-        self.routes: dict[str, BoundRoute] = {}
-        for attr_name, spec in iter_marked_routes(type(self)):
-            handler = getattr(self, attr_name)
-            entry = BoundRoute(
-                action=bind_params(handler),
-                positional_capacity=_max_positional_args(handler),
-                spec=spec,
-            )
-            for path in spec.paths:
-                if path in self.routes:
-                    msg = f"Route path {path!r} is claimed by both {self.routes[path].action.__name__} and {attr_name}"
-                    raise RuntimeError(msg)
-                self.routes[path] = entry
+        self.routes = build_route_table(self)
 
-        # Static once the route table is fully populated — see _build_routes_listing.
-        self._not_found_routes = _build_routes_listing(self.routes)
+        # Static once the route table is fully populated — see build_routes_listing.
+        self._not_found_routes = build_routes_listing(self.routes)
 
         self._cache_generation: Synchronized = cache_generation or multiprocessing.Value("i", 0)
         self._query_cache: GenerationCache = GenerationCache(
