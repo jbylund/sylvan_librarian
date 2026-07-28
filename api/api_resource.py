@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import datetime
-import hashlib
 import inspect
 import itertools
 import logging
@@ -23,19 +22,15 @@ import uuid
 # unnecessary once handlers carry a route decorator.
 from collections.abc import Sequence  # noqa: TC003
 from datetime import timedelta
-from functools import wraps
 from typing import TYPE_CHECKING, Any
 from typing import cast as typecast
 
-import cachebox
 import falcon
-import minify_html
 import orjson
 import psycopg
 import psycopg_pool
 import requests
 from cachebox import LRUCache, TTLCache
-from cachebox import cached as cachebox_cached
 from psycopg import Connection, Cursor
 
 from api.card_processing import preprocess_card
@@ -49,9 +44,11 @@ from api.settings import settings
 from api.tag_import import import_art_tags as _import_art_tags
 from api.tag_import import import_oracle_tags as _import_oracle_tags
 from api.utils import db_utils, error_monitoring, multiprocessing_utils
+from api.utils.caching import cached
 from api.utils.css_utils import build_critical_css
 from api.utils.generation_cache import GenerationCache
 from api.utils.http_utils import make_user_agent
+from api.utils.page_rendering import SITE_NAME_PLACEHOLDER, STATIC_DIR, build_base_html, build_card_html
 from api.utils.param_binding import ParamCoercionError
 from api.utils.routing import build_route_table, build_routes_listing, route
 from api.utils.site_name import hostname_to_site_name
@@ -83,69 +80,6 @@ def _rss_mb() -> str:
     except OSError:
         pass
     return "unknown"
-
-
-# Placeholder written into index.html/card.html wherever the site name belongs, so the substitution
-# below can't accidentally match unrelated copy that happens to contain "MTG Search".
-_SITE_NAME_PLACEHOLDER = "%%%SITENAME%%%"
-
-
-_STATIC_DIR = pathlib.Path(__file__).parent / "static"
-_INDEX_HTML_PATH = _STATIC_DIR / "index.html"
-_CARD_HTML_PATH = _STATIC_DIR / "card.html"
-_FRAGMENTS_DIR = _STATIC_DIR / "fragments"
-
-
-def _static_hash(filename: str) -> str | None:
-    try:
-        return hashlib.sha256((_STATIC_DIR / filename).read_bytes()).hexdigest()[:12]
-    except FileNotFoundError:
-        return None
-
-
-_STYLES_CSS_HASH = _static_hash("styles.css")
-_APP_MIN_JS_HASH = _static_hash("app.min.js")
-_CARD_JS_HASH = _static_hash("card.js")
-
-# Markup identical across index.html and card.html — read once at import time and spliced into
-# each template's own placeholder comment (<!-- FAVICON --> etc.) by _build_base_html /
-# _build_card_html. Fragments live in fragments/ rather than static/ directly since they are not
-# complete documents and are never served on their own (only files with an action_map entry are
-# reachable over HTTP).
-_FAVICON_HTML = (_FRAGMENTS_DIR / "favicon.html").read_text()
-_PRECONNECTS_HTML = (_FRAGMENTS_DIR / "preconnects.html").read_text()
-_FONTS_HTML = (_FRAGMENTS_DIR / "fonts.html").read_text()
-_CSS_HTML = (_FRAGMENTS_DIR / "css.html").read_text()
-_FOOTER_HTML = (_FRAGMENTS_DIR / "footer.html").read_text()
-
-
-def _inject_shared_fragments(html: str) -> str:
-    """Splice the shared head/footer fragments into their placeholder comments.
-
-    Must run before the CRITICAL_CSS/asset-hash substitutions below: the CSS fragment carries its
-    own inner <!-- CRITICAL_CSS --> placeholder, which only exists in `html` after this replace.
-    """
-    html = html.replace("<!-- FAVICON -->", _FAVICON_HTML)
-    html = html.replace("<!-- PRECONNECTS -->", _PRECONNECTS_HTML)
-    html = html.replace("<!-- FONTS -->", _FONTS_HTML)
-    html = html.replace("<!-- CSS -->", _CSS_HTML)
-    return html.replace("<!-- FOOTER -->", _FOOTER_HTML)
-
-
-# Flip to False to disable HTML minification (e.g. while debugging a minifier-induced issue).
-_MINIFY_HTML_ENABLED = True
-
-
-def _minify_html(html: str) -> str:
-    """Minify HTML to shave a bit more off the page weight on top of gzip/brotli/zstd compression.
-
-    keep_comments=True is required: `_build_base_html`'s cached output still carries per-request
-    placeholders (SERVER_SIDE_RESULTS, SERVER_SIDE_EMBEDDED_DATA) substituted by `search()` after
-    this function returns, and those are plain HTML comments that must survive intact.
-    """
-    if not _MINIFY_HTML_ENABLED:
-        return html
-    return minify_html.minify(html, minify_js=True, minify_css=True, keep_comments=True)
 
 
 # Query parameters that must not be forwarded to action handlers.
@@ -266,30 +200,6 @@ CARD_IS_TAGS = LAND_IS_TAGS + [  # noqa: RUF005
 ]
 
 
-def cached(cache: Any, key: Any = None) -> Any:  # noqa: ANN401
-    """Decorator that respects the settings.enable_cache flag at runtime.
-
-    Always creates the cached function, but checks settings at call time
-    to determine whether to use the cache or call the original function.
-    """
-    key_maker = key or cachebox.make_hash_key
-
-    def decorator(func: Any) -> Any:  # noqa: ANN401
-        cached_func = cachebox_cached(cache, key_maker=key_maker)(func)
-
-        @wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
-            if settings.enable_cache:
-                return cached_func(*args, **kwargs)
-            return func(*args, **kwargs)
-
-        # Copy attributes from cached_func for compatibility
-        wrapper.cache = cache  # type: ignore[attr-defined]
-        return wrapper
-
-    return decorator
-
-
 def set_cache_header(falcon_response: falcon.Response | None, duration: timedelta) -> None:
     """Set the Cache-Control header on a Falcon response.
 
@@ -308,32 +218,6 @@ def set_no_store_header(falcon_response: falcon.Response | None) -> None:
     if falcon_response is None:
         return
     falcon_response.set_header("Cache-Control", "no-store")
-
-
-@cached(cache=LRUCache(maxsize=16))
-def _build_base_html(critical_css: str, site_name: str) -> str:
-    """Read index.html and inject critical CSS and site name. Cached per (critical_css, site_name) pair."""
-    html = _INDEX_HTML_PATH.read_text()
-    html = _inject_shared_fragments(html)
-    html = html.replace("<!-- CRITICAL_CSS -->", critical_css)
-    if _STYLES_CSS_HASH:
-        html = html.replace("/static/styles.css", f"/static/styles.css?v={_STYLES_CSS_HASH}")
-    if _APP_MIN_JS_HASH:
-        html = html.replace("/static/app.min.js", f"/static/app.min.js?v={_APP_MIN_JS_HASH}")
-    return _minify_html(html.replace(_SITE_NAME_PLACEHOLDER, site_name))
-
-
-@cached(cache=LRUCache(maxsize=4))
-def _build_card_html(critical_css: str) -> str:
-    """Read card.html and inject critical CSS and versioned asset URLs."""
-    html = _CARD_HTML_PATH.read_text()
-    html = _inject_shared_fragments(html)
-    html = html.replace("<!-- CRITICAL_CSS -->", critical_css)
-    if _STYLES_CSS_HASH:
-        html = html.replace("/static/styles.css", f"/static/styles.css?v={_STYLES_CSS_HASH}")
-    if _CARD_JS_HASH:
-        html = html.replace("/static/card.js", f"/static/card.js?v={_CARD_JS_HASH}")
-    return _minify_html(html)
 
 
 @cached(cache=LRUCache(maxsize=10_000))
@@ -397,7 +281,7 @@ class APIResource:
         Sets up the database connection pool and action mapping for the API.
         """
         self._bulk_data_fetcher = ScryfallBulkDataFetcher()
-        self._critical_css: str = build_critical_css(_STATIC_DIR / "styles.css")
+        self._critical_css: str = build_critical_css(STATIC_DIR / "styles.css")
         self._conn_pool: psycopg_pool.ConnectionPool = db_utils.make_pool()
         # Build the route table from methods marked with @route, scanning the class rather than this
         # instance so nothing assigned below can become a route. Each entry carries everything
@@ -1367,7 +1251,7 @@ class APIResource:
 
         """
         site_name = hostname_to_site_name(request_host)
-        html_content = _build_base_html(self._critical_css, site_name)
+        html_content = build_base_html(self._critical_css, site_name)
 
         # Check if we have a search query
         search_query = query or q
@@ -1448,7 +1332,7 @@ class APIResource:
         """
         if falcon_response is None:
             return
-        full_filename = _STATIC_DIR / "favicon.ico"
+        full_filename = STATIC_DIR / "favicon.ico"
         with pathlib.Path(full_filename).open(mode="rb") as f:
             falcon_response.data = contents = f.read()
         falcon_response.content_type = "image/vnd.microsoft.icon"
@@ -1463,7 +1347,7 @@ class APIResource:
         """Return the social preview image."""
         if falcon_response is None:
             return
-        full_filename = _STATIC_DIR / "social-preview.webp"
+        full_filename = STATIC_DIR / "social-preview.webp"
         with full_filename.open(mode="rb") as f:
             contents = f.read()
         falcon_response.data = contents
@@ -1559,8 +1443,8 @@ class APIResource:
         if falcon_response is None:
             return
         site_name = hostname_to_site_name(request_host)
-        html = _build_card_html(self._critical_css)
-        falcon_response.text = html.replace(_SITE_NAME_PLACEHOLDER, site_name)
+        html = build_card_html(self._critical_css)
+        falcon_response.text = html.replace(SITE_NAME_PLACEHOLDER, site_name)
         falcon_response.content_type = "text/html"
         set_cache_header(falcon_response, duration=timedelta(hours=1))
 
@@ -1573,7 +1457,7 @@ class APIResource:
             falcon_response (falcon.Response): The Falcon response to write to.
 
         """
-        full_filename = _STATIC_DIR / filename
+        full_filename = STATIC_DIR / filename
         try:
             with pathlib.Path(full_filename).open() as f:
                 falcon_response.text = f.read()
