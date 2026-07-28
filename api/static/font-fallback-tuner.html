@@ -1,0 +1,630 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Font Fallback Tuner</title>
+    <link rel="preconnect" href="https://d1hot9ps2xugbc.cloudfront.net" />
+    <link rel="preconnect" href="https://d1hot9ps2xugbc.cloudfront.net" crossorigin />
+    <link href="https://d1hot9ps2xugbc.cloudfront.net/cdn/fonts/beleren/beleren-subset.css" rel="stylesheet" />
+    <link href="https://d1hot9ps2xugbc.cloudfront.net/cdn/fonts/mplantin/mplantin-subset.css" rel="stylesheet" />
+    <style id="tuner-fontface">
+      /* injected by JS */
+    </style>
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      body {
+        background: #1a1a2e;
+        color: #e0e0e0;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        font-size: 14px;
+        padding: 20px;
+      }
+
+      h1 {
+        font-size: 1.4rem;
+        margin-bottom: 4px;
+        color: #7eb8f7;
+      }
+
+      .subtitle {
+        color: #888;
+        margin-bottom: 20px;
+        font-size: 0.85rem;
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns: 320px 1fr;
+        gap: 24px;
+        align-items: start;
+      }
+
+      /* ---- Controls ---- */
+      .controls {
+        background: #12122a;
+        border: 1px solid #2a2a4a;
+        border-radius: 8px;
+        padding: 16px;
+      }
+
+      .font-section {
+        margin-bottom: 20px;
+      }
+
+      .font-section:last-child {
+        margin-bottom: 0;
+      }
+
+      .font-section h2 {
+        font-size: 0.9rem;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: #7eb8f7;
+        margin-bottom: 12px;
+        padding-bottom: 6px;
+        border-bottom: 1px solid #2a2a4a;
+      }
+
+      .slider-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
+
+      .slider-label {
+        width: 120px;
+        flex-shrink: 0;
+        color: #aaa;
+        font-size: 0.82rem;
+        font-family: monospace;
+      }
+
+      input[type='range'] {
+        flex: 1;
+        accent-color: #7eb8f7;
+        cursor: pointer;
+      }
+
+      .slider-value {
+        width: 68px;
+        text-align: right;
+        font-family: monospace;
+        font-size: 0.82rem;
+        color: #e0e0e0;
+      }
+
+      .reset-btn {
+        margin-top: 12px;
+        padding: 5px 12px;
+        background: #2a2a4a;
+        border: 1px solid #3a3a6a;
+        border-radius: 4px;
+        color: #aaa;
+        cursor: pointer;
+        font-size: 0.8rem;
+        width: 100%;
+      }
+
+      .reset-btn:hover {
+        background: #3a3a6a;
+        color: #e0e0e0;
+      }
+
+      .export-btn {
+        margin-top: 8px;
+        padding: 5px 12px;
+        background: #1a3a5a;
+        border: 1px solid #2a5a8a;
+        border-radius: 4px;
+        color: #7eb8f7;
+        cursor: pointer;
+        font-size: 0.8rem;
+        width: 100%;
+      }
+
+      .export-btn:hover {
+        background: #2a4a7a;
+      }
+
+      /* ---- View controls ---- */
+      .view-controls {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 16px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+
+      .view-controls label {
+        font-size: 0.82rem;
+        color: #aaa;
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        cursor: pointer;
+        padding: 4px 10px;
+        border-radius: 4px;
+        border: 1px solid #2a2a4a;
+        background: #12122a;
+      }
+
+      .view-controls label:has(input:checked) {
+        border-color: #7eb8f7;
+        color: #e0e0e0;
+      }
+
+      .view-controls input[type='radio'] {
+        accent-color: #7eb8f7;
+      }
+
+      .opacity-control {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 0.82rem;
+        color: #aaa;
+        margin-left: auto;
+      }
+
+      .opacity-control input[type='range'] {
+        width: 80px;
+        accent-color: #f7a87e;
+      }
+
+      /* ---- Preview ---- */
+      .preview {
+        background: #12122a;
+        border: 1px solid #2a2a4a;
+        border-radius: 8px;
+        padding: 20px;
+      }
+
+      .preview-section {
+        margin-bottom: 28px;
+      }
+
+      .preview-section:last-child {
+        margin-bottom: 0;
+      }
+
+      .preview-label {
+        font-size: 0.75rem;
+        color: #666;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        margin-bottom: 10px;
+      }
+
+      /* Overlay container — positions both layers in the same flow space */
+      .overlay-wrap {
+        position: relative;
+        display: inline-block;
+      }
+
+      .layer {
+        display: block;
+      }
+
+      /* The fallback layer sits exactly on top */
+      .layer-fallback {
+        position: absolute;
+        top: 0;
+        left: 0;
+        pointer-events: none;
+      }
+
+      /* Color coding */
+      .show-web .layer-web {
+        color: rgba(126, 184, 247, 0.7); /* blue */
+        mix-blend-mode: normal;
+      }
+
+      .show-web .layer-fallback {
+        display: none;
+      }
+
+      .show-fallback .layer-web {
+        display: none;
+      }
+
+      .show-fallback .layer-fallback {
+        position: static;
+        color: rgba(247, 168, 126, 0.9);
+      }
+
+      .show-overlay .layer-web {
+        color: rgba(100, 160, 255, 0.6);
+      }
+
+      .show-overlay .layer-fallback {
+        color: rgba(255, 130, 80, 0.6);
+      }
+
+      /* Sample text styles — mirror the actual site */
+      .sample-title {
+        font-size: 3rem;
+        line-height: 1.1;
+        white-space: nowrap;
+      }
+
+      .sample-card-name {
+        font-size: 1.38rem;
+        font-weight: bold;
+        line-height: 1.3;
+        white-space: nowrap;
+      }
+
+      .sample-card-type {
+        font-size: 1.04rem;
+        line-height: 1.3;
+        white-space: nowrap;
+      }
+
+      .sample-oracle {
+        font-size: 1.38rem;
+        line-height: 1.5;
+        max-width: 500px;
+      }
+
+      .sample-flavor {
+        font-style: italic;
+        font-size: 1.14rem;
+        line-height: 1.5;
+        max-width: 500px;
+      }
+
+      /* Web font layer uses real fonts; fallback layer uses only the local fallback @font-face */
+      .layer-web.sample-title,
+      .layer-web.sample-card-name,
+      .layer-web.sample-card-type {
+        font-family: 'Beleren', sans-serif;
+      }
+
+      .layer-web.sample-oracle,
+      .layer-web.sample-flavor {
+        font-family: 'MPlantin', Georgia, serif;
+      }
+
+      .layer-fallback.sample-title,
+      .layer-fallback.sample-card-name,
+      .layer-fallback.sample-card-type {
+        font-family: 'Beleren Fallback', sans-serif;
+      }
+
+      .layer-fallback.sample-oracle,
+      .layer-fallback.sample-flavor {
+        font-family: 'MPlantin Fallback', Georgia, serif;
+      }
+
+      /* ---- Output CSS ---- */
+      .css-output {
+        background: #0a0a1a;
+        border: 1px solid #2a2a4a;
+        border-radius: 6px;
+        padding: 12px;
+        font-family: monospace;
+        font-size: 0.78rem;
+        color: #88c0d0;
+        white-space: pre;
+        overflow-x: auto;
+        margin-top: 12px;
+        display: none;
+      }
+
+      .css-output.visible {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Font Fallback Tuner</h1>
+    <p class="subtitle">
+      Overlay web font (blue) and fallback font (orange) to tune metrics. Perfect alignment = minimal layout shift on
+      load.
+    </p>
+
+    <div class="layout">
+      <!-- Controls -->
+      <aside class="controls">
+        <div class="font-section" id="section-beleren">
+          <h2>Beleren → Arial/Liberation Sans Bold</h2>
+          <div class="slider-row">
+            <span class="slider-label">size-adjust</span>
+            <input type="range" min="70" max="130" step="0.1" id="b-size-adjust" />
+            <span class="slider-value" id="b-size-adjust-val"></span>
+          </div>
+          <div class="slider-row">
+            <span class="slider-label">ascent-override</span>
+            <input type="range" min="50" max="150" step="0.1" id="b-ascent" />
+            <span class="slider-value" id="b-ascent-val"></span>
+          </div>
+          <div class="slider-row">
+            <span class="slider-label">descent-override</span>
+            <input type="range" min="0" max="80" step="0.1" id="b-descent" />
+            <span class="slider-value" id="b-descent-val"></span>
+          </div>
+          <div class="slider-row">
+            <span class="slider-label">line-gap-override</span>
+            <input type="range" min="0" max="80" step="0.1" id="b-line-gap" />
+            <span class="slider-value" id="b-line-gap-val"></span>
+          </div>
+          <button class="reset-btn" onclick="resetFont('beleren')">Reset to saved values</button>
+        </div>
+
+        <div class="font-section" id="section-mplantin">
+          <h2>MPlantin → Georgia/Liberation Serif</h2>
+          <div class="slider-row">
+            <span class="slider-label">size-adjust</span>
+            <input type="range" min="70" max="130" step="0.1" id="m-size-adjust" />
+            <span class="slider-value" id="m-size-adjust-val"></span>
+          </div>
+          <div class="slider-row">
+            <span class="slider-label">ascent-override</span>
+            <input type="range" min="50" max="150" step="0.1" id="m-ascent" />
+            <span class="slider-value" id="m-ascent-val"></span>
+          </div>
+          <div class="slider-row">
+            <span class="slider-label">descent-override</span>
+            <input type="range" min="0" max="80" step="0.1" id="m-descent" />
+            <span class="slider-value" id="m-descent-val"></span>
+          </div>
+          <div class="slider-row">
+            <span class="slider-label">line-gap-override</span>
+            <input type="range" min="0" max="80" step="0.1" id="m-line-gap" />
+            <span class="slider-value" id="m-line-gap-val"></span>
+          </div>
+          <button class="reset-btn" onclick="resetFont('mplantin')">Reset to saved values</button>
+        </div>
+
+        <button class="export-btn" onclick="toggleOutput()">Show/copy CSS output</button>
+        <div class="css-output" id="css-output"></div>
+      </aside>
+
+      <!-- Preview -->
+      <section class="preview">
+        <div class="view-controls">
+          <label><input type="radio" name="view" value="overlay" checked /> Overlay</label>
+          <label><input type="radio" name="view" value="web" /> Web font only</label>
+          <label><input type="radio" name="view" value="fallback" /> Fallback only</label>
+          <div class="opacity-control">
+            <span>Overlay opacity:</span>
+            <input type="range" id="overlay-opacity" min="20" max="100" value="60" step="1" />
+            <span id="overlay-opacity-val">60%</span>
+          </div>
+        </div>
+
+        <div id="samples" class="show-overlay">
+          <div class="preview-section">
+            <div class="preview-label">Site title (Beleren, 3rem)</div>
+            <div class="overlay-wrap">
+              <span class="layer layer-web sample-title">MTG Search</span>
+              <span class="layer layer-fallback sample-title">MTG Search</span>
+            </div>
+          </div>
+
+          <div class="preview-section">
+            <div class="preview-label">Card name (Beleren bold, 1.38rem)</div>
+            <div class="overlay-wrap">
+              <span class="layer layer-web sample-card-name">Lightning Bolt</span>
+              <span class="layer layer-fallback sample-card-name">Lightning Bolt</span>
+            </div>
+            <br /><br />
+            <div class="overlay-wrap">
+              <span class="layer layer-web sample-card-name">Black Lotus</span>
+              <span class="layer layer-fallback sample-card-name">Black Lotus</span>
+            </div>
+            <br /><br />
+            <div class="overlay-wrap">
+              <span class="layer layer-web sample-card-name">Jace, the Mind Sculptor</span>
+              <span class="layer layer-fallback sample-card-name">Jace, the Mind Sculptor</span>
+            </div>
+          </div>
+
+          <div class="preview-section">
+            <div class="preview-label">Card type line (Beleren, 1.04rem)</div>
+            <div class="overlay-wrap">
+              <span class="layer layer-web sample-card-type">Instant</span>
+              <span class="layer layer-fallback sample-card-type">Instant</span>
+            </div>
+            <br /><br />
+            <div class="overlay-wrap">
+              <span class="layer layer-web sample-card-type">Legendary Planeswalker — Jace</span>
+              <span class="layer layer-fallback sample-card-type">Legendary Planeswalker — Jace</span>
+            </div>
+          </div>
+
+          <div class="preview-section">
+            <div class="preview-label">Oracle text (MPlantin, 1.38rem)</div>
+            <div class="overlay-wrap">
+              <div class="layer layer-web sample-oracle">Deal 3 damage to any target.</div>
+              <div class="layer layer-fallback sample-oracle">Deal 3 damage to any target.</div>
+            </div>
+            <br /><br />
+            <div class="overlay-wrap">
+              <div class="layer layer-web sample-oracle">
+                Counter target spell. Its controller draws a card. Then if that card is a land, put it onto the
+                battlefield.
+              </div>
+              <div class="layer layer-fallback sample-oracle">
+                Counter target spell. Its controller draws a card. Then if that card is a land, put it onto the
+                battlefield.
+              </div>
+            </div>
+          </div>
+
+          <div class="preview-section">
+            <div class="preview-label">Flavor text (MPlantin italic, 1.14rem)</div>
+            <div class="overlay-wrap">
+              <div class="layer layer-web sample-flavor">
+                "Channeling the chaos of a raging fire into a contained, directional force requires tremendous will —
+                but the results are undeniable."
+              </div>
+              <div class="layer layer-fallback sample-flavor">
+                "Channeling the chaos of a raging fire into a contained, directional force requires tremendous will —
+                but the results are undeniable."
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <script>
+      // Saved values (from commit b3371b6, computed via fontTools)
+      const SAVED = {
+        beleren: { sizeAdjust: 91.6, ascent: 100.0, descent: 42.9, lineGap: 23.9 },
+        mplantin: { sizeAdjust: 99.7, ascent: 81.8, descent: 30.3, lineGap: 0.0 },
+      };
+
+      const state = {
+        beleren: { ...SAVED.beleren },
+        mplantin: { ...SAVED.mplantin },
+      };
+
+      function fmt(v) {
+        return v.toFixed(1) + '%';
+      }
+
+      function rebuildFontFace() {
+        const b = state.beleren;
+        const m = state.mplantin;
+        document.getElementById('tuner-fontface').textContent = `
+@font-face {
+  font-family: 'Beleren Fallback';
+  src: local('Arial Bold'), local('Liberation Sans Bold');
+  font-weight: bold;
+  font-style: normal;
+  size-adjust: ${fmt(b.sizeAdjust)};
+  ascent-override: ${fmt(b.ascent)};
+  descent-override: ${fmt(b.descent)};
+  line-gap-override: ${fmt(b.lineGap)};
+}
+
+@font-face {
+  font-family: 'MPlantin Fallback';
+  src: local('Georgia'), local('Liberation Serif');
+  font-weight: normal;
+  font-style: normal;
+  size-adjust: ${fmt(m.sizeAdjust)};
+  ascent-override: ${fmt(m.ascent)};
+  descent-override: ${fmt(m.descent)};
+  line-gap-override: ${fmt(m.lineGap)};
+}`;
+        updateOutput();
+      }
+
+      function updateOutput() {
+        const b = state.beleren;
+        const m = state.mplantin;
+        document.getElementById('css-output').textContent =
+          `/* Beleren → Arial Bold fallback */\n` +
+          `@font-face {\n` +
+          `  font-family: 'Beleren Fallback';\n` +
+          `  src: local('Arial Bold'), local('Liberation Sans Bold');\n` +
+          `  font-weight: bold;\n` +
+          `  font-style: normal;\n` +
+          `  size-adjust: ${fmt(b.sizeAdjust)};\n` +
+          `  ascent-override: ${fmt(b.ascent)};\n` +
+          `  descent-override: ${fmt(b.descent)};\n` +
+          `  line-gap-override: ${fmt(b.lineGap)};\n` +
+          `}\n\n` +
+          `/* MPlantin → Georgia fallback */\n` +
+          `@font-face {\n` +
+          `  font-family: 'MPlantin Fallback';\n` +
+          `  src: local('Georgia'), local('Liberation Serif');\n` +
+          `  font-weight: normal;\n` +
+          `  font-style: normal;\n` +
+          `  size-adjust: ${fmt(m.sizeAdjust)};\n` +
+          `  ascent-override: ${fmt(m.ascent)};\n` +
+          `  descent-override: ${fmt(m.descent)};\n` +
+          `  line-gap-override: ${fmt(m.lineGap)};\n` +
+          `}`;
+      }
+
+      function bindSlider(id, font, key, valId) {
+        const slider = document.getElementById(id);
+        const valEl = document.getElementById(valId);
+        slider.addEventListener('input', () => {
+          const v = parseFloat(slider.value);
+          state[font][key] = v;
+          valEl.textContent = fmt(v);
+          rebuildFontFace();
+        });
+        // Init
+        slider.value = state[font][key];
+        valEl.textContent = fmt(state[font][key]);
+      }
+
+      function resetFont(font) {
+        state[font] = { ...SAVED[font] };
+        // Re-sync sliders
+        const prefix = font === 'beleren' ? 'b' : 'm';
+        document.getElementById(`${prefix}-size-adjust`).value = state[font].sizeAdjust;
+        document.getElementById(`${prefix}-ascent`).value = state[font].ascent;
+        document.getElementById(`${prefix}-descent`).value = state[font].descent;
+        document.getElementById(`${prefix}-line-gap`).value = state[font].lineGap;
+        document.getElementById(`${prefix}-size-adjust-val`).textContent = fmt(state[font].sizeAdjust);
+        document.getElementById(`${prefix}-ascent-val`).textContent = fmt(state[font].ascent);
+        document.getElementById(`${prefix}-descent-val`).textContent = fmt(state[font].descent);
+        document.getElementById(`${prefix}-line-gap-val`).textContent = fmt(state[font].lineGap);
+        rebuildFontFace();
+      }
+
+      function toggleOutput() {
+        const el = document.getElementById('css-output');
+        el.classList.toggle('visible');
+        if (el.classList.contains('visible')) {
+          try {
+            navigator.clipboard.writeText(el.textContent);
+          } catch (_) {}
+        }
+      }
+
+      // View mode toggle
+      document.querySelectorAll('input[name="view"]').forEach(radio => {
+        radio.addEventListener('change', () => {
+          const samples = document.getElementById('samples');
+          samples.className = 'show-' + radio.value;
+        });
+      });
+
+      // Overlay opacity
+      const opacitySlider = document.getElementById('overlay-opacity');
+      const opacityVal = document.getElementById('overlay-opacity-val');
+      opacitySlider.addEventListener('input', () => {
+        const v = opacitySlider.value;
+        opacityVal.textContent = v + '%';
+        const alpha = v / 100;
+        // Update the show-overlay color rules dynamically
+        const style = document.createElement('style');
+        style.textContent = `
+          .show-overlay .layer-web { color: rgba(100, 160, 255, ${alpha}); }
+          .show-overlay .layer-fallback { color: rgba(255, 130, 80, ${alpha}); }
+        `;
+        const existing = document.getElementById('opacity-override');
+        if (existing) existing.remove();
+        style.id = 'opacity-override';
+        document.head.appendChild(style);
+      });
+
+      // Wire up all sliders
+      bindSlider('b-size-adjust', 'beleren', 'sizeAdjust', 'b-size-adjust-val');
+      bindSlider('b-ascent', 'beleren', 'ascent', 'b-ascent-val');
+      bindSlider('b-descent', 'beleren', 'descent', 'b-descent-val');
+      bindSlider('b-line-gap', 'beleren', 'lineGap', 'b-line-gap-val');
+      bindSlider('m-size-adjust', 'mplantin', 'sizeAdjust', 'm-size-adjust-val');
+      bindSlider('m-ascent', 'mplantin', 'ascent', 'm-ascent-val');
+      bindSlider('m-descent', 'mplantin', 'descent', 'm-descent-val');
+      bindSlider('m-line-gap', 'mplantin', 'lineGap', 'm-line-gap-val');
+
+      rebuildFontFace();
+    </script>
+  </body>
+</html>
