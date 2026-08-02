@@ -2,11 +2,44 @@
 
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
 
 MAX_ORACLE_TEXT_LENGTH = 200
 MAX_ALT_TEXT_LENGTH = 300  # oracle text truncation length in image alt/title text
 _EAGER_LOAD_COUNT = 4  # covers a full first row at the widest common grid (4 columns)
+
+CARD_IMAGES_SPEC = json.loads((Path(__file__).parent / "static" / "card_images.json").read_text(encoding="utf-8"))
+CARD_IMAGE_LADDER = CARD_IMAGES_SPEC["ladder"]
+GRID_SRC_DEFAULT = CARD_IMAGES_SPEC["grid_src_default"]
+
+
+def build_card_image_sizes(spec: dict) -> str:
+    """Build the card <img sizes> attribute from the shared spec (see card_images.json).
+
+    One clause per (density tier, layout breakpoint) pair; density tiers scale the slot
+    width down so high-DPR screens fetch a smaller candidate (the fidelity budget).
+    Must stay in lockstep with buildCardImageSizes in app.js.
+
+    Args:
+    ----
+        spec: Parsed card_images.json (layout and density tables)
+
+    Returns:
+    -------
+        The sizes attribute value (comma-joined clauses, first match wins)
+    """
+    clauses = []
+    for density_condition, multiplier in spec["density"]:
+        for layout_condition, formula in spec["layout"]:
+            value = f"calc({formula})" if multiplier is None else f"calc(({formula}) * {multiplier})"
+            condition = " and ".join(part for part in (density_condition, layout_condition) if part)
+            clauses.append(f"{condition} {value}" if condition else value)
+    return ", ".join(clauses)
+
+
+CARD_IMAGE_SIZES = build_card_image_sizes(CARD_IMAGES_SPEC)
 
 
 def escape_html(text: str) -> str:
@@ -243,7 +276,7 @@ def build_image_url(card: dict, size: str) -> str:
     Args:
     ----
         card: Card dictionary with set_code, collector_number, and optionally face_idx
-        size: Image size (280, 388, 538, or 745)
+        size: Image width from the ladder in card_images.json (e.g. "280", "745")
 
     Returns:
     -------
@@ -295,39 +328,19 @@ def create_card_html(card: dict, index: int) -> str:
     """
     card_id = str(index)
 
-    # Build image URLs for srcset - using 4 sizes uniformly spread between 280 and 745
-    image_280 = build_image_url(card, "280")
-    image_388 = build_image_url(card, "388")
-    image_538 = build_image_url(card, "538")
-    image_745 = build_image_url(card, "745")
-
     alt_text = _build_alt_text(card)
 
-    # Build srcset and sizes for responsive images
-    # sizes breakpoints are one below the CSS grid min-width thresholds (< not <=):
-    # - < 410px: 1 column, < 750px: 2 columns, < 1370px: 3 columns, < 2500px: 4 columns, else 5
-    # calc values derived from CSS: body padding 1em (2em total), card padding 0.8em (1.6em total), gap 15px
-    srcset = (
-        f"{escape_html(image_280)} 280w, "
-        f"{escape_html(image_388)} 388w, "
-        f"{escape_html(image_538)} 538w, "
-        f"{escape_html(image_745)} 745w"
-    )
-    sizes = (
-        "(max-width: 409px) calc(100vw - 3.6em), "
-        "(max-width: 749px) calc(50vw - 2.6em - 7.5px), "
-        "(max-width: 1369px) calc(33.33vw - 2.27em - 10px), "
-        "(max-width: 2499px) calc(25vw - 2.1em - 11.25px), "
-        "calc(20vw - 2em - 12px)"
-    )
+    # Build srcset and sizes for responsive images; the size ladder and the sizes
+    # clause tables both come from api/static/card_images.json.
+    srcset = ", ".join(f"{escape_html(build_image_url(card, str(width)))} {width}w" for width in CARD_IMAGE_LADDER)
+    sizes = CARD_IMAGE_SIZES
 
     # Create image HTML with srcset for responsive images
-    # Use 388px as default src (good middle ground for initial load)
     priority_attr = ' fetchpriority="high"' if index == 0 else ""
     lazy_attr = "" if index < _EAGER_LOAD_COUNT else ' loading="lazy"'
     img_tag = (
         f'<img class="card-image" '
-        f'src="{escape_html(image_388)}" '
+        f'src="{escape_html(build_image_url(card, str(GRID_SRC_DEFAULT)))}" '
         f'srcset="{srcset}" '
         f'sizes="{sizes}" '
         f'alt="{alt_text}" title="{alt_text}"{priority_attr}{lazy_attr} />'

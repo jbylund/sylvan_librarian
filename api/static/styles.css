@@ -756,13 +756,13 @@ body {
 }
 
 .card-image {
-  aspect-ratio: 745 / 1041;
+  aspect-ratio: 745 / 1040;
   border-radius: 5.5% / 4%;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
   display: block;
   margin: 0 auto 10px auto;
-  max-height: min(100vh, 1041px);
-  max-width: min(100%, 745px, calc(min(100vh, 1041px) * 745 / 1041));
+  max-height: min(100vh, 1040px);
+  max-width: min(100%, 745px, calc(min(100vh, 1040px) * 745 / 1040));
   object-fit: contain;
   width: 100%;
 }

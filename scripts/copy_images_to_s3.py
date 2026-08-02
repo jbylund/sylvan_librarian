@@ -3,7 +3,7 @@
 This script:
 1. Fetches card data from the database (set_code, collector_number, image_location_uuid)
 2. Downloads PNG images from Scryfall
-3. Converts them to WebP at 4 different sizes (280, 388, 538, 745)
+3. Converts them to WebP at each ladder width in api/static/card_images.json
 4. Uploads to S3 using a face-aware path structure:
    s3://biblioplex/img/{set_code}/{collector_number}/{face}/{width}.webp
    (for now, single-faced cards use face = "1")
@@ -34,21 +34,16 @@ from api.utils.db_utils import configure_connection, get_pg_creds
 
 logger = logging.getLogger(__name__)
 
-# Image size configuration
-ORIGINAL_WIDTH = 745  # this seems to be the size of the pngs that scryfall returns
-# Four sizes uniformly spread between 280 and 745
-XLARGE_WIDTH = 745  # Full resolution width in pixels
-LARGE_WIDTH = 538  # Large resolution width in pixels
-MEDIUM_WIDTH = 388  # Medium resolution width in pixels
-SMALL_WIDTH = 280  # Small resolution width in pixels
+# Image size configuration comes from the shared spec; ladder widths double as S3 key names
+_CARD_IMAGES_SPEC = json.loads(
+    (Path(__file__).resolve().parents[1] / "api" / "static" / "card_images.json").read_text(encoding="utf-8")
+)
+LADDER_WIDTHS = _CARD_IMAGES_SPEC["ladder"]
+SIZE_KEYS = [str(width) for width in LADDER_WIDTHS]
+ORIGINAL_WIDTH = _CARD_IMAGES_SPEC["full"]["width"]  # the size of the pngs that scryfall returns
 
 # WebP quality setting
 WEBP_QUALITY = 75
-
-XLARGE_KEY = "745"
-LARGE_KEY = "538"
-MEDIUM_KEY = "388"
-SMALL_KEY = "280"
 
 ORIGINAL_KEY = "o"
 
@@ -67,7 +62,7 @@ class CardImage:
         self.face_idx = face_idx
         self.size = size
         self.png_url = png_url
-        if size not in [SMALL_KEY, MEDIUM_KEY, LARGE_KEY, XLARGE_KEY, ORIGINAL_KEY]:
+        if size not in [*SIZE_KEYS, ORIGINAL_KEY]:
             msg = f"Invalid size: {size}"
             raise ValueError(msg)
         if face_idx not in [DEFAULT_FACE, "2"]:
@@ -302,7 +297,7 @@ def process_card(
         dry_run: If True, skip actual downloads and uploads
 
     Returns:
-        Dict with success status for each size (280, 388, 538, 745)
+        Dict with success status for each ladder size key
     """
     set_code = card["card_set_code"]
     collector_number = card["collector_number"]
@@ -310,15 +305,15 @@ def process_card(
 
     if not set_code or not collector_number or not png_url:
         logger.warning("Skipping card with missing data: %s", card)
-        return {SMALL_KEY: False, MEDIUM_KEY: False, LARGE_KEY: False, XLARGE_KEY: False}
+        return dict.fromkeys(SIZE_KEYS, False)
 
     logger.info("Processing %s/%s", set_code, collector_number)
 
     if dry_run:
         logger.info("[DRY RUN] Would process %s/%s", set_code, collector_number)
-        return {SMALL_KEY: True, MEDIUM_KEY: True, LARGE_KEY: True, XLARGE_KEY: True}
+        return dict.fromkeys(SIZE_KEYS, True)
 
-    results = {SMALL_KEY: False, MEDIUM_KEY: False, LARGE_KEY: False, XLARGE_KEY: False}
+    results = dict.fromkeys(SIZE_KEYS, False)
 
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
@@ -329,15 +324,8 @@ def process_card(
         if not download_image(png_url, png_path):
             return results
 
-        sizes = {
-            SMALL_KEY: SMALL_WIDTH,
-            MEDIUM_KEY: MEDIUM_WIDTH,
-            LARGE_KEY: LARGE_WIDTH,
-            XLARGE_KEY: XLARGE_WIDTH,
-        }
-
         # Convert and upload each size
-        for size_name, width in sizes.items():
+        for size_name, width in zip(SIZE_KEYS, LADDER_WIDTHS, strict=True):
             webp_path = temp_path / f"{size_name}.webp"
 
             if not convert_to_webp(png_path, webp_path, width):
@@ -350,7 +338,7 @@ def process_card(
                 results[size_name] = True
 
     success_count = sum(results.values())
-    logger.info("Completed %s/%s: %d/4 sizes uploaded", set_code, collector_number, success_count)
+    logger.info("Completed %s/%s: %d/%d sizes uploaded", set_code, collector_number, success_count, len(SIZE_KEYS))
 
     return results
 
@@ -384,7 +372,7 @@ class CardProcessorPool:
             job_task: Dict of job task
 
         Returns:
-            Dict with success status for each size (280, 388, 538, 745)
+            Dict with success status for each ladder size key
         """
         bucket = job_task.pop("bucket")
         dry_run = job_task.pop("dry_run")
@@ -506,8 +494,7 @@ def get_db_cards(args: Args) -> set[tuple[str, str, str, str]]:
         logger.warning("No cards found to process")
         return None
 
-    sizes = [SMALL_KEY, MEDIUM_KEY, LARGE_KEY, XLARGE_KEY]
-    logger.info("Found %d cards in database, should create %d images", len(db_cards), len(db_cards) * len(sizes))
+    logger.info("Found %d cards in database, should create %d images", len(db_cards), len(db_cards) * len(SIZE_KEYS))
     return {
         CardImage(
             set_code=card["card_set_code"],
@@ -517,7 +504,7 @@ def get_db_cards(args: Args) -> set[tuple[str, str, str, str]]:
             size=size,
         )
         for card in db_cards
-        for size in sizes
+        for size in SIZE_KEYS
     }
 
 
