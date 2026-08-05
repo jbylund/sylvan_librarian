@@ -2,6 +2,49 @@ const UNIQUE_PRINTING = 'printing';
 const DWELL_MS = 2500; // milliseconds user must stay on results before adding a history entry
 const MAX_EXPLANATION_LENGTH = 140; // truncate very long query explanations (e.g. giant OR chains)
 
+// Mirrors api/static/card_images.json (the source of truth — app.test.js asserts
+// these copies match it; browsers can't require() JSON so they're inlined).
+// ladder = CDN widths (and S3 key names); full = dimensions of the largest webp.
+const CARD_IMAGE_LADDER = [280, 388, 538, 745];
+const GRID_SRC_DEFAULT = 388;
+const CARD_IMAGE_FULL = { width: 745, height: 1040 };
+
+// layout = [media condition, grid slot-width formula] per breakpoint; density =
+// [media condition, multiplier] tiers that scale the declared slot width down on
+// high-DPR screens so grid thumbnails fetch a smaller srcset candidate (fidelity
+// budget, effective-DPR cap ~1.5 — the modal stays the full-fidelity surface).
+const CARD_GRID_SIZES_SPEC = {
+  layout: [
+    ['(max-width: 409px)', '100vw - 3.6em'],
+    ['(max-width: 749px)', '50vw - 2.6em - 7.5px'],
+    ['(max-width: 1369px)', '33.33vw - 2.27em - 10px'],
+    ['(max-width: 2499px)', '25vw - 2.1em - 11.25px'],
+    [null, '20vw - 2em - 12px'],
+  ],
+  density: [
+    ['(min-resolution: 2.9dppx)', '0.5'],
+    ['(min-resolution: 1.9dppx)', '0.75'],
+    [null, null],
+  ],
+};
+
+// One clause per (density tier, layout breakpoint); first match wins, so density
+// tiers run densest-first and each table ends with a null-condition default.
+// Must stay in lockstep with build_card_image_sizes in noscript_helpers.py.
+function buildCardImageSizes(spec) {
+  const clauses = [];
+  for (const [densityCondition, multiplier] of spec.density) {
+    for (const [layoutCondition, formula] of spec.layout) {
+      const value = multiplier === null ? `calc(${formula})` : `calc((${formula}) * ${multiplier})`;
+      const condition = [densityCondition, layoutCondition].filter(Boolean).join(' and ');
+      clauses.push(condition ? `${condition} ${value}` : value);
+    }
+  }
+  return clauses.join(', ');
+}
+
+const CARD_IMAGE_SIZES = buildCardImageSizes(CARD_GRID_SIZES_SPEC);
+
 // Hoisted so escapeHtml() doesn't allocate a new RegExp or callback on every call.
 const HTML_ESCAPE_RE = /[&<>"]/g;
 const HTML_ESCAPE_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
@@ -764,12 +807,6 @@ class CardSearch {
   createCardHTML(card, index, isFirstRow = false) {
     const cardId = index.toString();
 
-    // Build image URLs for srcset - using 4 sizes uniformly spread between 280 and 745
-    const image280 = this.buildImageUrl(card, '280');
-    const image388 = this.buildImageUrl(card, '388');
-    const image538 = this.buildImageUrl(card, '538');
-    const image745 = this.buildImageUrl(card, '745');
-
     // Debug logging
     console.debug('Creating card HTML for:', card);
     console.debug('Card ID will be:', cardId);
@@ -799,23 +836,18 @@ class CardSearch {
       altText += this.escapeHtml(truncatedText);
     }
 
-    // Build srcset and sizes for responsive images
-    // sizes attribute matches the grid breakpoints:
-    // - < 410px: 1 column (100vw minus padding/gap)
-    // - 410-750px: 2 columns (50vw minus gap/padding)
-    // - 750-1370px: 3 columns (33.33vw minus gap/padding)
-    // - 1370-2500px: 4 columns (25vw minus gap/padding)
-    // - >= 2500px: 5 columns (20vw minus gap/padding)
-    const srcset = `${this.escapeHtml(image280)} 280w, ${this.escapeHtml(image388)} 388w, ${this.escapeHtml(image538)} 538w, ${this.escapeHtml(image745)} 745w`;
-    const sizes =
-      '(max-width: 409px) calc(100vw - 3.6em), (max-width: 749px) calc(50vw - 2.6em - 7.5px), (max-width: 1369px) calc(33.33vw - 2.27em - 10px), (max-width: 2499px) calc(25vw - 2.1em - 11.25px), calc(20vw - 2em - 12px)';
+    // Build srcset and sizes for responsive images; the size ladder and the sizes
+    // clause tables both come from card_images.json (via the mirrored constants).
+    const srcset = CARD_IMAGE_LADDER.map(
+      width => `${this.escapeHtml(this.buildImageUrl(card, String(width)))} ${width}w`
+    ).join(', ');
+    const sizes = CARD_IMAGE_SIZES;
 
-    // Use 388px as default src (good middle ground for initial load)
     // Add fetchpriority="high" for first row cards to improve LCP
     // Add loading="lazy" for non-first-row images to improve initial load
     const fetchPriorityAttr = isFirstRow ? ' fetchpriority="high"' : '';
     const loadingAttr = isFirstRow ? '' : ' loading="lazy"';
-    const imgTag = `<img class="card-image" src="${this.escapeHtml(image388)}" srcset="${srcset}" sizes="${sizes}" alt="${altText}" title="${altText}"${fetchPriorityAttr}${loadingAttr} />`;
+    const imgTag = `<img class="card-image" src="${this.escapeHtml(this.buildImageUrl(card, String(GRID_SRC_DEFAULT)))}" srcset="${srcset}" sizes="${sizes}" alt="${altText}" title="${altText}"${fetchPriorityAttr}${loadingAttr} />`;
     const imageHtml =
       card.set_code && card.collector_number
         ? `<a href="/card/${this.escapeHtml(card.set_code)}/${this.escapeHtml(card.collector_number)}" class="card-page-link">${imgTag}</a>`
@@ -890,11 +922,11 @@ class CardSearch {
     const modalContent = document.getElementById('modalContent');
 
     // Create modal content
-    const imageLarge = this.buildImageUrl(card, '745');
+    const imageLarge = this.buildImageUrl(card, String(CARD_IMAGE_FULL.width));
     // Build image element
     let imageHtml = '';
     if (imageLarge) {
-      const imgTag = `<img class="modal-image" src="${this.escapeHtml(imageLarge)}" width="745" height="1040" alt="${this.escapeHtml(card.name || 'Card Image')}" />`;
+      const imgTag = `<img class="modal-image" src="${this.escapeHtml(imageLarge)}" width="${CARD_IMAGE_FULL.width}" height="${CARD_IMAGE_FULL.height}" alt="${this.escapeHtml(card.name || 'Card Image')}" />`;
       if (card.set_code && card.collector_number) {
         // Build manapool.com referral URL
         // Set codes and collector numbers from our database are safe for URLs
