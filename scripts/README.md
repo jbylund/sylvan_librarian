@@ -72,7 +72,7 @@ The script includes automatic rate limiting (0.1-0.2 second delays) to be respec
 ## Copy Images to S3 Script
 
 ### Overview
-`copy_images_to_s3.py` downloads card images from Scryfall, converts them to WebP format at multiple sizes, and uploads them to AWS S3.
+`copy_images_to_s3.py` downloads card images from Scryfall, converts them to WebP format at multiple sizes, and uploads them to S3-compatible object storage such as AWS S3 or Wasabi.
 
 ### Usage
 
@@ -96,10 +96,18 @@ python -m scripts.copy_images_to_s3 --limit 100
 python -m scripts.copy_images_to_s3 --dry-run --limit 10 --verbose
 ```
 
+#### Wasabi / S3-Compatible Endpoint
+```bash
+python -m scripts.copy_images_to_s3 \
+  --bucket biblioplex \
+  --endpoint-url https://s3.us-east-1.wasabisys.com \
+  --region-name us-east-1
+```
+
 ### Prerequisites
 
 - **cwebp**: Install with `sudo apt-get install webp` (Ubuntu/Debian) or `brew install webp` (macOS)
-- **AWS credentials**: Configure via `aws configure` or environment variables
+- **S3-compatible credentials**: Configure via `aws configure` or environment variables supported by boto3
 - **Database access**: PostgreSQL connection environment variables (PGHOST, PGUSER, etc.)
 
 ### Image Sizes
@@ -119,6 +127,8 @@ Example: `s3://biblioplex/iko/123/lg.webp`
 ### Options
 
 - `--bucket`: S3 bucket name (default: biblioplex)
+- `--endpoint-url`: Optional S3-compatible endpoint override (for example, Wasabi)
+- `--region-name`: Optional S3-compatible region override
 - `--set`: Filter by set code
 - `--limit`: Limit number of cards
 - `--skip-existing`: Skip cards with existing images (default)

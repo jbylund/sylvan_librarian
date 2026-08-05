@@ -1,4 +1,4 @@
-"""Script to copy card images to S3.
+"""Script to copy card images to S3-compatible object storage.
 
 This script:
 1. Fetches card data from the database (set_code, collector_number, image_location_uuid)
@@ -287,6 +287,25 @@ def upload_to_s3(
         return False
 
 
+def get_s3_client_kwargs(args: Args) -> dict[str, Any]:
+    """Build optional boto3 client/resource keyword arguments.
+
+    Args:
+        args: Parsed command-line arguments for the image copy script
+
+    Returns:
+        dict containing only explicitly configured boto3 overrides:
+            - endpoint_url when targeting a custom S3-compatible API endpoint
+            - region_name when a specific region override is requested
+    """
+    s3_kwargs = {}
+    if args.endpoint_url:
+        s3_kwargs["endpoint_url"] = args.endpoint_url
+    if args.region_name:
+        s3_kwargs["region_name"] = args.region_name
+    return s3_kwargs
+
+
 def process_card(
     card: dict[str, Any],
     s3_client: Any,  # noqa: ANN401
@@ -366,13 +385,13 @@ class CardProcessorPool:
     s3_client = None
 
     @classmethod
-    def init_worker(cls) -> None:
+    def init_worker(cls, s3_client_kwargs: dict[str, Any]) -> None:
         """Initialize worker process with S3 client.
 
         This runs once per worker process when the pool is created.
         Sets cls.s3_client which is separate per worker process.
         """
-        cls.s3_client = boto3.client("s3")
+        cls.s3_client = boto3.client("s3", **s3_client_kwargs)
 
     @classmethod
     def process_card_worker(cls, job_task: dict[str, Any]) -> dict[str, bool]:
@@ -397,6 +416,8 @@ class Args:
 
     Attributes:
         bucket: S3 bucket name to upload images to
+        endpoint_url: Optional S3-compatible endpoint URL override
+        region_name: Optional S3-compatible region override
         set_code: Optional set code to filter cards by
         limit: Optional limit on number of cards to process
         skip_existing: Whether to skip cards that already have images in S3
@@ -406,6 +427,8 @@ class Args:
     """
 
     bucket: str = "biblioplex"
+    endpoint_url: str | None = None
+    region_name: str | None = None
     set_code: str | None = None
     limit: int | None = None
     skip_existing: bool = True
@@ -425,12 +448,20 @@ def get_args() -> Args:
         return s.lower()
 
     parser = argparse.ArgumentParser(
-        description="Copy card images to S3 with WebP conversion",
+        description="Copy card images to S3-compatible object storage with WebP conversion",
     )
     parser.add_argument(
         "--bucket",
         default="biblioplex",
         help="S3 bucket name (default: biblioplex)",
+    )
+    parser.add_argument(
+        "--endpoint-url",
+        help="S3-compatible endpoint URL (for example, Wasabi)",
+    )
+    parser.add_argument(
+        "--region-name",
+        help="S3-compatible region override",
     )
     parser.add_argument(
         "--set",
@@ -535,7 +566,7 @@ def get_s3_cards(args: Args) -> set[CardImage]:
         # no point in populating if we're not going to use it
         return s3_cards
 
-    s3resource = boto3.resource("s3")
+    s3resource = boto3.resource("s3", **get_s3_client_kwargs(args))
     bucket = s3resource.Bucket(args.bucket)
 
     prefix = "img/"
@@ -578,6 +609,8 @@ def main() -> None:
 
     if args.dry_run:
         logger.info("Running in DRY RUN mode - no actual downloads or uploads")
+    if args.endpoint_url:
+        logger.info("Using S3-compatible endpoint: %s", args.endpoint_url)
 
     check_cwebp()
     configure_env()
@@ -617,7 +650,11 @@ def main() -> None:
     successful_cards = failed_cards = 0
     start_time = time.monotonic()
 
-    pool = multiprocessing.Pool(processes=args.workers, initializer=CardProcessorPool.init_worker)
+    pool = multiprocessing.Pool(
+        processes=args.workers,
+        initializer=CardProcessorPool.init_worker,
+        initargs=(get_s3_client_kwargs(args),),
+    )
     try:
         # Use imap_unordered for better progress tracking
         for idx, results in enumerate(
