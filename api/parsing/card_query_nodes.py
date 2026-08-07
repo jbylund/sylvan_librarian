@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import typing
 import unicodedata
 
 from titlecase import titlecase
@@ -203,6 +204,28 @@ _COLOR_BITS: dict[str, int] = {"W": 16, "U": 8, "B": 4, "R": 2, "G": 1}
 
 def _color_dict_to_mask(color_dict: dict[str, bool]) -> int:
     return sum(bit for color, bit in _COLOR_BITS.items() if color_dict.get(color))
+
+
+def _compare_ints(lhs: int, operator: str, rhs: int) -> bool:
+    if operator == "=":
+        return lhs == rhs
+    if operator in ("!=", "<>"):
+        return lhs != rhs
+    if operator == ">=":
+        return lhs >= rhs
+    if operator == "<=":
+        return lhs <= rhs
+    if operator == ">":
+        return lhs > rhs
+    if operator == "<":
+        return lhs < rhs
+    msg = f"Unknown operator: {operator}"
+    raise ValueError(msg)
+
+
+def _color_count_masks(operator: str, count: int) -> list[int]:
+    """Bitmask values (5 colors => 2^5) whose popcount satisfies `popcount <op> count`."""
+    return [v for v in range(32) if _compare_ints(v.bit_count(), operator, count)]
 
 
 def _subset_masks(query_mask: int) -> list[int]:
@@ -568,7 +591,17 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
 
         return {"lhs": self.lhs.to_json(), "op": self.operator, "rhs": self._rhs_to_json()}
 
-    def _rhs_to_json(self) -> object:  # noqa: PLR0912
+    # JSONB_OBJECT attrs whose engine rhs is the normalized keys of a comparison
+    # object built by a single-argument normalizer, shared by _rhs_to_json.
+    _TAG_COMPARISON_BUILDERS: typing.ClassVar = {
+        "card_keywords": get_keywords_comparison_object,
+        "card_frame_data": get_frame_data_comparison_object,
+        "card_oracle_tags": get_oracle_tags_comparison_object,
+        "card_art_tags": get_art_tags_comparison_object,
+        "card_is_tags": get_is_tags_comparison_object,
+    }
+
+    def _rhs_to_json(self) -> object:
         """Compute the JSON-serializable rhs for non-JSONB_ARRAY CardAttributeNode LHS."""
         if not self.lhs.field_infos:
             return _node_to_json(self.rhs)
@@ -580,19 +613,15 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
             # Mana cost and devotion: pass raw ManaValueNode for Rust to parse pip counts
             if field_info.parser_class == ParserClass.MANA:
                 return _node_to_json(self.rhs)
+            # Numeric color syntax (id>=3 / c=2): pass the raw NumericValueNode so the
+            # Rust engine builds a color-count comparison instead of a mask compare.
+            if isinstance(self.rhs, NumericValueNode):
+                return self._numeric_color_rhs_to_json(attr)
             val = self.rhs.value.strip()
             if attr in ("card_colors", "card_color_identity", "produced_mana"):
                 return list(get_colors_comparison_object(val.lower(), attr).keys())
-            if attr == "card_keywords":
-                return list(get_keywords_comparison_object(val).keys())
-            if attr == "card_frame_data":
-                return list(get_frame_data_comparison_object(val).keys())
-            if attr == "card_oracle_tags":
-                return list(get_oracle_tags_comparison_object(val).keys())
-            if attr == "card_art_tags":
-                return list(get_art_tags_comparison_object(val).keys())
-            if attr == "card_is_tags":
-                return list(get_is_tags_comparison_object(val).keys())
+            if attr in self._TAG_COMPARISON_BUILDERS:
+                return list(self._TAG_COMPARISON_BUILDERS[attr](val).keys())
             if attr == "card_legalities":
                 return list(get_legality_comparison_object(val, self.lhs.original_attribute).keys())
 
@@ -609,6 +638,17 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
             return {"node_type": "StringValueNode", "kwargs": {"value": value}}
 
         return _node_to_json(self.rhs)
+
+    def _numeric_color_rhs_to_json(self, attr: str) -> object:
+        """Serialize a numeric color-count rhs (id>=3 / c=2) for the Rust engine.
+
+        Only the two real color fields support counting; produced_mana's C key is a
+        genuine producible value, not a color, so a count over it would be ambiguous.
+        """
+        if attr in ("card_colors", "card_color_identity"):
+            return _node_to_json(self.rhs)
+        msg = f"Numeric comparison is not supported for {attr}"
+        raise ValueError(msg)
 
     def to_sql(self, context: QueryContext) -> str:
         """Generate SQL for card-specific binary operations.
@@ -661,13 +701,18 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         """Format explanation for card attribute comparisons."""
         db_column_name = attr_node.attribute_name.lower()
 
+        # Numeric color syntax compares the count of colors, not the colors themselves
+        if db_column_name in ("card_colors", "card_color_identity") and isinstance(self.rhs, NumericValueNode):
+            noun = "colors in the color identity" if db_column_name == "card_color_identity" else "colors"
+            count_op = "is" if self.operator == ":" else operator_str  # : compares counts as equality
+            return f"the number of {noun} {count_op} {rhs_str}"
+
         # Special formatting for certain attributes
-        if db_column_name == "card_color_identity" and self.operator in ("=", ":"):
-            return f"the color identity is {rhs_str}"
+        if db_column_name in ("card_color_identity", "card_colors") and self.operator in ("=", ":"):
+            noun = "color identity" if db_column_name == "card_color_identity" else "color"
+            return f"the {noun} is {rhs_str}"
         if db_column_name == "card_legalities" and self.operator in ("=", ":"):
             return f"it's legal in {rhs_str}"
-        if db_column_name == "card_colors" and self.operator in ("=", ":"):
-            return f"the color is {rhs_str}"
         if db_column_name == "creature_power":
             return f"the power {operator_str} {rhs_str}"
         if db_column_name == "creature_toughness":
@@ -1002,11 +1047,32 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
     query ?& col AND not(col ?& query) # as array
     """
 
+    def _handle_color_count_comparison(self, lhs_sql: str, attr: str, context: QueryContext) -> str:
+        """SQL for Scryfall numeric color syntax (id>=3 / c=2): compare the NUMBER of colors.
+
+        Generates the same indexed mask expression the letter-valued subset queries
+        use — magic.color_identity_mask reads only the five WUBRG keys — with the
+        mask set restricted to values whose popcount satisfies the comparison.
+        ":" with a number behaves like "=" (verified against the live Scryfall API).
+
+        produced_mana is refused: its C key is a genuine producible value, not a
+        color, so a count over it would be ambiguous.
+        """
+        if attr == "produced_mana":
+            msg = f"Numeric comparison is not supported for {attr}"
+            raise ValueError(msg)
+        operator = "=" if self.operator == ":" else self.operator
+        masks = IntArray(_color_count_masks(operator, int(self.rhs.value)))
+        pmask = context.add(masks)
+        return f"(magic.color_identity_mask({lhs_sql}) = ANY({pmask}::smallint[]))"
+
     def _handle_jsonb_object(self, context: QueryContext) -> str:  # noqa: PLR0912, C901
         # Produce the query as a jsonb object
         lhs_sql = self.lhs.to_sql(context)
         attr = self.lhs.attribute_name
         is_color_identity = False
+        if attr in ("card_colors", "card_color_identity", "produced_mana") and isinstance(self.rhs, NumericValueNode):
+            return self._handle_color_count_comparison(lhs_sql, attr, context)
         if attr in ("card_colors", "card_color_identity", "produced_mana"):
             rhs = get_colors_comparison_object(self.rhs.value.strip().lower(), attr)
             is_color_identity = attr == "card_color_identity"

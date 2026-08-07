@@ -487,6 +487,16 @@ pub(crate) enum FilterExpr {
         mask: u8,
     },
 
+    /// Scryfall numeric color syntax (`id>=3`, `c=2`): compares the NUMBER of
+    /// colors in the field (popcount over the WUBRG bits) against `count`.
+    /// Only Colors/ColorIdentity reach here — the Python side rejects numeric
+    /// comparisons on produced_mana, whose C key is not a color.
+    ColorCountCmp {
+        field: ColorField,
+        op: CmpOp,
+        count: u8,
+    },
+
     TypeCmp {
         mask: u16,
         op: CmpOp,
@@ -630,6 +640,7 @@ pub(crate) fn verify_cost_tier(f: &FilterExpr) -> u32 {
         | FilterExpr::NumericCmp { .. }
         | FilterExpr::TextExact { .. }
         | FilterExpr::ColorCmp { .. }
+        | FilterExpr::ColorCountCmp { .. }
         | FilterExpr::TypeCmp { .. }
         | FilterExpr::Legality { .. }
         | FilterExpr::DateCmp { .. }
@@ -774,6 +785,7 @@ fn leaf_compares_printing_field(f: &FilterExpr) -> bool {
         | FilterExpr::NameMatch { .. }
         | FilterExpr::OracleMatch { .. }
         | FilterExpr::ColorCmp { .. }
+        | FilterExpr::ColorCountCmp { .. }
         | FilterExpr::TypeCmp { .. }
         | FilterExpr::ManaCostCmp { .. }
         | FilterExpr::Devotion { .. } => false,
@@ -1417,6 +1429,15 @@ impl FilterExpr {
                 })
             }
 
+            FilterExpr::ColorCountCmp { field, op, count } => {
+                // Colors are always present (colorless = 0 bits, not Null), so this is
+                // total and two-valued. The C bit (32) is masked off before counting:
+                // colorless is ZERO colors on Scryfall, and the SQL path's
+                // magic.color_identity_mask likewise reads only the WUBRG keys.
+                let n = (card_colors(card, *field) & 0b1_1111).count_ones() as u8;
+                tri_bool(num_cmp(*op, f64::from(n), f64::from(*count)))
+            }
+
             FilterExpr::TypeCmp { mask, op } => {
                 let bits = u16::from(card.card_types);
                 tri_bool(match op {
@@ -1757,6 +1778,18 @@ fn build_binary(kw: &Value) -> Result<FilterExpr, String> {
             "card_color_identity"  => ColorField::ColorIdentity,
             _                      => ColorField::ProducedMana,
         };
+        // Scryfall numeric color syntax (id>=3, c=2): the rhs arrives as a raw
+        // NumericValueNode instead of a color-letter list, and compares the
+        // NUMBER of colors in the field. ":" behaves like "=" here (verified
+        // against the live Scryfall API: id:2 and id=2 return identical sets),
+        // which is exactly what str_op_to_cmp yields.
+        if rhs["node_type"].as_str() == Some("NumericValueNode") {
+            if matches!(color_field, ColorField::ProducedMana) {
+                return Err("numeric comparison is not supported for produced_mana".to_string());
+            }
+            let count = rhs["kwargs"]["value"].as_f64().ok_or("NumericValueNode missing value")? as u8;
+            return Ok(FilterExpr::ColorCountCmp { field: color_field, op: str_op_to_cmp(op)?, count });
+        }
         let color_strs: Vec<&str> = rhs
             .as_array()
             .map(|a| a.iter().filter_map(|v| v.as_str()).collect())

@@ -57,6 +57,12 @@ TESTCASES = [
     {"query": "cmc>2 power<5", "expected": "cmc>2 AND power<5", "id": "cmp_gt_lt"},
     {"query": "cmc>=3 cmc<=5", "expected": "cmc>=3 AND cmc<=5", "id": "cmp_gte_lte"},
     {"query": "color!=W", "expected": "color!=W", "id": "cmp_neq"},
+    # Numeric color syntax: the value is the NUMBER of colors in the field
+    {"query": "id>=3", "expected": "id>=3", "id": "identity_count_ge"},
+    {"query": "id=2 t:creature", "expected": "id=2 AND t:creature", "id": "identity_count_with_type"},
+    {"query": "c:3", "expected": "c:3", "id": "color_count_colon"},
+    {"query": "id<2 c=1", "expected": "id<2 AND c=1", "id": "identity_and_color_counts"},
+    {"query": "-id>=4", "expected": "-id>=4", "id": "negated_identity_count"},
     # Arithmetic in comparison — no AND inside expression
     {"query": "power+toughness>cmc+cmc", "expected": "power+toughness>cmc+cmc", "id": "arithmetic_comparison"},
     {

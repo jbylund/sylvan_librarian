@@ -652,11 +652,19 @@ class Parser:
         raise ParseError(msg)
 
     def parse_color_value(self) -> QueryNode:
-        """Parse a color value: a recognized color name or a combination of color letters."""
+        """Parse a color value: a color name, a combination of color letters, or a bare integer color count."""
         tok = self.peek()
         if tok.type == TT.QUOTED:
             self.consume()
             return StringValueNode(str(tok.value))
+        if tok.type == TT.NUMBER:
+            # Scryfall numeric color syntax: id>=3 / c=2 compare the NUMBER of
+            # colors in the field, so a bare integer is a valid color value.
+            if isinstance(tok.value, float):
+                msg = f"Expected integer color count, got {tok.value!r} at position {tok.pos}"
+                raise ParseError(msg)
+            self.consume()
+            return NumericValueNode(tok.value)
         if tok.type == TT.WORD:
             val = str(tok.value)
             if val.lower() not in _VALID_COLOR_NAMES and not all(c in _COLOR_LETTERS for c in val):

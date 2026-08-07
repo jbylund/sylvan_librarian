@@ -114,6 +114,7 @@ pub(crate) fn has_printing_varying_leaf(f: &FilterExpr) -> bool {
         | FilterExpr::NameMatch { .. }
         | FilterExpr::OracleMatch { .. }
         | FilterExpr::ColorCmp { .. }
+        | FilterExpr::ColorCountCmp { .. }
         | FilterExpr::TypeCmp { .. }
         | FilterExpr::ManaCostCmp { .. }
         | FilterExpr::Devotion { .. } => false,
@@ -129,13 +130,14 @@ pub(crate) fn has_printing_varying_leaf(f: &FilterExpr) -> bool {
 /// harness on `NOT(toughness>3)`: toughness is Null for non-creatures).
 ///
 /// Base cases are exactly the leaves whose `tri` is unconditional `tri_bool`
-/// (filter.rs): `True`, `ColorCmp` (colors always present — colorless is mask
-/// 0, not Null), `TypeCmp` (type line always present). And/Or/Not of total
-/// children stay total (no child can introduce a Null), and all three bases are
-/// card-invariant, so totality implies card-invariance.
+/// (filter.rs): `True`, `ColorCmp`/`ColorCountCmp` (colors always present —
+/// colorless is mask 0 / count 0, not Null), `TypeCmp` (type line always
+/// present). And/Or/Not of total children stay total (no child can introduce a
+/// Null), and all the bases are card-invariant, so totality implies
+/// card-invariance.
 fn is_total_two_valued(f: &FilterExpr) -> bool {
     match f {
-        FilterExpr::True | FilterExpr::ColorCmp { .. } | FilterExpr::TypeCmp { .. } => true,
+        FilterExpr::True | FilterExpr::ColorCmp { .. } | FilterExpr::ColorCountCmp { .. } | FilterExpr::TypeCmp { .. } => true,
         FilterExpr::And(children) | FilterExpr::Or(children) => children.iter().all(is_total_two_valued),
         FilterExpr::Not(inner) => is_total_two_valued(inner),
         _ => false,
@@ -397,6 +399,9 @@ fn estimate_leaf(f: &FilterExpr, indexes: &Archived<CardIndexes>, n_cards: u32, 
 
         // Card-invariant exact plane popcount.
         FilterExpr::ColorCmp { .. } | FilterExpr::TypeCmp { .. } => plane_card(f, indexes, n_cards, false),
+
+        // Numeric color-count comparisons (id>=3) have no plane compilation → sound unknown.
+        FilterExpr::ColorCountCmp { .. } => unknown(n),
 
         // Existence-projection plane → superset {0, c, c}.
         FilterExpr::Legality { .. } => plane_card(f, indexes, n_cards, true),
