@@ -280,7 +280,28 @@ RESULT_FIELD_COLUMNS: dict[str, str] = {
     "scryfall_id": "scryfall_id",
     "price_usd": "price_usd",
     "prefer_score": "prefer_score",
+    # Card-data fields consumers need to run their own downstream filtering
+    # (Scryfall JSON names and shapes): layout and rarity are plain text,
+    # cmc an integer, legalities the imported {format: status} object, and
+    # color_identity a WUBRG-ordered letter list (the raw column is a JSONB
+    # object -- _search_sql reshapes it; the engine emits the list directly).
+    "layout": "card_layout",
+    "cmc": "cmc",
+    "rarity": "card_rarity_text",
+    "color_identity": "card_color_identity",
+    "legalities": "card_legalities",
 }
+
+# Scryfall's canonical color order, used to reshape identity objects into lists.
+_COLOR_ORDER: tuple[str, ...] = ("W", "U", "B", "R", "G", "C")
+
+
+def _identity_letters(identity: dict[str, object] | None) -> list[str]:
+    """Reshape a JSONB color-identity object into Scryfall's WUBRG-ordered letter list."""
+    keys = set(identity or ())
+    return [letter for letter in _COLOR_ORDER if letter in keys]
+
+
 # `fields=None` resolves to these 9 — the fixed set every caller got before field selection
 # existed. Order/membership must match DEFAULT_FIELDS in card_engine/src/lib.rs.
 DEFAULT_RESULT_FIELDS: tuple[str, ...] = (
@@ -1478,8 +1499,12 @@ class APIResource:
         cards = result_bag.pop("result", [])
         count_row = cards.pop()
         total_cards = count_row["total_cards_count"]
+        reshape_identity = "color_identity" in resolved_fields
         for icard in cards:
             icard.pop("total_cards_count")
+            if reshape_identity:
+                # Match the engine path's shape (see FIELD_TABLE in card_engine).
+                icard["color_identity"] = _identity_letters(icard["color_identity"])
         return {
             "cards": cards,
             "compiled": query_sql,

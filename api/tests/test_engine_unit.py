@@ -1249,6 +1249,34 @@ class TestFieldSelection:
         with pytest.raises(UnknownFieldError):
             _run(engine, unique="printing", fields=["not_a_real_field"])
 
+    def test_card_data_fields_ship_scryfall_shapes(self, engine: QueryEngine) -> None:
+        """layout/cmc/rarity/color_identity/legalities come back Scryfall-shaped."""
+        _, cards = _run(
+            engine,
+            'name="Lightning Bolt"',
+            unique="card",
+            limit=1,
+            fields=["name", "layout", "cmc", "rarity", "color_identity", "legalities"],
+        )
+        card = cards[0]
+        assert card["layout"] == "normal"
+        assert card["cmc"] == 1
+        assert card["rarity"] == "common"
+        # WUBRG-ordered letter list, not the raw JSONB object.
+        assert card["color_identity"] == ["R"]
+        legalities = card["legalities"]
+        assert legalities["modern"] == "legal"
+        assert set(legalities.values()) <= {"legal", "not_legal", "restricted", "banned"}
+
+    def test_color_identity_is_wubrg_ordered(self, engine: QueryEngine) -> None:
+        # Any multicolor card: letters come back in WUBRG order regardless of storage order.
+        _, cards = _run(engine, "id>=rg", unique="card", limit=5, fields=["name", "color_identity"])
+        order = {letter: i for i, letter in enumerate("WUBRGC")}
+        for card in cards:
+            letters = card["color_identity"]
+            assert letters == sorted(letters, key=order.__getitem__)
+            assert {"R", "G"} <= set(letters)
+
 
 class TestExplain:
     """explain()/explain_analyze() (#745): the router's own cost model as an on-demand diagnostic.

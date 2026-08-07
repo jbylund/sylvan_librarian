@@ -11325,7 +11325,43 @@ const FIELD_TABLE: &[(&str, FieldExtractor)] = &[
     ("card_art_tags", |py, _c, p, _s, v| Ok(sorted_strs(v, &p.card_art_tags).into_pyobject(py)?.into_any())),
     ("card_is_tags", |py, _c, p, _s, v| Ok(sorted_strs(v, &p.card_is_tags).into_pyobject(py)?.into_any())),
     ("card_frame_data", |py, _c, p, _s, v| Ok(sorted_strs(v, &p.card_frame_data).into_pyobject(py)?.into_any())),
+    // Card-data fields for downstream filtering, in Scryfall JSON shapes (names and value
+    // shapes match RESULT_FIELD_COLUMNS in api/api_resource.py, which reshapes the SQL
+    // path's raw columns to agree with these).
+    ("layout", |py, c, _p, s, _v| Ok(str_at(s, u32::from(c.card_layout_id)).into_pyobject(py)?.into_any())),
+    ("cmc", |py, c, _p, _s, _v| Ok(c.cmc.as_ref().map(|v| u8::from(*v)).into_pyobject(py)?.into_any())),
+    ("rarity", |py, _c, p, _s, _v| {
+        Ok(p.card_rarity_int.as_ref().and_then(|v| rarity_int_to_text(u8::from(*v))).into_pyobject(py)?.into_any())
+    }),
+    ("color_identity", |py, c, _p, _s, _v| Ok(identity_letters(u8::from(c.card_color_identity)).into_pyobject(py)?.into_any())),
+    ("legalities", |py, c, p, _s, _v| {
+        // Printing-level word only for the ~556 divergence cards, same rule the filters use.
+        let bits = if c.legality_divergent { u64::from(p.card_legalities) } else { u64::from(c.card_legalities) };
+        Ok(legality_bits_to_pydict(py, bits)?.into_any())
+    }),
 ];
+
+/// Mirror of magic.rarity_int_to_text -- the import stores 0-5, Scryfall speaks words.
+fn rarity_int_to_text(value: u8) -> Option<&'static str> {
+    match value {
+        0 => Some("common"),
+        1 => Some("uncommon"),
+        2 => Some("rare"),
+        3 => Some("mythic"),
+        4 => Some("special"),
+        5 => Some("bonus"),
+        _ => None,
+    }
+}
+
+/// Decode an identity bitmap into Scryfall's WUBRG-ordered letter list.
+fn identity_letters(mask: u8) -> Vec<&'static str> {
+    [("W", 1u8), ("U", 2), ("B", 4), ("R", 8), ("G", 16), ("C", 32)]
+        .iter()
+        .filter(|(_, bit)| mask & bit != 0)
+        .map(|(letter, _)| *letter)
+        .collect()
+}
 
 /// Resolve one interned collection-element id against the archived vocab table.
 /// Every id is a real entry (there is no absent sentinel for collection elements).

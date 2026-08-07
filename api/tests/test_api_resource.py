@@ -627,6 +627,20 @@ class TestSearchResponseShape(TestBaseAPIResourceTest):
         assert list(api_resource_module._columnarize_cards(cards)) == ["b", "a"]
 
 
+class TestIdentityLetters(unittest.TestCase):
+    """_identity_letters reshapes JSONB identity objects into WUBRG-ordered letter lists."""
+
+    def test_orders_letters_wubrg(self) -> None:
+        """Letters come back in Scryfall's canonical order, not storage order."""
+        letters = api_resource_module._identity_letters({"G": True, "W": True, "U": True})
+        assert letters == ["W", "U", "G"]
+
+    def test_empty_and_none_are_colorless(self) -> None:
+        """A colorless identity is an empty list, matching Scryfall's JSON."""
+        assert api_resource_module._identity_letters({}) == []
+        assert api_resource_module._identity_letters(None) == []
+
+
 class TestAPIResourceStaticFileServing(unittest.TestCase):
     """Test static file serving methods."""
 
