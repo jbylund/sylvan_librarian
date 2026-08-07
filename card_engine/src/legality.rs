@@ -71,6 +71,28 @@ pub(crate) fn jsonb_obj_to_legality_bits(d: &Bound<PyDict>, key: &str) -> u64 {
         .unwrap_or_default()
 }
 
+/// Decode a packed legality word into a `{format: status}` Python dict covering every
+/// format the registry knows, alphabetically — the field-extraction counterpart of
+/// `jsonb_obj_to_legality_bits`. A format absent from the imported JSONB round-trips
+/// as "not_legal", exactly as the encoder treated it.
+pub(crate) fn legality_bits_to_pydict<'a>(py: Python<'a>, bits: u64) -> PyResult<pyo3::Bound<'a, PyDict>> {
+    let dict = PyDict::new(py);
+    if let Ok(shifts) = format_shifts().read() {
+        let mut entries: Vec<(String, u8)> = shifts.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        entries.sort();
+        for (format, shift) in entries {
+            let word = match (bits >> shift) & 0b11 {
+                LEGALITY_LEGAL => "legal",
+                LEGALITY_RESTRICTED => "restricted",
+                LEGALITY_BANNED => "banned",
+                _ => "not_legal",
+            };
+            dict.set_item(format, word)?;
+        }
+    }
+    Ok(dict)
+}
+
 /// Adopt the archive's format→shift assignments into this process's registry.
 /// Cheap no-op (one read lock) once the registry has caught up.
 pub(crate) fn sync_format_shifts(archived: &Archived<HashMap<String, u8>>) {
