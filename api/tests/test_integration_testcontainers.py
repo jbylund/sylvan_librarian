@@ -118,10 +118,10 @@ class TestContainerIntegration:
             return True
 
         override_attr(api, "_setup_complete", always_true)
-        override_attr(api, "_import_recent", always_true)
+        override_attr(api.admin, "_import_recent", always_true)
 
         # Set up the schema using real migrations
-        api.setup_schema()
+        api.admin.setup_schema()
 
         # Load test data
         test_dir = pathlib.Path(__file__).parent
@@ -360,7 +360,7 @@ class TestContainerIntegration:
         card_name = "Beast Within"
 
         # Import the card using the import_card_by_name method
-        import_result = api_resource.import_card_by_name(card_name=card_name)
+        import_result = api_resource.admin.import_card_by_name(card_name=card_name)
 
         # Check that the import was successful
         assert import_result["status"] == "success"
@@ -394,7 +394,7 @@ class TestContainerIntegration:
         card_name = "Mox Ruby"  # A well-known card from Alpha/Beta
 
         # Import the card using the import_card_by_name method
-        import_result = api_resource.import_card_by_name(card_name=card_name)
+        import_result = api_resource.admin.import_card_by_name(card_name=card_name)
 
         # Check that the import was successful (or already exists, which is also fine for this test)
         assert import_result["status"] in ["success", "already_exists"], f"Import failed: {import_result}"
@@ -457,7 +457,7 @@ class TestContainerIntegration:
     def test_artist_search_integration(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """Test end-to-end artist search functionality with real database."""
         # Import Brainstorm card which has "Willian Murai" as artist
-        import_result = api_resource.import_card_by_name(card_name="Brainstorm")
+        import_result = api_resource.admin.import_card_by_name(card_name="Brainstorm")
 
         # Check if import was successful
         if import_result.get("status") != "success":

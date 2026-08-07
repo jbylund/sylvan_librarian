@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import psycopg
 
+from api.admin_resource import AdminResource
 from api.api_resource import APIResource
 from api.card_processing import preprocess_card
 from api.db.bulk_upsert import bulk_upsert
@@ -28,33 +29,33 @@ class TestUpsertCardsStatus:
     """_upsert_cards returns the correct status string for each no-cards scenario."""
 
     def test_empty_list_returns_no_cards_before_preprocessing(self, api_resource: APIResource) -> None:
-        result = api_resource._upsert_cards([])
+        result = api_resource.admin._upsert_cards([])
         assert result["status"] == "no_cards_before_preprocessing"
         assert result["cards_loaded"] == 0
         assert result["cards_sent"] == 0
 
     def test_empty_generator_returns_no_cards_before_preprocessing(self, api_resource: APIResource) -> None:
-        result = api_resource._upsert_cards(x for x in [])
+        result = api_resource.admin._upsert_cards(x for x in [])
         assert result["status"] == "no_cards_before_preprocessing"
 
     def test_preprocessing_filters_all_cards_returns_no_cards_after_preprocessing(self, api_resource: APIResource) -> None:
         """When preprocess_card returns [] for all inputs, status is no_cards_after_preprocessing."""
-        with patch("api.api_resource.preprocess_card", return_value=[]):
-            result = api_resource._upsert_cards([make_raw_card()])
+        with patch("api.admin_resource.preprocess_card", return_value=[]):
+            result = api_resource.admin._upsert_cards([make_raw_card()])
         assert result["status"] == "no_cards_after_preprocessing"
         assert result["cards_loaded"] == 0
 
     def test_unchanged_card_on_reimport_loads_zero(self, api_resource: APIResource) -> None:
         """Re-submitting an identical card produces success with zero loads (unchanged, no write)."""
         card = make_raw_card(name="Already Present Card")
-        api_resource._upsert_cards([card])  # first insert
+        api_resource.admin._upsert_cards([card])  # first insert
 
-        result = api_resource._upsert_cards([card])  # second attempt
+        result = api_resource.admin._upsert_cards([card])  # second attempt
         assert result["status"] == "success"
         assert result["cards_loaded"] == 0
 
     def test_success_result_includes_cards_sent(self, api_resource: APIResource) -> None:
-        result = api_resource._upsert_cards([make_raw_card(name="Cards Sent Test")])
+        result = api_resource.admin._upsert_cards([make_raw_card(name="Cards Sent Test")])
         assert result["status"] == "success"
         assert result["cards_sent"] >= 1
         assert "cards_loaded" in result
@@ -71,17 +72,17 @@ class TestCardStreamCounting:
     def test_multiple_preprocessed_but_all_unchanged_loads_zero(self, api_resource: APIResource) -> None:
         """Raw > 0 and preprocessed > 0 but all unchanged → success with cards_loaded=0."""
         cards = [make_raw_card(name=f"Count Card {i}") for i in range(3)]
-        api_resource._upsert_cards(cards)  # seed the DB
+        api_resource.admin._upsert_cards(cards)  # seed the DB
 
-        result = api_resource._upsert_cards(cards)
+        result = api_resource.admin._upsert_cards(cards)
         assert result["status"] == "success"
         assert result["cards_loaded"] == 0
 
     def test_preprocessing_filter_distinguished_from_empty_input(self, api_resource: APIResource) -> None:
         """no_cards_after_preprocessing is distinct from no_cards_before_preprocessing."""
-        with patch("api.api_resource.preprocess_card", return_value=[]):
-            filtered = api_resource._upsert_cards([make_raw_card(), make_raw_card()])
-        empty = api_resource._upsert_cards([])
+        with patch("api.admin_resource.preprocess_card", return_value=[]):
+            filtered = api_resource.admin._upsert_cards([make_raw_card(), make_raw_card()])
+        empty = api_resource.admin._upsert_cards([])
 
         assert filtered["status"] == "no_cards_after_preprocessing"
         assert empty["status"] == "no_cards_before_preprocessing"
@@ -97,7 +98,7 @@ class TestMultiBatchLoad:
 
     def test_all_cards_inserted_across_batches(self, api_resource: APIResource) -> None:
         cards = [make_raw_card(name=f"Batch Card {uuid.uuid4()}") for _ in range(7)]
-        result = api_resource._upsert_cards(cards, page_size=3)
+        result = api_resource.admin._upsert_cards(cards, page_size=3)
         assert result["status"] == "success"
         assert result["cards_loaded"] == 7
         assert result["cards_sent"] == 7
@@ -105,16 +106,16 @@ class TestMultiBatchLoad:
     def test_batch_boundary_at_exact_multiple(self, api_resource: APIResource) -> None:
         """page_size=4, 8 cards → two full batches of 4."""
         cards = [make_raw_card(name=f"Exact Batch {uuid.uuid4()}") for _ in range(8)]
-        result = api_resource._upsert_cards(cards, page_size=4)
+        result = api_resource.admin._upsert_cards(cards, page_size=4)
         assert result["status"] == "success"
         assert result["cards_loaded"] == 8
 
     def test_unchanged_cards_not_loaded_across_batch_boundary(self, api_resource: APIResource) -> None:
         existing = [make_raw_card(name=f"Existing {uuid.uuid4()}") for _ in range(3)]
-        api_resource._upsert_cards(existing, page_size=10)
+        api_resource.admin._upsert_cards(existing, page_size=10)
 
         new_cards = [make_raw_card(name=f"New {uuid.uuid4()}") for _ in range(4)]
-        result = api_resource._upsert_cards(existing + new_cards, page_size=3)
+        result = api_resource.admin._upsert_cards(existing + new_cards, page_size=3)
         assert result["status"] == "success"
         assert result["cards_loaded"] == 4
         assert result["cards_sent"] == 7  # all cards are sent; existing ones just produce 0 loads
@@ -135,10 +136,10 @@ class TestErrorRecovery:
 
     def test_error_mid_batch_returns_database_error(self, api_resource: APIResource, caplog: pytest.LogCaptureFixture) -> None:
         with (
-            patch("api.api_resource._bulk_upsert", side_effect=self._raise_data_error),
-            caplog.at_level(logging.ERROR, logger="api.api_resource"),
+            patch("api.admin_resource._bulk_upsert", side_effect=self._raise_data_error),
+            caplog.at_level(logging.ERROR, logger="api.admin_resource"),
         ):
-            result = api_resource._upsert_cards([make_raw_card(name="Doomed Card")])
+            result = api_resource.admin._upsert_cards([make_raw_card(name="Doomed Card")])
 
         assert result["status"] == "database_error"
         assert result["cards_loaded"] == 0
@@ -150,11 +151,11 @@ class TestErrorRecovery:
 
     def test_import_succeeds_after_earlier_failure(self, api_resource: APIResource) -> None:
         """The pool is reusable after a failed import: the next import on the same pool succeeds."""
-        with patch("api.api_resource._bulk_upsert", side_effect=self._raise_data_error):
-            failed = api_resource._upsert_cards([make_raw_card(name="First Try Fails")])
+        with patch("api.admin_resource._bulk_upsert", side_effect=self._raise_data_error):
+            failed = api_resource.admin._upsert_cards([make_raw_card(name="First Try Fails")])
         assert failed["status"] == "database_error"
 
-        recovered = api_resource._upsert_cards([make_raw_card(name="Second Try Succeeds")])
+        recovered = api_resource.admin._upsert_cards([make_raw_card(name="Second Try Succeeds")])
         assert recovered["status"] == "success"
         assert recovered["cards_loaded"] == 1
 
@@ -170,7 +171,7 @@ class TestRunImportUnderLockStreaming:
     def _make_api(self) -> APIResource:
         # Patch out setup_schema and import_data during construction: __init__ calls both, and an
         # unpatched import_data with last_import_time=0.0 performs a real full Scryfall import.
-        with patch.object(APIResource, "setup_schema"), patch.object(APIResource, "import_data"):
+        with patch.object(AdminResource, "setup_schema"), patch.object(AdminResource, "import_data"):
             api = APIResource(last_import_time=multiprocessing.Value("d", 0.0, lock=True))
         api._conn_pool.close()
         api._conn_pool = MagicMock()
@@ -179,17 +180,17 @@ class TestRunImportUnderLockStreaming:
     def test_calls_stream_data_for_key(self) -> None:
         api = self._make_api()
         with (
-            patch.object(api, "_import_recent", return_value=False),
-            patch.object(api, "setup_schema"),
+            patch.object(api.admin, "_import_recent", return_value=False),
+            patch.object(api.admin, "setup_schema"),
             patch.object(
-                api,
+                api.admin,
                 "_upsert_cards",
                 return_value={"status": "no_cards_before_preprocessing", "cards_loaded": 0, "message": ""},
             ),
-            patch.object(api._bulk_data_fetcher, "stream_data_for_key") as mock_stream,
+            patch.object(api.admin._bulk_data_fetcher, "stream_data_for_key") as mock_stream,
         ):
             mock_stream.return_value = iter([])
-            api._run_import_under_lock()
+            api.admin._run_import_under_lock()
         mock_stream.assert_called_once_with(BulkDataKey.DEFAULT_CARDS)
 
     def test_stream_iterator_passed_directly_to_upsert_cards(self) -> None:
@@ -197,16 +198,16 @@ class TestRunImportUnderLockStreaming:
         api = self._make_api()
         sentinel = iter([{"id": "sentinel"}])
         with (
-            patch.object(api, "_import_recent", return_value=False),
-            patch.object(api, "setup_schema"),
-            patch.object(api._bulk_data_fetcher, "stream_data_for_key", return_value=sentinel),
+            patch.object(api.admin, "_import_recent", return_value=False),
+            patch.object(api.admin, "setup_schema"),
+            patch.object(api.admin._bulk_data_fetcher, "stream_data_for_key", return_value=sentinel),
             patch.object(
-                api,
+                api.admin,
                 "_upsert_cards",
                 return_value={"status": "no_cards_before_preprocessing", "cards_loaded": 0, "message": ""},
             ) as mock_staging,
         ):
-            api._run_import_under_lock()
+            api.admin._run_import_under_lock()
         args, _ = mock_staging.call_args
         assert args[0] is sentinel
 
@@ -251,18 +252,18 @@ class TestUpsertBehavior:
         """Group 2: re-submitting identical data produces zero loads."""
         card_id = str(uuid.uuid4())
         card = make_raw_card(card_id=card_id)
-        api_resource._upsert_cards([card])
+        api_resource.admin._upsert_cards([card])
 
-        result = api_resource._upsert_cards([card])
+        result = api_resource.admin._upsert_cards([card])
         assert result["cards_inserted"] == 0
         assert result["cards_updated"] == 0
 
     def test_changed_card_is_updated(self, api_resource: APIResource) -> None:
         """Group 3: re-submitting a card with changed data updates the stored row."""
         card_id = str(uuid.uuid4())
-        api_resource._upsert_cards([make_raw_card(card_id=card_id)])
+        api_resource.admin._upsert_cards([make_raw_card(card_id=card_id)])
 
-        result = api_resource._upsert_cards([make_raw_card(card_id=card_id, rarity="rare")])
+        result = api_resource.admin._upsert_cards([make_raw_card(card_id=card_id, rarity="rare")])
         assert result["cards_inserted"] == 0
         assert result["cards_updated"] == 1
 
@@ -274,7 +275,7 @@ class TestUpsertBehavior:
     def test_changed_card_preserves_backfilled_columns(self, api_resource: APIResource) -> None:
         """Group 3: updating a changed card leaves prefer_score and card_is_tags intact."""
         card_id = str(uuid.uuid4())
-        api_resource._upsert_cards([make_raw_card(card_id=card_id)])
+        api_resource.admin._upsert_cards([make_raw_card(card_id=card_id)])
 
         with api_resource._conn_pool.connection() as conn, conn.cursor() as cursor:
             cursor.execute(
@@ -283,7 +284,7 @@ class TestUpsertBehavior:
             )
             conn.commit()
 
-        api_resource._upsert_cards([make_raw_card(card_id=card_id, rarity="rare")])
+        api_resource.admin._upsert_cards([make_raw_card(card_id=card_id, rarity="rare")])
 
         with api_resource._conn_pool.connection() as conn, conn.cursor() as cursor:
             cursor.execute("SELECT prefer_score, card_is_tags FROM magic.cards WHERE scryfall_id = %s", (card_id,))

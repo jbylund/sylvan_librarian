@@ -17,8 +17,8 @@ reasoning the shipped work rests on — but read them as the state of the code *
 | --- | --- |
 | 1. Rewrite coercion | shipped — #787 |
 | 2. `@route` and explicit registration | shipped — #789, with #791 following on |
-| 3. Move the admin handlers to a child resource | not started |
-| 4. Delist | not started |
+| 3. Move the admin handlers to a child resource | shipped |
+| 4. Delist | partly — the child is unadvertised; the public listing is not yet opt-in |
 | 5. Auth at the mount | not started |
 
 Three things this doc commits to that the shipped code deliberately does **not** do:
@@ -27,8 +27,9 @@ Three things this doc commits to that the shipped code deliberately does **not**
   revised to record why the hand-rolled dispatch stayed.
 - **`DISALLOWED_QUERY_ARGS` still exists**, and handlers still declare `**_: object` — 27 of 28 do.
   Both retire with per-route unknown-parameter enforcement, which step 2 declared but did not enforce.
-- **Nothing reads `advertise` or `ignore_unknown_params` yet.** They are on every `RouteSpec`; all 30
-  routes are still published in the 404 listing. Steps 4 and the unknown-parameter work consume them.
+- **`advertise` is now read; `ignore_unknown_params` is not.** The mount passes `advertise=False`
+  once for the whole child, and the listing filters on it. Making the *public* listing opt-in — so a
+  forgotten flag under-advertises rather than over-advertises — is what remains of step 4.
 
 ## Current mechanics
 
@@ -194,7 +195,7 @@ that move code.
    and makes each route declare which HTTP methods it accepts. #791 followed on, registering the
    static assets at the URLs they are actually requested at now that paths are declared rather than
    derived from method names.
-3. **Move the admin handlers to a child resource.** *(next)* The closure analysis for this — which
+3. **Move the admin handlers to a child resource.** *(shipped)* The closure analysis for this — which
    methods and handles are shared, which move — lives in the out-of-tree doc. Mounting is a loop over
    a child's marked methods; resist extracting a `Router` abstraction until a second mount point
    exists.

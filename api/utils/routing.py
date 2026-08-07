@@ -17,7 +17,11 @@ assigned in `__init__` can become a route.
 from __future__ import annotations
 
 import dataclasses
+import inspect
 from typing import TYPE_CHECKING, Any
+
+from api.utils.param_binding import bind_params
+from api.utils.type_conversions import _get_type_name
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -109,6 +113,134 @@ def route(
         return func
 
     return mark
+
+
+def max_positional_args(func: Any) -> float:  # noqa: ANN401
+    """Return how many positional args `func` accepts; inf if it takes *args.
+
+    Computed once per registered route at construction, not per request. `inspect.signature()`
+    follows a `bind_params` wrapper's `__wrapped__` link, so this sees the real handler's signature.
+
+    Args:
+        func: The handler, wrapped or not.
+
+    Returns:
+        The count, or inf for a handler taking *args.
+    """
+    try:
+        params = inspect.signature(func).parameters.values()
+    except (TypeError, ValueError):
+        return 0.0
+    if any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params):
+        return float("inf")
+    return float(sum(1 for p in params if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)))
+
+
+def build_route_table(
+    resource: object,
+    *,
+    prefix: str = "",
+    advertise: bool | None = None,
+) -> dict[str, BoundRoute]:
+    """Bind every marked method on a resource into a path-to-route table.
+
+    The same routine builds the root resource's table and a mounted child's, so a child cannot end up
+    registered by a different set of rules than its parent.
+
+    Args:
+        resource: Instance whose class carries the markers. Handlers are bound to this instance.
+        prefix: Path prefix to register under, for a mounted child. Empty for the root resource.
+        advertise: Overrides what each route declared. A mount passes this once rather than trusting
+            every handler in the child to carry the flag — forgetting it in one place is then a
+            property of the mount, not a hole in one handler.
+
+    Returns:
+        Path to the route that answers it.
+
+    Raises:
+        RuntimeError: Two methods claim the same path.
+    """
+    table: dict[str, BoundRoute] = {}
+    for attr_name, declared in iter_marked_routes(type(resource)):
+        spec = declared
+        if advertise is not None and spec.advertise != advertise:
+            spec = dataclasses.replace(spec, advertise=advertise)
+        handler = getattr(resource, attr_name)
+        entry = BoundRoute(
+            action=bind_params(handler),
+            positional_capacity=max_positional_args(handler),
+            spec=spec,
+        )
+        for path in spec.paths:
+            full_path = f"{prefix}/{path}" if prefix else path
+            if full_path in table:
+                msg = f"Route path {full_path!r} is claimed by both {table[full_path].action.__name__} and {attr_name}"
+                raise RuntimeError(msg)
+            table[full_path] = entry
+    return table
+
+
+def build_routes_listing(route_table: dict[str, BoundRoute]) -> dict[str, dict[str, Any]]:
+    """Build the {route: {doc, args, kwargs}} listing served in 404 responses.
+
+    Only routes that declared themselves advertisable appear. A mounted child is registered with
+    advertise=False, so the listing cannot turn the mount into a directory of what is behind it —
+    which would undo the boundary while leaving every test passing.
+
+    Depends only on the table's contents, fixed once construction finishes, so it is built once
+    there rather than on every 404 (inspect.signature() per route isn't free).
+
+    Args:
+        route_table: Path to bound route.
+
+    Returns:
+        Route name to its doc, args and kwargs.
+    """
+    routes = {}
+    for endpoint_name, entry in route_table.items():
+        if not entry.spec.advertise:
+            continue
+        wrapped_func = entry.action
+        # Get the original function from the wrapper
+        original_func = wrapped_func.__wrapped__ if hasattr(wrapped_func, "__wrapped__") else wrapped_func
+
+        # Get function signature
+        sig = inspect.signature(original_func)
+
+        # Extract docstring
+        doc = original_func.__doc__ or ""
+
+        # Parse arguments
+        args = []
+        kwargs = {}
+
+        for param_name, param in sig.parameters.items():
+            if param_name.startswith("_"):
+                continue
+            if param_name in ("self", "falcon_response"):
+                continue
+
+            param_info = {
+                "name": param_name,
+                "type": _get_type_name(param.annotation),
+            }
+
+            if param.default != inspect.Parameter.empty:
+                # It's a keyword argument with default
+                kwargs[param_name] = {
+                    "type": _get_type_name(param.annotation),
+                    "default": param.default,
+                }
+            else:
+                # It's a positional argument
+                args.append(param_info)
+
+        routes[endpoint_name] = {
+            "doc": doc,
+            "args": args,
+            "kwargs": kwargs,
+        }
+    return routes
 
 
 def iter_marked_routes(cls: type) -> Iterator[tuple[str, RouteSpec]]:

@@ -61,7 +61,7 @@ def api_resource(postgres_container: None) -> Generator[APIResource]:
         schema_setup_event=multiprocessing.Event(),
     )
     override_attr(api, "_setup_complete", lambda: True)
-    override_attr(api, "_import_recent", lambda: True)
-    api.setup_schema()
+    override_attr(api.admin, "_import_recent", lambda: True)
+    api.admin.setup_schema()
     yield api
     api._conn_pool.close()
