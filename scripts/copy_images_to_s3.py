@@ -22,6 +22,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -171,6 +172,38 @@ def fetch_cards_from_db(
     return cards
 
 
+# Scryfall's CDN rejects the requests library's default User-Agent with HTTP 400 -- not a
+# rate limit and not specific to any image, so every download fails while the same URL opens
+# fine in a browser. Any descriptive UA is accepted; their API guidelines ask for one that
+# identifies the client.
+SCRYFALL_USER_AGENT = "sylvan-librarian/1.0 (+https://github.com/jbylund/sylvan_librarian)"
+
+
+@lru_cache(maxsize=1)
+def get_session(_pid: int) -> requests.Session:
+    """Return the requests Session for the calling process, creating it on first use.
+
+    Connections are pooled per process rather than per request. The sync makes one request
+    per image over tens of thousands of images, and without a Session each one pays a fresh
+    TCP handshake plus a TLS negotiation to the same host.
+
+    Keyed on pid because the worker pool forks: a Session created in the parent would hand
+    every child a copy of the same open sockets, and concurrent use of a shared TLS connection
+    corrupts the stream. A child's first call misses on its own pid and builds its own pool,
+    without depending on how the pool is started. maxsize=1 keeps only the current process's
+    session, so the inherited parent entry is evicted rather than held for the whole run.
+
+    Args:
+        _pid: The calling process's id, from os.getpid(). Used only as the cache key.
+
+    Returns:
+        A Session identifying itself to Scryfall, reused for the life of the process.
+    """
+    session = requests.Session()
+    session.headers["User-Agent"] = SCRYFALL_USER_AGENT
+    return session
+
+
 def download_image(url: str, output_path: Path) -> bool:
     """Download an image from a URL.
 
@@ -182,7 +215,7 @@ def download_image(url: str, output_path: Path) -> bool:
         True if successful, False otherwise
     """
     try:
-        response = requests.get(url, timeout=30, stream=True)
+        response = get_session(os.getpid()).get(url, timeout=30, stream=True)
         response.raise_for_status()
 
         with output_path.open("wb") as f:
@@ -478,7 +511,11 @@ def configure_env() -> None:
     """Load environment variables from env.json file."""
     with Path("env.json").open("r") as f:
         env = json.load(f)
-    os.environ.update(env)
+    # setdefault, not update: env.json supplies defaults, so an explicitly exported PGHOST or
+    # PGPORT still wins. `update` silently discarded them, which made the standard libpq
+    # variables look broken and left editing env.json as the only way to point at a database.
+    for key, value in env.items():
+        os.environ.setdefault(key, str(value))
 
 
 def check_cwebp() -> None:
