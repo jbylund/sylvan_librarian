@@ -51,6 +51,13 @@ if TYPE_CHECKING:
 # Enable pyparsing packrat caching for improved performance with increased cache size
 ParserElement.enable_packrat(cache_size_limit=2**13)  # 8192 cache entries
 
+# A comma standing on its own is a natural-language separator, skipped like whitespace
+# (Scryfall: "rograkh , son" filters exactly as "rograkh son"). A comma attached to a word
+# is part of that word's token — the word/value regexes below accept it — so field values
+# keep it verbatim (Scryfall: "t:goblin," matches nothing) while bare names shed it in
+# make_implicit_name. Mirrors the hand parser's _SKIPPED / _scan_word_end.
+ParserElement.set_default_whitespace_chars(" \n\t\r,")
+
 # Constants
 NEGATION_TOKEN_COUNT = 2
 DEFAULT_OPERATORS = one_of(": > < >= <= = !=")
@@ -60,7 +67,7 @@ _NUMERIC_LITERAL_RE = re.compile(r"^\d+(\.\d+)?$")
 _COMPARISON_OPERATORS = frozenset({">", "<", ">=", "<=", "=", "!=", ":"})
 
 # Characters that make a query ineligible for the fast preprocess_implicit_and path.
-_FP_UNSAFE_CHARS = frozenset("()\"'/{+*")
+_FP_UNSAFE_CHARS = frozenset("()\"'/{+*,")
 _FP_TERM_START_OPS = frozenset("><=!:")
 _FP_TERM_END_OPS = frozenset("><=!:-")
 
@@ -227,10 +234,13 @@ def create_basic_parsers() -> dict[str, ParserElement]:
     # (Python 3 `re` treats `\w`/`\W` as Unicode-aware by default for str patterns), so
     # bare words can start with accented letters like "Éowyn" (#649) without also
     # allowing a leading digit.
-    word = Regex(r"[^\W\d][\w-]*\w|[^\W\d]").set_parse_action(make_word)
+    # Start letter, then word chars / hyphens / commas / word-internal apostrophes ("urza's"),
+    # never ending on a hyphen or apostrophe (a trailing "-" is the next term's negation, and a
+    # trailing "'" opens a quoted string). Mirrors the hand tokenizer's _scan_word_end.
+    word = Regex(r"[^\W\d](?:(?:[\w\-,]|'(?=\w))*[\w,])?").set_parse_action(make_word)
 
     literal_number = float_number | integer
-    string_value_word = Regex(r"\w[\w.-]*")
+    string_value_word = Regex(r"\w(?:[\w.\-,]|'(?=\w))*")
 
     return {
         "attrop": attrop,
@@ -468,7 +478,9 @@ def get_parse_expr() -> ParserElement:  # noqa: PLR0915
 
     def make_implicit_name(tokens: list[object]) -> BinaryOperatorNode:
         token = tokens[0]
-        value = token[1] if isinstance(token, tuple) and token[0] == "quoted" else str(token)
+        # Quoted names stay verbatim, commas included; bare words shed their
+        # natural-language commas (Scryfall: "son," filters as "son").
+        value = token[1] if isinstance(token, tuple) and token[0] == "quoted" else str(token).rstrip(",")
         return BinaryOperatorNode(CardAttributeNode("name", ParserClass.TEXT), ":", StringValueNode(value))
 
     implicit_name = _implicit_name_value.set_parse_action(make_implicit_name)
@@ -583,7 +595,8 @@ def _get_implicit_and_tokenizer() -> ParserElement:
 
     float_tok = Regex(r"\b\d+\.\d*\b").set_parse_action(lambda t: t[0])
 
-    string_value_tok = Regex(r"\w([\w.-]*[\w.])?").set_parse_action(lambda t: t[0])
+    # Same word shape as the main grammar: commas ride along, apostrophes only word-internally.
+    string_value_tok = Regex(r"\w(?:(?:[\w.\-,]|'(?=\w))*[\w.,])?").set_parse_action(lambda t: t[0])
 
     curly_mana_symbol = Regex(r"\{[^}]+\}")
     simple_mana_symbol = Regex(r"[0-9WUBRGCXYZwubrgcxyz]")
