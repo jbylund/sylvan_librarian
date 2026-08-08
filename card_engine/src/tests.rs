@@ -8309,6 +8309,77 @@ fn color_cmp_ge_empty_mask_is_colorless_only() {
     check(ColorField::ColorIdentity, &[0]);
 }
 
+// Scryfall numeric color syntax (id>=3, c=2): ColorCountCmp compares the
+// popcount of the WUBRG bits against the queried count. Checked for every op ×
+// count 0..=5 against a popcount oracle over the color-diverse plane fixture —
+// which includes a C-bit identity (card 9) that must count as ZERO colors,
+// mirroring the SQL path's magic.color_identity_mask reading only the five
+// WUBRG keys.
+#[test]
+fn color_count_cmp_matches_popcount_oracle() {
+    let data = plane_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let cmp = |op: CmpOp, a: u32, b: u32| match op {
+        CmpOp::Eq => a == b,
+        CmpOp::Ne => a != b,
+        CmpOp::Lt => a < b,
+        CmpOp::Le => a <= b,
+        CmpOp::Gt => a > b,
+        CmpOp::Ge => a >= b,
+    };
+    for op in [CmpOp::Eq, CmpOp::Ne, CmpOp::Lt, CmpOp::Le, CmpOp::Gt, CmpOp::Ge] {
+        for count in 0u8..=5 {
+            for field in [ColorField::Colors, ColorField::ColorIdentity] {
+                let f = FilterExpr::ColorCountCmp { field, op, count };
+                for (cid, card) in archived.cards.iter().enumerate() {
+                    let bits = match field {
+                        ColorField::Colors => card.card_colors,
+                        ColorField::ColorIdentity => card.card_color_identity,
+                        ColorField::ProducedMana => unreachable!("numeric syntax never targets produced_mana"),
+                    };
+                    let want = cmp(op, u32::from(bits & 0b1_1111).count_ones(), u32::from(count));
+                    assert_eq!(
+                        f.eval_card(card, &archived.strings) == Tri::True,
+                        want,
+                        "color-count mismatch at card {cid} ({op:?} {count})"
+                    );
+                }
+            }
+        }
+    }
+}
+
+// The Python side serializes a numeric color comparison as a raw
+// NumericValueNode rhs (not the usual color-letter list); build_binary must
+// turn that into ColorCountCmp — with ":" behaving as equality, matching the
+// live Scryfall API — and refuse produced_mana, whose C key is not a color.
+#[test]
+fn build_filter_numeric_color_rhs() {
+    let node = |attr: &str, orig: &str, op: &str, n: u8| {
+        serde_json::json!({
+            "node_type": "CardBinaryOperatorNode",
+            "kwargs": {
+                "lhs": {"node_type": "CardAttributeNode", "kwargs": {"attribute_name": attr, "original_attribute": orig}},
+                "op": op,
+                "rhs": {"node_type": "NumericValueNode", "kwargs": {"value": n}},
+            },
+        })
+    };
+
+    let f = super::build_filter(&node("card_color_identity", "id", ">=", 3)).expect("id>=3 must build");
+    assert!(matches!(f, FilterExpr::ColorCountCmp { field: ColorField::ColorIdentity, op: CmpOp::Ge, count: 3 }));
+
+    let f = super::build_filter(&node("card_colors", "c", ":", 2)).expect("c:2 must build");
+    assert!(matches!(f, FilterExpr::ColorCountCmp { field: ColorField::Colors, op: CmpOp::Eq, count: 2 }));
+
+    let f = super::build_filter(&node("card_color_identity", "id", "=", 0)).expect("id=0 must build");
+    assert!(matches!(f, FilterExpr::ColorCountCmp { field: ColorField::ColorIdentity, op: CmpOp::Eq, count: 0 }));
+
+    assert!(super::build_filter(&node("produced_mana", "produces", "=", 2)).is_err());
+}
+
 // produced_mana must be its own independent transposition, not derived from
 // colors or identity: card 0 (colorless, produces everything) and card 5
 // (Fallaji Wayfarer, colors=WUBR/identity=G, produces only C) both have

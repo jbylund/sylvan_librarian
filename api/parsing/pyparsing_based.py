@@ -280,7 +280,11 @@ def create_color_parsers() -> dict[str, ParserElement]:
     """
     color_word = make_regex_pattern(COLOR_NAME_TO_CODE)
     color_letter_pattern = Regex(r"[wubrgcWUBRGC]+")
-    color_value = color_word | color_letter_pattern
+    # Scryfall numeric color syntax: id>=3 / c=2 compare the NUMBER of colors in
+    # the field. A bare integer is a valid color value; the negative lookahead
+    # keeps mixed tokens like "2rr" or floats out (the hand parser rejects both).
+    color_count = Regex(r"\d+(?![\w.])").set_parse_action(lambda tokens: NumericValueNode(int(tokens[0])))
+    color_value = color_word | color_letter_pattern | color_count
 
     return {
         "color_value": color_value,
