@@ -20,11 +20,13 @@ from api.parsing.hand_parser import parse_query as _parse_query
 from api.parsing.nodes import (
     AndNode,
     BinaryOperatorNode,
+    DirectiveNode,
     NotNode,
     OrNode,
     Query,
     RegexValueNode,
     StringValueNode,
+    TrueNode,
     flatten_nested_operations,
 )
 
@@ -269,6 +271,57 @@ def expand_derived_predicates(query: Query) -> Query:
     return flatten_nested_operations(Query(root))
 
 
+def _strip_directives(node: QueryNode, found: list[tuple[str, str, bool]], *, nested: bool) -> QueryNode | None:
+    """Return `node` with directive leaves removed, appending (name, value, nested) in source order.
+
+    Returns None when the node vanishes entirely (it was a directive, or a compound made only
+    of directives); the original object when nothing changed. A directive is removed from the
+    structure as if it had never been written — inside an Or it does not make the Or true, and
+    a negated directive is still just a directive (Scryfall ignores the negation, measured
+    2026-08-07: `-unique:art` dedups by artwork exactly as `unique:art` does).
+
+    `nested` marks directives found under an Or or a negation: a directive always applies to
+    the WHOLE search, so one written inside such a group looks scoped but is not — the API
+    layer turns the flag into an explicit response warning rather than a silent surprise.
+    Parenthesized AND groups do not count: conjunction is flat, so `(t:goblin sort:x) t:elf`
+    means exactly `t:goblin sort:x t:elf`.
+    """
+    cls = node.__class__
+    if cls is DirectiveNode:
+        found.append((node.name, node.value, nested))
+        return None
+    if cls in (AndNode, OrNode):
+        inner_nested = nested or cls is OrNode
+        ops = [_strip_directives(op, found, nested=inner_nested) for op in node.operands]
+        kept = [op for op in ops if op is not None]
+        if not kept:
+            return None
+        if len(kept) == 1:
+            return kept[0]
+        return cls(kept) if kept != list(node.operands) else node
+    if cls is NotNode:
+        inner = _strip_directives(node.operand, found, nested=True)
+        if inner is None:
+            return None
+        return NotNode(inner) if inner is not node.operand else node
+    return node
+
+
+def extract_directives(query: Query) -> tuple[Query, tuple[tuple[str, str, bool], ...]]:
+    """Strip result-shape directives from the filter tree, returning (name, value, nested) triples.
+
+    A directive like `sort:edhrec` constrains presentation, not membership; without this pass a
+    query carrying one would serialize with a vestigial residue, making `t:goblin sort:edhrec`
+    compare unequal to `t:goblin` despite filtering identically. A query that is nothing but
+    directives filters as the empty query does.
+    """
+    found: list[tuple[str, str, bool]] = []
+    root = _strip_directives(query.root, found, nested=False)
+    if not found:
+        return query, ()
+    return Query(root if root is not None else TrueNode()), tuple(found)
+
+
 # The post-parse rewrite pipeline, applied in order at the shared parse seam. Add future AST
 # rewrites to this tuple — both parsers call `rewrite_query`, so a new pass lands in exactly one
 # place and is guaranteed identical treatment across parsers (enforced by test_parser_parity).
@@ -278,10 +331,14 @@ _REWRITE_PASSES = (expand_derived_predicates, lower_literal_regexes)
 def rewrite_query(query: Query) -> Query:
     """Apply every post-parse AST rewrite, in order. The single seam both parsers call.
 
-    Order is significant: `expand_derived_predicates` runs first (a synonym may expand into a subtree
-    that itself contains a regex or other rewritable leaf), then `lower_literal_regexes`, then any
-    future pass appended to `_REWRITE_PASSES`.
+    Directive extraction runs first so no later pass sees a DirectiveNode, and the collected
+    pairs are attached to the final Query afterward because each pass returns a fresh Query.
+    Order among the passes is significant: `expand_derived_predicates` runs before
+    `lower_literal_regexes` (a synonym may expand into a subtree that itself contains a regex
+    or other rewritable leaf), then any future pass appended to `_REWRITE_PASSES`.
     """
+    query, directives = extract_directives(query)
     for rewrite_pass in _REWRITE_PASSES:
         query = rewrite_pass(query)
+    query.directives = directives
     return query

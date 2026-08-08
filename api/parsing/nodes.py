@@ -436,12 +436,50 @@ class TrueNode(LeafNode):
         return ""
 
 
+class DirectiveNode(LeafNode):
+    """A result-shape directive written inside the query string (unique:art, sort:usd).
+
+    Carries the directive's name and value so `extract_directives` at the rewrite seam can
+    record them on the Query and strip the node from the filter tree — a directive constrains
+    presentation, not membership, so one never reaches SQL generation or the engine. `to_sql`
+    still renders the always-true condition as a backstop for a tree that skipped the seam.
+    """
+
+    def __init__(self: DirectiveNode, name: str, value: str) -> None:
+        """Initialize a DirectiveNode with the directive's lowercased name and value."""
+        self.name = name
+        self.value = value
+
+    def kwargs(self) -> dict:
+        """Return this node's kwargs dict for Rust engine JSON serialization."""
+        return {}
+
+    def to_sql(self: DirectiveNode, context: QueryContext) -> str:
+        """Serialize this node to the SQL literal TRUE."""
+        del context
+        return "TRUE"
+
+    def to_human_explanation(self: DirectiveNode) -> str:
+        """Return an empty explanation; a directive does not constrain matching."""
+        return ""
+
+    def __repr__(self: DirectiveNode) -> str:
+        """Return a string representation of the DirectiveNode."""
+        return f"DirectiveNode({self.name!r}, {self.value!r})"
+
+
 class Query(QueryNode):
     """Top-level query container node for the AST."""
 
     def __init__(self: Query, root: QueryNode) -> None:
-        """Initialize a Query with the root QueryNode."""
+        """Initialize a Query with the root QueryNode.
+
+        `directives` holds (name, value, nested) triples for the result-shape directives the
+        query carried, in source order — `nested` marks one written inside an Or or a negation.
+        `rewrite_query` populates it after stripping their nodes from the filter tree.
+        """
         self.root = root
+        self.directives: tuple[tuple[str, str, bool], ...] = ()
 
     def to_json(self) -> dict:
         """Delegate to the root node."""
