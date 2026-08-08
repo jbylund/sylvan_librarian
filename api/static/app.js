@@ -94,6 +94,7 @@ class CardSearch {
     this.currentRequestUrl = null; // URL of the in-flight request, if any
     this.imageObserver = null;
     this.cardsData = new Map(); // Store card data by ID
+    this.backFaceKeys = new Map(); // "set/collector" -> bool, cached back-face image probes
     this.lastCompletedUrl = null; // URL whose results are currently displayed; null when results are cleared
     this.isAscending = true; // Track order direction
     this.currentCardCount = 0; // Track current number of cards displayed for resize handling
@@ -710,6 +711,9 @@ class CardSearch {
         .join('');
     }
 
+    // Runs against the DOM, so it enhances SSR-rendered and JS-rendered cards alike.
+    this.enhanceDoubleFacedCards();
+
     // Record arrival time; we only push this state when leaving if they stayed > DWELL_MS and it's not already saved (updateURL)
     const url = this.buildCurrentSearchUrl();
     window.history.replaceState({ arrivalTime: Date.now() }, '', url);
@@ -756,9 +760,90 @@ class CardSearch {
     this.resultsContainer.style.gridTemplateColumns = `repeat(${actualColumns}, 1fr)`;
   }
 
-  buildImageUrl(card, size) {
-    const face = card.face_idx || 1;
-    return `https://d1hot9ps2xugbc.cloudfront.net/img/${card.set_code}/${card.collector_number}/${face}/${size}.webp`;
+  buildImageUrl(card, size, face) {
+    const resolvedFace = face || card.face_idx || 1;
+    return `https://d1hot9ps2xugbc.cloudfront.net/img/${card.set_code}/${card.collector_number}/${resolvedFace}/${size}.webp`;
+  }
+
+  buildSrcset(card, face) {
+    return ['280', '388', '538', '745'].map(size => `${this.buildImageUrl(card, size, face)} ${size}w`).join(', ');
+  }
+
+  // ── Double-faced cards: flip button (progressive enhancement) ──
+  // The rendered card HTML is shared with the no-JS server renderer (parity fixture), so the
+  // flip button is injected AFTER render rather than templated in. A card gets one when a
+  // face-2 image exists on the CDN — which is exactly the set of cards with a physical back
+  // face (transform/MDFC), since the image sync only uploads face 2 for those. Split and
+  // adventure cards share a "//" name but have no face-2 image, so they correctly get none.
+
+  cardBackFaceKey(card) {
+    return `${card.set_code}/${card.collector_number}`;
+  }
+
+  probeBackFace(card, onExists) {
+    if (!card.name || !card.name.includes(' // ') || !card.set_code || !card.collector_number) {
+      return;
+    }
+    const key = this.cardBackFaceKey(card);
+    if (this.backFaceKeys.has(key)) {
+      if (this.backFaceKeys.get(key)) onExists();
+      return;
+    }
+    const probe = new Image();
+    probe.onload = () => {
+      this.backFaceKeys.set(key, true);
+      onExists();
+    };
+    probe.onerror = () => this.backFaceKeys.set(key, false);
+    probe.src = this.buildImageUrl(card, '280', 2);
+  }
+
+  enhanceDoubleFacedCards() {
+    for (const [cardId, card] of this.cardsData) {
+      this.probeBackFace(card, () => this.attachGridFlipButton(cardId, card));
+    }
+  }
+
+  createFlipButton(onFlip) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'card-flip-button';
+    button.title = 'Transform';
+    button.setAttribute('aria-label', 'Show other face');
+    button.textContent = '⟳';
+    button.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      onFlip();
+    });
+    return button;
+  }
+
+  attachGridFlipButton(cardId, card) {
+    // cardId is the numeric grid index (displayCards), safe to interpolate directly.
+    const item = this.resultsContainer && this.resultsContainer.querySelector(`.card-item[data-card-id="${cardId}"]`);
+    if (!item || item.querySelector('.card-flip-button')) {
+      return;
+    }
+    item.appendChild(
+      this.createFlipButton(() => this.flipCardImage(item.querySelector('.card-image'), card, item, '388', true))
+    );
+  }
+
+  flipCardImage(img, card, faceHolder, size, withSrcset) {
+    if (!img) {
+      return;
+    }
+    const nextFace = faceHolder.dataset.shownFace === '2' ? 1 : 2;
+    faceHolder.dataset.shownFace = String(nextFace);
+    img.classList.add('card-image-flipping');
+    setTimeout(() => {
+      img.src = this.buildImageUrl(card, size, nextFace);
+      if (withSrcset) {
+        img.srcset = this.buildSrcset(card, nextFace);
+      }
+      img.classList.remove('card-image-flipping');
+    }, 150);
   }
 
   createCardHTML(card, index, isFirstRow = false) {
@@ -929,6 +1014,19 @@ class CardSearch {
         })()}
       </div>
     `;
+
+    // Flip button for cards with a physical back face (cached probe from the grid, or fresh)
+    this.probeBackFace(card, () => {
+      const wrapper = modalContent.querySelector('.modal-image-wrapper');
+      if (!wrapper || wrapper.querySelector('.card-flip-button')) {
+        return;
+      }
+      wrapper.appendChild(
+        this.createFlipButton(() =>
+          this.flipCardImage(wrapper.querySelector('.modal-image'), card, wrapper, '745', false)
+        )
+      );
+    });
 
     // Show modal
     modalOverlay.style.display = 'flex';

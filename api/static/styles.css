@@ -356,6 +356,7 @@ body {
   cursor: pointer;
   display: flex;
   flex-direction: column;
+  position: relative; /* anchors the injected .card-flip-button over the image */
   height: 100%;
   width: 100%;
   min-width: 0;
@@ -527,6 +528,44 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+  position: relative; /* anchors the injected .card-flip-button over the image */
+}
+
+/* Flip button for double-faced cards, injected by JS when a back-face image exists.
+   Sits over the card image's top-right corner, like Scryfall's transform button. */
+.card-flip-button {
+  position: absolute;
+  top: 1.6em;
+  right: 1.6em;
+  z-index: 2;
+  width: 2.2em;
+  height: 2.2em;
+  border: none;
+  border-radius: 50%;
+  background: var(--color-card-background);
+  color: var(--color-text-primary);
+  box-shadow: 0 2px 8px var(--color-shadow-dark);
+  font-size: 1em;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.85;
+  transition:
+    opacity 0.15s ease,
+    transform 0.15s ease;
+}
+
+.card-flip-button:hover {
+  opacity: 1;
+  transform: rotate(180deg);
+}
+
+.card-image-flipping {
+  transform: rotateY(90deg);
+}
+
+.card-image,
+.modal-image {
+  transition: transform 0.15s ease;
 }
 
 .modal-image-link {

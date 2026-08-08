@@ -94,11 +94,66 @@ def extract_collector_number_int(collector_number: str | int | float | None) -> 
     return None  # Field will be null by default
 
 
+# Face-merge policy for multi-face cards (#400, #873). Scryfall AND's search predicates at the
+# CARD level, each satisfiable by any face — measured against api.scryfall.com 2026-08-08:
+# `t:sorcery t:land` returns the MDFC lands (no single face is both), o: conjunctions match
+# across faces (Ral, Monsoon Mage), and `c:b` matches Westvale Abbey's back-face-only color.
+# One row per printing carrying any-face unions reproduces those semantics directly; one row
+# per face would instead break every cross-face conjunction (no face-row satisfies both terms)
+# on top of colliding on the scryfall_id primary key, which is how the back face silently won
+# until now. Front-face scalars (cmc, mana cost, illustration, image, prices) match Scryfall's
+# own top-level fields, verified on its card objects.
+_FACE_LIST_UNIONS = ("card_types", "card_subtypes")
+_FACE_FLAG_UNIONS = ("card_colors", "card_keywords", "produced_mana")
+_FACE_JOINED_TEXTS = ("oracle_text", "flavor_text", "type_line")
+# Copied per GROUP from the first face that has any of the group, so the numeric columns and
+# their _text twins always describe the same face (the schema's check constraints couple them).
+_FACE_STAT_GROUPS = (
+    ("creature_power", "creature_toughness", "creature_power_text", "creature_toughness_text"),
+    ("planeswalker_loyalty", "planeswalker_loyalty_text"),
+)
+# Joins face texts. "\n" so substring/regex matches cannot span faces in practice (`.` does not
+# cross newlines), "//" because that is the face separator Scryfall itself renders.
+_FACE_TEXT_SEPARATOR = "\n//\n"
+
+
+def _merge_processed_faces(faces: list[dict[str, Any]]) -> dict[str, Any]:
+    """Collapse fully-processed per-face rows into the card's single searchable row.
+
+    The first face (the front) supplies the row and with it every identity and display
+    scalar; later faces fold in per the policy tables above. Known residual, sized in
+    the tests: when several faces carry a stat group (Brutal Cathar's 2/2 // 3/3), only
+    the first face's values are searchable — Scryfall also matches the back's.
+
+    Args:
+        faces: Non-empty list of processed rows, one per surviving face, front first.
+
+    Returns:
+        The merged row (the front face's dict, mutated in place).
+    """
+    merged, *rest = faces
+    for face in rest:
+        for key in _FACE_LIST_UNIONS:
+            seen = merged[key]
+            seen.extend(value for value in face[key] if value not in seen)
+        for key in _FACE_FLAG_UNIONS:
+            merged[key].update(face[key])
+        for key in _FACE_JOINED_TEXTS:
+            parts = [part for part in (merged.get(key), face.get(key)) if part]
+            merged[key] = (" // " if key == "type_line" else _FACE_TEXT_SEPARATOR).join(parts)
+        for group in _FACE_STAT_GROUPS:
+            if all(merged.get(field) is None for field in group) and any(face.get(field) is not None for field in group):
+                for field in group:
+                    merged[field] = face.get(field)
+    return merged
+
+
 def preprocess_card(card: dict[str, Any]) -> list[dict[str, Any]]:  # noqa: PLR0915,C901,PLR0912
     """Preprocess a card to remove invalid cards and add necessary fields.
 
-    For Double-Faced Cards (DFCs), returns multiple dictionaries (one per face).
-    For single-faced cards, returns a list with one dictionary.
+    A multi-face card (transform, MDFC, split, adventure, flip) is merged into ONE row
+    carrying the front face's identity and every face's searchable data — see
+    `_merge_processed_faces`. Single-faced cards return a list with one dictionary.
     Returns an empty list for invalid/filtered cards.
     """
     if not set(card["legalities"].values()) & {"legal", "restricted"}:
@@ -136,21 +191,28 @@ def preprocess_card(card: dict[str, Any]) -> list[dict[str, Any]]:  # noqa: PLR0
         # Recursive case: processing a face
         card["face_name"] = card.get("name")
 
-    # Handle cards with card_faces (DFCs)
+    # Handle cards with card_faces (DFCs): process each face through the full pipeline below,
+    # then collapse the per-face rows into the card's one searchable row.
     card_faces = card.get("card_faces")
     if card_faces:
         for creature_attribute in ["creature_power", "creature_toughness"]:
             card.pop(creature_attribute, None)
             card.pop(f"{creature_attribute}_text", None)
-        processed_faces = []
-        for face_idx, face_data in enumerate(card_faces, start=1):
+        face_rows = []
+        for face_data in card_faces:
             # Merge card-level data with face-specific data
-            # Precedence: face_idx override > face_data (name, type_line, etc.) > card (legalities, games, etc.)
-            merged = copy.deepcopy(card) | face_data | {"face_idx": face_idx}
+            # Precedence: face_data (name, type_line, etc.) > card (legalities, games, etc.)
+            merged = copy.deepcopy(card) | face_data
             merged.pop("card_faces", None)  # Don't keep recursing
-            processed_faces_for_face = preprocess_card(merged)
-            processed_faces.extend(processed_faces_for_face)
-        return processed_faces
+            face_rows.extend(preprocess_card(merged))
+        if not face_rows:
+            return []
+        merged_row = _merge_processed_faces(face_rows)
+        # The blob is the front face's dict, so every existing top-level read (image_uris, lang,
+        # finishes, ...) keeps meaning "the front". Re-attach the raw faces for consumers that
+        # need per-face data — the back-face image sync in scripts/copy_images_to_s3.py.
+        merged_row["raw_card_blob"]["card_faces"] = card_faces
+        return [merged_row]
 
     # Single face case - set defaults
     card.setdefault("face_name", card.get("name"))

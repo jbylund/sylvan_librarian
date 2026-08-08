@@ -128,8 +128,11 @@ def fetch_cards_from_db(
         List of dictionaries containing
              card_set_code,
              collector_number,
-             png_url,
-             face_idx
+             png_url (front face; for merged multi-face rows the top-level image_uris
+                 IS the front's, with the blob's card_faces[0] as fallback),
+             back_png_url (card_faces[1]'s image, present only for cards with a
+                 physical back face — transform/MDFC; split/adventure/flip faces
+                 carry no per-face images)
     """
     with conn.cursor() as cursor:
         where_clause = ""
@@ -150,8 +153,11 @@ def fetch_cards_from_db(
             SELECT
                 card_set_code,
                 collector_number,
-                raw_card_blob->'image_uris'->>'png' as png_url,
-                coalesce((raw_card_blob->>'face_idx')::int, 1) as face_idx
+                coalesce(
+                    raw_card_blob->'image_uris'->>'png',
+                    raw_card_blob->'card_faces'->0->'image_uris'->>'png'
+                ) as png_url,
+                raw_card_blob->'card_faces'->1->'image_uris'->>'png' as back_png_url
             FROM
                 magic.cards
             WHERE
@@ -344,7 +350,7 @@ def process_card(
                 continue
 
             # Face-aware key structure: img/{set_code}/{collector_number}/{face}/{size}.webp
-            s3_key = f"img/{set_code}/{collector_number}/{DEFAULT_FACE}/{size_name}.webp"
+            s3_key = f"img/{set_code}/{collector_number}/{card.get('face_idx', DEFAULT_FACE)}/{size_name}.webp"
 
             if upload_to_s3(s3_client, webp_path, bucket, s3_key):
                 results[size_name] = True
@@ -507,18 +513,23 @@ def get_db_cards(args: Args) -> set[tuple[str, str, str, str]]:
         return None
 
     sizes = [SMALL_KEY, MEDIUM_KEY, LARGE_KEY, XLARGE_KEY]
-    logger.info("Found %d cards in database, should create %d images", len(db_cards), len(db_cards) * len(sizes))
-    return {
+    images = {
         CardImage(
             set_code=card["card_set_code"],
             collector_number=card["collector_number"],
-            face_idx=str(card["face_idx"]),
-            png_url=card["png_url"],
+            face_idx=face_idx,
+            png_url=png_url,
             size=size,
         )
         for card in db_cards
+        # One image per face that actually has one: every card's front, plus the back for
+        # cards with a physical back face (the flip button's image on the site).
+        for face_idx, png_url in ((DEFAULT_FACE, card["png_url"]), ("2", card["back_png_url"]))
+        if png_url
         for size in sizes
     }
+    logger.info("Found %d cards in database, should create %d images", len(db_cards), len(images))
+    return images
 
 
 def get_s3_cards(args: Args) -> set[CardImage]:

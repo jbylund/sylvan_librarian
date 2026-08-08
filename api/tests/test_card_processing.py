@@ -118,21 +118,24 @@ class TestCardProcessing:
         result = preprocess_card(invalid_card)
         assert result == []
 
-    def test_preprocess_card_processes_double_faced_cards(self) -> None:
-        """Test preprocess_card processes cards with card_faces (DFCs) correctly."""
+    def test_preprocess_card_merges_double_faced_cards_into_one_row(self) -> None:
+        """A multi-face card produces exactly ONE row, so faces no longer fight for the PK.
+
+        The old per-face fan-out emitted N rows sharing one scryfall_id; the upsert's
+        ON CONFLICT then kept whichever face came last — the back — which is how every
+        battle, MDFC spell side, and front-face text went missing (#400, #873).
+        """
         dfc_card = create_test_card(
             card_faces=[{"name": "Front", "type_line": "Creature — Human"}, {"name": "Back", "type_line": "Creature — Werewolf"}],
         )
 
         result = preprocess_card(dfc_card)
-        # DFCs should return 2 cards (one per face)
-        assert len(result) == 2
-        assert result[0]["face_idx"] == 1
-        assert result[0]["face_name"] == "Front"
-        assert result[0]["card_name"] == "Test Card"
-        assert result[1]["face_idx"] == 2
-        assert result[1]["face_name"] == "Back"
-        assert result[1]["card_name"] == "Test Card"
+        assert len(result) == 1
+        merged = result[0]
+        assert merged["card_name"] == "Test Card"
+        assert merged["scryfall_id"] == dfc_card["id"]
+        assert merged["card_subtypes"] == ["Human", "Werewolf"]
+        assert merged["type_line"] == "Creature — Human // Creature — Werewolf"
 
     def test_preprocess_card_filters_same_faced_double_side_cards(self) -> None:
         """Test preprocess_card filters out cards with the same name on both faces (X // X)."""
@@ -159,8 +162,8 @@ class TestCardProcessing:
         )
 
         result = preprocess_card(normal_dfc)
-        # Different names — should be processed normally (2 faces)
-        assert len(result) == 2
+        assert len(result) == 1
+        assert result[0]["card_name"] == "Hound Tamer // Untamed Pup"
 
     def test_preprocess_card_filters_all_not_legal_cards(self) -> None:
         """Test preprocess_card filters out cards that are not legal in any format."""
@@ -399,48 +402,199 @@ class TestCardProcessing:
         assert result["creature_toughness"] is None
 
     def test_preprocess_hound_tamer_dfc(self) -> None:
-        """Test preprocess_card processes Hound Tamer DFC sample data correctly."""
+        """A real transform card merges to one row: front stats, both faces searchable."""
         sample_file = _SAMPLE_DATA_DIR / "hound_tamer.json"
         with sample_file.open() as f:
             hound_tamer = json.load(f)
 
         result = preprocess_card(hound_tamer)
 
-        # Should return 2 faces
-        assert len(result) == 2
-
-        # Check front face
-        front = result[0]
-        assert front["face_idx"] == 1
-        assert front["face_name"] == "Hound Tamer"
-        assert front["card_name"] == "Hound Tamer // Untamed Pup"
-        assert front["creature_power"] == 3
-        assert front["creature_toughness"] == 3
-        assert "Creature" in front["card_types"]
-        assert front["cmc"] == 3
-
-        # Check back face
-        back = result[1]
-        assert back["face_idx"] == 2
-        assert back["face_name"] == "Untamed Pup"
-        assert back["card_name"] == "Hound Tamer // Untamed Pup"
-        assert back["creature_power"] == 4
-        assert back["creature_toughness"] == 4
-        assert "Creature" in back["card_types"]
-        # CMC is inherited from the card (3), even though back face has no mana cost
-        assert back["cmc"] == 3
+        assert len(result) == 1
+        merged = result[0]
+        assert merged["card_name"] == "Hound Tamer // Untamed Pup"
+        # Front face supplies the stat group (the 3/3, not the pup's 4/4)
+        assert merged["creature_power"] == 3
+        assert merged["creature_toughness"] == 3
+        assert merged["cmc"] == 3
+        assert merged["mana_cost_text"] == "{2}{G}"
+        # Both faces' searchable data is present
+        assert merged["card_subtypes"] == ["Human", "Werewolf"]
+        assert merged["type_line"] == "Creature — Human Werewolf // Creature — Werewolf"
+        assert "Trample" in merged["oracle_text"]  # front-face text
+        assert "Nightbound" in merged["oracle_text"]  # back-face text
+        assert "nightbound" in merged["card_keywords"]
 
     def test_preprocess_obyras_attendants(self) -> None:
-        """Test preprocess_card processes Obyra's Attendants DFC sample data correctly."""
+        """A real adventure card merges to one row with both faces' types searchable."""
         sample_file = _SAMPLE_DATA_DIR / "obyras_attendants.json"
         with sample_file.open() as f:
             obyras_attendants = json.load(f)
 
         result = preprocess_card(obyras_attendants)
 
-        # Should return 2 faces
-        front, back = result
-        assert front["creature_power"] == 3
-        assert back.get("creature_power") is None
-        assert front["card_types"] == ["Creature"]
-        assert back["card_types"] == ["Instant"]
+        assert len(result) == 1
+        merged = result[0]
+        # Creature body's stats, both faces' types: `t:creature t:instant` both match now
+        assert merged["creature_power"] == 3
+        assert merged["card_types"] == ["Creature", "Instant"]
+        assert merged["card_subtypes"] == ["Faerie", "Wizard", "Adventure"]
+
+
+class TestFaceMerging:
+    """The face-merge policy: front-face identity, any-face searchability (#400, #873).
+
+    Scryfall AND's predicates at the card level, each satisfiable by any face (measured
+    2026-08-08: `t:sorcery t:land` returns MDFC lands, `o:` conjunctions match across
+    faces, `c:b` matches Westvale Abbey's back-face-only color). These tests pin the
+    merged row to those semantics.
+    """
+
+    @staticmethod
+    def _battle_card() -> dict:
+        """A transform battle shaped like Invasion of Kamigawa // Rooftop Saboteurs."""
+        return create_test_card(
+            name="Invasion of Testing // Test Saboteurs",
+            layout="transform",
+            cmc=3,
+            card_faces=[
+                {
+                    "name": "Invasion of Testing",
+                    "type_line": "Battle — Siege",
+                    "mana_cost": "{2}{U}",
+                    "colors": ["U"],
+                    "oracle_text": "When this Siege enters, look at the top card.",
+                    "illustration_id": "11111111-1111-1111-1111-111111111111",
+                },
+                {
+                    "name": "Test Saboteurs",
+                    "type_line": "Creature — Moonfolk Ninja",
+                    "mana_cost": "",
+                    "colors": ["U"],
+                    "power": "3",
+                    "toughness": "2",
+                    "oracle_text": "This creature can't be blocked.",
+                    "illustration_id": "22222222-2222-2222-2222-222222222222",
+                },
+            ],
+        )
+
+    def test_battle_front_types_are_searchable(self) -> None:
+        """`t:battle` must match transform battles — the union carries the front's types.
+
+        The acceptance test from #400: Battle appears in zero type lines corpus-wide today
+        because every battle is stored as its back face.
+        """
+        merged = preprocess_card(self._battle_card())[0]
+        assert merged["card_types"] == ["Battle", "Creature"]
+        assert merged["card_subtypes"] == ["Siege", "Moonfolk", "Ninja"]
+
+    def test_front_face_supplies_identity_scalars(self) -> None:
+        """Mana cost, illustration, and image come from the front face, as on Scryfall."""
+        merged = preprocess_card(self._battle_card())[0]
+        assert merged["mana_cost_text"] == "{2}{U}"
+        assert merged["illustration_id"] == "11111111-1111-1111-1111-111111111111"
+
+    def test_oracle_text_joins_faces_with_separator(self) -> None:
+        """Each face's text is substring-searchable in the one joined column.
+
+        The newline separator keeps `.`-based regexes from matching across the face boundary.
+        """
+        merged = preprocess_card(self._battle_card())[0]
+        assert merged["oracle_text"] == ("When this Siege enters, look at the top card.\n//\nThis creature can't be blocked.")
+
+    def test_back_face_stats_used_when_front_has_none(self) -> None:
+        """A land-front / creature-back card (Westvale Abbey) keeps the back's P/T.
+
+        The front offers none, and Scryfall's pow: matches the back there too.
+        """
+        card = create_test_card(
+            name="Test Abbey // Test Prince",
+            card_faces=[
+                {"name": "Test Abbey", "type_line": "Land", "colors": [], "oracle_text": "{T}: Add {C}."},
+                {
+                    "name": "Test Prince",
+                    "type_line": "Legendary Creature — Demon",
+                    "colors": ["B"],
+                    "power": "9",
+                    "toughness": "7",
+                    "oracle_text": "Flying, lifelink.",
+                },
+            ],
+        )
+        merged = preprocess_card(card)[0]
+        assert merged["creature_power"] == 9
+        assert merged["creature_toughness"] == 7
+        # ...and the back-face-only color is searchable (c:b matches on Scryfall)
+        assert merged["card_colors"] == {"B": True}
+
+    def test_front_face_stats_win_when_both_faces_have_them(self) -> None:
+        """Two creature faces (Brutal Cathar's 2/2 // 3/3): the front's group wins.
+
+        Known residual vs Scryfall, which also matches the back's pow=3; documented in
+        the merge policy and left for a per-face follow-up if measurement warrants.
+        """
+        card = create_test_card(
+            name="Test Cathar // Test Brute",
+            card_faces=[
+                {"name": "Test Cathar", "type_line": "Creature — Human Soldier", "colors": ["W"], "power": "2", "toughness": "2"},
+                {"name": "Test Brute", "type_line": "Creature — Werewolf", "colors": [], "power": "3", "toughness": "3"},
+            ],
+        )
+        merged = preprocess_card(card)[0]
+        assert merged["creature_power"] == 2
+        assert merged["creature_toughness"] == 2
+        assert merged["creature_power_text"] == "2"
+
+    def test_stat_group_stays_face_consistent(self) -> None:
+        """The numeric and _text stat columns always describe the same face.
+
+        A `*`-power back face still counts as carrying the group: its text is real data.
+        """
+        card = create_test_card(
+            name="Test Land // Test Goyf",
+            card_faces=[
+                {"name": "Test Land", "type_line": "Land", "colors": []},
+                {"name": "Test Goyf", "type_line": "Creature — Lhurgoyf", "colors": ["G"], "power": "*", "toughness": "1+*"},
+            ],
+        )
+        merged = preprocess_card(card)[0]
+        assert merged["creature_power"] is None  # "*" is non-numeric
+        assert merged["creature_power_text"] == "*"
+        assert merged["creature_toughness_text"] == "1+*"
+
+    def test_mdfc_spell_and_land_types_both_searchable(self) -> None:
+        """`t:sorcery t:land` matches an MDFC (Agadeem's Awakening) — #400's acceptance."""
+        card = create_test_card(
+            name="Test Awakening // Test Undercrypt",
+            layout="modal_dfc",
+            card_faces=[
+                {
+                    "name": "Test Awakening",
+                    "type_line": "Sorcery",
+                    "mana_cost": "{X}{B}{B}{B}",
+                    "colors": ["B"],
+                    "oracle_text": "Return cards from your graveyard.",
+                },
+                {
+                    "name": "Test Undercrypt",
+                    "type_line": "Land",
+                    "mana_cost": "",
+                    "colors": [],
+                    "oracle_text": "As this land enters, you may pay 3 life.",
+                },
+            ],
+        )
+        merged = preprocess_card(card)[0]
+        assert merged["card_types"] == ["Sorcery", "Land"]
+        assert merged["mana_cost_text"] == "{X}{B}{B}{B}"
+
+    def test_all_faces_filtered_drops_the_card(self) -> None:
+        """A card whose every face is filtered (e.g. Token type lines) yields no row."""
+        card = create_test_card(
+            name="Test A // Test B",
+            card_faces=[
+                {"name": "Test A", "type_line": "Token Creature — Goblin"},
+                {"name": "Test B", "type_line": "Token Creature — Elf"},
+            ],
+        )
+        assert preprocess_card(card) == []

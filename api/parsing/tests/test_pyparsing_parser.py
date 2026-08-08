@@ -1244,3 +1244,24 @@ def test_hyphenated_words_edge_cases_fail(invalid_query: str) -> None:
     """
     with pytest.raises(ValueError, match="Failed to parse query"):
         parsing.parse_search_query(invalid_query)
+
+
+class TestBattleTypeRouting:
+    """`t:battle` routes to card_types, matching every other card type.
+
+    Battle was absent from CARD_TYPES, so it fell through to the subtype arm on both the
+    SQL and engine paths — invisible while the corpus stored every battle as its back face
+    (#400), a guaranteed zero-match once the face merge put Battle into card_types.
+    """
+
+    def test_battle_routes_like_a_card_type(self) -> None:
+        """t:battle generates card_types SQL binding ['Battle'], as t:creature does for its type."""
+        sql, params = parsing.generate_sql_query(parsing.parse_scryfall_query("t:battle"))
+        assert "card_types" in sql
+        assert "card_subtypes" not in sql
+        assert ["Battle"] in params.values()
+
+    def test_siege_still_routes_as_a_subtype(self) -> None:
+        """t:siege stays on the subtype arm; only the card type moved."""
+        siege_sql = str(parsing.generate_sql_query(parsing.parse_scryfall_query("t:siege")))
+        assert "card_subtypes" in siege_sql

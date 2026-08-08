@@ -463,3 +463,70 @@ describe('CardSearch getColumnsFromViewportWidth', () => {
     expect(search.getColumnsFromViewportWidth()).toBe(expectedColumns);
   });
 });
+
+describe('CardSearch double-faced flip', () => {
+  const dfc = { name: 'Front // Back', set_code: 'mid', collector_number: '5' };
+
+  test('buildImageUrl face parameter overrides the card face', () => {
+    expect(search.buildImageUrl(dfc, '388')).toContain('/mid/5/1/388.webp');
+    expect(search.buildImageUrl(dfc, '388', 2)).toContain('/mid/5/2/388.webp');
+  });
+
+  test('buildSrcset builds all four sizes for the requested face', () => {
+    const srcset = search.buildSrcset(dfc, 2);
+    for (const size of ['280', '388', '538', '745']) {
+      expect(srcset).toContain(`/mid/5/2/${size}.webp ${size}w`);
+    }
+  });
+
+  test('probeBackFace skips cards without a // name', () => {
+    const onExists = jest.fn();
+    search.probeBackFace({ name: 'Lightning Bolt', set_code: 'm15', collector_number: '1' }, onExists);
+    expect(onExists).not.toHaveBeenCalled();
+    expect(search.backFaceKeys.size).toBe(0);
+  });
+
+  test('probeBackFace uses the cached probe result', () => {
+    const onExists = jest.fn();
+    search.backFaceKeys.set('mid/5', true);
+    search.probeBackFace(dfc, onExists);
+    expect(onExists).toHaveBeenCalledTimes(1);
+
+    search.backFaceKeys.set('mid/5', false);
+    search.probeBackFace(dfc, onExists);
+    expect(onExists).toHaveBeenCalledTimes(1);
+  });
+
+  test('flip button toggles the image between faces', () => {
+    jest.useFakeTimers();
+    try {
+      search.resultsContainer.innerHTML =
+        '<div class="card-item" data-card-id="0"><img class="card-image" src="x" srcset="y" /></div>';
+      search.attachGridFlipButton('0', dfc);
+
+      const item = search.resultsContainer.querySelector('.card-item');
+      const button = item.querySelector('.card-flip-button');
+      expect(button).not.toBeNull();
+
+      button.click();
+      jest.runAllTimers();
+      const img = item.querySelector('.card-image');
+      expect(img.src).toContain('/mid/5/2/388.webp');
+      expect(img.srcset).toContain('/mid/5/2/745.webp 745w');
+
+      button.click();
+      jest.runAllTimers();
+      expect(img.src).toContain('/mid/5/1/388.webp');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('attachGridFlipButton injects at most one button', () => {
+    search.resultsContainer.innerHTML =
+      '<div class="card-item" data-card-id="0"><img class="card-image" src="x" /></div>';
+    search.attachGridFlipButton('0', dfc);
+    search.attachGridFlipButton('0', dfc);
+    expect(search.resultsContainer.querySelectorAll('.card-flip-button')).toHaveLength(1);
+  });
+});
