@@ -472,6 +472,21 @@ class CardSearch {
     });
   }
 
+  // Returns the index of the '/' closing a regex that opened before start, or null when it is
+  // unterminated. Mirrors the lexer's rule in hand_parser.tokenize: scan for the next unescaped
+  // '/', and treat the opening '/' as arithmetic division when there is none. The JS counterpart
+  // of _regex_close_index in api/parsing/parsing_f.py.
+  regexCloseIndex(query, start) {
+    for (let i = start; i < query.length; i++) {
+      if (query[i] === '\\' && i + 1 < query.length) {
+        i++;
+      } else if (query[i] === '/') {
+        return i;
+      }
+    }
+    return null;
+  }
+
   // Scans the query with a bracket/quote stack and returns the closing suffix
   // needed to balance it, or null when a closing paren with no matching opener
   // makes it unbalance-able (the JS counterpart of balance_partial_query's
@@ -496,6 +511,16 @@ class CardSearch {
       if (stack.length > 0 && quoteChars.has(stack[stack.length - 1])) {
         if (char === stack[stack.length - 1]) {
           stack.pop();
+        }
+        continue;
+      }
+
+      // A closed /regex/ is opaque: the quotes and parens inside it are pattern characters, not
+      // delimiters. An unterminated '/' is division, so it falls through as an ordinary character.
+      if (char === '/') {
+        const closeIndex = this.regexCloseIndex(query, i + 1);
+        if (closeIndex !== null) {
+          i = closeIndex;
         }
         continue;
       }
