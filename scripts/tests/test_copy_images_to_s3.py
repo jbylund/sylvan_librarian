@@ -9,6 +9,7 @@ import requests
 from scripts.copy_images_to_s3 import (
     download_image,
     fetch_cards_from_db,
+    get_db_cards,
 )
 
 
@@ -75,3 +76,44 @@ def test_fetch_cards_from_db() -> None:
     assert cards[0]["card_set_code"] == "iko"
     assert cards[0]["collector_number"] == "123"
     assert cards[1]["card_set_code"] == "thb"
+
+
+def test_get_db_cards_emits_back_face_images() -> None:
+    """A card with a physical back face yields face-2 images alongside the front's.
+
+    The back image feeds the site's flip button; single-faced cards (and split/adventure
+    faces, which carry no per-face images) must stay front-only.
+    """
+    rows = [
+        {"card_set_code": "mid", "collector_number": "5", "png_url": "https://x/front.png", "back_png_url": "https://x/back.png"},
+        {"card_set_code": "m21", "collector_number": "1", "png_url": "https://x/solo.png", "back_png_url": None},
+    ]
+    args = Mock(limit=None, set_code=None)
+    with (
+        patch("scripts.copy_images_to_s3.get_database_connection"),
+        patch("scripts.copy_images_to_s3.fetch_cards_from_db", return_value=rows),
+    ):
+        images = get_db_cards(args)
+
+    keys = {image.get_s3_key() for image in images}
+    assert "img/mid/5/1/388.webp" in keys
+    assert "img/mid/5/2/388.webp" in keys
+    assert "img/m21/1/1/388.webp" in keys
+    assert not any("/m21/1/2/" in key for key in keys)
+    assert len(images) == 12  # (front+back) * 4 sizes + front-only * 4 sizes
+
+
+def test_get_db_cards_back_face_carries_its_own_png_url() -> None:
+    """The face-2 image downloads the back PNG, not the front's."""
+    rows = [
+        {"card_set_code": "mid", "collector_number": "5", "png_url": "https://x/front.png", "back_png_url": "https://x/back.png"},
+    ]
+    args = Mock(limit=None, set_code=None)
+    with (
+        patch("scripts.copy_images_to_s3.get_database_connection"),
+        patch("scripts.copy_images_to_s3.fetch_cards_from_db", return_value=rows),
+    ):
+        images = get_db_cards(args)
+
+    by_face = {image.face_idx: image.png_url for image in images}
+    assert by_face == {"1": "https://x/front.png", "2": "https://x/back.png"}

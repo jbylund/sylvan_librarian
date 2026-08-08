@@ -7,9 +7,42 @@ function escapeHtml(str) {
   return String(str).replace(HTML_ESCAPE_RE, c => HTML_ESCAPE_MAP[c]);
 }
 
-function buildImageUrl(card, size) {
-  const face = card.face_idx || 1;
-  return `https://d1hot9ps2xugbc.cloudfront.net/img/${card.set_code}/${card.collector_number}/${face}/${size}.webp`;
+function buildImageUrl(card, size, face) {
+  const resolvedFace = face || card.face_idx || 1;
+  return `https://d1hot9ps2xugbc.cloudfront.net/img/${card.set_code}/${card.collector_number}/${resolvedFace}/${size}.webp`;
+}
+
+// Flip button for double-faced cards, mirroring the search page's progressive enhancement:
+// shown only when a face-2 image exists on the CDN (transform/MDFC backs; split and
+// adventure cards have no back image and correctly get no button).
+function attachFlipButton(container, card) {
+  if (!card.name || !card.name.includes(' // ') || !card.set_code || !card.collector_number) return;
+  const probe = new Image();
+  probe.onload = () => {
+    const wrapper = container.querySelector('.modal-image-wrapper');
+    if (!wrapper || wrapper.querySelector('.card-flip-button')) return;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'card-flip-button';
+    button.title = 'Transform';
+    button.setAttribute('aria-label', 'Show other face');
+    button.textContent = '⟳';
+    button.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      const img = wrapper.querySelector('.modal-image');
+      if (!img) return;
+      const nextFace = wrapper.dataset.shownFace === '2' ? 1 : 2;
+      wrapper.dataset.shownFace = String(nextFace);
+      img.classList.add('card-image-flipping');
+      setTimeout(() => {
+        img.src = buildImageUrl(card, '745', nextFace);
+        img.classList.remove('card-image-flipping');
+      }, 150);
+    });
+    wrapper.appendChild(button);
+  };
+  probe.src = buildImageUrl(card, '280', 2);
 }
 
 const MANA_SYMBOLS = new Map([
@@ -205,6 +238,7 @@ async function main() {
   const cardFace = document.getElementById('card-face');
   cardFace.innerHTML = renderCardFace(card);
   cardFace.style.display = '';
+  attachFlipButton(cardFace, card);
   document.getElementById('card-loading').style.display = 'none';
 
   try {
