@@ -24,7 +24,7 @@ from api.api_resource import (
     _split_words,
     hostname_to_site_name,
 )
-from api.enums import ResponseShape
+from api.enums import ResponseShape, UniqueOn
 from api.middlewares.caching_middleware import CachingMiddleware
 from api.settings import settings
 from api.utils.routing import BoundRoute, RouteSpec, route
@@ -637,6 +637,112 @@ class TestOffsetValidation(TestBaseAPIResourceTest):
     def test_valid_offsets_pass_through(self) -> None:
         assert self.api_resource._validate_offset(0) == 0
         assert self.api_resource._validate_offset(175) == 175
+
+
+class TestSearchQueryDirectives(TestBaseAPIResourceTest):
+    """In-query directives (unique:/sort:/order:/direction:/prefer:) apply before either search path.
+
+    The fold happens in _search, upstream of the engine/SQL dispatch, so both paths receive the
+    same effective parameters by construction. Scryfall semantics throughout (measured
+    2026-08-07): a directive overrides its query parameter, the last repeat wins, and an unknown
+    value warns and is ignored.
+    """
+
+    @contextmanager
+    def _search_flags(self, *, enable_engine: bool) -> Generator[None]:
+        """Force the engine gate and disable caching, restoring both afterward."""
+        saved = (settings.enable_engine, settings.enable_cache)
+        settings.enable_engine = enable_engine
+        settings.enable_cache = False
+        try:
+            yield
+        finally:
+            settings.enable_engine, settings.enable_cache = saved
+
+    def _engine_search(self, q: str, **params: Any) -> tuple[MagicMock, dict[str, Any]]:
+        """Run _search against a stubbed engine; return the engine mock and the result."""
+        mock_engine = MagicMock()
+        mock_engine.size.return_value = 90
+        mock_engine.query.return_value = (0, iter([]))
+        with (
+            patch.object(self.api_resource, "_setup_complete", lambda: True),
+            patch.object(self.api_resource, "_engine", mock_engine),
+            self._search_flags(enable_engine=True),
+        ):
+            result = self.api_resource._search(query=q, **params)
+        return mock_engine, result
+
+    def test_unique_directive_reaches_engine(self) -> None:
+        """`unique:art` in the query string turns into the artwork mode the engine sees."""
+        mock_engine, _ = self._engine_search("t:goblin unique:art")
+        assert mock_engine.query.call_args.kwargs["unique"] == "artwork"
+
+    def test_directive_overrides_parameter(self) -> None:
+        """An inline directive beats the query parameter of the same meaning."""
+        mock_engine, _ = self._engine_search("t:goblin unique:prints", unique=UniqueOn.ARTWORK)
+        assert mock_engine.query.call_args.kwargs["unique"] == "printing"
+
+    def test_last_repeated_directive_wins(self) -> None:
+        """`unique:cards unique:art` dedups by artwork, matching Scryfall."""
+        mock_engine, _ = self._engine_search("t:goblin unique:cards unique:art")
+        assert mock_engine.query.call_args.kwargs["unique"] == "artwork"
+
+    def test_every_directive_kind_applies(self) -> None:
+        """sort:, direction:, and prefer: all reach the engine as their enum values."""
+        mock_engine, _ = self._engine_search("t:goblin sort:usd direction:desc prefer:oldest")
+        kwargs = mock_engine.query.call_args.kwargs
+        assert kwargs["orderby"] == "usd"
+        assert kwargs["direction"] == "desc"
+        assert kwargs["prefer"] == "oldest"
+
+    def test_unknown_directive_value_warns_and_keeps_parameter(self) -> None:
+        """An unknown value is ignored with a Scryfall-shaped warning; the search still runs."""
+        mock_engine, result = self._engine_search("t:goblin unique:bogus")
+        assert mock_engine.query.call_args.kwargs["unique"] == "card"
+        assert result["warnings"] == ['Unknown unique mode "bogus" was ignored']
+
+    def test_directive_free_search_has_no_warnings_key(self) -> None:
+        """The warnings key appears only when there is something to say."""
+        _, result = self._engine_search("t:goblin")
+        assert "warnings" not in result
+
+    def test_overriding_repeat_warns_with_both_values(self) -> None:
+        """`(cmc=5 prefer:oldest) (cmc=4 prefer:newest)` applies newest and SAYS so.
+
+        The grouped-scope ambiguity from #872: a directive always applies to the whole
+        search, so the losing spelling is named in a warning rather than silently dropped.
+        """
+        mock_engine, result = self._engine_search("(cmc=5 prefer:oldest) (cmc=4 prefer:newest)")
+        assert mock_engine.query.call_args.kwargs["prefer"] == "newest"
+        assert result["warnings"] == ["prefer:newest overrode the earlier prefer:oldest"]
+
+    def test_sort_and_order_spellings_override_each_other(self) -> None:
+        """sort: and order: set the same parameter, so a later one warns about the earlier."""
+        mock_engine, result = self._engine_search("t:goblin sort:usd order:name")
+        assert mock_engine.query.call_args.kwargs["orderby"] == "name"
+        assert result["warnings"] == ["order:name overrode the earlier sort:usd"]
+
+    def test_same_value_repeat_warns_nothing(self) -> None:
+        """Repeating a directive with the same value has nothing surprising to report."""
+        _, result = self._engine_search("t:goblin unique:art unique:art")
+        assert "warnings" not in result
+
+    def test_directive_inside_a_group_warns_about_its_scope(self) -> None:
+        """A directive under an or-group applies globally, and the response says so."""
+        mock_engine, result = self._engine_search("t:goblin or unique:art")
+        assert mock_engine.query.call_args.kwargs["unique"] == "artwork"
+        assert result["warnings"] == ["unique:art applies to the whole search, not only its group"]
+
+    def test_sql_path_receives_effective_values(self) -> None:
+        """The fold happens before dispatch, so the SQL fallback sees the same effective unique."""
+        with (
+            patch.object(self.api_resource, "_setup_complete", lambda: True),
+            self._search_flags(enable_engine=False),
+            patch.object(self.api_resource, "_search_sql", return_value={"cards": [], "total_cards": 0}) as mock_sql,
+        ):
+            result = self.api_resource._search(query="t:goblin unique:art unique:bogus")
+        assert mock_sql.call_args.kwargs["unique"] == UniqueOn.ARTWORK
+        assert result["warnings"] == ['Unknown unique mode "bogus" was ignored']
 
 
 class TestAPIResourceStaticFileServing(unittest.TestCase):
