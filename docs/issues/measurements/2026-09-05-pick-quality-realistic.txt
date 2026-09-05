@@ -1,0 +1,44 @@
+Engine loaded: 97,812 printings in 2.7s
+
+5,312 queries with >= 2 plans timed, mode=realistic
+
+  picked the fastest plan              95.9%  (5,096 of 5,312)
+  picked within 1.09x of fastest        96.9%  <-- a miss inside the noise floor costs nothing
+  time-weighted hit rate               91.6%
+  total time lost to mis-picks          2.8%  (3.2 ms of 113.6 ms)
+
+  MISS MARGIN (picked / best), 216 missed queries -- how bad is a miss?
+    p10 1.024   p50 1.288   p90 2.469   p99 10.733   max 24.64
+
+  HEADROOM (second-best / best) -- how much was on the table at all?
+    on MISSED queries   p50 1.278   p90 2.391
+    on HIT queries      p50 3.740   p90 12.111
+    Misses concentrated at LOW headroom means the router loses ties, which is nearly free.
+
+  CONCENTRATION: the worst 1% of misses carry 13.6% of all lost time
+
+by acquire route
+  slice                                   n    hit%  tie-ok%  time-wtd hit%   lost%
+  candidates                          2,172   96.0%    97.0%          95.5%   13.0%
+  printing_compose                    1,841   93.2%    94.8%          88.3%   86.4%
+  plane                               1,150   99.8%    99.9%          99.8%    0.0%
+  card_range_popcount                   125  100.0%   100.0%         100.0%    0.0%
+
+by picked plan
+  slice                                   n    hit%  tie-ok%  time-wtd hit%   lost%
+  GatheredScan                        2,212   97.1%    97.9%          93.4%   15.2%
+  StreamedSelect                      1,345   91.2%    93.4%          92.5%   31.1%
+  PlanePopcountOrder                  1,146   99.9%   100.0%          99.8%    0.0%
+  PrintingCompose                       467   93.4%    94.0%          86.9%   53.6%
+  CardRangePopcount                     125  100.0%   100.0%         100.0%    0.0%
+
+by distinct-on
+  slice                                   n    hit%  tie-ok%  time-wtd hit%   lost%
+  card                                3,894   96.1%    97.2%          90.8%   79.0%
+  printing                            1,136   94.7%    95.8%          91.7%   19.3%
+  artwork                               282   97.9%    97.9%          98.3%    1.6%
+
+MISSES ONLY, by transition
+  slice                                   n    hit%  tie-ok%  time-wtd hit%   lost%
+  StreamedSelect -> GatheredScan        114    0.0%    23.7%           0.0%   27.8%
+  GatheredScan -> StreamedSelect         40    0.0%    40.0%           0.0%    3.4%

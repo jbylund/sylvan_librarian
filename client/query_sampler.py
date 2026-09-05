@@ -590,9 +590,17 @@ class QuerySampler:
         # guaranteed-empty query, which measures nothing.
         counters["legality"].update(fmt.lower() for fmt, status in (row.get("card_legalities") or {}).items() if status == "legal")
         # Counter over the SET of words per row, so a word repeated within one card counts once and
-        # MIN_WORD_ROWS means "appears in N rows", not "appears N times".
+        # MIN_WORD_ROWS means "appears in N rows", not "appears N times". `sorted(...)` (not just
+        # `set(...)`) matters: CPython's per-process string hash randomization makes a bare set's
+        # iteration order vary run to run, and `Counter.update`'s iteration order determines a NEW
+        # key's insertion position -- two words that first co-occur in the same row's set can insert
+        # in either order depending on the (random) hash seed. Final counts are unaffected (addition
+        # is order-independent), but `most_common()`'s tie-break for equal counts falls back to
+        # insertion order, so a hash-seed-dependent insertion order silently made tied words swap
+        # across process runs -- the same class of bug Round 47 fixed in the Rust engine's own
+        # `top_n_and_rest_max` (no deterministic secondary key), here on the Python side instead.
         for family, column in (("oracle", "oracle_text"), ("flavor", "flavor_text")):
-            counters[family].update(set(WORD_RE.findall((row.get(column) or "").lower())))
+            counters[family].update(sorted(set(WORD_RE.findall((row.get(column) or "").lower()))))
 
     def _read_corpus(self, corpus: pathlib.Path) -> None:
         """One pass: sorted values per numeric column, plus every corpus-derived vocabulary."""

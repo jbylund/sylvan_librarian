@@ -1,0 +1,96 @@
+Engine loaded: 97,812 printings in 2.6s
+
+================================================================================================
+ALL costed plan-rows -- what the argmin compares
+================================================================================================
+
+GatheredScan  (n=6,300 rows, 613.8 ms of predicted time in total)
+  term                                aggregate    median  p90 share   spread     risk
+  CARD_PASS+FLOOR                        58.2%    18.7%     65.7%       --       --
+  SCAN_PER_ROW                           15.8%     6.7%     22.3%     11.1     1.76
+  LOOP_PER_CARD                          13.7%     8.6%     23.7%       --       --
+  PUSH_PER_MATCH                         10.2%     5.8%     21.6%       --       --
+  ARTWORK_PER_PRINTING                    1.4%     0.0%      3.9%       --       --
+  COLLECT_PER_PAGE_ROW                    0.3%     0.3%     19.4%       --       --
+  SELECT_PER_PAGE_SLOT                    0.2%     1.9%     12.0%       --       --
+  FIXED                                   0.1%     2.0%     60.8%       --       --
+  FIXED_ZERO_MATCH                        0.0%     0.0%    100.0%       --       --
+  RESIDUAL_EXCESS                         0.0%     0.0%      0.0%       --       --
+
+StreamedSelect  (n=4,714 rows, 395.5 ms of predicted time in total)
+  term                                aggregate    median  p90 share   spread     risk
+  SCAN_PER_ROW                           44.1%     0.2%     45.0%     27.1    11.96
+  CARD_PASS+FLOOR                        27.8%     0.3%     32.3%       --       --
+  SMALL_TOTAL_FLOOR_PER_CARD             13.5%     0.0%     97.1%       --       --
+  LOOP_PER_CARD                          10.7%     1.0%     15.8%       --       --
+  ARTWORK_SEEN_PER_CARD                   1.6%     0.0%      1.9%       --       --
+  CORPUS_PASS_PER_CARD                    0.8%     1.9%     74.5%       --       --
+  EMIT_PER_MATCH                          0.7%     0.1%      1.9%       --       --
+  RESIDUAL_EXCESS                         0.3%     0.0%      1.1%       --       --
+  PERM_STEP                               0.3%     0.0%      1.0%     15.5     0.04
+  FIXED                                   0.3%     0.7%     25.5%       --       --
+
+PrintingCompose  (n=1,897 rows, 193.4 ms of predicted time in total)
+  term                                aggregate    median  p90 share   spread     risk
+  BROADCAST_PER_PRINTING                 37.1%     0.0%     92.9%       --       --
+  PROJECT_PER_PRINTING                   23.1%     0.0%     78.8%       --       --
+  GATHER_CARD_PASS                       14.8%     0.0%     18.2%       --       --
+  SCATTER_PER_PRINTING                   10.4%     3.1%     65.6%       --       --
+  WALK_STEP                               7.6%     0.7%     54.1%     21.8     1.65
+  GATHER_PUSH_PER_MATCH                   4.2%     0.0%      4.7%       --       --
+  BUILD_PER_PRINTING                      1.3%     0.0%      6.9%       --       --
+  POPCOUNT_PER_WORD                       0.8%     0.9%      6.8%       --       --
+  GATHER_BITTEST_PER_PRINTING             0.2%     0.0%      0.0%     34.2     0.08
+  GATHER_GROUP_PER_PRINTING               0.2%     0.0%      0.0%       --       --
+  FIXED                                   0.2%     0.2%      1.6%       --       --
+  WALK_EMIT_PER_ROW                       0.1%     0.1%      0.9%       --       --
+  COLLECTION_BROADCAST_PER_PRINTING       0.0%     0.0%      0.0%       --       --
+
+================================================================================================
+PICKED rows only -- what actually becomes latency
+================================================================================================
+
+GatheredScan  (n=4,662 rows, 26.5 ms of predicted time in total)
+  term                                aggregate    median  p90 share   spread     risk
+  CARD_PASS+FLOOR                        35.1%    10.4%     56.7%       --       --
+  SCAN_PER_ROW                           19.8%     5.0%     20.7%     11.1     2.20
+  LOOP_PER_CARD                          18.8%     5.8%     13.8%       --       --
+  PUSH_PER_MATCH                         15.9%     4.2%     15.0%       --       --
+  COLLECT_PER_PAGE_ROW                    3.4%     0.3%     22.3%       --       --
+  SELECT_PER_PAGE_SLOT                    2.6%     3.9%     12.7%       --       --
+  FIXED                                   2.2%     5.9%     70.5%       --       --
+  ARTWORK_PER_PRINTING                    2.0%     0.0%      2.9%       --       --
+  FIXED_ZERO_MATCH                        0.2%     0.0%    100.0%       --       --
+  RESIDUAL_EXCESS                         0.1%     0.0%      0.0%       --       --
+
+PrintingCompose  (n=682 rows, 57.8 ms of predicted time in total)
+  term                                aggregate    median  p90 share   spread     risk
+  PROJECT_PER_PRINTING                   47.6%    36.2%     79.3%       --       --
+  BROADCAST_PER_PRINTING                 24.5%     0.0%     66.4%       --       --
+  SCATTER_PER_PRINTING                   21.1%    19.6%     75.0%       --       --
+  GATHER_CARD_PASS                        2.4%     0.0%      0.0%       --       --
+  WALK_STEP                               2.0%     1.0%     22.9%     21.8     0.43
+  POPCOUNT_PER_WORD                       1.1%     1.2%      9.6%       --       --
+  GATHER_PUSH_PER_MATCH                   0.4%     0.0%      0.0%       --       --
+  GATHER_GROUP_PER_PRINTING               0.4%     0.0%      0.0%       --       --
+  FIXED                                   0.2%     0.2%      1.6%       --       --
+  WALK_EMIT_PER_ROW                       0.2%     0.2%      1.3%       --       --
+  GATHER_BITTEST_PER_PRINTING             0.1%     0.0%      0.0%     34.2     0.03
+  BUILD_PER_PRINTING                      0.1%     0.0%      0.0%       --       --
+  COLLECTION_BROADCAST_PER_PRINTING       0.0%     0.0%      0.0%       --       --
+
+StreamedSelect  (n=598 rows, 24.2 ms of predicted time in total)
+  term                                aggregate    median  p90 share   spread     risk
+  LOOP_PER_CARD                          34.2%    26.4%     84.7%       --       --
+  SCAN_PER_ROW                           29.4%     0.0%     55.2%     27.1     7.98
+  CARD_PASS+FLOOR                        21.2%     0.0%     43.1%       --       --
+  ARTWORK_SEEN_PER_CARD                   7.2%     0.0%     29.6%       --       --
+  EMIT_PER_MATCH                          3.2%     3.1%     11.5%       --       --
+  PERM_STEP                               2.0%     0.7%     18.1%     15.5     0.31
+  CORPUS_PASS_PER_CARD                    1.6%     3.2%     29.5%       --       --
+  RESIDUAL_EXCESS                         0.7%     0.0%      0.0%       --       --
+  FIXED                                   0.5%     1.1%     10.1%       --       --
+  SMALL_TOTAL_FLOOR_PER_CARD              0.0%     0.0%      0.0%       --       --
+
+risk = aggregate share x the feature's measured p90/p10. '--' means no graded feature
+backs the term, which is itself worth noting where the share is large.

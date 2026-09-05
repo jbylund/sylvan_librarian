@@ -160,6 +160,20 @@ pub(crate) struct PlanFeatures {
     pub limit: u32,
     /// Page offset.
     pub offset: u32,
+    /// The permutation segment `StreamedSelect`'s emission walk is actually bounded to —
+    /// `walk_bounds(...).len()` for `(sort_col, descending)`, computed once at acquire from the SAME
+    /// inputs the executor uses (`QueryParams::sort_bound`, the filter's own interval on the sort
+    /// column). `n_cards` when the filter constrains nothing about the sort column, and also when no
+    /// permutation exists for this `(sort_col, descending)` pair — `StreamedSelect` is inapplicable
+    /// there and never reads this field, but `mk_plan_feats` sets it uniformly for every acquire
+    /// branch (the shared feats have to cost a competing `StreamedSelect` honestly regardless of which
+    /// branch produced them), so the fallback must still be a value, not an absent one.
+    ///
+    /// Round 32 of the printing-varying-depth ledger
+    /// (docs/issues/local-engine-gathered-scan-card-printing-varying-depth.md): `perm_steps` used to
+    /// multiply by `n_cards` unconditionally, which is right only for the unbounded case. See
+    /// `perm_steps`'s own doc for the regrade this field closes.
+    pub perm_walk_span: u32,
     /// Printings the legality **broadcast-down** synthesizes (card ∃-plane → printing bitmap) in
     /// `PrintingCompose`. `0` for border/rarity (precomputed planes) and for bare ranges (no broadcast).
     /// Costed at `LINEAR_PASS_PER_PRINTING_NS`.
@@ -210,6 +224,29 @@ pub(crate) struct PlanFeatures {
     /// in ~`page_span/selectivity` steps), while the permutation-free gather visits every match — so
     /// the formula branches on this rather than assuming one. Ignored by every other plan.
     pub compose_paging: super::ComposePaging,
+    /// Nodes the candidate narrowing can descend into (`FilterExpr::narrow_nodes`) — the driver of
+    /// `prepare_candidates`' FIRST phase, which is the one the old `materialize_cost` had no term for
+    /// at all. See `PREPARE_PER_NODE_NS`.
+    pub prepare_nodes: u32,
+    /// Word-wise operations `prepare_candidates` pays for a PLANE, or `0` when the query has none:
+    /// `PlaneExpr::node_count() * n_cards.div_ceil(64)`, because `eval_planes` calls `eval_word` once
+    /// per word and `eval_word` walks the whole expression each time. NOT a bare word count — the
+    /// plane's SHAPE is the difference between a one-plane `f:modern` and a five-node `c:bru id:bw`,
+    /// and a single per-word rate fitted across both lands halfway between and is wrong for each.
+    /// See `PREPARE_PLANE_PER_WORD_OP_NS`.
+    pub prepare_plane_word_ops: u32,
+    /// Cards the prepare step is expected to MATERIALIZE into the candidate vec — `eval_domain` where
+    /// that field really is the narrowed count, the `matches` estimate on the two acquires that pin
+    /// `eval_domain` at `n_cards`, and **`0`** where `narrow_candidates_exact`'s breadth guard will
+    /// discard the narrowing outright. Distinct from `eval_domain` for exactly those reasons:
+    /// charging the pinned value read 157 us against a measured 354-458 ns. The guard is mirrored at
+    /// the one site that sets this field; see there. See `PREPARE_PER_CAND_NS`.
+    pub prepare_cands: u32,
+    /// Printings a CARD-SPACE collection leaf's build broadcasts (`ids_of` +
+    /// `broadcast_card_ids_to_printings`). See `ComposeEstimate::collection_broadcast`'s doc for why
+    /// this is not just folded into `scatter_printings`. `0` for everything except `PrintingCompose`
+    /// on a card-space `subtypes`/`keywords`/`oracle_tags` leaf.
+    pub collection_broadcast_printings: u32,
 }
 
 // ─── P1: PrintingRangeScan ──────────────────────────────────────────────────
@@ -266,41 +303,128 @@ const PLANE_POPCOUNT_FIXED_COST_NS: f64 = 200.0;
 /// — the two simply measure different things.
 pub(crate) const CARD_RANGE_BUILD_PER_PRINTING_NS: f64 = 0.93;
 
-// ─── Candidate materialization ──────────────────────────────────────────────
+// ─── Candidate materialization (the dispatch-time prepare step) ─────────────
 // `plan_cost` prices only what happens AFTER the acquire step: `eval_domain` and `matches` are its
-// inputs, not its outputs. The acquire step is therefore unpriced, and it is where the model's error
-// lives — over 40 sampled queries the median `(measured - predicted) / acquire_ns` is 1.09, so
-// adding the MEASURED acquire time roughly closes the gap.
+// inputs, not its outputs. On a `Prep::Range` acquire the router only ESTIMATED, so a materializing
+// winner calls `prepare_candidates` in DISPATCH — real latency `costbench.plan_self_ns` counts and
+// `plan_cost` charges zero for. Round 80 sized that omission at ~50% of GatheredScan's error mass.
 //
-// `materialize_cost` below is NOT that term, and does not close that gap. It prices one component of
-// acquire — the candidate `collect` + `sort_unstable` — which measurement puts at a median 5% of
-// acquire (quartiles 2%–40%, n=167 candidate-acquired queries): the rest is index walks, the
-// narrowing recursion, `memoize_text_predicates` and feature building. Adding it to `predicted_ns`
-// measurably makes absolute accuracy slightly WORSE (73.1% -> 74.9% mean error), because it is a
-// small piece of a large omission and does not change which plans compare equal.
+// `materialize_cost` below is the model of exactly that work, and it is STILL not added to
+// `plan_cost` — charging it as written measured net +1.49 ms slower end to end, because
+// `StreamedSelect` over-charges its own executor on the same route and adding a real cost makes it
+// lose picks it should win. So it stays REPORTED BY `explain` (as `materialize_ns`) and out of the
+// argmin until that arm is recalibrated. Nothing here can move a routing decision.
 //
-// So it is REPORTED BY `explain`, NOT ADDED TO `plan_cost`, for three reasons: it is validated as
-// too small to help; it is identical for the plans that actually compete (`StreamedSelect` and
-// `GatheredScan` call the same `prepare_candidates`), so it cannot change an argmin; and its real
-// purpose is to price the bitmap-versus-sort question in
-// docs/issues/done/local-engine-candidate-materialize.md, which is what it does measure exactly.
+// What DID change is the shape. Graded against the realized `PhaseStats::ns_prepare` — the counter
+// that measures the very thing it claims to predict — the old `143 + 4.95·eval_domain` read a median
+// |ln| of 1.6-2.0 with 6-9% of predictions within 25%. It priced a `collect` + `sort_unstable` and
+// nothing else, while `prepare_candidates` has three phases that scale with three different things:
+//
+//     acquire              median ns_prepare   narrow   project   memo     (median per-row share,
+//     candidates                       3,375     0.85      0.04   0.01      uniform, n=5,090,
+//     printing_compose                 3,167     0.12      0.80   0.00      --features prepare-phases)
+//     plane                            5,000     0.00      0.99   0.00
+//     printing_range_scan              1,041     0.50      0.25   0.00
+//
+// The narrowing walk is the phase the old shape had no term for at all, and on the acquire where a
+// lazy materialize actually happens it is 85% of the cost. Refit on the three-phase shape and graded
+// on a held-out half split by query hash: **1.71 -> 0.78 median |ln|, 8.8% -> 15.6% within 25%**
+// (uniform) and **1.99 -> 0.73, 6.4% -> 15.0%** (realistic). See
+// `scripts/bench_prepare_cost_shape.py`, which is the only thing that has ever graded this term.
+//
+// What the refit does NOT fix: the narrowing phase itself is still the accuracy floor. Regressed
+// alone it reaches a median |ln| of 1.03 against 1.29 for a bare constant, because `prepare_nodes`
+// is a tree-shape proxy for a cost that is really per-INDEX-PROBE and the probes differ by an order
+// of magnitude in kind (a two-byte name bigram lookup against an `ExactName` binary search against a
+// range slice collect). Nothing published separates them. The projection phase, by contrast, fits at
+// 0.43 once it is charged on plane WORD-OPS rather than on candidates. Closing the rest needs a WORK
+// counter inside `narrow_rec` -- index entries walked and bitmap words touched -- which is a
+// measurement this refit deliberately did not take on: it would grade the narrowing term, not improve
+// it, since `plan_cost` reads acquire-time features and a counter is only available afterwards.
+
+/// The fraction of its domain a narrowed set may cover before `narrow_candidates_exact` throws it
+/// away: it keeps a set only while `len <= domain - domain/4`. Mirrored here as a divisor rather than
+/// restated as `0.75` so the two read as the same rule, and so a change to the guard shows up as a
+/// conflict rather than as silent model drift. Read only by the acquire site that fills
+/// `PlanFeatures::prepare_cands`.
+pub(crate) const NARROW_BREADTH_DISCARD_DIVISOR: u32 = 4;
 
 /// `Vec::with_capacity` plus the run walk, before any comparison work
 /// (`bench_candidate_materialize`, axis A).
+///
+/// A KERNEL figure, and since the `materialize_cost` refit no longer a cost-model constant: its one
+/// consumer is `bench_candidate_materialize`, which exists to answer the bitmap-versus-sort question
+/// in docs/issues/done/local-engine-candidate-materialize.md and needs the collect+sort priced in
+/// isolation. `PREPARE_PER_CAND_NS` is the end-to-end sibling that `materialize_cost` reads; the two
+/// disagree by design, exactly as `CARD_RANGE_BUILD_PER_PRINTING_NS` disagrees with its own kernel.
+#[cfg(test)]
 pub(crate) const MATERIALIZE_SORT_FIXED_NS: f64 = 143.0;
 /// pdqsort on `u32`, per candidate — **linear**, not `c·log2 c`. `sort_unstable` is a full pdqsort
 /// so it is asymptotically `n log n`, but measured per-element cost is flat across the sizes this
 /// engine sees (4.39 ns at 1,024 rising only to 5.09 at 31,508, where an `n log n` fit predicts
 /// 4.39 → 6.57). Fit on the rows bracketing the crossover. Re-fit rather than extrapolating past
-/// ~3M cards, where the log factor does start to show.
+/// ~3M cards, where the log factor does start to show. Kernel-only — see the constant above.
+#[cfg(test)]
 pub(crate) const MATERIALIZE_SORT_PER_CAND_NS: f64 = 4.95;
 
-/// Modelled cost of producing the candidate list a materializing plan consumes, in ns. `0.0` for
-/// plans that never build one — those walk or read a plane bitmap directly, and charging them this
-/// would invert exactly the comparison the term is meant to inform.
+/// Per-query floor of `prepare_candidates`: the `PreparedCandidates` build,
+/// `plane_leaves_nothing_to_verify`, `memoize_text_predicates` and `order_children_by_verify_cost`
+/// (one timer tick on the median query of every acquire — too small to earn a term of their own), and
+/// the `Vec::with_capacity` the old `MATERIALIZE_SORT_FIXED_NS = 143.0` was fit on in isolation.
 ///
-/// Prices today's behavior: a `collect` + `sort_unstable`. It does **not** model the bitmap
-/// alternative that doc proposes; if that ships, this needs the domain term as well.
+/// 143 ns was measured by `bench_candidate_materialize` axis A on the collect+sort ALONE, and that
+/// number is not wrong — it is the wrong quantity. The realized `ns_prepare` on a `Candidates`
+/// acquire has a median of ~2.8 us with a median candidate count of EIGHT, so the shipped shape read
+/// 143 + 4.95·8 = 183 ns against 2,834 measured. What the shape was missing is the whole first phase.
+pub(crate) const PREPARE_FIXED_NS: f64 = 121.0;
+
+/// Per narrowing-tree node (`FilterExpr::narrow_nodes`) — the index probe each leaf pays and the set
+/// composition each interior node pays.
+///
+/// This is the term the old shape did not have, and it is the one that matters: split three ways by a
+/// `--features prepare-phases` build, `prepare_candidates` spends a median **85%** of its time in
+/// `narrow_candidates_exact` on a `Candidates` acquire, 4% projecting and 1% memoizing. The narrowing
+/// is not proportional to the candidates that come out of it — a bare `ExactName` yields FOUR
+/// candidates and still costs ~2.4 us, because it is two `partition_point` binary searches over the
+/// name permutation, ~15 cache-missing probes each, every one of them a string compare against a card
+/// record. That is a per-PROBE cost, and the probe count is a property of the tree, not of the answer.
+pub(crate) const PREPARE_PER_NODE_NS: f64 = 942.0;
+
+/// Per word-wise plane operation (`prepare_plane_word_ops`), when a plane survived `split_planes`.
+///
+/// The plane branch of `prepare_candidates` makes three word-wise passes over the card space —
+/// `eval_planes` into the thread-local bitmap, `and_bits_into` against the residual's own bits, and
+/// `bitmap_card_ids` to extract the list — none of which depends on how many cards survive. It is the
+/// DOMINANT phase whenever a plane is present: 99% of prepare on a `plane` acquire and 80% on
+/// `printing_compose`, against 0%/12% for the narrowing there.
+pub(crate) const PREPARE_PLANE_PER_WORD_OP_NS: f64 = 1.543;
+
+/// Per candidate materialized into the list (`prepare_cands`) — the `collect` + `sort_unstable` the
+/// old shape priced, and the `retain` against the plane bitmap.
+///
+/// The old 4.95 ns/candidate is a real measurement of a real kernel; what changed is that it is no
+/// longer asked to carry the other two phases as well. It is charged on `prepare_cands`, not
+/// `eval_domain`, because the two bare-range acquires pin `eval_domain` at `n_cards` — 4.95 × 31,508
+/// is 156 us against a measured 354-458 ns, and any fit that pooled those rows would have fit garbage.
+pub(crate) const PREPARE_PER_CAND_NS: f64 = 1.641;
+
+/// Modelled cost of the artifact a plan builds **in dispatch**, in ns — what the realized
+/// `PhaseStats::ns_prepare` measures. `0.0` for plans that build nothing there.
+///
+/// Only the two materializing plans have a term here, and that is not an omission:
+///
+/// * `PlanePopcountOrder` reads a plane bitmap the ROUTER already built during acquire
+///   (`Prep::Plane`), so its dispatch pays nothing. A forced trial rebuilds it and reports the
+///   rebuild in `ns_prepare`, which is exactly the figure `costbench.plan_self_ns` excludes.
+/// * `PrintingRangeScan` / `PrintingCompose` win off a `Prep::Range` estimate and then run their own
+///   fastpath, whose build lands in `ns_setup` and is priced by their own arms.
+/// * `CardRangePopcount` DOES build `build_card_range_bits` in dispatch, and `ns_prepare` measures
+///   it — but `plan_cost`'s own arm already charges it as
+///   `scatter_printings * CARD_RANGE_BUILD_PER_PRINTING_NS`. Returning a second cost here would
+///   double-charge the one plan whose dispatch build is already modelled.
+///
+/// Prices the three phases of `prepare_candidates` separately, because they scale with three
+/// different things and the previous shape had a term for only one of them. See each constant.
 ///
 /// The match below is deliberately NOT `PhysicalPlan::materializing()`, which means something
 /// else — "runnable off a materialized prep", and so includes `PlanePopcountOrder`, which reads
@@ -309,7 +433,10 @@ pub(crate) const MATERIALIZE_SORT_PER_CAND_NS: f64 = 4.95;
 pub(crate) fn materialize_cost(plan: PhysicalPlan, f: &PlanFeatures) -> f64 {
     match plan {
         PhysicalPlan::StreamedSelect | PhysicalPlan::GatheredScan => {
-            MATERIALIZE_SORT_FIXED_NS + MATERIALIZE_SORT_PER_CAND_NS * f64::from(f.eval_domain)
+            PREPARE_FIXED_NS
+                + PREPARE_PER_NODE_NS * f64::from(f.prepare_nodes)
+                + PREPARE_PLANE_PER_WORD_OP_NS * f64::from(f.prepare_plane_word_ops)
+                + PREPARE_PER_CAND_NS * f64::from(f.prepare_cands)
         }
         PhysicalPlan::PrintingRangeScan
         | PhysicalPlan::PrintingCompose
@@ -475,18 +602,56 @@ const STREAM_ARTWORK_SEEN_PER_CARD_NS: f64 = 1.21;
 /// evaluation cost), `Mode::Printing` vs `Mode::Artwork`, min-of-150 rounds. Four runs (two repeats,
 /// one on a different 5,000-card slice): 0.489, 0.528, 0.508, 0.489 ns/printing.
 const GATHER_ARTWORK_PER_PRINTING_NS: f64 = 0.50;
-/// ns per card scanned in the small-total gather (`for cid in 0..n_cards`,
-/// counts[cid]==0 check). Cheaper than a match-phase visit (no filter work). Fit
-/// from the narrow-query floor: cmc>=15 / o:annihilator / cmc==7 card SHALLOW all
-/// ~52µs = 31508 × 1.65. Only added when `matches <= STREAM_MIN_MATCHES`, the
-/// exact condition that routes P3 into that gather branch. The 1.65 above was fit on three hand
-/// picked narrow queries; across the sampled space the floor measures ~31µs, not 52µs.
+/// ns per card SWEPT in the small-total gather (`for cid in 0..n_cards`, `counts[cid] == 0` check
+/// and nothing else). Only added when `matches <= STREAM_MIN_MATCHES`, the exact condition that
+/// routes P3 into that gather branch.
 ///
-/// CONFIRMED 2026-08-03 by `bench_streamed_loop`, which needed 600-card cells to reach this branch at
-/// all -- every earlier cell had more than `STREAM_MIN_MATCHES` matches and took the permutation walk
-/// instead, so this constant had never been measured against the branch it prices. It now reads
-/// 1.075-1.250 ns per card scanned against the 1.02 shipped, on a 33.9 us finish phase. Left alone.
-const STREAM_SMALL_TOTAL_FLOOR_PER_CARD_NS: f64 = 1.02;
+/// **Round 81 (2026-09-05): 1.02 -> 0.30, because the old value was a per-card rate that had absorbed
+/// the per-MATCH work of the same loop.** The redo loop does two things per iteration: it reads one
+/// `u32` count (every card), and where that count is nonzero it runs `card_pass` and
+/// `push_card_matches` over the card's printings (a few dozen cards out of ~31.7k). Charging both on
+/// `n_cards` makes the rate a function of how many matches the cell happened to have, and every fit
+/// this constant ever had was taken at a match count far above the median query's.
+///
+/// The two confirmations of 1.02 both have that shape. `bench_streamed_loop`'s 2026-08-03 reading of
+/// 1.075-1.250 came from its 600-card cells -- the only ones that reached this branch at all -- "on a
+/// 33.9 us finish phase". Re-run today at `n_cards = 31,724`, the SAME harness reads **0.305-0.332 at
+/// its 100-card cells and 0.369-0.478 at its 400-card cells**: the per-card rate tracks the match
+/// count, which a per-card cost cannot do. The intercept those cells imply is ~0.30, and the slope is
+/// ~15.6 ns per matching singleton card with a residual (10,500 -> 15,166 ns over 300 more matches),
+/// i.e. the `card_pass` this arm already charges plus one printing's push. And `fit_cost_model`'s
+/// 0.98 is the same conflation seen from traffic: that column is literally `n_cards` or 0, collinear
+/// with the intercept, with no second column for the per-match half to separate against.
+///
+/// Measured directly against the phase it names, on 1,085 sampled rows where the executor really took
+/// this exit (`perm_steps == 0`, `0 < result_total <= STREAM_MIN_MATCHES`, page inside the total), the
+/// realized `ns_finish` is p10 8.3 / p50 11.0 / p90 27.5 us against a flat 32.4 us charged -- **the
+/// whole of StreamedSelect's finish-phase over-charge, which reads 2.0x aggregate against its loop's
+/// 0.996 and is the single reason the arm over-prices itself on a `printing_compose` acquire.**
+///
+/// NNLS on those rows: `n_cards` alone takes 0.474 and still reads p10 0.55 / p90 1.81, while
+/// `n_cards = 0.304` beside `redo_examined = 6.565` reads p10 0.83 / p50 1.07 / p90 1.21. The second
+/// column is [`STREAM_REDO_SCAN_PER_ROW_NS`]; 0.30 is this one's half of that fit.
+const STREAM_SMALL_TOTAL_FLOOR_PER_CARD_NS: f64 = 0.30;
+/// ns per printing the small-total redo pass's `push_card_matches` walks, over
+/// [`stream_redo_printings`].
+///
+/// The per-MATCH half of the redo loop that [`STREAM_SMALL_TOTAL_FLOOR_PER_CARD_NS`] used to absorb.
+/// `push_card_matches` walks `offsets[cid]..offsets[cid + 1]` for every card with a nonzero count and
+/// builds a `Match` per surviving printing -- the same printing walk `card_match_count` does in the
+/// counting pass, which is why this is set EQUAL to [`STREAM_SCAN_PER_ROW_NS`] rather than fitted to a
+/// free value of its own. The two independent estimates of it bracket that number: NNLS on 1,085
+/// sampled redo rows takes 6.565 (two-column) / 5.074 (three-column), and `bench_streamed_loop`'s
+/// singleton-card cells imply ~8.9 ns per matching 1-printing card under `all_match` (9,791 -> 12,458
+/// ns over 300 more matches), which is one printing's push plus the loop iteration.
+///
+/// It is a SEPARATE constant rather than a second use of `STREAM_SCAN_PER_ROW_NS` so that the two
+/// populations stay independently refittable: the counting pass early-breaks in card mode and skips
+/// printings entirely under `all_match`, and this pass does neither.
+///
+/// Unlike the counting pass's term, this is NOT gated on [`residual_verified`] -- see
+/// [`stream_redo_printings`] for why the walk happens either way.
+const STREAM_REDO_SCAN_PER_ROW_NS: f64 = STREAM_SCAN_PER_ROW_NS;
 /// ns per permutation entry stepped in the streaming walk, the branch taken when
 /// `total > STREAM_MIN_MATCHES`.
 ///
@@ -610,6 +775,34 @@ const GATHER_COLLECT_PER_PAGE_ROW_NS: f64 = 9.79;
 /// and drift as either query sizes or the corpus change. The fix is a term for the curvature -- see the
 /// corpus-size note in `bench_gather_loop` -- not a smaller constant.
 const GATHER_FIXED_COST_NS: f64 = 169.6;
+/// `GATHER_FIXED_COST_NS`'s own value when `matches == 0` -- a `Prep::Candidates`-acquired zero-match
+/// round, where every other term in this arm is already provably zero (`eval_domain`, `scan_units`,
+/// `page_span`/`page_rows`, `artwork_seen_printings` all vanish with the candidate list itself), so
+/// the whole prediction collapses to this one constant alone. `GATHER_FIXED_COST_NS` was fit against
+/// the general population and reads 169.6 there; a zero-candidate round pays none of the loop/verify
+/// work that constant was priced to cover, so charging it here is a straight ~4x over-charge, not a
+/// rounding difference.
+///
+/// Fit as the calibration half's median measured `plan_self_ns` (not a mean, and not per-mode --
+/// `PlanFeatures` carries no `unique`/mode field this arm can read, so one pooled constant is what
+/// this branch can express; see the doc issue's Round 9 section for the residual mode split this
+/// leaves on the table for card/printing vs. artwork). 9,890 sampled `GatheredScan`/`candidates`
+/// zero-match rows (31.9% of the sampled `candidates` population), hash-of-query split:
+///
+///     calibration (n=4,944): median measured_ns = 42.0 -> this constant
+///     held-out    (n=4,946): 4,577 improved / 369 regressed / 0 tied
+///                            total abs ns error 530,256 -> 103,110 (5.1x)
+///                            median ratio (measured/predicted) 0.248 -> 1.000
+///                            within-25% 0.1% -> 57.7%
+///
+/// The held-out gain is not uniform across mode: card/printing land almost exactly on 1.00 (83-90%
+/// within 25%), while artwork's real zero-match cost reads a flat ~2x higher (84ns vs. card/printing's
+/// ~42ns -- plausibly `exec_gathered_scan`'s unconditional per-printing dedupe check setup, per its own
+/// comment on `artwork_seen_printings` above), so artwork's ratio moves from 0.495 (over-cost) to 2.0
+/// (under-cost) -- roughly the same LOG-ratio magnitude, just flipped sign, and still a net win on
+/// absolute ns error (|84-169.6| = 85.6 -> |84-42| = 42.0). Splitting this properly by mode needs a
+/// `PlanFeatures` field this arm does not have; out of scope for a `cost.rs`-only round.
+const GATHER_FIXED_COST_ZERO_MATCH_NS: f64 = 42.0;
 
 // --- PrintingCompose's own rates -------------------------------------------------------------
 //
@@ -637,6 +830,22 @@ const GATHER_FIXED_COST_NS: f64 = 169.6;
 pub(crate) const COMPOSE_LINEAR_PASS_PER_PRINTING_NS: f64 = 1.93;
 /// Range-slice scatter into the printing bitmap during build.
 pub(crate) const COMPOSE_SCATTER_PER_PRINTING_NS: f64 = 0.48;
+
+/// A CARD-SPACE collection leaf's build (`ids_of` + `broadcast_card_ids_to_printings`) used to ride
+/// `COMPOSE_SCATTER_PER_PRINTING_NS`, on the assumption that it was the same shape of operation as a
+/// range's contiguous slice-scatter. It measurably is not: a card-cursor lookup per id (`offsets[c]`/
+/// `offsets[c+1]`) plus a variable-width printing-range fill, against a range's single contiguous
+/// write.
+///
+/// Backed out of `otag:triggered-ability`/`otag:cycle`/`otag:activated-ability` (`unique=printing`,
+/// EDHREC): with `printings_walked` corrected (`WalkCheckpoints`) and every other term in
+/// `PhysicalPlan::PrintingCompose`'s formula computed from measured features, the residual against real
+/// wall time scaled cleanly with `collection_broadcast_printings` (not a flat offset), implying 1.41,
+/// 1.30, and 1.31 ns/printing -- tight enough (2.7-2.9x `COMPOSE_SCATTER_PER_PRINTING_NS`, all three
+/// within 8% of each other) to be a real rate and not sampling noise, but from 3 points on one corpus
+/// size, not the corpus-scaling sweep the rates above this comment were fit with. Revisit if a wider
+/// measurement disagrees.
+pub(crate) const COMPOSE_COLLECTION_BROADCAST_PER_PRINTING_NS: f64 = 1.34;
 /// Result-space bitmap words popcounted for the total.
 const COMPOSE_POPCOUNT_PER_WORD_NS: f64 = 1.07;
 /// Per printing stepped over by the Perm / OrderbyWalk page fill.
@@ -713,6 +922,200 @@ pub(crate) fn printings_walked(f: &PlanFeatures) -> f64 {
     page_span / match_rate * WALK_LENGTH_BIAS
 }
 
+/// Whether a residual has to be VERIFIED per candidate, i.e. whether the executors call
+/// `filter.card_pass` at all. `residual_tier_ns100 == 0` is exactly `all_match_known` — the narrowing
+/// already proved every candidate matches, so #634 step 1 skips the call outright.
+///
+/// One definition, read by both materializing arms (each gates its `CARD_PASS + max(tier, FLOOR)`
+/// term on it) and by `residual_card_pass` below, rather than three copies of `tier_ns > 0.0`.
+fn residual_verified(f: &PlanFeatures) -> bool {
+    f.residual_tier_ns100 > 0
+}
+
+/// Candidate cards the loop invokes `filter.card_pass` on — the quantity the `CARD_PASS + max(tier,
+/// RESIDUAL_FLOOR)` term of BOTH materializing arms multiplies, and on `GatheredScan` the single
+/// largest term in the whole model (58% of its predicted time, since the coefficient IS the residual
+/// floor). `0` under `all_match_known`, where the arms charge nothing.
+///
+/// Derived rather than stored, and exposed for the same reason `stream_perm_steps` and
+/// `printings_walked` are: a harness recomputing the gate in Python is a second definition of it.
+/// Graded against the realized `card_pass_calls` counter.
+///
+/// **It describes ONE call per visited candidate, which is `GatheredScan`'s whole loop and only the
+/// FIRST of `StreamedSelect`'s passes.** `StreamedSelect`'s arm therefore does NOT multiply this — it
+/// multiplies [`stream_residual_card_pass`], which adds the small-total redo pass on top. The split
+/// follows `scan_units`/`stream_scan_units` exactly: one shared feature vector, two arms that do
+/// different amounts of work with it, and a per-plan quantity rather than a compromise value that is
+/// ~2x wrong for whichever arm loses.
+pub(crate) fn residual_card_pass(f: &PlanFeatures) -> u32 {
+    if residual_verified(f) { f.eval_domain } else { 0 }
+}
+
+/// Whether `run_query_streamed`'s small-total gather runs, as the model predicts it: at or below
+/// `STREAM_MIN_MATCHES` it scans all `n_cards` instead of walking, and either way it returns before
+/// both branches when there are no matches or the page starts past the end.
+///
+/// Branches on the ESTIMATE `f.matches`, deliberately, because that is all the router has. The
+/// executor branches on the realized `total`, so an estimate that crosses the boundary sends the two
+/// down different arms with this predicate entirely correct — measured as **all 83** of 2,974
+/// StreamedSelect gate disagreements in Round 69, none of them a formula error.
+fn stream_runs_small_gather(f: &PlanFeatures) -> bool {
+    u64::from(f.matches) <= *super::STREAM_MIN_MATCHES as u64
+        && f.matches > 0
+        && u64::from(f.offset) < u64::from(f.matches)
+}
+
+/// Cards `run_query_streamed`'s small-total redo loop re-derives `card_pass` for — a SECOND
+/// population on top of [`residual_card_pass`], and `0` on every other exit.
+///
+/// That loop's `card_pass` call sits directly below its `counts[cid] == 0` continue, so it runs for
+/// every card with a nonzero count: bounded above by the candidates the counting pass visited
+/// (`eval_domain` — a card the narrowing never offered cannot have a count) and, independently, by
+/// the total itself (each such card contributes at least one match), hence the `min`. Both bounds
+/// bind in practice, which is why neither alone is used: measured against the realized
+/// `card_pass_calls - cards_visited` over the 6,638 sampled rows where this gate fires and the redo
+/// really ran, `eval_domain` alone reads p75 1.667 / p90 6.197 and `matches` alone p50 1.231 /
+/// p90 9.500, while the `min` reads **p50 1.000 in all three distinct-ons** at p75 1.489 / p90 5.281.
+/// The residual p90 is the cardinality estimate's own error arriving through `matches`, not this
+/// term's shape — `eval_domain`, which does not read `matches` at all, carries the same tail.
+///
+/// The loop OVERHEAD is deliberately not charged here: that loop iterates `0..n_cards`, not the
+/// candidates, and `STREAM_SMALL_TOTAL_FLOOR_PER_CARD_NS * n_cards` already prices exactly that
+/// sweep. What no term priced is the `card_pass` + residual verify these matching cards pay a second
+/// time, which is what this counts.
+///
+/// The permutation-walk exit re-derives `card_pass` too, and deliberately gets NO term. It re-derives
+/// only for entries it actually emits from (both skip continues come first), which measured p50 57
+/// cards against a p50 `eval_domain` in the thousands: **0.1% of that plan's own measured run time at
+/// p50 and 0.8% at p90**, an order of magnitude under the ~9% noise floor, and the cell already reads
+/// 0.997. The only plan-time predictor available for it (`min(page_rows, limit)`) over-counts the
+/// emitting cards by 2.24x at p50 in printing mode and 1.28x in artwork, because one card can supply
+/// many page rows — so a term would trade a graded 0.997 for a worse feature to price work that
+/// cannot move a routing decision.
+fn stream_redo_cards(f: &PlanFeatures) -> u32 {
+    if !residual_verified(f) {
+        return 0;
+    }
+    stream_redo_matching_cards(f)
+}
+
+/// Cards the small-total redo loop runs its BODY for -- every card with a nonzero count -- with no
+/// `residual_verified` gate, which is the difference from [`stream_redo_cards`].
+///
+/// Both quantities count the same cards. They differ in what the card is charged FOR: `card_pass` is
+/// skipped under `all_match_known` (#634 step 1) and so has to be gated, while `push_card_matches`
+/// runs on every one of these cards regardless — `all_match` changes what it tests per printing, not
+/// whether it walks them. Split out so the two gates are visible as one shared population with one
+/// conditional charge on top, rather than as two nearly-identical formulas that could drift.
+///
+/// The `min` and the evidence for it are in [`stream_redo_cards`]'s doc.
+fn stream_redo_matching_cards(f: &PlanFeatures) -> u32 {
+    if !stream_runs_small_gather(f) {
+        return 0;
+    }
+    f.matches.min(f.eval_domain)
+}
+
+/// Printings the small-total redo pass walks, priced at [`STREAM_REDO_SCAN_PER_ROW_NS`].
+///
+/// `push_card_matches` walks the whole of `offsets[cid]..offsets[cid + 1]` for each card the redo
+/// loop finds with a nonzero count, so this is (matching cards) x (printings per card). The card
+/// count is [`stream_redo_matching_cards`]; the per-card printing count is the corpus ratio
+/// `n_printings / n_cards`, because nothing on `PlanFeatures` describes the printing span of the
+/// MATCHING subset specifically — `scan_units` spans the candidates, not the matches.
+///
+/// Graded against the realized `redo_examined`, a counter that until now no term consumed at all.
+/// Over 1,085 sampled redo rows this estimate reads p10 0.19 / p50 0.93 / p90 3.38 against it, and
+/// the tail is the cardinality estimate arriving through `matches` rather than this shape: the same
+/// tail rides [`stream_redo_cards`], which the `CARD_PASS+FLOOR` term already multiplies. Scored as a
+/// whole formula against the measured `ns_finish` — the number that decides whether the term helps —
+/// `n_cards * 0.30 + 5.97 * this` reads p10 0.57 / p50 1.03 / p90 1.22, against p10 0.80 / p50 1.04 /
+/// p90 1.19 for the same formula given the ORACLE `redo_examined`. It is within noise of the best a
+/// perfect counter could do.
+///
+/// Exposed by `explain` as a `u32` and computed as a `u32` here for the reason `printings_walked` is
+/// NOT: the value the arm multiplies and the value a harness (or `fit_cost_model`'s mirror) reads
+/// have to be the same number, and rounding it once here means there is no truncation gap to tolerate.
+pub(crate) fn stream_redo_printings(f: &PlanFeatures) -> u32 {
+    let cards = stream_redo_matching_cards(f);
+    if cards == 0 || f.n_cards == 0 {
+        return 0;
+    }
+    (f64::from(cards) * f64::from(f.n_printings) / f64::from(f.n_cards)).round() as u32
+}
+
+/// `StreamedSelect`'s own count of `filter.card_pass` invocations: BOTH of its passes, where
+/// [`residual_card_pass`] is one. This is what that arm's `CARD_PASS + max(tier, RESIDUAL_FLOOR)`
+/// term multiplies and what `bench_feature_accuracy` must grade it on — the shared
+/// `residual_card_pass` read StreamedSelect at p50 **0.500** on the small-total branch (3,213 graded
+/// rows), an exact 2x under-count, while the pooled `<StreamedSelect>` cell hid it at 0.988.
+///
+/// Exposed by `explain` alongside `residual_card_pass` for the reason `stream_perm_steps` is: the
+/// arm's quantity and the harness's must be one definition, or the harness grades a number the arm
+/// does not use.
+pub(crate) fn stream_residual_card_pass(f: &PlanFeatures) -> u32 {
+    residual_card_pass(f).saturating_add(stream_redo_cards(f))
+}
+
+/// Permutation entries `StreamedSelect`'s page walk steps to fill one page, and the whole of what
+/// `perm_walk_span` contributes to cost. Graded against the realized `perm_steps` counter.
+///
+/// Extracted from the arm rather than left inline for the reason `printings_walked`'s own doc gives:
+/// a harness that recomputes a walk formula in Python is a second definition, and last time that
+/// happened adding `WALK_LENGTH_BIAS` to the function alone changed what harnesses were TOLD without
+/// changing what the router CHARGED — a 3.7% disagreement `fit_cost_model`'s mirror check caught.
+/// One definition, read by the arm and reported to `explain`.
+///
+/// Zero when no walk term is charged at all, which is most rows: the small-total gather runs instead,
+/// or the query returns before either branch. Note the asymmetry with `printings_walked` — that one
+/// divides out a measured bias, this one has no bias correction, because Round 69 measured its pooled
+/// median at **1.023** already. What it lacks is not a constant but a shape: dispersion runs from 1.9x
+/// (`orderby=name`, where the sort order really is uncorrelated with the filter) to 38.8x
+/// (`orderby=cmc`, where it is not), at flat medians, and nothing already on `PlanFeatures` predicts
+/// the residual (max |r| 0.12 against `match_rate`, page depth, and the estimate itself).
+pub(crate) fn stream_perm_steps(f: &PlanFeatures) -> f64 {
+    if stream_runs_small_gather(f) || f.matches == 0 || u64::from(f.offset) >= u64::from(f.matches) {
+        return 0.0;
+    }
+    // Entries visited to accumulate `page_span` matches, when matches are spread uniformly through
+    // the WALKED SEGMENT: one match per `perm_walk_span / matches` entries. Bounded by that segment,
+    // since the walk cannot step past its end.
+    //
+    // The executor starts and ends the walk at the segment its filter's bound on the SORT COLUMN
+    // admits (`walk_bounds`), and `perm_walk_span` is that same segment's length, computed once at
+    // acquire by `mk_plan_feats` calling the identical `walk_bounds` helper over the identical
+    // `QueryParams::sort_bound` the executor reads -- not re-derived by a second path that could
+    // silently disagree with what dispatch actually walks. Before Round 32 this multiplied by
+    // `n_cards` unconditionally, which is right only when the filter constrains nothing about the sort
+    // column; `perm_walk_span` already collapses to `n_cards` in exactly that case, so this is a
+    // strict generalization, not a second code path with its own edge cases.
+    //
+    // It also collapses to `n_cards` when no permutation exists at all -- but that case never reaches
+    // here, because `streamed_select_applicable` requires `sort_perms.order(..).is_some()` and so
+    // drops the plan from the argmin before `plan_cost` runs. `SortCol::Rarity` and
+    // `SortCol::PriceUsd` have no permutation built, and Round 69 confirmed StreamedSelect is offered
+    // on 0 of 12 such queries against 12 of 12 for `name`/`cmc`. The fallback is unreachable for this
+    // term; it is the applicability gate, not the collapse, that makes it safe.
+    //
+    // Realized/estimated `perm_steps` over ~12.5k walking rows, same seed and sample length
+    // (docs/issues/local-engine-gathered-scan-card-printing-varying-depth.md, Round 32 for
+    // the held-out re-check against current traffic):
+    //
+    //     unbounded walk (pre-Round-32)  p10 0.13   median 1.00   p90 6.43
+    //     sort-column bound (shipped)     p10 0.11   median 0.96   p90 5.31
+    //     realized inv_perm min/max      p10 0.08   median 0.90   p90 4.26
+    //
+    // The third row is not shipped -- it cost 0.51 ns per matching card -- but it bounds how
+    // much of the tail a start position can reach at all, and the gap between rows two and
+    // three is real: a realized minimum catches clustering from ANY source, while a bound
+    // catches only what the predicate names. What is left in BOTH is non-matching entries
+    // INTERIOR to the walked segment, which no start position reaches by construction. That
+    // is the popcount-skip mechanism's territory.
+    let page_span = f64::from((f.offset.saturating_add(f.limit)).min(f.matches));
+    let perm_walk_span = f64::from(f.perm_walk_span);
+    (page_span * perm_walk_span / f64::from(f.matches)).min(perm_walk_span)
+}
+
 /// The closed form above assumes matches are spread UNIFORMLY along the walk order, so a page of
 /// `page_span` rows arrives after `page_span / match_rate` printings. They are not: the permutation
 /// orders cards by the sort column, and matches cluster within that order, so the walk runs longer
@@ -727,6 +1130,35 @@ pub(crate) fn printings_walked(f: &PlanFeatures) -> f64 {
 /// not something a density ratio can see, and no constant will fix that.
 const WALK_LENGTH_BIAS: f64 = 1.45;
 
+/// Page slots `GatheredScan`'s finish phase quickselects, charged at `GATHER_SELECT_PER_PAGE_SLOT_NS`.
+/// `min(offset + limit, matches)` -- bounded by `matches` because a page past the end of the matches
+/// returns early out of `select_page` (see that constant's own doc for the sweep that established it).
+///
+/// Exposed to `explain` for the reason `stream_perm_steps` and `residual_card_pass` are: the arm's
+/// quantity and the harness's must be ONE definition. `fit_cost_model.design_row` held its own copy of
+/// this clamp, which is the exact shape that has drifted twice in this file's history.
+///
+/// Graded against the realized `PhaseStats::select_input_len`, which is NOT this quantity and is not
+/// meant to be: `GatherSelect` keeps a bounded buffer and prunes it back to `k = offset + limit` only
+/// once it has grown `GATHER_PRUNE_CHUNK` past `k`, so what `select_page` really quickselects over is
+/// anywhere in `[k, k + GATHER_PRUNE_CHUNK)` on any query with more matches than one page. On the
+/// default 60-row page that is a bound of 4,156 against a charged 60.
+pub(crate) fn gather_page_span(f: &PlanFeatures) -> u32 {
+    (f.offset.saturating_add(f.limit)).min(f.matches)
+}
+
+/// Rows `GatheredScan`'s finish phase collects into the page, charged at
+/// `GATHER_COLLECT_PER_PAGE_ROW_NS`. `select_page` returns `clamp(matches - offset, 0, limit)`, so a
+/// page past the end of the matches collects fewer rows than `limit` asked for.
+///
+/// Exposed for the same one-definition reason as [`gather_page_span`]. Graded against the realized
+/// `PhaseStats::page_rows_collected`; unlike the span above, the realized quantity here is the SAME
+/// clamp applied to the realized total instead of the estimated `matches`, so the cell reports the
+/// cardinality estimate's error propagating into the page phase and nothing else.
+pub(crate) fn gather_page_rows(f: &PlanFeatures) -> u32 {
+    f.matches.saturating_sub(f.offset).min(f.limit)
+}
+
 pub(crate) fn plan_cost(plan: PhysicalPlan, f: &PlanFeatures) -> f64 {
     let n_cards = f64::from(f.n_cards);
     // `n_printings` is no longer bound here: it was only feeding the local copy of the walk-length
@@ -736,7 +1168,9 @@ pub(crate) fn plan_cost(plan: PhysicalPlan, f: &PlanFeatures) -> f64 {
     let scan_units = f64::from(f.scan_units);
     let tier_ns = f64::from(f.residual_tier_ns100) / 100.0;
     let limit = f64::from(f.limit);
-    let page_span = f64::from((f.offset.saturating_add(f.limit)).min(f.matches));
+    // Read from `gather_page_span` rather than inlined: this local feeds the `GatheredScan` arm and
+    // nothing else, and `explain` reports the same function, so the two cannot drift.
+    let page_span = f64::from(gather_page_span(f));
 
     // Printings walked to fill the page in a forward-permutation walk (both printing-space plans).
     // Calls the shared `printings_walked` rather than recomputing `page_span / match_rate`: this was
@@ -758,6 +1192,7 @@ pub(crate) fn plan_cost(plan: PhysicalPlan, f: &PlanFeatures) -> f64 {
         PhysicalPlan::PrintingCompose => {
             let build = f64::from(f.broadcast_printings) * COMPOSE_LINEAR_PASS_PER_PRINTING_NS  // legality broadcast-down into the printing bitmap (border/rarity read a plane → 0)
                 + f64::from(f.scatter_printings) * COMPOSE_SCATTER_PER_PRINTING_NS  // range-slice scatter into the printing bitmap (cheap: no card cursor)
+                + f64::from(f.collection_broadcast_printings) * COMPOSE_COLLECTION_BROADCAST_PER_PRINTING_NS  // card-space collection leaf's build (ids_of + broadcast_card_ids_to_printings) — a card cursor per id, pricier than a range's contiguous scatter
                 + f64::from(f.project_printings) * COMPOSE_LINEAR_PASS_PER_PRINTING_NS  // second pass: project printing→card/artwork (0 for printing mode) — the pass CardRangePopcount fuses away
                 + f64::from(f.popcount_words) * COMPOSE_POPCOUNT_PER_WORD_NS; // popcount the result-space bitmap for the total (printing/card/artwork words)
             let page = match f.compose_paging {
@@ -823,41 +1258,20 @@ pub(crate) fn plan_cost(plan: PhysicalPlan, f: &PlanFeatures) -> f64 {
             // must not be charged for it. Charging them anyway over-costs by the whole floor --
             // measured est/real of 55.7 at p50 on zero-match queries, which really take 0.62 us
             // against a ~35 us estimate, and 1,265 of 33k StreamedSelect rows land there.
-            let runs_small_gather = u64::from(f.matches) <= *super::STREAM_MIN_MATCHES as u64
-                && f.matches > 0
-                && u64::from(f.offset) < u64::from(f.matches);
-            let floor = if runs_small_gather { n_cards * STREAM_SMALL_TOTAL_FLOOR_PER_CARD_NS } else { 0.0 };
+            //
+            // Round 81 split this in two. The sweep rate below prices the `counts[cid] == 0` read
+            // that every card pays; `stream_redo_printings` prices the `push_card_matches` walk the
+            // matching handful pays on top, which the old flat rate had absorbed into a per-card
+            // number and so charged over the whole corpus. See both constants.
+            let floor =
+                if stream_runs_small_gather(f) { n_cards * STREAM_SMALL_TOTAL_FLOOR_PER_CARD_NS } else { 0.0 };
+            let redo_scan = f64::from(stream_redo_printings(f)) * STREAM_REDO_SCAN_PER_ROW_NS;
             // The other branch: when the small-total gather does NOT run and there is a page to emit,
             // the walk steps the permutation until it fills. Same guards as the gather -- a query with
-            // no matches, or a page past the end, returns before the walk too.
-            let walks_permutation = !runs_small_gather && f.matches > 0 && u64::from(f.offset) < u64::from(f.matches);
-            let perm_steps = if walks_permutation {
-                // Entries visited to accumulate `page_span` matches, when matches are spread uniformly
-                // through the permutation: one match per `n_cards / matches` entries. Bounded by the
-                // corpus, since the walk cannot step past the end of the permutation.
-                //
-                // The executor now starts and ends the walk at the segment its filter's bound on the
-                // SORT COLUMN admits (`walk_bounds`), which this cannot see -- no `PlanFeatures` field
-                // carries the filter's shape. The uniform-spread assumption absorbs it: the expected gap
-                // before the first match is one `n_cards / matches` stride, negligible against
-                // `page_span` of them. What the regrade showed is that the assumption's remaining error
-                // is a DIFFERENT shape. Realized/estimated over ~12.5k walking rows, same seed and
-                // sample length:
-                //
-                //     unbounded walk                 p10 0.13   median 1.00   p90 6.43
-                //     sort-column bound              p10 0.11   median 0.96   p90 5.31
-                //     realized inv_perm min/max      p10 0.08   median 0.90   p90 4.26
-                //
-                // The third row is not shipped -- it cost 0.51 ns per matching card -- but it bounds how
-                // much of the tail a start position can reach at all, and the gap between rows two and
-                // three is real: a realized minimum catches clustering from ANY source, while a bound
-                // catches only what the predicate names. What is left in BOTH is non-matching entries
-                // INTERIOR to the walked segment, which no start position reaches by construction. That
-                // is the popcount-skip mechanism's territory.
-                (page_span * n_cards / f64::from(f.matches)).min(n_cards)
-            } else {
-                0.0
-            };
+            // no matches, or a page past the end, returns before the walk too. Both the guards and the
+            // formula live in `stream_perm_steps`, which `explain` also reports so a harness can grade
+            // the term against the realized `perm_steps` without a second copy of it.
+            let perm_steps = stream_perm_steps(f);
             // card_pass — and the verify tier that prices it — is per candidate CARD: the loop
             // calls `filter.card_pass` once per `cid`, and only the cheaper printing-dependent
             // residual is re-checked per row inside `push_card_matches`. Charging `tier_ns` per
@@ -869,22 +1283,35 @@ pub(crate) fn plan_cost(plan: PhysicalPlan, f: &PlanFeatures) -> f64 {
             // CALL only happens when there is a residual to check. `all_match_known` skips it outright
             // (#634 step 1), and `tier_ns == 0` is exactly that condition. Charging the call anyway made
             // the arm's card-mode body read p50 1.90 over-costed.
-            eval_domain
-                * (STREAM_LOOP_PER_CARD_NS
-                    + if tier_ns > 0.0 { STREAM_CARD_PASS_NS + tier_ns.max(STREAM_RESIDUAL_FLOOR_NS) } else { 0.0 })
+            //
+            // And the residual half is charged over `stream_residual_card_pass`, NOT `eval_domain`,
+            // because this plan runs TWO passes and only the counting one visits `eval_domain` cards.
+            // The small-total exit re-derives `card_pass` for every card with a nonzero count -- it
+            // has to, since that call returns the per-card residual conjunct list `push_card_matches`
+            // needs and not just a cacheable verdict. Graded against the realized `card_pass_calls`
+            // the small-total cell read p50 0.500, an exact 2x under-count on 3,213 rows, which the
+            // pooled 0.988 and the [0.8, 1.25] band both hid. See `stream_redo_cards` for the
+            // quantity, for why the loop overhead is NOT charged here (the floor below is that
+            // sweep), and for the evidence that the walk exit's own re-derivation stays unpriced.
+            let residual_ns =
+                if residual_verified(f) { STREAM_CARD_PASS_NS + tier_ns.max(STREAM_RESIDUAL_FLOOR_NS) } else { 0.0 };
+            eval_domain * STREAM_LOOP_PER_CARD_NS
+                + f64::from(stream_residual_card_pass(f)) * residual_ns
                 // Only with a residual does P3 walk printings; see STREAM_SCAN_PER_ROW_NS.
-                + if tier_ns > 0.0 { f64::from(f.stream_scan_units) * STREAM_SCAN_PER_ROW_NS } else { 0.0 }
+                + if residual_verified(f) { f64::from(f.stream_scan_units) * STREAM_SCAN_PER_ROW_NS } else { 0.0 }
                 + matches * STREAM_EMIT_PER_MATCH_NS
                 + perm_steps * STREAM_PERM_STEP_NS
                 + f64::from(f.artwork_seen_cards) * STREAM_ARTWORK_SEEN_PER_CARD_NS
                 + floor
+                + redo_scan
                 + n_cards * STREAM_CORPUS_PASS_PER_CARD_NS
                 + STREAM_FIXED_COST_NS
         }
         PhysicalPlan::GatheredScan => {
     // Rows the collect actually walks: `select_page` yields `clamp(matches - offset, 0, limit)`, so a
-    // page past the end of the matches collects fewer rows than `limit` asked for.
-    let page_rows = f64::from(f.matches.saturating_sub(f.offset).min(f.limit));
+    // page past the end of the matches collects fewer rows than `limit` asked for. One definition,
+    // in `gather_page_rows`, which `explain` reports for grading.
+    let page_rows = f64::from(gather_page_rows(f));
             // Per-CARD verify tier, for the reason spelled out in the StreamedSelect arm above.
             // Split and gated exactly as in the StreamedSelect arm above, and deliberately in the same
             // change: this lowers both plans' cost on `all_match` queries, and the one asymmetric
@@ -892,13 +1319,13 @@ pub(crate) fn plan_cost(plan: PhysicalPlan, f: &PlanFeatures) -> f64 {
             // `StreamedSelect -> GatheredScan` from 407 lost-time queries to 653.
             eval_domain
                 * (GATHER_LOOP_PER_CARD_NS
-                    + if tier_ns > 0.0 { GATHER_CARD_PASS_NS + tier_ns.max(GATHER_RESIDUAL_FLOOR_NS) } else { 0.0 })
+                    + if residual_verified(f) { GATHER_CARD_PASS_NS + tier_ns.max(GATHER_RESIDUAL_FLOOR_NS) } else { 0.0 })
                 + scan_units * GATHER_SCAN_PER_ROW_NS
                 + matches * GATHER_PUSH_PER_MATCH_NS
                 + page_span * GATHER_SELECT_PER_PAGE_SLOT_NS
                 + page_rows * GATHER_COLLECT_PER_PAGE_ROW_NS
                 + f64::from(f.artwork_seen_printings) * GATHER_ARTWORK_PER_PRINTING_NS
-                + GATHER_FIXED_COST_NS
+                + if matches > 0.0 { GATHER_FIXED_COST_NS } else { GATHER_FIXED_COST_ZERO_MATCH_NS }
         }
     }
 }

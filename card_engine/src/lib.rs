@@ -1515,6 +1515,73 @@ fn build_numeric_index(cards: &[OracleCard], get_val: impl Fn(&OracleCard) -> Op
     idx
 }
 
+/// Per-distinct-value cumulative `SpaceTotals` over a `NumericIndex`'s own sorted value order, so a
+/// bare cmc/power/toughness comparison can be answered EXACTLY in all three spaces by one
+/// subtraction (Round 63).
+///
+/// `NumericIndex` is card space only, which left `compose_printing_estimate`'s bare numeric leaf arm
+/// scaling its card count into printing space by the corpus-average reprint ratio -- measured at
+/// **0.310x-1.274x** of truth over 117 leaves, with 44% missing by >=200 printings AND >=10%. The
+/// worst are low-cmc, where the lands sit: `cmc=0` reported 3,699 against a true 11,948, its own
+/// reprint depth being 9.96 against the corpus's 3.08. `exact_result_total`'s own arith arm has the
+/// same hole and says so ("the index has no printing/artwork aggregate ... no cheap exact conversion
+/// from a card-space index to those spaces"); this is that aggregate.
+///
+/// Deliberately per-DISTINCT-VALUE rather than per-entry. Both are exact and both are O(log n), but
+/// cmc/power/toughness have only ~20-40 distinct values each against up to 31,724 entries, so this
+/// is ~570 bytes per field where a per-entry prefix would be ~250 KB. Round 57's `LegalityDateTotals`
+/// is the same shape one dimension over (a prefix sum along a value axis, answering any range by
+/// subtraction).
+///
+/// The alternative considered and REJECTED on measurement: reuse the existing `arith_tuple_totals`,
+/// which already returns the exact triple for a single bound. It is an O(distinct tuples) scan (~564
+/// keys, four `f64` conversions and an `eval_arith_tuple_tri` each) where this is two
+/// `partition_point`s, and it measured **+186% on `and_estimate_ns` p50** for queries carrying a
+/// numeric leaf against +7% drift on a control subset that cannot reach the arm -- about +3.8us on
+/// the highest-traffic leaf arm. Preserved unmerged on `r63p1-arith-tuple-reuse-measured-slow`.
+///
+/// `values` holds the distinct values ascending; `prefix` is an EXCLUSIVE prefix sum with
+/// `prefix.len() == values.len() + 1`, so the totals for the value range `[s, e)` are
+/// `prefix[e] - prefix[s]`. Empty `values` means unbuilt (a test fixture) or a field no card carries,
+/// both of which decline rather than answer 0 -- the same convention every other index here uses.
+#[derive(Archive, Serialize, Deserialize, Default)]
+struct NumericSpanTotals {
+    values: Vec<i16>,
+    prefix: Vec<SpaceTotals>,
+}
+
+/// `NumericSpanTotals` for one already-built `NumericIndex`.
+///
+/// Relies on `build_numeric_index` sorting by `(value, card_id)`, which makes every entry sharing a
+/// value contiguous -- so distinct values come out of one pass with no separate grouping structure.
+/// Per-card printings/artworks come from the same `offsets`/`artwork_base` spans
+/// `build_arith_tuple_index` sums, so the two indices cannot disagree about a card's own footprint.
+fn build_numeric_span_totals(idx: &NumericIndex, offsets: &[u32], artwork_base: &[u32]) -> NumericSpanTotals {
+    let mut values: Vec<i16> = Vec::new();
+    let mut per_value: Vec<SpaceTotals> = Vec::new();
+    for &(v, id) in idx {
+        if values.last() != Some(&v) {
+            values.push(v);
+            per_value.push(SpaceTotals::default());
+        }
+        let id = id as usize;
+        let t = per_value.last_mut().expect("pushed on the branch above");
+        t.printings += offsets[id + 1] - offsets[id];
+        t.artworks += artwork_base[id + 1] - artwork_base[id];
+        t.cards += 1;
+    }
+    let mut prefix: Vec<SpaceTotals> = Vec::with_capacity(per_value.len() + 1);
+    let mut running = SpaceTotals::default();
+    prefix.push(running);
+    for t in &per_value {
+        running.printings += t.printings;
+        running.cards += t.cards;
+        running.artworks += t.artworks;
+        prefix.push(running);
+    }
+    NumericSpanTotals { values, prefix }
+}
+
 fn flip_op(op: CmpOp) -> CmpOp {
     match op {
         CmpOp::Lt => CmpOp::Gt,
@@ -1595,13 +1662,16 @@ struct ArithTupleKey {
 }
 
 /// Joint (cmc,power,toughness,loyalty) postings. `keys[t]` is combination `t`'s field
-/// values (for query-time re-evaluation) and `postings[t]` its sorted card ids; the two
-/// are parallel. `n_cards` gates applicability (0 = unbuilt, e.g. a test fixture store),
-/// like every other index's domain check.
+/// values (for query-time re-evaluation), `postings[t]` its sorted card ids, and `totals[t]`
+/// (Round 51) that same key's own exact `SpaceTotals` -- printings/cards/artworks summed once at
+/// build time from `postings[t]`, so a query-time scan reads a precomputed triple instead of a
+/// card count that then has to be scaled. All three are parallel. `n_cards` gates applicability
+/// (0 = unbuilt, e.g. a test fixture store), like every other index's domain check.
 #[derive(Archive, Serialize, Deserialize, Default)]
 struct ArithTupleIndex {
     keys: Vec<ArithTupleKey>,
     postings: Vec<Vec<u32>>,
+    totals: Vec<SpaceTotals>,
     n_cards: u32,
 }
 
@@ -1640,7 +1710,14 @@ fn arith_tuple_key_budget(n_cards: usize) -> usize {
 /// precisely because it would blow this up to ~card-count distinct values (#743), and the
 /// `debug_assert` below is what makes that a test failure rather than a silent regression
 /// to a per-card scan with extra indirection.
-fn build_arith_tuple_index(cards: &[OracleCard]) -> ArithTupleIndex {
+///
+/// `offsets`/`artwork_base` (the same CSR boundary tables every other builder in this file
+/// reads, e.g. `build_bit_planes`) let this pass also sum each key's own exact printing/artwork
+/// spans, once, right after that key's `postings` row is fully populated -- Round 51's fix for
+/// `arith_tuple_totals` otherwise having to scale a card count into printing space (and having no
+/// artwork source at all). Cost: one more `u32` add per (key, card) pair already being visited to
+/// build `postings`, i.e. still O(n_cards) total, paid once at load rather than per query.
+fn build_arith_tuple_index(cards: &[OracleCard], offsets: &[u32], artwork_base: &[u32]) -> ArithTupleIndex {
     let mut interner: HashMap<ArithTupleKey, usize> = HashMap::new();
     let mut keys: Vec<ArithTupleKey> = Vec::new();
     let mut postings: Vec<Vec<u32>> = Vec::new();
@@ -1666,7 +1743,22 @@ fn build_arith_tuple_index(cards: &[OracleCard]) -> ArithTupleIndex {
         cards.len(),
         arith_tuple_key_budget(cards.len()),
     );
-    ArithTupleIndex { keys, postings, n_cards: cards.len() as u32 }
+    // Same "sum spans for an explicit id list" shape `ArithIdProbe`'s own local `span_of` closure
+    // uses at query time -- computed once here, over each key's own postings, instead of on every
+    // query that reaches this index.
+    let totals: Vec<SpaceTotals> = postings
+        .iter()
+        .map(|ids| {
+            let (mut printings, mut artworks) = (0u32, 0u32);
+            for &id in ids {
+                let id = id as usize;
+                printings += offsets[id + 1] - offsets[id];
+                artworks += artwork_base[id + 1] - artwork_base[id];
+            }
+            SpaceTotals { printings, cards: ids.len() as u32, artworks }
+        })
+        .collect();
+    ArithTupleIndex { keys, postings, totals, n_cards: cards.len() as u32 }
 }
 
 /// Narrow a tuple-routed `NumericCmp` (`is_arith_tuple_route`) to a card-space candidate
@@ -1724,6 +1816,1440 @@ fn arith_tuple_narrow(filter: &FilterExpr, idx: &Archived<ArithTupleIndex>, n_ca
 // Lists are naturally sorted because rows are iterated in index order.
 
 type TagIndex = HashMap<String, Vec<u32>>;
+
+/// One O(n_printings) pass at load time, the same cost class as `set_codes`'s own build just above
+/// it (not a second full-corpus scan on top of an existing one — this and `set_codes` are built from
+/// two independent loops over `printings` today, each already O(n_printings) on its own). See
+/// `SetCollectorRange`'s own doc for what this feeds and why.
+fn build_set_collector_ranges<T>(printings: &[T], set_code: impl Fn(&T) -> &str, collector_number_int: impl Fn(&T) -> Option<u32>) -> HashMap<String, SetCollectorRange> {
+    let mut ranges: HashMap<String, SetCollectorRange> = HashMap::new();
+    for p in printings {
+        let code = set_code(p);
+        if code.is_empty() {
+            continue;
+        }
+        let Some(cn) = collector_number_int(p) else { continue };
+        ranges
+            .entry(code.to_string())
+            .and_modify(|r| {
+                r.min = r.min.min(cn);
+                r.max = r.max.max(cn);
+                r.count += 1;
+            })
+            .or_insert(SetCollectorRange { min: cn, max: cn, count: 1 });
+    }
+    ranges
+}
+
+/// Round 34 (docs/issues/local-engine-gathered-scan-card-printing-varying-depth.md): `set:X`/`c:X`/
+/// `id:X` And'd with a subtype leaf (`t:Y`, `CollectionCmp{Subtypes, Ge}`) has the SAME gap Round 33
+/// closed for `set:X`+`cn`-range — `t:` has no `compile_plane` arm (unlike the main card TYPES,
+/// `TypeCmp`, which already has a whole-tree `compile_plane` fast path) and isn't in any pair table,
+/// so `compose_printing_estimate`'s `And` arm's plain min-fold picks whichever leaf's own CORPUS-WIDE
+/// count is smaller, real ratios of 6-60x median and up to 1,500x+ worst case.
+///
+/// **Cells are `SpaceTotals` (card/printing/artwork together), not a flat card-space number** —
+/// mirroring `PairTotals`'s own pattern for exactly this kind of dense-pair-value table, and
+/// deliberately NOT the flat-number design an earlier draft of this round shipped with. A flat
+/// card-space count would have to be converted into printing space to reach
+/// `compose_printing_estimate`'s `result` — and a query running under `unique=card`/`artwork` reads a
+/// DIFFERENT, separately-computed feature (`acquire_plan_features`'s `est_cards`/`exact_total`, fed by
+/// `exact_result_total`), which does not consult `result` at all. A flat card number would therefore
+/// have been silently invisible to card/artwork mode entirely (the exact card/printing/artwork total
+/// this round can cheaply have in hand would still fall back to `calibrated_balls_into_bins`'s lossy
+/// estimate one layer down) — precisely the card-mode-calibrated-value-used-in-printing/artwork-mode
+/// class of bug this doc's Round 28 already found once. Storing the exact triple and reading `.get
+/// (mode)` (see `exact_result_total`'s own new arm) answers every mode directly, with no
+/// space-conversion step at all.
+///
+/// One exact top-256 table per dimension is not affordable the way `ValueTotals`/`PairTotals` are:
+/// unlike border/rarity/frame/legality (a handful of values each), a dimension crossed with ~300
+/// subtypes is thousands of pairs, almost all near zero. `top` stores only the 256 most extreme real
+/// pairs (ranked by CARD count, the `.cards` field — matching the population `rest_max` is defined
+/// over); `rest_max` is the largest real CARD count among every pair EXCLUDED from `top`, a guaranteed
+/// cap for the compose And arm's independence-product ESTIMATE (not exact, so it stays card-space and
+/// gets scaled into `result`'s printing space the same way Round 33's arith-tuple merge/the legality
+/// arm already do — see the And arm's own tightening-step doc). See `build_subtype_pair_tables` for
+/// how `top`/`rest_max` are built.
+#[derive(Archive, Serialize, Deserialize, Default)]
+struct SetSubtypeTable {
+    /// Top 256 (set_code, subtype) exact `SpaceTotals`. Nested (`HashMap<String, HashMap<String, _>>`)
+    /// rather than `HashMap<(String, String), _>` so a query-time lookup is two `Borrow<str>` `.get()`s
+    /// and no tuple allocation.
+    top: HashMap<String, HashMap<String, SpaceTotals>>,
+    /// Round 64: the largest real (set_code, subtype) count among every pair EXCLUDED from `top`, as a
+    /// per-space TRIPLE rather than the single CARD scalar this used to hold. See
+    /// `top_n_union_and_rest_max` for how it is computed and `SubtypePairEstimate` for why the printing
+    /// column is what the consumer wants.
+    rest_max: SpaceTotals,
+    /// Distinct-card count per set — the one marginal `set:X` needs that nothing else already derives
+    /// per-card (`set_codes`/`set_collector_ranges` are both PRINTING-indexed the other way; `c:X`/
+    /// `id:X` get theirs for free from `ComposeEstimate.result.card` instead, so they need no
+    /// equivalent map here).
+    set_cards: HashMap<String, u32>,
+    /// Round 45: distinct-artwork count per set, the sibling `set_cards` never carried. Built from the
+    /// SAME `set_totals` pass as `set_cards` (see `build_subtype_pair_tables`) — this is not a second
+    /// aggregation, just the `.artworks` field of a `SpaceTotals` `set_cards` was already discarding.
+    /// Lets a bare `set:X` leaf's own solo `ComposeEstimate` report a real `Some(artwork)` instead of
+    /// `None` (see `ComposeEstimate::leaf`'s doc for what that costs downstream — the Round 41 And-arm
+    /// card/artwork floor can only use a leaf's own count when the leaf's estimate actually carries
+    /// one).
+    set_artworks: HashMap<String, u32>,
+}
+
+/// `SetSubtypeTable`'s sibling for `c:X`/`id:X` (one instance each, in `SubtypePairIndexes`) — see
+/// `SetSubtypeTable`'s own doc for the shared reasoning. Keyed by the raw `colors`/`color_identity`
+/// bitmask (<=32 distinct real values, WUBRG) rather than a string, and CUMULATIVE over the real
+/// bare-colon default op for that field: `colors` cumulates GE (superset, matching `color_cmp_matches
+/// (Ge, ...)`, the same semantics `op_to_color_cmp` gives a bare `c:` — see `build_subtype_pair_tables`
+/// for the verified real-data check). **`color_identity` cumulates LE (subset), not Ge** — a bare
+/// `id:` resolves to `CmpOp::Le` at the FilterExpr level despite `op_to_color_cmp` mapping every other
+/// bare-colon color field to `Ge`; confirmed directly against a live query (`id:g t:elf` produced
+/// `op=Le` reaching this match, not `Ge`) while investigating why this round's colors branch measurably
+/// changed real query estimates and its identity branch silently did not — a real, previously-unnoticed
+/// asymmetry between the two color fields' default operator, not a bug this round introduces. Each
+/// entry is already summed over every raw mask a query naming this mask would actually match (real
+/// `color_cmp_matches` semantics, baked in once at build time), so the And arm's lookup is one `.get()`
+/// with no runtime re-summation. Scoped to that one default op per field: any OTHER explicit operator
+/// (`c=`, `c<=`, `id>=`, `id=`, ...) doesn't match the And arm's shape guard at all and falls through to
+/// the pre-existing fold unchanged, the same as any other shape this tightening declines.
+#[derive(Archive, Serialize, Deserialize, Default)]
+struct ColorSubtypeTable {
+    top: HashMap<u8, HashMap<String, SpaceTotals>>,
+    /// Round 64: a per-space TRIPLE, as on `SetSubtypeTable` — see its own `rest_max` doc.
+    rest_max: SpaceTotals,
+}
+
+/// The three Round 34 tables `compose_printing_estimate`'s `And` arm (and `exact_result_total`) read.
+/// One field on `CardIndexes` rather than three, purely for call-site brevity
+/// (`indexes.subtype_pairs.set`/`.colors`/`.identity`).
+#[derive(Archive, Serialize, Deserialize, Default)]
+struct SubtypePairIndexes {
+    set: SetSubtypeTable,
+    colors: ColorSubtypeTable,
+    identity: ColorSubtypeTable,
+}
+
+/// Round 55: `(subtype, subtype)` top-N table -- closes `same_family:type+type_realistic`'s 0%
+/// mechanism coverage (`t:cleric t:spirit` fell to a plain per-leaf min-fold, 628 vs true 19, 33x over
+/// -- `SubtypePairIndexes` above only ever pairs a subtype against `set:X`/`c:X`/`id:X`, never against
+/// ANOTHER subtype). A NEW, separate mechanism alongside `SubtypePairIndexes`. Round 55 shipped this
+/// table's triple-`rest_max`/union-of-3-spaces cutoff here ONLY, deliberately leaving
+/// `SetSubtypeTable`/`ColorSubtypeTable` on the older card-space-then-scaled-by-a-global-ratio
+/// behavior; **Round 64 backported both ideas to those three and deleted the card-space-only cutoff
+/// helper**, so there is now one cutoff convention and one `rest_max` shape across every pair table.
+///
+/// `top` is keyed with `subtype_a < subtype_b` lexicographically -- the PAIR's own canonical order, not
+/// two syntactically different leaf shapes the way `SubtypePairIndexes`' dim/subtype pairing needs (a
+/// `set:X` leaf can never be mistaken for a `t:Y` leaf, so THAT lookup tries both `(dim, sub)` and
+/// `(sub, dim)`): here both sides are the SAME leaf shape (`subtype_pair_leaf`), so sorting once at
+/// build time AND once at query time means a lookup never has to try both orders.
+///
+/// `rest_max` is a real `SpaceTotals` TRIPLE, not one card-space scalar scaled by a global reprint
+/// ratio (`SetSubtypeTable`'s existing pattern) -- see `top_n_union_and_rest_max`'s own doc for why:
+/// validated directly against the real corpus, printing-space-native independence+cap beats
+/// card-space-then-x3.083-ratio at every percentile on the same N=256 excluded population (median
+/// 0.42x vs 0.64x, max 21x vs 24.67x).
+#[derive(Archive, Serialize, Deserialize, Default)]
+struct SubtypePairTable {
+    /// Top (union of per-space top-256) `(subtype_a, subtype_b)` exact `SpaceTotals`, `subtype_a <
+    /// subtype_b`. Nested (not `HashMap<(String, String), _>`) for the same `Borrow<str>`-two-`.get()`s
+    /// reason `SetSubtypeTable::top` already is.
+    top: HashMap<String, HashMap<String, SpaceTotals>>,
+    /// The max real count among every pair EXCLUDED from `top`, PER SPACE independently -- see
+    /// `top_n_union_and_rest_max`'s own doc.
+    rest_max: SpaceTotals,
+}
+
+/// How far below the routing boundary an EXCLUDED pair's printing count is forced to stay, as a
+/// divisor of `STREAM_MIN_MATCHES` (Round 65).
+///
+/// 2 means "every excluded pair is at most half the boundary", i.e. a guaranteed 2x margin. Derived
+/// from the live boundary rather than hardcoded at 512 so the invariant tracks the knob: raising
+/// `STREAM_MIN_MATCHES` must not silently shrink the margin, and lowering it must not silently void
+/// it. See `pair_inclusion_floor`.
+const PAIR_INCLUSION_FLOOR_DIVISOR: usize = 2;
+
+/// The printing count at or above which a pair is ALWAYS kept in a top-N table, regardless of rank.
+///
+/// This is what makes "the fallback estimate cannot flip a routing decision" a proven invariant
+/// rather than an observation about one corpus. `SubtypePairEstimate` reports
+/// `min(independence_product, rest_max.printings)`, so an excluded pair's estimate can never exceed
+/// `rest_max.printings`; forcing every pair at or above this floor INTO the table forces
+/// `rest_max.printings` below it, hence below `STREAM_MIN_MATCHES` with the divisor's margin. And
+/// because `printings >= cards` and `printings >= artworks` for any pair, bounding the printing column
+/// bounds the other two for free — the same safety holds in card and artwork space without a separate
+/// rule.
+///
+/// Round 65 measured why this was needed: the `identity` table's `rest_max.printings` was **1,060**
+/// against a boundary of 1,024, so the CAP ITSELF sat on the wrong side, and all 9 of that
+/// dimension's routing-relevant misses read the cap exactly (`id:ubr t:Elf` estimated 1,060 against a
+/// true 164). The build code had asserted the opposite since Round 34 — "each dimension's `rest_max`
+/// at this N lands far below the count where a wrong estimate starts actually flipping a routing
+/// decision" — which was verified in CARD space (identity's card `rest_max` is 377, genuinely far
+/// below) while the boundary it invokes applies to the space the estimate is compared in. A
+/// space-mismatched safety argument, sitting in the comment that claimed the argument held.
+fn pair_inclusion_floor() -> u32 {
+    (*STREAM_MIN_MATCHES / PAIR_INCLUSION_FLOOR_DIVISOR) as u32
+}
+
+/// The ONE cutoff helper for every top-N pair table: keeps the union of the tie-inclusive top-N in
+/// EACH of the three spaces independently PLUS every pair at or above `pair_inclusion_floor`, and
+/// returns `rest_max` as a per-space `SpaceTotals` over the pairs actually excluded. Used by
+/// `build_subtype_pair2_table` and, since Round 64, by all three `build_subtype_pair_tables` dimension
+/// tables (`set`/`colors`/`identity`) too.
+///
+/// **The floor is a separate rule from the rank cutoff, and it is the one that carries the safety
+/// guarantee** (Round 65). Rank keeps the table useful — the pairs queries actually ask about — while
+/// the floor keeps it SOUND, by making the excluded population's maximum a known quantity instead of
+/// whatever the N-th largest pair happens to be on today's corpus. Measured cost on the real corpus:
+/// **+325 pairs**, all in `identity` (286 -> 611). It adds nothing to `set` (whose largest pair is 503
+/// printings, so no set pair reaches the floor at all) or to `colors` (whose 48 qualifying pairs are
+/// already inside the rank cutoff), which is the shape to expect — the floor only bites where a
+/// dimension genuinely has pairs big enough to matter.
+///
+/// **Round 47's tie rule, which this inherits and which is the reason the sort can be unstable.**
+/// The original helper was a plain `sort_unstable_by_key` + `truncate(n)` with no secondary sort key.
+/// `HashMap`'s iteration order depends on a randomly seeded per-process hasher, so a pair tied with
+/// the boundary value could land inside or outside the top-`n` depending on which process built the
+/// table -- a real, confirmed nondeterminism bug (the same query hit `SubtypePairIndexes` on some runs
+/// and fell back to `SubtypePairEstimate` on others, with no code change between runs).
+///
+/// The fix is deliberately "include every tie," not "pick a deterministic winner among ties": a
+/// deterministic tiebreak (e.g. sorting on `(Reverse(cards), key)`) would make the outcome
+/// reproducible, but membership would still hinge on an arbitrary property (the tiebreak key) that has
+/// nothing to do with the data. Under "count >= threshold," a pair's membership only ever changes when
+/// THAT PAIR'S OWN count crosses the threshold -- incrementing one unrelated pair's count (e.g. one
+/// new printing) can never flip a different pair's membership, which a fixed-size
+/// "top-N-then-tiebreak" order can (nudging one value can reshuffle the whole order enough to evict
+/// something that never changed). Because every tie is kept, order among tied items never matters, so
+/// the unstable sort (no secondary key, no `Ord`/`Clone` bound on `K`) is correct here, not just
+/// tolerated. `top_n_union_and_rest_max_*` in the test module guards this property directly.
+///
+/// **Round 64 retired the card-space-only sibling** (`top_n_and_rest_max`), which ranked by `.cards`
+/// alone and returned one `u32`. It had been kept deliberately for the three dimension tables; once
+/// they moved here it had no callers, and keeping two cutoff conventions was itself a hazard — the
+/// three older tables silently dropped pairs that are large in printings but small in cards, because
+/// their sort key never looked at printings.
+///
+/// Generalizing from one space to three was validated against the real corpus before Round 55 was
+/// scoped: at N=256, `Island` x `Swamp` (card=10, printing=107) sits outside the top-64-by-CARD cutoff
+/// but deep inside the top-64-by-PRINTING one. On the real corpus the union adds 37 printing-only + 21
+/// artwork-only pairs on top of 258 card-ranked ones (258 -> 302, +17%).
+///
+/// `rest_max` is computed as one pass over the pairs NOT in the union (not derived from the three
+/// per-space boundaries individually) -- union membership is not any single space's own top-N, so only
+/// a real pass over the actual excluded set gives the true per-space max over it.
+fn top_n_union_and_rest_max<K: Eq + std::hash::Hash>(pairs: HashMap<K, SpaceTotals>, n: usize) -> (Vec<(K, SpaceTotals)>, SpaceTotals) {
+    let items: Vec<(K, SpaceTotals)> = pairs.into_iter().collect();
+
+    // Tie-inclusive top-N index set for ONE space -- Round 47's "include every tie" boundary rule (see
+    // this function's own doc), applied to an arbitrary field rather than hardcoding `.cards`. Called
+    // once per space; the caller unions the three results.
+    fn top_n_indices(values: &[u32], n: usize) -> HashSet<usize> {
+        let mut order: Vec<usize> = (0..values.len()).collect();
+        order.sort_unstable_by_key(|&i| std::cmp::Reverse(values[i]));
+        let Some(&boundary_idx) = order.get(n.saturating_sub(1)) else {
+            // Fewer than `n` items total: everything qualifies, nothing is excluded.
+            return (0..values.len()).collect();
+        };
+        let boundary = values[boundary_idx];
+        // `order` is already sorted descending, so every index whose value is >= boundary is a
+        // contiguous prefix -- `take_while` is correct here, not just convenient.
+        order.into_iter().take_while(|&i| values[i] >= boundary).collect()
+    }
+
+    let printings: Vec<u32> = items.iter().map(|(_, t)| t.printings).collect();
+    let cards: Vec<u32> = items.iter().map(|(_, t)| t.cards).collect();
+    let artworks: Vec<u32> = items.iter().map(|(_, t)| t.artworks).collect();
+    let mut union: HashSet<usize> = top_n_indices(&printings, n);
+    union.extend(top_n_indices(&cards, n));
+    union.extend(top_n_indices(&artworks, n));
+    // Round 65: the inclusion floor, applied on top of the rank cutoff rather than instead of it --
+    // see this function's own doc for why the two rules are separate.
+    let floor = pair_inclusion_floor();
+    union.extend(items.iter().enumerate().filter(|(_, (_, t))| t.printings >= floor).map(|(i, _)| i));
+
+    let mut rest_max = SpaceTotals::default();
+    for (i, (_, t)) in items.iter().enumerate() {
+        if !union.contains(&i) {
+            rest_max.printings = rest_max.printings.max(t.printings);
+            rest_max.cards = rest_max.cards.max(t.cards);
+            rest_max.artworks = rest_max.artworks.max(t.artworks);
+        }
+    }
+
+    // Round 65: the invariant the floor exists to buy, asserted where it is established rather than
+    // trusted downstream. Every excluded pair has `printings < floor` by construction, so this can
+    // only fire if the floor stopped being applied -- which is exactly the drift that let the Round 34
+    // safety claim go stale for `identity` (see `pair_inclusion_floor`'s doc). `rest_max` is 0 when
+    // nothing was excluded, which satisfies this trivially.
+    debug_assert!(
+        rest_max.printings < floor,
+        "excluded pairs must stay below the inclusion floor: rest_max.printings={} floor={floor} (STREAM_MIN_MATCHES={})",
+        rest_max.printings,
+        *STREAM_MIN_MATCHES
+    );
+    let top: Vec<(K, SpaceTotals)> = items.into_iter().enumerate().filter(|(i, _)| union.contains(i)).map(|(_, kv)| kv).collect();
+    (top, rest_max)
+}
+
+/// Round 55: builds `SubtypePairTable` -- the direct analog of `set_subtype_totals` inside
+/// `build_subtype_pair_tables` below, crossing a card's own subtypes with EACH OTHER instead of with an
+/// external dimension. One `build_value_totals` pass whose `keys_of` closure dedups + sorts each card's
+/// own subtype names once, then emits every unordered pair `(names[i], names[j])` for `i < j` -- so
+/// `top`'s own key order (`subtype_a < subtype_b`) falls out of the SAME sort, no separate
+/// canonicalization step needed at lookup time.
+fn build_subtype_pair2_table(
+    cards: &[OracleCard],
+    printings: &[Printing],
+    printing_to_card: &[u32],
+    coll_vocab: &[String],
+    max_artwork_groups: usize,
+) -> SubtypePairTable {
+    // Same N=256 cutoff as `build_subtype_pair_tables`'s own `TOP_N` -- validated separately for this
+    // table (docs/issues/local-engine-nway-followup-queue.md, active queue item #1): the excluded
+    // population's `rest_max` is already far below where a wrong estimate could flip a routing
+    // decision at this N, and N is not sized by the `StreamedSelect`/`GatheredScan` transition either
+    // (only 2 of 2,221 distinct pairs clear `PAIR_MIN_PRINTINGS` in any space).
+    const TOP_N: usize = 256;
+
+    let pair_totals: HashMap<(String, String), SpaceTotals> = build_value_totals(cards, printings, printing_to_card, max_artwork_groups, |card, _p| {
+        let mut names: Vec<&str> = card.card_subtypes.iter().map(|id| coll_vocab[usize::from(*id)].as_str()).collect();
+        names.sort_unstable();
+        names.dedup();
+        let mut out = Vec::new();
+        for i in 0..names.len() {
+            for j in (i + 1)..names.len() {
+                out.push((names[i].to_string(), names[j].to_string()));
+            }
+        }
+        out
+    });
+
+    let (top_items, rest_max) = top_n_union_and_rest_max(pair_totals, TOP_N);
+    let mut top: HashMap<String, HashMap<String, SpaceTotals>> = HashMap::new();
+    for ((a, b), totals) in top_items {
+        top.entry(a).or_default().insert(b, totals);
+    }
+    SubtypePairTable { top, rest_max }
+}
+
+/// Builds the three Round 34 tables (`SubtypePairIndexes`) -- see `SetSubtypeTable`/`ColorSubtypeTable`'s
+/// own docs for what they hold and why. Reuses `build_value_totals` (the SAME exact card/printing/
+/// artwork dedup logic `ValueTotals`/`PairTotals` are already built with) for the raw per-pair totals,
+/// rather than a hand-rolled accumulator that would have to re-derive that dedup itself.
+fn build_subtype_pair_tables(
+    cards: &[OracleCard],
+    printings: &[Printing],
+    printing_to_card: &[u32],
+    coll_vocab: &[String],
+    max_artwork_groups: usize,
+) -> SubtypePairIndexes {
+    // The top-256 cutoff, uniform across all three dimensions (verified against the real corpus,
+    // docs/issues/local-engine-gathered-scan-card-printing-varying-depth.md, Round 34): each
+    // dimension's `rest_max` at this N lands far below the count where a wrong estimate starts
+    // actually flipping a routing decision, so the fallback's whole operating range stays nowhere
+    // near that risk zone.
+    //
+    // Round 47: `TOP_N` is a target size, not a hard cap -- `top_n_union_and_rest_max` extends the
+    // cutoff to include every pair tied with the boundary count, so membership is
+    // the well-defined predicate "count >= threshold" rather than "first N in some arbitrary order
+    // among ties." See that function's own doc for why (a real, previously-confirmed nondeterminism
+    // bug: `HashMap`'s randomly-seeded per-process hasher meant a boundary tie could land inside or
+    // outside the table depending on which process built it, since the old code had no tiebreak).
+    const TOP_N: usize = 256;
+
+    // Per-(set_code, subtype) exact totals, one `build_value_totals` pass: `keys_of` returns, for a
+    // printing in a non-empty set, one key per subtype the printing's CARD has (subtypes are card-
+    // level, sets are printing-level, so distinct pairs come from crossing this one printing's set
+    // against every one of its card's subtypes).
+    let set_subtype_totals: HashMap<(String, String), SpaceTotals> = build_value_totals(cards, printings, printing_to_card, max_artwork_groups, |card, p| {
+        if p.card_set_code.as_str().is_empty() {
+            return Vec::new();
+        }
+        card.card_subtypes.iter().map(|id| (p.card_set_code.as_str().to_string(), coll_vocab[usize::from(*id)].clone())).collect()
+    });
+    // Distinct-card (etc.) totals per set alone -- the one marginal `set:X` needs that nothing else
+    // already derives per-card. Same pass shape, one key (the set itself) instead of a cross with
+    // subtypes.
+    let set_totals: HashMap<String, SpaceTotals> = build_value_totals(cards, printings, printing_to_card, max_artwork_groups, |_card, p| {
+        if p.card_set_code.as_str().is_empty() { Vec::new() } else { vec![p.card_set_code.as_str().to_string()] }
+    });
+    // One pass over `set_totals` (not two, and no clone of the map itself) extracting both `.cards`
+    // and `.artworks` -- `.printings` isn't kept here since printing space already has an exact answer
+    // elsewhere (`set_codes`'s own postings length).
+    let mut set_cards: HashMap<String, u32> = HashMap::with_capacity(set_totals.len());
+    let mut set_artworks: HashMap<String, u32> = HashMap::with_capacity(set_totals.len());
+    for (k, t) in set_totals {
+        set_artworks.insert(k.clone(), t.artworks);
+        set_cards.insert(k, t.cards);
+    }
+
+    // Per-(raw colors/color_identity mask, subtype) exact totals -- colors/identity are single-valued
+    // per card, so this is a plain cross of the card's one mask against every one of its subtypes, no
+    // set-style "only if non-empty" guard needed.
+    let colors_raw: HashMap<(u8, String), SpaceTotals> = build_value_totals(cards, printings, printing_to_card, max_artwork_groups, |card, _p| {
+        card.card_subtypes.iter().map(|id| (card.card_colors, coll_vocab[usize::from(*id)].clone())).collect()
+    });
+    let identity_raw: HashMap<(u8, String), SpaceTotals> = build_value_totals(cards, printings, printing_to_card, max_artwork_groups, |card, _p| {
+        card.card_subtypes.iter().map(|id| (card.card_color_identity, coll_vocab[usize::from(*id)].clone())).collect()
+    });
+
+    // Cumulative sum over every raw mask a query naming `query_mask` would actually match, via the
+    // SAME real matcher `ColorCmp` itself uses (`color_cmp_matches`) -- so this can't drift from what a
+    // query would actually match. A card has exactly one raw mask, so summing disjoint raw cells'
+    // `SpaceTotals` together double-counts nothing. O(32 * distinct raw masks), trivial at load time.
+    fn cumulative_sum(raw: &HashMap<(u8, String), SpaceTotals>, op: CmpOp) -> HashMap<(u8, String), SpaceTotals> {
+        let mut out: HashMap<(u8, String), SpaceTotals> = HashMap::new();
+        for query_mask in 0u8..32 {
+            for ((raw_mask, subtype), totals) in raw {
+                if color_cmp_matches(op, query_mask, *raw_mask) {
+                    let entry = out.entry((query_mask, subtype.clone())).or_default();
+                    entry.printings += totals.printings;
+                    entry.cards += totals.cards;
+                    entry.artworks += totals.artworks;
+                }
+            }
+        }
+        out
+    }
+    // `colors` cumulates GE (a bare `c:` is `CmpOp::Ge`); `color_identity` cumulates LE (a bare `id:`
+    // is `CmpOp::Le`, verified directly -- see `ColorSubtypeTable`'s own doc).
+    let colors_pair = cumulative_sum(&colors_raw, CmpOp::Ge);
+    let identity_pair = cumulative_sum(&identity_raw, CmpOp::Le);
+
+    // Top-N globally (not per outer key) as the UNION of the tie-inclusive top-N in each of the three
+    // spaces -- see `top_n_union_and_rest_max`'s own doc (module scope, above this function) for the
+    // full nondeterminism story, why "include every tie" was chosen, and why ranking by `.cards` alone
+    // (what these three did before Round 64) drops pairs that are large in a space its sort key never
+    // looked at.
+    fn nest_set(items: Vec<((String, String), SpaceTotals)>) -> HashMap<String, HashMap<String, SpaceTotals>> {
+        let mut out: HashMap<String, HashMap<String, SpaceTotals>> = HashMap::new();
+        for ((set_code, subtype), totals) in items {
+            out.entry(set_code).or_default().insert(subtype, totals);
+        }
+        out
+    }
+    fn nest_color(items: Vec<((u8, String), SpaceTotals)>) -> HashMap<u8, HashMap<String, SpaceTotals>> {
+        let mut out: HashMap<u8, HashMap<String, SpaceTotals>> = HashMap::new();
+        for ((mask, subtype), totals) in items {
+            out.entry(mask).or_default().insert(subtype, totals);
+        }
+        out
+    }
+
+    // Round 64: all three now use Round 55's union-of-3-spaces cutoff, which is what retires
+    // `top_n_and_rest_max` entirely (it had no other caller). Two changes in one helper swap: the kept
+    // set is the union of the tie-inclusive top-N in EACH space rather than the top-N by `.cards`
+    // alone, so a pair that is large in printings but small in cards is no longer silently dropped by
+    // a sort key that never looks at printings; and `rest_max` becomes a real per-space triple over
+    // the actual excluded set instead of one card scalar the consumer had to scale.
+    let (set_top, set_rest_max) = top_n_union_and_rest_max(set_subtype_totals, TOP_N);
+    let (colors_top, colors_rest_max) = top_n_union_and_rest_max(colors_pair, TOP_N);
+    let (identity_top, identity_rest_max) = top_n_union_and_rest_max(identity_pair, TOP_N);
+    SubtypePairIndexes {
+        set: SetSubtypeTable { top: nest_set(set_top), rest_max: set_rest_max, set_cards, set_artworks },
+        colors: ColorSubtypeTable { top: nest_color(colors_top), rest_max: colors_rest_max },
+        identity: ColorSubtypeTable { top: nest_color(identity_top), rest_max: identity_rest_max },
+    }
+}
+
+/// Round 34: whichever of `set:X`/`c:X`/`id:X` a strict 2-leaf `And`'s OTHER child is (its real
+/// bare-colon default op only -- `Ge` for `set:`/`c:`, `Le` for `id:`, see `ColorSubtypeTable`'s own
+/// doc for why `id:` differs), paired with a subtype leaf (`t:Y`). Shared by `compose_printing_estimate`
+/// (which additionally needs the fallback below on a table MISS) and `exact_result_total` (which does
+/// not -- a miss there just means "no answer", the same convention every other arm in that function
+/// already follows).
+enum SubtypePairDim<'f> {
+    Set(&'f str),
+    Colors(u8),
+    Identity(u8),
+}
+fn subtype_pair_dim(f: &FilterExpr) -> Option<SubtypePairDim<'_>> {
+    match f {
+        FilterExpr::TextExact { field: TextField::SetCode, op: CmpOp::Eq, value } => Some(SubtypePairDim::Set(value.as_str())),
+        FilterExpr::ColorCmp { field: ColorField::Colors, op: CmpOp::Ge, mask } => Some(SubtypePairDim::Colors(*mask)),
+        FilterExpr::ColorCmp { field: ColorField::ColorIdentity, op: CmpOp::Le, mask } => Some(SubtypePairDim::Identity(*mask)),
+        _ => None,
+    }
+}
+fn subtype_pair_leaf(f: &FilterExpr) -> Option<&str> {
+    match f {
+        FilterExpr::CollectionCmp { field: CollField::Subtypes, op: CmpOp::Ge, value, .. } => Some(value.as_str()),
+        _ => None,
+    }
+}
+
+/// The EXACT `SpaceTotals` for one `(a, b)` pair of `FilterExpr`s where one is a `subtype_pair_dim`
+/// leaf and the other a `subtype_pair_leaf` leaf (either order), when the pair is one of the top 256
+/// most extreme real ones `build_subtype_pair_tables` kept. `None` on a miss or when the shape doesn't
+/// match at all -- the caller's own fallback (if it has one) applies. Round 42: takes the two leaves
+/// directly rather than a 2-element slice -- callers used to be required to hand this a strict 2-leaf
+/// `And`'s full child list; now `compose_printing_estimate`'s `And` arm calls this once per (dim,
+/// subtype) pair found anywhere in a residual of arbitrary size, not just when the whole `And` has
+/// exactly two children.
+fn subtype_pair_exact<'i>(a: &FilterExpr, b: &FilterExpr, indexes: &'i Archived<CardIndexes>) -> Option<&'i Archived<SpaceTotals>> {
+    fn try_pair<'i>(dim: &FilterExpr, sub: &FilterExpr, indexes: &'i Archived<CardIndexes>) -> Option<&'i Archived<SpaceTotals>> {
+        let subtype = subtype_pair_leaf(sub)?;
+        match subtype_pair_dim(dim)? {
+            SubtypePairDim::Set(set_name) => indexes.subtype_pairs.set.top.get(set_name)?.get(subtype),
+            SubtypePairDim::Colors(mask) => indexes.subtype_pairs.colors.top.get(&mask)?.get(subtype),
+            SubtypePairDim::Identity(mask) => indexes.subtype_pairs.identity.top.get(&mask)?.get(subtype),
+        }
+    }
+    try_pair(a, b, indexes).or_else(|| try_pair(b, a, indexes))
+}
+
+/// Round 55: the EXACT `SpaceTotals` for one unordered pair of subtype strings, when the pair (sorted
+/// into `top`'s own canonical `a < b` order -- see `SubtypePairTable`'s own doc for why this table
+/// never needs to try both orders the way `subtype_pair_exact` above does) is one of the
+/// top-256-union-of-3-spaces pairs `build_subtype_pair2_table` kept. `None` on a miss -- the caller's
+/// own capped-independence fallback applies.
+fn subtype_pair2_exact<'i>(a: &str, b: &str, indexes: &'i Archived<CardIndexes>) -> Option<&'i Archived<SpaceTotals>> {
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    indexes.subtype_subtype.top.get(lo)?.get(hi)
+}
+
+// ─── Round 44: (colors|identity) x cmc exact joint ────────────────────────────
+// docs/issues/local-engine-gathered-scan-card-printing-varying-depth.md, Round 43/44. Round 43 found
+// that `color:G cmc<=3 usd<=10`-shaped queries fire TWO independence candidates at once (`ColorId` x
+// `Price` and `Cmc` x `Price`, both individually registered safe) whose `.min()`-fold is measurably
+// worse than either component's own baseline -- a composition neither pair's own 2-leaf calibration
+// ever measured. `ColorId`/`ColorIdentity` x `Cmc` itself is NOT in the independence registry (color
+// count correlates with cmc in a real, mostly-monotonic way -- more colored mana symbols needed as a
+// card asks for more colors, plus WotC's own color-pie curve conventions), so the fix is not to
+// decline the star combination but to give `color`/`identity` x `cmc` a real EXACT table: once it's a
+// genuine 2-leaf exact joint, it `.min()`-folds alongside the two independence candidates (Round 42's
+// own finding: any true sub-conjunction is a valid bound, `.min()`-folding across mechanisms is
+// always safe regardless of order) and, being both exact and tight, wins the fold in the cases that
+// were bad.
+//
+// Deliberately RAW per-exact-mask buckets (<=32 rows on the real corpus, one per real `colors`/
+// `color_identity` byte), NOT `ColorSubtypeTable`'s Ge/Le lattice pre-summing (baking "sum over every
+// matching mask" into each of 32 entries at BUILD time) -- that pattern is what surfaced
+// `ColorSubtypeTable`'s own real Ge-vs-Le bug (see that struct's doc), and at this table's size (32
+// masks x ~17 cmc values, 544 cells) there is no size-driven reason to risk it again. Each mask's own
+// CMC axis IS prefix-summed, mirroring `RangeCardCounts` (`distinct_cards`, its `below`/`at_or_above`
+// shape) -- that axis has no directional ambiguity (below/at-or-above over an ordered numeric
+// dimension is unambiguous, unlike Ge/Le over a mask lattice), so reusing that idiom is safe. Query
+// time resolves ANY real comparison op directly against the raw masks via `color_cmp_matches` (the
+// SAME matcher `ColorCmp`'s own per-card evaluator uses), which is actually MORE general than
+// `ColorSubtypeTable`/`subtype_pair_dim`'s restriction to one hard-coded default op per field (`Ge`
+// for colors, `Le` for identity) -- raw storage needs no build-time op scoping at all.
+//
+// Two separate tables (`colors`/`identity`), not one shared table, even though the two fields'
+// underlying DATA is highly redundant (94.1% of distinct real cards have `colors == identity`) --
+// `colors` and `color_identity` have a real, previously-documented asymmetry in which raw masks a
+// given query mask matches (`colors` defaults to `Ge`/superset, `color_identity` to `Le`/subset --
+// see `ColorSubtypeTable`'s own doc), and both `ColorId` x `Price` and `ColorIdentity` x `Price` are
+// independently registered and independently degraded by the star shape, so both need their own exact
+// answer. Built from one shared per-card scan (colors, identity, and cmc are all in hand together).
+
+/// One mask's own cmc axis: `below[i]`/`at_or_above[i]` are SpaceTotals summed over `values[0..i)` /
+/// `values[i..]` respectively -- same shape as `RangeCardCounts`'s two arrays, but a plain additive
+/// running sum rather than a DISTINCT-card count: a card has exactly one cmc value (unlike a card's
+/// several printings, which can each carry a different price/date), so summing disjoint per-value
+/// totals across a range can never double-count, and (unlike `RangeCardCounts`) a general interior
+/// range can be answered exactly too, not just a single value or a fully one-sided range -- see
+/// `range_sum`'s own doc.
+#[derive(Archive, Serialize, Deserialize, Default)]
+struct MaskCmcCounts {
+    below: Vec<SpaceTotals>,
+    at_or_above: Vec<SpaceTotals>,
+}
+
+impl ArchivedMaskCmcCounts {
+    /// Exact `(printings, cards, artworks)` summed over every distinct cmc value in `values` that
+    /// falls in the half-open `[lo, hi)` range. Mirrors `ArchivedRangeCardCounts::lookup`'s own
+    /// branching (same `partition_point` positions, same `below`/`at_or_above` case split), but
+    /// generalizes its one declined shape: `RangeCardCounts` cannot answer a multi-value INTERIOR
+    /// range because distinct-card totals cannot be subtracted (a card with printings on both sides
+    /// of the cut is in both halves) -- here the totals ARE additive (see this struct's own doc), so
+    /// `at_or_above[i] - at_or_above[j]` (a sum over `[i, j)` of the value axis) answers that case
+    /// exactly instead of declining.
+    fn range_sum(&self, values: &Archived<Vec<u16>>, lo: u32, hi: u32) -> (usize, usize, usize) {
+        if values.is_empty() || hi <= lo {
+            return (0, 0, 0);
+        }
+        let pos = |v: u32| values.partition_point(|x| u32::from(u16::from(*x)) < v);
+        let (i, j) = (pos(lo), pos(hi));
+        if j <= i {
+            return (0, 0, 0); // no indexed cmc value falls in the range
+        }
+        let as_usize = |t: &ArchivedSpaceTotals| (u32::from(t.printings) as usize, u32::from(t.cards) as usize, u32::from(t.artworks) as usize);
+        let first = u32::from(u16::from(values[0]));
+        let last_covers_end = j == values.len();
+        match (lo <= first, last_covers_end) {
+            (true, true) => as_usize(&self.at_or_above[0]), // whole table
+            (true, false) => as_usize(&self.below[j]),      // `<` / `<=`
+            (false, true) => as_usize(&self.at_or_above[i]), // `>` / `>=`
+            (false, false) => {
+                let (p1, c1, a1) = as_usize(&self.at_or_above[i]);
+                let (p2, c2, a2) = as_usize(&self.at_or_above[j]);
+                (p1 - p2, c1 - c2, a1 - a2) // interior [i, j): additive, so subtraction is exact
+            }
+        }
+    }
+}
+
+/// `colors`/`color_identity` x cmc -- see this section's own doc for why RAW per-mask (not lattice-
+/// summed) and why the shared `values` axis is stored once per table rather than once per mask (every
+/// mask's `MaskCmcCounts` is parallel to the SAME `values`, so a query only needs to compute `pos(lo)`/
+/// `pos(hi)` once conceptually per table, not once per mask -- though `range_sum` above takes `values`
+/// as a parameter rather than this struct hoisting the position lookup itself, since the caller sums
+/// over several masks per query and only `values` -- not the positions -- is actually mask-invariant
+/// enough to hoist without complicating this struct's own shape).
+#[derive(Archive, Serialize, Deserialize, Default)]
+struct ColorCmcTable {
+    /// Every distinct real cmc value in the table, ascending. Parallel to each mask's own
+    /// `below`/`at_or_above` in `by_mask`.
+    values: Vec<u16>,
+    /// Keyed by the raw `colors`/`color_identity` byte -- <=32 real entries on the production corpus
+    /// (all of WUBRG's 2^5 combinations appear), so a full scan of `by_mask` per query (worst case ~32
+    /// entries x a `log2(17)`-ish binary search each) is cheap, and cheaper than `arith_tuple_totals`'s
+    /// own already-shipped ~564-key linear scan.
+    by_mask: HashMap<u8, MaskCmcCounts>,
+}
+
+/// `ColorCmcTable`'s sibling pair -- one field on `CardIndexes` for the same call-site-brevity reason
+/// `SubtypePairIndexes` is (`indexes.color_cmc.colors`/`.identity`).
+#[derive(Archive, Serialize, Deserialize, Default)]
+struct ColorCmcIndexes {
+    colors: ColorCmcTable,
+    identity: ColorCmcTable,
+}
+
+/// Builds `ColorCmcIndexes` from one shared per-card scan: `build_value_totals` reused exactly as
+/// `build_subtype_pair_tables`/`build_subtype_arith_tables` already reuse it (the SAME card/printing/
+/// artwork dedup `ValueTotals`/`PairTotals`/`SubtypePairIndexes`/`SubtypeArithIndexes` all share), not a
+/// hand-rolled accumulator. `card.cmc` is verified never null on a real card (see `SubtypeArithBox`'s
+/// own doc) -- a card with a null `cmc` (a test fixture, typically) simply contributes no key, which is
+/// an exact absence, not a wrong answer, for any range that doesn't happen to need it.
+fn build_color_cmc_tables(cards: &[OracleCard], printings: &[Printing], printing_to_card: &[u32], max_artwork_groups: usize) -> ColorCmcIndexes {
+    let colors_raw: HashMap<(u8, u16), SpaceTotals> = build_value_totals(cards, printings, printing_to_card, max_artwork_groups, |card, _p| {
+        card.cmc.map(|cmc| (card.card_colors, u16::from(cmc))).into_iter().collect()
+    });
+    let identity_raw: HashMap<(u8, u16), SpaceTotals> = build_value_totals(cards, printings, printing_to_card, max_artwork_groups, |card, _p| {
+        card.cmc.map(|cmc| (card.card_color_identity, u16::from(cmc))).into_iter().collect()
+    });
+    ColorCmcIndexes { colors: build_one_color_cmc_table(colors_raw), identity: build_one_color_cmc_table(identity_raw) }
+}
+
+fn build_one_color_cmc_table(raw: HashMap<(u8, u16), SpaceTotals>) -> ColorCmcTable {
+    let mut values: Vec<u16> = raw.keys().map(|(_, cmc)| *cmc).collect();
+    values.sort_unstable();
+    values.dedup();
+    let mut by_raw_mask: HashMap<u8, HashMap<u16, SpaceTotals>> = HashMap::new();
+    for ((mask, cmc), totals) in raw {
+        by_raw_mask.entry(mask).or_default().insert(cmc, totals);
+    }
+    let by_mask: HashMap<u8, MaskCmcCounts> = by_raw_mask.into_iter().map(|(mask, cells)| (mask, build_mask_cmc_counts(&values, &cells))).collect();
+    ColorCmcTable { values, by_mask }
+}
+
+/// One mask's `below`/`at_or_above`, built the same two-pass way `build_range_card_counts` builds its
+/// own forward/backward pair -- forward for `below[i]` (running sum strictly before `values[i]`),
+/// backward for `at_or_above[i]` (running sum from `values[i]` to the end).
+fn build_mask_cmc_counts(values: &[u16], cells: &HashMap<u16, SpaceTotals>) -> MaskCmcCounts {
+    let add = |a: SpaceTotals, b: SpaceTotals| SpaceTotals { printings: a.printings + b.printings, cards: a.cards + b.cards, artworks: a.artworks + b.artworks };
+    let mut below = Vec::with_capacity(values.len());
+    let mut running = SpaceTotals::default();
+    for v in values {
+        below.push(running);
+        if let Some(t) = cells.get(v) {
+            running = add(running, *t);
+        }
+    }
+    let mut at_or_above = vec![SpaceTotals::default(); values.len()];
+    let mut running = SpaceTotals::default();
+    for i in (0..values.len()).rev() {
+        if let Some(t) = cells.get(&values[i]) {
+            running = add(running, *t);
+        }
+        at_or_above[i] = running;
+    }
+    MaskCmcCounts { below, at_or_above }
+}
+
+/// Whichever of `color:X`/`id:X` a leaf is, plus its own comparison op and mask -- ANY op, unlike
+/// `subtype_pair_dim`'s Ge/Le-only scope (see this section's own doc for why the raw-mask design
+/// doesn't need that restriction). `None` for anything else (including `ColorField::ProducedMana`,
+/// which this table doesn't cover -- `produces:` has no documented correlation with cmc the way
+/// colors/identity do, so extending this table to it is out of this round's scope).
+fn color_cmc_dim(f: &FilterExpr) -> Option<(ColorField, CmpOp, u8)> {
+    match f {
+        FilterExpr::ColorCmp { field: field @ (ColorField::Colors | ColorField::ColorIdentity), op, mask } => Some((*field, *op, *mask)),
+        _ => None,
+    }
+}
+
+/// The table `field` reads, or `None` for `ProducedMana` (see `color_cmc_dim`'s own doc).
+fn color_cmc_table_for(field: ColorField, indexes: &Archived<CardIndexes>) -> Option<&Archived<ColorCmcTable>> {
+    match field {
+        ColorField::Colors => Some(&indexes.color_cmc.colors),
+        ColorField::ColorIdentity => Some(&indexes.color_cmc.identity),
+        ColorField::ProducedMana => None,
+    }
+}
+
+/// The exact `(printings, cards, artworks)` triple for one color/identity leaf `(op, query_mask)`
+/// And'd with one resolved `[cmc_lo, cmc_hi)` range, summing every one of the <=32 real stored masks
+/// `table` holds that `color_cmp_matches` (the SAME matcher `ColorCmp`'s own per-card evaluator uses)
+/// says `(op, query_mask)` admits. `None` only when `table` isn't built for this store at all (`by_mask`
+/// empty -- a test fixture, typically, the same convention `arith_tuple_totals`'s own `n_cards == 0`
+/// check uses for the identical reason): a store with real data always has 1+ real mask, so an empty
+/// `by_mask` cannot be a genuine "zero real cards" answer, and treating it as one is exactly the bug
+/// this distinction exists to prevent. Once `table` IS built, every real mask contributes its own real
+/// (possibly zero) count, so there is no OTHER miss case -- callers wrap a `Some` in `Some` again purely
+/// for a uniform "hit" trace shape, the same convention `Independence`'s own trace group already uses
+/// for a formula that always produces a value once its shape gate matches.
+fn color_cmc_exact(op: CmpOp, query_mask: u8, cmc_lo: u32, cmc_hi: u32, table: &Archived<ColorCmcTable>) -> Option<(usize, usize, usize)> {
+    if table.by_mask.is_empty() {
+        return None;
+    }
+    let mut total = (0usize, 0usize, 0usize);
+    for (mask, counts) in table.by_mask.iter() {
+        if color_cmp_matches(op, query_mask, *mask) {
+            let (p, c, a) = counts.range_sum(&table.values, cmc_lo, cmc_hi);
+            total = (total.0 + p, total.1 + c, total.2 + a);
+        }
+    }
+    Some(total)
+}
+
+// ─── Round 53/54: 2D price-pair joint bucket tables ───────────────────────────
+// docs/issues/local-engine-nway-followup-queue.md. `IndepClass::Price` bundles usd/eur/tix into ONE
+// class (see that enum's own doc): once 2+ price leaves are present, the independence registry's
+// `by_class` bucketing hits its `_ => {}` catch-all ("2+ occurrences of a class with no combining
+// table, dropped") and NEITHER leaf becomes a unit -- the query falls all the way back to a bare
+// per-leaf `min()`-fold. A fresh 108K-row sweep found `usd`x`eur` the worst-performing shape by far
+// (`usd>0.75 eur<0.16`: predicted 25,444 against a true 137, 185x over; several other real examples in
+// the same shape show 75-180x error). Round 53 fixed `usd`x`eur` only, deliberately leaving `tix`
+// untouched pending its own validation (r=0.336 usd<->tix, weak). Round 54 re-checked that decision
+// with real sample size once `usd`x`eur` stopped dominating the survey: `usd`x`tix` and `eur`x`tix`
+// surfaced as the next-worst shapes (median 0.55 and 0.44), with ZERO mechanism covering either --
+// exactly the same "2+ occurrences of `Price`, no table, dropped" fallback `usd`x`eur` had before Round
+// 53. A Python 2D quantile-bucketed joint histogram simulation (identical approach to Round 53's own)
+// found both pairs benefit dramatically MORE than plain independence would predict (1.70x/1.35x/0.87x
+// on real tail queries, versus ~10-11x under independence and 87x/~10x under today's min-fold) despite
+// their weak LINEAR (Pearson) correlation -- r only measures linear relationships, and usd/tix, eur/tix
+// apparently have a real, non-linear, exploitable relationship a joint histogram captures and a
+// correlation coefficient alone does not. Round 54 generalizes `PriceJointTable`/
+// `build_price_joint_table` to build one such joint per PAIR (three tables: `price_joint_usd_eur`,
+// `price_joint_usd_tix`, `price_joint_eur_tix`), sharing the exact same quantile-bucketing/sparse-cell/
+// "any overlap counts fully" machinery for all three -- only the field ACCESSORS differ per pair, now
+// passed in as closures rather than hardcoded.
+
+/// Quantile-bucket count per axis for `PriceJointTable` below -- 64 gives a sparse table of at most
+/// 64*64 = 4,096 possible cells per pair (only the `(a_bucket, b_bucket)` pairs that actually co-occur
+/// among real printings are stored). Checked directly against the real corpus for `usd`x`eur` in Round
+/// 53, not assumed: heavy ties collapse the real bucket COUNT well below 64 per axis (55 usd / 52 eur
+/// buckets, since a single dominant tied value can absorb many buckets' worth of target share in one
+/// step -- see `build_quantile_edges`'s own doc), and the real corpus populates 1,834 of the resulting
+/// 2,860 possible cells (64%) -- NOT "far fewer", a real, measured cost this table's own
+/// `joint_estimate` pays on every query that reaches it (see that function's own doc for the measured
+/// ns impact). Round 54 re-checked this constant against the real corpus for `usd`x`tix` and `eur`x`tix`
+/// too rather than assuming it carries over unchanged: `tix`'s own real price values cluster far more
+/// heavily than `usd`/`eur`'s (MTGO tickets trade in a narrower, more discretized range), so both new
+/// tables collapse to only 22 real `tix`-axis buckets (against `usd`'s 53 / `eur`'s 50 on their own
+/// other axis) -- but that same clustering makes the resulting tables MUCH denser, not sparser: `usd`x
+/// `tix` populates 1,072 of 1,166 possible cells (92%) and `eur`x`tix` populates 993 of 1,100 (90%),
+/// both well above `usd`x`eur`'s own 64%. 64 remains a reasonable shared constant for all three -- it
+/// caps the WORST-case cell count, and the real corpus never gets close to it on any axis -- rather
+/// than a knob that needed retuning per pair. See `build_price_joint_table`'s own doc for the full
+/// per-pair counts.
+const PRICE_JOINT_BUCKETS: usize = 64;
+
+/// A 2D quantile-bucketed joint over ANY one of the three validated price-field PAIRS -- `(usd, eur)`
+/// (Round 53), `(usd, tix)` and `(eur, tix)` (Round 54) -- each stored as its own instance of this same
+/// struct (`CardIndexes::price_joint_usd_eur`/`_usd_tix`/`_eur_tix`), built by the same generalized
+/// `build_price_joint_table` over two caller-supplied field accessors. The struct and this
+/// `impl ArchivedPriceJointTable` block are themselves entirely pair-agnostic (`a`/`b`, not `usd`/`eur`)
+/// -- only the BUILDER's own field access and the two call sites' own field-to-table dispatch
+/// (`price_joint_table_for`, see its own doc) know which currency each axis represents.
+///
+/// Each pair was validated directly against the real corpus BEFORE being built, not assumed safe by
+/// analogy to the others. Round 53: `usd`<->`eur` Pearson r=0.877 (strongly correlated -- eur tracks a
+/// related but genuinely separate secondary market, not just an FX rate) -- but the eur/usd ratio
+/// itself spans p10=0.346 to p90=1.357, too wide for a simple "translate the bound" rule to be tight. A
+/// 2D histogram simulation, quantile-bucketed (64 per axis, equal-*count* not equal-width --
+/// equal-log-width buckets were checked and rejected: they concentrate 38.6% of all mass in 5 of 64
+/// buckets, since MTG prices are heavily skewed cheap), gave 1.03-1.52x on the five worst real tail
+/// queries -- against 75-180x under the fallback.
+///
+/// Round 54: `usd`<->`tix` and `eur`<->`tix` have only WEAK Pearson correlation (r=0.336 usd<->tix --
+/// the reason Round 53 deliberately left them untouched), and a real fresh full-corpus survey (after
+/// Round 53 shipped) confirmed they'd become the next-worst shapes with ZERO mechanism firing for
+/// either. The methodological finding driving this round: r only measures LINEAR correlation. A direct
+/// simulation of the same quantile-bucketed joint histogram approach (not plain independence) found
+/// usd/tix and eur/tix have a real, exploitable, NON-linear relationship despite the weak r -- 1.70x/
+/// 1.35x/0.87x on real tail queries, dramatically better than plain independence's own ~10-11x on the
+/// same queries, even though plain independence is itself a real improvement over the ~87x/~10x the
+/// unmodified min-fold gave. See `build_price_joint_table`'s own doc for the real bucket/cell counts
+/// found for these two pairs specifically -- not assumed to match `usd`x`eur`'s own.
+///
+/// Stores each axis's own bucket UPPER edges (exclusive, raw integer cents -- prices are ALREADY
+/// integer cents everywhere else in this codebase, see `Printing::price_usd`'s own doc comment; this
+/// table does not reopen that and does not use floats, unlike an earlier draft of this design) plus a
+/// SPARSE map over only the bucket pairs that actually occur among printings where BOTH of this
+/// instance's own two price fields are populated -- a printing missing either field can never satisfy a
+/// two-sided `a<op>x b<op>y` query under this codebase's own `Tri`-valued NULL semantics, so it
+/// correctly contributes to no cell at all.
+///
+/// No dense 2D array or prefix-sum/summed-area table: `color_cmp_value_total`'s own `table.iter()
+/// .filter(...).sum()` linear scan over a `HashMap` is the established precedent this reuses
+/// (`joint_estimate` below) rather than building inclusion-exclusion machinery for a table this
+/// bounded. NOT actually comparable in SCALE to that precedent, though: `color_cmp_value_total`'s own
+/// table holds "at most a few dozen" real entries (its own doc), while `usd`x`eur` alone holds 1,834 on
+/// the real corpus (see `PRICE_JOINT_BUCKETS`'s own doc) -- measured directly (`and_estimate_ns`,
+/// isolated release wheels, interleaved same-build canary, a cross-build canary on an UNRELATED query
+/// to rule out machine drift between the two wheels, and a cross-build check that `usd`x`eur`'s own
+/// pre-existing cost didn't move): `usd`x`eur`'s own bare-fold cost is unchanged by this round's
+/// generalization, 1833ns before -> 1875ns after (noise, not a regression -- its own by_class-arm cost
+/// is exactly unchanged, 2500ns both builds), confirming the closure/dispatch indirection this round
+/// added costs nothing measurable. The two NEW tables cost real, non-trivial time where there was
+/// previously none at all (the old fallback for these two shapes was a bare per-leaf min-fold, ~330-
+/// 340ns): `usd`x`tix`'s bare fold now costs ~1458ns, its by_class arm ~2000ns; `eur`x`tix`'s bare fold
+/// ~1417ns, its by_class arm ~1958ns -- both somewhat CHEAPER than `usd`x`eur`'s own equivalent costs
+/// (1875ns/2500ns), consistent with their tables holding fewer populated cells (1,072 and 993 against
+/// `usd`x`eur`'s 1,834 -- see `PRICE_JOINT_BUCKETS`'s own doc). An unrelated canary query (untouched by
+/// any of the three tables) measured bit-for-bit identical across both wheels (1292ns both), ruling out
+/// general machine drift as an explanation for any of the above. Real, non-trivial overhead, not "cheap"
+/// in the absolute sense the `Cmc`/`Pow` multi-arm's own two-call-site precedent assumed for its own
+/// much smaller per-call lookup cost -- but still microseconds against a query whose OWN acquire cost
+/// is routinely in the same range, and a large, validated accuracy win in exchange.
+///
+/// A real, MEASURED inefficiency found and fixed before Round 53 shipped, which generalizes for free to
+/// all three pairs (never pair-specific in the first place -- see `and_sources.len() > 2`'s own call
+/// site doc): the standalone fold and the `by_class` special case both used to run for a bare 2-source
+/// `a<op>x b<op>y` query with nothing else (the standalone fold's own gate fires, AND `IndepClass::Price`
+/// has exactly 2 occurrences so the `by_class` arm's own gate fired too) -- but the `by_class` arm's own
+/// unit can never actually pair with anything in that shape (there is no third source left to pair
+/// against), so its own `joint_estimate` call was entirely wasted work: confirmed directly on `usd`x
+/// `eur`, the bare-2-leaf case's ~3.6us was almost exactly double the 3-leaf case's ~2.7us minus the old
+/// baseline's own leaf costs, consistent with two full table scans where only one payoff was ever used.
+/// Fixed with an `and_sources.len() > 2` guard on the `by_class` arm itself (see that match arm's own
+/// doc) -- a zero-behavior-change fix (`_ => {}` already declines to push a unit for any shape it
+/// doesn't recognize, and a query with nothing else to pair against was never going to reach the pairing
+/// loop regardless), independently re-verified to halve the bare-2-leaf case's own cost with no change
+/// to any correctness-relevant test or corpus result. This guard checks "is there anything left in the
+/// query for this unit to ever pair with" -- true regardless of which price PAIR fired -- so it applies
+/// unchanged to `usd`x`tix`/`eur`x`tix` without needing its own separate validation.
+///
+/// `cells` is keyed by a single combined `u32` (`(a_bucket << 16) | b_bucket`), not a `(u16, u16)`
+/// tuple -- mirroring `PairTotals`'s own combined-key precedent for the identical "two small ids into
+/// one archived map key" shape (every other `#[derive(Archive)]` map key in this file is a single
+/// scalar or `String`, never a tuple; `SetSubtypeTable`'s own doc explains the same preference for
+/// query ergonomics, not an rkyv limitation).
+#[derive(Archive, Serialize, Deserialize, Default)]
+struct PriceJointTable {
+    a_edges: Vec<u32>,
+    b_edges: Vec<u32>,
+    cells: HashMap<u32, SpaceTotals>,
+}
+
+impl ArchivedPriceJointTable {
+    /// The bucket index owning raw value `v` on one axis: the count of `edges` entries `<= v` --
+    /// correct both when `v` is a real observed value (which bucket contains it) and when `v` is used
+    /// as an INCLUSIVE lower query bound (which bucket the range should start at), since `edges[i]` is
+    /// stored as the first value of the bucket AFTER `i`, so a bucket containing `v` is never
+    /// miscounted as "entirely below" it. Mirrors `PrintingValueIndex::offset_of`'s own
+    /// `partition_point` idiom for the equivalent half-open-range-to-offset conversion, one level
+    /// coarser (buckets instead of individual values).
+    fn bucket_of(edges: &Archived<Vec<u32>>, v: u32) -> u16 {
+        edges.partition_point(|e| u32::from(*e) <= v) as u16
+    }
+
+    /// The EXCLUSIVE bucket-index upper bound for a half-open query `[.., hi)`: one past the bucket
+    /// that owns `hi`'s own predecessor (`hi - 1`) -- i.e. the bucket containing the LAST value the
+    /// query range actually includes. Deliberately NOT just `bucket_of(hi)`: a `hi` that lands strictly
+    /// INSIDE a bucket (not exactly on a boundary -- the common case for a narrow `Eq`/tight-range
+    /// query) must still count that whole bucket as overlapping (`joint_estimate`'s own "any overlap
+    /// counts fully" convention), which `bucket_of(hi)` alone would miss for a query wholly inside one
+    /// bucket (`bucket_of(lo) == bucket_of(hi)` would read as an apparently-empty range). `hi == 0` is
+    /// the one genuinely-empty case (no cents value is `< 0`), handled by a direct check rather than
+    /// `saturating_sub` silently returning bucket 0's own range for an empty query.
+    ///
+    /// This also handles `hi == u32::MAX` (`int_range_bounds`'s own "no upper bound" sentinel for
+    /// `Ge`/`Gt`) with no separate special case: `bucket_of(u32::MAX - 1)` still lands in the last real
+    /// bucket (only `PRICE_JOINT_BUCKETS - 1` edges are ever stored, see `PriceJointTable`'s own doc,
+    /// so no real edge is anywhere near `u32::MAX`), and `+ 1` correctly reaches one past it.
+    fn hi_bucket_of(edges: &Archived<Vec<u32>>, hi: u32) -> u16 {
+        if hi == 0 {
+            return 0;
+        }
+        Self::bucket_of(edges, hi - 1) + 1
+    }
+
+    fn cell_key(a_bucket: u16, b_bucket: u16) -> u32 {
+        (u32::from(a_bucket) << 16) | u32::from(b_bucket)
+    }
+
+    /// Exact-cell sum for the bucket-space rectangle covering `[a_lo, a_hi)` x `[b_lo, b_hi)` (raw
+    /// cents on each axis, half-open, the same convention every other range consumer in this file
+    /// uses), or `None` when the table isn't built for this store at all (`cells` empty -- a test
+    /// fixture, typically, the same convention `color_cmc_exact`'s own miss case uses: a store with
+    /// real data always has 1+ real cell).
+    ///
+    /// "Any overlap counts fully": a bucket whose own range only partially overlaps the query still
+    /// contributes its ENTIRE total, no boundary interpolation -- validated in this table's own
+    /// simulation as already a real, large improvement; interpolation is a plausible future
+    /// refinement, not needed to ship this table (see this table's own top-level doc).
+    fn joint_estimate(&self, a_lo: u32, a_hi: u32, b_lo: u32, b_hi: u32) -> Option<(usize, usize, usize)> {
+        if self.cells.is_empty() {
+            return None;
+        }
+        // A provably-empty RAW range on either axis (`hi <= lo`, e.g. `bare_range_bounds`'s own `(0, 0)`
+        // convention for a `Ne`-adjacent or out-of-domain bound) is checked directly on the raw values,
+        // before any bucket conversion -- the same "zero-width range trivially resolves to k=0
+        // regardless of which value" property `PrintingValueIndex::range` already has via its own
+        // `offset_of(lo) == offset_of(hi)` fold. This also makes the bucket-space check unnecessary: once
+        // `a_hi > a_lo` here, `hi_bucket_of(a_hi) > bucket_of(a_lo)` always holds (`bucket_of` is
+        // monotonic non-decreasing and `hi_bucket_of(hi) >= bucket_of(hi - 1) + 1 >= bucket_of(lo) + 1`
+        // whenever `hi - 1 >= lo`), so no separate bucket-space emptiness guard is needed below.
+        if a_hi <= a_lo || b_hi <= b_lo {
+            return Some((0, 0, 0));
+        }
+        let a_lo_b = Self::bucket_of(&self.a_edges, a_lo);
+        let a_hi_b = Self::hi_bucket_of(&self.a_edges, a_hi);
+        let b_lo_b = Self::bucket_of(&self.b_edges, b_lo);
+        let b_hi_b = Self::hi_bucket_of(&self.b_edges, b_hi);
+        let mut total = (0usize, 0usize, 0usize);
+        for (key, t) in self.cells.iter() {
+            let key = u32::from(*key);
+            let (a_b, b_b) = ((key >> 16) as u16, (key & 0xFFFF) as u16);
+            if (a_lo_b..a_hi_b).contains(&a_b) && (b_lo_b..b_hi_b).contains(&b_b) {
+                total.0 += u32::from(t.printings) as usize;
+                total.1 += u32::from(t.cards) as usize;
+                total.2 += u32::from(t.artworks) as usize;
+            }
+        }
+        Some(total)
+    }
+}
+
+/// Tie-safe quantile bucket UPPER edges (exclusive, half-open) for one price axis, built over
+/// `counts` (each distinct raw-cents value's occurrence count among the population `PriceJointTable`
+/// covers -- printings with BOTH prices present). Walks distinct values ascending, accumulating a
+/// running per-bucket count; closes the current bucket (records the edge as `v + 1`, so every value
+/// `<= v` stays in the bucket just closed and every value `> v` starts the next one) only once the
+/// running count reaches the target per-bucket share (`total / PRICE_JOINT_BUCKETS`, rounded up) --
+/// and only at a value boundary, NEVER inside a run of identical values, so a single dominant value
+/// (e.g. the "$0.23 bulk common" tier, 1,500-1,700 occurrences on its own on the real corpus --
+/// comfortably more than one bucket's ~1,282-item target share at 64 buckets) always lands whole in
+/// one bucket, even when that makes the bucket wider than its "ideal" share (the same technique
+/// `pandas.qcut(duplicates='drop')` uses). Also caps the number of edges produced at
+/// `PRICE_JOINT_BUCKETS - 1` (one fewer than the bucket count -- the last bucket has no upper edge, it
+/// silently absorbs everything past the final recorded edge), so a heavy tail of many distinct
+/// large-count values near the end cannot spawn more than `PRICE_JOINT_BUCKETS` buckets. Returns fewer
+/// edges than that cap when a heavy tie or a small population produces fewer real buckets than the
+/// target -- never degenerate (empty), never split.
+fn build_quantile_edges(counts: &HashMap<u32, u32>, total: u32) -> Vec<u32> {
+    if total == 0 {
+        return Vec::new();
+    }
+    let mut values: Vec<u32> = counts.keys().copied().collect();
+    values.sort_unstable();
+    let target = ((f64::from(total) / PRICE_JOINT_BUCKETS as f64).ceil() as u32).max(1);
+    let mut edges = Vec::new();
+    let mut running: u32 = 0;
+    for &v in &values {
+        running += counts[&v];
+        if running >= target && edges.len() + 1 < PRICE_JOINT_BUCKETS {
+            edges.push(v.saturating_add(1));
+            running = 0;
+        }
+    }
+    edges
+}
+
+/// Build-time (unarchived) counterpart to `ArchivedPriceJointTable::bucket_of` -- same
+/// `partition_point` conversion, over a plain `&[u32]` rather than an archived slice, used while
+/// constructing `PriceJointTable::cells` so the build pass and the query-time lookup can never
+/// disagree about which bucket a value falls in. No `u32::MAX` special case here (unlike the query-time
+/// version): `v` is always a REAL observed price in this caller, never a query's own "no upper bound"
+/// sentinel.
+fn price_bucket_of(edges: &[u32], v: u32) -> u16 {
+    edges.partition_point(|&e| e <= v) as u16
+}
+
+/// Builds a price-pair joint (see `PriceJointTable`'s own doc for the full motivation and validation).
+/// Round 54 generalized this past its original Round 53 `(usd, eur)`-only hardcoding: `get_a`/`get_b`
+/// are caller-supplied field accessors (mirroring `build_numeric_index`/`build_printing_value_index`'s
+/// own established closure-accessor precedent elsewhere in this file) so the SAME builder produces all
+/// three validated pairs' tables (`price_joint_usd_eur`/`_usd_tix`/`_eur_tix` at the one call site in
+/// `CardIndexes`'s own build path) instead of three hand-copied near-duplicates.
+///
+/// One shared pass over `printings` to find each axis's own quantile edges (only over printings where
+/// BOTH of `get_a`/`get_b`'s own fields are populated -- the same population the cells themselves are
+/// scoped to, so the bucket boundaries and the cells they index can never disagree about which
+/// printings exist), then `build_value_totals` (the SAME exact card/printing/artwork dedup every other
+/// exact table in this file already shares, not a hand-rolled accumulator) for the cell totals, keyed by
+/// each printing's own bucket pair.
+///
+/// Real corpus cell/bucket counts found, per pair (`PRICE_JOINT_BUCKETS` = 64 for all three, re-checked
+/// directly rather than assumed to carry over from `usd`x`eur`'s own Round 53 numbers -- 64 needed no
+/// adjustment for either new pair, see `PRICE_JOINT_BUCKETS`'s own doc for why): `usd`x`eur` 55x52 real
+/// buckets, 1,834 of 2,860 possible cells populated (64%, Round 53); `usd`x`tix` 53x22 real buckets,
+/// 1,072 of 1,166 possible cells populated (92%, Round 54); `eur`x`tix` 50x22 real buckets, 993 of 1,100
+/// possible cells populated (90%, Round 54).
+fn build_price_joint_table(
+    cards: &[OracleCard],
+    printings: &[Printing],
+    printing_to_card: &[u32],
+    max_artwork_groups: usize,
+    get_a: impl Fn(&Printing) -> Option<u32>,
+    get_b: impl Fn(&Printing) -> Option<u32>,
+) -> PriceJointTable {
+    let mut a_counts: HashMap<u32, u32> = HashMap::new();
+    let mut b_counts: HashMap<u32, u32> = HashMap::new();
+    let mut total: u32 = 0;
+    for p in printings {
+        if let (Some(a), Some(b)) = (get_a(p), get_b(p)) {
+            *a_counts.entry(a).or_insert(0) += 1;
+            *b_counts.entry(b).or_insert(0) += 1;
+            total += 1;
+        }
+    }
+    let a_edges = build_quantile_edges(&a_counts, total);
+    let b_edges = build_quantile_edges(&b_counts, total);
+    let cells: HashMap<u32, SpaceTotals> = build_value_totals(cards, printings, printing_to_card, max_artwork_groups, |_card, p| {
+        match (get_a(p), get_b(p)) {
+            (Some(a), Some(b)) => {
+                let a_bucket = price_bucket_of(&a_edges, a);
+                let b_bucket = price_bucket_of(&b_edges, b);
+                vec![ArchivedPriceJointTable::cell_key(a_bucket, b_bucket)]
+            }
+            _ => vec![],
+        }
+    });
+    PriceJointTable { a_edges, b_edges, cells }
+}
+
+/// One literal `NumericCmp` child on `NumField::Cmc` resolved into the half-open `[lo, hi)` integer
+/// range it admits, via the SAME op-to-bound conversion `bare_range_bounds` itself uses
+/// (`int_range_bounds`) -- shared so this table's own bound resolution can never disagree with the
+/// rest of the engine's cmc-bound handling. `None` for anything not a bare `Cmc op Const` comparison,
+/// or for `Ne` (which `int_range_bounds` itself declines, the same "decline rather than guess"
+/// treatment `bare_range_bounds`/`bare_rarity_bounds` already give it) -- the caller's fold applies
+/// unchanged. A provably-empty window (`int_range_bounds`'s inner `None`) resolves to `(0, 0)`, a
+/// zero-width range that `range_sum` reads as a genuine exact zero, not a decline.
+fn cmc_leaf_bounds(filter: &FilterExpr) -> Option<(u32, u32)> {
+    let (op, value) = match filter {
+        FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Cmc), op, rhs: NumExpr::Const(v) } => (*op, *v),
+        FilterExpr::NumericCmp { lhs: NumExpr::Const(v), op, rhs: NumExpr::Field(NumField::Cmc) } => (flip_op(*op), *v),
+        _ => return None,
+    };
+    match int_range_bounds(op, value)? {
+        None => Some((0, 0)),
+        Some((lo, hi)) => Some((lo, hi)),
+    }
+}
+
+/// Intersect 1+ resolved cmc `[lo, hi)` windows into the ONE range they jointly admit (tighter lo,
+/// tighter hi) -- unlike `SubtypePairIndexes`' dim/subtype leaves (which COMPETE: 2+ uncovered ones
+/// with no combining table means "decline entirely"), every literal cmc child on the same field always
+/// COMBINES into one range (`cmc>=1 cmc<=5` is two children, one range), since `cmc` is never fused by
+/// `fuse_and_range_children` (only price/collector-number/date/year are) and there is no "which cmc
+/// leaf" ambiguity the way subtype leaves have "which subtype leaf" -- ALL of them narrow the same
+/// axis. `None` only when `children` is empty or any one of them fails to resolve at all (e.g. a `Ne`
+/// child) -- the same "decline rather than guess" precedent used throughout this arm; a resolved-but-
+/// empty intersection (`hi <= lo` after narrowing) is returned as-is, a genuine exact zero rather than
+/// a decline.
+fn cmc_bounds_intersect(children: &[&FilterExpr]) -> Option<(u32, u32)> {
+    let mut acc: Option<(u32, u32)> = None;
+    for &c in children {
+        let (lo, hi) = cmc_leaf_bounds(c)?;
+        acc = Some(acc.map_or((lo, hi), |(alo, ahi)| (alo.max(lo), ahi.min(hi))));
+    }
+    acc
+}
+
+// ─── Round 36: subtype x (cmc, power, toughness) dense prefix-sum cube ────────
+// docs/issues/local-engine-gathered-scan-card-printing-varying-depth.md. `t:X` And'd with a
+// cmc/power/toughness range bound has the SAME gap Rounds 33/34 closed for set/cn and set/c/id/
+// subtype pairs: `t:` has no `compile_plane` arm and isn't in any pair table (a dimension crossed
+// with ~300 subtypes is thousands of pairs, not the handful `PairTotals` covers), and cmc/power/
+// toughness are RANGE predicates, not the single-value `Eq` shape `SubtypePairIndexes` answers -- so
+// this pair gets no tightening from any existing mechanism, and the fold picks whichever leaf's own
+// (corpus-wide, not subtype-scoped) count is smaller. Real ratios of 5-14x for "big creature"
+// subtypes concentrated in a narrow stat range (Dragon/Wurm/Giant), and worse at extreme thresholds
+// for a common subtype that spans nearly the WHOLE stat range (Human: knowing the subtype alone
+// barely narrows the joint distribution at all).
+
+/// One subtype's exact 3-D (cmc, power, toughness) box, LOCAL to that subtype's own real occupied
+/// range in each dimension -- NOT one global cube sized to the corpus's full extremes (cmc up to 16,
+/// power up to 18, toughness up to 30 on the real corpus, driven by rare outlier subtypes, not the
+/// common ones this table targets). Verified per-subtype rather than assumed uniform: Human's own box
+/// is only 9x9x10 = 810 cells (cmc/power observed 0..=8, toughness 0..=9), Spirit's is 13x19x11 =
+/// 2,717 -- both comfortably inside the "~2,744" scale this round's brief anticipated for the widest
+/// covered subtype.
+///
+/// `min_power`/`max_power`/`min_toughness`/`max_toughness` are computed over cards that HAVE a value
+/// in that field -- checked directly against the real corpus, NOT gated on any `card_types` bit.
+/// Power/toughness presence and the `Creature` type bit are NOT the same population here: 217 real
+/// cards (192 Vehicle, 25 Spacecraft, 1 Equipment -- Vehicles/Spacecraft-style permanents that carry
+/// stats on a plain `Artifact` type line) have real power/toughness with no `Creature` bit at all, and
+/// conversely some `Creature`-typed cards (e.g. 35 of Human's 4,265) have NEITHER value set. Gating
+/// on `card_types` would have silently misranked which 128 subtypes get a table AND miscounted the
+/// occupied range for any subtype the mis-scoping touched -- caught and fixed before this round shipped,
+/// not a hypothetical.
+///
+/// `min_cmc`/`max_cmc` and the reserved "no value" slot below assume `cmc` is never null on a real
+/// card, verified directly (0 of 97,812 real corpus rows have a null `cmc`) -- unlike power/toughness,
+/// cmc gets no reserved slot at all, since one is never needed.
+///
+/// Reserves ONE extra "no value" slot at LOCAL INDEX 0 of the power/toughness axes (real values start
+/// at local index 1) for cards that carry the subtype but have no power/toughness at all -- mostly
+/// Tribal-typed spells (e.g. 22 real Elf cards, 29 Eldrazi, ~180 total across the whole top-128
+/// population). A bare `cmc` bound alone (no power/toughness bound in the query) must still count
+/// these cards -- excluding them from the table entirely would make a table HIT silently WRONG (an
+/// undercount), not just incomplete, for exactly that shape. See the And arm's own doc for how the
+/// reserved slot is included or excluded per query depending on whether that axis is bound at all.
+#[derive(Archive, Serialize, Deserialize, Default, Clone)]
+struct SubtypeArithBox {
+    min_cmc: i16,
+    max_cmc: i16,
+    min_power: i16,
+    max_power: i16,
+    min_toughness: i16,
+    max_toughness: i16,
+    /// `max_cmc - min_cmc + 1` -- stored explicitly (not re-derived at query time) so the build pass
+    /// and the query-time lookup can never disagree about this table's own layout.
+    cmc_span: u16,
+    /// `(max_power - min_power + 1) + 1`, the `+1` for the reserved "no value" slot at local index 0.
+    pow_slots: u16,
+    tou_slots: u16,
+    /// Row-major `[cmc_span][pow_slots][tou_slots]` INCLUSIVE 3-D prefix sums: `prefix[i][j][k]` is
+    /// the sum of every real cell with index <= `(i, j, k)` in all three dimensions, in one fixed
+    /// direction chosen at BUILD time -- independent of which comparison operators a query later uses
+    /// (that conversion happens entirely at query time; see `subtype_arith_exact`'s own doc).
+    prefix: Vec<SpaceTotals>,
+}
+
+impl ArchivedSubtypeArithBox {
+    fn dims(&self) -> (i64, i64, i64) {
+        (i64::from(u16::from(self.cmc_span)), i64::from(u16::from(self.pow_slots)), i64::from(u16::from(self.tou_slots)))
+    }
+
+    /// One prefix cell as a signed triple, or `(0, 0, 0)` for any out-of-range (negative) coordinate --
+    /// the "sentinel row of zeros" `subtype_arith_box_sum`'s inclusion-exclusion formula needs at each
+    /// dimension's low boundary, so the 8-corner formula never special-cases an edge itself. `i64`, not
+    /// `usize`/`u32`: `subtype_arith_box_sum` accumulates alternating +/- terms, and only the FINAL sum
+    /// is guaranteed non-negative -- an intermediate partial sum is not, so unsigned arithmetic anywhere
+    /// in that chain would risk a panic-on-underflow that never reflects a real error.
+    fn prefix_at(&self, i: i64, j: i64, k: i64) -> (i64, i64, i64) {
+        if i < 0 || j < 0 || k < 0 {
+            return (0, 0, 0);
+        }
+        let (_, pow_slots, tou_slots) = self.dims();
+        let t = &self.prefix[(i * pow_slots * tou_slots + j * tou_slots + k) as usize];
+        (i64::from(u32::from(t.printings)), i64::from(u32::from(t.cards)), i64::from(u32::from(t.artworks)))
+    }
+}
+
+/// The `SubtypeArithBox` per subtype covered -- the top 128 most common subtypes, ranked by real
+/// distinct-card count among cards that HAVE both `creature_power`/`creature_toughness` set (see
+/// `SubtypeArithBox`'s own doc for why this is not the same population as `card_types & TYPE_CREATURE`).
+#[derive(Archive, Serialize, Deserialize, Default)]
+struct SubtypeArithIndexes {
+    tables: HashMap<String, SubtypeArithBox>,
+}
+
+/// Distinct-subtype table budget: verified against the real corpus (Round 36) rather than assumed --
+/// the largest subtype, Human, has 4,230 real stat-bearing cards; rank 128 has 34. No "tier 2" is
+/// needed below this cutoff: a full diagnostic pass (real engine instrumentation, 720 query/mode pairs
+/// across 45 tail subtypes) found routing never differs between today's min-fold and a hypothetical
+/// better estimate for 44/45 tail subtypes -- the one exception (`t:forest`, a name collision between
+/// the rare Dryad Arbor creature and the ubiquitous basic-land subtype string) has only 1 real
+/// stat-bearing card, nowhere near this cutoff, so it is unaffected by this table either way.
+const SUBTYPE_ARITH_TOP_N: usize = 128;
+
+/// Build the Round 36 `SubtypeArithIndexes`: the top `SUBTYPE_ARITH_TOP_N` subtypes' own dense 3-D
+/// (cmc, power, toughness) prefix-sum cube. Reuses `build_value_totals` for the raw per-cell totals
+/// (the SAME exact card/printing/artwork dedup `ValueTotals`/`PairTotals`/`SubtypePairIndexes` already
+/// use), not a hand-rolled accumulator.
+///
+/// Ranking population and table population are DELIBERATELY DIFFERENT, both verified against the real
+/// corpus: RANKING counts only cards with `creature_power`/`creature_toughness` both present (the
+/// "real stat-bearing card" population this round's whole motivation is about), but each ranked
+/// subtype's table is built from EVERY card carrying that subtype -- stat-bearing or not. A card
+/// without stats (mostly Tribal-typed spells) still has a real `cmc`, and a bare `t:elf cmc>=5` (no
+/// power/toughness bound at all) must still count it; excluding it from the table would silently
+/// undercount that shape. See `SubtypeArithBox`'s own doc for how the reserved "no value" slot makes
+/// this exact rather than approximated away.
+fn build_subtype_arith_tables(
+    cards: &[OracleCard],
+    printings: &[Printing],
+    printing_to_card: &[u32],
+    coll_vocab: &[String],
+    max_artwork_groups: usize,
+) -> SubtypeArithIndexes {
+    let mut stat_card_counts: HashMap<String, u32> = HashMap::new();
+    for card in cards {
+        // Presence of the DATA, not `card_types & TYPE_CREATURE` -- see this fn's and
+        // `SubtypeArithBox`'s own docs for the real corpus population this distinction changes (217
+        // Vehicle/Spacecraft/Equipment cards with stats and no Creature bit; ~35 Human cards with the
+        // Creature bit and no stats).
+        if card.creature_power.is_none() || card.creature_toughness.is_none() {
+            continue;
+        }
+        for id in &card.card_subtypes {
+            *stat_card_counts.entry(coll_vocab[usize::from(*id)].clone()).or_insert(0) += 1;
+        }
+    }
+    let mut ranked: Vec<(String, u32)> = stat_card_counts.into_iter().collect();
+    // Ties broken by name for a deterministic table across builds -- otherwise HashMap iteration
+    // order could pick a different 128th subtype from one build to the next.
+    ranked.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    ranked.truncate(SUBTYPE_ARITH_TOP_N);
+    let top: HashSet<String> = ranked.into_iter().map(|(name, _)| name).collect();
+
+    type Key = (String, CmcPowTou);
+    let raw: HashMap<Key, SpaceTotals> = build_value_totals(cards, printings, printing_to_card, max_artwork_groups, |card, _p| {
+        card.card_subtypes
+            .iter()
+            .map(|id| &coll_vocab[usize::from(*id)])
+            .filter(|name| top.contains(name.as_str()))
+            .map(|name| (name.clone(), (card.cmc, card.creature_power, card.creature_toughness)))
+            .collect()
+    });
+
+    let mut by_subtype: HashMap<String, Vec<(CmcPowTou, SpaceTotals)>> = HashMap::new();
+    for ((name, cpt), totals) in raw {
+        by_subtype.entry(name).or_default().push((cpt, totals));
+    }
+    let tables: HashMap<String, SubtypeArithBox> = by_subtype.into_iter().map(|(name, cells)| (name, build_subtype_arith_box(&cells))).collect();
+    SubtypeArithIndexes { tables }
+}
+
+/// One card's `(cmc, power, toughness)` key for the Round 36 cube -- power/toughness are `Option`
+/// because not every card that carries a subtype has stats (see `SubtypeArithBox`'s own doc); `cmc`
+/// is `Option` only because `OracleCard::cmc` itself is (verified never actually `None` on a real
+/// card).
+type CmcPowTou = (Option<u8>, Option<i8>, Option<i8>);
+
+/// Build one subtype's `SubtypeArithBox` from its raw `(cmc, power, toughness) -> SpaceTotals` cells.
+fn build_subtype_arith_box(cells: &[(CmcPowTou, SpaceTotals)]) -> SubtypeArithBox {
+    // cmc is verified never null on a real card (see the struct's own doc); filtered defensively
+    // rather than assumed, so a future data anomaly declines this cell instead of panicking.
+    let cmcs: Vec<i32> = cells.iter().filter_map(|((cmc, _, _), _)| cmc.map(i32::from)).collect();
+    let Some((&min_cmc, &max_cmc)) = cmcs.iter().min().zip(cmcs.iter().max()) else {
+        return SubtypeArithBox::default(); // no usable cell at all -- an empty/unbuilt table, a miss to every caller
+    };
+    let pows: Vec<i32> = cells.iter().filter_map(|((_, p, _), _)| p.map(i32::from)).collect();
+    // `(0, -1)`: an empty (span-0) real range if somehow no member has a power value at all --
+    // shouldn't happen given the ranking above guarantees >=1 stat-bearing member, but this keeps the
+    // rest of the function's arithmetic well-defined (only the reserved slot 0 is ever populated)
+    // rather than panicking, the same "decline rather than guess" posture as the rest of this table.
+    let (min_pow, max_pow) = pows.iter().min().zip(pows.iter().max()).map_or((0, -1), |(&a, &b)| (a, b));
+    let tous: Vec<i32> = cells.iter().filter_map(|((_, _, t), _)| t.map(i32::from)).collect();
+    let (min_tou, max_tou) = tous.iter().min().zip(tous.iter().max()).map_or((0, -1), |(&a, &b)| (a, b));
+
+    let cmc_span = (max_cmc - min_cmc + 1) as usize;
+    let pow_slots = (max_pow - min_pow + 1).max(0) as usize + 1;
+    let tou_slots = (max_tou - min_tou + 1).max(0) as usize + 1;
+
+    let mut grid = vec![SpaceTotals::default(); cmc_span * pow_slots * tou_slots];
+    for ((cmc_opt, pow_opt, tou_opt), totals) in cells {
+        let Some(cmc) = cmc_opt else { continue };
+        let i = (i32::from(*cmc) - min_cmc) as usize;
+        let j = pow_opt.map_or(0, |p| (i32::from(p) - min_pow + 1) as usize);
+        let k = tou_opt.map_or(0, |t| (i32::from(t) - min_tou + 1) as usize);
+        // Each `(cmc, power, toughness)` combination is a distinct key upstream (`build_value_totals`
+        // dedups by the full tuple), so this index is visited exactly once -- a plain assign, not `+=`.
+        grid[(i * pow_slots + j) * tou_slots + k] = *totals;
+    }
+
+    // Build the INCLUSIVE prefix sum via three sequential single-axis cumulative passes -- pure
+    // addition only, so unlike the query-time inclusion-exclusion formula (which needs signed
+    // arithmetic for its alternating +/- terms), this can never have a negative intermediate value:
+    // `prefix[i][j][k] = raw[i][j][k]` after pass 0 (the initial copy), then each pass folds in the
+    // previous index along exactly one axis, in increasing index order.
+    let mut prefix = grid;
+    let add_totals = |a: &mut SpaceTotals, b: SpaceTotals| {
+        a.printings += b.printings;
+        a.cards += b.cards;
+        a.artworks += b.artworks;
+    };
+    for i in 1..cmc_span {
+        for j in 0..pow_slots {
+            for k in 0..tou_slots {
+                let prev = prefix[((i - 1) * pow_slots + j) * tou_slots + k];
+                add_totals(&mut prefix[(i * pow_slots + j) * tou_slots + k], prev);
+            }
+        }
+    }
+    for j in 1..pow_slots {
+        for i in 0..cmc_span {
+            for k in 0..tou_slots {
+                let prev = prefix[(i * pow_slots + (j - 1)) * tou_slots + k];
+                add_totals(&mut prefix[(i * pow_slots + j) * tou_slots + k], prev);
+            }
+        }
+    }
+    for k in 1..tou_slots {
+        for i in 0..cmc_span {
+            for j in 0..pow_slots {
+                let prev = prefix[(i * pow_slots + j) * tou_slots + (k - 1)];
+                add_totals(&mut prefix[(i * pow_slots + j) * tou_slots + k], prev);
+            }
+        }
+    }
+
+    SubtypeArithBox {
+        min_cmc: min_cmc as i16,
+        max_cmc: max_cmc as i16,
+        min_power: min_pow as i16,
+        max_power: max_pow as i16,
+        min_toughness: min_tou as i16,
+        max_toughness: max_tou as i16,
+        cmc_span: cmc_span as u16,
+        pow_slots: pow_slots as u16,
+        tou_slots: tou_slots as u16,
+        prefix,
+    }
+}
+
+/// The 3-D box-sum inclusion-exclusion formula over `b`'s prefix cube, given INCLUSIVE local index
+/// ranges on all three axes (already converted from the query's real operator/threshold by the
+/// caller). The standard 8-corner formula, using `prefix_at`'s sentinel-zero row at each dimension's
+/// `lo - 1` so no edge needs its own special case.
+fn subtype_arith_box_sum(b: &ArchivedSubtypeArithBox, lo_i: i64, hi_i: i64, lo_j: i64, hi_j: i64, lo_k: i64, hi_k: i64) -> (usize, usize, usize) {
+    let add = |a: (i64, i64, i64), c: (i64, i64, i64)| (a.0 + c.0, a.1 + c.1, a.2 + c.2);
+    let sub = |a: (i64, i64, i64), c: (i64, i64, i64)| (a.0 - c.0, a.1 - c.1, a.2 - c.2);
+    let mut total = b.prefix_at(hi_i, hi_j, hi_k);
+    total = sub(total, b.prefix_at(lo_i - 1, hi_j, hi_k));
+    total = sub(total, b.prefix_at(hi_i, lo_j - 1, hi_k));
+    total = sub(total, b.prefix_at(hi_i, hi_j, lo_k - 1));
+    total = add(total, b.prefix_at(lo_i - 1, lo_j - 1, hi_k));
+    total = add(total, b.prefix_at(lo_i - 1, hi_j, lo_k - 1));
+    total = add(total, b.prefix_at(hi_i, lo_j - 1, lo_k - 1));
+    total = sub(total, b.prefix_at(lo_i - 1, lo_j - 1, lo_k - 1));
+    // Guaranteed non-negative in the end (a real box sum of non-negative cells) even though
+    // intermediate terms are not -- `.max(0)` is defensive, not load-bearing.
+    (total.0.max(0) as usize, total.1.max(0) as usize, total.2.max(0) as usize)
+}
+
+/// Convert one field's arith-eligible bound children (already known to all reference the SAME field,
+/// by construction of the caller's grouping) into the inclusive REAL integer value range they jointly
+/// admit, by testing each candidate integer directly with `matches_op` (planes.rs's own
+/// float-comparison primitive -- the SAME one `compile_numeric_cmp`/`numeric_candidates` use, so this
+/// cannot disagree with the real per-card evaluator on a fractional-threshold edge case like
+/// `cmc>6.5`). Bounded to the SUBTYPE's own small local span (`min_real..=max_real`, at most ~30 wide
+/// across every table this round builds), NOT `NumericLayout`'s bucket layout (planes.rs) -- read
+/// before writing this, and deliberately not reused: those buckets are sized to keep a GLOBAL,
+/// whole-corpus existential plane small, and answer an AMBIGUOUS verdict at their own edges by design
+/// (`bucket_verdict`'s `Ambiguous` case) -- a lossy compromise this table doesn't need, since a window
+/// this narrow can just test every real candidate value directly and get an EXACT answer, not a
+/// superset.
+///
+/// `None` means no real value in the subtype's own range satisfies every bound in `group` -- a
+/// genuine empty intersection (the caller's own min/max short-circuit fires on this: an exact zero),
+/// not a declined shape -- every arith-eligible leaf is already a bare `Field <op> Const` comparison
+/// by construction (`is_arith_tuple_eligible`), so there is no shape this can fail to recognize.
+fn arith_group_real_range(group: &[&FilterExpr], min_real: i32, max_real: i32) -> Option<(i32, i32)> {
+    let mut lo: Option<i32> = None;
+    let mut hi: Option<i32> = None;
+    for v in min_real..=max_real {
+        let ok = group.iter().all(|f| {
+            let (op, threshold) = match **f {
+                FilterExpr::NumericCmp { lhs: NumExpr::Field(_), op, rhs: NumExpr::Const(c) } => (op, c),
+                FilterExpr::NumericCmp { lhs: NumExpr::Const(c), op, rhs: NumExpr::Field(_) } => (flip_op(op), c),
+                _ => return false,
+            };
+            matches_op(op, f64::from(v), threshold)
+        });
+        if ok {
+            lo.get_or_insert(v);
+            hi = Some(v);
+        }
+    }
+    lo.zip(hi)
+}
+
+/// Round 36: exact `(printings, cards, artworks)` for a `t:X` subtype leaf And'd with 1+ cmc/power/
+/// toughness bound children (`is_arith_tuple_eligible`), when `X` is one of the `SUBTYPE_ARITH_TOP_N`
+/// subtypes `build_subtype_arith_tables` covers. `None` means "no table for this subtype" -- the
+/// caller's own fallback (the pre-existing fold) applies unchanged. `Some((0, 0, 0))` is a genuine
+/// EXACT zero (the query's own bound(s) don't overlap this subtype's real occupied range in some
+/// dimension -- the min/max short-circuit this round's design calls for) and is returned WITHOUT ever
+/// reading `prefix`, the same as every other miss/short-circuit path in this function.
+fn subtype_arith_exact(subtype: &str, arith_children: &[&FilterExpr], indexes: &Archived<CardIndexes>) -> Option<(usize, usize, usize)> {
+    let table = indexes.subtype_arith.tables.get(subtype)?;
+    let (mut cmc_group, mut pow_group, mut tou_group): (Vec<&FilterExpr>, Vec<&FilterExpr>, Vec<&FilterExpr>) = (Vec::new(), Vec::new(), Vec::new());
+    for &c in arith_children {
+        let field = match c {
+            FilterExpr::NumericCmp { lhs: NumExpr::Field(f), .. } | FilterExpr::NumericCmp { rhs: NumExpr::Field(f), .. } => *f,
+            _ => return None, // not the bare Field/Const shape `is_arith_tuple_eligible` already guarantees -- unreachable in practice
+        };
+        match field {
+            NumField::Cmc => cmc_group.push(c),
+            NumField::Power => pow_group.push(c),
+            NumField::Toughness => tou_group.push(c),
+            _ => return None, // `is_arith_tuple_eligible` only ever admits these three fields -- unreachable in practice
+        }
+    }
+
+    let (min_cmc, max_cmc) = (i32::from(i16::from(table.min_cmc)), i32::from(i16::from(table.max_cmc)));
+    let (min_pow, max_pow) = (i32::from(i16::from(table.min_power)), i32::from(i16::from(table.max_power)));
+    let (min_tou, max_tou) = (i32::from(i16::from(table.min_toughness)), i32::from(i16::from(table.max_toughness)));
+    let (cmc_span, pow_slots, tou_slots) = table.dims();
+
+    // For each dimension: BOUND (part of the query) -> the real range the bound(s) admit, converted to
+    // a LOCAL index range; UNBOUND (absent from the query entirely) -> the FULL local range, which for
+    // power/toughness includes the reserved "no value" slot at index 0 (a card with no value for an
+    // unconstrained dimension still counts, since the query places no requirement on it at all).
+    let (lo_i, hi_i) = if cmc_group.is_empty() {
+        (0, cmc_span - 1)
+    } else {
+        match arith_group_real_range(&cmc_group, min_cmc, max_cmc) {
+            Some((lo, hi)) => ((lo - min_cmc) as i64, (hi - min_cmc) as i64),
+            None => return Some((0, 0, 0)),
+        }
+    };
+    let (lo_j, hi_j) = if pow_group.is_empty() {
+        (0, pow_slots - 1)
+    } else {
+        match arith_group_real_range(&pow_group, min_pow, max_pow) {
+            Some((lo, hi)) => ((lo - min_pow + 1) as i64, (hi - min_pow + 1) as i64),
+            None => return Some((0, 0, 0)),
+        }
+    };
+    let (lo_k, hi_k) = if tou_group.is_empty() {
+        (0, tou_slots - 1)
+    } else {
+        match arith_group_real_range(&tou_group, min_tou, max_tou) {
+            Some((lo, hi)) => ((lo - min_tou + 1) as i64, (hi - min_tou + 1) as i64),
+            None => return Some((0, 0, 0)),
+        }
+    };
+    Some(subtype_arith_box_sum(table, lo_i, hi_i, lo_j, hi_j, lo_k, hi_k))
+}
+
+/// Per-set `collector_number_int` span, derived once from `set_codes`'s own postings at load time
+/// (docs/issues/local-engine-gathered-scan-card-printing-varying-depth.md, Round 33). Lets an `And`
+/// of `set:X` + a `collector_number_int` range answer with a density estimate
+/// (`count / (max - min + 1)` scaled by the query's own overlap with `[min, max]`) instead of the
+/// `compose_printing_estimate` `And` arm's plain min-fold, which has no tightening at all for this
+/// pair today — `set` has no `compile_plane` arm and isn't in `ValueTotals`, and
+/// `collector_number_int` isn't arith-tuple-eligible and has no `compile_plane` arm either, so the
+/// fold picks whichever leaf's own (corpus-wide, not set-scoped) count happens to be smaller.
+///
+/// Exact for a contiguously-numbered set (`density == 1.0`) and near-exact for one with a handful of
+/// internal gaps; only a genuinely non-contiguous set (Secret Lair Drop, whose numbering resets per
+/// drop rather than running sequentially) sees real residual error — still far smaller than either
+/// alternative the fold could otherwise pick, per Round 33's held-out validation.
+#[derive(Archive, Serialize, Deserialize, Default, Clone, Copy)]
+struct SetCollectorRange {
+    min: u32,
+    max: u32,
+    /// Printings in the set with a `collector_number_int` value — almost always the set's own full
+    /// postings length, but tracked separately rather than assumed, since a handful of promo prints
+    /// omit it.
+    count: u32,
+}
 
 /// Build a tag/list index from interned collection ids. Accumulates postings by
 /// vocab id in the hot loop (integer keys, no per-element string hashing), then
@@ -2602,6 +4128,52 @@ struct SpaceTotals {
     cards: u32,
     artworks: u32,
 }
+// SPECIFIED, NOT BUILT (Round 74) -- the statistic `scan_all`'s printing/artwork branch needs and no
+// table holds: a fourth `span: u32`, the sum of `offsets[cid + 1] - offsets[cid]` over the cards this
+// value matches. That branch currently estimates it as `cards * printings_per_card * a premium`, whose
+// residual spread is ~18x and which no constant can tighten (see
+// `COMPOSE_FULL_SPAN_REPRINT_PREMIUM`).
+//
+// `printings` is NOT this, and the repo already proved it rather than guessing: `scan_all`'s own doc
+// records that substituting `exact_result_total(composed, Mode::Printing)` for the span regressed
+// 1,077 queries, "because a card can have OTHER printings that don't match the leaf's own value but
+// are still part of that card's range". `span` is that whole range -- which is exactly what
+// `printings_examined` realizes in printing and artwork mode, where the kernel returns `end - start`
+// unconditionally (`printing_span == printings_examined` on 99.5% / 99.4% of measured rows).
+//
+// Cost: one `u32` per existing entry, computed inside the `build_value_totals` pass that already
+// visits every (card, printing) pair -- no new index probe, no per-query scan, no new pass. The table
+// is ~2 KB today, so ~+0.7 KB of archive plus an `ARCHIVE_FORMAT_VERSION` bump. A single-value leaf
+// reads it exactly; an `And` takes `min` over children, the same composition `domain_cards` already
+// uses, and a true upper bound since the candidate set is a subset of each child's.
+//
+// What it does NOT cover is a range leaf: `RangeCardCounts` would need the mirrored prefix/suffix span
+// aggregate, the same idea at a second table's cost. Coverage of the affected population is therefore
+// partial and unmeasured -- size it before building.
+//
+// **SIZED (Round 79), and the answer is: not on its own.** Measured with
+// `bench_error_attribution_weighted.py`'s own units over an 8,000-query uniform prefer-varied survey,
+// substituting the realized span for every row this column would reach:
+//
+//     SpaceTotals `span` (border / frame / art / is)          1.95% of total model error mass
+//     + the mirrored RangeCardCounts triple (usd/eur/tix/cn/date)   3.78%
+//     every fallback row answered exactly (unreachable ceiling)     9.78%
+//
+// against a `GatheredScan / SCAN_PER_ROW` total of 13.9%. The column reaches 136 of the 715
+// fallback rows and 21% of their error mass, and Round 79's prefer gate removed **2.43 points**
+// with no archive change at all -- more than the column, for none of its cost. Attributing the
+// fallback mass to the dimension that caused it says why:
+//
+//     set:        3.14%   NO TABLE          border:  1.69%   this column
+//     watermark:  1.25%   NO TABLE          frame:   0.71%   this column
+//     r:          0.36%   NO TABLE          is:      0.07%   this column
+//     cn/eur/usd/year/date/tix  2.22% combined         RangeCardCounts mirror
+//
+// `set:` ALONE outweighs the whole column. It and `watermark:` are `TextExact` printing-space
+// dimensions of exactly the shape `ValueTotals` already holds (a `HashMap<String, SpaceTotals>`) and
+// they are simply absent from it. **The archive bump is worth taking when those two dimensions join
+// `ValueTotals` and get a `span` alongside everyone else** -- ~6.3% reachable in one format version
+// instead of 1.95% in this one.
 
 impl ArchivedSpaceTotals {
     fn get(&self, mode: Mode) -> usize {
@@ -2674,6 +4246,23 @@ fn legality_totals_key(shift: u8, expected: u64) -> u16 {
     (u16::from(shift) << 2) | (expected as u16 & 0b11)
 }
 
+/// The `ValueTotals::legality` row for one (format, status) -- all three spaces at once.
+///
+/// Shared by `exact_result_total`'s `Legality` arm and `compose_printing_estimate`'s, which is the
+/// point: that compose arm needs printings AND artworks for the same key, and reaching them through
+/// two `exact_result_total` calls means walking that function's whole shape-dispatch prelude twice.
+/// Measured (Round 61, 8,247 legality-bearing survey queries at seed 0, against a 31,180-query
+/// no-legality control subset that stayed at exactly 1.000): the two-call form cost +9.3% of
+/// `and_estimate_ns` p50 on those queries, 3,584 ns -> 3,916 ns. One lookup, two columns, and the
+/// control subset says the remainder is free.
+///
+/// `None` is an exact ZERO in every space, not "unknown" -- this table is complete (see
+/// `ValueTotals`' own doc), so a missing key means no printing carries that (format, status). Both
+/// callers turn it into 0 rather than declining.
+fn legality_space_totals(indexes: &Archived<CardIndexes>, shift: u8, expected: u64) -> Option<&ArchivedSpaceTotals> {
+    indexes.value_totals.legality.get(&legality_totals_key(shift, expected).into())
+}
+
 /// A value is worth PAIRING only if it is broad enough that an estimate about it can change a routing
 /// decision. `STREAM_MIN_MATCHES` is that line: below it the sparse floor decides the plan, not the
 /// estimate's precision, and min-over-singles is already within a small factor of the truth.
@@ -2709,6 +4298,24 @@ struct PairTotals {
     frame: HashMap<String, u16>,
     /// Keyed as `ValueTotals::legality` is, `(shift << 2) | status`.
     legality: HashMap<u16, u16>,
+    /// `cmc`/`power`/`toughness` — single-valued per card (a card has exactly one of each), so a
+    /// per-value entry here can be SUMMED over a range exactly (`pair_range_sum`, Round 24), unlike
+    /// border/rarity/frame/legality above which only ever answer a single `Eq` value. Keyed by the
+    /// field's own raw integer value (not a bucket scheme): `NumericLayout` (planes.rs) buckets by PLANE
+    /// layout for bitmap compilation, a different job, and this table only ever needs the same
+    /// dense-but-small value→id shape the other three dimensions above already use.
+    cmc: HashMap<u8, u16>,
+    power: HashMap<i8, u16>,
+    toughness: HashMap<i8, u16>,
+    /// Every DISTINCT `cmc`/`power`/`toughness` value observed in the corpus at all, regardless of
+    /// whether it cleared `PAIR_MIN_PRINTINGS` above — lets `pair_range_sum` tell "no card has this
+    /// value" (safe: contributes nothing to a range sum) apart from "some card has this value, but it
+    /// was pruned from the id map above" (unsafe: silently treating a pruned value as zero would
+    /// undercount any range that spans it). The id maps alone cannot make that distinction on their
+    /// own. Sorted, and small in practice (~14-21 entries per field on the production corpus).
+    cmc_seen: Vec<u8>,
+    power_seen: Vec<i8>,
+    toughness_seen: Vec<i8>,
     /// `min(a,b) * n_ids + max(a,b)` → the pair's exact totals. Complete over the stored ids: a present
     /// key is exact (possibly zero), a missing one means at least one value was pruned by the floor.
     pairs: HashMap<u32, SpaceTotals>,
@@ -2725,6 +4332,14 @@ impl ArchivedPairTotals {
     /// not covered.
     fn get(&self, a: u16, b: u16, mode: Mode) -> Option<usize> {
         self.pairs.get(&self.key(a, b).into()).map(|t| t.get(mode))
+    }
+
+    /// All three spaces at once, for `pair_range_sum` — which needs card/printing/artwork totals
+    /// together for every value in a range, and would otherwise hash the same key three times.
+    fn get_all(&self, a: u16, b: u16) -> Option<(usize, usize, usize)> {
+        self.pairs.get(&self.key(a, b).into()).map(|t| {
+            (u32::from(t.printings) as usize, u32::from(t.cards) as usize, u32::from(t.artworks) as usize)
+        })
     }
 }
 
@@ -2793,6 +4408,8 @@ fn build_pair_totals(
     // Pass 1: per-value printing counts, to apply the selectivity floor.
     let (mut border_n, mut rarity_n, mut frame_n, mut legality_n) =
         (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new());
+    let (mut cmc_n, mut power_n, mut toughness_n): (HashMap<u8, usize>, HashMap<i8, usize>, HashMap<i8, usize>) =
+        (HashMap::new(), HashMap::new(), HashMap::new());
     let shifts: Vec<u8> = (0..MAX_FORMATS as u8).map(|i| i * 2).collect();
     for (pid, p) in printings.iter().enumerate() {
         let card = &cards[printing_to_card[pid] as usize];
@@ -2813,6 +4430,15 @@ fn build_pair_totals(
             if status == LEGALITY_LEGAL || status == 0 {
                 *legality_n.entry(legality_totals_key(shift, status)).or_insert(0usize) += 1;
             }
+        }
+        if let Some(v) = card.cmc {
+            *cmc_n.entry(v).or_insert(0usize) += 1;
+        }
+        if let Some(v) = card.creature_power {
+            *power_n.entry(v).or_insert(0usize) += 1;
+        }
+        if let Some(v) = card.creature_toughness {
+            *toughness_n.entry(v).or_insert(0usize) += 1;
         }
     }
 
@@ -2852,6 +4478,32 @@ fn build_pair_totals(
     for (v, n) in legality_sorted {
         if let Some(id) = assign(n, &mut next) {
             out.legality.insert(v, id);
+        }
+    }
+    // `_seen` records EVERY distinct value observed, before the floor prunes the id map -- see its own
+    // doc on `PairTotals` for why `pair_range_sum` needs that distinction.
+    let mut cmc_sorted: Vec<_> = cmc_n.into_iter().collect();
+    cmc_sorted.sort_unstable();
+    out.cmc_seen = cmc_sorted.iter().map(|(v, _)| *v).collect();
+    for (v, n) in cmc_sorted {
+        if let Some(id) = assign(n, &mut next) {
+            out.cmc.insert(v, id);
+        }
+    }
+    let mut power_sorted: Vec<_> = power_n.into_iter().collect();
+    power_sorted.sort_unstable();
+    out.power_seen = power_sorted.iter().map(|(v, _)| *v).collect();
+    for (v, n) in power_sorted {
+        if let Some(id) = assign(n, &mut next) {
+            out.power.insert(v, id);
+        }
+    }
+    let mut toughness_sorted: Vec<_> = toughness_n.into_iter().collect();
+    toughness_sorted.sort_unstable();
+    out.toughness_seen = toughness_sorted.iter().map(|(v, _)| *v).collect();
+    for (v, n) in toughness_sorted {
+        if let Some(id) = assign(n, &mut next) {
+            out.toughness.insert(v, id);
         }
     }
     out.n_ids = next;
@@ -2896,6 +4548,21 @@ fn build_pair_totals(
             {
                 ids.push(id);
             }
+        }
+        if let Some(v) = card.cmc
+            && let Some(&id) = out.cmc.get(&v)
+        {
+            ids.push(id);
+        }
+        if let Some(v) = card.creature_power
+            && let Some(&id) = out.power.get(&v)
+        {
+            ids.push(id);
+        }
+        if let Some(v) = card.creature_toughness
+            && let Some(&id) = out.toughness.get(&v)
+        {
+            ids.push(id);
         }
         for (i, &a) in ids.iter().enumerate() {
             for &b in &ids[i + 1..] {
@@ -3264,6 +4931,221 @@ fn build_range_card_counts(
             for &id in touched.iter() {
                 blk[id >> 6] &= !(1u64 << (id & 63));
             }
+        }
+    }
+    out
+}
+
+// ─── Round 57: exact `legality` x `released_at` printing prefix sums ───────────
+// docs/issues/local-engine-nway-followup-queue.md. `f:modern year<=2003`-shaped queries get NO
+// tightening from any mechanism today: `legality` x `released` is deliberately absent from the
+// independence registry (`INDEPENDENCE_SAFE_PAIR`), `released_at` is not a `PairTotals` dimension,
+// and the two leaves share no exact joint -- so `compose_printing_estimate`'s `And` fold reports the
+// smaller marginal exactly, measured 5-14x over on real queries (`f:gladiator year<=2003` predicted
+// 14,928 against a true 2,673). The registry's own exclusion was justified in the design doc by
+// "Modern/Pioneer-style format legality is *defined* by a release-date cutoff", which is wrong for
+// the data an estimator over PRINTINGS sees: every format except `oldschool` has legal printings back
+// to 1993-08-05, because legality is card-level and reprints scatter legal cards across the whole
+// date axis. The cutoff is a property of SET legality, not of the joint distribution.
+//
+// Independence would beat the status quo (17.2% -> 7.6% of measured (format, date-predicate) pairs on
+// the wrong side of the 1,024 sparse floor over 460 pairs), but its residual error is an IDENTITY,
+// not noise: substituting a format's global legal density for its local density makes the error
+// exactly `global_density / window_density`, which is why `premodern`'s 3.69x temporal skew in its own
+// era predicts the 0.27x undershoot that was measured. That error is per-format temporal STRUCTURE,
+// so the fix is to store the structure. A bucketed granularity sweep (23 formats) settled where:
+//
+//   granularity        cells   median   p90    max    mean |log|   wrong side of 1,024
+//   plain independence     0    1.00x  2.66x   6.1x     0.413      8/138
+//   per-year             782    1.00x  1.05x   2.7x     0.061      2
+//   per-quarter        3,059    1.00x  1.07x   2.6x     0.040      0
+//   per-month          7,544    1.00x  1.00x   1.3x     0.008      0
+//   per-date          21,252    1.00x  1.00x   1.0x     0.001      0
+//
+// Every coarser bucket leaves real error because the knees are mid-year (Modern's is 2003-07-28, 8th
+// Edition, 16.8% -> 100.0%; Pioneer's 2012-10-05) and `standard` has no knee at all -- it alternates
+// date-to-date (2024 reads 15.8%, 61.0%, 17.3%, 8.6%, 4.7%, 61.4%, ...) because main sets interleave
+// with supplemental products. Run-length compression was measured and rejected: only ~40% savings at
+// tol=0.20, because for 17 of 23 formats that high-frequency alternation IS the signal (`vintage`
+// compresses to 3 runs, `standard` needs 580 of 924).
+//
+// At per-DATE granularity this stops being an estimator at all: release dates are the atoms of the
+// `released_at` axis, so every query range aligns to bucket boundaries and there is nothing to
+// pro-rate. The stored value is the exact answer.
+
+/// A `(format, status)` key is worth a per-date prefix sum only if it is broad enough that an estimate
+/// about it can change a routing decision -- the identical line `PAIR_MIN_PRINTINGS` draws for
+/// `PairTotals`, at the same `STREAM_MIN_MATCHES` value and for the same stated reason (below it the
+/// sparse floor decides the plan, not the estimate's precision, and min-over-singles is already within
+/// a small factor of the truth).
+///
+/// A separate constant rather than reusing `PAIR_MIN_PRINTINGS`: that one's doc records a pruning
+/// measurement specific to the pair table (4.2x, 3,705 pairs -> 879, `layout` removed entirely), and
+/// this table's own is a different number over a different population. Measured on the production
+/// corpus (2026-09-03): this prunes **29 of the 70** `(format, status)` keys that occur at all, and
+/// every pruned key is a `banned`/`restricted`/degenerate-`not_legal` population of 1-970 printings,
+/// where no amount of precision can move a routing decision. The surviving 41 keys x (924 distinct
+/// release dates + 1 sentinel) x 4 bytes is ~148 KB, 0.20% of the archive -- the same order as
+/// `RangeCardCounts`' own documented 156.6 KB across five dimensions.
+///
+/// See `build_legality_date_totals` for the SECOND prune the floor alone does not catch: a key whose
+/// population is the whole date index, which is uninformative rather than merely small.
+const LEGALITY_DATE_MIN_PRINTINGS: usize = 1_024;
+
+/// Exact per-`(format, status)` PRINTING counts along the `released_at` value axis, as a prefix sum.
+///
+/// **Printing space only, and that is the whole point.** Printing counts are ADDITIVE -- each printing
+/// has exactly one release date -- so a prefix sum answers any `[lo, hi)` exactly by subtraction,
+/// including a genuinely interior multi-date range (`year:2024`). Distinct CARD and ARTWORK counts are
+/// not additive: a card with printings on both sides of a cut lands in both halves. That is precisely
+/// the constraint `RangeCardCounts` documents for this same axis (its `lookup` declines a multi-value
+/// interior range and names `year:Y` as the shape it cannot answer), and it is the same split that
+/// lets `MaskCmcCounts` sum its own cmc axis additively (cmc is single-valued per card). So this table
+/// makes printing mode exact for EVERY range shape and leaves card/artwork mode unimproved --
+/// deliberately, not as an oversight; the calibrated occupancy estimator that converts an exact
+/// printing count into card/artwork estimates is its own follow-up, and it depends on this table
+/// existing because its input is the exact printing count.
+///
+/// Keyed exactly as `ValueTotals::legality` and `PairTotals::legality` already are, via
+/// `legality_totals_key` (`(shift << 2) | status`) -- one entry per (format, status) rather than per
+/// format, because `FilterExpr::Legality` carries a single 2-bit `expected` and statuses PARTITION each
+/// space (a printing has exactly one status per format), so a per-status entry is exact on its own.
+/// Counted per PRINTING and reading a `legality_divergent` card's own PRINTING word, the same
+/// derivation `ValueTotals::legality` uses and for the same reason.
+///
+/// **Unlike `ValueTotals`, this table may be incomplete** -- `LEGALITY_DATE_MIN_PRINTINGS` prunes it.
+/// Absence is read as "no answer" and the caller keeps the bound it already had, exactly the
+/// distinction `PairTotals`' own doc draws against `ValueTotals` (where absence must mean an exact
+/// zero, so the floor could not be applied at all).
+#[derive(Archive, Serialize, Deserialize, Default)]
+struct LegalityDateTotals {
+    /// `legality_totals_key(shift, status)` -> a prefix sum with `released_at.keys.len() + 1` entries:
+    /// `prefix[i]` is the number of printings with this (format, status) whose release date is one of
+    /// `released_at.keys[0..i)`. `prefix[0]` is 0 and the last entry is the key's whole population, so
+    /// ANY `[i, j)` window is `prefix[j] - prefix[i]` with no case split at all.
+    ///
+    /// That trailing sentinel is why this is one array rather than `MaskCmcCounts`/`RangeCardCounts`'
+    /// `below`/`at_or_above` pair: those store one entry per value and therefore need
+    /// `range_sum`/`lookup`'s four-way branch on whether each end is open. The sentinel is the same
+    /// idiom `PrintingValueIndex::starts` already uses for the same reason -- it removes the
+    /// `get(i + 1).unwrap_or(len)` at every use site.
+    ///
+    /// The date axis itself is NOT duplicated here. `RangeCardCounts` keeps its own `values` copy
+    /// because it is reached through `range_card_counts_for` and its callers would have to thread the
+    /// index in; this table's only caller has already resolved the index reference itself (that is what
+    /// the `std::ptr::eq(idx, &indexes.released_at)` guard IS), so `range_printings` takes `values` as
+    /// a parameter the way `ArchivedMaskCmcCounts::range_sum` does -- 3.7 KB saved and one fewer copy
+    /// that could drift.
+    by_key: HashMap<u16, Vec<u32>>,
+}
+
+impl ArchivedLegalityDateTotals {
+    /// Exact PRINTING count for one `(format, status)` `key` And'd with the half-open release-date
+    /// range `[lo, hi)`, or `None` when this table cannot answer.
+    ///
+    /// `values` must be `indexes.released_at.keys` -- the same distinct, ascending release dates the
+    /// build pass walked, so `prefix` is parallel to it. Two `partition_point`s and one subtraction:
+    /// unlike `ArchivedRangeCardCounts::lookup`, there is no shape this declines on ARITHMETIC grounds
+    /// (see this struct's own doc for why printing counts subtract and distinct counts do not). The
+    /// only miss is a key that is absent -- pruned by either of `build_legality_date_totals`' two
+    /// prunes, or the table not built for this store at all (an empty `by_key`, the same convention
+    /// `color_cmc_exact`'s own `by_mask.is_empty()` check uses).
+    fn range_printings(&self, values: &Archived<Vec<u32>>, key: u16, lo: u32, hi: u32) -> Option<usize> {
+        let prefix = self.by_key.get(&key.into())?;
+        // A prefix out of step with `values` can only come from a store built by different code, which
+        // `ARCHIVE_FORMAT_VERSION` already refuses to load -- checked anyway, because the indices below
+        // are derived from `values` and used to index `prefix`.
+        if prefix.len() != values.len() + 1 {
+            return None;
+        }
+        if hi <= lo {
+            return Some(0); // empty or unsatisfiable range
+        }
+        let pos = |v: u32| values.partition_point(|x| u32::from(*x) < v);
+        let (i, j) = (pos(lo), pos(hi));
+        Some((u32::from(prefix[j]) - u32::from(prefix[i])) as usize)
+    }
+}
+
+/// Build one prefix sum per surviving `(format, status)` key from a single value-major walk of the
+/// `released_at` index.
+///
+/// Walking the INDEX rather than `printings` is what makes a printing's date position the loop
+/// variable instead of a binary search -- the same reason `build_range_card_counts` walks it too. It
+/// also gets the null handling right for free: a printing with no release date is absent from the
+/// index, and it can never satisfy a date comparison (SQL null semantics), so it must contribute to no
+/// bucket.
+///
+/// The accumulator is DENSE (32 format slots x 4 statuses x one u32 per distinct date, ~473 KB
+/// transient at the corpus's 924 dates) and collapsed to the surviving sparse keys at the end. A hash
+/// lookup per increment would dominate the store build -- there are ~3.1M (printing, format)
+/// increments on the real corpus -- the same argument `build_pair_totals`' own dense accumulator makes.
+///
+/// **Two prunes, not one.** `LEGALITY_DATE_MIN_PRINTINGS` drops keys too small to matter. The second
+/// drops keys whose population is the ENTIRE date index, which the floor cannot catch because they are
+/// the broadest keys there are. This was measured, not anticipated: like `ValueTotals::legality`, the
+/// loop below walks all 32 format SLOTS rather than the 23 formats this corpus assigns, and an
+/// unassigned slot reads `not_legal` for every printing -- so 9 slots each cleared the floor at 97,812
+/// printings and cost 33 KB of archive for keys no query can even name (`FilterExpr::Legality`'s
+/// `shift` comes from `format_shift(name)`, and an unassigned slot has no name). Pruning them is
+/// provably behaviour-neutral, and for a reason that is not slot-specific: if a key covers every
+/// indexed printing, then `prefix[j] - prefix[i]` is exactly the date window's own `k`, which the date
+/// leaf's own estimate already contributes to the same `.min()`-fold -- so the candidate can never be
+/// tighter than what the arm already had. Checked against the real corpus rather than assumed safe for
+/// real formats too: the broadest real key is `commander`/`legal` at 97,496 of 97,812, so no genuine
+/// format-status is anywhere near this cut, and the prune removes exactly the 9 phantom slots.
+fn build_legality_date_totals(
+    cards: &[OracleCard],
+    printings: &[Printing],
+    printing_to_card: &[u32],
+    released_at: &PrintingValueIndex,
+) -> LegalityDateTotals {
+    let n_values = released_at.keys.len();
+    let mut out = LegalityDateTotals::default();
+    if n_values == 0 {
+        return out;
+    }
+    const N_STATUSES: usize = 4; // a 2-bit `expected`, so exactly four
+    let mut counts = vec![0u32; MAX_FORMATS * N_STATUSES * n_values];
+    for b in 0..n_values {
+        let run = released_at.starts[b] as usize..released_at.starts[b + 1] as usize;
+        for &pid in &released_at.pids[run] {
+            let card = &cards[printing_to_card[pid as usize] as usize];
+            // Per PRINTING, reading the PRINTING's own word for a divergent card (30A, Collectors'
+            // Edition, gold border) -- the same derivation `ValueTotals::legality`'s `keys_of` uses.
+            let word = if card.legality_divergent { printings[pid as usize].card_legalities } else { card.card_legalities };
+            for fmt in 0..MAX_FORMATS {
+                let status = (word >> (fmt * 2)) & 0b11;
+                counts[(fmt * N_STATUSES + status as usize) * n_values + b] += 1;
+            }
+        }
+    }
+    // Printings WITH a release date, i.e. the population these prefix sums cover. Not
+    // `printings.len()`: an undated printing is absent from the index (and can never satisfy a date
+    // comparison), so it is not part of any key's total here.
+    let n_indexed = released_at.pids.len();
+    for fmt in 0..MAX_FORMATS {
+        for status in 0..N_STATUSES {
+            let row = &counts[(fmt * N_STATUSES + status) * n_values..][..n_values];
+            // `u32` cannot overflow here: this is a subset of the corpus's printings, and the store
+            // caps those well below `u32::MAX`.
+            let total: u32 = row.iter().sum();
+            // Both prunes -- too small to change a routing decision, or so broad that the joint IS the
+            // date marginal the fold already holds. See this fn's own doc for why the second is
+            // behaviour-neutral and what it actually removes.
+            if (total as usize) < LEGALITY_DATE_MIN_PRINTINGS || total as usize == n_indexed {
+                continue;
+            }
+            let mut prefix = Vec::with_capacity(n_values + 1);
+            let mut running = 0u32;
+            prefix.push(running);
+            for &c in row {
+                running += c;
+                prefix.push(running);
+            }
+            // `MAX_FORMATS` is 32, so `shift` is even and <= 62 -- exactly the domain
+            // `legality_totals_key`'s own doc requires for the key not to collide.
+            out.by_key.insert(legality_totals_key((fmt * 2) as u8, status as u64), prefix);
         }
     }
     out
@@ -3719,6 +5601,11 @@ struct CardIndexes {
     cmc:            NumericIndex,    // card space
     power:          NumericIndex,    // card space
     toughness:      NumericIndex,    // card space
+    // Round 63: the three-space aggregate the `NumericIndex`es above lack, one per field. See
+    // `NumericSpanTotals` for why this exists and why it is per-distinct-value.
+    cmc_spans:       NumericSpanTotals,
+    power_spans:     NumericSpanTotals,
+    toughness_spans: NumericSpanTotals,
     rarity:         RarityIndex,     // card space (any-printing-at-rarity)
     // All five are HYBRID, joining `frame_data` below: a value above the 1/32 density crossover is
     // stored as a bitmap instead of a posting list, which is smaller for exactly the values that
@@ -3745,6 +5632,10 @@ struct CardIndexes {
     artists:        ArtistIndex,     // printing space (CSR by artist vocab id)
     flavor:         FlavorIndex,     // printing space (CSR by dense flavor text id)
     set_codes:      TagIndex,        // printing space
+    // printing space, keyed the same as `set_codes`: per-set collector_number_int min/max/count, for
+    // `compose_printing_estimate`'s `set:X` + `cn`-range density tightening (Round 33). Derived from
+    // `set_codes`'s own build pass, not a second corpus scan.
+    set_collector_ranges: HashMap<String, SetCollectorRange>,
     watermarks:     TagIndex,        // printing space
     released_at:    PrintingValueIndex,       // printing space
     price_usd:      PrintingValueIndex,       // printing space (integer cents, already order-preserving)
@@ -3768,12 +5659,36 @@ struct CardIndexes {
     /// distinct cards for `r<=rare` is not the sum of the at-rarity counts. Prefix/suffix/at is the
     /// shape the question needs, and it is the shape this struct already is.
     rarity_cards:           RangeCardCounts,
+    /// Round 57: exact per-`(format, status)` PRINTING counts along the `released_at` value axis, as
+    /// prefix sums parallel to `released_at.keys` above. ~148 KB. Printing space only -- distinct card
+    /// and artwork counts do not subtract, which is the same limit `released_at_cards` documents. For
+    /// `compose_printing_estimate`'s `And` arm; see `LegalityDateTotals`'s own doc.
+    legality_date:          LegalityDateTotals,
     /// Exact 3-space totals for the low-cardinality dimensions whose predicate tests one value:
     /// border, layout, frame, and (format, status). ~2 KB.
     value_totals:   ValueTotals,
     /// Exact 3-space totals for PAIRS of dense low-cardinality values (~14 KB), so a two-leaf `And` over
     /// them is answered rather than bounded by `min`.
     pair_totals:    PairTotals,
+    /// Round 34: `set:X`/`c:X`/`id:X` x subtype co-occurrence, for `compose_printing_estimate`'s
+    /// `And` arm and `exact_result_total`. See `SubtypePairIndexes`'s own doc.
+    subtype_pairs:  SubtypePairIndexes,
+    /// Round 55: `(subtype, subtype)` co-occurrence, for `compose_printing_estimate`'s `And` arm. A
+    /// NEW, separate mechanism alongside `subtype_pairs` above (which only ever pairs a subtype
+    /// against `set:X`/`c:X`/`id:X`, never against another subtype). See `SubtypePairTable`'s own doc.
+    subtype_subtype: SubtypePairTable,
+    /// Round 36: the top `SUBTYPE_ARITH_TOP_N` subtypes' own dense (cmc, power, toughness) prefix-sum
+    /// cube, for `compose_printing_estimate`'s `And` arm. See `SubtypeArithIndexes`'s own doc.
+    subtype_arith:  SubtypeArithIndexes,
+    /// Round 44: `colors`/`color_identity` x cmc exact joint, for `compose_printing_estimate`'s `And`
+    /// arm and `exact_result_total`. See `ColorCmcTable`'s own doc.
+    color_cmc:      ColorCmcIndexes,
+    /// Round 53/54: the three validated price-pair joint bucket tables, for
+    /// `compose_printing_estimate`'s `And` arm and the independence registry's own `by_class` multi-arm.
+    /// See `PriceJointTable`'s own doc.
+    price_joint_usd_eur: PriceJointTable,
+    price_joint_usd_tix: PriceJointTable,
+    price_joint_eur_tix: PriceJointTable,
     sort_perms:     SortPermutations,          // card space (streamed selection)
     artwork_groups: Vec<u16>,                  // card space: distinct illustration groups
     // card space, n_cards+1 entries: prefix sum of artwork_groups, so card c's artworks are the
@@ -4491,6 +6406,11 @@ fn probe_collection_k(filter: &FilterExpr, indexes: &Archived<CardIndexes>) -> O
 /// interval is never discovered — measured at 1,146.8 µs, against 26.7 µs for the one-sided
 /// `usd>=200`, which returns *more* rows. Fusing before ranking puts the two-sided form on the same
 /// sparse-vec path the one-sided form already takes.
+// `Clone, Copy`: every field is itself a reference or a `Copy` scalar, so a caller that wants to
+// inspect the fused list a second time (Round 33's `set:X` + `cn`-range density check, which reads it
+// after `compose_printing_estimate`'s own fold already consumed one copy) can hold the `Vec` and
+// iterate it by value instead of fighting reference-of-reference match ergonomics.
+#[derive(Clone, Copy)]
 enum AndSource<'f, 'i> {
     Child(&'f FilterExpr),
     /// `[lo, hi)` on `idx`, the intersection of two or more children's intervals, holding `k`
@@ -5763,6 +7683,17 @@ impl GatherSelect {
         }
     }
 
+    /// How many matches `finish`'s `select_page` will quickselect over — the realized input length of
+    /// the finish phase, published as `PhaseStats::select_input_len`.
+    ///
+    /// This is what the buffer holds, NOT `min(offset + limit, matches)`: `absorb` prunes back to `k`
+    /// only after the buffer has grown `GATHER_PRUNE_CHUNK` past it, so once a query has more matches
+    /// than a page this sits in `[k, k + GATHER_PRUNE_CHUNK)`. `cost::gather_page_span` charges the
+    /// former; this reports the latter, which is the whole point of grading one against the other.
+    fn buffered_len(&self) -> usize {
+        self.best.len()
+    }
+
     /// The exact total absorbed and the page `[offset, offset+limit)`.
     fn finish(self, offset: usize, limit: usize) -> (usize, Vec<(u32, u32)>) {
         (self.total, select_page(self.best, offset, limit))
@@ -6508,6 +8439,41 @@ fn bare_range_bounds<'i>(
     }
 }
 
+/// Round 57: the positions of every bare `released_at` range child of an `And`, plus their fused
+/// half-open `[lo, hi)` (`lo = max(lo_i)`, `hi = min(hi_i)`). `None` when the `And` holds no date
+/// child at all.
+///
+/// The `std::ptr::eq(idx, &indexes.released_at)` test is what keeps a price or collector-number range
+/// out: `bare_range_bounds` resolves all five printing-range families and hands back the index
+/// REFERENCE rather than a discriminant, so pointer identity is exact rather than heuristic -- the
+/// same idiom `range_card_counts_for` and Round 33's own `collector_number_bounds` use, and for the
+/// same reason (threading a dimension tag through `resolve_numeric_range_leaf` would touch every
+/// caller for no more safety).
+///
+/// Deliberately re-derived from `v` rather than read off `and_sources`: `fuse_and_range_children` only
+/// emits a `FusedRange` for a group of 2+, so a lone `year<=2003` child stays an `AndSource::Child` and
+/// both cases would have to be handled anyway (`collector_number_bounds` does exactly that). One pass
+/// over `v` gives the literal child POSITIONS the trace wants alongside the interval, applying the
+/// same `max`/`min` fusion math `fuse_and_range_children` itself does.
+fn released_at_bounds_intersect(v: &[FilterExpr], indexes: &Archived<CardIndexes>) -> Option<(Vec<usize>, u32, u32)> {
+    let mut positions: Vec<usize> = Vec::new();
+    let (mut lo, mut hi) = (0u32, u32::MAX);
+    for (i, c) in v.iter().enumerate() {
+        if let Some((idx, c_lo, c_hi)) = bare_range_bounds(c, indexes)
+            && std::ptr::eq(idx, &indexes.released_at)
+        {
+            positions.push(i);
+            lo = lo.max(c_lo);
+            hi = hi.min(c_hi);
+        }
+    }
+    // `hi < lo` is an unsatisfiable conjunction (`year>=2005 year<=2003`). Clamping to `[lo, lo)`
+    // yields 0, which is what an empty range means -- the same clamp `fuse_and_range_children` applies,
+    // for the same reason (every consumer computes a width by subtracting two `partition_point`s, and
+    // that subtraction underflows if the ends cross).
+    (!positions.is_empty()).then(|| (positions, lo, hi.max(lo)))
+}
+
 /// Build `CardRangePopcount`'s two bitmaps from an exact range slice — `bare_range_bounds` supplies
 /// the index + half-open `[lo, hi)` for whichever range family the leaf is (usd/cn/date) — in a
 /// single pass: the tight printing-space membership set (`range_pbits`, set directly from the
@@ -6897,9 +8863,9 @@ fn printing_compose_indexes_built(indexes: &Archived<CardIndexes>) -> bool {
         // unbuilt fixture store reports 0 cards there, same "decline cleanly" contract as the two
         // checks above.
         && u32::from(indexes.planes.n_cards) > 0
-        // cmc/power/toughness's estimate arm reads `indexes.arith_tuple` (`arith_tuple_count`) instead
+        // cmc/power/toughness's estimate arm reads `indexes.arith_tuple` (`arith_tuple_totals`) instead
         // of `eval_planes` now — an unbuilt fixture store reports 0 cards there too, and without this
-        // check `arith_tuple_count` returning `None` would hit compose_printing_estimate's
+        // check `arith_tuple_totals` returning `None` would hit compose_printing_estimate's
         // `.expect("gated by is_printing_composable")` and panic instead of declining cleanly.
         && u32::from(indexes.arith_tuple.n_cards) > 0
 }
@@ -7035,22 +9001,48 @@ fn range_leaf_bits(idx: &Archived<PrintingValueIndex>, lo: u32, hi: u32, n_print
     bits
 }
 
+/// Exact total width across every set card in `card_bits`, against any per-card offsets array shaped
+/// like `offsets`/`artwork_base` (`[card_offsets[c], card_offsets[c+1])` per card) -- the printing OR
+/// artwork total of an exact card-space set, by direct summation instead of the corpus-average
+/// `card_count * n_printings / n_cards` ratio. Same iteration `broadcast_card_bits_to_printings` (just
+/// below) uses, summing span widths instead of setting bits, since only the total is needed here.
+/// O(set cards), not O(n_cards).
+fn card_bits_span_total(card_bits: &[u64], card_offsets: &AOffsets) -> usize {
+    let mut total = 0usize;
+    for (i, &word) in card_bits.iter().enumerate() {
+        let mut w = word;
+        while w != 0 {
+            let c = (((i as u32) << 6) | w.trailing_zeros()) as usize;
+            w &= w - 1;
+            total += u32::from(card_offsets[c + 1]) as usize - u32::from(card_offsets[c]) as usize;
+        }
+    }
+    total
+}
+
 /// Broadcast a card-space bitmap **down** to printing space: set every printing of each set card. The
 /// inverse of `printing_bits_to_card_bits`, used to lift a card-settled fact (a legality that doesn't
 /// diverge across the card's printings) into the printing domain for composition. Iterates set cards
 /// only, so it is O(set cards + their printings), not O(n_cards).
 fn broadcast_card_bits_to_printings(card_bits: &[u64], offsets: &AOffsets, n_printings: usize) -> Vec<u64> {
     let mut pbits = vec![0u64; words_per_plane(n_printings)];
+    // Realized `broadcast_printings` for the cost model -- a plain local, noted once below. The
+    // per-card `end - start` the loop already computes for its range bound, so this adds one integer
+    // add per SET CARD and nothing at all per printing. See `PhaseStats::broadcast_printings`.
+    let mut touched = 0u64;
     for (i, &word) in card_bits.iter().enumerate() {
         let mut w = word;
         while w != 0 {
             let c = (((i as u32) << 6) | w.trailing_zeros()) as usize;
             w &= w - 1;
-            for p in u32::from(offsets[c]) as usize..u32::from(offsets[c + 1]) as usize {
+            let (start, end) = (u32::from(offsets[c]) as usize, u32::from(offsets[c + 1]) as usize);
+            touched += (end - start) as u64;
+            for p in start..end {
                 pbits[p >> 6] |= 1u64 << (p & 63);
             }
         }
     }
+    note_broadcast_printings(touched);
     pbits
 }
 
@@ -7226,12 +9218,19 @@ fn legality_leaf_bits_from_absent(
     n_printings: usize,
 ) -> Vec<u64> {
     let mut pbits = all_printing_bits(n_printings);
+    // Same realized `broadcast_printings` quantity as the from-exists side: this branch CLEARS the
+    // sparse illegal set's printings instead of setting the legal set's, and the cost term prices
+    // whichever side ran. A plain local, noted once at the loop's exit.
+    let mut touched = 0u64;
     for cid in bitmap_card_ids(absent) {
         let c = cid as usize;
-        for p in u32::from(offsets[c]) as usize..u32::from(offsets[c + 1]) as usize {
+        let (start, end) = (u32::from(offsets[c]) as usize, u32::from(offsets[c + 1]) as usize);
+        touched += (end - start) as u64;
+        for p in start..end {
             pbits[p >> 6] &= !(1u64 << (p & 63));
         }
     }
+    note_broadcast_printings(touched);
     // Divergent-in-this-format cards (∃ legal ∧ ∃ illegal printing) are exactly `exists ∧ absent`;
     // repair only if there are any (skip the whole pass for a format with none, e.g. commander).
     let divergent = exists.iter().zip(absent.iter()).map(|(&a, &b)| (a & b).count_ones()).sum::<u32>();
@@ -7373,6 +9372,257 @@ fn compose_printing_bits(
     }
 }
 
+/// ONE space's two independent answers (Round 58). They never compete for one slot: `guaranteed` is
+/// only ever lowered by a mechanism that computed a real count, `estimate` only by one that guessed.
+///
+/// **Consumer contract -- read this before adding a call site, it is not per-site judgment:**
+///
+/// - A consumer needing SOUNDNESS (`scan_units`, "is this the exact answer", Round 58's own
+///   `COMPOSE_CARD_ESTIMATE_BIAS` skip) reads `guaranteed` and treats `None` as **unknown**, never as
+///   zero and never as "the estimate will do".
+/// - A consumer needing ACCURACY (routing cardinality) reads `estimate.min(guaranteed)`, i.e. `best()`.
+///   Clamping a guess to a proven ceiling is always correct. The reverse -- letting a guess lower a
+///   proven bound below truth -- is the bug Round 55 found, and is now structurally impossible.
+///
+/// `guaranteed` is a PER-SPACE *bound*, not a claim about which SET it counts: Round 42's principle is
+/// what makes it sound for any subset (any true sub-conjunction's count bounds the whole `And` above,
+/// so `.min()`-folding any number of these in any order is always safe).
+///
+/// **It carries NO cross-space consistency guarantee, and `guaranteed.card <= guaranteed.artwork <=
+/// guaranteed.printing` is NOT true.** Each space's bound can come from a different mechanism, so
+/// nothing relates them. `cards <= artworks <= printings` exists only as `fold_candidate`'s
+/// `debug_assert!`s on ONE `Candidate::Exact`'s own INPUTS -- it is never enforced on the folded
+/// output, and the assembled `SpaceEstimate` never clamps card/artwork against printing. Round 46
+/// censused the consequence directly: **10,269 root-level violations across 3,421 distinct queries,
+/// every one `artworks > printings`, never `cards > artworks`**, all traceable to Round 41's
+/// unclamped `narrow_floor` (a child's loose SOLO artwork count surviving while a joint mechanism
+/// tightens printing hard). Recorded as a known, still-open issue in
+/// `docs/issues/local-engine-nway-compose-independence-search.md`. Round 58 deliberately does not add
+/// that clamp: it would move ~32% of `root=and` rows, which is its own validated round.
+///
+/// For "one set's count, the same set in all three spaces", see `ExactDomain` -- a different and
+/// stronger claim, and the reason it is retained as its own field rather than treated as a synonym for
+/// `guaranteed`.
+///
+/// **The admission rule (Round 59), and it is not per-site judgment either.** A source may write
+/// `guaranteed` only if its number is a REAL COUNT OF A REAL SET -- a table lookup, a popcount, a
+/// prefix-sum subtraction, a precomputed `SpaceTotals`, or a bucketed lookup that provably counts every
+/// matching row (`PriceJointTable`: each printing lives in exactly one cell and a cell is counted
+/// whenever it overlaps the query rectangle at all, so a match can never be missed). An independence
+/// PRODUCT never qualifies, and neither does a card count multiplied by the corpus reprint ratio
+/// (`card_count * n_printings / n_cards`): that is an average-case approximation, measured to
+/// UNDERSHOOT by 5-13% on the `Legality` leaf, and Round 58 let it seed `guaranteed` only because that
+/// round was byte-identical by construction. Round 59 routes all THREE such leaf arms
+/// (`FilterExpr::Legality`, the `is_broadcast_leaf_shape`/devotion arm, and the bare
+/// cmc/power/toughness arm's `bare_numeric_field_count` branch) through
+/// `estimate_only`/`SpaceEstimate::spaces_approx_printing` instead, so `guaranteed` no longer holds
+/// values BELOW truth. `min(a bound, a guess)` is NOT a bound, which is why `SubtypePairEstimate`'s
+/// `min(indep, rest_max)` stays estimate-only despite `rest_max` alone being a bound.
+///
+/// A corollary that is easy to lose: a number derived from `best()` may not be written to `guaranteed`
+/// either, since `best()` can resolve from the estimate channel. That is why the `And` arm seeds its
+/// own `printing` accumulator from the per-leaf fold's `SpaceMeasure` DIRECTLY, channel by channel,
+/// rather than wrapping one `best()`-derived `usize` in `known()` the way Round 58 left it.
+/// `PartialEq` (Round 62) is a STRUCTURAL comparison of both channels, deliberately not a comparison
+/// of `best()`: it is used to ask "did a fold move this measure at all", which is precisely the
+/// question `best()` cannot answer once one channel can move while the other decides the number. See
+/// `ComposeEstimate::printing_tightened`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SpaceMeasure {
+    /// Tightest PROVEN upper bound on the true count, or `None` for "no mechanism proved one".
+    guaranteed: Option<usize>,
+    /// Best available GUESS. May undershoot. Never constrains `guaranteed`.
+    estimate: Option<usize>,
+}
+
+impl SpaceMeasure {
+    /// No answer in either channel.
+    const UNKNOWN: Self = Self { guaranteed: None, estimate: None };
+
+    /// A real count in hand: simultaneously a proven bound and the best guess, so it fills BOTH
+    /// channels. This is what every leaf/table/popcount answer is -- the two channels only diverge
+    /// once a mechanism that merely *guessed* folds in via `lower_estimate`.
+    fn known(v: usize) -> Self {
+        Self { guaranteed: Some(v), estimate: Some(v) }
+    }
+
+    /// `known`, for a space this leaf/join may or may not have an answer for.
+    fn known_opt(v: Option<usize>) -> Self {
+        Self { guaranteed: v, estimate: v }
+    }
+
+    /// A number that is only ever a GUESS: it fills `estimate` and leaves `guaranteed` absent
+    /// (= "no mechanism proved one", which is what `None` already means).
+    ///
+    /// Deliberately spelled out at the call site rather than reached by passing `None` somewhere,
+    /// because the whole bug class this exists to close is `known()` being the path of least
+    /// resistance: `known` reads like "here is the number" when what it actually asserts is "this
+    /// number is a proven upper bound on the truth". Use this whenever that second half is false --
+    /// see this type's own admission rule above.
+    fn estimate_only(v: usize) -> Self {
+        Self { guaranteed: None, estimate: Some(v) }
+    }
+
+    /// The ACCURACY read: `estimate.min(guaranteed)`, with either side absent simply skipped. `None`
+    /// only when neither channel has anything.
+    fn best(self) -> Option<usize> {
+        [self.guaranteed, self.estimate].into_iter().flatten().min()
+    }
+
+    /// Fold in a mechanism that computed a real count. Cannot touch `estimate`.
+    fn lower_guaranteed(&mut self, v: usize) {
+        self.guaranteed = Some(self.guaranteed.map_or(v, |g| g.min(v)));
+    }
+
+    /// Fold in a mechanism that guessed. Cannot touch `guaranteed` -- the whole point of the split.
+    fn lower_estimate(&mut self, v: usize) {
+        self.estimate = Some(self.estimate.map_or(v, |e| e.min(v)));
+    }
+
+    /// Per-channel `min`, each channel folded only against its own counterpart.
+    fn min(self, other: Self) -> Self {
+        Self {
+            guaranteed: [self.guaranteed, other.guaranteed].into_iter().flatten().min(),
+            estimate: [self.estimate, other.estimate].into_iter().flatten().min(),
+        }
+    }
+
+    /// `Or`'s sum, needing BOTH sides known per channel -- `Some(0) + None` must not silently drop
+    /// the unknown side's real contribution and under-report a union.
+    ///
+    /// **Deliberately asymmetric, and this is load-bearing.** `guaranteed` sums the two `guaranteed`s
+    /// (a sum of proven bounds is a proven bound on the union), but `estimate` sums the two `best()`s,
+    /// NOT the two `estimate`s -- the best guess for a union is the sum of each side's best guess,
+    /// whichever channel that came from. Summing the `estimate` channels alone is wrong and was caught
+    /// empirically by Round 58's own phase-1 byte-identity survey (`(pow=8 t:minotaur) or (id:b
+    /// set:gtc)`: 61 -> 249): `min` distributes over a per-channel fold, but `+` does not.
+    /// `min(g1, e1) + min(g2, e2)` can pick `g` on one side and `e` on the other, which
+    /// `min(g1 + g2, e1 + e2)` cannot reproduce -- so the union's number silently rose whenever the
+    /// two children's tightest answers came from DIFFERENT channels. Summing `best()` keeps
+    /// `best(a.add(b)) == a.best() + b.best()` exactly, since `best() <= guaranteed` makes the
+    /// estimate channel the smaller sum by construction.
+    fn add(self, other: Self) -> Self {
+        Self {
+            guaranteed: self.guaranteed.zip(other.guaranteed).map(|(a, b)| a + b),
+            estimate: self.best().zip(other.best()).map(|(a, b)| a + b),
+        }
+    }
+
+    /// Apply the same transform to both channels (a clamp, a scale) -- for a rewrite that is a
+    /// property of the SPACE, not of how trustworthy either channel is.
+    fn map(self, f: impl Fn(usize) -> usize) -> Self {
+        Self { guaranteed: self.guaranteed.map(&f), estimate: self.estimate.map(&f) }
+    }
+}
+
+/// One count, in all three spaces at once -- `printing` is always known (every leaf/join here builds
+/// or bounds a printing-space set, one way or another), `card`/`artwork` are known exactly when this
+/// same leaf/join has one for free. Replaces a design where `card`/`artwork` were bolted on next to a
+/// bare `result: usize`/`candidate: usize` (each already implicitly printing-space, but nothing in the
+/// TYPE said so): that shape made it possible -- and it happened, twice, checked against real data
+/// before being caught -- to fold or consume the wrong field's value where a printing-space number was
+/// expected, or vice versa. A `SpaceEstimate` can't be misread that way: the field name IS the space.
+///
+/// Round 58: each space is a `SpaceMeasure` (a proven bound AND a best guess) rather than one number
+/// the two had to compete for. See `SpaceMeasure`'s own doc for the consumer contract.
+///
+/// Deliberately NOT `Default`: a default-constructed one would have `printing` empty in both channels,
+/// which `printing()` documents as impossible and would panic on. Every construction goes through
+/// `printing_only`/`spaces` (or the `And` arm's own explicit seed), all of which set it.
+#[derive(Clone, Copy)]
+struct SpaceEstimate {
+    printing: SpaceMeasure,
+    card: SpaceMeasure,
+    artwork: SpaceMeasure,
+}
+
+impl SpaceEstimate {
+    fn printing_only(printing: usize) -> Self {
+        Self { printing: SpaceMeasure::known(printing), card: SpaceMeasure::UNKNOWN, artwork: SpaceMeasure::UNKNOWN }
+    }
+
+    /// A real count in printing space, plus whichever of card/artwork the caller has in hand.
+    fn spaces(printing: usize, card: Option<usize>, artwork: Option<usize>) -> Self {
+        Self { printing: SpaceMeasure::known(printing), card: SpaceMeasure::known_opt(card), artwork: SpaceMeasure::known_opt(artwork) }
+    }
+
+    /// `spaces`, for a leaf whose PRINTING figure is only an approximation while its card/artwork
+    /// counts are real -- the exact shape of the remaining `card_count * n_printings / n_cards` leaf
+    /// arms (`is_broadcast_leaf_shape`/devotion, and bare cmc/power/toughness), whose card count is
+    /// exact and whose printing number is the corpus reprint ratio applied to it. `FilterExpr::Legality`
+    /// was the third until Round 61 gave it the exact `ValueTotals` printing count instead -- the
+    /// demotion this constructor exists for is the SECOND-best outcome, behind removing the guess.
+    /// `printing` therefore fills the
+    /// estimate channel ONLY; card/artwork fill both, as `spaces` does. See `SpaceMeasure`'s admission
+    /// rule for why the asymmetry is the point rather than an oversight.
+    fn spaces_approx_printing(printing: usize, card: Option<usize>, artwork: Option<usize>) -> Self {
+        Self {
+            printing: SpaceMeasure::estimate_only(printing),
+            card: SpaceMeasure::known_opt(card),
+            artwork: SpaceMeasure::known_opt(artwork),
+        }
+    }
+
+    /// The printing-space ACCURACY read. Infallible by construction: every constructor above sets
+    /// `printing`'s `estimate` channel (`spaces_approx_printing` sets ONLY that one, which `best()`
+    /// reads just as happily as a bound), `min` takes whichever side has an answer, and `add` fills
+    /// `estimate` from both children's `best()` -- which is `Some` by induction. Note `add` CAN leave
+    /// `guaranteed` absent (it needs both sides proven), so `printing.guaranteed.is_some()` is not an
+    /// invariant and must never be assumed; `printing.best().is_some()` is.
+    fn printing(self) -> usize {
+        self.printing.best().expect("printing is set in at least one channel at every SpaceEstimate construction site")
+    }
+
+    /// `And`'s fold: printing always narrows (min); card/artwork narrow too whenever EITHER side has
+    /// an answer for that space -- a one-sided answer is still a valid tightening (the other side is
+    /// unconstrained information, not a competing value), so this is not the same as requiring both.
+    /// Per CHANNEL as well as per space (`SpaceMeasure::min`): a guess on one side never lowers the
+    /// other side's proven bound.
+    fn min(self, other: Self) -> Self {
+        Self {
+            printing: self.printing.min(other.printing),
+            card: self.card.min(other.card),
+            artwork: self.artwork.min(other.artwork),
+        }
+    }
+
+    /// `Or`'s fold: a valid (if loose, on overlap) upper bound per space, mirroring how printing's own
+    /// sum-then-clamp already worked. Unlike `min`, a card/artwork total here needs BOTH sides known --
+    /// `Some(0) + None` must not silently drop the unknown side's real contribution and under-report
+    /// the union.
+    fn add(self, other: Self) -> Self {
+        Self {
+            printing: self.printing.add(other.printing),
+            card: self.card.add(other.card),
+            artwork: self.artwork.add(other.artwork),
+        }
+    }
+}
+
+/// ONE set's count in all three spaces at once -- the `And` arm's `best_other`/arith-tuple-merge
+/// intersection, captured before any further `pair_bounded_min` tightening.
+///
+/// Deliberately NOT a `SpaceEstimate`, and deliberately not folded into `SpaceMeasure::guaranteed`:
+/// this is a different and STRONGER claim. `guaranteed` is a per-space bound with no cross-space set
+/// identity (its printing number can come from one mechanism and its card number from another, each
+/// individually sound). Every field here is guaranteed to be the SAME set's count in each space, which
+/// is what `acquire_plan_features` needs for `scan_units` -- the printing SPAN of the CANDIDATE cards,
+/// not the tightest number found in each space independently. Conflating the two would quietly break
+/// those printing-SPAN semantics.
+#[derive(Clone, Copy)]
+struct ExactDomain {
+    printing: usize,
+    card: Option<usize>,
+    // No production consumer reads the artwork span yet -- `exact_domain`'s two live consumers are
+    // `exact_domain_won` (`.card`) and `scan_all` (`.printing`). That was already true before Round 58
+    // and was merely masked by this struct sharing `SpaceEstimate`'s type, whose `.artwork` IS read via
+    // `result`. Kept (rather than dropped) because it is the third space of a genuine same-set triple
+    // that `fold_candidate` already accumulates and the suite already asserts on, and dropping it would
+    // silently narrow what a later artwork-space consumer can ask this for.
+    #[allow(dead_code)]
+    artwork: Option<usize>,
+}
+
 /// Cheap cost-model estimate for a composable filter: `(matches, broadcast_printings, scatter_printings)`
 /// **without** paying legality's broadcast. The two synthesis kinds are returned separately because they
 /// cost different rates (`LINEAR_PASS_PER_PRINTING_NS` vs `RANGE_SCATTER_PER_PRINTING_NS`): a legality
@@ -7395,36 +9645,96 @@ fn compose_printing_bits(
 /// distinction `exact_cards` vs `exact_total` draws one level down.
 #[derive(Clone)]
 struct ComposeEstimate {
-    result: usize,
-    candidate: usize,
+    result: SpaceEstimate,
+    candidate: SpaceEstimate,
     broadcast: usize,
     scatter: usize,
-    /// Best-effort CARD count `narrow_rec` really leaves for `GatheredScan`/`StreamedSelect` to walk,
-    /// when this estimate came from an `And` with plane-compilable children — `None` everywhere else
-    /// (leaves, `Or`, no plane-compilable children at all). Computed once alongside `result`'s own
-    /// plane-AND tightening (`compile_children_once`'s doc has the two-case mechanism) specifically so
-    /// `acquire_plan_features` never has to re-run `compile_plane`/`eval_planes` over the same children
-    /// a second time just to answer a different question about them — measured to matter: computing it
-    /// via a second independent pass over the same children was a real ~4x `acquire_ns` regression on
-    /// cheap queries, not just redundant-looking code.
-    domain_hint: Option<usize>,
+    /// Printings a CARD-SPACE collection leaf's build broadcasts (`ids_of` +
+    /// `broadcast_card_ids_to_printings`) -- kept apart from `scatter` because it is a different,
+    /// pricier operation (a card-cursor lookup per id, then a variable-width printing-range fill) than
+    /// a range's contiguous slice-scatter. Measured riding `scatter`'s rate on `otag:triggered-ability`
+    /// /`otag:cycle`/`otag:activated-ability`: 2.7-2.9x too cheap, consistently across all three (see
+    /// `COMPOSE_COLLECTION_BROADCAST_PER_PRINTING_NS`). Printing-space collection leaves (art_tags/
+    /// is_tags) still ride `scatter`: their build IS a contiguous `bits()` copy, the same shape a
+    /// range's is, and measured fine.
+    collection_broadcast: usize,
+    /// The `And` arm's `best_other`/arith-tuple-merge intersection, in all three spaces, captured
+    /// before `result` could be tightened any further by `pair_bounded_min` -- `None` everywhere else
+    /// (leaves, `Or`, an `And` where neither mechanism fired). Unlike `result` (which folds in every
+    /// tightening this match found, so its printing count is not guaranteed to describe the same set
+    /// its card/artwork counts do), every field here is guaranteed to be the SAME set's count in each
+    /// space. `acquire_plan_features` uses this for `scan_units` -- the printing SPAN of the CANDIDATE
+    /// cards, which needs a printing/card pair known to match, not `result`'s tightest-found number.
+    /// Round 58: its own type (`ExactDomain`) rather than a `SpaceEstimate`, so the stronger claim
+    /// cannot be mistaken for `SpaceMeasure::guaranteed`'s per-space bound -- see `ExactDomain`'s doc.
+    exact_domain: Option<ExactDomain>,
+    /// Round 37a: structured provenance for the OUTERMOST `And` node's own evaluation -- see
+    /// `AndTrace`'s own doc. `None` everywhere except an `And` arm invoked with `want_trace: true`,
+    /// which is only the `explain`/`explain_analyze` diagnostic entry points, never a production
+    /// acquire or `compose_gather_declines`'s runtime decline check. Boxed so every OTHER leaf/`Or`/
+    /// recursive-child `ComposeEstimate` -- the overwhelming majority of the ones this function ever
+    /// builds -- stays exactly as cheap to construct/clone/fold as before this field existed: `None`
+    /// is one pointer-sized niche, not an inline `Vec`/`String` payload every clone would have to
+    /// pay for.
+    and_trace: Option<Box<AndTrace>>,
+    /// Round 62: **did any mechanism actually tighten `result.printing` below what the per-leaf fold
+    /// seeded?** A structural fact, recorded where it happens, rather than a number comparison
+    /// downstream.
+    ///
+    /// `acquire_plan_features` has to know this to price the MATERIALIZING alternatives: they walk the
+    /// CANDIDATE set (`narrow_rec` declines broad children), so the moment `result` moves below
+    /// `candidate` the answer's own count stops describing the domain they scan. It used to ask
+    /// `est.candidate.printing() == est.result.printing()`. That test is not simply wrong --
+    /// `result <= candidate` always holds, so an inequality really does imply a tightening -- but it
+    /// is unsound in the other direction, in two ways, both of which report "nothing tightened" when
+    /// something did:
+    ///
+    /// - **It cannot see a bound-only tightening.** `printing()` is `SpaceMeasure::best()`, and Round
+    ///   60 measured the estimate channel to be the tighter of the two on 17,628 of 32,745 roots -- so
+    ///   on over half of roots `best()` reads the estimate, and a mechanism that lowered only
+    ///   `guaranteed` leaves the number it compares completely unmoved. Round 59 made bound-only
+    ///   tightenings the norm rather than a curiosity (`Candidate::PrintingBound`, `pair_bounded_min`'s
+    ///   `guaranteed`-seeded fold), so this is a live gap, not a hypothetical.
+    /// - **It cannot separate "tightened to the same number" from "not tightened."**
+    ///
+    /// `true` on an `And` whose own `pair_bounded_min`/`fold_candidate` folds moved `result.printing`
+    /// off its seed, and on any node with such a child (a nested `And` under an `And`/`Or` pushes
+    /// `result` below `candidate` at the parent too, which is exactly the same question the parent's
+    /// consumer is asking). `false` for every leaf, where `result` and `candidate` are the same value
+    /// by construction.
+    printing_tightened: bool,
 }
 
 impl ComposeEstimate {
-    /// A leaf: nothing to tighten, so both figures are the same count, and there is no `And` of
-    /// plane-compilable children to hint a domain from.
+    /// A leaf with no cheap exact card/artwork source: nothing to tighten, so `result`/`candidate` are
+    /// the same count, and there is no space beyond printing to report.
     fn leaf(k: usize, broadcast: usize, scatter: usize) -> Self {
-        Self { result: k, candidate: k, broadcast, scatter, domain_hint: None }
+        let space = SpaceEstimate::printing_only(k);
+        Self { result: space, candidate: space, broadcast, scatter, collection_broadcast: 0, exact_domain: None, and_trace: None, printing_tightened: false }
     }
-}
 
-/// The breadth gate `narrow_rec`'s own `And` arm applies to each child before intersecting: a child
-/// covering more than this fraction of its own domain gets dropped from the intersection entirely
-/// (see the `len > domain - domain / 4` check in `narrow_rec`'s `And` arm) — kept as the identical
-/// integer-division shape, not a `f64` fraction, so this can never round differently from the real
-/// gate as domain sizes vary.
-fn exceeds_own_domain_breadth(len: usize, domain: usize) -> bool {
-    len > domain - domain / 4
+    /// `leaf`, plus whichever of the card/artwork spaces the caller already has in hand for free --
+    /// every call site that has one is expected to pass it, not re-derive it via `result`'s own scale.
+    fn leaf_spaces(k: usize, broadcast: usize, scatter: usize, card: Option<usize>, artwork: Option<usize>) -> Self {
+        let space = SpaceEstimate::spaces(k, card, artwork);
+        Self { result: space, candidate: space, broadcast, scatter, collection_broadcast: 0, exact_domain: None, and_trace: None, printing_tightened: false }
+    }
+
+    /// `leaf_spaces`, for the two leaf arms whose printing figure is a card count scaled by the corpus
+    /// reprint ratio rather than a real count -- see `SpaceEstimate::spaces_approx_printing`. Named
+    /// apart from `leaf_spaces` (rather than taking a flag) so a reader of either call site can see,
+    /// without leaving the line, that `k` here is a GUESS and not a bound.
+    fn leaf_spaces_approx_printing(k: usize, broadcast: usize, scatter: usize, card: Option<usize>, artwork: Option<usize>) -> Self {
+        let space = SpaceEstimate::spaces_approx_printing(k, card, artwork);
+        Self { result: space, candidate: space, broadcast, scatter, collection_broadcast: 0, exact_domain: None, and_trace: None, printing_tightened: false }
+    }
+
+    /// A card-space collection leaf specifically -- see `collection_broadcast`'s doc for why this
+    /// isn't just `leaf(k, 0, k)`.
+    fn collection_leaf(k: usize, card: Option<usize>, artwork: Option<usize>) -> Self {
+        let space = SpaceEstimate::spaces(k, card, artwork);
+        Self { result: space, candidate: space, broadcast: 0, scatter: 0, collection_broadcast: k, exact_domain: None, and_trace: None, printing_tightened: false }
+    }
 }
 
 /// Exact count for a `ColorCmp` leaf (either polarity) via `ValueTotals`'s per-raw-combo table —
@@ -7456,8 +9766,8 @@ fn card_numeric_index(field: NumField, indexes: &Archived<CardIndexes>) -> Optio
 
 /// Exact CARD count for ONE bare cmc/power/toughness comparison, via the same two `partition_point`
 /// calls `numeric_candidates` makes to build a real candidate list — without paying for the list
-/// itself (no `sorted_ids` allocation/materialization). O(log n), cheaper than `arith_tuple_count`'s
-/// O(distinct tuples) scan, and the right choice whenever there's only one bound: `arith_tuple_count`
+/// itself (no `sorted_ids` allocation/materialization). O(log n), cheaper than `arith_tuple_totals`'s
+/// O(distinct tuples) scan, and the right choice whenever there's only one bound: `arith_tuple_totals`
 /// exists for when 2+ of these need a true JOINT count in one scan, not for the single-bound case.
 /// `None` for `Ne` (not a range — same as `numeric_candidates`); a non-integer `Eq` is an exact `Some(0)`
 /// (never present in an integer-valued index), not `None`.
@@ -7478,6 +9788,68 @@ fn numeric_range_count(idx: &Archived<NumericIndex>, op: CmpOp, val: f64) -> Opt
         CmpOp::Ge => (idx.partition_point(|p| (i16::from(p.0) as f64) < val), idx.len()),
     };
     Some(end - start)
+}
+
+/// `field`'s `NumericSpanTotals` (Round 63), the three-space sibling of `card_numeric_index`.
+fn card_numeric_spans(field: NumField, indexes: &Archived<CardIndexes>) -> Option<&Archived<NumericSpanTotals>> {
+    match field {
+        NumField::Cmc => Some(&indexes.cmc_spans),
+        NumField::Power => Some(&indexes.power_spans),
+        NumField::Toughness => Some(&indexes.toughness_spans),
+        _ => None,
+    }
+}
+
+/// Exact (printings, cards, artworks) for ONE bare cmc/power/toughness comparison, by subtracting two
+/// entries of `NumericSpanTotals::prefix`. O(log distinct values) — two `partition_point`s over the
+/// ~20-40 distinct values a field has, against `arith_tuple_totals`' ~564-key scan for the same
+/// answer (measured at +186% on `and_estimate_ns` p50; see `NumericSpanTotals`' own doc).
+///
+/// The op match MIRRORS `numeric_range_count`'s exactly, including `Ne` declining (not a range) and a
+/// non-integer `Eq` being an exact all-zero triple rather than `None` — an integer-valued axis holds
+/// no fractional value, so the answer is genuinely 0 and not "unknown". The two functions must agree
+/// on which shapes they answer, since the caller falls back from one to the other; the mirror is why
+/// they sit adjacent.
+///
+/// `None` when the table is unbuilt or the field is absent from every card (empty `values`), matching
+/// `card_numeric_index`'s own decline rather than claiming an exact 0.
+fn numeric_range_span_totals(t: &Archived<NumericSpanTotals>, op: CmpOp, val: f64) -> Option<(usize, usize, usize)> {
+    if t.values.is_empty() {
+        return None;
+    }
+    let below = |v: f64| t.values.partition_point(|p| (i16::from(*p) as f64) < v);
+    let at_or_below = |v: f64| t.values.partition_point(|p| (i16::from(*p) as f64) <= v);
+    let (start, end) = match op {
+        CmpOp::Ne => return None,
+        CmpOp::Eq => {
+            if val.fract() != 0.0 {
+                return Some((0, 0, 0));
+            }
+            (below(val), at_or_below(val))
+        }
+        CmpOp::Lt => (0, below(val)),
+        CmpOp::Le => (0, at_or_below(val)),
+        CmpOp::Gt => (at_or_below(val), t.values.len()),
+        CmpOp::Ge => (below(val), t.values.len()),
+    };
+    let (lo, hi) = (&t.prefix[start], &t.prefix[end]);
+    Some((
+        (u32::from(hi.printings) - u32::from(lo.printings)) as usize,
+        (u32::from(hi.cards) - u32::from(lo.cards)) as usize,
+        (u32::from(hi.artworks) - u32::from(lo.artworks)) as usize,
+    ))
+}
+
+/// `numeric_range_span_totals` for a whole bare `field op const` filter, the three-space sibling of
+/// `bare_numeric_field_count` — same shape recognition (either operand order), same `flip_op` on the
+/// reversed form.
+fn bare_numeric_field_spans(filter: &FilterExpr, indexes: &Archived<CardIndexes>) -> Option<(usize, usize, usize)> {
+    let (field, op, val) = match filter {
+        FilterExpr::NumericCmp { lhs: NumExpr::Field(f), op, rhs: NumExpr::Const(v) } => (*f, *op, *v),
+        FilterExpr::NumericCmp { lhs: NumExpr::Const(v), op, rhs: NumExpr::Field(f) } => (*f, flip_op(*op), *v),
+        _ => return None,
+    };
+    numeric_range_span_totals(card_numeric_spans(field, indexes)?, op, val)
 }
 
 /// The same range `numeric_range_count` bounds, but returning the actual card ids in it rather than
@@ -7506,7 +9878,7 @@ fn numeric_range_ids(idx: &Archived<NumericIndex>, op: CmpOp, val: f64) -> Optio
 }
 
 /// Exact CARD count for a bare cmc/power/toughness `NumericCmp` leaf, trying the dedicated index
-/// first (cheap, O(log n)) — `arith_tuple_count` is reserved for the 2+-bound joint case, where no
+/// first (cheap, O(log n)) — `arith_tuple_totals` is reserved for the 2+-bound joint case, where no
 /// dedicated single-field index can answer at all.
 fn bare_numeric_field_count(filter: &FilterExpr, indexes: &Archived<CardIndexes>) -> Option<usize> {
     let (field, op, val) = match filter {
@@ -7531,8 +9903,8 @@ fn bare_numeric_field_ids(filter: &FilterExpr, indexes: &Archived<CardIndexes>) 
 }
 
 /// Whether `filter` is a bare single-field cmc/power/toughness comparison against a constant — the
-/// shape `bare_numeric_field_count`/`arith_tuple_count` can answer, and the shape a joint `And` of
-/// several of them should be combined via one `arith_tuple_count` scan rather than a `min` of
+/// shape `bare_numeric_field_count`/`arith_tuple_totals` can answer, and the shape a joint `And` of
+/// several of them should be combined via one `arith_tuple_totals` scan rather than a `min` of
 /// independents (see the `And` arm's own doc).
 fn is_arith_tuple_eligible(filter: &FilterExpr) -> bool {
     matches!(
@@ -7542,24 +9914,570 @@ fn is_arith_tuple_eligible(filter: &FilterExpr) -> bool {
     )
 }
 
-/// Exact CARD count of cards satisfying every one of `bounds` simultaneously, via the existing #743
-/// `ArithTupleIndex` (~564 distinct `(cmc,power,toughness,loyalty)` combinations on the real corpus) —
-/// O(distinct tuples), not O(n_cards) and not `eval_planes`, and always exact: each stored tuple's
-/// real field values are re-tested against every bound with `eval_arith_tuple_tri` (the SAME evaluator
-/// the real per-card path uses, so this can't disagree with it), and its whole postings length is
-/// summed only when every bound reads `Tri::True` on that tuple — a NULL field (non-creature power/
-/// toughness, non-planeswalker loyalty) correctly fails any comparison, same as the real per-card
-/// path. `None` if the index isn't built for this store (a test fixture, typically) or `bounds` is
-/// empty. This is the joint-AND version: calling it with 2+ bounds gets their TRUE intersection in one
-/// scan, not `min` of each bound's own count — e.g. `cmc<=5 power>=3`'s real joint count, not
-/// `min(cmc<=5's own count, power>=3's own count)`.
-fn arith_tuple_count(bounds: &[&FilterExpr], indexes: &Archived<CardIndexes>) -> Option<usize> {
+/// The single `NumField` a bare `field op const` `NumericCmp` targets (either operand order), or
+/// `None` for anything else (`Ne` is still a `NumericCmp` so it's included here — the caller decides
+/// whether the op matters; only the shape `field op const`/`const op field` is recognized at all, so
+/// arithmetic like `cmc+1<power` or a non-`NumericCmp` filter both yield `None`). Shared by the Round
+/// 38 independence tightening's price/cmc shape gates below -- unlike `single_arith_field` (which
+/// requires every child in a whole slice to agree on ONE field before answering), this classifies one
+/// filter at a time, for any `NumField`, not just the arith-tuple-eligible three.
+fn numeric_cmp_field(filter: &FilterExpr) -> Option<NumField> {
+    match filter {
+        FilterExpr::NumericCmp { lhs: NumExpr::Field(f), rhs: NumExpr::Const(_), .. }
+        | FilterExpr::NumericCmp { lhs: NumExpr::Const(_), rhs: NumExpr::Field(f), .. } => Some(*f),
+        _ => None,
+    }
+}
+
+/// Whether `f` is one of the three price fields -- the "price family" side of the Round 38
+/// independence tightening below, any comparison op (`:`/`=`/`>=`/`<=`/`>`/`<` all compile to
+/// `NumericCmp` with a different `CmpOp`, none of which this cares about).
+fn is_price_num_field(f: NumField) -> bool {
+    matches!(f, NumField::PriceUsd | NumField::PriceEur | NumField::PriceTix)
+}
+
+/// Round 53: which SPECIFIC price field an `IndepClass::Price`-classified `AndSource` represents --
+/// `indep_class_of`'s own classification deliberately does NOT distinguish usd/eur/tix (every other
+/// caller of `IndepClass` only needs "is this the price family", never which currency), so this is a
+/// finer-grained sibling used only by the `PriceJointTable` call sites below. Mirrors
+/// `indep_class_of`'s own `FusedRange` ptr-identity checks exactly, and extends the same treatment to
+/// `AndSource::Child` (via `numeric_cmp_field`), which `indep_class_of` does not currently expose.
+fn price_field_of(src: AndSource<'_, '_>, indexes: &Archived<CardIndexes>) -> Option<NumField> {
+    match src {
+        AndSource::Child(c) => numeric_cmp_field(c).filter(|f| is_price_num_field(*f)),
+        AndSource::FusedRange { idx, .. } => {
+            if std::ptr::eq(idx, &indexes.price_usd) {
+                Some(NumField::PriceUsd)
+            } else if std::ptr::eq(idx, &indexes.price_eur) {
+                Some(NumField::PriceEur)
+            } else if std::ptr::eq(idx, &indexes.price_tix) {
+                Some(NumField::PriceTix)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Round 53: the half-open `[lo, hi)` raw-cents bounds a price `AndSource` resolves to, whichever
+/// shape it is -- a `FusedRange` already carries them; a bare `Child` resolves via `bare_range_bounds`
+/// (the SAME op-to-bound conversion every other printing-range consumer in this file shares), keeping
+/// only the bounds and discarding the index reference (the caller already knows which axis from
+/// `price_field_of`, called separately). Only ever called after `price_field_of` confirms `src` is one
+/// of the three price fields, so there is no risk of silently reusing this for e.g. a `cn`/`released`
+/// bound.
+fn price_leaf_bounds(src: AndSource<'_, '_>, indexes: &Archived<CardIndexes>) -> Option<(u32, u32)> {
+    match src {
+        AndSource::Child(c) => bare_range_bounds(c, indexes).map(|(_, lo, hi)| (lo, hi)),
+        AndSource::FusedRange { lo, hi, .. } => Some((lo, hi)),
+    }
+}
+
+/// Round 54: the single shared dispatch resolving any of the three validated, order-independent price
+/// field PAIRS to the one `PriceJointTable` covering them -- replaces what used to be two separately
+/// hand-rolled `match (fa, fb) { (PriceUsd, PriceEur) => ..., _ => None }` arms (the standalone whole-
+/// `And` fold below, and the `by_class` multi-arm further down), each of which only ever recognized
+/// `usd`+`eur`. Returns `None` only when both fields are the SAME price field (not a real pair) --
+/// every other combination of two distinct price fields now resolves to one of the three tables.
+///
+/// The `bool` is whether `fa`'s own bounds are the table's own "A" axis (`true`) or its "B" axis
+/// (`false`, meaning `fa`/`fb` arrived in the OPPOSITE order the table's own two axes expect, and the
+/// caller must swap `(a_bounds, b_bounds)` before calling `joint_estimate`) -- both call sites resolve
+/// `fa`/`fb` from `and_sources` in whatever order they were found in the query, which need not match
+/// either table's own fixed axis order.
+fn price_joint_table_for(fa: NumField, fb: NumField, indexes: &Archived<CardIndexes>) -> Option<(&Archived<PriceJointTable>, bool)> {
+    match (fa, fb) {
+        (NumField::PriceUsd, NumField::PriceEur) => Some((&indexes.price_joint_usd_eur, true)),
+        (NumField::PriceEur, NumField::PriceUsd) => Some((&indexes.price_joint_usd_eur, false)),
+        (NumField::PriceUsd, NumField::PriceTix) => Some((&indexes.price_joint_usd_tix, true)),
+        (NumField::PriceTix, NumField::PriceUsd) => Some((&indexes.price_joint_usd_tix, false)),
+        (NumField::PriceEur, NumField::PriceTix) => Some((&indexes.price_joint_eur_tix, true)),
+        (NumField::PriceTix, NumField::PriceEur) => Some((&indexes.price_joint_eur_tix, false)),
+        _ => None, // same field twice (or a non-price field slipped in) -- not a real pair, declines
+    }
+}
+
+/// The table plus its own two axis bounds, already reordered into that table's A/B axis order --
+/// `resolve_price_joint_pair`'s own return shape, factored into a named type per clippy's
+/// `type_complexity` (a bare 3-tuple nesting two more tuples reads worse inline at both the
+/// declaration and every call site).
+type ResolvedPriceJoint<'a> = (&'a Archived<PriceJointTable>, (u32, u32), (u32, u32));
+
+/// Resolves two `AndSource`s' own price fields/bounds and dispatches to `price_joint_table_for`,
+/// returning `(table, a_bounds, b_bounds)` already in the table's own A/B axis order -- the one helper
+/// both `PriceJointTable` call sites share instead of each re-deriving fields, bounds, AND the pair
+/// match/swap logic separately.
+fn resolve_price_joint_pair<'a>(a: AndSource<'_, '_>, b: AndSource<'_, '_>, indexes: &'a Archived<CardIndexes>) -> Option<ResolvedPriceJoint<'a>> {
+    let (fa, a_bounds) = price_field_of(a, indexes).zip(price_leaf_bounds(a, indexes))?;
+    let (fb, b_bounds) = price_field_of(b, indexes).zip(price_leaf_bounds(b, indexes))?;
+    let (table, same_order) = price_joint_table_for(fa, fb, indexes)?;
+    Some(if same_order { (table, a_bounds, b_bounds) } else { (table, b_bounds, a_bounds) })
+}
+
+/// Per-`And`-arm bookkeeping for which leaves, and which exact leaf SUBSETS, already have a real
+/// answer.
+///
+/// Round 49 (loosening the independence registry's `covered` gate, see
+/// `docs/issues/local-engine-nway-followup-queue.md` item 1): before this round, `covered: Vec<bool>`
+/// alone made a leaf permanently unavailable to the independence registry the moment ANY mechanism
+/// touched it for ANY partner -- too conservative, since the only real danger is an ESTIMATE-class
+/// candidate re-answering the IDENTICAL leaf subset an exact/bound mechanism (or a prior estimate)
+/// already answered. `flags` keeps that original leaf-occupancy signal exactly as it was (still read
+/// by `SubtypePairEstimate`'s own narrow-leaf fallback, untouched by this round); `subsets` adds the
+/// narrower, subset-identity signal the independence registry now checks instead of `flags`.
+struct CoveredState {
+    /// `flags[i]` true once leaf `v[i]` participates in any genuine joint -- unchanged Round-40
+    /// semantics.
+    flags: Vec<bool>,
+    /// One bitmask per genuinely joint hit recorded via `mark_covered`/`pair_bounded_min`: bit `i` set
+    /// means `v[i]` was part of that answer. Read ONLY by the independence registry's pairing step: a
+    /// candidate pairing whose own combined mask exactly equals one of these is declined (an
+    /// identical-subset re-answer); any other combination, even one sharing a single leaf with a
+    /// covered entry, is fair game. A leaf at position `>= 64` never sets a bit (see `mark_covered`'s
+    /// own doc) -- a defensive no-op for a pathologically long `And`, not tracked, never a panic.
+    subsets: Vec<u64>,
+}
+
+impl CoveredState {
+    fn new(len: usize) -> Self {
+        CoveredState { flags: vec![false; len], subsets: Vec::new() }
+    }
+}
+
+/// Marks `covered.flags[i] = true` for every literal child of `v` that's one of `leaves` (matched by
+/// pointer identity, the same identity `and_source_pos_of`/`AndSource::Child` already rely on) -- Round
+/// 40's class-priority bookkeeping, called at every EXACT/bound (and, defensively, ESTIMATE-class) hit
+/// site in this arm so the independence registry scan (below) never revisits the IDENTICAL leaf subset
+/// another mechanism already answered. `O(leaves.len() * v.len())`, both bounded in practice by how
+/// many predicates a person types, same complexity class `pair_bounded_min`'s own nested loop already
+/// accepts.
+///
+/// Round 49: also ORs the resolved positions into one bitmask, pushed onto `covered.subsets` (skipped
+/// when the mask is 0 -- i.e. every resolved position was `>= 64`, or `leaves` resolved to nothing at
+/// all). Every shift is guarded (`pos < 64`) rather than a bare `1u64 << pos`, which would panic in
+/// debug / wrap in release on an out-of-range shift amount.
+fn mark_covered(v: &[FilterExpr], leaves: &[&FilterExpr], covered: &mut CoveredState) {
+    let mut mask: u64 = 0;
+    for leaf in leaves {
+        if let Some(pos) = v.iter().position(|c| std::ptr::eq(c, *leaf)) {
+            covered.flags[pos] = true;
+            if pos < 64 {
+                mask |= 1u64 << pos;
+            }
+        }
+    }
+    if mask != 0 {
+        covered.subsets.push(mask);
+    }
+}
+
+/// Round 46: one mechanism's candidate answer for the outermost `And` arm's cost estimate, handed to
+/// `fold_candidate` -- replaces what used to be an independently hand-copied fold (either the 4-line
+/// `result`/`exact_domain_*` update, or the 1-line `result`-only update) at each of ~10 call sites in
+/// that arm.
+///
+/// `Exact` is for a mechanism that computed a genuinely exact triple across all three spaces (a
+/// pair-table hit, `compile_plane`'s popcount, `SubtypeArithBox`'s box lookup, ...) -- every real
+/// candidate of this kind is expected to satisfy `cards <= artworks <= printings` (every printing
+/// belongs to exactly one card and has exactly one artwork; different cards never share an artwork),
+/// which `fold_candidate` below checks with a `debug_assert!`. `Estimate` is for a mechanism that only
+/// ever produced a printing-space GUESS (`SetCollectorRange`'s density, the independence registry's
+/// product, ...) and structurally has no card/artwork triple to fold in at all.
+///
+/// Round 59 adds a third variant for the case between them: a mechanism whose printing number is a
+/// real count of a real set but which has no card/artwork counts to go with it, so it can claim
+/// `guaranteed.printing` while claiming nothing at all in the other two spaces and never touching
+/// `exact_domain_*` (a same-set triple it does not have -- see `ExactDomain`'s doc for why that is the
+/// stronger claim). `LegalityDateTotals` (an exact prefix-sum subtraction on the `released_at` axis)
+/// and `PriceJointTable` (a bucketed lookup that counts a cell whenever it overlaps the query
+/// rectangle at all, so a matching printing's own cell can never be missed -- structurally `>=` the
+/// truth) are its two users.
+///
+/// **Why a variant and not a `bound: bool` parameter next to `Estimate`.** The enum's whole job is to
+/// name what KIND of answer a mechanism produced and let `fold_candidate` derive the fold from that --
+/// that is what let Round 46 delete ten hand-copied folds. A parallel parameter puts the kind back
+/// into an argument every call site has to get right, and admits combinations that are not answers at
+/// all (`Exact` with `bound: false`). A variant makes those unrepresentable and makes
+/// `fold_candidate`'s `match` force a future mechanism's author to choose deliberately, which is the
+/// property this whole round is about.
+///
+/// `Copy` (Round 60): a call site builds ONE `Candidate` and uses it twice -- folded via
+/// `fold_candidate`, and reported via `spaces()` on the `AndTraceGroup` -- so the traced channels
+/// cannot drift from the folded ones.
+#[derive(Clone, Copy)]
+enum Candidate {
+    Exact {
+        printings: usize,
+        cards: usize,
+        artworks: usize,
+    },
+    Estimate {
+        printing: usize,
+        /// Card/artwork-space GUESSES the same mechanism produced alongside `printing`, REPORTED but
+        /// deliberately NOT folded -- `fold_candidate` touches `result.printing` and nothing else for
+        /// this variant, exactly as it did before Round 60. `None` at every site but `"Independence"`,
+        /// whose registry pairing computes `card_indep`/`artwork_indep` from the two units' own card/
+        /// artwork marginals and has always reported them in its trace group.
+        ///
+        /// They live on the variant (rather than being hand-attached at that one trace site) so
+        /// `spaces()` below stays the single derivation of what a mechanism claimed -- and so the fact
+        /// that the `And` arm computes two card/artwork guesses it then throws away is visible in the
+        /// trace instead of only in this source file. Folding them would change `result.card.best()`
+        /// and is therefore a behaviour change for its own round, not this one.
+        card: Option<usize>,
+        artwork: Option<usize>,
+    },
+    PrintingBound {
+        printing: usize,
+    },
+}
+
+impl Candidate {
+    /// The channels this candidate WRITES, as a `SpaceEstimate` of its own -- the per-space,
+    /// per-channel shape `fold_candidate` below folds into the arm's accumulator, and nothing else.
+    ///
+    /// Round 60: this is what an `AndTraceGroup`/`AndTraceNode` reports, so a trace states which
+    /// CHANNEL each mechanism actually wrote rather than one `best()`-collapsed number. Derived here,
+    /// once, from the variant -- never hand-written at each of the ~17 `AndTraceGroup` construction
+    /// sites, which would rot the moment a mechanism changed variant (Round 59 moved two of them).
+    ///
+    /// Matched arm-for-arm against `fold_candidate` deliberately, and
+    /// `candidate_spaces_matches_fold_candidate` in tests.rs asserts the two agree for every variant.
+    /// `Estimate`'s `card`/`artwork` are the one deliberate divergence -- reported, not folded; see
+    /// that variant's own doc.
+    fn spaces(self) -> SpaceEstimate {
+        match self {
+            // Both `lower_guaranteed`, so the CONTRIBUTION is guaranteed-only in all three spaces --
+            // an exact triple is a proven bound the fold admits, and it leaves `estimate` alone.
+            Candidate::Exact { printings, cards, artworks } => SpaceEstimate {
+                printing: SpaceMeasure { guaranteed: Some(printings), estimate: None },
+                card: SpaceMeasure { guaranteed: Some(cards), estimate: None },
+                artwork: SpaceMeasure { guaranteed: Some(artworks), estimate: None },
+            },
+            Candidate::Estimate { printing, card, artwork } => SpaceEstimate {
+                printing: SpaceMeasure::estimate_only(printing),
+                card: SpaceMeasure { guaranteed: None, estimate: card },
+                artwork: SpaceMeasure { guaranteed: None, estimate: artwork },
+            },
+            // A real count: simultaneously a proven bound and the best guess, which is exactly what
+            // `SpaceMeasure::known` means and what the fold writes (both channels of printing only).
+            Candidate::PrintingBound { printing } => {
+                SpaceEstimate { printing: SpaceMeasure::known(printing), card: SpaceMeasure::UNKNOWN, artwork: SpaceMeasure::UNKNOWN }
+            }
+        }
+    }
+}
+
+/// Folds one mechanism's `Candidate` into the outermost `And` arm's running accumulators --
+/// `result` (this arm's own three-space `SpaceEstimate`) and `exact_domain_cards`/
+/// `exact_domain_printing`/`exact_domain_artworks` (the tightest EXACT intersection found so far in
+/// each space, `None` until some mechanism produces one). `mechanism` is diagnostic only (folded
+/// into the `debug_assert!` messages below so a failure names which mechanism produced the bad
+/// candidate) and has no effect on `result`/`exact_domain_*`.
+///
+/// **Round 58: the variants fold into two different CHANNELS, never one contested slot.** `Exact`
+/// lowers `result`'s `guaranteed` in all three spaces; `Estimate` lowers `result.printing`'s
+/// `estimate` and nothing else; Round 59's `PrintingBound` lowers both channels of
+/// `result.printing` and neither of the other two spaces. That is the structural replacement for "both write `result` and
+/// `.min()` picks whichever is smaller regardless of which is trustworthy" -- the conflation Rounds
+/// 40/52/55/56/57 each worked around separately (see `SpaceMeasure`'s own doc). It is exactly
+/// behaviour-preserving on the ACCURACY read (`SpaceMeasure::best()` is `min` over both channels, so
+/// the printing number every existing consumer sees is unchanged), and it makes the soundness read
+/// (`guaranteed`) newly available and newly trustworthy: an undershooting `Estimate` can no longer
+/// pull it below truth.
+///
+/// `exact_domain_*` are RETAINED, unchanged, and deliberately not merged into the `guaranteed`
+/// channels they currently duplicate for card/artwork -- see `ExactDomain`'s doc for why this is a
+/// stronger claim than a per-space bound, and `result.printing.guaranteed` (seeded from the per-leaf
+/// fold, unlike `exact_domain_printing`, which starts `None`) for a live case where they genuinely
+/// differ.
+///
+/// A pure structural extraction: every call site below used to write this same fold out by hand (see
+/// this function's own call sites in the `And` arm for the mechanical, behavior-preserving swap).
+///
+/// The `debug_assert!`s are Round 46's own diagnostic addition, not a correction -- see this
+/// function's own `Candidate::Exact` doc for why `cards <= artworks <= printings` is expected to hold
+/// for every individual candidate BY CONSTRUCTION, and note the proof sketch in this round's own
+/// report: if it holds for every candidate independently, folding via independent per-space `min`s
+/// (which is all this function does) provably preserves the ordering in the combined `result`
+/// regardless of which mechanism wins which space. So a debug_assert failure here means one
+/// mechanism produced an internally-inconsistent candidate, never that this fold is wrong.
+/// Deliberately `debug_assert!`, never `assert!`: this must have zero effect on release builds --
+/// a production query must never be able to panic because some mechanism's candidate violates the
+/// invariant, only a debug build (`cargo test`, or a debug wheel run against real traffic) should
+/// ever surface it.
+fn fold_candidate(
+    result: &mut SpaceEstimate,
+    exact_domain_cards: &mut Option<usize>,
+    exact_domain_printing: &mut Option<usize>,
+    exact_domain_artworks: &mut Option<usize>,
+    mechanism: &'static str,
+    candidate: Candidate,
+) {
+    match candidate {
+        Candidate::Exact { printings, cards, artworks } => {
+            debug_assert!(
+                cards <= artworks,
+                "fold_candidate[{mechanism}]: cards ({cards}) > artworks ({artworks}) (printings={printings}) -- \
+                 every card's printings share one card, so cards <= artworks must hold for an exact candidate"
+            );
+            debug_assert!(
+                artworks <= printings,
+                "fold_candidate[{mechanism}]: artworks ({artworks}) > printings ({printings}) (cards={cards}) -- \
+                 every printing has exactly one artwork, so artworks <= printings must hold for an exact candidate"
+            );
+            result.printing.lower_guaranteed(printings);
+            result.card.lower_guaranteed(cards);
+            result.artwork.lower_guaranteed(artworks);
+            *exact_domain_cards = Some(exact_domain_cards.map_or(cards, |d| d.min(cards)));
+            *exact_domain_printing = Some(exact_domain_printing.map_or(printings, |d| d.min(printings)));
+            *exact_domain_artworks = Some(exact_domain_artworks.map_or(artworks, |d| d.min(artworks)));
+        }
+        // `card`/`artwork` are deliberately NOT read here: they are reported (see `Estimate`'s own
+        // doc and `Candidate::spaces`) but folding them would lower `result.card`/`result.artwork`'s
+        // estimate channel and change `best()`, which is a behaviour change and not this round's.
+        Candidate::Estimate { printing, card: _, artwork: _ } => {
+            result.printing.lower_estimate(printing);
+        }
+        // Round 59: a real count in printing space with no card/artwork counts beside it. Both
+        // channels, because a real count is simultaneously a proven bound AND the best available
+        // guess -- the same reason `SpaceMeasure::known` fills both. `exact_domain_*` stays untouched
+        // (no same-set triple), which is why this cannot just be `Exact` with two invented numbers.
+        Candidate::PrintingBound { printing } => {
+            result.printing.lower_guaranteed(printing);
+            result.printing.lower_estimate(printing);
+        }
+    }
+}
+
+/// Shared two-bucket Cartesian-product exact-lookup scan: for every position in `a_positions` (bucket
+/// A) crossed with every `(positions, value)` entry of `b_candidates` (bucket B), calls `lookup` on
+/// the bucket-A leaf and the bucket-B `value`, and on a hit (`Some((printings, cards, artworks))`)
+/// folds it via `fold_candidate`. Round 46 extraction of the identical scan/lookup/fold/cover/trace
+/// shape three mechanisms in the `And` arm each hand-rolled separately: `SubtypePairIndexes` (bucket A
+/// = a `set`/`c`/`id` leaf, bucket B = one competing subtype leaf each), `ColorCmcTable` (bucket A = a
+/// `color`/`id` leaf, bucket B = every cmc bound fused into ONE range), and `SubtypeArithBox` (bucket A
+/// = the one subtype leaf its shape gate admits, bucket B = every cmc/power/toughness child, fed to a
+/// 6-argument box lookup already encapsulated inside `subtype_arith_exact` -- so `B` is `()` for this
+/// caller, not because the shape differs, but because the box's own ranges are resolved one layer
+/// deeper than this call site).
+///
+/// `order_positions(a_position, b_positions) -> Vec<usize>` controls the ORDER `v`-positions are
+/// turned into trace `leaves`/`mark_covered` input -- the one real behavioral difference among the
+/// three callers that this helper does not paper over: `SubtypePairIndexes`/`ColorCmcTable` both want
+/// a fixed "A leaf, then B leaves" order regardless of each leaf's actual position in `v`; a
+/// `SubtypeArithBox` hit instead reports every position of `v` in `v`'s OWN original order (its shape
+/// gate already guarantees A's position plus every B position covers the whole of `v`, so this is the
+/// same *set*, just reordered to match what that mechanism traced before this refactor).
+///
+/// `trace_on_miss` and `mark_covered_on_hit` capture the other two real differences, each verified
+/// directly against the pre-refactor code rather than assumed: `SubtypePairIndexes` traces hits only
+/// and covers just the two matched positions on a hit; `ColorCmcTable` always traces (hit or miss) and
+/// NEVER marks covered (deliberately -- see that call site's own doc for the measured regression this
+/// avoids); `SubtypeArithBox` always traces and, on a hit, covers every position of `v`.
+#[allow(clippy::too_many_arguments)]
+fn scan_two_bucket_exact<B: Copy>(
+    v: &[FilterExpr],
+    covered: &mut CoveredState,
+    result: &mut SpaceEstimate,
+    exact_domain_cards: &mut Option<usize>,
+    exact_domain_printing: &mut Option<usize>,
+    exact_domain_artworks: &mut Option<usize>,
+    and_trace: &mut Option<AndTrace>,
+    mechanism: &'static str,
+    trace_on_miss: bool,
+    mark_covered_on_hit: bool,
+    a_positions: &[usize],
+    b_candidates: &[(Vec<usize>, B)],
+    order_positions: impl Fn(usize, &[usize]) -> Vec<usize>,
+    lookup: impl Fn(&FilterExpr, B) -> Option<(usize, usize, usize)>,
+) {
+    for &ai in a_positions {
+        for (b_positions, b_value) in b_candidates {
+            let hit = lookup(&v[ai], *b_value);
+            let candidate = hit.map(|(printings, cards, artworks)| Candidate::Exact { printings, cards, artworks });
+            let positions = order_positions(ai, b_positions);
+            if let Some(c) = candidate {
+                fold_candidate(result, exact_domain_cards, exact_domain_printing, exact_domain_artworks, mechanism, c);
+                if mark_covered_on_hit {
+                    let leaves: Vec<&FilterExpr> = positions.iter().map(|&p| &v[p]).collect();
+                    mark_covered(v, &leaves, covered);
+                }
+            }
+            if (candidate.is_some() || trace_on_miss)
+                && let Some(t) = and_trace.as_mut()
+            {
+                t.considered.push(and_trace_group(positions.iter().map(|&p| format!("{:?}", v[p])).collect(), mechanism, candidate));
+            }
+        }
+    }
+}
+
+/// Round 40: the leaf-class SIDE of a pair the independence registry (`INDEPENDENCE_SAFE_PAIR`,
+/// `independence_safe_pair`) recognizes -- generalizes Round 38's one hard-coded shape (`color:X`/
+/// `id:X`/`cmc<op>N` paired with a price comparison) to a small table, re-validated directly against
+/// real data before being trusted (`docs/issues/local-engine-gathered-scan-card-printing-varying-
+/// depth.md`'s Round 40 section has the numbers).
+///
+/// `Type` merges `TypeCmp` (the main creature/instant/... types, which DOES have a `compile_plane`
+/// arm) and `CollectionCmp{Subtypes,..}` (which does not) into one class deliberately: `client/
+/// query_sampler.py`'s own `"type"` family draws from both pools under one shared vocabulary (`t:` is
+/// the shared operator for both), so the calibration that validated this pair already measured both
+/// shapes together, and both are individually EXACT on their own regardless (a subtype leaf's own card
+/// count comes from `exact_result_total`'s `value_totals` lookup, same as any other bare containment
+/// leaf) -- there is no reason to split them into two registry entries.
+// Explicit discriminants: the And arm's residual scan indexes a fixed-size array by `as usize`
+// instead of hashing into a `HashMap` (a handful of buckets, no per-lookup allocation, on a path whose
+// own tax is measured -- see `and_estimate_ns`) -- `INDEP_CLASS_COUNT`/`INDEP_CLASS_ORDER` must be kept
+// in sync with this list, which `cargo test`'s `indep_class_order_matches_count` fixture checks.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum IndepClass {
+    Legality = 0,
+    ColorId = 1,
+    ColorIdentity = 2,
+    Cmc = 3,
+    Pow = 4,
+    Type = 5,
+    SetCode = 6,
+    Price = 7,
+    CollectorNumber = 8,
+    ReleasedDate = 9,
+}
+
+/// Number of `IndepClass` variants -- the residual scan's fixed-size bucket array length.
+const INDEP_CLASS_COUNT: usize = 10;
+/// `IndepClass` variants in discriminant order (`INDEP_CLASS_ORDER[c as usize] == c` for every `c`) --
+/// lets the residual scan recover the class from a bucket-array index without an inverse-lookup table.
+const INDEP_CLASS_ORDER: [IndepClass; INDEP_CLASS_COUNT] = [
+    IndepClass::Legality,
+    IndepClass::ColorId,
+    IndepClass::ColorIdentity,
+    IndepClass::Cmc,
+    IndepClass::Pow,
+    IndepClass::Type,
+    IndepClass::SetCode,
+    IndepClass::Price,
+    IndepClass::CollectorNumber,
+    IndepClass::ReleasedDate,
+];
+
+/// Whether independence is CONFIRMED-safe for this leaf class pair (order-independent) -- the registry
+/// itself. NOT the design doc's proposal list verbatim: two entries here (`SetCode`x`ColorIdentity`,
+/// `SetCode`x`Pow`, i.e. `id:X set:Y` / `pow<op>N set:Y`) empirically REVERSE the doc's own "unsafe"
+/// classification (`identity+set`: median abs-log-ratio 1.151->0.106 combined, 118 improved/3
+/// regressed of 122 scored rows, printing space, n=300 draws; `pow+set`: 1.114->0.154, 72/1 of 73 --
+/// both far past the bar Round 38's own 610-row calibration used). Legality x {SetCode, DateCmp,
+/// YearCmp} is DELIBERATELY absent, but **NOT for the reason this comment used to give**. It claimed
+/// "format legality is date-DEFINED (a format's cutoff IS a release date), a categorically different
+/// case from a real-world correlation-with-exceptions." Round 57 measured that and it is false in the
+/// space this arm works in: legality is CARD-level while `released_at` is PRINTING-level, so reprints
+/// scatter a format's legal cards across the whole axis -- every format except `oldschool` has legal
+/// printings back to 1993-08-05. The cutoff governs SET legality, not the printing population an
+/// estimate sees. What actually breaks independence here is ordinary (if extreme) correlation: a
+/// format's legal DENSITY varies over time, and independence substitutes the global density for the
+/// local one, so its error is exactly `global_density / window_density`. Measured skew spreads run from
+/// 1.0x (`legacy`/`commander`/`vintage` -- independence is essentially EXACT for those) to 250x
+/// (`oldschool`), which is the real source of the blowups that earned the blanket exclusion.
+///
+/// The DateCmp/YearCmp half is now moot rather than merely excluded: Round 57's `LegalityDateTotals`
+/// answers `(format, status) x released_at` EXACTLY in printing space for every range shape, so there
+/// is nothing left for independence to approximate there. `Legality x SetCode` is still genuinely
+/// absent and still uncalibrated. Same-currency price
+/// crosses (`usd`x`eur` etc) are also absent: this round's own calibration found a genuinely MIXED
+/// signal (`usd`x`eur` net WORSE in printing space -- median 0.159->0.394 -- while `usd`x`tix`/
+/// `eur`x`tix` net better), inconsistent enough on top of the design doc's own correlation reasoning
+/// that shipping any of the three was judged not warranted this round (see this round's own doc
+/// section for the full numbers and reasoning either way).
+fn independence_safe_pair(a: IndepClass, b: IndepClass) -> bool {
+    use IndepClass::{Cmc, ColorId, ColorIdentity, CollectorNumber, Legality, Pow, Price, ReleasedDate, SetCode, Type};
+    matches!(
+        (a, b),
+        (Legality, CollectorNumber)
+            | (CollectorNumber, Legality)
+            | (Legality, Price)
+            | (Price, Legality)
+            | (ColorId, Price)
+            | (Price, ColorId)
+            | (ColorIdentity, Price)
+            | (Price, ColorIdentity)
+            | (Cmc, Price)
+            | (Price, Cmc)
+            | (Type, ReleasedDate)
+            | (ReleasedDate, Type)
+            | (Type, Price)
+            | (Price, Type)
+            | (ColorIdentity, SetCode)
+            | (SetCode, ColorIdentity)
+            | (Pow, SetCode)
+            | (SetCode, Pow)
+    )
+}
+
+/// Classify one post-fusion `AndSource` into an `IndepClass`, or `None` when it isn't one of the leaf
+/// shapes the registry knows about at all. Mirrors `is_price_num_field`'s own pointer-identity style
+/// for the three printing-range families (a `FusedRange` carries the winning index's address, not the
+/// original `FilterExpr`, so a two-sided `usd>=1 usd<=5`/`released>=2019 released<=2021` classifies the
+/// same way a bare `usd:3`/`year:2020` does).
+fn indep_class_of(src: AndSource<'_, '_>, indexes: &Archived<CardIndexes>) -> Option<IndepClass> {
+    match src {
+        AndSource::Child(c) => match c {
+            FilterExpr::Legality { .. } => Some(IndepClass::Legality),
+            FilterExpr::ColorCmp { field: ColorField::Colors, .. } => Some(IndepClass::ColorId),
+            FilterExpr::ColorCmp { field: ColorField::ColorIdentity, .. } => Some(IndepClass::ColorIdentity),
+            FilterExpr::TypeCmp { .. } => Some(IndepClass::Type),
+            FilterExpr::CollectionCmp { field: CollField::Subtypes, .. } => Some(IndepClass::Type),
+            FilterExpr::TextExact { field: TextField::SetCode, op: CmpOp::Eq, .. } => Some(IndepClass::SetCode),
+            FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. } => Some(IndepClass::ReleasedDate),
+            _ => match numeric_cmp_field(c) {
+                Some(NumField::Cmc) => Some(IndepClass::Cmc),
+                Some(NumField::Power) => Some(IndepClass::Pow),
+                Some(NumField::CollectorNumberInt) => Some(IndepClass::CollectorNumber),
+                Some(f) if is_price_num_field(f) => Some(IndepClass::Price),
+                _ => None,
+            },
+        },
+        AndSource::FusedRange { idx, .. } => {
+            if std::ptr::eq(idx, &indexes.price_usd) || std::ptr::eq(idx, &indexes.price_eur) || std::ptr::eq(idx, &indexes.price_tix) {
+                Some(IndepClass::Price)
+            } else if std::ptr::eq(idx, &indexes.collector_number) {
+                Some(IndepClass::CollectorNumber)
+            } else if std::ptr::eq(idx, &indexes.released_at) {
+                Some(IndepClass::ReleasedDate)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Exact (printings, cards, artworks) triple for cards satisfying every one of `bounds`
+/// simultaneously, via the existing #743 `ArithTupleIndex` (~564 distinct
+/// `(cmc,power,toughness,loyalty)` combinations on the real corpus) — O(distinct tuples), not
+/// O(n_cards) and not `eval_planes`, and exact in all three spaces: each stored tuple's real field
+/// values are re-tested against every bound with `eval_arith_tuple_tri` (the SAME evaluator the
+/// real per-card path uses, so this can't disagree with it), and its precomputed `totals` (Round
+/// 51 -- summed once at build time from that key's own postings, see `build_arith_tuple_index`)
+/// are added only when every bound reads `Tri::True` on that tuple — a NULL field (non-creature
+/// power/toughness, non-planeswalker loyalty) correctly fails any comparison, same as the real
+/// per-card path. `None` if the index isn't built for this store (a test fixture, typically) or
+/// `bounds` is empty. This is the joint-AND version: calling it with 2+ bounds gets their TRUE
+/// intersection's exact triple in one scan, not `min` of each bound's own count — e.g.
+/// `cmc<=5 power>=3`'s real joint triple, not `min(cmc<=5's own triple, power>=3's own triple)`.
+///
+/// Before Round 51 this returned only a card count (`Option<usize>`), leaving every call site to
+/// scale that count into printing space by the corpus-average reprint ratio and give up on artwork
+/// entirely — an estimate, not exact, and the one mechanism invisible to the `debug_assert!`
+/// census in `fold_candidate`'s own doc (scoped to `Candidate::Exact`). Summing the real triple
+/// costs nothing extra over the identical scan this function already ran, so there is no reason to
+/// keep a card-only variant around; replaces `arith_tuple_totals`'s old `usize`-returning form at
+/// all 3 of its call sites.
+fn arith_tuple_totals(bounds: &[&FilterExpr], indexes: &Archived<CardIndexes>) -> Option<(usize, usize, usize)> {
     let idx = &indexes.arith_tuple;
     if bounds.is_empty() || u32::from(idx.n_cards) == 0 {
         return None;
     }
-    let mut total = 0usize;
-    for (key, postings) in idx.keys.iter().zip(idx.postings.iter()) {
+    let (mut printings, mut cards, mut artworks) = (0usize, 0usize, 0usize);
+    for (key, totals) in idx.keys.iter().zip(idx.totals.iter()) {
         let cmc = key.cmc.as_ref().map(|v| f64::from(*v));
         let power = key.power.as_ref().map(|v| f64::from(*v));
         let toughness = key.toughness.as_ref().map(|v| f64::from(*v));
@@ -7569,15 +10487,17 @@ fn arith_tuple_count(bounds: &[&FilterExpr], indexes: &Archived<CardIndexes>) ->
             matches!(eval_arith_tuple_tri(lhs, *op, rhs, cmc, power, toughness, loyalty), Tri::True)
         });
         if all_match {
-            total += postings.len();
+            printings += u32::from(totals.printings) as usize;
+            cards += u32::from(totals.cards) as usize;
+            artworks += u32::from(totals.artworks) as usize;
         }
     }
-    Some(total)
+    Some((printings, cards, artworks))
 }
 
-/// `arith_tuple_count`'s ids, for the same reason `numeric_range_ids` exists next to
+/// `arith_tuple_totals`'s ids, for the same reason `numeric_range_ids` exists next to
 /// `numeric_range_count` — the smaller-side merge needs the actual card ids to probe, not just how
-/// many there are. Still bounded by the ~564-key scan `arith_tuple_count` already does, not by
+/// many there are. Still bounded by the ~564-key scan `arith_tuple_totals` already does, not by
 /// corpus size: collecting matching keys' postings is the same walk plus a `Vec` extend.
 fn arith_tuple_ids(bounds: &[&FilterExpr], indexes: &Archived<CardIndexes>) -> Option<Vec<u32>> {
     let idx = &indexes.arith_tuple;
@@ -7601,29 +10521,414 @@ fn arith_tuple_ids(bounds: &[&FilterExpr], indexes: &Archived<CardIndexes>) -> O
     Some(ids)
 }
 
+/// One `And` child's compiled plane, paired with the original `FilterExpr` it came from -- the `And`
+/// arm's `card_invariant`/`existential` partition keeps both so `pair_range_sum`'s preferred path can
+/// ask `pair_leaf_id` about the lone existential leaf's own value without re-deriving it from the plane.
+type CompiledLeaf<'a> = (&'a FilterExpr, PlaneExpr);
+
+/// One direct child of the outermost `And`'s own solo estimate -- an `AndTraceNode::Leaf` payload,
+/// and also `AndTrace`'s own scratch record of it before the tree gets assembled (`expr` doubles as
+/// the join key `and_trace_build_tree` uses to find a leaf's numbers again once it knows which
+/// `AndTraceGroup` won). `expr` is the derived `Debug` form (Round 37a added `Debug` to `FilterExpr`
+/// and everything it nests for exactly this): the harness this feeds only needs to bucket/dedupe/
+/// compare trace strings, not display them beautifully, so a hand-written pretty-printer is out of
+/// scope.
+///
+/// Round 60: one `SpaceEstimate` rather than three hand-listed `Option<usize>` fields -- it is
+/// exactly that shape, it is `Copy`, and carrying the estimator's own type means a leaf's numbers
+/// stay directly comparable, channel by channel, to the tree node they fold into. Not an `Option`
+/// here (unlike `AndTraceGroup::spaces`): this is a child's own solo estimate, which always exists.
+#[derive(Clone)]
+struct AndTraceLeaf {
+    expr: String,
+    spaces: SpaceEstimate,
+}
+
+/// One 2-or-3-child combination the outermost `And` arm's existing fixed sequence of tightening
+/// checks actually attempted -- see `AndTrace`'s `considered` field. `hit: false` is as informative
+/// as `hit: true`: it says this exact combination of children WAS considered by a mechanism that
+/// could in principle answer it, and got nothing (a table miss, a pruned value, a declined shape),
+/// rather than the mechanism never running at all (which is simply the absence of an entry for it).
+///
+/// An entry can be `hit: true` and still never show up in `AndTrace::tree`: today's fixed-sequence
+/// logic takes whichever check fires FIRST (in a fixed evaluation order), not necessarily the
+/// tightest one available, so two different mechanisms can both `hit` the identical pair while only
+/// one of them actually produced the number the arm kept. `considered` reports both hits; the tree
+/// reports only the one that won.
+///
+/// Round 60: the three `Option<usize>` numbers become one `Option<SpaceEstimate>` -- the mechanism's
+/// own contribution, per space AND per channel, derived once from its `Candidate` variant
+/// (`Candidate::spaces`) rather than hand-listed at each construction site.
+///
+/// `Option`, and specifically NOT a bare `SpaceEstimate`, for a reason worth stating: a MISS group
+/// carries real information (which leaves were tried, by which mechanism, and that it declined) but
+/// no CARDINALITY at all. `SpaceEstimate::printing()` documents printing as set in at least one
+/// channel and `expect`s it, so a bare one on a miss would either break that invariant or force a
+/// fabricated zero -- and a zero here reads as "proved the answer is empty", the opposite claim.
+/// `hit == spaces.is_some()` therefore holds by construction (`and_trace_group` is the only
+/// constructor) and is asserted in tests.rs.
+#[derive(Clone)]
+struct AndTraceGroup {
+    leaves: Vec<String>,
+    mechanism: &'static str,
+    hit: bool,
+    spaces: Option<SpaceEstimate>,
+}
+
+impl AndTraceGroup {
+    /// The printing-space ACCURACY read (`SpaceMeasure::best()`), `None` on a miss -- what this
+    /// group's `printing` key reported before Round 60 split the channels out beside it.
+    fn printing(&self) -> Option<usize> {
+        self.spaces.and_then(|s| s.printing.best())
+    }
+
+    /// `printing()`, card space. `None` both on a miss AND on a printing-only mechanism.
+    /// `#[cfg(test)]`: production reads this group's card space only through the pydict conversion,
+    /// which goes channel by channel; the suite is what asserts on the collapsed number.
+    #[cfg(test)]
+    fn card(&self) -> Option<usize> {
+        self.spaces.and_then(|s| s.card.best())
+    }
+
+    /// `card()`, artwork space.
+    #[cfg(test)]
+    fn artwork(&self) -> Option<usize> {
+        self.spaces.and_then(|s| s.artwork.best())
+    }
+}
+
+/// The ONLY `AndTraceGroup` constructor: `hit` and `spaces` are both derived from `candidate`, so
+/// they cannot disagree, and the channel assignment comes from `Candidate::spaces` rather than from
+/// whatever each of the ~17 trace sites happened to write by hand. `None` = the mechanism was
+/// attempted and declined.
+fn and_trace_group(leaves: Vec<String>, mechanism: &'static str, candidate: Option<Candidate>) -> AndTraceGroup {
+    AndTraceGroup { leaves, mechanism, hit: candidate.is_some(), spaces: candidate.map(Candidate::spaces) }
+}
+
+/// One node of `AndTrace::tree`. Every node -- leaf or op -- carries its own `card`/`printing`/
+/// `artwork` numbers, so any subtree is self-contained and the root's own numbers ARE the `And`
+/// arm's final answer (the same triple otherwise surfacing as `.result`/`matches`) -- there is no
+/// separate top-level "final" field to keep in sync with it.
+///
+/// `op` is a small, stable, low-cardinality tag (today: `"min_fold"`, `"joint_lookup"`, or
+/// `"independence"`), never a sentence built from leaf reprs -- literal leaf detail belongs only on
+/// `Leaf::expr`. A `"min_fold"` node's own numbers equal `min()` of its children's numbers in each
+/// space (see `and_trace_build_tree`'s doc for why this holds by construction here); a
+/// `"joint_lookup"` node's `mechanism` names which of the arm's existing EXACT tightening mechanisms
+/// produced it (the same vocabulary `AndTraceGroup::mechanism` uses), and its `children` are the
+/// leaves that one specific lookup covers. `"independence"` (Round 38) is the one INEXACT tightening:
+/// `count(a) * count(b) / domain` for a pair with no exact source at all (today: color/color-identity/
+/// cmc paired with exactly one price comparison) -- `mechanism: None` on this variant, since the op
+/// name alone already says what happened (there is exactly one independence formula, unlike
+/// `joint_lookup`'s several named table/scan mechanisms).
+///
+/// Round 60: the three numbers on each variant become one `SpaceEstimate`, so a node reports the
+/// PROVEN bound and the GUESS separately in each space instead of one `best()`-collapsed figure per
+/// space. A bare `SpaceEstimate` (not an `Option`, unlike `AndTraceGroup`'s): every node here is a
+/// real answer -- a leaf's own solo estimate, a winning mechanism's hit, or the arm's own final
+/// `result_space` -- never a decline.
+#[derive(Clone)]
+enum AndTraceNode {
+    Leaf {
+        expr: String,
+        spaces: SpaceEstimate,
+    },
+    Op {
+        op: &'static str,
+        mechanism: Option<&'static str>,
+        spaces: SpaceEstimate,
+        children: Vec<AndTraceNode>,
+    },
+}
+
+/// Variant-agnostic reads of a node's own numbers. `#[cfg(test)]` as a block: production reaches a
+/// node only through `and_trace_node_to_pydict`, which matches on the variant and emits both channels
+/// per space; these exist so the suite can assert on a node without re-destructuring it every time.
+#[cfg(test)]
+impl AndTraceNode {
+    /// This node's own three-space numbers, whichever variant it is.
+    fn spaces(&self) -> SpaceEstimate {
+        match self {
+            AndTraceNode::Leaf { spaces, .. } | AndTraceNode::Op { spaces, .. } => *spaces,
+        }
+    }
+
+    /// The printing-space ACCURACY read -- infallible, as `SpaceEstimate::printing` documents.
+    fn printing(&self) -> usize {
+        self.spaces().printing()
+    }
+
+    /// The card-space ACCURACY read; `None` when no mechanism answered this space.
+    fn card(&self) -> Option<usize> {
+        self.spaces().card.best()
+    }
+
+    /// `card()`, artwork space.
+    fn artwork(&self) -> Option<usize> {
+        self.spaces().artwork.best()
+    }
+}
+
+/// Always-on, structured provenance for the OUTERMOST `And` node's `compose_printing_estimate`
+/// evaluation -- replaces the throwaway `CARD_ENGINE_ROUND35_DEBUG`-style env-gated `eprintln!`
+/// instrumentation every round from 33 through 36 built and then discarded to answer exactly this
+/// question (see docs/issues/local-engine-gathered-scan-card-printing-varying-depth.md). `tree`
+/// (built by `and_trace_build_tree`, from `considered` plus each child's own solo estimate) is the
+/// actual computation as a small tree rather than a flat "what won" tag: a flat tag can describe
+/// only one level, and cannot say "this pair was tightened via one table, that other pair via a
+/// different table, and everything else was still min-folded together" -- which is exactly the
+/// shape a future, real partition-search build (more than one tightening feeding the same `And`)
+/// needs room for, without another schema change.
+///
+/// Purely observational: every number here is read from the SAME computation the arm already does
+/// for `result`/`exact_domain_*`, never a second, independently-derived estimate -- this field
+/// changes what the engine REPORTS, not what it computes.
+///
+/// Built only when `want_trace` is set on `compose_printing_estimate` -- the `explain`/
+/// `explain_analyze` diagnostic entry points (via `and_trace_for`), never a production acquire or the
+/// `compose_gather_declines` runtime decline check, both of which pass `false` and pay only one
+/// `bool` check per site, no `String`/`Vec` work.
+#[derive(Clone, Default)]
+struct AndTrace {
+    /// Scratch: each direct child's own solo estimate, keyed by its `expr` string -- consumed by
+    /// `and_trace_build_tree` to materialize `Leaf` nodes, never itself exposed to Python (there is
+    /// no separate top-level "leaves" key any more; every child's solo estimate appears exactly once
+    /// inside `tree`, either directly under the root or nested inside the one `joint_lookup` node
+    /// that covers it).
+    leaves: Vec<AndTraceLeaf>,
+    considered: Vec<AndTraceGroup>,
+    /// Built by `and_trace_build_tree` once `leaves`/`considered` are both finished -- `Default`'s
+    /// empty root (`Op { op: "min_fold", ..., children: vec![] }`) is a placeholder only ever
+    /// observed if a caller inspects `AndTrace` before the `And` arm finishes, which no caller does.
+    tree: AndTraceNode,
+}
+
+impl Default for AndTraceNode {
+    fn default() -> Self {
+        // `estimate_only(0)` rather than `printing_only(0)`: this is a placeholder (`AndTrace::tree`
+        // before `and_trace_build_tree` overwrites it) and must not claim a PROVEN count of zero,
+        // which is what a `guaranteed` of 0 asserts. `best()` is 0 either way, so the `printing`
+        // this reports is unchanged from the pre-Round-60 `printing: 0`.
+        let spaces = SpaceEstimate { printing: SpaceMeasure::estimate_only(0), card: SpaceMeasure::UNKNOWN, artwork: SpaceMeasure::UNKNOWN };
+        AndTraceNode::Op { op: "min_fold", mechanism: None, spaces, children: Vec::new() }
+    }
+}
+
+/// The `AndTrace` for `filter`'s top-level `And`, or `None` when `filter` is not an `And` at all, or
+/// not `is_printing_composable` -- the scope this round's own harness needs (flat conjunctions only,
+/// never recursing into a nested `And`-within-`And`). A second, diagnostic-only call into
+/// `compose_printing_estimate` with `want_trace: true`: cheap to call twice here (this fn is reached
+/// only from `explain`/`explain_analyze`, never a production acquire), and guaranteed to reproduce
+/// the exact same numbers as whichever call `acquire_plan_features` itself made (same pure fn, same
+/// inputs) -- so this never drifts from what the real acquire step computed, without threading a
+/// trace sink through `acquire_plan_features`'s own call site and risking it being built (and
+/// discarded) on every production query that takes the `PrintingCompose` branch.
+///
+/// The `is_printing_composable` check is load-bearing, not defensive redundancy: every other caller
+/// of `compose_printing_estimate` reaches it only after that gate (`lib.rs:10332`, `lib.rs:10985`),
+/// and the function itself panics (`unreachable!`) on a non-composable filter -- confirmed directly,
+/// `is:bear` (a single-leaf `And([tag_leaf])`, an `is:`/`keyword:` tag lookup that has no printing-
+/// compose representation at all) crashed `explain()` before this check was added. `explain` is
+/// documented "safe to call constantly"; without this guard `and_trace_for` broke that contract for
+/// any tag-only query, not just a contrived one -- `is:`/`keyword:` predicates are common real traffic
+/// (`client/query_sampler.py`'s own `tag` family).
+fn and_trace_for(filter: &FilterExpr, indexes: &Archived<CardIndexes>, offsets: &AOffsets, n_printings: usize) -> Option<AndTrace> {
+    if !matches!(filter, FilterExpr::And(_)) || !is_printing_composable(filter, indexes) {
+        return None;
+    }
+    compose_printing_estimate(filter, indexes, offsets, n_printings, true).and_trace.map(|b| *b)
+}
+
+/// Assembles `AndTrace::tree` from the finished `leaves`/`considered`, against the arm's own final
+/// `SpaceEstimate` (`final_est`) -- built mechanically at the end, not tracked live through the arm's
+/// control flow, because every tightening site in the `And` arm computes its own candidate
+/// independently (from `indexes`/children, never from the current `result`), so the arm's final
+/// printing count is simply the minimum over `{every leaf's own solo printing, every attempted
+/// group's printing}` -- order-independent, which is what makes a post-hoc scan exact rather than a
+/// heuristic approximation.
+///
+/// Picks ONE winning group -- the first `hit` group (in evaluation order, which is also
+/// `considered`'s own push order) whose `printing` equals `final_est.printing` -- and builds
+/// `root = Op("min_fold", children: [winner as a "joint_lookup" node, one Leaf per child NOT among
+/// the winner's own leaves])`. This root's `printing` is PROVABLY `min()` of its children's printings
+/// for any query, not just the ones this round happened to check: `final_est.printing` is itself
+/// `min(all-leaves-folded, winner.printing)`, so `winner.printing <= all-leaves-folded`, and folding
+/// over ALL leaves is `<=` folding over any subset (a superset's min can only be smaller or equal) --
+/// so folding over just the UNCOVERED leaves is `>= all-leaves-folded >= winner.printing`, which
+/// makes `min(winner.printing, uncovered-leaves-folded) == winner.printing == final_est.printing`
+/// exactly, every time.
+///
+/// `card`/`artwork` do not carry the same guarantee, and are reported as-is (from `winner`/
+/// `final_est`, never re-derived): unlike `printing`, this arm's own `.card`/`.artwork` are `None`
+/// whenever no mechanism produced a genuine joint intersection for that space, WITHOUT falling back
+/// to a min-fold over the leaves' own marginal counts (`domain_hint`'s retirement, this arm's own
+/// doc, is exactly why -- a broad leaf's own card count is not a safe stand-in for what narrowing
+/// would actually walk). So a `min_fold` node's card/artwork equal `min()` of its children's ONLY
+/// when every present child card/artwork happens to already be `None`-safe for that reason; this is
+/// not asserted as a general law the way the printing invariant is (see `and_trace_root_is_min_fold`
+/// in tests.rs, which checks printing on every fixture and card/artwork only where it happens to
+/// hold).
+///
+/// Round 40: whether `mechanism` (an `AndTraceGroup::mechanism`/`AndTraceNode::Op::mechanism` string)
+/// is an ESTIMATE-class candidate -- a central estimate that can land on either side of the truth
+/// (Round 38's own calibration: roughly half of 610 real rows undershot, half overshot) -- rather than
+/// an EXACT value or a mathematically guaranteed upper bound.
+///
+/// **The name is a half-truth as of Round 59, and this is the precise statement of what it means.**
+/// `"LegalityDateTotals"` is a member and, since Round 59, contributes a genuine bound
+/// (`Candidate::PrintingBound`) with an exactly-correct number. So this predicate does NOT answer "can
+/// this mechanism undershoot" and does not answer "does this mechanism write `guaranteed`". It
+/// classifies a mechanism by its WEAKEST claim -- specifically, by whether it can offer a same-set
+/// (printing, card, artwork) triple, which is what `Candidate::Exact`/`exact_domain_*` require and what
+/// trace attribution wants to prefer. A printing-only answer is second-class HERE regardless of how
+/// exact its one number is.
+///
+/// Deliberately not renamed, and the membership list is deliberately unchanged from Round 58. Every
+/// accurate rename ("can undershoot", "writes no bound") would imply moving `"LegalityDateTotals"` out
+/// of the list, and the list's one live consumer is trace attribution -- so that would be a change to
+/// `explain`'s output, i.e. Round 40's class-priority rule, which Round 59 explicitly does not retire.
+/// One recorded inconsistency, left as-is for the same reason: `"PriceJointTable"` is ALSO printing-only
+/// yet has never been a member, so it already out-ranks three-space mechanisms for attribution. Round 59
+/// makes that accidentally correct (it is a real bound now), but it is not derived from this predicate.
+///
+/// **Correction to the pre-Round-59 doc:** this function has exactly ONE call site,
+/// `and_trace_build_tree`'s winner selection (an estimate-class candidate may only win attribution when
+/// no exact/bound candidate ties the global min). The `covered` bookkeeping it used to credit is real
+/// but is written out by hand at each estimate-class call site (see `SetCollectorRange`'s and
+/// `PriceJointTable`'s own `mark_covered` calls), never routed through here.
+///
+/// `"Independence"` is Round 38/40's own formula; `"SetCollectorRange"` is Round 33's density
+/// estimate (can undershoot on a non-contiguous set, e.g. Secret Lair Drop); `"SubtypePairEstimate"` is
+/// Round 34's capped independence-product MISS branch (the HIT branch, `"SubtypePairIndexes"`, is a
+/// genuine table lookup and stays in the exact/bound class). `"SubtypeArithAnchoredIndependence"`
+/// (Round 50) is `SubtypeArithBox`'s own exact joint multiplied by a single residual `Price` leaf's own
+/// solo rate -- the product of an exact count and an inexact rate is itself inexact, so this stays
+/// ESTIMATE-class even though it's anchored on an exact box hit (see that call site's own doc).
+/// `"ColorCmcAnchoredIndependence"` (Round 56) is the exact same construction one anchor over --
+/// `ColorCmcTable`'s own exact `(color|identity, cmc)` joint times a single residual `Price` leaf's own
+/// solo rate -- and stays ESTIMATE-class for the identical reason.
+/// `"LegalityDateTotals"` (Round 57) is the one entry here whose NUMBER is exact: at per-date
+/// granularity its `(format, status)` x `released_at` prefix sum has nothing to pro-rate. It is classed
+/// by what it can offer in ALL THREE spaces rather than by its precision -- only printings are stored,
+/// card/artwork counts do not subtract on the `released_at` axis (see `LegalityDateTotals`'s own doc),
+/// so it never participates in `exact_domain_*`. Classing it exact/bound here would let a printing-only
+/// candidate out-rank, for trace attribution, a mechanism that answered all three spaces. Nothing is
+/// lost: the second-pass pick only needs a tie against the global min, and an exact value cannot
+/// undershoot it. Round 59 promoted its FOLD to `Candidate::PrintingBound` without moving it out of
+/// this list -- see the "half-truth" paragraph at the top for why those two facts coexist.
+/// `"SubtypeSubtypeEstimate"` (Round 55) is the direct one-bucket analog of `"SubtypePairEstimate"` --
+/// `SubtypePairTable`'s own capped independence-product MISS branch (the HIT branch,
+/// `"SubtypeSubtypeExact"`, is a genuine table lookup and stays in the exact/bound class, same split as
+/// `SubtypePairIndexes`/`SubtypePairEstimate`). Every other mechanism string in this arm
+/// (`"PairTotals"`, `"arith_tuple_totals"`, `"PlanePopcount"`, `"PairRangeSum"`, `"ArithIdProbe"`,
+/// `"SubtypePairIndexes"`, `"SubtypeArithBox"`, `"SubtypeSubtypeExact"`, `"leaves_are_disjoint"`) is
+/// exact/bound.
+fn is_estimate_class_mechanism(mechanism: &str) -> bool {
+    matches!(
+        mechanism,
+        "Independence"
+            | "SetCollectorRange"
+            | "SubtypePairEstimate"
+            | "SubtypeArithAnchoredIndependence"
+            | "ColorCmcAnchoredIndependence"
+            | "SubtypeSubtypeEstimate"
+            | "LegalityDateTotals"
+    )
+}
+
+/// No winning group at all means nothing tightened this `And` beyond the per-leaf fold: `root =
+/// Op("min_fold", children: one Leaf per direct child)`.
+///
+/// Round 40: winner selection is a class-priority pick, not "first considered group that matches" --
+/// `and_trace_reports_the_winning_mechanism_and_every_considered_one`'s own fixture found the old
+/// `find()` (first-in-evaluation-order) attributed a tie between `arith_tuple_totals` and
+/// `SubtypeArithBox` to whichever ran first, not whichever was actually the tighter/more complete
+/// answer. Every mechanism that isn't `is_estimate_class_mechanism` produces either an exact value or a
+/// mathematically guaranteed upper bound, so among THOSE, "pick the tightest" is always sound -- and
+/// since every candidate here already ties `final_est.printing` (the true global min, by construction:
+/// see this fn's own doc), "tightest" only needs a tie-break, which is "most leaves covered" (the more
+/// complete intersection is the more informative report; `SubtypeArithBox`'s 3-leaf answer over
+/// `arith_tuple_totals`'s 2-leaf one). An ESTIMATE-class hit (independence, `SetCollectorRange`'s
+/// density, `SubtypePairEstimate`'s miss branch) is a central estimate, not a bound -- it is only ever
+/// considered SECOND, when no exact/bound candidate ties the global min at all. This mirrors, on the
+/// reporting side, the same invariant the arm's own `covered` bookkeeping enforces on the VALUE side:
+/// an estimate may fill a gap no exact/bound mechanism reaches, never be preferred over one for an
+/// overlapping subset.
+fn and_trace_build_tree(leaves: &[AndTraceLeaf], considered: &[AndTraceGroup], final_est: SpaceEstimate) -> AndTraceNode {
+    let leaf_node = |l: &AndTraceLeaf| AndTraceNode::Leaf { expr: l.expr.clone(), spaces: l.spaces };
+    let ties = |g: &&AndTraceGroup| g.hit && g.printing() == Some(final_est.printing());
+    let winner = considered
+        .iter()
+        .filter(|g| ties(g) && !is_estimate_class_mechanism(g.mechanism))
+        .max_by_key(|g| g.leaves.len())
+        .or_else(|| considered.iter().filter(|g| ties(g) && is_estimate_class_mechanism(g.mechanism)).max_by_key(|g| g.leaves.len()));
+    let mut children: Vec<AndTraceNode> = Vec::new();
+    if let Some(w) = winner {
+        let covered_children: Vec<AndTraceNode> =
+            w.leaves.iter().filter_map(|expr| leaves.iter().find(|l| &l.expr == expr)).map(leaf_node).collect();
+        // Round 38: an "Independence" winner gets its own `op` rather than `"joint_lookup"` --
+        // `mechanism: None` because the op name itself already says what happened (there is exactly
+        // one independence formula, unlike `joint_lookup`'s several named table/scan mechanisms).
+        let (op, mechanism) = if w.mechanism == "Independence" { ("independence", None) } else { ("joint_lookup", Some(w.mechanism)) };
+        // `hit == spaces.is_some()` by construction (`and_trace_group`) and `ties` already required
+        // `hit`, so the fallback is unreachable -- it mirrors the pre-Round-60
+        // `w.printing.unwrap_or(final_est.printing())` default rather than introducing a panic on
+        // what is otherwise a purely diagnostic path.
+        let spaces = w.spaces.unwrap_or(final_est);
+        children.push(AndTraceNode::Op { op, mechanism, spaces, children: covered_children });
+        children.extend(leaves.iter().filter(|l| !w.leaves.contains(&l.expr)).map(leaf_node));
+    } else {
+        children.extend(leaves.iter().map(leaf_node));
+    }
+    AndTraceNode::Op { op: "min_fold", mechanism: None, spaces: final_est, children }
+}
+
 fn compose_printing_estimate(
     filter: &FilterExpr,
     indexes: &Archived<CardIndexes>,
     offsets: &AOffsets,
     n_printings: usize,
+    // Round 37a: when true, the `And` arm additionally builds an `AndTrace` describing its own
+    // evaluation and attaches it to the returned `ComposeEstimate`. `false` everywhere except
+    // `and_trace_for` -- every recursive call this fn makes into a child (both arms below), and
+    // every other external call site (`compose_gather_declines`'s runtime decline check,
+    // `acquire_plan_features`'s `PrintingCompose` branch, which production queries reach) passes
+    // `false`, so the cost of this field on those paths is exactly one `bool` parameter and one
+    // `if want_trace` branch that predicts perfectly -- no `String`/`Vec` allocation, ever, off the
+    // diagnostic path.
+    want_trace: bool,
 ) -> ComposeEstimate {
     let popcount = |bits: &[u64]| bits.iter().map(|w| w.count_ones() as usize).sum::<usize>();
     match filter {
-        FilterExpr::True => ComposeEstimate::leaf(n_printings, 0, 0),
+        FilterExpr::True => {
+            let n_cards = offsets.len() - 1;
+            let n_artworks = u32::from(*indexes.artwork_base.last().expect("artwork_base has n_cards+1 entries")) as usize;
+            ComposeEstimate::leaf_spaces(n_printings, 0, 0, Some(n_cards), Some(n_artworks))
+        }
         // The min-of-children fold is an intersection UPPER BOUND, and on a two-sided range it is a bad
         // one: `usd>=0.42 usd<=0.43` folded to min(33,862, 48,559) against a true 879, and the summed
         // scatter to 82,421 for an 879-row answer. Fusing same-index children first replaces both with
         // the interval's exact `k` — the same two `partition_point` calls the one-sided arm below
         // already makes, which is why a one-sided range estimates at 1.0x and this did not.
         FilterExpr::And(v) => {
-            // Collected (not folded straight through) so `domain_hint` below can look at each child's
-            // OWN result afterward, without re-deriving anything: every leaf arm in this match already
-            // answers cheaply and exactly now except `Devotion` (see that arm's own doc), so there is
-            // nothing left to recompute a second time the way `compile_children_once` used to.
-            let children_estimates: Vec<ComposeEstimate> = fuse_and_range_children(v, indexes, false)
-                .into_iter()
+            // Collected (not folded straight through) so the arith-tuple merge below can look at each
+            // child's OWN shape afterward (which ones are arith-eligible), without re-deriving anything:
+            // every leaf arm in this match already answers cheaply and exactly now except `Devotion`
+            // (see that arm's own doc), so there is nothing left to recompute a second time the way
+            // `compile_children_once` used to.
+            // Bound to a variable (not consumed straight into the fold below) so Round 33's
+            // `set:X` + `cn`-range check further down can inspect the same fused sources a second
+            // time — `AndSource` is `Copy`, so this costs nothing beyond holding the `Vec` a little
+            // longer, not a second call into `fuse_and_range_children`.
+            let and_sources = fuse_and_range_children(v, indexes, false);
+            let children_estimates: Vec<ComposeEstimate> = and_sources
+                .iter()
+                .copied()
                 .map(|src| match src {
-                    AndSource::Child(c) => compose_printing_estimate(c, indexes, offsets, n_printings),
+                    AndSource::Child(c) => compose_printing_estimate(c, indexes, offsets, n_printings, false),
+                    // `.card`/`.artwork` left `None`: `range_card_counts_for`'s `distinct_cards`/
+                    // `distinct_artworks` is the same structure the bare-range leaf arm below found
+                    // unreliable for broad ranges -- see that arm's own doc.
                     AndSource::FusedRange { k, .. } => ComposeEstimate::leaf(k, 0, k),
                 })
                 .collect();
@@ -7632,7 +10937,36 @@ fn compose_printing_estimate(
                 candidate: a.candidate.min(c.candidate),
                 broadcast: a.broadcast + c.broadcast,
                 scatter: a.scatter + c.scatter,
-                domain_hint: None,
+                collection_broadcast: a.collection_broadcast + c.collection_broadcast,
+                exact_domain: None,
+                and_trace: None,
+                // A child that tightened its OWN `result` below its OWN `candidate` has already
+                // pushed `folded.result` below `folded.candidate` here -- so the flag propagates
+                // through the fold, not just out of this arm's own mechanisms. Without this, an
+                // `And` whose children did all the tightening (a nested `And`) would report
+                // "nothing tightened" to a consumer whose candidate set really is broader than the
+                // answer, which is the same false negative the numeric test is being replaced for.
+                printing_tightened: a.printing_tightened || c.printing_tightened,
+            });
+            // Round 37a: `leaves` reports each DIRECT child's own solo estimate -- recomputed here
+            // (not read off `children_estimates`, which is keyed to `and_sources` and can hold FEWER
+            // entries than `v` once a two-sided range fuses two literal children into one
+            // `FusedRange`) so this always has exactly one entry per element of `v`, matching what a
+            // caller sees in the parsed query. `want_trace: false` on every one of these recursive
+            // calls: a leaf never needs its own nested trace, only its solo numbers.
+            let mut and_trace: Option<AndTrace> = want_trace.then(|| AndTrace {
+                leaves: v
+                    .iter()
+                    .map(|c| {
+                        let e = compose_printing_estimate(c, indexes, offsets, n_printings, false);
+                        // Round 60: the child's own `SpaceEstimate` carried through verbatim, both
+                        // channels intact -- it already IS the right shape, and collapsing it to
+                        // three `best()` numbers is exactly what this round removes.
+                        AndTraceLeaf { expr: format!("{c:?}"), spaces: e.result }
+                    })
+                    .collect(),
+                considered: Vec::new(),
+                tree: AndTraceNode::default(), // placeholder; `and_trace_build_tree` fills this in once `considered` is finished
             });
             // Tighten the `min` bound with every PAIR of children the table stores. `min` over singles
             // lets the most selective leaf decide alone, which is why `f:modern r:rare border:white`
@@ -7644,17 +10978,347 @@ fn compose_printing_estimate(
             // needs this.
             // Only `result` is tightened. `candidate` keeps the untightened `min`, because that is what
             // narrowing leaves the alternatives to walk once its broad children decline.
-            let mut result = pair_bounded_min(v, indexes, folded.result);
-            // Second tightening: 2+ cmc/power/toughness children get their TRUE joint card count from
-            // one #743 scan (`arith_tuple_count`), not `min` of each one's own count — e.g.
-            // `cmc<=5 power>=3` gets the real intersection, not `min(cmc<=5, power>=3)`.
+            //
+            // Round 58: `result` is a real `SpaceEstimate` accumulator from here down, not a bare
+            // printing-space `usize` that gets wrapped once at the end. That is what lets
+            // `fold_candidate` route an EXACT candidate and an ESTIMATE candidate into two different
+            // channels of the same space instead of making them compete for one `.min()` slot -- see
+            // `SpaceMeasure`'s and `fold_candidate`'s own docs. `card`/`artwork` start UNKNOWN in both
+            // channels (deliberately NOT seeded from `folded`, whose per-leaf card/artwork counts are
+            // only admissible through the breadth-guarded `narrow_floor` fold at the very end -- see
+            // the retired `domain_hint`'s own post-mortem further down); `printing` is seeded from the
+            // per-leaf fold's own two channels with `pair_bounded_min`'s real counts folded into both --
+            // see the seed's own comment below for why it is no longer one `known()`-wrapped `usize`.
+            //
+            // Round 40: `covered.flags[i]` becomes `true` the moment leaf `v[i]` participates in a
+            // GENUINE exact/bound joint tightening somewhere in this arm (2+ leaves actually
+            // intersected, not a leaf's own repackaged marginal) -- read by `SubtypePairEstimate`'s own
+            // narrow-leaf fallback (still leaf-occupancy-based, out of scope for Round 49 below): an
+            // estimate-class candidate there may only fill leaves NO exact/bound mechanism already
+            // covers, never magnitude-compare against or override one for an overlapping subset (see
+            // that scan's own doc for why "pick the smallest candidate" is unsound once an inexact
+            // estimator is in the mix). Estimate-class mechanisms also mark `covered` themselves,
+            // defensively, so two different inexact estimates can never stack on the same leaves either
+            // -- see each mechanism's own comment below.
+            //
+            // Round 49: the independence registry (near the end of this arm) no longer reads `flags` at
+            // all -- it reads `covered.subsets` instead, a narrower subset-identity signal (see
+            // `CoveredState`'s own doc) that only blocks an estimate from re-answering the IDENTICAL
+            // leaf subset an exact/bound mechanism already answered, not any leaf a mechanism merely
+            // touched for some OTHER partner.
+            let mut covered = CoveredState::new(v.len());
+            // Round 59: the seed carries the per-leaf fold's OWN two channels through, instead of
+            // collapsing them into one `usize` and re-wrapping it in `known()`. That collapse is what
+            // made Round 58 byte-identical, but it also undid the leaf-level channel split one level
+            // up: `folded.result.printing()` is `best()`, which resolves from the ESTIMATE channel
+            // whenever a leaf's guess is the smallest number in the fold -- so the reprint-ratio
+            // approximations this round demoted at the leaves would be laundered straight back into
+            // `guaranteed` here, and `result.printing.guaranteed` at the `And` root (the number the
+            // queued cross-space clamp is meant to clamp against) would still sit below truth. This
+            // is what makes the leaf demotions mean anything above a single leaf.
+            //
+            // `pair_bounded_min` is handed `guaranteed`, not `best()`, for exactly that reason: seeded
+            // with a proven bound it can only ever return a proven bound (its own contributions are a
+            // real `PairTotals` count or a disjointness proof's exact 0), so folding its result into
+            // BOTH channels is sound. `guaranteed` is `Some` here by construction -- the fold above
+            // starts from `ComposeEstimate::leaf(n_printings, ..)`, a real count, so the domain size
+            // is always in the guaranteed channel even when every leaf is estimate-only (`f:modern
+            // f:legacy`).
+            //
+            // Behaviour-preserving on the ACCURACY read, and this is the load-bearing part: the seed's
+            // `best()` was `min(folded.best(), pair_min)` and still is, because `pair_min` is now
+            // `min(folded.guaranteed, k)` and `min(folded.guaranteed, folded.estimate, k)` is the same
+            // number either way.
+            let folded_printing_bound =
+                folded.result.printing.guaranteed.expect("the And fold seeds printing's guaranteed channel from leaf(n_printings)");
+            let pair = pair_bounded_min(v, indexes, folded_printing_bound, &mut covered);
+            // Round 62: the seed `printing_tightened` is measured against -- the per-leaf fold's own
+            // printing measure, both channels, BEFORE `pair_bounded_min` or any `fold_candidate` gets
+            // to lower it. See `ComposeEstimate::printing_tightened`'s doc for what the flag answers
+            // and why the old `candidate == result` number comparison could not.
+            let seed_printing = folded.result.printing;
+            let mut printing = folded.result.printing;
+            printing.lower_guaranteed(pair.printing);
+            printing.lower_estimate(pair.printing);
+            let mut result = SpaceEstimate { printing, card: SpaceMeasure::UNKNOWN, artwork: SpaceMeasure::UNKNOWN };
+            // Round 63: `PairTotals`' card/artwork columns now reach `result` instead of being fetched
+            // for the trace and discarded. `guaranteed` only, mirroring `fold_candidate`'s
+            // `Candidate::Exact` arm -- these are real counts of a real set, so they are proven bounds;
+            // the estimate channel stays absent so `best()` resolves to the bound rather than to a
+            // number nothing guessed. See `PairBound`'s doc for how this was found.
+            if let Some(c) = pair.card {
+                result.card.lower_guaranteed(c);
+            }
+            if let Some(a) = pair.artwork {
+                result.artwork.lower_guaranteed(a);
+            }
+            // Round 46: hoisted here (used to be declared much further down, right before their own
+            // first write) so every `fold_candidate` call site in this arm -- including the two
+            // ESTIMATE-class ones below (`SetCollectorRange`, the `arith_tuple_totals` merge) that fire
+            // before the first EXACT candidate does -- has all four accumulators in scope. A pure
+            // scoping change: nothing between here and each variable's original declaration point ever
+            // reads them, so they are still `None` at every one of those original points, same as
+            // before this hoist.
+            let mut exact_domain_cards: Option<usize> = None;
+            let mut exact_domain_printing: Option<usize> = None;
+            let mut exact_domain_artworks: Option<usize> = None;
+            // Round 37a trace: mirrors `pair_bounded_min`'s own nested loop (same disjoint check,
+            // same table lookup, same short-circuit the instant a disjoint pair is found -- the real
+            // function returns 0 immediately at that point and never looks at any later pair, so the
+            // trace stops there too, rather than claiming pairs that were never actually checked).
+            // Purely a read of what that call already computed from `indexes`/`v` -- `result` above is
+            // untouched by any of this, so there is no risk of this instrumentation nudging the real
+            // number.
+            if let Some(t) = and_trace.as_mut()
+                && v.len() >= 2
+                && *PAIR_TOTALS
+            {
+                let pt = &indexes.pair_totals;
+                let ids: Vec<Option<u16>> = v.iter().map(|c| pair_leaf_id(c, pt)).collect();
+                'pairs: for (i, a) in v.iter().enumerate() {
+                    for (j, b) in v.iter().enumerate().skip(i + 1) {
+                        if leaves_are_disjoint(a, b) {
+                            // A disjointness PROOF: an exact zero in all three spaces, which is the
+                            // `Candidate::Exact` shape (`pair_bounded_min` itself returns 0 here).
+                            t.considered.push(and_trace_group(
+                                vec![format!("{a:?}"), format!("{b:?}")],
+                                "leaves_are_disjoint",
+                                Some(Candidate::Exact { printings: 0, cards: 0, artworks: 0 }),
+                            ));
+                            break 'pairs;
+                        }
+                        let hit = ids[i].zip(ids[j]).and_then(|(x, y)| pt.get_all(x, y));
+                        t.considered.push(and_trace_group(
+                            vec![format!("{a:?}"), format!("{b:?}")],
+                            "PairTotals",
+                            hit.map(|(printings, cards, artworks)| Candidate::Exact { printings, cards, artworks }),
+                        ));
+                    }
+                }
+            }
+            // Round 33 tightening: a bare `set:X` And'd with exactly one `collector_number_int`
+            // range (fused two-sided, e.g. `cn>=30 cn<=39`, or a bare one-sided child, e.g. `cn<=100`)
+            // gets a density estimate instead of the plain min-fold above. `set` has no `compile_plane`
+            // arm and isn't in `ValueTotals`, and `collector_number_int` isn't arith-tuple-eligible and
+            // has no `compile_plane` arm either -- so this pair gets NO tightening from any existing
+            // mechanism, and the fold picks whichever leaf's own (corpus-wide, not set-scoped) count
+            // happens to be smaller, frequently `set:X`'s own full postings length (`set:sld cn<=100`
+            // folds to 2,535 against a true 104).
+            //
+            // `set_collector_ranges` (built once per set at load time from `set_codes`'s own postings,
+            // O(1) to look up here) gives that set's own `[min, max]` collector-number span and how
+            // many of its printings carry a value -- `density = count / (max - min + 1)`. Scaling
+            // density by the query's own overlap with `[min, max]` is exact for a contiguously-numbered
+            // set (density == 1.0) and near-exact for one with a handful of internal gaps; only a
+            // genuinely non-contiguous set (Secret Lair Drop, numbered per-drop rather than
+            // sequentially) sees real residual error, and even there the estimate is a strict
+            // improvement over either marginal the fold could otherwise pick (Round 33's own
+            // `set:sld cn<=100`: density estimate 25.3 against a true 104, versus the fold's 2,535).
+            //
+            // Scoped to the strict 2-source shape only (after fusion): a `set:X` leaf and a lone
+            // `collector_number_int` source, nothing else in the `And`. `fuse_and_range_children`
+            // already reduces a two-sided cn bound to one `FusedRange` source, so this also covers
+            // `set:X cn>=30 cn<=39` despite it being 3 literal filter children. A third leaf
+            // (`set:sld id:g cn<=100`) is out of scope for this round -- `and_sources.len() != 2`
+            // simply skips it, same as any other shape this tightening doesn't recognize; the
+            // pre-existing fold still applies to it unchanged.
+            // Plain `fn`s, not closures: a closure returning a borrow tied to its argument's own
+            // lifetime needs an explicit HRTB Rust won't infer for a closure (unlike a `fn` item,
+            // which gets ordinary lifetime elision), so these are written the same way
+            // `bare_range_bounds` itself is.
+            fn set_code_eq_value<'f>(src: AndSource<'f, '_>) -> Option<&'f str> {
+                match src {
+                    AndSource::Child(FilterExpr::TextExact { field: TextField::SetCode, op: CmpOp::Eq, value }) => Some(value.as_str()),
+                    _ => None,
+                }
+            }
+            fn collector_number_bounds(src: AndSource<'_, '_>, indexes: &Archived<CardIndexes>) -> Option<(u32, u32)> {
+                match src {
+                    AndSource::FusedRange { idx, lo, hi, .. } if std::ptr::eq(idx, &indexes.collector_number) => Some((lo, hi)),
+                    AndSource::Child(c) => bare_range_bounds(c, indexes).and_then(|(idx, lo, hi)| std::ptr::eq(idx, &indexes.collector_number).then_some((lo, hi))),
+                    _ => None,
+                }
+            }
+            if let [a, b] = and_sources.as_slice() {
+                let (a, b) = (*a, *b);
+                let shape = set_code_eq_value(a)
+                    .zip(collector_number_bounds(b, indexes))
+                    .or_else(|| set_code_eq_value(b).zip(collector_number_bounds(a, indexes)));
+                // Round 37a trace: `shape.is_some()` is this mechanism's own applicability gate (a
+                // `set:X` leaf paired with a lone collector-number bound, nothing else in the `And`),
+                // so a group is logged only when that gate matched -- not for every 2-source `And`,
+                // which would misreport this mechanism as "attempted" on pairs it structurally never
+                // looks at. `leaves` lists every element of `v` (not just `a`/`b`, which are POST-fusion
+                // sources and can be fewer than `v`'s literal children -- see `fuse_and_range_children`'s
+                // own doc) since a fused two-sided `cn` range still traces back to 2 literal children.
+                let mut estimate_hit: Option<Candidate> = None;
+                if let Some((set_name, (q_lo, q_hi))) = shape
+                    && let Some(range) = indexes.set_collector_ranges.get(set_name)
+                {
+                    // Archived fields, not plain `u32` -- `range` is a reference into the persisted
+                    // store, unlike `lo`/`hi`/`k` above, which are computed fresh from the query.
+                    let (set_min, set_max, set_count) = (u32::from(range.min), u32::from(range.max), u32::from(range.count));
+                    if set_count > 0 && set_max >= set_min {
+                        let span = f64::from(set_max - set_min + 1);
+                        let density = f64::from(set_count) / span;
+                        // Half-open `[q_lo, q_hi)` against the set's inclusive `[min, max]`: overlap
+                        // is `min(q_hi - 1, max) - max(q_lo, min) + 1`, clamped to 0 when the
+                        // intervals don't touch. `q_hi == 0` (an unsatisfiable fused range, see
+                        // `fuse_and_range_children`'s own doc) is handled by the same clamp: `q_hi - 1`
+                        // would underflow, so it's checked first.
+                        let overlap = if q_hi == 0 {
+                            0
+                        } else {
+                            let hi_incl = (q_hi - 1).min(set_max);
+                            let lo_incl = q_lo.max(set_min);
+                            if hi_incl >= lo_incl { hi_incl - lo_incl + 1 } else { 0 }
+                        };
+                        let estimate = (density * f64::from(overlap)).round() as usize;
+                        let candidate = Candidate::Estimate { printing: estimate, card: None, artwork: None };
+                        fold_candidate(
+                            &mut result,
+                            &mut exact_domain_cards,
+                            &mut exact_domain_printing,
+                            &mut exact_domain_artworks,
+                            "SetCollectorRange",
+                            candidate,
+                        );
+                        estimate_hit = Some(candidate);
+                        // Round 40: ESTIMATE-class (density, not a bound -- a non-contiguous set, e.g.
+                        // Secret Lair Drop, can undershoot; see this mechanism's own doc above), so this
+                        // marks `covered` defensively rather than because it's exact -- prevents the
+                        // independence registry scan below from ALSO landing an inexact candidate on the
+                        // same leaves (no live case does this today, since `set`/`cn` aren't in the
+                        // registry, but this keeps the invariant true structurally, not by accident).
+                        // All of `v` (not just `a`/`b`): a fused two-sided `cn` range still traces back
+                        // to 2+ literal children, same reasoning the trace group below already uses.
+                        let all_v: Vec<&FilterExpr> = v.iter().collect();
+                        mark_covered(v, &all_v, &mut covered);
+                    }
+                }
+                if shape.is_some()
+                    && let Some(t) = and_trace.as_mut()
+                {
+                    t.considered.push(and_trace_group(v.iter().map(|c| format!("{c:?}")).collect(), "SetCollectorRange", estimate_hit));
+                }
+            }
+            // Round 53 (`docs/issues/local-engine-nway-followup-queue.md`): two price bounds of
+            // DIFFERENT fields And'd together, and NOTHING else, get the exact bucketed joint estimate
+            // below instead of the plain min-fold above -- see `PriceJointTable`'s own doc for the full
+            // motivation (`usd>0.75 eur<0.16` predicted 25,444 against a true 137 pre-Round-53, 185x
+            // over, because `IndepClass::Price` bundles usd/eur/tix into ONE class and the `by_class`
+            // registry's own `_ => {}` catch-all further down drops any 2+-occurrence class it has no
+            // combining table for -- neither leaf becomes a unit at all). Round 53 covered `usd`+`eur`
+            // only; Round 54 generalized `price_joint_table_for` (called via `resolve_price_joint_pair`
+            // below) to also resolve `usd`+`tix`/`eur`+`tix` here, closing the identical gap for those
+            // two pairs (see this round's own doc/report -- `usd`x`tix`/`eur`x`tix` surfaced as the next-
+            // worst shapes in a fresh survey once `usd`x`eur` stopped dominating it).
+            //
+            // Deliberately narrow, mirroring `SetCollectorRange`'s own strict 2-source shape just above
+            // and `SubtypePairIndexes`/`SubtypeArithBox`'s own "start narrow" discipline: the WHOLE `And`
+            // must be exactly these two sources (`and_sources.len() == 2`), not a residual-scan
+            // generalization (a natural future round, out of scope here -- see the followup queue).
+            //
+            // Round 59: folded as `Candidate::PrintingBound`, so it claims `guaranteed.printing` as
+            // well as `estimate` -- and still never feeds `exact_domain_*`, which needs a same-set
+            // (printing, card, artwork) triple this table has no card or artwork column for.
+            //
+            // The bound is STRUCTURAL, not a measurement. `joint_estimate` counts a cell whenever the
+            // cell overlaps the query rectangle at all ("any overlap counts fully", no boundary
+            // interpolation -- see `PriceJointTable`'s own doc and the followup queue's own entry on
+            // interpolation as a possible refinement). Every printing lives in exactly ONE cell, and a
+            // matching printing's own cell necessarily overlaps the rectangle its own prices sit
+            // inside, so no matching printing can ever be missed -- the result is `>=` the true count,
+            // always. The over-count is the non-matching remainder of the partially-overlapping cells
+            // on the rectangle's boundary. Corroborated (not established) by Round 59's own audit:
+            // 0 of 1,237 `unique=printing` survey rows predicted below `true_total`.
+            //
+            // It keeps `estimate` too: it is the best available guess for this shape as well as a
+            // bound, so this ADDS a channel rather than moving one.
+            if let [a, b] = and_sources.as_slice() {
+                let (a, b) = (*a, *b);
+                let pair = resolve_price_joint_pair(a, b, indexes);
+                let mut estimate_hit: Option<Candidate> = None;
+                if let Some((table, (a_lo, a_hi), (b_lo, b_hi))) = pair
+                    && let Some((printing, _card, _artwork)) = table.joint_estimate(a_lo, a_hi, b_lo, b_hi)
+                {
+                    let candidate = Candidate::PrintingBound { printing };
+                    fold_candidate(
+                        &mut result,
+                        &mut exact_domain_cards,
+                        &mut exact_domain_printing,
+                        &mut exact_domain_artworks,
+                        "PriceJointTable",
+                        candidate,
+                    );
+                    estimate_hit = Some(candidate);
+                    // Round 40's own convention: mark this Estimate-class candidate's own leaves
+                    // covered, mirroring `SetCollectorRange`'s own defensive self-mark just above --
+                    // prevents some future mechanism from redundantly re-answering the identical price-
+                    // pair subset (in practice this can't overlap with the `by_class` registry's own
+                    // Price special case below, since that requires a THIRD leaf of some other class to
+                    // be present at all, but this keeps the invariant true structurally, not by
+                    // accident).
+                    let all_v: Vec<&FilterExpr> = v.iter().collect();
+                    mark_covered(v, &all_v, &mut covered);
+                }
+                if pair.is_some()
+                    && let Some(t) = and_trace.as_mut()
+                {
+                    t.considered.push(and_trace_group(v.iter().map(|c| format!("{c:?}")).collect(), "PriceJointTable", estimate_hit));
+                }
+            }
+            // Second tightening: 2+ cmc/power/toughness children get their TRUE joint (printing,
+            // card, artwork) triple from one #743 scan (`arith_tuple_totals`), not `min` of each
+            // one's own count — e.g. `cmc<=5 power>=3` gets the real intersection, not
+            // `min(cmc<=5, power>=3)`. Round 51: the scan's own `totals` are exact in all three
+            // spaces (no more scaling a card count by the corpus reprint ratio, no more giving up on
+            // artwork), so this folds as `Candidate::Exact` and finally participates in
+            // `exact_domain_cards`/`exact_domain_printing`/`exact_domain_artworks`.
             let arith_children: Vec<&FilterExpr> = v.iter().filter(|c| is_arith_tuple_eligible(c)).collect();
             let n_cards = offsets.len() - 1;
-            if arith_children.len() >= 2
-                && let Some(card_count) = arith_tuple_count(&arith_children, indexes)
-            {
-                let scaled = (card_count * n_printings).checked_div(n_cards).unwrap_or(0);
-                result = result.min(scaled);
+            if arith_children.len() >= 2 {
+                let triple = arith_tuple_totals(&arith_children, indexes);
+                let arith_candidate = triple.map(|(printings, cards, artworks)| Candidate::Exact { printings, cards, artworks });
+                if let Some(candidate) = arith_candidate {
+                    fold_candidate(
+                        &mut result,
+                        &mut exact_domain_cards,
+                        &mut exact_domain_printing,
+                        &mut exact_domain_artworks,
+                        "arith_tuple_totals",
+                        candidate,
+                    );
+                    // Round 40 (fixed after a real regression a coordinator review caught pre-merge:
+                    // `usd>6.03 cmc>=1 cmc<=1` lost Round 38's own price x cmc combination entirely,
+                    // regressing `safe:cmc+usd` below its Round-38 baseline): only mark `covered` when
+                    // `arith_children` spans 2+ DISTINCT fields (`single_arith_field` returns `None`) --
+                    // a genuine cross-dimension joint, e.g. `cmc<=5 power>=3`, where nothing else in
+                    // this arm could safely reuse either leaf. When every child shares ONE field
+                    // (`single_arith_field` returns `Some`, e.g. `cmc>=1 cmc<=1`), this is NOT a
+                    // cross-dimension intersection at all -- it's resolving that one field's own
+                    // effective value from two partial bounds, exactly the shape Round 38's own
+                    // cmc-combining path already relied on to hand a SINGLE exact cmc unit to the
+                    // independence registry for pairing against price. Marking it covered here silently
+                    // stole those leaves from the registry's own same-field consolidation (the `Cmc`/
+                    // `Pow` arm of the `by_class` grouping below) before it ever got to run, dropping
+                    // the price x cmc pairing Round 38 shipped -- not just failing to add new coverage.
+                    // Unrelated to this round's exactness upgrade -- left exactly as-is.
+                    if single_arith_field(&arith_children).is_none() {
+                        mark_covered(v, &arith_children, &mut covered);
+                    }
+                }
+                // Round 37a trace: `triple` is `None` only when the #743 scan itself declines
+                // (see `arith_tuple_totals`'s own doc) -- the shape gate here (2+ arith-eligible
+                // children) is the same one the real tightening above just checked, so a group is
+                // logged whenever that gate matched, hit or miss.
+                if let Some(t) = and_trace.as_mut() {
+                    t.considered.push(and_trace_group(
+                        arith_children.iter().map(|c| format!("{c:?}")).collect(),
+                        "arith_tuple_totals",
+                        arith_candidate,
+                    ));
+                }
             }
             // Third tightening: compile each child to a card-space `PlaneExpr` individually and AND the
             // results — the exact mechanism `narrow_rec` already runs in production for a whole
@@ -7682,7 +11346,7 @@ fn compose_printing_estimate(
             // work for no additional tightening — measured as a real ~15% regression on bare range-pair
             // queries (`pow>=1 pow<=2`, `tou>=2 tou<=5`) before this exclusion, since each accrued a
             // second, redundant `eval_planes` pass (a numeric range's plane can union up to 13 interior
-            // buckets, not a single-bit lookup like color/devotion) on top of the `arith_tuple_count` scan
+            // buckets, not a single-bit lookup like color/devotion) on top of the `arith_tuple_totals` scan
             // that already answered them exactly.
             //
             // Existential leaves (rarity/border always, legality only for a divergent format) are NOT
@@ -7709,11 +11373,14 @@ fn compose_printing_estimate(
             // leaf separately and ANDs printing-space bitmaps (unchanged), so this estimate-only shortcut
             // changes nothing about when or how the expensive work happens.
             let divergent_formats = u64::from(indexes.planes.divergent_formats);
-            let (card_invariant, existential): (Vec<PlaneExpr>, Vec<PlaneExpr>) = v
+            // Carries the original `FilterExpr` alongside each compiled `PlaneExpr` (not just the
+            // compiled form) so `pair_range_sum`'s preferred path below can ask `pair_leaf_id` about the
+            // lone existential leaf's own value directly, without re-deriving it from the plane.
+            let (card_invariant, existential): (Vec<CompiledLeaf>, Vec<CompiledLeaf>) = v
                 .iter()
                 .filter(|c| !is_arith_tuple_eligible(c))
-                .filter_map(|c| compile_plane(c, &indexes.planes, &indexes.oracle_trigram.words))
-                .partition(|pe| !plane_expr_is_existential(pe, divergent_formats));
+                .filter_map(|c| compile_plane(c, &indexes.planes, &indexes.oracle_trigram.words).map(|pe| (c, pe)))
+                .partition(|(_, pe)| !plane_expr_is_existential(pe, divergent_formats));
             // One trial per existential leaf present (each paired with ALL card-invariant leaves), not
             // "the first one, dropping the rest": every `(card-invariant leaves + this one existential
             // leaf)` combination is independently exact and safe (still only one existential fact, no
@@ -7727,7 +11394,7 @@ fn compose_printing_estimate(
             // Bits are kept alongside the count (not just the scaled number) for the smaller-side merge
             // below, which needs to probe individual card ids against the winning combination's bitmap.
             let popcount_with_bits = |extra: Option<&PlaneExpr>| -> (usize, Vec<u64>) {
-                let mut children = card_invariant.clone();
+                let mut children: Vec<PlaneExpr> = card_invariant.iter().map(|(_, pe)| pe.clone()).collect();
                 if let Some(e) = extra {
                     children.push(e.clone());
                 }
@@ -7736,24 +11403,175 @@ fn compose_printing_estimate(
                 let card_count = popcount(&bits);
                 (card_count, bits)
             };
-            let mut exact_domain: Option<usize> = None;
+            // Two DIFFERENT spaces come out of this intersection, and conflating them was a real bug
+            // (found while investigating `GatheredScan[printing_compose]`'s worst-in-the-survey spread,
+            // p90/p10 up to 40x): `exact_domain_cards` is the raw card-space popcount -- the CARD count
+            // this whole `And` finally exposes on `.card` (a real live query, `devotion:w c:u usd>5`,
+            // traced a 15.8x over-estimate to exactly this value being printing-scaled before reaching
+            // a card-space consumer). `result` (this function's own, PRINTING-space quantity) needs the
+            // printing-space total of the SAME exact card set, and that no longer means guessing it from
+            // the corpus's average printings-per-card (`card_count * n_printings / n_cards`) either --
+            // `card_bits_span_total` sums each set card's OWN printing count directly from `offsets`,
+            // exact rather than average-case, since the exact bits are already in hand from the popcount
+            // above. Ditto `artwork` from `indexes.artwork_base`, the same shape one space over.
+            // Round 46: `exact_domain_cards`/`exact_domain_printing`/`exact_domain_artworks` are now
+            // declared earlier, right alongside `result` (see that declaration's own comment) --
+            // `fold_candidate` needs all four accumulators in scope at every call site, including the
+            // two ESTIMATE-class ones (`SetCollectorRange`, the `arith_tuple_totals` merge) that fire
+            // before this point. Hoisting the declaration changes nothing: every mechanism between here
+            // and there is ESTIMATE-class and never touches these three, so they are still `None` at
+            // this exact point, same as before this hoist.
             let mut best_other: Option<(usize, Vec<u64>)> = None;
-            if existential.is_empty() {
-                if card_invariant.len() >= 2 {
-                    best_other = Some(popcount_with_bits(None));
-                }
-            } else if !card_invariant.is_empty() {
-                for e in &existential {
-                    let candidate = popcount_with_bits(Some(e));
-                    if best_other.as_ref().is_none_or(|(c, _)| candidate.0 < *c) {
-                        best_other = Some(candidate);
+            // Round 40: the specific leaves that fed `best_other`'s winning popcount -- tracked
+            // alongside it (not re-derived) so the class-priority `covered` bookkeeping below can tell
+            // a GENUINE joint (2+ distinct leaves actually intersected) from a lone existential leaf's
+            // own repackaged marginal (`card_invariant` empty, one existential leaf, nothing else --
+            // e.g. a bare `f:modern` with no card-invariant partner): only the former should ever block
+            // the independence registry scan from using that leaf, since the latter tightens nothing
+            // beyond what the plain per-leaf fold already had.
+            let mut best_other_leaves: Option<Vec<&FilterExpr>> = None;
+            // Preferred path (Round 24) for a LONE existential leaf ANDed with a range over exactly one
+            // arith-tuple field (`cmc=1 border:white`, `cmc>=1 cmc<=5 r=mythic`, ...): sum the exact
+            // per-value pair-total over every value the arith bound(s) admit (`pair_range_sum`), rather
+            // than materializing a card-space bitmap and probing `arith_children`'s ids into it (Round
+            // 22's fix, kept below as the fallback). Exact whenever it answers, and strictly cheaper:
+            // bounded by the field's own distinct value count (~14-21), not `O(matching_ids)`. Declines
+            // to `None` (falling through to the existing logic unchanged) whenever a card-invariant leaf
+            // is ALSO present, whenever more than one existential leaf is present, whenever the arith
+            // children span more than one field, or whenever any admitted value was pruned from the pair
+            // table by its own selectivity floor -- see `pair_range_sum`'s own doc.
+            // Round 37a trace: split out of the `if let` chain below into its own "did the gate even
+            // match" value (`pair_range_attempt`), separate from `pair_range_answer` (whether
+            // `pair_range_sum` itself then answered) -- a pure refactor, same conditions in the same
+            // order, so `pair_range_answer`'s value is unchanged; it just also lets the trace log
+            // this mechanism as "attempted, missed" instead of only ever "attempted, hit" or
+            // "never attempted".
+            let pair_range_attempt: Option<(&FilterExpr, NumField, u16)> = if card_invariant.is_empty()
+                && let [(e_filter, _)] = existential.as_slice()
+                && !arith_children.is_empty()
+                && let Some(field) = single_arith_field(&arith_children)
+                && let Some(existential_id) = pair_leaf_id(e_filter, &indexes.pair_totals)
+            {
+                Some((*e_filter, field, existential_id))
+            } else {
+                None
+            };
+            let pair_range_answer = pair_range_attempt
+                .and_then(|(_, field, existential_id)| pair_range_sum(&arith_children, field, existential_id, &indexes.pair_totals));
+            if let Some((e_filter, _, _)) = pair_range_attempt
+                && let Some(t) = and_trace.as_mut()
+            {
+                let mut leaves: Vec<String> = arith_children.iter().map(|c| format!("{c:?}")).collect();
+                leaves.push(format!("{e_filter:?}"));
+                t.considered.push(and_trace_group(
+                    leaves,
+                    "PairRangeSum",
+                    pair_range_answer.map(|(printings, cards, artworks)| Candidate::Exact { printings, cards, artworks }),
+                ));
+            }
+            if pair_range_answer.is_none() {
+                if existential.is_empty() {
+                    if card_invariant.len() >= 2 {
+                        let (card_count, bits) = popcount_with_bits(None);
+                        if let Some(t) = and_trace.as_mut() {
+                            t.considered.push(and_trace_group(
+                                card_invariant.iter().map(|(c, _)| format!("{c:?}")).collect(),
+                                "PlanePopcount",
+                                Some(Candidate::Exact {
+                                    printings: card_bits_span_total(&bits, offsets),
+                                    cards: card_count,
+                                    artworks: card_bits_span_total(&bits, &indexes.artwork_base),
+                                }),
+                            ));
+                        }
+                        best_other = Some((card_count, bits));
+                        best_other_leaves = Some(card_invariant.iter().map(|(c, _)| *c).collect());
+                    }
+                } else {
+                    // A LONE existential leaf (no card-invariant partner at all -- `card_invariant` may be
+                    // empty here) still gets its own exact joint via `popcount_with_bits(Some(e))`: the
+                    // closure already handles an empty `card_invariant` correctly (`card_invariant.clone()`
+                    // plus one pushed `e` is just `PlaneExpr::And(vec![e.clone()])`, a valid single-child
+                    // AND, and `eval_planes` answers it exactly). This branch used to require
+                    // `!card_invariant.is_empty()`, which meant a shape like `cmc=1 border:white` (an
+                    // arith-tuple leaf ANDed with exactly one existential leaf and nothing else
+                    // card-invariant) never ran this loop at all -- `best_other` stayed `None` for the rest
+                    // of the function, so `exact_domain_cards`/`result`'s printing-space tightening below,
+                    // and everything downstream that reads them (`domain_cards`'s `is_and` tightening,
+                    // `card_invariant_domain_exact`, `est.result.card`), silently fell back to the
+                    // untightened per-child `min` instead of an exact popcount. Root-caused and verified in
+                    // docs/issues/local-engine-domain-cards-existential-arith-and.md (`eval_domain` off by up
+                    // to ~9x for this shape); this loop is the fix. `pair_range_answer` above now answers
+                    // most of this same population more cheaply; this loop is the fallback for the rest
+                    // (multiple existential leaves, a card-invariant partner also present, or a pruned
+                    // pair-table entry).
+                    for (orig, e) in &existential {
+                        let candidate = popcount_with_bits(Some(e));
+                        // Round 37a trace: every trial is independently exact and gets its own group
+                        // (not just the winning one) -- `card_bits_span_total` here is the one extra
+                        // cost this instrumentation adds over the real code's own winner-only pass,
+                        // paid only under `want_trace` (diagnostic path), over at most as many
+                        // existential leaves as the query actually has.
+                        if let Some(t) = and_trace.as_mut() {
+                            let mut leaves: Vec<String> = card_invariant.iter().map(|(c, _)| format!("{c:?}")).collect();
+                            leaves.push(format!("{orig:?}"));
+                            t.considered.push(and_trace_group(
+                                leaves,
+                                "PlanePopcount",
+                                Some(Candidate::Exact {
+                                    printings: card_bits_span_total(&candidate.1, offsets),
+                                    cards: candidate.0,
+                                    artworks: card_bits_span_total(&candidate.1, &indexes.artwork_base),
+                                }),
+                            ));
+                        }
+                        if best_other.as_ref().is_none_or(|(c, _)| candidate.0 < *c) {
+                            best_other_leaves = Some(card_invariant.iter().map(|(c, _)| *c).chain(std::iter::once(*orig)).collect());
+                            best_other = Some(candidate);
+                        }
                     }
                 }
             }
-            if let Some((card_count, _)) = &best_other {
-                let scaled = (card_count * n_printings).checked_div(n_cards).unwrap_or(0);
-                result = result.min(scaled);
-                exact_domain = Some(scaled);
+            // Round 40: mark `covered` for `best_other`'s own leaves, but ONLY when it's a genuine 2+
+            // leaf joint -- a lone existential leaf with no card-invariant partner (`best_other_leaves`
+            // of length 1) is just that leaf's own marginal restated, and must stay free for the
+            // independence registry scan below (this is what makes `legality x cn`/`legality x price`
+            // reachable at all: `f:modern` alone would otherwise "cover" itself here on every query and
+            // permanently block its own registry entry).
+            if let Some(leaves) = &best_other_leaves
+                && leaves.len() >= 2
+            {
+                mark_covered(v, leaves, &mut covered);
+            }
+            if let Some((e_filter, _, _)) = pair_range_attempt
+                && pair_range_answer.is_some()
+            {
+                // Round 40: `pair_range_sum`'s own answer is ALWAYS a genuine joint (arith_children is
+                // non-empty by this gate's own condition), unlike `best_other`'s lone-existential case.
+                let mut leaves: Vec<&FilterExpr> = arith_children.clone();
+                leaves.push(e_filter);
+                mark_covered(v, &leaves, &mut covered);
+            }
+            if let Some((printings, cards, artworks)) = pair_range_answer {
+                fold_candidate(
+                    &mut result,
+                    &mut exact_domain_cards,
+                    &mut exact_domain_printing,
+                    &mut exact_domain_artworks,
+                    "PairRangeSum",
+                    Candidate::Exact { printings, cards, artworks },
+                );
+            } else if let Some((card_count, bits)) = &best_other {
+                let printing_span = card_bits_span_total(bits, offsets);
+                let artworks = card_bits_span_total(bits, &indexes.artwork_base);
+                fold_candidate(
+                    &mut result,
+                    &mut exact_domain_cards,
+                    &mut exact_domain_printing,
+                    &mut exact_domain_artworks,
+                    "PlanePopcount",
+                    Candidate::Exact { printings: printing_span, cards: *card_count, artworks },
+                );
             }
             // Merge with the arith-tuple family (cmc/power/toughness) by ID probe, instead of compiling
             // their numeric-range planes into the SAME joint above: that was tried first and reverted
@@ -7765,12 +11583,15 @@ fn compose_printing_estimate(
             // reuses the exact card ids `bare_numeric_field_ids`/`arith_tuple_ids` already have cheaply
             // in hand (`O(log n)` or `O(564 keys)`, no plane involved) and probes each one against
             // `best_other`'s bitmap directly -- cost `O(arith_count)`, adaptive to the actual data rather
-            // than a fixed worst case. Gated only on `best_other` existing at all: a query with rarity/
-            // border/legality alongside arith leaves but nothing ELSE plane-compilable (`r<=rare
-            // tou>=4 tou<=5`, one of the regressed queries under the plane-based version) never reaches
-            // here at all, since `best_other` stays `None` for it (the existential branch above requires
-            // a card-invariant partner) -- measured back to the exact pre-this-commit acquire cost for
-            // that shape specifically, not just cheaper. Only handles "arith side probes into other's
+            // than a fixed worst case. Gated only on `best_other` existing at all: a query with NEITHER a
+            // card-invariant NOR an existential leaf compiling (an all-arith `And`, or one with a
+            // non-plane-compilable sibling like `year<=2017` and no rarity/border/legality anywhere)
+            // never reaches here, since `best_other` stays `None` for it -- measured back to the exact
+            // pre-this-commit acquire cost for that shape specifically, not just cheaper. A LONE
+            // existential leaf with no card-invariant partner (`r<=rare tou>=4 tou<=5`) now DOES reach
+            // here (the existential branch above no longer requires a card-invariant partner -- see its
+            // own comment) and gets the same arith-ID-probe tightening a card-invariant-paired
+            // existential leaf already got. Only handles "arith side probes into other's
             // bitmap", not the reverse (iterating `other`'s bits and checking the arith bound directly):
             // that direction would need a raw per-card cmc/power/toughness lookup this function has no
             // access to. Not a correctness gap -- probing arith into `best_other` is enough on its own to
@@ -7782,69 +11603,1215 @@ fn compose_printing_estimate(
                     1 => bare_numeric_field_ids(arith_children[0], indexes),
                     _ => arith_tuple_ids(&arith_children, indexes),
                 };
+                // Round 37a trace: `probe_hit` mirrors what this block already computes when it
+                // fires, purely so the group logged below can report the same numbers -- nothing
+                // here changes `result`/`exact_domain_*`.
+                let mut probe_hit: Option<Candidate> = None;
                 if let Some(ids) = arith_ids {
-                    let joint_count = ids
+                    let joint_ids: Vec<u32> = ids
                         .iter()
-                        .filter(|&&id| {
+                        .copied()
+                        .filter(|&id| {
                             let (word, bit) = (id as usize / 64, id as usize % 64);
                             word < other_bits.len() && (other_bits[word] >> bit) & 1 == 1
                         })
-                        .count();
-                    let scaled = (joint_count * n_printings).checked_div(n_cards).unwrap_or(0);
-                    result = result.min(scaled);
-                    exact_domain = Some(exact_domain.map_or(scaled, |d| d.min(scaled)));
+                        .collect();
+                    // Same exact-sum shape as `card_bits_span_total`, over an id LIST instead of a
+                    // bitmap -- the joint set only exists as `joint_ids` here, never materialized as
+                    // its own bitmap, so summing directly over the list avoids building one just to
+                    // re-iterate it.
+                    let span_of = |card_offsets: &AOffsets| -> usize {
+                        joint_ids.iter().map(|&id| u32::from(card_offsets[id as usize + 1]) as usize - u32::from(card_offsets[id as usize]) as usize).sum()
+                    };
+                    let joint_count = joint_ids.len();
+                    let joint_printing = span_of(offsets);
+                    let joint_artwork = span_of(&indexes.artwork_base);
+                    let candidate = Candidate::Exact { printings: joint_printing, cards: joint_count, artworks: joint_artwork };
+                    fold_candidate(
+                        &mut result,
+                        &mut exact_domain_cards,
+                        &mut exact_domain_printing,
+                        &mut exact_domain_artworks,
+                        "ArithIdProbe",
+                        candidate,
+                    );
+                    probe_hit = Some(candidate);
+                    // Round 40: a genuine exact joint of best_other's own leaves (however many -- even
+                    // just the one lone existential leaf `best_other_leaves` held back from `covered`
+                    // above) PLUS the arith leaves probed in here -- e.g. `f:modern cmc>=5 power>=5`
+                    // becomes a real 3-way exact answer at exactly this point, and `f:modern` must be
+                    // marked covered now even though the earlier best_other step deliberately left it
+                    // free.
+                    if let Some(other_leaves) = &best_other_leaves {
+                        mark_covered(v, other_leaves, &mut covered);
+                    }
+                    mark_covered(v, &arith_children, &mut covered);
+                }
+                if !arith_children.is_empty()
+                    && let Some(t) = and_trace.as_mut()
+                {
+                    t.considered.push(and_trace_group(arith_children.iter().map(|c| format!("{c:?}")).collect(), "ArithIdProbe", probe_hit));
                 }
             }
-            // `domain_hint`: what GatheredScan/StreamedSelect really see once narrow_rec intersects.
-            // Every leaf type in this match now already answers its OWN `.result` cheaply and exactly
-            // (border/rarity/legality/range/collection/color/cmc/power/toughness), so the breadth-
-            // filtered min over the children already collected above is real information, not a
-            // separate re-derivation — a child whose own result exceeds
-            // `exceeds_own_domain_breadth` of `n_printings` is dropped first, mirroring `narrow_rec`'s
-            // own breadth gate on its `And` arm, rather than left to dominate a `min` it would never
-            // survive to contribute to for real. (`Devotion`'s own `.result`, the one leaf type still
-            // priced via `eval_planes`, participates the same way as everything else here — nothing
-            // special-cased for it.) `exact_domain`, when present, is folded in too — it is the true
-            // value rather than an upper bound, so `min`-ing it in can only tighten, never regress: this
-            // is what actually reaches `acquire_plan_features`'s `domain_cards` (the `result`-only
-            // tightening above helps `PrintingCompose`'s own pricing, but `GatheredScan`/`StreamedSelect`
-            // are priced from `domain_hint`, not `result`, whenever `est.candidate != est.result`).
-            let domain_hint = [
-                children_estimates.iter().filter(|c| !exceeds_own_domain_breadth(c.result, n_printings)).map(|c| c.result).min(),
-                exact_domain,
-            ]
-            .into_iter()
-            .flatten()
-            .min();
-            ComposeEstimate { result, domain_hint, ..folded }
+            // Round 34 tightening, generalized in Round 42: a `set:X`/`c:X`/`id:X` leaf paired with a
+            // subtype leaf (`t:Y`, `CollectionCmp{Subtypes, Ge}`) gets an exact triple from
+            // `indexes.subtype_pairs` (top 256 most extreme real pairs per dimension) or, on a miss, a
+            // capped independence-product ESTIMATE, instead of the plain min-fold above. `t:` has no
+            // `compile_plane` arm (unlike the main card TYPES -- `creature`/`instant`/etc, `TypeCmp`,
+            // which already has its own whole-tree `compile_plane` fast path and is untouched by this
+            // round) and isn't in any pair table, so this pair gets NO tightening from any existing
+            // mechanism otherwise: the fold picks whichever leaf's own CORPUS-WIDE count is smaller.
+            //
+            // This USED to require the WHOLE `And` be exactly these two children (`v.len() == 2`), so a
+            // 3+-leaf query combining a dim leaf with a subtype leaf and anything else (`color:G
+            // format:pioneer t:elf`) got zero benefit here, even though `color:G t:elf` alone would hit
+            // the table. There is no placement/ordering issue to fix -- `exact_domain_*`'s `.map_or(x,
+            // |d| d.min(x))` chaining (see the arith-ID-probe merge above, and this mechanism's own hit
+            // branch below) already composes correctly across mechanisms regardless of what else ran
+            // first or what other leaves are present; the actual gap was that this mechanism never
+            // computed a candidate at all past two total leaves.
+            //
+            // A table HIT is genuinely exact in all three spaces (`SpaceTotals`, not a flat number --
+            // see `SetSubtypeTable`'s own doc for why), so it feeds `exact_domain_*` exactly like
+            // `best_other`/the arith-tuple merge above -- `min`-ing across multiple independently-exact
+            // intersections is still exact, same reasoning those two already establish. Because of that,
+            // the EXACT-hit scan below does NOT filter its two leaf positions by `covered` at all --
+            // unlike the independence registry scan/Round 41's narrow-leaf floor, which skip covered
+            // leaves because THEIR tightening is only safe to apply to genuinely uncovered leaves. A
+            // real table hit's exact count is a valid upper bound on the full `And` regardless of
+            // whether one of its two leaves is ALSO part of some OTHER mechanism's joint (e.g. `color`
+            // already covered by `compile_plane`'s own joint with `legality`) -- `compile_plane`,
+            // `pair_bounded_min`, and the arith-tuple merge above don't filter their own inputs by
+            // `covered` either, for the identical reason. So this scans EVERY (dim, subtype) pair in
+            // the whole `v`, not just the uncovered residual, and each gets its own independent lookup
+            // and its own trace group (not just the tightest), mirroring the existential-leaf loop's own
+            // "every trial is independently exact" precedent above. `mark_covered` below is still called
+            // on every hit (harmless -- and needed by the ESTIMATE fallback's own residual scan just
+            // below -- if a leaf was already covered).
+            //
+            // A MISS is not exact (`independence_product = dim_card * subtype_card / n_cards`, capped at
+            // `rest_max`), so it only narrows `result` (printing space), never `exact_domain_*` -- the
+            // same exact/estimate line Round 33's own density tightening draws for the identical reason.
+            // Unlike the exact-hit scan above, this fallback DOES need to filter by `covered` (computed
+            // fresh, AFTER the exact-hit loop, so its own `mark_covered` calls are reflected): an
+            // independence-shaped estimate can undershoot (Round 40's own class-priority finding), so
+            // computing one for a leaf some OTHER mechanism has ALREADY captured exactly and `min`-ing it
+            // in could pull `result` below the true count -- a real corruption, not just looseness,
+            // unlike the exact-hit scan's `.min()`-chain which can only ever tighten. This fallback also
+            // deliberately stays SINGLE-PAIR-ONLY: computed only when exactly one uncovered dim leaf and
+            // exactly one uncovered subtype leaf remain. With 2+ uncovered leaves of either bucket and no
+            // table hit for any combination, this declines entirely rather than computing an estimate per
+            // combination and taking their min -- the same undershoot-compounding risk. This mirrors the
+            // independence registry scan's own existing precedent for the identical ambiguity (see "2+
+            // occurrences of a class with no combining table" a bit further down in this same function).
+            let all_dim_positions: Vec<usize> = (0..v.len()).filter(|&i| subtype_pair_dim(&v[i]).is_some()).collect();
+            let all_sub_positions: Vec<usize> = (0..v.len()).filter(|&i| subtype_pair_leaf(&v[i]).is_some()).collect();
+            // Round 46: shared `scan_two_bucket_exact` helper (also used by `ColorCmcTable`/
+            // `SubtypeArithBox` below) -- bucket A is every `subtype_pair_dim` position, bucket B is
+            // one candidate per COMPETING `subtype_pair_leaf` position (each its own singleton `Vec`,
+            // unlike `ColorCmcTable`'s one fused range), matching this mechanism's own original
+            // "every (dim, subtype) pair, independently" scan. `trace_on_miss: false` (a miss here is
+            // never logged, unlike the other two callers) and `mark_covered_on_hit: true` (covers just
+            // the two matched positions) are this mechanism's own two behavioral knobs, verified
+            // directly against the pre-refactor loop above.
+            let sub_candidates: Vec<(Vec<usize>, usize)> = all_sub_positions.iter().map(|&si| (vec![si], si)).collect();
+            scan_two_bucket_exact(
+                v,
+                &mut covered,
+                &mut result,
+                &mut exact_domain_cards,
+                &mut exact_domain_printing,
+                &mut exact_domain_artworks,
+                &mut and_trace,
+                "SubtypePairIndexes",
+                false,
+                true,
+                &all_dim_positions,
+                &sub_candidates,
+                |ai, b_positions| {
+                    let mut ps = vec![ai];
+                    ps.extend_from_slice(b_positions);
+                    ps
+                },
+                |dim_leaf, si: usize| subtype_pair_exact(dim_leaf, &v[si], indexes).map(|totals| (totals.get(Mode::Printing), totals.get(Mode::Card), totals.get(Mode::Artwork))),
+            );
+            // The capped independence-product fallback (see this mechanism's own doc above for why it
+            // stays single-pair-only AND, unlike the exact-hit scan above, must respect `covered`):
+            // freshly scan `v` for uncovered dim/subtype leaves -- freshly, not derived from
+            // `all_dim_positions`/`all_sub_positions` above (which deliberately include covered
+            // positions), and AFTER the exact-hit loop above so a hit's own `mark_covered` calls (which
+            // may have covered one or both of the two leaves an estimate would otherwise have used) are
+            // reflected here.
+            let remaining_dims: Vec<usize> = (0..v.len()).filter(|&i| !covered.flags[i] && subtype_pair_dim(&v[i]).is_some()).collect();
+            let remaining_subs: Vec<usize> = (0..v.len()).filter(|&i| !covered.flags[i] && subtype_pair_leaf(&v[i]).is_some()).collect();
+            if let (&[di], &[si]) = (remaining_dims.as_slice(), remaining_subs.as_slice()) {
+                let dim = subtype_pair_dim(&v[di]).expect("dim_positions only holds subtype_pair_dim leaves");
+                // `dim_est`/`subtype_card` (this leaf's own solo estimate, recomputed directly rather
+                // than indexed out of `children_estimates`/`and_sources`: those are keyed to whatever
+                // `fuse_and_range_children` produced, which can hold FEWER entries than `v` once a
+                // two-sided range fuses two literal children into one `FusedRange` -- the same reason
+                // `and_trace`'s own `leaves` field above recomputes per-`v`-child instead of reusing
+                // `children_estimates`).
+                //
+                // Round 64: this works NATIVELY in printing space, the way Round 55's
+                // `SubtypeSubtypeEstimate` already did. It used to build a CARD-space independence
+                // product, cap it with a card-space `rest_max`, then scale the result into printing
+                // space by the corpus-average reprint ratio (`* n_printings / n_cards`) -- the same
+                // idiom Rounds 61 and 63 deleted from the legality and bare-numeric leaf arms, and for
+                // the same reason: it assumes a uniform reprint rate across all (dim, subtype) pairs,
+                // which is false. Round 55 measured printing-native independence+cap beating
+                // card-space-then-scaled at every percentile on its own excluded population (median
+                // 0.42x vs 0.64x, p90 3.27x vs 4.45x, max 21x vs 24.67x), and this population needed
+                // the fix at least as badly -- measured over 750 real table-MISS pairs before scoping,
+                // the old form read median 1.309x, p90 8.25x, max 628x, worst on `identity` (median
+                // 1.466x, p90 10.9x).
+                //
+                // Both printing marginals are EXACT and already available, so this needs no new index:
+                // the subtype's comes from `value_totals.subtypes` (the same source Round 55 reads),
+                // and the dim's from the leaf's own solo estimate -- `set:X` from
+                // `indexes.set_codes.get(..).len()` (printing-indexed) and `c:X`/`id:X` from
+                // `color_cmp_value_total(.., Mode::Printing)`. That also retires the special case this
+                // match used to need: `set_cards` existed only because a set leaf has no card marginal
+                // anywhere else, and printing space simply does not have that hole.
+                let dim_est = compose_printing_estimate(&v[di], indexes, offsets, n_printings, false);
+                let sub_name = subtype_pair_leaf(&v[si]).expect("remaining_subs only holds subtype_pair_leaf leaves");
+                let dim_printings = dim_est.result.printing();
+                let sub_printings = indexes.value_totals.subtypes.get(sub_name).map_or(0, |t| t.get(Mode::Printing));
+                let indep = dim_printings.checked_mul(sub_printings).and_then(|p| p.checked_div(n_printings)).unwrap_or(0);
+                // `rest_max` is now a real printing-space bound over the ACTUAL excluded set, not a
+                // card scalar times a global ratio. It is a genuine upper bound here -- this arm only
+                // fires when no exact subtype-pair hit covered these leaves, which means the pair was
+                // excluded from `top`, and a pair absent from the build's map entirely has count 0. The
+                // fold below still reports ESTIMATE class, because `min(indep, rest_max)` can land
+                // below truth whenever `indep` does; recording the bound in its own channel is a
+                // separate follow-up, deliberately not bundled here.
+                let rest_max_printing = match dim {
+                    SubtypePairDim::Set(_) => indexes.subtype_pairs.set.rest_max.get(Mode::Printing),
+                    SubtypePairDim::Colors(_) => indexes.subtype_pairs.colors.rest_max.get(Mode::Printing),
+                    SubtypePairDim::Identity(_) => indexes.subtype_pairs.identity.rest_max.get(Mode::Printing),
+                };
+                let printing_est = indep.min(rest_max_printing);
+                let candidate = Candidate::Estimate { printing: printing_est, card: None, artwork: None };
+                fold_candidate(
+                    &mut result,
+                    &mut exact_domain_cards,
+                    &mut exact_domain_printing,
+                    &mut exact_domain_artworks,
+                    "SubtypePairEstimate",
+                    candidate,
+                );
+                // Round 40: ESTIMATE-class (a capped independence product, not a bound -- this
+                // mechanism's own doc above), marked defensively so the registry scan below never stacks
+                // a second inexact estimate on the same two leaves.
+                let pair: [&FilterExpr; 2] = [&v[di], &v[si]];
+                mark_covered(v, &pair, &mut covered);
+                if let Some(t) = and_trace.as_mut() {
+                    t.considered.push(and_trace_group(
+                        vec![format!("{:?}", &v[di]), format!("{:?}", &v[si])],
+                        "SubtypePairEstimate",
+                        Some(candidate),
+                    ));
+                }
+            }
+            // Round 55: `(subtype, subtype)` co-occurrence -- a NEW, separate mechanism alongside the
+            // `SubtypePairIndexes`/`SubtypePairEstimate` pair just above (which only ever pairs a
+            // subtype against `set:X`/`c:X`/`id:X`, never against ANOTHER subtype). Closes
+            // `same_family:type+type_realistic`'s 0% mechanism coverage: `t:cleric t:spirit` fell to a
+            // plain per-leaf min-fold (628, true 19, 33x over) with nothing else in this arm able to
+            // answer a bare (subtype, subtype) pair at all. Reuses `all_sub_positions` (computed just
+            // above for the dim/subtype scan) directly -- same predicate, same list, no new scan needed
+            // to find the candidate leaves. Just the EXACT-hit scan lives here; the ESTIMATE-class
+            // capped-independence fallback is deliberately placed LATER in this arm (after
+            // `SubtypeArithBox`/`SubtypeArithAnchoredIndependence`, right before "Round 44 tightening")
+            // -- see that block's own doc for the real regression (caught by the existing test suite)
+            // that placing it here instead would have reintroduced.
+            //
+            // Exact-hit scan, mirroring the dim/subtype exact-hit scan's own philosophy (unconditional
+            // on `covered`, `.min()`-folds `Candidate::Exact` on every hit, `mark_covered` on hit
+            // leaves -- a genuine table hit is a valid upper bound on the whole `And` regardless of
+            // what else already covers either leaf, and regardless of ITS OWN position in this arm,
+            // unlike an ESTIMATE that can undershoot). This needs a small dedicated loop rather than
+            // `scan_two_bucket_exact`: that helper is built for two DISTINCT buckets (bucket A crossed
+            // with bucket B), and handing it `all_sub_positions` for BOTH sides would double-iterate
+            // every unordered pair (once as (i, j), once as (j, i)) and double-trace it, not just waste
+            // cycles -- so this scans `for i in 0..len { for j in (i+1)..len { ... } }` instead, one
+            // `subtype_pair2_exact` lookup per unordered pair.
+            for i in 0..all_sub_positions.len() {
+                for j in (i + 1)..all_sub_positions.len() {
+                    let (pi, pj) = (all_sub_positions[i], all_sub_positions[j]);
+                    let a = subtype_pair_leaf(&v[pi]).expect("all_sub_positions only holds subtype_pair_leaf leaves");
+                    let b = subtype_pair_leaf(&v[pj]).expect("all_sub_positions only holds subtype_pair_leaf leaves");
+                    if let Some(totals) = subtype_pair2_exact(a, b, indexes) {
+                        let candidate = Candidate::Exact {
+                            printings: totals.get(Mode::Printing),
+                            cards: totals.get(Mode::Card),
+                            artworks: totals.get(Mode::Artwork),
+                        };
+                        fold_candidate(
+                            &mut result,
+                            &mut exact_domain_cards,
+                            &mut exact_domain_printing,
+                            &mut exact_domain_artworks,
+                            "SubtypeSubtypeExact",
+                            candidate,
+                        );
+                        let pair: [&FilterExpr; 2] = [&v[pi], &v[pj]];
+                        mark_covered(v, &pair, &mut covered);
+                        if let Some(t) = and_trace.as_mut() {
+                            t.considered.push(and_trace_group(
+                                vec![format!("{:?}", &v[pi]), format!("{:?}", &v[pj])],
+                                "SubtypeSubtypeExact",
+                                Some(candidate),
+                            ));
+                        }
+                    }
+                }
+            }
+            // ─── Shared anchored-independence machinery (Rounds 50 and 56) ───────────────────────
+            // "Anchored independence": an EXACT joint this arm already computed (`SubtypeArithBox`'s
+            // `(subtype, cmc/pow/tou)` box below, `ColorCmcTable`'s `(color|identity, cmc)` table
+            // further down) is blind to whatever OTHER leaves the query still carries, so multiplying
+            // that joint by a single residual `IndepClass::Price` leaf's own solo selectivity rate
+            // tightens it dramatically -- see Round 50's own call site below for the full motivation
+            // and its validated real-data example, and Round 56's at the `ColorCmcTable` scan for the
+            // second one.
+            //
+            // Round 50 kept all of this inline in its own block. Round 56 added a SECOND anchor site,
+            // so it lives here instead, called by both -- deliberately hoisted rather than copied, so
+            // the two sites can never drift apart on how a residual source is resolved, which classes
+            // count as residual, or where the price rate is read from. Round 50's own observable
+            // behavior is unchanged by the hoist (its `subtype_arith_anchored_independence_*` tests
+            // pass untouched).
+            //
+            // `anchored_leaves_for`/`position_mask` are a small, self-contained equivalent of the
+            // independence registry's own `leaves_for`/`mask_for` closures (defined further down in
+            // this same function, over the same `and_sources`, but not reachable from here) --
+            // verified to resolve `AndSource::Child`/`FusedRange` identically to those.
+            let anchored_leaves_for = |i: usize| -> Vec<&FilterExpr> {
+                match and_sources[i] {
+                    AndSource::Child(c) => vec![c],
+                    AndSource::FusedRange { idx, .. } => {
+                        v.iter().filter(|c| bare_range_bounds(c, indexes).is_some_and(|(i2, ..)| std::ptr::eq(i2, idx))).collect()
+                    }
+                }
+            };
+            // Buckets every RESIDUAL `and_source` (one entirely disjoint from `explained` -- not just
+            // non-overlapping at a single leaf) by `IndepClass`, mirroring the independence registry's
+            // own `by_class` bucketing below, and returns the ONE residual `Price` source's
+            // `and_sources` index together with its printing-space selectivity rate.
+            //
+            // `None` means "decline, form no product": either no residual `Price` source exists at all,
+            // or 2+ residual sources classify as `Price` (e.g. both `usd<10` and `eur<5` present,
+            // unfused). The latter mirrors the independence registry's own "2+ occurrences of a class
+            // with no combining table, dropped" convention (`by_class`'s own `_ => {}` arm further
+            // down), because the price-triple correlation risk already documented in
+            // `local-engine-gathered-scan-card-printing-varying-depth.md` means multiplying two price
+            // rates in is not validated as safe.
+            //
+            // The rate is read off `children_estimates[i].result.printing`, i.e. off whatever
+            // `fuse_and_range_children` produced for that source -- deliberately NOT re-derived from the
+            // individual literal bounds. That distinction is load-bearing: a two-sided `usd>=0.23
+            // usd<=0.31` is ONE `AndSource::FusedRange` whose `k` is the real fused interval count, and
+            // Round 56 measured the naive product of the two one-sided marginals at 1.98x/2.58x on such
+            // queries where the single fused rate gives 1.22x/1.23x.
+            let anchored_price_residual = |explained: &[usize]| -> Option<(usize, f64)> {
+                let position_mask = |positions: &[usize]| -> u64 {
+                    positions.iter().fold(0u64, |m, &p| if p < 64 { m | (1u64 << p) } else { m })
+                };
+                let explained_mask = position_mask(explained);
+                let mut by_class: [Vec<usize>; INDEP_CLASS_COUNT] = Default::default();
+                for (i, src) in and_sources.iter().enumerate() {
+                    let leaves = anchored_leaves_for(i);
+                    let positions: Vec<usize> = leaves.iter().filter_map(|c| v.iter().position(|vc| std::ptr::eq(vc, *c))).collect();
+                    if positions.is_empty() {
+                        continue;
+                    }
+                    if position_mask(&positions) & explained_mask != 0 {
+                        continue; // shares a leaf with this hit -- not residual
+                    }
+                    if let Some(class) = indep_class_of(*src, indexes) {
+                        by_class[class as usize].push(i);
+                    }
+                }
+                match by_class[IndepClass::Price as usize].as_slice() {
+                    [i] if n_printings > 0 => Some((*i, children_estimates[*i].result.printing() as f64 / n_printings as f64)),
+                    _ => None,
+                }
+            };
+            // Round 36 tightening: a bare `t:X` subtype leaf And'd with 1+ cmc/power/toughness bound
+            // children (nothing else in the `And`) gets an exact triple from `indexes.subtype_arith`
+            // (a dense per-subtype 3-D (cmc, power, toughness) prefix-sum cube over the top
+            // `SUBTYPE_ARITH_TOP_N` subtypes) instead of the plain min-fold above -- the same kind of
+            // gap Rounds 33/34 closed for set/cn-range and set/c/id/subtype: cmc/power/toughness are
+            // RANGE predicates, not the single-value shape `SubtypePairIndexes` answers, so this pair
+            // gets no tightening from any existing mechanism otherwise.
+            //
+            // Reuses `arith_children` (computed above for the arith-tuple-count tightening) rather
+            // than re-deriving it, and shapes the check the same way that tightening's own bound-set
+            // does: EVERY child other than the one subtype leaf must be arith-eligible (so
+            // `arith_children.len() + 1 == v.len()`), which is what lets a 3+-leaf query like
+            // `t:human cmc>=5 power>=5` (a fused two-sided-looking shape that is actually THREE
+            // literal `FilterExpr` children, not two) still match -- unlike Round 33/34's strict
+            // `v.len() == 2`, this shape's "other side" is genuinely 1-6 children (up to two bounds
+            // per field, three fields), not one `AndSource`. A genuine 2-subtype-leaf query
+            // (`t:human t:soldier cmc>=5`) or one mixing a subtype leaf with a Round 34-recognized
+            // dimension (`set:plst t:human cmc>=5`) has 2+ non-arith children and correctly fails this
+            // shape check, falling through to whichever of the two disjoint tightenings above (if
+            // either) already applies, or the plain fold if neither does.
+            //
+            // A table HIT is exact in all three spaces (`SpaceTotals`, the same reasoning
+            // `best_other`/the arith-tuple merge/Round 34's own hit already establish for `min`-ing
+            // across multiple independently-exact intersections), so it feeds `exact_domain_*`
+            // exactly like those. Unlike Round 33/34, there is no separate MISS/estimate branch here:
+            // this round's own diagnostic pass found no tier-2 fallback worth building (see
+            // `SUBTYPE_ARITH_TOP_N`'s own doc) -- a miss (subtype outside the top
+            // `SUBTYPE_ARITH_TOP_N`, or a `Ne`/compound-arith child `is_arith_tuple_eligible` already
+            // declined) just leaves `result`/`exact_domain_*` exactly as every other unrecognized shape
+            // does, at whatever the fold and the tightenings above already gave them.
+            // Round 37a trace: `shape_ok` is this mechanism's own applicability gate (every non-arith
+            // child is exactly one recognized subtype leaf), split out from the exact lookup itself
+            // so a shape-matched-but-table-missed query (subtype outside the top
+            // `SUBTYPE_ARITH_TOP_N`) still produces a `hit: false` group -- there is no separate
+            // estimate fallback for this round (see this arm's own doc), so `hit: false` here means
+            // exactly "the fold's number stands, unimproved by this mechanism".
+            // Round 48: generalized past the Round 46 gate (`arith_children.len() + 1 == v.len()`,
+            // requiring the WHOLE query to be exactly "one subtype leaf + N arith leaves, nothing
+            // else") to scan the residual, mirroring `SubtypePairIndexes`'s own Round 42 generalization
+            // exactly. The gate is now just "at least one arith-eligible child present" -- this
+            // mechanism's own real precondition, not an artificial whole-query restriction. Confirmed
+            // live gap this closes: `t:elf cmc>=5 usd<10` (a subtype leaf, an arith leaf, AND an
+            // unrelated price leaf) got ZERO benefit from this mechanism before this round, for the
+            // same reason `color:G format:pioneer t:elf` got none from `SubtypePairIndexes` before
+            // Round 42.
+            //
+            // `a_positions` is now EVERY `subtype_pair_leaf` position in the whole query (computed the
+            // same unrestricted way `SubtypePairIndexes` computes `all_dim_positions`/
+            // `all_sub_positions`), not just a single position gated on the rest of `v`'s shape -- a
+            // query with multiple subtype leaves (`t:elf t:human cmc>=5 usd<10`) now tries each one
+            // independently against the same arith box, each its own trace group, folded via `.min()`.
+            // Deliberately NOT filtered by `covered` on input, same reasoning as `SubtypePairIndexes`'s
+            // own exact-hit scan (Round 42's fix): any true sub-conjunction's exact count is a valid
+            // upper bound on the whole `And` regardless of what else already covered a leaf.
+            //
+            // Bucket B changes shape from the old single dummy `(Vec::new(), ())` (relying on
+            // `order_positions` reporting "all of `v`", safe only because the old gate guaranteed
+            // bucket A's one position plus every arith child covered the whole query) to a single
+            // candidate carrying the ACTUAL positions of the arith-eligible children (`arith_positions`,
+            // verified below to correspond 1:1 with `arith_children` -- same filter over the same `v`,
+            // just positions instead of refs). Still one combined candidate (not one per arith leaf),
+            // since all arith children combine into ONE box query via `subtype_arith_exact`, unlike
+            // `SubtypePairIndexes`'s per-subtype-leaf separate candidates. `order_positions` now mirrors
+            // `SubtypePairIndexes`'s own closure (`[a_position] ++ b_positions`) instead of "all of
+            // `v`" -- this is what makes `mark_covered_on_hit` (still `true`) cover ONLY the leaves this
+            // specific hit actually explains, leaving any other, unrelated leaf (the `usd` above) free
+            // for the independence registry or other mechanisms. `lookup` is UNCHANGED from before this
+            // round: it still closes over the outer `arith_children` (`Vec<&FilterExpr>`) directly
+            // rather than threading it through `B`, since `B` only ever holds the one combined
+            // candidate here and `scan_two_bucket_exact`'s `B: Copy` bound can't hold a `Vec` anyway --
+            // `b_positions` (the tuple's `Vec<usize>` slot, not `B` itself) is what carries the arith
+            // positions through to `order_positions`.
+            if !arith_children.is_empty() {
+                let a_positions: Vec<usize> = (0..v.len()).filter(|&i| subtype_pair_leaf(&v[i]).is_some()).collect();
+                let arith_positions: Vec<usize> = (0..v.len()).filter(|&i| is_arith_tuple_eligible(&v[i])).collect();
+                debug_assert_eq!(arith_positions.len(), arith_children.len(), "arith_positions must correspond 1:1 with arith_children");
+                // `arith_positions.clone()` (not a move): the anchored-independence block just below
+                // reuses `arith_positions` directly, so it must survive past this call.
+                scan_two_bucket_exact(
+                    v,
+                    &mut covered,
+                    &mut result,
+                    &mut exact_domain_cards,
+                    &mut exact_domain_printing,
+                    &mut exact_domain_artworks,
+                    &mut and_trace,
+                    "SubtypeArithBox",
+                    true,
+                    true,
+                    &a_positions,
+                    &[(arith_positions.clone(), ())],
+                    |ai, b_positions| {
+                        let mut ps = vec![ai];
+                        ps.extend_from_slice(b_positions);
+                        ps
+                    },
+                    |leaf, ()| subtype_pair_leaf(leaf).and_then(|subtype| subtype_arith_exact(subtype, &arith_children, indexes)),
+                );
+                // Round 50 ("anchored independence", `docs/issues/local-engine-nway-followup-queue.md`
+                // item #1): `SubtypeArithBox`'s own exact joint above is blind to any OTHER leaf in the
+                // query -- for `t:elf cmc>=5 usd<10`, the box's own exact answer (241) ignores `usd<10`
+                // entirely, even though the box is 1.36x looser than truth (177) precisely because
+                // price correlates with the joint it DID compute. Validated on real data during Round
+                // 48's review: `t:elf cmc>=5` alone also gives 241 (confirming price-blindness);
+                // combining 241 with `usd<10`'s own solo rate (76189/97812 ~= 0.779) gives ~188 --
+                // tighter than the box's bare 241 AND tighter than either RAW-marginal independence
+                // estimate for this query (`Independence(cmc,price)`=17056, `Independence(Elf,price)`=
+                // 1665, both looser than 241 itself), because Elf's/cmc's own MARGINAL solo counts are
+                // much broader than their ACTUAL joint -- the box's own exact joint is a far better
+                // anchor than either marginal alone.
+                //
+                // Deliberately narrow, matching Round 38's/Round 42's own "one hardcoded mechanism
+                // before a registry" discipline: anchors ONLY this mechanism's own hit (not
+                // `SubtypePairIndexes`/`ColorCmcTable`), combines ONLY a residual `IndepClass::Price`
+                // leaf (the one class with a validated real-data example), and -- mirroring the
+                // independence registry's own "2+ occurrences of a class with no combining table,
+                // dropped" convention (`by_class`'s own `_ => {}` arm further down) -- declines
+                // entirely (no product formed) when 2+ residual leaves classify as `Price` (e.g. both
+                // `usd<10` and `eur<5` present, unfused): the price-triple correlation risk already
+                // documented in `local-engine-gathered-scan-card-printing-varying-depth.md` means
+                // multiplying two price rates in is not validated as safe. Folded as an `Estimate` (see
+                // `is_estimate_class_mechanism`'s own updated doc) via `.min()` -- ignoring a residual
+                // leaf this mechanism doesn't recognize only makes the estimate a bound on a LARGER
+                // population (anchor ∩ classified residuals) than the true query (anchor ∩ ALL
+                // residuals, a subset of that), so `.min()`-folding it in is always safe, never a new
+                // correctness risk, only sometimes leaving accuracy on the table for a later round.
+                //
+                // Round 56: the residual-bucketing and leaf-resolution steps this block used to keep
+                // inline now live in `anchored_price_residual`/`anchored_leaves_for`, hoisted to And-arm
+                // scope so `ColorCmcTable`'s own anchor site can share them verbatim -- see that
+                // helper's own doc above. This block's behavior is unchanged by the hoist.
+                for &ai in &a_positions {
+                    let Some(subtype) = subtype_pair_leaf(&v[ai]) else { continue };
+                    // A second, cheap lookup into the same table `scan_two_bucket_exact` already
+                    // queried above -- deliberately not threaded out of that shared helper, keeping
+                    // this mechanism fully decoupled from a helper shared with two other mechanisms
+                    // (mirrors Round 42's own precedent of a small recomputation in exchange for
+                    // decoupling).
+                    let Some((box_printing, _box_cards, _box_artworks)) = subtype_arith_exact(subtype, &arith_children, indexes) else {
+                        continue;
+                    };
+                    let explained: Vec<usize> = std::iter::once(ai).chain(arith_positions.iter().copied()).collect();
+                    if let Some((price_src, rate)) = anchored_price_residual(&explained) {
+                        let anchored_printing = ((box_printing as f64) * rate).round() as usize;
+                        let candidate = Candidate::Estimate { printing: anchored_printing, card: None, artwork: None };
+                        fold_candidate(
+                            &mut result,
+                            &mut exact_domain_cards,
+                            &mut exact_domain_printing,
+                            &mut exact_domain_artworks,
+                            "SubtypeArithAnchoredIndependence",
+                            candidate,
+                        );
+                        // Round 40's own convention: mark this Estimate-class candidate's own leaves
+                        // (the box's own explained positions PLUS the contributing Price leaf)
+                        // defensively covered, mirroring `SubtypePairEstimate`'s own defensive
+                        // self-mark -- prevents some future mechanism from redundantly re-answering
+                        // the identical combined subset.
+                        let price_leaves = anchored_leaves_for(price_src);
+                        let mut cover_leaves: Vec<&FilterExpr> = explained.iter().map(|&p| &v[p]).collect();
+                        cover_leaves.extend(price_leaves.iter().copied());
+                        mark_covered(v, &cover_leaves, &mut covered);
+                        if let Some(t) = and_trace.as_mut() {
+                            let mut leaves: Vec<String> = explained.iter().map(|&p| format!("{:?}", v[p])).collect();
+                            leaves.extend(price_leaves.iter().map(|c| format!("{c:?}")));
+                            t.considered.push(and_trace_group(leaves, "SubtypeArithAnchoredIndependence", Some(candidate)));
+                        }
+                    }
+                }
+            }
+            // Round 55: the (subtype, subtype) capped-independence fallback, mirroring
+            // `SubtypePairEstimate`'s own structure (single-pair-only, ESTIMATE-class, respects
+            // `covered` recomputed fresh). Deliberately placed HERE -- after `SubtypeArithBox`/
+            // `SubtypeArithAnchoredIndependence` above, not immediately after the exact-hit scan next
+            // to `all_sub_positions` -- rather than at the exact-hit scan's own call site: a real
+            // regression, caught by the existing suite (`subtype_arith_box_multiple_subtype_leaves_
+            // fold_via_min`/`subtype_arith_anchored_independence_multi_subtype_leaves_use_their_own_
+            // box_hit`), showed why. `fold_candidate`'s min-fold is commutative in principle, but an
+            // ESTIMATE candidate that UNDERSHOOTS (this fallback's own documented risk -- see
+            // `is_estimate_class_mechanism`'s doc) permanently pulls `result` below the truth the
+            // moment it folds, and no later EXACT/bound candidate can ever raise `result` back up
+            // (`fold_candidate`'s `Exact` arm only ever tightens via `.min()` too). `t:elf t:human
+            // cmc>=5` has TWO bare subtype leaves and no dim leaf, so it never reaches
+            // `SubtypePairEstimate` (which requires one) -- but it is exactly `all_sub_positions`'
+            // own "exactly 2 uncovered" shape for THIS mechanism, and it is ALSO
+            // `SubtypeArithBox`'s own "multiple subtype leaves against the same arith bound" shape.
+            // Running this fallback before `SubtypeArithBox` got a chance let an uncapped/undershot
+            // independence guess for (Elf, Human) win the arm's min-fold outright, even though each
+            // leaf's own EXACT box hit (Elf=2, Human=3) was available and tighter-but-larger. Placing
+            // this block after `SubtypeArithBox`/`SubtypeArithAnchoredIndependence` means their own
+            // `mark_covered` calls (both mechanisms cover on hit) are reflected in `covered` BEFORE
+            // this fallback's fresh scan runs: a subtype leaf `SubtypeArithBox` already explained is
+            // no longer "remaining," so this fallback correctly declines rather than potentially
+            // undershooting a leaf a real exact mechanism already bounded. The exact-hit scan above
+            // (`subtype_pair2_exact`) has NO such risk and stays at the plan's original position next
+            // to `all_sub_positions`: an EXACT hit is a genuine upper bound on the whole `And`
+            // regardless of order, so it can never corrupt `result` the way an estimate can.
+            //
+            // Fires only when EXACTLY 2 positions in `all_sub_positions` remain uncovered (not 1, not
+            // 3+) -- the one-bucket analog of `SubtypePairEstimate`'s own "exactly 1 dim + 1 subtype"
+            // gate, for the identical undershoot-compounding reason (2+ uncovered pairs with no table
+            // hit for any combination declines entirely rather than computing one estimate per
+            // combination and taking their min).
+            //
+            // Unlike `SubtypePairEstimate`, which computes a CARD-space independence product and
+            // scales it into printing space by `* n_printings / n_cards`, this works NATIVELY in
+            // printing space: `indep = solo_a.printings * solo_b.printings / n_printings`, reading each
+            // leaf's own EXACT printing-space marginal directly from the already-existing
+            // `indexes.value_totals.subtypes` (no new per-subtype total needed). Validated directly
+            // against the real corpus before this round was scoped: printing-space-native
+            // independence+cap beats card-space-then-scaled-by-a-global-reprint-ratio
+            // (`SetSubtypeTable`'s own pattern) at every percentile on the same N=256 excluded
+            // population (median 0.42x vs 0.64x, max 21x vs 24.67x) -- the ratio-scaling step assumes a
+            // uniform reprint rate across all subtype pairs, which is false.
+            let remaining_sub_positions: Vec<usize> = all_sub_positions.iter().copied().filter(|&i| !covered.flags[i]).collect();
+            if let [pi, pj] = remaining_sub_positions[..] {
+                let a = subtype_pair_leaf(&v[pi]).expect("remaining_sub_positions only holds subtype_pair_leaf leaves");
+                let b = subtype_pair_leaf(&v[pj]).expect("remaining_sub_positions only holds subtype_pair_leaf leaves");
+                let solo_a = indexes.value_totals.subtypes.get(a).map_or(0, |t| t.get(Mode::Printing));
+                let solo_b = indexes.value_totals.subtypes.get(b).map_or(0, |t| t.get(Mode::Printing));
+                let indep = solo_a.checked_mul(solo_b).and_then(|p| p.checked_div(n_printings)).unwrap_or(0);
+                let rest_max_printing = indexes.subtype_subtype.rest_max.get(Mode::Printing);
+                let printing_est = indep.min(rest_max_printing);
+                let candidate = Candidate::Estimate { printing: printing_est, card: None, artwork: None };
+                fold_candidate(
+                    &mut result,
+                    &mut exact_domain_cards,
+                    &mut exact_domain_printing,
+                    &mut exact_domain_artworks,
+                    "SubtypeSubtypeEstimate",
+                    candidate,
+                );
+                // ESTIMATE-class (a capped independence product, not a bound -- this mechanism's own
+                // doc above), marked defensively so the independence registry scan below never stacks
+                // a second inexact estimate on the same two leaves (Round 40's own convention).
+                let pair: [&FilterExpr; 2] = [&v[pi], &v[pj]];
+                mark_covered(v, &pair, &mut covered);
+                if let Some(t) = and_trace.as_mut() {
+                    t.considered.push(and_trace_group(
+                        vec![format!("{:?}", &v[pi]), format!("{:?}", &v[pj])],
+                        "SubtypeSubtypeEstimate",
+                        Some(candidate),
+                    ));
+                }
+            }
+            // Round 44 tightening: a `color:X`/`id:X` leaf And'd with 1+ literal cmc bound children
+            // gets an exact triple from `indexes.color_cmc` instead of the plain min-fold above -- see
+            // that table's own doc (right above `subtype_pair_exact`) for the full motivation. Unlike
+            // the `SubtypePairIndexes` scan above (dim leaves paired against COMPETING subtype leaves),
+            // every cmc child present combines into exactly ONE range (`cmc_bounds_intersect`), so this
+            // is a Cartesian product over (dim leaf) x (the one resolved cmc range), mirroring Round
+            // 42's own (dim, subtype) pair scan shape one level simpler. No covered-filtering on
+            // INPUT, for the same reason Round 42's own exact-hit scan skips it: a real table hit's
+            // exact count is a valid upper bound on the whole `And` regardless of whether either leaf
+            // is ALSO part of some other mechanism's joint, and `exact_domain_*`'s
+            // `.map_or(x, |d| d.min(x))` chaining already composes correctly across independently-
+            // exact mechanisms (Round 42's own finding).
+            //
+            // Deliberately does NOT call `mark_covered` on a hit, unlike every other exact mechanism
+            // in this arm -- measured directly (isolated-wheel A/B, `nway_estimate_truth_survey.py`'s
+            // `star:color+cmc+usd`/`star:identity+cmc+usd` shapes, n=300/seed=0) and found to matter:
+            // this table only bounds the (color, cmc) PAIR, ignoring price entirely, and on the star
+            // shape's own query population that 2-leaf bound is routinely LOOSER than what the Round
+            // 40 independence registry's `ColorId`x`Price`/`Cmc`x`Price` candidates would have given
+            // (those DO incorporate price, if only via the independence assumption). Marking the color
+            // and cmc leaf positions covered starves BOTH independence candidates at once (neither has
+            // a partner left to pair against `Price` once both are gone), so the final `min()` was
+            // left holding only this mechanism's own looser number -- median `abs_log_ratio` measured
+            // WORSE after adding `mark_covered` here (0.80->1.08 for `star:color+cmc+usd`, 0.71->1.12
+            // for `star:identity+cmc+usd`) than before this table existed at all. Leaving the leaves
+            // uncovered instead lets every candidate -- this exact pair AND both independence
+            // candidates -- compute independently and `.min()`-fold together, exactly the composition
+            // this round's own design doc describes; measured to fix the regression (see this round's
+            // report for the full before/after numbers). This is safe: unlike two ESTIMATE-class
+            // mechanisms compounding on the identical two leaves (Round 40's own concern),
+            // Independence's two candidates here each share only ONE leaf with this mechanism's pair
+            // (never both), so nothing is being double-counted -- they are genuinely different
+            // sub-conjunctions, not competing answers to the same question.
+            //
+            // `color_cmc_exact` still has ONE miss case (the table isn't built for this store at all --
+            // see its own doc), which just leaves `result`/`exact_domain_*` unimproved, the same
+            // convention `SubtypeArithBox`'s own miss case uses; there is no ESTIMATE-class fallback
+            // beyond that, since every real (mask, cmc) combination the table DOES cover is
+            // representable exactly, including a genuine zero.
+            //
+            // Round 56 added an ESTIMATE-class companion immediately after this scan
+            // (`ColorCmcAnchoredIndependence`) that multiplies this table's own exact joint by a single
+            // residual `Price` leaf's rate. It inherits this call site's "never `mark_covered`" decision
+            // for the same measured reason -- see its own doc below.
+            let color_cmc_dim_positions: Vec<usize> = (0..v.len()).filter(|&i| color_cmc_dim(&v[i]).is_some()).collect();
+            let cmc_leaf_positions: Vec<usize> = (0..v.len()).filter(|&i| numeric_cmp_field(&v[i]) == Some(NumField::Cmc)).collect();
+            // Round 46: shared `scan_two_bucket_exact` helper -- bucket A is every `color_cmc_dim`
+            // position, bucket B is the ONE fused cmc range (unlike `SubtypePairIndexes`'s several
+            // competing subtype candidates). `trace_on_miss: true` (always logs, hit or miss) and
+            // `mark_covered_on_hit: false` (deliberately never covers -- see this call site's own doc
+            // above for the measured regression that requires leaving these leaves free) are this
+            // mechanism's own two behavioral knobs, verified directly against the pre-refactor loop.
+            if !color_cmc_dim_positions.is_empty()
+                && !cmc_leaf_positions.is_empty()
+                && let Some((cmc_lo, cmc_hi)) = cmc_bounds_intersect(&cmc_leaf_positions.iter().map(|&i| &v[i]).collect::<Vec<_>>())
+            {
+                scan_two_bucket_exact(
+                    v,
+                    &mut covered,
+                    &mut result,
+                    &mut exact_domain_cards,
+                    &mut exact_domain_printing,
+                    &mut exact_domain_artworks,
+                    &mut and_trace,
+                    "ColorCmcTable",
+                    true,
+                    false,
+                    &color_cmc_dim_positions,
+                    &[(cmc_leaf_positions.clone(), (cmc_lo, cmc_hi))],
+                    |ai, b_positions| {
+                        let mut ps = vec![ai];
+                        ps.extend_from_slice(b_positions);
+                        ps
+                    },
+                    |dim_leaf, (lo, hi): (u32, u32)| {
+                        let (field, op, mask) = color_cmc_dim(dim_leaf).expect("color_cmc_dim_positions only holds color_cmc_dim leaves");
+                        color_cmc_table_for(field, indexes).and_then(|table| color_cmc_exact(op, mask, lo, hi, table))
+                    },
+                );
+                // Round 56 ("anchored independence" for `ColorCmcTable`, the second half of
+                // `docs/issues/local-engine-nway-followup-queue.md` item #2): exactly the pattern Round
+                // 50 shipped for `SubtypeArithBox`, applied to this table's own exact hit. The
+                // `(color|identity, cmc)` joint above is EXACT and wins this arm's `.min()`-fold outright
+                // on the `*+cmc+usd` star shapes -- at which point the query's price leaf contributes
+                // nothing at all, because the joint is blind to it. Traced directly on the real corpus:
+                //
+                //   'cmc=4 id:b usd<0.21'  pred=3669  true=801
+                //     HIT ColorCmcTable  printing=3669  [id:b, cmc=4]   <- exact, wins the min-fold
+                //     HIT Independence   printing=5173  [id:b, usd<0.21]
+                //     HIT Independence   printing=3966  [cmc=4, usd<0.21]
+                //   marginal usd<0.21 = 21014/97812 = 21.5%  ->  3669 * 0.215 = 788  vs true 801 (0.98x)
+                //
+                // Validated BEFORE scoping on 70 queries sampled at random from the full 245-query
+                // printing-mode population of `star:identity+cmc+usd` (deliberately not the straddling
+                // tail, to avoid calibrating on it): median ratio 1.97x -> 1.01x, mean 2.17x -> 1.06x,
+                // p90 3.59x -> 1.28x, and the routing-relevant count of rows landing on the WRONG side of
+                // the 1,024 `STREAM_MIN_MATCHES` boundary 5 -> 0. NO fudge factor: a sweep
+                // (1.05/1.10/1.15/1.25/1.50) was measured on that same population and every non-trivial
+                // factor made routing WORSE (1.10-1.25 put one wrong-side row back, 1.50 put two), since
+                // 83% of routing-relevant misses in this whole survey are already over-estimates and
+                // biasing upward pushes genuinely-small queries back over the line this exists to get
+                // them under. That matches Round 38's own finding that `fudge = 1.0` was strictly optimal
+                // for the independence registry; plain `anchor * rate` it is.
+                //
+                // Stated tradeoff, identical to the one Round 50 already accepted: this moves the shape
+                // from systematically over (96% over) to roughly unbiased (median 1.01x, 44% of rows
+                // below truth, worst 0.62x). Strictly more accurate and strictly better for routing on
+                // the measured population, but it gives up the "errors are always in the safe direction"
+                // property. The change is monotone -- an `Estimate` folded via `.min()` can only ever
+                // LOWER `result`, never raise it.
+                //
+                // Deliberately does NOT call `mark_covered`, unlike Round 50's otherwise-identical site.
+                // This is the one place this round diverges, and it is load-bearing: `ColorCmcTable`'s
+                // own exact scan just above deliberately never covers its leaves either, because
+                // covering them starves BOTH `Independence` candidates at once (`ColorId` x `Price` and
+                // `Cmc` x `Price`) and measured WORSE (median `abs_log_ratio` 0.71 -> 1.12 for
+                // `star:identity+cmc+usd`) -- see that scan's own doc for the full measurement. Covering
+                // here would re-introduce exactly that. It is also unnecessary: the anchored estimate is
+                // already the SMALLEST candidate in every traced case (788 against the table's own 3669
+                // and the two independence candidates' 5173/3966), so it wins the `.min()`-fold on merit
+                // without starving anything.
+                //
+                // Placement: immediately after the exact scan it anchors on, mirroring Round 50's own
+                // placement right after `SubtypeArithBox`'s. Round 55's ordering constraint (an
+                // ESTIMATE-class mechanism must run after every EXACT mechanism whose leaves it could
+                // compete for, since `covered` only reflects what already ran and an undershooting
+                // estimate permanently pulls `result` below truth through the min-fold) is satisfied:
+                // everything after this point in the arm is the estimate-class independence registry
+                // (`"Independence"`) and the final `narrow_floor`/`result_space` assembly -- no exact
+                // candidate is folded after here that this could undercut.
+                //
+                // Folded as `Candidate::Estimate` (never `Exact`) so it narrows `result` only and never
+                // touches `exact_domain_*` -- the product of an exact count and an inexact rate is
+                // itself inexact, the same exact/estimate line Round 50's own site draws.
+                //
+                // `any_price_source` is a cheap, provably EQUIVALENT precheck, not a heuristic: with no
+                // `Price`-classified source anywhere in this `And` (or an empty store),
+                // `anchored_price_residual` declines for EVERY dim position, whatever is explained --
+                // its `by_class[Price]` bucket would be empty either way -- so the per-position
+                // `color_cmc_exact` re-lookup below (up to 32 stored masks, each a prefix-sum
+                // `range_sum`) is pure waste. Measured on the real corpus: without this guard, a bare
+                // `id:b cmc=4` with no price leaf at all paid ~210 ns (~21%) more `and_estimate_ns` for
+                // a candidate that could never form. Not applied to Round 50's own site above, which
+                // measured unregressed by the hoist as-is; the same guard would help it too and is
+                // noted as a possible follow-up rather than folded into this round.
+                let any_price_source = n_printings > 0 && and_sources.iter().any(|src| indep_class_of(*src, indexes) == Some(IndepClass::Price));
+                let anchor_positions: &[usize] = if any_price_source { &color_cmc_dim_positions } else { &[] };
+                for &ai in anchor_positions {
+                    let (field, op, mask) = color_cmc_dim(&v[ai]).expect("color_cmc_dim_positions only holds color_cmc_dim leaves");
+                    // A second, cheap lookup into the same table `scan_two_bucket_exact` already
+                    // queried above -- not threaded out of that shared helper, keeping this mechanism
+                    // decoupled from a helper shared with two others (Round 50's own precedent, and
+                    // Round 42's before it).
+                    let Some((joint_printing, _joint_cards, _joint_artworks)) =
+                        color_cmc_table_for(field, indexes).and_then(|table| color_cmc_exact(op, mask, cmc_lo, cmc_hi, table))
+                    else {
+                        continue;
+                    };
+                    let explained: Vec<usize> = std::iter::once(ai).chain(cmc_leaf_positions.iter().copied()).collect();
+                    if let Some((price_src, rate)) = anchored_price_residual(&explained) {
+                        let anchored_printing = ((joint_printing as f64) * rate).round() as usize;
+                        let candidate = Candidate::Estimate { printing: anchored_printing, card: None, artwork: None };
+                        fold_candidate(
+                            &mut result,
+                            &mut exact_domain_cards,
+                            &mut exact_domain_printing,
+                            &mut exact_domain_artworks,
+                            "ColorCmcAnchoredIndependence",
+                            candidate,
+                        );
+                        if let Some(t) = and_trace.as_mut() {
+                            let mut leaves: Vec<String> = explained.iter().map(|&p| format!("{:?}", v[p])).collect();
+                            leaves.extend(anchored_leaves_for(price_src).iter().map(|c| format!("{c:?}")));
+                            t.considered.push(and_trace_group(leaves, "ColorCmcAnchoredIndependence", Some(candidate)));
+                        }
+                    }
+                }
+            }
+            // Round 57 tightening: a format-legality leaf (`f:modern`, `banned:X`, `restricted:X`)
+            // And'd with 1+ bare `released_at` range children gets the EXACT printing count from
+            // `indexes.legality_date` instead of the plain min-fold above. See that table's own doc
+            // (right after `build_range_card_counts`) for the full motivation -- in short, this pair is
+            // deliberately absent from the independence registry, `released_at` is not a `PairTotals`
+            // dimension, and nothing else joins them, so `f:gladiator year<=2003` predicted 14,928
+            // against a true 2,673, the smaller marginal exactly.
+            //
+            // Mirrors the `ColorCmcTable` block just above one level: bucket A is every legality leaf
+            // position, bucket B is the ONE fused date range (`released_at_bounds_intersect`, the same
+            // `max`/`min` fusion `cmc_bounds_intersect` does for cmc), so this is a Cartesian product
+            // over (legality leaf) x (the one resolved date range). No covered-filtering on INPUT, for
+            // the same reason that scan skips it: a real table hit is a valid upper bound on the whole
+            // `And` regardless of what else already touched either leaf.
+            //
+            // Written as its own loop rather than through `scan_two_bucket_exact` for ONE reason: that
+            // helper folds `Candidate::Exact`, and this mechanism cannot. The value is genuinely exact
+            // -- at per-date granularity there is nothing to pro-rate -- but `Candidate::Exact`
+            // requires a consistent (printings, cards, artworks) TRIPLE and debug-asserts
+            // `cards <= artworks <= printings`, and this table has only printings (see its own doc for
+            // why card/artwork counts cannot be had by subtraction on this axis).
+            //
+            // Round 59: it folds `Candidate::PrintingBound`, so its exact printing count now claims
+            // `guaranteed.printing` -- the under-claim Round 57 could not express, because at the time
+            // the only way to say "printing-only" was `Candidate::Estimate`, which routes to the guess
+            // channel. `exact_domain_*` is still untouched, for the same reason as before: no
+            // card/artwork consumer may ever read a number this table does not have.
+            //
+            // Deliberately does NOT call `mark_covered`, inheriting the `ColorCmcTable` call site's own
+            // decision for the same reason: this is a genuine sub-conjunction bound whose leaves the
+            // independence registry may still pair PRODUCTIVELY with a third class (`Legality` x
+            // `Type`, `Legality` x `Price`, ... are all registered safe), and covering them would
+            // starve those candidates the way covering `ColorCmcTable`'s leaves measurably starved
+            // `ColorId` x `Price`/`Cmc` x `Price`. It is also unnecessary here: `legality` x `released`
+            // is not itself a registered pair, so no independence candidate ever re-answers THIS
+            // subset, and the exact value wins the `.min()`-fold on merit whenever it is the smallest.
+            //
+            // Placement: immediately after the `ColorCmcTable`/`ColorCmcAnchoredIndependence` block, and
+            // Round 55's ordering constraint (an ESTIMATE-class mechanism must run after every EXACT
+            // mechanism whose leaves it could compete for, since `covered` only reflects what already
+            // ran and an undershooting estimate permanently pulls `result` below truth through the
+            // min-fold) is satisfied: everything after this point in the arm is the estimate-class
+            // independence registry (`"Independence"`) and the final `narrow_floor`/`result_space`
+            // assembly -- no exact candidate folds after here. The constraint is also slack for this
+            // mechanism in particular, since an exact value cannot undershoot in the first place.
+            //
+            // `any_legality_leaf` is a cheap, provably EQUIVALENT precheck, not a heuristic -- exactly
+            // the guard Round 56 added to its own anchor loop after measuring a real +21%
+            // `and_estimate_ns` tax from a loop that ran when it could never produce a candidate. With
+            // no legality leaf anywhere in this `And`, bucket A is empty and the scan below produces
+            // nothing whatever the date children are, so neither the position `Vec` nor
+            // `released_at_bounds_intersect`'s own per-child `bare_range_bounds` walk is worth paying
+            // for. `matches!` over `v` allocates nothing.
+            let any_legality_leaf = v.iter().any(|c| matches!(c, FilterExpr::Legality { shift: Some(_), .. }));
+            if any_legality_leaf
+                && let Some((date_positions, date_lo, date_hi)) = released_at_bounds_intersect(v, indexes)
+            {
+                let legality_positions: Vec<usize> =
+                    (0..v.len()).filter(|&i| matches!(v[i], FilterExpr::Legality { shift: Some(_), .. })).collect();
+                for &ai in &legality_positions {
+                    let FilterExpr::Legality { shift: Some(shift), expected } = &v[ai] else {
+                        unreachable!("legality_positions only holds `Legality {{ shift: Some(_), .. }}` leaves")
+                    };
+                    let key = legality_totals_key(*shift, *expected);
+                    let hit = indexes.legality_date.range_printings(&indexes.released_at.keys, key, date_lo, date_hi);
+                    let candidate = hit.map(|printing| Candidate::PrintingBound { printing });
+                    if let Some(c) = candidate {
+                        fold_candidate(
+                            &mut result,
+                            &mut exact_domain_cards,
+                            &mut exact_domain_printing,
+                            &mut exact_domain_artworks,
+                            "LegalityDateTotals",
+                            c,
+                        );
+                    }
+                    // Traces on a MISS too (like `ColorCmcTable`, unlike `SubtypePairIndexes`): a miss
+                    // here means the key was pruned by `LEGALITY_DATE_MIN_PRINTINGS`, which is a real,
+                    // deliberate decline worth seeing in a trace rather than silence.
+                    if let Some(t) = and_trace.as_mut() {
+                        let mut leaves: Vec<String> = vec![format!("{:?}", v[ai])];
+                        leaves.extend(date_positions.iter().map(|&p| format!("{:?}", v[p])));
+                        t.considered.push(and_trace_group(leaves, "LegalityDateTotals", candidate));
+                    }
+                }
+            }
+            // Round 40 tightening: generalizes Round 38's one hard-coded shape (`color:X`/`id:X`/
+            // `cmc<op>N` paired with exactly one price comparison) into a small REGISTRY of confirmed
+            // leaf-class pairs (`IndepClass`/`independence_safe_pair`, re-validated directly against
+            // real data -- see that function's own doc and this round's own doc section for the
+            // numbers), scanning every pair of `and_sources` instead of one fixed shape. Pairwise only --
+            // NOT generalized to triples: pairwise-safe does not imply joint-safe (the design doc's own
+            // `color`x`identity`x`type` counterexample), so a query with 3+ mutually pairwise-safe
+            // residual classes still gets one independent candidate per PAIR of them, each separately
+            // narrowing `result` via `min` -- never a single joint estimate over all of them at once.
+            //
+            // `independence = round(count(a) * count(b) / domain)`, unbiased (Round 38's own grid
+            // search already found `fudge = 1.0` strictly optimal; nothing here reopens that). Not
+            // exact, so this narrows only `result`, never `exact_domain_*` -- the same exact/estimate
+            // line `SetCollectorRange`'s density estimate and `SubtypePairEstimate`'s miss branch draw.
+            //
+            // Round 49: no longer skips a leaf-occupancy-`covered` source up front (see
+            // `CoveredState`'s own doc) -- a leaf touched by some OTHER, unrelated exact mechanism (e.g.
+            // `SubtypeArithBox`'s own `(subtype, cmc)` joint) is now a fully eligible unit here, for any
+            // partner. The narrower, still-real danger -- an estimate re-answering the IDENTICAL subset
+            // an exact mechanism already answered -- is checked at pairing time instead, against
+            // `covered.subsets` (see the pairing loop below).
+            let n_artworks = u32::from(*indexes.artwork_base.last().expect("artwork_base has n_cards+1 entries")) as usize;
+            // One unit per `IndepClass` actually present among `and_sources`: its own contributing
+            // leaves (for `covered.subsets`/trace reporting), its own solo `SpaceEstimate` (the
+            // independence formula's per-side input), and its own combined leaf-position bitmask
+            // (`mask`, Round 49 -- computed the same way the old `is_covered` closure resolved
+            // positions, just OR'd together instead of checked against `covered.flags`). `leaves_for`
+            // unifies the `AndSource::Child`/`FusedRange` cases the same way Round 38's own price
+            // handling did -- a `FusedRange` source's constituents are the literal `v` children
+            // `bare_range_bounds` resolves to the same index.
+            let leaves_for = |i: usize| -> Vec<&FilterExpr> {
+                match and_sources[i] {
+                    AndSource::Child(c) => vec![c],
+                    AndSource::FusedRange { idx, .. } => {
+                        v.iter().filter(|c| bare_range_bounds(c, indexes).is_some_and(|(i2, ..)| std::ptr::eq(i2, idx))).collect()
+                    }
+                }
+            };
+            let mask_for = |leaves: &[&FilterExpr]| -> u64 {
+                let mut mask: u64 = 0;
+                for leaf in leaves {
+                    if let Some(pos) = v.iter().position(|c| std::ptr::eq(c, *leaf))
+                        && pos < 64
+                    {
+                        mask |= 1u64 << pos;
+                    }
+                }
+                mask
+            };
+            struct IndepUnit<'f> {
+                class: IndepClass,
+                leaves: Vec<&'f FilterExpr>,
+                est: SpaceEstimate,
+                mask: u64,
+            }
+            let mut units: Vec<IndepUnit<'_>> = Vec::new();
+            {
+                // Indexed by `IndepClass as usize` rather than a `HashMap` -- at most
+                // `INDEP_CLASS_COUNT` buckets, no hashing/allocation-per-lookup on a path whose own
+                // tax (`and_estimate_ns`) is measured.
+                let mut by_class: [Vec<usize>; INDEP_CLASS_COUNT] = Default::default();
+                for (i, src) in and_sources.iter().enumerate() {
+                    if let Some(class) = indep_class_of(*src, indexes) {
+                        by_class[class as usize].push(i);
+                    }
+                }
+                for class_ord in 0..INDEP_CLASS_COUNT {
+                    let positions = &by_class[class_ord];
+                    let class = INDEP_CLASS_ORDER[class_ord];
+                    match positions.as_slice() {
+                        [] => {}
+                        [p] => {
+                            let leaves = leaves_for(*p);
+                            let mask = mask_for(&leaves);
+                            units.push(IndepUnit { class, leaves, est: children_estimates[*p].result, mask });
+                        }
+                        multi if matches!(class, IndepClass::Cmc | IndepClass::Pow) => {
+                            // 2+ literal bounds on the SAME arith field (`cmc>=2 cmc<=5`, unfused --
+                            // `fuse_and_range_children` only fuses price/collector-number/date/year):
+                            // combine via the existing #743 `arith_tuple_totals` scan, its exact JOINT
+                            // (printing, card, artwork) triple, same as Round 38's own cmc handling.
+                            // Round 51: `artwork` is now `Some(...)` instead of always `None` -- lets
+                            // the pairing loop below compute `artwork_indep` for any pairing involving
+                            // this unit for the first time (its `.zip()` on two `Option<usize>`
+                            // previously short-circuited to `None` whenever either side was `None`).
+                            // The folded candidate for a PAIRING still stays `Candidate::Estimate`
+                            // regardless -- an independence product of two marginals is never exact, no
+                            // matter how exact its own inputs are -- only this component's own inputs
+                            // got more precise, not its class.
+                            let field_children: Vec<&FilterExpr> = multi.iter().flat_map(|&p| leaves_for(p)).collect();
+                            if let Some((printings, cards, artworks)) = arith_tuple_totals(&field_children, indexes) {
+                                let mask = mask_for(&field_children);
+                                units.push(IndepUnit {
+                                    class,
+                                    leaves: field_children,
+                                    est: SpaceEstimate::spaces(printings, Some(cards), Some(artworks)),
+                                    mask,
+                                });
+                            }
+                            // else: the scan itself declined (index not built) -- dropped, no unit
+                            // pushed, same as any other shape this tightening doesn't recognize.
+                        }
+                        // Round 53/54 (`docs/issues/local-engine-nway-followup-queue.md`): exactly 2
+                        // `Price`-classified residual sources present. Before Round 53, EVERY 2+-
+                        // occurrence `Price` combination fell straight to the `_ => {}` catch-all below
+                        // -- this is the by_class-registry-side half of the fix (the OTHER half is the
+                        // standalone whole-`And` fold a few hundred lines up, for when the price pair is
+                        // the entire query with nothing else to pair against; this arm is for when a
+                        // THIRD class -- `Type`, `ColorId`, `Legality`, `Cmc`, etc. -- is ALSO present,
+                        // so the price pair needs to become ONE unit before it can pair against that
+                        // third class via the existing loop below).
+                        //
+                        // Resolves which specific price field each of the two positions is
+                        // (`price_field_of`, `indep_class_of`'s finer-grained sibling), then dispatches
+                        // to whichever of the three validated pairs' tables covers them via the SAME
+                        // `resolve_price_joint_pair`/`price_joint_table_for` the standalone fold uses --
+                        // Round 53 covered only `usd`+`eur` here; Round 54 generalized the dispatch so
+                        // `usd`+`tix`/`eur`+`tix` resolve too, gaining a real `(printing, card, artwork)`
+                        // triple -- `est.card`/`.artwork` are `Some(...)`, not `None`, so the pairing
+                        // loop below can compute `card_indep`/`artwork_indep` for this unit for the first
+                        // time, the same upgrade Round 51 gave the `Cmc`/`Pow` arm above.
+                        //
+                        // Two SAME-field leaves (e.g. `usd<10 usd>2`, unfused) and 3-way usd+eur+tix
+                        // (`multi.len() == 3`, guard fails, never reaches this arm at all) are NOT this
+                        // special case -- both fall through to the unchanged `_ => {}` drop below.
+                        //
+                        // `and_sources.len() > 2` guard: this check ("is there anything left in the query
+                        // for this unit to ever pair with") is not, and never was, specific to any one
+                        // price pair -- it generalizes to all three unchanged. When a price pair is the
+                        // ONLY two residual sources in the whole `And`, this unit could never pair with
+                        // anything anyway (there is no third source left to form another unit from -- the
+                        // standalone whole-`And` fold a few hundred lines up already answers that exact
+                        // shape). Building it there was pure waste, measured directly on `usd`+`eur`: a
+                        // bare 2-leaf query paid for the SAME `joint_estimate` table scan twice (once
+                        // here, once in the standalone fold) for a unit that could structurally never be
+                        // used. Skipping it here changes no behavior -- `_ => {}` already declines to
+                        // push a unit for any shape it doesn't recognize, and a query with nothing else to
+                        // pair against was never going to reach the pairing loop below regardless.
+                        multi if class == IndepClass::Price && multi.len() == 2 && and_sources.len() > 2 => {
+                            let [pa, pb] = multi else { unreachable!("multi.len() == 2 checked above") };
+                            let pair = resolve_price_joint_pair(and_sources[*pa], and_sources[*pb], indexes);
+                            if let Some((table, (a_lo, a_hi), (b_lo, b_hi))) = pair
+                                && let Some((printings, cards, artworks)) = table.joint_estimate(a_lo, a_hi, b_lo, b_hi)
+                            {
+                                let field_children: Vec<&FilterExpr> = multi.iter().flat_map(|&p| leaves_for(p)).collect();
+                                let mask = mask_for(&field_children);
+                                units.push(IndepUnit {
+                                    class,
+                                    leaves: field_children,
+                                    est: SpaceEstimate::spaces(printings, Some(cards), Some(artworks)),
+                                    mask,
+                                });
+                            }
+                            // else: two same-field leaves / table not built -- dropped, no unit pushed,
+                            // same as the `_ => {}` catch-all below would have done.
+                        }
+                        // 2+ occurrences of a class with no combining table (e.g. two literal `f:`
+                        // leaves) -- dropped rather than guessing which one to use, Round 38's own
+                        // precedent for `color:`/`id:`.
+                        _ => {}
+                    }
+                }
+            }
+            for i in 0..units.len() {
+                for j in (i + 1)..units.len() {
+                    let (a, b) = (&units[i], &units[j]);
+                    if !independence_safe_pair(a.class, b.class) {
+                        continue;
+                    }
+                    // Round 49: decline ONLY when the exact combined subset was already answered
+                    // elsewhere (`covered.subsets`, see `CoveredState`'s own doc) -- any other combined
+                    // mask, including one sharing leaves with a covered subset, proceeds unchanged.
+                    let combined = a.mask | b.mask;
+                    if covered.subsets.contains(&combined) {
+                        continue;
+                    }
+                    let printing_indep =
+                        if n_printings == 0 { 0 } else { ((a.est.printing() as f64) * (b.est.printing() as f64) / (n_printings as f64)).round() as usize };
+                    let card_indep = a
+                        .est
+                        .card
+                        .best()
+                        .zip(b.est.card.best())
+                        .map(|(x, y)| if n_cards == 0 { 0 } else { ((x as f64) * (y as f64) / (n_cards as f64)).round() as usize });
+                    let artwork_indep = a
+                        .est
+                        .artwork
+                        .best()
+                        .zip(b.est.artwork.best())
+                        .map(|(x, y)| if n_artworks == 0 { 0 } else { ((x as f64) * (y as f64) / (n_artworks as f64)).round() as usize });
+                    // The one `Candidate::Estimate` that carries card/artwork guesses: this pairing
+                    // computes them from both units' own marginals, and has always REPORTED them in
+                    // its trace group. `fold_candidate` still folds `printing` and nothing else --
+                    // see `Candidate::Estimate`'s own doc.
+                    let candidate = Candidate::Estimate { printing: printing_indep, card: card_indep, artwork: artwork_indep };
+                    fold_candidate(
+                        &mut result,
+                        &mut exact_domain_cards,
+                        &mut exact_domain_printing,
+                        &mut exact_domain_artworks,
+                        "Independence",
+                        candidate,
+                    );
+                    // Round 38 trace, unchanged shape: `hit: true` always -- independence is a formula
+                    // that always produces a value once the registry says the pair is safe, so `hit`
+                    // here just means "eligible and computed", not a lookup-miss emulation.
+                    if let Some(t) = and_trace.as_mut() {
+                        let mut leaves: Vec<String> = a.leaves.iter().map(|c| format!("{c:?}")).collect();
+                        leaves.extend(b.leaves.iter().map(|c| format!("{c:?}")));
+                        t.considered.push(and_trace_group(leaves, "Independence", Some(candidate)));
+                    }
+                }
+            }
+            // `domain_hint` used to be its own field, folded from `children_estimates`'s own `.result`
+            // -- but `.result` is this function's PRINTING-space quantity for every leaf type (confirmed
+            // directly: `ColorCmp`'s arm calls `color_cmp_value_total(..., Mode::Printing)` explicitly),
+            // so that fold was handing a printing count to `domain_cards`, a card-space consumer. Because
+            // the corpus's average reprint rate inflates a card count into its printing equivalent
+            // (~3.08x here), the bug was largely self-masking -- an inflated `domain_hint` usually lost
+            // the outer `.min(calibrated)` at the call site to the correctly-scaled `calibrated`, so it
+            // only bit when the true intersection was selective enough that even the inflated number
+            // still undercut `calibrated`, which is exactly the long-tail-not-median shape this cell
+            // measured (median 1.00, p99 14-24x, p100 up to 382x).
+            //
+            // `domain_hint` is retired in favor of `.card` directly, but fed ONLY by
+            // `exact_domain_cards` (this intersection's own exact popcount from `best_other`/the
+            // arith-tuple merge) -- deliberately NOT `folded.card` (each child's OWN, individual card
+            // count, folded via `min`). That fold was tried and checked directly against real data: a
+            // single BROAD leaf's own card count (`border:black`, `f:duel`'s own legal-card count --
+            // both individually correct numbers) is not a safe upper bound on the whole `And` unless
+            // `narrow_rec` would actually USE that leaf to narrow, and it does not for a broad one
+            // (`border:black` declining at 87% under `broad_ok: false` is the exact, already-documented
+            // precedent -- see `exceeds_own_domain_breadth`'s old callers). The retired `domain_hint`
+            // guarded against exactly this with a breadth filter before folding; dropping that filter
+            // along with the space-mismatch fix silently lost the guard too. `exact_domain_cards` has
+            // no such risk: it is a real INTERSECTION (`eval_planes` over the combined `PlaneExpr`), not
+            // a per-leaf bound, so it can only ever be <= the true joint count, never an overcount from
+            // a leaf `narrow_rec` would have declined to use alone.
+            //
+            // Round 41: printing space already gets a "tightest single leaf's own count" floor for free
+            // -- `folded.result.printing` above is a plain unconditional min-fold over every leaf's own
+            // printing count, whether or not any multi-leaf mechanism fired. Card/artwork space never
+            // had the equivalent: `exact_domain_cards`/`exact_domain_artworks` are populated ONLY when
+            // some specific joint mechanism (`compile_plane`'s popcount, the arith-tuple merge,
+            // `pair_bounded_min`) actually fires, and were never subsequently folded against the OTHER
+            // leaves' own already-exact card/artwork counts. This reuses the SAME breadth guard the
+            // paragraph above explains `domain_hint` needed and lost (`range_too_broad_to_narrow`, the
+            // exact threshold `narrow_rec` itself uses for `broad_ok`) so a narrow leaf's own count CAN
+            // tighten the bound while a broad one (`border:black` at 87%) still cannot -- unlike the
+            // retired `domain_hint`, this folds only into `result_space`, never into `exact_domain_cards`/
+            // `exact_domain_artworks` themselves (see `exact_domain`'s own doc a few lines down: those
+            // feed `scan_units`'s real execution-cost pricing and must stay byte-identical to before this
+            // fix). `children_estimates` (not `folded`, which discards `exact_domain` per-child and only
+            // ever held printing-shaped `.result.card`/`.artwork` behind the same "populated only when a
+            // mechanism fires" rule anyway) is read here because it is keyed one-to-one with `and_sources`
+            // and holds each child's own solo `SpaceEstimate`, uncombined.
+            let narrow_floor = |get: fn(&SpaceEstimate) -> Option<usize>, domain: usize| -> Option<usize> {
+                children_estimates.iter().filter_map(|ce| get(&ce.result)).filter(|&c| !range_too_broad_to_narrow(c, domain)).min()
+            };
+            let card_floor = narrow_floor(|s| s.card.best(), n_cards);
+            let artwork_floor = narrow_floor(|s| s.artwork.best(), n_artworks);
+            // Round 58: a narrow leaf's OWN exact card/artwork count is a proven upper bound on the
+            // whole `And` (Round 42's principle again -- a sub-conjunction's count bounds the
+            // conjunction), so it folds into `guaranteed`, alongside whatever `Candidate::Exact`
+            // mechanisms already lowered it to. `SpaceMeasure::min` over `[guaranteed, floor]` is
+            // exactly the `(Some(d), Some(f)) => d.min(f) | (d, f) => d.or(f)` match this replaces.
+            let mut result_space = result;
+            if let Some(f) = card_floor {
+                result_space.card.lower_guaranteed(f);
+            }
+            if let Some(f) = artwork_floor {
+                result_space.artwork.lower_guaranteed(f);
+            }
+            // `exact_domain`: the SAME `best_other`/arith-merge intersection, but captured BEFORE
+            // `result` could be tightened any further by `pair_bounded_min` (above) -- so unlike
+            // `result`, `.printing`/`.card`/`.artwork` here are guaranteed to describe the exact same
+            // set, never a printing count over-tightened past what the card/artwork counts still
+            // describe. `result` doesn't have that guarantee (it takes the `min` across every
+            // tightening this match found, from whichever source got there first), which is exactly
+            // why `scan_units` -- the printing SPAN of the CANDIDATE cards, not the tightest known
+            // match count -- needs its own field instead of reusing `result`.
+            let exact_domain = exact_domain_printing.map(|printing| ExactDomain { printing, card: exact_domain_cards, artwork: exact_domain_artworks });
+            // Round 37a: `tree` is assembled last, from the now-finished `leaves`/`considered`
+            // against this arm's own final `result_space` -- see `and_trace_build_tree`'s own doc for
+            // why this is exact (for printing) rather than a heuristic.
+            if let Some(t) = and_trace.as_mut() {
+                t.tree = and_trace_build_tree(&t.leaves, &t.considered, result_space);
+            }
+            // Round 62: "did anything in THIS arm move `result.printing` off the per-leaf seed", ORed
+            // with whatever the children already reported through `folded`. Stated as one comparison
+            // of the SAME field against its own seed, both channels, rather than threaded as a
+            // `&mut bool` through `fold_candidate`'s ~20 call sites: `SpaceMeasure`'s only mutators
+            // (`lower_guaranteed`/`lower_estimate`) are monotone -- each either lowers a channel or
+            // fills an absent one, never restores it -- so `!=` against the seed holds exactly when at
+            // least one of them fired, and unlike a threaded flag it cannot silently go stale when a
+            // future mechanism writes `result.printing` without updating a bookkeeping parameter.
+            // This is NOT the comparison being retired: that one read `best()` across two DIFFERENT
+            // fields (`candidate` vs `result`), which is blind to a bound-only tightening; this reads
+            // both channels of one field against its own earlier value.
+            let printing_tightened = folded.printing_tightened || result_space.printing != seed_printing;
+            ComposeEstimate { result: result_space, exact_domain, and_trace: and_trace.map(Box::new), printing_tightened, ..folded }
         }
         FilterExpr::Or(v) => {
+            let n_cards = offsets.len() - 1;
+            let n_artworks = u32::from(*indexes.artwork_base.last().expect("artwork_base has n_cards+1 entries")) as usize;
+            let clamp = |space: SpaceEstimate| SpaceEstimate {
+                printing: space.printing.map(|p| p.min(n_printings)),
+                card: space.card.map(|c| c.min(n_cards)),
+                artwork: space.artwork.map(|a| a.min(n_artworks)),
+            };
             let summed = v
                 .iter()
-                .map(|c| compose_printing_estimate(c, indexes, offsets, n_printings))
+                .map(|c| compose_printing_estimate(c, indexes, offsets, n_printings, false))
                 .fold(ComposeEstimate::leaf(0, 0, 0), |a, c| ComposeEstimate {
-                    result: a.result + c.result,
-                    candidate: a.candidate + c.candidate,
+                    result: a.result.add(c.result),
+                    candidate: a.candidate.add(c.candidate),
                     broadcast: a.broadcast + c.broadcast,
                     scatter: a.scatter + c.scatter,
-                    domain_hint: None,
+                    collection_broadcast: a.collection_broadcast + c.collection_broadcast,
+                    exact_domain: None,
+                    and_trace: None,
+                    // `Or` tightens nothing of its own (it is a sum-then-clamp), but a tightened child
+                    // makes this node's `result` sum smaller than its `candidate` sum, which is
+                    // exactly the condition the consumer is asking about -- so the flag propagates.
+                    // `clamp` below cannot introduce a divergence: it applies the identical `min` to
+                    // `result` and `candidate` alike.
+                    printing_tightened: a.printing_tightened || c.printing_tightened,
                 });
-            ComposeEstimate {
-                result: summed.result.min(n_printings),
-                candidate: summed.candidate.min(n_printings),
-                ..summed
-            }
+            ComposeEstimate { result: clamp(summed.result), candidate: clamp(summed.candidate), ..summed }
         }
         // Precomputed planes: exact cheap popcount, nothing synthesized.
         FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value } => {
-            ComposeEstimate::leaf(popcount(&border_leaf_bits(value.as_str(), &indexes.border_printing, n_printings)), 0, 0)
+            let k = popcount(&border_leaf_bits(value.as_str(), &indexes.border_printing, n_printings));
+            ComposeEstimate::leaf_spaces(k, 0, 0, exact_result_total(filter, indexes, Mode::Card), exact_result_total(filter, indexes, Mode::Artwork))
         }
         // #746: `set:`/`watermark:` postings — matches = the value's postings length `k` (each
         // posting is one distinct printing), synthesized by scattering `k` ids → rides `scatter`
         // (the same cheap range-slice scatter rate). O(1) here: the length, no bitmap built.
+        //
+        // Round 45: card/artwork come from the SAME Round 34 `set_cards`/`set_artworks` maps
+        // `SubtypePairEstimate`'s own independence-product formula already reaches (see
+        // `SetSubtypeTable`'s doc) -- both are exact per-set aggregations, not an approximation, so a
+        // bare `set:X` leaf's own solo estimate is now exact in every space, not just printing. Before
+        // this, this arm's `ComposeEstimate::leaf` left card/artwork at `None`, which is exactly what
+        // let an unrelated, looser exact joint stand unchallenged in the And arm's card/artwork floor
+        // for `set:mh2 usd<10 cmc<5 power>1 color:g` (see docs/issues/local-engine-gathered-scan-card-
+        // printing-varying-depth.md) -- the floor can only use a leaf's own count when the leaf's
+        // `ComposeEstimate` actually carries one.
+        //
+        // `.get(...).map(...)` -- NOT `.map_or(0, ...)` -- on a miss: a real store's `set_totals`
+        // covers every set with 1+ printings, so a miss here only ever means the table itself isn't
+        // built for this store at all (every fixture that populates `set_codes` without also calling
+        // `build_subtype_pair_tables`, confirmed directly by `domain_hint_is_card_space_not_printing_
+        // scaled`'s regression when this arm first tried `map_or(0, ...)`: `subtype_pairs` was left at
+        // its `Default::default()` there, which made `set:dmu`'s solo card count a false exact `Some
+        // (0)` and floored an unrelated 2-card intersection down to 0). Declining to `None` on a miss
+        // matches every other exact mechanism's own "decline rather than guess" convention in this
+        // function (`ColorCmcTable`'s empty-`by_mask` check has the identical shape, for the identical
+        // reason).
         FilterExpr::TextExact { field: TextField::SetCode, op: CmpOp::Eq, value } => {
             let k = indexes.set_codes.get(value.as_str()).map_or(0, |v| v.len());
-            ComposeEstimate::leaf(k, 0, k)
+            let set = &indexes.subtype_pairs.set;
+            let card = set.set_cards.get(value.as_str()).map(|c| u32::from(*c) as usize);
+            let artwork = set.set_artworks.get(value.as_str()).map(|a| u32::from(*a) as usize);
+            ComposeEstimate::leaf_spaces(k, 0, k, card, artwork)
         }
         FilterExpr::TextExact { field: TextField::Watermark, op: CmpOp::Eq, value } => {
             let k = indexes.watermarks.get(value.as_str()).map_or(0, |v| v.len());
@@ -7863,17 +12830,27 @@ fn compose_printing_estimate(
         }
         // Collection containment leaf (`type:`/`kw:`/`otag:`/`art:`/`is:`, `Ge`): `k` = the exact
         // printing count the leaf matches (card-space sums the matching cards' printing ranges,
-        // printing-space is the postings length). The build scatters `k` printings → rides `scatter`,
-        // the cheap range-slice rate.
+        // printing-space is the postings length). Card-space fields build via `ids_of` +
+        // `broadcast_card_ids_to_printings` (a card-cursor lookup per id) -- `collection_broadcast`,
+        // not `scatter`. Printing-space fields build via a contiguous `bits()` copy, the same shape a
+        // range's scatter is, so they keep riding `scatter`'s rate.
         FilterExpr::CollectionCmp { field, op: CmpOp::Ge, value, .. }
             if collection_compose_index(indexes, *field).is_some() =>
         {
             let src = collection_compose_index(indexes, *field).expect("guarded by the if");
             let k = collection_leaf_printing_count(&src, value.as_str(), offsets);
-            ComposeEstimate::leaf(k, 0, k)
+            // Every field reaching this arm is one of `exact_result_total`'s per-value `ValueTotals`
+            // dimensions (subtypes/keywords/oracle_tags/art_tags/is_tags/frame_data), which store all
+            // three spaces per value regardless of whether the field's own postings are card- or
+            // printing-space -- reusing it here for card/artwork is the exact same table lookup
+            // `collection_leaf_printing_count` uses for printing, not a second derivation.
+            let card = exact_result_total(filter, indexes, Mode::Card);
+            let artwork = exact_result_total(filter, indexes, Mode::Artwork);
+            if src.card_space { ComposeEstimate::collection_leaf(k, card, artwork) } else { ComposeEstimate::leaf_spaces(k, 0, k, card, artwork) }
         }
-        // Negated collection leaf: all printings minus the positive `k`; the scatter cost rides the
-        // (small) positive `k` cleared, not the (large) complement it produces — same shape as `-set:`.
+        // Negated collection leaf: all printings minus the positive `k`; the build cost rides the
+        // (small) positive `k` cleared, not the (large) complement it produces — same shape as `-set:`,
+        // and the same card-space-vs-printing-space split as the positive leaf above.
         FilterExpr::Not(inner)
             if matches!(inner.as_ref(), FilterExpr::CollectionCmp { field, op: CmpOp::Ge, .. } if collection_compose_index(indexes, *field).is_some()) =>
         {
@@ -7882,8 +12859,29 @@ fn compose_printing_estimate(
             };
             let src = collection_compose_index(indexes, *field).expect("guarded by the matches!");
             let k = collection_leaf_printing_count(&src, value.as_str(), offsets);
-            ComposeEstimate::leaf(n_printings.saturating_sub(k), 0, k)
+            let complement = n_printings.saturating_sub(k);
+            let n_cards = offsets.len() - 1;
+            let n_artworks = u32::from(*indexes.artwork_base.last().expect("artwork_base has n_cards+1 entries")) as usize;
+            // Safe to complement in card/artwork space too: every one of `exact_result_total`'s
+            // per-value tables is COMPLETE (holds every value present in the corpus, so absence is an
+            // exact zero, not an unknown), matching the same guarantee the printing-space complement
+            // above already relies on.
+            let card = exact_result_total(inner, indexes, Mode::Card).map(|c| n_cards.saturating_sub(c));
+            let artwork = exact_result_total(inner, indexes, Mode::Artwork).map(|a| n_artworks.saturating_sub(a));
+            if src.card_space {
+                let space = SpaceEstimate::spaces(complement, card, artwork);
+                ComposeEstimate { result: space, candidate: space, broadcast: 0, scatter: 0, collection_broadcast: k, exact_domain: None, and_trace: None, printing_tightened: false }
+            } else {
+                ComposeEstimate::leaf_spaces(complement, 0, k, card, artwork)
+            }
         }
+        // `.card`/`.artwork` deliberately left `None` here, not `exact_result_total(..., Mode::Card)`:
+        // checked directly against real data, `RangeCardCounts::distinct_cards` (the structure rarity's
+        // Mode::Card/Artwork arms in `exact_result_total` read, shared with the bare-range arm below)
+        // gave wrong-by-a-wide-margin answers for broad ranges (`r<=mythic` real 31,724 cards, this
+        // path 31,722; part of a broader pattern -- see the bare-range arm's own doc, and the `is_and`
+        // doc in `acquire_plan_features`, for the 250-query regression this traced to). A real,
+        // pre-existing bug in that structure's card/artwork counting, not something this pass fixes.
         FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::RarityInt), op, rhs: NumExpr::Const(c) } => {
             ComposeEstimate::leaf(popcount(&rarity_cmp_leaf_bits(*op, *c, &indexes.rarity_printing, n_printings)), 0, 0)
         }
@@ -7900,7 +12898,45 @@ fn compose_printing_estimate(
             let legal = legality_candidate_bits(indexes, n_cards, *shift, *expected, false).map_or(0, |b| popcount(&b));
             let illegal = legality_candidate_bits(indexes, n_cards, *shift, *expected, true).map_or(0, |b| popcount(&b));
             let scale = |c: usize| (c * n_printings).checked_div(n_cards).unwrap_or(0);
-            ComposeEstimate::leaf(scale(legal), scale(legal.min(illegal)), 0)
+            // `legal` is already the exact CARD count this leaf matches -- reused directly rather than
+            // re-deriving it a second way through `exact_result_total`.
+            //
+            // Round 61: PRINTING is now the exact `ValueTotals::legality` count too, not
+            // `legal * n_printings / n_cards`. That scale spread a format's legal cards at the
+            // CORPUS-WIDE average reprint depth (3.083 on the production corpus), which is not the
+            // format's own, and the error is exactly `global_depth / that format's depth`: measured
+            // across all 23 formats it runs **0.647x to 1.040x**, with 16 of them under truth. The
+            // worst cases are small curated pools whose cards are reprinted far more than average --
+            // `oldschool` is 961 cards at depth 4.765, predicting 2,962 against a true 4,579 -- while
+            // formats covering nearly the whole corpus (`vintage`, `commander`) came out right only
+            // because their population's depth IS the corpus depth. `banned:`/`restricted:` were worse
+            // still, since their tiny card sets sit on the corpus's most-reprinted cards:
+            // `banned:modern` read 160 against a true 403 (0.40x), `restricted:vintage` 160 against 657
+            // (0.24x). Being an undershoot it won `min()`-folds against genuinely exact joints, which
+            // is what left Round 57's exactly-right-but-outvoted rows on record.
+            //
+            // The exact number costs nothing: it is the SAME `HashMap<u16, SpaceTotals>` row the
+            // artwork count was already reading, one column over. `legality_space_totals` is that one
+            // lookup, shared with `exact_result_total`'s own `Legality` arm -- reaching printings and
+            // artworks through two `exact_result_total` calls instead measured at +9.3% of this
+            // function's p50 on legality-bearing queries (see that helper's doc for the numbers and the
+            // control subset). A missing key is an exact 0, which is what "no printing has this
+            // (format, status)" means. All four statuses are stored -- `ValueTotals`' `keys_of` maps
+            // every shift to its own status with no filtering, unlike `PairTotals`, which deliberately
+            // keeps only legal/not_legal -- so `banned:`/`restricted:` leaves are exact here too, not
+            // just `f:`.
+            //
+            // `broadcast` below stays the scaled figure deliberately: it is a COST bucket (how much
+            // broadcast-down work a plan does), not a cardinality, so corpus-average spreading is the
+            // right shape for it and it is not what this round is about.
+            let totals = legality_space_totals(indexes, *shift, *expected);
+            ComposeEstimate::leaf_spaces(
+                totals.map_or(0, |t| t.get(Mode::Printing)),
+                scale(legal.min(illegal)),
+                0,
+                Some(legal),
+                Some(totals.map_or(0, |t| t.get(Mode::Artwork))),
+            )
         }
         // Color family: exact via `ValueTotals`'s per-combo table — no `eval_planes`, no bitmap.
         // `.result`/`.broadcast` both ride the printing count: the REAL build (`compose_printing_bits`)
@@ -7908,27 +12944,64 @@ fn compose_printing_estimate(
         // even though this estimate no longer computes it that way.
         FilterExpr::ColorCmp { field, op, mask } => {
             let k = color_cmp_value_total(*field, *op, *mask, false, indexes, Mode::Printing);
-            ComposeEstimate::leaf(k, k, 0)
+            let card = color_cmp_value_total(*field, *op, *mask, false, indexes, Mode::Card);
+            let artwork = color_cmp_value_total(*field, *op, *mask, false, indexes, Mode::Artwork);
+            ComposeEstimate::leaf_spaces(k, k, 0, Some(card), Some(artwork))
         }
         FilterExpr::Not(inner) if matches!(inner.as_ref(), FilterExpr::ColorCmp { .. }) => {
             let FilterExpr::ColorCmp { field, op, mask } = inner.as_ref() else { unreachable!("guarded above") };
             let k = color_cmp_value_total(*field, *op, *mask, true, indexes, Mode::Printing);
-            ComposeEstimate::leaf(k, k, 0)
+            let card = color_cmp_value_total(*field, *op, *mask, true, indexes, Mode::Card);
+            let artwork = color_cmp_value_total(*field, *op, *mask, true, indexes, Mode::Artwork);
+            ComposeEstimate::leaf_spaces(k, k, 0, Some(card), Some(artwork))
         }
-        // cmc/power/toughness: exact via the dedicated per-field sorted index (O(log n)) — no
-        // `eval_planes`, and cheaper than the joint #743 index's O(distinct tuples) scan, which this
-        // single-bound case doesn't need (`arith_tuple_count`'s doc covers the multi-bound `And`-level
-        // case above). Falls back to `arith_tuple_count` only if the dedicated lookup somehow declines
-        // (defensive — `is_printing_composable` already restricts this arm to shapes both accept).
+        // cmc/power/toughness: the exact (printings, cards, artworks) triple, in three tiers.
+        //
+        // Round 63 makes this arm exact. It used to lead with `bare_numeric_field_count`, whose
+        // dedicated per-field sorted index is card space ONLY, and scale that count into printing
+        // space by the corpus-average reprint ratio -- the same `card_count * n_printings / n_cards`
+        // idiom Round 61 deleted from the legality arm, and measurably the worse of the two: over 117
+        // bare numeric leaves against ground truth it spanned **0.310x-1.274x**, with **51 of 117
+        // (44%)** missing by >=200 printings AND >=10%, against legality's 0.647x-1.040x. The misses
+        // concentrate at low cmc, where the lands are and reprint depth is nothing like the corpus
+        // average -- `cmc=0` reported 3,699 against a true 11,948 (own depth 9.96, corpus 3.08),
+        // `cmc<=1` 13,159 against 21,584.
+        //
+        // 1. `bare_numeric_field_spans` -- `NumericSpanTotals`, two `partition_point`s over the field's
+        //    ~20-40 distinct values and one subtraction. Exact in all three spaces, so BOTH channels.
+        // 2. `arith_tuple_totals` -- also exact, but an O(distinct tuples) scan. Kept for the shapes
+        //    tier 1 cannot recognize, which is the reason this arm's guard is wider than
+        //    `bare_numeric_field_spans`' own: cross-field arithmetic like `cmc+1<power` is admitted
+        //    here and evaluated properly by `eval_arith_tuple_tri`.
+        // 3. `bare_numeric_field_count` scaled -- the old primary, now the last resort, reached only
+        //    when neither table is built for this store (a test fixture). Still estimate-only channel,
+        //    since a reprint-ratio guess is not a bound (Round 59's admission rule).
+        //
+        // Tier 1 is deliberately FIRST rather than tier 2, and that ordering is measured, not
+        // stylistic: leading with `arith_tuple_totals` gets the identical exact numbers but cost
+        // **+186% on `and_estimate_ns` p50** for queries carrying a numeric leaf, against +7% drift on
+        // a control subset that cannot reach this arm at all -- roughly +3.8us on what the queue calls
+        // the highest-traffic of the three reprint-ratio arms. That version is preserved unmerged on
+        // `r63p1-arith-tuple-reuse-measured-slow`.
+        //
+        // `broadcast` takes the exact `printings` rather than the old `scaled`, which is what the
+        // Round 51 fallback branch already did -- so the arm now has one convention instead of two.
+        // It is a cost bucket rather than a cardinality, and here the exact number is also the more
+        // accurate cost: this leaf is card-invariant, so the broadcast-down pass touches every printing
+        // of every matching card, which is exactly `printings`. (Round 61 kept `broadcast` scaled for
+        // legality, where the broadcast figure is NOT the leaf's own printing count; here it is.)
         FilterExpr::NumericCmp { lhs: NumExpr::Field(f), .. } | FilterExpr::NumericCmp { rhs: NumExpr::Field(f), .. }
             if matches!(f, NumField::Cmc | NumField::Power | NumField::Toughness) =>
         {
-            let card_count = bare_numeric_field_count(filter, indexes)
-                .or_else(|| arith_tuple_count(&[filter], indexes))
-                .expect("gated by is_printing_composable");
-            let n_cards = offsets.len() - 1;
-            let scaled = (card_count * n_printings).checked_div(n_cards).unwrap_or(0);
-            ComposeEstimate::leaf(scaled, scaled, 0)
+            match bare_numeric_field_spans(filter, indexes).or_else(|| arith_tuple_totals(&[filter], indexes)) {
+                Some((printings, cards, artworks)) => ComposeEstimate::leaf_spaces(printings, printings, 0, Some(cards), Some(artworks)),
+                None => {
+                    let n_cards = offsets.len() - 1;
+                    let cc = bare_numeric_field_count(filter, indexes).expect("gated by is_printing_composable");
+                    let scaled = (cc * n_printings).checked_div(n_cards).unwrap_or(0);
+                    ComposeEstimate::leaf_spaces_approx_printing(scaled, scaled, 0, Some(cc), None)
+                }
+            }
         }
         // Devotion: the one card-invariant broadcast leaf left with no cheaper exact source than a
         // real (cheap — O(n_cards/64)) `eval_planes` pass. No divergent-card fuzziness here (unlike
@@ -7938,12 +13011,28 @@ fn compose_printing_estimate(
         _ if is_broadcast_leaf_shape(filter) => {
             let card_bits = broadcast_composable_card_bits(filter, indexes).expect("gated by is_printing_composable");
             let n_cards = offsets.len() - 1;
-            let scaled = (popcount(&card_bits) * n_printings).checked_div(n_cards).unwrap_or(0);
-            ComposeEstimate::leaf(scaled, scaled, 0)
+            let card_count = popcount(&card_bits);
+            let scaled = (card_count * n_printings).checked_div(n_cards).unwrap_or(0);
+            // No artwork source here either -- devotion is synthesized from mana cost, not a raw
+            // corpus dimension `ValueTotals` has an artwork column for.
+            //
+            // Round 59: `scaled` fills the ESTIMATE channel only, for the identical reason the legality
+            // arm above does -- the card popcount is exact, the reprint-ratio scaling into printing
+            // space is an average-case approximation and not a bound.
+            ComposeEstimate::leaf_spaces_approx_printing(scaled, scaled, 0, Some(card_count), None)
         }
         // Range (bare or negated — `-usd<50` etc., see `bare_range_bounds`'s doc): `k` in-range
         // printings from the index partition points (O(log n), no scatter here); matches ≈ k, and k
         // rides `scatter` — the cheap range-slice scatter into the printing bitmap.
+        //
+        // `.card`/`.artwork` deliberately left `None`, not `exact_result_total(..., Mode::Card/Artwork)`
+        // (which reads `RangeCardCounts::distinct_cards`/`distinct_artworks` for this same shape):
+        // checked directly against real data, that path gave wrong-by-a-wide-margin answers for broad
+        // ranges (`eur>0.16`, real 31,724 cards out of 31,724, this path 19,992 -- part of a 250-query
+        // regression pattern this traced to, all broad range/rarity queries; full detail on the `is_and`
+        // gate in `acquire_plan_features`). A real, pre-existing bug in that structure's card/artwork
+        // counting, not something this pass fixes -- `ValueTotals`-backed leaves (`ColorCmp`/`Legality`/
+        // `CollectionCmp`/border), a different, simpler per-value lookup, show no sign of the same issue.
         FilterExpr::NumericCmp { .. } | FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. } | FilterExpr::Not(_)
             if bare_range_bounds(filter, indexes).is_some() =>
         {
@@ -8054,6 +13143,68 @@ impl RoutedPhaseTimer {
     fn acquired(&mut self) {}
     #[inline(always)]
     fn chosen(&mut self) {}
+    #[inline(always)]
+    fn finish(self) {}
+}
+
+/// Marks the two interior boundaries of `prepare_candidates`, splitting it into the three phases that
+/// scale with three different things -- the narrowing walk, the projection/materialization, and the
+/// text memoization. Or nothing at all when the `prepare-phases` feature is off.
+///
+/// Behind a cargo feature for exactly the reason `RoutedPhaseTimer` is: `prepare_candidates` runs on
+/// the routed production path, four clock reads there were measured at ~1.6% of a median query for
+/// `routed-phases`, and this answers a calibration question a diagnostic build can answer instead.
+/// With the feature off this is a zero-sized struct with empty methods and the reads compile away, so
+/// the shipped `materialize_cost` constants are reproducible without anyone paying for them.
+///
+/// The split is what established the shape those constants have: on a `Candidates` acquire the
+/// narrowing is a median 85% of prepare against 4% for the projection, and with a plane present the
+/// two swap (0% / 99% on a `plane` acquire). A model with one term for the projection alone -- which
+/// is what `MATERIALIZE_SORT_*` was -- cannot be repaired by moving its constants.
+///
+/// Note when reading a `prepare-phases` build's absolute numbers: the four clock reads inflate
+/// `ns_prepare` itself by ~10% against the default build (median 3,416 ns against 3,020 ns on the
+/// same seeded uniform sample). The SHARES are what this is for; the constants are fitted on a
+/// default build.
+#[cfg(feature = "prepare-phases")]
+struct PrepareSplitTimer {
+    last: std::time::Instant,
+    split: [u64; 3],
+    marked: usize,
+}
+
+#[cfg(feature = "prepare-phases")]
+impl PrepareSplitTimer {
+    fn start() -> Self {
+        Self { last: std::time::Instant::now(), split: [0; 3], marked: 0 }
+    }
+    /// Close the phase in progress and open the next. Silently ignores a mark past the third phase,
+    /// which cannot happen -- the two call sites are unconditional and `finish` closes the third.
+    fn mark(&mut self) {
+        let now = std::time::Instant::now();
+        if let Some(slot) = self.split.get_mut(self.marked) {
+            *slot = (now - self.last).as_nanos() as u64;
+            self.marked += 1;
+        }
+        self.last = now;
+    }
+    fn finish(mut self) {
+        self.mark();
+        PENDING_PREPARE_SPLIT.with(|c| c.set(self.split));
+    }
+}
+
+#[cfg(not(feature = "prepare-phases"))]
+struct PrepareSplitTimer;
+
+#[cfg(not(feature = "prepare-phases"))]
+impl PrepareSplitTimer {
+    #[inline(always)]
+    fn start() -> Self {
+        Self
+    }
+    #[inline(always)]
+    fn mark(&mut self) {}
     #[inline(always)]
     fn finish(self) {}
 }
@@ -8324,35 +13475,107 @@ fn walk_value_orderby_page<'a>(
 /// Both are still UPPER BOUNDS for three or more children -- the intersection of three sets is at most
 /// the smallest pairwise intersection -- but a pairwise bound is much tighter than a single-leaf one
 /// whenever the leaves are individually broad, which is exactly when the estimate matters.
-fn pair_bounded_min(children: &[FilterExpr], indexes: &Archived<CardIndexes>, single_min: usize) -> usize {
+///
+/// Round 59: `single_min` must itself be a PROVEN bound (`SpaceMeasure::guaranteed`), never a `best()`
+/// guess. This function's own contributions are real counts -- a stored `PairTotals` entry, or a
+/// disjointness proof's exact 0 -- so given a bound it returns a bound, and the `And` arm folds the
+/// result into both channels on that basis. Hand it a guess and the guess comes back out wearing the
+/// return type of a bound, which is the exact confusion `SpaceMeasure` exists to prevent.
+// Round 40: `covered.flags` gains a `true` at position `i` for every child that participated in a
+// genuine `PairTotals`/disjointness hit here -- read by the And arm's independence registry scan
+// (below) so a leaf already given an EXACT joint by this mechanism is never also handed to an inexact
+// independence estimate (the class-priority rule: estimate-class may only fill a subset no exact/
+// bound mechanism covers at all -- see that scan's own doc).
+// Round 49: also pushes `(1 << i) | (1 << j)` onto `covered.subsets` on a `PairTotals` hit -- without
+// this, an exact hit here would still block independence from ever using either leaf again (via
+// `flags`), since before this round `covered` had no subset-identity tracking at all. Both `i`/`j` are
+// always `< 64` in practice (bounded by `children.len()`), but guarded anyway for defense-in-depth,
+// matching `mark_covered`'s own guard. The disjoint-fill branch (`covered.flags.fill(true)`) is left
+// as-is -- `result` is already forced to 0 there, which no subsequent `.min()`-fold can undo, so no new
+// subset tracking is needed for it.
+fn pair_bounded_min(children: &[FilterExpr], indexes: &Archived<CardIndexes>, single_min: usize, covered: &mut CoveredState) -> PairBound {
     if children.len() < 2 || !*PAIR_TOTALS {
-        return single_min;
+        return PairBound { printing: single_min, card: None, artwork: None };
     }
     let pt = &indexes.pair_totals;
     let ids: Vec<Option<u16>> = children.iter().map(|c| pair_leaf_id(c, pt)).collect();
-    let mut best = single_min;
+    let mut out = PairBound { printing: single_min, card: None, artwork: None };
     for (i, a) in children.iter().enumerate() {
         for (j, b) in children.iter().enumerate().skip(i + 1) {
             if leaves_are_disjoint(a, b) {
-                return 0;
+                covered.flags.fill(true); // the whole And is provably empty; nothing else matters
+                // Round 63 deliberately leaves card/artwork ABSENT here rather than proving them 0.
+                // A disjointness proof really does mean zero cards and zero artworks, so `Some(0)`
+                // would be a true statement about the ANSWER -- but `result.card` is consumed by
+                // `acquire_plan_features` as the DOMAIN the materializing alternatives walk, and those
+                // two part company exactly when narrowing declines a child. Tried and measured:
+                // `Some(0)` here drove `border:white border:black`'s `eval_domain`/`scan_units` to 0
+                // and flipped it `PrintingCompose -> GatheredScan`, against a realized
+                // `cards_visited` of 2,059 -- the 0.2us-against-199.3us mispricing `est.candidate`
+                // exists to prevent, since a plan still has to SCAN to discover a set is empty.
+                // A genuine `PairTotals` hit below is different: its count is what narrowing on both
+                // values actually reaches (verified, `cmc=5 frame:1997` eval_domain 643 against a
+                // realized 643).
+                return PairBound { printing: 0, card: None, artwork: None };
             }
             if let (Some(x), Some(y)) = (ids[i], ids[j])
-                && let Some(k) = pt.get(x, y, Mode::Printing)
+                && let Some((k, pair_cards, pair_artworks)) = pt.get_all(x, y)
             {
-                best = best.min(k);
+                out.printing = out.printing.min(k);
+                // Round 63: card and artwork come off the SAME hashmap lookup as the printing count
+                // (`get_all` against `get`), so this costs nothing and is exact. Folded per space
+                // independently, which is sound for the same reason the printing fold is: each stored
+                // entry is a real count of the pair's own intersection, and that intersection is a
+                // SUPERSET of the whole And's answer, so its count bounds the And's answer in whichever
+                // space it is read. Mirrors `fold_candidate`'s `Candidate::Exact` arm, which likewise
+                // takes a per-space `lower_guaranteed` over all three.
+                out.card = Some(out.card.map_or(pair_cards, |c: usize| c.min(pair_cards)));
+                out.artwork = Some(out.artwork.map_or(pair_artworks, |c: usize| c.min(pair_artworks)));
+                covered.flags[i] = true;
+                covered.flags[j] = true;
+                let mut mask: u64 = 0;
+                if i < 64 {
+                    mask |= 1u64 << i;
+                }
+                if j < 64 {
+                    mask |= 1u64 << j;
+                }
+                if mask != 0 {
+                    covered.subsets.push(mask);
+                }
             }
         }
     }
-    best
+    out
+}
+
+/// What `pair_bounded_min` proved, per space (Round 63).
+///
+/// `printing` is the tightest printing-space bound, seeded from the caller's own `single_min` so it is
+/// always present. `card`/`artwork` are `None` when no pair hit at all — an absent bound, never a zero
+/// (the "absence means unknown, never zero" rule `SpaceMeasure` exists to enforce).
+///
+/// Before Round 63 this function returned the printing number alone and the `And` arm built
+/// `SpaceEstimate { printing, card: UNKNOWN, artwork: UNKNOWN }` from it, so `PairTotals`' exact card
+/// and artwork columns were fetched by the trace's `get_all` and then thrown away. Found by reading
+/// `explain`'s own trace on `cmc=0 f:premodern`: the `considered` entry showed the `PairTotals` hit
+/// carrying `card: 216`, the true value, while the root reported 1,200 — `cmc=0`'s own solo count,
+/// arriving via `narrow_floor` because nothing had folded anything tighter. Round 60's decision to
+/// report both channels for all three spaces in the trace is the only reason that was visible.
+struct PairBound {
+    printing: usize,
+    card: Option<usize>,
+    artwork: Option<usize>,
 }
 
 /// The pair-table id for a leaf, or `None` when the leaf's dimension is not covered or its value was
 /// pruned by the selectivity floor.
 ///
-/// Deliberately the same four shapes `exact_result_total`'s singleton arms accept, and for the same
+/// Deliberately the same shapes `exact_result_total`'s singleton arms accept, and for the same
 /// reasons: `Eq` only on the interned strings (the ordering ops are not a per-value question), `Ge` only
-/// on the collection (`Eq`/`Gt` add a length condition containment does not prove), and rarity only at
-/// `Eq` (any other op is a range over several values, which no per-value entry answers).
+/// on the collection (`Eq`/`Gt` add a length condition containment does not prove), and rarity/cmc/
+/// power/toughness only at `Eq` (any other op is a range over several values, which no per-value entry
+/// answers on its own — `pair_range_sum` is the range-capable counterpart for the arith-tuple three).
 fn pair_leaf_id(filter: &FilterExpr, pt: &ArchivedPairTotals) -> Option<u16> {
     let id = match filter {
         FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value } => pt.border.get(value.as_str()),
@@ -8365,9 +13588,112 @@ fn pair_leaf_id(filter: &FilterExpr, pt: &ArchivedPairTotals) -> Option<u16> {
             }
             pt.rarity.get(&(*v as u8))
         }
+        FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Cmc), op: CmpOp::Eq, rhs: NumExpr::Const(v) }
+        | FilterExpr::NumericCmp { lhs: NumExpr::Const(v), op: CmpOp::Eq, rhs: NumExpr::Field(NumField::Cmc) } => {
+            if v.fract() != 0.0 || *v < 0.0 || *v > f64::from(u8::MAX) {
+                return None;
+            }
+            pt.cmc.get(&(*v as u8))
+        }
+        FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Power), op: CmpOp::Eq, rhs: NumExpr::Const(v) }
+        | FilterExpr::NumericCmp { lhs: NumExpr::Const(v), op: CmpOp::Eq, rhs: NumExpr::Field(NumField::Power) } => {
+            if v.fract() != 0.0 || *v < f64::from(i8::MIN) || *v > f64::from(i8::MAX) {
+                return None;
+            }
+            pt.power.get(&(*v as i8))
+        }
+        FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::Toughness), op: CmpOp::Eq, rhs: NumExpr::Const(v) }
+        | FilterExpr::NumericCmp { lhs: NumExpr::Const(v), op: CmpOp::Eq, rhs: NumExpr::Field(NumField::Toughness) } => {
+            if v.fract() != 0.0 || *v < f64::from(i8::MIN) || *v > f64::from(i8::MAX) {
+                return None;
+            }
+            pt.toughness.get(&(*v as i8))
+        }
         _ => None,
     }?;
     Some(u16::from(*id))
+}
+
+/// The single `NumField` every one of `children` constrains, or `None` when they don't all agree (a
+/// mixed `cmc>=1 power<=2`-shaped `And` — `pair_range_sum` sums over ONE field's own value axis per
+/// call, not several at once) or `children` is empty. `children` is expected to already be
+/// `is_arith_tuple_eligible`-filtered.
+fn single_arith_field(children: &[&FilterExpr]) -> Option<NumField> {
+    let mut field = None;
+    for c in children {
+        let f = match c {
+            FilterExpr::NumericCmp { lhs: NumExpr::Field(f), rhs: NumExpr::Const(_), .. }
+            | FilterExpr::NumericCmp { lhs: NumExpr::Const(_), rhs: NumExpr::Field(f), .. } => *f,
+            _ => return None,
+        };
+        match field {
+            None => field = Some(f),
+            Some(existing) if existing == f => {}
+            Some(_) => return None,
+        }
+    }
+    field
+}
+
+/// Exact (printing, card, artwork) totals for a RANGE over one arith-tuple field's values (`cmc`/
+/// `power`/`toughness`) ANDed with one existential leaf's own pair-table id (`pair_leaf_id`).
+///
+/// `cmc`/`power`/`toughness` are single-valued per card — exactly one value per card, never several —
+/// so partitioning the card space by that one value is genuinely exhaustive and non-overlapping.
+/// Summing the per-value exact pair-total (`pt.get_all`) over every value `bounds` admits therefore
+/// reproduces the TRUE joint total exactly: a sum over disjoint cells, not a product or a `min`, so
+/// there is no independence assumption and no anti-correlation risk. Validated 429/429 against real
+/// corpus data in Round 23's investigation before this was wired in — see
+/// docs/issues/local-engine-domain-cards-existential-arith-and.md.
+///
+/// Declines (`None`) the instant ANY value `bounds` admits was pruned from the field's own id map by
+/// the selectivity floor — `*_seen` (on `PairTotals`) is what tells that apart from "this value never
+/// occurs at all" (safe either way: contributes nothing), so a missing id here means "give up", never
+/// "count it as zero".
+///
+/// Bounded by the field's own distinct observed value count (~14-21 on the production corpus), not by
+/// how wide `bounds` phrases the range: `cmc<=250` costs exactly what `cmc<=5` does.
+fn pair_range_sum(bounds: &[&FilterExpr], field: NumField, existential_id: u16, pt: &ArchivedPairTotals) -> Option<(usize, usize, usize)> {
+    let admits = |v: f64| -> bool {
+        let cmc = matches!(field, NumField::Cmc).then_some(v);
+        let power = matches!(field, NumField::Power).then_some(v);
+        let toughness = matches!(field, NumField::Toughness).then_some(v);
+        bounds.iter().all(|b| {
+            let FilterExpr::NumericCmp { lhs, op, rhs } = b else { return false };
+            matches!(eval_arith_tuple_tri(lhs, *op, rhs, cmc, power, toughness, None), Tri::True)
+        })
+    };
+    let mut total = (0usize, 0usize, 0usize);
+    let mut add = |field_id: u16| -> Option<()> {
+        let (p, c, a) = pt.get_all(field_id, existential_id)?;
+        total = (total.0 + p, total.1 + c, total.2 + a);
+        Some(())
+    };
+    match field {
+        NumField::Cmc => {
+            for &v in pt.cmc_seen.iter() {
+                if admits(f64::from(v)) {
+                    add(u16::from(*pt.cmc.get(&v)?))?;
+                }
+            }
+        }
+        NumField::Power => {
+            for &v in pt.power_seen.iter() {
+                if admits(f64::from(v)) {
+                    add(u16::from(*pt.power.get(&v)?))?;
+                }
+            }
+        }
+        NumField::Toughness => {
+            for &v in pt.toughness_seen.iter() {
+                if admits(f64::from(v)) {
+                    add(u16::from(*pt.toughness.get(&v)?))?;
+                }
+            }
+        }
+        _ => return None,
+    }
+    Some(total)
 }
 
 /// Whether two leaves are provably disjoint: distinct values of a dimension that holds exactly ONE value
@@ -8376,11 +13702,30 @@ fn pair_leaf_id(filter: &FilterExpr, pt: &ArchivedPairTotals) -> Option<u16> {
 /// `frame_data` is excluded because it is multi-valued -- `frame:2015 frame:legendary` matches 10,321
 /// printings. A rule rather than stored data, which is why the pair table need not carry same-dimension
 /// entries for the partitions.
+///
+/// Every arm here is exact in all three `unique=` modes, not just `printing`/`artwork` -- verified
+/// against the real per-printing residual walk (`card_match_count`'s `Mode::Card`/`Mode::Artwork` arms,
+/// both of which test every child of an `And` residual against the SAME single printing via
+/// `residual_matches`/`FilterExpr::tri`, never two different printings independently) rather than
+/// assumed by analogy. `set` looks like it could be an exception -- a card's printings commonly span
+/// several sets (unlike `border`/`rarity`, which rarely vary meaningfully across a card's own
+/// reprints), and a single ILLUSTRATION can too (real corpus check: 16,838 of 46,523 distinct
+/// `illustration_id`s in benchmarks/bitplanes/corpus.jsonl appear under more than one `card_set_code`,
+/// e.g. Immaculate Magistrate's art spans `dpa`/`lrw`/`gn3`/`cma`/`c14`/`cmr`/`ps11`) -- but that reuse
+/// is irrelevant here: `set:X AND set:Y` (x != y) still requires ONE printing to have two set codes at
+/// once, which is impossible regardless of how its card or artwork group is assembled from OTHER
+/// printings. `set:dpa set:lrw` against that real fixture reads 0 in every mode already (the residual
+/// walk gets it right without this function's help); this arm only lets the acquire-time estimate say
+/// so exactly instead of min-folding two individually-broad `set:` counts.
 fn leaves_are_disjoint(a: &FilterExpr, b: &FilterExpr) -> bool {
     match (a, b) {
         (
             FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value: x },
             FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value: y },
+        ) => x != y,
+        (
+            FilterExpr::TextExact { field: TextField::SetCode, op: CmpOp::Eq, value: x },
+            FilterExpr::TextExact { field: TextField::SetCode, op: CmpOp::Eq, value: y },
         ) => x != y,
         (FilterExpr::Legality { shift: Some(sa), expected: ea }, FilterExpr::Legality { shift: Some(sb), expected: eb }) => {
             sa == sb && ea != eb
@@ -8437,6 +13782,63 @@ fn exact_result_total(composed: &FilterExpr, indexes: &Archived<CardIndexes>, mo
             return Some(total);
         }
     }
+    // Round 34: `set:X`/`c:X`/`id:X` x subtype -- the same 2-leaf shape as the PAIR table above, but a
+    // dimension `pair_leaf_id` doesn't cover (subtype has ~300 distinct values, too many for a dense
+    // pair table; `subtype_pairs` is the top-256-per-dimension answer to that instead). Declines to
+    // `None` (not "no answer" — that's what happens when the pair is outside the top 256; the caller's
+    // OWN fallback, if it has one, applies) via `subtype_pair_exact`'s own miss case.
+    if let FilterExpr::And(children) = composed
+        && children.len() == 2
+        && let Some(totals) = subtype_pair_exact(&children[0], &children[1], indexes)
+    {
+        return Some(totals.get(mode));
+    }
+    // Round 36: `t:X` And'd with 1+ cmc/power/toughness bound children -- the SAME shape
+    // `compose_printing_estimate`'s own `And` arm recognizes (see that arm's own doc for why this is
+    // not a strict 2-leaf shape like the two arms just above). Needed here for the identical reason
+    // Round 34's own arm is: `PrintingCompose`'s acquire branch gets its card/artwork-mode match count
+    // from THIS function (`exact_cards = exact_result_total(composed, indexes, Mode::Card)`), not from
+    // `compose_printing_estimate`'s own `exact_domain` -- confirmed directly against a real query
+    // during this round (`t:dragon power>=6`, `unique=card`: `compose_printing_estimate` alone made
+    // `result.printing`/`.card` exact, but `explain()`'s own card-mode `matches` feature still read a
+    // `calibrated_balls_into_bins` guess, 216, until this arm was added). Declines to `None` (not "no
+    // answer") on a miss -- outside the top `SUBTYPE_ARITH_TOP_N`, or the shape doesn't match -- the
+    // same convention every other arm in this function follows.
+    if let FilterExpr::And(children) = composed {
+        let arith_children: Vec<&FilterExpr> = children.iter().filter(|c| is_arith_tuple_eligible(c)).collect();
+        if !arith_children.is_empty()
+            && arith_children.len() + 1 == children.len()
+            && let Some(subtype_child) = children.iter().find(|c| !is_arith_tuple_eligible(c))
+            && let Some(subtype) = subtype_pair_leaf(subtype_child)
+            && let Some((printings, cards, artworks)) = subtype_arith_exact(subtype, &arith_children, indexes)
+        {
+            return Some(match mode {
+                Mode::Printing => printings,
+                Mode::Card => cards,
+                Mode::Artwork => artworks,
+            });
+        }
+    }
+    // Round 44: `color:X`/`id:X` And'd with exactly one literal cmc bound (nothing else) -- the
+    // strict 2-leaf shape, same as the `PairTotals`/`SubtypePairIndexes` arms above. A two-cmc-child
+    // shape (`color:G cmc>=1 cmc<=5`, a 3-child `And`) only reaches `indexes.color_cmc` via
+    // `compose_printing_estimate`'s own generalized `And`-arm scan, not this shortcut -- same
+    // division of labor `subtype_arith_exact`'s arm just above draws for its own multi-bound shape.
+    if let FilterExpr::And(children) = composed
+        && let [a, b] = children.as_slice()
+    {
+        let dim_cmc = color_cmc_dim(a).zip(cmc_leaf_bounds(b)).or_else(|| color_cmc_dim(b).zip(cmc_leaf_bounds(a)));
+        if let Some(((field, op, mask), (cmc_lo, cmc_hi))) = dim_cmc
+            && let Some(table) = color_cmc_table_for(field, indexes)
+            && let Some((printings, cards, artworks)) = color_cmc_exact(op, mask, cmc_lo, cmc_hi, table)
+        {
+            return Some(match mode {
+                Mode::Printing => printings,
+                Mode::Card => cards,
+                Mode::Artwork => artworks,
+            });
+        }
+    }
     // The per-value table, which covers the dimensions whose predicate tests ONE value, in all three
     // spaces. Absence from a COMPLETE table is an exact zero, not a declined shape -- every one of
     // these maps holds every value present in the corpus, so a miss means nothing matches.
@@ -8472,7 +13874,7 @@ fn exact_result_total(composed: &FilterExpr, indexes: &Archived<CardIndexes>, mo
             return Some(vt.is_tags.get(value.as_str()).map_or(0, |t| t.get(mode)));
         }
         FilterExpr::Legality { shift: Some(shift), expected } => {
-            return Some(vt.legality.get(&legality_totals_key(*shift, *expected).into()).map_or(0, |t| t.get(mode)));
+            return Some(legality_space_totals(indexes, *shift, *expected).map_or(0, |t| t.get(mode)));
         }
         // A format absent from all loaded data matches nothing, in every space.
         FilterExpr::Legality { shift: None, .. } => return Some(0),
@@ -9373,6 +14775,52 @@ fn compose_leaf_nothing_to_verify(filter: &FilterExpr) -> bool {
     )
 }
 
+/// The PLANE half of the router's `tier`/`residual_tier_ns100` charge in the `PrintingCompose`-acquire
+/// branch of `acquire_plan_features` -- the counterpart to `plane_leaves_nothing_to_verify`'s combined
+/// (filter-must-be-True-too) check, factored out so it can be ANDed with the FILTER half
+/// (`compose_leaf_nothing_to_verify`) independently instead of ORed as two whole-query claims. See
+/// the call site for why the OR shape was unsound.
+///
+/// Round 15 shipped this scoped to a special-cased `plane_touches_rarity_or_border` helper (a plane-
+/// index-range check) instead of the general `plane_expr_is_existential` this now uses directly, on the
+/// theory that legality's `Mode::Card` bypass (#667: "the card has some legal printing" already IS
+/// `unique=card`'s semantics) was sound while rarity/border's wasn't. That theory doesn't survive
+/// contact with the executor: `existential_plane_for` (this file) grants NO `Mode::Card`-vs-family
+/// carveout at all -- it forces `push_card_matches` into the same per-candidate, per-printing
+/// `eval_plane_expr_for_printing` walk for ANY plane where `plane_expr_is_existential` is true, rarity,
+/// border, or a DIVERGENT legality format alike (row selection must still return an actual witnessing
+/// printing -- see #667's "Row selection for `unique=card`"). A bare `f:oldschool` (Round 15's
+/// production corpus's one divergent format), `unique=card`: `GatheredScan` predicted 10,358ns
+/// (`residual_tier_ns100 == 0`, the Round-15 bypass firing because a pure-legality plane never
+/// "touches rarity or border") against a measured 29,083ns median -- a 2.8x under-charge, and
+/// `printings_examined` (6,037) over `cards_visited` (961) proves the per-printing walk is real, not a
+/// costing artifact, exactly the same shape as Round 15's `border`/`rarity` finding
+/// (docs/issues/local-engine-gathered-scan-undercosted-arith-existential-and.md). `f:oldschool
+/// cmc>=1 cmc<=5` (folds to one plane the same way the shipped fix's `cmc`+`border` reproducer did):
+/// predicted 18,519ns against measured 58,625ns, a 3.16x under-charge.
+///
+/// So the right question was never "which FIELD is this" -- it's "does `existential_plane_for` force a
+/// per-printing walk here", and `plane_expr_is_existential` (planes.rs) already answers that precisely,
+/// per plane index, via the family-keyed `PLANE_BLOCKS`/`existential_leaf`/`needs_printing_verification`
+/// table (legality: divergent-format-dependent; rarity/border: unconditional) -- the exact table
+/// `existential_plane_for` itself reads. No `Mode::Card` term is needed here either: `split_planes`
+/// (planes.rs) only ever folds an existential leaf into `plane` under `unique_is_card` (its whole-filter
+/// guard and its `And`-child guard are both `unique_is_card || !plane_expr_is_existential`), so
+/// `plane_expr_is_existential(plane)` being true already implies `mode == Mode::Card` -- there is no
+/// live case for a `mode` check to distinguish here that the plane's own existential-ness doesn't
+/// already settle. A future field (e.g. a new tracked value in a new `BlockKind`) inherits the right
+/// answer automatically by which `PLANE_BLOCKS` entry it lands in, with no new arm needed here.
+///
+/// `plane_leaves_nothing_to_verify` itself is deliberately left as-is (still used by the EXECUTOR's own
+/// `all_match_known` in `prepare_candidates`): granting Mode::Card's bypass to EVERY existential family
+/// there (legality included) is harmless because the real per-printing correctness work runs through
+/// `existential_plane_for` regardless of what `all_match_known` says. The router's `tier` charge has no
+/// such second mechanism: if `tier` is 0 ("nothing to verify"), `GatheredScan`/`StreamedSelect` are
+/// priced as though that per-printing walk never happens, when for any existential plane it always does.
+fn cost_plane_nothing_to_verify(plane: Option<&PlaneExpr>, indexes: &Archived<CardIndexes>) -> bool {
+    plane.is_none_or(|expr| !plane_expr_is_existential(expr, u64::from(indexes.planes.divergent_formats)))
+}
+
 /// The candidate materialization + filter rewriting shared by `StreamedSelect`
 /// and `GatheredScan`, extracted verbatim from `run_query`. Mutates `filter` via
 /// `memoize_text_predicates` + `order_children_by_verify_cost` under the same
@@ -9389,8 +14837,10 @@ fn prepare_candidates(ctx: &QueryCtx, params: &QueryParams, filter: &mut FilterE
     // queries exactly as before. Left un-materialized (Candidates, not
     // Vec<u32>) here so the plane branch below can AND two card-space bitmaps
     // directly instead of paying to materialize one of them first.
+    let mut split = PrepareSplitTimer::start();
     let (raw_candidates, residual_exact, proven_conjuncts): (Option<Candidates>, bool, u64) =
         narrow_candidates_exact(filter, indexes, offsets, cards);
+    split.mark();
     // Captured before the flattening below consumes it — see PreparedCandidates::narrowed_repr.
     let narrowed_repr = raw_candidates.as_ref().map_or(NarrowedRepr::None, Candidates::repr);
     // A present plane is always exact (that's what compile_plane guarantees),
@@ -9468,6 +14918,7 @@ fn prepare_candidates(ctx: &QueryCtx, params: &QueryParams, filter: &mut FilterE
     // The `plane_leaves_nothing_to_verify` half needs no such guard: with a plane present
     // `candidate_cards` is always Some, and with no plane it can only hold for a filter that matches
     // everything, where scanning everything is the right answer.
+    split.mark();
     let all_match_known =
         plane_leaves_nothing_to_verify(filter, mode, plane, ctx.indexes) || (residual_exact && candidate_cards.is_some());
 
@@ -9502,6 +14953,7 @@ fn prepare_candidates(ctx: &QueryCtx, params: &QueryParams, filter: &mut FilterE
         proven_conjuncts = 0;
     }
 
+    split.finish();
     PreparedCandidates { candidate_cards, all_match_known, narrowed_repr, proven_conjuncts }
 }
 
@@ -9668,20 +15120,48 @@ fn walk_grouped_page<'a>(
         let start = u32::from(offsets[cid as usize]) as usize;
         let end = u32::from(offsets[cid as usize + 1]) as usize;
         work.cards_visited += 1;
-        work.printings_examined += (end - start) as u64;
         scratch.clear();
         match mode {
             // Printing: every set printing is its own row (no grouping).
             Mode::Printing => {
+                work.printings_examined += (end - start) as u64;
                 for pid in start..end {
                     if is_set(pid) {
                         scratch.push((sort_key_bits(card, &printings[pid], sort_col, descending), cid, pid as u32));
                     }
                 }
             }
-            // Card / Artwork: one best-prefer representative per group — a single group for Card, one
-            // per `artwork_group_id` for Artwork.
+            // Card, default prefer: printings are stored prefer-DESCENDING within a card (the load-time
+            // sort in `from_rows`, ties by illustration_id then scryfall_id), so the first *set* printing
+            // in range already IS the chosen representative — every `prefer_score` call after it was
+            // wasted, as was the `touched`/`group_best` bookkeeping. Same early break
+            // `gather_composed_page` and `push_card_matches` take, and byte-identical in what it picks:
+            // the general loop's strict `>` gives ties to the lowest pid, which is the one `find` stops
+            // at. Only MATCHING cards save anything, though: this walk steps the whole permutation, so a
+            // card with no set printing still bit-tests its full span (the `else`) and is untouched here.
+            Mode::Card if matches!(prefer, Prefer::Default) => {
+                // `find` rather than an explicit indexed loop with a `break`, so this reads as the
+                // same construct `gather_composed_page`'s corresponding arm uses. Both shapes were
+                // measured on the real corpus and are indistinguishable, at every density in the live
+                // `Perm` population and in the out-of-population sparse regime alike, so consistency
+                // with the sibling decides it.
+                if let Some(pid) = (start..end).find(|&pid| is_set(pid)) {
+                    // Counted from the EXIT POSITION, not per iteration: `printings_examined` used to
+                    // be an unconditional `end - start` before the match, which an early-exiting loop
+                    // would over-report, and instrumentation inside this loop is exactly what the
+                    // project's hot-path rule exists to prevent.
+                    work.printings_examined += (pid - start + 1) as u64;
+                    scratch.push((sort_key_bits(card, &printings[pid], sort_col, descending), cid, pid as u32));
+                } else {
+                    work.printings_examined += (end - start) as u64;
+                }
+            }
+            // Card (non-default prefer) / Artwork: one best-prefer representative per group — a single
+            // group for Card, one per `artwork_group_id` for Artwork. Both must score every set printing:
+            // a custom prefer has no relationship to store order, and Artwork cannot stop until it has
+            // seen every group (a cheaper stop for it is a separate optimization).
             Mode::Card | Mode::Artwork => {
+                work.printings_examined += (end - start) as u64;
                 touched.clear();
                 for pid in start..end {
                     if !is_set(pid) {
@@ -10170,11 +15650,10 @@ fn gather_composed_page<'a>(
             // Card, default prefer: printings are stored prefer-desc within a card (same invariant
             // `push_card_matches` relies on), so the first *set* printing in range is already the
             // chosen one — no score to compute, no `touched`/`group_best` bookkeeping, an O(1) early
-            // break instead of scanning the rest of the card's printings. This matters here (unlike
-            // `walk_grouped_page`, which pays the same unconditional score-every-candidate cost) since
-            // this loop isn't bounded by page size — it visits every candidate card, so a per-printing
-            // cost that scales with total matches rather than `limit` is the dominant term for a broad
-            // composed set.
+            // break instead of scanning the rest of the card's printings. It matters more here than in
+            // `walk_grouped_page` (which now takes the same break) since this loop isn't bounded by page
+            // size — it visits every candidate card, so a per-printing cost that scales with total
+            // matches rather than `limit` is the dominant term for a broad composed set.
             Mode::Card if matches!(prefer, Prefer::Default) => {
                 // The one arm that does stop early: `find` breaks at the first set printing, and a
                 // candidate card has at least one by construction, so this tests `first_set - start + 1`
@@ -10295,6 +15774,77 @@ pub(crate) struct PhaseStats {
     /// `matches x EMIT + FIXED` ~ 397 ns throughout: under by 3.4x at the production corpus and 26x at
     /// 410k. Published so the estimate can be GRADED rather than assumed, like the other three counters.
     pub(crate) perm_steps: u64,
+    /// Printings `push_card_matches` re-examined in `run_query_streamed`'s `total <= STREAM_MIN_MATCHES`
+    /// branch's SECOND pass over every matching card -- the redo Round 30 of the printing-varying-leaf
+    /// depth ledger (docs/issues/local-engine-gathered-scan-card-printing-varying-depth.md) found
+    /// `printings_examined` structurally cannot see, because that counter is captured only from the
+    /// first, counting-only pass (`card_match_count`), which this second pass never touches.
+    ///
+    /// `push_card_matches` already computes and returns this per call (mirroring `card_match_count`'s
+    /// own `(c, examined)` pattern) -- capturing it here is free, not a new pass or a new computation,
+    /// just no longer discarding a value the redo loop already produces.
+    ///
+    /// Zero for every other executor and for P3's other two exits (the empty/past-the-end return and
+    /// the permutation walk, whose own per-step `push_card_matches` cost already flows into `ns_loop`
+    /// there and is not double-counted here -- see `perm_steps`'s own calibration). Nonzero only on the
+    /// exit this field exists to price: the small-total gather-and-quickselect branch, any mode.
+    pub(crate) redo_examined: u64,
+    /// `filter.card_pass` invocations this run made -- realized ground truth for
+    /// `cost::residual_card_pass`, the quantity both materializing arms multiply by
+    /// `CARD_PASS + max(tier, RESIDUAL_FLOOR)`. Zero under `all_match_known` (the call is skipped
+    /// outright, #634 step 1) and zero for every executor with no residual to verify (compose composes
+    /// exact membership).
+    ///
+    /// Free on the hot path, which is why it is shaped this way rather than as a loop counter: the
+    /// call happens exactly once per iteration of each pass, gated on one query-wide flag, so the
+    /// count is `if all_match_known { 0 } else { <that pass's iteration count> }` and every one of
+    /// those counts is a local the loop already keeps. Round 68's precedent -- accumulate nothing new
+    /// in the inner loop, publish once at the exit position.
+    ///
+    /// The reason it exists: the term's own doc in `cost.rs` used to say "the loop calls
+    /// `filter.card_pass` once per `cid`", which is true of `exec_gathered_scan` and NOT of
+    /// `run_query_streamed`, whose small-total redo loop and permutation walk each re-derive it for a
+    /// second population. That is a claim about the executor, so it is graded against the executor --
+    /// and this counter is what sized the gap. The small-total redo is now priced
+    /// (`cost::stream_redo_cards`); the walk's own re-derivation is measured, deliberately unpriced,
+    /// and still visible here.
+    pub(crate) card_pass_calls: u64,
+    /// Printings `PrintingCompose`'s BUILD broadcast passes wrote or cleared -- realized ground truth
+    /// for `PlanFeatures::broadcast_printings`, charged at `COMPOSE_LINEAR_PASS_PER_PRINTING_NS`. Zero
+    /// for every other executor, and for a compose whose leaves are all ranges/postings/planes.
+    ///
+    /// Accumulated through `note_broadcast_printings` rather than published whole here: the two passes
+    /// that do this work (`broadcast_card_bits_to_printings` and `legality_leaf_bits_from_absent`) sit
+    /// under `compose_printing_bits`' recursion, which has no publish site of its own. See that
+    /// function's slot for why a thread-local accumulator and not a threaded-through argument.
+    pub(crate) broadcast_printings: u64,
+    /// Matches `GatheredScan`'s finish phase quickselected over — `GatherSelect::buffered_len()` at
+    /// the moment `finish` is called, i.e. the real input length of `select_page`. Realized ground
+    /// truth for `cost::gather_page_span`, charged at `GATHER_SELECT_PER_PAGE_SLOT_NS`.
+    ///
+    /// It exists because the two are NOT the same quantity and nothing said so. The arm charges
+    /// `min(offset + limit, matches)`; the selector keeps a bounded buffer and prunes it back to
+    /// `k = offset + limit` only once it has grown `GATHER_PRUNE_CHUNK` past `k`, so on any query with
+    /// more matches than one page the realized input is somewhere in `[k, k + GATHER_PRUNE_CHUNK)` —
+    /// up to 4,156 slots against a charged 60 on the default page. Free on the hot path: one `Vec::len`
+    /// read at the phase boundary, Round 68's shape, nothing added to the loop body.
+    ///
+    /// Zero for every other executor. `run_query_streamed`'s small-total exit and
+    /// `gather_composed_page` both drive a `GatherSelect` too, but neither arm charges a page-slot
+    /// term at all, so a counter published from them would be graded against nothing.
+    pub(crate) select_input_len: u64,
+    /// Rows `GatheredScan`'s finish phase actually collected into the page — `page.len()`. Realized
+    /// ground truth for `cost::gather_page_rows`, charged at `GATHER_COLLECT_PER_PAGE_ROW_NS`.
+    ///
+    /// Unlike `select_input_len` this is the SAME clamp the arm applies, taken over the realized total
+    /// instead of the estimated `matches` — so the cell isolates the cardinality estimate's error
+    /// propagating into the page phase, with no shape error of its own mixed in. It is therefore
+    /// exactly `clamp(result_total - offset, 0, limit)`, and `gather_page_counters_match_the_realized_page`
+    /// asserts that identity rather than leaving it as a comment: if it ever fails, the arm's clamp is
+    /// the wrong form and not merely mis-fed.
+    ///
+    /// Zero for every other executor, for the reason on `select_input_len`.
+    pub(crate) page_rows_collected: u64,
     /// Per-query scratch setup, before the match loop starts. Split out because it is neither
     /// prepare nor match and it is NOT negligible: `run_query_streamed` zeroes an `n_cards`-long
     /// counts buffer here (~126 kB on the real corpus) no matter how few candidates it is about to
@@ -10314,6 +15864,22 @@ pub(crate) struct PhaseStats {
     /// inferred. No cost term describes it, and on range-acquired queries it is where a third of the
     /// runtime was landing unaccounted.
     pub(crate) ns_prepare: u64,
+    /// `ns_prepare` split into the three phases of `prepare_candidates`, which scale with three
+    /// different things and are what `cost::materialize_cost`'s three terms are fitted against.
+    /// **All zero without the `prepare-phases` cargo feature** -- see `PrepareSplitTimer` for why
+    /// they are not on by default, and read them from a build that has it rather than assuming a
+    /// zero means the phase was free.
+    ///
+    /// `narrow_candidates_exact`: the index probes and set composition. The term the old
+    /// `MATERIALIZE_SORT_*` shape had nothing for, and a median 85% of prepare on a `Candidates`
+    /// acquire.
+    pub(crate) ns_narrow: u64,
+    /// Projection into card space and materialization of the id list, including `eval_planes` and the
+    /// plane AND/extract when a plane survived `split_planes`. 99% of prepare on a `plane` acquire.
+    pub(crate) ns_project: u64,
+    /// `memoize_text_predicates` + `order_children_by_verify_cost`. Measured at one timer tick on the
+    /// median query of every acquire -- folded into `PREPARE_FIXED_NS` rather than given a term.
+    pub(crate) ns_memo: u64,
     /// The result total this run returned. `explain_analyze` had no ground truth at all before: a
     /// harness wanting the true cardinality made a SECOND `query()` call, which is a different
     /// execution, so agreement with the analyzed run was assumed rather than observed.
@@ -10558,8 +16124,10 @@ thread_local! {
     /// owned elsewhere: `paging_taken` by `PAGING_TAKEN` below, `ns_round_total`/`result_total` by
     /// `explain_analyze`, which fills them after the take.
     static PHASE_STATS: std::cell::Cell<PhaseStats> = const { std::cell::Cell::new(PhaseStats {
-        cards_visited: 0, printing_span: 0, printings_examined: 0, matches_pushed: 0, set_printings: 0, perm_steps: 0, ns_setup: 0,
-        ns_loop: 0, ns_finish: 0, ns_round_total: 0, ns_prepare: 0, result_total: 0, paging_taken: PagingTaken::NotEntered,
+        cards_visited: 0, printing_span: 0, printings_examined: 0, matches_pushed: 0, set_printings: 0, perm_steps: 0,
+        redo_examined: 0, card_pass_calls: 0, broadcast_printings: 0, select_input_len: 0, page_rows_collected: 0,
+        ns_setup: 0,
+        ns_loop: 0, ns_finish: 0, ns_round_total: 0, ns_prepare: 0, ns_narrow: 0, ns_project: 0, ns_memo: 0, result_total: 0, paging_taken: PagingTaken::NotEntered,
     }) };
 
     /// The compose fastpath's branch label, stored apart from `PHASE_STATS` because it is the one
@@ -10599,6 +16167,23 @@ thread_local! {
         std::cell::Cell::new(ComposePhases { ns_build: 0, ns_paging: 0, set_printings: 0 })
     };
 
+    /// Printings the compose BUILD's card→printing broadcast passes wrote or cleared, ACCUMULATED --
+    /// see `PhaseStats::broadcast_printings`, which is where `take_phase_stats` delivers it.
+    ///
+    /// An accumulator rather than a whole-value publish, and its own slot rather than a field threaded
+    /// through `compose_printing_bits`, because the work is spread over a RECURSION whose leaf
+    /// builders (`legality_leaf_bits`, the `is_broadcast_leaf_shape` arm) each have their own call
+    /// sites in tests and no shared publish point. Threading a `&mut` would have to widen seven leaf
+    /// helpers' signatures to report one number the leaves already compute; an add per BROADCAST LEAF
+    /// (one or two per query, never per card or per printing) does not.
+    ///
+    /// Nothing resets this on the production path, deliberately and for the same reason `PHASE_STATS`
+    /// does not: it would be a store for a reader that does not exist there. It therefore grows across
+    /// a production process's lifetime, which is why the add SATURATES rather than wrapping -- a
+    /// diagnostic reader is preceded by `take_phase_stats`, which zeroes it, so no consumer ever sees
+    /// the accumulated total.
+    static BUILD_BROADCAST_PRINTINGS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+
     /// The routed path's disjoint phase split — see `RoutedPhases`. Its own slot for the same reason
     /// the two above have theirs: `run_query_routed` is the production entry point, and one 24-byte
     /// store there is affordable where a read-modify-write of `PhaseStats` measurably was not.
@@ -10621,6 +16206,10 @@ thread_local! {
     /// `debug_assert` below pins it, because the failure is silent: an unconsumed value is read by
     /// the NEXT participant and reported as its `ns_prepare`, which looks entirely plausible.
     static PENDING_PREPARE_NS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+
+    /// `[narrow, project, memo]` ns of the pending prepare, handed to the executor that publishes it
+    /// exactly as `PENDING_PREPARE_NS` is. Always `[0; 3]` without the `prepare-phases` feature.
+    static PENDING_PREPARE_SPLIT: std::cell::Cell<[u64; 3]> = const { std::cell::Cell::new([0; 3]) };
 }
 
 /// `prepare_candidates`, timed. Only `run_query_with_plan`'s materializing arms use this; the routed
@@ -10678,6 +16267,13 @@ fn publish_compose_phases(phases: ComposePhases) {
     COMPOSE_PHASES.with(|c| c.set(phases));
 }
 
+/// Add `n` printings to the compose build's realized broadcast count. One call per broadcast LEAF --
+/// the callers accumulate their own per-card widths into a plain local and note the total once, at the
+/// loop's exit position, so nothing new lands in the per-card body. See `BUILD_BROADCAST_PRINTINGS`.
+fn note_broadcast_printings(n: u64) {
+    BUILD_BROADCAST_PRINTINGS.with(|c| c.set(c.get().saturating_add(n)));
+}
+
 /// Last executor run's phase stats, and clear them. `explain_analyze` reads this immediately after a
 /// timed run, having cleared beforehand — see `PHASE_STATS` for why that order is the contract and
 /// why an unpaired read does NOT see zeros.
@@ -10693,6 +16289,11 @@ fn take_phase_stats() -> PhaseStats {
     // taking every slot together is what stops any of them leaking into the next participant.
     let compose = COMPOSE_WORK.with(|c| c.replace(ComposePageWork::default()));
     let compose_phases = COMPOSE_PHASES.with(|c| c.replace(ComposePhases::default()));
+    // Taken unconditionally, not inside the `if compose ran` branch below: the accumulator has to be
+    // zeroed for the NEXT participant whether or not this one composed, which is the same
+    // leak-prevention rule every other slot here follows. Only compose ever adds to it, so a
+    // materializing plan's row reads the 0 it should.
+    stats.broadcast_printings = BUILD_BROADCAST_PRINTINGS.with(|c| c.replace(0));
     if compose.cards_visited | compose.printings_examined | compose.matches_pushed | compose.ns_total != 0 {
         stats.cards_visited = compose.cards_visited;
         stats.printings_examined = compose.printings_examined;
@@ -10776,13 +16377,19 @@ fn exec_gathered_scan<'a>(
     }
     // Ends `ns_loop` and starts `ns_finish`.
     let t_finish = std::time::Instant::now();
+    // One `Vec::len` read, before `finish` consumes the selector: the number of matches the
+    // quickselect below really runs over. See `PhaseStats::select_input_len` for why this is not
+    // `page_span`.
+    let n_select_input = sel.buffered_len() as u64;
     let (total, page_ids) = sel.finish(page_offset, limit);
-    let page = page_ids
+    let page: Vec<(&AOracleCard, &APrinting)> = page_ids
         .into_iter()
         .map(|(cid, pid)| (&cards[cid as usize], &printings[pid as usize]))
         .collect();
+    let n_page_rows = page.len() as u64;
     let t_end = std::time::Instant::now();
     let prep_ns = PENDING_PREPARE_NS.with(|c| c.replace(0));
+    let split = PENDING_PREPARE_SPLIT.with(|c| c.replace([0; 3]));
     PHASE_STATS.with(|c| {
         // A WHOLE-struct set, deliberately: nothing here is inherited, so this executor cannot
         // report a field an earlier query wrote. The compose fastpath's `paging_taken` survives
@@ -10794,11 +16401,24 @@ fn exec_gathered_scan<'a>(
             matches_pushed: n_matches_pushed,
             set_printings: 0, // PrintingCompose-only; GatheredScan never composes pbits
             perm_steps: 0, // GatheredScan never walks the permutation
+            redo_examined: 0, // StreamedSelect-only; GatheredScan pays one pass, never a redo
+            // One `card_pass` per visited candidate, or none at all -- the call sits directly under
+            // `all_match_known ||`, so the flag decides for the whole query and there is nothing
+            // per-card to count. This is exactly what `cost::residual_card_pass` claims, which makes
+            // GatheredScan the plan the claim is TRUE for.
+            card_pass_calls: if all_match_known { 0 } else { n_cards_visited },
+            broadcast_printings: 0, // PrintingCompose-only; taken from its own slot by take_phase_stats
+            // The finish phase's two realized quantities, against which the arm charges
+            // `cost::gather_page_span` and `cost::gather_page_rows`. Both are single reads at the
+            // phase boundary, not loop counters.
+            select_input_len: n_select_input,
+            page_rows_collected: n_page_rows,
             ns_setup: (t_loop - t_start).as_nanos() as u64,
             ns_loop: (t_finish - t_loop).as_nanos() as u64,
             ns_finish: (t_end - t_finish).as_nanos() as u64,
             ns_round_total: 0, // filled by explain_analyze, which owns the round timer
             ns_prepare: prep_ns,
+            ns_narrow: split[0], ns_project: split[1], ns_memo: split[2],
             result_total: 0,   // likewise: explain_analyze fills it from the value actually returned
             paging_taken: PagingTaken::NotEntered, // owned by PAGING_TAKEN; take_phase_stats merges it in
         });
@@ -11008,6 +16628,204 @@ fn declined_sibling_fastpath<'a>(
 /// like 1.35 before the two populations were separated.
 const COMPOSE_CARD_ESTIMATE_BIAS: f64 = 1.78;
 
+/// A SECOND clustering-bias divisor for `calibrated_balls_into_bins`, for a population
+/// `COMPOSE_CARD_ESTIMATE_BIAS` was never fit against: an `And` of 2+ printing-varying range leaves
+/// on DIFFERENT indexes (`price_usd`/`price_eur`/`price_tix`/`collector_number_int`/`released_at`
+/// combinations, e.g. `usd<5 cn>100`, `eur<=0.3 tix>=0.03 tix<=0.97`) where `exact_cards` declines
+/// because no pair-table / arith-tuple / plane-compile mechanism covers this combination (see
+/// `is_cross_index_range_and`'s call site). `COMPOSE_CARD_ESTIMATE_BIAS`'s 1.78 was fit on a
+/// single-leaf broadcast population (a card-invariant leaf setting a whole card's printings at
+/// once) -- this population's `k` is instead the MIN-FOLD of 2-3 independently-indexed leaves'
+/// own exact printing counts, and Round 2 of
+/// `docs/issues/local-engine-gathered-scan-card-printing-varying-depth.md` proved directly that this
+/// min-fold under-counts the true candidate span (866/1,500 sampled rows under-estimate
+/// `scan_units` against only 450 over-estimate) -- the opposite direction from the single-leaf
+/// broadcast population, where dividing `k` further (as 1.78 does) was the right correction.
+///
+/// Fit as a plain bias sweep (same shape as `COMPOSE_CANDIDATE_SPAN_BIAS`'s Round 1 method): capture
+/// each sampled query's per-leaf exact printing counts (one `unique=printing` sub-query per leaf) and
+/// the real `printings_examined` GatheredScan counter, then re-derive `scan_units` in Python for any
+/// candidate bias with no rebuild (`calibrated_balls_into_bins_with_bias` is a closed-form function
+/// of `k`/`domain`/`bias`). Swept 0.20-1.78 in steps of 0.02 on a HELD-OUT split (hash of the query
+/// string mod 2, fit on one half, graded on the other -- the two halves' error-vs-bias curves have
+/// minima 0.04 apart, confirming the fit is not chasing split-specific noise) over 1,500 and2/and3
+/// RANGE_FAMILIES queries (`unique=card`), the same population and precedent size as Rounds 1-2:
+///
+///     total abs scan_units error, calibration half (n=758): 8.70M (bias 1.78) -> 8.31M (bias 1.1)
+///     total abs scan_units error, held-out half    (n=742): 8.60M (bias 1.78) -> 8.02M (bias 1.1)
+///     held-out improved/regressed/tied: 433 / 117 / 192
+///
+/// Restricted to the rows a bias can actually move -- `range_too_broad_to_narrow` resets
+/// `eval_domain`/`scan_units` to the full corpus independently of any bias whenever the And's
+/// min-folded `printing_matches` alone is already too broad a fraction of `n_printings` to trust
+/// narrowing (found mid-investigation: a naive Python re-derivation missed this and only matched
+/// 1,138/1,500 of the live build's own `scan_units`; modeling the guard brought that to 1,500/1,500)
+/// -- the held-out NARROW subset alone (562/742 rows) moves 3.19M -> 2.61M, 433 improved / 117
+/// regressed / 12 tied.
+///
+/// The held-out price-triple subset (`usd`/`eur`/`tix`, 2+ of them, 363/742 rows) moves 3.73M ->
+/// 3.47M, 213 improved / 68 regressed / 82 tied -- proportionally in line with the whole population,
+/// so the near-identical price columns' correlation (flagged as a risk for any independence-style
+/// combination by Round 2) does not appear here: this is a flat multiplicative correction on
+/// `calibrated_balls_into_bins`'s existing ball-count math, not a combination formula across the
+/// leaves, so there is no per-leaf independence assumption for correlated fields to break.
+///
+/// Smaller than 1.78 (less division, so a HIGHER effective ball count and a higher resulting
+/// estimate) as the ledger's Round 3 assignment hypothesized: this population's undercount needed
+/// raising, not the single-leaf population's saturating overcount that 1.78 corrects.
+const COMPOSE_RANGE_AND_CLUSTER_BIAS: f64 = 1.1;
+
+/// Downscale for `scan_units` alone, on the ~25% of the SAME `is_cross_index_range_and` population
+/// (see `COMPOSE_RANGE_AND_CLUSTER_BIAS`, just above) where `range_too_broad_to_narrow` -- a LATER,
+/// independent guard just below in `acquire_plan_features` -- resets `eval_domain`/`scan_units` to
+/// the full corpus (`n_cards`/`n_printings`) because the And's min-folded `printing_matches` alone
+/// is too broad a fraction of `n_printings` to trust `domain_cards`. That reset is deliberately
+/// conservative for `eval_domain`: real card-space narrowing gives up at the SAME threshold this
+/// guard checks (`range_too_broad_to_narrow` is called from the real narrowing path too, not just
+/// here), so a GatheredScan the router actually runs after this fires really does visit every card
+/// -- confirmed directly against the real `cards_visited` counter, 0 total absolute error over 372
+/// sampled rows (see below), not merely assumed. `eval_domain` is therefore left untouched: it is
+/// already exact for this population, and scaling it down would reintroduce the under-charge this
+/// guard exists to prevent.
+///
+/// `scan_units` is a different story. Every printing under every candidate card is NOT what
+/// `exec_gathered_scan` actually bit-tests once card-space narrowing has given up -- the real
+/// `printings_examined` counter (round-invariant; checked directly by rerunning 20 queries at
+/// `num_warmups=0/trials=1` against `num_warmups=2/trials=5` with identical counters both times)
+/// reads a stable ~70% of `n_printings`, not 100%, on this population specifically. `n_printings`
+/// is still a sound UPPER bound (never measured over 1.0 on the sample below), so this is the same
+/// "calibrated multiplicative correction on an already-conservative estimate" pattern as
+/// `COMPOSE_RANGE_AND_CLUSTER_BIAS` and `COMPOSE_CANDIDATE_SPAN_BIAS` -- not a new exactness claim,
+/// and not a 5th exemption added to the guard's own disjunction (the guard's reset still happens
+/// unconditionally; only what it resets `scan_units` TO changes for this one shape).
+///
+/// Fit as a plain scale sweep on 1,500 and2/and3 RANGE_FAMILIES queries (`unique=card`, same
+/// population and precedent size as Rounds 1-3 of
+/// `docs/issues/local-engine-gathered-scan-card-printing-varying-depth.md`), captured via
+/// `explain_analyze`'s real `printings_examined` GatheredScan counter. Every sampled query is
+/// `is_cross_index_range_and` by construction (`query()`'s family draws are distinct-without-
+/// replacement over the 5 `RANGE_FAMILIES`, each its own index), so no separate shape filter was
+/// needed on top of the guard-fired subset. 372/1,500 (24.8%) rows had the guard fire -- matching
+/// the ~24-25% this constant's population was flagged at when `COMPOSE_RANGE_AND_CLUSTER_BIAS` was
+/// fit. Split by `hash(query) % 2`: 191 calibration / 181 held-out. Swept 0.60-0.84 in steps of 0.01
+/// on the calibration half only; both halves' error-vs-scale curves are smooth, convex, and minimize
+/// at the SAME 0.71 (closer agreement than `COMPOSE_RANGE_AND_CLUSTER_BIAS`'s two minima 0.04 apart).
+/// Picked 0.7, inside the flat bottom of both curves and matching the sample's own mean/median
+/// realized fraction (0.697 / 0.713) almost exactly.
+///
+/// ```text
+///                           calibration (n=191)              held-out (n=181)
+/// scan_units total abs      5.64M (1.0) -> 1.92M (0.7)        5.40M (1.0) -> 1.90M (0.7)
+/// improved / regressed                172 / 19                        166 / 15
+/// price-triple subset (n)                  79                              71
+/// price-triple total abs   1.91M (1.0) -> 0.79M (0.7)        1.82M (1.0) -> 0.75M (0.7)
+/// ```
+///
+/// The held-out price-triple subset (`usd`/`eur`/`tix`, 2+ of them) improves proportionally in line
+/// with the whole population (62 improved / 9 regressed) -- same reasoning as
+/// `COMPOSE_RANGE_AND_CLUSTER_BIAS`'s own price-triple check: this is a flat scale on an already-
+/// computed ceiling, not a per-leaf independence combination, so the near-identical price columns'
+/// correlation has nothing to break.
+const COMPOSE_RANGE_AND_BROAD_SCAN_SCALE: f64 = 0.7;
+
+/// Downscale for `scan_units` alone, in the `CardRangePopcount` arm's own
+/// `range_too_broad_to_narrow` broad-guard reset (see the arm below) -- a bare single range leaf
+/// under `unique=card` (e.g. `usd>=0.24` alone, no `And` at all), a completely separate acquire
+/// branch from `PrintingCompose`'s `is_cross_index_range_and` guard
+/// (`COMPOSE_RANGE_AND_BROAD_SCAN_SCALE`, just above): confirmed live, `usd>=0.24` alone routes via
+/// `count_source: card_range_popcount`, never `printing_compose`.
+///
+/// Re-derived fresh rather than assumed to share `COMPOSE_RANGE_AND_BROAD_SCAN_SCALE`'s 0.7: Round
+/// 5's diagnostic (`docs/issues/local-engine-gathered-scan-card-printing-varying-depth.md`) found
+/// this arm's own broad-guard reset is the single largest bucket of pooled `GatheredScan`/`card`
+/// error by magnitude (53.7% of the pooled total, median ratio 0.64) -- a materially different
+/// realized fraction from the `PrintingCompose` sibling's 0.7, confirming the two arms should not
+/// share one constant.
+///
+/// Sampled 3,500 bare single-range `unique=card` queries where the guard fires
+/// (`Shape(families=RANGE_FAMILIES, predicates=1, unique={"card"})`, filtered to `count_source ==
+/// "card_range_popcount"` and `eval_domain == n_cards && scan_units == n_printings`), captured
+/// against the real `printings_examined` GatheredScan counter (GatheredScan is always tried as a
+/// forced trial regardless of which plan wins, same trick Rounds 3/4 used).
+///
+/// `eval_domain` (`n_cards`) is left untouched, same call as `COMPOSE_RANGE_AND_BROAD_SCAN_SCALE`,
+/// but independently checked rather than assumed to transfer: 96.6% of rows read exactly 1.0 (mean
+/// 0.975, not a clean 1.000 like the `PrintingCompose` sibling's 0 mismatches). The tail is real,
+/// not sampling noise -- every row below 1.0 is a price field (`usd`/`eur`/`tix`) at an extreme
+/// threshold, where most cards have no printing with that currency at all, so the real scan still
+/// narrows out the null-complement even though the guard (correctly) judged the VALUE range itself
+/// too broad to narrow on. Scaling the dominant 96.6%-exact regime down to chase that rare tail
+/// would reintroduce the under-charge the guard exists to prevent, so this constant touches
+/// `scan_units` only.
+///
+/// `scan_units`'s realized fraction of `n_printings` is stable across all five `RANGE_FAMILIES`
+/// (median 0.41-0.48 per field; overall median 0.43-0.45, mean ~0.45) -- close enough that a
+/// per-field constant would only buy ~3.5% more total-error reduction than one flat scale (checked
+/// directly: 31.4M vs an oracle 30.3M using each field's own median as its own best case), not worth
+/// the extra parameterization. Split by `hash(query) % 2`: 1,765 calibration / 1,735 held-out. Swept
+/// 0.30-0.60 in steps of 0.01 on the calibration half only; both halves' error-vs-scale curves are
+/// smooth and convex, minimizing one step apart (0.43 calibration, 0.44 held-out).
+///
+/// ```text
+///                           calibration (n=1,765)            held-out (n=1,735)
+/// scan_units total abs      96.0M (1.0) -> 15.4M (0.43)       93.3M (1.0) -> 16.0M (0.43)
+/// improved / regressed              1,742 / 23                        1,704 / 31
+/// ```
+///
+/// Verified against the real build, not just the Python-side sweep above: rebuilt with this
+/// constant and re-ran the identical 3,500-query sample directly against it -- `scan_units` matched
+/// `round(0.43 * n_printings)` exactly on every guard-fired row, and the real paired diff landed on
+/// the exact same totals as the simulation above.
+const COMPOSE_BARE_RANGE_BROAD_SCALE: f64 = 0.43;
+
+/// Downscale for `scan_units` alone, in `PrintingCompose`'s OWN `range_too_broad_to_narrow`
+/// broad-guard reset (the arm below), for the shape `is_cross_index_range_and` was never meant to
+/// cover: a bare single range leaf, or an `And` of range leaves that all share the SAME printing-
+/// value index (a fused two-sided bound like `eur>=0.23 eur<=0.45`) -- see `is_same_index_range_only`.
+///
+/// Round 5's diagnostic (`docs/issues/local-engine-gathered-scan-card-printing-varying-depth.md`)
+/// found `GatheredScan`/`card`'s "single:range" bucket (a single family/predicate drawn from
+/// `RANGE_FAMILIES`) at 3,041 rows, 53.7% of pooled error -- Round 6 fixed the slice of it that
+/// reaches `CardRangePopcount` (`COMPOSE_BARE_RANGE_BROAD_SCALE`), but that arm is only ~4.7% of the
+/// pooled `GatheredScan`/`card` cell by row count, smaller than the 3,041-row bucket. Round 7 traced
+/// the rest: `card_range_popcount_applicable` requires BOTH sort-permutation directions for
+/// `(sort_col, descending, cards.len())`, and a fused two-sided bound never satisfies
+/// `bare_range_bounds` at all (it matches one comparison, not an `And` of two -- confirmed live,
+/// `eur>=0.23 eur<=0.45` and a `cn>=8`-shaped query with an orderby lacking a permutation both route
+/// via `count_source: printing_compose`) -- so both land here instead, in the ONE broad-guard branch
+/// `is_cross_index_range_and`'s own doc already flagged as unscaled on purpose ("every other query
+/// reaching this branch ... keeps today's unscaled `n_printings` ceiling").
+///
+/// Sampled 13,053 guard-fired rows from `Shape(families=RANGE_FAMILIES, predicates=1,
+/// unique={"card"})` (varying orderby/direction/limit/offset the way `bench_cost_model_agreement.py`
+/// does, not pinned, so the population is not an artifact of one page shape), filtered to
+/// `count_source == "printing_compose"` and the guard signature (`scan_units == n_printings`),
+/// against the real `printings_examined` GatheredScan counter. 5,300 of the 13,053 are a true bare
+/// single leaf (no sort permutation for the drawn orderby/direction); 7,753 are a fused same-field
+/// two-sided bound. `eval_domain` (`n_cards`) reads exactly 1.0 on every row (mean/median both
+/// 1.000, cleaner than the `CardRangePopcount` sibling's 96.6%/0.975) -- left untouched, same call as
+/// both existing broad-guard constants.
+///
+/// `scan_units`'s realized fraction of `n_printings` is stable across the two sub-shapes (bare-single
+/// median 0.473, fused-two-sided median 0.548 -- 0.075 apart, not worth two constants) and across all
+/// five `RANGE_FAMILIES` (per-field median 0.46-0.58). Split by `hash(query|orderby|direction) % 2`:
+/// 6,598 calibration / 6,455 held-out. Swept 0.20-0.80 in steps of 0.02 on the calibration half only;
+/// both halves' error-vs-scale curves are smooth and convex, minimizing at the SAME 0.52 (each
+/// sub-shape's own argmin, 0.48 and 0.55, brackets it tightly).
+///
+/// ```text
+///                           calibration (n=6,598)            held-out (n=6,455)
+/// scan_units total abs     310.8M (1.0) -> 60.2M (0.52)      304.8M (1.0) -> 57.6M (0.52)
+/// improved / regressed              6,560 / 38                       6,422 / 33
+/// ```
+///
+/// Price-triple sanity (per-field, not cross-field correlation -- this is a flat scale on an
+/// already-computed ceiling, not a per-leaf independence combination, so the near-identical price
+/// columns' correlation has nothing to break, same reasoning as both sibling constants): `usd`
+/// (0.534), `eur` (0.546), `tix` (0.574) all sit within the same band as `cn`/`date`/`year`
+/// (0.46-0.49); `tix` reads highest but not an outlier.
+const COMPOSE_SAME_RANGE_BROAD_SCAN_SCALE: f64 = 0.52;
+
 /// Printings the gather BIT-TESTS per matching printing.
 ///
 /// `compose_scan_printings` was the composed bitmap's popcount, on the stated grounds that compose
@@ -11024,6 +16842,16 @@ const COMPOSE_CARD_ESTIMATE_BIAS: f64 = 1.78;
 /// old comment claimed. Measured ceiling for that: bit tests on non-set printings are 11% of the
 /// gather's modelled page cost (`card_pass` is 60%, `push` 26%), so it is a constant-factor
 /// optimisation of one branch, not a model change. Left as a separate question.
+///
+/// Round 66: the carve-out this doc names is now honoured at the call site -- the card/default-prefer
+/// arm is charged `eval_domain` (one printing per candidate card) instead of this multiplier, since
+/// that arm provably breaks at the first set printing. This constant therefore applies only to the two
+/// arms that really do iterate `start..end`. Its 1.47 was fit on a population blending both regimes,
+/// which leaves it calibrated against the wrong one -- measured on the card/non-default-prefer arm
+/// alone (105 compose-Gather rows, `prefer=newest`), the feature/`printings_examined` ratio reads a
+/// median of exactly 1.47, i.e. bare `printing_matches` is already ~exact there and the multiplier is
+/// pure over-charge. Artwork and printing mode were too thin to grade in that run. Refitting is a
+/// separate change and deliberately not folded in here.
 const COMPOSE_GATHER_SPAN_PER_MATCH: f64 = 1.47;
 
 /// How much bigger the candidate cards on a compose acquire are than an average card.
@@ -11038,7 +16866,77 @@ const COMPOSE_GATHER_SPAN_PER_MATCH: f64 = 1.47;
 /// lose, so it is a routing input even though compose never reads it. Calibrating the card estimate
 /// exposed it: `scan_units [printing_compose]` had been reading 0.75 with the two errors partly
 /// cancelling, and dividing `est_cards` by 1.78 moved it to 0.47.
-const COMPOSE_CANDIDATE_SPAN_BIAS: f64 = 2.1;
+///
+/// Round 1 of the printing-varying-leaf depth ledger
+/// (`docs/issues/local-engine-gathered-scan-card-printing-varying-depth.md`) put a match-density
+/// depth term (`(printings_per_card + 1) / (density + 1)`, see `scan_all`'s fallback arm) UNDER this
+/// multiplier instead of the bare `printings_per_card` it used to scale — that term already prices
+/// most of the "how deep does this query's own candidates get walked" question, so this constant's
+/// remaining job is only the size bias described above (heavily-reprinted cards over-represented
+/// among candidates), not the depth question too.
+///
+/// Refit by a manual sweep (not `fit_cost_model.py`, which fits `cost.rs`'s per-unit NANOSECOND
+/// rates against measured plan time -- a different regression than calibrating this dimensionless
+/// FEATURE constant against the realized `printings_examined` counter): captured one build's raw
+/// `domain_cards * expected_depth` (this constant pinned to 1.0) against measured
+/// `printings_examined` over 1,500 and2/and3 queries on the RANGE_FAMILIES fields (unique=card), then
+/// swept the multiplier in Python (no rebuild per candidate -- the cap at `n_printings` never binds
+/// at 1.0 since `domain_cards <= n_cards` makes the uncapped product already `<= n_printings`, so
+/// multiplying the raw capture by a candidate bias and re-applying the cap is equivalent to having
+/// built with that bias). 0.7 minimized total absolute `scan_units` error on that sample (9.86M
+/// against the old formula's 29.6M on the same rows, 946 improved / 544 regressed) -- lower than the
+/// ~1.0 the ledger doc guessed going in, because the depth term alone still runs a bit hot relative
+/// to the realized span, not because the size-bias premise above reversed sign.
+const COMPOSE_CANDIDATE_SPAN_BIAS: f64 = 0.7;
+
+/// How much more reprinted a composable predicate's candidate cards are than an average card, for
+/// `scan_all`'s FULL-SPAN branch — every walk except `Mode::Card` under `Prefer::Default`, which is
+/// the only one with a first-match depth to discount by (`card_first_match_break`).
+///
+/// Round 79 widened the population this serves from `Mode::Printing`/`Mode::Artwork` to
+/// "`!card_first_match_break`", and the constant TRANSFERS rather than needing a refit, which was
+/// checked rather than assumed. Realized `printings_examined / cards_visited` over picked
+/// `GatheredScan` rows, by the cell the walk actually belongs to:
+///
+///     card    | custom prefer   4.60      <-- joins this branch in Round 79
+///     printing| custom prefer   4.41
+///     artwork | custom prefer   4.33
+///     card    | default prefer  1.87      <-- keeps the first-match discount
+///
+/// The three full-span cells agree to within 6% of each other and the newcomer sits inside them,
+/// because they run the SAME loop: `push_card_matches` scores every printing whenever it cannot rely
+/// on store order. A separate constant for the new arm would be fitting the same quantity twice.
+///
+/// Deliberately NOT folded into `COMPOSE_CANDIDATE_SPAN_BIAS`: that constant is fit on `unique=card`
+/// samples (see its own doc) and multiplies the card-mode depth term, and laundering a card-fitted
+/// constant into a non-card path is what hid the bug this branch exists to fix. This one is fit on the
+/// population it serves and multiplies nothing else.
+///
+/// **1.2, and the choice is a real trade-off rather than an optimum**, because the three metrics
+/// disagree. Graded as `feature / printings_examined` over 955 compose printing/artwork rows, sweeping
+/// this constant:
+///
+///     x1.0   median 0.914   within-25% 36%   |mean log| 0.4679   spread 19.0
+///     x1.2   median 1.000   within-25% 31%   |mean log| 0.3193   spread 18.8   <-- shipped
+///     x1.4   median 1.000   within-25% 29%   |mean log| 0.1939   spread 18.1
+///     x1.9   median 1.076   within-25% 30%   |mean log| 0.0540   spread 16.8
+///
+/// `within-25%` peaks at 1.0, median-unbiasedness starts at 1.2, and |mean log| minimises near 1.9
+/// because the realized distribution is right-skewed (p90 8.26) and a mean chases that tail. 1.2 is
+/// the SMALLEST value that lands the median at exactly 1.000, which is the criterion
+/// `bench_feature_accuracy` actually flags on ([0.8, 1.25] on the median), while staying near the
+/// within-25% peak. The realized multiplier's own median is **1.095**, so this is close to
+/// median-unbiased by construction.
+///
+/// The direction is load-bearing, not aesthetic: this term is 44% of StreamedSelect's predicted cost,
+/// so under-charging over-picks P3, and over-charging pushes traffic to compose — which `lib.rs`
+/// already notes is over-picked in artwork, carrying 21% of all routing regret. Median-neutral is the
+/// defensible target; the mean-log optimum at 1.9 would over-charge P3 at the median and is rejected
+/// for that reason, not for lack of fit.
+///
+/// The residual ~18x spread is this premium's own variance and no constant fixes it — see
+/// `SpaceTotals`' doc for the per-value `span` column that would supply it exactly.
+const COMPOSE_FULL_SPAN_REPRINT_PREMIUM: f64 = 1.2;
 
 /// `balls_into_bins` with its measured clustering bias divided out of the BALL COUNT. See
 /// `COMPOSE_CARD_ESTIMATE_BIAS` for the 1.78 and why clustering causes it.
@@ -11071,7 +16969,82 @@ const COMPOSE_CANDIDATE_SPAN_BIAS: f64 = 2.1;
 /// 2.2× as much. On the broad-residual class that inverted the pair — P3 measured 819.7 µs against P4's
 /// 1,308.4 with the model pricing them within 5 µs of each other.
 fn calibrated_balls_into_bins(k: usize, domain: usize) -> usize {
-    balls_into_bins_effective(k as f64 / COMPOSE_CARD_ESTIMATE_BIAS, domain).max(usize::from(k > 0))
+    calibrated_balls_into_bins_with_bias(k, domain, COMPOSE_CARD_ESTIMATE_BIAS)
+}
+
+/// `calibrated_balls_into_bins`, parameterized on which clustering bias divides `k` -- see
+/// `COMPOSE_RANGE_AND_CLUSTER_BIAS`'s doc for the second population this exists for.
+fn calibrated_balls_into_bins_with_bias(k: usize, domain: usize, bias: f64) -> usize {
+    balls_into_bins_effective(k as f64 / bias, domain).max(usize::from(k > 0))
+}
+
+/// Whether `composed` is an `And` of 2+ printing-varying range leaves spanning 2+ DIFFERENT printing
+/// value indexes (`price_usd`/`price_eur`/`price_tix`/`collector_number_int`/`released_at`) -- the
+/// shape `COMPOSE_RANGE_AND_CLUSTER_BIAS` is fit against, see that constant's doc.
+///
+/// Reuses `bare_range_bounds` per child rather than re-deriving anything: it is the same leaf
+/// dispatch `fuse_and_range_children` already runs over this And's children one call up, just
+/// counting distinct index POINTERS instead of building intervals. Same-index children (a two-sided
+/// `usd>=a usd<=b`) collapse to one entry here exactly as they fuse to one exact `k` there, so a
+/// single-field bound never counts as "2+ different indexes" -- this is deliberately narrower than
+/// "2+ range leaves", matching the population `est.result.card` never covers for (no pair-table /
+/// arith-tuple / plane-compile tightening reaches a price/cn/date combination, so `exact_cards`
+/// declines and `calibrated_balls_into_bins` is what actually answers it).
+///
+/// O(children), pure `FilterExpr` matches and float comparisons (`bare_range_bounds` computes bounds
+/// from the op/threshold, no index probe) -- cost is bounded by query length, never by match count,
+/// and this only runs after `exact_cards` has already declined.
+fn is_cross_index_range_and(composed: &FilterExpr, indexes: &Archived<CardIndexes>) -> bool {
+    let FilterExpr::And(children) = composed else { return false };
+    let mut seen: Vec<*const Archived<PrintingValueIndex>> = Vec::new();
+    for child in children {
+        if let Some((idx, ..)) = bare_range_bounds(child, indexes) {
+            let ptr: *const Archived<PrintingValueIndex> = idx;
+            if !seen.contains(&ptr) {
+                seen.push(ptr);
+            }
+        }
+    }
+    seen.len() >= 2
+}
+
+/// A bare range leaf, or an `And` of 2+ range leaves that all share the SAME printing-value index --
+/// the same-index counterpart `is_cross_index_range_and` deliberately excludes (see its own doc: "a
+/// single-field bound never counts as 2+ different indexes"). Neither shape ever reaches
+/// `CardRangePopcount`: a bare leaf can still land there when a sort permutation exists for the
+/// query's orderby/direction (`card_range_popcount_applicable`), but a fused two-sided bound like
+/// `usd>=a usd<=b` never does regardless of permutation (`bare_range_bounds`, `CardRangePopcount`'s
+/// own gate, matches one comparison, not an `And` of two) -- both fall through to `PrintingCompose`
+/// instead, where this identifies them for `COMPOSE_SAME_RANGE_BROAD_SCAN_SCALE`'s own broad-guard
+/// scale.
+///
+/// A mixed `And` (one range leaf plus a collection/rarity/numeric_other leaf) returns `false` here --
+/// every child must independently satisfy `bare_range_bounds`, which a non-range leaf never does --
+/// deliberately, since Round 5's diagnostic found that population's own broad-guard realized
+/// fractions (0.21-0.36) read nothing like this shape's (0.46-0.58), so it needs its own future
+/// investigation rather than silently sharing this constant.
+///
+/// Same complexity bound as `is_cross_index_range_and`: O(children), no index probe, only runs after
+/// `exact_cards` has already declined.
+fn is_same_index_range_only(composed: &FilterExpr, indexes: &Archived<CardIndexes>) -> bool {
+    if bare_range_bounds(composed, indexes).is_some() {
+        return true;
+    }
+    let FilterExpr::And(children) = composed else { return false };
+    if children.is_empty() {
+        return false;
+    }
+    let mut shared: Option<*const Archived<PrintingValueIndex>> = None;
+    for child in children {
+        let Some((idx, ..)) = bare_range_bounds(child, indexes) else { return false };
+        let ptr: *const Archived<PrintingValueIndex> = idx;
+        match shared {
+            None => shared = Some(ptr),
+            Some(seen) if seen == ptr => {}
+            Some(_) => return false,
+        }
+    }
+    true
 }
 
 fn balls_into_bins(k: usize, domain: usize) -> usize {
@@ -11114,7 +17087,7 @@ fn compose_gather_declines(
     mode: Mode,
 ) -> Option<PagingTaken> {
     // The gather's own decline is about the composed set it would page over, so it reads `result`.
-    let printing_matches = compose_printing_estimate(filter, indexes, offsets, printings.len()).result;
+    let printing_matches = compose_printing_estimate(filter, indexes, offsets, printings.len(), false).result.printing();
     // Artwork's domain is n_artworks, not n_cards. That used to be approximated by `cards.len()`
     // because the exact figure meant prefix-summing `artwork_groups` here -- real O(n_cards) work
     // paid just to maybe decline. It is a stored index now, so read the truth: the stand-in is
@@ -11215,6 +17188,29 @@ fn compose_paging_with_total(
     }
 }
 
+/// The segment `StreamedSelect`'s emission walk is bounded to, computed the SAME way
+/// `exec_streamed_select` derives its own walk (`walk_bounds` over the identical
+/// `(sort_col, descending, sort_bound)` triple) rather than by a second path that could silently
+/// disagree with what dispatch actually walks.
+///
+/// Free when the filter bounds nothing: `walk_bounds` returns the whole permutation on the
+/// `bound.is_unbounded()` check before ever probing it, so the common case (most queries do not
+/// filter on their own sort column) pays one branch, not a search. O(log n_cards) -- two binary
+/// searches, nothing per candidate, nothing per printing -- when it does, mirroring
+/// `CardRangePopcount`'s acquire-time range lookup a few branches up in `acquire_plan_features`
+/// ("two binary searches, no scan"), the same style of cheap-exact acquire-time probe this cost
+/// model already relies on elsewhere. `n_cards` when this `(sort_col, descending)` pair has no
+/// permutation at all: `StreamedSelect` is inapplicable there and never reads this field, but
+/// `mk_plan_feats` sets it uniformly for every acquire branch, since the shared feats have to cost
+/// a competing `StreamedSelect` honestly regardless of which branch produced them.
+///
+/// docs/issues/local-engine-gathered-scan-card-printing-varying-depth.md, Round 32.
+fn perm_walk_span(ctx: &QueryCtx, params: &QueryParams) -> u32 {
+    ctx.indexes.sort_perms.get(params.sort_col, params.descending).map_or(ctx.n_cards(), |perm| {
+        walk_bounds(perm, ctx.cards, params.sort_col, params.descending, params.sort_bound).len() as u32
+    })
+}
+
 /// Cost features: the query-invariant fields filled once; the four that vary by
 /// count source passed in. Collapses each acquire branch's 8-field literal to one call.
 fn mk_plan_feats(
@@ -11237,11 +17233,13 @@ fn mk_plan_feats(
         residual_tier_ns100,
         limit: params.limit as u32,
         offset: params.page_offset as u32,
+        perm_walk_span: perm_walk_span(ctx, params),
         broadcast_printings: 0, // PrintingCompose's legality broadcast-down (0 for ranges / precomputed planes)
         scatter_printings: 0,  // range-slice k — set by both range-plan acquire branches (costed per-plan)
         project_printings: 0,  // PrintingCompose's card/artwork projection pass; CardRangePopcount sets it too (for costing compose)
         popcount_words: 0,     // PrintingCompose overrides this (result-space bitmap words)
         compose_paging: ComposePaging::Gather, // PrintingCompose overrides this (which paging strategy it'll actually use)
+        collection_broadcast_printings: 0, // PrintingCompose overrides this for a card-space collection leaf
         // `run_query_streamed`'s per-card artwork overhead applies to every candidate it visits, in
         // artwork mode only — so it rides `eval_domain` there and vanishes elsewhere. See
         // STREAM_ARTWORK_SEEN_PER_CARD_NS for the mechanism and the measurement.
@@ -11252,6 +17250,13 @@ fn mk_plan_feats(
         artwork_seen_printings: if matches!(params.mode, Mode::Artwork) { scan_units } else { 0 },
         compose_scan_printings: 0, // set by every branch that costs a PrintingCompose (its own, or as a competitor)
         gather_group_printings: 0, // only the compose branch, and only when its grouping arm runs
+        // The three prepare-step features are filled in by `acquire_plan_features`' wrapper, which is
+        // the one place that holds both the residual filter and the plane. `prepare_cands` defaults to
+        // `eval_domain` here because that IS the narrowed candidate count under a `Candidates`
+        // acquire; the wrapper overrides it on the acquires that pin `eval_domain` at `n_cards`.
+        prepare_nodes: 0,
+        prepare_plane_word_ops: 0,
+        prepare_cands: eval_domain,
     }
 }
 
@@ -11394,13 +17399,64 @@ fn candidate_feats(ctx: &QueryCtx, params: &QueryParams, prep: &PreparedCandidat
 /// or `prepare_candidates` (`Prep::Candidates`). Returns the plane popcount bitmap
 /// alongside `Prep::Plane` (empty otherwise) — `run_query_routed`'s dispatch needs
 /// it to execute the winner; a caller that only wants `feats` (`explain`) drops it.
+///
+/// The three `prepare_*` features are filled in HERE rather than in `mk_plan_feats`, in a wrapper
+/// around the branching body: this is the only scope that holds the residual filter, the plane and
+/// the resulting `Prep` at once, and every one of the six acquire branches would otherwise need the
+/// same three lines. Counted BEFORE the body runs, because a `Candidates` acquire calls
+/// `prepare_candidates`, which rewrites `filter` in place (`memoize_text_predicates`,
+/// `order_children_by_verify_cost`) — the narrowing walk being modelled saw the tree as it is now.
 fn acquire_plan_features(
     ctx: &QueryCtx,
     params: &QueryParams,
     filter: &mut FilterExpr,
     unsplit: Option<&FilterExpr>,
     plane: Option<&PlaneExpr>,
-) -> (cost::PlanFeatures, Prep, Vec<u64>) {
+) -> (cost::PlanFeatures, Prep, Vec<u64>, Option<u64>) {
+    let prepare_nodes = filter.narrow_nodes();
+    // `nodes * words` when a plane survived `split_planes`, else 0 — one field carrying both "is
+    // there a plane" and "how much word-wise work does it take", because the prepare step's plane
+    // work is `eval_planes`, which is exactly that product, and pays nothing when there is no plane.
+    let prepare_plane_word_ops =
+        plane.map_or(0, |p| p.node_count().saturating_mul(ctx.cards.len().div_ceil(64) as u32));
+    let (mut feats, prep, plane_bits, and_estimate_ns) = acquire_plan_features_inner(ctx, params, filter, unsplit, plane);
+    feats.prepare_nodes = prepare_nodes;
+    feats.prepare_plane_word_ops = prepare_plane_word_ops;
+    // `eval_domain` is the honest narrowed count under a `Candidates` acquire and under the compose
+    // branch, which estimates it. The two BARE-RANGE acquires do not narrow at all — they leave
+    // `eval_domain` pinned at `n_cards` — so a materializing plan's prepare step is charged the
+    // `matches` estimate there instead. Measured: the pinned value made this term read ~157 us
+    // against a real 354-458 ns on those rows.
+    if matches!(prep, Prep::Range(CountSource::PrintingRangeScan | CountSource::CardRangePopcount)) {
+        feats.prepare_cands = feats.matches;
+    }
+    // Then `narrow_candidates_exact`'s own breadth guard, mirrored: a set covering more than
+    // `1 - 1/NARROW_BREADTH_DISCARD_DIVISOR` of its domain is DISCARDED there, and a discarded
+    // narrowing materializes nothing at all. Without this the two bare-range acquires are bimodal and
+    // unmodellable — the discarded half measures a median 188 ns of prepare against 23.7 us for the
+    // half that materializes, and charging either population's value to both is ~18x wrong at the
+    // median (`card_range_popcount` graded 3.80 without the guard, 1.33 with it).
+    //
+    // PLANE-EXEMPT, because `prepare_candidates`' `Some(expr)` arm returns `Some(..)` on every one of
+    // its three paths: with a plane present there is always a candidate list, even when the residual's
+    // own narrowing was discarded — the list is then the plane bitmap's own ids. Applying the guard
+    // there anyway costs 0.79 -> 0.83 overall and 0.70 -> 0.88 on the `plane` acquire.
+    let breadth_limit = feats.n_cards - feats.n_cards / cost::NARROW_BREADTH_DISCARD_DIVISOR;
+    if feats.prepare_plane_word_ops == 0 && feats.prepare_cands > breadth_limit {
+        feats.prepare_cands = 0;
+    }
+    (feats, prep, plane_bits, and_estimate_ns)
+}
+
+/// The branching body of `acquire_plan_features`; see that wrapper for why the prepare-step features
+/// are not set here.
+fn acquire_plan_features_inner(
+    ctx: &QueryCtx,
+    params: &QueryParams,
+    filter: &mut FilterExpr,
+    unsplit: Option<&FilterExpr>,
+    plane: Option<&PlaneExpr>,
+) -> (cost::PlanFeatures, Prep, Vec<u64>, Option<u64>) {
     let QueryCtx { cards, offsets, indexes, .. } = *ctx;
     let QueryParams { mode, prefer, sort_col, descending, .. } = *params;
     let n_cards = ctx.n_cards();
@@ -11415,7 +17471,7 @@ fn acquire_plan_features(
     // empty (no alloc).
     let mut plane_bits: Vec<u64> = Vec::new();
 
-    let (feats, prep) = if PhysicalPlan::PlanePopcountOrder.applicable(ctx, params, filter, unsplit, plane) {
+    let (feats, prep, and_estimate_ns) = if PhysicalPlan::PlanePopcountOrder.applicable(ctx, params, filter, unsplit, plane) {
         // The ONE plane eval; its popcount IS the exact count. True residual ⇒ tier 0.
         eval_planes(plane.expect("PlanePopcountOrder ⇒ plane"), &indexes.planes, &mut plane_bits);
         let count: u32 = plane_bits.iter().map(|w| w.count_ones()).sum();
@@ -11453,7 +17509,7 @@ fn acquire_plan_features(
             }
             span.min(u64::from(n_printings)) as u32
         };
-        (mk_plan_feats(ctx, params, count, count, scan_units, 0), Prep::Plane)
+        (mk_plan_feats(ctx, params, count, count, scan_units, 0), Prep::Plane, None)
     } else if PhysicalPlan::CardRangePopcount.applicable(ctx, params, filter, unsplit, plane) {
         // Exact in-range printing count `k` from the index partition points (two binary searches, no
         // scan, no scatter). The O(k) card-bitmap build is deferred to dispatch and paid only if this
@@ -11484,8 +17540,14 @@ fn acquire_plan_features(
         // two: measured 31,508 cards / 97,206 printings visited against a `card_est` of 12,450, a
         // 3.2x gap no rate constant can absorb. The sibling `PrintingRangeScan` branch below assumes
         // the opposite (always unnarrowed) and its cells agree to within 1% -- this makes both exact.
+        //
+        // `n_printings` is still a sound upper bound here (never measured over 1.0), but loose: the
+        // real `printings_examined` GatheredScan counter reads a stable ~43% of it on this bare
+        // single-range population -- see `COMPOSE_BARE_RANGE_BROAD_SCALE`'s doc for the calibration.
+        // `eval_domain` is left at the full `n_cards`, same reasoning as that constant's doc: the
+        // dominant regime already reads exact there.
         let (eval_domain, scan_units) = if range_too_broad_to_narrow(k as usize, idx.len()) {
-            (n_cards, n_printings)
+            (n_cards, (f64::from(n_printings) * COMPOSE_BARE_RANGE_BROAD_SCALE).round() as u32)
         } else {
             (card_est, card_est)
         };
@@ -11498,7 +17560,7 @@ fn acquire_plan_features(
         feats.project_printings = k;
         feats.compose_scan_printings = k;
         feats.compose_paging = compose_paging_for(indexes, cards.len(), filter, mode, sort_col, descending);
-        (feats, Prep::Range(CountSource::CardRangePopcount))
+        (feats, Prep::Range(CountSource::CardRangePopcount), None)
     } else if PhysicalPlan::PrintingRangeScan.applicable(ctx, params, filter, unsplit, plane) {
         // Bare range: exact k from the index (no scan).
         let (idx, lo, hi) = bare_range_bounds(filter, indexes).expect("applicable ⇒ bare range");
@@ -11525,7 +17587,7 @@ fn acquire_plan_features(
         // `compose_paging` at its `Gather` default charged compose a full-corpus gather it would
         // never run. Compose's page term only reads `eval_domain` in the Gather branch.
         feats.compose_paging = compose_paging_for(indexes, cards.len(), filter, mode, sort_col, descending);
-        (feats, Prep::Range(CountSource::PrintingRangeScan))
+        (feats, Prep::Range(CountSource::PrintingRangeScan), None)
     } else if PhysicalPlan::PrintingCompose.applicable(ctx, params, filter, unsplit, plane) {
         // Composable printing-space expr, any distinct-on. Estimate the counts cheaply — the fast path
         // composes once, only if this plan wins (never in acquire; a legality broadcast paid here and
@@ -11544,8 +17606,19 @@ fn acquire_plan_features(
         // not the pre-split residual). Assigned to `feats` below, once it exists. Not read by
         // `plan_cost`.
         let composed_card_invariant = !touches_printing_field(composed);
-        let est = compose_printing_estimate(composed, indexes, offsets, n_printings as usize);
-        let (printing_matches, broadcast, scatter) = (est.result, est.broadcast, est.scatter);
+        // Round 39: single-shot wall time of THIS call -- the real, production, acquire-time
+        // estimation cost every `printing_compose`-routed query pays, as a permanent baseline for
+        // grading the general partition-search estimator's own "tax" once it exists (see
+        // docs/issues/local-engine-nway-compose-independence-search.md). Deliberately not
+        // multi-trial: the target is an aggregate distribution across thousands of queries (the
+        // existing `nway_estimate_truth_survey.py` harness already runs at that scale), where
+        // `Instant::now()`'s own ~10-40ns overhead and per-call jitter wash out in the percentile
+        // view the same way `costbench.py`'s `percentile`/`spread` machinery already tolerates
+        // per-observation noise elsewhere. Threaded to `AcquireFacts::and_estimate_ns`.
+        let t_est = std::time::Instant::now();
+        let est = compose_printing_estimate(composed, indexes, offsets, n_printings as usize, false);
+        let and_estimate_ns = t_est.elapsed().as_nanos() as u64;
+        let (printing_matches, broadcast, scatter, collection_broadcast) = (est.result.printing(), est.broadcast, est.scatter, est.collection_broadcast);
         // Two build kinds, charged at different rates: `broadcast` = legality broadcast-down (linear
         // pass), `scatter` = range-slice scatter (cheap). `project` = the second pass (printing→
         // card/artwork), 0 for printing mode. Keeping all three separate is what lets a bare range's
@@ -11564,14 +17637,62 @@ fn acquire_plan_features(
         // mode, because `eval_domain`, `scan_all` and the artwork capacity all consume a card count.
         // `exact_total` is the answer in the query's OWN mode, and is what `result_total` wants.
         // Conflating them puts an artwork count where cards are expected in artwork mode.
+        //
+        // `exact_result_total` is a hand-maintained mirror recognizing only specific shapes (bare
+        // ranges, bare rarity, a 2-leaf `Eq`-only pair, `SetSubtypeTable`, a single bare arith leaf)
+        // -- it has no arm for the 2+-leaf arith-tuple combinations `compose_printing_estimate`'s own
+        // `And` arm already folds exactly (Round 51's `arith_tuple_totals`, plus every other exact
+        // mechanism that arm accumulates into `exact_domain_cards`). `exact_cards` itself is left
+        // UNTOUCHED here (still `exact_result_total` alone): every one of that function's own arms is
+        // structured so that whenever it fires, its answer covers the WHOLE composed filter, never a
+        // subset -- see e.g. the 2-leaf `PAIR_TOTALS`/`ColorCmc` arms' own `[a, b] = children.as_slice()`
+        // guards, or the subtype+arith arm's `arith_children.len() + 1 == children.len()` gate. It is
+        // therefore always safe to adopt directly.
         let exact_cards = exact_result_total(composed, indexes, Mode::Card);
         let exact_total = if matches!(mode, Mode::Card) {
             exact_cards
         } else {
             exact_result_total(composed, indexes, mode)
         };
-        let est_cards =
-            exact_cards.unwrap_or_else(|| calibrated_balls_into_bins(printing_matches, n_cards as usize));
+        // `is_cross_index_range_and` routes an And of 2+ different-index printing-varying range
+        // leaves to its OWN clustering-bias constant -- see `COMPOSE_RANGE_AND_CLUSTER_BIAS`'s doc
+        // for why `COMPOSE_CARD_ESTIMATE_BIAS` (fit on a single-leaf broadcast population) undershoots
+        // here instead. Checked only once `exact_cards` has already declined, so a query this
+        // mechanism never reaches (a single leaf, or a shape the pair table/arith-tuple/plane-compile
+        // paths already answer exactly) pays nothing extra.
+        let est_cards_before_and_arm = exact_cards.unwrap_or_else(|| {
+            if is_cross_index_range_and(composed, indexes) {
+                calibrated_balls_into_bins_with_bias(printing_matches, n_cards as usize, COMPOSE_RANGE_AND_CLUSTER_BIAS)
+            } else {
+                calibrated_balls_into_bins(printing_matches, n_cards as usize)
+            }
+        });
+        // `est.result.card` -- `compose_printing_estimate`'s own And-arm fold -- is a SECOND,
+        // independently-computed candidate here, mirroring `domain_cards`'s own established
+        // `is_and`-scoped tightening a little further down. It is NOT safe to adopt outright the way
+        // `exact_cards` above is: unlike `exact_result_total`, it can come from a mechanism that only
+        // covers a SUBSET of the And's children (e.g. `ColorCmcTable` folding just an `(identity, cmc)`
+        // pair), blind to a residual leaf that materially restricts the real answer. Found directly on
+        // a real corpus query while validating this round: `id:ruw usd:0.50 cmc>=2`, artwork mode --
+        // `ColorCmcTable`'s own exact `(identity, cmc)` joint is 21,048, but the true 3-leaf answer is
+        // 123, because that joint is blind to the highly-restrictive `usd:0.50` residual. Applying it
+        // as an outright replacement for `est_cards_before_and_arm` (this round's first attempt, caught
+        // by the corpus sweep before shipping) regressed exactly this class of query by two orders of
+        // magnitude. `.min()`-folding it in AFTER the calibrated baseline is what keeps this a strict
+        // tightening: `est.result.card` is a genuine upper bound on the true count (never smaller), so
+        // it can only pull `est_cards` down toward the truth, never push it up past a reasonable guess.
+        let est_cards = est.result.card.best().map_or(est_cards_before_and_arm, |dc| dc.min(est_cards_before_and_arm));
+        // Exact PRINTING total for the same composed filter -- valid as the candidate cards' full
+        // printing SPAN (what `scan_all` below needs) only when the filter is CARD-INVARIANT
+        // (`composed_card_invariant`): for a card-invariant field, every printing of a matching card
+        // matches too, so the exact MATCH count and the matching cards' full span are the same number.
+        // For a printing-VARYING field (border/rarity/legality/year/date/price/cn) they are not: a
+        // card can have printings that don't match the leaf's own value but are still part of that
+        // card's range, which `GatheredScan` walks in full. Checked directly against real data before
+        // adding the gate: applied unconditionally, this regressed 1,077 bare-leaf queries, every one
+        // printing-varying (`border:borderless`, `r>=mythic`, `year:2006`); scoped to card-invariant
+        // leaves only, it is exact by construction, not an approximation with a lucky population.
+        let exact_printing_span = composed_card_invariant.then(|| exact_result_total(composed, indexes, Mode::Printing)).flatten();
         // The card count the MATERIALIZING alternatives walk, which stops being `est_cards` once the
         // estimate has been tightened. `est.candidate` is the untightened `min` over single leaves, and
         // that is what narrowing actually leaves them: it declines broad children (`border:black` at 87%
@@ -11584,16 +17705,92 @@ fn acquire_plan_features(
         //
         // For an `And`, that "declines broad children" premise is false specifically for
         // `ColorCmp`/`NumericCmp(Cmc|Power|Toughness)`/`Devotion`: `narrow_rec` genuinely intersects
-        // them (see `compile_children_once`'s doc). `est.domain_hint`, computed alongside `est.result`
-        // in the SAME pass over the And's children (not re-derived here), can only be >= the real
-        // domain (it ignores what non-plane siblings would additionally narrow), so `min`-ing it with
-        // the existing estimate is a strict tightening, never a regression.
-        let domain_cards = if est.candidate == est.result {
-            est_cards
+        // them (see `compile_children_once`'s doc). `est.card`, computed alongside `est.result` in the
+        // SAME pass over the And's children (not re-derived here) -- a real CARD count now, not a
+        // printing-scaled one wearing a card-shaped name (`domain_hint_is_card_space_not_printing_scaled`)
+        // -- can only be >= the real domain (it ignores what non-plane siblings would additionally
+        // narrow), so `min`-ing it with the existing estimate is a strict tightening, never a regression.
+        //
+        // Round 62: the branch is taken on `est.printing_tightened`, an explicit flag the estimator
+        // sets where a fold actually lowers `result.printing`, replacing the numeric
+        // `est.candidate.printing() == est.result.printing()` test. The structural question here has
+        // always been "did any mechanism tighten `result.printing` below the per-leaf fold" -- if it
+        // did, `est_cards` describes the ANSWER and no longer describes the domain the materializing
+        // alternatives walk. `printing()` is `best()`, so the old spelling could not see a tightening
+        // that moved only `guaranteed`, and Round 60 measured `best()` reading from the estimate
+        // channel on 17,628 of 32,745 roots -- i.e. on the majority of roots a bound-only tightening
+        // was silently reported as "nothing tightened", and this branch handed `scan_units` an
+        // answer-shaped number for a domain-shaped slot. See `ComposeEstimate::printing_tightened`.
+        let domain_cards_before_card = if est.printing_tightened {
+            calibrated_balls_into_bins(est.candidate.printing(), n_cards as usize)
         } else {
-            let calibrated = calibrated_balls_into_bins(est.candidate, n_cards as usize);
-            est.domain_hint.map_or(calibrated, |dc| dc.min(calibrated))
+            est_cards
         };
+        // `est.card` additionally tightens `domain_cards`, beyond the `else` branch above, but ONLY for
+        // a genuine `And` -- found live (`id:g border:white`, artwork mode): `est.candidate == est.result`
+        // (both 5131, border:white's own printing count) took the `est_cards` branch, and `est_cards`
+        // falls back to `exact_result_total`'s OWN, narrower 2-child-pair-table check, which doesn't
+        // cover a `ColorCmp`+`TextExact(Border)` combination and returned `None` -- landing on
+        // `calibrated_balls_into_bins`'s 2,756 guess despite `compose_printing_estimate`'s own And arm
+        // (a DIFFERENT, newer mechanism, `best_other`'s existential+card-invariant plane intersection)
+        // already knowing the exact answer, 576, on `est.card`.
+        //
+        // Scoped to `And` specifically, NOT applied to bare leaves too, after that broader version was
+        // checked directly against real data and found to regress 809 queries -- every one a genuinely
+        // broad bare leaf (`eur>0.16`, `tix<0.04`, `border:black` alone, ~100% of the corpus) where
+        // `est.card` (from `exact_result_total`'s OWN bare-leaf Mode::Card arms, the SAME function
+        // `est_cards` already calls) came back wrong by a wide margin -- e.g. `eur>0.16` real 31,724,
+        // `est.card` 19,992. That mismatch predates this session (it is `exact_result_total`'s own
+        // Mode::Card answer, not `compose_printing_estimate`'s), and was invisible before only because
+        // `range_too_broad_to_narrow`'s full-corpus fallback happened to override it every time a bare
+        // leaf was this broad -- a real, separate bug, worth its own investigation, but out of scope
+        // for this pass. Restricting the extra tightening to `And` keeps today's fix to the case it was
+        // actually verified against, without newly trusting a leaf-level answer nothing here checked.
+        let is_and = matches!(composed, FilterExpr::And(_));
+        let domain_cards = if is_and { est.result.card.best().map_or(domain_cards_before_card, |dc| dc.min(domain_cards_before_card)) } else { domain_cards_before_card };
+        // Card mode's `push_card_matches`/`Prefer::Default` loop settles a card in exactly ONE printing
+        // when the composed field is card-invariant: either the first printing checked satisfies the
+        // residual (found, done) or it does not -- and since every OTHER printing of that card carries
+        // the identical value, none of them would satisfy it either, so the loop has nothing left to
+        // gain by continuing (confirmed directly against the executor: `found` is set or the loop simply
+        // runs out at `end`, one check per printing, never a rescan). Declared here, not inside the
+        // `Mode::Card` arm below, because the LATER `range_too_broad_to_narrow` guard (see its own doc)
+        // also needs it -- a query this exact and this broad (`cmc>=0`, `id:bgruw`) is exactly the shape
+        // that guard exists to catch, and without this exemption it clobbers the correct answer computed
+        // below back to the full corpus.
+        //
+        // Gated on `est.result.card.guaranteed == Some(domain_cards)`, not `composed_card_invariant`
+        // alone: the
+        // "one printing settles it" argument only holds when `domain_cards` carries ZERO false
+        // positives, since a false-positive candidate's residual is false on every printing and the
+        // `Prefer::Default` loop has no way to know that in advance -- it still walks every printing
+        // before giving up, `examined = span`. `est.result.card` is populated only for the leaf types
+        // already verified this session to be a real, exact card-space count (ColorCmp/Legality/
+        // CollectionCmp/Border/Devotion/NumericCmp), and deliberately left `None` for bare ranges/
+        // rarity precisely because their own card counts are NOT reliably exact
+        // (`RangeCardCounts::distinct_cards`'s broad-range undercount, `eur>0.16` real 31,724 vs
+        // computed 19,992) -- reusing that field instead of a fresh `exact_cards.is_some()` check keeps
+        // this scoped to the population already trusted, not the wider one `exact_result_total` alone
+        // would admit. Measured: bare `cmc`/`power`/`toughness`/`color_identity` read a median 3.08x
+        // over (== `printings_per_card` exactly) across their WHOLE bucket, not just the near-universal
+        // queries -- the gap is structural, not a selectivity artifact, because card-invariance makes
+        // depth-1 true regardless of how selective the predicate is.
+        //
+        // Round 62: that property is `guaranteed`, so the gate says so directly instead of asking
+        // `best()` and relying on the two coinciding. "Came from a trusted exact source" is
+        // `SpaceMeasure::guaranteed`'s definition post-Round-59; `best()` is the ACCURACY read and is
+        // free to resolve from the estimate channel, which would answer a different question.
+        // Byte-identical today, provably and not just by measurement: NOTHING writes `result.card`'s
+        // estimate channel anywhere in `compose_printing_estimate` (`Candidate::Estimate`/
+        // `PrintingBound` touch printing only; the `And` arm seeds card UNKNOWN and reaches it only
+        // via `lower_guaranteed`; every leaf constructor fills both channels with the same number;
+        // `Or`'s `add` needs both children's `guaranteed` and its `estimate` sums the same `best()`s),
+        // so `card.best()` and `card.guaranteed` are the SAME `Option<usize>` at every node. Confirmed
+        // by a full survey diff before this swap landed: zero rows moved. The swap matters because the
+        // queued domain-seeding round makes `card.best()` unconditionally `Some`, at which point the
+        // `best()` spelling silently becomes vacuous while the `guaranteed` spelling keeps meaning what
+        // this doc says.
+        let card_invariant_domain_exact = composed_card_invariant && est.result.card.guaranteed == Some(domain_cards);
         // What the MATERIALIZING alternatives scan if compose loses. Every mode narrows -- a
         // composable filter has an index for every leaf -- so all three are the NARROWED counts.
         // Printing mode took the unnarrowed universe while card/artwork took a narrowed count; only
@@ -11612,8 +17809,159 @@ fn acquire_plan_features(
         // `printings_examined` of exactly 97,206. The clamp makes that cell exact. It matters for routing
         // because this feature is 76% of P3's arm on the broad-residual class, where it drove P3 to
         // pred/meas 1.53 while P4 sat at 0.88 — the pair inverted, with both plans over the same feature.
-        let scan_all =
-            |cards: usize| (((cards as f64) * printings_per_card * COMPOSE_CANDIDATE_SPAN_BIAS) as usize).min(n_printings as usize);
+        // An earlier version of this used `exact_result_total(composed, Mode::Printing)` here whenever
+        // `est.candidate.printing() == est.result.printing()`, on the theory that a bare leaf's own exact
+        // MATCH count is the candidate cards' printing span. Checked directly against real data (a
+        // paired diff on `scan_units` specifically, not just the pooled percentile view): 1,077
+        // queries regressed, every one a bare leaf (`border:borderless`, `r>=mythic`, `year:2006`).
+        // The two quantities are not the same: a card can have OTHER printings that don't match the
+        // leaf's own value but are still part of that card's range, which `GatheredScan` walks in
+        // full -- `printings_examined` counts that whole span, not just the matching subset. Removed
+        // rather than fixed further; `exact_domain` below doesn't have this flaw because
+        // `card_bits_span_total` (which built it) already sums each candidate card's FULL span, not a
+        // filtered match count -- confirmed by the same paired diff, run on this fix: `id:br r<=uncommon`
+        // 97,812 -> 23,394 against a real 23,394, exact.
+        //
+        // Whether `est.exact_domain` is actually what won `domain_cards`' `is_and` tightening above --
+        // `domain_cards` is `.min()`-ed from TWO independent sources (`domain_cards_before_card` and
+        // `est.result.card`, which is `est.exact_domain`'s own `.card`), so `exact_domain.printing` is
+        // only the CANDIDATE set's true span when its `.card` is the side that actually won. If the
+        // OTHER side was tighter, the real candidate set is smaller than what `exact_domain` describes,
+        // and using its printing span would overstate the span of a set that isn't the one being priced.
+        let exact_domain_won = is_and && est.exact_domain.is_some_and(|ed| ed.card == Some(domain_cards));
+        // **The one condition under which a candidate card's walk stops at its FIRST matching printing**
+        // instead of burning the card's whole span. Round 79: named once here because THREE independent
+        // sites below were each spelling it `matches!(mode, Mode::Card)` and each therefore wrong under a
+        // custom prefer -- `scan_all`'s depth term, the `card_invariant_domain_exact` fast path, and the
+        // `nothing_to_verify` override.
+        //
+        // From source, not inference: `push_card_matches` has one early-breaking arm per existential-plane
+        // case and both are guarded `matches!(prefer, Prefer::Default)` -- "the custom-prefer paths score
+        // every printing and so examine the whole span, UNCONDITIONALLY" (its own doc), all_match included,
+        // because a custom prefer has no relationship to store order and the max cannot be known without
+        // seeing every candidate printing. `walk_grouped_page` and `gather_composed_page` carry the same
+        // `Mode::Card if matches!(prefer, Prefer::Default)` arm, with `Mode::Card | Mode::Artwork` falling
+        // through to `printings_examined += end - start`.
+        //
+        // This is Round 74's bug on its second axis. That round found `scan_all`'s depth discount was a
+        // card-MODE order statistic applied to every mode and gated it by mode; the same discount is also
+        // a default-PREFER order statistic, and was still applied under every prefer. Measured on 3,372
+        // picked `GatheredScan` rows, realized `printings_examined / printing_span` -- i.e. what fraction
+        // of the candidate span the loop really burned:
+        //
+        //     card | default   0.35-0.75   <-- the discount is real here
+        //     card | custom    1.000
+        //     printing | *     1.000
+        //     artwork  | *     1.000
+        //
+        // Every cell but `card | default` walks the span EXACTLY, and the discount could only under-charge
+        // them: `scan_units / printings_examined` read p50 0.325 on the `card_invariant_domain_exact` fast
+        // path and 0.124 on the depth term, against 1.000 for the same two under the default prefer.
+        let card_first_match_break = matches!(mode, Mode::Card) && matches!(prefer, Prefer::Default);
+        // `first_match_break` is a PARAMETER rather than a capture of the flag above because the two plans
+        // genuinely disagree here and the acquire has to be able to ask each question. See
+        // `stream_scan_base` below: `card_match_count`, which is P3's counting pass, takes no `prefer` at
+        // all and returns `(1, i + 1)` for every `Mode::Card` candidate whatever the prefer is. Round 74's
+        // warning was that fixing ONE plan manufactures a false P3/P4 asymmetry; this asymmetry is real and
+        // measured (realized `printings_examined / printing_span` under `card`/custom prefer: 1.000 for
+        // GatheredScan, 0.51 for StreamedSelect), so the fix has to be able to express it.
+        let scan_all = |cards: usize, first_match_break: bool| {
+            if exact_domain_won
+                && let Some(exact_domain) = est.exact_domain
+            {
+                // Bare, not `.min()`-ed against the statistical guess: tried that (real data first --
+                // it always is), and it made things worse both by row count (732/119 improved/regressed
+                // vs 772/79 bare) and by total magnitude. Unlike `domain_cards` (where `est.card` is a
+                // mathematically guaranteed upper bound on the true joint count, so `.min()` can only
+                // tighten), there's no such guarantee here -- `exact_domain` only covers the children
+                // `best_other`/the arith-merge actually captured (a sibling those mechanisms skip, a
+                // residual range or an uncaptured second existential, narrows the REAL candidate set
+                // further without `exact_domain` knowing it), and the true value is SOMETIMES bigger
+                // than both candidates, not just smaller. "Take the smaller number" isn't a safety net
+                // for a quantity that can be wrong in either direction -- it just doubles down on
+                // whichever candidate under-shoots.
+                //
+                // The 79 residual regressions (`f:penny produces:u`, `border:black id:r`, ...) are
+                // accepted as a known, documented gap: summed by MAGNITUDE, not row count, they add
+                // 134,494 units of error against 6,805,680 shed by the 772 improved rows (total absolute
+                // error across the whole affected population: 8,008,106 -> 1,336,920, an 83% cut) --
+                // the worst single regression is 6,235, the best single improvement 74,418
+                // (`id:br r<=uncommon`: 97,812 predicted -> 23,394, an exact match). A raw
+                // improved/regressed row COUNT alone overstates how mixed this is: several of the
+                // "regressed" rows are swings like 3 -> 4 against a true 1, noise on a query this
+                // narrow already costs nothing to get wrong.
+                return exact_domain.printing.min(n_printings as usize);
+            }
+            // `!est.printing_tightened` mirrors `domain_cards`' own guard: nothing was tightened
+            // away from the leaf/pair-exact estimate, so `exact_printing_span` (already gated to
+            // card-invariant filters above, where match count IS the matching cards' full span) is the
+            // true span under exactly these candidates. Round 62: the explicit flag, for the same
+            // reason the sibling guard above swapped to it -- `exact_printing_span` describes the span
+            // of the UNTIGHTENED candidate set, so a tightening this test cannot see (one that moved
+            // only `guaranteed`) makes it the span of a set larger than the one being priced.
+            if !est.printing_tightened
+                && let Some(printings) = exact_printing_span
+            {
+                return printings.min(n_printings as usize);
+            }
+            // Printing-varying leaf (price/collector_number/released_at, or an And of them): no
+            // "first printing settles it" guarantee, so this candidate's card DOES get walked past
+            // its first printing when that printing doesn't happen to satisfy the residual. The old
+            // formula priced every candidate at the CORPUS-WIDE average reprint depth
+            // (`printings_per_card`) regardless of how selective the predicate is at the printing
+            // level -- as wrong for `price_usd<0.05` (near-universal, few candidates settle deep) as
+            // for `price_usd=99.99` (rare, most candidates that have ANY match burn their whole span
+            // finding it).
+            //
+            // `printing_matches / cards` is the query's own match DENSITY: how many of each
+            // candidate's printings match, on average, among cards known to have at least one. Model
+            // each candidate's matching printings as landing at uniformly random positions among its
+            // `printings_per_card` slots (order-statistics on the position of the FIRST match, not a
+            // per-card exact position this has no data for) -- expected position of the first hit
+            // among `printings_per_card` slots with `density` of them set is
+            // `(printings_per_card + 1) / (density + 1)`. `density -> printings_per_card` (every slot
+            // set, i.e. card-invariant) collapses this to 1 (first printing always hits, the case the
+            // sibling `card_invariant_domain_exact` fast path already prices exactly); `density -> 0`
+            // (barely any matching printings) pushes it toward the corpus-average span, never past it
+            // -- `.min(printings_per_card)` is a belt-and-suspenders cap for float edge cases, not a
+            // load-bearing clamp (the order-statistics formula is already bounded by construction).
+            //
+            // Both inputs are already-computed scalars (`printing_matches` = `est.result.printing`,
+            // `cards` = `domain_cards` at every call site, `printings_per_card` = a corpus-wide ratio
+            // computed once per acquire) -- no new index probe, no per-query scan, cost independent of
+            // match/printing/candidate count. `COMPOSE_CANDIDATE_SPAN_BIAS` still corrects the
+            // remaining "candidates are more reprinted than an average card" size bias (see its own
+            // doc) on top of the depth term, refit for this shape (see the constant's own doc).
+            // **Everything above is `Mode::Card` ONLY**, and Round 74 gates it there. The depth term
+            // models the position of the FIRST MATCHING printing, which is where `card_match_count`'s
+            // `Mode::Card` arm returns (`return (1, i as u32 + 1)`). The `Mode::Printing` and
+            // `Mode::Artwork` arms of that same function return `(end - start)` UNCONDITIONALLY, so
+            // what gets realized there is the candidate's whole span -- `printing_span ==
+            // printings_examined` on 99.5% / 99.4% of measured rows in those modes, against a card-mode
+            // realized depth of 0.54 of the span. And `(ppc + 1) / (density + 1) <= ppc` by
+            // construction, so applying the discount to a full-span walk can ONLY under-charge. It did,
+            // by 3x at the median: the shipped feature graded p50 **0.335** against realized
+            // `printings_examined` on 955 compose printing/artwork rows, |mean log| 1.2301.
+            //
+            // `COMPOSE_CANDIDATE_SPAN_BIAS` does not transfer either -- its own doc records that it was
+            // fit on `unique=card` samples exclusively -- so the non-card branch returns early rather
+            // than inheriting it. That matters beyond tidiness: a card-fitted constant silently
+            // multiplying a non-card path is precisely what made this bug invisible, and Round 72 hit
+            // the same shape one estimator over (a span multiplier pooled across two regimes, pure
+            // over-charge on one). One constant, named for the population it is fit on.
+            //
+            // Round 79: the gate is `first_match_break`, not `!matches!(mode, Mode::Card)`. The depth term
+            // models the position of the first matching printing, so it is valid exactly where the loop
+            // stops there -- which is `Mode::Card` AND `Prefer::Default`, never `Mode::Card` alone. See
+            // `card_first_match_break`'s own doc for the source and the measured cells.
+            if !first_match_break {
+                return (((cards as f64) * printings_per_card * COMPOSE_FULL_SPAN_REPRINT_PREMIUM) as usize)
+                    .min(n_printings as usize);
+            }
+            let density = (printing_matches as f64) / (cards as f64).max(1.0);
+            let expected_depth = ((printings_per_card + 1.0) / (density + 1.0)).min(printings_per_card);
+            (((cards as f64) * expected_depth * COMPOSE_CANDIDATE_SPAN_BIAS) as usize).min(n_printings as usize)
+        };
         let (result_total, project, popcount_words, eval_domain, scan_units) = match mode {
             Mode::Printing => {
                 // `exact_total` for the RESULT, `printing_matches` for everything else. They are not the
@@ -11624,7 +17972,7 @@ fn acquire_plan_features(
                 // would under-charge the scan on exactly the divergent-legality cards the superset exists
                 // for. `f:modern` reads 68,687 against a true 73,783; `banned:modern` 160 against 399.
                 let total = if *EXACT_VALUE_TOTALS { exact_total.unwrap_or(printing_matches) } else { printing_matches };
-                (total, 0, (n_printings as usize).div_ceil(64), domain_cards, scan_all(domain_cards))
+                (total, 0, (n_printings as usize).div_ceil(64), domain_cards, scan_all(domain_cards, card_first_match_break))
             }
             Mode::Card => {
                 // Card mode's result total IS the distinct-card count, which is precisely what
@@ -11632,7 +17980,27 @@ fn acquire_plan_features(
                 // `printing_matches.min(n_cards)`, which reads a median 1.99x the deduped
                 // `matches_pushed` counter -- p10 1.01, so it is over on nearly every query. Two
                 // names for one quantity, one of them wrong.
-                (est_cards, printing_matches, (n_cards as usize).div_ceil(64), domain_cards, scan_all(domain_cards))
+                //
+                // `card_invariant_domain_exact` (computed above, alongside `domain_cards` -- see its own
+                // doc) replaces the generic `printings_per_card * BIAS` fallback with `domain_cards`
+                // directly whenever the composed field is card-invariant and exact: the executor settles
+                // each such card in exactly one printing, so the average-reprint-rate multiplier is not
+                // an approximation here, it is pricing a rescan that never happens.
+                //
+                // Round 79: "settles each such card in exactly one printing" is true only under
+                // `Prefer::Default`. A custom prefer makes `push_card_matches` score the card's whole span
+                // even when `all_match` is already proven, because the best-prefer printing cannot be known
+                // without seeing them all -- so this fast path was pricing a rescan that DOES happen,
+                // reading p50 0.325 against the realized `printings_examined` (against exactly 1.000, p10
+                // and p90 both 1.000, under the default prefer). Falling through hands the row to
+                // `scan_all`, whose `exact_printing_span` arm answers a card-invariant filter's span
+                // exactly -- the same quantity, without the depth assumption.
+                let scan_units = if card_invariant_domain_exact && card_first_match_break {
+                    domain_cards
+                } else {
+                    scan_all(domain_cards, card_first_match_break)
+                };
+                (est_cards, printing_matches, (n_cards as usize).div_ceil(64), domain_cards, scan_units)
             }
             Mode::Artwork => {
                 // `result_total` is consumed as a per-RESULT count (GatheredScan's push term,
@@ -11655,12 +18023,40 @@ fn acquire_plan_features(
                 // The two-stage estimate is only reached when nothing exact is available. A bare
                 // one-sided range now answers artwork exactly from the range table's artwork column,
                 // which is the one space every such query used to estimate (0.80-0.87 measured).
-                let rt = exact_total.unwrap_or_else(|| artwork_estimate(printing_matches, capacity_cards, n_cards as usize, n_artworks));
+                //
+                // `exact_total` here is `exact_result_total(.., Mode::Artwork)` -- untouched, same
+                // "always covers the whole filter when it fires" guarantee as `exact_cards` above, so
+                // adopting it outright is safe. `est.result.artwork` is `est.result.card`'s own
+                // artwork-space sibling and carries the identical risk documented at `est_cards`'s own
+                // definition above (a partial-subset mechanism can be blind to a materially-restrictive
+                // residual leaf) -- folded in the same way, as an ADDITIONAL `.min()` tightening on top
+                // of the two-stage estimate, never a replacement for it.
+                let rt_before_and_arm =
+                    exact_total.unwrap_or_else(|| artwork_estimate(printing_matches, capacity_cards, n_cards as usize, n_artworks));
+                let rt = est.result.artwork.best().map_or(rt_before_and_arm, |da| da.min(rt_before_and_arm));
                 // The bitmap `printing_bits_to_artwork_bits` popcounts is n_artworks bits wide, not
                 // n_printings -- 46,112 against 97,206 here, so this was 2.1x over as well.
-                (rt, printing_matches, n_artworks.div_ceil(64), domain_cards, scan_all(domain_cards))
+                (rt, printing_matches, n_artworks.div_ceil(64), domain_cards, scan_all(domain_cards, card_first_match_break))
             }
         };
+        // **P3's counting pass keeps the first-match depth that Round 79 took away from P4**, so where the
+        // two disagree `stream_scan_units` reads this instead of `scan_units`. `None` means "they agree",
+        // which is every mode but `Mode::Card` and every `Mode::Card` row under the default prefer.
+        //
+        // The asymmetry is structural, not a calibration difference. `card_match_count` -- the kernel
+        // `run_query_streamed`'s counting pass calls -- does not take a `prefer` argument AT ALL, and its
+        // `Mode::Card` arm returns `(1, i as u32 + 1)` at the first residual-matching printing however the
+        // query is preferred: it answers "does this card match", which store order settles regardless of
+        // which printing would be SHOWN. P4 has no such luxury, because it must produce the row. Measured
+        // as realized `printings_examined / printing_span` on `unique=card` rows under a custom prefer:
+        // 1.000 for GatheredScan against 0.51 for StreamedSelect.
+        //
+        // Round 74's hazard was the mirror image -- fixing `stream_scan_units` alone while GatheredScan
+        // carried the identical defect would have manufactured an asymmetry that does not exist. The rule
+        // it set is that the two features must differ only where the two kernels differ, and here they do.
+        let stream_scan_base = (!card_first_match_break && matches!(mode, Mode::Card)).then(|| {
+            if card_invariant_domain_exact { domain_cards } else { scan_all(domain_cards, true) }
+        });
         // `eval_domain` and `scan_units` describe what the MATERIALIZING alternatives walk, and when the
         // narrowing does not shrink the candidate set they walk the whole corpus — at which point these are
         // not badly estimated, they are estimating the wrong QUANTITY. `est_cards` is a count of MATCHING
@@ -11708,21 +18104,87 @@ fn acquire_plan_features(
         // `And` and matches no bare-leaf shape at all, silently undoing the #1005 collection-leaf
         // exemption for every query combining it with one of these fields. `plane_leaves_nothing_to_verify`
         // reaches the `pow<=2` case through `filter == True` instead, without disturbing that one.
-        let (eval_domain, scan_units) = if !(compose_leaf_nothing_to_verify(filter) || plane_leaves_nothing_to_verify(filter, mode, plane, indexes))
+        //
+        // A third exemption, `is_and && est.result.card.guaranteed.is_some()`: the same failure mode
+        // again, this time for
+        // an `And` whose EXACT card intersection this session's `compose_printing_estimate` work now
+        // knows (`f:timeless r>=rare`, card mode: `domain_cards` a correct, verified 5,854 against
+        // `est.result`/`printing_matches` of 36,623 -- 37% of the corpus, over `MAX_NARROW_FRACTION`, so
+        // this guard fired and threw the exact card count away for the full 31,724-card corpus).
+        // `domain_cards` is `.min()`-ed against `est.card` for exactly this `is_and` case (see just
+        // above), so an exact card count in hand there can only make `domain_cards` tighter than a
+        // fabricated one, the same non-regression argument the other two exemptions already rely on.
+        // NOT extended to bare leaves -- see `is_and`'s own doc for the 809-query regression that
+        // surfaced when this was tried unscoped.
+        //
+        // Round 62: reads `guaranteed` rather than `best()`, for the same reason and with the same
+        // proof as `card_invariant_domain_exact` above -- the question here is "did the `And` arm
+        // produce a TRUSTED card number", which is `guaranteed`'s definition, not `best()`'s. Same
+        // `Option<usize>` today; not the same question once domain-seeding lands.
+        // A fourth exemption, `card_invariant_domain_exact` (computed alongside `domain_cards` above --
+        // see its own doc): the same failure mode again, this time for a BARE card-invariant leaf whose
+        // exact card count this session's `compose_printing_estimate` work now knows (`cmc>=0`, card
+        // mode: `domain_cards` a correct, verified 31,724, discarded back to the full corpus by this
+        // guard because a bare leaf never reaches the `is_and` exemption above it). Safe across every
+        // mode, not just `Mode::Card`: whatever `scan_units`/`eval_domain` the arm above already computed
+        // for a card-invariant, false-positive-free domain is either that same exact card count (Card
+        // mode) or `exact_printing_span`'s exact span of it (Printing/Artwork, gated identically on
+        // card-invariance) -- never a value this guard would improve on by falling back to `n_printings`.
+        //
+        // Round 79 threads `stream_scan_base` through unchanged in shape: when this guard fires it
+        // overwrites `scan_units` with a corpus-wide ceiling that describes BOTH plans equally, so the
+        // P3/P4 split computed above no longer applies and is dropped to `None`.
+        let (eval_domain, scan_units, stream_scan_base) = if !(compose_leaf_nothing_to_verify(filter)
+            || plane_leaves_nothing_to_verify(filter, mode, plane, indexes)
+            || (is_and && est.result.card.guaranteed.is_some())
+            || card_invariant_domain_exact)
             && range_too_broad_to_narrow(printing_matches, n_printings as usize)
         {
-            (n_cards as usize, n_printings as usize)
+            // `eval_domain` stays the full `n_cards` unconditionally -- see
+            // `COMPOSE_RANGE_AND_BROAD_SCAN_SCALE`'s doc for why that half of the reset is already
+            // exact for the one shape this narrows further. `scan_units` alone gets a downward scale,
+            // keyed on which range shape reached this branch: `is_cross_index_range_and` (2+
+            // different-index range leaves) and `is_same_index_range_only` (a bare single range leaf,
+            // or a fused same-field two-sided bound -- see its own doc for why neither reaches
+            // `CardRangePopcount`) each have their own fitted constant. Anything else reaching this
+            // branch (a broadcast legality, a range mixed with a collection/rarity/numeric_other leaf,
+            // ...) never had either scale's calibration sample in it, so it keeps today's unscaled
+            // `n_printings` ceiling.
+            //
+            // BOTH scales are `Mode::Card`-only, and deliberately so (Round 28 fix, #costcell-28):
+            // both were fit exclusively against `unique=card` samples (Round 4's re-derivation and
+            // Round 7's fit are each explicit about this), because card mode's kernels short-circuit
+            // per candidate and printing/artwork mode's do not -- confirmed directly against a fresh
+            // `bench_feature_accuracy.py`-style sample of this exact guard-fired population: `scan_units
+            // == n_printings` held EXACTLY on every `Mode::Printing`/`Mode::Artwork` row (p10/p50/p90 of
+            // `printings_examined / n_printings` all landing on 1.000, zero spread -- those loops really
+            // do walk the full candidate-card printing span with no early exit), while `Mode::Card`'s
+            // same population reads the ~0.52/0.7 fraction that motivated the fit. Applying either scale
+            // to `Mode::Printing`/`Mode::Artwork` was silently manufacturing a `Mode::Card`-shaped
+            // under-count out of a population that had no such property, and is what tipped
+            // `bench_feature_accuracy.py`'s pooled `scan_units` cell from clean (main) to UNDER-COUNTS
+            // (this branch) -- see `docs/issues/local-engine-gathered-scan-card-printing-varying-depth.md`'s
+            // Round 28 entry.
+            let scan_units = if matches!(mode, Mode::Card) && is_cross_index_range_and(composed, indexes) {
+                ((n_printings as f64) * COMPOSE_RANGE_AND_BROAD_SCAN_SCALE).round() as usize
+            } else if matches!(mode, Mode::Card) && is_same_index_range_only(composed, indexes) {
+                ((n_printings as f64) * COMPOSE_SAME_RANGE_BROAD_SCAN_SCALE).round() as usize
+            } else {
+                n_printings as usize
+            };
+            (n_cards as usize, scan_units, None)
         } else {
-            (eval_domain, scan_units)
+            (eval_domain, scan_units, stream_scan_base)
         };
         // The tier is what the MATERIALIZING alternatives pay per candidate, so it must be asked about
         // the predicate THEY see (`filter` + `plane`), not about `composed` — and gated exactly as
-        // `prepare_candidates` gates it, or the router charges a `card_pass` the kernels will skip. On a
-        // card-invariant legality format `card_pass` resolves at card level for every card, so
-        // `printings_examined` reads 0 and both the per-card residual and the per-row scan are dead
-        // terms; charging them anyway was 92-94% of P3's predicted cost on `f:modern`, `f:gladiator`,
-        // `f:commander` and `f:predh`. `residual_exact` is unavailable here (this branch never narrows),
-        // so this is the conservative half of the executor's disjunction: it can over-charge, never under.
+        // `prepare_candidates` gates `all_match_known` (skipping `card_pass`), or the router charges a
+        // `card_pass` the kernels will skip. On a card-invariant legality format `card_pass` resolves at
+        // card level for every card, so `printings_examined` reads 0 and both the per-card residual and
+        // the per-row scan are dead terms; charging them anyway was 92-94% of P3's predicted cost on
+        // `f:modern`, `f:gladiator`, `f:commander` and `f:predh`. `residual_exact` is unavailable here
+        // (this branch never narrows), so this is the conservative half of the executor's disjunction: it
+        // can over-charge, never under.
         //
         // `compose_leaf_nothing_to_verify` closes the analogous gap for a bare compose-exact collection
         // leaf: `otag:triggered-ability` (47% dense) measured StreamedSelect predicted at 1026us against
@@ -11730,8 +18192,33 @@ fn acquire_plan_features(
         // query to `PrintingCompose` (176.5us) despite it being ~4x slower (#1005). `plane_leaves_
         // nothing_to_verify` cannot see this — it only recognizes the legality plane's rewrite to `True`,
         // and a compose-exact leaf is never rewritten that way.
-        let nothing_to_verify =
-            plane_leaves_nothing_to_verify(filter, mode, plane, indexes) || compose_leaf_nothing_to_verify(filter);
+        //
+        // ANDed, not ORed like `plane_leaves_nothing_to_verify`'s own combined (filter-must-be-True-too)
+        // test: `compose_leaf_nothing_to_verify` and `cost_plane_nothing_to_verify` each answer for their
+        // OWN half of the query (the residual `filter` and the compiled `plane` respectively), and each
+        // can be satisfied while the OTHER half still needs a per-printing check. Originally this OR'd
+        // `plane_leaves_nothing_to_verify(filter, mode, plane, indexes)` (which itself requires filter ==
+        // `True`, so it only ever fired when there was no separate residual) with
+        // `compose_leaf_nothing_to_verify(filter)` alone — but the latter says nothing about `plane`, so
+        // whenever `plane` ALSO existed and was existential, a residual that happened to be a bare safe
+        // collection leaf (`t:swamp`, `otag:X`, `keyword:Y`) still forced `nothing_to_verify = true` for
+        // the WHOLE query, silently discarding the plane side's real per-printing existential work.
+        // Found live: `t:swamp tou=5 border:black`/card kept `residual_tier_ns100 == 0` even after
+        // `cost_plane_nothing_to_verify` alone was scoped to reject it, because the OR's other arm
+        // (`compose_leaf_nothing_to_verify(t:swamp)`) still fired on its own.
+        //
+        // The `all_match_known` claim in the comment above (matching `prepare_candidates`'s `card_pass`
+        // skip) is true for `card_pass` — both use the same shaped test on each half — but incomplete
+        // whenever `plane` is existential (`plane_expr_is_existential`, any family): the executor's
+        // `existential_plane_for` runs a SEPARATE per-candidate-printing walk in exactly that case (see
+        // `cost_plane_nothing_to_verify`'s doc), and that walk is real work neither half's own "I have
+        // nothing to verify" claim accounts for on its own. Found live: `cmc>=1 cmc<=5 border:black`/card
+        // — `residual_tier_ns100 == 0` priced `GatheredScan` at 326,263ns against a measured
+        // 1,015,209-1,290,166ns; `f:oldschool cmc>=1 cmc<=5`/card (a DIVERGENT legality format in the
+        // same shape, no rarity/border involved) — predicted 18,519ns against a measured 58,625ns
+        // (docs/issues/local-engine-gathered-scan-undercosted-arith-existential-and.md).
+        let filter_nothing_to_verify = matches!(filter, FilterExpr::True) || compose_leaf_nothing_to_verify(filter);
+        let nothing_to_verify = filter_nothing_to_verify && cost_plane_nothing_to_verify(plane, indexes);
         let tier = if nothing_to_verify { 0 } else { verify_cost_tier(composed) };
         // `GatheredScan` walks every printing of every candidate card, so its scan feature is the candidate
         // SPAN. `scan_all` estimates that span as `est_cards x` the corpus-average printings-per-card `x 2.1`,
@@ -11748,9 +18235,46 @@ fn acquire_plan_features(
         // the same boolean as the tier because the grading inverts on the other population — with a real
         // residual `scan_units` is right at p50 0.97 and `printing_matches` badly under at 0.39.
         //
-        // Fixes the BIAS, not the spread: both rows read p90/p10 4.5, so what remains is the candidate
-        // count's own variance (`eval_domain` grades p90/p10 3.1 here) and is not a scan-feature problem.
-        let scan_units = if nothing_to_verify { printing_matches } else { scan_units };
+        // That comparison pooled every `prefer` together, and the two are not actually competing for the
+        // same rows: `push_card_matches`'s `Mode::Card`/`Prefer::Default` loop settles a card-invariant
+        // match in exactly ONE printing (the plane pass already proved `all_match`, so the very first
+        // printing checked is the pick, no rescan), while any OTHER `prefer` must score every printing to
+        // find the best one and genuinely does walk the full span -- the identical distinction the sibling
+        // `PlanePopcountOrder` branch above already makes explicit for the same reason. `printing_matches`
+        // was the better SINGLE number for a population blending both regimes (median 0.93 against 1.76),
+        // but it is the wrong one for the ~85% `Prefer::Default` share (`REALISTIC_PREFER_WEIGHTS`) once
+        // the two are told apart: `eval_domain` is what that regime's executor actually walks.
+        // `PlanFeatures` has no `prefer` field, but the NUMBER this call computes can still condition on
+        // the `prefer` this call was actually made with -- it is not predicting for an unknown future
+        // prefer, it already knows this one, same as the plane branch above.
+        //
+        // Gated on `card_invariant_domain_exact`, not `matches!(mode, Mode::Card) &&
+        // matches!(prefer, Prefer::Default)` alone: `nothing_to_verify` can be true from
+        // `compose_leaf_nothing_to_verify` too, and neither flag says `eval_domain`/`domain_cards` is
+        // actually EXACT there -- checked directly against real data first (paired diff on `scan_units`):
+        // the looser condition regressed `cmc>=2 cmc<=3 pow>2` 5,463 -> 11,405 against a real 1,772,
+        // because an all-arith-tuple-eligible `And` is exactly the shape `best_other`'s intersection
+        // (the thing that makes `est.result.card` trustworthy) does not cover -- `is_arith_tuple_eligible`
+        // children are filtered OUT of `best_other`'s `card_invariant`/`existential` partition, and the
+        // arith-merge that would otherwise pick them up is itself gated on `best_other` already being
+        // `Some` (see the `And` arm's own doc) -- so `domain_cards` there falls back to
+        // `calibrated_balls_into_bins`, an ESTIMATE, not the exact answer this branch needs.
+        // `card_invariant_domain_exact` is the same proof already required for the bare-leaf `scan_all`
+        // shortcut and the `range_too_broad_to_narrow` exemption above -- reusing it here instead of a
+        // fresh, looser condition keeps all three tied to one verified population rather than three
+        // separately-trusted ones.
+        //
+        // Round 79: `&& card_first_match_break`. The paragraph above argues, at length and correctly, that
+        // `eval_domain` is right for the `Prefer::Default` regime and `printing_matches` for the one that
+        // "genuinely does walk the full span" -- and then the condition shipped without the prefer half of
+        // it, so every prefer took the default regime's number. The `alone` in the paragraph below is the
+        // tell: the gate was always meant to be a conjunction, and `card_invariant_domain_exact` is the
+        // exactness half of it, never the whole.
+        let scan_units = if nothing_to_verify {
+            if card_invariant_domain_exact && card_first_match_break { eval_domain } else { printing_matches }
+        } else {
+            scan_units
+        };
         let mut feats = mk_plan_feats(ctx, params, result_total as u32, eval_domain as u32, scan_units as u32, tier);
         feats.residual_card_invariant = composed_card_invariant;
         // What `StreamedSelect` actually examines here, which is NOT `scan_units`. P4 walks a card's whole
@@ -11790,15 +18314,152 @@ fn acquire_plan_features(
             // examine the boundary printing of the cards it matches, which the share alone would put at
             // zero. Only reachable now when there IS something to verify, which is the case the floor was
             // argued for -- the `tier == 0` arm above is where it used to be wrong.
-            ((scan_units as f64) * share).max(eval_domain as f64) as u32
+            ((stream_scan_base.unwrap_or(scan_units) as f64) * share).max(eval_domain as f64) as u32
         } else {
-            scan_units as u32
+            // Round 30 of the printing-varying-leaf depth ledger
+            // (docs/issues/local-engine-gathered-scan-card-printing-varying-depth.md): the bare
+            // `scan_units` inheritance here was fine BEFORE Round 1 revised `scan_all`'s fallback
+            // downward for a printing-varying leaf (price/collector_number/released_at, or an And of
+            // them) -- not because it was pricing the right thing, but because the old, cruder
+            // `domain_cards * printings_per_card * 2.1` term happened to be large enough to also mask
+            // a SEPARATE cost this feature has never priced: `run_query_streamed` runs a counting pass
+            // over every candidate (the SAME per-card cost `scan_units` already estimates -- confirmed
+            // directly, `f:pioneer cn>=30 cn<=39` reports IDENTICAL `printings_examined` for both
+            // plans, 2,449), then a SECOND pass that re-derives `card_pass` and re-walks the printing
+            // span for every MATCHING card to select the page. `cost.rs`'s `StreamedSelect` arm already
+            // has a `runs_small_gather` term for this second pass's OWN `total <= *STREAM_MIN_MATCHES`
+            // branch (`STREAM_SMALL_TOTAL_FLOOR_PER_CARD_NS * n_cards`) -- but that floor is a per-CORPUS
+            // constant, fit on a population where the branch's `matches` count was small enough that the
+            // redo itself was negligible next to the O(n_cards) "scan every stored count" overhead the
+            // floor was measured against. It cannot vary with a DIFFERENT query's `matches`, so on a
+            // query sitting near the `STREAM_MIN_MATCHES` ceiling (853 matches on `f:pioneer
+            // cn>=30 cn<=39`) the floor alone materially undershoots: real `ns_finish` 65.3us against a
+            // 32.4us floor (`n_cards=31,724 * 1.02`), the remainder being exactly the redo this note
+            // describes.
+            //
+            // Round 30 calibrated this against `ns_finish` minus the floor's own contribution (a
+            // wall-clock RESIDUAL, converted to `stream_scan_units` units via the existing, untouched
+            // `STREAM_SCAN_PER_ROW_NS`), because no structural counter existed for the redo pass's real
+            // work -- `push_card_matches`'s return value was discarded in that loop. Fit: median 1.32,
+            // p10 -38.7, p90 12.7.
+            //
+            // Round 31 of the same ledger entry closed that gap: `PhaseStats::redo_examined` now
+            // captures the exact printing count the redo pass re-examines (see its own doc -- free,
+            // `push_card_matches` already computed and returned it). Refitting DIRECTLY against that
+            // real counter instead of the noisy wall-clock/rate-conversion chain, over 2,926 held-in /
+            // 3,019 held-out `unique=card` `printing_compose` rows (same `bench_regret_matrix.py
+            // --mode realistic` corpus, same real-dispatch gate: small-total branch confirmed to have
+            // actually run via `perm_steps == 0` AND `matches_pushed > 0`, PLUS a guard Round 30's own
+            // gate missed -- `page_offset < matches_pushed`, ruling out the OTHER `perm_steps == 0` exit
+            // where `page_offset >= total` returns before the redo loop ever runs but still reports the
+            // counting pass's `matches_pushed`) surfaced TWO real numbers, not one, and they disagree:
+            //
+            // - The per-row ratio's MEDIAN is 1.0, and it minimizes held-out total absolute error on the
+            //   `redo_examined` counter itself (2.476e6 at the old 1.32 -> 2.388e6 at 1.0) -- the best
+            //   POINTWISE fit.
+            // - The candidate-WEIGHTED mean (`sum(redo_examined) / sum(redo_candidates)` over the same
+            //   calib half) is 2.237 -- a worse pointwise fit (held-out error 2.752e6) because the
+            //   distribution is heavily right-skewed (p10 0.15, p90 10.2): most rows sit near/under 1.0,
+            //   but the flip-query population this bias exists to fix draws disproportionately from the
+            //   heavy tail (a query only flips to the wrong plan when its real redo cost was
+            //   under-priced, which the tail-heavy rows are), so a pointwise-optimal median systematically
+            //   UNDER-corrects exactly the rows that matter for routing.
+            //
+            // Checked directly, not assumed: replaying the SAME reproduced 118-query f3f4a017 flip set
+            // (see the round's own doc entry) against both candidates confirms the divergence is real --
+            // 1.0 fixes 43/118 and actively REGRESSES 9 of the 52 Round 30's own 1.32 already fixed (0
+            // newly fixed); 2.237 fixes 64/118, regresses ZERO of Round 30's 52, and gains 12 more. Same
+            // asymmetry Round 30's own bias sweep found (a false-positive/false-negative trade-off, not a
+            // free lunch), just resolved this time against a real ground-truth counter instead of a
+            // guessed multiplier: 2.237 is kept because it is the real, structurally-grounded statistic
+            // that does not regress the live routing outcome, not because it minimizes the ns-error metric
+            // in isolation -- the same "live outcome over pointwise ns-error" precedent Round 30 itself
+            // set. Ratio by candidate-count bucket reads flat at ~1.0-1.3 across the whole small-total
+            // range (0-50, 50-150, 150-400, 400-1024 candidates) -- no saturation or other non-linearity
+            // to chase, so a flat linear bias remains the right shape; the skew is in the PER-QUERY
+            // residual (as Round 30 itself already flagged), not in candidate count.
+            //
+            // Above the threshold the small-total branch never runs (the permutation walk does
+            // instead, bounded by `limit`), so the redo candidate count is capped at `limit` rather
+            // than dropped to zero outright -- a discontinuity at the threshold would make the acquire
+            // estimate's own noise (this exact query's OWN estimate, 1,983, sits just above the 1,024
+            // threshold despite really landing in the small-total branch) an all-or-nothing coin flip
+            // instead of a graceful degradation.
+            //
+            // `Mode::Card` only: the calibration sample above is `unique=card` exclusively, and
+            // `Printing`/`Artwork` never take `push_card_matches`'s early-break arm (see its own doc),
+            // so `scan_units` already prices the full span there -- a population this round did not
+            // check.
+            const STREAM_SMALL_TOTAL_REDO_BIAS: f64 = 2.237;
+            let redo = if matches!(mode, Mode::Card) {
+                let redo_candidates = if result_total > 0 && result_total <= *STREAM_MIN_MATCHES {
+                    result_total
+                } else {
+                    (feats.limit as usize).min(result_total)
+                };
+                (STREAM_SMALL_TOTAL_REDO_BIAS * redo_candidates as f64) as u32
+            } else {
+                0
+            };
+            stream_scan_base.unwrap_or(scan_units) as u32 + redo
         };
         feats.broadcast_printings = broadcast as u32;
         feats.scatter_printings = scatter as u32;
+        feats.collection_broadcast_printings = collection_broadcast as u32;
         feats.project_printings = project as u32;
         feats.popcount_words = popcount_words as u32;
-        feats.compose_scan_printings = (printing_matches as f64 * COMPOSE_GATHER_SPAN_PER_MATCH) as u32;
+        // `gather_composed_page` takes exactly ONE of three per-card arms, and only two of them walk
+        // the candidate's `start..end` span: printing mode pushes every set printing, and the grouping
+        // arm (artwork always, card under a non-default prefer) must score every printing to find each
+        // group's best. `COMPOSE_GATHER_SPAN_PER_MATCH` prices that span walk -- see its own doc, which
+        // already NAMES this carve-out ("except in its card/default-prefer arm") without the call site
+        // ever honouring it.
+        //
+        // The card/default-prefer arm does not walk the span. Printings are stored prefer-descending
+        // within a card, so the first *set* printing IS the chosen representative and the loop breaks
+        // there (`(start..end).find(is_set)`, charging `pid - start + 1`); a candidate card has at least
+        // one set printing by construction, so the else-branch that falls back to the span is
+        // unreachable. The realized quantity is therefore the CANDIDATE CARD count -- which is what
+        // `gather_composed_page` publishes as `cards_visited` (`candidate_cards.len()`) and what this
+        // branch already holds as `eval_domain` -- not `printing_matches` scaled by a span multiplier.
+        //
+        // Measured, 93 `unique=card`/`prefer=default` compose-Gather rows graded against the realized
+        // `printings_examined`: the old value read p10 0.79 / p50 5.04 / p90 10.84 (mean 7.38);
+        // `eval_domain` reads p10 0.16 / p50 1.00 / p90 3.11 (mean 1.48). Single rows are exact --
+        // `f:gladiator`/card: `eval_domain` 15,131 against `printings_examined` 15,131 and
+        // `cards_visited` 15,131, where the old feature charged 80,654.
+        //
+        // NOT the sibling `groups` predicate just below, even though the two agree on card mode:
+        // printing mode really does iterate the span, so it keeps the multiplier while it never groups.
+        // The remaining tail is the arm's own, not this feature's -- `find` charges `pid - start + 1`,
+        // so a card whose first matching printing sits deep costs more than one, and that is the shape
+        // `eval_domain` cannot express (p90 3.11 above). It is the right SHAPE regardless: one term per
+        // candidate card rather than per matching printing.
+        // Round 70: the GROUPING arm's multiplier is a pure over-charge and comes off. That arm
+        // charges `printings_examined += (end - start)` -- the candidate span -- and graded against it
+        // the shipped feature reads a median of **exactly 1.47**, the constant itself, on every slice:
+        // 622 rows in `bench_feature_accuracy` (artwork 305 p50 1.47, card 301 p50 1.47, both orderby
+        // slices 1.47, p70 also 1.47), and 87 prefer-matched rows in a standalone check (span-walk arm
+        // p50 1.470, artwork 1.470, card 1.462). A median at the constant means bare `printing_matches`
+        // reads 1.000, which is arithmetic rather than a second fit -- and `within 25%` improves
+        // 22% -> 30% while the spread is unchanged by construction (scaling every row by a constant
+        // cannot move p90/p10). This is Round 66's own finding one arm over: that round diagnosed the
+        // constant as "pooling two regimes produced a value that is pure over-charge on one of them",
+        // fixed the early-break regime, and left the multiplier on the grouping regime where it is
+        // equally unearned.
+        //
+        // Two candidates that looked better on paper and measured WORSE, both rejected: `scan_units`
+        // (p50 0.499) despite being the engine's own candidate-span estimate and grading 1.00 on
+        // GatheredScan, which walks the same quantity; and `eval_domain` (p50 0.364).
+        //
+        // `Mode::Printing` KEEPS the multiplier: it walks the same span, so the same argument probably
+        // applies, but it produced no gradeable rows here (below `MIN_ROWS` in every slice) and Round 66
+        // left it alone for the same reason. Unmeasured, so unchanged.
+        feats.compose_scan_printings = match mode {
+            Mode::Card if matches!(prefer, Prefer::Default) => eval_domain as u32,
+            Mode::Card | Mode::Artwork => printing_matches as u32,
+            Mode::Printing => (printing_matches as f64 * COMPOSE_GATHER_SPAN_PER_MATCH) as u32,
+        };
         // The gather's grouping arm runs for artwork always, and for card only under a non-default
         // prefer -- card/default takes the early-break arm and never groups. Printing mode gets 0
         // because its push term already rides the printing count. Driven by the PRE-dedup printing
@@ -11824,14 +18485,14 @@ fn acquire_plan_features(
             .flatten();
         feats.compose_paging =
             compose_paging_with_total(indexes, cards.len(), composed, mode, sort_col, descending, Some(result_total), gather_declines);
-        (feats, Prep::Range(CountSource::PrintingCompose))
+        (feats, Prep::Range(CountSource::PrintingCompose), Some(and_estimate_ns))
     } else {
         let prep = prepare_candidates(ctx, params, filter, plane);
         let feats = candidate_feats(ctx, params, &prep, filter);
-        (feats, Prep::Candidates(prep))
+        (feats, Prep::Candidates(prep), None)
     };
 
-    (feats, prep, plane_bits)
+    (feats, prep, plane_bits, and_estimate_ns)
 }
 
 /// #702: the single cost-based plan-selection layer for ALL unique modes — the
@@ -11882,7 +18543,9 @@ fn run_query_routed<'a>(
     let mut phases = RoutedPhaseTimer::start();
 
     // ── acquire: pick the count source, build features, materialize its artifact ──
-    let (feats, prep, plane_bits) = acquire_plan_features(ctx, params, filter, unsplit, plane);
+    // `and_estimate_ns` is `explain`/`explain_analyze`'s diagnostic (`AcquireFacts::and_estimate_ns`)
+    // -- the real routing path spends its own clock on dispatch, not on reporting this.
+    let (feats, prep, plane_bits, _and_estimate_ns) = acquire_plan_features(ctx, params, filter, unsplit, plane);
     phases.acquired();
 
     // ── choose: cheapest applicable plan this acquire's dispatch arm can run ──
@@ -12030,15 +18693,17 @@ fn run_query_with_plan<'a>(
 pub(crate) struct PlanEstimate {
     pub(crate) plan: PhysicalPlan,
     pub(crate) predicted_ns: f64,
-    /// `cost::materialize_cost` for this plan: the modelled `collect` + `sort_unstable` cost of the
-    /// candidate list it consumes — the candidate-production term `plan_cost` omits. Reported but
-    /// deliberately NOT added to `predicted_ns`; `0.0` for plans that build no candidate list. See
-    /// `cost.rs`'s "Candidate materialization" section for why it stays out of the routing decision.
+    /// `cost::materialize_cost` for this plan: the modelled cost of the artifact its DISPATCH builds
+    /// — `prepare_candidates` for the two materializing plans, and `0.0` for the four that build
+    /// nothing there (see that function's doc for why `CardRangePopcount`, which does build one, is
+    /// among them). The term `plan_cost` omits for a `Prep::Range` acquire. Reported but deliberately
+    /// NOT added to `predicted_ns`; see `cost.rs`'s "Candidate materialization" section.
     ///
-    /// Charged on `eval_domain`, which is the candidate count only under a `Candidates` acquire.
-    /// Under `Prep::Range` the two materializing plans are estimated UNNARROWED
-    /// (`eval_domain = n_cards`), so this figure has no referent there -- do not pool range-acquired
-    /// rows with candidate-acquired ones when reading it.
+    /// Comparable across acquires, which it was not before Round 81: it is charged on
+    /// `prepare_nodes`/`prepare_plane_word_ops`/`prepare_cands`, each of which is set per acquire
+    /// branch, rather than on `eval_domain`, which the two bare-range acquires leave pinned at
+    /// `n_cards`. Grade it against the realized `PhaseStats::ns_prepare` --
+    /// `scripts/bench_prepare_cost_shape.py` does exactly that.
     pub(crate) materialize_ns: f64,
     /// Whether this is the plan `run_query_routed` would run: the cheapest `predicted_ns` among the
     /// plans this acquire's dispatch arm can execute (`Prep::scope`). That is index 0 after the
@@ -12134,6 +18799,27 @@ pub(crate) struct AcquireFacts {
     pub(crate) routed_acquire_ns: Vec<u64>,
     pub(crate) routed_choose_ns: Vec<u64>,
     pub(crate) routed_dispatch_ns: Vec<u64>,
+    /// Round 37a: structured provenance for the query's top-level `And` node's own
+    /// `compose_printing_estimate` evaluation -- see `AndTrace`'s own doc. `None` whenever the
+    /// query's top-level filter (`unsplit` when a plane split one off, `filter` otherwise -- the
+    /// same `compose_source` precedence every other consumer of these two uses) is not an `And` at
+    /// all. Computed independently of `count_source`/whichever acquire branch this query actually
+    /// took (`and_trace_for`'s own doc) — always populated for a top-level `And`, regardless of
+    /// routing, not only on the `PrintingCompose` acquire path.
+    pub(crate) and_trace: Option<AndTrace>,
+    /// Round 39: single-shot wall time (ns) of the REAL, production, acquire-time
+    /// `compose_printing_estimate` call -- the one inside `acquire_plan_features`'s own
+    /// `PrintingCompose` branch that this query's routing decision actually depends on. `None`
+    /// whenever this query's acquire took a different branch (`Plane`/`CardRangePopcount`/
+    /// `PrintingRangeScan`/`Candidates`), which never reaches that call at all -- NOT to be
+    /// confused with "ran in 0ns". Deliberately distinct from `and_trace`'s own diagnostic-only
+    /// duplicate call (`and_trace_for`, always made regardless of which branch this query took):
+    /// this field times only the call every `printing_compose`-routed query already pays for
+    /// itself, not `explain`'s extra diagnostic overhead.
+    ///
+    /// A permanent baseline for the general partition-search estimator's own future "tax" --
+    /// see docs/issues/local-engine-nway-compose-independence-search.md.
+    pub(crate) and_estimate_ns: Option<u64>,
 }
 
 impl Prep {
@@ -12175,8 +18861,16 @@ fn explain(
     plane: Option<&PlaneExpr>,
 ) -> (AcquireFacts, Vec<PlanEstimate>) {
     let t0 = std::time::Instant::now();
-    let (feats, prep, _plane_bits) = acquire_plan_features(ctx, params, filter, unsplit, plane);
+    let (feats, prep, _plane_bits, and_estimate_ns) = acquire_plan_features(ctx, params, filter, unsplit, plane);
     let acquire_ns = t0.elapsed().as_nanos() as u64;
+    // Round 37a: the SAME "which filter is really the top-level one" precedence `compose_source`
+    // already uses (a plane split some predicate off into `unsplit`'s side, so `unsplit` -- not the
+    // post-split `filter` residual -- is the tree the query's own `And` lives in whenever one was
+    // split at all). Computed independently of `prep`/`feats` above: `and_trace_for` returns `None`
+    // immediately for a non-`And` top level, and otherwise makes its OWN call into
+    // `compose_printing_estimate`, so this never depends on which acquire branch this query happened
+    // to take.
+    let and_trace = and_trace_for(compose_source(filter, unsplit, plane), ctx.indexes, ctx.offsets, ctx.n_printings() as usize);
     let facts = AcquireFacts {
         count_source: prep.count_source(),
         narrowed_repr: prep.narrowed_repr(),
@@ -12186,6 +18880,8 @@ fn explain(
         routed_acquire_ns: Vec::new(),
         routed_choose_ns: Vec::new(),
         routed_dispatch_ns: Vec::new(),
+        and_trace,
+        and_estimate_ns,
     };
     let mut estimates: Vec<PlanEstimate> = PhysicalPlan::ALL
         .into_iter()
@@ -12653,7 +19349,8 @@ fn run_query_streamed_popcount<'a>(
 /// `card_range_popcount` IS a range acquire). Same handoff, opposite treatment, both from one rule.
 fn publish_popcount_phases(ns_setup: u64, ns_loop: u64, ns_finish: u64) {
     let prep_ns = PENDING_PREPARE_NS.with(|c| c.replace(0));
-    PHASE_STATS.with(|c| c.set(PhaseStats { ns_setup, ns_loop, ns_finish, ns_prepare: prep_ns, ..PhaseStats::default() }));
+    let split = PENDING_PREPARE_SPLIT.with(|c| c.replace([0; 3]));
+    PHASE_STATS.with(|c| c.set(PhaseStats { ns_setup, ns_loop, ns_finish, ns_prepare: prep_ns, ns_narrow: split[0], ns_project: split[1], ns_memo: split[2], ..PhaseStats::default() }));
 }
 
 /// Streamed selection: match phase records per-card match counts (total is
@@ -12787,8 +19484,13 @@ fn run_query_streamed<'a>(
     // Publishing helper: the walk below has several early returns, and every one of them must leave
     // the stats behind or the accounting silently attributes this plan's work to nothing. Each takes
     // the closing instant itself, so the emit phase is bounded without a second start marker.
-    let publish = |end: std::time::Instant, perm_steps: u64| {
+    // `second_pass_cards`: cards the exit's own pass ALSO ran `card_pass` on, on top of the counting
+    // pass above. Zero for the empty/past-the-end return, the matching-card count for the small-total
+    // redo, and the emitting-entry count for the permutation walk. Passed in rather than closed over
+    // because each exit computes its own, exactly like `perm_steps`/`redo_examined`.
+    let publish = |end: std::time::Instant, perm_steps: u64, redo_examined: u64, second_pass_cards: u64| {
         let prep_ns = PENDING_PREPARE_NS.with(|c| c.replace(0));
+        let split = PENDING_PREPARE_SPLIT.with(|c| c.replace([0; 3]));
         PHASE_STATS.with(|c| {
             c.set(PhaseStats {
                 cards_visited: n_cards_visited,
@@ -12797,18 +19499,31 @@ fn run_query_streamed<'a>(
                 matches_pushed: n_matches_pushed,
                 set_printings: 0, // PrintingCompose-only; StreamedSelect never composes pbits
                 perm_steps,
+                redo_examined,
+                // The counting pass is one call per visited candidate, exactly as GatheredScan's is;
+                // the exit's own pass adds a SECOND population no cost term describes. Both halves
+                // vanish under `all_match_known`, which is the one flag every `card_pass` site here
+                // sits under.
+                card_pass_calls: if all_match_known { 0 } else { n_cards_visited + second_pass_cards },
+                broadcast_printings: 0, // PrintingCompose-only; taken from its own slot
+                // GatheredScan-only. This plan's small-total exit drives a `GatherSelect` too, but its
+                // arm charges no page-slot or page-row term, so publishing here would offer a counter
+                // with nothing to grade it against. See `PhaseStats::select_input_len`.
+                select_input_len: 0,
+                page_rows_collected: 0,
                 ns_setup: (t_loop - t_start).as_nanos() as u64,
                 ns_loop: (t_finish - t_loop).as_nanos() as u64,
                 ns_finish: (end - t_finish).as_nanos() as u64,
                 ns_round_total: 0,
                 ns_prepare: prep_ns,
+            ns_narrow: split[0], ns_project: split[1], ns_memo: split[2],
                 result_total: 0,                       // see the note at the other publisher
                 paging_taken: PagingTaken::NotEntered, // ditto: owned by PAGING_TAKEN
             });
         });
     };
     if total == 0 || page_offset >= total {
-        publish(std::time::Instant::now(), 0);
+        publish(std::time::Instant::now(), 0, 0, 0);
         return (total, Vec::new());
     }
 
@@ -12821,10 +19536,24 @@ fn run_query_streamed<'a>(
     // Small totals: gather and quickselect — same result as the gathered path.
     if total <= *STREAM_MIN_MATCHES {
         let mut best: Vec<Match> = Vec::with_capacity(total);
+        // Round 31 of the printing-varying-leaf depth ledger
+        // (docs/issues/local-engine-gathered-scan-card-printing-varying-depth.md): this loop IS the
+        // redo Round 30 priced from a wall-clock residual because `printings_examined` (captured only
+        // from the FIRST, counting-only pass above) structurally cannot see it. `push_card_matches`
+        // already returns the printings it examined per call -- the same value the counting pass's
+        // `card_match_count` call captures into `n_printings_examined` -- so summing it here is free:
+        // no new computation, just no longer discarding a return value this loop already produces.
+        let mut n_redo_examined = 0u64;
+        // Cards this pass re-derives `card_pass` for -- every card with a nonzero count, since the
+        // call sits directly below the `counts == 0` continue. Counted unconditionally rather than
+        // under `if !all_match_known` so the loop body has one add and no branch; the flag is applied
+        // once, at the publish. See `PhaseStats::card_pass_calls`.
+        let mut n_redo_cards = 0u64;
         for cid in 0..cards.len() as u32 {
             if counts[cid as usize] == 0 {
                 continue;
             }
+            n_redo_cards += 1;
             let card = &cards[cid as usize];
             let all_match = all_match_known
                 || match filter.card_pass(card, strings, &mut residual, &mut residual_is_or, proven_conjuncts) {
@@ -12834,16 +19563,16 @@ fn run_query_streamed<'a>(
                 };
             let start = u32::from(offsets[cid as usize]) as usize;
             let end   = u32::from(offsets[cid as usize + 1]) as usize;
-            push_card_matches(
+            n_redo_examined += u64::from(push_card_matches(
                 card, cid, printings, artwork_group_col, start, end, all_match, &residual, residual_is_or, mode, prefer,
                 sort_col, descending, strings, existential_plane, &mut best, &mut group_best, &mut touched,
-            );
+            ));
         }
         let page = select_page(best, page_offset, limit)
             .into_iter()
             .map(|(cid, pid)| (&cards[cid as usize], &printings[pid as usize]))
             .collect();
-        publish(std::time::Instant::now(), 0);
+        publish(std::time::Instant::now(), 0, n_redo_examined, n_redo_cards);
         return (total, page);
     }
 
@@ -12865,6 +19594,11 @@ fn run_query_streamed<'a>(
     // outside the segment are NOT counted: they are never stepped, and the counter's job is to grade
     // the cost model against work actually done. A plain local, published once, like the others.
     let mut n_perm_steps = 0u64;
+    // Entries this walk re-derives `card_pass` for: only the ones it actually EMITS from, since both
+    // skip continues above come first. A tiny population next to `n_perm_steps` -- and the point of
+    // counting it is that no cost term charges for it at all. One add, on the branch that already
+    // pays a `card_pass` plus a `push_card_matches` plus a sort, never in the skip path.
+    let mut n_walk_emit_cards = 0u64;
     'walk: for cid in walk.iter().map(|x| u32::from(*x)) {
         n_perm_steps += 1;
         let c = counts[cid as usize] as usize;
@@ -12875,6 +19609,7 @@ fn run_query_streamed<'a>(
             skip -= c;
             continue;
         }
+        n_walk_emit_cards += 1;
         let card = &cards[cid as usize];
         let all_match = all_match_known
             || match filter.card_pass(card, strings, &mut residual, &mut residual_is_or, proven_conjuncts) {
@@ -12898,7 +19633,7 @@ fn run_query_streamed<'a>(
         }
         skip = 0;
     }
-    publish(std::time::Instant::now(), n_perm_steps);
+    publish(std::time::Instant::now(), n_perm_steps, 0, n_walk_emit_cards);
     (total, page)
     }) // COUNTS.with
 }
@@ -13059,7 +19794,27 @@ const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 //
 // 2026082501 — `SortPermutations` gains per-order printing-span prefix sums, used to turn a bound on
 // cards visited into a sound O(1) bound on printings examined. Entirely inside `CardIndexes` again.
-const ARCHIVE_FORMAT_VERSION: u32 = 2026082501;
+//
+// 2026090201 — `ArithTupleIndex` gains `totals: Vec<SpaceTotals>`, one exact (printing, card,
+// artwork) triple per distinct (cmc,power,toughness,loyalty) combination, summed at build time from
+// that key's own postings. Same blind spot again: entirely inside `CardIndexes`.
+//
+// 2026090202 — new `CardIndexes` field `price_joint` (`PriceJointTable`, the Round 53 `(usd, eur)`
+// quantile-bucket joint). Same blind spot again: entirely inside `CardIndexes`.
+//
+// 2026090301 — Round 54: `CardIndexes`'s single `price_joint` field (Round 53) is replaced by three --
+// `price_joint_usd_eur` (a straight rename, same contents), `price_joint_usd_tix`, `price_joint_eur_tix`
+// (both new) -- generalizing the same `PriceJointTable` shape past its original usd/eur-only scope.
+// Same blind spot again: entirely inside `CardIndexes`.
+//
+// 2026090302 — Round 55: new `CardIndexes` field `subtype_subtype` (`SubtypePairTable`, the
+// (subtype, subtype) top-256-union-of-3-spaces table). Same blind spot again: entirely inside
+// `CardIndexes`.
+//
+// 2026090303 — Round 57: new `CardIndexes` field `legality_date` (`LegalityDateTotals`, one exact
+// per-`(format, status)` printing prefix sum along the `released_at` value axis). Same blind spot
+// again: entirely inside `CardIndexes`.
+const ARCHIVE_FORMAT_VERSION: u32 = 2026090403;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -13264,11 +20019,29 @@ fn plan_trial_to_pydict<'py>(py: Python<'py>, t: &PlanTrial) -> PyResult<Bound<'
     // `sigma_bound::three_phase_cost_ns` against real per-query values from Python.
     d.set_item("set_printings", t.phases.set_printings)?;
     d.set_item("perm_steps", t.phases.perm_steps)?;
+    // StreamedSelect's small-total branch only (0 for every other plan/exit) -- see
+    // `PhaseStats::redo_examined`'s own doc for what this counts and why it's free.
+    d.set_item("redo_examined", t.phases.redo_examined)?;
+    // Realized ground truth for `cost::residual_card_pass` (GatheredScan) and
+    // `cost::stream_residual_card_pass` (StreamedSelect) -- the two materializing plans only. See
+    // `PhaseStats::card_pass_calls` for why StreamedSelect's is not just `cards_visited`.
+    d.set_item("card_pass_calls", t.phases.card_pass_calls)?;
+    // Realized ground truth for `PlanFeatures::broadcast_printings` -- PrintingCompose only.
+    d.set_item("broadcast_printings", t.phases.broadcast_printings)?;
+    // Realized ground truth for `cost::gather_page_span` and `cost::gather_page_rows` -- GatheredScan
+    // only (0 for every other plan). The finish phase's two drivers, neither of which had a counter.
+    d.set_item("select_input_len", t.phases.select_input_len)?;
+    d.set_item("page_rows_collected", t.phases.page_rows_collected)?;
     d.set_item("ns_setup", t.phases.ns_setup)?;
     d.set_item("ns_loop", t.phases.ns_loop)?;
     d.set_item("ns_finish", t.phases.ns_finish)?;
     d.set_item("ns_round_total", t.phases.ns_round_total)?;
     d.set_item("ns_prepare", t.phases.ns_prepare)?;
+    // The `prepare_candidates` phase split behind `ns_prepare`. All three are 0 unless the build
+    // carries the `prepare-phases` cargo feature; see `PhaseStats::ns_narrow`.
+    d.set_item("ns_narrow", t.phases.ns_narrow)?;
+    d.set_item("ns_project", t.phases.ns_project)?;
+    d.set_item("ns_memo", t.phases.ns_memo)?;
     // Ground truth for this run, and which paging branch really ran. Both exist so a harness can
     // check the model against what happened rather than against a second, separate execution.
     d.set_item("result_total", t.phases.result_total)?;
@@ -13276,8 +20049,98 @@ fn plan_trial_to_pydict<'py>(py: Python<'py>, t: &PlanTrial) -> PyResult<Bound<'
     Ok(d)
 }
 
-/// The acquire step's per-query facts, as both `explain` and `explain_analyze` report
-/// them under the `"acquire"` key.
+/// Round 60: one space's THREE keys on a trace dict -- `{space}` (unchanged: `SpaceMeasure::best()`,
+/// what every existing consumer reads) plus the two channels behind it, `{space}_guaranteed` (the
+/// tightest PROVEN bound) and `{space}_estimate` (the best GUESS).
+///
+/// **Flattened, deliberately, rather than nesting a dict under the existing key.** Turning `printing`
+/// into `{"guaranteed": .., "estimate": ..}` would change an existing key's TYPE and break every
+/// reader, for no gain at a serialization boundary where flattening is normal
+/// (`costbench.py`'s `ACQUIRE_KEYS`/`PLAN_KEYS` are checked as required-but-missing, so extra keys
+/// pass; `nway_estimate_truth_survey.py` stores `and_trace` wholesale).
+///
+/// **An absent channel is `None`, never `0`.** `printing.guaranteed` can legitimately be absent (an
+/// `Or` of two estimate-only leaves -- `SpaceMeasure::add` needs both sides proven), while
+/// `printing.best()` is always present. A `0` there would read as "proved the answer is empty", the
+/// opposite claim. `None`/`Some(usize)` maps to Python `None`/`int` directly, so this holds by
+/// construction.
+///
+/// `m` itself is `Option` for a MISS group, which has no cardinality in any space at all -- every one
+/// of the three keys is then `None`.
+fn set_space_keys(d: &Bound<'_, PyDict>, keys: (&str, &str, &str), m: Option<SpaceMeasure>) -> PyResult<()> {
+    d.set_item(keys.0, m.and_then(SpaceMeasure::best))?;
+    d.set_item(keys.1, m.and_then(|m| m.guaranteed))?;
+    d.set_item(keys.2, m.and_then(|m| m.estimate))?;
+    Ok(())
+}
+
+/// `(collapsed, guaranteed, estimate)` key names per space, as `&'static str` literals rather than
+/// `format!("{space}_guaranteed")` -- measured, not stylistic. `explain()` builds one of these dicts
+/// per trace group AND per tree node (up to 34 groups on the widest real `And` in the survey
+/// catalog), so building six key `String`s per dict cost a measured +12% of `explain()`'s own wall
+/// time on that population: p50 53.4 us with `format!` vs 48.3 us with these literals, against a
+/// 41.6 us pre-Round-60 baseline (300 widest queries, 15 reps, same-build canary within 2%).
+const SPACE_KEYS: [(&str, &str, &str); 3] = [
+    ("card", "card_guaranteed", "card_estimate"),
+    ("printing", "printing_guaranteed", "printing_estimate"),
+    ("artwork", "artwork_guaranteed", "artwork_estimate"),
+];
+
+/// All three spaces of one trace dict -- `None` on a `hit: false` group (see `set_space_keys`).
+/// Emission order (card, printing, artwork) matches what the pre-Round-60 conversion wrote.
+fn set_space_estimate_keys(d: &Bound<'_, PyDict>, s: Option<SpaceEstimate>) -> PyResult<()> {
+    set_space_keys(d, SPACE_KEYS[0], s.map(|s| s.card))?;
+    set_space_keys(d, SPACE_KEYS[1], s.map(|s| s.printing))?;
+    set_space_keys(d, SPACE_KEYS[2], s.map(|s| s.artwork))?;
+    Ok(())
+}
+
+/// One `AndTraceGroup` (an `AndTrace::considered` entry) as a Python dict -- see `AndTrace`'s own doc
+/// for the field shapes.
+fn and_trace_group_to_pydict<'py>(py: Python<'py>, g: &AndTraceGroup) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("leaves", g.leaves.clone())?;
+    d.set_item("mechanism", g.mechanism)?;
+    // Still emitted alongside `spaces`, even though `hit == spaces.is_some()`: consumers read it.
+    d.set_item("hit", g.hit)?;
+    set_space_estimate_keys(&d, g.spaces)?;
+    Ok(d)
+}
+
+/// One `AndTraceNode` as a Python dict, recursively -- see `AndTraceNode`'s own doc for the field
+/// shapes (`"leaf"` vs `"op"`, via `kind`).
+fn and_trace_node_to_pydict<'py>(py: Python<'py>, n: &AndTraceNode) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    match n {
+        AndTraceNode::Leaf { expr, spaces } => {
+            d.set_item("kind", "leaf")?;
+            d.set_item("expr", expr)?;
+            set_space_estimate_keys(&d, Some(*spaces))?;
+        }
+        AndTraceNode::Op { op, mechanism, spaces, children } => {
+            d.set_item("kind", "op")?;
+            d.set_item("op", op)?;
+            d.set_item("mechanism", mechanism)?;
+            set_space_estimate_keys(&d, Some(*spaces))?;
+            d.set_item("children", children.iter().map(|c| and_trace_node_to_pydict(py, c)).collect::<PyResult<Vec<_>>>()?)?;
+        }
+    }
+    Ok(d)
+}
+
+/// `AndTrace` as a Python dict -- the `and_trace` key `acquire_facts_to_pydict` reports. The root
+/// node's own numbers ARE the `And` arm's final answer (see `AndTraceNode`'s own doc), so there is no
+/// separate top-level "final" key to keep in sync with it.
+fn and_trace_to_pydict<'py>(py: Python<'py>, t: &AndTrace) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("tree", and_trace_node_to_pydict(py, &t.tree)?)?;
+    d.set_item("considered", t.considered.iter().map(|g| and_trace_group_to_pydict(py, g)).collect::<PyResult<Vec<_>>>()?)?;
+    Ok(d)
+}
+
+/// The acquire step's per-query facts, as both `explain` and `explain_analyze` report them under the
+/// `"acquire"` key. (Round 60 moved this doc back onto its own function: it had drifted upward onto
+/// the trace conversions during an earlier round.)
 fn acquire_facts_to_pydict<'py>(py: Python<'py>, f: &AcquireFacts) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     d.set_item("count_source", f.count_source.label())?;
@@ -13287,6 +20150,18 @@ fn acquire_facts_to_pydict<'py>(py: Python<'py>, f: &AcquireFacts) -> PyResult<B
     d.set_item("routed_acquire_ns", f.routed_acquire_ns.clone())?;
     d.set_item("routed_choose_ns", f.routed_choose_ns.clone())?;
     d.set_item("routed_dispatch_ns", f.routed_dispatch_ns.clone())?;
+    // Round 37a: `None` when the query's top-level filter is not an `And` at all -- see
+    // `AcquireFacts::and_trace`'s own doc.
+    match &f.and_trace {
+        Some(t) => d.set_item("and_trace", and_trace_to_pydict(py, t)?)?,
+        None => d.set_item("and_trace", py.None())?,
+    }
+    // Round 39: sibling to `and_trace` -- `None` means this query's acquire never reached the
+    // `PrintingCompose` branch at all (see `AcquireFacts::and_estimate_ns`'s own doc), not "0ns".
+    match f.and_estimate_ns {
+        Some(ns) => d.set_item("and_estimate_ns", ns)?,
+        None => d.set_item("and_estimate_ns", py.None())?,
+    }
     // The model's own inputs, so a calibration fit regresses on the same vector `plan_cost` reads.
     let g = &f.feats;
     for (k, v) in [
@@ -13301,17 +20176,56 @@ fn acquire_facts_to_pydict<'py>(py: Python<'py>, f: &AcquireFacts) -> PyResult<B
         ("residual_card_invariant", u32::from(g.residual_card_invariant)),
         ("limit", g.limit),
         ("offset", g.offset),
+        ("perm_walk_span", g.perm_walk_span),
         ("broadcast_printings", g.broadcast_printings),
         ("scatter_printings", g.scatter_printings),
+        ("collection_broadcast_printings", g.collection_broadcast_printings),
         ("project_printings", g.project_printings),
         ("popcount_words", g.popcount_words),
         ("artwork_seen_cards", g.artwork_seen_cards),
         ("artwork_seen_printings", g.artwork_seen_printings),
         ("compose_scan_printings", g.compose_scan_printings),
         ("gather_group_printings", g.gather_group_printings),
+        // The three prepare-step features, and the term they feed. Graded against the realized
+        // `ns_prepare` by `scripts/bench_prepare_cost_shape.py`; `prepare_cands` is graded against
+        // `cards_visited`, which on GatheredScan IS the candidate count.
+        ("prepare_nodes", g.prepare_nodes),
+        ("prepare_plane_word_ops", g.prepare_plane_word_ops),
+        ("prepare_cands", g.prepare_cands),
         // Derived inside plan_cost rather than stored, and exposed because the Perm/OrderbyWalk
         // paging branches are priced entirely on it and nothing else can check them.
         ("printings_walked", cost::printings_walked(g) as u32),
+        // Same argument for StreamedSelect's page walk: `perm_walk_span` reaches cost ONLY through
+        // this derived term, so grading the raw span against anything is meaningless while grading
+        // this against the realized `perm_steps` is exactly the check. 0 where the arm charges no walk
+        // (the small-total gather, or a return before both branches).
+        ("stream_perm_steps", cost::stream_perm_steps(g) as u32),
+        // The residual-gated per-card term (`CARD_PASS + max(tier, FLOOR)`), which on GatheredScan is
+        // 58% of predicted time. Derived from the same gate the arms read, and exposed rather than
+        // recomputed in Python for the reason above: the gate is `residual_tier_ns100 > 0`, and a
+        // harness holding its own copy of that is a second definition. Graded against the realized
+        // `card_pass_calls`.
+        //
+        // TWO keys, because the two materializing arms multiply DIFFERENT quantities -- exactly as
+        // `scan_units`/`stream_scan_units` do, and for the same reason. `GatheredScan`'s loop calls
+        // `card_pass` once per candidate; `run_query_streamed` runs two passes and its small-total
+        // exit re-derives the call for every matching card, so a consumer must pick the key that
+        // matches the plan it is grading or it grades a number that arm never reads.
+        ("residual_card_pass", cost::residual_card_pass(g)),
+        ("stream_residual_card_pass", cost::stream_residual_card_pass(g)),
+        // Round 81: the small-total redo pass's printing walk, the term that took `redo_examined`
+        // from a published counter no arm consumed to a graded one. Exposed for the same
+        // one-definition reason as the two above -- the arm's quantity and the mirror's have to be
+        // the same number, and this one is a `u32` in `cost.rs` precisely so that reading it here
+        // introduces no rounding gap for `fit_cost_model`'s mirror check to tolerate.
+        ("stream_redo_printings", cost::stream_redo_printings(g)),
+        // `GatheredScan`'s finish phase, whose two terms are 3,290 of the 3,320 rows the error
+        // attribution reports as UNGRADED. Derived from `limit`/`offset`/`matches` rather than stored,
+        // and exposed for the same reason `stream_perm_steps` is: `fit_cost_model.design_row` held a
+        // second copy of both clamps. Graded against the realized `select_input_len` and
+        // `page_rows_collected`.
+        ("gather_page_span", cost::gather_page_span(g)),
+        ("gather_page_rows", cost::gather_page_rows(g)),
     ] {
         d.set_item(k, v)?;
     }
@@ -13619,6 +20533,10 @@ impl QueryEngine {
         let collector_number_cards = build_range_card_counts(&collector_number_idx, &printing_to_card, cards.len(), &printings, &artwork_base);
         let rarity_idx = build_printing_value_index(&printings, &cards, &offsets, |p| p.card_rarity_int.map(u32::from));
         let rarity_cards = build_range_card_counts(&rarity_idx, &printing_to_card, cards.len(), &printings, &artwork_base);
+        // Round 57: out here for the same reason as the count tables above -- it reads
+        // `printing_to_card`, which the struct literal below moves -- and it must come after
+        // `released_at_idx`, since its prefix sums are parallel to that index's own `keys`.
+        let legality_date = build_legality_date_totals(&cards, &printings, &printing_to_card, &released_at_idx);
         // Out here for the same reason as the count tables: it reads `printing_to_card`, which the
         // struct literal below moves.
         let pair_totals = build_pair_totals(
@@ -13637,12 +20555,88 @@ impl QueryEngine {
             &coll_vocab,
             usize::from(artwork_group_counts.iter().copied().max().unwrap_or(0)),
         );
+        // Out here for the same reason as `pair_totals`/`value_totals`: reads `printing_to_card`,
+        // which the struct literal below moves.
+        let subtype_pairs = build_subtype_pair_tables(
+            &cards,
+            &printings,
+            &printing_to_card,
+            &coll_vocab,
+            usize::from(artwork_group_counts.iter().copied().max().unwrap_or(0)),
+        );
+        // Round 55: same reasoning as `subtype_pairs` immediately above -- reads `printing_to_card`,
+        // which the struct literal below moves.
+        let subtype_subtype = build_subtype_pair2_table(
+            &cards,
+            &printings,
+            &printing_to_card,
+            &coll_vocab,
+            usize::from(artwork_group_counts.iter().copied().max().unwrap_or(0)),
+        );
+        let subtype_arith = build_subtype_arith_tables(
+            &cards,
+            &printings,
+            &printing_to_card,
+            &coll_vocab,
+            usize::from(artwork_group_counts.iter().copied().max().unwrap_or(0)),
+        );
+        // Same reasoning as `subtype_pairs`/`subtype_arith` above: reads `printing_to_card`, which the
+        // struct literal below moves.
+        let color_cmc = build_color_cmc_tables(
+            &cards,
+            &printings,
+            &printing_to_card,
+            usize::from(artwork_group_counts.iter().copied().max().unwrap_or(0)),
+        );
+        // Out here for the same reason as `pair_totals`/`subtype_arith`/`color_cmc` above: reads
+        // `offsets`/`artwork_base`, both of which the struct literal below moves (`artwork_base` via
+        // its own shorthand field, before `arith_tuple`'s field position).
+        let arith_tuple = build_arith_tuple_index(&cards, &offsets, &artwork_base);
+        // Same reasoning as `subtype_pairs`/`subtype_arith`/`color_cmc` above: reads `printing_to_card`,
+        // which the struct literal below moves. Round 54: three calls instead of one, one per validated
+        // price pair, sharing the same generalized builder -- only the two field-accessor closures
+        // differ per call.
+        let price_joint_usd_eur = build_price_joint_table(
+            &cards,
+            &printings,
+            &printing_to_card,
+            usize::from(artwork_group_counts.iter().copied().max().unwrap_or(0)),
+            |p| p.price_usd,
+            |p| p.price_eur,
+        );
+        let price_joint_usd_tix = build_price_joint_table(
+            &cards,
+            &printings,
+            &printing_to_card,
+            usize::from(artwork_group_counts.iter().copied().max().unwrap_or(0)),
+            |p| p.price_usd,
+            |p| p.price_tix,
+        );
+        let price_joint_eur_tix = build_price_joint_table(
+            &cards,
+            &printings,
+            &printing_to_card,
+            usize::from(artwork_group_counts.iter().copied().max().unwrap_or(0)),
+            |p| p.price_eur,
+            |p| p.price_tix,
+        );
+        // Round 63: built as locals so each field's `NumericSpanTotals` can be summed from the very
+        // index it describes, rather than re-deriving the sort in a second pass.
+        let cmc_index = build_numeric_index(&cards, |c| c.cmc.map(|v| v as i16));
+        let power_index = build_numeric_index(&cards, |c| c.creature_power.map(|v| v as i16));
+        let toughness_index = build_numeric_index(&cards, |c| c.creature_toughness.map(|v| v as i16));
+        let cmc_spans = build_numeric_span_totals(&cmc_index, &offsets, &artwork_base);
+        let power_spans = build_numeric_span_totals(&power_index, &offsets, &artwork_base);
+        let toughness_spans = build_numeric_span_totals(&toughness_index, &offsets, &artwork_base);
         let indexes = CardIndexes {
             name_trigram:   build_trigram_index(&cards, |c| c.card_name_folded.as_str()),
             oracle_trigram: build_oracle_text_index(&cards, &strings),
-            cmc:            build_numeric_index(&cards, |c| c.cmc.map(|v| v as i16)),
-            power:          build_numeric_index(&cards, |c| c.creature_power.map(|v| v as i16)),
-            toughness:      build_numeric_index(&cards, |c| c.creature_toughness.map(|v| v as i16)),
+            cmc:            cmc_index,
+            power:          power_index,
+            toughness:      toughness_index,
+            cmc_spans,
+            power_spans,
+            toughness_spans,
             rarity:         build_rarity_index(&printings, &offsets),
             subtypes:       build_hybrid_tag_index(&cards, &coll_vocab, |c| &c.card_subtypes),
             keywords:       build_hybrid_tag_index(&cards, &coll_vocab, |c| &c.card_keywords),
@@ -13663,6 +20657,7 @@ impl QueryEngine {
                 }
                 idx
             },
+            set_collector_ranges: build_set_collector_ranges(&printings, |p| p.card_set_code.as_str(), |p| p.collector_number_int.map(u32::from)),
             watermarks:     {
                 let mut idx: TagIndex = HashMap::new();
                 for (i, p) in printings.iter().enumerate() {
@@ -13699,12 +20694,20 @@ impl QueryEngine {
             rarity_printing: build_rarity_printing_planes(&printings),
             rarity_printing_ordered: rarity_idx,
             rarity_cards,
+            legality_date,
             value_totals,
             pair_totals,
+            subtype_pairs,
+            subtype_subtype,
+            subtype_arith,
+            color_cmc,
+            price_joint_usd_eur,
+            price_joint_usd_tix,
+            price_joint_eur_tix,
             name_bigrams:   build_name_bigram_index(&cards),
             name_unigrams:  build_name_unigram_index(&cards),
             legal_divergent: build_divergent_ids(&cards),
-            arith_tuple:    build_arith_tuple_index(&cards),
+            arith_tuple,
         };
 
         #[cfg(feature = "alloc-counter")]

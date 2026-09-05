@@ -1,0 +1,25 @@
+Engine loaded: 97,812 printings in 2.6s
+955 compose printing/artwork StreamedSelect rows with a residual and a gradeable counter
+
+Feature / realized `printings_examined`.  1.000 is perfect; <1 under-counts.
+  candidate                       n      p10      p25   median      p75      p90   spread   w/in25% |mean log|
+  shipped                       955    0.036    0.135    0.335    1.000    1.011     27.8       30%   1.2301
+  lane_a                        955    0.121    0.408    0.914    1.120    2.306     19.0       36%   0.4679
+  lane_c                        955    0.169    0.571    1.000    1.566    3.066     18.1       29%   0.1939
+
+Sweeping the multiplier on `cards * ppc` (Lane A = 1.0, Lane C = 1.4):
+  candidate                       n      p10      p25   median      p75      p90   spread   w/in25% |mean log|
+  x0.8                          955    0.097    0.326    0.731    0.896    1.844     19.0       31%   0.6910
+  x1.0                          955    0.121    0.408    0.914    1.120    2.306     19.0       36%   0.4679
+  x1.2                          955    0.145    0.490    1.000    1.343    2.733     18.8       31%   0.3193
+  x1.4                          955    0.169    0.571    1.000    1.566    3.066     18.1       29%   0.1939
+  x1.6                          955    0.194    0.653    1.000    1.774    3.350     17.3       30%   0.0854
+  x1.9                          955    0.230    0.775    1.076    2.107    3.861     16.8       30%   0.0540
+  x2.2                          955    0.266    0.898    1.246    2.400    4.404     16.5       27%   0.1723
+  x2.6                          955    0.315    1.000    1.473    2.762    5.204     16.5       24%   0.3049
+
+Realized multiplier itself: examined / (cards * ppc) -- what the constant is estimating
+  slice                       n      p10      p25   median      p75      p90   spread   w/in25% |mean log|
+  POOLED                        955    0.434    0.893    1.095    2.451    8.260     19.0       36%   0.4679
+  unique=artwork                549    0.466    0.946    1.069    2.296    7.460     16.0       39%   0.4356
+  unique=printing               406    0.367    0.833    1.131    2.812   11.491     31.3       31%   0.5115

@@ -142,7 +142,13 @@
 //!       STREAM_EMIT_PER_MATCH_NS               0.12    0.11  0.95
 //!       STREAM_PERM_STEP_NS                    1.00    1.24  1.24
 //!       STREAM_ARTWORK_SEEN_PER_CARD_NS        1.21    1.10  0.91
-//!       STREAM_SMALL_TOTAL_FLOOR_PER_CARD_NS   1.02    0.98  0.96   (already confirmed; left alone)
+//!       STREAM_SMALL_TOTAL_FLOOR_PER_CARD_NS   1.02    0.98  0.96   (SUPERSEDED -- Round 81 split this
+//!                                                                    term in two and the sweep half now
+//!                                                                    ships at 0.30. The 0.98 here and
+//!                                                                    the "already confirmed" note both
+//!                                                                    read a per-MATCH cost as per-card;
+//!                                                                    see the constant's own doc and the
+//!                                                                    gather-row caveat printed below.)
 //!       STREAM_CORPUS_PASS_PER_CARD_NS         0.02    0.01  0.67   (2 sig figs on an unseparable
 //!                                                                    constant; left alone)
 //!       STREAM_FIXED_COST_NS                 217.00  192.69  0.89   (curvature-confounded; NOT applied)
@@ -498,8 +504,14 @@ fn bench_streamed_loop() {
     }
     println!(
         "\n  gather rows are ns per card scanned, against a shipped STREAM_SMALL_TOTAL_FLOOR_PER_CARD_NS\n  \
-         of 1.02; perm-walk rows are ns per permutation entry, against STREAM_PERM_STEP_NS. Grade the\n  \
-         step ESTIMATE against the realized `perm_steps` counter separately -- this table assumes it."
+         of 0.30; perm-walk rows are ns per permutation entry, against STREAM_PERM_STEP_NS. Grade the\n  \
+         step ESTIMATE against the realized `perm_steps` counter separately -- this table assumes it.\n\n  \
+         READ THE GATHER ROWS AS A SLOPE, NOT AS A LEVEL. The divisor is the whole corpus while the redo\n  \
+         loop's per-match work (card_pass + push_card_matches) rides its `matches` column, so the per-unit\n  \
+         figure GROWS with the match count and only its intercept is the sweep rate this constant means.\n  \
+         The 1.02 that shipped until Round 81 came from reading a 600-match cell's per-unit figure as a\n  \
+         level; the 100- and 400-match cells here put the intercept near 0.30 and the slope near one\n  \
+         printing's push, which is now STREAM_REDO_SCAN_PER_ROW_NS over `stream_redo_printings`."
     );
 
     println!(

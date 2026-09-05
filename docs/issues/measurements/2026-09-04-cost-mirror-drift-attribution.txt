@@ -1,0 +1,88 @@
+Engine loaded: 97,812 printings in 2.7s
+11,133 mirror-comparable plan-rows;  MIRROR_TOLERANCE = 0.001
+pooled agreement: 89.8%
+
+BY PLAN -- a wrong constant hits ~100% of a plan; a wrong guard hits a subset
+  slice                                              n     bad    bad%   med mine/engine
+  GatheredScan                                   5,400   1,081   20.0%             4.038
+  PrintingCompose                                1,680      53    3.2%             0.985
+  StreamedSelect                                 4,053       0    0.0%               nan
+
+===== GatheredScan: 1,081 disagreements of 5,400 =====
+
+  by acquire route
+  slice                                              n     bad    bad%   med mine/engine
+  candidates                                     2,268     987   43.5%             4.038
+  printing_compose                               2,741      90    3.3%             3.407
+  plane                                            172       4    2.3%             4.038
+  printing_range_scan                              121       0    0.0%               nan
+  card_range_popcount                               98       0    0.0%               nan
+
+  by distinct-on
+  slice                                              n     bad    bad%   med mine/engine
+  card                                           1,800     361   20.1%             4.038
+  printing                                       1,800     360   20.0%             4.038
+  artwork                                        1,800     360   20.0%             4.038
+
+  by structural gate (matches vs offset, residual presence)
+  slice                                              n     bad    bad%   med mine/engine
+  matches=0 tier=>0 card_inv=False                 817     817  100.0%             4.038
+  matches=0 tier=0 card_inv=False                  173     173  100.0%             4.038
+  matches=0 tier=>0 card_inv=True                   72      72  100.0%             4.038
+  matches=0 tier=0 card_inv=True                    19      19  100.0%             4.038
+  matches=>off tier=0 card_inv=False               466       0    0.0%               nan
+  matches=>off tier=0 card_inv=True                555       0    0.0%               nan
+  matches=<=off tier=0 card_inv=True               155       0    0.0%               nan
+  matches=>off tier=>0 card_inv=False            2,164       0    0.0%               nan
+  matches=>off tier=>0 card_inv=True                85       0    0.0%               nan
+  matches=<=off tier=>0 card_inv=True               48       0    0.0%               nan
+  matches=<=off tier=0 card_inv=False              104       0    0.0%               nan
+  matches=<=off tier=>0 card_inv=False             742       0    0.0%               nan
+
+  worst rows (mine / engine):
+         4.038   mine          170  engine           42   loyalty>7                          printing  ob=cmc        off=300 m=0 ed=0 tier=0
+         4.038   mine          170  engine           42   loyalty>7                          card      ob=cubecobra  off=0 m=0 ed=0 tier=0
+         4.038   mine          170  engine           42   loyalty>7                          artwork   ob=usd        off=60 m=0 ed=0 tier=0
+         4.038   mine          170  engine           42   name:guildpact set:aer             printing  ob=toughness  off=60 m=0 ed=0 tier=2300
+
+===== PrintingCompose: 53 disagreements of 1,680 =====
+
+  by acquire route
+  slice                                              n     bad    bad%   med mine/engine
+  printing_compose                               1,289      53    4.1%             0.985
+  plane                                            172       0    0.0%               nan
+  printing_range_scan                              121       0    0.0%               nan
+  card_range_popcount                               98       0    0.0%               nan
+
+  by predicted paging branch
+  slice                                              n     bad    bad%   med mine/engine
+  Perm                                           1,011      31    3.1%             0.973
+  OrderbyWalk                                      405      22    5.4%             0.996
+  Gather                                           264       0    0.0%               nan
+
+  by distinct-on
+  slice                                              n     bad    bad%   med mine/engine
+  printing                                         664      35    5.3%             0.992
+  card                                             533       9    1.7%             0.973
+  artwork                                          483       9    1.9%             0.974
+
+  by structural gate (matches vs offset, residual presence)
+  slice                                              n     bad    bad%   med mine/engine
+  matches=0 tier=>0 card_inv=False                  61      18   29.5%             0.979
+  matches=>off tier=0 card_inv=True                331      13    3.9%             0.908
+  matches=>off tier=>0 card_inv=False            1,032      10    1.0%             0.997
+  matches=0 tier=0 card_inv=True                    13       4   30.8%             0.983
+  matches=0 tier=>0 card_inv=True                    5       3   60.0%             0.992
+  matches=<=off tier=>0 card_inv=False              51       2    3.9%             0.998
+  matches=>off tier=>0 card_inv=True                 5       2   40.0%             0.991
+  matches=<=off tier=0 card_inv=True                10       1   10.0%             0.998
+  matches=>off tier=0 card_inv=False               157       0    0.0%               nan
+  matches=<=off tier=0 card_inv=False               11       0    0.0%               nan
+  matches=0 tier=0 card_inv=False                    4       0    0.0%               nan
+
+  worst rows (mine / engine):
+         0.436   mine        3,425  engine        7,852   is:frenchvanilla                   printing  ob=cmc        off=0 m=3,304 ed=1,319 tier=0
+         0.520   mine        3,810  engine        7,330   keyword:trample                    printing  ob=cmc        off=0 m=2,627 ed=981 tier=0
+         0.685   mine        4,878  engine        7,122   t:equipment                        printing  ob=cubecobra  off=0 m=1,675 ed=610 tier=0
+         0.712   mine       10,944  engine       15,372   is:frenchvanilla                   card      ob=cubecobra  off=0 m=1,319 ed=1,319 tier=0
+

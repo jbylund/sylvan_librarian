@@ -1,0 +1,43 @@
+Engine loaded: 97,812 printings in 2.7s
+971 Perm/OrderbyWalk compose rows with a gradeable counter
+
+POOLED residual (realized / uniform_mean): p10 0.537  median 1.312  p90 12.766  spread 23.8x
+  (WALK_LENGTH_BIAS is 1.45 -- that is this median's job)
+
+residual sliced by orderby
+  value               n      p10   median      p90   spread
+  rarity            238    0.632    2.967   17.041     27.0
+  usd               213    0.397    1.049    5.928     14.9
+  name              154    0.656    0.925    1.423      2.2
+  cmc               129    0.438    3.579   37.327     85.3
+  power             121    0.488    1.243    3.094      6.3
+  edhrec            116    0.537    2.802   11.453     21.3
+
+residual sliced by unique
+  value               n      p10   median      p90   spread
+  printing          407    0.537    1.192    9.437     17.6
+  artwork           355    0.602    1.546   18.943     31.5
+  card              209    0.431    1.438   11.415     26.5
+
+residual sliced by paging
+  value               n      p10   median      p90   spread
+  Perm              520    0.588    1.277   13.077     22.2
+  OrderbyWalk       451    0.493    1.449   12.596     25.6
+
+residual sliced by n_leaves
+  value               n      p10   median      p90   spread
+  2                 394    0.526    1.281   12.388     23.6
+  1                 391    0.671    1.343   12.945     19.3
+  3                 133    0.318    1.320   11.453     36.1
+  4                  42    0.474    1.408   19.146     40.4
+  5                  11    0.607    1.136    9.808     16.2
+
+residual sliced by card_inv
+  value               n      p10   median      p90   spread
+  False             626    0.509    1.316   11.415     22.4
+  True              345    0.537    1.311   14.075     26.2
+
+log-log correlation of residual against continuous candidates (control first)
+  match_rate   Pearson r = +0.186  (n=971)
+  page_frac    Pearson r = -0.203  (n=971)
+  um           Pearson r = -0.206  (n=971)

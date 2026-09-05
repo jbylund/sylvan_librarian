@@ -1,11 +1,54 @@
 # Rank `GatheredScan` vs `StreamedSelect` on the Compose Acquire
 
-Status: open — the largest single routing error left in the engine. Filed as
+Status: **this pair is resolved** — see "Re-verified" below. Filed as
 [#852](https://github.com/jbylund/sylvan_librarian/issues/852). Successor to
 [the loop-phase measurement record](done/local-engine-loop-phase-measurement.md), whose calibration work
 shipped in #833 / #834 / #836.
 
-## Where it stands
+## Re-verified after the printing-varying-depth loop (`local-engine-gathered-scan-card-printing-varying-depth.md`)
+
+That doc's Rounds 1/3/4/6/7 targeted exactly this doc's #1 remaining item — `eval_domain`/`domain_cards`
+accuracy for an `And` of printing-varying range leaves in the narrowed regime — without realizing the
+connection at the time. Re-measured with `bench_pairwise_ordering.py` against the accumulated result
+(`costcell/trunk`, 10 rounds landed):
+
+| | historical (this doc) | re-verified |
+| --- | --: | --: |
+| pair ordered right (realistic) | 87% | **97%** |
+| pair mean regret (realistic) | 4.29 µs | **0.82 µs** |
+| pair gap meas/pred (realistic) | 0.98 | **0.99** |
+| pair ordered right (uniform) | — | 95% |
+| pair mean regret (uniform) | — | 1.74 µs |
+
+**This pair is closed as a priority** — 0.82 µs mean regret is now smaller than several pairs that were
+never a concern. Item 1 on this doc's "Remaining, in order" list (the narrowed-regime `eval_domain`
+error) is substantially resolved; items 2 and 3 are no longer worth pursuing on their own now that this
+pair isn't the routing error the pursuit was justified by.
+
+**The re-verification surfaced a bigger, different problem**, not previously examined by this doc: both
+`GatheredScan vs PrintingCompose` and `PrintingCompose vs StreamedSelect` are now the worst pairs in the
+engine, concentrated in the `plane`-acquire branch specifically:
+
+| pair / acquire | ordered right | mean regret | gap meas/pred |
+| --- | --: | --: | --: |
+| `GatheredScan vs PrintingCompose` [plane], realistic | 87% | 19.09 µs | 0.85 |
+| `GatheredScan vs PrintingCompose` [plane], uniform | 83% | 27.21 µs | 0.94 |
+| `PrintingCompose vs StreamedSelect` [plane], realistic | 92% | 11.42 µs | 0.75 |
+| `PrintingCompose vs StreamedSelect` [plane], uniform | 86% | 15.72 µs | 0.83 |
+
+Root cause (traced, not yet fixed): `acquire_plan_features`'s `Plane` branch returns
+`mk_plan_feats(ctx, params, count, count, scan_units, 0)` directly with no further field overrides —
+unlike every other acquire branch, which sets `PrintingCompose`-specific build-cost fields
+(`broadcast_printings`, `scatter_printings`, `project_printings`, `popcount_words`, `compose_paging`)
+after the shared call. Those fields' defaults in `mk_plan_feats` (0 / `ComposePaging::Gather`) are
+correct for the plans that don't read them, but `PrintingCompose` — a genuine alternative plan whenever
+the plane-covered predicate is also printing-composable — gets costed off inputs that describe nothing
+real about what it would actually do if it won. Same class of bug as the historical
+`compose_paging`-left-at-`Gather`-default issue this doc's "Both fixed" section already closed for a
+different acquire branch, not yet applied to this one. Tracked onward in
+[local-engine-plane-acquire-compose-costing.md](local-engine-plane-acquire-compose-costing.md).
+
+## Where it stands (historical, before re-verification above)
 
 The pair went **69% → 87% ordered right** and mean regret **35.96 µs → 4.29 µs** across that stack. What
 moved it last was `eval_domain`, and the mechanism is worth stating because it was misdiagnosed twice:

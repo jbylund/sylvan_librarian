@@ -1,0 +1,22 @@
+Engine loaded: 97,812 printings in 2.7s
+WALK-GATE disagreements, attributed:
+      83  estimate on the wrong side of the gate
+
+RESIDUAL-SCAN-GATE disagreements, attributed:
+     720  plan returned before any loop (no work to estimate)
+      40  UNEXPLAINED -- tier>0, loop ran, examined 0
+      18  UNEXPLAINED -- tier=0, but printings were examined
+
+sample boundary straddles (query | unique | offset | estimated matches | realized total):
+  year:2008                                    card      off=60   est=1,026    real=945     
+  is:vanilla                                   artwork   off=60   est=17,437   real=429     
+  border:white produces:g                      printing  off=0    est=1,555    real=271     
+  pow>=5 devotion:u                            artwork   off=300  est=3,249    real=622     
+  r>=mythic year>=1994 year<=2005              printing  off=60   est=9,466    real=0       
+  r>=mythic year>=1994 year<=2005              card      off=0    est=2,893    real=0       
+  r>=mythic year>=1994 year<=2005              artwork   off=0    est=6,548    real=0       
+  produces:w tix>=0.02 tix<=0.03               card      off=60   est=1,074    real=728     
+  devotion:w date:2022-12-02                   printing  off=60   est=1,231    real=160     
+  border:gold date>=2021-04-23 date<=2024-09-2 printing  off=60   est=1,238    real=0       
+  r:rare is:vanilla                            card      off=60   est=5,653    real=15      
+  r:rare is:vanilla                            artwork   off=60   est=5,653    real=21      

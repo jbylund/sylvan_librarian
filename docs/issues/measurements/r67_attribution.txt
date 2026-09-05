@@ -1,0 +1,28 @@
+Engine loaded: 97,812 printings in 2.7s
+
+300,100 plan-rows, mode=uniform
+
+=== GatheredScan ===
+  acquire                     n    mean  median  FEATURES   COEFFS  form floor  dominant
+  ALL                    113581   0.602   0.415    +0.021   -0.124       0.704  model form
+  candidates              34379   0.463   0.378    +0.009   +0.219       0.235  model form
+  card_range_popcount      2131   0.361   0.322    +0.099   +0.113       0.149  model form
+  plane                    6978   0.599   0.578    +0.061   +0.251       0.287  model form
+  printing_compose        67205   0.690   0.434    +0.021   +0.015       0.654  model form
+  printing_range_scan      2888   0.395   0.302    +0.021   +0.238       0.136  coefficients
+  fitted vs shipped: card_pass=1.21/5.77  scan_units=4.98/1.72  residual=28.64/15.00  push=0.00/3.30  page_slot=6.34/2.79  fixed=1315.00/237.00
+
+=== StreamedSelect ===
+  acquire                     n    mean  median  FEATURES   COEFFS  form floor  dominant
+  ALL                     85039   1.084   0.845    +0.035   +0.511       0.538  model form
+  candidates              25622   1.438   1.058    +0.007   +0.791       0.641  coefficients
+  card_range_popcount      2131   0.405   0.373    +0.065   +0.191       0.149  coefficients
+  plane                    6978   0.895   0.715    +0.000   +0.032       0.862  model form
+  printing_compose        48157   0.977   0.757    +0.056   +0.450       0.471  model form
+  printing_range_scan      2151   0.537   0.518    -0.003   +0.361       0.178  coefficients
+  fitted vs shipped: card_pass=3.36/3.29  scan_units=9.59/2.13  residual=5.92/9.00  emit=0.00/0.12  small_total_floor=0.16/0.81  corpus_pass=0.18/0.29  fixed=0.00/233.00
+
+  mean |ln| drives the attribution (monotone by construction); median is the TYPICAL query.
+  TAIL marks a cell whose mean far exceeds its median -- its problem is outliers, not its centre.
+  FEATURES/COEFFS are error REMOVED by fixing that cause (bigger = more of the problem).
+  'form floor' is what survives exact features AND refitted coefficients: the arm's shape.

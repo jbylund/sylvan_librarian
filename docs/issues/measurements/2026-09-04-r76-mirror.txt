@@ -1,0 +1,5 @@
+Engine loaded: 97,812 printings in 2.7s
+rows                                  6,000
+PlanFeatures.offset != request offset 0  (must be 0)
+python says small-total gather        2,617
+  of those, stream_perm_steps != 0    0  (must be 0)

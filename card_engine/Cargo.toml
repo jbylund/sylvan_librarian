@@ -19,6 +19,9 @@ alloc-counter = []
 # acquire turns out to be 45% of a candidate-acquired query and the cost model prices none of
 # it -- and not worth it on every production request.
 routed-phases = []
+# `prepare_candidates`' three-phase split, for calibrating `cost::materialize_cost`. Off by
+# default: the clock reads sit on the routed production path. See `PrepareSplitTimer`.
+prepare-phases = []
 
 [dependencies]
 # extension-module is enabled by maturin (see pyproject.toml [tool.maturin]) so that

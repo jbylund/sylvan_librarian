@@ -1,0 +1,326 @@
+Engine loaded: 97,812 printings in 2.6s
+
+78,364 feature-rows, mode=uniform, bound=20,000 queries.  ratio = FEATURE / COUNTER, so >1 is OVER-counted.
+
+feature (pooled -- hides per-cell errors that cancel)      n      p0      p1     p10     p20     p50     p70     p90     p99    p100  p90/p10   [worst-calibrated first]
+stream_perm_steps                              3505    0.00    0.02    0.13    0.26    0.84    1.10    1.89    6.64   37.09     14.6
+printings_walked                               5597    0.00    0.01    0.09    0.21    0.91    1.45    2.66    7.36  137.92     29.5
+scan_units                                    11987    0.00    0.01    0.18    0.30    0.93    1.00    1.22    4.66  156.74      6.6
+matches                                       17185    0.37    0.53    0.95    1.00    1.00    1.00    1.77    9.59   57.46      1.9
+eval_domain                                   16581    0.00    0.58    1.00    1.00    1.00    1.00    1.51    6.16   33.86      1.5
+broadcast_printings                            4888    0.00    0.00    0.00    0.85    1.00    1.00    1.04    1.14    1.22      inf
+project_printings                              4042    0.00    0.00    0.00    1.00    1.00    1.00    1.67    7.00   50.33      inf
+residual_card_pass                             9312    0.00    0.31    0.51    0.80    1.00    1.00    2.10    6.26   46.74      4.1
+stream_scan_units                              5038    0.00    0.01    0.17    0.38    1.00    1.00    2.11    6.84   72.36     12.6
+compose_scan_printings                          229    0.00    0.00    0.12    0.32    1.00    1.11    4.25   17.74   39.96     35.8
+
+feature [acquire]                                 n      p0      p1     p10     p20     p50     p70     p90     p99    p100  p90/p10   [worst-calibrated first]
+broadcast_printings [plane]                     656    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00      inf  UNDER-COUNTS
+project_printings [plane]                       738    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00      inf  UNDER-COUNTS
+scan_units [printing_compose]                  7447    0.00    0.01    0.13    0.22    0.39    1.00    1.53    5.32   69.74     11.3  UNDER-COUNTS
+scan_units [card_range_popcount]                304    0.02    0.02    0.09    0.17    0.43    0.43    0.77    1.31    1.76      9.0  UNDER-COUNTS
+stream_scan_units [card_range_popcount]         304    0.04    0.05    0.20    0.34    0.72    0.88    1.19    2.26    2.61      6.0  UNDER-COUNTS
+printings_walked [printing_range_scan]          321    0.01    0.02    0.29    0.68    1.39    1.73    2.80    7.06   16.68      9.8  OVER-COUNTS
+stream_perm_steps [printing_compose]           2081    0.00    0.02    0.11    0.22    0.73    1.05    1.77    7.89   37.09     16.6  UNDER-COUNTS
+printings_walked [card_range_popcount]          228    0.02    0.06    0.26    0.43    1.29    1.73    3.97    6.65   13.36     15.2  OVER-COUNTS
+printings_walked [printing_compose]            4390    0.00    0.01    0.08    0.19    0.80    1.40    2.44    7.51  137.92     31.4
+stream_perm_steps [printing_range_scan]         118    0.03    0.06    0.20    0.50    0.85    1.02    2.10    4.50    7.32     10.7
+stream_perm_steps [candidates]                  501    0.00    0.00    0.13    0.29    0.89    1.26    2.26    6.55   32.33     17.6
+printings_walked [plane]                        658    0.00    0.02    0.14    0.27    1.09    1.58    3.79    7.40   20.09     26.2
+stream_perm_steps [card_range_popcount]         210    0.03    0.12    0.40    0.77    1.06    1.36    2.16    4.09   12.85      5.5
+stream_perm_steps [plane]                       595    0.02    0.05    0.17    0.38    0.98    1.06    1.66    6.25   10.62      9.6
+matches [printing_compose]                    10727    0.37    0.64    0.93    1.00    1.00    1.03    2.31   11.22   57.46      2.5
+eval_domain [printing_compose]                10365    0.00    0.56    0.95    1.00    1.00    1.00    2.29    7.50   33.86      2.4
+broadcast_printings [printing_compose]         4232    0.25    0.38    0.90    1.00    1.00    1.00    1.08    1.14    1.22      1.2
+project_printings [printing_compose]           3046    0.68    0.96    1.00    1.00    1.00    1.00    2.17    7.98   50.33      2.2
+residual_card_pass [printing_compose]          6615    0.00    0.30    0.54    0.79    1.00    1.00    2.48    7.43   46.74      4.6
+stream_scan_units [printing_compose]           3434    0.00    0.00    0.14    0.32    1.00    1.08    2.61    8.04   72.36     18.4
+matches [printing_range_scan]                   731    1.00    1.00    1.00    1.00    1.00    1.00    1.00    1.00    1.00      1.0
+eval_domain [printing_range_scan]               729    1.00    1.00    1.00    1.00    1.00    1.30    2.21    3.64    3.88      2.2
+stream_scan_units [printing_range_scan]         325    0.01    0.02    0.09    0.26    1.00    1.00    1.00    2.43    2.54     10.9
+residual_card_pass [printing_range_scan]        731    0.50    0.53    1.00    1.00    1.00    1.22    2.18    3.64    3.88      2.2
+scan_units [printing_range_scan]                421    0.01    0.02    0.10    0.27    1.00    1.00    1.00    2.32    2.54      9.9
+matches [candidates]                           3363    0.40    0.40    0.83    1.00    1.00    1.00    1.36    7.37   50.84      1.6
+scan_units [candidates]                        2870    0.00    0.08    0.67    1.00    1.00    1.00    1.12    2.06  156.74      1.7
+stream_scan_units [candidates]                  975    0.00    0.01    0.71    1.00    1.00    1.00    1.34    2.98   41.11      1.9
+residual_card_pass [candidates]                1373    0.50    0.50    0.50    0.51    1.00    1.00    1.00    1.00    1.00      2.0
+eval_domain [candidates]                       3123    1.00    1.00    1.00    1.00    1.00    1.00    1.00    1.00    1.00      1.0
+
+feature [acquire] / distinct-on                   n      p0      p1     p10     p20     p50     p70     p90     p99    p100  p90/p10   [worst-calibrated first]
+broadcast_printings [plane] / card              656    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00      inf  UNDER-COUNTS
+project_printings [plane] / card                738    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00      inf  UNDER-COUNTS
+scan_units [printing_compose] / card           1744    0.00    0.00    0.05    0.11    0.34    0.52    1.11    4.65   46.54     24.0  UNDER-COUNTS
+scan_units [printing_compose] / printing       2644    0.00    0.03    0.18    0.27    0.39    1.00    1.72    6.10   69.74      9.3  UNDER-COUNTS
+scan_units [card_range_popcount] / card         304    0.02    0.02    0.09    0.17    0.43    0.43    0.77    1.31    1.76      9.0  UNDER-COUNTS
+scan_units [printing_compose] / artwork        3059    0.00    0.03    0.19    0.28    0.46    1.00    1.61    5.64   21.59      8.6  UNDER-COUNTS
+printings_walked [printing_compose] / card      805    0.00    0.00    0.04    0.12    0.48    1.03    1.92    4.96   12.67     43.8  UNDER-COUNTS
+stream_perm_steps [printing_compose] / printing    762    0.00    0.01    0.07    0.15    0.50    0.86    1.51    7.72   18.57     21.1  UNDER-COUNTS
+stream_scan_units [card_range_popcount] / card    304    0.04    0.05    0.20    0.34    0.72    0.88    1.19    2.26    2.61      6.0  UNDER-COUNTS
+printings_walked [printing_range_scan] / printing    321    0.01    0.02    0.29    0.68    1.39    1.73    2.80    7.06   16.68      9.8  OVER-COUNTS
+printings_walked [printing_compose] / artwork   1785    0.00    0.01    0.08    0.18    0.77    1.31    2.37    7.51   17.09     28.2  UNDER-COUNTS
+stream_perm_steps [candidates] / printing       173    0.00    0.00    0.09    0.24    0.78    1.42    2.55   13.46   32.33     29.9  UNDER-COUNTS
+printings_walked [card_range_popcount] / card    228    0.02    0.06    0.26    0.43    1.29    1.73    3.97    6.65   13.36     15.2  OVER-COUNTS
+stream_perm_steps [printing_compose] / artwork    999    0.00    0.02    0.14    0.26    0.83    1.11    1.88   11.23   37.09     13.8
+stream_perm_steps [candidates] / card           163    0.02    0.02    0.16    0.31    0.84    1.15    1.63    3.88    7.44     10.4
+stream_perm_steps [printing_range_scan] / printing    118    0.03    0.06    0.20    0.50    0.85    1.02    2.10    4.50    7.32     10.7
+stream_scan_units [printing_compose] / card     862    0.00    0.00    0.11    0.26    0.88    1.41    3.11    8.52   72.36     27.3
+stream_perm_steps [printing_compose] / card     320    0.01    0.03    0.20    0.34    0.88    1.20    1.89    3.79    6.63      9.7
+printings_walked [plane] / card                 658    0.00    0.02    0.14    0.27    1.09    1.58    3.79    7.40   20.09     26.2
+scan_units [candidates] / card                  974    0.00    0.01    0.33    0.57    0.93    1.07    1.20    2.92  156.74      3.7
+stream_perm_steps [card_range_popcount] / card    210    0.03    0.12    0.40    0.77    1.06    1.36    2.16    4.09   12.85      5.5
+stream_scan_units [candidates] / card           283    0.01    0.01    0.19    0.50    0.95    1.44    2.28    3.08   41.11     12.3
+printings_walked [printing_compose] / printing   1800    0.00    0.01    0.09    0.23    1.02    1.48    2.70    9.01  137.92     29.3
+stream_perm_steps [candidates] / artwork        165    0.00    0.00    0.10    0.31    0.98    1.33    2.46    6.55   10.77     24.8
+stream_perm_steps [plane] / card                595    0.02    0.05    0.17    0.38    0.98    1.06    1.66    6.25   10.62      9.6
+residual_card_pass [candidates] / printing      474    0.50    0.50    0.50    0.51    1.00    1.00    1.00    1.00    1.00      2.0
+matches [printing_compose] / artwork           4616    0.37    0.70    0.91    1.00    1.00    1.00    1.98   10.41   27.18      2.2
+eval_domain [printing_compose] / artwork       4560    0.00    0.58    1.00    1.00    1.00    1.00    2.04    7.15   20.71      2.0
+broadcast_printings [printing_compose] / artwork   1603    0.25    0.38    0.89    1.00    1.00    1.00    1.08    1.14    1.22      1.2
+project_printings [printing_compose] / artwork   2061    0.70    0.98    1.00    1.00    1.00    1.00    1.71    7.23   34.75      1.7
+
+feature <plan> / distinct-on                      n      p0      p1     p10     p20     p50     p70     p90     p99    p100  p90/p10   [worst-calibrated first]
+stream_perm_steps <StreamedSelect> / printing   1053    0.00    0.00    0.08    0.17    0.60    0.94    1.81    7.32   32.33     23.9  UNDER-COUNTS
+eval_domain <PrintingCompose> / card             95    0.62    0.62    1.00    1.00    1.40    3.44    6.04   22.07   22.07      6.0  OVER-COUNTS
+scan_units <GatheredScan> / card               3967    0.00    0.01    0.10    0.23    0.71    1.00    1.15    3.28  156.74     12.1  UNDER-COUNTS
+matches <PrintingCompose> / card                 95    0.62    0.62    0.98    1.00    1.30    3.31    5.50   22.07   22.07      5.6  OVER-COUNTS
+printings_walked <PrintingCompose> / artwork   1785    0.00    0.01    0.08    0.18    0.77    1.31    2.37    7.51   17.09     28.2  UNDER-COUNTS
+printings_walked <PrintingCompose> / card      1691    0.00    0.01    0.08    0.21    0.80    1.40    2.94    6.39   20.09     34.7
+stream_scan_units <StreamedSelect> / card      1449    0.00    0.01    0.13    0.33    0.83    1.22    2.72    7.68   72.36     21.0
+stream_perm_steps <StreamedSelect> / artwork   1164    0.00    0.01    0.13    0.27    0.84    1.13    1.99    9.97   37.09     15.2
+printings_walked <PrintingCompose> / printing   2121    0.00    0.01    0.10    0.25    1.13    1.52    2.72    8.80  137.92     26.6
+matches <PrintingCompose> / artwork              87    0.73    0.73    1.00    1.00    1.03    1.56    8.79   27.18   27.18      8.8
+broadcast_printings <PrintingCompose> / card   1534    0.00    0.00    0.00    0.00    0.97    1.00    1.00    1.14    1.22      inf
+stream_perm_steps <StreamedSelect> / card      1288    0.01    0.04    0.20    0.40    0.98    1.16    1.88    5.61   12.85      9.6
+residual_card_pass <StreamedSelect> / card     1255    0.00    0.29    0.50    0.50    0.98    1.00    1.69    4.68   12.75      3.4
+residual_card_pass <StreamedSelect> / artwork   1463    0.00    0.29    0.50    0.50    0.99    1.00    1.92    4.92   46.74      3.8
+residual_card_pass <StreamedSelect> / printing   1543    0.28    0.29    0.50    0.52    0.99    1.00    1.94    5.19   41.64      3.9
+matches <StreamedSelect> / artwork             2397    0.37    0.64    0.90    1.00    1.00    1.00    1.79    9.60   42.97      2.0
+eval_domain <StreamedSelect> / artwork         2338    0.00    0.59    1.00    1.00    1.00    1.00    1.57    6.10   16.07      1.6
+matches <GatheredScan> / artwork               3205    0.37    0.65    0.91    1.00    1.00    1.00    1.77    9.59   42.97      2.0
+eval_domain <GatheredScan> / artwork           3130    0.00    0.58    1.00    1.00    1.00    1.00    1.53    6.23   16.48      1.5
+scan_units <GatheredScan> / artwork            4007    0.00    0.04    0.20    0.32    1.00    1.00    1.33    5.24   45.02      6.6
+broadcast_printings <PrintingCompose> / artwork   1603    0.25    0.38    0.89    1.00    1.00    1.00    1.08    1.14    1.22      1.2
+project_printings <PrintingCompose> / artwork   2061    0.70    0.98    1.00    1.00    1.00    1.00    1.71    7.23   34.75      1.7
+matches <GatheredScan> / printing              3453    0.39    0.41    1.00    1.00    1.00    1.00    1.99   12.10   57.46      2.0
+eval_domain <GatheredScan> / printing          3081    0.38    0.58    1.00    1.00    1.00    1.00    1.73    5.96   33.86      1.7
+scan_units <GatheredScan> / printing           4013    0.00    0.03    0.20    0.31    1.00    1.00    1.33    5.23   69.74      6.7
+residual_card_pass <GatheredScan> / printing   1772    0.38    0.56    0.94    1.00    1.00    1.00    2.30    7.69   33.86      2.4
+matches <StreamedSelect> / printing            2637    0.39    0.40    1.00    1.00    1.00    1.00    2.01   10.51   49.44      2.0
+eval_domain <StreamedSelect> / printing        2354    0.38    0.58    1.00    1.00    1.00    1.00    1.71    5.79   18.71      1.7
+stream_scan_units <StreamedSelect> / printing   1832    0.00    0.01    0.16    0.38    1.00    1.00    1.72    6.74   69.74     10.7
+broadcast_printings <PrintingCompose> / printing   1751    0.25    0.34    0.87    1.00    1.00    1.00    1.08    1.14    1.22      1.2
+
+scan features by distinct-on and PREFER           n      p0      p1     p10     p20     p50     p70     p90     p99    p100  p90/p10   [worst-calibrated first]
+scan_units / card / prefer=newest               842    0.00    0.01    0.08    0.20    0.59    1.00    1.12    2.32    9.13     13.8  UNDER-COUNTS
+scan_units / card / prefer=usd_low              821    0.00    0.01    0.08    0.21    0.64    1.00    1.08    2.47   52.35     13.3  UNDER-COUNTS
+scan_units / card / prefer=usd_high             757    0.00    0.01    0.10    0.20    0.68    1.00    1.08    2.32    4.09     11.3  UNDER-COUNTS
+scan_units / card / prefer=oldest               825    0.00    0.01    0.10    0.22    0.69    1.00    1.08    2.62   52.35     11.3  UNDER-COUNTS
+stream_scan_units / card / prefer=newest        301    0.00    0.01    0.11    0.32    0.80    1.17    2.55    7.61   25.14     22.9  UNDER-COUNTS
+stream_scan_units / card / prefer=default       319    0.00    0.01    0.12    0.33    0.82    1.26    2.78    7.68   41.11     22.6
+stream_scan_units / card / prefer=oldest        293    0.00    0.01    0.17    0.38    0.83    1.24    2.87    8.70   17.32     16.9
+stream_scan_units / card / prefer=usd_high      255    0.00    0.00    0.15    0.30    0.84    1.20    2.68    6.48    8.39     17.3
+stream_scan_units / card / prefer=usd_low       281    0.00    0.00    0.14    0.33    0.86    1.20    2.65    7.81   72.36     18.6
+scan_units / artwork / prefer=default           788    0.00    0.04    0.21    0.32    0.99    1.00    1.33    5.65   45.02      6.5
+scan_units / printing / prefer=usd_high         797    0.00    0.03    0.20    0.32    1.00    1.00    1.18    4.29   14.21      6.0
+scan_units / artwork / prefer=oldest            814    0.00    0.03    0.20    0.32    1.00    1.00    1.31    4.50   45.02      6.4
+scan_units / printing / prefer=default          823    0.00    0.03    0.20    0.30    1.00    1.00    1.33    4.83   69.74      6.7
+stream_scan_units / printing / prefer=default    380    0.00    0.00    0.16    0.38    1.00    1.00    1.77    6.74   69.74     10.9
+scan_units / artwork / prefer=usd_high          870    0.00    0.05    0.21    0.32    1.00    1.00    1.33    5.57    8.89      6.5
+scan_units / printing / prefer=newest           820    0.00    0.04    0.19    0.30    1.00    1.00    1.37    5.53   45.02      7.0
+stream_scan_units / printing / prefer=usd_low    373    0.00    0.04    0.18    0.43    1.00    1.00    1.77    7.67   39.92      9.6
+scan_units / printing / prefer=usd_low          791    0.00    0.04    0.21    0.31    1.00    1.00    1.34    5.98   39.92      6.5
+stream_scan_units / printing / prefer=oldest    358    0.00    0.02    0.15    0.36    1.00    1.00    1.48    6.84   49.81      9.9
+scan_units / printing / prefer=oldest           782    0.00    0.03    0.20    0.32    1.00    1.00    1.31    6.10   49.81      6.6
+stream_scan_units / artwork / prefer=newest     339    0.00    0.01    0.18    0.43    1.00    1.00    2.20    8.43   14.83     12.1
+scan_units / artwork / prefer=newest            788    0.00    0.02    0.20    0.31    1.00    1.00    1.35    6.60   45.02      6.8
+stream_scan_units / artwork / prefer=usd_high    400    0.00    0.01    0.17    0.37    1.00    1.00    2.09    6.33    8.89     12.2
+scan_units / card / prefer=default              722    0.00    0.00    0.15    0.37    1.00    1.00    1.70    6.20  156.74     11.1
+stream_scan_units / artwork / prefer=default    345    0.00    0.01    0.22    0.47    1.00    1.00    1.44    6.64   19.70      6.7
+stream_scan_units / printing / prefer=usd_high    357    0.00    0.01    0.14    0.37    1.00    1.00    1.71    4.11    9.45     12.1
+stream_scan_units / printing / prefer=newest    364    0.00    0.01    0.14    0.37    1.00    1.00    1.71    9.51   13.27     12.2
+scan_units / artwork / prefer=usd_low           747    0.00    0.03    0.20    0.32    1.00    1.00    1.33    6.17   44.00      6.7
+stream_scan_units / artwork / prefer=oldest     354    0.00    0.00    0.20    0.45    1.00    1.00    1.91    5.04   21.59      9.7
+stream_scan_units / artwork / prefer=usd_low    319    0.00    0.00    0.19    0.47    1.00    1.00    1.85    6.17    8.06      9.8
+
+feature by ORDERBY                                n      p0      p1     p10     p20     p50     p70     p90     p99    p100  p90/p10   [worst-calibrated first]
+printings_walked / orderby=rarity               794    0.00    0.00    0.03    0.07    0.33    1.03    1.78    8.80  137.92     58.1  UNDER-COUNTS
+stream_perm_steps / orderby=cmc                 573    0.00    0.00    0.06    0.13    0.54    1.10    2.28   10.22   37.09     38.1  UNDER-COUNTS
+printings_walked / orderby=usd                  793    0.00    0.00    0.04    0.12    0.57    1.09    2.02    6.23   17.54     47.1  UNDER-COUNTS
+printings_walked / orderby=cmc                  697    0.00    0.01    0.06    0.13    0.59    1.28    2.65   13.73   22.13     42.0  UNDER-COUNTS
+scan_units / orderby=rarity                    1456    0.00    0.02    0.18    0.28    0.64    1.00    1.18    3.87   45.02      6.4  UNDER-COUNTS
+stream_perm_steps / orderby=edhrec              631    0.00    0.01    0.09    0.19    0.65    1.02    1.92    9.06   35.56     21.0  UNDER-COUNTS
+printings_walked / orderby=edhrec               707    0.02    0.02    0.11    0.19    0.68    1.56    3.57    6.51   17.09     31.1  UNDER-COUNTS
+scan_units / orderby=usd                       1533    0.00    0.02    0.17    0.29    0.68    1.00    1.32    5.50   52.35      7.6  UNDER-COUNTS
+printings_walked / orderby=name                 598    0.16    0.25    0.82    1.09    1.45    1.64    2.17    3.97    7.48      2.6  OVER-COUNTS
+stream_perm_steps / orderby=cubecobra           565    0.01    0.02    0.14    0.27    0.80    1.22    2.55   17.99   22.66     18.5  UNDER-COUNTS
+stream_perm_steps / orderby=toughness           583    0.00    0.00    0.15    0.29    0.88    1.15    1.88    3.25   32.33     12.4
+stream_perm_steps / orderby=power               579    0.01    0.03    0.17    0.31    0.88    1.21    2.12    5.32   13.37     12.6
+printings_walked / orderby=power                704    0.01    0.02    0.22    0.42    1.10    1.45    2.66    7.16   20.09     12.2
+printings_walked / orderby=toughness            674    0.00    0.01    0.20    0.38    1.09    1.46    2.37    5.82   10.85     11.9
+scan_units / orderby=cmc                       1497    0.00    0.02    0.18    0.30    0.94    1.00    1.24    5.05   44.82      6.8
+stream_perm_steps / orderby=name                574    0.10    0.16    0.56    0.73    0.94    1.04    1.29    1.82    3.10      2.3
+printings_walked / orderby=cubecobra            630    0.02    0.04    0.15    0.26    0.95    1.99    4.06    9.54   13.81     26.3
+scan_units / orderby=power                     1515    0.00    0.01    0.18    0.30    0.99    1.00    1.23    4.16   49.81      6.7
+residual_card_pass / orderby=edhrec            1404    0.28    0.31    0.50    0.69    1.00    1.00    1.61    4.46    9.43      3.2
+matches / orderby=cmc                          2410    0.37    0.53    0.95    1.00    1.00    1.00    1.54    7.82   42.97      1.6
+eval_domain / orderby=cmc                      2354    0.00    0.58    1.00    1.00    1.00    1.00    1.56    6.41   18.71      1.6
+broadcast_printings / orderby=cmc               622    0.00    0.00    0.00    0.68    1.00    1.00    1.04    1.14    1.22      inf
+project_printings / orderby=cmc                 466    0.00    0.00    0.00    0.00    1.00    1.00    1.58    5.45    7.54      inf
+matches / orderby=toughness                    2468    0.37    0.45    0.94    1.00    1.00    1.00    1.81   11.22   50.84      1.9
+eval_domain / orderby=toughness                2368    0.37    0.59    1.00    1.00    1.00    1.00    1.42    5.80   10.71      1.4
+scan_units / orderby=toughness                 1483    0.00    0.01    0.19    0.32    1.00    1.00    1.25    5.32  149.46      6.4
+residual_card_pass / orderby=toughness         1387    0.28    0.31    0.50    0.78    1.00    1.00    2.13    6.10   41.64      4.3
+stream_scan_units / orderby=toughness           829    0.00    0.01    0.20    0.43    1.00    1.00    2.16    5.64   69.74     10.6
+scan_units / orderby=edhrec                    1569    0.00    0.02    0.17    0.31    1.00    1.00    1.17    3.87   14.83      6.8
+matches / orderby=rarity                       1269    0.37    0.48    0.96    1.00    1.00    1.00    1.72    7.93   27.18      1.8
+eval_domain / orderby=rarity                   1224    0.36    0.59    1.00    1.00    1.00    1.00    1.52    6.04   20.71      1.5
+broadcast_printings / orderby=rarity            678    0.25    0.34    0.93    1.00    1.00    1.00    1.07    1.22    1.22      1.1
+project_printings / orderby=rarity              542    0.70    1.00    1.00    1.00    1.00    1.00    2.06   10.81   34.75      2.1
+residual_card_pass / orderby=rarity             581    0.36    0.56    0.91    1.00    1.00    1.00    1.96    5.33    7.90      2.1
+matches / orderby=usd                          1320    0.37    0.55    0.96    1.00    1.00    1.00    2.64   18.01   57.46      2.8
+eval_domain / orderby=usd                      1285    0.24    0.58    1.00    1.00    1.00    1.00    2.55   13.81   33.86      2.5
+broadcast_printings / orderby=usd               703    0.25    0.63    0.92    1.00    1.00    1.00    1.08    1.14    1.22      1.2
+project_printings / orderby=usd                 584    0.92    0.98    1.00    1.00    1.00    1.00    2.64   14.26   24.81      2.6
+stream_scan_units / orderby=cmc                 848    0.00    0.01    0.17    0.37    1.00    1.00    2.26    8.43   25.14     13.3
+residual_card_pass / orderby=cmc               1333    0.00    0.29    0.50    0.76    1.00    1.00    2.29    7.35   18.71      4.6
+
+RESIDUAL per-card term (CARD_PASS+FLOOR) by plan, distinct-on and PREFER      n      p0      p1     p10     p20     p50     p70     p90     p99    p100  p90/p10   [worst-calibrated first]
+<StreamedSelect> / artwork / prefer=default     293    0.28    0.28    0.50    0.50    0.98    1.00    1.30    4.92    7.36      2.6
+<StreamedSelect> / card / prefer=usd_low        236    0.28    0.30    0.50    0.50    0.98    1.00    1.58    3.92   12.75      3.2
+<StreamedSelect> / card / prefer=default        270    0.28    0.29    0.50    0.51    0.98    1.00    1.35    3.97    7.60      2.7
+<StreamedSelect> / card / prefer=oldest         268    0.00    0.30    0.50    0.50    0.98    1.00    2.00    8.10   11.24      4.0
+<StreamedSelect> / artwork / prefer=usd_low     264    0.00    0.29    0.50    0.50    0.99    1.00    1.95    4.09    4.52      3.9
+<StreamedSelect> / card / prefer=newest         259    0.28    0.28    0.49    0.50    0.99    1.00    1.76    3.76    7.76      3.6
+<StreamedSelect> / artwork / prefer=usd_high    329    0.28    0.29    0.50    0.50    0.99    1.00    2.10    4.71    6.37      4.2
+<StreamedSelect> / printing / prefer=usd_low    323    0.28    0.30    0.50    0.54    0.99    1.00    1.72    5.19    8.50      3.4
+<StreamedSelect> / card / prefer=usd_high       222    0.28    0.28    0.50    0.50    0.99    1.00    1.55    5.47    5.87      3.1
+<StreamedSelect> / printing / prefer=usd_high    296    0.28    0.28    0.50    0.50    0.99    1.00    1.75    5.36   11.57      3.5
+<StreamedSelect> / printing / prefer=newest     304    0.28    0.29    0.50    0.52    0.99    1.00    1.90    4.36    6.82      3.8
+<StreamedSelect> / artwork / prefer=newest      281    0.28    0.30    0.50    0.51    0.99    1.00    2.26    8.28   46.74      4.5
+<StreamedSelect> / artwork / prefer=oldest      296    0.28    0.29    0.50    0.50    0.99    1.00    2.13    7.16   12.94      4.3
+<StreamedSelect> / printing / prefer=oldest     298    0.28    0.30    0.50    0.50    0.99    1.00    1.85    4.85    5.05      3.7
+<StreamedSelect> / printing / prefer=default    322    0.28    0.29    0.50    0.58    1.00    1.00    2.19    9.36   41.64      4.4
+<GatheredScan> / printing / prefer=default      361    0.41    0.56    0.83    1.00    1.00    1.00    2.21    8.26   18.71      2.7
+<GatheredScan> / card / prefer=usd_high         283    0.56    0.56    0.82    1.00    1.00    1.00    2.02   11.28   16.21      2.5
+<GatheredScan> / printing / prefer=usd_low      354    0.47    0.59    0.99    1.00    1.00    1.00    2.40    7.69   26.38      2.4
+<GatheredScan> / printing / prefer=oldest       336    0.38    0.57    0.95    1.00    1.00    1.00    2.47    7.98   33.86      2.6
+<GatheredScan> / artwork / prefer=newest        343    0.59    0.59    0.92    1.00    1.00    1.00    2.38    6.16   15.23      2.6
+<GatheredScan> / artwork / prefer=usd_high      379    0.38    0.56    0.89    1.00    1.00    1.00    2.44    6.41    9.43      2.7
+<GatheredScan> / artwork / prefer=default       371    0.36    0.56    0.91    1.00    1.00    1.00    1.87    7.83   14.37      2.1
+<GatheredScan> / card / prefer=newest           309    0.37    0.56    0.83    1.00    1.00    1.00    2.01    6.45    7.81      2.4
+<GatheredScan> / printing / prefer=usd_high     354    0.51    0.56    0.95    1.00    1.00    1.00    2.26    7.68   15.24      2.4
+<GatheredScan> / printing / prefer=newest       367    0.38    0.58    0.88    1.00    1.00    1.00    2.30    5.96   10.33      2.6
+<GatheredScan> / artwork / prefer=oldest        361    0.37    0.50    0.91    1.00    1.00    1.00    2.44    9.99   16.07      2.7
+<GatheredScan> / card / prefer=default          307    0.47    0.56    0.96    1.00    1.00    1.00    1.87    5.95    7.67      1.9
+<GatheredScan> / card / prefer=usd_low          295    0.38    0.56    0.85    1.00    1.00    1.00    2.14    5.80   11.43      2.5
+<GatheredScan> / artwork / prefer=usd_low       321    0.00    0.58    0.92    1.00    1.00    1.00    2.42    7.15   16.48      2.6
+<GatheredScan> / card / prefer=oldest           310    0.00    0.56    0.81    1.00    1.00    1.00    2.26   11.12   22.07      2.8
+
+COMPOSE BUILD terms by distinct-on and PREFER      n      p0      p1     p10     p20     p50     p70     p90     p99    p100  p90/p10   [worst-calibrated first]
+broadcast_printings / card / prefer=oldest      320    0.00    0.00    0.00    0.00    0.85    1.00    1.00    1.14    1.22      inf
+broadcast_printings / card / prefer=newest      297    0.00    0.00    0.00    0.00    0.93    1.00    1.00    1.12    1.14      inf
+broadcast_printings / card / prefer=usd_high    286    0.00    0.00    0.00    0.00    0.95    1.00    1.00    1.14    1.16      inf
+broadcast_printings / artwork / prefer=oldest    326    0.25    0.34    0.86    1.00    1.00    1.00    1.03    1.14    1.22      1.2
+project_printings / artwork / prefer=oldest     443    0.91    0.99    1.00    1.00    1.00    1.00    1.44    7.00   15.08      1.4
+broadcast_printings / printing / prefer=newest    363    0.25    0.34    0.92    1.00    1.00    1.00    1.06    1.14    1.22      1.2
+project_printings / card / prefer=usd_high      389    0.00    0.00    0.00    0.00    1.00    1.00    1.51    7.04   20.20      inf
+project_printings / card / prefer=newest        404    0.00    0.00    0.00    0.00    1.00    1.00    1.52    4.62   20.64      inf
+broadcast_printings / artwork / prefer=usd_low    273    0.38    0.68    0.95    1.00    1.00    1.00    1.07    1.22    1.22      1.1
+broadcast_printings / artwork / prefer=default    316    0.36    0.40    0.93    1.00    1.00    1.00    1.12    1.14    1.22      1.2
+project_printings / artwork / prefer=default    405    0.84    0.97    1.00    1.00    1.00    1.00    1.52    6.72   10.27      1.5
+broadcast_printings / artwork / prefer=newest    326    0.25    0.39    0.85    1.00    1.00    1.00    1.08    1.14    1.22      1.3
+project_printings / artwork / prefer=newest     417    0.70    0.94    1.00    1.00    1.00    1.00    1.99    8.27   34.75      2.0
+broadcast_printings / artwork / prefer=usd_high    362    0.25    0.34    0.87    1.00    1.00    1.00    1.08    1.22    1.22      1.2
+project_printings / artwork / prefer=usd_high    434    0.85    0.99    1.00    1.00    1.00    1.00    1.84    5.79   12.72      1.8
+broadcast_printings / card / prefer=default     300    0.00    0.00    0.00    0.00    1.00    1.00    1.00    1.14    1.14      inf
+project_printings / card / prefer=default       385    0.00    0.00    0.00    0.00    1.00    1.00    1.76    7.32   16.63      inf
+project_printings / card / prefer=oldest        396    0.00    0.00    0.00    0.00    1.00    1.00    1.62   14.00   50.33      inf
+broadcast_printings / card / prefer=usd_low     331    0.00    0.00    0.00    0.00    1.00    1.00    1.00    1.14    1.22      inf
+project_printings / card / prefer=usd_low       407    0.00    0.00    0.00    0.00    1.00    1.00    1.51    4.91    9.77      inf
+broadcast_printings / printing / prefer=default    338    0.25    0.40    0.86    1.00    1.00    1.00    1.08    1.22    1.22      1.3
+broadcast_printings / printing / prefer=oldest    354    0.25    0.39    0.92    1.00    1.00    1.00    1.09    1.14    1.22      1.2
+broadcast_printings / printing / prefer=usd_low    348    0.25    0.34    0.87    1.00    1.00    1.00    1.04    1.19    1.22      1.2
+project_printings / artwork / prefer=usd_low    362    0.95    1.00    1.00    1.00    1.00    1.00    1.86   10.27   15.05      1.9
+broadcast_printings / printing / prefer=usd_high    348    0.25    0.25    0.85    1.00    1.00    1.00    1.04    1.14    1.22      1.2
+
+compose only: feature by PAGING branch            n      p0      p1     p10     p20     p50     p70     p90     p99    p100  p90/p10   [worst-calibrated first]
+broadcast_printings <compose Perm> / card       793    0.00    0.00    0.00    0.00    0.00    0.00    1.00    1.14    1.22      inf  UNDER-COUNTS
+project_printings <compose Perm> / card        1381    0.00    0.00    0.00    0.00    0.00    1.00    1.22    4.42   10.72      inf  UNDER-COUNTS
+printings_walked <compose OrderbyWalk> / artwork    460    0.00    0.00    0.03    0.07    0.22    0.46    1.12    2.83    7.36     38.3  UNDER-COUNTS
+printings_walked <compose OrderbyWalk> / card    437    0.00    0.00    0.02    0.05    0.27    0.52    1.30    2.78    4.70     56.5  UNDER-COUNTS
+project_printings <compose Gather> / card       103    0.95    0.99    1.00    1.00    1.53    3.82    7.98   20.20   24.81      8.0  OVER-COUNTS
+eval_domain <compose Gather> / card              95    0.62    0.62    1.00    1.00    1.40    3.44    6.04   22.07   22.07      6.0  OVER-COUNTS
+matches <compose Gather> / card                  95    0.62    0.62    0.98    1.00    1.30    3.31    5.50   22.07   22.07      5.6  OVER-COUNTS
+printings_walked <compose OrderbyWalk> / printing    690    0.00    0.01    0.07    0.26    1.15    1.51    2.75   14.98  137.92     38.9
+printings_walked <compose Perm> / printing     1431    0.00    0.02    0.12    0.25    1.11    1.53    2.71    7.48   22.13     22.3
+printings_walked <compose Perm> / card         1254    0.00    0.02    0.17    0.29    1.11    1.58    3.60    6.65   20.09     21.8
+printings_walked <compose Perm> / artwork      1325    0.00    0.01    0.16    0.31    1.04    1.47    2.67    8.65   17.09     16.4
+matches <compose Gather> / artwork               87    0.73    0.73    1.00    1.00    1.03    1.56    8.79   27.18   27.18      8.8
+broadcast_printings <compose Perm> / artwork    858    0.25    0.38    0.89    1.00    1.00    1.00    1.10    1.15    1.22      1.2
+project_printings <compose Perm> / artwork     1469    0.74    0.96    1.00    1.00    1.00    1.00    1.70    5.73   11.97      1.7
+broadcast_printings <compose OrderbyWalk> / printing    406    0.25    0.34    0.92    1.00    1.00    1.00    1.09    1.22    1.22      1.2
+project_printings <compose OrderbyWalk> / card    437    0.95    1.00    1.00    1.00    1.00    1.00    1.43    4.58    8.58      1.4
+broadcast_printings <compose OrderbyWalk> / card    234    1.00    1.00    1.00    1.00    1.00    1.00    1.08    1.14    1.14      1.1
+broadcast_printings <compose EmptyPage> / artwork    403    0.25    0.25    0.85    1.00    1.00    1.00    1.00    1.14    1.22      1.2
+broadcast_printings <compose EmptyPage> / printing    421    0.25    0.39    0.88    1.00    1.00    1.00    1.03    1.20    1.22      1.2
+broadcast_printings <compose Perm> / printing    918    0.25    0.34    0.86    1.00    1.00    1.00    1.08    1.14    1.22      1.3
+broadcast_printings <compose EmptyPage> / card    421    0.00    0.00    0.00    0.92    1.00    1.00    1.00    1.14    1.22      inf
+broadcast_printings <compose OrderbyWalk> / artwork    253    1.00    1.00    1.00    1.00    1.00    1.00    1.12    1.14    1.14      1.1
+project_printings <compose OrderbyWalk> / artwork    461    0.92    0.98    1.00    1.00    1.00    1.00    1.34    4.07    6.83      1.3
+eval_domain <compose Gather> / artwork           86    0.62    0.62    1.00    1.00    1.00    2.42    7.83   20.71   20.71      7.8
+compose_scan_printings <compose Gather> / artwork    114    0.00    0.06    0.14    0.35    1.00    1.00    3.15   17.74   26.53     22.2
+broadcast_printings <compose Gather> / artwork     89    0.39    0.39    0.83    0.85    1.00    1.00    1.10    1.22    1.22      1.3
+project_printings <compose Gather> / artwork     99    0.70    0.70    1.00    1.00    1.00    1.43    9.70   34.75   34.75      9.7
+compose_scan_printings <compose Gather> / card    108    0.00    0.06    0.11    0.29    1.00    1.25    4.28   12.08   14.26     39.4
+broadcast_printings <compose Gather> / card      86    0.63    0.63    0.85    0.87    1.00    1.00    1.03    1.16    1.16      1.2
+project_printings <compose EmptyPage> / card     60    0.00    0.00    0.00    0.00    1.00    1.00    3.38   50.33   50.33      inf
+
+WALK TERMS by sort column -- read the SPREAD, not the median      n      p0      p1     p10     p20     p50     p70     p90     p99    p100  p90/p10   [n first]
+printings_walked / orderby=rarity / printing    358    0.00    0.00    0.09    0.28    1.25    1.45    2.86   16.68  137.92     31.9
+printings_walked / orderby=usd / printing       332    0.00    0.01    0.06    0.21    1.03    1.73    2.64    8.65   17.54     44.2
+printings_walked / orderby=edhrec / printing    266    0.02    0.02    0.10    0.15    0.67    1.27    2.98    5.36   10.20     30.0  UNDER-COUNTS
+printings_walked / orderby=cmc / printing       259    0.00    0.01    0.06    0.14    0.70    1.50    3.00   16.37   22.13     49.8  UNDER-COUNTS
+stream_perm_steps / orderby=edhrec / card       248    0.03    0.07    0.15    0.26    0.84    1.20    1.98    5.95    8.15     13.7
+printings_walked / orderby=toughness / artwork    240    0.01    0.01    0.18    0.37    1.04    1.31    2.03    5.23   10.85     11.0
+printings_walked / orderby=power / artwork      238    0.01    0.01    0.22    0.42    1.03    1.36    2.09    6.48   11.18      9.6
+printings_walked / orderby=usd / artwork        238    0.00    0.00    0.03    0.08    0.30    0.64    1.18    3.67    7.36     34.0  UNDER-COUNTS
+printings_walked / orderby=power / printing     236    0.01    0.03    0.18    0.33    1.05    1.53    2.90    8.72   15.72     16.4
+printings_walked / orderby=power / card         230    0.01    0.02    0.32    0.61    1.16    1.46    2.83    7.16   20.09      8.8
+printings_walked / orderby=toughness / printing    228    0.00    0.01    0.19    0.34    1.19    1.56    3.04    5.80    9.01     16.3
+printings_walked / orderby=cmc / artwork        227    0.00    0.01    0.06    0.13    0.61    1.16    2.18    7.87    8.81     34.1  UNDER-COUNTS
+printings_walked / orderby=edhrec / card        227    0.02    0.02    0.13    0.19    0.57    2.18    4.40    6.45    6.73     33.0  UNDER-COUNTS
+printings_walked / orderby=name / printing      226    0.16    0.24    0.70    0.96    1.38    1.57    1.89    3.77    7.48      2.7  OVER-COUNTS
+printings_walked / orderby=usd / card           223    0.00    0.00    0.04    0.14    0.46    0.87    1.49    2.78    4.70     36.1  UNDER-COUNTS
+printings_walked / orderby=rarity / artwork     222    0.00    0.01    0.02    0.05    0.17    0.32    1.03    2.37    2.85     45.3  UNDER-COUNTS
+stream_perm_steps / orderby=cmc / card          219    0.02    0.02    0.08    0.18    0.86    1.13    2.27    9.96   10.62     30.2
+stream_perm_steps / orderby=power / card        219    0.01    0.05    0.27    0.58    1.00    1.24    2.05    5.14    6.25      7.5
+printings_walked / orderby=cubecobra / printing    216    0.02    0.03    0.12    0.24    1.13    1.69    2.79    4.51    7.28     24.1
+printings_walked / orderby=cubecobra / artwork    215    0.04    0.05    0.15    0.26    1.00    2.24    4.22    9.96   11.64     27.5
+printings_walked / orderby=rarity / card        214    0.00    0.00    0.01    0.03    0.13    0.29    0.71    2.22    3.05     54.1  UNDER-COUNTS
+printings_walked / orderby=edhrec / artwork     214    0.02    0.03    0.15    0.25    0.85    1.72    3.51    8.80   17.09     23.2
+stream_perm_steps / orderby=toughness / artwork    211    0.00    0.05    0.16    0.30    0.92    1.09    1.74    2.87    9.97     11.2
+printings_walked / orderby=cmc / card           211    0.00    0.01    0.07    0.13    0.44    1.08    1.98    6.36    7.62     26.9  UNDER-COUNTS
+stream_perm_steps / orderby=power / artwork     209    0.01    0.06    0.14    0.29    0.87    1.24    2.13    4.41    6.55     14.9
+stream_perm_steps / orderby=cubecobra / card    208    0.02    0.03    0.24    0.41    0.98    1.31    1.94    6.13   12.85      8.2
+stream_perm_steps / orderby=toughness / card    208    0.06    0.08    0.21    0.37    1.00    1.19    1.97    3.25    3.88      9.5
+printings_walked / orderby=toughness / card     206    0.01    0.06    0.24    0.46    1.12    1.46    2.54    6.54    9.54     10.4
+stream_perm_steps / orderby=edhrec / printing    204    0.00    0.01    0.06    0.09    0.38    0.79    1.50    5.80    9.97     27.2  UNDER-COUNTS
+printings_walked / orderby=cubecobra / card     199    0.05    0.05    0.18    0.27    0.72    2.46    5.48   13.36   13.81     30.7  UNDER-COUNTS
+stream_perm_steps / orderby=name / artwork      198    0.16    0.16    0.58    0.75    0.94    1.04    1.28    1.66    1.96      2.2
+printings_walked / orderby=name / artwork       191    0.24    0.25    0.83    1.07    1.42    1.64    1.95    3.76    6.89      2.4  OVER-COUNTS
+stream_perm_steps / orderby=name / printing     190    0.10    0.11    0.44    0.59    0.87    0.98    1.25    2.13    2.32      2.8
+stream_perm_steps / orderby=name / card         186    0.21    0.29    0.73    0.85    1.00    1.06    1.30    1.74    3.10      1.8
+stream_perm_steps / orderby=cubecobra / artwork    184    0.01    0.02    0.14    0.26    0.84    1.33    3.02   20.79   22.66     21.2
+stream_perm_steps / orderby=cmc / artwork       183    0.00    0.00    0.05    0.13    0.59    1.17    2.10    6.24   37.09     40.2  UNDER-COUNTS
+printings_walked / orderby=name / card          181    0.30    0.44    1.03    1.30    1.58    1.73    2.50    4.13    4.55      2.4  OVER-COUNTS
+stream_perm_steps / orderby=edhrec / artwork    179    0.00    0.00    0.10    0.20    0.69    1.02    2.23   32.15   35.56     23.2  UNDER-COUNTS
+stream_perm_steps / orderby=cubecobra / printing    173    0.01    0.02    0.06    0.15    0.53    0.83    2.49    8.51   18.57     39.3  UNDER-COUNTS
+stream_perm_steps / orderby=cmc / printing      171    0.00    0.00    0.05    0.09    0.28    0.76    2.47   13.46   13.81     47.7  UNDER-COUNTS
+
+CONTROL: scan_units vs printing SPAN (the old grading)      n      p0      p1     p10     p20     p50     p70     p90     p99    p100  p90/p10   [worst-calibrated first]
+scan_units / card                              5416    0.00    0.00    0.08    0.18    0.48    1.00    1.10    2.80   52.35     13.0  UNDER-COUNTS
+scan_units / artwork                           5764    0.00    0.03    0.20    0.32    1.00    1.00    1.46    5.66   45.02      7.4
+scan_units / printing                          5845    0.00    0.03    0.19    0.32    1.00    1.00    1.42    5.50   69.74      7.3
+
+  Cells outside [0.8, 1.25] are flagged. A feature error cannot be fixed by any
+  rate: fit_cost_model.py will bury it in whichever coefficient correlates with it.

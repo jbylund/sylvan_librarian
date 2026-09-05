@@ -8,8 +8,11 @@ unparseable predicate silently drops those samples from whichever benchmark drew
 from __future__ import annotations
 
 import json
+import os
+import pathlib
 import random
-from typing import TYPE_CHECKING
+import subprocess
+import sys
 
 import pytest
 
@@ -31,9 +34,6 @@ from client.query_sampler import (
     QuerySampler,
     Shape,
 )
-
-if TYPE_CHECKING:
-    import pathlib
 
 # Enough draws that a 1-in-N branch inside a family (bounded ranges, name prefixing, the year/date
 # split) is hit many times over, without making the suite slow.
@@ -143,6 +143,51 @@ class TestQueries:
         first = [sampler.query(random.Random(11)) for _ in range(5)]
         second = [sampler.query(random.Random(11)) for _ in range(5)]
         assert first == second
+
+    def test_oracle_vocab_order_is_stable_across_hash_seeds(self, tmp_path: pathlib.Path) -> None:
+        """`_count_row` folds each row's oracle words via `Counter.update(sorted(set(...)))`.
+
+        Before that `sorted(...)` was added, this read `set(...)` directly: `Counter.update`'s own
+        iteration order determines a NEW key's insertion position, and CPython randomizes string hash
+        (hence bare `set` iteration order) per process. Two words tied on raw frequency that always
+        co-occur in the same rows could insert into the counter in either relative order depending on
+        the process's hash seed -- final counts are unaffected (addition is order-independent), but
+        `most_common()`'s tie-break for equal counts falls back to insertion order, so which of the two
+        tied words `_vocab` lists first (and therefore which index `rng.choices` can land on) silently
+        depended on `PYTHONHASHSEED`. Reproduces the actual bug class end to end: two fresh
+        subprocesses, deliberately different hash seeds, same corpus -- the vocab order must match.
+        """
+        # Two made-up words, guaranteed absent from any real vocabulary, always co-occurring together
+        # (so they tie in count AND their first-seen row is the same one, the exact condition that let
+        # hash-randomized set iteration decide their relative insertion order pre-fix).
+        rows = [
+            {
+                "card_name": f"Filler {i}",
+                "oracle_text": "Zephyria's quoxilbane triggers. Zephyria's quoxilbane resolves.",
+                "flavor_text": "",
+            }
+            for i in range(MIN_WORD_ROWS)
+        ]
+        corpus = tmp_path / "corpus.jsonl"
+        corpus.write_text("\n".join(json.dumps(r) for r in rows))
+        script = (
+            "import pathlib, sys; sys.path.insert(0, '.'); "
+            "from client.query_sampler import QuerySampler; "
+            f"s = QuerySampler(pathlib.Path({corpus.as_posix()!r})); "
+            "print(s.vocab['oracle'][0])"
+        )
+        runs = [
+            subprocess.run(  # noqa: S603 - fixed interpreter (sys.executable), test-authored script, no untrusted input
+                [sys.executable, "-c", script],
+                capture_output=True,
+                text=True,
+                check=True,
+                cwd=pathlib.Path(__file__).resolve().parents[2],
+                env={**os.environ, "PYTHONHASHSEED": seed},
+            ).stdout
+            for seed in ("0", "1")
+        ]
+        assert runs[0] == runs[1], f"oracle vocab order depends on PYTHONHASHSEED: {runs}"
 
     def test_every_family_is_reachable(self, sampler: QuerySampler) -> None:
         rng = random.Random(0)

@@ -140,10 +140,28 @@ PLAN_KEYS = frozenset(
         # PrintingCompose only (0 for every other plan): popcount(pbits), the composed printing-space
         # bitmap. Keyed variable for sigma_bound::three_phase_cost_ns's grading, not matches.
         "set_printings",
-    # Permutation entries StreamedSelect's walk stepped. Realized ground truth for the estimate
-    # `page_span * n_cards / matches`, which assumes matches are spread uniformly through the
-    # permutation -- an assumption worth grading rather than trusting.
-    "perm_steps",
+        # Permutation entries StreamedSelect's walk stepped. Realized ground truth for
+        # `cost::stream_perm_steps`, `page_span * perm_walk_span / matches` -- NOT `n_cards`, which is
+        # what this said until Round 70 and what two Python mirrors of the formula also had wrong. It
+        # assumes matches are spread uniformly through the walked segment; Round 69 graded that at a
+        # median of 1.023 with the error living entirely in the spread (1.9x on `orderby=name` to
+        # 38.8x on `cmc`), so grade it rather than trust it, and read the spread rather than the median.
+        "perm_steps",
+        # StreamedSelect's small-total branch only (0 for every other plan/exit): printings
+        # `push_card_matches` re-examined in the second, page-selecting pass over every matching
+        # card -- the redo `printings_examined` (captured only from the first, counting-only pass)
+        # structurally cannot see. Round 31 of the printing-varying-leaf depth ledger.
+        # `filter.card_pass` invocations, the realized quantity behind `cost::residual_card_pass` --
+        # the residual-gated per-card term whose coefficient is the residual floor, and the largest
+        # single term in the model (58% of GatheredScan's predicted time). Zero for every plan that
+        # verifies no residual. NOT `cards_visited` for StreamedSelect: its small-total redo loop and
+        # its permutation walk each re-derive `card_pass` for a second population.
+        "card_pass_calls",
+        # PrintingCompose only: printings its BUILD's card->printing broadcast passes wrote or
+        # cleared, the realized quantity behind `PlanFeatures::broadcast_printings`. Accumulated by
+        # the passes themselves (`broadcast_card_bits_to_printings`, `legality_leaf_bits_from_absent`)
+        # because they sit under a recursion with no publish site of its own.
+        "broadcast_printings",
         "ns_setup",
         "ns_loop",
         "ns_finish",
@@ -165,6 +183,14 @@ ACQUIRE_KEYS = frozenset(
         "routed_choose_ns",
         "routed_dispatch_ns",
         "compose_paging",
+        # Round 37a: per-query provenance for the top-level `And` node's own `compose_printing_estimate`
+        # evaluation (`None` when the top-level filter isn't an `And` at all) -- see
+        # `docs/issues/local-engine-gathered-scan-card-printing-varying-depth.md`.
+        "and_trace",
+        # Round 39: single-shot wall time (ns) of the REAL, production, acquire-time
+        # `compose_printing_estimate` call -- `None` whenever this query's acquire took a branch
+        # other than `PrintingCompose` -- see `docs/issues/local-engine-nway-compose-independence-search.md`.
+        "and_estimate_ns",
     }
 )
 
@@ -279,11 +305,17 @@ def iter_samples(
         q = sampler.query(rng)
         try:
             kw["filters"] = parse_scryfall_query(q)
-            # Both calls get the same `prefer`. Note what that does and does not buy: `PlanFeatures`
-            # does not carry `prefer`, so the features and every `predicted_ns` come back identical
-            # whatever is passed, while execution honours it. That asymmetry is what makes a prefer
-            # slice readable -- only the COUNTERS move, so a ratio that shifts with `prefer` is the
-            # feature failing to model a real difference in work, not two numbers drifting at once.
+            # Both calls get the same `prefer`, and since Round 66 that MATTERS -- it is no longer a
+            # convention. This comment used to say `PlanFeatures` does not carry `prefer`, "so the
+            # features and every `predicted_ns` come back identical whatever is passed, while execution
+            # honours it". That stopped being true when `compose_scan_printings` gained a
+            # `Mode::Card if Prefer::Default` arm: the ACQUIRE reads `prefer` even though the struct
+            # does not store it, so acquiring under one prefer and executing under another grades the
+            # wrong feature against the right counter. (Measured cost of getting this wrong: compose's
+            # gather cell reads 0.508 mismatched against 1.470 matched -- a 2.9x error that looks like
+            # a finding.) Any harness written against the old claim must pass `prefer` to `explain` too.
+            # What still holds is the useful half: most features are prefer-independent, so a ratio that
+            # shifts with `prefer` is usually the feature failing to model a real difference in work.
             acquire = engine.explain(**kw)["acquire"]
             res = engine.explain_analyze(num_warmups=budget.warmups, num_trials=budget.trials, **{"prefer": "default", **kw})
         except Exception:  # noqa: BLE001, S112 - a rejected query is a skipped sample

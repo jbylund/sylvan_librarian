@@ -611,6 +611,25 @@ pub(crate) enum PlaneExpr {
     Const(bool),
 }
 
+impl PlaneExpr {
+    /// Nodes in the expression — the per-WORD work `eval_planes` does, since it calls `eval_word`
+    /// once per word and `eval_word` recurses over the whole tree each time. Multiplying this by the
+    /// word count gives the plane evaluation's real unit of work, which is what
+    /// `PlanFeatures::prepare_plane_word_ops` carries.
+    ///
+    /// `Bits` counts as one node like any other leaf: `eval_word` reads one word from the cloned
+    /// bitmap, exactly as a `Plane` reads one word from the archive.
+    pub(crate) fn node_count(&self) -> u32 {
+        match self {
+            PlaneExpr::And(children) | PlaneExpr::Or(children) => {
+                1 + children.iter().map(PlaneExpr::node_count).sum::<u32>()
+            }
+            PlaneExpr::Not(child) => 1 + child.node_count(),
+            PlaneExpr::Plane(_) | PlaneExpr::Bits(_) | PlaneExpr::Const(_) => 1,
+        }
+    }
+}
+
 /// And over children, collapsing the empty (vacuously true) and singleton cases.
 fn and_of(mut children: Vec<PlaneExpr>) -> PlaneExpr {
     match children.len() {
@@ -1058,6 +1077,19 @@ fn compile_plane_children(children: &[FilterExpr], bounds: &rkyv::Archived<BitPl
 /// card-level True here does not imply every printing of the card
 /// individually satisfies the query, unlike colors/types/devotion/numeric
 /// buckets.
+///
+/// This IS the CARD-vs-PRINTING-level property classification, not a separate concept next to one:
+/// `existential_leaf(p).is_some()` (equivalently `needs_printing_verification` once the divergent-format
+/// mask is folded in) answers "can this specific fact disagree between two printings of the same card"
+/// -- exactly the fact that forces `push_card_matches`/`existential_plane_for` to re-walk printings
+/// under `Mode::Card` for row selection, and exactly the fact `#680`'s doc calls "printing-varying".
+/// Rarity/border are STATICALLY printing-level (every leaf, unconditionally -- the field structurally
+/// allows two printings of a card to disagree). Legality is the one property that is DYNAMICALLY
+/// either bucket depending on `divergent_formats` for that specific format: card-level for a format
+/// where the corpus happens to agree on every printing, printing-level for one where it doesn't
+/// (`needs_printing_verification` reads that bitmask to resolve which bucket a given format is in for
+/// THIS store). Every other plane (color/type/cmc/devotion/...) is statically card-level and never
+/// reaches this table at all -- `existential_leaf` returns `None` for it, by construction.
 enum ExistentialLeaf {
     Legality { shift: u8, expected: u64, is_illegal: bool },
     /// One of the 4 tracked one-hot rarity values (common/uncommon/rare/mythic).
@@ -1117,7 +1149,12 @@ const PLANE_BLOCKS: [PlaneBlock; 10] = [
 ];
 
 /// Whether plane `p` needs PER-PRINTING verification: an existential leaf whose fact can actually differ
-/// between the printings of one card.
+/// between the printings of one card -- i.e. whether the property this plane index addresses is a
+/// PRINTING-level property (this specific fact, this specific store) rather than a CARD-level one. Not
+/// a separate question from "is this a printing-level property" -- see `ExistentialLeaf`'s doc: needing
+/// re-verification and being printing-level are the same fact, traced through the executor
+/// (`push_card_matches`'s `existential_plane` branch re-walks printings for row selection precisely
+/// when this is true, never otherwise).
 ///
 /// For rarity and border that is every leaf — those are printing-varying by nature. For legality it is a
 /// per-FORMAT question, and the answer is usually no: `divergent_formats` names the formats whose
@@ -1128,6 +1165,16 @@ const PLANE_BLOCKS: [PlaneBlock; 10] = [
 ///
 /// `u64::MAX` — every format divergent — is the conservative value and reproduces the behaviour that
 /// predates the mask, which is what a store built before it (or a fixture that does not care) supplies.
+///
+/// Not the only card-vs-printing-level classifier in this crate: `estimator.rs`'s
+/// `has_printing_varying_leaf` (ANY-composition, for cardinality estimation) and `filter.rs`'s
+/// `printing_dependent`/`leaf_compares_printing_field` (verifier-ordering heuristic) each answer a
+/// related but distinct question over a different leaf set, and each documents its own deliberate
+/// disagreement with this table on legality specifically (one always counts it as varying, the other
+/// always counts it as card-level, both as documented simplifications for their own purpose, not bugs).
+/// This function is the one used for correctness-critical row selection and cost-tier charging; a single
+/// canonical property table those two could also read from is a plausible future unification, not
+/// attempted here.
 fn needs_printing_verification(p: usize, divergent_formats: u64) -> bool {
     match existential_leaf(p) {
         Some(ExistentialLeaf::Legality { shift, .. }) => divergent_formats >> shift & 0b11 != 0,
@@ -1623,4 +1670,81 @@ pub(crate) fn decode_bitmap_ids(words: impl Iterator<Item = u64>, count: usize) 
         }
     }
     out
+}
+
+/// Property tests over `PLANE_BLOCKS`/`existential_leaf`/`needs_printing_verification` -- guards the
+/// invariant the Round 16 fix relies on (docs/issues/local-engine-gathered-scan-undercosted-arith-
+/// existential-and.md): the router's cost-tier check (`cost_plane_nothing_to_verify`, lib.rs) trusts
+/// `plane_expr_is_existential` to answer "is this a printing-level property" uniformly across every
+/// family, with NO per-field special case in the caller. That trust is only sound while every entry in
+/// this table actually behaves one of the two ways a family can: STATICALLY printing-level (true no
+/// matter what `divergent_formats` says -- rarity, border) or DYNAMICALLY printing-level, gated
+/// EXACTLY on its own format's bits in `divergent_formats` (legality). A future family wired into the
+/// wrong bucket -- e.g. a new always-varying field accidentally routed through the `Legality` arm, or
+/// a new format-gated field accidentally landing in the `Some(_) => true` catch-all -- would silently
+/// reproduce this round's bug shape (a real per-printing walk priced as free) for a different field,
+/// without any caller of `plane_expr_is_existential` needing to change at all. Iterates every index the
+/// table actually covers, not a hardcoded list, so a new `PlaneBlock` entry is exercised automatically.
+#[cfg(test)]
+mod plane_block_family_invariants {
+    use super::{existential_leaf, needs_printing_verification, ExistentialLeaf, PLANE_COUNT};
+
+    /// Representative `divergent_formats` masks: none divergent, every format divergent (the
+    /// conservative default a mask-less caller supplies), and a single arbitrary bit set (the
+    /// production shape -- one real format, `oldschool`, diverges in the shipped corpus).
+    const MASKS: [u64; 3] = [0, u64::MAX, 0b11 << 6];
+
+    #[test]
+    fn rarity_and_border_are_existential_regardless_of_divergent_formats() {
+        for p in 0..PLANE_COUNT {
+            let is_static_existential = matches!(
+                existential_leaf(p),
+                Some(ExistentialLeaf::RarityTracked(_) | ExistentialLeaf::RarityHi | ExistentialLeaf::BorderTracked(_) | ExistentialLeaf::BorderOther)
+            );
+            if !is_static_existential {
+                continue;
+            }
+            for &mask in &MASKS {
+                assert!(
+                    needs_printing_verification(p, mask),
+                    "plane {p} is a rarity/border family member -- printing-varying by construction, so it must \
+                     need per-printing verification for every divergent_formats mask, not just some (got mask \
+                     {mask:#x})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn legality_is_existential_exactly_when_its_own_format_diverges() {
+        for p in 0..PLANE_COUNT {
+            let Some(ExistentialLeaf::Legality { shift, .. }) = existential_leaf(p) else { continue };
+            for &mask in &MASKS {
+                let format_diverges = mask >> shift & 0b11 != 0;
+                assert_eq!(
+                    needs_printing_verification(p, mask),
+                    format_diverges,
+                    "plane {p} (legality shift {shift}) must need per-printing verification IFF its own \
+                     format's bits are set in divergent_formats (mask {mask:#x}) -- not unconditionally \
+                     (that's rarity/border's shape) and not never (that's a card-invariant plane's shape)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn planes_outside_every_block_are_never_existential() {
+        for p in 0..PLANE_COUNT {
+            if existential_leaf(p).is_some() {
+                continue;
+            }
+            for &mask in &MASKS {
+                assert!(
+                    !needs_printing_verification(p, mask),
+                    "plane {p} belongs to no existential family (`existential_leaf` returned `None`) -- a \
+                     card-invariant plane must never need per-printing verification, for any mask (got {mask:#x})"
+                );
+            }
+        }
+    }
 }

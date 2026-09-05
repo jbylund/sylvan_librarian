@@ -1,0 +1,71 @@
+Engine loaded: 97,812 printings in 2.7s
+2,974 StreamedSelect plan-rows that actually ran
+
+====================================================================================================
+1. GATE AGREEMENT -- does the arm know whether the walk runs?
+====================================================================================================
+  est walks    real walked      rows
+  False        False           2,166
+  False        True                2  <-- MISMATCH
+  True         False              81  <-- MISMATCH
+  True         True              725
+
+  gate disagreement: 83 / 2,974 = 2.79%
+
+  residual-scan gate (tier>0       vs examined>0  ):
+  False        False             765
+  False        True               23  <-- MISMATCH
+  True         False             755  <-- MISMATCH
+  True         True            1,431
+
+====================================================================================================
+2. WALK TERM -- realized perm_steps / estimated, on rows where BOTH are usable
+====================================================================================================
+  slice                 n      p10      p25   median      p75      p90  p90/p10
+  POOLED              560    0.446    0.787    1.023    1.697    4.302      9.6
+
+  by orderby:
+    name              180    0.865    0.956    1.043    1.307    1.674      1.9
+    cmc               144    0.290    0.633    1.183    3.746   11.249     38.8
+    power             131    0.440    0.678    0.918    1.534    3.786      8.6
+    edhrec            105    0.289    0.537    1.039    1.905    3.402     11.8
+
+  by unique:
+    card              223    0.495    0.790    0.995    1.522    3.111      6.3
+    printing          170    0.349    0.696    1.159    2.388    6.410     18.4
+    artwork           167    0.446    0.826    1.039    1.674    4.207      9.4
+
+  by offset:
+    0                 242    0.473    0.849    1.082    2.043    6.045     12.8
+    300               169    0.436    0.742    1.012    1.445    3.179      7.3
+    60                149    0.440    0.784    0.991    1.592    5.173     11.8
+
+  by picked:
+    False             352    0.414    0.764    0.994    1.418    3.111      7.5
+    True              208    0.495    0.869    1.211    2.657    6.777     13.7
+
+  perm_walk_span == n_cards on 530 / 560 = 94.6% of these walk rows
+
+====================================================================================================
+3. RESIDUAL SCAN -- realized printings_examined / stream_scan_units, where the term is charged
+====================================================================================================
+  slice                 n      p10      p25   median      p75      p90  p90/p10
+  POOLED            1,011    0.566    1.000    1.000    3.811   11.839     20.9
+
+  by unique:
+    artwork           366    1.000    1.000    1.000    5.141   14.000     14.0
+    printing          354    1.000    1.000    1.000    5.099   16.667     16.7
+    card              291    0.308    0.619    1.052    2.316    4.562     14.8
+
+  by orderby:
+    cmc               288    0.566    1.000    1.000    3.244    7.735     13.7
+    name              265    0.565    1.000    1.000    3.413    9.689     17.1
+    power             231    0.585    1.000    1.170    5.054   15.571     26.6
+    edhrec            227    0.563    1.000    1.000    3.611   16.257     28.9
+
+====================================================================================================
+4. Is the walk residual predicted by anything the router already has?
+====================================================================================================
+  match_rate     Pearson r(log x, log residual) = +0.058   (n=560)
+  page_frac      Pearson r(log x, log residual) = -0.105   (n=560)
+  steps_est      Pearson r(log x, log residual) = -0.122   (n=560)

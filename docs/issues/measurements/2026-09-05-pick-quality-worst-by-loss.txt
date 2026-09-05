@@ -1,0 +1,124 @@
+Engine loaded: 97,812 printings in 2.6s
+
+5,368 queries with >= 2 plans timed, mode=uniform
+
+  picked the fastest plan              93.8%  (5,037 of 5,368)
+  picked within 1.09x of fastest        94.8%  <-- a miss inside the noise floor costs nothing
+  time-weighted hit rate               89.1%
+  total time lost to mis-picks          3.4%  (5.9 ms of 175.4 ms)
+
+  MISS MARGIN (picked / best), 331 missed queries -- how bad is a miss?
+    p10 1.037   p50 1.447   p90 3.947   p99 19.191   max 31.30
+
+  HEADROOM (second-best / best) -- how much was on the table at all?
+    on MISSED queries   p50 1.387   p90 3.755
+    on HIT queries      p50 3.492   p90 16.386
+    Misses concentrated at LOW headroom means the router loses ties, which is nearly free.
+
+  CONCENTRATION: the worst 1% of misses carry 13.3% of all lost time
+
+by acquire route
+  slice                                   n    hit%  tie-ok%  time-wtd hit%   lost%
+  printing_compose                    3,745   92.7%    93.6%          88.3%   95.5%
+  candidates                          1,049   94.9%    96.3%          92.0%    4.5%
+  plane                                 361   99.4%   100.0%          99.4%    0.0%
+  card_range_popcount                   114  100.0%   100.0%         100.0%    0.0%
+  printing_range_scan                    99  100.0%   100.0%         100.0%    0.0%
+
+by picked plan
+  slice                                   n    hit%  tie-ok%  time-wtd hit%   lost%
+  GatheredScan                        2,714   93.4%    94.5%          84.8%   38.5%
+  PrintingCompose                     1,177   95.8%    96.6%          92.0%   28.8%
+  StreamedSelect                        944   89.2%    90.6%          84.5%   32.7%
+  PlanePopcountOrder                    356   99.4%   100.0%          99.4%    0.0%
+  CardRangePopcount                     114  100.0%   100.0%         100.0%    0.0%
+  PrintingRangeScan                      63  100.0%   100.0%         100.0%    0.0%
+
+by distinct-on
+  slice                                   n    hit%  tie-ok%  time-wtd hit%   lost%
+  artwork                             1,817   94.8%    95.6%          92.2%   28.0%
+  printing                            1,796   94.8%    95.5%          92.1%   20.0%
+  card                                1,755   91.9%    93.4%          83.6%   51.9%
+
+MISSES ONLY, by transition
+  slice                                   n    hit%  tie-ok%  time-wtd hit%   lost%
+  GatheredScan -> PrintingCompose       116    0.0%     5.2%           0.0%   34.6%
+  StreamedSelect -> GatheredScan         81    0.0%     9.9%           0.0%   18.0%
+  GatheredScan -> StreamedSelect         62    0.0%    38.7%           0.0%    3.9%
+  PrintingCompose -> StreamedSelect      25    0.0%    12.0%           0.0%   18.7%
+
+============================================================================================================
+WORST 12 MIS-PICKS -- predicted vs measured, per plan
+============================================================================================================
+
+  lost    487.9 us   measured    2.00x   predicted   0.72x   headroom   2.00x
+    usd>=0.13 usd<=0.76 cmc>=2 cmc<=5 cn<=126
+    card/cubecobra/off=100/prefer=newest  [printing_compose]  matches=18,851 eval_domain=16,906
+      PICKED StreamedSelect      predicted     303.3 us   measured     978.0 us   p/m   0.31
+      BEST   PrintingCompose     predicted     422.7 us   measured     490.0 us   p/m   0.86
+
+  lost    158.4 us   measured    2.00x   predicted   0.70x   headroom   2.00x
+    id:bguw border:borderless
+    card/usd/off=100/prefer=oldest  [printing_compose]  matches=2,537 eval_domain=2,537
+      PICKED GatheredScan        predicted     117.7 us   measured     317.5 us   p/m   0.37
+      BEST   PrintingCompose     predicted     167.8 us   measured     159.0 us   p/m   1.06
+
+  lost    139.9 us   measured    2.17x   predicted   0.95x   headroom   2.17x
+    eur>=0.11 eur<=1.15 f:alchemy r<=mythic
+    card/rarity/off=100/prefer=newest  [printing_compose]  matches=3,685 eval_domain=3,685
+      PICKED GatheredScan        predicted     136.4 us   measured     259.0 us   p/m   0.53
+      BEST   PrintingCompose     predicted     143.0 us   measured     119.1 us   p/m   1.20
+
+  lost    131.0 us   measured    2.24x   predicted   0.98x   headroom   1.38x
+    cmc>=6 usd<7.31 eur>=0.51 eur<=3.82
+    card/cmc/off=100/prefer=newest  [printing_compose]  matches=1,768 eval_domain=3,314
+      PICKED PrintingCompose     predicted      74.1 us   measured     236.8 us   p/m   0.31
+      BEST   StreamedSelect      predicted      75.2 us   measured     105.8 us   p/m   0.71
+
+  lost    123.8 us   measured    1.67x   predicted   0.96x   headroom   1.67x
+    id:uw
+    card/rarity/off=0/prefer=newest  [printing_compose]  matches=12,600 eval_domain=12,600
+      PICKED PrintingCompose     predicted     153.2 us   measured     309.1 us   p/m   0.50
+      BEST   GatheredScan        predicted     159.5 us   measured     185.3 us   p/m   0.86
+
+  lost    122.6 us   measured    2.32x   predicted   0.85x   headroom   1.04x
+    tou>=1 tou<=2 tix>=0.22
+    artwork/cmc/off=100/prefer=oldest  [printing_compose]  matches=6,980 eval_domain=5,206
+      PICKED PrintingCompose     predicted     156.9 us   measured     215.2 us   p/m   0.73
+      BEST   StreamedSelect      predicted     184.8 us   measured      92.6 us   p/m   2.00
+
+  lost    119.0 us   measured    1.69x   predicted   0.74x   headroom   1.27x
+    eur<=2.80 pow>=1 pow<=3
+    card/toughness/off=0/prefer=default  [printing_compose]  matches=12,256 eval_domain=12,256
+      PICKED PrintingCompose     predicted     243.8 us   measured     292.2 us   p/m   0.83
+      BEST   StreamedSelect      predicted     331.1 us   measured     173.2 us   p/m   1.91
+
+  lost    102.5 us   measured    1.57x   predicted   1.00x   headroom   1.45x
+    id:bgu frame:2015 pow>=2 pow<=4
+    artwork/edhrec/off=0/prefer=oldest  [printing_compose]  matches=14,160 eval_domain=11,112
+      PICKED PrintingCompose     predicted     339.4 us   measured     283.7 us   p/m   1.20
+      BEST   StreamedSelect      predicted     340.3 us   measured     181.2 us   p/m   1.88
+
+  lost     84.3 us   measured    2.84x   predicted   0.70x   headroom   2.84x
+    usd<10.62 eur:0.16
+    artwork/rarity/off=0/prefer=newest  [printing_compose]  matches=1,190 eval_domain=926
+      PICKED GatheredScan        predicted      37.8 us   measured     130.0 us   p/m   0.29
+      BEST   PrintingCompose     predicted      54.1 us   measured      45.8 us   p/m   1.18
+
+  lost     79.8 us   measured    1.73x   predicted   0.96x   headroom   1.73x
+    tou>=3 f:predh tix>0.02
+    artwork/rarity/off=0/prefer=usd_high  [printing_compose]  matches=12,814 eval_domain=11,469
+      PICKED PrintingCompose     predicted     417.0 us   measured     189.5 us   p/m   2.20
+      BEST   GatheredScan        predicted     435.4 us   measured     109.8 us   p/m   3.97
+
+  lost     79.0 us   measured    1.80x   predicted   0.69x   headroom   1.20x
+    pow<3 eur>2.55 tou<=6
+    artwork/cmc/off=100/prefer=usd_high  [printing_compose]  matches=9,293 eval_domain=6,850
+      PICKED PrintingCompose     predicted     167.7 us   measured     177.5 us   p/m   0.94
+      BEST   StreamedSelect      predicted     241.6 us   measured      98.5 us   p/m   2.45
+
+  lost     76.8 us   measured    4.20x   predicted   0.00x   headroom   4.20x
+    c:gw usd<0.23 tix>=0.11
+    printing/cubecobra/off=100/prefer=newest  [printing_compose]  matches=19 eval_domain=624
+      PICKED GatheredScan        predicted      21.1 us   measured     100.8 us   p/m   0.21
+      BEST   PrintingCompose     predicted       inf us   measured      24.0 us   p/m    inf

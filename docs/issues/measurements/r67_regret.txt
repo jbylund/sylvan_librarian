@@ -1,0 +1,48 @@
+Engine loaded: 97,812 printings in 2.7s
+invariant: 64,267 queries where picked IS best price at exactly 0, as it must be
+skipped 9 queries where a plan that ran published no phase timing and so cannot be priced
+skipped 844 queries with no routed phase split -- build with --features routed-phases
+
+68,376 multi-plan queries, mode=uniform.  total regret 92.0 ms, mean 1.35 µs
+
+acquire                                           n  miss%    mean      p90      p99       max   SHARE
+printing_compose                              40484    7%    2.20     0.00    50.25     957.1    97%
+candidates                                    21423    1%    0.12     0.00     1.79     118.2     3%
+printing_range_scan                            1045    4%    0.44     0.00    14.00      34.4     1%
+plane                                          4211    0%    0.02     0.00     0.38       8.5     0%
+card_range_popcount                            1213    0%    0.02     0.00     0.00       6.0     0%
+
+unique                                            n  miss%    mean      p90      p99       max   SHARE
+artwork                                       22802    6%    1.82     0.00    44.04     957.1    45%
+printing                                      22796    5%    1.25     0.00    29.58     930.6    31%
+card                                          22778    3%    0.96     0.00    26.71     337.9    24%
+
+acquire / unique                                  n  miss%    mean      p90      p99       max   SHARE
+printing_compose / artwork                    15601    8%    2.60     0.00    55.38     957.1    44%
+printing_compose / printing                   14629    6%    1.83     0.00    40.17     930.6    29%
+printing_compose / card                       10254    7%    2.10     0.00    49.79     337.9    23%
+candidates / printing                          7122    2%    0.17     0.00     4.04     118.2     1%
+candidates / artwork                           7201    1%    0.14     0.00     0.42      67.3     1%
+printing_range_scan / printing                 1045    4%    0.44     0.00    14.00      34.4     1%
+candidates / card                              7100    1%    0.05     0.00     0.37      27.4     0%
+plane / card                                   4211    0%    0.02     0.00     0.38       8.5     0%
+card_range_popcount / card                     1213    0%    0.02     0.00     0.00       6.0     0%
+
+compose paging branch (every row where a compose cost was priced)      n  miss%    mean      p90      p99       max   SHARE
+Perm                                          15737    8%    3.33     0.00    71.29     957.1    57%
+OrderbyWalk                                    7048   11%    2.78     2.67    58.00     260.4    21%
+Decline                                       19092    4%    0.73     0.00    23.92     137.7    15%
+Gather                                        26499    1%    0.24     0.00     3.12     318.7     7%
+
+picked -> best (only when they differ)            n  miss%    mean      p90      p99       max   SHARE
+GatheredScan -> PrintingCompose                1620   84%   19.66    49.79   100.79     318.7    35%
+StreamedSelect -> PrintingCompose               508   88%   58.16   139.12   720.29     957.1    32%
+StreamedSelect -> GatheredScan                 1104   75%   14.48    30.29    72.67     137.7    17%
+PrintingCompose -> StreamedSelect               170   98%   49.77   108.17   280.58     337.9     9%
+PrintingCompose -> GatheredScan                 131   93%   33.66    86.08   218.12     260.4     5%
+GatheredScan -> StreamedSelect                  421   48%    3.60     8.08    47.71     118.2     2%
+GatheredScan -> PlanePopcountOrder              109   12%    0.68     2.38     7.75       8.5     0%
+GatheredScan -> GatheredScan                  41132    0%    0.00     0.00     0.00       0.0     0%
+
+  SHARE is the fraction of ALL lost time, which is what ranks the work: frequency times
+  severity. miss% counts queries losing more than 1µs. Regret is mostly zeros, so no median.

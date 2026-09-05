@@ -1,0 +1,53 @@
+Engine loaded: 97,812 printings in 2.9s
+
+78,129 plan-rows collected in 120s
+arm mirror vs engine predicted_ns: 100.0% exact over 75,393 rows
+
+plan                counter / feature                          median
+GatheredScan        cards_visited/eval_domain                    1.00
+GatheredScan        printings_examined/scan_units                1.00
+GatheredScan        matches_pushed/matches                       1.00
+PrintingCompose     cards_visited/eval_domain                    0.79  <-- FEATURE, not rate
+PrintingCompose     printings_examined/printings_walked          1.24  <-- FEATURE, not rate
+PrintingCompose     matches_pushed/matches                       0.80  <-- FEATURE, not rate
+StreamedSelect      cards_visited/eval_domain                    1.00
+StreamedSelect      printings_examined/stream_scan_units         1.00
+StreamedSelect      matches_pushed/matches                       1.00
+  a ratio far from 1.00 is a miscounted feature; no rate can absorb it.
+
+StreamedSelect perm_steps realized/estimated over 9,007 walking rows:
+  p10 0.16   median 1.00   p90 5.32
+  tests the uniform-spread assumption behind `page_span * perm_walk_span / matches`; skew
+  would show as a median away from 1.00, and clustering as a wide p10-p90 spread.
+  Round 69: the median is fine and the SPREAD is the defect -- 1.9x on orderby=name
+  against 38.8x on orderby=cmc, at flat medians. No rate can represent that.
+
+=== GatheredScan (36,109 rows, 17,992 distinct shapes) ===
+term                                   current      fitted       x
+LOOP_PER_CARD                             3.88        6.22    1.60
+SCAN_PER_ROW                              2.06        1.45    0.71
+CARD_PASS+FLOOR                          21.89       42.91    1.96
+PUSH_PER_MATCH                            2.24        2.81    1.25
+SELECT_PER_PAGE_SLOT                      3.51        5.18    1.48
+COLLECT_PER_PAGE_ROW                      9.79       13.05    1.33
+ARTWORK_PER_PRINTING                      0.50        0.51    1.01
+FIXED                                   169.60      372.99    2.20
+FIXED_ZERO_MATCH                         42.00       49.64    1.18
+  current  median   1.00   p10   0.58   p90    2.79   within 25%   35%
+  fitted   median   0.75   p10   0.34   p90    1.69   within 25%   31%
+
+=== PrintingCompose — SKIPPED: fix the feature above before fitting rates to it ===
+
+=== StreamedSelect (27,076 rows, 13,047 distinct shapes) ===
+term                                   current      fitted       x
+LOOP_PER_CARD                             2.58        3.69    1.43
+SCAN_PER_ROW                              5.97        7.59    1.27
+CARD_PASS+FLOOR                           9.05       21.32    2.36
+EMIT_PER_MATCH                            0.12        0.12    1.01
+PERM_STEP                                 1.00        1.29    1.29
+ARTWORK_SEEN_PER_CARD                     1.21        1.05    0.87
+SMALL_TOTAL_FLOOR_PER_CARD                1.02        0.38    0.37
+CORPUS_PASS_PER_CARD                      0.02        0.02    0.91
+FIXED                                   217.00      210.56    0.97
+  current  median   0.64   p10   0.30   p90    1.88   within 25%   20%
+  fitted   median   0.78   p10   0.52   p90    1.65   within 25%   28%

@@ -1,0 +1,25 @@
+54 flipped rows to price
+
+Engine loaded: 97,812 printings in 2.8s
+priced 47 rows:  21 faster / 3 slower / 23 within the 1 us noise floor
+NET -2324.3 us   (wins -2506.0, losses +186.1)
+median per-row delta -0.50 us
+
+transition                                  n     net us  median us
+StreamedSelect -> PrintingCompose          16    -2410.7     -56.67
+StreamedSelect -> GatheredScan             29      -65.0      -0.37
+GatheredScan -> PrintingCompose             2     +151.4     +75.71
+
+worst regressions:
+     +180.1 us  GatheredScan -> PrintingCompose        id:u pow>=1 pow<=4 year>=1995|printing|rarity|300|newest
+       +4.9 us  StreamedSelect -> GatheredScan         eur>=0.50 eur<=1.07 border:yellow|printing|name|300|usd_high
+       +1.1 us  StreamedSelect -> GatheredScan         set:mat|artwork|power|300|usd_high
+       +0.8 us  StreamedSelect -> GatheredScan         set:slc|printing|name|300|newest
+       +0.5 us  StreamedSelect -> GatheredScan         watermark:witherbloom|artwork|power|300|newest
+
+best wins:
+    -1049.8 us  StreamedSelect -> PrintingCompose      border:black date>=2019-07-12 cmc>=0 cmc<=7|printing|cmc|300
+     -247.0 us  StreamedSelect -> PrintingCompose      usd>1.71 cmc<=6|printing|power|300|oldest
+     -233.9 us  StreamedSelect -> PrintingCompose      usd>1.71 cmc<=6|artwork|edhrec|0|default
+     -160.5 us  StreamedSelect -> PrintingCompose      frame:1993 eur<1.18|printing|name|300|default
+     -150.0 us  StreamedSelect -> PrintingCompose      frame:1993 eur<1.18|artwork|cmc|60|usd_high

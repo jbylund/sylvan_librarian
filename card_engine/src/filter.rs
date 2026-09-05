@@ -79,7 +79,7 @@ pub(crate) enum CmpOp {
     Ge,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum ArithOp {
     Add,
     Sub,
@@ -110,7 +110,7 @@ fn tri_bool(b: bool) -> Tri {
 
 // PartialEq so a caller can ask "is this leaf about the field I care about" — `sort_col_bound` matches
 // the sort column against the field a NumericCmp constrains.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum NumField {
     Cmc,
     Power,
@@ -182,7 +182,7 @@ fn field_num(card: &AOracleCard, printing: Option<&APrinting>, f: NumField) -> N
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) enum NumExpr {
     Const(f64),
     Field(NumField),
@@ -349,7 +349,7 @@ pub(crate) fn num_cmp(op: CmpOp, a: f64, b: f64) -> bool {
 
 // ─── Color / collection / text field enums ───────────────────────────────────
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum ColorField {
     Colors,
     ColorIdentity,
@@ -383,7 +383,7 @@ pub(crate) fn color_cmp_matches(op: CmpOp, mask: u8, bits: u8) -> bool {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum CollField {
     Subtypes,
     Keywords,
@@ -415,7 +415,7 @@ fn collection<'a>(
 // case/accent-folded store columns (`card_name_lower`, `oracle_text_lower`, …) that search
 // actually reads, as distinct from the display columns of the same fields.
 #[allow(clippy::enum_variant_names)]
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum TextSearchField {
     NameLower,
     OracleTextLower,
@@ -454,7 +454,7 @@ fn text_search_field_value<'a>(
 /// Enum that replaces fn-pointer fields in TextExact / TextRegex.
 /// Function pointers cannot be parameterized over &Card vs &ACard, so enum
 /// dispatch is used instead.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum TextField {
     NameLower,
     OracleTextLower,
@@ -500,7 +500,12 @@ fn text_field_value<'a>(
 /// rather than reusing one filter across plans/rounds. Every field here is
 /// cheaply `Clone` already (small `Vec`s, `String`, `regex::Regex` is
 /// internally `Arc`-based); this is a plain derive, not a deep-copy concern.
-#[derive(Clone)]
+///
+/// `Debug` (Round 37a): the only string form `and_trace`'s `expr` field needs -- a debug harness that
+/// buckets/dedupes/compares trace strings, not a pretty-printer for humans, so the derived form (which
+/// is exactly what every nested enum here already reports once each gets its own `Debug` derive) is
+/// deliberately not replaced with a hand-written `Display`.
+#[derive(Clone, Debug)]
 pub(crate) enum FilterExpr {
     True,
     And(Vec<FilterExpr>),
@@ -1133,6 +1138,30 @@ impl FilterExpr {
         const MEMO_DOMAIN_FACTOR: usize = 2;
         const MEMO_DOMAIN_FLOOR: usize = 2_048;
         eval_domain >= (bind_bound * MEMO_DOMAIN_FACTOR).max(MEMO_DOMAIN_FLOOR.min(n_rows / 4))
+    }
+
+    /// Nodes the candidate narrowing (`narrow_rec`) can descend into for this expression — an UPPER
+    /// bound on the index probes `prepare_candidates` will pay, and the acquire-time feature behind
+    /// `cost::prepare_narrow_cost`.
+    ///
+    /// An upper bound, not a count, and deliberately so: `narrow_rec` short-circuits in two ways this
+    /// cannot see from the tree alone (a `compile_plane` hit consumes a whole subtree in one word-wise
+    /// evaluation, and the `AND_SKIP_THRESHOLD` guard stops descending once a driver is selective
+    /// enough). Both make the real walk cheaper than this says, never dearer, so the feature errs
+    /// toward over-costing a shape that narrows early — which is the safe direction for a term whose
+    /// consumer is choosing whether to materialize at all.
+    ///
+    /// Counted over the WHOLE tree rather than the leaves only because the interior nodes are not free:
+    /// each `And`/`Or` composes its children's sets (`and_all`/`or_all`), and a `Not` complements one.
+    /// A two-leaf `And` therefore pays three visits' worth of work, not two.
+    pub(crate) fn narrow_nodes(&self) -> u32 {
+        match self {
+            FilterExpr::And(children) | FilterExpr::Or(children) => {
+                1 + children.iter().map(FilterExpr::narrow_nodes).sum::<u32>()
+            }
+            FilterExpr::Not(child) => 1 + child.narrow_nodes(),
+            _ => 1,
+        }
     }
 
     pub(crate) fn memoize_text_predicates(
