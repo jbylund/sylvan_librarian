@@ -528,6 +528,15 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         field_type = field_infos[0].field_type if field_infos else None
 
         if field_type == FieldType.JSONB_ARRAY:
+            # A regex is a pattern over the printed type line, not a member of
+            # the type/subtype arrays. The `.title()` below would turn
+            # `t:/goblin|elf/` into the literal subtype "Goblin|Elf" and
+            # `t:/^drag/` into "^Drag", neither of which is a type any card
+            # has — the query then matches nothing, silently. Scryfall answers
+            # both as regexes, so pass the node through and let the engine run
+            # it against the type line (`type_line ~* …` on the SQL path).
+            if isinstance(self.rhs, RegexValueNode) and self.lhs.attribute_name.lower() in ("card_types", "card_subtypes", "type"):
+                return {"lhs": self.lhs.to_json(), "op": self.operator, "rhs": _node_to_json(self.rhs)}
             # Resolve type vs subtype without mutating self.lhs — build lhs JSON explicitly.
             rhs_val = self.rhs.value.strip().title()
             attr = self.lhs.attribute_name.lower()
@@ -1089,6 +1098,13 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         raise ValueError(msg)
 
     def _handle_jsonb_array(self, context: QueryContext) -> str:
+        # Regex over a type field reads the printed type line, for the reason
+        # spelled out in kwargs(): the containment tests below take a literal
+        # type name, and a pattern is not one. `type_line` is the column the
+        # type/subtype arrays are derived from, so this is the same text the
+        # engine's TextField::TypeLine sees.
+        if isinstance(self.rhs, RegexValueNode) and self.lhs.attribute_name.lower() in ("card_types", "card_subtypes", "type"):
+            return f"(card.type_line ~* {context.add(self.rhs.value)})"
         # TODO: this should produce the query as an array, not jsonb
         rhs_val = self.rhs.value.strip().title()
         if self.lhs.attribute_name.lower() in ("card_types", "card_subtypes", "type"):

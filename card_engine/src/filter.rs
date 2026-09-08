@@ -1,7 +1,8 @@
 use memchr::memmem;
-use fancy_regex::{Error as FancyError, Regex};
+use fancy_regex::Error as FancyError;
 use serde_json::Value;
-use super::{AOracleCard, APrinting, AStrings, str_at, mana_lane, lane_add, lanes_ge, LANES6_HI, LANES8_HI, mana_pip_counts, mana_cmc, color_list_to_mask, card_type_str_to_bit, trigram_candidates, trigram_min_posting, ARTIST_NONE, NONE_STR, FlavorIndex, NameBigramIndex, OracleTextIndex, SortedTrigramIndex, flavor_fingerprint, flavor_match_sets};
+use super::regex_compat::{CompiledRegex, QUERY_REGEX_FLAGS};
+use super::{AOracleCard, APrinting, AStrings, str_at, mana_lane, lane_add, lanes_ge, LANES6_HI, LANES8_HI, mana_pip_counts, mana_cmc, color_list_to_mask, card_type_str_to_bit, trigram_candidates, trigram_min_posting, ARTIST_NONE, NONE_STR, FlavorIndex, NameBigramIndex, NO_TYPE_LINE_INDEX, OracleTextIndex, SortedTrigramIndex, TypeLineIndex, flavor_fingerprint, flavor_match_sets};
 use super::legality::{LEGALITY_LEGAL, LEGALITY_BANNED, LEGALITY_RESTRICTED, format_shift};
 
 /// Public search TextRegex backtrack cap — calibrated in docs/issues/security-regex-execution-budget.md.
@@ -13,11 +14,14 @@ pub(crate) const REGEX_COMPILE_ERR_PREFIX: &str = "regex_compile:";
 /// Prefix on runtime regex match failures (`is_match` backtrack exhaustion, etc.).
 pub(crate) const REGEX_MATCH_ERR_PREFIX: &str = "regex_match:";
 
-pub(crate) fn compile_search_regex(pattern: &str) -> Result<Regex, String> {
-    fancy_regex::RegexBuilder::new(&format!("(?i){pattern}"))
-        .backtrack_limit(REGEX_BACKTRACK_LIMIT)
-        .build()
-        .map_err(|e| format!("{REGEX_COMPILE_ERR_PREFIX}{e}"))
+/// Compile one query regex under the dialect `regex_compat` defines.
+///
+/// The budget and the error prefix live here because they are properties of the
+/// public search surface, not of the dialect: whichever engine
+/// [`CompiledRegex`] picks, a compile failure is an `UnsupportedRegexError` and
+/// a backtracking match is bounded by [`REGEX_BACKTRACK_LIMIT`].
+pub(crate) fn compile_search_regex(pattern: &str) -> Result<CompiledRegex, String> {
+    CompiledRegex::new(pattern).map_err(|e| format!("{REGEX_COMPILE_ERR_PREFIX}{e}"))
 }
 
 use std::cell::Cell;
@@ -43,11 +47,17 @@ pub(crate) fn take_regex_match_failed() -> Option<String> {
     })
 }
 
-fn regex_is_match(re: &Regex, hay: &str) -> bool {
+/// Match under the execution budget, latching the first runtime failure.
+///
+/// Only the backtracking arm can fail: the linear engine has no step budget to
+/// exhaust, which is the whole reason [`CompiledRegex`] keeps every pattern it
+/// can on it. `try_is_match` returns `Ok` unconditionally for that arm, so the
+/// latch below is reachable only from a lookaround/backreference pattern.
+fn regex_is_match(re: &CompiledRegex, hay: &str) -> bool {
     if REGEX_MATCH_FAILED.with(|c| c.get()) {
         return false;
     }
-    match re.is_match(hay) {
+    match re.try_is_match(hay) {
         Ok(m) => m,
         Err(FancyError::RuntimeError(_)) => {
             REGEX_MATCH_FAILED.with(|c| c.set(true));
@@ -58,12 +68,12 @@ fn regex_is_match(re: &Regex, hay: &str) -> bool {
 }
 
 #[cfg(test)]
-pub(crate) fn regex_is_match_for_test(re: &Regex, hay: &str) -> bool {
+pub(crate) fn regex_is_match_for_test(re: &CompiledRegex, hay: &str) -> bool {
     regex_is_match(re, hay)
 }
 
 #[cfg(test)]
-pub(crate) fn compile_search_regex_for_test(pattern: &str) -> Regex {
+pub(crate) fn compile_search_regex_for_test(pattern: &str) -> CompiledRegex {
     compile_search_regex(pattern).expect("test regex should compile")
 }
 
@@ -419,6 +429,12 @@ fn collection<'a>(
 pub(crate) enum TextSearchField {
     NameLower,
     OracleTextLower,
+    /// `fo:`/`fulloracle:` — oracle text WITH reminder text, the form Scryfall's
+    /// full-oracle operator searches and the one `OracleTextLower` stopped being.
+    /// Deliberately index-free: `o:` carries the trigram index because it is the
+    /// common operator, and `fo:` is rare enough that a card-level scan over the
+    /// distinct texts is the right trade against a second ~5 MB index.
+    FullOracleTextLower,
     FlavorTextLower,
     ArtistLower,
 }
@@ -445,6 +461,8 @@ fn text_search_field_value<'a>(
         // before it reaches TextContains/NameMatch, so this must match.
         TextSearchField::NameLower       => StrVal::Known(card.card_name_folded.as_str()),
         TextSearchField::OracleTextLower => opt_sv(str_at(strings, u32::from(card.oracle_text_lower_id))),
+        // `fo:` -- the text WITH its reminder text, which `OracleTextLower` no longer has.
+        TextSearchField::FullOracleTextLower => opt_sv(str_at(strings, u32::from(card.oracle_full_lower_id))),
         TextSearchField::FlavorTextLower => printing.map_or(StrVal::PDep, |p| opt_sv(str_at(strings, u32::from(p.flavor_text_lower_id)))),
         // Rewritten to ArtistMatch by bind(); printings carry no artist strings.
         TextSearchField::ArtistLower     => StrVal::Null,
@@ -458,6 +476,7 @@ fn text_search_field_value<'a>(
 pub(crate) enum TextField {
     NameLower,
     OracleTextLower,
+    FullOracleTextLower,
     FlavorTextLower,
     ArtistLower,
     SetCode,
@@ -465,6 +484,7 @@ pub(crate) enum TextField {
     Border,
     Watermark,
     CollectorNumber,
+    TypeLine,
 }
 
 fn text_field_value<'a>(
@@ -476,6 +496,7 @@ fn text_field_value<'a>(
     match field {
         TextField::NameLower       => StrVal::Known(card.card_name_lower.as_str()),
         TextField::OracleTextLower => opt_sv(str_at(strings, u32::from(card.oracle_text_lower_id))),
+        TextField::FullOracleTextLower => opt_sv(str_at(strings, u32::from(card.oracle_full_lower_id))),
         TextField::Layout          => opt_sv(str_at(strings, u32::from(card.card_layout_id))),
         TextField::FlavorTextLower => printing.map_or(StrVal::PDep, |p| opt_sv(str_at(strings, u32::from(p.flavor_text_lower_id)))),
         // Rewritten to ArtistMatch by bind(); printings carry no artist strings.
@@ -484,6 +505,11 @@ fn text_field_value<'a>(
         TextField::Border          => printing.map_or(StrVal::PDep, |p| opt_sv(str_at(strings, u32::from(p.card_border_id)))),
         TextField::Watermark       => printing.map_or(StrVal::PDep, |p| opt_sv(str_at(strings, u32::from(p.card_watermark_id)))),
         TextField::CollectorNumber => printing.map_or(StrVal::PDep, |p| opt_sv(str_at(strings, u32::from(p.collector_number_id)))),
+        // Card-level, like Layout above: printings carry their own copy, but
+        // Scryfall's type line is oracle data, so the group's value answers for
+        // all of them — and reading it here keeps `t:/…/` card-invariant
+        // instead of forcing a printing walk.
+        TextField::TypeLine        => opt_sv(str_at(strings, u32::from(card.type_line_id))),
     }
 }
 
@@ -553,6 +579,25 @@ pub(crate) enum FilterExpr {
     OracleMatch {
         gids: Vec<u32>,
     },
+    /// A literal `t:` needle, already lowercased and whitespace-collapsed, before
+    /// `bind_type_lines` resolves it. Separate from `TextRegex { TypeLine }` for
+    /// speed alone — the semantics are identical (`regex::escape` of this needle
+    /// under `(?i)` matches the same lines) — but a case-insensitive regex over
+    /// ~3k mixed-case type lines costs ~160 us per query where `memmem` over the
+    /// index's pre-lowercased copies costs ~5 us, and `t:` is the most common
+    /// filter there is.
+    ///
+    /// `whole_word` is set when the needle NAMES A TYPE — see `CANONICAL_TYPE_NAMES`
+    /// — and the match is then anchored to type-word boundaries instead of being a
+    /// bare substring.
+    TypeLineContains {
+        needle: String,
+        whole_word: bool,
+    },
+    TypeLineMatch {
+        gids: Vec<u32>,
+        line_ids: Vec<u32>,
+    },
     TextExact {
         field: TextField,
         op: CmpOp,
@@ -560,7 +605,7 @@ pub(crate) enum FilterExpr {
     },
     TextRegex {
         field: TextField,
-        regex: Regex,
+        regex: CompiledRegex,
     },
 
     ColorCmp {
@@ -674,6 +719,20 @@ pub(crate) const REGEX_MACHINERY_NS100: u32 = 5_000;
 ///   `draw .* cards?` ~24 ns/card). Deliberately dwarfs machinery so And reordering
 ///   runs cheap predicates first; `(?=.*…)` shapes can cost more still — the tier
 ///   prices ordering, not worst-case plan latency.
+///
+/// Reached from `CompiledRegex::Backtrack` — the arm a lookaround or a
+/// backreference forces. Measured a second way at **77x** the linear engine's
+/// per-candidate cost on the same corpus (6,535 vs 85 ns/card, mean over
+/// negative lookahead / positive lookahead / lookbehind;
+/// `bench_backtrack_engine`). The engines themselves are the same speed —
+/// fancy_regex delegates to the `regex` crate whenever a pattern needs nothing
+/// extra, measured at 1.00x — so this prices lookaround, not the dispatch.
+///
+/// It dwarfs every other tier deliberately. These patterns are the one node
+/// kind the #734 trigram narrow cannot read a literal factor out of, so they
+/// scan the whole corpus; ordering them last in an And is the only lever the
+/// model has, and any candidate that a cheaper sibling can reject first is a
+/// candidate this never has to see.
 pub(crate) const REGEX_BACKTRACK_NS100: u32 = 380_000;
 
 /// Per-candidate verification cost of a node in the tri walk. Composites take
@@ -700,13 +759,20 @@ pub(crate) fn verify_cost_tier_unproven(f: &FilterExpr, proven: u64) -> u32 {
 
 pub(crate) fn verify_cost_tier(f: &FilterExpr) -> u32 {
     match f {
+        FilterExpr::TextRegex { regex, .. } if regex.is_backtracking() => REGEX_BACKTRACK_NS100,
         FilterExpr::TextRegex { regex, .. } => regex_tier(regex.as_str()),
-        FilterExpr::TextContains { .. } => TEXT_SCAN_NS100,
+        // Unbound only (see tri()): a lowercasing scan of the type line, the same tier as any
+        // other per-card text scan.
+        FilterExpr::TypeLineContains { .. } | FilterExpr::TextContains { .. } => TEXT_SCAN_NS100,
         FilterExpr::Devotion { .. } | FilterExpr::ManaCostCmp { .. } => SET_LOOKUP_NS100,
         FilterExpr::ArtistMatch { .. }
         | FilterExpr::FlavorMatch { .. }
         | FilterExpr::NameMatch { .. }
         | FilterExpr::OracleMatch { .. }
+        // A binary search over the distinct type-line ids, the same shape as
+        // OracleMatch's — and the whole point of the rewrite is that this
+        // replaces regex_tier's REGEX_MACHINERY_NS100 for every `t:` predicate.
+        | FilterExpr::TypeLineMatch { .. }
         | FilterExpr::CollectionCmp { .. } => SET_LOOKUP_NS100,
         FilterExpr::And(children) | FilterExpr::Or(children) => {
             children.iter().map(verify_cost_tier).max().unwrap_or(0)
@@ -728,7 +794,7 @@ pub(crate) fn verify_cost_tier(f: &FilterExpr) -> u32 {
 
 /// Classify a regex pattern's per-candidate cost by shape. The regex crate
 /// compiles literal-only patterns to memcmp-style matchers (with case
-/// folding for the (?i) every query regex carries), and anchors bound the
+/// folding for the QUERY_REGEX_FLAGS every query regex carries), and anchors bound the
 /// scan to one position — measured on the real corpus, `^flying$` costs
 /// ~half a substring scan while an unanchored literal costs about the same
 /// as one. Ranking them as general regexes inverted real costs and made
@@ -742,7 +808,7 @@ pub(crate) fn verify_cost_tier(f: &FilterExpr) -> u32 {
 ///   REGEX_BACKTRACK_NS100 — lookarounds and other fancy-regex backtracking
 ///                         features (see bench_regex_backtrack_tier)
 pub(crate) fn regex_tier(pattern: &str) -> u32 {
-    let p = pattern.strip_prefix("(?i)").unwrap_or(pattern);
+    let p = pattern.strip_prefix(QUERY_REGEX_FLAGS).unwrap_or(pattern);
     if pattern_requires_backtrack(p) {
         return REGEX_BACKTRACK_NS100;
     }
@@ -874,14 +940,22 @@ fn leaf_compares_printing_field(f: &FilterExpr) -> bool {
         // Exhaustive over TextSearchField (no `matches!`), same reason as num_pdep.
         FilterExpr::TextContains { field, .. } => match field {
             TextSearchField::FlavorTextLower => true,
-            TextSearchField::NameLower | TextSearchField::OracleTextLower | TextSearchField::ArtistLower => false,
+            TextSearchField::NameLower
+            | TextSearchField::OracleTextLower
+            | TextSearchField::FullOracleTextLower
+            | TextSearchField::ArtistLower => false,
         },
         // Exhaustive over TextField (no `matches!`), same reason as num_pdep.
         FilterExpr::TextExact { field, .. } | FilterExpr::TextRegex { field, .. } => match field {
             TextField::FlavorTextLower | TextField::SetCode | TextField::Border | TextField::Watermark | TextField::CollectorNumber => {
                 true
             }
-            TextField::NameLower | TextField::OracleTextLower | TextField::ArtistLower | TextField::Layout => false,
+            TextField::NameLower
+            | TextField::OracleTextLower
+            | TextField::FullOracleTextLower
+            | TextField::ArtistLower
+            | TextField::Layout
+            | TextField::TypeLine => false,
         },
         // Exhaustive over CollField (no `matches!`), same reason as num_pdep.
         FilterExpr::CollectionCmp { field, .. } => match field {
@@ -902,6 +976,11 @@ fn leaf_compares_printing_field(f: &FilterExpr) -> bool {
         | FilterExpr::ExactName(_)
         | FilterExpr::NameMatch { .. }
         | FilterExpr::OracleMatch { .. }
+        // The type line is oracle data (TextField::TypeLine reads the card, not
+        // the printing), so both the needle and the resolved id set are
+        // card-invariant.
+        | FilterExpr::TypeLineContains { .. }
+        | FilterExpr::TypeLineMatch { .. }
         | FilterExpr::ColorCmp { .. }
         | FilterExpr::TypeCmp { .. }
         | FilterExpr::ManaCostCmp { .. }
@@ -949,6 +1028,12 @@ fn and_child_set_len(f: &FilterExpr) -> usize {
         FilterExpr::ArtistMatch { ids } => ids.len(),
         FilterExpr::NameMatch { ids } => ids.len(),
         FilterExpr::FlavorMatch { gids, .. } | FilterExpr::OracleMatch { gids } => gids.len(),
+        // Distinct type lines, not cards — a strictly smaller number than the
+        // card set it expands to, so a `t:` leaf sorts ahead of set-sized
+        // siblings it is in fact broader than. That is the same approximation
+        // the four above make (ids are values, not rows) and it only orders
+        // verification, never correctness.
+        FilterExpr::TypeLineMatch { gids, .. } => gids.len(),
         _ => usize::MAX,
     }
 }
@@ -1133,6 +1218,87 @@ impl FilterExpr {
         const MEMO_DOMAIN_FACTOR: usize = 2;
         const MEMO_DOMAIN_FLOOR: usize = 2_048;
         eval_domain >= (bind_bound * MEMO_DOMAIN_FACTOR).max(MEMO_DOMAIN_FLOOR.min(n_rows / 4))
+    }
+
+    /// Resolve every type-line predicate against the distinct type lines, the
+    /// second half of `bind()` — split out only because `bind()` predates the
+    /// index and is called from a dozen benches and tests that have no use for
+    /// it. `bind_and_split_filter` calls the two together and nothing else
+    /// should call one without the other.
+    ///
+    /// UNCONDITIONAL, unlike `memoize_text_predicates`. That rewrite is gated on
+    /// a cost model because it scans ~30k distinct oracle texts; this one walks
+    /// **3,965** distinct type lines totalling 127 KB (measured on the 2026-08-16
+    /// corpus, 526,865 rows) — fewer in any one partition — so there is no query
+    /// for which paying it is worse
+    /// than the per-card regex it replaces — and it is what turns a type
+    /// predicate from "no narrowing arm exists" into an exact card set.
+    ///
+    /// The answer is EXACT, not a prefilter: a card's whole type-line identity
+    /// is its interned id, so "the predicate held for these lines" is precisely
+    /// "these cards match". `narrow_rec` returns it `tight` for that reason.
+    pub(crate) fn bind_type_lines(&mut self, idx: &rkyv::Archived<TypeLineIndex>, strings: &AStrings) {
+        // MEASUREMENT ESCAPE HATCH, the same shape as CARD_ENGINE_MAX_NARROW_FRACTION and there
+        // for the same reason: the gate's ratios only mean something if the unnarrowed state can
+        // be measured too. With this set, `t:` keeps its (correct) substring semantics and falls
+        // back to running the regex against every card's type line — the naive shape this index
+        // exists to avoid. Never set in production; `guard_env` defaults it off.
+        if *NO_TYPE_LINE_INDEX {
+            return;
+        }
+        match self {
+            FilterExpr::And(children) | FilterExpr::Or(children) => {
+                for c in children.iter_mut() {
+                    c.bind_type_lines(idx, strings);
+                }
+            }
+            FilterExpr::Not(inner) => inner.bind_type_lines(idx, strings),
+            FilterExpr::TypeLineContains { .. } | FilterExpr::TextRegex { field: TextField::TypeLine, .. } => {
+                // The literal scans the index's lowercased copies with a SIMD `memmem`; a user's
+                // own `t:/…/` runs against the original line, where its pattern's own case
+                // expectations still mean what they say.
+                fn scan(idx: &rkyv::Archived<TypeLineIndex>, hit: impl Fn(usize, u32) -> bool) -> (Vec<u32>, Vec<u32>) {
+                    let mut gids: Vec<u32> = Vec::new();
+                    let mut line_ids: Vec<u32> = Vec::new();
+                    for (d, gid) in idx.gids.iter().enumerate() {
+                        let gid = u32::from(*gid);
+                        if hit(d, gid) {
+                            gids.push(gid);
+                            line_ids.push(d as u32);
+                        }
+                    }
+                    // `line_ids` comes out ascending (dense order); `gids` follows first-seen order
+                    // and has to be sorted for the binary search in tri(). Distinct dense ids intern
+                    // to distinct strings, so there are no duplicates to dedup.
+                    gids.sort_unstable();
+                    (gids, line_ids)
+                }
+                // The literal scans the index's lowercased copies with a SIMD `memmem`; a user's
+                // own `t:/…/` runs against the original line, where its pattern's own case
+                // expectations still mean what they say.
+                let (gids, line_ids) = match self {
+                    FilterExpr::TypeLineContains { needle, whole_word: false } => {
+                        let finder = memmem::Finder::new(needle.as_bytes());
+                        scan(idx, |d, _| idx.lower.get(d).is_some_and(|l| finder.find(l.as_bytes()).is_some()))
+                    }
+                    // The canonical-name arm. Same scan, same pre-lowercased copies; the finder is
+                    // asked for EVERY occurrence rather than the first, because the anchored one
+                    // need not be the leftmost ("Demigod Warrior" against `t:warrior`).
+                    FilterExpr::TypeLineContains { needle, whole_word: true } => {
+                        let finder = memmem::Finder::new(needle.as_bytes());
+                        scan(idx, |d, _| {
+                            idx.lower.get(d).is_some_and(|l| type_word_match(l.as_bytes(), &finder, needle.len()))
+                        })
+                    }
+                    FilterExpr::TextRegex { regex, .. } => {
+                        scan(idx, |_, gid| str_at(strings, gid).is_some_and(|s| regex.is_match(s)))
+                    }
+                    _ => unreachable!("guarded by the match arm above"),
+                };
+                *self = FilterExpr::TypeLineMatch { gids, line_ids };
+            }
+            _ => {}
+        }
     }
 
     pub(crate) fn memoize_text_predicates(
@@ -1510,6 +1676,29 @@ impl FilterExpr {
                 }
             }
 
+            // The type line is interned per distinct string, so a card's line id
+            // IS its type-line identity: `bind_type_lines` already decided which
+            // ids satisfy the predicate, and there is nothing left to re-derive
+            // here. Missing type lines intern "" (never NONE_STR — see
+            // `type_line_id`'s `unwrap_or_default` at load), so this is
+            // two-valued like NameMatch rather than three-valued like
+            // OracleMatch.
+            FilterExpr::TypeLineMatch { gids, .. } => {
+                tri_bool(gids.binary_search(&u32::from(card.type_line_id)).is_ok())
+            }
+
+            // Only reachable when `bind_type_lines` did not run — a bench or a test that calls
+            // `bind` alone, or the CARD_ENGINE_NO_TYPE_LINE_INDEX measurement mode. Correct, and
+            // deliberately the slow way round: one allocation per card is what the index exists to
+            // remove, so a path that starts paying it is easy to spot in a profile.
+            FilterExpr::TypeLineContains { needle, whole_word } => {
+                match text_field_value(card, printing, strings, TextField::TypeLine) {
+                    StrVal::Known(s) => tri_bool(type_line_hit(&s.to_lowercase(), needle, *whole_word)),
+                    StrVal::Null => Tri::Null,
+                    StrVal::PDep => Tri::PrintingDep,
+                }
+            }
+
             FilterExpr::TextExact { field, op, value } => {
                 match text_field_value(card, printing, strings, *field) {
                     StrVal::Known(s) => tri_bool(match op {
@@ -1811,6 +2000,18 @@ fn build_binary(kw: &Value) -> Result<FilterExpr, String> {
         return Ok(FilterExpr::NumericCmp { lhs: NumExpr::Field(num_field), op: cmp_op, rhs: rhs_expr });
     }
 
+    // A regex rhs is a text predicate whatever attribute it names, so it routes
+    // here rather than falling into the attribute branches below. Those all
+    // read their value with `rhs.as_array()`, which is `None` for a
+    // RegexValueNode: `t:/dragon/` used to fold an empty array into
+    // `TypeCmp { mask: 0, op: Ge }`, and `bits & 0 != 0` is false for every
+    // card — a silent empty result, not a decline, so the SQL fallback never
+    // saw it either. The SQL path answers the same query with
+    // `type_line ~* 'dragon'`.
+    if rhs["node_type"].as_str() == Some("RegexValueNode") {
+        return build_text_filter(attr, op, rhs, orig);
+    }
+
     if attr == "released_at" {
         let val_str = rhs_value_str(rhs);
         if orig == "year" {
@@ -1905,6 +2106,54 @@ fn build_binary(kw: &Value) -> Result<FilterExpr, String> {
         return Ok(FilterExpr::Legality { shift: format_shift(format), expected });
     }
 
+    // A `t:` VALUE IS A SUBSTRING OF THE PRINTED TYPE LINE — *unless* it NAMES A TYPE, and then it
+    // is anchored to the type word. Both halves are measured; see `CANONICAL_TYPE_NAMES` for the
+    // anchored half and its catalog.
+    //
+    // The substring half, MEASURED against api.scryfall.com on 2026-08-16 over `e:khm` (323 prints)
+    // and not guessed:
+    //
+    //   t:creature 151   t:creat 151   t:reature 151   t:eatur 151   -> unanchored on both sides
+    //   t:snow 47        t:no 47                                     -> "no" inside "Snow"
+    //   t:elf 22         t:lf 25                                     -> "lf" also inside "Wolf"
+    //   t:CREAT 39 = t:Creat 39 = t:creat 39 (with cmc<=2)           -> case-insensitive
+    //   t:legend 42 = t:legendary 42                                 -> supertypes are in the line
+    //   t:— 227 = t:"—" 227                                          -> the em dash is ordinary text
+    //   t:"// creature" 182, t:"creature //" 0                       -> the " // " face join is too
+    //   -t:creat 172, and 151 + 172 = 323                            -> negation is a plain complement
+    //   t=creature 151 = t:creature, t="legendary creature" 32       -> `=` is the same substring
+    //   t:artifactcreature 0, t:"artifact creature" 360              -> not a token-set test
+    //
+    // and for a phrase, whitespace runs collapse (`t:"artifact  creature"` is the same query),
+    // order matters (`t:"creature artifact"` is empty) and it is not word-anchored either
+    // (`t:"tifact creat"` returns the same 360).
+    //
+    // Everything above is one rule — case-insensitive substring of the whole type line — so this
+    // compiles single tokens and phrases identically, as a regex over the escaped literal. The
+    // regex is not for its own sake: `bind()` rewrites EVERY TypeLine regex (this one and the
+    // user's own `t:/…/`) into a `TypeLineMatch` by running it over the ~1,519 distinct type lines
+    // in the corpus, which is both the case folding and the narrowing. See `TypeLineIndex`.
+    //
+    // WHAT THE SUBSTRING RULE ALONE GETS WRONG, and it is not an edge: `t:god` answers 96 on
+    // api.scryfall.com and answered 104 here, the 8 extra being every **Demigod** in the corpus.
+    // The needle that names a type is matched against the type WORD.
+    //
+    // WHICH OPERATORS. `:` and `>=` are containment and `=` is measurably the same substring test
+    // on Scryfall (`t=creature` 151, `t="legendary creature"` 32 — set equality would answer 0
+    // there, since no card's type array is exactly ["Creature"] once subtypes exist). `<`, `<=`,
+    // `>` and `!=` keep upstream's set-comparison meaning: Scryfall has no answer to compare
+    // against (`t>=creature` and `t!=creature` both return zero rows there), so there is nothing
+    // to follow, and this port's superset stays.
+    if matches!(attr, "card_types" | "card_subtypes") && matches!(op, ":" | ">=" | "=") {
+        let raw = rhs.as_array().and_then(|a| a.first()).and_then(|v| v.as_str()).unwrap_or("");
+        let needle = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !needle.is_empty() {
+            let needle = needle.to_lowercase();
+            let whole_word = is_canonical_type_name(&needle);
+            return Ok(FilterExpr::TypeLineContains { needle, whole_word });
+        }
+    }
+
     if attr == "card_types" {
         let mask: u16 = rhs
             .as_array()
@@ -1936,24 +2185,191 @@ fn build_binary(kw: &Value) -> Result<FilterExpr, String> {
         return Ok(FilterExpr::CollectionCmp { field: coll_field, op: cmp_op, value, value_id: None });
     }
 
-    build_text_filter(attr, op, rhs)
+    build_text_filter(attr, op, rhs, orig)
 }
 
 fn rhs_value_str(rhs: &Value) -> &str {
     rhs["kwargs"]["value"].as_str().unwrap_or("")
 }
 
-fn build_text_filter(attr: &str, op: &str, rhs: &Value) -> Result<FilterExpr, String> {
+/// Whether a byte can be part of a type WORD, for `type_word_match`.
+///
+/// The type line's own punctuation is what separates one type from the next: a space, the em dash
+/// before the subtypes, the ` // ` face join, and the comma and question mark two joke type lines
+/// print. Everything else BINDS — and the three that bind are exactly the three the catalog spells
+/// inside a name: the hyphen (`Assembly-Worker`, `Power-Plant`), the apostrophe (`Urza's`,
+/// `C'tan`, `Shi'ar`) and the period (`B.O.B.`). Binding them is not cosmetic: it is what keeps
+/// `t:worker` off `Assembly-Worker` and `t:bolas` off the plane `Bolas's Meditation Realm`, which
+/// is what Scryfall answers, because neither type ARRAY holds the shorter name.
+fn type_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'\'' || b == b'-' || b == b'.'
+}
+
+/// Whether `needle` occurs in `line` bounded by type-word boundaries on both sides.
+///
+/// Every occurrence is tried, not just the leftmost: `t:warrior` has to match `Demigod Warrior`,
+/// whose first `warrior`-bearing position is the anchored one only because the earlier candidate
+/// does not exist — reverse the pair (`Warrior Demigod` against `t:god`) and the leftmost hit is
+/// the one that must be rejected.
+fn type_word_match(line: &[u8], finder: &memmem::Finder<'_>, needle_len: usize) -> bool {
+    let mut base = 0usize;
+    while let Some(rel) = finder.find(&line[base..]) {
+        let start = base + rel;
+        let end = start + needle_len;
+        let before_ok = start == 0 || !type_word_byte(line[start - 1]);
+        let after_ok = end >= line.len() || !type_word_byte(line[end]);
+        if before_ok && after_ok {
+            return true;
+        }
+        base = start + 1;
+        if base >= line.len() {
+            break;
+        }
+    }
+    false
+}
+
+/// One `t:` needle against one ALREADY-LOWERCASED type line, for the callers that have no
+/// prebuilt `Finder` to reuse — the per-card fallback in `tri` and the tests. `bind_type_lines`
+/// deliberately does not come through here: it builds the finder once for the whole vocab scan.
+pub(crate) fn type_line_hit(lower: &str, needle: &str, whole_word: bool) -> bool {
+    if whole_word {
+        type_word_match(lower.as_bytes(), &memmem::Finder::new(needle.as_bytes()), needle.len())
+    } else {
+        lower.contains(needle)
+    }
+}
+
+/// Whether a `t:` needle NAMES A TYPE, in which case it matches the type word rather than any
+/// substring of the printed line.
+///
+/// `CANONICAL_TYPE_NAMES` is the union of the nine type catalogs api.scryfall.com publishes —
+/// `/catalog/supertypes`, `card-types`, `artifact-types`, `battle-types`, `creature-types`,
+/// `enchantment-types`, `land-types`, `planeswalker-types` and `spell-types` — fetched 2026-08-17,
+/// lowercased and sorted. 531 names.
+///
+/// THE CATALOGS ARE THE RULE, not "any word on a type line", and that distinction is measured
+/// rather than assumed. Every probe below is api.scryfall.com against this store on the same day:
+///
+/// ```text
+///   t:god     96 vs 104   ANCHORED   the 8 extra were every Demigod
+///   t:ape     45 vs 273   ANCHORED   "ape" also sits inside Shapeshifter and Spellshaper
+///   t:bat     54 vs  92   ANCHORED   and inside Wombat and Incubator
+///   t:ir    1906 = 1906   SUBSTRING  `Plane — Ir` is a real type line, and "Ir" is in no catalog
+///   t:las     43 =   43   SUBSTRING  `Plane — Las Vegas` likewise; Scryfall still matches Bolas
+///   t:art   4171 = 4171   SUBSTRING  `Creature — Art Lizard` likewise; Artifact still matches
+/// ```
+///
+/// The three SUBSTRING rows are the reason this is a fixed catalog and not a vocabulary derived
+/// from the corpus's own type lines: plane types are printed, are not published in any catalog,
+/// and Scryfall does NOT anchor on them. A corpus-derived vocabulary would have anchored `t:ir`
+/// and answered 0 where Scryfall answers 1,906.
+///
+/// WHAT IT STILL CANNOT DO. Scryfall matches the type ARRAY, which holds subtypes it never prints:
+/// `t:warrior` is 1,298 there against the printed line's 1,294, because `Burakos, Party Leader`
+/// answers to all four party classes while its `type_line` reads `Legendary Creature — Orc` on
+/// both sides. That residual is not derivable from any published field and is one card per party
+/// class.
+///
+/// A catalog is a SNAPSHOT: a creature type printed after the date above matches as a substring
+/// until this list is refreshed, which is the safe direction — the pre-fix behaviour, not a miss.
+fn is_canonical_type_name(needle: &str) -> bool {
+    CANONICAL_TYPE_NAMES.binary_search(&needle).is_ok()
+}
+
+/// The catalog itself, for the test that asserts its shape.
+#[cfg(test)]
+pub(crate) fn canonical_type_names() -> &'static [&'static str] {
+    &CANONICAL_TYPE_NAMES
+}
+
+const CANONICAL_TYPE_NAMES: [&str; 531] = [
+    "abian", "adventure", "advisor", "aetherborn", "ajani", "alien", "ally", "aminatou", "andorian", "angel",
+    "angrath", "antelope", "ape", "arcane", "archer", "archon", "arlinn", "armadillo", "army", "artifact",
+    "artificer", "arzakon", "ashiok", "assassin", "assembly-worker", "astartes", "atog", "attraction", "aura",
+    "aurochs", "automaton", "avatar", "azra", "b.o.b.", "background", "badger", "bahamut", "balloon", "barbarian",
+    "bard", "basic", "basilisk", "basri", "bat", "battle", "bear", "beast", "beaver", "beeble", "beholder",
+    "berserker", "bird", "bison", "blinkmoth", "blood", "boar", "bobblehead", "bolas", "book", "borg", "boss",
+    "brainiac", "bringer", "brushwagg", "c'tan", "caitian", "calix", "camarid", "camel", "capybara", "caribou",
+    "carrier", "cartouche", "case", "cat", "cave", "centaur", "chandra", "chicken", "child", "chimera", "chorus",
+    "citizen", "class", "cleric", "cloud", "clown", "clue", "cockatrice", "comet", "conspiracy", "construct",
+    "contraption", "coward", "coyote", "crab", "creature", "crocodile", "curse", "custodes", "cyberman", "cyclops",
+    "dack", "dakkon", "dalek", "daretti", "dauthi", "davriel", "deb", "dellian", "demigod", "demon", "desert",
+    "deserter", "detective", "devil", "dihada", "dinosaur", "djinn", "doctor", "dog", "domri", "dovin", "dragon",
+    "drake", "dreadnought", "drix", "drone", "druid", "dryad", "duck", "dungeon", "dwarf", "dyfed", "echidna",
+    "efreet", "egg", "elder", "eldrazi", "elemental", "elephant", "elf", "elite", "elk", "ellywick", "elminster",
+    "elspeth", "emblem", "employee", "enchantment", "equipment", "ersta", "estrid", "eternal", "event", "eye",
+    "faerie", "feroz", "ferret", "fish", "flagbearer", "food", "forest", "fortification", "fox", "fractal",
+    "freyalise", "frog", "fungus", "gamer", "gamma", "gargoyle", "garruk", "gate", "germ", "giant", "gideon",
+    "giraffe", "gith", "glimmer", "gnoll", "gnome", "goat", "goblin", "god", "gold", "golem", "gorgon", "gorn",
+    "graveborn", "greensleeves", "gremlin", "griffin", "grist", "guest", "guff", "hag", "halfling", "hamster",
+    "harpy", "head", "hedgehog", "hellion", "hero", "hippo", "hippogriff", "homarid", "homunculus", "horror",
+    "horse", "huatli", "human", "hydra", "hyena", "illusion", "imp", "incarnation", "incubator", "infinity",
+    "inhuman", "inkling", "inquisitor", "insect", "instant", "inzerva", "island", "jace", "jackal", "jared", "jaya",
+    "jellyfish", "jeska", "juggernaut", "junk", "kaito", "kangaroo", "karn", "kasmina", "kavu", "kaya", "kelpien",
+    "kindred", "kiora", "kirin", "kithkin", "klingon", "knight", "kobold", "kor", "koth", "kraken", "kree", "lair",
+    "lamia", "lammasu", "land", "lanthanite", "leech", "legendary", "lemur", "lesson", "leviathan", "lhurgoyf",
+    "licid", "liliana", "lizard", "llama", "lobster", "locus", "lolth", "lukka", "luxior", "manticore", "map",
+    "master", "masticore", "mercenary", "merfolk", "metathran", "mine", "minion", "minotaur", "minsc", "mite",
+    "mole", "monger", "mongoose", "monk", "monkey", "monopoly", "moogle", "moonfolk", "mordenkainen", "mount",
+    "mountain", "mouse", "mutant", "myr", "mystic", "naga", "nahiri", "narset", "nautilus", "necron", "nephilim",
+    "nightmare", "nightstalker", "niko", "ninja", "nissa", "nixilis", "noble", "noggle", "nomad", "nymph",
+    "octopus", "officer", "ogre", "oko", "omen", "ongoing", "ooze", "orb", "orc", "orgg", "orion", "otter", "ouphe",
+    "ox", "oyster", "pangolin", "peasant", "pegasus", "pentavite", "performer", "pest", "phelddagrif", "phenomenon",
+    "phoenix", "phyrexian", "pilot", "pincher", "pirate", "plains", "plan", "plane", "planeswalker", "planet",
+    "plant", "platypus", "porcupine", "possum", "power-plant", "powerstone", "praetor", "primarch", "prism",
+    "processor", "q", "qu", "quintorius", "rabbit", "raccoon", "ral", "ranger", "rat", "rebel", "reflection",
+    "reveler", "rhino", "rigger", "robot", "rogue", "role", "room", "rowan", "rukh", "rune", "sable", "saga",
+    "saheeli", "salamander", "samurai", "samut", "sand", "saproling", "sarkhan", "satyr", "scarecrow", "scheme",
+    "scientist", "scion", "scorpion", "scout", "sculpture", "seal", "serf", "serpent", "serra", "servo", "shade",
+    "shaman", "shapeshifter", "shard", "shark", "sheep", "shi'ar", "shrine", "siege", "sifa", "siren", "sivitri",
+    "skeleton", "skrull", "skunk", "slith", "sliver", "sloth", "slug", "snail", "snake", "snow", "soldier",
+    "soltari", "sorcerer", "sorcery", "sorin", "spacecraft", "spawn", "specter", "spellshaper", "sphere", "sphinx",
+    "spider", "spike", "spirit", "splinter", "sponge", "spy", "squid", "squirrel", "starfish", "stone", "surrakar",
+    "survivor", "svega", "swamp", "symbiote", "synth", "szat", "talosian", "tamiyo", "tasha", "teddy", "teferi",
+    "tellarite", "tentacle", "terminus", "tetravite", "teyo", "tezzeret", "thalakos", "tholian", "thomil",
+    "thopter", "thrull", "tibalt", "tiefling", "time lord", "token", "tosk", "tower", "town", "toy", "trap",
+    "treasure", "treefolk", "trilobite", "triskelavite", "troll", "turtle", "tyranid", "tyvar", "ugin", "unicorn",
+    "urza", "urza's", "urzan", "utrom", "vampire", "vanguard", "varmint", "vedalken", "vehicle", "venser",
+    "villain", "vivien", "volver", "vorta", "vraska", "vronos", "vulcan", "wall", "walrus", "wanderer", "warlock",
+    "warrior", "weasel", "weird", "werewolf", "whale", "will", "windgrace", "wizard", "wolf", "wolverine", "wombat",
+    "world", "worm", "worzel", "wraith", "wrenn", "wurm", "xenagos", "xindi", "yanggu", "yanling", "yeti", "zariel",
+    "zombie", "zubera",
+];
+
+fn build_text_filter(attr: &str, op: &str, rhs: &Value, orig: &str) -> Result<FilterExpr, String> {
     let rhs_node_type = rhs["node_type"].as_str().unwrap_or("");
+    // `fo:`/`fulloracle:` share `oracle_text`'s COLUMN — upstream's Postgres copy is the full
+    // text, so the SQL path answers both from it and needs no second column — and are told
+    // apart here by the spelling the user typed. Measured on api.scryfall.com 2026-08-16:
+    // `fo:lifelink` 713 against `o:lifelink`'s stripped answer, `fo:draw e:khm` 57 against
+    // `o:draw e:khm` 39, and `fo:` takes a regex like `o:` does (`fo:/\(this creature/` 1,098 —
+    // a pattern that cannot match the stripped form at all).
+    let full_oracle = attr == "oracle_text" && matches!(orig, "fo" | "fulloracle");
 
     if rhs_node_type == "RegexValueNode" {
         let pattern  = rhs["kwargs"]["value"].as_str().unwrap_or("");
         let re = compile_search_regex(pattern)?;
+        // Every field the store holds as a string can carry a regex: `~*`
+        // applies to all of them on the SQL path, and restricting the engine to
+        // the first four only sent the rest to that path as a decline. The
+        // printing-scoped ones (set code, collector number, watermark) resolve
+        // through the same StrVal::PDep path their exact-match twins use.
         let field = match attr {
-            "card_name"   => TextField::NameLower,
-            "oracle_text" => TextField::OracleTextLower,
-            "flavor_text" => TextField::FlavorTextLower,
-            "card_artist" => TextField::ArtistLower,
+            "card_name"        => TextField::NameLower,
+            "oracle_text" if full_oracle => TextField::FullOracleTextLower,
+            "oracle_text"      => TextField::OracleTextLower,
+            "flavor_text"      => TextField::FlavorTextLower,
+            "card_artist"      => TextField::ArtistLower,
+            "card_set_code"    => TextField::SetCode,
+            "card_layout"      => TextField::Layout,
+            "card_border"      => TextField::Border,
+            "card_watermark"   => TextField::Watermark,
+            "collector_number" => TextField::CollectorNumber,
+            // `t:/…/` matches against the printed type line, the same string
+            // the SQL path's `type_line ~* …` reads — not the type/subtype
+            // bitmasks `t:goblin` compiles to, which cannot answer a regex.
+            "card_types" | "card_subtypes" => TextField::TypeLine,
             _ => return Err(format!("regex not supported on {attr}")),
         };
         return Ok(FilterExpr::TextRegex { field, regex: re });
@@ -1982,6 +2398,7 @@ fn build_text_filter(attr: &str, op: &str, rhs: &Value) -> Result<FilterExpr, St
     if op == ":" {
         let tsf = match attr {
             "card_name"   => TextSearchField::NameLower,
+            "oracle_text" if full_oracle => TextSearchField::FullOracleTextLower,
             "oracle_text" => TextSearchField::OracleTextLower,
             "flavor_text" => TextSearchField::FlavorTextLower,
             "card_artist" => TextSearchField::ArtistLower,
@@ -1992,6 +2409,7 @@ fn build_text_filter(attr: &str, op: &str, rhs: &Value) -> Result<FilterExpr, St
 
     let field = match attr {
         "card_name"   => TextField::NameLower,
+        "oracle_text" if full_oracle => TextField::FullOracleTextLower,
         "oracle_text" => TextField::OracleTextLower,
         "flavor_text" => TextField::FlavorTextLower,
         "card_artist" => TextField::ArtistLower,
