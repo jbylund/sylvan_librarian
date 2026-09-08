@@ -145,18 +145,45 @@ fn format_keys(py: Python<'_>, entries: &SortedFormats) -> FormatKeys {
     built
 }
 
+/// Cap on distinct legality words held as template dicts.
+///
+/// The real corpus has 591 distinct combinations across 97,812 printings, so this is ~7x headroom
+/// and exists only so a pathological corpus cannot grow the map without bound. Past the cap the
+/// builder still returns correct dicts, just uncached.
+const MAX_CACHED_LEGALITY_WORDS: usize = 4096;
+
+/// Template dicts by legality word, valid for a `SortedFormats` snapshot of the recorded length.
+type LegalityTemplates = (usize, HashMap<u64, Py<PyDict>>);
+
+fn legality_templates() -> &'static RwLock<LegalityTemplates> {
+    static DICTS: OnceLock<RwLock<LegalityTemplates>> = OnceLock::new();
+    DICTS.get_or_init(|| RwLock::new((usize::MAX, HashMap::new())))
+}
+
 /// Build one row's `{format: status}` dict.
 ///
-/// Both halves are interned rather than built per row. `set_item` with a `&str` allocates a
-/// fresh `PyUnicode` every call, and this runs once per FORMAT per ROW -- 23 keys plus 23
-/// status words is 46 string allocations per row, for a vocabulary of 23 names and exactly
-/// four status words. The dict itself is still built per row: handing the same cached dict to
-/// several rows would let a caller mutating one row's legalities corrupt the others.
+/// The whole dict is memoized on the legality word, not just its pieces: the corpus has 591
+/// distinct combinations over 97,812 printings, and `{format: status}` is a pure function of the
+/// word and the format snapshot. Rebuilding it per row costs 23 dict inserts; copying a template
+/// costs one `PyDict_Copy`, measured at 64 ns against 429 ns to rebuild.
+///
+/// A COPY, not the template itself. Returning the shared dict would be a further ~20x, but two rows
+/// with the same legalities would then be the same object: a caller mutating one row's dict would
+/// silently change every other row carrying that word, and corrupt the template for the rest of the
+/// process. Each row keeping its own mutable dict is the behavior callers have today.
 pub(crate) fn legality_bits_to_pydict<'a>(py: Python<'a>, bits: u64) -> PyResult<pyo3::Bound<'a, PyDict>> {
-    let dict = PyDict::new(py);
     let entries = format_shifts_sorted();
+
+    if let Ok(guard) = legality_templates().read()
+        && guard.0 == entries.len()
+        && let Some(template) = guard.1.get(&bits)
+    {
+        return template.bind(py).copy();
+    }
+
     let keys = format_keys(py, &entries);
     debug_assert_eq!(keys.len(), entries.len(), "format_keys snapshot is not parallel to entries");
+    let dict = PyDict::new(py);
     for ((_, shift), key) in entries.iter().zip(keys.iter()) {
         let word = match (bits >> shift) & 0b11 {
             LEGALITY_LEGAL => intern!(py, "legal"),
@@ -166,7 +193,25 @@ pub(crate) fn legality_bits_to_pydict<'a>(py: Python<'a>, bits: u64) -> PyResult
         };
         dict.set_item(key.bind(py), word)?;
     }
-    Ok(dict)
+
+    let mut cached = false;
+    if let Ok(mut guard) = legality_templates().write() {
+        // A snapshot of a different length means a format was registered since these templates were
+        // built, so every one of them is missing a key. Drop the lot rather than serve short dicts.
+        if guard.0 != entries.len() {
+            guard.1.clear();
+            guard.0 = entries.len();
+        }
+        if guard.1.len() < MAX_CACHED_LEGALITY_WORDS {
+            guard.1.insert(bits, dict.clone().unbind());
+            cached = true;
+        }
+    }
+    // `dict` is now the TEMPLATE, not a row's dict -- `Bound::clone` increfs the same object rather
+    // than copying it. Handing it back would let the caller's first mutation rewrite the template
+    // and every later row built from it, which is the exact aliasing this function copies to avoid.
+    // Only the uncached path, whose dict no one else holds, may return it directly.
+    if cached { dict.copy() } else { Ok(dict) }
 }
 
 /// Adopt the archive's format→shift assignments into this process's registry.
