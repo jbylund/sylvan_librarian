@@ -744,17 +744,22 @@ class TestSearchPaginationBounds:
 
 
 class TestIdentityLetters(unittest.TestCase):
-    """_identity_letters reshapes JSONB identity objects into WUBRG-ordered letter lists."""
+    """_identity_letters reshapes JSONB identity objects into WUBRG-ordered letter tuples.
+
+    Tuples rather than lists so this path stays identical to the engine's, which serves
+    `color_identity` from one cached tuple per color mask -- safe only for an immutable type.
+    Consumers see no difference: orjson writes either as a JSON array.
+    """
 
     def test_orders_letters_wubrg(self) -> None:
         """Letters come back in Scryfall's canonical order, not storage order."""
         letters = api_resource_module._identity_letters({"G": True, "W": True, "U": True})
-        assert letters == ["W", "U", "G"]
+        assert letters == ("W", "U", "G")
 
     def test_empty_and_none_are_colorless(self) -> None:
-        """A colorless identity is an empty list, matching Scryfall's JSON."""
-        assert api_resource_module._identity_letters({}) == []
-        assert api_resource_module._identity_letters(None) == []
+        """A colorless identity is an empty tuple, matching Scryfall's JSON array."""
+        assert api_resource_module._identity_letters({}) == ()
+        assert api_resource_module._identity_letters(None) == ()
 
 
 class TestAPIResourceStaticFileServing(unittest.TestCase):

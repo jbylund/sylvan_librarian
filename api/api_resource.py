@@ -152,14 +152,19 @@ RESULT_FIELD_COLUMNS: dict[str, str] = {
 _COLOR_ORDER: tuple[str, ...] = ("W", "U", "B", "R", "G", "C")
 
 
-def _identity_letters(identity: dict[str, object] | None) -> list[str]:
-    """Reshape a JSONB color-identity object into Scryfall's WUBRG-ordered letter list."""
+def _identity_letters(identity: dict[str, object] | None) -> tuple[str, ...]:
+    """Reshape a JSONB color-identity object into Scryfall's WUBRG-ordered letter tuple.
+
+    A tuple, not a list, to stay identical to the engine path: `color_identity` is served there
+    from 64 cached tuples, one per color mask, which is only safe because tuples are immutable.
+    JSON output is unaffected -- orjson writes either as an array.
+    """
     if not identity:
-        return []
+        return ()
     if len(identity) == 1:
         # A single color is trivially already in WUBRG order -- no need to walk _COLOR_ORDER.
-        return list(identity)
-    return [letter for letter in _COLOR_ORDER if letter in identity]
+        return tuple(identity)
+    return tuple(letter for letter in _COLOR_ORDER if letter in identity)
 
 
 # `fields=None` resolves to these 9 — the fixed set every caller got before field selection
