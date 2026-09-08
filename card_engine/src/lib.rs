@@ -12989,17 +12989,9 @@ const FIELD_TABLE: &[(&str, FieldKey, FieldExtractor)] = &[
     ("layout", |py| intern!(py, "layout"), |py, c, _p, s, _v| Ok(str_at(s, u32::from(c.card_layout_id)).into_pyobject(py)?.into_any())),
     ("cmc", |py| intern!(py, "cmc"), |py, c, _p, _s, _v| Ok(c.cmc.as_ref().copied().into_pyobject(py)?.into_any())),
     ("rarity", |py| intern!(py, "rarity"), |py, _c, p, _s, _v| {
-        // Six values, so the words are interned rather than built per row -- the same argument as
-        // the legality status words. Order must track RARITY_NAMES; an int outside it is None, as
-        // `rarity_int_to_text` returns None there.
-        Ok(match p.card_rarity_int.as_ref().map(|v| u8::from(*v)) {
-            Some(0) => intern!(py, "common").clone().into_any(),
-            Some(1) => intern!(py, "uncommon").clone().into_any(),
-            Some(2) => intern!(py, "rare").clone().into_any(),
-            Some(3) => intern!(py, "mythic").clone().into_any(),
-            Some(4) => intern!(py, "special").clone().into_any(),
-            Some(5) => intern!(py, "bonus").clone().into_any(),
-            _ => py.None().into_bound(py),
+        Ok(match p.card_rarity_int.as_ref().and_then(|v| rarity_pystring(py, *v)) {
+            Some(word) => word.bind(py).clone().into_any(),
+            None => py.None().into_bound(py),
         })
     }),
     ("color_identity", |py| intern!(py, "color_identity"), |py, c, _p, _s, _v| Ok(identity_letters(c.card_color_identity).into_pyobject(py)?.into_any())),
@@ -13013,8 +13005,16 @@ const FIELD_TABLE: &[(&str, FieldKey, FieldExtractor)] = &[
 /// Mirror of magic.rarity_int_to_text -- the import stores 0-5, Scryfall speaks words.
 const RARITY_NAMES: [&str; 6] = ["common", "uncommon", "rare", "mythic", "special", "bonus"];
 
-fn rarity_int_to_text(value: u8) -> Option<&'static str> {
-    RARITY_NAMES.get(value as usize).copied()
+/// One rarity word as an interned `PyString`, or `None` for an int outside `RARITY_NAMES`.
+///
+/// Six values, so the words are interned once rather than rebuilt per row -- the same argument as
+/// the legality status words, and cheaper still because there is nothing to invalidate. Built FROM
+/// `RARITY_NAMES` so the spellings exist in exactly one place; an `intern!` arm per word would be a
+/// second copy of the table with nothing checking the two agree.
+fn rarity_pystring(py: Python<'_>, value: u8) -> Option<&'static Py<PyString>> {
+    static WORDS: OnceLock<Vec<Py<PyString>>> = OnceLock::new();
+    WORDS.get_or_init(|| RARITY_NAMES.iter().map(|name| PyString::intern(py, name).unbind()).collect())
+        .get(value as usize)
 }
 
 /// Decode an identity bitmap into Scryfall's WUBRG-ordered letter list.
