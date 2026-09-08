@@ -24,7 +24,7 @@ from cachebox import LRUCache, TTLCache
 
 from api.admin_resource import ADMIN_MOUNT_PREFIX, AdminContext, AdminResource
 from api.app_context import AppContext
-from api.enums import CardOrdering, PreferOrder, ResponseShape, SortDirection, UniqueOn
+from api.enums import CardOrdering, PreferOrder, ResponseShape, SortDirection, UniqueOn, resolve_direction
 from api.middlewares.timing import record_span
 from api.noscript_helpers import generate_results_count_html, generate_results_html
 from api.parsing import generate_sql_query, parse_scryfall_query
@@ -34,6 +34,7 @@ from api.parsing.query_budget import (
     QueryBudgetExceeded,
     bounded_query_log_context,
 )
+from api.scryfall_compat import ScryfallCardsRoutes
 from api.settings import settings
 from api.utils import db_utils, error_monitoring
 from api.utils.css_utils import build_critical_css
@@ -95,7 +96,7 @@ def _raise_query_bad_request(*, exc_name: str, query: str, description: str, err
 
 
 # Query parameters that must not be forwarded to action handlers.
-DISALLOWED_QUERY_ARGS: frozenset[str] = frozenset(["falcon_response", "request_host"])
+DISALLOWED_QUERY_ARGS: frozenset[str] = frozenset(["falcon_response", "request", "request_host"])
 
 # Body for an unhandled exception. Fixed and content-free on purpose: the frames live at throw sites
 # inside query and import paths, so their locals can hold connection and query state. Diagnostics go
@@ -122,6 +123,25 @@ def pagination_ceiling() -> int:
     return int((time.time() - PAGINATION_BASE_TIMESTAMP) // PAGINATION_GROWTH_INTERVAL_SECONDS)
 
 
+# `order=color`, as SQL. The eleven buckets Scryfall sorts colour into, measured 2026-08-09 over 923
+# cards spanning every colour shape: mono WUBRG, then multicolour by HOW MANY colours (guild pairs
+# tie), then colourless, then lands. Two of those are not what a colour bitmask would give -- the
+# colourless bucket sorts last rather than first, and lands after it -- which is why this is a CASE
+# rather than an expression over card_colors. Mirrors color_sort_rank in card_engine/src/lib.rs; the
+# two must agree or the SQL and engine paths order the same query differently.
+_COLOR_ORDER_SQL = """
+        (CASE
+            WHEN card_colors = '{"W": true}'::jsonb THEN 0
+            WHEN card_colors = '{"U": true}'::jsonb THEN 1
+            WHEN card_colors = '{"B": true}'::jsonb THEN 2
+            WHEN card_colors = '{"R": true}'::jsonb THEN 3
+            WHEN card_colors = '{"G": true}'::jsonb THEN 4
+            WHEN (SELECT count(1) FROM jsonb_object_keys(card_colors)) > 1
+                THEN 3 + (SELECT count(1) FROM jsonb_object_keys(card_colors))
+            WHEN card_types ? 'Land' THEN 10
+            ELSE 9
+        END)"""
+
 RESULT_FIELD_COLUMNS: dict[str, str] = {
     "name": "card_name",
     "set_code": "card_set_code",
@@ -135,6 +155,11 @@ RESULT_FIELD_COLUMNS: dict[str, str] = {
     "illustration_id": "illustration_id",
     "scryfall_id": "scryfall_id",
     "price_usd": "price_usd",
+    # The other two currencies CardOrdering already sorts by (see the sql_orderby map's
+    # EUR/TIX entries). Without these a caller can rank a page by EUR or TIX and then have
+    # no way to read the number it was ranked on. Both are real magic.cards columns.
+    "price_eur": "price_eur",
+    "price_tix": "price_tix",
     "prefer_score": "prefer_score",
     # Card-data fields consumers need to run their own downstream filtering
     # (Scryfall JSON names and shapes): layout and rarity are plain text,
@@ -218,6 +243,29 @@ def rewrap(query: str) -> str:
     return " ".join(query.strip().split())
 
 
+def _request_injection(entry: BoundRoute | None, req: falcon.Request) -> dict[str, Any]:
+    """Return the `request` keyword for handlers that declare it, and nothing for the rest.
+
+    Only `POST /cards/collection` wants the request object: its identifiers arrive in the body,
+    which nothing else in the dispatch path reads. Injecting it unconditionally is not an option —
+    a non-string keyword a handler neither declares nor absorbs through `**kwargs` reaches it as a
+    TypeError, and `search` is one such handler.
+
+    Args:
+        entry: The resolved route, or None when the path identified nothing.
+        req: The request being dispatched.
+
+    Returns:
+        `{"request": req}` when the handler declares the parameter, otherwise an empty dict.
+    """
+    if entry is None:
+        return {}
+    binder = getattr(entry.action, "binder", None)
+    if binder is None or not binder.accepts("request"):
+        return {}
+    return {"request": req}
+
+
 def _columnarize_cards(cards: list[dict[str, Any]]) -> dict[str, list[Any]]:
     """Convert a list of card dicts into a dict of per-field value lists.
 
@@ -252,8 +300,13 @@ def _copy_query_result(result: dict[str, Any]) -> dict[str, Any]:
     return copied
 
 
-class APIResource:
-    """Class implementing request handling for our simple API."""
+class APIResource(ScryfallCardsRoutes):
+    """Class implementing request handling for our simple API.
+
+    The Scryfall-compatible `/cards/*` routes live in the base class rather than here: they are a
+    self-contained compatibility surface with their own response objects, and `iter_marked_routes`
+    scans inherited attributes, so they register exactly like the routes defined below.
+    """
 
     def __init__(
         self,
@@ -341,6 +394,10 @@ class APIResource:
             Keyword arguments for the action call.
         """
         params = {k: v for k, v in req.params.items() if k not in DISALLOWED_QUERY_ARGS}
+        # The request object itself, for the one handler that declares it (POST /cards/collection
+        # reads its identifiers from the body). Only where declared: a non-string keyword reaches a
+        # handler that neither declares nor absorbs it as a TypeError.
+        params.update(_request_injection(entry, req))
         if entry is None:
             # Only _raise_not_found reads this; set after the query string so a request can't
             # spoof it via ?admin_authenticated=1 on a path that doesn't resolve to anything.
@@ -820,6 +877,13 @@ class APIResource:
         offset: int = DEFAULT_OFFSET,
         fields: Sequence[str] | None = None,
     ) -> dict[str, Any]:
+        # AUTO is a request-level spelling neither search path knows, resolved on the way in so
+        # nothing downstream can see it. Resolved in each path rather than once in `_search`
+        # because what AUTO means depends on `orderby`: doing it here is necessarily after
+        # everything upstream that can still change `orderby` -- today nothing, once the in-query
+        # directives land their fold. Resolving before that fold would answer `order:usd` with the
+        # default ordering's direction and hand the engine the literal "auto".
+        direction = resolve_direction(direction, orderby)
         logger.info("Searching engine for %r", query)
         query_explanation = parsed_query.to_human_explanation() if query else ""
         try:
@@ -867,6 +931,13 @@ class APIResource:
         offset: int = DEFAULT_OFFSET,
         fields: Sequence[str] | None = None,
     ) -> dict[str, Any]:
+        # AUTO is a request-level spelling neither search path knows, resolved on the way in so
+        # nothing downstream can see it. Resolved in each path rather than once in `_search`
+        # because what AUTO means depends on `orderby`: doing it here is necessarily after
+        # everything upstream that can still change `orderby` -- today nothing, once the in-query
+        # directives land their fold. Resolving before that fold would answer `order:usd` with the
+        # default ordering's direction and hand the engine the literal "auto".
+        direction = resolve_direction(direction, orderby)
         logger.info("Searching SQL for %r", query)
         resolved_fields = self._resolve_result_fields(fields)
         query_explanation = parsed_query.to_human_explanation() if query else ""
@@ -885,7 +956,18 @@ class APIResource:
             CardOrdering.RARITY: "card_rarity_int",
             CardOrdering.TOUGHNESS: "creature_toughness",
             CardOrdering.USD: "price_usd",
+            CardOrdering.EUR: "price_eur",
+            CardOrdering.TIX: "price_tix",
             CardOrdering.CUBECOBRA: "cubecobra_score",
+            CardOrdering.RELEASED: "released_at",
+            # lower() for the same reason as name: the engine ranks the lowercased artist, and set
+            # codes are stored lowercase but nothing constrains them to be.
+            CardOrdering.ARTIST: "lower(card_artist)",
+            CardOrdering.SET: "lower(card_set_code)",
+            # Scryfall's colour order is eleven buckets, not the colour bitmask -- WUBRG, then
+            # multicolour by how many colours, then colourless, then lands. Measured 2026-08-09;
+            # mirrors color_sort_rank in card_engine/src/lib.rs, which the engine path uses.
+            CardOrdering.COLOR: _COLOR_ORDER_SQL,
         }.get(orderby, "edhrec_rank")
         sql_direction = {
             "asc": "ASC",

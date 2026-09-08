@@ -1,12 +1,12 @@
 use super::{
     renumber_coll_vocab,
-    and_child_rank, assign_name_ranks,
+    and_child_rank, assign_name_ranks, split_lower_name, NAME_INLINE,
     build_numeric_index, build_oracle_text_index, build_trigram_index,
     build_rarity_index, build_flavor_index, build_hybrid_tag_index, build_layout_hybrid_index, bitmap_beats_postings, HybridTagIndex, build_sort_permutations,
-    assign_artwork_groups, build_artwork_base_from, build_bit_planes, build_border_printing_planes, build_rarity_printing_planes, build_divergent_ids, build_name_bigram_index, build_name_unigram_index, build_printing_to_card, flavor_fingerprint, flavor_match_sets,
+    assign_artwork_groups, assign_artist_ranks, build_artwork_base_from, build_bit_planes, build_border_printing_planes, build_rarity_printing_planes, build_divergent_ids, build_name_bigram_index, build_name_unigram_index, build_printing_to_card, flavor_fingerprint, flavor_match_sets,
     cards_of_printings, count_common_keywords, count_common_types,
     build_artist_index, build_printing_value_index, build_arith_tuple_index, is_arith_tuple_route, range_candidates, narrow_candidates, narrow_candidates_exact, rarity_candidates,
-    range_too_broad_to_narrow, run_query, run_query_routed, run_query_with_plan, explain, explain_analyze, AcquireFacts, PlanEstimate, PlanTrial,
+    perm_primary_key, range_too_broad_to_narrow, run_query, run_query_routed, run_query_with_plan, explain, explain_analyze, AcquireFacts, PlanEstimate, PlanTrial,
     acquire_plan_features, take_phase_stats, PagingTaken, CountSource, NarrowedRepr,
     EXACT_VALUE_TOTALS, RangeCardCounts, narrow_rec, ValueTotals, PairTotals, build_all_value_totals, build_pair_totals, build_range_card_counts, exact_result_total,
     PhysicalPlan, PlanScope, CandidatePlan, ComposePaging, trigram_candidates, finalize_trigram_index, PrintingValueIndex, NARROW_FLOOR,
@@ -18,12 +18,18 @@ use super::{
     archive_header, archive_payload, ARCHIVE_HEADER_LEN, Mmap,
     bitmap_contains, bitmap_card_ids, compile_plane, eval_planes, split_planes,
     ArithOp, ArtistIndex, CardData, CardIndexes, Candidates, ColorField, NumExpr, NumField, RarityIndex,
-    CollField, CmpOp, FilterExpr, InlineStr, Interner, ManaCost, OracleCard, Printing, TagIndex,
+    CollField, CmpOp, FilterExpr, InlineStr, Interner, ManaCost, CompatFields, OracleCard, OracleFace, Printing, PrintingFace, RelatedCard, TagIndex,
+    build_printing_by_scryfall_id, build_oracle_by_oracle_id, find_printing_by_scryfall_id, find_oracle_by_oracle_id,
+    build_external_id_index, find_printing_by_external_id, EXT_MULTIVERSE, EXT_MTGO, EXT_ARENA, EXT_TCGPLAYER,
+    trigram_similarity, fuzzy_name_match, autocomplete_names, FuzzyOutcome,
+    exact_name_match, collection_name_match, names_containing_all_words, name_best, NameScope, CollectionScope,
+    VOCAB_NONE, COMPAT_FULL_ART, COMPAT_PROMO, COMPAT_REPRINT, COMPAT_TEXTLESS, GAME_PAPER, GAME_ARENA, FINISH_FOIL, FINISH_NONFOIL,
     TextField, TextSearchField, Tri, SortedTrigramIndex, VocabInterner, ARTIST_NONE, NONE_STR, TYPE_ARTIFACT, TYPE_CREATURE,
     TYPE_ENCHANTMENT, TYPE_INSTANT, TYPE_LAND, TYPE_LEGENDARY, TYPE_PLANESWALKER, TYPE_SNOW, TYPE_SORCERY,
 };
 use rkyv::{rancor::Error, Archived};
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::sync::OnceLock;
 // Trait bringing random_range/random_bool/random into scope for the #677 fuzzer
 // helpers below (SmallRng's inherent methods live on this extension trait).
@@ -202,7 +208,8 @@ fn test_tag_index_str_lookup() {
 fn stub_card(oracle_id: u128, card_types: u16, subtypes: &[&str], vocab: &mut VocabInterner) -> OracleCard {
     OracleCard {
         card_name_lower: InlineStr::from_str(""),
-        card_name_folded: InlineStr::from_str(""),
+        card_name_lower_id: NONE_STR,
+        card_name_folded_id: NONE_STR,
         card_colors: 0,
         card_color_identity: 0,
         produced_mana: 0,
@@ -229,6 +236,9 @@ fn stub_card(oracle_id: u128, card_types: u16, subtypes: &[&str], vocab: &mut Vo
         mana_cost: ManaCost { core: 0, hybrids: Vec::new(), devotion: 0, cmc: 0.0 },
         creature_power_text_id: NONE_STR,
         creature_toughness_text_id: NONE_STR,
+        planeswalker_loyalty_text_id: NONE_STR,
+        faces: Vec::new(),
+        all_parts: Vec::new(),
     }
 }
 
@@ -236,11 +246,15 @@ fn stub_card(oracle_id: u128, card_types: u16, subtypes: &[&str], vocab: &mut Vo
 fn stub_printing(scryfall_id: u128, illustration_id: u128, prefer_score: Option<f32>) -> Printing {
     Printing {
         scryfall_id,
+        flavor_name_id: NONE_STR,
+        flavor_name_folded_id: NONE_STR,
         illustration_id,
         flavor_text_id: NONE_STR,
         flavor_text_lower_id: NONE_STR,
         card_artist_vid: ARTIST_NONE,
         card_set_code: InlineStr::from_str(""),
+        set_rank: 0,
+        artist_rank: 0,
         card_border_id: NONE_STR,
         card_watermark_id: NONE_STR,
         collector_number_id: NONE_STR,
@@ -257,6 +271,8 @@ fn stub_printing(scryfall_id: u128, illustration_id: u128, prefer_score: Option<
         card_is_tags: Vec::new(),
         card_frame_data: Vec::new(),
         artwork_group_id: 0, // placeholder; store_of overwrites via assign_artwork_groups
+        faces: Vec::new(),
+        compat: CompatFields::default(),
     }
 }
 
@@ -308,8 +324,8 @@ fn store_of(mut cards: Vec<OracleCard>, printing_counts: &[usize], vocab: VocabI
         // border_planes_fixture_store already does), so an empty string table is
         // safe here -- the border-scatter loop skips every printing regardless.
         planes: build_bit_planes(&cards, &printings, &offsets, &[]),
-        name_bigrams: build_name_bigram_index(&cards),
-        name_unigrams: build_name_unigram_index(&cards),
+        name_bigrams: build_name_bigram_index(&cards, &[]),
+        name_unigrams: build_name_unigram_index(&cards, &[]),
         legal_divergent: build_divergent_ids(&cards),
         sort_perms: build_sort_permutations(&cards, &offsets),
         max_artwork_groups: artwork_groups.iter().copied().max().unwrap_or(0),
@@ -2315,7 +2331,6 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
         // tests indexing/algebra parity, not fold_accents() semantics (#649 covers that directly).
         let name = corpus[rng.random_range(0..corpus.len())].0;
         card.card_name_lower = InlineStr::from_str(name);
-        card.card_name_folded = card.card_name_lower;
         card.card_name_id = interner.intern(name.to_string());
         let vanilla = card.card_types & TYPE_CREATURE != 0 && rng.random_bool(VANILLA_CREATURE_FRAC);
         let oracle = if vanilla {
@@ -2496,9 +2511,9 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
     data.indexes.artists = build_artist_index(&data.printings, data.artist_vocab.len());
     // Text narrowing indexes — same load-bearing property. name/oracle drive trigram + bigram
     // narrowing and the full-scan memoization; flavor is the printing-space CSR bind() resolves against.
-    data.indexes.name_trigram = build_trigram_index(&data.cards, |c| c.card_name_folded.as_str());
-    data.indexes.name_bigrams = build_name_bigram_index(&data.cards);
-    data.indexes.name_unigrams = build_name_unigram_index(&data.cards);
+    data.indexes.name_trigram = build_trigram_index(&data.cards, |c| crate::folded_name_of(c, &data.strings));
+    data.indexes.name_bigrams = build_name_bigram_index(&data.cards, &data.strings);
+    data.indexes.name_unigrams = build_name_unigram_index(&data.cards, &data.strings);
     data.indexes.oracle_trigram = build_oracle_text_index(&data.cards, &data.strings);
     data.indexes.flavor = build_flavor_index(&data.printings, &data.strings);
     data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
@@ -6617,7 +6632,6 @@ fn bench_checked_vs_unchecked_access() {
         );
         let mut card = stub_card((i + 1) as u128, TYPE_CREATURE, &["Benchmark", words[i % 10]], &mut vocab);
         card.card_name_lower = InlineStr::from_str(&name.to_lowercase());
-        card.card_name_folded = card.card_name_lower;
         card.card_name_id = interner.intern(name.clone());
         card.oracle_text_id = interner.intern(oracle.clone());
         card.oracle_text_lower_id = interner.intern(oracle.to_lowercase());
@@ -6642,8 +6656,8 @@ fn bench_checked_vs_unchecked_access() {
 
     let indexes = CardIndexes {
         artwork_base,
-        name_trigram:   build_trigram_index(&cards, |c| c.card_name_folded.as_str()),
-        name_unigrams:  build_name_unigram_index(&cards),
+        name_trigram:   build_trigram_index(&cards, |c| crate::folded_name_of(c, &[])),
+        name_unigrams:  build_name_unigram_index(&cards, &[]),
         oracle_trigram: build_oracle_text_index(&cards, &strings),
         cmc:            build_numeric_index(&cards, |c| c.cmc.map(|v| v as i16)),
         power:          build_numeric_index(&cards, |c| c.creature_power.map(|v| v as i16)),
@@ -6683,9 +6697,13 @@ fn bench_checked_vs_unchecked_access() {
         border_printing: build_border_printing_planes(&printings, &strings),
         rarity_printing: build_rarity_printing_planes(&printings),
         rarity_printing_ordered: build_printing_value_index(&printings, &cards, &offsets, |p| p.card_rarity_int.map(u32::from)),
-        name_bigrams:   build_name_bigram_index(&cards),
+        name_bigrams:   build_name_bigram_index(&cards, &[]),
         legal_divergent: build_divergent_ids(&cards),
         arith_tuple:    build_arith_tuple_index(&cards),
+        printing_by_scryfall_id: build_printing_by_scryfall_id(&printings),
+        printing_by_illustration_id: crate::build_printing_by_illustration_id(&printings),
+        oracle_by_oracle_id:     build_oracle_by_oracle_id(&cards),
+        external_id_index:       build_external_id_index(&printings),
     };
     let data = CardData {
         cards,
@@ -9163,7 +9181,6 @@ fn text_fixture_store() -> CardData {
         .map(|(i, &(name, text))| {
             let mut c = stub_card(i as u128 + 1, TYPE_CREATURE, &[], &mut vocab);
             c.card_name_lower = InlineStr::from_str(name);
-            c.card_name_folded = c.card_name_lower;
             c.card_name_id = interner.intern(name.to_string());
             c.oracle_text_lower_id = interner.intern(text.unwrap_or_default().to_string());
             c
@@ -9171,7 +9188,7 @@ fn text_fixture_store() -> CardData {
         .collect();
     let mut data = store_of(cards, &[1usize; 6], vocab);
     data.strings = interner.strings;
-    data.indexes.name_trigram = build_trigram_index(&data.cards, |c| c.card_name_folded.as_str());
+    data.indexes.name_trigram = build_trigram_index(&data.cards, |c| crate::folded_name_of(c, &data.strings));
     data.indexes.oracle_trigram = build_oracle_text_index(&data.cards, &data.strings);
     data
 }
@@ -10061,7 +10078,6 @@ fn name_bigrams_tiers_and_exactness() {
         let mut c = stub_card(u128::from(i) + 1, TYPE_CREATURE, &[], &mut vocab);
         let name = if i % 64 == 0 { format!("azz qx{i}") } else { format!("azz b{i}") };
         c.card_name_lower = InlineStr::from_str(&name);
-        c.card_name_folded = c.card_name_lower;
         c
     }).collect();
     let data = store_of(cards, &vec![1usize; 4096], vocab);
@@ -10086,7 +10102,7 @@ fn name_bigrams_tiers_and_exactness() {
     assert!(n.tight);
     let cand = n.set.into_cards(&archived.offsets, &archived.indexes.printing_to_card);
     let brute: Vec<u32> = archived.cards.iter().enumerate()
-        .filter(|(_, c)| c.card_name_folded.as_str().contains("qx"))
+        .filter(|(_, c)| crate::folded_name(c, &archived.strings).contains("qx"))
         .map(|(i, _)| i as u32)
         .collect();
     assert_eq!(cand, brute, "bigram membership IS containment for 2-byte needles");
@@ -10112,7 +10128,6 @@ fn not_over_unigram_is_tight_but_oracle_stays_loose() {
             let mut c = stub_card(u128::from(i) + 1, TYPE_CREATURE, &[], &mut vocab);
             let name = if i % 8 == 0 { format!("aq b{i}") } else { format!("ab c{i}") };
             c.card_name_lower = InlineStr::from_str(&name);
-            c.card_name_folded = c.card_name_lower;
             c
         })
         .collect();
@@ -10129,7 +10144,7 @@ fn not_over_unigram_is_tight_but_oracle_stays_loose() {
         .cards
         .iter()
         .enumerate()
-        .filter(|(_, c)| !c.card_name_folded.as_str().contains('q'))
+        .filter(|(_, c)| !crate::folded_name(c, &archived.strings).contains('q'))
         .map(|(i, _)| i as u32)
         .collect();
     assert_eq!(cand, brute, "-name:q must be exactly the cards whose name lacks 'q'");
@@ -10159,7 +10174,6 @@ fn name_unigrams_tiers_and_exactness() {
         let mut c = stub_card(u128::from(i) + 1, TYPE_CREATURE, &[], &mut vocab);
         let name = if i % 64 == 0 { format!("az q{i}") } else { format!("az b{i}") };
         c.card_name_lower = InlineStr::from_str(&name);
-        c.card_name_folded = c.card_name_lower;
         c
     }).collect();
     let data = store_of(cards, &vec![1usize; 4096], vocab);
@@ -10184,7 +10198,7 @@ fn name_unigrams_tiers_and_exactness() {
     assert!(n.tight);
     let cand = n.set.into_cards(&archived.offsets, &archived.indexes.printing_to_card);
     let brute: Vec<u32> = archived.cards.iter().enumerate()
-        .filter(|(_, c)| c.card_name_folded.as_str().contains('q'))
+        .filter(|(_, c)| crate::folded_name(c, &archived.strings).contains('q'))
         .map(|(i, _)| i as u32)
         .collect();
     assert_eq!(cand, brute, "byte membership IS containment for 1-byte needles");
@@ -10205,7 +10219,6 @@ fn name_bigrams_compose_and_memoize() {
     let cards: Vec<OracleCard> = names.iter().enumerate().map(|(i, name)| {
         let mut c = stub_card(i as u128 + 1, TYPE_CREATURE, &[], &mut vocab);
         c.card_name_lower = InlineStr::from_str(name);
-        c.card_name_folded = c.card_name_lower;
         c.card_name_id = interner.intern(name.to_string());
         c
     }).collect();
@@ -10243,7 +10256,7 @@ fn name_bigrams_compose_and_memoize() {
         _ => panic!("2-byte needle must memoize via bigrams"),
     }
     for (cid, card) in archived.cards.iter().enumerate() {
-        let want = card.card_name_folded.as_str().contains("fi");
+        let want = crate::folded_name(card, &archived.strings).contains("fi");
         assert!((f.eval_card(card, &archived.strings) == Tri::True) == want, "NameMatch parity at card {cid}");
     }
 }
@@ -10470,7 +10483,6 @@ fn named_store() -> CardData {
         .map(|(i, name)| {
             let mut c = stub_card((i + 1) as u128, TYPE_CREATURE, &[], &mut vocab);
             c.card_name_lower = InlineStr::from_str(name);
-            c.card_name_folded = c.card_name_lower;
             // Distinct, deliberately store-order-scrambled edhrec ranks: the
             // second "sol ring" (card 3) outranks the first (card 1).
             c.edhrec_rank = Some([40, 60, 10, 20, 30, 50][i]);
@@ -10490,6 +10502,78 @@ fn name_ranks_dense_and_shared_across_duplicates() {
     let ranks: Vec<u32> = data.cards.iter().map(|c| c.name_rank).collect();
     // fog=3, sol ring=4 (both copies), atog=0, black lotus=1, cancel=2
     assert_eq!(ranks, vec![3, 4, 0, 4, 1, 2]);
+}
+
+/// The `!` operator over a name PAST the inline bound, on both sides of the cut.
+///
+/// The ascending name permutation is keyed on `name_rank`, i.e. on the INLINE field, and for an
+/// over-long name the inline is a prefix of what the card is called. That makes the binary search
+/// wrong in two opposite directions, and because `ExactName` narrows TIGHT -- the walk never
+/// re-verifies a tight set -- each one is a wrong answer rather than a slow one:
+///
+///   - the real name is not in the permutation under its own spelling, so the search answered the
+///     EMPTY set for a card that exists (`!"Curse of the Fire Penguin // …Creature"` -> 0 rows);
+///   - the cut IS in it, so the search answered the card for a string nothing is named
+///     (`!"Curse of the Fire Penguin Creatu"` -> 1 row, where api.scryfall.com answers 0).
+///
+/// Both measured on a deployment of this engine 2026-08-31. The arm now declines the first (the
+/// scan verifies through `lower_name` instead) and drops spilled cards from the block for the
+/// second, so the narrowing and the predicate agree again -- which is what `tight` claims.
+#[test]
+fn exact_name_narrowing_survives_a_name_past_the_inline_bound() {
+    let long = "curse of the fire penguin // curse of the fire penguin creature";
+    let cut = &long[..NAME_INLINE];
+    assert!(long.len() > NAME_INLINE, "the fixture has to be over the bound to test anything");
+
+    let mut data = name_store(&[long, "fog"], &[1, 1]);
+    assign_name_ranks(&mut data.cards);
+    data.indexes.sort_perms = build_sort_permutations(&data.cards, &data.offsets);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let narrow = |name: &str| {
+        super::narrow_rec(
+            &FilterExpr::ExactName(name.to_string()),
+            &archived.indexes,
+            &archived.offsets,
+            &archived.cards,
+            false,
+        )
+    };
+    let matches = |cid: usize, name: &str| {
+        FilterExpr::ExactName(name.to_string()).matches(
+            &archived.cards[cid],
+            &archived.printings[cid],
+            &archived.strings,
+        )
+    };
+
+    // The whole name: the permutation cannot answer it, so the arm DECLINES rather than answering
+    // the empty set, and the unnarrowed walk finds the card.
+    assert!(narrow(long).is_none(), "a needle the inline bound cuts declines the permutation");
+    assert!(matches(0, long), "and the predicate itself matches the whole name");
+
+    // The cut: the permutation lands on the card's block, and the spill filter removes it. Empty,
+    // and still tight -- the predicate agrees.
+    let n = narrow(cut).expect("a needle that fits the bound still narrows");
+    assert!(n.tight, "still a tight card set");
+    assert_eq!(n.set.len(), 0, "the {NAME_INLINE}-byte cut names no card");
+    assert!(!matches(0, cut), "and the predicate agrees the cut is not the name");
+
+    // The struct's OTHER unfolded name reader, on the same store: `TextField::NameLower` backs
+    // `name:` as an exact text compare and the `name:/…/` regex surface, and it read the inline
+    // field too -- so it answered about the cut on exactly these 36 cards.
+    let text_eq = |cid: usize, name: &str| {
+        FilterExpr::TextExact { field: TextField::NameLower, op: CmpOp::Eq, value: name.to_string() }
+            .matches(&archived.cards[cid], &archived.printings[cid], &archived.strings)
+    };
+    assert!(text_eq(0, long), "an exact text compare sees the whole name");
+    assert!(!text_eq(0, cut), "and not the cut");
+
+    // A short name in the same store is untouched by any of it.
+    let fog = narrow("fog").expect("narrows");
+    assert!(fog.tight);
+    assert_eq!(fog.set.len(), 1, "the ordinary case still resolves through the permutation");
+    assert!(matches(1, "fog"));
 }
 
 // ExactName narrows to the exact, tight card set through the ascending name
@@ -10558,13 +10642,21 @@ fn accent_folded_name_search_matches_unaccented_query() {
         ("éowyn, fearless knight", "eowyn, fearless knight"),
         ("ferocious knight", "ferocious knight"),
     ];
-    let cards: Vec<OracleCard> = rows.iter().enumerate().map(|(i, (lower, folded))| {
+    let cards: Vec<OracleCard> = rows.iter().enumerate().map(|(i, (lower, _))| {
         let mut c = stub_card(i as u128 + 1, TYPE_CREATURE, &[], &mut vocab);
         c.card_name_lower = InlineStr::from_str(lower);
-        c.card_name_folded = InlineStr::from_str(folded);
         c
     }).collect();
-    let data = store_of(cards, &[1usize; 2], vocab);
+    let mut data = store_of(cards, &[1usize; 2], vocab);
+    // Interned the way the builder does: a folded name that DIFFERS from the lower one is the only
+    // case that reaches the strings table, and this fixture exists precisely for that case.
+    for (i, (lower, folded)) in rows.iter().enumerate() {
+        if lower != folded {
+            data.strings.push((*folded).to_owned());
+            data.cards[i].card_name_folded_id = (data.strings.len() - 1) as u32;
+        }
+    }
+    let data = data;
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
@@ -13002,6 +13094,1450 @@ fn arith_tuple_key_budget_catches_a_blown_domain() {
 /// clears `10*sqrt(n)+32` by a wide margin.
 const ARITH_TUPLE_BLOWUP_CARDS: usize = 6_000;
 
+// ─── Face storage ─────────────────────────────────────────────────────────────
+
+/// Two faces whose text and art both differ, so a merge-shaped answer cannot fake it.
+fn two_faces() -> (Vec<OracleFace>, Vec<PrintingFace>) {
+    let oracle = vec![
+        OracleFace {
+            card_name_id: 1,
+            mana_cost_text_id: 2,
+            type_line_id: 3,
+            oracle_text_id: 4,
+            creature_power_text_id: 5,
+            creature_toughness_text_id: 6,
+            planeswalker_loyalty_text_id: NONE_STR,
+            defense_text_id: NONE_STR,
+            card_colors: 0b0000_0001, // W
+            color_indicator: 0,
+        },
+        OracleFace {
+            card_name_id: 11,
+            mana_cost_text_id: NONE_STR, // a transform back has no mana cost at all
+            type_line_id: 13,
+            oracle_text_id: 14,
+            creature_power_text_id: 15,
+            creature_toughness_text_id: 16,
+            planeswalker_loyalty_text_id: NONE_STR,
+            defense_text_id: NONE_STR,
+            card_colors: 0b0000_1000, // R
+            color_indicator: 0b0000_1000,
+        },
+    ];
+    let printing = vec![
+        PrintingFace { illustration_id: 0xAAAA, card_artist_vid: 1, flavor_text_id: 7, flavor_name_id: NONE_STR },
+        PrintingFace { illustration_id: 0xBBBB, card_artist_vid: 2, flavor_text_id: NONE_STR, flavor_name_id: NONE_STR },
+    ];
+    (oracle, printing)
+}
+
+#[test]
+fn faces_survive_the_archive_round_trip() {
+    let mut vocab = VocabInterner::new();
+    let (oracle_faces, printing_faces) = two_faces();
+    let mut card = stub_card(1, 0, &[], &mut vocab);
+    card.faces = oracle_faces;
+    let mut printing = stub_printing(1, 1, Some(1.0));
+    printing.faces = printing_faces;
+
+    let card_bytes = rkyv::to_bytes::<Error>(&card).expect("serialize card");
+    let archived_card = rkyv::access::<Archived<OracleCard>, Error>(&card_bytes).expect("access card");
+    let print_bytes = rkyv::to_bytes::<Error>(&printing).expect("serialize printing");
+    let archived_print = rkyv::access::<Archived<Printing>, Error>(&print_bytes).expect("access printing");
+
+    assert_eq!(archived_card.faces.len(), 2);
+    assert_eq!(archived_print.faces.len(), 2);
+
+    // Text: the back keeps its own name, types and stats -- the thing the merged row cannot say.
+    assert_eq!(archived_card.faces[0].card_name_id, 1);
+    assert_eq!(archived_card.faces[1].card_name_id, 11);
+    assert_eq!(archived_card.faces[1].mana_cost_text_id, NONE_STR);
+    assert_eq!(archived_card.faces[0].creature_power_text_id, 5);
+    assert_eq!(archived_card.faces[1].creature_power_text_id, 15);
+
+    // Colors are per face, which is how `c:r` reaches a red back on a white front.
+    assert_eq!(archived_card.faces[0].card_colors, 0b0000_0001);
+    assert_eq!(archived_card.faces[1].card_colors, 0b0000_1000);
+    assert_eq!(archived_card.faces[1].color_indicator, 0b0000_1000);
+
+    // Art: per printing, and distinct per face.
+    assert_eq!(archived_print.faces[0].illustration_id, 0xAAAA);
+    assert_eq!(archived_print.faces[1].illustration_id, 0xBBBB);
+    assert_ne!(archived_print.faces[0].card_artist_vid, archived_print.faces[1].card_artist_vid);
+    assert_eq!(archived_print.faces[1].flavor_text_id, NONE_STR);
+}
+
+#[test]
+fn single_faced_cards_carry_no_faces() {
+    let mut vocab = VocabInterner::new();
+    let card = stub_card(1, 0, &[], &mut vocab);
+    let bytes = rkyv::to_bytes::<Error>(&card).expect("serialize");
+    let archived = rkyv::access::<Archived<OracleCard>, Error>(&bytes).expect("access");
+    // ~82% of the corpus. An empty Vec archives to a length word, so the cost is bounded.
+    assert!(archived.faces.is_empty());
+}
+
+#[test]
+fn face_indexes_line_up_across_the_split() {
+    // OracleFace and PrintingFace are two halves of one face, so index i must mean the same face
+    // in both. The commit pass fills them from the same FaceRow list; this pins that contract.
+    let (oracle_faces, printing_faces) = two_faces();
+    assert_eq!(oracle_faces.len(), printing_faces.len());
+}
+
+// ─── Lookup by id ─────────────────────────────────────────────────────────────
+
+#[test]
+fn printings_are_findable_by_scryfall_id() {
+    // Ids deliberately out of order, and not dense: the permutation has to do real work.
+    let ids: [u128; 5] = [0xF00D, 0x0010, 0xBEEF, 0x0002, 0xCAFE];
+    let printings: Vec<Printing> = ids.iter().map(|&id| stub_printing(id, id, Some(1.0))).collect();
+    let perm = build_printing_by_scryfall_id(&printings);
+
+    let perm_bytes = rkyv::to_bytes::<Error>(&perm).expect("serialize perm");
+    let aperm = rkyv::access::<Archived<Vec<u32>>, Error>(&perm_bytes).expect("access perm");
+    let print_bytes = rkyv::to_bytes::<Error>(&printings).expect("serialize printings");
+    let aprint = rkyv::access::<Archived<Vec<Printing>>, Error>(&print_bytes).expect("access printings");
+
+    for (want_index, &id) in ids.iter().enumerate() {
+        let got = find_printing_by_scryfall_id(aperm, aprint, id);
+        assert_eq!(got, Some(want_index as u32), "id {id:#x} should resolve to its own row");
+    }
+    assert_eq!(find_printing_by_scryfall_id(aperm, aprint, 0xDEAD), None, "absent id");
+    // 0 is parse_uuid_or_hash's null. It must never resolve, even though it sorts first.
+    assert_eq!(find_printing_by_scryfall_id(aperm, aprint, 0), None, "null id");
+}
+
+#[test]
+fn cards_are_findable_by_oracle_id() {
+    let mut vocab = VocabInterner::new();
+    let ids: [u128; 4] = [0x30, 0x10, 0x40, 0x20];
+    let cards: Vec<OracleCard> = ids.iter().map(|&id| stub_card(id, 0, &[], &mut vocab)).collect();
+    let perm = build_oracle_by_oracle_id(&cards);
+
+    let perm_bytes = rkyv::to_bytes::<Error>(&perm).expect("serialize perm");
+    let aperm = rkyv::access::<Archived<Vec<u32>>, Error>(&perm_bytes).expect("access perm");
+    let card_bytes = rkyv::to_bytes::<Error>(&cards).expect("serialize cards");
+    let acards = rkyv::access::<Archived<Vec<OracleCard>>, Error>(&card_bytes).expect("access cards");
+
+    for (want_index, &id) in ids.iter().enumerate() {
+        assert_eq!(find_oracle_by_oracle_id(aperm, acards, id), Some(want_index as u32));
+    }
+    assert_eq!(find_oracle_by_oracle_id(aperm, acards, 0x99), None);
+}
+
+#[test]
+fn the_id_permutation_is_a_permutation() {
+    // Every row appears exactly once: a lookup index that drops a row silently 404s a real card.
+    let ids: [u128; 6] = [5, 3, 9, 1, 7, 3_000_000_000];
+    let printings: Vec<Printing> = ids.iter().map(|&id| stub_printing(id, id, None)).collect();
+    let mut perm = build_printing_by_scryfall_id(&printings);
+    assert_eq!(perm.len(), ids.len());
+    perm.sort_unstable();
+    assert_eq!(perm, (0..ids.len() as u32).collect::<Vec<_>>());
+}
+
+// ─── Compat residue ───────────────────────────────────────────────────────────
+
+#[test]
+fn compat_fields_survive_the_archive_round_trip() {
+    let compat = CompatFields {
+        arena_id: NonZeroU32::new(105_816),
+        mtgo_id: NonZeroU32::new(152_037),
+        tcgplayer_id: NonZeroU32::new(697_344),
+        cardmarket_id: NonZeroU32::new(892_161),
+        penny_rank: NonZeroU32::new(42),
+        image_updated_at: NonZeroU32::new(1_783_903_008),
+        price_usd_foil: NonZeroU32::new(282), // integer cents, same convention as the price columns
+        price_eur_foil: NonZeroU32::new(164),
+        set_vid: 7,
+        lang_id: 3,
+        set_type_id: 7,
+        games: GAME_PAPER | GAME_ARENA,
+        finishes: FINISH_NONFOIL | FINISH_FOIL,
+        flags: COMPAT_PROMO | COMPAT_REPRINT,
+        multiverse_ids: vec![1, 2, 3],
+        ..CompatFields::default()
+    };
+
+    let bytes = rkyv::to_bytes::<Error>(&compat).expect("serialize");
+    let a = rkyv::access::<Archived<CompatFields>, Error>(&bytes).expect("access");
+
+    assert_eq!(a.arena_id.as_ref().map(|v| v.get()), Some(105_816));
+    assert_eq!(a.price_usd_foil.as_ref().map(|v| v.get()), Some(282));
+    // set_vid is a vocab id now, not the raw UUID: ~1,000 sets against ~98,000
+    // printings, so interning it costs 2 bytes a row instead of 16.
+    assert_eq!(u16::from(a.set_vid), 7);
+    assert_eq!(u16::from(a.lang_id), 3);
+    assert_eq!(a.multiverse_ids.len(), 3);
+
+    // Bitsets are only useful if membership survives independently of each other.
+    assert_ne!(a.games & GAME_PAPER, 0);
+    assert_ne!(a.games & GAME_ARENA, 0);
+    assert_eq!(a.games & 0b0000_0010, 0, "mtgo was not set");
+    assert_ne!(u16::from(a.flags) & COMPAT_PROMO, 0);
+    assert_ne!(u16::from(a.flags) & COMPAT_REPRINT, 0);
+    assert_eq!(u16::from(a.flags) & COMPAT_TEXTLESS, 0, "textless was not set");
+}
+
+/// `card_name_lower_id` costs the archived row NOTHING, and that is why it is a u32 sitting beside
+/// a 62-byte inline rather than four bytes taken out of the inline to pay for itself.
+///
+/// `oracle_id` gives `Archived<OracleCard>` 16-byte alignment, and the trailing round-up already
+/// held more than four spare bytes: the row measured 256 before the field and measures 256 with it.
+/// The cliff is real and not far away — widening the inline to `InlineStr<65>` takes the row to 272,
+/// which over ~31,700 cards is ~500 KB of archive — so this is pinned rather than left to be
+/// rediscovered by whoever adds the next field.
+#[test]
+fn the_overflow_id_is_free_in_the_row() {
+    assert_eq!(std::mem::size_of::<Archived<OracleCard>>(), 256);
+    // `Printing` is 272 since #927's flavor-name pair (`flavor_name_id` + `flavor_name_folded_id`,
+    // carried here for `prefer:borderless`): eight bytes of ids under the 16-byte alignment
+    // `scryfall_id` gives the row, which the trailing round-up could not absorb — a single u32 did
+    // fit, the pair moved the row a step, ~1.5 MB over ~98k canonical printings. Pinned for the
+    // same reason as the card row: the next field gets measured, not assumed free.
+    assert_eq!(std::mem::size_of::<Archived<Printing>>(), 272);
+    // The inline width is unchanged by this field: 61 bytes plus the length byte, and the u32 that
+    // follows starts at 64 either way. Narrowing it would only push more names onto the spill path.
+    assert_eq!(std::mem::size_of::<InlineStr<NAME_INLINE>>(), 62);
+}
+
+#[test]
+fn the_niche_actually_niches() {
+    // The size the "Halve What the Compat Residue Costs a Printing" reasoning depends on, pinned
+    // rather than asserted in a commit message. rkyv 0.8 does NOT niche an Option<NonZeroU32> on
+    // its own -- without `#[rkyv(with = NicheInto<Zero>)]` each of the eleven is 8 bytes and this
+    // struct is 128, which is what it measured at before the attribute was added. Multiplied by
+    // ~98,000 printings, the difference is 4.2 MB.
+    assert_eq!(std::mem::size_of::<Archived<CompatFields>>(), 84);
+    assert_eq!(std::mem::size_of::<Archived<Option<NonZeroU32>>>(), 8, "the bare Option is NOT niched");
+}
+
+#[test]
+fn absent_compat_values_stay_absent() {
+    // Scryfall OMITS a key rather than sending null, so a reconstructed card object has to be able
+    // to tell "was not there" from "was empty" -- otherwise every card sprouts nulls Scryfall never
+    // sent, and a client comparing shapes sees a difference on every single row.
+    let bytes = rkyv::to_bytes::<Error>(&CompatFields::default()).expect("serialize");
+    let a = rkyv::access::<Archived<CompatFields>, Error>(&bytes).expect("access");
+
+    assert!(a.arena_id.is_none());
+    assert!(a.mtgo_id.is_none());
+    assert!(a.penny_rank.is_none());
+    assert!(a.price_usd_foil.is_none());
+    assert_eq!(u16::from(a.lang_id), VOCAB_NONE, "absent lang is the sentinel, not vocab id 0");
+    assert_eq!(u16::from(a.set_type_id), VOCAB_NONE);
+    assert_eq!(u16::from(a.set_vid), VOCAB_NONE);
+    assert_eq!(a.games, 0);
+    assert_eq!(u16::from(a.flags), 0);
+    assert!(a.multiverse_ids.is_empty());
+    assert!(a.promo_types.is_empty());
+}
+
+/// An illustration id is NOT unique -- reprints sharing art carry the same one -- so the binary
+/// search lands anywhere inside a run. The SQL this replaces ordered by `prefer_score` and took the
+/// first, which is the first printing in CORPUS order, so the index must return the run's MINIMUM
+/// pid rather than whichever member the search happened to hit.
+#[test]
+fn an_illustration_id_resolves_to_its_first_printing() {
+    let mut vocab = VocabInterner::new();
+    let mut cards = Vec::new();
+    for i in 0..4u128 {
+        cards.push(stub_card(i + 1, 0, &[], &mut vocab));
+    }
+    let mut data = store_of(cards, &[1, 1, 1, 1], vocab);
+    // Shared art on three printings, deliberately NOT in pid order once sorted: 7 on pids 3, 1, 2.
+    data.printings[0].illustration_id = 9;
+    data.printings[1].illustration_id = 7;
+    data.printings[2].illustration_id = 7;
+    data.printings[3].illustration_id = 7;
+    data.indexes.printing_by_illustration_id = crate::build_printing_by_illustration_id(&data.printings);
+
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let a = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let perm = &a.indexes.printing_by_illustration_id;
+
+    assert_eq!(crate::find_printing_by_illustration_id(perm, &a.printings, 7), Some(1), "the FIRST, not any");
+    assert_eq!(crate::find_printing_by_illustration_id(perm, &a.printings, 9), Some(0));
+    assert_eq!(crate::find_printing_by_illustration_id(perm, &a.printings, 8), None, "a miss is None, not a neighbour");
+    // 0 is parse_uuid_or_hash's null and must never match a stored row.
+    assert_eq!(crate::find_printing_by_illustration_id(perm, &a.printings, 0), None);
+}
+
+#[test]
+fn external_ids_resolve_to_their_printing() {
+    let mut a = stub_printing(1, 1, Some(1.0));
+    a.compat = CompatFields {
+        multiverse_ids: vec![100, 101],
+        mtgo_id: NonZeroU32::new(200),
+        mtgo_foil_id: NonZeroU32::new(201),
+        arena_id: NonZeroU32::new(300),
+        ..CompatFields::default()
+    };
+    let mut b = stub_printing(2, 2, Some(1.0));
+    b.compat =
+        CompatFields { tcgplayer_id: NonZeroU32::new(400), tcgplayer_etched_id: NonZeroU32::new(401), ..CompatFields::default() };
+    let printings = vec![a, b];
+
+    let idx = build_external_id_index(&printings);
+    let bytes = rkyv::to_bytes::<Error>(&idx).expect("serialize");
+    let aidx = rkyv::access::<Archived<Vec<(u8, u64, u32)>>, Error>(&bytes).expect("access");
+
+    // A multiverse id is a LIST, so one printing contributes several entries.
+    assert_eq!(find_printing_by_external_id(aidx, EXT_MULTIVERSE, 100), Some(0));
+    assert_eq!(find_printing_by_external_id(aidx, EXT_MULTIVERSE, 101), Some(0));
+    // mtgo resolves against BOTH mtgo_id and mtgo_foil_id, as Scryfall's route does.
+    assert_eq!(find_printing_by_external_id(aidx, EXT_MTGO, 200), Some(0));
+    assert_eq!(find_printing_by_external_id(aidx, EXT_MTGO, 201), Some(0));
+    assert_eq!(find_printing_by_external_id(aidx, EXT_ARENA, 300), Some(0));
+    // ...and tcgplayer against both plain and etched.
+    assert_eq!(find_printing_by_external_id(aidx, EXT_TCGPLAYER, 400), Some(1));
+    assert_eq!(find_printing_by_external_id(aidx, EXT_TCGPLAYER, 401), Some(1));
+
+    // Namespaces are separate keyspaces: id 200 is an mtgo id, not an arena one.
+    assert_eq!(find_printing_by_external_id(aidx, EXT_ARENA, 200), None);
+    assert_eq!(find_printing_by_external_id(aidx, EXT_MTGO, 999), None);
+}
+
+#[test]
+fn a_shared_external_id_resolves_to_the_first_printing() {
+    // Etched and nonfoil rows do collide on a TCGplayer id. Printings are stored in descending
+    // prefer order, so the lowest index is the one the rest of the API would show.
+    let mut a = stub_printing(1, 1, Some(9.0));
+    a.compat = CompatFields { tcgplayer_id: NonZeroU32::new(500), ..CompatFields::default() };
+    let mut b = stub_printing(2, 2, Some(1.0));
+    b.compat = CompatFields { tcgplayer_id: NonZeroU32::new(500), ..CompatFields::default() };
+
+    let idx = build_external_id_index(&[a, b]);
+    let bytes = rkyv::to_bytes::<Error>(&idx).expect("serialize");
+    let aidx = rkyv::access::<Archived<Vec<(u8, u64, u32)>>, Error>(&bytes).expect("access");
+    assert_eq!(find_printing_by_external_id(aidx, EXT_TCGPLAYER, 500), Some(0));
+}
+
+#[test]
+fn related_cards_stand_alone_without_the_referenced_card() {
+    // The reason all_parts carries its own name and type line: a `token` component references a
+    // card the import FILTERS OUT (preprocess_card drops Token type lines), so an index into our
+    // cards would resolve to nothing. The reference has to be self-contained.
+    let mut vocab = VocabInterner::new();
+    let mut card = stub_card(1, 0, &[], &mut vocab);
+    card.all_parts = vec![
+        RelatedCard { id: 0xAAAA, name_id: 10, type_line_id: 11, component_id: 1 },
+        RelatedCard { id: 0xBBBB, name_id: 20, type_line_id: 21, component_id: 2 },
+    ];
+
+    let bytes = rkyv::to_bytes::<Error>(&card).expect("serialize");
+    let a = rkyv::access::<Archived<OracleCard>, Error>(&bytes).expect("access");
+
+    assert_eq!(a.all_parts.len(), 2);
+    // Order is meaningful for melds: the two parts, then the result.
+    assert_eq!(u128::from(a.all_parts[0].id), 0xAAAA);
+    assert_eq!(u128::from(a.all_parts[1].id), 0xBBBB);
+    assert_eq!(u32::from(a.all_parts[0].name_id), 10);
+    assert_eq!(u32::from(a.all_parts[0].type_line_id), 11);
+    assert_ne!(u16::from(a.all_parts[0].component_id), u16::from(a.all_parts[1].component_id));
+}
+
+#[test]
+fn cards_without_relations_carry_none() {
+    let mut vocab = VocabInterner::new();
+    let card = stub_card(1, 0, &[], &mut vocab);
+    let bytes = rkyv::to_bytes::<Error>(&card).expect("serialize");
+    let a = rkyv::access::<Archived<OracleCard>, Error>(&bytes).expect("access");
+    assert!(a.all_parts.is_empty(), "~59% of cards have no relations");
+}
+
+// ─── Fuzzy name matching ──────────────────────────────────────────────────────
+
+/// `trigrams_into` is a hand-rolled restatement of `trigrams`'s padded-window definition that
+/// avoids materialising the `"  word "` buffer, so the two must agree EXACTLY — a single dropped
+/// or extra window would shift every fuzzy score without failing anything else.
+///
+/// The word lengths are the interesting axis: 1 and 2 bytes are the cases where the padded form is
+/// shorter than a full 3-window and the leading/trailing windows overlap, which is precisely where
+/// an off-by-one would hide.
+#[test]
+fn trigrams_into_matches_the_padded_definition() {
+    let mut buf = Vec::new();
+    for s in [
+        "",
+        "a",
+        "ab",
+        "abc",
+        "abcd",
+        "a b",
+        "a bc def",
+        "jace beleren",
+        "urza's bauble",
+        "  leading and trailing  ",
+        "!!! ??? ---",
+        "eowyn",
+        "\u{e9}owyn",
+        "fire // ice",
+        "x",
+        "aaaa aaaa",
+        "\u{c6}therling",
+    ] {
+        crate::trigrams_into(s, &mut buf);
+        let want: Vec<[u8; 3]> = crate::trigrams(s).into_iter().collect();
+        assert_eq!(buf, want, "trigrams_into disagrees with trigrams for {s:?}");
+    }
+}
+
+#[test]
+fn trigram_similarity_matches_pg_trgm() {
+    // pg_trgm pads each word "  word " and windows over it, so "abc" yields exactly
+    // {"  a", " ab", "abc", "bc "}. Identical strings therefore score 1.0.
+    assert!((trigram_similarity("abc", "abc") - 1.0).abs() < 1e-6);
+
+    // "abc" vs "abd": {"  a"," ab","abc","bc "} vs {"  a"," ab","abd","bd "}.
+    // shared 2, union 4 + 4 - 2 = 6, so 1/3. Hand-computed against pg_trgm's definition.
+    assert!((trigram_similarity("abc", "abd") - 1.0 / 3.0).abs() < 1e-6);
+
+    // Non-alphanumerics are separators, not characters: punctuation between words changes nothing.
+    assert!((trigram_similarity("urza's bauble", "urza s bauble") - 1.0).abs() < 1e-6);
+
+    // Nothing in common scores 0, and an empty side scores 0 rather than dividing by zero.
+    assert_eq!(trigram_similarity("abc", "xyz"), 0.0);
+    assert_eq!(trigram_similarity("", "abc"), 0.0);
+    assert_eq!(trigram_similarity("", ""), 0.0);
+
+    // Symmetric, as Jaccard is.
+    assert_eq!(trigram_similarity("lightning", "lightnin"), trigram_similarity("lightnin", "lightning"));
+}
+
+/// The by-name lookups narrow through `name_trigram`, and narrowing must not change the answer.
+///
+/// Asserted DIFFERENTIALLY, over the same store built twice: once with the index (the narrowed
+/// path) and once without it (the full scan, which `store_of` produces because it does not build
+/// `name_trigram`). Every probe must agree. A test that only exercised the fast path would pass
+/// just as happily if the narrowing were fast and wrong.
+#[test]
+fn name_lookups_agree_with_and_without_the_trigram_index() {
+    // Built twice rather than cloned: neither OracleCard nor VocabInterner is Clone.
+    let fixture = || {
+        let mut vocab = VocabInterner::new();
+        let names = [
+            "lightning bolt",
+            "emeritus of conflict // lightning bolt",
+            "delver of secrets // insectile aberration",
+            "shock",
+            // Punctuated, so a COLLATED needle for it (`limduls vault`) shares no trigram with the
+            // stored spelling and the narrowed pass finds nothing -- the case the full-scan
+            // fallback in `name_best` exists for, and the one this test has to reach.
+            "lim-dul's vault",
+        ];
+        let mut cards = Vec::new();
+        for (i, name) in names.iter().enumerate() {
+            let mut c = stub_card(i as u128 + 1, 0, &[], &mut vocab);
+            c.card_name_lower = InlineStr::from_str(name);
+            cards.push(c);
+        }
+        store_of(cards, &[1, 1, 1, 1, 1], vocab)
+    };
+    // `store_of` does not build `name_trigram`, so this one takes the full-scan path.
+    let scan_data = fixture();
+    let mut idx_data = fixture();
+    idx_data.indexes.name_trigram = build_trigram_index(&idx_data.cards, |c| crate::folded_name_of(c, &[]));
+
+    let scan_bytes = rkyv::to_bytes::<Error>(&scan_data).expect("serialize");
+    let scan = rkyv::access::<Archived<CardData>, Error>(&scan_bytes).expect("access");
+    let idx_bytes = rkyv::to_bytes::<Error>(&idx_data).expect("serialize");
+    let idx = rkyv::access::<Archived<CardData>, Error>(&idx_bytes).expect("access");
+
+    for needle in [
+        "lightning bolt",
+        "delver of secrets",
+        "insectile aberration",
+        "emeritus of conflict",
+        "shock",
+        "no such card",
+        "li", // under 3 bytes: the index has nothing to say and both sides scan
+        // COLLATED spellings. Each of these matches a card whose stored folded name shares no
+        // trigram with it, so the narrowed side reaches its answer only through the full-scan
+        // fallback -- and an unnarrowed side that quietly disagreed would be the bug.
+        "limduls vault",
+        "limdulsvault",
+        "lim-duls vault",
+        "lightningbolt",
+        "lightning-bolt",
+        "delverofsecrets",
+    ] {
+        assert_eq!(
+            exact_name_match(scan, needle, None),
+            exact_name_match(idx, needle, None),
+            "exact_name_match disagrees for {needle:?}"
+        );
+        assert_eq!(
+            collection_name_match(scan, needle, None),
+            collection_name_match(idx, needle, None),
+            "collection_name_match disagrees for {needle:?}"
+        );
+    }
+    for words in [vec!["lightning".to_owned()], vec!["of".to_owned(), "secrets".to_owned()], vec!["zzz".to_owned()]] {
+        assert_eq!(
+            names_containing_all_words(scan, &words, None, 2),
+            names_containing_all_words(idx, &words, None, 2),
+            "names_containing_all_words disagrees for {words:?}"
+        );
+    }
+
+    // And the ranking rule the SQL carried in its ORDER BY: a WHOLE-name match beats a face match,
+    // even when the face's card scores higher. `lightning bolt` is card 0 and also the BACK face of
+    // card 1, whose printing has the better prefer_score.
+    assert_eq!(exact_name_match(idx, "lightning bolt", None).map(|(cid, _)| cid), Some(0));
+    // A face match is still found when nothing carries the whole name.
+    assert_eq!(exact_name_match(idx, "insectile aberration", None).map(|(cid, _)| cid), Some(2));
+}
+
+/// A collection SCOPE narrows a `{name}` identifier to the printings passing its filter and
+/// picks among them by its prefer -- the `?q=` of `POST /cards/collection`.
+///
+/// Clive, Ifrit's Dominant in miniature: the plain fin/133 first in default order, the
+/// date-stamped prerelease promo second, his ART-SERIES card third, the borderless fin/318
+/// fourth. No scope answers fin/133; `prefer:atypical` answers the promo (a date stamp is an
+/// atypical treatment, and it ranks first among the atypical ones, on api.scryfall.com too);
+/// `-is:datestamped prefer:atypical` answers the borderless one; and a filter no printing passes
+/// is None, exactly as a name that does not exist.
+///
+/// The art-series card is borderless, in-universe and carries no flavor name, ranks ABOVE fin/318,
+/// and is tagged `extra` -- Birgi's akhm/31 shape, which won `prefer:borderless` and
+/// `prefer:atypical` on a scoped collection before the pool excluded extras. It never wins a
+/// scoped pick; an identifier's own `set` still reaches it, because a collection resolves extras
+/// BY ID.
+#[test]
+fn a_collection_scope_filters_the_printings_and_prefers_among_them() {
+    let mut vocab = VocabInterner::new();
+    for word in ["datestamped", "prerelease", crate::EXTRA_IS_TAG] {
+        vocab.intern(word.to_owned()).expect("vocab");
+    }
+    let mut card = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
+    card.card_name_lower = InlineStr::from_str("clive, ifrit's dominant");
+    let mut data = store_of(vec![card], &[4], vocab);
+    // Resolved AFTER store_of: it renumbers the vocab lexicographically, so an id taken from the
+    // interner before it ran names a different word now.
+    let id_of = |word: &str| coll_ids_in(&data.coll_vocab, &[word])[0];
+    let (datestamped, prerelease, extra) = (id_of("datestamped"), id_of("prerelease"), id_of(crate::EXTRA_IS_TAG));
+    data.strings.push("black".to_owned());
+    data.strings.push("borderless".to_owned());
+    let (black, borderless) = ((data.strings.len() - 2) as u32, (data.strings.len() - 1) as u32);
+    for (p, set) in data.printings.iter_mut().zip(["fin", "pfin", "afin", "fin"]) {
+        p.card_set_code = InlineStr::from_str(set);
+        p.card_border_id = black;
+    }
+    // The tag is what `-is:datestamped` reads; the promo_types member is what the atypical class
+    // reads (see `PreferClassIds`) -- the importer writes both from the one bulk key.
+    data.printings[1].card_is_tags = vec![datestamped];
+    data.printings[1].compat.promo_types = vec![prerelease, datestamped];
+    // id 3: the art-series card, borderless, an extra -- and the OLDEST, so `prefer:oldest` would
+    // reach it too (Coruscation Mage's token tblb/17 shape).
+    data.printings[2].card_border_id = borderless;
+    data.printings[2].card_is_tags = vec![extra];
+    data.printings[2].released_at_int = Some(19800101);
+    data.printings[3].card_border_id = borderless;
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let is_tag = |tag: &str| FilterExpr::CollectionCmp { field: CollField::IsTags, op: CmpOp::Ge, value: tag.to_owned(), value_id: None };
+    let not_datestamped = || FilterExpr::Not(Box::new(is_tag("datestamped")));
+    // Bound the way `bind_collection_scope` binds: the filter against this store's vocabs, the
+    // prefer's class ids through `bind_prefer`.
+    let scope = |prefer: &str, filter: Option<FilterExpr>| CollectionScope {
+        prefer: QueryParams::from_strs("printing", prefer, "name", "asc", 1, 0).bind_prefer(&archived.coll_vocab).prefer,
+        filter: filter.map(|mut f| {
+            f.bind(&archived.coll_vocab, &archived.artist_vocab, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
+            f
+        }),
+        extra_vid: archived.coll_vocab.iter().position(|s| s.as_str() == crate::EXTRA_IS_TAG).map(|p| p as u16),
+    };
+    let pick = |set_code: Option<&str>, scope: Option<&CollectionScope>| -> Option<usize> {
+        name_best(archived, "clive, ifrit's dominant", set_code, NameScope::Collection, scope).map(|(_, pid)| pid)
+    };
+
+    assert_eq!(pick(None, None), Some(0), "no scope: the default pick");
+    assert_eq!(pick(None, Some(&scope("atypical", None))), Some(1), "the date stamp is atypical and ranks first");
+    assert_eq!(pick(None, Some(&scope("atypical", Some(not_datestamped())))), Some(3), "filtered to the borderless printing, never the art-series extra");
+    assert_eq!(pick(None, Some(&scope("borderless", None))), Some(3), "the art-series card is borderless and outranks fin/318, and still never wins");
+    assert_eq!(pick(None, Some(&scope("oldest", None))), Some(3), "nor under `prefer:oldest`, though it is the oldest");
+    assert_eq!(pick(None, Some(&scope("default", Some(not_datestamped())))), Some(0), "a filter alone keeps the default order");
+    // An identifier's own `set` resolves the extra without a scope -- a collection resolves extras
+    // by id -- and a scope over that set has nothing left to pick from.
+    assert_eq!(pick(Some("afin"), None), Some(2));
+    assert_eq!(pick(Some("afin"), Some(&scope("default", None))), None);
+    let none_pass = FilterExpr::And(vec![is_tag("datestamped"), is_tag("nonexistenttag")]);
+    assert_eq!(pick(None, Some(&scope("atypical", Some(none_pass)))), None, "a filter no printing passes is not_found");
+    // The identifier's own `set` and the scope COMPOSE: inside `pfin`, `-is:datestamped` leaves nothing.
+    assert_eq!(pick(Some("pfin"), None), Some(1));
+    assert_eq!(pick(Some("pfin"), Some(&scope("default", Some(not_datestamped())))), None);
+    // `exact=` never consults a scope.
+    assert_eq!(exact_name_match(archived, "clive, ifrit's dominant", None).map(|(_, pid)| pid), Some(0));
+}
+
+/// A store of `names`, folded == lowered (the fixture leaves `card_name_folded_id` unset), with
+/// `printing_counts[i]` printings on card i. The by-name tests below all want the same shape.
+///
+/// Names go in through `split_lower_name`, the SAME function the builder writes them with, so a
+/// name past the inline bound spills to `strings` here exactly as it does in a real store. A
+/// fixture that called `InlineStr::from_str` directly would store the cut and quietly test the bug.
+fn name_store(names: &[&str], printing_counts: &[usize]) -> CardData {
+    let mut vocab = VocabInterner::new();
+    let mut strings: Vec<String> = Vec::new();
+    let mut cards = Vec::new();
+    for (i, name) in names.iter().enumerate() {
+        let mut c = stub_card(i as u128 + 1, 0, &[], &mut vocab);
+        let (inline, id) = split_lower_name(name, |s| {
+            strings.push(s);
+            (strings.len() - 1) as u32
+        });
+        c.card_name_lower = inline;
+        c.card_name_lower_id = id;
+        cards.push(c);
+    }
+    let mut data = store_of(cards, printing_counts, vocab);
+    data.strings = strings;
+    data
+}
+
+/// The two name surfaces over one scan: a collection identifier's `{"name"}` reads a card's FACE
+/// names when the name splits in EXACTLY two and its whole name otherwise; `named?exact=` reads
+/// that set PLUS the joined name.
+///
+/// Measured against api.scryfall.com on 2026-08-31, one identifier per request -- a collection
+/// response's `data` is not in identifier order, so a batched probe answers the wrong needles:
+///
+///   {"name":"Delver of Secrets"}                   -> Delver of Secrets // Insectile Aberration
+///   {"name":"Insectile Aberration"}                -> the same card (a BACK face names it)
+///   {"name":"Delver of Secrets // Insectile ..."}  -> not_found, where `exact=` is the card
+///   {"name":"Fire // Ice"}                         -> not_found, likewise
+///   {"name":"Who // What // When // Where // Why"} -> und/75, a FIVE-part name IS a key
+///   {"name":"Who"}                                 -> not_found, and so is `exact=Who`
+#[test]
+fn a_collection_identifier_reads_faces_where_exact_also_reads_the_joined_name() {
+    let names = ["delver of secrets // insectile aberration", "who // what // when // where // why", "fire // ice"];
+    let data = name_store(&names, &[1, 1, 1]);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let d = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let exact = |n: &str| exact_name_match(d, n, None).map(|(cid, _)| cid);
+    let coll = |n: &str| collection_name_match(d, n, None).map(|(cid, _)| cid);
+
+    // Either FACE names the card on both surfaces. The BACK is the half the SQL predicate the
+    // collection route carried never looked at: it split on ' // ' and compared part 1 only.
+    for needle in ["delver of secrets", "insectile aberration"] {
+        assert_eq!(exact(needle), Some(0), "exact= resolves a face name: {needle:?}");
+        assert_eq!(coll(needle), Some(0), "a collection identifier resolves a face name: {needle:?}");
+    }
+
+    // The JOINED name is the one key the two surfaces disagree about.
+    for (needle, cid) in [("delver of secrets // insectile aberration", 0), ("fire // ice", 2)] {
+        assert_eq!(exact(needle), Some(cid), "exact= answers the joined name: {needle:?}");
+        assert_eq!(coll(needle), None, "a collection identifier does not: {needle:?}");
+    }
+
+    // MORE than two halves: the whole name is the key and NO part of it is, on either surface.
+    // `split_once(" // ")` read this name as "who" plus the rest and answered und/75 for `who`.
+    let five = "who // what // when // where // why";
+    assert_eq!(exact(five), Some(1), "the five-part name is a key");
+    assert_eq!(coll(five), Some(1), "on both surfaces");
+    for part in ["who", "what", "when", "where", "why"] {
+        assert_eq!(exact(part), None, "no part of a five-part name is an exact= key: {part:?}");
+        assert_eq!(coll(part), None, "nor a collection identifier's: {part:?}");
+    }
+}
+
+/// Both name surfaces compare COLLATED names -- accent-folded (already, by the caller), lowercased,
+/// every non-alphanumeric character removed -- which is what Scryfall compares.
+///
+/// api.scryfall.com, 2026-08-31: `exact=limduls vault`, `exact=lim-duls vault`,
+/// `exact=Lightning-Bolt`, `exact=delverofsecrets` and `exact=whowhatwhenwherewhy` all resolve, and
+/// so do the same spellings as collection identifiers. Every one of them answered 404 here.
+#[test]
+fn both_name_surfaces_compare_collated_names() {
+    let names = ["lim-dul's vault", "lightning bolt", "delver of secrets // insectile aberration"];
+    let data = name_store(&names, &[1, 1, 1]);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let d = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let exact = |n: &str| exact_name_match(d, n, None).map(|(cid, _)| cid);
+    let coll = |n: &str| collection_name_match(d, n, None).map(|(cid, _)| cid);
+
+    for needle in ["lim-dul's vault", "limduls vault", "lim-duls vault", "limdulsvault"] {
+        assert_eq!(exact(needle), Some(0), "exact= {needle:?}");
+        assert_eq!(coll(needle), Some(0), "collection {needle:?}");
+    }
+    for needle in ["lightning bolt", "lightning-bolt", "lightningbolt", "lightning  bolt"] {
+        assert_eq!(exact(needle), Some(1), "exact= {needle:?}");
+        assert_eq!(coll(needle), Some(1), "collection {needle:?}");
+    }
+
+    // A FACE collates the same way, and the " // " it sits beside does not leak into it: the
+    // halves are split BEFORE either side is collated, so no needle straddles the join.
+    assert_eq!(coll("delverofsecrets"), Some(2));
+    assert_eq!(coll("secretsinsectile"), None, "a needle across the join names nothing");
+
+    // Collating does not make the joined name a collection key, only a differently spelled one.
+    assert_eq!(exact("delverofsecretsinsectileaberration"), Some(2));
+    assert_eq!(coll("delverofsecretsinsectileaberration"), None);
+
+    // A KEY, not a substring. `{"name":"Elves"}` answers *Elves* (ffdn/9) on api.scryfall.com --
+    // the obscure card actually named that, not one of the hundreds whose names contain the word,
+    // which is what a containment lookup ordered by popularity would have said.
+    for needle in ["elves", "bolt", "vault", "dul"] {
+        assert_eq!(exact(needle), None, "exact= {needle:?}");
+        assert_eq!(coll(needle), None, "collection {needle:?}");
+    }
+    // A needle with no alphanumerics at all collates to nothing and names nothing -- answered
+    // without a scan, because `{"name":"  "}` is a shape a collection POST can carry.
+    for needle in ["", "  ", " // "] {
+        assert_eq!(exact(needle), None, "exact= {needle:?}");
+        assert_eq!(coll(needle), None, "collection {needle:?}");
+    }
+}
+
+/// A name too long for the inline field survives the build WHOLE, on every name surface.
+///
+/// `card_name_lower` is an `InlineStr<61>` whose `from_str` cuts in SILENCE, and the comment beside
+/// it used to claim 61 bytes covered every card name in the Scryfall dataset. 36 names in
+/// `all_cards` are longer: 34 doubled `X // X` art-series and reversible names, the 141-character
+/// Unhinged elemental, and this one -- 63 bytes, and the only one of the 36 whose two halves say
+/// different things, which is what makes it the one that loses a searchable FACE.
+/// The folded name is DERIVED from the same field, so the single cut reached every surface at once.
+///
+/// Measured on a deployment of this engine 2026-08-31, against api.scryfall.com, which answers the
+/// first three and not the fourth:
+///
+///   !"Curse of the Fire Penguin Creature"     0 here   1 there
+///   name:"fire penguin creature"              0 here   1 there
+///   /cards/named?exact= of the same string    404      the card
+///   !"Curse of the Fire Penguin Creatu"       1 HERE   0 there
+///
+/// The last line is how it was found: the 61-byte cut answered, and the name the card prints did
+/// not. It is also the assertion at the bottom of this test -- the one that fails on the old build,
+/// where every other assertion here fails by returning None.
+#[test]
+fn a_name_past_the_inline_bound_survives_every_name_surface() {
+    let long = "curse of the fire penguin // curse of the fire penguin creature";
+    assert!(long.len() > NAME_INLINE, "the fixture has to be over the bound to test anything: {}", long.len());
+    let cut = &long[..NAME_INLINE];
+
+    let data = name_store(&[long, "lightning bolt"], &[1, 1]);
+    assert_ne!(data.cards[0].card_name_lower_id, NONE_STR, "the fixture spilled, as the builder would");
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let d = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let exact = |n: &str| exact_name_match(d, n, None).map(|(cid, _)| cid);
+    let coll = |n: &str| collection_name_match(d, n, None).map(|(cid, _)| cid);
+
+    // The WHOLE joined name, which no version of the inline field ever held.
+    assert_eq!(exact(long), Some(0), "the whole joined name is an exact= key");
+    // Both FACES. The front one the cut never lost; the back one begins at byte 29 and runs past
+    // 61, so it existed only in the half of the string that was thrown away.
+    assert_eq!(exact("curse of the fire penguin"), Some(0), "the front face");
+    assert_eq!(coll("curse of the fire penguin"), Some(0), "on the collection surface too");
+    assert_eq!(exact("curse of the fire penguin creature"), Some(0), "the BACK face, which the cut lost");
+    assert_eq!(coll("curse of the fire penguin creature"), Some(0), "and a collection identifier reads it");
+    // The COLLATED spelling of the same back face -- separators removed, which is what Scryfall
+    // compares. It is derived from the stored name at query time, so a cut name cut this too.
+    assert_eq!(exact("curseofthefirepenguincreature"), Some(0), "the collated back face");
+    assert_eq!(coll("curseofthefirepenguincreature"), Some(0), "as a collection identifier");
+
+    // AND THE CUT IS NOBODY'S NAME. This is the assertion that fails on the old build rather than
+    // erroring: the 61-byte prefix answered the card, on both surfaces, because it was literally
+    // what the store held.
+    assert_eq!(exact(cut), None, "the {NAME_INLINE}-byte cut is not an exact= key");
+    assert_eq!(coll(cut), None, "nor a collection identifier's");
+    // Nor is the cut of the back face alone, for the same reason.
+    assert_eq!(exact("curse of the fire penguin creatu"), None, "and neither is a cut of the face");
+}
+
+/// A WHOLE-name match beats a FACE match on the collection surface too, and `set` filters the
+/// lookup rather than its answer.
+///
+/// The tier is not decoration: without it the collection rule is wrong wherever a needle is one
+/// card's whole name and another's face, and the loser scores higher. `{"name":"Delver of
+/// Secrets","set":"mid"}` answers mid/47 on api.scryfall.com -- the same card the unset identifier
+/// resolves, in the set asked for -- so the set narrows which PRINTING answers, and a card with no
+/// printing in that set drops out of the lookup entirely.
+#[test]
+fn a_collection_identifier_ranks_whole_over_face_and_takes_set_as_a_filter() {
+    // Card 1's printings score higher than card 0's (store_of scores a range descending from its
+    // length), so a rule ordering on prefer_score alone answers the FACE match here.
+    let names = ["lightning bolt", "emeritus of conflict // lightning bolt"];
+    let mut data = name_store(&names, &[1, 2]);
+    for (pid, code) in [(0, "aaa"), (1, "bbb"), (2, "ccc")] {
+        data.printings[pid].card_set_code = InlineStr::from_str(code);
+    }
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let d = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    assert_eq!(collection_name_match(d, "lightning bolt", None), Some((0, 0)), "whole name beats the face");
+    assert_eq!(exact_name_match(d, "lightning bolt", None), Some((0, 0)), "on exact= alike");
+
+    // Restricted to the set the FACE card is printed in, the face match is the only candidate left.
+    assert_eq!(collection_name_match(d, "lightning bolt", Some("bbb")), Some((1, 1)));
+    assert_eq!(collection_name_match(d, "lightning bolt", Some("ccc")), Some((1, 2)));
+    // And a set nothing is printed in resolves nothing, rather than falling back to any printing.
+    assert_eq!(collection_name_match(d, "lightning bolt", Some("zzz")), None);
+}
+
+#[test]
+fn a_typo_resolves_to_the_intended_card() {
+    let mut vocab = VocabInterner::new();
+    let mut cards = Vec::new();
+    for (i, name) in ["lightning bolt", "shock", "counterspell"].iter().enumerate() {
+        let mut c = stub_card(i as u128 + 1, 0, &[], &mut vocab);
+        c.card_name_lower = InlineStr::from_str(name);
+        cards.push(c);
+    }
+    let bytes = rkyv::to_bytes::<Error>(&cards).expect("serialize");
+    let a = rkyv::access::<Archived<Vec<OracleCard>>, Error>(&bytes).expect("access");
+    // Every card here carries NONE_STR (folded == lower), so an EMPTY table is the right one:
+    // `folded_name` never reaches it, and a populated one would prove nothing extra.
+    let sbytes = rkyv::to_bytes::<Error>(&Vec::<String>::new()).expect("serialize strings");
+    let strs = rkyv::access::<Archived<Vec<String>>, Error>(&sbytes).expect("access strings");
+
+    match fuzzy_name_match(a, strs, "lightnig bolt", 0.4, 0.05) {
+        FuzzyOutcome::Hit(cid) => assert_eq!(cid, 0, "a one-letter typo still finds Lightning Bolt"),
+        _ => panic!("expected a hit"),
+    }
+    // Nothing close enough clears the floor.
+    assert!(matches!(fuzzy_name_match(a, strs, "zzzzzzzz", 0.4, 0.05), FuzzyOutcome::Miss));
+}
+
+#[test]
+fn two_close_names_are_ambiguous_not_a_guess() {
+    // Scryfall reports `ambiguous` rather than picking, and collapsing that to "not found" would
+    // tell the client the card does not exist.
+    let mut vocab = VocabInterner::new();
+    let mut cards = Vec::new();
+    for (i, name) in ["fire dragon", "fire dragoon"].iter().enumerate() {
+        let mut c = stub_card(i as u128 + 1, 0, &[], &mut vocab);
+        c.card_name_lower = InlineStr::from_str(name);
+        cards.push(c);
+    }
+    let bytes = rkyv::to_bytes::<Error>(&cards).expect("serialize");
+    let a = rkyv::access::<Archived<Vec<OracleCard>>, Error>(&bytes).expect("access");
+    // Every card here carries NONE_STR (folded == lower), so an EMPTY table is the right one:
+    // `folded_name` never reaches it, and a populated one would prove nothing extra.
+    let sbytes = rkyv::to_bytes::<Error>(&Vec::<String>::new()).expect("serialize strings");
+    let strs = rkyv::access::<Archived<Vec<String>>, Error>(&sbytes).expect("access strings");
+    assert!(matches!(fuzzy_name_match(a, strs, "fire dragen", 0.4, 0.05), FuzzyOutcome::Ambiguous));
+}
+
+#[test]
+fn printings_of_one_card_do_not_look_ambiguous() {
+    // Several cards sharing a NAME are one answer, not competing ones. Without the distinct-name
+    // rule they would tie with themselves and every fuzzy lookup would report ambiguous.
+    let mut vocab = VocabInterner::new();
+    let mut cards = Vec::new();
+    for i in 0..3u128 {
+        let mut c = stub_card(i + 1, 0, &[], &mut vocab);
+        // `card_name_folded_id` defaults to NONE_STR, i.e. "same as card_name_lower".
+        c.card_name_lower = InlineStr::from_str("lightning bolt");
+        cards.push(c);
+    }
+    let bytes = rkyv::to_bytes::<Error>(&cards).expect("serialize");
+    let a = rkyv::access::<Archived<Vec<OracleCard>>, Error>(&bytes).expect("access");
+    // Every card here carries NONE_STR (folded == lower), so an EMPTY table is the right one:
+    // `folded_name` never reaches it, and a populated one would prove nothing extra.
+    let sbytes = rkyv::to_bytes::<Error>(&Vec::<String>::new()).expect("serialize strings");
+    let strs = rkyv::access::<Archived<Vec<String>>, Error>(&sbytes).expect("access strings");
+    assert!(matches!(fuzzy_name_match(a, strs, "lightning bolt", 0.4, 0.05), FuzzyOutcome::Hit(_)));
+}
+
+#[test]
+fn autocomplete_matches_the_sql_routes_set_and_order() {
+    let mut vocab = VocabInterner::new();
+    let mut interner = Interner::new();
+    let mut cards = Vec::new();
+    // Matched on the lowercased key, ANSWERED with the printed name -- the two differ, which is
+    // the point: a catalog entry is something a client hands back to /cards/named?exact=.
+    // "Aftershock" is the substring case: it contains "sho" without starting with it.
+    for (i, name) in ["Shock", "Shatter", "Shockwave", "Aftershock", "Counterspell"].iter().enumerate() {
+        let mut c = stub_card(i as u128 + 1, 0, &[], &mut vocab);
+        c.card_name_lower = InlineStr::from_str(&name.to_lowercase());
+        // FOLDED is what the catalog now matches, so the fixture carries it. These names are ASCII,
+        // where folding is the identity -- the accented case is asserted separately below.
+        c.card_name_id = interner.intern((*name).to_string());
+        cards.push(c);
+    }
+    let n = cards.len();
+    let mut data = store_of(cards, &vec![1usize; n], vocab);
+    data.strings = interner.strings;
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let a = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    // The SQL this route falls back to is
+    //   WHERE lower(card_name) LIKE '%needle%' ORDER BY rank, length(card_name), card_name
+    // with rank 0 for a prefix match and 1 for a bare substring. The route asks the ENGINE first,
+    // so a disagreement is not a fallback -- it is two different answers to one request, and this
+    // one is what ships. Every assertion below is that query's behaviour.
+
+    // Substring matches are IN the set, and rank behind every prefix match. Verified against
+    // api.scryfall.com, where q=bolt answers Bolt Bend .. Boltwing Marauder THEN Firebolt,
+    // Rift Bolt -- a prefix-only catalog would never offer the client "Aftershock" at all.
+    assert_eq!(
+        autocomplete_names(a, "sho", 20),
+        vec!["Shock", "Shockwave", "Aftershock"],
+        "prefix matches rank 0, substring matches rank 1"
+    );
+    assert_eq!(
+        autocomplete_names(a, "SHO", 20),
+        vec!["Shock", "Shockwave", "Aftershock"],
+        "case-insensitive"
+    );
+    // Within a rank the order is by LENGTH then name, not alphabetical: Shock(5), Shatter(7),
+    // Shockwave(9). Alphabetical would put Shatter first, which is what this returned before.
+    assert_eq!(
+        autocomplete_names(a, "sh", 20),
+        vec!["Shock", "Shatter", "Shockwave", "Aftershock"],
+        "length then name within a rank, and PRINTED -- a lowercase entry is not a name Scryfall prints"
+    );
+    // THE ACCENT CASE, which is why this matches the folded name at all. `q=eowyn` answered an
+    // EMPTY catalog before: the needle is ASCII, the stored lowercase name is not, and nobody types
+    // the accent. api.scryfall.com answers q=eowyn with three Éowyn cards, q=jotun with three Jötun
+    // ones and q=lim-dul with eight. The PRINTED name still comes back accented -- folding decides
+    // what MATCHES, not what is shown.
+    {
+        let mut vocab2 = VocabInterner::new();
+        let mut interner2 = Interner::new();
+        let mut accented = Vec::new();
+        for (i, (printed, folded)) in
+            [("Éowyn, Lady of Rohan", "eowyn, lady of rohan"), ("Jötun Grunt", "jotun grunt")].iter().enumerate()
+        {
+            let mut c = stub_card(i as u128 + 1, 0, &[], &mut vocab2);
+            c.card_name_lower = InlineStr::from_str(&printed.to_lowercase());
+            // A folded name that DIFFERS is the only case that reaches the strings table, which is
+            // exactly what these two names are here to exercise.
+            c.card_name_folded_id = interner2.intern((*folded).to_string());
+            c.card_name_id = interner2.intern((*printed).to_string());
+            accented.push(c);
+        }
+        let n2 = accented.len();
+        let mut d2 = store_of(accented, &vec![1usize; n2], vocab2);
+        d2.strings = interner2.strings;
+        let b2 = rkyv::to_bytes::<Error>(&d2).expect("serialize");
+        let a2 = rkyv::access::<Archived<CardData>, Error>(&b2).expect("access");
+        assert_eq!(autocomplete_names(a2, "eowyn", 20), vec!["Éowyn, Lady of Rohan"], "an ASCII needle reaches É");
+        assert_eq!(autocomplete_names(a2, "jotun", 20), vec!["Jötun Grunt"], "an ASCII needle reaches ö");
+        // Ordered by CHARACTERS, as Postgres `length()` counts, not bytes as `str::len()` does.
+        // Both names are prefix matches for "e", so rank cannot separate them: "Éxx" is 3
+        // characters and 4 bytes, "Exxx" is 4 of each. By characters "Éxx" wins outright, which is
+        // what the SQL answers; by bytes they TIE at 4 and fall to alphabetical, where 'E' precedes
+        // 'É' and the answer flips.
+        {
+            let mut v3 = VocabInterner::new();
+            let mut i3 = Interner::new();
+            let mut tie = Vec::new();
+            for (n, (printed, folded)) in [("Exxx", "exxx"), ("Éxx", "exx")].iter().enumerate() {
+                let mut c = stub_card(n as u128 + 1, 0, &[], &mut v3);
+                c.card_name_lower = InlineStr::from_str(&printed.to_lowercase());
+                c.card_name_folded_id = i3.intern((*folded).to_string());
+                c.card_name_id = i3.intern((*printed).to_string());
+                tie.push(c);
+            }
+            let n3 = tie.len();
+            let mut d3 = store_of(tie, &vec![1usize; n3], v3);
+            d3.strings = i3.strings;
+            let b3 = rkyv::to_bytes::<Error>(&d3).expect("serialize");
+            let a3 = rkyv::access::<Archived<CardData>, Error>(&b3).expect("access");
+            assert_eq!(autocomplete_names(a3, "e", 20), vec!["Éxx", "Exxx"], "shorter in CHARACTERS first");
+        }
+
+        // And the accented spelling still works, which is what it did before.
+        assert_eq!(autocomplete_names(a2, "jötun", 20), Vec::<&str>::new(), "the needle is folded by the caller");
+    }
+
+    // The cap applies to the ORDERED list, so it keeps the shortest prefix match rather than
+    // whichever name the corpus happened to reach first.
+    assert_eq!(autocomplete_names(a, "sh", 1), vec!["Shock"], "capped, after ordering");
+    assert!(autocomplete_names(a, "zzz", 20).is_empty());
+
+    // THE OVER-LONG NAME, in its own store so it cannot perturb the ordering asserted above (it
+    // contains "sh", twice). The catalog matches on the FOLDED name, which for a name with no
+    // diacritic is the lowercase one -- so before `lower_name` it matched the 61-byte inline, and
+    // everything past byte 61 of a 141-character name was simply not in the catalog. "absolute
+    // longest" starts at byte 102.
+    {
+        let elemental = "Our Market Research Shows That Players Like Really Long Card Names So We Made this Card to Have the Absolute Longest Card Name Ever Elemental";
+        assert!(elemental.len() > NAME_INLINE * 2, "the fixture is well past the bound");
+        let mut v4 = VocabInterner::new();
+        let mut i4 = Interner::new();
+        let mut c = stub_card(1, 0, &[], &mut v4);
+        let (inline, id) = split_lower_name(&elemental.to_lowercase(), |s| i4.intern(s));
+        c.card_name_lower = inline;
+        c.card_name_lower_id = id;
+        assert_ne!(id, NONE_STR, "the fixture spilled, as the builder would");
+        c.card_name_id = i4.intern(elemental.to_string());
+        let mut d4 = store_of(vec![c], &[1], v4);
+        d4.strings = i4.strings;
+        let b4 = rkyv::to_bytes::<Error>(&d4).expect("serialize");
+        let a4 = rkyv::access::<Archived<CardData>, Error>(&b4).expect("access");
+
+        assert_eq!(
+            autocomplete_names(a4, "absolute longest", 20),
+            vec![elemental],
+            "a needle PAST the inline bound reaches the name at all"
+        );
+        assert_eq!(
+            autocomplete_names(a4, "our market", 20),
+            vec![elemental],
+            "and a prefix needle answers the WHOLE string, not a completion to the inline cut"
+        );
+    }
+}
+
+// ─── Price orderings pick the group's cheapest printing ───────────────────────
+//
+// See `prefer_for_sort`. Scryfall ranks a card by its CHEAPEST printing in the ordered
+// currency and returns that printing, so under `unique=card`/`unique=artwork` the
+// representative has to be chosen by the ordered price rather than by `prefer_score`.
+
+/// One card whose three printings disagree about which is cheapest in each currency,
+/// plus a `prefer_score` order that agrees with none of them. `store_of` stores printings
+/// prefer-descending, so scryfall_id 1 is the default-preferred one.
+fn priced_store(prices: &[(Option<u32>, Option<u32>, Option<u32>)]) -> CardData {
+    let mut vocab = VocabInterner::new();
+    let card = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
+    let mut data = store_of(vec![card], &[prices.len()], vocab);
+    for (p, &(usd, eur, tix)) in data.printings.iter_mut().zip(prices) {
+        p.price_usd = usd;
+        p.price_eur = eur;
+        p.price_tix = tix;
+    }
+    // Built, not left at their empty defaults: an empty index makes `walk_value_orderby_page`
+    // decline and fall back to the gather, which would leave the walk's `rep == pid` emission
+    // test — the one place the representative choice and the page order have to agree —
+    // silently uncovered.
+    data.indexes.price_usd = build_printing_value_index(&data.printings, &data.cards, &data.offsets, |p| p.price_usd);
+    data.indexes.price_eur = build_printing_value_index(&data.printings, &data.cards, &data.offsets, |p| p.price_eur);
+    data.indexes.price_tix = build_printing_value_index(&data.printings, &data.cards, &data.offsets, |p| p.price_tix);
+    data
+}
+
+/// The representative `unique=card` returns for `orderby`/`direction`, as a scryfall_id.
+fn representative(data: &CardData, prefer: &str, orderby: &str, direction: &str) -> u128 {
+    let bytes = rkyv::to_bytes::<Error>(data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let mut filter = FilterExpr::True;
+    let (total, page) = run_query(&QueryCtx::from(archived), &mut filter, None, "card", prefer, orderby, direction, 100, 0);
+    assert_eq!(total, 1, "unique=card collapses the fixture to one row");
+    u128::from(page[0].1.scryfall_id)
+}
+
+#[test]
+// Prices are integer CENTS, written `dollars_cents` so `1827_00` reads as $1827.00 at a
+// glance. clippy wants `182_700` and `50`; both are what the column holds and neither says
+// what the money is. The grouping is the documentation here, so the lints are allowed on
+// these three rather than the literals being flattened.
+#[allow(clippy::inconsistent_digit_grouping, clippy::zero_prefixed_literal)]
+fn price_orderby_represents_the_card_by_its_cheapest_printing() {
+    // id 1 is prefer-best; the cheapest is a different printing in each currency.
+    let data = priced_store(&[
+        (Some(9_00), Some(1_00), Some(9_00)), // id 1 — cheapest in EUR
+        (Some(5_00), Some(5_00), Some(0_50)), // id 2 — cheapest in TIX
+        (Some(1_00), Some(3_00), Some(3_00)), // id 3 — cheapest in USD
+    ]);
+    // The non-price ordering is untouched: it still gets the prefer_score pick.
+    assert_eq!(representative(&data, "default", "edhrec", "asc"), 1);
+    assert_eq!(representative(&data, "default", "name", "desc"), 1);
+    // Each price ordering gets that currency's cheapest printing...
+    assert_eq!(representative(&data, "default", "usd", "desc"), 3);
+    assert_eq!(representative(&data, "default", "eur", "desc"), 1);
+    assert_eq!(representative(&data, "default", "tix", "desc"), 2);
+    // ...in BOTH directions. Direction reverses the page; it does not re-pick the printing.
+    assert_eq!(representative(&data, "default", "usd", "asc"), 3);
+    assert_eq!(representative(&data, "default", "eur", "asc"), 1);
+    assert_eq!(representative(&data, "default", "tix", "asc"), 2);
+}
+
+/// The Juzám Djinn shape: the prefer-best printing is an unpriced oversized promo, so
+/// leaving the pick to `prefer_score` gave the card no USD price at all and dropped it out
+/// of a price sort entirely. A missing price must lose to any real one.
+#[test]
+// Prices are integer CENTS, written `dollars_cents` so `1827_00` reads as $1827.00 at a
+// glance. clippy wants `182_700` and `50`; both are what the column holds and neither says
+// what the money is. The grouping is the documentation here, so the lints are allowed on
+// these three rather than the literals being flattened.
+#[allow(clippy::inconsistent_digit_grouping, clippy::zero_prefixed_literal)]
+fn price_orderby_skips_a_printing_with_no_price_in_that_currency() {
+    let data = priced_store(&[
+        (None, None, Some(1_00)),          // id 1 — prefer-best, but unpriced in USD and EUR
+        (Some(1827_00), Some(1775_40), None), // id 2 — the only printing with a USD/EUR price
+    ]);
+    assert_eq!(representative(&data, "default", "edhrec", "asc"), 1);
+    assert_eq!(representative(&data, "default", "usd", "desc"), 2);
+    assert_eq!(representative(&data, "default", "eur", "desc"), 2);
+    // TIX is the mirror image: only the prefer-best printing has one.
+    assert_eq!(representative(&data, "default", "tix", "desc"), 1);
+}
+
+/// When NOTHING is priced there is no cheaper printing to prefer, so the card keeps its
+/// ordinary representative rather than silently changing which printing it shows.
+#[test]
+fn price_orderby_keeps_the_default_representative_when_no_printing_is_priced() {
+    let data = priced_store(&[(None, None, None), (None, None, None)]);
+    assert_eq!(representative(&data, "default", "usd", "desc"), 1);
+    assert_eq!(representative(&data, "default", "eur", "asc"), 1);
+    assert_eq!(representative(&data, "default", "tix", "desc"), 1);
+}
+
+/// An explicit `prefer=` is the caller naming the printing they want, and it still wins —
+/// `prefer_for_sort` only fills in a pick for callers that did not make one.
+#[test]
+// Prices are integer CENTS, written `dollars_cents` so `1827_00` reads as $1827.00 at a
+// glance. clippy wants `182_700` and `50`; both are what the column holds and neither says
+// what the money is. The grouping is the documentation here, so the lints are allowed on
+// these three rather than the literals being flattened.
+#[allow(clippy::inconsistent_digit_grouping, clippy::zero_prefixed_literal)]
+fn an_explicit_prefer_still_beats_the_price_orderby() {
+    let data = priced_store(&[
+        (Some(9_00), Some(1_00), Some(9_00)), // id 1 — prefer-best, dearest in USD
+        (Some(5_00), Some(5_00), Some(0_50)),
+        (Some(1_00), Some(3_00), Some(3_00)), // id 3 — cheapest in USD
+    ]);
+    assert_eq!(representative(&data, "usd_high", "usd", "desc"), 1);
+    assert_eq!(representative(&data, "usd_low", "usd", "desc"), 3);
+    // `oldest`/`newest` are price-blind: store_of makes the LAST printing the oldest.
+    assert_eq!(representative(&data, "oldest", "usd", "desc"), 3);
+    assert_eq!(representative(&data, "newest", "usd", "desc"), 1);
+}
+
+/// A four-printing card for the CLASS prefers, in default order: id 1 the default (plain 2015
+/// frame, black border, nonfoil), id 2 a showcase frame from a Universes Beyond set, id 3 a
+/// borderless printing, id 4 a foil-only surge-foil variant. Every marker the measured class
+/// reads has a printing here that carries ONLY it, so a wrong arm shows up as the wrong id.
+fn class_prefer_store() -> CardData {
+    let mut vocab = VocabInterner::new();
+    let card = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
+    for word in ["showcase", "legendary", "boosterfun", "surgefoil", "universesbeyond", "2015"] {
+        vocab.intern(word.to_owned()).expect("vocab");
+    }
+    let mut data = store_of(vec![card], &[4], vocab);
+    // Resolved AFTER store_of: it renumbers the vocab lexicographically, so an id taken from the
+    // interner before it ran names a different word now.
+    let id_of = |word: &str| coll_ids_in(&data.coll_vocab, &[word])[0];
+    let (showcase, legendary, boosterfun) = (id_of("showcase"), id_of("legendary"), id_of("boosterfun"));
+    let (surgefoil, ub, frame_2015) = (id_of("surgefoil"), id_of("universesbeyond"), id_of("2015"));
+    data.strings.push("black".to_owned());
+    data.strings.push("borderless".to_owned());
+    let (black, borderless) = ((data.strings.len() - 2) as u32, (data.strings.len() - 1) as u32);
+    for p in &mut data.printings {
+        p.card_border_id = black;
+        p.card_frame_data = vec![frame_2015];
+        p.compat.finishes = FINISH_NONFOIL | FINISH_FOIL;
+        // A rules frame on every printing: it must not count as atypical.
+        p.compat.frame_effects = vec![legendary];
+    }
+    // id 2: showcase, Universes Beyond (the set's ordinary rows carry `surgefoil` too — not a variant).
+    data.printings[1].compat.frame_effects = vec![legendary, showcase];
+    data.printings[1].compat.promo_types = vec![ub, surgefoil, boosterfun];
+    data.printings[1].card_is_tags = vec![ub];
+    // id 3: borderless, nothing else.
+    data.printings[2].card_border_id = borderless;
+    // id 4: the ★ variant — surge foil as the ONLY finish, and Universes Beyond.
+    data.printings[3].compat.promo_types = vec![ub, surgefoil];
+    data.printings[3].compat.finishes = FINISH_FOIL;
+    data.printings[3].card_is_tags = vec![ub];
+    data
+}
+
+/// `prefer:atypical` answers the BEST atypical printing (the class first, default order inside
+/// it), `prefer:default` — `default_frame` here — the best default-frame one, and the two
+/// Universes Beyond prefers read the stored tag. See `PreferClassIds` for the measured class.
+#[test]
+fn class_prefers_pick_the_best_printing_in_the_class() {
+    let data = class_prefer_store();
+    // No preference: the default order's first printing, whatever its frame.
+    assert_eq!(representative(&data, "default", "name", "asc"), 1);
+    // The class first, then the default order: id 2 (showcase) outranks id 3 (borderless) and
+    // id 4 (foil-only surge foil), all three atypical.
+    assert_eq!(representative(&data, "atypical", "name", "asc"), 2);
+    assert_eq!(representative(&data, "default_frame", "name", "asc"), 1);
+    assert_eq!(representative(&data, "universesbeyond", "name", "asc"), 2);
+    assert_eq!(representative(&data, "notuniversesbeyond", "name", "asc"), 1);
+}
+
+/// Each marker on its own moves a printing into the atypical class — and the two look-alikes
+/// that must NOT: a rules frame effect (`legendary`) and `surgefoil` on a printing that also
+/// comes nonfoil.
+#[test]
+fn every_atypical_marker_counts_and_the_look_alikes_do_not() {
+    let mut data = class_prefer_store();
+    // Strip id 2's showcase: its remaining `legendary` + nonfoil `surgefoil` + `boosterfun`...
+    let legendary = data.printings[1].compat.frame_effects[0];
+    data.printings[1].compat.frame_effects = vec![legendary];
+    // ...`boosterfun` alone still counts, so id 2 stays the pick.
+    assert_eq!(representative(&data, "atypical", "name", "asc"), 2);
+    let ub = data.printings[1].card_is_tags[0];
+    let surgefoil = data.printings[1].compat.promo_types[1];
+    data.printings[1].compat.promo_types = vec![ub, surgefoil];
+    // Now id 2 is a plain legendary frame with a nonfoil surge-foil word: NOT atypical, so the
+    // borderless id 3 is the best of the class.
+    assert_eq!(representative(&data, "atypical", "name", "asc"), 3);
+    // Make id 3 black-bordered again and only the foil-only ★ variant remains.
+    data.printings[2].card_border_id = data.printings[0].card_border_id;
+    assert_eq!(representative(&data, "atypical", "name", "asc"), 4);
+    // Give id 4 a nonfoil finish too and NOTHING is atypical: the class prefer is the default order.
+    data.printings[3].compat.finishes = FINISH_NONFOIL | FINISH_FOIL;
+    assert_eq!(representative(&data, "atypical", "name", "asc"), 1);
+    // Full art, textless and the future frame each count alone.
+    data.printings[2].compat.flags = COMPAT_FULL_ART;
+    assert_eq!(representative(&data, "atypical", "name", "asc"), 3);
+    data.printings[2].compat.flags = COMPAT_TEXTLESS;
+    assert_eq!(representative(&data, "atypical", "name", "asc"), 3);
+    data.printings[2].compat.flags = 0;
+    let future = data.coll_vocab.len() as u16;
+    data.coll_vocab.push("Future".to_owned());
+    data.printings[3].card_frame_data = vec![future];
+    assert_eq!(representative(&data, "atypical", "name", "asc"), 4);
+    // ...and the default-frame prefer is its exact complement.
+    assert_eq!(representative(&data, "default_frame", "name", "asc"), 1);
+}
+
+/// `is:atypical` IS the class `prefer:atypical` ranks by — `FilterExpr::Atypical` calls the same
+/// `printing_is_atypical` over the same bound ids — and `is:default` is its `Not`. Pinned over
+/// the same four-printing fixture under `unique=printing`, where every printing is its own row,
+/// so the filter's answer is the SET the prefer only ever showed the best member of.
+#[test]
+fn is_atypical_is_the_same_class_the_prefer_ranks_by() {
+    fn ids_with(data: &CardData, mut filter: FilterExpr, bind: bool) -> Vec<u128> {
+        let bytes = rkyv::to_bytes::<Error>(data).expect("serialize");
+        let a = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+        // `run_query` does NOT bind: the production entry point does, in
+        // `bind_and_split_filter_value`, before `run_query` ever sees the tree. So the bind is
+        // made here, with the same arguments that call passes, and made OPTIONAL so the unbound
+        // answer can be pinned too — see the first assertion below.
+        if bind {
+            filter.bind(&a.coll_vocab, &a.artist_vocab, &a.mana_vocab, &a.indexes.flavor, &a.strings);
+        }
+        let (_, page) = run_query(&QueryCtx::from(a), &mut filter, None, "printing", "default", "name", "asc", 100, 0);
+        let mut out: Vec<u128> = page.iter().map(|r| u128::from(r.1.scryfall_id)).collect();
+        out.sort_unstable();
+        out
+    }
+    let ids = |data: &CardData, filter: FilterExpr| ids_with(data, filter, true);
+    // Built the way the parser sends them: an ordinary `is:` tag over `card_is_tags`. The engine
+    // claims the two words in `build_binary`; any other word stays a stored-tag lookup.
+    let is_tag = |word: &str| -> FilterExpr {
+        let json = serde_json::json!({
+            "node_type": "CardBinaryOperatorNode",
+            "kwargs": {
+                "lhs": { "node_type": "CardAttributeNode", "kwargs": { "attribute_name": "card_is_tags", "original_attribute": "is" } },
+                "op": ":",
+                "rhs": [word]
+            }
+        });
+        super::filter::build_filter(&json).expect("is: tag builds")
+    };
+    let atypical = || is_tag("atypical");
+    let default = || is_tag("default");
+    assert!(matches!(atypical(), FilterExpr::Atypical(ids) if ids == super::PreferClassIds::UNBOUND), "is:atypical is the class leaf, unbound at build");
+    assert!(
+        matches!(default(), FilterExpr::Not(inner) if matches!(*inner, FilterExpr::Atypical(ids) if ids == super::PreferClassIds::UNBOUND)),
+        "is:default is the Not of the same leaf"
+    );
+    assert!(matches!(is_tag("universesbeyond"), FilterExpr::CollectionCmp { field: CollField::IsTags, .. }), "every other is: word is still a stored tag");
+
+    let mut data = class_prefer_store();
+    // THE HAZARD THE VARIANT'S DOC NAMES, pinned: unbound, every vocab test is false and only the
+    // border/flag half of the class answers — id 3 alone, a silently wrong class rather than an
+    // error. An entry point that skipped `bind` would ship exactly this; bind is not optional.
+    assert_eq!(ids_with(&data, atypical(), false), vec![3], "unbound, only the borderless printing counts: bind is not optional");
+    // ids 2 (showcase), 3 (borderless), 4 (foil-only surge foil) are the class; 1 is the default.
+    assert_eq!(ids(&data, atypical()), vec![2, 3, 4]);
+    assert_eq!(ids(&data, default()), vec![1]);
+    // The promo TREATMENT half: a date-stamped prerelease printing is atypical on the stamp alone.
+    let datestamped = data.coll_vocab.len() as u16;
+    data.coll_vocab.push("datestamped".to_owned());
+    data.printings[0].compat.promo_types = vec![datestamped];
+    assert_eq!(ids(&data, atypical()), vec![1, 2, 3, 4]);
+    assert_eq!(ids(&data, default()), Vec::<u128>::new());
+    data.printings[0].compat.promo_types = vec![];
+
+    // The same marker walk `every_atypical_marker_counts_and_the_look_alikes_do_not` does, read as
+    // sets: strip id 3's border and it leaves the class...
+    data.printings[2].card_border_id = data.printings[0].card_border_id;
+    assert_eq!(ids(&data, atypical()), vec![2, 4]);
+    assert_eq!(ids(&data, default()), vec![1, 3]);
+    // ...give id 4 a nonfoil finish and its surge-foil word stops counting...
+    data.printings[3].compat.finishes = FINISH_NONFOIL | FINISH_FOIL;
+    assert_eq!(ids(&data, atypical()), vec![2]);
+    // ...and the look-alike: a plain legendary frame with a nonfoil surge-foil word is NOT atypical.
+    let legendary = data.printings[1].compat.frame_effects[0];
+    let (ub, surgefoil) = (data.printings[1].card_is_tags[0], data.printings[1].compat.promo_types[1]);
+    data.printings[1].compat.frame_effects = vec![legendary];
+    data.printings[1].compat.promo_types = vec![ub, surgefoil];
+    assert_eq!(ids(&data, atypical()), Vec::<u128>::new());
+    assert_eq!(ids(&data, default()), vec![1, 2, 3, 4]);
+    // Full art alone brings a printing back in, and the two spellings stay exact complements.
+    data.printings[2].compat.flags = COMPAT_FULL_ART;
+    assert_eq!(ids(&data, atypical()), vec![3]);
+    assert_eq!(ids(&data, default()), vec![1, 2, 4]);
+    assert_eq!(ids(&data, FilterExpr::And(vec![atypical(), default()])), Vec::<u128>::new(), "no printing is both");
+}
+
+/// `prefer:borderless` is "the best-looking printing that is still this card": Najeela's shape.
+/// Four printings in default order — the plain original, a borderless CROSSOVER (a flavor
+/// name: Spider-Gwen), an etched inverted same-named variant, and a same-named borderless one
+/// ranked last. Borderless-and-same-named wins; drop its border and the etched variant wins over
+/// the crossover borderless; give that one a flavor name too and the plain original wins — a
+/// flavor-named printing is never the answer.
+#[test]
+fn prefer_borderless_ignores_flavor_named_printings_and_ranks_frames() {
+    let mut data = class_prefer_store();
+    let inverted = data.coll_vocab.len() as u16;
+    data.coll_vocab.push("inverted".to_owned());
+    let etched = data.coll_vocab.len() as u16;
+    data.coll_vocab.push("etched".to_owned());
+    data.strings.push("Spider-Gwen, Web-Warrior".to_owned());
+    let spider_gwen = (data.strings.len() - 1) as u32;
+    let (black, borderless) = (data.printings[0].card_border_id, data.printings[2].card_border_id);
+    // id 1: the plain original (class_prefer_store's id 1 already is).
+    // id 2: borderless, but sold as Spider-Gwen.
+    data.printings[1].card_border_id = borderless;
+    data.printings[1].compat.frame_effects = vec![inverted];
+    data.printings[1].compat.promo_types = vec![];
+    data.printings[1].flavor_name_id = spider_gwen;
+    // id 3: etched + inverted, black border, same name — the cmr/514 shape.
+    data.printings[2].card_border_id = black;
+    data.printings[2].compat.frame_effects = vec![inverted, etched];
+    // id 4: borderless and same-named, in-universe, ranked last by default.
+    data.printings[3].card_border_id = borderless;
+    data.printings[3].compat.promo_types = vec![];
+    data.printings[3].compat.finishes = FINISH_NONFOIL | FINISH_FOIL;
+    data.printings[3].card_is_tags = vec![];
+
+    assert_eq!(representative(&data, "borderless", "name", "asc"), 4, "same-named borderless, however low it ranks");
+    // Universes Beyond under the card's own name is a candidate, but every in-universe printing
+    // outranks it: tag id 4 and the etched in-universe id 3 wins; strip id 3's variant and the
+    // PLAIN in-universe id 1 still wins over the UB borderless.
+    let ub = data.printings[1].card_is_tags[0];
+    data.printings[3].card_is_tags = vec![ub];
+    assert_eq!(representative(&data, "borderless", "name", "asc"), 3, "in-universe variant over a Universes Beyond borderless");
+    let etched_fx = data.printings[2].compat.frame_effects.clone();
+    data.printings[2].compat.frame_effects = vec![];
+    assert_eq!(representative(&data, "borderless", "name", "asc"), 1, "in-universe plain over a Universes Beyond borderless");
+    // A TEXTLESS variant is the one nobody can read, and it ranks below the plain printing: give
+    // the etched id 3 the flag and the plain id 1 wins; give id 3 full art WITH text instead and
+    // it is a readable variant again. (Moonshaker Cavalry's sch/17 against its woe/325.)
+    data.printings[2].compat.frame_effects = etched_fx.clone();
+    data.printings[2].compat.flags = COMPAT_FULL_ART | COMPAT_TEXTLESS;
+    assert_eq!(representative(&data, "borderless", "name", "asc"), 1, "textless ranks below plain");
+    data.printings[2].compat.flags = COMPAT_FULL_ART;
+    assert_eq!(representative(&data, "borderless", "name", "asc"), 3, "full art with text is a readable variant");
+    data.printings[2].compat.flags = 0;
+    data.printings[2].compat.frame_effects = vec![];
+    // ...and an in-universe textless printing still outranks a Universes Beyond borderless one.
+    data.printings[0].compat.flags = COMPAT_TEXTLESS;
+    data.printings[2].card_is_tags = vec![ub];
+    assert_eq!(representative(&data, "borderless", "name", "asc"), 1, "in-universe textless over UB anything");
+    data.printings[0].compat.flags = 0;
+    data.printings[2].card_is_tags = vec![];
+    // ENGLISH FIRST: make the borderless id 4 Japanese and the etched English id 3 wins; make
+    // every printing Japanese (a `lang:ja` pool) and the tiers decide again, id 4.
+    let en = data.coll_vocab.len() as u16;
+    data.coll_vocab.push("en".to_owned());
+    let ja = data.coll_vocab.len() as u16;
+    data.coll_vocab.push("ja".to_owned());
+    data.printings[2].compat.frame_effects = etched_fx.clone();
+    data.printings[3].card_is_tags = vec![]; // in-universe again for this block
+    for p in &mut data.printings {
+        p.compat.lang_id = en;
+    }
+    data.printings[3].compat.lang_id = ja;
+    assert_eq!(representative(&data, "borderless", "name", "asc"), 3, "an English variant over a Japanese borderless");
+    for p in &mut data.printings {
+        p.compat.lang_id = ja;
+    }
+    assert_eq!(representative(&data, "borderless", "name", "asc"), 4, "all Japanese: the tiers decide");
+    for p in &mut data.printings {
+        p.compat.lang_id = VOCAB_NONE;
+    }
+    data.printings[2].compat.frame_effects = vec![];
+    // ...and among Universes Beyond printings only, the frame tiers still decide: tag them all
+    // and the borderless id 4 wins again.
+    for p in &mut data.printings {
+        p.card_is_tags = vec![ub];
+    }
+    assert_eq!(representative(&data, "borderless", "name", "asc"), 4, "all Universes Beyond: borderless first");
+    for p in &mut data.printings {
+        p.card_is_tags = vec![];
+    }
+    data.printings[1].card_is_tags = vec![ub];
+    data.printings[2].compat.frame_effects = etched_fx;
+    data.printings[3].card_border_id = black;
+    assert_eq!(representative(&data, "borderless", "name", "asc"), 3, "no same-named borderless: the etched variant beats the crossover");
+    data.printings[2].flavor_name_id = spider_gwen;
+    assert_eq!(representative(&data, "borderless", "name", "asc"), 1, "every variant is a crossover: the plain original");
+    // ...while `prefer:atypical` still reaches the crossover borderless, which is its measured job.
+    assert_eq!(representative(&data, "atypical", "name", "asc"), 2);
+    // A FACE flavor name excludes just the same — Scryfall puts the key on the face of a
+    // multi-face crossover and at the top level of a single-face one, never both.
+    data.printings[2].flavor_name_id = NONE_STR;
+    assert_eq!(representative(&data, "borderless", "name", "asc"), 3);
+    data.printings[2].faces = vec![PrintingFace {
+        illustration_id: 0,
+        card_artist_vid: ARTIST_NONE,
+        flavor_text_id: NONE_STR,
+        flavor_name_id: spider_gwen,
+    }];
+    assert_eq!(representative(&data, "borderless", "name", "asc"), 1, "a face-level flavor name excludes too");
+    data.printings[2].faces = Vec::new();
+    assert_eq!(representative(&data, "borderless", "name", "asc"), 3);
+}
+
+/// The eur and tix `*_high` prefers pick the dearest printing by the same search-price chain the
+/// orderings read, an unpriced printing losing to any priced one; `*_low` were already reachable
+/// under a price ordering and are now spellable.
+#[test]
+#[allow(clippy::inconsistent_digit_grouping, clippy::zero_prefixed_literal)]
+fn eur_and_tix_prefers_pick_by_price() {
+    let data = priced_store(&[
+        (Some(9_00), Some(1_00), None),       // id 1 — prefer-best, cheapest EUR, unpriced TIX
+        (Some(5_00), Some(5_00), Some(0_50)), // id 2 — dearest EUR, cheapest TIX
+        (Some(1_00), Some(3_00), Some(3_00)), // id 3 — dearest TIX
+    ]);
+    assert_eq!(representative(&data, "eur_high", "name", "asc"), 2);
+    assert_eq!(representative(&data, "eur_low", "name", "asc"), 1);
+    assert_eq!(representative(&data, "tix_high", "name", "asc"), 3);
+    assert_eq!(representative(&data, "tix_low", "name", "asc"), 2);
+    assert_eq!(representative(&data, "usd_high", "name", "asc"), 1);
+}
+
+/// `order=artist` treats an artistless printing the way every other ordering treats an absent
+/// value, rather than as a real rank at the far end.
+///
+/// `assign_artist_ranks` parks the artistless printings in a trailing rank block, and reporting
+/// that block as a VALUE made this the one ordering whose absent side moved with the direction in
+/// the wrong sense: last ascending (correct) but FIRST descending (not), because a real rank
+/// reflects under `desc` and an absent sentinel does not.
+#[test]
+fn an_artistless_printing_sorts_like_an_absent_value() {
+    let mut vocab = VocabInterner::new();
+    let cards = vec![stub_card(1, TYPE_CREATURE, &[], &mut vocab), stub_card(2, TYPE_CREATURE, &[], &mut vocab)];
+    let mut data = store_of(cards, &[1, 1], vocab);
+    let artist_vocab = vec!["aaa".to_string()];
+    data.printings[0].card_artist_vid = 0;
+    data.printings[1].card_artist_vid = ARTIST_NONE;
+    assign_artist_ranks(&mut data.printings, &artist_vocab);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    // Asserted RELATIVE to a column that is already nullable, not against a fixed direction, so
+    // this pins the property that matters -- artist's absent side behaves like everybody else's --
+    // without also pinning WHICH side that is. It therefore holds both before and after the
+    // nulls-sort-lowest change, and would fail if only one of the two were ever flipped.
+    for descending in [false, true] {
+        let artist_named = sort_key_bits(&archived.cards[0], &archived.printings[0], SortCol::Artist, descending);
+        let artist_absent = sort_key_bits(&archived.cards[1], &archived.printings[1], SortCol::Artist, descending);
+        let cmc_present = perm_primary_key(Some(1.0), descending);
+        let cmc_absent = perm_primary_key(None, descending);
+        assert_eq!(
+            artist_absent > artist_named,
+            cmc_absent > cmc_present,
+            "artist's absent side disagrees with cmc's (descending={descending})",
+        );
+    }
+}
+
 /// `super::sigma_bound`'s Rust port must agree with the Python original
 /// (`scripts/bench_compose_card_visited_safety_bound.py`) it was translated from -- that Python side
 /// is already Monte-Carlo-verified against simulated random placements (`selfcheck_nhg_moments`), so
@@ -13353,4 +14889,60 @@ fn compose_perm_three_phase_order_only_fires_when_enabled_and_sparse() {
             "{label}: the promoted walk is Mode::Card-only, so this must never divert regardless of enabled"
         );
     }
+}
+
+// ─── The compat ids follow the vocab renumber ─────────────────────────────────
+
+/// `renumber_coll_vocab` remaps every coll_vocab id a row holds, and the compat residue holds
+/// eight of them that the six tag collections do not cover. A field missed there COMPILES and
+/// serves the wrong word for every row -- the id still lands inside the vocab -- so the check is
+/// by string: each id must name the same word before and after, `VOCAB_NONE` must pass through
+/// as absent, and the list-shaped ones must keep Scryfall's order (they are not id-sorted;
+/// `str_list_to_ids` preserves the source order and `sorted_strs` orders them at emit).
+#[test]
+fn renumber_remaps_the_compat_ids_and_keeps_their_words() {
+    let mut vocab = VocabInterner::new();
+    // Interned in REVERSE alphabetical order, so every id moves under the renumber.
+    let words = ["zz-set", "ja", "lowres", "token-set", "oval", "showcase", "boosterfun", "meld_part"];
+    let ids: Vec<u16> = words.iter().map(|w| vocab.intern((*w).to_owned()).expect("vocab")).collect();
+    let [set_vid, lang, image_status, set_type, stamp, showcase, boosterfun, meld_part] = ids[..] else { unreachable!() };
+    let mut card = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
+    card.all_parts = vec![
+        RelatedCard { id: 0xAAAA, name_id: 0, type_line_id: 0, component_id: meld_part },
+        RelatedCard { id: 0xBBBB, name_id: 0, type_line_id: 0, component_id: VOCAB_NONE },
+    ];
+    let mut printing = stub_printing(1, 1, Some(1.0));
+    printing.compat.set_vid = set_vid;
+    printing.compat.lang_id = lang;
+    printing.compat.image_status_id = image_status;
+    printing.compat.set_type_id = set_type;
+    printing.compat.security_stamp_id = stamp;
+    // Source order, not id order: showcase was interned before boosterfun.
+    printing.compat.promo_types = vec![boosterfun, showcase];
+    printing.compat.frame_effects = vec![showcase, boosterfun];
+    let mut absent = stub_printing(2, 2, Some(1.0));
+    absent.compat.promo_types = vec![showcase];
+    let mut cards = vec![card];
+    let mut printings = vec![printing, absent];
+
+    let sorted = renumber_coll_vocab(&mut cards, &mut printings, vocab.strings);
+    assert!(sorted.windows(2).all(|w| w[0] < w[1]), "the vocab comes back lexicographic");
+    let word = |id: u16| sorted[id as usize].as_str();
+
+    let c = &printings[0].compat;
+    assert_eq!(word(c.set_vid), "zz-set");
+    assert_eq!(word(c.lang_id), "ja");
+    assert_eq!(word(c.image_status_id), "lowres");
+    assert_eq!(word(c.set_type_id), "token-set");
+    assert_eq!(word(c.security_stamp_id), "oval");
+    assert_eq!(c.promo_types.iter().map(|&i| word(i)).collect::<Vec<_>>(), vec!["boosterfun", "showcase"], "source order kept");
+    assert_eq!(c.frame_effects.iter().map(|&i| word(i)).collect::<Vec<_>>(), vec!["showcase", "boosterfun"], "source order kept");
+    assert_eq!(word(cards[0].all_parts[0].component_id), "meld_part");
+    assert_eq!(cards[0].all_parts[1].component_id, VOCAB_NONE, "absent stays absent");
+    let a = &printings[1].compat;
+    assert_eq!(a.set_vid, VOCAB_NONE, "the default sentinel is not a vocab slot");
+    assert_eq!(a.lang_id, VOCAB_NONE);
+    assert_eq!(a.promo_types.iter().map(|&i| word(i)).collect::<Vec<_>>(), vec!["showcase"]);
+    // And the ids really did move: at least one differs from what the interner handed out.
+    assert!(c.set_vid != set_vid || c.lang_id != lang, "the fixture must exercise a renumber, not an identity map");
 }

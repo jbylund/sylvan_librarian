@@ -128,8 +128,8 @@ def fetch_cards_from_db(
         List of dictionaries containing
              card_set_code,
              collector_number,
-             png_url,
-             face_idx
+             png_url (the FRONT face),
+             back_png_url (the back face, or NULL for a card that has no physical back)
     """
     with conn.cursor() as cursor:
         where_clause = ""
@@ -146,12 +146,39 @@ def fetch_cards_from_db(
 
         where_clause = " AND ".join(conditions)
 
+        # Both URLs are DERIVED from scryfall_id rather than read out of raw_card_blob, and
+        # whether a back face exists is read from card_layout. Two reasons, both load-bearing:
+        #
+        # 1. The blob is wrong for exactly the cards this is about. Until the face merge, a
+        #    multi-face row WAS its last face, so `raw_card_blob->'image_uris'` is that face's
+        #    -- the BACK's -- because Scryfall omits top-level image_uris on a transform card
+        #    and puts one on each face. Every such card therefore has its back image uploaded
+        #    under the face-1 key, and its front uploaded nowhere. (Verified against the live
+        #    CDN: img/bot/6/1/*.webp is Slicer, High-Speed Antagonist -- the back.) A coalesce
+        #    onto card_faces[0] does not rescue it, because the first branch is non-NULL.
+        # 2. The blob is unavailable for the same cards. preprocess_card popped card_faces
+        #    before snapshotting, so no pre-merge row's blob has that key at all, which is why
+        #    2026-08-10-01's backfill leaves card_faces NULL corpus-wide and back_png_url with
+        #    it. Reading the blob means "correct only after a full reimport"; reading columns
+        #    means correct now.
+        #
+        # scryfall_id and card_layout are both NOT NULL/indexed columns populated for every
+        # row today, and Scryfall's image path is a pure function of the id, so this is right
+        # on the existing corpus with no reimport and self-heals rows the blob never captured.
         query = f"""
             SELECT
                 card_set_code,
                 collector_number,
-                raw_card_blob->'image_uris'->>'png' as png_url,
-                coalesce((raw_card_blob->>'face_idx')::int, 1) as face_idx
+                'https://cards.scryfall.io/png/front/'
+                    || left(scryfall_id::text, 1) || '/' || substr(scryfall_id::text, 2, 1)
+                    || '/' || scryfall_id::text || '.png' as png_url,
+                CASE WHEN card_layout IN (
+                        'transform', 'modal_dfc', 'reversible_card', 'double_faced_token', 'art_series'
+                     ) THEN
+                    'https://cards.scryfall.io/png/back/'
+                        || left(scryfall_id::text, 1) || '/' || substr(scryfall_id::text, 2, 1)
+                        || '/' || scryfall_id::text || '.png'
+                END as back_png_url
             FROM
                 magic.cards
             WHERE
@@ -344,7 +371,7 @@ def process_card(
                 continue
 
             # Face-aware key structure: img/{set_code}/{collector_number}/{face}/{size}.webp
-            s3_key = f"img/{set_code}/{collector_number}/{DEFAULT_FACE}/{size_name}.webp"
+            s3_key = f"img/{set_code}/{collector_number}/{card.get('face_idx', DEFAULT_FACE)}/{size_name}.webp"
 
             if upload_to_s3(s3_client, webp_path, bucket, s3_key):
                 results[size_name] = True
@@ -507,18 +534,23 @@ def get_db_cards(args: Args) -> set[tuple[str, str, str, str]]:
         return None
 
     sizes = [SMALL_KEY, MEDIUM_KEY, LARGE_KEY, XLARGE_KEY]
-    logger.info("Found %d cards in database, should create %d images", len(db_cards), len(db_cards) * len(sizes))
-    return {
+    images = {
         CardImage(
             set_code=card["card_set_code"],
             collector_number=card["collector_number"],
-            face_idx=str(card["face_idx"]),
-            png_url=card["png_url"],
+            face_idx=face_idx,
+            png_url=png_url,
             size=size,
         )
         for card in db_cards
+        # One image per face that actually has one: every card's front, plus the back for
+        # cards with a physical back face (the flip button's image on the site).
+        for face_idx, png_url in ((DEFAULT_FACE, card["png_url"]), ("2", card["back_png_url"]))
+        if png_url
         for size in sizes
     }
+    logger.info("Found %d cards in database, should create %d images", len(db_cards), len(images))
+    return images
 
 
 def get_s3_cards(args: Args) -> set[CardImage]:
