@@ -7,9 +7,63 @@ function escapeHtml(str) {
   return String(str).replace(HTML_ESCAPE_RE, c => HTML_ESCAPE_MAP[c]);
 }
 
-function buildImageUrl(card, size) {
-  const face = card.face_idx || 1;
-  return `https://d1hot9ps2xugbc.cloudfront.net/img/${card.set_code}/${card.collector_number}/${face}/${size}.webp`;
+function buildImageUrl(card, size, face) {
+  const resolvedFace = face || card.face_idx || 1;
+  return `https://d1hot9ps2xugbc.cloudfront.net/img/${card.set_code}/${card.collector_number}/${resolvedFace}/${size}.webp`;
+}
+
+// Flip button for double-faced cards, mirroring the search page's progressive enhancement:
+// shown only when a face-2 image exists on the CDN (transform/MDFC backs; split and
+// adventure cards have no back image and correctly get no button).
+function attachFlipButton(container, card) {
+  if (!card.name || !card.name.includes(' // ') || !card.set_code || !card.collector_number) return;
+  const probe = new Image();
+  probe.onload = () => {
+    const wrapper = container.querySelector('.modal-image-wrapper');
+    if (!wrapper || wrapper.querySelector('.card-flip-button')) return;
+    // A frame that hugs the image, so the button's percentage offsets resolve
+    // against the picture rather than the flex area around it. See app.js.
+    const img = wrapper.querySelector('.modal-image');
+    if (!img) return;
+    let frame = wrapper.querySelector('.card-image-frame');
+    if (!frame) {
+      const node = img.closest('a') || img;
+      frame = document.createElement('div');
+      frame.className = 'card-image-frame';
+      node.parentNode.insertBefore(frame, node);
+      frame.appendChild(node);
+    }
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'card-flip-button';
+    button.title = 'Transform';
+    button.setAttribute('aria-label', 'Show other face');
+    button.setAttribute('aria-pressed', 'false');
+    // An SVG, not a text glyph: a glyph's ink box is not its em box, so no amount of
+    // flex centring puts it in the middle of the disc. currentColor means the inverted
+    // back-face state restyles it with no extra rule.
+    button.innerHTML =
+      '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true" focusable="false"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" /></svg>';
+    button.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      const img = wrapper.querySelector('.modal-image');
+      if (!img) return;
+      const nextFace = wrapper.dataset.shownFace === '2' ? 1 : 2;
+      wrapper.dataset.shownFace = String(nextFace);
+      // Inverted while the back is showing, toggled now rather than after the
+      // transition so the control answers the click.
+      button.classList.toggle('showing-back', nextFace === 2);
+      button.setAttribute('aria-pressed', nextFace === 2 ? 'true' : 'false');
+      img.classList.add('card-image-flipping');
+      setTimeout(() => {
+        img.src = buildImageUrl(card, '745', nextFace);
+        img.classList.remove('card-image-flipping');
+      }, 150);
+    });
+    frame.appendChild(button);
+  };
+  probe.src = buildImageUrl(card, '280', 2);
 }
 
 const MANA_SYMBOLS = new Map([
@@ -217,6 +271,7 @@ async function main() {
   const cardFace = document.getElementById('card-face');
   cardFace.innerHTML = renderCardFace(card);
   cardFace.style.display = '';
+  attachFlipButton(cardFace, card);
   document.getElementById('card-loading').style.display = 'none';
 
   try {

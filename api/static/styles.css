@@ -527,6 +527,107 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+  position: relative; /* anchors the injected .card-flip-button over the image */
+}
+
+/* Flip button for double-faced cards, injected by JS when a back-face image exists.
+   Sits over the card image's top-right corner, like Scryfall's transform button. */
+/* Geometry, colours and timing taken from Scryfall's own
+   .card-grid-item-transform-button, so the control reads as the same control. */
+.card-flip-button {
+  position: absolute;
+  /* NOT a corner. Scryfall places it over the right edge of the artwork about a
+     quarter of the way down — roughly where the transform icon sits on the
+     printed card. Percentages OF .card-image-frame, which hugs the image, so
+     they mean the same thing in a grid tile and in a full-size modal. */
+  top: 26%;
+  left: 75%;
+  z-index: 2;
+  box-sizing: border-box;
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* White disc, dark ring — it has to read against both a black card border and
+     bright artwork, and inverting to a dark fill loses it against the border. */
+  border: 2px solid #343242;
+  border-radius: 100%;
+  background: #fff;
+  color: #343242;
+  line-height: 1;
+  cursor: pointer;
+  /* Always present, dimmed. Revealing on hover would make it undiscoverable on
+     touch, where there is no hover at all — and Scryfall does not hide it either. */
+  opacity: 0.6;
+  transition:
+    background-color 200ms linear,
+    opacity 50ms linear;
+}
+
+/* Inverted while the BACK face is showing (Scryfall's `.spooky`). The button is
+   the only thing on screen that says which face you are looking at once the art
+   has changed, so it carries the state rather than just the action. */
+.card-flip-button.showing-back {
+  background: #343242;
+  border-color: #fff;
+  color: #fff;
+}
+
+/* 22px inside the 44px disc. Scryfall insets its icon by 7px, but its artwork
+   carries padding inside its own viewBox; this outline stroke runs to the edge
+   of the 24-unit box, so matching their inset makes a visibly bigger mark.
+   Matching the resulting INK is what makes it read the same.
+   display:block drops the inline baseline gap, which is what otherwise leaves
+   an SVG sitting a pixel or two high in a flex-centred button. */
+.card-flip-button svg {
+  display: block;
+  width: 22px;
+  height: 22px;
+}
+
+.card-flip-button:hover,
+.card-flip-button:active,
+.card-flip-button:focus-visible {
+  opacity: 1;
+}
+
+.card-flip-button:focus-visible {
+  outline: 2px solid #343242;
+  outline-offset: 2px;
+}
+
+.card-flip-button.showing-back:focus-visible {
+  outline-color: #fff;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card-flip-button {
+    transition: none;
+  }
+}
+
+.card-image-flipping {
+  transform: rotateY(90deg);
+}
+
+/* Hugs the card image so the flip button can be positioned as a percentage OF
+   THE IMAGE. Injected by JS alongside the button, never present in the server
+   render. Neither natural parent works: a grid tile also contains the name,
+   type and text rows, and the modal's image wrapper is a flex area much wider
+   than the picture — which is how the button ended up beside a large card
+   rather than on it. fit-content makes the box the image's box in both. */
+.card-image-frame {
+  position: relative;
+  width: fit-content;
+  max-width: 100%;
+  margin-inline: auto;
+  line-height: 0;
+}
+
+.card-image,
+.modal-image {
+  transition: transform 0.15s ease;
 }
 
 .modal-image-link {

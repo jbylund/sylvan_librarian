@@ -130,5 +130,8 @@ the traffic weight is the open question and the reason this is not already done.
 
 `is:` covers more than layout, and the rest is separate work: `is:new`/`is:old` resolve to
 `card_frame_data` (already indexed, but *thresholded*, and `2015` is the dropped dense value — hence
-`frame:2015` at 785 µs), while `is:permanent`/`is:vanilla` become `Or`/`And` over `card_types`. Those
-are three different problems behind one prefix; this doc is only the layout one.
+`frame:2015` at 785 µs); `is:permanent` becomes an `Or` over `card_types`; and `is:vanilla` expands to
+nothing at all since `37ce298`, reaching the engine as `FilterExpr::VanillaFace` — a whole-corpus
+verify with no `narrow_rec` arm, which is
+[its own doc](./local-engine-vanilla-face-narrowing.md). Those are three different problems behind one
+prefix; this doc is only the layout one.

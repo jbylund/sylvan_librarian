@@ -313,7 +313,12 @@ def _lower_regex_leaves(node: QueryNode) -> None:
     elif isinstance(node, BinaryOperatorNode) and node.operator == ":" and isinstance(node.rhs, RegexValueNode):
         literal = _regex_plain_literal(node.rhs.value)
         if literal is not None:
-            node.rhs = StringValueNode(literal)
+            # LITERAL, not a bare word: a regex matches the stored name as written, so the
+            # lowered form must keep the quoted spelling's semantics rather than pick up the
+            # bare word's separator/diacritic fold. Measured on api.scryfall.com 2026-08-16:
+            # `name:/lim-dul/` answers 0 and `name:/Lim-D.l/` answers 8, so `/lim-dul/` is NOT
+            # the fold that `name:limdul` (8) applies.
+            node.rhs = StringValueNode(literal, literal=True)
 
 
 def lower_literal_regexes(query: Query) -> Query:

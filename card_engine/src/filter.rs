@@ -1,7 +1,8 @@
 use memchr::memmem;
+use rkyv::Archived;
 use fancy_regex::{Error as FancyError, Regex};
 use serde_json::Value;
-use super::{AOracleCard, APrinting, AStrings, str_at, mana_lane, lane_add, lanes_ge, LANES6_HI, LANES8_HI, mana_pip_counts, mana_cmc, color_list_to_mask, card_type_str_to_bit, trigram_candidates, trigram_min_posting, ARTIST_NONE, NONE_STR, FlavorIndex, NameBigramIndex, OracleTextIndex, SortedTrigramIndex, flavor_fingerprint, flavor_match_sets};
+use super::{AOracleCard, APrinting, AStrings, ManaCost, str_at, mana_lane, lane_add, lane_get, lanes_ge, LANES8_HI, mana_pip_counts, mana_cmc, mana_bare_generic, color_list_to_mask, card_type_str_to_bit, trigram_candidates, trigram_min_posting, ARTIST_NONE, NONE_STR, FlavorIndex, NameBigramIndex, PrintedNameIndex, OracleTextIndex, SortedTrigramIndex, flavor_fingerprint, flavor_match_sets};
 use super::legality::{LEGALITY_LEGAL, LEGALITY_BANNED, LEGALITY_RESTRICTED, format_shift};
 
 /// Public search TextRegex backtrack cap — calibrated in docs/issues/security-regex-execution-budget.md.
@@ -175,8 +176,12 @@ fn field_num(card: &AOracleCard, printing: Option<&APrinting>, f: NumField) -> N
         NumField::EdhrEc             => known(card.edhrec_rank.as_ref().map(|v| u32::from(*v) as f32)),
         NumField::RarityInt          => printing.map_or(NumVal::PDep, |p| known(p.card_rarity_int.as_ref().map(|v| f32::from(*v)))),
         NumField::CollectorNumberInt => printing.map_or(NumVal::PDep, |p| known(p.collector_number_int.as_ref().map(|v| u16::from(*v) as f32))),
-        NumField::PriceUsd           => printing.map_or(NumVal::PDep, |p| known_cents(p.price_usd.as_ref().map(|v| u32::from(*v)))),
-        NumField::PriceEur           => printing.map_or(NumVal::PDep, |p| known_cents(p.price_eur.as_ref().map(|v| u32::from(*v)))),
+        // The COALESCED search key, not the raw column: `usd` falls back to the foil and then the
+        // etched price on api.scryfall.com, which is 121 cards on `usd>=500` alone. See
+        // `crate::search_price_usd_cents` — the range index the planner narrows with is built from
+        // the same function, and they have to agree or a correct row is narrowed away.
+        NumField::PriceUsd           => printing.map_or(NumVal::PDep, |p| known_cents(super::search_price_usd_cents(p))),
+        NumField::PriceEur           => printing.map_or(NumVal::PDep, |p| known_cents(super::search_price_eur_cents(p))),
         NumField::PriceTix           => printing.map_or(NumVal::PDep, |p| known_cents(p.price_tix.as_ref().map(|v| u32::from(*v)))),
         NumField::PreferScore        => printing.map_or(NumVal::PDep, |p| known(p.prefer_score.as_ref().map(|v| f32::from(*v)))),
     }
@@ -252,6 +257,170 @@ pub(crate) fn numeric_cmp_tri<F: Fn(NumField) -> NumVal>(lhs: &NumExpr, op: CmpO
         (NumVal::PDep, _) | (_, NumVal::PDep) => Tri::PrintingDep,
         (NumVal::Known(a), NumVal::Known(b)) => tri_bool(num_cmp(op, a, b)),
     }
+}
+
+// ─── per-face numeric values ────────────────────────────────────────
+//
+// Scryfall matches a `//` card if ANY FACE satisfies the predicate, and the three stat columns
+// are INDEPENDENT of one another when it does. Both halves are measured against
+// api.scryfall.com, 2026-08-16, with `!"Full // Name"` scoping so the answer is 1 or 404:
+//
+//   pow>=3                on Delver of Secrets (1/1 // 3/2)          -> 1   (back only)
+//   pow=1 tou=2           on Delver                                   -> 1   (no face is 1/2)
+//   pow>=3 pow<=1         on Delver                                   -> 1   (one column, two faces)
+//   pow>tou               on Huntmaster of the Fells (2/2 // 4/4)     -> 1   (no face has p>t)
+//   pow=tou               on Thing in the Ice (0/4 // 7/8)            -> 404 (no pair is equal)
+//
+// The last two are the pair that settles the shape: a per-face ROW model answers 404 to
+// `pow>tou` on Huntmaster, and a "max power vs max toughness" model answers 1 to `pow=tou` on
+// Thing in the Ice. A card carrying a SET of values per column, with the comparison existential
+// over the cross product, is the only one of the three that answers both as measured — so that
+// is what `face_num_values` builds and what `build_arith_tuple_index` interns.
+//
+// NEGATION is deliberately not part of this: Scryfall IGNORES a negated numeric term outright
+// (`-pow=1` answers with `Invalid expression "-pow=1" was ignored`, and `is:dfc -pow>=3` is 2,895
+// = the unfiltered `is:dfc`), so it offers no oracle for what NOT should mean over a value set.
+// This port keeps its existing NOT-of-the-existential, which is the deviation already ledgered.
+
+/// How many distinct values one card can hold for one face-scoped column. Two faces is the whole
+/// corpus (`reversible_card` and `meld` are single-faced rows), and the front's own value is one
+/// of them; 4 leaves room for a future three-face layout without a heap allocation in `tri`.
+const MAX_FACE_VALUES: usize = 4;
+
+/// A fixed-capacity, allocation-free value set. Local rather than a new crate dependency: the
+/// whole need is "up to four f64s on the stack, deduped", and the wasm engine pays for every
+/// dependency it links.
+#[derive(Default)]
+struct FaceValues {
+    vals: [f64; MAX_FACE_VALUES],
+    len: usize,
+}
+
+impl FaceValues {
+    fn push(&mut self, v: f64) {
+        if self.vals[..self.len].contains(&v) || self.len == MAX_FACE_VALUES {
+            return;
+        }
+        self.vals[self.len] = v;
+        self.len += 1;
+    }
+    fn get(&self, i: usize) -> Option<f64> {
+        if i < self.len { Some(self.vals[i]) } else { None }
+    }
+    /// One "don't care" slot when the card has 0 or 1 value, so a column the card has nothing
+    /// for still evaluates once and reaches `field_num`'s NULL exactly as before.
+    fn slots(&self) -> usize {
+        self.len.max(1)
+    }
+}
+
+/// True for the columns whose values a face can differ on. `Cmc` is deliberately NOT here:
+/// measured, mana value stays card-level on every layout — `mv=0` on Delver (back has no cost),
+/// `mv=2` on Fire // Ice (each half) and `mv=2` on Bonecrusher Giant // Stomp (the adventure's
+/// cost) are all 404, while the front's 1 / the joined 4 / the creature's 3 all answer 1.
+fn num_field_is_face_scoped(f: NumField) -> bool {
+    matches!(f, NumField::Power | NumField::Toughness | NumField::Loyalty)
+}
+
+fn num_expr_touches_face_field(e: &NumExpr) -> bool {
+    match e {
+        NumExpr::Const(_) => false,
+        NumExpr::Field(f) => num_field_is_face_scoped(*f),
+        NumExpr::Arith(l, _, r) => num_expr_touches_face_field(l) || num_expr_touches_face_field(r),
+    }
+}
+
+/// The distinct values this card holds for one face-scoped column, card value first.
+///
+/// The card value is always one of the faces' (the merge copies a whole `_FACE_STAT_GROUPS`
+/// group from one face), so listing it first costs nothing and makes the single-face path —
+/// `faces` empty, one value, identical to the pre-gen-28 behaviour — fall out rather than be
+/// special-cased. A face with no value for the column contributes nothing, which is why
+/// `pow=4` matches Bonecrusher Giant // Stomp and the costless adventure half adds no NULL.
+fn face_num_values(card: &AOracleCard, f: NumField) -> FaceValues {
+    let mut out = FaceValues::default();
+    let mut push = |v: f64| out.push(v);
+    match f {
+        NumField::Power => {
+            if let Some(v) = card.creature_power.as_ref() {
+                push(f64::from(*v));
+            }
+            for face in card.faces.iter() {
+                if let Some(v) = face.creature_power.as_ref() {
+                    push(f64::from(*v));
+                }
+            }
+        }
+        NumField::Toughness => {
+            if let Some(v) = card.creature_toughness.as_ref() {
+                push(f64::from(*v));
+            }
+            for face in card.faces.iter() {
+                if let Some(v) = face.creature_toughness.as_ref() {
+                    push(f64::from(*v));
+                }
+            }
+        }
+        NumField::Loyalty => {
+            if let Some(v) = card.planeswalker_loyalty.as_ref() {
+                push(f64::from(*v));
+            }
+            for face in card.faces.iter() {
+                if let Some(v) = face.planeswalker_loyalty.as_ref() {
+                    push(f64::from(*v));
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// Existential re-evaluation of a `NumericCmp` over a multi-face card's value sets.
+///
+/// Only reached from `tri` when the card HAS faces and the card-level answer was not already
+/// `True`, so the 82% single-face majority and every already-matching row pay one branch. The
+/// three columns are enumerated independently (the cross product, per the measurements above);
+/// `Cmc` and every printing-level field keep coming from `field_num`, unchanged.
+///
+/// Three-valued aggregation matches `tri`'s own: any `True` wins, else any `False`, else `Null`.
+fn face_numeric_cmp_tri(
+    card: &AOracleCard,
+    printing: Option<&APrinting>,
+    lhs: &NumExpr,
+    op: CmpOp,
+    rhs: &NumExpr,
+    base: Tri,
+) -> Tri {
+    if !num_expr_touches_face_field(lhs) && !num_expr_touches_face_field(rhs) {
+        return base;
+    }
+    let powers = face_num_values(card, NumField::Power);
+    let toughnesses = face_num_values(card, NumField::Toughness);
+    let loyalties = face_num_values(card, NumField::Loyalty);
+    let mut acc = base;
+    for pi in 0..powers.slots() {
+        for ti in 0..toughnesses.slots() {
+            for li in 0..loyalties.slots() {
+                let fetch = |f: NumField| -> NumVal {
+                    let pick = |vs: &FaceValues, i: usize| vs.get(i).map_or(NumVal::Null, NumVal::Known);
+                    match f {
+                        NumField::Power => pick(&powers, pi),
+                        NumField::Toughness => pick(&toughnesses, ti),
+                        NumField::Loyalty => pick(&loyalties, li),
+                        other => field_num(card, printing, other),
+                    }
+                };
+                match numeric_cmp_tri(lhs, op, rhs, &fetch) {
+                    Tri::True => return Tri::True,
+                    Tri::PrintingDep => return Tri::PrintingDep,
+                    Tri::False => acc = Tri::False,
+                    Tri::Null => {}
+                }
+            }
+        }
+    }
+    acc
 }
 
 /// Card-level numeric fields the #743 joint-tuple index covers: all card-scoped (not
@@ -364,11 +533,39 @@ fn card_colors(card: &AOracleCard, f: ColorField) -> u8 {
     }
 }
 
-/// The `ColorCmp` predicate against one card's (or, for an exact-total lookup, one stored
-/// combination's) bits. Shared by `matches()` and `exact_result_total`'s color arm so the two answers
-/// cannot drift apart -- a query bare enough to reach the totals table still has to agree with the
-/// residual path a compound query would fall back to.
-pub(crate) fn color_cmp_matches(op: CmpOp, mask: u8, bits: u8) -> bool {
+// ─── per-face colours ────────────────────────────────────────────────────────
+//
+// `colors` is the one colour column a face has of its own, and Scryfall compares the query against
+// EVERY face's mask, existentially — the same shape the stat columns take, and for the same
+// measured reason. Each row below is a live probe against api.scryfall.com on 2026-08-16, scoped
+// with `!"Full // Name"` so the answer is 1 or 404:
+//
+//   c=b     on Valki, God of Lies // Tibalt (B // BR)             -> 1    the FRONT's mask alone
+//   c:c     on Kabira Takedown // Kabira Plateau (W // [])        -> 1    the land back is colourless
+//   c=wb    on Extus // Awaken the Blood Avatar (WB // BR)        -> 1    one face exactly
+//   c=br    on Extus                                              -> 1    the other face exactly
+//   c:brw   on Extus                                              -> 404  NO face is {W,B,R}
+//   c=3     on Extus                                              -> 404  no face has three
+//   c=2     on Extus                                              -> 1    both faces have two
+//   c<=b    on Valki // Tibalt                                    -> 1    B ⊆ B
+//   c:c     on Fire // Ice (split, faces declare NO colours)      -> 404  the faces are the card's
+//
+// The last row is the one that constrains the SHAPE rather than the semantics: a split or flip
+// face carries no `colors` key at all, so reading its absence as the mask 0 would answer 1 there.
+// The middle rows are why the card's own union is NOT a member of the set — `c:brw` and `c=3` are
+// satisfied by {W,B,R} and by nothing else, and {W,B,R} is a value no face of Extus has.
+//
+// `color_identity` and `produced_mana` are card-level and stay that way, measured the same way and
+// agreeing on both sides already: `id=wbr` on Extus is 1 while `id=wb` and `id=2` are 404 (the
+// identity really is the card's three colours, not either face's two), and Scryfall's face objects
+// carry neither key. Mana VALUE is card-level for the identical reason — see
+// `num_field_is_face_scoped`.
+
+/// One card's colour comparison against one mask. The single definition the two structures that
+/// decide a colour leaf share: `tri`'s ColorCmp arm below, and `planes::compile_plane`, which
+/// evaluates it at COMPILE time against every possible mask to pick the planes to OR. Stating the
+/// operator once is what makes the plane expression and `tri` unable to disagree about it.
+pub(crate) fn color_cmp(bits: u8, op: CmpOp, mask: u8) -> bool {
     match op {
         // mask == 0 means the query was literally "c"/"colorless" (see
         // get_colors_comparison_object on the Python side), not "at
@@ -381,6 +578,108 @@ pub(crate) fn color_cmp_matches(op: CmpOp, mask: u8, bits: u8) -> bool {
         CmpOp::Gt => bits & mask == mask && bits != mask,
         CmpOp::Ne => bits != mask,
     }
+}
+
+/// The `ColorCmp` predicate against one card's (or, for an exact-total lookup, one stored
+/// combination's) bits, in the argument order `exact_result_total`'s color arm reads: the same
+/// single definition as `color_cmp`, so the totals table and the residual verify path cannot
+/// drift apart.
+pub(crate) fn color_cmp_matches(op: CmpOp, mask: u8, bits: u8) -> bool {
+    color_cmp(bits, op, mask)
+}
+
+/// The distinct colour masks this card holds — the query-time twin of `lib::face_color_masks`,
+/// which enumerates the identical set at build time for the planes. Read that one's doc for why
+/// the card's union is excluded and why an absent face `colors` inherits it.
+///
+/// Returns `None` for the two card-level columns and for the ~82% of cards with no faces, which is
+/// the caller's signal to keep using the single card-level mask it already read.
+fn face_color_masks(card: &AOracleCard, f: ColorField) -> Option<impl Iterator<Item = u8> + '_> {
+    if card.faces.is_empty() || !matches!(f, ColorField::Colors) {
+        return None;
+    }
+    let card_mask = card.card_colors;
+    Some(card.faces.iter().map(move |face| face.card_colors.as_ref().map_or(card_mask, |v| *v)))
+}
+
+// ─── the front face, and `is:vanilla` ────────────────────────────────────────
+//
+// `is:vanilla` is the third face-scoped shape after the numeric columns above and the colour masks
+// beside them, and the only one that is not existential. It is a predicate rather than the
+// `t:creature -o:/./` expansion the parser used to give it because that rewrite reads the MERGED
+// row, whose oracle text is every face's joined: a card whose FRONT face prints nothing loses to
+// the half that does. 352 on both sides against Scryfall's own 363.
+//
+// THREE RULES, each measured against api.scryfall.com on 2026-08-17, and only the first is the
+// question the diagnosis started from:
+//
+//   1. THE FRONT FACE ANSWERS — not the merged row, and NOT any face. `is:vanilla o:/./` is 12
+//      there and all 12 are adventures whose creature front is blank behind an Instant/Sorcery half
+//      that prints (`Beluna's Gatekeeper // Entry Denied`). The back is NOT enough: all four of
+//      `Kaslem's Stonetree`, `Ecstatic Awakener`, `Chosen of Markov` and `Skin Invasion` have a
+//      blank creature BACK behind a front that prints, and `is:vanilla` on the four is 0. The token
+//      rows settle it in the other direction — `is:vanilla is:dfc` is 18 there, and it holds
+//      `Servo // Thopter` and `Goblin // Blood` (blank front, printing back) while leaving out
+//      `Elemental // Centaur` and `Fish // Kraken` (printing front, blank back).
+//
+//   2. THE CREATURE TEST IS THE CARD'S, not the front face's. `City's Blessing // Elemental` and
+//      `Copy // Horror` are both in that 18, and neither FRONT is a creature — the back is. So the
+//      card must be a creature somewhere and its front must be silent, which is exactly the pair
+//      `card_types` and `faces[0]` already hold.
+//
+//   3. A LAND IS NEVER VANILLA. `t:creature -o:/./ -is:vanilla` is exactly 1 there and it is
+//      `Dryad Arbor`, whose land types grant `{T}: Add {G}` with nothing printed to say so.
+//      `is:vanilla t:land` is 0 there with and without `include_extras`, while
+//      `t:creature t:land -o:/./` is 2 — Dryad Arbor and the `Forest Dryad` token. Both candidates,
+//      neither vanilla, and over the whole 540,484-row import those 2 are the only rows the clause
+//      removes: a creature with no printed text produces mana only through a land type.
+//
+// And the text read is the printed text WITHOUT its reminder text: `Icehide Golem` ("({S} can be
+// paid with one mana from a snow source.)") and `Infinity Elemental` ("(This creature has INFINITE
+// POWER.)") are both vanilla there and neither prints an empty string.
+//
+// 352 + 12 − 1 = 363, which is Scryfall's own count — and card for card, not merely the same size:
+// the full 363 was fetched in three pages and diffed against this engine's own by `oracle_id`, and
+// both set differences are empty. Every field this reads is already in the archive, so nothing is
+// stored for it and no format moves.
+
+/// Whether a printed oracle text leaves nothing behind once its reminder text is removed.
+///
+/// A depth walk rather than a strip-and-compare: the question is only whether ANY character
+/// survives outside the parentheses, so nothing needs to be built. Reminder text nests in practice
+/// (`Dryad Arbor`'s parenthetical quotes an ability), which is why the depth is counted rather than
+/// the first `)` taken.
+///
+/// This is the blankness half of the rule `o:` will want in full when the reminder-text work lands;
+/// at that point this collapses onto whatever that introduces, rather than staying a second copy.
+fn text_blank_after_reminders(text: &str) -> bool {
+    let mut depth = 0usize;
+    for c in text.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ if depth == 0 && !c.is_whitespace() => return false,
+            _ => {}
+        }
+    }
+    true
+}
+
+/// `is:vanilla` / `has:vanilla`: a creature whose FRONT face prints no rules text.
+///
+/// The type half is two mask bits the build already parsed off the whole type line, so it needs no
+/// face walk; the text half is one face read, or the card's own text for the ~82% with no faces —
+/// where the card IS its one face.
+fn card_is_vanilla(card: &AOracleCard, strings: &AStrings) -> bool {
+    let bits = u16::from(card.card_types);
+    if bits & super::TYPE_CREATURE == 0 || bits & super::TYPE_LAND != 0 {
+        return false;
+    }
+    let text_id = match card.faces.first() {
+        None => card.oracle_text_id,
+        Some(front) => front.oracle_text_id,
+    };
+    str_at(strings, u32::from(text_id)).is_none_or(text_blank_after_reminders)
 }
 
 #[derive(Clone, Copy)]
@@ -417,10 +716,27 @@ fn collection<'a>(
 #[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum TextSearchField {
+    /// `name:"…"` — the LITERAL name match, `card_name_lower` and nothing folded past its case.
+    /// Measured on api.scryfall.com 2026-08-16: `name:"eowyn"` answers 0 while `name:"éowyn"`
+    /// answers 3, and `name:"lim-dul"` answers 0 while `name:"lim-dûl"` answers 8 — a quoted
+    /// value reaches only the spelling the searcher typed.
     NameLower,
+    /// `name:word` — the BARE-word match, against `card_name_collated`: diacritics folded and
+    /// every non-alphanumeric character removed. The overwhelmingly common form (a bare word in
+    /// a query IS this predicate), and the one that makes `ft` answer 1,628 rather than 362 by
+    /// reaching "Sword **of the** Ages" through the vanished space.
+    NameCollated,
     OracleTextLower,
     FlavorTextLower,
+    /// `a:"quoted"` — the value as written, still UNfolded by the parser.
+    ///
+    /// Kept as its own variant only because the parser distinguishes the two node shapes; both
+    /// arms bind through `artist_contains_ids`, because Scryfall draws no quoted/bare line for
+    /// artists the way it does for `name:` — `a:"rebeccaguay"` answers `a:rebecca-guay`'s 399.
     ArtistLower,
+    /// `a:word` — the COLLATED artist (diacritics folded, every non-alphanumeric character gone),
+    /// which is what Scryfall compares EVERY artist value against, bare or quoted, `:` or `=`.
+    ArtistCollated,
 }
 
 /// Text operand during evaluation; PDep only in the card-level pass.
@@ -434,6 +750,114 @@ fn opt_sv(v: Option<&str>) -> StrVal<'_> {
     v.map_or(StrVal::Null, StrVal::Known)
 }
 
+/// The SECOND value a text field compares against, for the one field that has two.
+///
+/// `layout:` is a multi-VALUE column and not a scalar one: a `reversible_card` printing answers
+/// both `layout:reversible_card` and its faces' `layout:normal` (measured on api.scryfall.com —
+/// `is:reversible layout:reversible_card` 81, `is:reversible layout:normal` 77, and the whole
+/// 77-row gap between `layout:normal`'s 106,635 there and the 106,558 printings whose own layout
+/// is `normal`). See `DivergentPrinting::face_layout_id`.
+///
+/// `watermark:` is one too, and per FACE rather than per printing: `Research // Development`
+/// (dis/155) prints simic on its front and izzet on its back, and api.scryfall.com answers it for
+/// both `wm:simic` and `wm:izzet`. 19 printings in the 2026-08-16 default_cards bulk carry a
+/// watermark only a non-front face has. See `PrintingFace::card_watermark_id`.
+///
+/// UNBOUNDED, not "one more". A cap here would be a cap on what `tri` can see while
+/// `indexes.watermarks` indexes every value a printing has, and the two disagreeing is precisely
+/// the shape the compose path's exactness contract cannot survive — the postings leaf is claimed
+/// EXACT and nothing downstream re-checks it, so a third face watermark would have to either
+/// silently drop out of the filter or panic the build. It does neither: this yields all of them.
+/// Allocation-free (an enum, not a `Box<dyn Iterator>`) because it runs per candidate printing.
+///
+/// Exhaustive over `TextField`, not a `matches!` with a hidden `_ => Empty`: a field that gains a
+/// second value must get a considered answer here rather than silently keeping one. `Empty` means
+/// "this field has exactly one value", which is every field but `Layout` and `Watermark`.
+fn extra_text_field_values<'a>(
+    card: &'a AOracleCard,
+    printing: Option<&'a APrinting>,
+    strings: &'a AStrings,
+    field: TextField,
+) -> ExtraStrs<'a> {
+    match field {
+        TextField::Layout => printing
+            .and_then(|p| crate::divergent_of(card, p))
+            .and_then(|d| str_at(strings, u32::from(d.face_layout_id)))
+            .map_or(ExtraStrs::Empty, ExtraStrs::One),
+        // The FACES' watermarks. `text_field_value` already answered with `Printing`'s own, which
+        // is the front face's copy for a faced printing, so the front repeating here is harmless:
+        // every use of this is an existential OR against that same value.
+        TextField::Watermark => match printing {
+            Some(p) => ExtraStrs::Faces { faces: p.faces.iter(), strings },
+            None => ExtraStrs::Empty,
+        },
+        TextField::NameLower
+        | TextField::OracleTextLower
+        | TextField::FlavorTextLower
+        | TextField::ArtistLower
+        | TextField::SetCode
+        | TextField::Border
+        | TextField::CollectorNumber => ExtraStrs::Empty,
+    }
+}
+
+/// Three-valued existential over every value a `TextField` carries on this printing — the one
+/// shape `TextExact` and `TextRegex` both evaluate, so they cannot drift apart on which values
+/// they see.
+///
+/// `Tri::Null` is reserved for "this printing answers NOTHING here", which on a nullable
+/// multi-valued field means the scalar is absent AND no face supplies one. A faced printing whose
+/// back alone carries the watermark is therefore False-or-True, never Null — the front's absence
+/// is not the printing's.
+fn tri_over_values(
+    card: &AOracleCard,
+    printing: Option<&APrinting>,
+    strings: &AStrings,
+    field: TextField,
+    holds: impl Fn(&str) -> bool,
+) -> Tri {
+    match text_field_value(card, printing, strings, field) {
+        StrVal::Known(s) => {
+            tri_bool(holds(s) || extra_text_field_values(card, printing, strings, field).any(&holds))
+        }
+        StrVal::Null => {
+            // `fold` and not `any`: whether ANY value existed is as load-bearing as whether one
+            // held, and `any` short-circuits away the evidence for the first half.
+            let (seen, hit) = extra_text_field_values(card, printing, strings, field)
+                .fold((false, false), |(_, hit), s| (true, hit || holds(s)));
+            if seen { tri_bool(hit) } else { Tri::Null }
+        }
+        StrVal::PDep => Tri::PrintingDep,
+    }
+}
+
+/// The additional values a multi-valued `TextField` carries — see `extra_text_field_values`.
+enum ExtraStrs<'a> {
+    Empty,
+    One(&'a str),
+    Faces { faces: std::slice::Iter<'a, Archived<crate::PrintingFace>>, strings: &'a AStrings },
+}
+
+impl<'a> Iterator for ExtraStrs<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<&'a str> {
+        match self {
+            ExtraStrs::Empty => None,
+            ExtraStrs::One(_) => match std::mem::replace(self, ExtraStrs::Empty) {
+                ExtraStrs::One(s) => Some(s),
+                _ => unreachable!(),
+            },
+            // A face WITHOUT a watermark is not a value — skipping rather than yielding "" is what
+            // keeps `Tri::Null` meaning "this printing answers nothing" on a faced printing whose
+            // faces are all bare.
+            ExtraStrs::Faces { faces, strings } => {
+                faces.find_map(|f| str_at(strings, u32::from(f.card_watermark_id)))
+            }
+        }
+    }
+}
+
 fn text_search_field_value<'a>(
     card: &'a AOracleCard,
     printing: Option<&'a APrinting>,
@@ -441,13 +865,17 @@ fn text_search_field_value<'a>(
     field: TextSearchField,
 ) -> StrVal<'a> {
     match field {
-        // Accent-folded (#649): the query word is folded the same way in Python
-        // before it reaches TextContains/NameMatch, so this must match.
-        TextSearchField::NameLower       => StrVal::Known(card.card_name_folded.as_str()),
+        // LITERAL (`name:"…"`, and a plain-literal regex lowered to one): the stored lowercase
+        // name, with neither fold. The query value keeps its diacritics in Python for the same
+        // reason.
+        TextSearchField::NameLower       => StrVal::Known(card.card_name_lower.as_str()),
+        // COLLATED (`name:word`): accent-folded (#649) AND separator-folded, the query word
+        // through `collate_name(fold_accents(...))` in Python, so this must match.
+        TextSearchField::NameCollated    => StrVal::Known(crate::collated_name(card, strings)),
         TextSearchField::OracleTextLower => opt_sv(str_at(strings, u32::from(card.oracle_text_lower_id))),
         TextSearchField::FlavorTextLower => printing.map_or(StrVal::PDep, |p| opt_sv(str_at(strings, u32::from(p.flavor_text_lower_id)))),
         // Rewritten to ArtistMatch by bind(); printings carry no artist strings.
-        TextSearchField::ArtistLower     => StrVal::Null,
+        TextSearchField::ArtistLower | TextSearchField::ArtistCollated => StrVal::Null,
     }
 }
 
@@ -476,7 +904,10 @@ fn text_field_value<'a>(
     match field {
         TextField::NameLower       => StrVal::Known(card.card_name_lower.as_str()),
         TextField::OracleTextLower => opt_sv(str_at(strings, u32::from(card.oracle_text_lower_id))),
-        TextField::Layout          => opt_sv(str_at(strings, u32::from(card.card_layout_id))),
+        // PRINTING-level (see Printing::card_layout_id): a reversible printing and an ordinary
+        // printing of the same card give different answers, so no card-level value can stand in
+        // for either.
+        TextField::Layout          => printing.map_or(StrVal::PDep, |p| opt_sv(str_at(strings, u32::from(p.card_layout_id)))),
         TextField::FlavorTextLower => printing.map_or(StrVal::PDep, |p| opt_sv(str_at(strings, u32::from(p.flavor_text_lower_id)))),
         // Rewritten to ArtistMatch by bind(); printings carry no artist strings.
         TextField::ArtistLower     => StrVal::Null,
@@ -586,6 +1017,116 @@ pub(crate) enum FilterExpr {
         value_id: Option<u16>,
     },
 
+    /// `lang:xx` — a printing's language equals `value` (`card_lang`, stored as
+    /// `CompatFields.lang_id`). `lang:any` matches every printing: its whole effect is the one
+    /// every LangMatch leaf has, widening the query to the foreign annex (the presence of this
+    /// variant in a bound filter is one of the two widening triggers; `include_multilingual` is
+    /// the other). Detected here, in the engine, so the flag and the operator cannot drift.
+    LangMatch {
+        value: String,
+        /// `value` resolved to its coll_vocab id by bind(), the CollectionCmp shape exactly:
+        /// None means no loaded printing carries the language, which matches nothing.
+        vid: Option<u16>,
+        any: bool,
+    },
+
+    /// `st:<type>` — a printing's SET TYPE equals `value` (Scryfall's `set_type`, stored as
+    /// `CompatFields.set_type_id`). `LangMatch`'s shape exactly, minus the widening: both live in
+    /// the compat blob rather than in a column of their own, both intern into `coll_vocab`, and
+    /// both resolve to an id in `bind()` so `tri()` is one integer equality.
+    ///
+    /// It is the predicate five `is:` values turn out to BE — `is:masterpiece` is `st:masterpiece`
+    /// exactly (measured against api.scryfall.com, both set differences empty), and `is:alchemy`
+    /// and `is:funny` are their set types — so it retires a family of stored tags rather than
+    /// adding one.
+    SetTypeMatch {
+        value: String,
+        /// `value` resolved to its coll_vocab id by bind(), the LangMatch shape exactly: None
+        /// means no loaded printing carries the set type, which matches nothing.
+        vid: Option<u16>,
+    },
+
+    /// `is:localizedname`, and `has:printedname`, its other spelling — this printing carries a
+    /// PRINTED name. One field compare (`printed_name_folded_id != NONE_STR`), because the importer
+    /// already folds the printed FULL name of every face into that id and leaves it NONE_STR when
+    /// no face has one; nothing is stored for this predicate and nothing is bound for it.
+    ///
+    /// Presence, not difference, and not "non-English" — measured against api.scryfall.com on
+    /// 2026-08-16 over the whole 540,484-row bulk. 182 of the printings it matches are ENGLISH
+    /// (om1/66 prints "Rhilex the Accursed" over Agent Venom); 4,468 of the foreign ones print a
+    /// name IDENTICAL to the English one and still count; and it reads per-FACE, so every Japanese
+    /// transform printing matches on face names with no top-level `printed_name` at all.
+    /// `is:localizedname e:dsk` is 1,917 printings there against the same 1,917 in the bulk.
+    ///
+    /// Its presence WIDENS the query — see `widens_to_annex`, and the count that proves it.
+    PrintedNamePresent,
+
+    /// `is:flavorname` — and `has:flavorname` — a PRINTING that carries a flavor name, Scryfall's
+    /// alternate SOLD-AS name (the Godzilla series, the Secret Lair crossovers). The presence twin
+    /// of `FlavorNameIn`: that leaf asks whether the flavor name satisfies a `name:` needle, this
+    /// one only whether there is one. Nothing is stored for it and nothing is bound.
+    ///
+    /// EITHER PLACE Scryfall puts the key counts. Measured against api.scryfall.com on
+    /// 2026-09-01: `is:flavorname` is 476 cards / 661 printings, 646 of them carrying the
+    /// top-level key and the other 15 carrying it on their FACES alone (`transform` and
+    /// `reversible_card` — vow/341 is "Dracula the Voyager" // "Casket of Native Earth", sld/1807
+    /// "Chucky" on the front face only), and none carrying neither. A printing-level read alone
+    /// would have answered 646 and called it the whole set.
+    ///
+    /// Its presence WIDENS the query, exactly as `PrintedNamePresent`'s does: 6 of the 661 are
+    /// Japanese rows (iko/387 ja prints "Mechagodzilla, the Weapon" over 結晶の巨人) and
+    /// api.scryfall.com returns them with no `lang:` term written.
+    FlavorNamePresent,
+
+    /// A PRINTING whose `flavor_name` satisfies the `name:` predicate that produced this leaf.
+    ///
+    /// `name:` reaches a printing's alternate SOLD-AS name, not just its oracle name. Measured on
+    /// api.scryfall.com 2026-08-16: `name:croft` answers 2 — Lara Croft, and **Command Tower**,
+    /// which is 2 of 112 printings there because two of them are sold as "Croft Manor";
+    /// `name:godzilla` is 8 cards / 14 printings; `!"croft manor"` is 1. It is printing-scoped in
+    /// both directions: `unique=prints` returns only the printings that carry the name.
+    ///
+    /// `ids` are interned `CardData.strings` ids of `Printing.flavor_name_folded_id`, sorted — a
+    /// printing matches iff its own id is in the set. Compiled by `bind_flavor_names` from the
+    /// ~546-record `flavor_names` index, and ONLY when the needle actually hits one of those
+    /// records: a `name:` query that matches no flavor name never grows this arm at all, so the
+    /// hottest predicate in the language pays a bounded scan of a table two orders of magnitude
+    /// smaller than the corpus and nothing else.
+    FlavorNameIn {
+        ids: Vec<u32>,
+    },
+
+    /// `is:unique` — the owning CARD has been printed in exactly one SET. Card-level and total, off
+    /// `OracleCard.single_set`, which the build computes over the canonical printings AND the annex
+    /// (`assign_single_set_flags`); nothing here to bind and nothing per printing to consult.
+    ///
+    /// A SET count, not a printing count: Scryfall's syntax page defines it as "cards that have
+    /// only been in a single set", and the two differ on 2,847 of its own 16,318 — `!"Forest"`
+    /// alone is two printings of one set. Spanning the annex is not optional either: 130 cards have
+    /// exactly one English set and a second set that exists only in another language (Salvat,
+    /// ps11, pmei), and api.scryfall.com calls none of the 130 unique. Reading canonical printings
+    /// alone would have called all 130 unique and been wrong 130 times.
+    SingleSet,
+
+    /// `is:vanilla` — and `has:vanilla` — a creature whose FRONT face prints no rules text.
+    /// Card-level and total, off fields the archive already holds; nothing to bind and nothing per
+    /// printing.
+    ///
+    /// A PREDICATE rather than the `t:creature -o:/./` expansion it replaces, because the merged
+    /// row cannot answer it: the join hides a blank front behind the half that prints. See
+    /// `card_is_vanilla` for the three measured rules — the front face, the card-level creature
+    /// test, and the land face that is never vanilla.
+    VanillaFace,
+
+    /// `oracleid:<uuid>` — the oracle card whose `oracle_id` equals `id` (`parse_uuid_or_hash`'s
+    /// u128, 0 for an unparseable value, which no stored id ever equals). Card-level and total,
+    /// with nothing for `bind()` to resolve — bind() sees the vocab tables, not `CardIndexes` —
+    /// so `tri()` compares the raw u128 and `narrow_rec` seeds the same id through
+    /// `oracle_by_oracle_id` for the O(log n) answer.
+    OracleIdMatch {
+        id: u128,
+    },
+
     Legality {
         shift: Option<u8>, // None: format absent from all loaded data — matches nothing
         expected: u64,
@@ -605,6 +1146,19 @@ pub(crate) enum FilterExpr {
         /// semantics. Built all-unknown, so an unbound filter behaves as if
         /// every hybrid symbol were unknown (mirroring CollectionCmp).
         hybrid_ids: Vec<(u8, u8)>,
+        /// Each mana-vocab id's CMC CONTRIBUTION, indexed by id, resolved by bind() — 2 for a
+        /// TWOBRID (`{2/W}`), 1 for every other hybrid.
+        ///
+        /// Generic is `cmc - (what the pips account for)`, and a twobrid accounts for TWO. Without
+        /// this the subtraction credits it with one, and the shortfall becomes generic the card
+        /// does not have. Measured on api.scryfall.com 2026-08-17 — Beseech the Queen,
+        /// `{2/B}{2/B}{2/B}`, cmc 6, three pips: the true generic is 0, this read 6 - 3 = 3, and
+        /// `!"Beseech the Queen" m>={3}` answered the card where Scryfall answers nothing.
+        /// Corpus-wide, `m:{2/w} m:{2}` was 16 against Scryfall's 0.
+        ///
+        /// Empty until bind(), which is the same all-unknown posture `hybrid_ids` takes; a missing
+        /// id falls back to 1, the weight of every non-twobrid symbol.
+        hybrid_cmc: Vec<u8>,
         cmc: f32,
     },
 
@@ -614,6 +1168,16 @@ pub(crate) enum FilterExpr {
         /// hybrid query pips expanded at build — same layout as
         /// ManaCost.devotion, so every comparison is lane arithmetic.
         pips: u64,
+        /// Each mana-vocab id's DEVOTION COLOUR MASK, indexed by id, resolved by bind(): the
+        /// lanes a pip of that symbol counts toward. `R/G` sets red and green; `2/W` and `W/P`
+        /// set white alone, since neither `2` nor `P` is a colour.
+        ///
+        /// Devotion is a count of PIPS, and `ManaCost.devotion` stores per-colour lanes with
+        /// hybrids expanded — so summing the queried lanes counts a `{R/G}` pip once for red and
+        /// again for green when both are queried. This table is what lets the sum be corrected
+        /// back to distinct pips. Empty until bind(); a missing id contributes no colours, which
+        /// costs a correction rather than inventing one.
+        hybrid_colors: Vec<u8>,
     },
 
     DateCmp {
@@ -702,10 +1266,16 @@ pub(crate) fn verify_cost_tier(f: &FilterExpr) -> u32 {
     match f {
         FilterExpr::TextRegex { regex, .. } => regex_tier(regex.as_str()),
         FilterExpr::TextContains { .. } => TEXT_SCAN_NS100,
+        // Two mask bits reject all but the creatures, and the survivors walk one string: the FRONT
+        // face's printed text, or the card's own. That walk is a scan, so it is ranked as one — the
+        // model must not under-charge a predicate on the strength of the branch it usually takes.
+        FilterExpr::VanillaFace => TEXT_SCAN_NS100,
         FilterExpr::Devotion { .. } | FilterExpr::ManaCostCmp { .. } => SET_LOOKUP_NS100,
         FilterExpr::ArtistMatch { .. }
         | FilterExpr::FlavorMatch { .. }
         | FilterExpr::NameMatch { .. }
+        // A binary search over the compiled flavor-name ids, against a u32 already on the printing.
+        | FilterExpr::FlavorNameIn { .. }
         | FilterExpr::OracleMatch { .. }
         | FilterExpr::CollectionCmp { .. } => SET_LOOKUP_NS100,
         FilterExpr::And(children) | FilterExpr::Or(children) => {
@@ -721,6 +1291,18 @@ pub(crate) fn verify_cost_tier(f: &FilterExpr) -> u32 {
         | FilterExpr::ColorCmp { .. }
         | FilterExpr::TypeCmp { .. }
         | FilterExpr::Legality { .. }
+        // A LangMatch is one integer equality against a resolved vocab id.
+        | FilterExpr::LangMatch { .. }
+        // ...and a SetTypeMatch is the same equality against a different id in the same vocab.
+        | FilterExpr::SetTypeMatch { .. }
+        // A PrintedNamePresent is one u32 compare against a field already on the printing, a
+        // FlavorNamePresent the same compare plus a walk of the printing's few faces, and a
+        // SingleSet one bool read off a field already on the card.
+        | FilterExpr::PrintedNamePresent
+        | FilterExpr::FlavorNamePresent
+        | FilterExpr::SingleSet
+        // An OracleIdMatch is one 128-bit integer equality against a field already in the card.
+        | FilterExpr::OracleIdMatch { .. }
         | FilterExpr::DateCmp { .. }
         | FilterExpr::YearCmp { .. } => MASK_COMPARE_NS100,
     }
@@ -874,14 +1456,26 @@ fn leaf_compares_printing_field(f: &FilterExpr) -> bool {
         // Exhaustive over TextSearchField (no `matches!`), same reason as num_pdep.
         FilterExpr::TextContains { field, .. } => match field {
             TextSearchField::FlavorTextLower => true,
-            TextSearchField::NameLower | TextSearchField::OracleTextLower | TextSearchField::ArtistLower => false,
+            TextSearchField::NameLower
+            | TextSearchField::NameCollated
+            | TextSearchField::OracleTextLower
+            | TextSearchField::ArtistLower
+            | TextSearchField::ArtistCollated => false,
         },
         // Exhaustive over TextField (no `matches!`), same reason as num_pdep.
         FilterExpr::TextExact { field, .. } | FilterExpr::TextRegex { field, .. } => match field {
-            TextField::FlavorTextLower | TextField::SetCode | TextField::Border | TextField::Watermark | TextField::CollectorNumber => {
-                true
-            }
-            TextField::NameLower | TextField::OracleTextLower | TextField::ArtistLower | TextField::Layout => false,
+            // `Layout` joined this list when the field moved to the printing, and is the reason the
+            // list is worth reading twice: it sat in the card-level arm below while
+            // `card_layout_id` lived on the OracleCard, and leaving it there would have let the
+            // verifier settle `layout:` at card level and never look at the printing whose value
+            // now decides it.
+            TextField::FlavorTextLower
+            | TextField::SetCode
+            | TextField::Layout
+            | TextField::Border
+            | TextField::Watermark
+            | TextField::CollectorNumber => true,
+            TextField::NameLower | TextField::OracleTextLower | TextField::ArtistLower => false,
         },
         // Exhaustive over CollField (no `matches!`), same reason as num_pdep.
         FilterExpr::CollectionCmp { field, .. } => match field {
@@ -891,17 +1485,38 @@ fn leaf_compares_printing_field(f: &FilterExpr) -> bool {
         // Divergent-legality cards defer to the printing, but they are a rare
         // exception (non-tournament reprints); rank by the common card-level case.
         FilterExpr::Legality { .. } => false,
+        // The language is a per-printing fact (CompatFields.lang_id).
+        FilterExpr::LangMatch { .. } => true,
+        // The set type is the PRINTING's set, so it can only settle once one is in hand.
+        FilterExpr::SetTypeMatch { .. } => true,
+        // The printed name is a per-printing fact (Printing.printed_name_folded_id) — an English
+        // row and its Japanese sibling answer differently.
+        FilterExpr::PrintedNamePresent => true,
+        // A flavor name is printed on the PRINTING; two printings of one card differ on it, which
+        // is the whole reason `name:croft` returns 2 of Command Tower's 112 — and the same reason
+        // `is:flavorname` matches Command Tower's sld/1864 row and none of its other 111.
+        FilterExpr::FlavorNameIn { .. } | FilterExpr::FlavorNamePresent => true,
         // Composites are composed by the two callers, which differ on `all` vs `any`; reaching here with
         // one is a bug in whichever caller forgot to handle it, not a case to answer silently.
         FilterExpr::And(_) | FilterExpr::Or(_) | FilterExpr::Not(_) => {
             unreachable!("composites are composed by printing_dependent / touches_printing_field")
         }
+        // A REVERSIBLE PRINTING PRINTS ITS OWN JOINED NAME ("Temple Garden // Temple Garden"
+        // against the card's "Temple Garden"), so an exact-name match can settle differently for
+        // two printings of one card — 81 printings over 71 cards in the 2026-08-16 corpus.
+        FilterExpr::ExactName(_) => true,
         // Exhaustive, not `_ => false`: a new variant must get a considered
         // answer here rather than silently inheriting "can settle at card level".
         FilterExpr::True
-        | FilterExpr::ExactName(_)
         | FilterExpr::NameMatch { .. }
         | FilterExpr::OracleMatch { .. }
+        // The oracle id is the card's own identity — every printing of it shares one.
+        | FilterExpr::OracleIdMatch { .. }
+        // How many SETS the card has been printed in is the card's fact too, decided at build over
+        // every printing of it; no printing can change the answer.
+        | FilterExpr::SingleSet
+        // Faces and their texts are oracle data — every printing of the card prints the same ones.
+        | FilterExpr::VanillaFace
         | FilterExpr::ColorCmp { .. }
         | FilterExpr::TypeCmp { .. }
         | FilterExpr::ManaCostCmp { .. }
@@ -998,6 +1613,74 @@ fn hybrids_eq(card: &AHybrids, query: &[(u8, u8)]) -> bool {
     card.len() == query.len() && card.iter().zip(query).all(|(c, q)| c.0 == q.0 && c.1 == q.1)
 }
 
+/// GENERIC mana — the `{2}` in `{2}{R}` — as a COUNTED quantity, recovered from a cost's cmc and
+/// its pips rather than stored.
+///
+/// It is not in `core`: `mana_pip_counts` drops numeric symbols on purpose (they are not pips and
+/// have no lane), so a cost's generic used to survive only inside `cmc`, and comparing THAT is a
+/// measurably different question. `cmc - (what the pips account for)` is the generic exactly, for a
+/// query cost and a card cost alike — which is why the query side needs no new field and the store
+/// needs no new column.
+///
+/// WHAT A PIP ACCOUNTS FOR IS NOT ALWAYS 1. Lane 7 is X (see `MANA_LANE_SYMS`) and contributes 0,
+/// so it is excluded from the subtraction rather than credited; every other single symbol
+/// contributes 1; and a TWOBRID contributes 2, which is why `hybrid_cmc` exists and why hybrids
+/// arrive here as (vocab id, count) rather than as a bare count. Beseech the Queen is the case
+/// that named it: `{2/B}{2/B}{2/B}` at cmc 6 read as 6 - 3 = 3 generic when every pip weighed 1,
+/// and `m>={3}` answered a card whose generic is 0. Saturating and clamped at 0, so a weight this
+/// table cannot supply degrades to 0 instead of wrapping.
+fn generic_of(core: u64, hybrids: impl Iterator<Item = (u8, u8)>, cmc: f32, hybrid_cmc: &[u8]) -> u8 {
+    // Lanes 0..6 only: lane 7 is X, which is a real pip and contributes 0 to cmc, so subtracting
+    // it would invent generic. Every other single symbol contributes exactly 1.
+    let core_pips: u32 = (0..7).map(|l| u32::from(lane_get(core, l))).sum();
+    // A hybrid contributes its OWN weight, which is 2 for a twobrid and 1 for the rest — see
+    // `hybrid_cmc`. Unknown ids weigh 1, the common case and the safe one.
+    let hybrid_pips: u32 = hybrids
+        .map(|(id, n)| u32::from(hybrid_cmc.get(id as usize).copied().unwrap_or(1)) * u32::from(n))
+        .sum();
+    let cmc = if cmc > 0.0 { cmc as u32 } else { 0 };
+    u8::try_from(cmc.saturating_sub(core_pips + hybrid_pips)).unwrap_or(u8::MAX)
+}
+
+/// A mana symbol's contribution to converted mana cost: 2 for a TWOBRID (`2/W`), 1 otherwise.
+///
+/// Scryfall's cmc counts a twobrid as two — `{2/B}{2/B}{2/B}` is cmc 6, not 3 — while every other
+/// hybrid (`W/U`, `W/P`, `B/G/P`) counts one. The vocab interns the symbol without its braces, so
+/// the leading component is what decides it.
+fn hybrid_cmc_weight(sym: &str) -> u8 {
+    sym.split('/').next().and_then(|head| head.parse::<u8>().ok()).unwrap_or(1)
+}
+
+/// The devotion lanes a pip of `sym` counts toward, as a bitmask over WUBRGC.
+///
+/// `R/G` sets red and green — a hybrid pip is devotion to BOTH its colours. `2/W` and `W/P` set
+/// white alone: neither `2` nor `P` is a colour, and Phyrexian mana is devotion to its one colour.
+fn devotion_color_mask(sym: &str) -> u8 {
+    sym.split('/')
+        .filter_map(mana_lane)
+        .filter(|&lane| lane < 6)
+        .fold(0u8, |mask, lane| mask | (1u8 << lane))
+}
+
+/// Interned name ids (ascending, deduplicated) of the `flavor_names` records satisfying `pred`.
+///
+/// `pred` sees the record's COLLATED name, which is the form both `name:` predicates compare in.
+fn flavor_name_ids(
+    idx: &rkyv::Archived<PrintedNameIndex>,
+    collated: &AStrings,
+    pred: impl Fn(&str) -> bool,
+) -> Vec<u32> {
+    let mut ids: Vec<u32> = collated
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| pred(s.as_str()))
+        .map(|(rec, _)| u32::from(idx.name_ids[rec]))
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
 /// Vocab ids (ascending) whose artist string satisfies `pred`.
 fn artist_match_ids(artist_vocab: &AStrings, pred: impl Fn(&str) -> bool) -> Vec<u16> {
     artist_vocab
@@ -1005,6 +1688,45 @@ fn artist_match_ids(artist_vocab: &AStrings, pred: impl Fn(&str) -> bool) -> Vec
         .enumerate()
         .filter(|(_, s)| pred(s.as_str()))
         .map(|(i, _)| i as u16)
+        .collect()
+}
+
+/// Vocab ids (ascending) whose artist CONTAINS `needle`, collated on both sides.
+///
+/// THE ONE COMPARISON EVERY ARTIST PREDICATE MAKES. On api.scryfall.com there is no `a:` / `a=`
+/// distinction and no quoted / bare distinction — measured 2026-08-16, every pair answers the same
+/// number:
+///
+///   a:"rebecca guay" 399   a="rebecca guay" 399   a:rebecca-guay 399   a=rebecca-guay 399
+///   a:gaweł           23   a=gaweł           23   a:gawel         23   a="gawel"       23
+///
+/// and it is a CONTAINS rather than an equality: `a="rebecca"` answers 405 exactly as `a:rebecca`
+/// does, and `a="guay"` answers 462 exactly as `a:guay` does. This port had `a=` as a full-string
+/// compare against the unfolded vocab, so `a="greg hildebrandt"` answered 0 where Scryfall answers
+/// 6, and a quoted `a:"…"` stayed literal, so `a:"rebeccaguay"` answered 0 against Scryfall's 399.
+///
+/// The needle arrives accent-folded ONLY when the parser built a CollatedNameValueNode (a bare
+/// `a:` word); the quoted and `=` forms keep their spelling. Rather than teach the engine a second
+/// copy of `fold_accents`, a NON-ASCII needle is compared against the unfolded vocab collated on
+/// the fly as well as the stored folded one — the union is exactly Scryfall's behaviour, which
+/// answers 23 for `gaweł` and `gawel` alike. An ASCII needle skips that pass entirely and cannot
+/// need it: folding only ever maps non-ASCII to ASCII, so the stored folded vocab is already the
+/// more permissive target. That keeps the common path allocation-free, as it was.
+fn artist_contains_ids(artist_vocab: &AStrings, artist_vocab_collated: &AStrings, needle: &str) -> Vec<u16> {
+    let collated = crate::collate_name(needle);
+    // memmem::Finder built once, reused across the vocab scan — its SIMD prefilter beats
+    // rebuilding str::contains's searcher per entry (~1.3x, bench_substring_finders). #734.
+    let finder = memmem::Finder::new(collated.as_bytes());
+    let also_unfolded = !collated.is_ascii();
+    artist_vocab_collated
+        .iter()
+        .enumerate()
+        .filter(|(vid, folded)| {
+            finder.find(folded.as_str().as_bytes()).is_some()
+                || (also_unfolded
+                    && finder.find(crate::collate_name(artist_vocab[*vid].as_str()).as_bytes()).is_some())
+        })
+        .map(|(vid, _)| vid as u16)
         .collect()
 }
 
@@ -1028,10 +1750,59 @@ impl FilterExpr {
     /// here: their rewrite is only profitable when the query full-scans, which
     /// isn't known until run_query computes candidates — see
     /// memoize_text_predicates().
+    /// Grow the FLAVOR-NAME arm of a `name:` predicate — but only when a flavor name answers it.
+    ///
+    /// Scryfall's `name:` reads a printing's alternate SOLD-AS name as well as its oracle name:
+    /// `name:croft` answers 2 there, because Command Tower is sold as "Croft Manor" on 2 of its 112
+    /// printings; `name:godzilla` is 8 cards / 14 printings; `!"croft manor"` is 1.
+    ///
+    /// THE COST ARGUMENT IS THE DESIGN. Answering that unconditionally would make `name:` — the
+    /// most common predicate in the language and the one the perf gate holds to <3% of a full scan
+    /// — printing-dependent for every query, which costs the card-level settle on all of them. So
+    /// the needle is put to the ~546-record `flavor_names` table FIRST, against the pre-collated
+    /// strings beside it, and the arm is added only on a hit. A needle that matches nothing there
+    /// leaves the tree byte-identical to what it was, which is the overwhelmingly common case; the
+    /// scan itself is one `memmem::Finder` over ~9 KB of short strings, built once per predicate.
+    ///
+    /// Both name predicates that Scryfall reaches flavor names through are handled — the bare
+    /// `name:word` (collated on both sides) and `!"…"` (collated, and matching either half of a
+    /// `A // B` name, exactly as the oracle-name arm does).
+    pub(crate) fn bind_flavor_names(&mut self, idx: &rkyv::Archived<PrintedNameIndex>, collated: &AStrings) {
+        match self {
+            FilterExpr::And(children) | FilterExpr::Or(children) => {
+                for c in children {
+                    c.bind_flavor_names(idx, collated);
+                }
+            }
+            FilterExpr::Not(inner) => inner.bind_flavor_names(idx, collated),
+            FilterExpr::TextContains { field: TextSearchField::NameCollated, word } => {
+                let finder = memmem::Finder::new(word.as_bytes());
+                let ids = flavor_name_ids(idx, collated, |s| finder.find(s.as_bytes()).is_some());
+                if !ids.is_empty() {
+                    let original = std::mem::replace(self, FilterExpr::True);
+                    *self = FilterExpr::Or(vec![original, FilterExpr::FlavorNameIn { ids }]);
+                }
+            }
+            FilterExpr::ExactName(needle) => {
+                let needle = needle.clone();
+                let ids = flavor_name_ids(idx, collated, |s| exact_name_matches(s, &needle));
+                if !ids.is_empty() {
+                    let original = std::mem::replace(self, FilterExpr::True);
+                    *self = FilterExpr::Or(vec![original, FilterExpr::FlavorNameIn { ids }]);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn bind(
         &mut self,
         vocab: &AStrings,
         artist_vocab: &AStrings,
+        // artist_vocab_collated: the same artists, `collate_name(fold_accents(...))` — the string
+        // `a:word` matches against (see TextSearchField::ArtistCollated).
+        artist_vocab_collated: &AStrings,
         mana_vocab: &AStrings,
         flavor: &rkyv::Archived<FlavorIndex>,
         strings: &AStrings,
@@ -1039,12 +1810,25 @@ impl FilterExpr {
         match self {
             FilterExpr::And(children) | FilterExpr::Or(children) => {
                 for c in children {
-                    c.bind(vocab, artist_vocab, mana_vocab, flavor, strings);
+                    c.bind(vocab, artist_vocab, artist_vocab_collated, mana_vocab, flavor, strings);
                 }
             }
-            FilterExpr::Not(inner) => inner.bind(vocab, artist_vocab, mana_vocab, flavor, strings),
-            FilterExpr::ManaCostCmp { hybrids, hybrid_ids, .. } if !hybrids.is_empty() => {
-                *hybrid_ids = bind_mana_hybrids(hybrids, mana_vocab);
+            FilterExpr::Not(inner) => inner.bind(vocab, artist_vocab, artist_vocab_collated, mana_vocab, flavor, strings),
+            // UNCONDITIONAL, unlike the other bind arms: the weights are read off the CARD's
+            // hybrids, not the query's, so `m:{2}` against a twobrid card needs them even though
+            // the query carries no hybrid symbol at all. Gating this on `!hybrids.is_empty()` —
+            // which is right for `hybrid_ids` — would have left the commonest twobrid query
+            // unweighted.
+            FilterExpr::ManaCostCmp { hybrids, hybrid_ids, hybrid_cmc, .. } => {
+                if !hybrids.is_empty() {
+                    *hybrid_ids = bind_mana_hybrids(hybrids, mana_vocab);
+                }
+                *hybrid_cmc = mana_vocab.iter().map(|s| hybrid_cmc_weight(s.as_str())).collect();
+            }
+            // Like ManaCostCmp's, UNCONDITIONAL: the masks are read off the CARD's hybrids, so a
+            // query naming no hybrid at all still needs them to correct its own sum.
+            FilterExpr::Devotion { hybrid_colors, .. } => {
+                *hybrid_colors = mana_vocab.iter().map(|s| devotion_color_mask(s.as_str())).collect();
             }
             FilterExpr::CollectionCmp { value, value_id, .. } => {
                 // The vocab is renumbered into lexicographic order at load, so ids ARE the sorted
@@ -1054,23 +1838,54 @@ impl FilterExpr {
                     .ok()
                     .filter(|&id| vocab.get(id as usize).is_some_and(|e| e.as_str() == value.as_str()));
             }
+            // The language lives in the same vocab the collection values do (CompatFields.lang_id
+            // interns into coll_vocab), so this is CollectionCmp's resolution verbatim.
+            FilterExpr::LangMatch { value, vid, any: false } => {
+                let i = vocab.partition_point(|entry| entry.as_str() < value.as_str());
+                *vid = u16::try_from(i)
+                    .ok()
+                    .filter(|&id| vocab.get(id as usize).is_some_and(|e| e.as_str() == value.as_str()));
+            }
+            // The set type interns into that same vocab (CompatFields.set_type_id), so this is
+            // the resolution above verbatim.
+            FilterExpr::SetTypeMatch { value, vid } => {
+                let i = vocab.partition_point(|entry| entry.as_str() < value.as_str());
+                *vid = u16::try_from(i)
+                    .ok()
+                    .filter(|&id| vocab.get(id as usize).is_some_and(|e| e.as_str() == value.as_str()));
+            }
             FilterExpr::TextContains { field: TextSearchField::ArtistLower, word } => {
-                // memmem::Finder built once, reused across the vocab scan — its SIMD prefilter beats
-                // rebuilding str::contains's searcher per entry (~1.3x, bench_substring_finders). #734.
-                let finder = memmem::Finder::new(word.as_bytes());
-                let ids = artist_match_ids(artist_vocab, |s| finder.find(s.as_bytes()).is_some());
+                // A QUOTED `a:"…"` reaches this arm, and it is collated too — Scryfall draws no
+                // quoted/bare line for artists, unlike `name:`. See `artist_contains_ids`.
+                let ids = artist_contains_ids(artist_vocab, artist_vocab_collated, word.as_str());
+                *self = FilterExpr::ArtistMatch { ids };
+            }
+            FilterExpr::TextContains { field: TextSearchField::ArtistCollated, word } => {
+                // A BARE `a:word`, already folded and collated by the parser. Collating an
+                // already-collated needle is idempotent, so it shares the one comparison.
+                let ids = artist_contains_ids(artist_vocab, artist_vocab_collated, word.as_str());
                 *self = FilterExpr::ArtistMatch { ids };
             }
             FilterExpr::TextExact { field: TextField::ArtistLower, op, value } => {
                 let (op, value) = (*op, std::mem::take(value));
-                let ids = artist_match_ids(artist_vocab, |s| match op {
-                    CmpOp::Eq => s == value,
-                    CmpOp::Ne => s != value,
-                    CmpOp::Lt => s < value.as_str(),
-                    CmpOp::Le => s <= value.as_str(),
-                    CmpOp::Gt => s > value.as_str(),
-                    CmpOp::Ge => s >= value.as_str(),
-                });
+                // `a=` IS `a:` on Scryfall — a contains, not an equality (see
+                // `artist_contains_ids` for the measurements). The ordering comparisons keep the
+                // full-string compare against the unfolded vocab: Scryfall answers 0 for every one
+                // of them (`a>"rebecca guay"` measured 2026-08-16), so there is no behaviour there
+                // to match, and `a!=` already agrees with it at 0 — changing either would be
+                // inventing semantics rather than reproducing them.
+                let ids = if matches!(op, CmpOp::Eq) {
+                    artist_contains_ids(artist_vocab, artist_vocab_collated, &value)
+                } else {
+                    artist_match_ids(artist_vocab, |s| match op {
+                        CmpOp::Eq => s == value,
+                        CmpOp::Ne => s != value,
+                        CmpOp::Lt => s < value.as_str(),
+                        CmpOp::Le => s <= value.as_str(),
+                        CmpOp::Gt => s > value.as_str(),
+                        CmpOp::Ge => s >= value.as_str(),
+                    })
+                };
                 *self = FilterExpr::ArtistMatch { ids };
             }
             FilterExpr::TextRegex { field: TextField::ArtistLower, regex } => {
@@ -1151,61 +1966,88 @@ impl FilterExpr {
                 }
             }
             FilterExpr::Not(inner) => inner.memoize_text_predicates(cards, strings, name_trigram, name_bigrams, oracle, eval_domain),
-            FilterExpr::TextContains { field: TextSearchField::NameLower, word } if word.len() == 2 => {
-                // 2-byte needles resolve exactly through the bigram index: the
-                // member cards are the complete match set (containment IS
-                // bigram membership), so no contains() verification runs at
-                // all — the ids just re-key to card_name_id for eval.
-                if u32::from(name_bigrams.n_cards) as usize != cards.len() {
+            FilterExpr::TextContains { field: field @ (TextSearchField::NameLower | TextSearchField::NameCollated), word } => {
+                // BOTH name predicates narrow through the SAME collated tiers, because both
+                // indexes are built over `card_name_collated`. The COLLATED predicate is answered
+                // by them; the LITERAL one only gets its candidates there and re-verifies against
+                // the name as written.
+                //
+                // Narrowing the literal predicate through a collated index is sound in the one
+                // direction it is used: deleting the same character class from both sides
+                // preserves containment, so a name containing `word` literally contains
+                // `collate_name(word)` collated, and the collated tier can only ever be a
+                // SUPERSET. `name:"of the"` narrows through `ofthe` and is then checked against
+                // the space. An all-punctuation needle collates to nothing and has no tier at
+                // all, so it declines to the walk rather than narrowing to everything.
+                // A NON-ASCII literal needle declines to narrow at all. The index is built over
+                // the ACCENT-FOLDED collated name, and folding is not a deletion — "éowyn" has no
+                // window in common with the stored "eowynladyofrohan", so narrowing would drop
+                // the very card `name:"éowyn"` names (measured: 3 on api.scryfall.com). The
+                // separator argument below survives folding only for ASCII, which is why the two
+                // guards are separate.
+                let literal = *field == TextSearchField::NameLower;
+                let collated = if literal { crate::collate_name(word) } else { word.clone() };
+                if collated.is_empty() || (literal && !word.is_ascii()) {
                     return;
                 }
-                let bg = [word.as_bytes()[0], word.as_bytes()[1]];
-                let bind_bound = name_bigrams.postings.get(&bg).map_or_else(
-                    || name_bigrams.plane_of.get(&bg).map_or(0, |_| cards.len() / 8),
-                    |v| v.len(),
-                );
-                if !Self::memoize_pays(bind_bound, eval_domain, cards.len()) {
-                    return;
-                }
-                let mut ids: Vec<u32> = if let Some(p) = name_bigrams.plane_of.get(&bg) {
-                    let wpp = cards.len().div_ceil(64);
-                    let start = u32::from(*p) as usize * wpp;
-                    let mut out = Vec::new();
-                    for (i, w) in name_bigrams.plane_words[start..start + wpp].iter().enumerate() {
-                        let mut w = u64::from(*w);
-                        while w != 0 {
-                            let cid = ((i as u32) << 6) | w.trailing_zeros();
-                            w &= w - 1;
-                            out.push(u32::from(cards[cid as usize].card_name_id));
-                        }
-                    }
-                    out
-                } else {
-                    name_bigrams
-                        .postings
-                        .get(&bg)
-                        .map_or_else(Vec::new, |v| v.iter().map(|x| u32::from(cards[u16::from(*x) as usize].card_name_id)).collect())
-                };
-                ids.sort_unstable();
-                ids.dedup();
-                *self = FilterExpr::NameMatch { ids };
-            }
-            FilterExpr::TextContains { field: TextSearchField::NameLower, word } => {
-                // The intersection is bounded by the shortest posting list, so
-                // checking that bound first makes the decline path free — no
-                // gather, no intersection. Declining when only the *bound*
-                // (not the exact count) exceeds half the corpus is deliberate:
-                // it can only happen when every trigram of the needle is
-                // ultra-common, where the match set is broad anyway.
-                match trigram_min_posting(name_trigram, word) {
-                    Some(min) if min <= cards.len() / 2 && Self::memoize_pays(min, eval_domain, cards.len()) => {}
-                    _ => return,
-                }
-                let Some(cand) = trigram_candidates(name_trigram, word) else { return };
+                // Verifies against the string THIS predicate compares, not the one the index is
+                // built from — the whole point of the split.
                 let finder = memmem::Finder::new(word.as_bytes()); // built once, reused across the verify scan
+                let verify = |cid: u32| -> bool {
+                    let card = &cards[cid as usize];
+                    let hay = if literal { card.card_name_lower.as_str() } else { crate::collated_name(card, strings) };
+                    finder.find(hay.as_bytes()).is_some()
+                };
+
+                let cand: Vec<u32> = if collated.len() == 2 {
+                    // 2-byte needles resolve exactly through the bigram index: containment IS
+                    // bigram membership over the indexed string, so the collated predicate skips
+                    // verification entirely and the ids just re-key to card_name_id for eval.
+                    if u32::from(name_bigrams.n_cards) as usize != cards.len() {
+                        return;
+                    }
+                    let bg = [collated.as_bytes()[0], collated.as_bytes()[1]];
+                    let bind_bound = name_bigrams.postings.get(&bg).map_or_else(
+                        || name_bigrams.plane_of.get(&bg).map_or(0, |_| cards.len() / 8),
+                        |v| v.len(),
+                    );
+                    if !Self::memoize_pays(bind_bound, eval_domain, cards.len()) {
+                        return;
+                    }
+                    if let Some(p) = name_bigrams.plane_of.get(&bg) {
+                        let wpp = cards.len().div_ceil(64);
+                        let start = u32::from(*p) as usize * wpp;
+                        let mut out = Vec::new();
+                        for (i, w) in name_bigrams.plane_words[start..start + wpp].iter().enumerate() {
+                            let mut w = u64::from(*w);
+                            while w != 0 {
+                                out.push(((i as u32) << 6) | w.trailing_zeros());
+                                w &= w - 1;
+                            }
+                        }
+                        out
+                    } else {
+                        name_bigrams.postings.get(&bg).map_or_else(Vec::new, |v| v.iter().map(|x| u32::from(u16::from(*x))).collect())
+                    }
+                } else {
+                    // The intersection is bounded by the shortest posting list, so
+                    // checking that bound first makes the decline path free — no
+                    // gather, no intersection. Declining when only the *bound*
+                    // (not the exact count) exceeds half the corpus is deliberate:
+                    // it can only happen when every trigram of the needle is
+                    // ultra-common, where the match set is broad anyway.
+                    match trigram_min_posting(name_trigram, &collated) {
+                        Some(min) if min <= cards.len() / 2 && Self::memoize_pays(min, eval_domain, cards.len()) => {}
+                        _ => return,
+                    }
+                    let Some(cand) = trigram_candidates(name_trigram, &collated) else { return };
+                    cand
+                };
+
+                let exact_tier = !literal && collated.len() == 2;
                 let mut ids: Vec<u32> = cand
                     .into_iter()
-                    .filter(|&cid| finder.find(cards[cid as usize].card_name_folded.as_str().as_bytes()).is_some())
+                    .filter(|&cid| exact_tier || verify(cid))
                     .map(|cid| u32::from(cards[cid as usize].card_name_id))
                     .collect();
                 ids.sort_unstable();
@@ -1315,6 +2157,14 @@ impl FilterExpr {
         self.tri(card, None, strings)
     }
 
+    /// Printing-level pass, the plain form, kept for tests: the same evaluation the residual walk
+    /// performs, with a printing in hand. `eval_card`'s twin — the one-printing question a
+    /// printing-scoped leaf (set code, watermark, set type) is the only way to ask directly.
+    #[cfg(test)]
+    pub(crate) fn eval_printing(&self, card: &AOracleCard, printing: &APrinting, strings: &AStrings) -> Tri {
+        self.tri(card, Some(printing), strings)
+    }
+
     /// Card pass with one-level residual extraction. For a top-level And/Or,
     /// children are classified individually: decided children are dropped (a
     /// False/Null child settles an And, a True child settles an Or — and at the
@@ -1407,6 +2257,66 @@ impl FilterExpr {
         }
     }
 
+    /// True iff any leaf of this (bound) filter can only be answered over the ANNEX — one of the
+    /// two triggers that send a query to the widened (multilingual) driver instead of
+    /// `run_query_routed`. Detected here, on the compiled tree, so the operators and the
+    /// `include_multilingual` flag cannot widen differently.
+    ///
+    /// Three leaves qualify. `LangMatch` is the obvious one. `PrintedNamePresent` is the second,
+    /// and it is not a design choice — it is Scryfall's measured behaviour: `is:localizedname`
+    /// with no `lang:` term in sight answers 31,294 cards there, and `&unique=prints` shows the
+    /// rows it returns are German, French, Japanese… A canonical-only reading would answer 182
+    /// (the English printings that carry a printed name) and call it the whole set.
+    /// `FlavorNamePresent` is the third, on the same measurement: `is:flavorname&unique=prints`
+    /// is 661 rows there and 6 of them are Japanese (2026-09-01).
+    pub(crate) fn widens_to_annex(&self) -> bool {
+        match self {
+            FilterExpr::LangMatch { .. } | FilterExpr::PrintedNamePresent | FilterExpr::FlavorNamePresent => true,
+            FilterExpr::And(children) | FilterExpr::Or(children) => children.iter().any(Self::widens_to_annex),
+            FilterExpr::Not(inner) => inner.widens_to_annex(),
+            _ => false,
+        }
+    }
+
+    /// A language every match MUST carry, when the filter pins one: a `LangMatch` that is the
+    /// whole filter or a direct conjunct of a top-level `And`. Conjuncts only — under `Or` or
+    /// `Not` a language constrains nothing on its own, and several conjuncts can only tighten,
+    /// so answering with the FIRST is a sound (superset) narrowing either way. `lang:any`
+    /// requires nothing.
+    pub(crate) fn required_lang_value(&self) -> Option<&str> {
+        fn leaf(f: &FilterExpr) -> Option<&str> {
+            match f {
+                FilterExpr::LangMatch { value, any: false, .. } => Some(value.as_str()),
+                _ => None,
+            }
+        }
+        match self {
+            FilterExpr::And(children) => children.iter().find_map(leaf),
+            other => leaf(other),
+        }
+    }
+
+    /// This filter with every `LangMatch` leaf replaced by `True`: the query's scope, minus the
+    /// language it asks for.
+    ///
+    /// `run_query_widened` needs it to answer "which CANONICAL rows would this query have
+    /// matched?" for a card whose only matching rows are foreign — the question that decides which
+    /// foreign row represents the card (see `annex_representative`). Relaxing to `True` rather
+    /// than deleting the leaf keeps the tree's shape, so a `LangMatch` under `Not` or `Or`
+    /// contributes exactly what a satisfied conjunct would and no arm changes arity.
+    ///
+    /// Not a narrowing helper and never used as one: this loosens the filter, so it may only be
+    /// asked about rows already known to be in scope.
+    pub(crate) fn with_lang_relaxed(&self) -> FilterExpr {
+        match self {
+            FilterExpr::LangMatch { .. } => FilterExpr::True,
+            FilterExpr::And(children) => FilterExpr::And(children.iter().map(Self::with_lang_relaxed).collect()),
+            FilterExpr::Or(children) => FilterExpr::Or(children.iter().map(Self::with_lang_relaxed).collect()),
+            FilterExpr::Not(inner) => FilterExpr::Not(Box::new(inner.with_lang_relaxed())),
+            other => other.clone(),
+        }
+    }
+
     /// Four-valued evaluation. True/False/Null mirror SQL ternary logic: Null is
     /// SQL's NULL ("unknown"), produced when a compared field is missing from the
     /// card, and NOT/AND/OR propagate it exactly like SQL — so -power>2 excludes
@@ -1457,10 +2367,36 @@ impl FilterExpr {
                 Tri::PrintingDep => Tri::PrintingDep,
             },
 
-            FilterExpr::ExactName(lower) => tri_bool(card.card_name_lower.as_str() == lower.as_str()),
+            FilterExpr::ExactName(lower) => {
+                if exact_name_matches(card.card_name_folded.as_str(), lower) {
+                    return Tri::True;
+                }
+                // The joined name a REVERSIBLE printing prints, which is not its card's — see
+                // `CardIndexes::name_divergent`, the index that makes this branch reachable at all.
+                // PRINTING-DEPENDENT by construction: only the printings whose layout is the
+                // divergent one print that name, which is exactly what `divergent_of` decides, so
+                // a card-space evaluation answers PrintingDep and the driver re-asks per printing
+                // — the same contract the `layout:` exact arm takes for the second layout value.
+                let Some(rec) = card.divergent.first() else { return Tri::False };
+                if !str_at(strings, u32::from(rec.card_name_folded_id)).is_some_and(|joined| exact_name_matches(joined, lower)) {
+                    return Tri::False;
+                }
+                match printing {
+                    None => Tri::PrintingDep,
+                    Some(p) => tri_bool(crate::divergent_of(card, p).is_some()),
+                }
+            }
 
             FilterExpr::NumericCmp { lhs, op, rhs } => {
-                numeric_cmp_tri(lhs, *op, rhs, &|f| field_num(card, printing, f))
+                let base = numeric_cmp_tri(lhs, *op, rhs, &|f| field_num(card, printing, f));
+                // The merged row answers for 82% of cards (no faces) and for every row that
+                // already matched, so the per-face cross product is reached only by a multi-face
+                // card the card-level values did not satisfy — see face_numeric_cmp_tri.
+                if base == Tri::True || card.faces.is_empty() {
+                    base
+                } else {
+                    face_numeric_cmp_tri(card, printing, lhs, *op, rhs, base)
+                }
             }
 
             FilterExpr::TextContains { field, word } => {
@@ -1480,6 +2416,68 @@ impl FilterExpr {
                     tri_bool(ids.binary_search(&vid).is_ok())
                 }
             }
+
+            // NONE_STR is Scryfall having omitted `printed_name` on every face, which is a real
+            // False (this printing has no printed name) and not an SQL NULL — unlike the interned
+            // scalars above, absence here IS the answer the predicate asks about.
+            FilterExpr::PrintedNamePresent => {
+                let Some(p) = printing else { return Tri::PrintingDep };
+                tri_bool(p.printed_name_folded_id != super::NONE_STR)
+            }
+
+            FilterExpr::FlavorNameIn { ids } => {
+                let Some(p) = printing else { return Tri::PrintingDep };
+                let id = u32::from(p.flavor_name_folded_id);
+                tri_bool(id != super::NONE_STR && ids.binary_search(&id).is_ok())
+            }
+
+            // Presence in EITHER place Scryfall puts the key: the printing's own top-level
+            // `flavor_name`, or a face's (`PrintingFace.flavor_name_id`, which the 15 transform /
+            // reversible printings carry INSTEAD of the top-level one — never both). NONE_STR on
+            // both is a real False, not an SQL NULL, for the same reason as PrintedNamePresent.
+            FilterExpr::FlavorNamePresent => {
+                let Some(p) = printing else { return Tri::PrintingDep };
+                tri_bool(
+                    u32::from(p.flavor_name_id) != super::NONE_STR
+                        || p.faces.iter().any(|f| u32::from(f.flavor_name_id) != super::NONE_STR),
+                )
+            }
+
+            FilterExpr::SingleSet => tri_bool(card.single_set),
+
+            // Two-valued: a card either has a silent creature front or it does not, and a card with
+            // no text at all interns "" rather than NONE_STR, so absence is never an SQL NULL here.
+            FilterExpr::VanillaFace => tri_bool(card_is_vanilla(card, strings)),
+
+            FilterExpr::SetTypeMatch { vid, .. } => {
+                let Some(p) = printing else { return Tri::PrintingDep };
+                if u16::from(p.compat.set_type_id) == super::VOCAB_NONE {
+                    Tri::Null // no set type recorded: SQL NULL, like the missing-string cases above
+                } else {
+                    // `vid` None = the set type exists on no loaded printing; matches nothing.
+                    tri_bool(vid.is_some_and(|v| u16::from(p.compat.set_type_id) == v))
+                }
+            }
+
+            FilterExpr::LangMatch { vid, any, .. } => {
+                // `lang:any` is True for every printing — its whole effect is the widening its
+                // presence triggers, so as a predicate it must reject nothing.
+                if *any {
+                    return Tri::True;
+                }
+                let Some(p) = printing else { return Tri::PrintingDep };
+                if u16::from(p.compat.lang_id) == super::VOCAB_NONE {
+                    Tri::Null // no lang recorded: SQL NULL, like the missing-string cases above
+                } else {
+                    // `vid` None = the language exists on no loaded printing; matches nothing.
+                    tri_bool(vid.is_some_and(|v| u16::from(p.compat.lang_id) == v))
+                }
+            }
+
+            // Two-valued, never Null: a stored oracle_id is never 0 (build enforces it), and
+            // parse_uuid_or_hash's 0 for an unparseable value therefore rejects every card —
+            // the same answer the oracle_by_oracle_id path gives, which refuses id 0 outright.
+            FilterExpr::OracleIdMatch { id } => tri_bool(u128::from(card.oracle_id) == *id),
 
             FilterExpr::FlavorMatch { gids, .. } => {
                 let Some(p) = printing else { return Tri::PrintingDep };
@@ -1511,29 +2509,39 @@ impl FilterExpr {
             }
 
             FilterExpr::TextExact { field, op, value } => {
-                match text_field_value(card, printing, strings, *field) {
-                    StrVal::Known(s) => tri_bool(match op {
-                        CmpOp::Eq => s == value,
-                        CmpOp::Ne => s != value,
-                        CmpOp::Lt => s < value.as_str(),
-                        CmpOp::Le => s <= value.as_str(),
-                        CmpOp::Gt => s > value.as_str(),
-                        CmpOp::Ge => s >= value.as_str(),
-                    }),
-                    StrVal::Null => Tri::Null,
-                    StrVal::PDep => Tri::PrintingDep,
-                }
+                let holds = |s: &str| match op {
+                    CmpOp::Eq => s == value,
+                    CmpOp::Ne => s != value,
+                    CmpOp::Lt => s < value.as_str(),
+                    CmpOp::Le => s <= value.as_str(),
+                    CmpOp::Gt => s > value.as_str(),
+                    CmpOp::Ge => s >= value.as_str(),
+                };
+                // EXISTENTIAL over the field's values, which is one value on every field but
+                // `layout:` and `watermark:` — see `extra_text_field_values`. Negation composes
+                // correctly through it: the `Not` arm complements this, so `-layout:normal` is
+                // "no value of this printing is normal", which is Scryfall's own 4 for
+                // `is:reversible -layout:normal`.
+                tri_over_values(card, printing, strings, *field, holds)
             }
 
             FilterExpr::TextRegex { field, regex } => {
-                match text_field_value(card, printing, strings, *field) {
-                    StrVal::Known(s) => tri_bool(regex_is_match(regex, s)),
-                    StrVal::Null => Tri::Null,
-                    StrVal::PDep => Tri::PrintingDep,
-                }
+                // Existential over the same values the exact arm tests, for the same reason.
+                // `regex_is_match`, not `Regex::is_match`: fancy-regex returns a Result, and a
+                // backtrack-limit abort has to set the thread flag the query layer reads rather
+                // than read as "no match".
+                tri_over_values(card, printing, strings, *field, |s| regex_is_match(regex, s))
             }
 
-            FilterExpr::ColorCmp { field, op, mask } => tri_bool(color_cmp_matches(*op, *mask, card_colors(card, *field))),
+            FilterExpr::ColorCmp { field, op, mask } => {
+                // Existential over the faces' own masks — see `face_color_masks`. The card-level
+                // mask answers for the 82% of cards with no faces and for every card-level column,
+                // where `face_color_masks` declines and this is exactly the pre-gen-28 line.
+                tri_bool(match face_color_masks(card, *field) {
+                    Some(masks) => masks.into_iter().any(|bits| color_cmp(bits, *op, *mask)),
+                    None => color_cmp(card_colors(card, *field), *op, *mask),
+                })
+            }
 
             FilterExpr::TypeCmp { mask, op } => {
                 let bits = u16::from(card.card_types);
@@ -1597,44 +2605,228 @@ impl FilterExpr {
                 tri_bool((word >> shift) & 0b11 == *expected)
             }
 
-            FilterExpr::ManaCostCmp { op, core, hybrid_ids, cmc, .. } => {
+            FilterExpr::ManaCostCmp { op, core, hybrid_ids, hybrid_cmc, cmc, .. } => {
                 // Containment/equality over the pip multiset = the same test
                 // per lane (SWAR, all eight at once) and per hybrid entry
                 // (sorted-slice walks; both sides empty on ~97% of cards).
-                let mc = &card.mana_cost;
-                let card_core = u64::from(mc.core);
-                let card_cmc = f32::from(mc.cmc);
-                let ge = || lanes_ge(card_core, *core, LANES8_HI) && hybrids_ge(&mc.hybrids, hybrid_ids) && card_cmc >= *cmc;
-                let le = || lanes_ge(*core, card_core, LANES8_HI) && hybrids_le(&mc.hybrids, hybrid_ids) && card_cmc <= *cmc;
-                let eq = || card_cmc == *cmc && card_core == *core && hybrids_eq(&mc.hybrids, hybrid_ids);
-                tri_bool(match op {
-                    CmpOp::Ge => ge(),
-                    CmpOp::Le => le(),
-                    CmpOp::Eq => eq(),
-                    CmpOp::Gt => ge() && !eq(),
-                    CmpOp::Lt => le() && !eq(),
-                    CmpOp::Ne => !eq(),
+                //
+                // Existential over the faces on top of that, for the same measured reason the
+                // numeric columns are : `m:{R}` matches Valki // Tibalt on the BACK's
+                // {5}{B}{R}, and `m={1}{R}` matches Fire // Ice on one half's cost rather than
+                // the card's joined "{1}{R} // {1}{U}" (whose cmc is 4, so `eq` could never
+                // hold). The card-level cost is tried first and is the whole answer for the 82%
+                // of cards with no faces; a face that printed NO cost has no `mana_cost` and is
+                // skipped, which is why `m=0` still does not match Delver's costless back.
+                // GENERIC MANA IS A COUNTED PIP, NOT A CMC. `{2}` in a query cost means "at least
+                // two GENERIC", not "cmc at least 2" — comparing cmc let every colored pip pay
+                // for it, so `m:{2}` matched a card costing {R}{R}.
+                //
+                // Measured on api.scryfall.com 2026-08-16, `e:khm t:creature` (151) unless noted:
+                //
+                //   m:{2}          102   this answered 142 (= cmc >= 2)
+                //   m:{1}          140   this answered 151
+                //   m:{3}           60   this answered 113
+                //   m:{1}{1}       102   generic SUMS across symbols — the same query as m:{2}
+                //   m:{2}{r}        17   this answered 20
+                //   m:{1}{1}{r}     17   again the same query
+                //   m:{2} -m:{1}     0   >= and not ==, so {2} implies {1}
+                //
+                // and the decisive one, on the whole corpus rather than on KHM, because KHM has no
+                // creature costing exactly {R}{R}: `m={r}{r} t:creature` is 24 there, and
+                // `m={r}{r} m:{2} t:creature` is **0** where this answered all 24. A cost of
+                // {R}{R} has cmc 2 and generic 0; only one of those two readings can be right, and
+                // Scryfall's is the pip.
+                //
+                // The cmc comparisons are GONE rather than kept alongside: once generic and every
+                // pip lane compare in the same direction, cmc's does too (cmc is their sum), so
+                // keeping it would be redundant on the Ge/Le/Eq paths and would re-admit exactly
+                // the cards this excludes.
+                let q_generic = generic_of(*core, hybrid_ids.iter().copied(), *cmc, hybrid_cmc);
+                let matches = |mc: &Archived<ManaCost>| {
+                    let card_core = u64::from(mc.core);
+                    let c_generic = generic_of(card_core, mc.hybrids.iter().map(|e| (e.0, e.1)), f32::from(mc.cmc), hybrid_cmc);
+                    let ge = || lanes_ge(card_core, *core, LANES8_HI) && hybrids_ge(&mc.hybrids, hybrid_ids) && c_generic >= q_generic;
+                    let le = || lanes_ge(*core, card_core, LANES8_HI) && hybrids_le(&mc.hybrids, hybrid_ids) && c_generic <= q_generic;
+                    let eq = || c_generic == q_generic && card_core == *core && hybrids_eq(&mc.hybrids, hybrid_ids);
+                    match op {
+                        CmpOp::Ge => ge(),
+                        CmpOp::Le => le(),
+                        CmpOp::Eq => eq(),
+                        CmpOp::Gt => ge() && !eq(),
+                        CmpOp::Lt => le() && !eq(),
+                        CmpOp::Ne => !eq(),
+                    }
+                };
+                // NO PRINTED COST IS NOT A COST OF ZERO, and the packed form cannot tell them
+                // apart: a land and Ornithopter both arrive as {core: 0, hybrids: [], cmc: 0},
+                // because `{0}` parses as a number and so contributes no pip and no cmc. The
+                // INTERNED STRING is where the difference survives, and it survives as EMPTY
+                // rather than absent — Scryfall prints `"mana_cost": ""` on a land and `"{0}"` on
+                // Ornithopter, and the card object has to keep emitting both, so the id is real
+                // either way and only its contents separate them.
+                //
+                // Measured on api.scryfall.com 2026-08-17, unique=prints:
+                //
+                //   m:{0} t:land   195     this answered 12,254 — every land in the corpus
+                //   m={0}          293     this answered 12,713
+                //   m:{0}       93,355     this answered 105,839
+                //   -m:{0}      12,442     this answered 0, because m:{0} had matched everything
+                //   m:{2} layout:meld  35  this answered 59 — the same cause, not a third one
+                //
+                // A costless card fails the containment and exactness comparisons rather than
+                // matching the zero ones, which is what makes `-m:{0}` return the lands: the
+                // negation is of the leaf, and the leaf is false for them.
+                //
+                // `!=` IS THE EXCEPTION, and measurement is the only reason this is not a blanket
+                // false: `m!={w} t:land` is 12,249 on Scryfall, so a card with no cost DOES
+                // satisfy "not exactly {W}". That is consistent rather than special — `!=` asks
+                // whether the costs differ, and an absent cost differs from every queried one,
+                // while `:` `=` `>` `<` all ask about a cost the card does not have.
+                //
+                // A FACE that prints a cost makes the card costed even when the card-level string
+                // is empty, which is the split-card shape: the face arm below is the one that
+                // answers, and gating it on the card-level string would silence it.
+                let has_cost = card.faces.iter().any(|f| f.mana_cost.is_some())
+                    || str_at(strings, u32::from(card.mana_cost_text_id)).is_some_and(|s| !s.is_empty());
+                tri_bool(if has_cost {
+                    matches(&card.mana_cost)
+                        || card.faces.iter().any(|f| f.mana_cost.as_ref().is_some_and(matches))
+                } else {
+                    matches!(op, CmpOp::Ne)
                 })
             }
 
-            FilterExpr::Devotion { op, pips } => {
-                // Mirrors the SQL path's JSONB containment on the devotion column
-                // (devotion @> query, <@, =, and the strict/negated variants):
-                // per-color positional arrays contain each other iff the counts
-                // compare, so containment is per-lane count comparison — one
-                // SWAR op across all six colors — and equality is integer
-                // equality (a zero lane and an absent key are the same thing).
+            FilterExpr::Devotion { op, pips, hybrid_colors } => {
+                // DEVOTION IS A QUESTION ABOUT THE QUERIED COLORS TAKEN TOGETHER, AND A HYBRID
+                // QUERIES **BOTH** OF ITS COLORS AS ONE QUANTITY.
+                //
+                // This read the whole six-lane vector at once — one SWAR containment, plus an
+                // integer equality that demanded every UNQUERIED color be zero too. Both are
+                // wrong, and the hybrid case was wrong by two orders of magnitude:
+                // `devotion:{r/g}` expands to lanes r=1,g=1, and a per-lane containment then
+                // means "at least one red pip AND at least one green pip" — one card in KHM,
+                // where Scryfall answers 62.
+                //
+                // MEASURED on api.scryfall.com 2026-08-16 over `e:khm t:creature` (151). `d[c]` is
+                // this card's devotion to color c; the measure is the SUM over the queried lanes.
+                //
+                //   devotion:{r}       27 = d[r] >= 1        devotion:{g}        36
+                //   devotion:{r}{r}     7 = d[r] >= 2        devotion:{g}{g}      8
+                //   devotion={r}       20 = d[r] == 1        (27 - 7, and NOT 15, which is what
+                //                                             whole-vector equality answered)
+                //   devotion>{r}        7 = d[r] >  1        devotion<={r}      144
+                //   devotion<{r}{r}   144   devotion!={r}    131 = 151 - 20
+                //   devotion:{r/g}     62 = d[r]+d[g] >= 1   (27 + 36 - 1 card carrying both)
+                //   devotion:{r/g}{r/g} 16 = d[r]+d[g] >= 2
+                //   devotion={r/g}     46 = d[r]+d[g] == 1   (62 - 16)
+                //   devotion>{r/g}     16   devotion<={r/g}  135   devotion!={r/g} 105
+                //
+                // THE SUM, NOT A PER-LANE OR — that 16 is what decides it. `devotion:{r}{r}` is 7
+                // and `devotion:{g}{g}` is 8, so "d[r] >= 2 OR d[g] >= 2" can be at most 15; the
+                // sixteenth card is the one KHM creature carrying one red pip AND one green pip,
+                // which has neither lane at 2 and a combined devotion of exactly 2. An OR answers
+                // 15 to all five hybrid rows above and 62 to the first, which is why the first one
+                // alone is not enough evidence to pick a model.
+                //
+                // The queried lanes only — a lane the query left at zero is not part of the sum
+                // and not a constraint. That is the half that made `devotion={r}` 15 here:
+                // pinning the unqueried colors to zero excluded every red card that is also green.
+                //
+                // THE MEASURE IS DISTINCT PIPS, NOT A SUM OF LANES — the sum was the last
+                // approximation here and it is gone. `ManaCost.devotion` stores per-color lanes
+                // with hybrids EXPANDED, so a `{R/G}` symbol sits in red and in green; summing
+                // both queried lanes counts one pip twice. Two cards falsify the two obvious
+                // readings in opposite directions, and only the pip count answers both:
+                //
+                //                                       Svella {1}{R}{G}   Burning-Tree {R/G}{R/G}
+                //   Scryfall's combined devotion               2                    2
+                //   sum of the queried lanes                   2  OK                4  WRONG
+                //   max of the queried lanes                   1  WRONG             2  OK
+                //   DISTINCT PIPS matching either              2  OK                2  OK
+                //
+                // Burning-Tree answers `devotion:{r/g}{r/g}` on api.scryfall.com and NOT
+                // `devotion:{r/g}{r/g}{r/g}`; Svella is the sixteenth card of KHM's 16, carrying
+                // one red pip and one green one. The correction below is inclusion-exclusion over
+                // the card's own hybrid symbols, and it is provably ZERO for a single-color query
+                // (one bit in the mask cannot match twice), so every single-color comparison —
+                // and the exact devotion PLANE, which declines multi-lane queries anyway — is
+                // bit-identical to before.
+                //
+                // The per-color lanes themselves were never the approximation and are untouched:
+                // Burning-Tree answers `devotion:{r}{r}` and `devotion:{g}{g}` on Scryfall, and so
+                // does this. It was only the measure ACROSS two queried lanes that was wrong.
+                //
+                // Verified set-scoped, where corpus vintage cannot reach: `e:rna
+                // devotion:{r/g}{r/g}` 24, `e:gtc devotion:{w/u}{w/u}` 16, `e:sok
+                // devotion:{b/g}{b/g}` 21, `e:rna devotion:{r/g}{r/g}{r/g}` 3, `e:khm
+                // devotion!={r/g}` 252, `e:khm devotion<={r/g}` 301 — all exact.
+                //
+                // A SECOND, SEPARATE RESIDUAL on Scryfall's side: `=` and `!=` with a hybrid value
+                // never match a card whose cost carries that hybrid pip. `devotion={r/g} m:{r/g}`
+                // is 0 there across all 61, while `devotion={r/g} m:{w/u} -m:{r/g}` is 1 — that
+                // pair specifically, not hybrids in general. It is not self-consistent (the same
+                // cards answer `devotion={r}` and `devotion:{r/g}`, and `!=` follows the model
+                // above exactly, so `=` and `!=` are not complements there), so no model fits it
+                // and none is guessed here.
                 let d = u64::from(card.mana_cost.devotion);
-                let ge = lanes_ge(d, *pips, LANES6_HI);
-                let le = lanes_ge(*pips, d, LANES6_HI);
-                let eq = d == *pips;
+                // The card's devotion to the queried colors TOGETHER, against the number of
+                // symbols the query asked for. A lane the query leaves at zero contributes
+                // nothing — including the vacuous all-zero query, which lands here as measure 0
+                // against want 0.
+                //
+                // The two sides use DIFFERENT reductions and both are deliberate. `measure` sums
+                // the card's lanes and then backs out the double count below, which is the pip
+                // count. `want` takes the MAX of the query's
+                // lanes, because a query lane counts SYMBOLS: `{r/g}{r/g}` sets r=2 and g=2 and
+                // asks for two, not four. Max is exact over the whole domain Scryfall honors,
+                // since a single color has one nonzero lane and a hybrid's two lanes are equal by
+                // construction. Outside that domain there is nothing to be exact about: a
+                // multi-color PLAIN value is REFUSED rather than answered — `devotion:{r}{g}`
+                // comes back with the whole corpus and the warning "Invalid expression … was
+                // ignored. Devotion can only match single color or hybrid mana." (measured
+                // 2026-08-16: `e:khm t:creature devotion:{r}{g}` is all 151 creatures, and
+                // `e:khm t:instant devotion:{r}{g}` is all 36 instants).
+                let mut measure: u32 = 0;
+                let mut want: u8 = 0;
+                let mut query_mask: u8 = 0;
+                for c in 0..6 {
+                    let k = lane_get(*pips, c);
+                    if k > 0 {
+                        measure += u32::from(lane_get(d, c));
+                        want = want.max(k);
+                        query_mask |= 1u8 << c;
+                    }
+                }
+                // BACK OUT THE DOUBLE COUNT. The lanes hold hybrids expanded, so a `{R/G}` pip
+                // sits in red AND green; summing both queried lanes counts one pip twice. Each
+                // hybrid symbol in the card's own cost gives back (matched queried colours - 1)
+                // per pip, which is inclusion-exclusion for the only overlap a mana symbol can
+                // have — a pip cannot be three of the queried colours unless the symbol says so,
+                // and the mask handles that case too.
+                //
+                // This is what makes the measure a count of DISTINCT PIPS rather than a sum of
+                // lanes. Both readings agree on every single-colour pip and differ only where a
+                // card carries a hybrid of the queried pair — 61 cards for {R/G}, 58 for {W/U},
+                // 64 for {B/G}.
+                let overcount: u32 = card
+                    .mana_cost
+                    .hybrids
+                    .iter()
+                    .map(|e| {
+                        let mask = hybrid_colors.get(usize::from(e.0)).copied().unwrap_or(0);
+                        let matched = (mask & query_mask).count_ones();
+                        u32::from(e.1) * matched.saturating_sub(1)
+                    })
+                    .sum();
+                let measure = measure.saturating_sub(overcount);
+                let want = u32::from(want);
                 tri_bool(match op {
-                    CmpOp::Ge => ge,
-                    CmpOp::Eq => eq,
-                    CmpOp::Le => le,
-                    CmpOp::Gt => ge && !eq,
-                    CmpOp::Lt => le && !eq,
-                    CmpOp::Ne => !eq,
+                    CmpOp::Ge => measure >= want,
+                    CmpOp::Gt => measure > want,
+                    CmpOp::Eq => measure == want,
+                    CmpOp::Lt => measure < want,
+                    CmpOp::Le => measure <= want,
+                    CmpOp::Ne => measure != want,
                 })
             }
 
@@ -1689,10 +2881,33 @@ fn str_op_to_cmp(s: &str) -> Result<CmpOp, String> {
     }
 }
 
+/// `=` IS `:` ON A COLLECTION COLUMN — set EQUALITY is not a meaning Scryfall gives it.
+///
+/// Measured on api.scryfall.com 2026-08-16, every collection column this feeds, `X=v` against
+/// `X:v` on the same corpus — identical on every row:
+///
+///   kw=flying e:khm      28 = kw:flying 28        (this answered 9: cards whose ONLY keyword is
+///                                                  Flying — set equality, which nothing asks for)
+///   otag=ramp e:khm      35 = otag:ramp 35        (this answered 0)
+///   atag=forest e:khm    17 = atag:forest 17      (this answered 0)
+///   is=foil e:khm t:cre  129 = is:foil 129        (this answered 0)
+///   frame=2015 …         151 = frame:2015 151     (this answered 99)
+///
+/// The boundary is real and lies elsewhere, not on this function: the columns where `=` DOES
+/// differ from `:` are the set-valued COLOR ones, and they go through `op_to_color_cmp`, which
+/// keeps `Eq` — `c=rg e:khm t:creature` is 1 against `c:rg`'s 2, `id=rg` is 1 against `id:rg`'s
+/// 52, `produces=rg` is 0 against `produces:rg`'s 5. Mana keeps it too (`m={2}` 0 against
+/// `m:{2}`'s 102). Probed in both directions before this changed.
+///
+/// The other operators are unaffected and already agree: `kw>=flying`, `kw>flying`, `kw<flying`
+/// and `kw!=flying` are each 404 on Scryfall and 404 here.
+///
+/// TypeCmp also reads this, but cannot observe the change: `card_types` with `=` is claimed by
+/// the TypeLineContains branch above for every non-empty needle, so the only `=` that reaches
+/// TypeCmp carries an empty value, which no query produces.
 fn op_to_collection_cmp(op: &str) -> CmpOp {
     match op {
-        ":" | ">=" => CmpOp::Ge,
-        "="        => CmpOp::Eq,
+        ":" | ">=" | "=" => CmpOp::Ge,
         ">"        => CmpOp::Gt,
         "<="       => CmpOp::Le,
         "<"        => CmpOp::Lt,
@@ -1843,9 +3058,15 @@ fn build_binary(kw: &Value) -> Result<FilterExpr, String> {
         // Until bind() resolves them against the store's vocab, hybrid
         // symbols count as unknown — one merged entry no card can match.
         let hybrid_ids = if hybrids.is_empty() { Vec::new() } else { vec![(MANA_SYM_UNKNOWN, 1)] };
-        let cmc = mana_cmc(mana_str);
+        // The TRUE cmc of the query cost, which is what `generic_of` subtracts the pips from.
+        // `mana_cmc` reads braces and bare letters but skips loose digits, so the shorthand forms
+        // the parser passes through verbatim — `m:2` as "2", `m>=2WW` as "2WW", `m:1{r}1` as
+        // "1{R}1" — arrived carrying none of their generic. `m:2` is the case that shows it: an
+        // empty cost with cmc 0 is a tautology, and this answered all 151 of `e:khm t:creature`
+        // where Scryfall answers 102, the same 102 as `m:{2}`.
+        let cmc = mana_cmc(mana_str) + mana_bare_generic(mana_str) as f32;
         let cmp_op = match op { ":" => CmpOp::Ge, _ => str_op_to_cmp(op)? };
-        return Ok(FilterExpr::ManaCostCmp { op: cmp_op, core, hybrids, hybrid_ids, cmc });
+        return Ok(FilterExpr::ManaCostCmp { op: cmp_op, core, hybrids, hybrid_ids, hybrid_cmc: Vec::new(), cmc });
     }
 
     if attr == "devotion" {
@@ -1867,7 +3088,7 @@ fn build_binary(kw: &Value) -> Result<FilterExpr, String> {
             }
         }
         let cmp_op = match op { ":" => CmpOp::Ge, _ => str_op_to_cmp(op)? };
-        return Ok(FilterExpr::Devotion { op: cmp_op, pips });
+        return Ok(FilterExpr::Devotion { op: cmp_op, pips, hybrid_colors: Vec::new() });
     }
 
     if matches!(attr, "card_colors" | "card_color_identity" | "produced_mana") {
@@ -1913,6 +3134,41 @@ fn build_binary(kw: &Value) -> Result<FilterExpr, String> {
         return Ok(FilterExpr::TypeCmp { mask, op: op_to_collection_cmp(op) });
     }
 
+    if attr == "card_lang" {
+        // Equality only, plus the `any` widener — the same surface upstream's parser grants
+        // `lang:` (string-order comparisons error there like on the other string columns, so a
+        // non-equality op reaching here is defense in depth, not a reachable path).
+        if !matches!(op, ":" | "=") {
+            return Err(format!("operator {op:?} is not supported on lang"));
+        }
+        let value = rhs_value_str(rhs).to_lowercase();
+        let any = value == "any";
+        return Ok(FilterExpr::LangMatch { value, vid: None, any });
+    }
+
+    if attr == "card_set_type" {
+        // Equality only, the surface upstream's parser grants `st:` — same as `lang:`, and for the
+        // same reason: it is a string column, and ordered comparisons on those error in the parser.
+        if !matches!(op, ":" | "=") {
+            return Err(format!("operator {op:?} is not supported on set_type"));
+        }
+        // Scryfall spells the set types with underscores (`draft_innovation`, `duel_deck`) and
+        // accepts the hyphenated form too; the stored value is Scryfall's own, lowercased.
+        let value = rhs_value_str(rhs).to_lowercase().replace('-', "_");
+        return Ok(FilterExpr::SetTypeMatch { value, vid: None });
+    }
+
+    if attr == "oracle_id" {
+        // Equality only, the surface upstream's parser grants `oracleid:` (string-order
+        // comparisons parse there like on the other string columns, so a non-equality op reaching
+        // here is defense in depth, not a reachable path). parse_uuid_or_hash folds hex case, so
+        // an uppercase uuid — the parser hands the value on unchanged — resolves the same id.
+        if !matches!(op, ":" | "=") {
+            return Err(format!("operator {op:?} is not supported on oracle_id"));
+        }
+        return Ok(FilterExpr::OracleIdMatch { id: super::parse_uuid_or_hash(rhs_value_str(rhs)) });
+    }
+
     if attr == "card_subtypes" {
         let value = rhs.as_array().and_then(|a| a.first()).and_then(|v| v.as_str()).unwrap_or("").to_string();
         return Ok(FilterExpr::CollectionCmp { field: CollField::Subtypes, op: op_to_collection_cmp(op), value, value_id: None });
@@ -1932,11 +3188,81 @@ fn build_binary(kw: &Value) -> Result<FilterExpr, String> {
             _                  => CollField::FrameData,
         };
         let value  = rhs.as_array().and_then(|a| a.first()).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        // Four `is:` values the importer stores no tag for, because fields already on the row
+        // answer them (see `rewrite.ENGINE_IS_VALUES`, which is what keeps the parser from
+        // reporting them unsupported). They arrive as `card_is_tags` membership like every other
+        // `is:` value and turn into their own leaf HERE rather than in the parser, so the tag
+        // vocabulary stays what the importer writes and nothing has to be stored twice.
+        if matches!(coll_field, CollField::IsTags) {
+            match value.as_str() {
+                "localizedname" => return Ok(FilterExpr::PrintedNamePresent),
+                "flavorname" => return Ok(FilterExpr::FlavorNamePresent),
+                "unique" => return Ok(FilterExpr::SingleSet),
+                "vanilla" => return Ok(FilterExpr::VanillaFace),
+                _ => {}
+            }
+        }
         let cmp_op = op_to_collection_cmp(op);
         return Ok(FilterExpr::CollectionCmp { field: coll_field, op: cmp_op, value, value_id: None });
     }
 
     build_text_filter(attr, op, rhs)
+}
+
+/// Does `!"needle"` name this card? `stored` is the card's FOLDED name, `needle` the query's own
+/// collated spelling (`collate_name(fold_accents(value.lower()))`, done in Python).
+///
+/// COLLATED on both sides — diacritics folded, every non-alphanumeric character removed — which
+/// is how Scryfall compares it. Measured on api.scryfall.com 2026-08-16, all four of
+/// `!"Lim-Dûl's Vault"`, `!"lim-dul's vault"`, `!"limduls vault"` and `!"Lim-Dul's Vault"` answer
+/// the same one card, and `!"eowyn, lady of rohan"` answers "Éowyn, Lady of Rohan". Comparing
+/// `card_name_lower` — what this did before — answered only the accented, fully punctuated
+/// spelling, so a searcher who typed the name off the card and skipped the circumflex got
+/// nothing.
+///
+/// The faces are split BEFORE collating, because the `" // "` join is itself non-alphanumeric:
+/// collapsing first would make every face boundary vanish and let a needle straddle it.
+///
+/// The whole name, or — when the name has EXACTLY TWO halves — either side of the `" // "` join.
+/// A two-faced card answers to each of its face names on its own. Measured against
+/// api.scryfall.com on 2026-08-16: `!"Lightning Bolt"` returns two cards, `Lightning Bolt` and
+/// `Emeritus of Conflict // Lightning Bolt` (sos/113), whose *second* face carries the name;
+/// `!"Fire"` returns `Fire // Ice`, `!"Stomp"` returns `Bonecrusher Giant // Stomp`,
+/// `!"Insectile Aberration"` returns `Delver of Secrets // Insectile Aberration`. Comparing only
+/// the joined name found the first of those and missed all the rest.
+///
+/// TWO, and not "any part". `split(" // ")` yields every part, so a longer name answered to each
+/// of its own — measured on api.scryfall.com 2026-08-31, `include_extras=true` throughout because
+/// und/75 is extras-gated: `!"Who"` answers 0 there and answered 1 here, `!"What"` answers 0 there
+/// and answered 1 here, both of them `Who // What // When // Where // Why`, the one printed name
+/// with more than two parts. Its whole name stays a key —
+/// `!"Who // What // When // Where // Why"` answers 1 on both sides. Nothing two-halved moves:
+/// `!"Stomp"` answers 1 on both, `!"Fire"` answers 2 on both (`Fire // Ice` and `Start // Fire`),
+/// and the joined name of a two-half card is a key as well
+/// (`!"Curse of the Fire Penguin // Curse of the Fire Penguin Creature"`, 1 on both). The
+/// collation is untouched: `!"limduls vault"` still answers `Lim-Dûl's Vault`, 1 on both.
+///
+/// THE SAME KEY SET `/cards/named?exact=` ANSWERS ON, and the by-name routes now say so in their
+/// own words: `_EXACT_NAME_MATCH` in api/scryfall_compat/routes.py is this predicate as SQL, and the
+/// block above `_collate_name` there carries the route-side measurements. They are two spellings of
+/// one rule rather than one rule shared, because those routes answer from SQL on this branch and
+/// this arm answers from the store — a needle both can reach must resolve the same card on both.
+///
+/// A `POST /cards/collection` `{"name"}` identifier is the one surface that reads NARROWER: it
+/// takes the two face names or the whole name, never both, so the joined name of a two-faced card
+/// is a key here and not_found there (`_COLLECTION_NAME_MATCH`). Nothing in the engine expresses
+/// that scope, because the `!` operator does not have it.
+pub(crate) fn exact_name_matches(stored: &str, needle: &str) -> bool {
+    if crate::collate_name(stored) == needle {
+        return true;
+    }
+    // `split_once` and then a reject, rather than `split(...).any(...)`: the face keys exist only
+    // for a name that is exactly two halves, and a third part means there are none.
+    let Some((front, back)) = stored.split_once(" // ") else { return false };
+    if back.contains(" // ") {
+        return false;
+    }
+    crate::collate_name(front) == needle || crate::collate_name(back) == needle
 }
 
 fn rhs_value_str(rhs: &Value) -> &str {
@@ -1961,6 +3287,19 @@ fn build_text_filter(attr: &str, op: &str, rhs: &Value) -> Result<FilterExpr, St
 
     let raw_value = rhs["kwargs"]["value"].as_str().unwrap_or("");
 
+    // `name!=x`, `o!=x`, `a!=x`, `set!=x` — Scryfall answers NOTHING, for every value and every
+    // string column, and that is a statement about the OPERATOR rather than about the value.
+    // Measured 2026-08-16: `name!="lightning bolt"` 404 where `name="lightning bolt"` answers 2,
+    // `name!=bolt` 404 where `name=bolt` answers 41; `o!="draw a card"`, `a!="rebecca guay"`,
+    // `t!=creature` and `set!=khm` all 404 — while the NUMERIC `cmc!=3` answers 25,522, so this is
+    // not "`!=` is unsupported". It is the empty set, and it composes as one: `name!=ft or
+    // t:creature` answers exactly `t:creature`'s 18,753 and `-name!=ft` answers the whole corpus.
+    // This port answered a not-equal SUPERSET (33,751 for `name!=ft`), which is the one shape a
+    // client cannot recover from — a filter that silently widens rather than narrows.
+    if op == "!=" {
+        return Ok(FilterExpr::Not(Box::new(FilterExpr::True)));
+    }
+
     if matches!(attr, "card_set_code" | "card_layout" | "card_border" | "card_watermark" | "collector_number") {
         // collector_number_id is stored raw and mixed-case (e.g. "10E-105"); compare exactly,
         // matching the SQL path. The other four are lowercased at import, so lowercasing
@@ -1979,15 +3318,58 @@ fn build_text_filter(attr: &str, op: &str, rhs: &Value) -> Result<FilterExpr, St
     }
 
     let lower_word = raw_value.to_lowercase();
-    if op == ":" {
+    // `=` IS `:` ON A TEXT COLUMN — a SUBSTRING test, not an equality, and not a member of the
+    // comparison family the branch above answers with the empty set.
+    //
+    // This is the one operator on these columns that carries no information at all. Measured on
+    // api.scryfall.com 2026-08-16, `X=v` against `X:v` over the whole default corpus:
+    //
+    //   o=flying    4,574 = o:flying 4,574      (this answered 99 — the cards whose ORACLE TEXT
+    //                                            IS the word "flying", i.e. a real equality)
+    //   ft=aether      80 = ft:aether 80        (this answered 0)
+    //   name=ft     1,628 = name:ft 1,628       (this answered 0)
+    //   fo=lifelink   713 = fo:lifelink 713
+    //   a=rebecca     170 = a:rebecca 170       (already agreed — `bind` collapses every artist
+    //                                            form onto one collated contains regardless)
+    //
+    // and the BARE/QUOTED split survives `=` intact rather than being flattened to one side of
+    // it: `name="ft"` is 362 on Scryfall, exactly `name:"ft"`, against `name=ft`'s 1,628. That
+    // distinction is carried by the node shape (`CollatedNameValueNode` vs `StringValueNode`), so
+    // routing `=` here preserves it for free — the parser now builds the collated node for `=`
+    // as well, which is the other half of this fix.
+    //
+    // WHAT IS NOT IN THIS CLASS, probed in both directions rather than assumed. `!=` is the empty
+    // set (the branch above, unchanged). `<`, `<=`, `>`, `>=` keep the string-order comparison
+    // they had; Scryfall answers 404 to all of them on every string column, which is what the
+    // query-validation layer already reproduces. And `=` stays a genuine EQUALITY on the columns
+    // that are stored exact rather than searched — set code, layout, border, watermark, collector
+    // number — which is why those five are claimed by the branch above this one and never reach
+    // here: `e=khm` is 151 and `layout=normal` is 284, agreeing with `:` because equality IS the
+    // meaning there, not because the operator was rewritten.
+    if matches!(op, ":" | "=") {
         let tsf = match attr {
+            // `CollatedNameValueNode` is the parser's spelling of "the user typed a BARE word
+            // here"; a `StringValueNode` under `name:` means they quoted it (or wrote a
+            // plain-literal regex, which lowers to the same). The two are different searches —
+            // see `TextSearchField::NameLower` / `NameCollated` for the live measurements.
+            "card_name" if rhs_node_type == "CollatedNameValueNode" => TextSearchField::NameCollated,
             "card_name"   => TextSearchField::NameLower,
             "oracle_text" => TextSearchField::OracleTextLower,
             "flavor_text" => TextSearchField::FlavorTextLower,
+            // Same split as `card_name`: a bare word arrives as a CollatedNameValueNode and is
+            // matched against the collated artist vocab, a quoted one stays literal.
+            "card_artist" if rhs_node_type == "CollatedNameValueNode" => TextSearchField::ArtistCollated,
             "card_artist" => TextSearchField::ArtistLower,
             _ => return Err(format!("text substring not supported on {attr}")),
         };
-        return Ok(FilterExpr::TextContains { field: tsf, word: lower_word });
+        // `æ` expands, and ONLY in the text columns — see `crate::fold_ae` for the per-character
+        // probe. The name and artist needles are already fully transliterated by the parser's
+        // `fold_accents`, and a literal `name:"…"` deliberately keeps its spelling.
+        let word = match tsf {
+            TextSearchField::OracleTextLower | TextSearchField::FlavorTextLower => crate::fold_ae(&lower_word),
+            _ => lower_word,
+        };
+        return Ok(FilterExpr::TextContains { field: tsf, word });
     }
 
     let field = match attr {
@@ -1998,5 +3380,9 @@ fn build_text_filter(attr: &str, op: &str, rhs: &Value) -> Result<FilterExpr, St
         _ => return Err(format!("unknown text field: {attr}")),
     };
     let cmp_op = str_op_to_cmp(op)?;
-    Ok(FilterExpr::TextExact { field, op: cmp_op, value: raw_value.to_lowercase() })
+    let value = match field {
+        TextField::OracleTextLower | TextField::FlavorTextLower => crate::fold_ae(&raw_value.to_lowercase()),
+        _ => raw_value.to_lowercase(),
+    };
+    Ok(FilterExpr::TextExact { field, op: cmp_op, value })
 }

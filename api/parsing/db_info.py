@@ -320,6 +320,7 @@ CARD_SUPERTYPES = {
 
 CARD_TYPES = {
     "Artifact",
+    "Battle",  # reaches the corpus once faces merge (#400): every battle is a transform front
     "Conspiracy",
     "Creature",
     "Enchantment",
