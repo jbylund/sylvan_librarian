@@ -283,6 +283,24 @@ def get_keywords_comparison_object(val: str) -> dict[str, bool]:
     return {normalized_keyword: True}
 
 
+def slugify_tag(val: str) -> str:
+    """Normalize a written tag spelling to the slug form oracle and art tags are stored under.
+
+    Every slug in both tag dumps matches `[a-z0-9]+(-[a-z0-9]+)*`, so folding runs of
+    non-alphanumerics to a single hyphen can only turn a miss into the hit the searcher meant.
+    Scryfall accepts the spaced spelling of a slug the same way -- `art:"right facing"` and
+    `art:right-facing` both find the `right-facing` tag -- and this is also what makes aliases
+    written with spaces reachable, since tag_import stores those slugified too.
+
+    Args:
+        val: Tag string as the searcher wrote it.
+
+    Returns:
+        The slugified tag, e.g. "Open Mouth" -> "open-mouth".
+    """
+    return re.sub(r"[^a-z0-9]+", "-", val.strip().lower()).strip("-")
+
+
 def get_oracle_tags_comparison_object(val: str) -> dict[str, bool]:
     """Convert oracle tag string to comparison object for database queries.
 
@@ -292,9 +310,7 @@ def get_oracle_tags_comparison_object(val: str) -> dict[str, bool]:
     Returns:
         Dictionary mapping normalized oracle tag to True.
     """
-    # Oracle tags are stored in lowercase
-    normalized_tag = val.strip().lower()
-    return {normalized_tag: True}
+    return {slugify_tag(val): True}
 
 
 def get_art_tags_comparison_object(val: str) -> dict[str, bool]:
@@ -306,8 +322,7 @@ def get_art_tags_comparison_object(val: str) -> dict[str, bool]:
     Returns:
         Dictionary mapping normalized art tag to True.
     """
-    normalized_tag = val.strip().lower()
-    return {normalized_tag: True}
+    return {slugify_tag(val): True}
 
 
 def get_is_tags_comparison_object(val: str) -> dict[str, bool]:
