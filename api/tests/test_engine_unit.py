@@ -357,15 +357,17 @@ class TestCollectionOperators:
         assert total_pw == 17
         assert total_creature == 1
 
-    def test_type_eq_exact(self, engine: QueryEngine) -> None:
-        # 34 creature printings are exactly {Creature} (the 33 pre-existing
-        # ones plus Monastery Messenger); Cathedral Membrane is {Artifact,
-        # Creature}, not exactly {Creature}. Both planeswalkers carry
-        # Legendary too, so t=planeswalker matches nothing.
+    def test_type_eq_is_type_colon(self, engine: QueryEngine) -> None:
+        # `t=` IS `t:`, not set equality. Measured on api.scryfall.com 2026-08-16:
+        # `t=creature e:khm` is 151 and `t:creature e:khm` is 151, `t=legendary e:khm` is 42 and
+        # `t:legendary e:khm` is 42. Set equality answered only the cards whose WHOLE type list is
+        # the one word -- 34 here rather than 35, and 0 planeswalkers rather than 17, because both
+        # fixture planeswalkers carry Legendary too.
         total_creature, _ = _run(engine, "t=creature")
         total_pw, _ = _run(engine, "t=planeswalker")
-        assert total_creature == 34
-        assert total_pw == 0
+        assert (total_creature, total_pw) == (_run(engine, "t:creature")[0], _run(engine, "t:planeswalker")[0])
+        assert total_creature == 35
+        assert total_pw == 17
 
     def test_type_lt_matches_nothing(self, engine: QueryEngine) -> None:
         # Proper subset of {Creature} is the empty type set — no card is typeless.
@@ -377,12 +379,16 @@ class TestCollectionOperators:
         total, _ = _run(engine, "t!=creature")
         assert total == 56
 
-    def test_keyword_eq_exact(self, engine: QueryEngine) -> None:
-        # Shivan Dragon has exactly {flying}; Serra Angel has {flying, vigilance}.
+    def test_keyword_eq_is_keyword_colon(self, engine: QueryEngine) -> None:
+        # `kw=` IS `kw:`. Measured on api.scryfall.com 2026-08-16: `kw=flying e:khm` is 28,
+        # exactly `kw:flying`'s 28. Set equality reached only the cards whose ONLY keyword is
+        # Flying -- Shivan Dragon here, and never Serra Angel, who also has vigilance.
         total_shivan, _ = _run(engine, 'keyword=flying name="Shivan Dragon"')
         total_serra, _ = _run(engine, 'keyword=flying name="Serra Angel"')
+        assert total_shivan == _run(engine, 'keyword:flying name="Shivan Dragon"')[0]
+        assert total_serra == _run(engine, 'keyword:flying name="Serra Angel"')[0]
         assert total_shivan == 5
-        assert total_serra == 0
+        assert total_serra == 7
 
     def test_keyword_gt_contains_plus_more(self, engine: QueryEngine) -> None:
         total_serra, _ = _run(engine, 'keyword>flying name="Serra Angel"')
@@ -672,13 +678,38 @@ class TestDevotion:
         total, _ = _run(engine, 'devotion={R} name="Shivan Dragon"')
         assert total == 0
 
-    def test_devotion_eq_rejects_extra_colors(self, engine: QueryEngine) -> None:
-        # Boggart Ram-Gang has devotion {R: 3, G: 3}; exactly-{R:3} must not match,
-        # but exactly-{R:3, G:3} must.
+    def test_devotion_eq_counts_the_queried_color_only(self, engine: QueryEngine) -> None:
+        # A COLOR THE QUERY LEFT OUT IS NOT A CONSTRAINT. Boggart Ram-Gang ({R/G}{R/G}{R/G}) has
+        # devotion {R: 3, G: 3}, and `devotion={r}{r}{r}` matches it on api.scryfall.com
+        # (2026-08-16) -- its devotion to RED is exactly 3, and its greenness is not asked about.
+        # This used to demand every unqueried color be zero and answered 0; the same rule made
+        # `devotion={r} e:khm t:creature` 15 where Scryfall answers 20.
         total_r3, _ = _run(engine, 'devotion={R}{R}{R} name="Boggart Ram-Gang"')
+        assert total_r3 == 4
+
+        # A MULTI-COLOR PLAIN VALUE IS A SHAPE SCRYFALL REFUSES, not one it answers differently:
+        # `devotion:{r}{g}` comes back with every card and the warning "Invalid expression
+        # `devotion:{r}{g}` was ignored. Devotion can only match single color or hybrid mana."
+        # Re-measured 2026-08-17: `e:khm t:creature devotion:{r}{g}` is the whole of
+        # `e:khm t:creature`, and `!"Boggart Ram-Gang" devotion={r}{r}{r}{g}{g}{g}` comes back
+        # with all five of its printings under that same warning.
+        #
+        # So the measure this leaf computes has no reference answer here and is not asserted
+        # against one; what IS pinned is that the leaf does not crash and stays self-consistent.
+        # Every value Scryfall DOES answer -- a single color, or a hybrid, whose two lanes are
+        # equal by construction -- has one symbol count, which is the target it compares against.
+        #
+        # THE ANSWER MOVED WHEN THE MEASURE BECAME DISTINCT PIPS, and only on this refused shape.
+        # Boggart Ram-Gang is {R/G}{R/G}{R/G}: three pips, each red AND green. The summed lanes
+        # read 6 against a target of 3 and the row missed; the pip count reads 3, which is what
+        # its devotion to red-or-green actually is, and the row matches. Neither number is
+        # Scryfall's, because Scryfall answers this query with the whole corpus.
         total_r3g3, _ = _run(engine, 'devotion={R}{R}{R}{G}{G}{G} name="Boggart Ram-Gang"')
-        assert total_r3 == 0
-        assert total_r3g3 == 4
+        total_r6, _ = _run(engine, 'devotion={R}{R}{R}{R}{R}{R} name="Boggart Ram-Gang"')
+        assert total_r3g3 == 4, "three pips that are red or green, against a target of 3"
+        # Red ALONE is a single-lane query, which the pip correction cannot touch -- one bit cannot
+        # be matched twice by one pip -- so this stays exactly what it was: devotion to red is 3.
+        assert total_r6 == 0, "and red alone is 3, not 6"
 
     def test_devotion_le_subset(self, engine: QueryEngine) -> None:
         # Shivan Dragon {R: 2} is a subset of {R: 2}; Boggart Ram-Gang {R: 3, G: 3} is not
@@ -1237,6 +1268,25 @@ class TestFieldSelection:
             "type_line",
         }
 
+    def test_loyalty_is_the_printed_string_from_the_engine(self, engine: QueryEngine) -> None:
+        """`loyalty` comes from planeswalker_loyalty_text, not the u8 the planner filters on.
+
+        The numeric column is an `Option<u8>` -- "always 1-12" -- so it cannot carry "X" (Nissa,
+        Steward of Elements) or "1+*". Before this field existed the key was served by nothing, and
+        every planeswalker's card object came back without it.
+        """
+        _, cards = _run(engine, "t:planeswalker", unique="card", fields=["name", "loyalty"])
+        assert cards, "the fixture corpus has planeswalkers"
+        assert all(c["loyalty"] for c in cards), f"every planeswalker reports a loyalty: {cards}"
+        assert {c["name"]: c["loyalty"] for c in cards} == {
+            "Jace, the Mind Sculptor": "3",
+            "Nicol Bolas, Planeswalker": "5",
+        }
+
+        # A card with no loyalty reports none, rather than a zero the u8 would have implied.
+        _, bolt = _run(engine, 'name="Lightning Bolt"', unique="card", limit=1, fields=["name", "loyalty"])
+        assert bolt[0]["loyalty"] is None
+
     def test_requested_fields_returned_exactly(self, engine: QueryEngine) -> None:
         _, cards = _run(
             engine,
@@ -1294,13 +1344,19 @@ class TestFieldSelection:
         assert legalities["modern"] == "legal"
         assert set(legalities.values()) <= {"legal", "not_legal", "restricted", "banned"}
 
-    def test_color_identity_is_wubrg_ordered(self, engine: QueryEngine) -> None:
-        # Any multicolor card: letters come back in WUBRG order regardless of storage order.
+    def test_color_identity_is_alphabetically_ordered(self, engine: QueryEngine) -> None:
+        # Any multicolor card: letters come back ALPHABETICALLY, regardless of storage order.
+        #
+        # This read WUBRG until it was checked against the data. Of the 540,484 printings in the
+        # 2026-08-16 all_cards bulk, every one of the 54,463 multi-colour `colors` arrays, all
+        # 96,030 multi-colour `color_identity` arrays and all 37,956 multi-symbol `produced_mana`
+        # arrays is in ascending letter order — and only 10,663 of the `colors` arrays are ALSO
+        # WUBRG-ordered. Scryfall serves ["R","U"] for Fire // Ice and ["B","G","R","U","W"] for
+        # Invasion of Alara; WUBRG was the coincidence and the alphabet is the rule.
         _, cards = _run(engine, "id>=rg", unique="card", limit=5, fields=["name", "color_identity"])
-        order = {letter: i for i, letter in enumerate("WUBRGC")}
         for card in cards:
             letters = card["color_identity"]
-            assert letters == tuple(sorted(letters, key=order.__getitem__))
+            assert letters == tuple(sorted(letters))
             assert {"R", "G"} <= set(letters)
 
 

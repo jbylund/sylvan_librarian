@@ -1,12 +1,12 @@
 use super::{
     renumber_coll_vocab,
-    and_child_rank, assign_name_ranks,
+    and_child_rank, AStrings, face_mana_cost, face_stat_nums, lane_get, mana_lane, ManaVocabInterner, assign_name_ranks,
     build_numeric_index, build_oracle_text_index, build_trigram_index,
     build_rarity_index, build_flavor_index, build_hybrid_tag_index, build_layout_hybrid_index, bitmap_beats_postings, HybridTagIndex, build_sort_permutations,
-    assign_artwork_groups, build_artwork_base_from, build_bit_planes, build_border_printing_planes, build_rarity_printing_planes, build_divergent_ids, build_name_bigram_index, build_name_unigram_index, build_printing_to_card, flavor_fingerprint, flavor_match_sets,
+    assign_artist_ranks, assign_artwork_groups, assign_collector_ranks, assign_set_ranks, assign_single_set_flags, order_annex_by_language, assign_foreign_artwork_groups, build_artwork_base_from, build_lang_index, build_printed_name_index, drop_group_if_annex_only, build_bit_planes, build_border_printing_planes, build_rarity_printing_planes, build_divergent_ids, build_name_bigram_index, build_name_unigram_index, build_printing_to_card, flavor_fingerprint, flavor_match_sets,
     cards_of_printings, count_common_keywords, count_common_types,
     build_artist_index, build_printing_value_index, build_arith_tuple_index, is_arith_tuple_route, range_candidates, narrow_candidates, narrow_candidates_exact, rarity_candidates,
-    range_too_broad_to_narrow, run_query, run_query_routed, run_query_with_plan, explain, explain_analyze, AcquireFacts, PlanEstimate, PlanTrial,
+    range_too_broad_to_narrow, run_query, run_query_routed, run_query_widened, run_query_with_plan, explain, explain_analyze, AcquireFacts, PlanEstimate, PlanTrial,
     acquire_plan_features, take_phase_stats, PagingTaken, CountSource, NarrowedRepr,
     EXACT_VALUE_TOTALS, RangeCardCounts, narrow_rec, ValueTotals, PairTotals, build_all_value_totals, build_pair_totals, build_range_card_counts, exact_result_total,
     PhysicalPlan, PlanScope, CandidatePlan, ComposePaging, trigram_candidates, finalize_trigram_index, PrintingValueIndex, NARROW_FLOOR,
@@ -18,12 +18,17 @@ use super::{
     archive_header, archive_payload, ARCHIVE_HEADER_LEN, Mmap,
     bitmap_contains, bitmap_card_ids, compile_plane, eval_planes, split_planes,
     ArithOp, ArtistIndex, CardData, CardIndexes, Candidates, ColorField, NumExpr, NumField, RarityIndex,
-    CollField, CmpOp, FilterExpr, InlineStr, Interner, ManaCost, OracleCard, Printing, TagIndex,
+    CollField, CmpOp, FilterExpr, InlineStr, Interner, ManaCost, CompatFields, OracleCard, OracleFace, Printing, PrintingFace, RelatedCard, TagIndex,
+    build_printing_by_scryfall_id, build_oracle_by_oracle_id, find_printing_by_scryfall_id, find_oracle_by_oracle_id,
+    build_external_id_index, find_printing_by_external_id, EXT_MULTIVERSE, EXT_MTGO, EXT_ARENA, EXT_TCGPLAYER,
+    fuzzy_similarity, fuzzy_name_match, autocomplete_names, iso8601_utc_to_epoch_secs, FuzzyOutcome,
+    VOCAB_NONE, COMPAT_PROMO, COMPAT_REPRINT, COMPAT_TEXTLESS, GAME_PAPER, GAME_ARENA, FINISH_FOIL, FINISH_NONFOIL,
     TextField, TextSearchField, Tri, SortedTrigramIndex, VocabInterner, ARTIST_NONE, NONE_STR, TYPE_ARTIFACT, TYPE_CREATURE,
     TYPE_ENCHANTMENT, TYPE_INSTANT, TYPE_LAND, TYPE_LEGENDARY, TYPE_PLANESWALKER, TYPE_SNOW, TYPE_SORCERY,
 };
 use rkyv::{rancor::Error, Archived};
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::sync::OnceLock;
 // Trait bringing random_range/random_bool/random into scope for the #677 fuzzer
 // helpers below (SmallRng's inherent methods live on this extension trait).
@@ -203,10 +208,13 @@ fn stub_card(oracle_id: u128, card_types: u16, subtypes: &[&str], vocab: &mut Vo
     OracleCard {
         card_name_lower: InlineStr::from_str(""),
         card_name_folded: InlineStr::from_str(""),
+        card_name_collated_id: NONE_STR,
         card_colors: 0,
         card_color_identity: 0,
         produced_mana: 0,
+        color_indicator: 0,
         card_types,
+        single_set: false,
         legality_divergent: false,
         oracle_id,
         card_name_id: NONE_STR,
@@ -224,11 +232,14 @@ fn stub_card(oracle_id: u128, card_types: u16, subtypes: &[&str], vocab: &mut Vo
         name_rank: 0,
         card_subtypes: subtypes.iter().map(|s| vocab.intern(s.to_string()).unwrap()).collect(),
         card_keywords: Vec::new(),
+        card_keywords_printed: Vec::new(),
         card_oracle_tags: Vec::new(),
         card_legalities: 0,
         mana_cost: ManaCost { core: 0, hybrids: Vec::new(), devotion: 0, cmc: 0.0 },
         creature_power_text_id: NONE_STR,
         creature_toughness_text_id: NONE_STR,
+        planeswalker_loyalty_text_id: NONE_STR,
+        faces: Vec::new(),
     }
 }
 
@@ -236,11 +247,16 @@ fn stub_card(oracle_id: u128, card_types: u16, subtypes: &[&str], vocab: &mut Vo
 fn stub_printing(scryfall_id: u128, illustration_id: u128, prefer_score: Option<f32>) -> Printing {
     Printing {
         scryfall_id,
+        flavor_name_id: NONE_STR,
+        flavor_name_folded_id: NONE_STR,
         illustration_id,
         flavor_text_id: NONE_STR,
         flavor_text_lower_id: NONE_STR,
         card_artist_vid: ARTIST_NONE,
+        card_artist_name_id: NONE_STR,
         card_set_code: InlineStr::from_str(""),
+        set_rank: 0,
+        artist_rank: 0,
         card_border_id: NONE_STR,
         card_watermark_id: NONE_STR,
         collector_number_id: NONE_STR,
@@ -248,6 +264,7 @@ fn stub_printing(scryfall_id: u128, illustration_id: u128, prefer_score: Option<
         released_at_int: None,
         card_rarity_int: None,
         collector_number_int: None,
+        collector_rank: 0,
         price_usd: None,
         price_eur: None,
         price_tix: None,
@@ -257,6 +274,14 @@ fn stub_printing(scryfall_id: u128, illustration_id: u128, prefer_score: Option<
         card_is_tags: Vec::new(),
         card_frame_data: Vec::new(),
         artwork_group_id: 0, // placeholder; store_of overwrites via assign_artwork_groups
+        faces: Vec::new(),
+        printed_name_id: NONE_STR,
+        printed_type_line_id: NONE_STR,
+        printed_text_id: NONE_STR,
+        printed_name_folded_id: NONE_STR,
+        printed_faces: Vec::new(),
+        all_parts: Vec::new(),
+        compat: CompatFields::default(),
     }
 }
 
@@ -298,18 +323,21 @@ fn store_of(mut cards: Vec<OracleCard>, printing_counts: &[usize], vocab: VocabI
     // Establish the load path's invariant BEFORE any index is built from these ids: the vocab is
     // renumbered lexicographically and every row's ids remapped (see `renumber_coll_vocab`). Index
     // builders below read the ids, so renumbering after them would leave the indexes on old ids.
-    let coll_vocab = renumber_coll_vocab(&mut cards, &mut printings, vocab.strings);
+    let coll_vocab = renumber_coll_vocab(&mut cards, &mut printings, &mut [], vocab.strings);
     // Real planes and bigrams so narrowing tests see the same store shape
     // reload_commit builds (type narrowing goes through the planes since #637).
     let indexes = CardIndexes {
+        flavor_names: Default::default(),
+        flavor_names_collated: Default::default(),
+        sets_with_extras: Default::default(),
         artwork_base,
         // No printing sets card_border_id away from NONE_STR at this point (any
         // border values a fixture wants get set after store_of returns, same as
         // border_planes_fixture_store already does), so an empty string table is
         // safe here -- the border-scatter loop skips every printing regardless.
         planes: build_bit_planes(&cards, &printings, &offsets, &[]),
-        name_bigrams: build_name_bigram_index(&cards),
-        name_unigrams: build_name_unigram_index(&cards),
+        name_bigrams: build_name_bigram_index(&cards, &[]),
+        name_unigrams: build_name_unigram_index(&cards, &[]),
         legal_divergent: build_divergent_ids(&cards),
         sort_perms: build_sort_permutations(&cards, &offsets),
         max_artwork_groups: artwork_groups.iter().copied().max().unwrap_or(0),
@@ -318,17 +346,45 @@ fn store_of(mut cards: Vec<OracleCard>, printing_counts: &[usize], vocab: VocabI
         printing_to_card: build_printing_to_card(&offsets),
         ..Default::default()
     };
-    CardData {
+    let foreign_offsets = vec![0u32; cards.len() + 1];
+    let mut data = CardData {
         cards,
         printings,
         offsets,
+        foreign: vec![],
+        foreign_offsets,
         strings: vec![],
         coll_vocab,
         artist_vocab: vec![],
+        artist_vocab_collated: vec![],
         mana_vocab: vec![],
         indexes,
         format_shifts: HashMap::new(),
+    };
+    derive_name_collation(&mut data);
+    data
+}
+
+/// Fill `card_name_collated_id` and rebuild the name tiers over it — the fixture twin of what
+/// `reload_commit` does for a real archive.
+///
+/// Fixtures that rewrite a name AFTER `store_of` returns have to call this again, for the same
+/// reason the builder derives the column rather than importing it: the collated name is a function
+/// of the folded one, and an index built over a stale collation narrows a `name:` needle to
+/// silence.
+pub(crate) fn derive_name_collation(data: &mut CardData) {
+    for i in 0..data.cards.len() {
+        let folded = data.cards[i].card_name_folded.as_str().to_owned();
+        let collated = crate::collate_name(&folded);
+        data.cards[i].card_name_collated_id = if collated == folded {
+            crate::NONE_STR
+        } else {
+            data.strings.push(collated);
+            (data.strings.len() - 1) as u32
+        };
     }
+    data.indexes.name_bigrams = build_name_bigram_index(&data.cards, &data.strings);
+    data.indexes.name_unigrams = build_name_unigram_index(&data.cards, &data.strings);
 }
 
 /// Recompute both artwork-grouping-derived index fields (per-card counts and the per-printing
@@ -979,7 +1035,7 @@ fn collection_cmp_binds_vocab_ids_and_matches() {
             value: value.to_string(),
             value_id: None,
         };
-        f.bind(&archived.coll_vocab, &archived.artist_vocab, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
+        f.bind(&archived.coll_vocab, &archived.artist_vocab, &archived.artist_vocab_collated, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
         archived.cards.iter().map(|c| f.eval_card(c, &archived.strings) == Tri::True).collect()
     };
 
@@ -1009,7 +1065,7 @@ fn printing_level_predicates_are_printing_dep_in_card_pass() {
         value: "wolf".to_string(),
         value_id: None,
     };
-    f.bind(&archived.coll_vocab, &archived.artist_vocab, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
+    f.bind(&archived.coll_vocab, &archived.artist_vocab, &archived.artist_vocab_collated, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
 
     let card = &archived.cards[0];
     // Card pass can't decide an art-tag predicate...
@@ -1864,10 +1920,10 @@ fn fuzz_text_needle(rng: &mut rand::rngs::SmallRng, field: TextSearchField) -> S
     for _ in 0..8 {
         let t = corpus[rng.random_range(0..corpus.len())];
         let text = match field {
-            TextSearchField::NameLower => t.0,
+            TextSearchField::NameLower | TextSearchField::NameCollated => t.0,
             TextSearchField::OracleTextLower => t.1,
             TextSearchField::FlavorTextLower => t.2,
-            TextSearchField::ArtistLower => t.0, // artist has its own leaf; not reached here
+            TextSearchField::ArtistLower | TextSearchField::ArtistCollated => t.0, // artist has its own leaf; not reached here
         };
         let words: Vec<&str> = text
             .split_whitespace()
@@ -1990,7 +2046,7 @@ fn fuzz_leaf(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
         17 => fuzz_leaf_collection(rng, CollField::IsTags, &FUZZ_IS_TAGS),
         18 => fuzz_leaf_collection(rng, CollField::FrameData, &FUZZ_FRAME_DATA),
         19 => fuzz_leaf_artist(rng),
-        20 => fuzz_leaf_text_contains(rng, TextSearchField::NameLower),
+        20 => fuzz_leaf_text_contains(rng, TextSearchField::NameCollated),
         21 => fuzz_leaf_text_contains(rng, TextSearchField::OracleTextLower),
         22 => fuzz_leaf_text_contains(rng, TextSearchField::FlavorTextLower),
         23 => fuzz_leaf_name_exact(rng),
@@ -2108,9 +2164,10 @@ fn fuzz_build_filter(spec: &FuzzSpec) -> FilterExpr {
             core: *core,
             hybrids: hybrids.clone(),
             hybrid_ids: Vec::new(), // bind() fills this from `hybrids` when non-empty
+            hybrid_cmc: Vec::new(), // bind() fills this from the store's mana vocab, always
             cmc: *cmc,
         },
-        FuzzSpec::Leaf(FuzzLeaf::Devotion { op, pips }) => FilterExpr::Devotion { op: *op, pips: *pips },
+        FuzzSpec::Leaf(FuzzLeaf::Devotion { op, pips }) => FilterExpr::Devotion { op: *op, pips: *pips, hybrid_colors: Vec::new() },
         FuzzSpec::Leaf(FuzzLeaf::Border { value }) => FilterExpr::TextExact { field: TextField::Border, op: CmpOp::Eq, value: value.clone() },
         FuzzSpec::Leaf(FuzzLeaf::Layout { value }) => FilterExpr::TextExact { field: TextField::Layout, op: CmpOp::Eq, value: value.clone() },
         FuzzSpec::Leaf(FuzzLeaf::Legality { shift, expected }) => FilterExpr::Legality { shift: *shift, expected: *expected },
@@ -2128,7 +2185,7 @@ fn fuzz_bound_filter(spec: &FuzzSpec, archived: &Archived<CardData>) -> FilterEx
     let mut f = fuzz_build_filter(spec);
     f.bind(
         &archived.coll_vocab, &archived.artist_vocab,
-        &archived.mana_vocab, &archived.indexes.flavor, &archived.strings,
+        &archived.artist_vocab_collated, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings,
     );
     f
 }
@@ -2182,10 +2239,13 @@ fn fuzz_describe(spec: &FuzzSpec) -> String {
         FuzzSpec::Leaf(FuzzLeaf::Artist { word }) => format!("artist:{word}"),
         FuzzSpec::Leaf(FuzzLeaf::TextContains { field, needle }) => {
             let f = match field {
+                // The bare-word spelling; `NameLower` is what a QUOTED value compiles to, which
+                // the round-trip below re-quotes.
+                TextSearchField::NameCollated => "name",
                 TextSearchField::NameLower => "name",
                 TextSearchField::OracleTextLower => "oracle",
                 TextSearchField::FlavorTextLower => "flavor",
-                TextSearchField::ArtistLower => "artist",
+                TextSearchField::ArtistLower | TextSearchField::ArtistCollated => "artist",
             };
             format!("{f}:{needle}")
         }
@@ -2474,6 +2534,7 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
         data.printings[idx].flavor_text_lower_id = flavor_meta[idx];
     }
     data.strings = interner.strings;
+    derive_name_collation(&mut data); // the assignment above discarded the collated ids store_of derived
     // store_of built indexes from the placeholder printings and left the numeric/range indexes at
     // empty defaults; rebuild everything the mutated fields feed. The range indexes are load-bearing
     // for correctness, not just coverage: an empty range index narrows a matching predicate to the
@@ -2496,9 +2557,9 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
     data.indexes.artists = build_artist_index(&data.printings, data.artist_vocab.len());
     // Text narrowing indexes — same load-bearing property. name/oracle drive trigram + bigram
     // narrowing and the full-scan memoization; flavor is the printing-space CSR bind() resolves against.
-    data.indexes.name_trigram = build_trigram_index(&data.cards, |c| c.card_name_folded.as_str());
-    data.indexes.name_bigrams = build_name_bigram_index(&data.cards);
-    data.indexes.name_unigrams = build_name_unigram_index(&data.cards);
+    data.indexes.name_trigram = build_trigram_index(&data.cards, |c| crate::collated_name_of(c, &data.strings));
+    data.indexes.name_bigrams = build_name_bigram_index(&data.cards, &data.strings);
+    data.indexes.name_unigrams = build_name_unigram_index(&data.cards, &data.strings);
     data.indexes.oracle_trigram = build_oracle_text_index(&data.cards, &data.strings);
     data.indexes.flavor = build_flavor_index(&data.printings, &data.strings);
     data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
@@ -2915,19 +2976,19 @@ fn arith_tuple_narrowing_matches_reference() {
 fn build_gather_matches(n: usize, ordering: u32) -> Vec<Match> {
     (0..n)
         .map(|i| {
-            let key: u64 = match ordering {
+            let key: u128 = match ordering {
                 // splitmix-style scramble: deterministic, no ordering structure
                 0 => {
-                    let mut x = (i as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
+                    let mut x = (i as u128).wrapping_add(0x9E37_79B9_7F4A_7C15);
                     x ^= x >> 30;
                     x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
                     x ^= x >> 27;
                     x
                 }
-                1 => i as u64,           // ascending: after the 1st prune every later match is rejected
-                2 => (n - 1 - i) as u64, // descending: every later match beats the cutoff → prune repeatedly
-                3 => 0,                  // all ties: page_cmp must break by pid
-                _ => (i % 8) as u64,     // clustered / heavy ties
+                1 => i as u128,           // ascending: after the 1st prune every later match is rejected
+                2 => (n - 1 - i) as u128, // descending: every later match beats the cutoff → prune repeatedly
+                3 => 0,                   // all ties: page_cmp must break by pid
+                _ => (i % 8) as u128,     // clustered / heavy ties
             };
             (key, i as u32, i as u32) // (sort_key, cid, pid)
         })
@@ -3214,18 +3275,16 @@ fn force_plan_differential_agreement() {
     };
 
     // Ordering-parity contract (#702): plans agree on the SQL-defined keys 1-2
-    // (primary sort column, then edhrec_rank) — sort_key_bits' whole u64 output. A tie on those
-    // is unspecified across plans: the permutation bakes in the *default* representative's
-    // prefer_score, so under a non-default prefer the perm-based plans can order a tie
-    // differently from the gathered path (a known, pre-existing divergence — see
-    // docs/issues/00702-engine-plan-selection-layer.md). This is independent of prefer_score
-    // ever having been a THIRD sort_key_bits component (it was, and dead everywhere it was
-    // read; see sort_key_bits' doc) -- the divergence lives in build_sort_permutations' own
-    // tiebreak, not in a key page_cmp ever consulted.
+    // (primary sort column, then edhrec_rank) — the top 64 bits of
+    // sort_key_bits. Key 3 (prefer_score) and beyond are unspecified across
+    // plans: the permutation bakes in the *default* representative's
+    // prefer_score, so under a non-default prefer the perm-based plans can order
+    // a key-3 tie differently from the gathered path (a known, pre-existing
+    // divergence — see docs/issues/00702-engine-plan-selection-layer.md).
     // Comparing the 2-key VALUE sequence is stable across that: tied rows share
     // their (key1, key2) value, so the sequence is identical even when they
     // interleave. Exercised under a default AND a non-default prefer — 2-key
-    // parity holds at both.
+    // parity holds at both (3-key would not, at non-default prefer).
     const PREFERS: [&str; 2] = ["default", "usd_low"];
 
     for (spec, orderby, direction) in &cases {
@@ -3239,11 +3298,9 @@ fn force_plan_differential_agreement() {
         // a bound that changed any plan's answer is equally wrong.
         let sort_bound = sort_col_bound(&fuzz_bound_filter(spec, archived), sort_col);
         bounded_cases[usize::from(descending)] += usize::from(!sort_bound.is_unbounded());
-        // (key1, key2) = sort_key_bits' whole u64 output. It used to carry a third key
-        // (prefer_score) that this comparison dropped with a `>> 32`; that key was dead in every
-        // real comparator too (see sort_key_bits' doc) and has since been removed at the source.
-        let key2_seq = |page: &[(&Archived<OracleCard>, &Archived<Printing>)]| -> Vec<u64> {
-            page.iter().map(|&(c, p)| sort_key_bits(c, p, sort_col, descending)).collect()
+        // (key1, key2) = the top 64 bits of sort_key_bits; drop the low 32 (key 3).
+        let key2_seq = |page: &[(&Archived<OracleCard>, &Archived<Printing>)]| -> Vec<u128> {
+            page.iter().map(|&(c, p)| sort_key_bits(c, p, sort_col, descending) >> 32).collect()
         };
         for &prefer in &PREFERS {
             for &mode in &modes {
@@ -3436,7 +3493,7 @@ fn a_dense_but_not_broad_frame_value_narrows_without_broad_ok() {
         };
         f.bind(
             &archived.coll_vocab, &archived.artist_vocab,
-            &archived.mana_vocab, &archived.indexes.flavor, &archived.strings,
+            &archived.artist_vocab_collated, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings,
         );
         let got = narrow_rec(&f, &archived.indexes, offsets, cards, false);
         if range_too_broad_to_narrow(k, n_printings) {
@@ -3536,7 +3593,7 @@ fn value_totals_are_exact_in_all_three_spaces() {
         let mut f = leaf.clone();
         f.bind(
             &archived.coll_vocab, &archived.artist_vocab,
-            &archived.mana_vocab, &archived.indexes.flavor, &archived.strings,
+            &archived.artist_vocab_collated, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings,
         );
         for (mode_label, mode) in [("printing", Mode::Printing), ("card", Mode::Card), ("artwork", Mode::Artwork)] {
             let got = exact_result_total(&f, &archived.indexes, mode)
@@ -4426,7 +4483,7 @@ fn materializing_plans_agree_on_the_counters_they_share() {
         FuzzSpec::And(vec![fuzz_leaf_type(&mut rng), fuzz_leaf_rarity(&mut rng)]),
         FuzzSpec::Leaf(FuzzLeaf::Border { value: "black".to_string() }),
         fuzz_leaf_text_contains(&mut rng, TextSearchField::OracleTextLower),
-        fuzz_leaf_text_contains(&mut rng, TextSearchField::NameLower),
+        fuzz_leaf_text_contains(&mut rng, TextSearchField::NameCollated),
         fuzz_leaf_arith(&mut rng),
         FuzzSpec::And(vec![fuzz_leaf_type(&mut rng), fuzz_leaf_text_contains(&mut rng, TextSearchField::OracleTextLower)]),
     ];
@@ -5090,7 +5147,7 @@ fn calibration_queries() -> Vec<(&'static str, FuzzSpec)> {
     let price = |op, val| FuzzSpec::Leaf(FuzzLeaf::Price { field: NumField::PriceUsd, op, val });
     let year   = |op, y: i32| FuzzSpec::Leaf(FuzzLeaf::Year { op, year: y });
     let otext  = |needle: &str| FuzzSpec::Leaf(FuzzLeaf::TextContains { field: TextSearchField::OracleTextLower, needle: needle.to_string() });
-    let ntext  = |needle: &str| FuzzSpec::Leaf(FuzzLeaf::TextContains { field: TextSearchField::NameLower, needle: needle.to_string() });
+    let ntext  = |needle: &str| FuzzSpec::Leaf(FuzzLeaf::TextContains { field: TextSearchField::NameCollated, needle: needle.to_string() });
     let rarity = |op, val| FuzzSpec::Leaf(FuzzLeaf::Rarity { op, val });
     let kw     = |value: &str| FuzzSpec::Leaf(FuzzLeaf::Collection { field: CollField::Keywords, op: CmpOp::Ge, value: value.to_string() });
 
@@ -6641,9 +6698,12 @@ fn bench_checked_vs_unchecked_access() {
     let artwork_base = build_artwork_base_from(&artwork_groups);
 
     let indexes = CardIndexes {
+        flavor_names: Default::default(),
+        flavor_names_collated: Default::default(),
+        sets_with_extras: Default::default(),
         artwork_base,
-        name_trigram:   build_trigram_index(&cards, |c| c.card_name_folded.as_str()),
-        name_unigrams:  build_name_unigram_index(&cards),
+        name_trigram:   build_trigram_index(&cards, |c| crate::collated_name_of(c, &[])),
+        name_unigrams:  build_name_unigram_index(&cards, &[]),
         oracle_trigram: build_oracle_text_index(&cards, &strings),
         cmc:            build_numeric_index(&cards, |c| c.cmc.map(|v| v as i16)),
         power:          build_numeric_index(&cards, |c| c.creature_power.map(|v| v as i16)),
@@ -6683,17 +6743,30 @@ fn bench_checked_vs_unchecked_access() {
         border_printing: build_border_printing_planes(&printings, &strings),
         rarity_printing: build_rarity_printing_planes(&printings),
         rarity_printing_ordered: build_printing_value_index(&printings, &cards, &offsets, |p| p.card_rarity_int.map(u32::from)),
-        name_bigrams:   build_name_bigram_index(&cards),
+        name_bigrams:   build_name_bigram_index(&cards, &[]),
         legal_divergent: build_divergent_ids(&cards),
         arith_tuple:    build_arith_tuple_index(&cards),
+        printing_by_scryfall_id: build_printing_by_scryfall_id(&printings),
+        oracle_by_oracle_id:     build_oracle_by_oracle_id(&cards),
+        external_id_index:       build_external_id_index(&printings),
+        langs: HybridTagIndex::default(),
+        foreign_langs: HybridTagIndex::default(),
+        foreign_to_card: vec![],
+        foreign_by_scryfall_id: vec![],
+        foreign_external_ids: vec![],
+        printed_names: crate::PrintedNameIndex::default(),
     };
+    let foreign_offsets = vec![0u32; cards.len() + 1];
     let data = CardData {
         cards,
         printings,
         offsets,
+        foreign: vec![],
+        foreign_offsets,
         strings,
         coll_vocab: vocab.strings,
         artist_vocab: vec![],
+        artist_vocab_collated: vec![],
         mana_vocab: vec![],
         indexes,
         format_shifts: HashMap::new(),
@@ -6740,7 +6813,7 @@ fn card_pass_extracts_residual_and_matches() {
         value: "wolf".to_string(),
         value_id: None,
     };
-    wolf.bind(&archived.coll_vocab, &archived.artist_vocab, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
+    wolf.bind(&archived.coll_vocab, &archived.artist_vocab, &archived.artist_vocab_collated, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
     let creature = || FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
 
     // And[t:creature, art:wolf]: the type check is proven at card level and
@@ -6768,7 +6841,7 @@ fn card_pass_extracts_residual_and_matches() {
         value: "wolf".to_string(),
         value_id: None,
     };
-    wolf2.bind(&archived.coll_vocab, &archived.artist_vocab, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
+    wolf2.bind(&archived.coll_vocab, &archived.artist_vocab, &archived.artist_vocab_collated, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
     let or = FilterExpr::Or(vec![creature(), wolf2]);
     let t = or.card_pass(&archived.cards[0], &archived.strings, &mut residual, &mut is_or, 0);
     assert!(t == Tri::True && residual.is_empty());
@@ -6791,6 +6864,9 @@ fn artist_predicates_bind_to_vocab_ids_and_narrow() {
     data.printings[1].card_artist_vid = avon;
     data.printings[2].card_artist_vid = rebecca;
     data.artist_vocab = artists.strings;
+    // Parallel BY VID, exactly as the commit pass backfills it — every artist predicate compares
+    // against this, so leaving it empty would make the fixture answer nothing.
+    data.artist_vocab_collated = data.artist_vocab.iter().map(|a| super::collate_name(a)).collect();
     data.indexes.artists = build_artist_index(&data.printings, data.artist_vocab.len());
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
@@ -6799,7 +6875,7 @@ fn artist_predicates_bind_to_vocab_ids_and_narrow() {
         field: super::TextSearchField::ArtistLower,
         word: "rebecca".to_string(),
     };
-    f.bind(&archived.coll_vocab, &archived.artist_vocab, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
+    f.bind(&archived.coll_vocab, &archived.artist_vocab, &archived.artist_vocab_collated, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
     // bind rewrites the contains into an id-set match
     let FilterExpr::ArtistMatch { ref ids } = f else { panic!("expected ArtistMatch after bind") };
     assert_eq!(ids, &vec![rebecca]);
@@ -6822,11 +6898,95 @@ fn artist_predicates_bind_to_vocab_ids_and_narrow() {
         field: super::TextSearchField::ArtistLower,
         word: "zzz".to_string(),
     };
-    g.bind(&archived.coll_vocab, &archived.artist_vocab, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
+    g.bind(&archived.coll_vocab, &archived.artist_vocab, &archived.artist_vocab_collated, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
     match narrow_candidates(&g, &archived.indexes, &archived.offsets, &archived.cards) {
         Some(Candidates::Printings(v)) => assert!(v.is_empty()),
         _ => panic!("empty artist match must narrow to the empty set"),
     }
+}
+
+/// Every artist form is ONE comparison: a collated contains, `a:` and `a=` alike.
+///
+/// api.scryfall.com draws no `:`/`=` and no quoted/bare line for artists the way it does for
+/// `name:` — measured 2026-08-16, `a="rebecca"` answers `a:rebecca`'s 405, `a="guay"` answers
+/// `a:guay`'s 462, and `a:"rebeccaguay"` answers `a:rebecca-guay`'s 399. This port had `a=` as a
+/// full-string compare and a quoted `a:"…"` as a literal one, so both answered 0 on values
+/// Scryfall answers in the hundreds.
+#[test]
+fn every_artist_form_is_a_collated_contains() {
+    let mut vocab = VocabInterner::new();
+    let cards = vec![stub_card(1, TYPE_CREATURE, &[], &mut vocab), stub_card(2, TYPE_CREATURE, &[], &mut vocab)];
+    let mut data = store_of(cards, &[2, 2], vocab);
+    let mut artists = VocabInterner::new();
+    // A solo credit, a JOINED two-artist credit (generation 27 stores Scryfall's own string), and
+    // an accented name, whose folded twin is what the collated vocab carries.
+    let guay = artists.intern("rebecca guay".to_string()).unwrap();
+    let joined = artists.intern("david martin & franz vohwinkel".to_string()).unwrap();
+    let gawel = artists.intern("jakub gaweł".to_string()).unwrap();
+    data.printings[0].card_artist_vid = guay;
+    data.printings[1].card_artist_vid = joined;
+    data.printings[2].card_artist_vid = gawel;
+    data.artist_vocab = artists.strings;
+    // The stored fold: `collate_name(fold_accents(lower))`. Only the accented name differs, and
+    // this fixture spells its fold out rather than importing the builder's `fold_accents`.
+    data.artist_vocab_collated = data
+        .artist_vocab
+        .iter()
+        .map(|a| super::collate_name(&a.replace('ł', "l")))
+        .collect();
+    data.indexes.artists = build_artist_index(&data.printings, data.artist_vocab.len());
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let bind = |mut f: FilterExpr| -> Vec<u16> {
+        f.bind(&archived.coll_vocab, &archived.artist_vocab, &archived.artist_vocab_collated, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
+        let FilterExpr::ArtistMatch { ids } = f else { panic!("artist predicate must bind to ArtistMatch") };
+        ids
+    };
+    let quoted = |w: &str| FilterExpr::TextContains { field: super::TextSearchField::ArtistLower, word: w.to_string() };
+    let bare = |w: &str| FilterExpr::TextContains { field: super::TextSearchField::ArtistCollated, word: w.to_string() };
+    let eq = |v: &str| FilterExpr::TextExact {
+        field: super::TextField::ArtistLower,
+        op: super::CmpOp::Eq,
+        value: v.to_string(),
+    };
+
+    // `a=` is a CONTAINS, not an equality: a fragment of a name finds it.
+    assert_eq!(bind(eq("rebecca")), vec![guay]);
+    assert_eq!(bind(eq("guay")), vec![guay]);
+    // ...and it agrees with `a:` in both spellings, which is the whole claim.
+    assert_eq!(bind(eq("rebecca")), bind(bare("rebecca")));
+    assert_eq!(bind(eq("rebecca")), bind(quoted("rebecca")));
+
+    // A QUOTED value is collated too — punctuation and spacing are dropped from both sides.
+    assert_eq!(bind(quoted("rebecca-guay")), vec![guay]);
+    assert_eq!(bind(quoted("rebeccaguay")), vec![guay]);
+    assert_eq!(bind(eq("rebecca guay")), vec![guay]);
+
+    // The joined two-artist credit is reachable under EITHER artist, because collation drops the
+    // " & " and leaves each name a substring. This is what makes `a:"franz vohwinkel"` return
+    // Fire // Ice, as it does on Scryfall.
+    assert_eq!(bind(eq("franz vohwinkel")), vec![joined]);
+    assert_eq!(bind(quoted("david martin")), vec![joined]);
+    assert_eq!(bind(bare("vohwinkel")), vec![joined]);
+
+    // An accented needle reaches the artist through the UNFOLDED vocab collated on the fly, and
+    // the unaccented spelling reaches them through the stored fold. Scryfall answers both.
+    assert_eq!(bind(quoted("gaweł")), vec![gawel]);
+    assert_eq!(bind(quoted("gawel")), vec![gawel]);
+    assert_eq!(bind(eq("jakub gaweł")), vec![gawel]);
+
+    // A needle in nobody's name still proves the empty set.
+    assert!(bind(eq("zzz")).is_empty());
+
+    // The ORDERING comparisons keep the full-string compare against the unfolded vocab: Scryfall
+    // answers 0 for all of them, so there is nothing to reproduce and nothing is changed here.
+    let ids = bind(FilterExpr::TextExact {
+        field: super::TextField::ArtistLower,
+        op: super::CmpOp::Ne,
+        value: "rebecca guay".to_string(),
+    });
+    assert_eq!(ids, vec![joined, gawel]);
 }
 
 // The fingerprint is a sound necessary-condition filter: a text containing the
@@ -6861,12 +7021,13 @@ fn flavor_match_bind_eval_and_narrow() {
     data.printings[1].flavor_text_lower_id = interner.intern("a quiet forest".to_string());
     // printings[3] keeps NONE_STR: no flavor text at all
     data.strings = interner.strings;
+    derive_name_collation(&mut data); // the assignment above discarded the collated ids store_of derived
     data.indexes.flavor = build_flavor_index(&data.printings, &data.strings);
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
     let bound = |f: &mut FilterExpr| {
-        f.bind(&archived.coll_vocab, &archived.artist_vocab, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
+        f.bind(&archived.coll_vocab, &archived.artist_vocab, &archived.artist_vocab_collated, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
     };
 
     let mut f = FilterExpr::TextContains {
@@ -7096,22 +7257,33 @@ fn all_match_promotion_correct_for_card_space_exact_predicate() {
 /// group's internal order would come out reversed in one direction.
 fn tie_break_fixture() -> (Vec<OracleCard>, VocabInterner) {
     let mut vocab = VocabInterner::new();
-    let mut card0 = stub_card(1, TYPE_CREATURE, &[], &mut vocab); // cmc=3, edhrec=10
+    // The tied trio is ordered by NAME, which is the tiebreak `sort_key_bits` puts in its third
+    // lane (Scryfall's own; see `sort_key_bits`). The names are chosen so the intended tie order —
+    // card1, card0, card2 — is the same one the edhrec ranks used to give, so every expectation
+    // below still reads as it did; only the reason the order holds has changed.
+    let mut card0 = stub_card(1, TYPE_CREATURE, &[], &mut vocab); // cmc=3, name "btie" (middle)
     card0.cmc = Some(3);
     card0.edhrec_rank = Some(10);
-    let mut card1 = stub_card(2, TYPE_CREATURE, &[], &mut vocab); // cmc=3, edhrec=5 (lowest in the tie)
+    card0.card_name_folded = InlineStr::from_str("btie");
+    let mut card1 = stub_card(2, TYPE_CREATURE, &[], &mut vocab); // cmc=3, name "atie" (first)
     card1.cmc = Some(3);
     card1.edhrec_rank = Some(5);
-    let mut card2 = stub_card(3, TYPE_CREATURE, &[], &mut vocab); // cmc=3, edhrec=20 (highest in the tie)
+    card1.card_name_folded = InlineStr::from_str("atie");
+    let mut card2 = stub_card(3, TYPE_CREATURE, &[], &mut vocab); // cmc=3, name "ctie" (last)
     card2.cmc = Some(3);
     card2.edhrec_rank = Some(20);
+    card2.card_name_folded = InlineStr::from_str("ctie");
     let mut card3 = stub_card(4, TYPE_CREATURE, &[], &mut vocab); // cmc=1
     card3.cmc = Some(1);
     card3.edhrec_rank = Some(1);
+    card3.card_name_folded = InlineStr::from_str("dsolo");
     let mut card4 = stub_card(5, TYPE_CREATURE, &[], &mut vocab); // cmc=5
     card4.cmc = Some(5);
     card4.edhrec_rank = Some(1);
-    (vec![card0, card1, card2, card3, card4], vocab)
+    card4.card_name_folded = InlineStr::from_str("esolo");
+    let mut cards = vec![card0, card1, card2, card3, card4];
+    assign_name_ranks(&mut cards, &[]);
+    (cards, vocab)
 }
 
 /// Expected order, by oracle_id: ascending is [card3(1), card1(3,e5),
@@ -7645,6 +7817,7 @@ fn watermark_narrowing() {
     data.printings[1].card_watermark_id = interner.intern("set".to_string());
     data.printings[2].card_watermark_id = NONE_STR; // no watermark — must not appear in any postings list
     data.strings = interner.strings;
+    derive_name_collation(&mut data); // the assignment above discarded the collated ids store_of derived
     let mut watermarks: TagIndex = HashMap::new();
     for (i, p) in data.printings.iter().enumerate() {
         if p.card_watermark_id != NONE_STR {
@@ -7825,6 +7998,7 @@ fn set_watermark_compose_leaves() {
         p.card_watermark_id = wm.map_or(NONE_STR, |s| interner.intern(s.to_string()));
     }
     data.strings = interner.strings;
+    derive_name_collation(&mut data); // the assignment above discarded the collated ids store_of derived
     // Released dates give a mix of years for the range-leaf mixes (pid4 dateless — fails any year).
     let year_by_pid = [Some(20200101), Some(20230101), Some(20200101), Some(20230101), None, Some(20240101)];
     for (p, y) in data.printings.iter_mut().zip(year_by_pid) {
@@ -8097,6 +8271,60 @@ fn broad_ranges_decline_to_narrow() {
     let archived = rkyv::access::<Archived<PrintingValueIndex>, Error>(&bytes).expect("access");
     assert!(range_candidates(archived, 0, u32::MAX).is_none());
     assert_eq!(range_candidates(archived, 100, 200).map(|v| v.len()), Some(100));
+}
+
+/// `usd` IS `COALESCE(usd, usd_foil, usd_etched)` ON api.scryfall.com, and the fallback has to
+/// reach BOTH the range index the planner narrows with and the verification that follows it — an
+/// index built on the raw column would narrow away the very printings the fallback exists to
+/// include, and the row would never reach `matches`.
+///
+/// `usd>=500` is 205 there against this port's 84 before the fix. Of the 175 rows of
+/// `usd>=500 unique=prints`, 99 carry `prices.usd` NULL beside a foil price over $500 and ZERO
+/// carry a LOW `usd` beside a high foil — which is the fourth printing here, and the reason this
+/// is a fallback rather than a maximum. Etched is measured too: Mox Opal (sld) is etched-priced
+/// and nothing else, and matches `usd>=300`.
+#[test]
+fn the_usd_search_key_falls_back_to_foil_then_etched_but_never_overrides() {
+    let mut vocab = VocabInterner::new();
+    let cards = vec![stub_card(1, TYPE_CREATURE, &[], &mut vocab)];
+    let mut data = store_of(cards, &[4], vocab);
+    data.printings[0].price_usd = Some(60_000); // $600 nonfoil
+    data.printings[1].compat.price_usd_foil = NonZeroU32::new(60_000); // foil only
+    data.printings[2].compat.price_usd_etched = NonZeroU32::new(60_000); // etched only
+    data.printings[3].price_usd = Some(100); // $1 nonfoil beside a $600 foil — NOT a maximum
+    data.printings[3].compat.price_usd_foil = NonZeroU32::new(60_000);
+    data.indexes.price_usd =
+        build_printing_value_index(&data.printings, &data.cards, &data.offsets, super::build_search_price_usd_cents);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let card = &archived.cards[0];
+
+    let ge = usd_cmp(CmpOp::Ge, 500.0);
+    // Verification: three match, the fourth is a dollar.
+    for pid in [0usize, 1, 2] {
+        assert!(ge.matches(card, &archived.printings[pid], &archived.strings), "printing {pid} must match usd>=500");
+    }
+    assert!(!ge.matches(card, &archived.printings[3], &archived.strings), "a low usd is not overridden by a high foil");
+    // Narrowing: the index has to carry the same three, or the planner drops them before
+    // verification ever runs. This is the half a query-time-only coalesce would get wrong.
+    match narrow_candidates(&ge, &archived.indexes, &archived.offsets, &archived.cards) {
+        Some(Candidates::Printings(v)) => {
+            for pid in [0u32, 1, 2] {
+                assert!(v.contains(&pid), "the range index must carry printing {pid}");
+            }
+            assert!(!v.contains(&3));
+        }
+        _ => panic!("usd must narrow in printing space"),
+    }
+    // And the two representations of the chain agree — the archived one the filter and the sort
+    // key read, and the unarchived one the index is built from.
+    for (pid, p) in archived.printings.iter().enumerate() {
+        assert_eq!(
+            super::search_price_usd_cents(p),
+            super::build_search_price_usd_cents(&data.printings[pid]),
+            "the search-price chain must not depend on which representation asks"
+        );
+    }
 }
 
 // Price is stored as integer cents (see Printing::price_usd's doc comment) specifically to make
@@ -8885,7 +9113,7 @@ fn usd_inside_arithmetic_evaluates_in_dollars_not_cents() {
         op: CmpOp::Lt,
         rhs: NumExpr::Field(NumField::Power),
     };
-    f.bind(&archived.coll_vocab, &archived.artist_vocab, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
+    f.bind(&archived.coll_vocab, &archived.artist_vocab, &archived.artist_vocab_collated, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
     assert!(f.matches(card, printing, &archived.strings), "usd+1<power must evaluate in dollars: 50+1=51 < 52");
 }
 
@@ -8908,7 +9136,7 @@ fn usd_compared_directly_against_another_field_evaluates_in_dollars() {
 
     // usd<cmc: $2.00 < cmc(3) -- must match.
     let mut f = FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op: CmpOp::Lt, rhs: NumExpr::Field(NumField::Cmc) };
-    f.bind(&archived.coll_vocab, &archived.artist_vocab, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
+    f.bind(&archived.coll_vocab, &archived.artist_vocab, &archived.artist_vocab_collated, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
     assert!(f.matches(card, printing, &archived.strings), "usd<cmc must evaluate in dollars: 2.00 < 3");
 }
 
@@ -9171,7 +9399,8 @@ fn text_fixture_store() -> CardData {
         .collect();
     let mut data = store_of(cards, &[1usize; 6], vocab);
     data.strings = interner.strings;
-    data.indexes.name_trigram = build_trigram_index(&data.cards, |c| c.card_name_folded.as_str());
+    derive_name_collation(&mut data); // the assignment above discarded the collated ids store_of derived
+    data.indexes.name_trigram = build_trigram_index(&data.cards, |c| crate::collated_name_of(c, &data.strings));
     data.indexes.oracle_trigram = build_oracle_text_index(&data.cards, &data.strings);
     data
 }
@@ -9189,7 +9418,7 @@ fn memoize_text_predicates_parity() {
         f
     };
     let oracle = |w: &str| FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: w.to_string() };
-    let name = |w: &str| FilterExpr::TextContains { field: TextSearchField::NameLower, word: w.to_string() };
+    let name = |w: &str| FilterExpr::TextContains { field: TextSearchField::NameCollated, word: w.to_string() };
 
     for needle in ["damage", "draw", "goblin", "abcde", "card.", "zzz"] {
         let rewritten = memo(oracle(needle));
@@ -9334,6 +9563,7 @@ fn oracle_word_fixture_store() -> CardData {
         .collect();
     let mut data = store_of(cards, &[1usize; 17], vocab);
     data.strings = interner.strings;
+    derive_name_collation(&mut data); // the assignment above discarded the collated ids store_of derived
     data.indexes.oracle_trigram = build_oracle_text_index(&data.cards, &data.strings);
     data
 }
@@ -9368,6 +9598,7 @@ fn oracle_word_multi_dense_fixture_store() -> CardData {
         .collect();
     let mut data = store_of(cards, &[1usize; 6], vocab);
     data.strings = interner.strings;
+    derive_name_collation(&mut data); // the assignment above discarded the collated ids store_of derived
     data.indexes.oracle_trigram = build_oracle_text_index(&data.cards, &data.strings);
     data
 }
@@ -9566,6 +9797,7 @@ fn border_planes_fixture_store() -> CardData {
         }
     }
     data.strings = interner.strings;
+    derive_name_collation(&mut data); // the assignment above discarded the collated ids store_of derived
     data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
     data
 }
@@ -9731,6 +9963,7 @@ fn border_broadness_fixture_store() -> CardData {
         data.printings[i].card_border_id = interner.intern(border.to_string());
     }
     data.strings = interner.strings;
+    derive_name_collation(&mut data); // the assignment above discarded the collated ids store_of derived
     data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
     data
 }
@@ -9999,7 +10232,7 @@ fn not_over_partial_and_is_blocked() {
     // the total below pins. Not a 1-byte needle any more -- those resolve exactly through the unigram
     // index now (#858) -- and not an oracle needle either, since this fixture leaves oracle text unset,
     // making it Null rather than False and changing what the negation matches.
-    let unindexable = || FilterExpr::TextContains { field: TextSearchField::NameLower, word: "qqqq".into() };
+    let unindexable = || FilterExpr::TextContains { field: TextSearchField::NameCollated, word: "qqqq".into() };
 
     // Static check: And with an unrepresentable child can't be tight → Not
     // must refuse to narrow at all.
@@ -10073,7 +10306,7 @@ fn name_bigrams_tiers_and_exactness() {
     assert!(idx.postings.get(b"qx").is_some(), "64-name bigram stays a posting list");
 
     let rec = |w: &str| {
-        let f = FilterExpr::TextContains { field: TextSearchField::NameLower, word: w.to_string() };
+        let f = FilterExpr::TextContains { field: TextSearchField::NameCollated, word: w.to_string() };
         super::narrow_rec(&f, &archived.indexes, &archived.offsets, &archived.cards, false)
     };
     // Dense tier: exact bitmap, tight.
@@ -10121,7 +10354,7 @@ fn not_over_unigram_is_tight_but_oracle_stays_loose() {
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
     let rec = |f: &FilterExpr| super::narrow_rec(f, &archived.indexes, &archived.offsets, &archived.cards, true);
 
-    let name_q = || FilterExpr::TextContains { field: TextSearchField::NameLower, word: "q".into() };
+    let name_q = || FilterExpr::TextContains { field: TextSearchField::NameCollated, word: "q".into() };
     let n = rec(&FilterExpr::Not(Box::new(name_q()))).expect("-name:q must narrow");
     assert!(n.tight, "name is never Null, so the complement of a tight 1-byte set is exact");
     let cand = n.set.into_cards(&archived.offsets, &archived.indexes.printing_to_card);
@@ -10135,7 +10368,7 @@ fn not_over_unigram_is_tight_but_oracle_stays_loose() {
     assert_eq!(cand, brute, "-name:q must be exactly the cards whose name lacks 'q'");
 
     // An absent byte complements to every card, and that must stay exact rather than trip a breadth guard.
-    let name_v = FilterExpr::TextContains { field: TextSearchField::NameLower, word: "v".into() };
+    let name_v = FilterExpr::TextContains { field: TextSearchField::NameCollated, word: "v".into() };
     let n = rec(&FilterExpr::Not(Box::new(name_v))).expect("-name:v must narrow");
     assert!(n.tight);
     assert_eq!(n.set.len(), archived.cards.len(), "no name contains 'v', so its negation is every card");
@@ -10171,7 +10404,7 @@ fn name_unigrams_tiers_and_exactness() {
     assert!(idx.postings.get(&b'q').is_some(), "a byte in 64 names stays a posting list");
 
     let rec = |w: &str| {
-        let f = FilterExpr::TextContains { field: TextSearchField::NameLower, word: w.to_string() };
+        let f = FilterExpr::TextContains { field: TextSearchField::NameCollated, word: w.to_string() };
         super::narrow_rec(&f, &archived.indexes, &archived.offsets, &archived.cards, false)
     };
     // Dense tier: exact bitmap, tight.
@@ -10211,10 +10444,11 @@ fn name_bigrams_compose_and_memoize() {
     }).collect();
     let mut data = store_of(cards, &[1usize; 6], vocab);
     data.strings = interner.strings;
+    derive_name_collation(&mut data); // the assignment above discarded the collated ids store_of derived
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
-    let name2 = |w: &str| FilterExpr::TextContains { field: TextSearchField::NameLower, word: w.to_string() };
+    let name2 = |w: &str| FilterExpr::TextContains { field: TextSearchField::NameCollated, word: w.to_string() };
 
     // Or of two bigram children composes: "fi" → {0,1,4}, "dr" → {0,2}.
     let or = FilterExpr::Or(vec![name2("fi"), name2("dr")]);
@@ -10378,6 +10612,67 @@ fn packed_pips(pips: &[(&str, u8)]) -> u64 {
     p
 }
 
+/// Devotion counts DISTINCT PIPS, so a `{R/G}` symbol answers a `{r/g}` query ONCE.
+///
+/// The fixture's card 5 is `{R/G}` — lanes R=1 and G=1, because the loader expands a hybrid into
+/// both colours — and card 6 is `{R/G}{R/G}{R}`, lanes R=3 and G=2. Summing the queried lanes
+/// gives 2 and 5; counting pips gives 1 and 3, which is what Scryfall answers.
+///
+/// MEASURED against api.scryfall.com 2026-08-17, on the two cards that falsify the two obvious
+/// readings in opposite directions: Burning-Tree Emissary (`{R/G}{R/G}`) matches
+/// `devotion:{r/g}{r/g}` and NOT `devotion:{r/g}{r/g}{r/g}`, so its devotion is 2 and not the
+/// sum's 4; Svella, Ice Shaper (`{1}{R}{G}`) is the sixteenth card of `e:khm t:creature
+/// devotion:{r/g}{r/g}`'s 16, so its devotion is 2 and not the max's 1. Set-scoped confirmations,
+/// where corpus vintage cannot reach: `e:rna devotion:{r/g}{r/g}` 24, `e:gtc
+/// devotion:{w/u}{w/u}` 16, `e:sok devotion:{b/g}{b/g}` 21.
+///
+/// THE FILTER MUST BE BOUND. `hybrid_colors` is empty until bind() resolves it against the store's
+/// mana vocab, and an empty table corrects nothing — which is exactly the pre-fix behaviour, and
+/// why every other devotion test in this file still passes unbound.
+#[test]
+fn devotion_counts_distinct_pips_not_summed_lanes() {
+    let data = devotion_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let bound = |op, pips: &[(&str, u8)]| {
+        let mut f = FilterExpr::Devotion { op, pips: packed_pips(pips), hybrid_colors: Vec::new() };
+        f.bind(
+            &archived.coll_vocab,
+            &archived.artist_vocab,
+            &archived.artist_vocab_collated,
+            &archived.mana_vocab,
+            &archived.indexes.flavor,
+            &archived.strings,
+        );
+        f
+    };
+    let matches = |f: &FilterExpr| -> Vec<usize> {
+        archived.cards.iter().enumerate()
+            .filter(|(_, c)| f.eval_card(c, &archived.strings) == Tri::True)
+            .map(|(i, _)| i)
+            .collect()
+    };
+
+    // One {R/G} pip is ONE pip of devotion to red-or-green, not two. Card 5 therefore answers a
+    // one-symbol query and not a two-symbol one; the sum said both.
+    assert!(matches(&bound(CmpOp::Ge, &[("R", 1), ("G", 1)])).contains(&5));
+    assert!(
+        !matches(&bound(CmpOp::Ge, &[("R", 2), ("G", 2)])).contains(&5),
+        "{{R/G}} is one pip: the summed lanes read 2 and matched, which is the Burning-Tree bug"
+    );
+    // Card 6 is {R/G}{R/G}{R} — three pips that are red or green, lanes 3 and 2 summing to 5.
+    assert!(matches(&bound(CmpOp::Ge, &[("R", 3), ("G", 3)])).contains(&6));
+    assert!(
+        !matches(&bound(CmpOp::Ge, &[("R", 4), ("G", 4)])).contains(&6),
+        "three distinct pips, not the five the summed lanes gave"
+    );
+    // A SINGLE-COLOUR query is untouched by the correction — one bit cannot match twice — so the
+    // hybrid still counts toward each colour on its own, and the exact plane stays valid.
+    assert!(matches(&bound(CmpOp::Ge, &[("R", 1)])).contains(&5));
+    assert!(matches(&bound(CmpOp::Ge, &[("G", 1)])).contains(&5));
+    assert_eq!(matches(&bound(CmpOp::Ge, &[("R", 3)])), vec![6]);
+}
+
 // Every devotion op agrees with tri() through the planes, at every saturation
 // depth — and past the boundary the compiler declines rather than guesses.
 #[test]
@@ -10385,7 +10680,7 @@ fn devotion_plane_parity_and_boundaries() {
     let data = devotion_fixture_store();
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
-    let dev = |op, pips: &[(&str, u8)]| FilterExpr::Devotion { op, pips: packed_pips(pips) };
+    let dev = |op, pips: &[(&str, u8)]| FilterExpr::Devotion { op, pips: packed_pips(pips), hybrid_colors: Vec::new() };
     let mut bitmap: Vec<u64> = Vec::new();
     let mut check_exact = |f: &FilterExpr| {
         let pe = compile_plane(f, &archived.indexes.planes, &archived.indexes.oracle_trigram.words).expect("must compile exactly");
@@ -10398,10 +10693,23 @@ fn devotion_plane_parity_and_boundaries() {
     for op in [CmpOp::Ge, CmpOp::Eq, CmpOp::Le, CmpOp::Ne, CmpOp::Gt, CmpOp::Lt] {
         for k in 1..=2u8 {
             check_exact(&dev(op, &[("U", k)]));
+            // MULTI-LANE (what a HYBRID value expands to) must DECLINE at every operator. tri()
+            // compares the SUM of the queried lanes, and the planes hold a saturating bucket per
+            // color that cannot be added — a card with one pip of each color satisfies
+            // `d[r]+d[g] >= 2` while sitting in no per-color bucket above 1. Declining is the
+            // whole point: `compile_plane` promises exactness, and nothing downstream re-checks a
+            // plane it claimed was exact, so "approximately right" here is a silent wrong answer.
+            for pips in [&[("W", k), ("U", k)], &[("R", k), ("G", k)]] {
+                assert!(
+                    compile_plane(&dev(op, pips), &archived.indexes.planes, &archived.indexes.oracle_trigram.words).is_none(),
+                    "multi-lane devotion must decline, not compile approximately"
+                );
+            }
         }
     }
     check_exact(&dev(CmpOp::Ge, &[("U", 3)])); // saturated value 3 means >= 3: exact
-    check_exact(&dev(CmpOp::Ge, &[("R", 1), ("G", 1)])); // multi-color, hybrid cards in play
+    // Multi-color (a hybrid value) declines — see the loop above and compile_devotion's note.
+    assert!(compile_plane(&dev(CmpOp::Ge, &[("R", 1), ("G", 1)]), &archived.indexes.planes, &archived.indexes.oracle_trigram.words).is_none());
     check_exact(&dev(CmpOp::Ge, &[("C", 2)])); // colorless devotion
     check_exact(&dev(CmpOp::Ge, &[("R", 3)])); // {R/G}{R/G}{R} card reaches R=3
 
@@ -10421,6 +10729,58 @@ fn devotion_plane_parity_and_boundaries() {
     }
 }
 
+// A HYBRID QUERY ADDS ITS TWO COLORS INTO ONE QUANTITY.
+//
+// Pinned against ABSOLUTE expectations, because the plane-parity test above proves only that the
+// compiler and tri() agree — and they agreed just as well when both read the query as a per-lane
+// AND, and again when both read it as a per-lane OR. All three disagree about the {W}{U} card,
+// which is the only card here with one pip in each queried color.
+//
+// Scryfall decides it. Over `e:khm t:creature`: `devotion:{r}{r}` is 7 and `devotion:{g}{g}` is 8,
+// so "d[r] >= 2 OR d[g] >= 2" cannot exceed 15 — and `devotion:{r/g}{r/g}` is **16**. The
+// sixteenth is the one KHM creature carrying a red pip and a green pip, whose lanes are 1 and 1
+// and whose combined devotion is 2. The AND reading answered 1 to `devotion:{r/g}`'s 62.
+#[test]
+fn a_hybrid_devotion_query_sums_its_two_colors() {
+    let data = devotion_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    // Fixture cards, in order: 0 no cost, 1 {U}, 2 {U}{U}, 3 {U}{U}{U}, 4 {U}x5, 5 {R/G},
+    // 6 {R/G}{R/G}{R} (R=3,G=2), 7 {W}{U}, 8 {C}{C}, 9 {R} on an INSTANT (devotion 0).
+    // Queried W,U with one symbol: the measure is d[W]+d[U], the want is 1.
+    let wu = |op| FilterExpr::Devotion { op, pips: packed_pips(&[("W", 1), ("U", 1)]), hybrid_colors: Vec::new() };
+    let cases: &[(CmpOp, &[usize])] = &[
+        (CmpOp::Ge, &[1, 2, 3, 4, 7]),                // sum >= 1
+        (CmpOp::Gt, &[2, 3, 4, 7]),                   // sum >  1 — card 7 is 1+1, and belongs here
+        (CmpOp::Eq, &[1]),                            // sum == 1 — and card 7 does NOT
+        (CmpOp::Lt, &[0, 5, 6, 8, 9]),                // sum <  1
+        (CmpOp::Le, &[0, 1, 5, 6, 8, 9]),             // sum <= 1
+        (CmpOp::Ne, &[0, 2, 3, 4, 5, 6, 7, 8, 9]),    // sum != 1
+    ];
+    for &(op, want) in cases {
+        let f = wu(op);
+        let got: Vec<usize> = archived
+            .cards
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| f.eval_card(c, &archived.strings) == Tri::True)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(got, want, "devotion {op:?} over lanes W,U");
+    }
+    // The superset must still COVER a multi-lane match, which is the direction that matters once
+    // the exact compiler declines: card 7 sits in no per-color bucket above 1.
+    let f = wu(CmpOp::Ge);
+    let pe = super::planes::compile_devotion_superset(packed_pips(&[("W", 1), ("U", 1)])).expect("superset compiles");
+    let mut bitmap: Vec<u64> = Vec::new();
+    eval_planes(&pe, &archived.indexes.planes, &mut bitmap);
+    for (cid, card) in archived.cards.iter().enumerate() {
+        if f.eval_card(card, &archived.strings) == Tri::True {
+            assert!(bitmap_contains(&bitmap, cid as u32), "superset must cover card {cid}");
+        }
+    }
+}
+
 // The user-specified hybrid invariant, pinned: a card costing {R/G} has one
 // red devotion AND one green devotion.
 #[test]
@@ -10428,7 +10788,7 @@ fn hybrid_pip_counts_toward_both_colors() {
     let data = devotion_fixture_store();
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
-    let dev = |sym: &str, k: u8| FilterExpr::Devotion { op: CmpOp::Ge, pips: packed_pips(&[(sym, k)]) };
+    let dev = |sym: &str, k: u8| FilterExpr::Devotion { op: CmpOp::Ge, pips: packed_pips(&[(sym, k)]), hybrid_colors: Vec::new() };
     let mut bitmap: Vec<u64> = Vec::new();
     let rg_card = 5; // {R/G}
     for (f, want) in [(dev("R", 1), true), (dev("G", 1), true), (dev("R", 2), false), (dev("U", 1), false)] {
@@ -10448,8 +10808,8 @@ fn devotion_ignores_nonpermanent_pips() {
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
     let instant_card = &archived.cards[9]; // {R} on TYPE_INSTANT
     assert_eq!(u64::from(instant_card.mana_cost.devotion), 0, "an Instant's devotion must be zeroed at load, regardless of its pips");
-    let ge_r = FilterExpr::Devotion { op: CmpOp::Ge, pips: packed_pips(&[("R", 1)]) };
-    let le_r = FilterExpr::Devotion { op: CmpOp::Le, pips: packed_pips(&[("R", 1)]) };
+    let ge_r = FilterExpr::Devotion { op: CmpOp::Ge, pips: packed_pips(&[("R", 1)]), hybrid_colors: Vec::new() };
+    let le_r = FilterExpr::Devotion { op: CmpOp::Le, pips: packed_pips(&[("R", 1)]), hybrid_colors: Vec::new() };
     assert!(ge_r.eval_card(instant_card, &archived.strings) != Tri::True, "a nonpermanent's {{R}} must not satisfy devotion:{{R}}");
     assert!(le_r.eval_card(instant_card, &archived.strings) == Tri::True, "empty devotion is a subset of any query");
 }
@@ -10477,9 +10837,12 @@ fn named_store() -> CardData {
             c
         })
         .collect();
-    assign_name_ranks(&mut cards);
+    assign_name_ranks(&mut cards, &[]);
     let mut data = store_of(cards, &[1; 6], vocab);
     data.indexes.sort_perms = build_sort_permutations(&data.cards, &data.offsets);
+    // ExactName narrows through this index, not the permutation — a face name is not addressable
+    // by a range over the joined name (see narrow_rec's ExactName arm).
+    data.indexes.name_trigram = build_trigram_index(&data.cards, |c| crate::collated_name_of(c, &data.strings));
     data
 }
 
@@ -10492,9 +10855,9 @@ fn name_ranks_dense_and_shared_across_duplicates() {
     assert_eq!(ranks, vec![3, 4, 0, 4, 1, 2]);
 }
 
-// ExactName narrows to the exact, tight card set through the ascending name
-// permutation: hit (single), hit (duplicate pair), boundary names, and a miss
-// proving the empty set.
+// ExactName narrows to the exact, tight card set: hit (single), hit (duplicate pair), boundary
+// names, and a miss proving the empty set. The candidates come from the folded-name trigram index
+// and are verified in the narrow, so the set is exactly what the walk would have kept.
 #[test]
 fn exact_name_narrows_tight() {
     let data = named_store();
@@ -10507,17 +10870,19 @@ fn exact_name_narrows_tight() {
             .expect("exact name must narrow")
     };
 
+    // Needles are COLLATED, which is the form the parser emits — "sol ring" reaches the engine as
+    // "solring".
     for (name, mut want) in [
         ("fog", vec![0u32]),
-        ("sol ring", vec![1, 3]),
+        ("solring", vec![1, 3]),
         ("atog", vec![2]),          // first in sorted order
         ("cancel", vec![5]),        // adjacent to the last block
-        ("zzz past the end", vec![]),
-        ("aaa before the start", vec![]),
-        ("sol rin", vec![]),        // prefix of a real name is still a miss
+        ("zzzpasttheend", vec![]),
+        ("aaabeforethestart", vec![]),
+        ("solrin", vec![]),         // prefix of a real name is still a miss
     ] {
         let n = narrow(name);
-        assert!(n.tight, "{name}: equality through the sorted permutation is exact");
+        assert!(n.tight, "{name}: candidates are verified in the narrow, so the set is exact");
         let mut got = n.set.into_cards(&archived.offsets, &archived.indexes.printing_to_card);
         got.sort_unstable();
         want.sort_unstable();
@@ -10527,11 +10892,11 @@ fn exact_name_narrows_tight() {
     // Composition: the tight set participates in the candidate algebra, and
     // run_query totals agree with a full scan on every shape.
     let mut shapes: Vec<FilterExpr> = vec![
-        exact("sol ring"),
-        exact("no such card"),
-        FilterExpr::Or(vec![exact("sol ring"), FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge }]),
+        exact("solring"),
+        exact("nosuchcard"),
+        FilterExpr::Or(vec![exact("solring"), FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge }]),
         FilterExpr::And(vec![exact("fog"), FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge }]),
-        FilterExpr::Not(Box::new(exact("sol ring"))),
+        FilterExpr::Not(Box::new(exact("solring"))),
     ];
     for (i, f) in shapes.iter_mut().enumerate() {
         let brute = archived
@@ -10568,21 +10933,35 @@ fn accent_folded_name_search_matches_unaccented_query() {
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
-    // A query word already folded by Python (whether the user typed "eowyn" or
-    // "Éowyn") must find the accented card and only it.
-    let contains_eowyn = FilterExpr::TextContains { field: TextSearchField::NameLower, word: "eowyn".to_string() };
-    let matches: Vec<u32> = archived.cards.iter().enumerate()
-        .filter(|(_, c)| contains_eowyn.eval_card(c, &archived.strings) == Tri::True)
-        .map(|(i, _)| i as u32)
-        .collect();
-    assert_eq!(matches, vec![0], "unaccented fuzzy query must find only the accented card");
+    let hits = |f: &FilterExpr| -> Vec<u32> {
+        archived.cards.iter().enumerate()
+            .filter(|(_, c)| f.eval_card(c, &archived.strings) == Tri::True)
+            .map(|(i, _)| i as u32)
+            .collect()
+    };
 
-    // Exact match stays accent-sensitive: typing the accent finds it; typing
-    // without the accent does not.
-    let exact_accented = FilterExpr::ExactName("éowyn, fearless knight".to_string());
-    let exact_unaccented = FilterExpr::ExactName("eowyn, fearless knight".to_string());
-    assert!(exact_accented.eval_card(&archived.cards[0], &archived.strings) == Tri::True);
-    assert!(exact_unaccented.eval_card(&archived.cards[0], &archived.strings) == Tri::False);
+    // A BARE query word — collated by Python, whether the user typed "eowyn" or "Éowyn" — finds
+    // the accented card and only it. `name:eowyn` and `name:éowyn` both answer 3 cards on
+    // api.scryfall.com (2026-08-16).
+    let collated = |w: &str| FilterExpr::TextContains { field: TextSearchField::NameCollated, word: w.to_string() };
+    assert_eq!(hits(&collated("eowyn")), vec![0], "an unaccented bare word must find the accented card");
+    // ...including across the separators the fold removes: `name:eowynfearless` is a hit, which is
+    // the whole reason `name:ft` answers 1,628 there and this port used to answer 359.
+    assert_eq!(hits(&collated("eowynfearless")), vec![0], "the collated word crosses the comma and the space");
+
+    // A QUOTED value is LITERAL: `name:"eowyn"` answers 0 on api.scryfall.com while
+    // `name:"éowyn"` answers 3, and neither crosses a separator.
+    let literal = |w: &str| FilterExpr::TextContains { field: TextSearchField::NameLower, word: w.to_string() };
+    assert_eq!(hits(&literal("eowyn")), Vec::<u32>::new(), "a quoted value does not fold the accent away");
+    assert_eq!(hits(&literal("éowyn")), vec![0], "typing the accent finds it");
+    assert_eq!(hits(&literal("eowyn, fearless")), Vec::<u32>::new(), "and the separators still count");
+    assert_eq!(hits(&literal("éowyn, fearless")), vec![0]);
+
+    // `!"…"` is COLLATED, so typing the name without its accent — or without its comma — finds the
+    // card. `!"eowyn, lady of rohan"` answers "Éowyn, Lady of Rohan" on api.scryfall.com.
+    let exact = |w: &str| FilterExpr::ExactName(w.to_string());
+    assert!(exact("eowynfearlessknight").eval_card(&archived.cards[0], &archived.strings) == Tri::True);
+    assert!(exact("eowynfearless").eval_card(&archived.cards[0], &archived.strings) == Tri::False, "exact, not a prefix");
 }
 
 // order:name sorts pages by name in both directions, breaks the duplicate-name
@@ -10616,8 +10995,14 @@ fn order_name_sorts_and_paginates() {
             .map(|(c, _)| u128::from(c.oracle_id))
             .collect()
     };
-    assert_eq!(ids("asc"), [4, 2], "within the tie: lower edhrec rank first");
-    assert_eq!(ids("desc"), [4, 2], "secondaries keep their order under desc");
+    // Two DISTINCT cards sharing a name tie all the way through the name lane, so the order falls
+    // to card order (oracle_id) — edhrec is no longer a tiebreak anywhere. Scryfall breaks this
+    // last tie by printing preference (measured: "Monster Mashup" tmc/117 2026 before "Monster
+    // Mash-Up" unk/RB15 2025, the two names being equal once collated); reproducing that would
+    // mean putting a printing-level value in a lane `page_cmp` deliberately keeps card-level, so
+    // it stays a recorded residual rather than a silent difference.
+    assert_eq!(ids("asc"), [2, 4], "within the tie: card order, edhrec no longer participating");
+    assert_eq!(ids("desc"), [2, 4], "secondaries keep their order under desc");
 }
 
 // ─── Verifier cost ordering ───────────────────────────────────────────────────
@@ -10750,7 +11135,7 @@ fn verify_order_or_sorts_by_bucket_only() {
 // devotion:bbb` 1.2× when measured).
 #[test]
 fn verify_order_or_keeps_scan_cost_band_in_written_order() {
-    let devotion = || FilterExpr::Devotion { op: CmpOp::Ge, pips: packed_pips(&[("B", 3)]) };
+    let devotion = || FilterExpr::Devotion { op: CmpOp::Ge, pips: packed_pips(&[("B", 3)]), hybrid_colors: Vec::new() };
     let mut f = FilterExpr::Or(vec![contains_scan(), devotion()]);
     f.order_children_by_verify_cost(&mut 0);
     let FilterExpr::Or(children) = &f else { panic!("still an Or") };
@@ -10943,6 +11328,20 @@ fn mana_fixture_store() -> CardData {
     }).collect();
     let mut data = store_of(cards, &[1usize; 8], vocab);
     data.mana_vocab = mana_vocab;
+    // EVERY card in a real store carries a mana_cost STRING, and it is the only place "no cost"
+    // and "a cost of {0}" differ — both pack to {core: 0, hybrids: [], cmc: 0}, because `{0}`
+    // parses as a number and contributes neither pip nor cmc. Scryfall prints "" on a land and
+    // "{0}" on Ornithopter, so the filter reads the string to tell them apart.
+    //
+    // The fixture left this NONE_STR on every card, which no store ever produces — and a fixture
+    // that cannot express the distinction cannot test it. Card 7 (index 6) is the costless one.
+    let empty_id = u32::try_from(data.strings.len()).expect("fixture strings fit u32");
+    data.strings.push(String::new());
+    let printed_id = u32::try_from(data.strings.len()).expect("fixture strings fit u32");
+    data.strings.push("{W}".to_string());
+    for (i, c) in data.cards.iter_mut().enumerate() {
+        c.mana_cost_text_id = if i == 6 { empty_id } else { printed_id };
+    }
     data
 }
 
@@ -10971,7 +11370,7 @@ fn mana_cmp_of(op: CmpOp, pips: &[(&str, u8)], cmc: f32, mana_vocab: &[String]) 
     if unknown > 0 {
         hybrid_ids.push((super::MANA_SYM_UNKNOWN, unknown));
     }
-    FilterExpr::ManaCostCmp { op, core, hybrids, hybrid_ids, cmc }
+    FilterExpr::ManaCostCmp { op, core, hybrids, hybrid_ids, hybrid_cmc: Vec::new(), cmc }
 }
 
 // Containment, exactness, and their strict/negated variants over the packed
@@ -10996,11 +11395,15 @@ fn mana_cost_cmp_packed_semantics() {
     assert_eq!(matches(&mana_cmp_of(CmpOp::Ge, &[("W", 1)], 1.0, &mv)), [1, 2, 3]);
     // Eq: same symbols, same counts, same cmc — {W} only, not {W}{W} or {W}{U}.
     assert_eq!(matches(&mana_cmp_of(CmpOp::Eq, &[("W", 1)], 1.0, &mv)), [1]);
-    // Le = card ⊆ query: {W}, {W}{W}, and the empty cost.
-    assert_eq!(matches(&mana_cmp_of(CmpOp::Le, &[("W", 2)], 2.0, &mv)), [1, 2, 7]);
+    // Le = card ⊆ query: {W} and {W}{W}. Card 7 PRINTS NO COST and so answers no mana comparison
+    // at all — not even the zero-ish ones. Measured on api.scryfall.com 2026-08-17: `m:{0} t:land`
+    // is 195, the cards that print a literal {0}, against the 12,254 lands this file used to
+    // return; and `-m:{0}` is 12,442, which is those lands arriving through the NEGATION because
+    // the leaf is false for them.
+    assert_eq!(matches(&mana_cmp_of(CmpOp::Le, &[("W", 2)], 2.0, &mv)), [1, 2]);
     // Strict variants exclude the exact cost.
     assert_eq!(matches(&mana_cmp_of(CmpOp::Gt, &[("W", 1)], 1.0, &mv)), [2, 3]);
-    assert_eq!(matches(&mana_cmp_of(CmpOp::Lt, &[("W", 2)], 2.0, &mv)), [1, 7]);
+    assert_eq!(matches(&mana_cmp_of(CmpOp::Lt, &[("W", 2)], 2.0, &mv)), [1]);
     // Hybrid pips are distinct symbols: {R/G} matches only through the vocab.
     assert_eq!(matches(&mana_cmp_of(CmpOp::Ge, &[("R/G", 1)], 1.0, &mv)), [4]);
     assert_eq!(matches(&mana_cmp_of(CmpOp::Eq, &[("R/G", 1)], 1.0, &mv)), [4]);
@@ -11023,14 +11426,184 @@ fn mana_cost_cmp_packed_semantics() {
     // builds the FilterExpr from typed pips and bypasses string parsing.)
     assert_eq!(matches(&mana_cmp_of(CmpOp::Ge, &[("X", 1)], 0.0, &mv)), [5]);
     assert_eq!(matches(&mana_cmp_of(CmpOp::Eq, &[("X", 1), ("R", 1)], 1.0, &mv)), [5]);
-    // A symbol no card carries: containment and exactness fail everywhere;
-    // card ⊆ query still holds for the empty cost (query-only symbols never
-    // constrain the subset direction — same as the HashMap semantics).
+    // A symbol no card carries: containment and exactness fail everywhere, and so now does the
+    // subset direction — card 7 was the only card that satisfied it, and it prints no cost, so it
+    // answers no mana comparison at all.
     assert_eq!(matches(&mana_cmp_of(CmpOp::Ge, &[("Q/Z", 1)], 1.0, &mv)), Vec::<u128>::new());
     assert_eq!(matches(&mana_cmp_of(CmpOp::Eq, &[("Q/Z", 1)], 1.0, &mv)), Vec::<u128>::new());
-    assert_eq!(matches(&mana_cmp_of(CmpOp::Le, &[("Q/Z", 1)], 2.0, &mv)), [7]);
-    // Ne is not-exactly-equal.
+    assert_eq!(matches(&mana_cmp_of(CmpOp::Le, &[("Q/Z", 1)], 2.0, &mv)), Vec::<u128>::new());
+    // Ne is not-exactly-equal, and card 7 IS in it: an absent cost differs from every queried
+    // cost. This is the one operator a costless card answers, measured rather than reasoned —
+    // `m!={w} t:land` is 12,249 on api.scryfall.com (2026-08-17), against the 191 a blanket
+    // "costless matches nothing" would give.
     assert_eq!(matches(&mana_cmp_of(CmpOp::Ne, &[("W", 1)], 1.0, &mv)), [2, 3, 4, 5, 6, 7, 8]);
+}
+
+// GENERIC MANA IS A COUNTED PIP, AND THE FIXTURE ABOVE CANNOT SEE IT.
+//
+// Every cost in `mana_fixture_store` has generic 0 — its cmc is exactly its pip count — so the
+// comparison this replaced (card cmc against query cmc) and the one that replaced it (card generic
+// against query generic) agree on all eight cards, and every assertion above passes under either.
+// That is the whole bug: `m:{2}` compared cmc, so any two pips paid for it.
+//
+// The decisive case is a card whose cmc and generic disagree. Measured on api.scryfall.com
+// 2026-08-16 over the whole corpus, because KHM has no creature costing exactly {R}{R}:
+// `m={r}{r} t:creature` is 24, and `m={r}{r} m:{2} t:creature` is **0** — a {R}{R} cost has cmc 2
+// and generic 0, and Scryfall reads the pip. Over `e:khm t:creature` (151): `m:{2}` 102 where cmc
+// answered 142, `m:{1}` 140 where cmc answered 151, `m:{3}` 60 where cmc answered 113.
+#[test]
+fn generic_mana_is_a_counted_pip_not_a_cmc() {
+    let mut vocab = VocabInterner::new();
+    let mut mana_vocab: Vec<String> = Vec::new();
+    // (pips, cmc) — the pips are what `core` holds, and cmc - pips is the GENERIC:
+    let costs: &[(&[(&str, u8)], f32)] = &[
+        (&[("R", 1)], 3.0),  // 1: {2}{R} — generic 2
+        (&[("R", 2)], 2.0),  // 2: {R}{R} — generic 0, same cmc as {1}{R}
+        (&[("R", 1)], 2.0),  // 3: {1}{R} — generic 1
+        (&[("R", 1)], 1.0),  // 4: {R}     — generic 0
+        (&[], 2.0),          // 5: {2}     — generic 2, no pips at all
+    ];
+    let cards: Vec<OracleCard> = costs.iter().enumerate().map(|(i, &(pips, cmc))| {
+        let mut c = stub_card(i as u128 + 1, TYPE_CREATURE, &[], &mut vocab);
+        c.mana_cost = mana_cost_of(pips, &mut mana_vocab);
+        c.mana_cost.cmc = cmc;
+        for (lane, sym) in ["W", "U", "B", "R", "G"].iter().enumerate() {
+            if super::lane_get(c.mana_cost.devotion, lane) > 0 {
+                c.card_color_identity |= super::color_list_to_mask(&[sym]);
+            }
+        }
+        c
+    }).collect();
+    let mut data = store_of(cards, &[1usize; 5], vocab);
+    data.mana_vocab = mana_vocab;
+    // All five of these cards PRINT a cost, so all five need a non-empty mana_cost string: the
+    // filter reads it to tell a costless card from one costing {0}, and NONE_STR (which no store
+    // emits) reads as costless.
+    let printed_id = u32::try_from(data.strings.len()).expect("fixture strings fit u32");
+    data.strings.push("{R}".to_string());
+    for c in data.cards.iter_mut() {
+        c.mana_cost_text_id = printed_id;
+    }
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let matches = |f: &FilterExpr| -> Vec<u128> {
+        archived.cards.iter()
+            .filter(|c| f.eval_card(c, &archived.strings) == Tri::True)
+            .map(|c| u128::from(c.oracle_id))
+            .collect()
+    };
+    let mv: Vec<String> = archived.mana_vocab.iter().map(|s| s.to_string()).collect();
+
+    // `m:{2}` — no pips, cmc 2, so generic 2. The {R}{R} card has cmc 2 and must NOT match; the
+    // cmc comparison matched it, and that is the divergence this closes.
+    assert_eq!(matches(&mana_cmp_of(CmpOp::Ge, &[], 2.0, &mv)), [1, 5]);
+    // `m:{1}` — generic >= 1, so {2}{R}, {1}{R} and {2}, but not {R}{R} or {R}.
+    assert_eq!(matches(&mana_cmp_of(CmpOp::Ge, &[], 1.0, &mv)), [1, 3, 5]);
+    // `m:{2}{r}` — generic >= 2 AND an R pip: {2}{R} alone, not the bare {2}.
+    assert_eq!(matches(&mana_cmp_of(CmpOp::Ge, &[("R", 1)], 3.0, &mv)), [1]);
+    // `m={r}{r}` — generic 0 and exactly two R. The {R}{R} card, and never {2}{R}.
+    assert_eq!(matches(&mana_cmp_of(CmpOp::Eq, &[("R", 2)], 2.0, &mv)), [2]);
+    // `m={1}{r}` — generic 1 and one R, which distinguishes it from {R}{R} at the SAME cmc.
+    assert_eq!(matches(&mana_cmp_of(CmpOp::Eq, &[("R", 1)], 2.0, &mv)), [3]);
+    // `m<={1}{r}` — card ⊆ query on both the pips and the generic.
+    assert_eq!(matches(&mana_cmp_of(CmpOp::Le, &[("R", 1)], 2.0, &mv)), [3, 4]);
+}
+
+// A TWOBRID PAYS TWO, AND `generic_of` CREDITED IT WITH ONE.
+//
+// Generic is `cmc - (what the pips account for)`, and Scryfall's cmc counts `{2/B}` as two.
+// Beseech the Queen is `{2/B}{2/B}{2/B}` at cmc 6, so three pips crediting 1 each read as
+// 6 - 3 = 3 generic where the truth is 0 — and `!"Beseech the Queen" m>={3}` answered the card
+// where Scryfall (api.scryfall.com, 2026-08-17) answers nothing. Corpus-wide at unique=prints,
+// `m:{2/w} m:{2}` was 16 against Scryfall's 0, and `m:{6}` 2,573 against 2,554.
+//
+// THE WEIGHT TABLE ARRIVES THROUGH bind(), AND UNCONDITIONALLY — the twobrid whose weight matters
+// here is the CARD's, not the query's, so `m:{2}` needs it while naming no hybrid at all. That is
+// why this test binds and `mana_cmp_of` alone would not be enough: an unbound leaf falls back to
+// weight 1 and reproduces the bug exactly.
+#[test]
+fn a_twobrid_pip_weighs_two_against_generic() {
+    let mut vocab = VocabInterner::new();
+    let mut mana_vocab: Vec<String> = Vec::new();
+    // (pips, cmc) — every one of these has generic 0 except card 3:
+    let costs: &[(&[(&str, u8)], f32)] = &[
+        (&[("2/B", 3)], 6.0),  // 1: {2/B}{2/B}{2/B} — Beseech the Queen. generic 0, cmc 6.
+        (&[("B", 3)], 3.0),    // 2: {B}{B}{B}       — generic 0 under either weight
+        (&[("B", 1)], 3.0),    // 3: {2}{B}          — the only card here with real generic
+        (&[("W/U", 2)], 2.0),  // 4: {W/U}{W/U}      — a NON-twobrid hybrid still weighs 1
+    ];
+    let cards: Vec<OracleCard> = costs.iter().enumerate().map(|(i, &(pips, cmc))| {
+        let mut c = stub_card(i as u128 + 1, TYPE_CREATURE, &[], &mut vocab);
+        c.mana_cost = mana_cost_of(pips, &mut mana_vocab);
+        c.mana_cost.cmc = cmc;
+        for (lane, sym) in ["W", "U", "B", "R", "G"].iter().enumerate() {
+            if super::lane_get(c.mana_cost.devotion, lane) > 0 {
+                c.card_color_identity |= super::color_list_to_mask(&[sym]);
+            }
+        }
+        c
+    }).collect();
+    let mut data = store_of(cards, &[1usize; 4], vocab);
+    data.mana_vocab = mana_vocab;
+    // All four print a cost — see `mana_fixture_store` for why an absent string is not a {0} cost.
+    let printed_id = u32::try_from(data.strings.len()).expect("fixture strings fit u32");
+    data.strings.push("{B}".to_string());
+    for c in data.cards.iter_mut() {
+        c.mana_cost_text_id = printed_id;
+    }
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let mv: Vec<String> = archived.mana_vocab.iter().map(|s| s.to_string()).collect();
+    let bound = |op, pips: &[(&str, u8)], cmc: f32| {
+        let mut f = mana_cmp_of(op, pips, cmc, &mv);
+        f.bind(
+            &archived.coll_vocab,
+            &archived.artist_vocab,
+            &archived.artist_vocab_collated,
+            &archived.mana_vocab,
+            &archived.indexes.flavor,
+            &archived.strings,
+        );
+        f
+    };
+    let matches = |f: &FilterExpr| -> Vec<u128> {
+        archived.cards.iter()
+            .filter(|c| f.eval_card(c, &archived.strings) == Tri::True)
+            .map(|c| u128::from(c.oracle_id))
+            .collect()
+    };
+
+    // `m>={3}` — the Beseech row. Card 1's generic is 0, not the 6 - 3 = 3 an unweighted
+    // subtraction gives, so nothing here answers it.
+    assert_eq!(matches(&bound(CmpOp::Ge, &[], 3.0)), Vec::<u128>::new());
+    // `m:{2}` — only the card that really carries {2}. Card 1 answered this too, which is the
+    // `m:{2/w} m:{2}` 16-against-0 divergence in miniature.
+    assert_eq!(matches(&bound(CmpOp::Ge, &[], 2.0)), [3]);
+    // `m:{2/b}` — the twobrid is still its own symbol and still matches through the vocab, and
+    // the query side's generic saturates to 0 rather than wrapping.
+    assert_eq!(matches(&bound(CmpOp::Ge, &[("2/B", 1)], 1.0)), [1]);
+    // A NON-twobrid hybrid keeps weight 1: {W/U}{W/U} at cmc 2 has generic 0, so `m:{1}` misses
+    // it. Weighting every hybrid at 2 would have made this -2, and saturation would have hidden
+    // the error behind the same 0.
+    assert_eq!(matches(&bound(CmpOp::Ge, &[], 1.0)), [3]);
+    assert_eq!(matches(&bound(CmpOp::Eq, &[("W/U", 2)], 2.0)), [4]);
+}
+
+// The bare, unbraced generic the query grammar allows and `mana_cmc` does not see: `m:2` arrives
+// as the mana string "2", `m>=2WW` as "2WW", `m:1{r}1` as "1{R}1". Without this the first became
+// the EMPTY cost — a tautology, answering all 151 of `e:khm t:creature` where Scryfall answers
+// `m:{2}`'s 102.
+#[test]
+fn bare_generic_digits_are_counted_outside_braces() {
+    use super::mana_bare_generic;
+    assert_eq!(mana_bare_generic("2"), 2);
+    assert_eq!(mana_bare_generic("2WW"), 2);
+    assert_eq!(mana_bare_generic("1{R}1"), 2, "runs on both sides of a braced pip");
+    assert_eq!(mana_bare_generic("10WW"), 10, "a maximal RUN, not one digit then another");
+    assert_eq!(mana_bare_generic("{2}{R}"), 0, "braced generic belongs to mana_cmc, not here");
+    assert_eq!(mana_bare_generic("{10}"), 0);
+    assert_eq!(mana_bare_generic("WW"), 0);
+    assert_eq!(mana_bare_generic(""), 0);
 }
 
 // The SWAR lane comparison agrees with the scalar per-lane loop across the
@@ -11072,21 +11645,29 @@ fn printing_range_fixture(seed: u64, n_cards: usize) -> CardData {
     use rand::SeedableRng;
     let mut rng = rand::rngs::SmallRng::seed_from_u64(seed);
     let mut vocab = VocabInterner::new();
-    // Distinct edhrec ranks (shuffled), as real data has — a rank is unique per card. This keeps
-    // any two cards from sharing a full (primary, edhrec) sort key, so the streamed/walk emission
-    // (per-card-contiguous) and a naive global (key, pid) sort agree; colliding ranks would let
-    // them legitimately differ on cross-card full ties, which never occur in practice.
+    // Distinct edhrec ranks AND distinct names (both shuffled), as real data has. The names are
+    // what matters now: `sort_key_bits`' tiebreak lane is `name_rank`, so distinct names are what
+    // keep any two cards from sharing a full (primary, tiebreak) sort key — which is what lets the
+    // streamed/walk emission (per-card-contiguous) and a naive global (key, pid) sort agree.
+    // Colliding names would let them legitimately differ on cross-card full ties, exactly as
+    // colliding edhrec ranks used to. edhrec stays distinct because it is still a sort COLUMN here.
     let mut ranks: Vec<u32> = (0..n_cards as u32).collect();
     for i in (1..n_cards).rev() {
         ranks.swap(i, rng.random_range(0..=i));
+    }
+    let mut names: Vec<u32> = (0..n_cards as u32).collect();
+    for i in (1..n_cards).rev() {
+        names.swap(i, rng.random_range(0..=i));
     }
     let mut cards = Vec::with_capacity(n_cards);
     for i in 0..n_cards {
         let mut c = stub_card(i as u128, 0, &[], &mut vocab);
         c.edhrec_rank = Some(ranks[i]);
         c.cmc = Some(rng.random_range(0..8u8));
+        c.card_name_folded = InlineStr::from_str(&format!("card{:05}", names[i]));
         cards.push(c);
     }
+    assign_name_ranks(&mut cards, &[]);
     let counts: Vec<usize> = (0..n_cards).map(|_| rng.random_range(1..=4)).collect();
     let mut data = store_of(cards, &counts, vocab);
     // cents; 5000 == $50.00, which usd<50 excludes (strict). Hot values 15/100 form big buckets.
@@ -11104,7 +11685,7 @@ fn printing_range_fixture(seed: u64, n_cards: usize) -> CardData {
 fn naive_printing_page(
     archived: &Archived<CardData>, leaf: &FilterExpr, sc: SortCol, desc: bool, offset: usize, limit: usize,
 ) -> Vec<u128> {
-    let mut all: Vec<(u64, u32, u32)> = Vec::new();
+    let mut all: Vec<(u128, u32, u32)> = Vec::new();
     for cid in 0..archived.cards.len() as u32 {
         let card = &archived.cards[cid as usize];
         let start = u32::from(archived.offsets[cid as usize]) as usize;
@@ -11465,7 +12046,7 @@ fn gather_artwork_kernel_costs() {
     let bench_mode = |mode: Mode| -> u128 {
         let mut group_best: Vec<Option<(u32, f64)>> = vec![None; max_groups];
         let mut touched: Vec<u16> = Vec::new();
-        let mut out: Vec<(u64, u32, u32)> = Vec::with_capacity(4096);
+        let mut out: Vec<(u128, u32, u32)> = Vec::with_capacity(4096);
         let mut best = u128::MAX;
         for it in 0..(WARMUP + ITERS) {
             out.clear();
@@ -12322,7 +12903,7 @@ fn compose_walk_kernel_costs() {
                 scratch.clear();
                 for pid in s..e {
                     if is_set(pid) {
-                        scratch.push((0u64, cid, pid as u32)); // unreachable: pbits is all-zero
+                        scratch.push((0u128, cid, pid as u32)); // unreachable: pbits is all-zero
                     }
                 }
                 if scratch.is_empty() {
@@ -13001,6 +13582,1938 @@ fn arith_tuple_key_budget_catches_a_blown_domain() {
 /// Above `ARITH_TUPLE_GUARD_MIN_CARDS`, and large enough that an all-distinct key space
 /// clears `10*sqrt(n)+32` by a wide margin.
 const ARITH_TUPLE_BLOWUP_CARDS: usize = 6_000;
+
+#[test]
+fn exact_name_matches_either_face() {
+    // `!"Lightning Bolt"` returns TWO cards on api.scryfall.com (2026-08-16): `Lightning Bolt` and
+    // `Emeritus of Conflict // Lightning Bolt` (sos/113), whose SECOND face carries the name. The
+    // same rule answers `!"Fire"` with `Fire // Ice`, `!"Stomp"` with `Bonecrusher Giant // Stomp`
+    // and `!"Insectile Aberration"` with `Delver of Secrets // Insectile Aberration`.
+    //
+    // The needle arrives COLLATED (`collate_name(fold_accents(value.lower()))`, done in Python),
+    // which is why `!"lim-dul's vault"` and `!"limduls vault"` are the same search on Scryfall —
+    // and the stored side is collated here, per face, before the comparison.
+    use super::filter::exact_name_matches;
+    let joined = "emeritus of conflict // lightning bolt";
+    assert!(exact_name_matches(joined, "emeritusofconflictlightningbolt"));
+    assert!(exact_name_matches(joined, "lightningbolt"), "the back face names the card");
+    assert!(exact_name_matches(joined, "emeritusofconflict"), "so does the front face");
+    assert!(exact_name_matches("lightning bolt", "lightningbolt"));
+    // The separators are gone from the needle too, so the punctuation a searcher skips no longer
+    // decides the answer. The STORED side arrives already accent-folded (`folded_name`), so
+    // "Lim-Dûl's Vault" reaches here as "lim-dul's vault" and all four spellings of it — with or
+    // without the circumflex, with or without the hyphen and apostrophe — collate to one string.
+    assert!(exact_name_matches("lim-dul's vault", "limdulsvault"));
+    // Still EXACT, per face: a prefix, a suffix or a substring of a face name is not a match.
+    assert!(!exact_name_matches(joined, "lightning"));
+    assert!(!exact_name_matches(joined, "bolt"));
+    assert!(!exact_name_matches(joined, "conflictlightningbolt"));
+    assert!(!exact_name_matches("lightning bolt", "lightningbol"));
+    // A one-sided separator is not the join, so nothing splits on it.
+    assert!(!exact_name_matches("who//what//when", "what"));
+}
+
+#[test]
+fn exact_name_face_keys_need_exactly_two_halves() {
+    // A FIVE-part name answers to its whole name and to none of its parts. `split(" // ")` yields
+    // every part, so this function handed `Who // What // When // Where // Why` (und/75, the one
+    // printed name with more than two parts) a key for each of the five. Measured on
+    // api.scryfall.com 2026-08-31, `include_extras=true` because und/75 is extras-gated:
+    // `!"Who"` and `!"What"` each answer 0 there and each answered 1 here, while
+    // `!"Who // What // When // Where // Why"` answers 1 on both.
+    use super::filter::exact_name_matches;
+    let five = "who // what // when // where // why";
+    assert!(exact_name_matches(five, "whowhatwhenwherewhy"), "the whole name is always a key");
+    for part in ["who", "what", "when", "where", "why"] {
+        assert!(!exact_name_matches(five, part), "{part} is a part of a five-part name, not a key");
+    }
+    // Two halves keep BOTH face keys and the joined one. `!"Stomp"` answers 1 on Scryfall the same
+    // day, `!"Fire"` answers 2 (`Fire // Ice` and `Start // Fire`), and the joined name of a
+    // two-half card is a key as well: `!"Curse of the Fire Penguin // Curse of the Fire Penguin
+    // Creature"` answers 1 there too.
+    let two = "curse of the fire penguin // curse of the fire penguin creature";
+    assert!(exact_name_matches(two, "curseofthefirepenguin"), "the front face names the card");
+    assert!(exact_name_matches(two, "curseofthefirepenguincreature"), "so does the back face");
+    assert!(
+        exact_name_matches(two, "curseofthefirepenguincurseofthefirepenguincreature"),
+        "and so does the joined name"
+    );
+    assert!(exact_name_matches("bonecrusher giant // stomp", "stomp"));
+    assert!(exact_name_matches("fire // ice", "fire"));
+    // THREE is already too many, not just five — the rule is the count, not this one card.
+    assert!(!exact_name_matches("a // b // c", "b"));
+    assert!(exact_name_matches("a // b // c", "abc"));
+}
+
+#[test]
+fn exact_name_narrow_finds_a_back_face_and_declines_where_it_cannot() {
+    // The narrowing half of the same bug: the ascending name permutation only addresses whole-name
+    // equality, so a card named by its BACK face was dropped before the walk could verify it. The
+    // folded-name trigram index reaches it; a needle that index cannot speak for (under three
+    // bytes, or non-ASCII against a folded index) declines to narrow instead of narrowing wrongly.
+    let mut vocab = VocabInterner::new();
+    let names = ["lightning bolt", "emeritus of conflict // lightning bolt", "fog", "ow"];
+    let mut cards: Vec<OracleCard> = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let mut c = stub_card((i + 1) as u128, TYPE_CREATURE, &[], &mut vocab);
+            c.card_name_lower = InlineStr::from_str(name);
+            c.card_name_folded = InlineStr::from_str(name);
+            c
+        })
+        .collect();
+    assign_name_ranks(&mut cards, &[]);
+    let mut data = store_of(cards, &[1; 4], vocab);
+    data.indexes.sort_perms = build_sort_permutations(&data.cards, &data.offsets);
+    data.indexes.name_trigram = build_trigram_index(&data.cards, |c| crate::collated_name_of(c, &data.strings));
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let narrow = |name: &str| {
+        super::narrow_rec(
+            &FilterExpr::ExactName(name.to_string()),
+            &archived.indexes,
+            &archived.offsets,
+            &archived.cards,
+            false,
+        )
+    };
+    let cards_of = |n: super::Narrowed| {
+        let mut got = n.set.into_cards(&archived.offsets, &archived.indexes.printing_to_card);
+        got.sort_unstable();
+        got
+    };
+
+    let n = narrow("lightningbolt").expect("must narrow");
+    assert!(n.tight);
+    assert_eq!(cards_of(n), vec![0, 1], "both the card and the card whose back face is named");
+    let n = narrow("emeritusofconflict").expect("must narrow");
+    assert_eq!(cards_of(n), vec![1]);
+    let n = narrow("fog").expect("must narrow");
+    assert_eq!(cards_of(n), vec![2]);
+    let n = narrow("nosuchcard").expect("must narrow");
+    assert_eq!(cards_of(n), Vec::<u32>::new());
+
+    // Under three bytes there is no trigram window, so there is nothing to narrow through and the
+    // walk scans — declining is the only sound answer, and it still finds the card.
+    assert!(narrow("ow").is_none());
+    // Likewise a non-ASCII needle: folding only guarantees an ASCII substring survives.
+    assert!(narrow("éowyn").is_none());
+
+    // Whatever the narrow does, run_query agrees with a full scan.
+    for name in ["lightning bolt", "emeritus of conflict", "ow", "no such card"] {
+        let mut f = FilterExpr::ExactName(name.to_string());
+        let brute = archived.cards.iter().filter(|c| f.eval_card(c, &archived.strings) == Tri::True).count();
+        let (total, _) = run_query(&QueryCtx::from(archived), &mut f, None, "card", "default", "edhrec", "asc", 100, 0);
+        assert_eq!(total, brute, "totals parity for {name:?}");
+    }
+}
+
+// ─── Face storage ─────────────────────────────────────────────────────────────
+
+/// Two faces whose text and art both differ, so a merge-shaped answer cannot fake it.
+fn two_faces() -> (Vec<OracleFace>, Vec<PrintingFace>) {
+    let oracle = vec![
+        OracleFace {
+            card_name_id: 1,
+            mana_cost_text_id: 2,
+            type_line_id: 3,
+            oracle_text_id: 4,
+            creature_power_text_id: 5,
+            creature_toughness_text_id: 6,
+            planeswalker_loyalty_text_id: NONE_STR,
+            defense_text_id: NONE_STR,
+            card_colors: Some(0b0000_0001), // W
+            color_indicator: 0,
+            // The front's 2/2 and its {W} cost, parsed — the searchable half of the same face.
+            creature_power: Some(2),
+            creature_toughness: Some(2),
+            planeswalker_loyalty: None,
+            mana_cost: Some(face_mana_cost("{W}", &mut ManaVocabInterner::new()).unwrap()),
+        },
+        OracleFace {
+            card_name_id: 11,
+            mana_cost_text_id: NONE_STR, // a transform back has no mana cost at all
+            type_line_id: 13,
+            oracle_text_id: 14,
+            creature_power_text_id: 15,
+            creature_toughness_text_id: 16,
+            planeswalker_loyalty_text_id: NONE_STR,
+            defense_text_id: NONE_STR,
+            card_colors: Some(0b0000_1000), // R
+            color_indicator: 0b0000_1000,
+            // A bigger back face with no cost of its own: the shape `pow>=3` used to miss.
+            creature_power: Some(5),
+            creature_toughness: Some(4),
+            planeswalker_loyalty: None,
+            mana_cost: None,
+        },
+    ];
+    let printing = vec![
+        PrintingFace { illustration_id: 0xAAAA, card_artist_vid: 1, card_artist_name_id: NONE_STR, flavor_text_id: 7, flavor_name_id: NONE_STR },
+        PrintingFace { illustration_id: 0xBBBB, card_artist_vid: 2, card_artist_name_id: NONE_STR, flavor_text_id: NONE_STR, flavor_name_id: NONE_STR },
+    ];
+    (oracle, printing)
+}
+
+#[test]
+fn faces_survive_the_archive_round_trip() {
+    let mut vocab = VocabInterner::new();
+    let (oracle_faces, printing_faces) = two_faces();
+    let mut card = stub_card(1, 0, &[], &mut vocab);
+    card.faces = oracle_faces;
+    let mut printing = stub_printing(1, 1, Some(1.0));
+    printing.faces = printing_faces;
+
+    let card_bytes = rkyv::to_bytes::<Error>(&card).expect("serialize card");
+    let archived_card = rkyv::access::<Archived<OracleCard>, Error>(&card_bytes).expect("access card");
+    let print_bytes = rkyv::to_bytes::<Error>(&printing).expect("serialize printing");
+    let archived_print = rkyv::access::<Archived<Printing>, Error>(&print_bytes).expect("access printing");
+
+    assert_eq!(archived_card.faces.len(), 2);
+    assert_eq!(archived_print.faces.len(), 2);
+
+    // Text: the back keeps its own name, types and stats -- the thing the merged row cannot say.
+    assert_eq!(archived_card.faces[0].card_name_id, 1);
+    assert_eq!(archived_card.faces[1].card_name_id, 11);
+    assert_eq!(archived_card.faces[1].mana_cost_text_id, NONE_STR);
+    assert_eq!(archived_card.faces[0].creature_power_text_id, 5);
+    assert_eq!(archived_card.faces[1].creature_power_text_id, 15);
+
+    // Colors are per face, which is how `c:r` reaches a red back on a white front. `Some` because
+    // this face DECLARED a `colors` key -- a split face declares none, and the two must not read
+    // the same (see face_color_masks).
+    assert_eq!(archived_card.faces[0].card_colors, Some(0b0000_0001));
+    assert_eq!(archived_card.faces[1].card_colors, Some(0b0000_1000));
+    assert_eq!(archived_card.faces[1].color_indicator, 0b0000_1000);
+
+    // Art: per printing, and distinct per face.
+    assert_eq!(archived_print.faces[0].illustration_id, 0xAAAA);
+    assert_eq!(archived_print.faces[1].illustration_id, 0xBBBB);
+    assert_ne!(archived_print.faces[0].card_artist_vid, archived_print.faces[1].card_artist_vid);
+    assert_eq!(archived_print.faces[1].flavor_text_id, NONE_STR);
+}
+
+#[test]
+fn single_faced_cards_carry_no_faces() {
+    let mut vocab = VocabInterner::new();
+    let card = stub_card(1, 0, &[], &mut vocab);
+    let bytes = rkyv::to_bytes::<Error>(&card).expect("serialize");
+    let archived = rkyv::access::<Archived<OracleCard>, Error>(&bytes).expect("access");
+    // ~82% of the corpus. An empty Vec archives to a length word, so the cost is bounded.
+    assert!(archived.faces.is_empty());
+}
+
+/// The per-face rule, as MEASURED against api.scryfall.com on 2026-08-16 rather than as inferred
+/// from `_merge_processed_faces`. Each row below is a live probe, scoped with `!"Full // Name"`
+/// so the reference answer is 1 or 404; the fixture reproduces the same stat lines.
+///
+/// The last two rows are the ones that choose between the three models that all explain
+/// `pow>=3` on Delver: a per-face ROW answers 404 to `pow>tou` on a 2/2 // 4/4, and a
+/// max-against-max model answers 1 to `pow=tou` on a 0/4 // 7/8. Only a card holding a SET of
+/// values per column, compared existentially over the CROSS PRODUCT, answers both as measured.
+#[test]
+fn a_face_satisfies_a_numeric_predicate_the_merged_row_cannot() {
+    fn card_with(faces: &[(Option<i8>, Option<i8>)]) -> Vec<u8> {
+        let mut vocab = VocabInterner::new();
+        let mut card = stub_card(1, 0, &[], &mut vocab);
+        // The merged row is the front face's group, exactly as _FACE_STAT_GROUPS leaves it.
+        card.creature_power = faces[0].0;
+        card.creature_toughness = faces[0].1;
+        card.faces = faces
+            .iter()
+            .map(|&(p, t)| OracleFace {
+                card_name_id: NONE_STR,
+                mana_cost_text_id: NONE_STR,
+                type_line_id: NONE_STR,
+                oracle_text_id: NONE_STR,
+                creature_power_text_id: NONE_STR,
+                creature_toughness_text_id: NONE_STR,
+                planeswalker_loyalty_text_id: NONE_STR,
+                defense_text_id: NONE_STR,
+                card_colors: None,
+                color_indicator: 0,
+                creature_power: p,
+                creature_toughness: t,
+                planeswalker_loyalty: None,
+                mana_cost: None,
+            })
+            .collect();
+        rkyv::to_bytes::<Error>(&card).expect("serialize").into_vec()
+    }
+    // Tri has no Debug (it is a hot enum), so equality is asserted through a named predicate
+    // rather than assert_eq!.
+    fn matches_tri(got: Tri, want: Tri) -> bool {
+        got == want
+    }
+    let num = |field, op, v: f64| FilterExpr::NumericCmp {
+        lhs: NumExpr::Field(field),
+        op,
+        rhs: NumExpr::Const(v),
+    };
+    let field_vs_field = |a, op, b| FilterExpr::NumericCmp {
+        lhs: NumExpr::Field(a),
+        op,
+        rhs: NumExpr::Field(b),
+    };
+
+    // Delver of Secrets // Insectile Aberration: 1/1 front, 3/2 back.
+    let delver = card_with(&[(Some(1), Some(1)), (Some(3), Some(2))]);
+    let delver = rkyv::access::<Archived<OracleCard>, Error>(&delver).expect("access");
+    let strings: Vec<String> = Vec::new();
+    let strings_bytes = rkyv::to_bytes::<Error>(&strings).expect("serialize strings");
+    let strings = rkyv::access::<AStrings, Error>(&strings_bytes).expect("access strings");
+    let t = |c: &Archived<OracleCard>, f: &FilterExpr| f.eval_card(c, strings);
+
+    // pow>=3 -> 1 on Scryfall. The back's power, which the merged row does not carry.
+    assert!(matches_tri(t(delver, &num(NumField::Power, CmpOp::Ge, 3.0)), Tri::True));
+    // pow=1 -> 1: the front's is still there.
+    assert!(matches_tri(t(delver, &num(NumField::Power, CmpOp::Eq, 1.0)), Tri::True));
+    // pow=2 -> 404: neither face, and the union must not invent a value between them.
+    assert!(matches_tri(t(delver, &num(NumField::Power, CmpOp::Eq, 2.0)), Tri::False));
+    // pow=1 tou=2 -> 1, and no face is 1/2: the columns are independent.
+    assert!(matches_tri(t(delver, &num(NumField::Power, CmpOp::Eq, 1.0)), Tri::True));
+    assert!(matches_tri(t(delver, &num(NumField::Toughness, CmpOp::Eq, 2.0)), Tri::True));
+    // pow>=3 pow<=1 -> 1: one column, two faces, both conjuncts satisfied by different ones.
+    assert!(matches_tri(t(delver, &num(NumField::Power, CmpOp::Le, 1.0)), Tri::True));
+
+    // Huntmaster of the Fells // Ravager of the Fells: 2/2 // 4/4. pow>tou -> 1 there, and no
+    // single face has power above its own toughness.
+    let huntmaster = card_with(&[(Some(2), Some(2)), (Some(4), Some(4))]);
+    let huntmaster = rkyv::access::<Archived<OracleCard>, Error>(&huntmaster).expect("access");
+    assert!(
+        matches_tri(t(huntmaster, &field_vs_field(NumField::Power, CmpOp::Gt, NumField::Toughness)), Tri::True),
+        "cross product: 4 against 2",
+    );
+
+    // Thing in the Ice // Awoken Horror: 0/4 // 7/8. pow=tou -> 404 there, which a max-vs-max
+    // reading (7 against 8) also gives — but pow>tou -> 1 there, which it does not.
+    let thing = card_with(&[(Some(0), Some(4)), (Some(7), Some(8))]);
+    let thing = rkyv::access::<Archived<OracleCard>, Error>(&thing).expect("access");
+    assert!(matches_tri(t(thing, &field_vs_field(NumField::Power, CmpOp::Eq, NumField::Toughness)), Tri::False));
+    assert!(matches_tri(t(thing, &field_vs_field(NumField::Power, CmpOp::Gt, NumField::Toughness)), Tri::True));
+
+    // A face with no value contributes none: the adventure half of Bonecrusher Giant // Stomp is
+    // costless and statless, and `pow=4` still answers 1 without a NULL leaking in.
+    let bonecrusher = card_with(&[(Some(4), Some(3)), (None, None)]);
+    let bonecrusher = rkyv::access::<Archived<OracleCard>, Error>(&bonecrusher).expect("access");
+    assert!(matches_tri(t(bonecrusher, &num(NumField::Power, CmpOp::Eq, 4.0)), Tri::True));
+    assert!(matches_tri(t(bonecrusher, &num(NumField::Power, CmpOp::Eq, 0.0)), Tri::False));
+
+    // A card with no faces is unchanged, which is the 82% path: same single value, same NULL.
+    let plain = card_with(&[(Some(1), Some(1))]);
+    let plain = rkyv::access::<Archived<OracleCard>, Error>(&plain).expect("access");
+    assert!(matches_tri(t(plain, &num(NumField::Power, CmpOp::Ge, 3.0)), Tri::False));
+    assert!(matches_tri(t(plain, &num(NumField::Loyalty, CmpOp::Ge, 1.0)), Tri::Null));
+}
+
+// ─── per-face colours ────────────────────────────────────────────────────────
+
+const C_W: u8 = 0b0_0001;
+const C_U: u8 = 0b0_0010;
+const C_B: u8 = 0b0_0100;
+const C_R: u8 = 0b0_1000;
+
+/// The cards the live probes named, in the shape the store holds them: the merged UNION the
+/// `_FACE_FLAG_UNIONS` policy writes, and each face's own `colors` — `None` where Scryfall sent no
+/// `colors` key for that face at all, which is every split and flip half.
+///
+/// `(name, card_colors, faces)`. Verified against api.scryfall.com's own JSON on 2026-08-16: the
+/// two split halves of Fire // Ice carry `name`/`mana_cost`/`type_line` and nothing else, while
+/// Kabira Plateau carries `"colors": []`.
+const COLOR_FIXTURE: &[(&str, u8, &[Option<u8>])] = &[
+    ("Fire // Ice", C_U | C_R, &[None, None]),
+    ("Delver of Secrets // Insectile Aberration", C_U, &[Some(C_U), Some(C_U)]),
+    ("Kabira Takedown // Kabira Plateau", C_W, &[Some(C_W), Some(0)]),
+    ("Valki, God of Lies // Tibalt, Cosmic Impostor", C_B | C_R, &[Some(C_B), Some(C_B | C_R)]),
+    ("Extus, Oriq Overlord // Awaken the Blood Avatar", C_W | C_B | C_R, &[Some(C_W | C_B), Some(C_B | C_R)]),
+    // The 82% path, both ends of it: a mono-red card and a colourless one, neither with faces.
+    ("Lightning Bolt", C_R, &[]),
+    ("Sol Ring", 0, &[]),
+];
+
+fn color_fixture_store() -> CardData {
+    let mut vocab = VocabInterner::new();
+    let cards: Vec<OracleCard> = COLOR_FIXTURE
+        .iter()
+        .enumerate()
+        .map(|(i, (_, mask, faces))| {
+            let mut c = stub_card(i as u128 + 1, TYPE_CREATURE, &[], &mut vocab);
+            c.card_colors = *mask;
+            // The identity is deliberately the union on every card: it is card-level, and holding
+            // it apart from `colors` is what proves the two columns did not get the same treatment.
+            c.card_color_identity = *mask;
+            c.faces = faces
+                .iter()
+                .map(|m| OracleFace {
+                    card_name_id: NONE_STR,
+                    mana_cost_text_id: NONE_STR,
+                    type_line_id: NONE_STR,
+                    oracle_text_id: NONE_STR,
+                    creature_power_text_id: NONE_STR,
+                    creature_toughness_text_id: NONE_STR,
+                    planeswalker_loyalty_text_id: NONE_STR,
+                    defense_text_id: NONE_STR,
+                    card_colors: *m,
+                    color_indicator: 0,
+                    creature_power: None,
+                    creature_toughness: None,
+                    planeswalker_loyalty: None,
+                    mana_cost: None,
+                })
+                .collect();
+            c
+        })
+        .collect();
+    let counts = vec![1usize; COLOR_FIXTURE.len()];
+    let mut data = store_of(cards, &counts, vocab);
+    data.indexes.planes = build_bit_planes(&data.cards, &data.printings, &data.offsets, &data.strings);
+    data
+}
+
+/// The per-face colour rule, as MEASURED against api.scryfall.com on 2026-08-16 rather than as
+/// inferred from `_merge_processed_faces`. Each assertion below is a live probe scoped with
+/// `!"Full // Name"`, so the reference answer is 1 or 404.
+///
+/// The rows that choose the shape are the Extus ones. `c=wb` and `c=br` are both 1 there and
+/// `c:brw` and `c=3` are both 404 — so the card holds its two FACES' masks and NOT their union,
+/// which is the opposite of the stat columns, whose merged value is copied from a face and can be
+/// listed beside them for free. And `!"Fire // Ice" c:c` is 404, which is why a face with no
+/// `colors` key inherits the card's mask instead of reading as colourless.
+#[test]
+fn a_face_satisfies_a_colour_predicate_the_merged_union_cannot() {
+    let data = color_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let card = |name: &str| {
+        let i = COLOR_FIXTURE.iter().position(|(n, _, _)| *n == name).expect("fixture card");
+        &archived.cards[i]
+    };
+    let hit = |name: &str, f: &FilterExpr| f.eval_card(card(name), &archived.strings) == Tri::True;
+    let c = |op, mask| FilterExpr::ColorCmp { field: ColorField::Colors, op, mask };
+    let id = |op, mask| FilterExpr::ColorCmp { field: ColorField::ColorIdentity, op, mask };
+
+    // c=b -> 1 on Valki // Tibalt: the FRONT's mask alone, where the union is {B,R}.
+    let valki = "Valki, God of Lies // Tibalt, Cosmic Impostor";
+    assert!(hit(valki, &c(CmpOp::Eq, C_B)));
+    assert!(hit(valki, &c(CmpOp::Eq, C_B | C_R)), "the back's own mask still matches too");
+    assert!(hit(valki, &c(CmpOp::Le, C_B)), "c<=b: B is a subset of B");
+
+    // c:c -> 1 on Kabira Takedown // Kabira Plateau: the land back DECLARED `"colors": []`.
+    let kabira = "Kabira Takedown // Kabira Plateau";
+    assert!(hit(kabira, &c(CmpOp::Ge, 0)), "c:c");
+    assert!(hit(kabira, &c(CmpOp::Eq, C_W)), "c=w, on the front");
+
+    // The union is NOT a value the card holds. c:brw and c=3 are 404 on Extus; c=wb and c=br are 1.
+    let extus = "Extus, Oriq Overlord // Awaken the Blood Avatar";
+    assert!(!hit(extus, &c(CmpOp::Ge, C_W | C_B | C_R)), "c:brw -> 404: no face is {{W,B,R}}");
+    assert!(hit(extus, &c(CmpOp::Eq, C_W | C_B)), "c=wb -> 1");
+    assert!(hit(extus, &c(CmpOp::Eq, C_B | C_R)), "c=br -> 1");
+    assert!(hit(extus, &c(CmpOp::Le, C_W | C_B)), "c<=wb -> 1");
+    assert!(!hit(extus, &c(CmpOp::Gt, C_W | C_B)), "c>wb -> 404");
+    assert!(hit(extus, &c(CmpOp::Lt, C_W | C_B | C_R)), "c<wbr -> 1");
+    assert!(hit(extus, &c(CmpOp::Ge, C_R)), "c:r -> 1, on the back");
+    // ...while the IDENTITY on the same card is the union and only the union. Measured:
+    // `id=wbr` is 1, `id=wb` and `id=2` are 404.
+    assert!(hit(extus, &id(CmpOp::Eq, C_W | C_B | C_R)));
+    assert!(!hit(extus, &id(CmpOp::Eq, C_W | C_B)));
+
+    // THE REGRESSION GUARD. Fire // Ice's halves declare no `colors` at all, so they are the
+    // card's {U,R} — c:r is 1 (it always was), and c:c is 404 (a bare mask 0 would answer 1).
+    let fire = "Fire // Ice";
+    assert!(hit(fire, &c(CmpOp::Ge, C_R)), "c:r on Fire // Ice, which worked before this change");
+    assert!(hit(fire, &c(CmpOp::Ge, C_U)), "c:u likewise");
+    assert!(!hit(fire, &c(CmpOp::Ge, 0)), "c:c -> 404: an absent key is not a colourless face");
+    assert!(hit(fire, &c(CmpOp::Eq, C_U | C_R)), "c=ur -> 1: the joined mask IS each half's");
+    assert!(!hit(fire, &c(CmpOp::Eq, C_R)), "c=r -> 404");
+
+    // Two faces that agree are one value: Delver is mono-blue on both halves.
+    let delver = "Delver of Secrets // Insectile Aberration";
+    assert!(hit(delver, &c(CmpOp::Eq, C_U)));
+    assert!(!hit(delver, &c(CmpOp::Ge, 0)), "c:c -> 404");
+
+    // The 82% path is untouched: no faces, one mask, exactly the pre-gen-29 answers.
+    assert!(hit("Lightning Bolt", &c(CmpOp::Eq, C_R)));
+    assert!(!hit("Lightning Bolt", &c(CmpOp::Ge, 0)));
+    assert!(hit("Sol Ring", &c(CmpOp::Ge, 0)), "c:c on a colourless card");
+}
+
+/// THE FOURTH STRUCTURE. A colour leaf is consumed by whichever narrowing reaches it first, and
+/// `compile_plane`'s contract is EXACTNESS — a plane expression is not re-verified, so a plane
+/// that disagrees with `tri` is a wrong answer rather than a slow one.
+///
+/// The stats work found this exact failure with a live probe after three of its four structures
+/// were already correct (`!"Thing in the Ice // Awoken Horror" pow>=7` still answered 404 because
+/// the plane had eaten the leaf). This asserts the agreement instead of probing for it: every
+/// operator against every one of the 32 colour masks, over every fixture card, both structures.
+#[test]
+fn the_colour_planes_answer_exactly_what_tri_answers() {
+    let data = color_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let planes = &archived.indexes.planes;
+    let words = &archived.indexes.oracle_trigram.words;
+    let ops = [
+        ("Eq", CmpOp::Eq), ("Ne", CmpOp::Ne), ("Lt", CmpOp::Lt),
+        ("Le", CmpOp::Le), ("Gt", CmpOp::Gt), ("Ge", CmpOp::Ge),
+    ];
+    let mut bits: Vec<u64> = Vec::new();
+    for field in [ColorField::Colors, ColorField::ColorIdentity] {
+        for (name, op) in ops {
+            for mask in 0u8..32 {
+                let f = FilterExpr::ColorCmp { field, op, mask };
+                let pe = compile_plane(&f, planes, words).expect("every colour mask must compile");
+                eval_planes(&pe, planes, &mut bits);
+                for (cid, (card_name, _, _)) in COLOR_FIXTURE.iter().enumerate() {
+                    let want = f.eval_card(&archived.cards[cid], &archived.strings) == Tri::True;
+                    assert_eq!(
+                        bitmap_contains(&bits, cid as u32),
+                        want,
+                        "op {name} mask {mask:#07b} on {card_name}: the plane and tri disagree",
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// `face_stat_nums` is the builder's `maybe_stat_int` behind the same creature-like gate the
+/// card-level column uses, so the FRONT face's parse must reproduce that column exactly. If it
+/// ever does not, `face_num_values` would add a phantom value beside the merged one — and the
+/// numeric PLANES are built from the face values, so the disagreement would narrow rather than
+/// merely differ.
+#[test]
+fn front_face_stats_match_card_columns() {
+    // The printed forms the corpus actually holds, including the ones that are not numbers.
+    let creature = Some("Creature — Human Wizard");
+    assert_eq!(face_stat_nums(creature, Some("3"), Some("2"), None), (Some(3), Some(2), None));
+    // `*` IS ZERO and the arithmetic around it still runs — `tou<1` is 434 on api.scryfall.com
+    // against this port's 273 before the fix, 160 cards. The builder's `maybe_stat_int` carries
+    // the three cards that pin the arithmetic; this is the same rule on a face's own string.
+    assert_eq!(face_stat_nums(creature, Some("*"), Some("1+*"), None), (Some(0), Some(1), None));
+    assert_eq!(face_stat_nums(creature, Some("2+*"), Some("7-*"), None), (Some(2), Some(7), None));
+    // `?` IS ZERO TOO, on its own measurement rather than by analogy: `Shellephant` (ust/121)
+    // prints it on both sides and api.scryfall.com answers `tou=0` 1, `tou>=0` 1, `tou>0` 0.
+    // Read as absent it satisfied no comparison at all, which was the last row of `toughness<1`.
+    assert_eq!(face_stat_nums(creature, Some("*\u{b2}"), Some("?"), None), (Some(0), Some(0), None));
+    // `∞` stays absent — `Infinity Elemental` is `ulst`, unanswerable there, so nothing measured.
+    assert_eq!(face_stat_nums(creature, Some("\u{221e}"), None, None), (None, None, None));
+    // Loyalty keeps the old rule: the two cards printing `*` there are funny-set cards
+    // api.scryfall.com will not answer for at all, so there is nothing measured to follow.
+    assert_eq!(face_stat_nums(Some("Planeswalker — Duck"), None, None, Some("*")), (None, None, None));
+    assert_eq!(face_stat_nums(creature, Some("-1"), Some("0"), None), (Some(-1), Some(0), None));
+    // int(float(...)) truncates, exactly as maybe_int does.
+    assert_eq!(face_stat_nums(creature, Some("1.5"), None, None), (Some(1), None, None));
+    // Not creature-like: the card-level column is None there, so the face's must be too.
+    assert_eq!(face_stat_nums(Some("Legendary Planeswalker — Tibalt"), Some("2"), Some("2"), Some("5")), (None, None, Some(5)));
+    // Vehicles and Spacecraft are inside the gate, as in card_processing.py.
+    assert_eq!(face_stat_nums(Some("Artifact — Vehicle"), Some("4"), Some("3"), None), (Some(4), Some(3), None));
+    assert_eq!(face_stat_nums(Some("Land"), Some("9"), Some("9"), None), (None, None, None));
+}
+
+/// A face's mana cost carries its OWN converted cost, which is the number `m=` compares.
+#[test]
+fn a_face_mana_cost_uses_its_own_cmc() {
+    let mut vocab = ManaVocabInterner::new();
+    // Fire, one half of Fire // Ice: cmc 2, where the card's joined cost is 4.
+    let fire = face_mana_cost("{1}{R}", &mut vocab).expect("fire");
+    assert_eq!(fire.cmc, 2.0);
+    assert_eq!(lane_get(fire.core, mana_lane("R").expect("R lane")), 1);
+    // Generic pips are not lanes; only the cmc records them, exactly as the card-level path does.
+    assert_eq!(lane_get(fire.core, mana_lane("W").expect("W lane")), 0);
+    // {X} is a real pip with no cmc contribution — Agadeem's Awakening answers `m:{X}`.
+    let agadeem = face_mana_cost("{X}{B}{B}{B}", &mut vocab).expect("agadeem");
+    assert_eq!(agadeem.cmc, 3.0);
+    assert_eq!(lane_get(agadeem.core, mana_lane("X").expect("X lane")), 1);
+    // Devotion stays a card-level column and is deliberately not derived per face.
+    assert_eq!(agadeem.devotion, 0);
+}
+
+/// `is:vanilla` reads the FRONT face, and two more rules besides — every row below is a live probe
+/// against api.scryfall.com on 2026-08-17, scoped with `!"Full // Name"` so the reference answer is
+/// 1 or 404, or a whole-corpus count where the note says so.
+///
+/// The rows that choose the shape:
+///
+/// * `is:vanilla` is 363 there and `t:creature -o:/./` — the expansion this predicate replaces — is
+///   352 on BOTH sides. The 11-card gap is not one class.
+/// * `is:vanilla o:/./` is 12, all adventures whose creature FRONT prints nothing while the other
+///   half does. The merged row joins the two texts, so no predicate over it can see the blank
+///   front. This is the +12.
+/// * The BACK is not enough: `Kaslem's Stonetree`, `Ecstatic Awakener`, `Chosen of Markov` and
+///   `Skin Invasion` each have a blank creature back behind a front that prints, and `is:vanilla`
+///   over the four is 0. `is:vanilla is:dfc` is 18 and settles it the other way — `Servo // Thopter`
+///   and `Goblin // Blood` are in it (blank front, printing back) and `Elemental // Centaur` and
+///   `Fish // Kraken` are not (printing front, blank back).
+/// * The CREATURE test is the card's, not the front's: `City's Blessing // Elemental` and
+///   `Copy // Horror` are both in that 18 and neither FRONT is a creature.
+/// * `t:creature -o:/./ -is:vanilla` is exactly 1 — `Dryad Arbor`, a LAND creature. `is:vanilla
+///   t:land` is 0 with and without `include_extras`, while `t:creature t:land -o:/./` is 2 (Dryad
+///   Arbor and the `Forest Dryad` token). This is the −1, and 352 + 12 − 1 = 363.
+/// * `Icehide Golem` and `Infinity Elemental` ARE vanilla there and print reminder text and nothing
+///   else, so the reminder text has to come off before the blankness test.
+#[test]
+fn is_vanilla_reads_the_front_face_and_the_card_types() {
+    let mut interner = Interner::new();
+    let mut intern = |s: &str| interner.intern(s.to_string());
+    let blank = intern("");
+    let adventure_text = intern("Return target creature you don't control with mana value 3 or less to its owner's hand.");
+    let transform_text = intern("{T}, Tap an untapped Vampire you control: Transform this creature.");
+    let reminder_only = intern("({S} can be paid with one mana from a snow source.)");
+    let flying = intern("Flying");
+
+    // `text` is the card's own printed oracle text; `faces` are the per-face printed strings, front
+    // first. A card with no faces IS its one face, which is why the two share a code path.
+    let card_of = |types: u16, text: u32, faces: &[u32]| {
+        let mut vocab = VocabInterner::new();
+        let mut card = stub_card(1, types, &[], &mut vocab);
+        card.oracle_text_id = text;
+        card.faces = faces
+            .iter()
+            .map(|&oracle_text_id| OracleFace {
+                card_name_id: NONE_STR,
+                mana_cost_text_id: NONE_STR,
+                type_line_id: NONE_STR,
+                oracle_text_id,
+                creature_power_text_id: NONE_STR,
+                creature_toughness_text_id: NONE_STR,
+                planeswalker_loyalty_text_id: NONE_STR,
+                defense_text_id: NONE_STR,
+                card_colors: None,
+                color_indicator: 0,
+                creature_power: None,
+                creature_toughness: None,
+                planeswalker_loyalty: None,
+                mana_cost: None,
+            })
+            .collect();
+        rkyv::to_bytes::<Error>(&card).expect("serialize").into_vec()
+    };
+
+    let strings_bytes = rkyv::to_bytes::<Error>(&interner.strings).expect("serialize strings");
+    let strings = rkyv::access::<AStrings, Error>(&strings_bytes).expect("access strings");
+    let vanilla = FilterExpr::VanillaFace;
+    let is_vanilla = |bytes: &[u8]| {
+        let card = rkyv::access::<Archived<OracleCard>, Error>(bytes).expect("access");
+        // Two-valued by construction: no arm of this predicate answers Null or PrintingDep.
+        vanilla.eval_card(card, strings) == Tri::True
+    };
+
+    // The 349 that were never in doubt: an unfaced creature with no text at all...
+    assert!(is_vanilla(&card_of(TYPE_CREATURE, blank, &[])));
+    // ...one with text, which is most of the corpus...
+    assert!(!is_vanilla(&card_of(TYPE_CREATURE, flying, &[])));
+    // ...and a textless NON-creature, since `is:vanilla -t:creature` is 0 there.
+    assert!(!is_vanilla(&card_of(TYPE_ARTIFACT, blank, &[])));
+
+    // THE +12. Beluna's Gatekeeper // Entry Denied: blank creature front, printing back. The merged
+    // text holds the join, which is why `-o:/./` answered 404 for it.
+    assert!(is_vanilla(&card_of(TYPE_CREATURE | TYPE_SORCERY, adventure_text, &[blank, adventure_text])));
+
+    // ...and its mirror, which is NOT vanilla: Chosen of Markov // Markov's Servant prints on the
+    // front and is blank on the back. An existential over faces would have matched this.
+    assert!(!is_vanilla(&card_of(TYPE_CREATURE, transform_text, &[transform_text, blank])));
+
+    // The creature test is the CARD's. City's Blessing // Elemental: the front is not a creature at
+    // all and the card is one, through the back — and it is vanilla there.
+    assert!(is_vanilla(&card_of(TYPE_CREATURE, blank, &[blank, flying])));
+
+    // THE −1. Dryad Arbor: unfaced, no printed rules text, and a LAND.
+    assert!(!is_vanilla(&card_of(TYPE_LAND | TYPE_CREATURE, blank, &[])));
+
+    // Icehide Golem: reminder text and nothing else, on the card and on a front face alike.
+    assert!(is_vanilla(&card_of(TYPE_ARTIFACT | TYPE_CREATURE, reminder_only, &[])));
+    assert!(is_vanilla(&card_of(TYPE_ARTIFACT | TYPE_CREATURE, blank, &[reminder_only, flying])));
+
+    // Negation is the plain complement — the predicate is total, so `-is:vanilla` has no third set.
+    let not_vanilla = FilterExpr::Not(Box::new(FilterExpr::VanillaFace));
+    let card = card_of(TYPE_CREATURE, blank, &[]);
+    let card = rkyv::access::<Archived<OracleCard>, Error>(&card).expect("access");
+    assert!(not_vanilla.eval_card(card, strings) == Tri::False);
+}
+
+#[test]
+fn face_indexes_line_up_across_the_split() {
+    // OracleFace and PrintingFace are two halves of one face, so index i must mean the same face
+    // in both. The commit pass fills them from the same FaceRow list; this pins that contract.
+    let (oracle_faces, printing_faces) = two_faces();
+    assert_eq!(oracle_faces.len(), printing_faces.len());
+}
+
+// ─── Lookup by id ─────────────────────────────────────────────────────────────
+
+#[test]
+fn printings_are_findable_by_scryfall_id() {
+    // Ids deliberately out of order, and not dense: the permutation has to do real work.
+    let ids: [u128; 5] = [0xF00D, 0x0010, 0xBEEF, 0x0002, 0xCAFE];
+    let printings: Vec<Printing> = ids.iter().map(|&id| stub_printing(id, id, Some(1.0))).collect();
+    let perm = build_printing_by_scryfall_id(&printings);
+
+    let perm_bytes = rkyv::to_bytes::<Error>(&perm).expect("serialize perm");
+    let aperm = rkyv::access::<Archived<Vec<u32>>, Error>(&perm_bytes).expect("access perm");
+    let print_bytes = rkyv::to_bytes::<Error>(&printings).expect("serialize printings");
+    let aprint = rkyv::access::<Archived<Vec<Printing>>, Error>(&print_bytes).expect("access printings");
+
+    for (want_index, &id) in ids.iter().enumerate() {
+        let got = find_printing_by_scryfall_id(aperm, aprint, id);
+        assert_eq!(got, Some(want_index as u32), "id {id:#x} should resolve to its own row");
+    }
+    assert_eq!(find_printing_by_scryfall_id(aperm, aprint, 0xDEAD), None, "absent id");
+    // 0 is parse_uuid_or_hash's null. It must never resolve, even though it sorts first.
+    assert_eq!(find_printing_by_scryfall_id(aperm, aprint, 0), None, "null id");
+}
+
+/// `oracleid:<uuid>` — the query every Scryfall-compat card object puts in its
+/// `prints_search_uri` — selects exactly one card's printings, through the sorted oracle-id
+/// permutation rather than a scan, and answers an id this store does not hold with the empty set.
+#[test]
+fn an_oracle_id_filter_selects_one_cards_printings() {
+    let mut vocab = VocabInterner::new();
+    let (id_a, id_b) = (0x43fb_feec_u128, 0x21f4_5043_u128);
+    let cards = vec![stub_card(id_a, 0, &[], &mut vocab), stub_card(id_b, 0, &[], &mut vocab)];
+    let mut data = store_of(cards, &[2, 1], vocab);
+    // The permutation the narrowing binary-searches; store_of leaves the index defaulted.
+    data.indexes.oracle_by_oracle_id = build_oracle_by_oracle_id(&data.cards);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let a = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let run = |f: &mut FilterExpr, unique: &str| {
+        run_query(&QueryCtx::from(a), f, None, unique, "default", "edhrec", "asc", 100, 0).0
+    };
+
+    // Card A owns printings 1 and 2; card B owns printing 3. Neither of B's rows may appear.
+    let mut filter = FilterExpr::OracleIdMatch { id: id_a };
+    assert_eq!(run(&mut filter, "printing"), 2, "both of A's printings");
+    let mut filter = FilterExpr::OracleIdMatch { id: id_a };
+    assert_eq!(run(&mut filter, "card"), 1, "unique=cards rolls the same match up to one row");
+
+    // An id this store does not hold, and parse_uuid_or_hash's 0 for an unparseable value: both
+    // are the empty set, never an error — the parser deliberately does not validate the uuid.
+    for miss in [0xdead_beef_u128, 0] {
+        let mut filter = FilterExpr::OracleIdMatch { id: miss };
+        assert_eq!(run(&mut filter, "printing"), 0, "id {miss:#x} names no card");
+    }
+
+    // Negation complements the same exact set, which is only sound because the narrowing is
+    // tight (tight_narrow_space) — B's single row and nothing else.
+    let mut filter = FilterExpr::Not(Box::new(FilterExpr::OracleIdMatch { id: id_a }));
+    assert_eq!(run(&mut filter, "printing"), 1, "everything that is not card A");
+}
+
+#[test]
+fn cards_are_findable_by_oracle_id() {
+    let mut vocab = VocabInterner::new();
+    let ids: [u128; 4] = [0x30, 0x10, 0x40, 0x20];
+    let cards: Vec<OracleCard> = ids.iter().map(|&id| stub_card(id, 0, &[], &mut vocab)).collect();
+    let perm = build_oracle_by_oracle_id(&cards);
+
+    let perm_bytes = rkyv::to_bytes::<Error>(&perm).expect("serialize perm");
+    let aperm = rkyv::access::<Archived<Vec<u32>>, Error>(&perm_bytes).expect("access perm");
+    let card_bytes = rkyv::to_bytes::<Error>(&cards).expect("serialize cards");
+    let acards = rkyv::access::<Archived<Vec<OracleCard>>, Error>(&card_bytes).expect("access cards");
+
+    for (want_index, &id) in ids.iter().enumerate() {
+        assert_eq!(find_oracle_by_oracle_id(aperm, acards, id), Some(want_index as u32));
+    }
+    assert_eq!(find_oracle_by_oracle_id(aperm, acards, 0x99), None);
+}
+
+#[test]
+fn the_id_permutation_is_a_permutation() {
+    // Every row appears exactly once: a lookup index that drops a row silently 404s a real card.
+    let ids: [u128; 6] = [5, 3, 9, 1, 7, 3_000_000_000];
+    let printings: Vec<Printing> = ids.iter().map(|&id| stub_printing(id, id, None)).collect();
+    let mut perm = build_printing_by_scryfall_id(&printings);
+    assert_eq!(perm.len(), ids.len());
+    perm.sort_unstable();
+    assert_eq!(perm, (0..ids.len() as u32).collect::<Vec<_>>());
+}
+
+#[test]
+fn set_type_matches_through_the_compat_vocab() {
+    // `st:` is `lang:`'s shape: both live in the compat blob rather than a column, both intern
+    // into coll_vocab, and both resolve to an id in bind() so tri() is one integer equality. This
+    // pins the three answers that shape has to give — hit, miss, and "no set type recorded".
+    let leaf = |value: &str| {
+        super::build_filter(&serde_json::json!({
+            "node_type": "CardBinaryOperatorNode",
+            "kwargs": {
+                "op": ":",
+                "lhs": {"node_type": "CardAttributeNode", "kwargs": {"attribute_name": "card_set_type", "original_attribute": "st"}},
+                "rhs": {"node_type": "StringValueNode", "kwargs": {"value": value}},
+            }
+        }))
+        .expect("st: must build")
+    };
+
+    // Scryfall spells the multi-word types with underscores and accepts the hyphen too.
+    match leaf("Draft-Innovation") {
+        FilterExpr::SetTypeMatch { value, vid } => {
+            assert_eq!(value, "draft_innovation", "hyphens fold to underscores, and the value lowercases");
+            assert!(vid.is_none(), "unbound: bind() is what resolves the vocab id");
+        }
+        other => panic!("st: built a {:?}, not SetTypeMatch", std::mem::discriminant(&other)),
+    }
+
+    // Ordered comparisons are not a thing on a string column, exactly as on lang:.
+    let ordered = serde_json::json!({
+        "node_type": "CardBinaryOperatorNode",
+        "kwargs": {
+            "op": ">=",
+            "lhs": {"node_type": "CardAttributeNode", "kwargs": {"attribute_name": "card_set_type", "original_attribute": "st"}},
+            "rhs": {"node_type": "StringValueNode", "kwargs": {"value": "promo"}},
+        }
+    });
+    assert!(super::build_filter(&ordered).is_err(), "st:>= must decline, like lang:");
+
+    // Evaluation, against a printing that carries a set type and one that does not.
+    let mut vocab = VocabInterner::new();
+    vocab.intern("masterpiece".to_string()).unwrap();
+    let mut card = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
+    card.card_name_lower = InlineStr::from_str("kozilek");
+    let mut data = store_of(vec![card], &[2], vocab);
+    // Resolved AFTER store_of, which renumbers the vocab (see `coll_ids_in`).
+    let masterpiece = coll_ids_in(&data.coll_vocab, &["masterpiece"])[0];
+    data.printings[0].compat.set_type_id = masterpiece;
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let bind = |f: &mut FilterExpr| {
+        f.bind(&archived.coll_vocab, &archived.artist_vocab, &archived.artist_vocab_collated, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
+    };
+
+    let mut hit = leaf("masterpiece");
+    bind(&mut hit);
+    assert!(hit.eval_printing(&archived.cards[0], &archived.printings[0], &archived.strings) == Tri::True);
+    assert!(
+        hit.eval_printing(&archived.cards[0], &archived.printings[1], &archived.strings) == Tri::Null,
+        "a printing with no set type is SQL NULL, not False"
+    );
+    assert!(
+        hit.eval_card(&archived.cards[0], &archived.strings) == Tri::PrintingDep,
+        "the set type is the PRINTING's set, so it cannot settle at card level"
+    );
+
+    // A value no loaded printing carries binds to None and matches nothing — not everything.
+    let mut absent = leaf("vanguard");
+    bind(&mut absent);
+    assert!(matches!(absent, FilterExpr::SetTypeMatch { vid: None, .. }));
+    assert!(absent.eval_printing(&archived.cards[0], &archived.printings[0], &archived.strings) == Tri::False);
+}
+
+// ─── Compat residue ───────────────────────────────────────────────────────────
+
+#[test]
+fn compat_fields_survive_the_archive_round_trip() {
+    let compat = CompatFields {
+        arena_id: NonZeroU32::new(105_816),
+        mtgo_id: NonZeroU32::new(152_037),
+        tcgplayer_id: NonZeroU32::new(697_344),
+        cardmarket_id: NonZeroU32::new(892_161),
+        penny_rank: NonZeroU32::new(42),
+        image_updated_at: NonZeroU32::new(1_783_903_008),
+        price_usd_foil: NonZeroU32::new(282), // integer cents, same convention as the price columns
+        price_eur_foil: NonZeroU32::new(164),
+        set_vid: 7,
+        lang_id: 3,
+        set_type_id: 7,
+        games: GAME_PAPER | GAME_ARENA,
+        finishes: FINISH_NONFOIL | FINISH_FOIL,
+        flags: COMPAT_PROMO | COMPAT_REPRINT,
+        multiverse_ids: vec![1, 2, 3],
+        ..CompatFields::default()
+    };
+
+    let bytes = rkyv::to_bytes::<Error>(&compat).expect("serialize");
+    let a = rkyv::access::<Archived<CompatFields>, Error>(&bytes).expect("access");
+
+    assert_eq!(a.arena_id.as_ref().map(|v| v.get()), Some(105_816));
+    assert_eq!(a.price_usd_foil.as_ref().map(|v| v.get()), Some(282));
+    // set_vid is a vocab id now, not the raw UUID: ~1,000 sets against ~98,000
+    // printings, so interning it costs 2 bytes a row instead of 16.
+    assert_eq!(u16::from(a.set_vid), 7);
+    assert_eq!(u16::from(a.lang_id), 3);
+    assert_eq!(a.multiverse_ids.len(), 3);
+
+    // Bitsets are only useful if membership survives independently of each other.
+    assert_ne!(a.games & GAME_PAPER, 0);
+    assert_ne!(a.games & GAME_ARENA, 0);
+    assert_eq!(a.games & 0b0000_0010, 0, "mtgo was not set");
+    assert_ne!(u16::from(a.flags) & COMPAT_PROMO, 0);
+    assert_ne!(u16::from(a.flags) & COMPAT_REPRINT, 0);
+    assert_eq!(u16::from(a.flags) & COMPAT_TEXTLESS, 0, "textless was not set");
+}
+
+/// `image_updated_at` reaches the residue as an ISO-8601 string and leaves it as the epoch seconds
+/// Scryfall hangs off an image URL, so the conversion is the whole of that field's correctness.
+#[test]
+fn an_iso_timestamp_converts_to_the_epoch_behind_the_image_cache_buster() {
+    // The exact pair the corpus serves: Lightning Bolt lea/161's `image_updated_at` against the
+    // `?1783903008` on its own `image_uris`.
+    assert_eq!(iso8601_utc_to_epoch_secs("2026-07-13T00:36:48Z"), Some(1_783_903_008));
+    // Leap day and the year boundaries on either side of it, where a hand-rolled civil calendar
+    // goes wrong if it goes wrong at all.
+    assert_eq!(iso8601_utc_to_epoch_secs("2024-02-29T00:00:00Z"), Some(1_709_164_800));
+    assert_eq!(iso8601_utc_to_epoch_secs("2024-03-01T00:00:00Z"), Some(1_709_251_200));
+    assert_eq!(iso8601_utc_to_epoch_secs("2000-02-29T00:00:00Z"), Some(951_782_400));
+    assert_eq!(iso8601_utc_to_epoch_secs("1970-01-01T00:00:00Z"), Some(0));
+    // The Z is optional; every other departure from the shape reads as absent rather than as a
+    // guess, including a pre-epoch date that would otherwise wrap through the u32.
+    assert_eq!(iso8601_utc_to_epoch_secs("2026-07-13T00:36:48"), Some(1_783_903_008));
+    assert_eq!(iso8601_utc_to_epoch_secs("1969-12-31T23:59:59Z"), None);
+    assert_eq!(iso8601_utc_to_epoch_secs("2026-07-13"), None);
+    assert_eq!(iso8601_utc_to_epoch_secs("2026-13-01T00:00:00Z"), None);
+    assert_eq!(iso8601_utc_to_epoch_secs("2026-07-13T00:36:48.123Z"), None);
+    assert_eq!(iso8601_utc_to_epoch_secs(""), None);
+}
+
+#[test]
+fn the_niche_actually_niches() {
+    // The size the "Halve What the Compat Residue Costs a Printing" reasoning depends on, pinned
+    // rather than asserted in a commit message. rkyv 0.8 does NOT niche an Option<NonZeroU32> on
+    // its own -- without `#[rkyv(with = NicheInto<Zero>)]` each of the eleven is 8 bytes and this
+    // struct is 128, which is what it measured at before the attribute was added. Multiplied by
+    // ~98,000 printings, the difference is 4.2 MB.
+    assert_eq!(std::mem::size_of::<Archived<CompatFields>>(), 84);
+    assert_eq!(std::mem::size_of::<Archived<Option<NonZeroU32>>>(), 8, "the bare Option is NOT niched");
+}
+
+#[test]
+fn absent_compat_values_stay_absent() {
+    // Scryfall OMITS a key rather than sending null, so a reconstructed card object has to be able
+    // to tell "was not there" from "was empty" -- otherwise every card sprouts nulls Scryfall never
+    // sent, and a client comparing shapes sees a difference on every single row.
+    let bytes = rkyv::to_bytes::<Error>(&CompatFields::default()).expect("serialize");
+    let a = rkyv::access::<Archived<CompatFields>, Error>(&bytes).expect("access");
+
+    assert!(a.arena_id.is_none());
+    assert!(a.mtgo_id.is_none());
+    assert!(a.penny_rank.is_none());
+    assert!(a.price_usd_foil.is_none());
+    assert_eq!(u16::from(a.lang_id), VOCAB_NONE, "absent lang is the sentinel, not vocab id 0");
+    assert_eq!(u16::from(a.set_type_id), VOCAB_NONE);
+    assert_eq!(u16::from(a.set_vid), VOCAB_NONE);
+    assert_eq!(a.games, 0);
+    assert_eq!(u16::from(a.flags), 0);
+    assert!(a.multiverse_ids.is_empty());
+    assert!(a.promo_types.is_empty());
+}
+
+#[test]
+fn external_ids_resolve_to_their_printing() {
+    let mut a = stub_printing(1, 1, Some(1.0));
+    a.compat = CompatFields {
+        multiverse_ids: vec![100, 101],
+        mtgo_id: NonZeroU32::new(200),
+        mtgo_foil_id: NonZeroU32::new(201),
+        arena_id: NonZeroU32::new(300),
+        ..CompatFields::default()
+    };
+    let mut b = stub_printing(2, 2, Some(1.0));
+    b.compat =
+        CompatFields { tcgplayer_id: NonZeroU32::new(400), tcgplayer_etched_id: NonZeroU32::new(401), ..CompatFields::default() };
+    let printings = vec![a, b];
+
+    let idx = build_external_id_index(&printings);
+    let bytes = rkyv::to_bytes::<Error>(&idx).expect("serialize");
+    let aidx = rkyv::access::<Archived<Vec<(u8, u64, u32)>>, Error>(&bytes).expect("access");
+
+    // A multiverse id is a LIST, so one printing contributes several entries.
+    assert_eq!(find_printing_by_external_id(aidx, EXT_MULTIVERSE, 100), Some(0));
+    assert_eq!(find_printing_by_external_id(aidx, EXT_MULTIVERSE, 101), Some(0));
+    // mtgo resolves against BOTH mtgo_id and mtgo_foil_id, as Scryfall's route does.
+    assert_eq!(find_printing_by_external_id(aidx, EXT_MTGO, 200), Some(0));
+    assert_eq!(find_printing_by_external_id(aidx, EXT_MTGO, 201), Some(0));
+    assert_eq!(find_printing_by_external_id(aidx, EXT_ARENA, 300), Some(0));
+    // ...and tcgplayer against both plain and etched.
+    assert_eq!(find_printing_by_external_id(aidx, EXT_TCGPLAYER, 400), Some(1));
+    assert_eq!(find_printing_by_external_id(aidx, EXT_TCGPLAYER, 401), Some(1));
+
+    // Namespaces are separate keyspaces: id 200 is an mtgo id, not an arena one.
+    assert_eq!(find_printing_by_external_id(aidx, EXT_ARENA, 200), None);
+    assert_eq!(find_printing_by_external_id(aidx, EXT_MTGO, 999), None);
+}
+
+#[test]
+fn a_shared_external_id_resolves_to_the_first_printing() {
+    // Etched and nonfoil rows do collide on a TCGplayer id. Printings are stored in descending
+    // prefer order, so the lowest index is the one the rest of the API would show.
+    let mut a = stub_printing(1, 1, Some(9.0));
+    a.compat = CompatFields { tcgplayer_id: NonZeroU32::new(500), ..CompatFields::default() };
+    let mut b = stub_printing(2, 2, Some(1.0));
+    b.compat = CompatFields { tcgplayer_id: NonZeroU32::new(500), ..CompatFields::default() };
+
+    let idx = build_external_id_index(&[a, b]);
+    let bytes = rkyv::to_bytes::<Error>(&idx).expect("serialize");
+    let aidx = rkyv::access::<Archived<Vec<(u8, u64, u32)>>, Error>(&bytes).expect("access");
+    assert_eq!(find_printing_by_external_id(aidx, EXT_TCGPLAYER, 500), Some(0));
+}
+
+#[test]
+fn related_cards_stand_alone_without_the_referenced_card() {
+    // The reason all_parts carries its own name and type line: a `token` component references a
+    // card the import FILTERS OUT (preprocess_card drops Token type lines), so an index into our
+    // cards would resolve to nothing. The reference has to be self-contained.
+    let mut printing = stub_printing(1, 1, None);
+    printing.all_parts = vec![
+        RelatedCard { id: 0xAAAA, name_id: 10, type_line_id: 11, component_id: 1 },
+        RelatedCard { id: 0xBBBB, name_id: 20, type_line_id: 21, component_id: 2 },
+    ];
+
+    let bytes = rkyv::to_bytes::<Error>(&printing).expect("serialize");
+    let a = rkyv::access::<Archived<Printing>, Error>(&bytes).expect("access");
+
+    assert_eq!(a.all_parts.len(), 2);
+    // Order is meaningful for melds: the two parts, then the result.
+    assert_eq!(u128::from(a.all_parts[0].id), 0xAAAA);
+    assert_eq!(u128::from(a.all_parts[1].id), 0xBBBB);
+    assert_eq!(u32::from(a.all_parts[0].name_id), 10);
+    assert_eq!(u32::from(a.all_parts[0].type_line_id), 11);
+    assert_ne!(u16::from(a.all_parts[0].component_id), u16::from(a.all_parts[1].component_id));
+}
+
+#[test]
+fn printings_without_relations_carry_none() {
+    let printing = stub_printing(1, 1, None);
+    let bytes = rkyv::to_bytes::<Error>(&printing).expect("serialize");
+    let a = rkyv::access::<Archived<Printing>, Error>(&bytes).expect("access");
+    assert!(a.all_parts.is_empty(), "~95% of printings have no relations");
+}
+
+// ─── Fuzzy name matching ──────────────────────────────────────────────────────
+
+/// `fuzzy_score_cleared` is a hand-rolled restatement of the metric that skips work two ways (the
+/// Jaccard prefilter, the size-ratio ceiling) and merges sorted runs instead of intersecting
+/// sets. It must agree EXACTLY with `fuzzy_similarity`, the reference statement — a single
+/// dropped window or an over-eager skip would shift every fuzzy score without failing anything
+/// else.
+///
+/// Lengths 1 and 2 are the interesting axis: they are the cases with no full 3-window, where the
+/// NUL padding is the only thing keeping two short strings from colliding.
+#[test]
+fn fuzzy_score_matches_the_reference() {
+    let cases = [
+        "",
+        "a",
+        "ab",
+        "abc",
+        "abcd",
+        "a b",
+        "a bc def",
+        "jace beleren",
+        "urza's bauble",
+        "  leading and trailing  ",
+        "!!! ??? ---",
+        "eowyn",
+        "fire // ice",
+        "x",
+        "aaaa aaaa",
+        "lightning bolt",
+        "bolt lightning",
+        "blightning",
+        "counterspell",
+        "counters",
+    ];
+    let mut dp = Vec::new();
+    let (mut ab, mut bb) = (Vec::new(), Vec::new());
+    let (mut at, mut bt) = (Vec::new(), Vec::new());
+    for a in cases {
+        for b in cases {
+            crate::fold_separators_into(a, &mut ab);
+            crate::fold_separators_into(b, &mut bb);
+            crate::name_trigrams_into(&ab, &mut at);
+            crate::name_trigrams_into(&bb, &mut bt);
+            let want = crate::fuzzy_similarity(a, b);
+            // Floor 0.0 asks for the score whenever one exists, so the skips are exercised
+            // against the reference rather than hidden behind them.
+            let got = crate::fuzzy_score_cleared(&at, &bt, &ab, &bb, 0.0, &mut dp);
+            match got {
+                Some(score) => assert!((score - want).abs() < 1e-6, "{a:?} vs {b:?}: {score} != {want}"),
+                None => assert_eq!(want, 0.0, "{a:?} vs {b:?}: skipped a nonzero score {want}"),
+            }
+        }
+    }
+}
+
+/// The metric itself, on the needles that fixed it. Hand-computed from the definition in lib.rs's
+/// module comment: J over the whole folded string's 3-byte windows, averaged with normalized
+/// Levenshtein.
+#[test]
+fn fuzzy_similarity_is_the_derived_metric() {
+    // Identical strings score 1.0, and separators are not characters.
+    assert!((fuzzy_similarity("abc", "abc") - 1.0).abs() < 1e-6);
+    assert!((fuzzy_similarity("urza's bauble", "urza s bauble") - 1.0).abs() < 1e-6);
+
+    // THE NEEDLE THAT DISPROVED pg_trgm. Word-set similarity scores `bolt lightning` against
+    // `Lightning Bolt` at 1.0, so Blightning could never win; Scryfall answers Blightning, and so
+    // does this metric. Measured on api.scryfall.com 2026-08-16.
+    let blightning = fuzzy_similarity("bolt lightning", "blightning");
+    let bolt = fuzzy_similarity("bolt lightning", "lightning bolt");
+    assert!(blightning > bolt, "bolt lightning: Blightning {blightning} must beat Lightning Bolt {bolt}");
+
+    // Nothing in common scores 0, and an empty side scores 0 rather than dividing by zero.
+    assert_eq!(fuzzy_similarity("abc", "xyz"), 0.0);
+    assert_eq!(fuzzy_similarity("", "abc"), 0.0);
+    assert_eq!(fuzzy_similarity("", ""), 0.0);
+
+    // Symmetric, as both halves are.
+    assert_eq!(fuzzy_similarity("lightning", "lightnin"), fuzzy_similarity("lightnin", "lightning"));
+
+    // The fitted floor admits the needles Scryfall resolves and rejects the ones it calls
+    // ambiguous or not_found — the plateau's two edges, on real names.
+    assert!(fuzzy_similarity("counterspellxxxxxxxxxx", "counterspell") >= crate::FUZZY_SCORE_FLOOR);
+    assert!(fuzzy_similarity("lihgtning bolt", "lightning bolt") >= crate::FUZZY_SCORE_FLOOR);
+    assert!(fuzzy_similarity("sol rin", "sol ring") >= crate::FUZZY_SCORE_FLOOR);
+    assert!(fuzzy_similarity("ring sol", "sol ring") < crate::FUZZY_SCORE_FLOOR);
+    assert!(fuzzy_similarity("red ego", "altered ego") < crate::FUZZY_SCORE_FLOOR);
+    assert!(fuzzy_similarity("bolt", "boltwave") < crate::FUZZY_SCORE_FLOOR);
+}
+
+/// A CardData whose cards carry the given names, one printing each — the fuzzy scan's minimal
+/// fixture. The printed-name index stays empty, which is every pre-multilingual store.
+fn named_cards_store(names: &[&str]) -> CardData {
+    let mut vocab = VocabInterner::new();
+    let mut cards = Vec::new();
+    for (i, name) in names.iter().enumerate() {
+        let mut c = stub_card(i as u128 + 1, 0, &[], &mut vocab);
+        c.card_name_folded = InlineStr::from_str(name);
+        c.card_name_lower = InlineStr::from_str(name);
+        cards.push(c);
+    }
+    let counts = vec![1usize; names.len()];
+    store_of(cards, &counts, vocab)
+}
+
+#[test]
+fn a_typo_resolves_to_the_intended_card() {
+    let data = named_cards_store(&["lightning bolt", "shock", "counterspell"]);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let a = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    match fuzzy_name_match(a, "lightnig bolt", crate::FUZZY_SCORE_FLOOR, crate::FUZZY_SCORE_LEAD) {
+        FuzzyOutcome::Hit { cid, vpid } => {
+            assert_eq!(cid, 0, "a one-letter typo still finds Lightning Bolt");
+            assert_eq!(vpid, 0, "an English hit carries the card's preferred printing");
+        }
+        _ => panic!("expected a hit"),
+    }
+    // Nothing close enough clears the floor.
+    assert!(matches!(fuzzy_name_match(a, "zzzzzzzz", crate::FUZZY_SCORE_FLOOR, crate::FUZZY_SCORE_LEAD), FuzzyOutcome::Miss));
+}
+
+#[test]
+fn two_close_names_are_ambiguous_not_a_guess() {
+    // Scryfall reports `ambiguous` rather than picking, and collapsing that to "not found" would
+    // tell the client the card does not exist.
+    //
+    // The pair is SYMMETRIC around the needle — "fire dragen" is one substitution from each, and
+    // each differs from it in the same three trigrams — so the two score identically and neither
+    // can lead. An asymmetric near-miss like "fire dragoon" (two edits, one more trigram) is NOT
+    // ambiguous under the derived metric and must not be used here: it loses by 0.068, which is
+    // the metric working rather than a tie.
+    let data = named_cards_store(&["fire dragon", "fire dragan"]);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let a = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    assert!(matches!(fuzzy_name_match(a, "fire dragen", crate::FUZZY_SCORE_FLOOR, crate::FUZZY_SCORE_LEAD), FuzzyOutcome::Ambiguous));
+}
+
+#[test]
+fn printings_of_one_card_do_not_look_ambiguous() {
+    // Several cards sharing a NAME are one answer, not competing ones. Without the distinct-name
+    // rule they would tie with themselves and every fuzzy lookup would report ambiguous.
+    let data = named_cards_store(&["lightning bolt", "lightning bolt", "lightning bolt"]);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let a = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    assert!(matches!(fuzzy_name_match(a, "lightning bolt", crate::FUZZY_SCORE_FLOOR, crate::FUZZY_SCORE_LEAD), FuzzyOutcome::Hit { .. }));
+}
+
+/// A catalog fixture: one card per (printed name, is_extra), one printing each.
+///
+/// The printed name is pushed into `strings` AFTER `store_of` (which fills `card_name_collated_id`
+/// from the folded name and pushes to the same table), so the two never fight over an index.
+fn autocomplete_store(entries: &[(&str, bool)]) -> CardData {
+    let mut vocab = VocabInterner::new();
+    // Interned with the rest of the vocab so `store_of`'s renumbering places it; resolved after.
+    vocab.intern(crate::EXTRA_IS_TAG.to_string()).expect("intern extra");
+    let mut cards = Vec::new();
+    for (i, (name, _)) in entries.iter().enumerate() {
+        let mut c = stub_card(i as u128 + 1, 0, &[], &mut vocab);
+        c.card_name_folded = InlineStr::from_str(&name.to_lowercase());
+        c.card_name_lower = InlineStr::from_str(&name.to_lowercase());
+        cards.push(c);
+    }
+    let counts = vec![1usize; entries.len()];
+    let mut data = store_of(cards, &counts, vocab);
+    for (i, (name, _)) in entries.iter().enumerate() {
+        data.strings.push((*name).to_string());
+        data.cards[i].card_name_id = (data.strings.len() - 1) as u32;
+    }
+    // The `is:extra` tag, on the printings of the cards Scryfall hides.
+    let extra_vid = coll_ids_in(&data.coll_vocab, &[crate::EXTRA_IS_TAG])[0];
+    for (i, (_, extra)) in entries.iter().enumerate() {
+        if *extra {
+            data.printings[i].card_is_tags.push(extra_vid);
+        }
+    }
+    data
+}
+
+/// The catalog's SET and ORDER, both measured against api.scryfall.com (2026-08-17) rather than
+/// against the SQL this route falls back to.
+#[test]
+fn autocomplete_orders_by_trigram_similarity_and_hides_extras() {
+    let data = autocomplete_store(&[
+        ("Light Up the Night", false),
+        ("Lightning Angel", false),
+        ("Lightning Bolt", false),
+        ("Serra Avenger", false),
+        ("Serenity", false),
+        // A token: in this corpus, and in none of Scryfall's answers.
+        ("Shark", true),
+        ("Shatter", false),
+        ("Shockwave", false),
+        ("Shock", false),
+        // The substring case: it contains "sho" without starting with it.
+        ("Aftershock", false),
+        // Collates to "goblin", so "gob" is a PREFIX of it.
+        ("_____ Goblin", false),
+        ("Goblin Welder", false),
+    ]);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let a = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    // THE ORDER IS SIMILARITY, NOT LENGTH, and these are the two shapes where the two disagree.
+    // `Light Up the Night` is 15 collated characters against `Lightning Angel`'s 14 and leads it,
+    // because `igh` and `ght` each occur twice and a trigram SET holds one of each. `Lightning
+    // Bolt` (13) sits between them, which is the ordering length would also give -- the point is
+    // that the 15 and the 13 TIE.
+    assert_eq!(
+        autocomplete_names(a, "lig", 20),
+        vec!["Light Up the Night", "Lightning Bolt", "Lightning Angel"],
+        "a repeated window shrinks the trigram set, so the longer name leads"
+    );
+    // `Serra Avenger` (12) leads `Serenity` (8) because it ends in "er" and so carries the "er "
+    // window "  ser " closes with. Nothing about length can express this.
+    assert_eq!(
+        autocomplete_names(a, "ser", 20),
+        vec!["Serra Avenger", "Serenity"],
+        "sharing the needle's closing window outranks being four characters shorter"
+    );
+
+    // Substring matches are IN the set and rank behind every prefix match. Verified against
+    // api.scryfall.com, where q=bolt answers Bolt Bend .. Boltwing Marauder THEN Firebolt,
+    // Rift Bolt -- a prefix-only catalog would never offer the client "Aftershock" at all.
+    assert_eq!(
+        autocomplete_names(a, "sho", 20),
+        vec!["Shock", "Shockwave", "Aftershock"],
+        "prefix matches rank 0, substring matches rank 1"
+    );
+    assert_eq!(autocomplete_names(a, "SHO", 20), vec!["Shock", "Shockwave", "Aftershock"], "case-insensitive");
+    // "Shark" is a token and never reaches a client, so it is absent here and does not consume
+    // the cap below either.
+    assert_eq!(
+        autocomplete_names(a, "sh", 20),
+        vec!["Shock", "Shatter", "Shockwave", "Aftershock"],
+        "the catalog excludes extras, and answers with the PRINTED name"
+    );
+    // The cap applies to the ORDERED list, so it keeps the best prefix match rather than
+    // whichever name the corpus happened to reach first.
+    assert_eq!(autocomplete_names(a, "sh", 1), vec!["Shock"], "capped, after ordering");
+
+    // The rank split and the predicate are asked of the COLLATED name: api.scryfall.com answers
+    // q=gob with `_____ Goblin` FIRST, and answers q=ningbolt with `Lightning Bolt` -- "ningbolt"
+    // is a substring of "lightningbolt" and of no spelling that keeps the space.
+    assert_eq!(
+        autocomplete_names(a, "gob", 20),
+        vec!["_____ Goblin", "Goblin Welder"],
+        "underscores are not part of the name the prefix rank is asked about"
+    );
+    assert_eq!(autocomplete_names(a, "ningbolt", 20), vec!["Lightning Bolt"], "the predicate is collated too");
+
+    assert!(autocomplete_names(a, "zzz", 20).is_empty());
+    // The route's own two-character floor, re-asked of the COLLATED needle: `q=a` is an empty
+    // catalog on api.scryfall.com, and a needle that collates to one letter is that query.
+    assert!(autocomplete_names(a, "s", 20).is_empty(), "under two collated characters is an empty catalog");
+}
+
+#[test]
+fn printing_ranks_run_over_the_canonical_and_annex_union() {
+    // Set codes: canonical rows in "aaa" and "ccc"; annex rows in "bbb" (annex-only) and "ccc"
+    // (shared). Dense over the union: aaa=0, bbb=1, ccc=2 — the annex-only code takes a rank of
+    // its own WITHOUT reordering the canonical codes around it.
+    let mut canonical = vec![stub_printing(1, 1, None), stub_printing(2, 2, None)];
+    canonical[0].card_set_code = InlineStr::from_str("aaa");
+    canonical[1].card_set_code = InlineStr::from_str("ccc");
+    let mut foreign = vec![stub_printing(3, 3, None), stub_printing(4, 4, None)];
+    foreign[0].card_set_code = InlineStr::from_str("bbb");
+    foreign[1].card_set_code = InlineStr::from_str("ccc");
+
+    assign_set_ranks(&mut canonical, &mut foreign);
+
+    assert_eq!(canonical[0].set_rank, 0);
+    assert_eq!(canonical[1].set_rank, 2);
+    assert_eq!(foreign[0].set_rank, 1);
+    assert_eq!(foreign[1].set_rank, 2, "a shared set code ties across the two spaces");
+    // The canonical ORDER is what the union must preserve: dense ranks over a superset never
+    // reorder the subset.
+    assert!(canonical[0].set_rank < canonical[1].set_rank);
+}
+
+#[test]
+fn annex_artwork_groups_share_canonical_ids_and_extend_past_them() {
+    // One card: canonical printings with illustrations 10 and 20 (gids 0 and 1); annex rows with
+    // illustration 20 (shares gid 1) and 30 (annex-only, continues at gid 2).
+    let mut printings = vec![stub_printing(1, 10, Some(2.0)), stub_printing(2, 20, Some(1.0))];
+    let offsets = vec![0u32, 2];
+    let counts = assign_artwork_groups(&mut printings, &offsets);
+    assert_eq!(counts, vec![2]);
+
+    let mut foreign = vec![stub_printing(3, 20, Some(0.5)), stub_printing(4, 30, Some(0.4))];
+    let foreign_offsets = vec![0u32, 2];
+    assign_foreign_artwork_groups(&mut foreign, &foreign_offsets, &printings, &offsets);
+
+    assert_eq!(foreign[0].artwork_group_id, 1, "shared artwork shares the canonical gid");
+    assert_eq!(foreign[1].artwork_group_id, 2, "a foreign-only illustration continues after the canonical count");
+    // And the canonical side is untouched: same gids, same counts as before the annex existed.
+    assert_eq!(printings[0].artwork_group_id, 0);
+    assert_eq!(printings[1].artwork_group_id, 1);
+}
+
+/// One card, two printing spaces: a canonical English "lightning bolt" printing and a French
+/// annex printing carrying the printed name "eclair de foudre" — the widened driver's and the
+/// foreign fuzzy pass's minimal fixture.
+fn bilingual_store() -> (CardData, u16, u16) {
+    let mut vocab = VocabInterner::new();
+    vocab.intern("en".to_string()).expect("intern en");
+    vocab.intern("fr".to_string()).expect("intern fr");
+    let mut card = stub_card(1, 0, &[], &mut vocab);
+    card.card_name_folded = InlineStr::from_str("lightning bolt");
+    card.card_name_lower = InlineStr::from_str("lightning bolt");
+    let mut data = store_of(vec![card], &[1], vocab);
+    // Resolved AFTER store_of, which renumbers the vocab (see `coll_ids_in`).
+    let en = coll_ids_in(&data.coll_vocab, &["en"])[0];
+    let fr = coll_ids_in(&data.coll_vocab, &["fr"])[0];
+    data.printings[0].compat.lang_id = en;
+
+    let mut foreign = stub_printing(2, 2, None);
+    foreign.compat.lang_id = fr;
+    data.strings = vec!["eclair de foudre".to_string()];
+    foreign.printed_name_folded_id = 0;
+    data.foreign = vec![foreign];
+    data.foreign_offsets = vec![0, 1];
+    data.indexes.langs = build_lang_index(&data.printings, &data.coll_vocab);
+    data.indexes.foreign_langs = build_lang_index(&data.foreign, &data.coll_vocab);
+    data.indexes.foreign_to_card = build_printing_to_card(&data.foreign_offsets);
+    data.indexes.printed_names = build_printed_name_index(&data.printings, &data.foreign, &data.strings, |p| p.printed_name_folded_id);
+    (data, en, fr)
+}
+
+#[test]
+fn a_lang_query_answers_the_foreign_printing_itself() {
+    let (data, _, fr) = bilingual_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let a = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    // lang:fr as the bound filter: unique=cards still answers with the French row — the mode
+    // picks the best MATCHING row, and no canonical row matches.
+    let filter = FilterExpr::LangMatch { value: "fr".to_string(), vid: Some(fr), any: false };
+    let params = QueryParams::from_strs("card", "default", "edhrec", "asc", 100, 0);
+    let (total, page) = run_query_widened(a, &params, &filter);
+    assert_eq!(total, 1);
+    assert_eq!(page.len(), 1);
+    assert_eq!(u128::from(page[0].1.scryfall_id), 2, "the annex row, not the canonical one");
+}
+
+#[test]
+fn include_multilingual_rolls_up_to_the_canonical_row() {
+    let (data, _, _) = bilingual_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let a = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    // No lang pinned (the include_multilingual trigger): every row matches, and under
+    // unique=cards the canonical row wins on prefer — foreign rows lack the English bonus.
+    let params = QueryParams::from_strs("card", "default", "edhrec", "asc", 100, 0);
+    let (total, page) = run_query_widened(a, &params, &FilterExpr::True);
+    assert_eq!(total, 1);
+    assert_eq!(u128::from(page[0].1.scryfall_id), 1, "rolls up to the canonical printing");
+
+    // unique=prints keeps both, canonical before annex within the card.
+    let params = QueryParams::from_strs("printing", "default", "edhrec", "asc", 100, 0);
+    let (total, page) = run_query_widened(a, &params, &FilterExpr::True);
+    assert_eq!(total, 2);
+    assert_eq!(u128::from(page[0].1.scryfall_id), 1);
+    assert_eq!(u128::from(page[1].1.scryfall_id), 2);
+}
+
+/// `is:flavorname` reads the printing's flavor name — top-level OR on a face — and WIDENS.
+///
+/// api.scryfall.com, 2026-09-01: 476 cards / 661 printings. 6 of the 661 are Japanese rows
+/// returned with no `lang:` written (iko/387 ja prints "Mechagodzilla, the Weapon" over
+/// 結晶の巨人), and 15 carry the key on their FACES alone and never at the top level (vow/341
+/// is "Dracula the Voyager" // "Casket of Native Earth"). One printing per shape here, plus
+/// an English sibling and a plain card that must both stay out.
+#[test]
+fn is_flavorname_reads_either_place_the_key_lives_and_widens() {
+    let mut vocab = VocabInterner::new();
+    vocab.intern("en".to_string()).expect("intern en");
+    vocab.intern("ja".to_string()).expect("intern ja");
+    // Four cards, one canonical printing each (scryfall ids 1..=4): Vial Smasher the Fierce with
+    // the top-level key (sld/1864's shape), Crystalline Giant whose English row carries nothing
+    // and whose Japanese ANNEX row (id 5) does, Edgar, Charmed Groom with the key on its faces
+    // alone, and a plain card.
+    let (oracle_faces, mut printing_faces) = two_faces();
+    let mut cards: Vec<OracleCard> = (1..=4).map(|i| stub_card(i, 0, &[], &mut vocab)).collect();
+    cards[2].faces = oracle_faces;
+    let mut data = store_of(cards, &[1, 1, 1, 1], vocab);
+    // Resolved AFTER store_of, which renumbers the vocab (see `coll_ids_in`).
+    let en = coll_ids_in(&data.coll_vocab, &["en"])[0];
+    let ja = coll_ids_in(&data.coll_vocab, &["ja"])[0];
+    // Padded past the largest interned id `two_faces` hands out, so no face field dangles.
+    let mut strings: Vec<String> = (0..20).map(|i| format!("s{i}")).collect();
+    strings[0] = "Clive Rosfield".to_string();
+    strings[1] = "Mechagodzilla, the Weapon".to_string();
+    strings[2] = "Dracula the Voyager".to_string();
+    strings[3] = "Casket of Native Earth".to_string();
+    data.strings = strings;
+    for p in &mut data.printings {
+        p.compat.lang_id = en;
+    }
+    data.printings[0].flavor_name_id = 0;
+    printing_faces[0].flavor_name_id = 2;
+    printing_faces[1].flavor_name_id = 3;
+    data.printings[2].faces = printing_faces;
+    assert_eq!(data.printings[2].flavor_name_id, NONE_STR, "face-only: Scryfall emits no top-level key there");
+
+    let mut foreign = stub_printing(5, 5, None);
+    foreign.compat.lang_id = ja;
+    foreign.flavor_name_id = 1;
+    data.foreign = vec![foreign];
+    data.foreign_offsets = vec![0, 0, 1, 1, 1];
+    data.indexes.langs = build_lang_index(&data.printings, &data.coll_vocab);
+    data.indexes.foreign_langs = build_lang_index(&data.foreign, &data.coll_vocab);
+    data.indexes.foreign_to_card = build_printing_to_card(&data.foreign_offsets);
+    data.indexes.printed_names = build_printed_name_index(&data.printings, &data.foreign, &data.strings, |p| p.printed_name_folded_id);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let a = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    // The tag arrives as `card_is_tags` membership like every other `is:` value and becomes its
+    // own leaf here, beside `localizedname` — nothing is stored for it.
+    let filter = super::build_filter(&serde_json::json!({
+        "node_type": "CardBinaryOperatorNode",
+        "kwargs": {
+            "op": ":",
+            "lhs": {"node_type": "CardAttributeNode", "kwargs": {"attribute_name": "card_is_tags", "original_attribute": "is"}},
+            "rhs": ["flavorname"],
+        }
+    }))
+    .expect("is:flavorname must build");
+    assert!(matches!(filter, FilterExpr::FlavorNamePresent), "is:flavorname must build its own leaf");
+    assert!(filter.widens_to_annex(), "its presence reaches the annex with no lang: written");
+
+    let ids_of = |page: &[(&crate::AOracleCard, &crate::APrinting)]| {
+        let mut ids: Vec<u128> = page.iter().map(|(_, p)| u128::from(p.scryfall_id)).collect();
+        ids.sort_unstable();
+        ids
+    };
+    let prints = QueryParams::from_strs("printing", "default", "edhrec", "asc", 100, 0);
+    let (total, page) = run_query_widened(a, &prints, &filter);
+    assert_eq!(total, 3, "the top-level English row, the Japanese annex row, and the face-only transform");
+    assert_eq!(ids_of(&page), [1, 3, 5], "the English Giant (2) carries no flavor name and stays out");
+
+    // Per PRINTING under unique=prints, and still three CARDS under unique=cards: the Giant is
+    // answered through its Japanese row, the way `clive is:flavorname` is three cards there.
+    let cards = QueryParams::from_strs("card", "default", "edhrec", "asc", 100, 0);
+    let (total, page) = run_query_widened(a, &cards, &filter);
+    assert_eq!(total, 3);
+    assert_eq!(ids_of(&page), [1, 3, 5]);
+
+    // The complement, over the same widened space: the English Giant and the plain card.
+    let negated = FilterExpr::Not(Box::new(FilterExpr::FlavorNamePresent));
+    let (total, page) = run_query_widened(a, &prints, &negated);
+    assert_eq!(total, 2);
+    assert_eq!(ids_of(&page), [2, 4]);
+}
+
+/// `order=set`'s second key is the collector number, by Scryfall's own (int, string) rule.
+///
+/// Read off api.scryfall.com on 2026-08-16: khm answers `... 39, 40, A-40, 41 ... 378, A-378,
+/// 379 ...`, so an ARENA-rebalanced row sits with the paper number it was rebalanced from rather
+/// than past every number, and `e:unk` answers `CAa, CAb, UB, CA01, ...`, so a digit-free number
+/// leads. Three shapes, one rule: integer first (9 before 10 — not a string sort), raw string
+/// breaking equal integers ("40" before "A-40" — not an integer sort), absent integer first.
+/// `order=artist` collates like `order=name` — the space is not a character.
+///
+/// Measured 2026-08-16 over 348 adjacent pairs from `e:khm` and `e:ltr` ordered by artist:
+/// stripping non-alphanumerics has 0 violations, raw byte order has 4. Each of those four is a
+/// pair where a space decides — `Alexander Mokhov` before `Alex Konstad`, `Steven Belledin`
+/// before `Steve Prescott`, `Daniel Zrom` before `Dan Murayama Scott` — and byte order gets every
+/// one of them backwards, because a space sorts below every letter.
+#[test]
+fn assign_artist_ranks_collates_like_a_name() {
+    let vocab_names = ["alex konstad", "alexander mokhov", "steve prescott", "steven belledin"];
+    // `CardData.artist_vocab_collated` is collated at BUILD now — `a:` matches against it as well
+    // as `order=artist` ranking on it — so the collation happens here rather than inside
+    // assign_artist_ranks. The ordering this asserts is unchanged.
+    let artist_vocab: Vec<String> = vocab_names.iter().map(|s| crate::collate_name(s)).collect();
+    let mut vocab = VocabInterner::new();
+    let mut printings: Vec<Printing> = (0..4)
+        .map(|i| {
+            let mut p = stub_printing(i as u128, i as u128, None);
+            p.card_artist_vid = i as u16;
+            p
+        })
+        .collect();
+    let _ = &mut vocab;
+    let mut none: Vec<Printing> = Vec::new();
+    assign_artist_ranks(&mut printings, &mut none, &artist_vocab);
+
+    let mut order: Vec<(u32, &str)> = printings.iter().zip(vocab_names).map(|(p, n)| (p.artist_rank, n)).collect();
+    order.sort_by_key(|&(r, _)| r);
+    assert_eq!(
+        order.iter().map(|&(_, n)| n).collect::<Vec<_>>(),
+        ["alexander mokhov", "alex konstad", "steven belledin", "steve prescott"],
+        "the space is dropped, so `alexander` beats `alexk` and `stevenb` beats `stevep`"
+    );
+}
+
+/// A card's annex rows are STORED in language order, which is the order Scryfall serves them in.
+///
+/// Measured 2026-08-16: `e:khm cn:1 include_multilingual=true` answers en, de, es, fr, it, ja, ko,
+/// pt, ru, zhs, zht. English is canonical and lives in the other space, so what has to be arranged
+/// here is the alphabetical tail — and it must beat prefer order, which is what it replaces: the
+/// fixture gives the LAST language alphabetically the best prefer score, so a prefer-desc store
+/// would put it first.
+#[test]
+fn the_annex_is_stored_in_language_order() {
+    let mut vocab = VocabInterner::new();
+    let ja = vocab.intern("ja".to_string()).expect("ja");
+    let de = vocab.intern("de".to_string()).expect("de");
+    let pt = vocab.intern("pt".to_string()).expect("pt");
+    let coll_vocab = vocab.strings.clone();
+    let row = |scry: u128, lang: u16, prefer: f32| {
+        let mut p = stub_printing(scry, scry, Some(prefer));
+        p.compat.lang_id = lang;
+        p
+    };
+    // Arrival order is prefer-desc, and it disagrees with language order on every pair.
+    let mut foreign = vec![row(1, pt, 90.0), row(2, ja, 80.0), row(3, de, 70.0)];
+    order_annex_by_language(&mut foreign, &[0, 3], &coll_vocab);
+    let langs: Vec<&str> = foreign.iter().map(|p| coll_vocab[p.compat.lang_id as usize].as_str()).collect();
+    assert_eq!(langs, ["de", "ja", "pt"], "alphabetical by code, not by prefer score");
+}
+
+#[test]
+fn assign_collector_ranks_follows_scryfalls_number_then_string() {
+    let numbers = ["41", "A-40", "40", "10", "9", "UB"];
+    let strings: Vec<String> = numbers.iter().map(|s| (*s).to_string()).collect();
+    let mut printings: Vec<Printing> = numbers
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            let mut p = stub_printing(i as u128, i as u128, None);
+            p.collector_number_id = i as u32;
+            p.collector_number_int = n.chars().filter(char::is_ascii_digit).collect::<String>().parse().ok();
+            p
+        })
+        .collect();
+    let mut none: Vec<Printing> = Vec::new();
+    assign_collector_ranks(&mut printings, &mut none, &strings);
+
+    let mut order: Vec<(u16, &str)> = printings.iter().zip(numbers).map(|(p, n)| (p.collector_rank, n)).collect();
+    order.sort_by_key(|&(rank, _)| rank);
+    assert_eq!(
+        order.iter().map(|&(_, n)| n).collect::<Vec<_>>(),
+        ["UB", "9", "10", "40", "A-40", "41"],
+        "absent integer first, then integer, then the raw string"
+    );
+    // Dense and gapless, so the complement `sort_col_secondary` applies under `dir=desc` is an
+    // exact reversal rather than a reflection about an arbitrary point.
+    assert_eq!(order.iter().map(|&(r, _)| r).collect::<Vec<_>>(), [0, 1, 2, 3, 4, 5]);
+}
+
+/// One card, four sets' worth of rows: the Maskwood Nexus shape from the multilingual ledger.
+///
+/// The card's representative printing is in clb; the query asks for khm, where the English pair is
+/// #240 (better) and #369 (extended art), and the two Japanese rows sit at those same two slots.
+fn cross_set_language_store() -> (CardData, u16, u16) {
+    let mut vocab = VocabInterner::new();
+    vocab.intern("en".to_string()).expect("intern en");
+    vocab.intern("ja".to_string()).expect("intern ja");
+    let mut card = stub_card(1, 0, &[], &mut vocab);
+    card.card_name_folded = InlineStr::from_str("maskwood nexus");
+    card.card_name_lower = InlineStr::from_str("maskwood nexus");
+
+    // strings[0..] are the collector numbers the slots are keyed on.
+    let numbers = ["865", "240", "369"];
+    let row = |scry: u128, set: &str, cn: u32, prefer: f32, lang: u16| {
+        let mut p = stub_printing(scry, scry, Some(prefer));
+        p.card_set_code = InlineStr::from_str(set);
+        p.collector_number_id = cn;
+        p.compat.lang_id = lang;
+        p
+    };
+    let mut data = store_of(vec![card], &[3], vocab);
+    // Resolved AFTER store_of, which renumbers the vocab (see `coll_ids_in`); the rows below
+    // carry these ids, so they are built after it too.
+    let en = coll_ids_in(&data.coll_vocab, &["en"])[0];
+    let ja = coll_ids_in(&data.coll_vocab, &["ja"])[0];
+    let canonical =
+        vec![row(1, "clb", 0, 240.0, en), row(2, "khm", 1, 197.36, en), row(3, "khm", 2, 191.36, en)];
+    data.printings = canonical;
+    data.strings = numbers.iter().map(|s| (*s).to_string()).collect();
+    // The two Japanese rows, and the WRONG one scores higher — Scryfall's data gives the ja
+    // extended-art printing no frame_effects, so nothing in the rows themselves prefers #240.
+    data.foreign = vec![row(4, "khm", 1, 90.0, ja), row(5, "khm", 2, 95.0, ja)];
+    data.foreign_offsets = vec![0, 2];
+    data.indexes.langs = build_lang_index(&data.printings, &data.coll_vocab);
+    data.indexes.foreign_langs = build_lang_index(&data.foreign, &data.coll_vocab);
+    data.indexes.foreign_to_card = build_printing_to_card(&data.foreign_offsets);
+    data.indexes.printed_names = build_printed_name_index(&data.printings, &data.foreign, &data.strings, |p| p.printed_name_folded_id);
+    (data, en, ja)
+}
+
+/// `lang:` + `unique=cards` follows the query's OWN English pick, not the card's global one.
+///
+/// api.scryfall.com answers khm ja #240 for `e:khm lang:ja unique=cards`, even though the card's
+/// representative printing lives in clb and so no khm row carries the representative bonus. The
+/// fixture makes the wrong answer the easy one: ja #369 outscores ja #240 on its own prefer, so a
+/// per-row rule picks #369. Only reading the canonical row at each SLOT, under the query with its
+/// language lifted, gets #240.
+#[test]
+fn a_language_pick_follows_the_english_row_in_the_querys_own_set() {
+    let (data, _, ja) = cross_set_language_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let a = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let khm = FilterExpr::TextExact { field: TextField::SetCode, op: CmpOp::Eq, value: "khm".to_string() };
+    let lang = FilterExpr::LangMatch { value: "ja".to_string(), vid: Some(ja), any: false };
+    let scoped = FilterExpr::And(vec![khm, lang]);
+
+    let params = QueryParams::from_strs("card", "default", "edhrec", "asc", 100, 0);
+    let (total, page) = run_query_widened(a, &params, &scoped);
+    assert_eq!(total, 1, "one card");
+    assert_eq!(u128::from(page[0].1.scryfall_id), 4, "the ja row at #240, the best khm ENGLISH slot");
+
+    // The row that outscores it is still there — this reorders the representative, it drops nothing.
+    let params = QueryParams::from_strs("printing", "default", "edhrec", "asc", 100, 0);
+    let (total, _) = run_query_widened(a, &params, &scoped);
+    assert_eq!(total, 2, "both ja rows still match");
+
+    // And the English lane is unmoved: bare widening rolls up to the card's own representative.
+    let params = QueryParams::from_strs("card", "default", "edhrec", "asc", 100, 0);
+    let (_, page) = run_query_widened(a, &params, &FilterExpr::True);
+    assert_eq!(u128::from(page[0].1.scryfall_id), 1, "clb 865 is still the card's own pick");
+}
+
+/// A foreign printed name gets NO TYPO TOLERANCE from this scan, and that is Scryfall's rule
+/// rather than a simplification. Measured on api.scryfall.com 2026-08-16: `fuzzy=blitzschlag`
+/// resolves the German printing of Lightning Bolt and `fuzzy=blitzschlagg` answers 404;
+/// `fuzzy=ego a deriva` resolves the Portuguese printing of Unmoored Ego and `fuzzy=ego a derva`
+/// answers 404. Printed names reach `?fuzzy=` through the EXACT and CONTAINMENT stages, which
+/// index them; this scan reads oracle names, which also takes ~247k records off its hot path.
+#[test]
+fn a_foreign_printed_name_gets_no_typo_tolerance() {
+    let (data, _, _) = bilingual_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let a = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    assert!(matches!(
+        fuzzy_name_match(a, "eclair de fouder", crate::FUZZY_SCORE_FLOOR, crate::FUZZY_SCORE_LEAD),
+        FuzzyOutcome::Miss
+    ));
+    // The card's own English and foreign names are ONE answer, never ambiguous with each other.
+    assert!(matches!(fuzzy_name_match(a, "lightning bolt", crate::FUZZY_SCORE_FLOOR, crate::FUZZY_SCORE_LEAD), FuzzyOutcome::Hit { .. }));
+}
+
+#[test]
+fn an_annex_only_oracle_is_dropped_not_panicked() {
+    // The real-corpus trigger: the ja 4ED printings of the ante cards (Bronze Tablet, Rebirth,
+    // Tempest Efreet) alone carry `oldschool: legal`, so the never-legal import filter keeps only
+    // non-canonical rows and the oracle reaches grouping annex-only. Before the drop guard this
+    // PANICKED the build (`divergent_formats_of` on the zero-width canonical window). Both close
+    // sites take the guard: the interior group boundary and the end of the stream.
+    let mut vocab = VocabInterner::new();
+    let mut cards = vec![stub_card(1, 0, &[], &mut vocab)];
+    let mut printings: Vec<Printing> = Vec::new();
+    let mut offsets = vec![0u32];
+    let mut foreign = vec![stub_printing(11, 11, None)];
+    let mut foreign_offsets = vec![0u32];
+    let (mut dropped, mut rows_dropped) = (0usize, 0usize);
+
+    // Interior close: the first group ends with no canonical row — dropped whole, annex row too.
+    drop_group_if_annex_only(
+        &mut cards, &printings, &mut offsets, &mut foreign, &mut foreign_offsets, &mut dropped, &mut rows_dropped,
+    );
+    assert!(cards.is_empty(), "the annex-only oracle is gone, card and rows alike");
+    assert!(foreign.is_empty());
+    assert_eq!((dropped, rows_dropped), (1, 1));
+
+    // A group WITH a canonical row survives untouched, its annex rows with it.
+    cards.push(stub_card(2, 0, &[], &mut vocab));
+    offsets.push(0);
+    foreign_offsets.push(0);
+    printings.push(stub_printing(21, 21, Some(2.0)));
+    foreign.push(stub_printing(22, 22, None));
+    drop_group_if_annex_only(
+        &mut cards, &printings, &mut offsets, &mut foreign, &mut foreign_offsets, &mut dropped, &mut rows_dropped,
+    );
+    assert_eq!(cards.len(), 1, "a canonical row keeps the group");
+    assert_eq!((printings.len(), foreign.len()), (1, 1));
+    assert_eq!((dropped, rows_dropped), (1, 1));
+
+    // End-of-stream close: a trailing annex-only group (two annex rows) drops the same way.
+    cards.push(stub_card(3, 0, &[], &mut vocab));
+    offsets.push(printings.len() as u32);
+    foreign_offsets.push(foreign.len() as u32);
+    foreign.push(stub_printing(31, 31, None));
+    foreign.push(stub_printing(32, 32, None));
+    drop_group_if_annex_only(
+        &mut cards, &printings, &mut offsets, &mut foreign, &mut foreign_offsets, &mut dropped, &mut rows_dropped,
+    );
+    assert_eq!(cards.len(), 1);
+    assert_eq!(foreign.len(), 1, "only the surviving card's annex row remains");
+    assert_eq!((dropped, rows_dropped), (2, 3));
+    // The accounting invariant reload_commit asserts: canonical + annex + dropped == staged.
+    assert_eq!(printings.len() + foreign.len() + rows_dropped, 5);
+}
+
+/// `assign_single_set_flags` counts SETS, over the canonical rows AND the annex.
+///
+/// Three cards, each breaking a different wrong rule. A: two printings, one set — unique, so
+/// "prints == 1" is not it (`!"Forest"` is the real-corpus shape: two lea printings, one set).
+/// B: one English set plus an annex row in a set of its own — NOT unique, the case a
+/// canonical-only walk gets wrong on 130 real cards (the Salvat inserts, ps11, pmei, none of
+/// which api.scryfall.com calls unique). C: a canonical row and an annex row in the SAME set —
+/// unique, so the annex cannot simply be counted either.
+#[test]
+fn single_set_counts_sets_across_the_annex() {
+    let mut vocab = VocabInterner::new();
+    let mut cards = vec![
+        stub_card(1, 0, &[], &mut vocab),
+        stub_card(2, 0, &[], &mut vocab),
+        stub_card(3, 0, &[], &mut vocab),
+    ];
+    let set = |p: &mut Printing, code: &str| p.card_set_code = InlineStr::from_str(code);
+    let mut canonical = vec![
+        stub_printing(1, 1, None),
+        stub_printing(2, 2, None),
+        stub_printing(3, 3, None),
+        stub_printing(4, 4, None),
+    ];
+    set(&mut canonical[0], "aaa");
+    set(&mut canonical[1], "aaa");
+    set(&mut canonical[2], "aaa");
+    set(&mut canonical[3], "aaa");
+    let offsets = vec![0u32, 2, 3, 4];
+    let mut foreign = vec![stub_printing(5, 5, None), stub_printing(6, 6, None)];
+    set(&mut foreign[0], "bbb"); // B's annex row, in a set of its own
+    set(&mut foreign[1], "aaa"); // C's annex row, in the set C already has
+    let foreign_offsets = vec![0u32, 0, 1, 2];
+
+    assign_single_set_flags(&mut cards, &canonical, &offsets, &foreign, &foreign_offsets);
+
+    assert!(cards[0].single_set, "two printings of one set is still one set");
+    assert!(!cards[1].single_set, "an annex-only second set disqualifies it");
+    assert!(cards[2].single_set, "an annex row in the same set changes nothing");
+}
+
+// `=` IS `:` ON A TEXT OR COLLECTION COLUMN — the one operator on those columns that carries no
+// information of its own.
+//
+// Measured on api.scryfall.com 2026-08-16, `X=v` against `X:v` on the same corpus, identical on
+// every row: `o=flying` 4,574 = `o:flying` 4,574 (this answered the cards whose oracle text IS the
+// word "flying"), `ft=aether` 80 = `ft:aether` 80, `name=ft` 1,628 = `name:ft` 1,628,
+// `kw=flying e:khm` 28 = `kw:flying` 28 (this answered 9 — the cards whose ONLY keyword is
+// Flying, a set equality nothing asks for), `otag=ramp e:khm` 35 = `otag:ramp` 35,
+// `t=creature e:khm` 151 = `t:creature` 151.
+//
+// The bare/quoted split survives it intact rather than being flattened to one side: `name="ft"` is
+// 362 on Scryfall, exactly `name:"ft"`, against `name=ft`'s 1,628. That distinction rides on the
+// rhs NODE SHAPE, which the operator does not touch, so routing `=` through the same branch keeps
+// it for free — pinned below on both spellings.
+#[test]
+fn equals_is_a_synonym_for_colon_on_text_and_collection_columns() {
+    let leaf = |attr: &str, op: &str, rhs: serde_json::Value| -> FilterExpr {
+        super::build_filter(&serde_json::json!({
+            "node_type": "CardBinaryOperatorNode",
+            "kwargs": {
+                "op": op,
+                "lhs": {"node_type": "CardAttributeNode", "kwargs": {"attribute_name": attr, "original_attribute": attr}},
+                "rhs": rhs,
+            }
+        }))
+        .unwrap_or_else(|e| panic!("{attr}{op} must build: {e}"))
+    };
+    let string_node = |v: &str| serde_json::json!({"node_type": "StringValueNode", "kwargs": {"value": v}});
+    let collated_node = |v: &str| serde_json::json!({"node_type": "CollatedNameValueNode", "kwargs": {"value": v}});
+
+    // A TEXT column: same field, same needle, under both spellings of the operator.
+    for (attr, rhs) in [
+        ("oracle_text", string_node("flying")),
+        ("flavor_text", string_node("aether")),
+        ("card_name", collated_node("ft")),
+        // ...and the QUOTED form, which is a different search and stays a different search.
+        ("card_name", string_node("ft")),
+        ("card_artist", collated_node("moeller")),
+    ] {
+        match (leaf(attr, ":", rhs.clone()), leaf(attr, "=", rhs.clone())) {
+            (
+                FilterExpr::TextContains { field: colon_field, word: colon_word },
+                FilterExpr::TextContains { field: equals_field, word: equals_word },
+            ) => {
+                assert!(colon_field == equals_field, "{attr}= must search the same field as {attr}:");
+                assert_eq!(colon_word, equals_word, "{attr}= must carry the same needle as {attr}:");
+            }
+            _ => panic!("{attr} must build a TextContains under both `:` and `=`"),
+        }
+    }
+
+    // The two card_name spellings must still land on DIFFERENT fields under `=`, or the split has
+    // been flattened rather than preserved.
+    let bare = leaf("card_name", "=", collated_node("ft"));
+    let quoted = leaf("card_name", "=", string_node("ft"));
+    match (bare, quoted) {
+        (FilterExpr::TextContains { field: bare_field, .. }, FilterExpr::TextContains { field: quoted_field, .. }) => {
+            assert!(bare_field == TextSearchField::NameCollated);
+            assert!(quoted_field == TextSearchField::NameLower);
+        }
+        _ => panic!("both card_name spellings must build a TextContains"),
+    }
+
+    // A COLLECTION column: `=` is containment, not set equality.
+    for attr in ["card_keywords", "card_oracle_tags", "card_art_tags", "card_is_tags", "card_frame_data", "card_subtypes"] {
+        let rhs = serde_json::json!(["flying"]);
+        match (leaf(attr, ":", rhs.clone()), leaf(attr, "=", rhs.clone())) {
+            (
+                FilterExpr::CollectionCmp { op: colon_op, value: colon_value, .. },
+                FilterExpr::CollectionCmp { op: equals_op, value: equals_value, .. },
+            ) => {
+                assert_eq!(colon_op, CmpOp::Ge, "{attr}: is containment");
+                assert_eq!(equals_op, CmpOp::Ge, "{attr}= must be containment too, not Eq");
+                assert_eq!(colon_value, equals_value);
+            }
+            _ => panic!("{attr} must build a CollectionCmp under both `:` and `=`"),
+        }
+    }
+
+    // THE BOUNDARY, probed in the other direction rather than assumed. `=` stays a real equality
+    // on the set-valued COLOR columns and on mana, because equality IS the meaning there. Over
+    // `e:khm t:creature` on api.scryfall.com 2026-08-16: `c=rg` 1 against `c:rg`'s 2, `id=rg` 1
+    // against `id:rg`'s 52, `produces=rg` 0 against 5, `m={2}` 0 against `m:{2}`'s 102.
+    for attr in ["card_colors", "card_color_identity", "produced_mana"] {
+        match leaf(attr, "=", string_node("rg")) {
+            FilterExpr::ColorCmp { op, .. } => assert_eq!(op, CmpOp::Eq, "{attr}= keeps its equality"),
+            _ => panic!("{attr}= must build a ColorCmp"),
+        }
+    }
+    match leaf("mana_cost_jsonb", "=", serde_json::json!({"node_type": "ManaValueNode", "kwargs": {"value": "{2}"}})) {
+        FilterExpr::ManaCostCmp { op, .. } => assert_eq!(op, CmpOp::Eq, "m= keeps its equality"),
+        _ => panic!("m= must build a ManaCostCmp"),
+    }
+}
+
+// THE TWO CARDS THAT SETTLE THE MEASURE, AND THE RESIDUAL THEY USED TO PIN — NOW CLOSED.
+//
+// Both have a Scryfall combined R/G devotion of exactly 2 — each matches `devotion:{r/g}{r/g}`
+// and neither matches `devotion:{r/g}{r/g}{r/g}` (api.scryfall.com, 2026-08-16) — and they pull
+// the model in opposite directions:
+//
+//                                cost         lanes      distinct pips   sum   max
+//   Svella, Ice Shaper           {1}{R}{G}    r=1 g=1          2          2     1
+//   Burning-Tree Emissary        {R/G}{R/G}   r=2 g=2          2          4     2
+//
+// So NEITHER a summed measure nor a per-lane max is Scryfall's rule; the quantity is the number
+// of DISTINCT pips matching either queried color, and that is what the leaf now computes: the
+// sum of the queried lanes, less the double count each hybrid pip of the queried pair
+// contributes. The store needed no new field for it — the per-hybrid-symbol counts were already
+// in `ManaCost.hybrids`, and the colours each symbol claims come from `hybrid_colors`, which
+// bind() resolves against the store's mana vocab.
+//
+// This test was written while the correction was still pending and asserted the divergence; it
+// now asserts the agreement, and it is still the row that keeps a future change from breaking the
+// Svella direction while satisfying the Burning-Tree one. The four rows at three and four symbols
+// are where the two used to part company: Scryfall answers NOTHING there, and now so does this.
+//
+// THE FILTER MUST BE BOUND for any of that to happen — an unbound `hybrid_colors` is empty and
+// corrects nothing, which is exactly the pre-fix reading. That is deliberate and is why the older
+// devotion tests in this file, which build leaves by hand and never bind, still pass unchanged:
+// every one of them queries a single colour, where the correction is provably zero anyway.
+#[test]
+fn a_hybrid_pip_of_the_queried_pair_counts_once() {
+    let mut vocab = VocabInterner::new();
+    let mut mana_vocab: Vec<String> = Vec::new();
+    let costs: &[&[(&str, u8)]] = &[&[("R", 1), ("G", 1)], &[("R/G", 2)]];
+    let cards: Vec<OracleCard> = costs
+        .iter()
+        .enumerate()
+        .map(|(i, &pips)| {
+            let mut c = stub_card(i as u128 + 1, TYPE_CREATURE, &[], &mut vocab);
+            c.mana_cost = mana_cost_of(pips, &mut mana_vocab);
+            let mut ident = 0u8;
+            for (lane, sym) in ["W", "U", "B", "R", "G"].iter().enumerate() {
+                if super::lane_get(c.mana_cost.devotion, lane) > 0 {
+                    ident |= super::color_list_to_mask(&[sym]);
+                }
+            }
+            c.card_color_identity = ident;
+            c
+        })
+        .collect();
+    let mut data = store_of(cards, &[1usize; 2], vocab);
+    data.mana_vocab = mana_vocab;
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    // A hybrid query value reaches the engine as BOTH lanes raised — that expansion is the
+    // parser's, and it is what makes the query side's max a symbol count.
+    let bound = |pips: &[(&str, u8)]| {
+        let mut f = FilterExpr::Devotion { op: CmpOp::Ge, pips: packed_pips(pips), hybrid_colors: Vec::new() };
+        f.bind(
+            &archived.coll_vocab,
+            &archived.artist_vocab,
+            &archived.artist_vocab_collated,
+            &archived.mana_vocab,
+            &archived.indexes.flavor,
+            &archived.strings,
+        );
+        f
+    };
+    let hybrid_rg = |n: u8| bound(&[("R", n), ("G", n)]);
+    let hits = |f: &FilterExpr| -> Vec<usize> {
+        archived
+            .cards
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| f.eval_card(c, &archived.strings) == Tri::True)
+            .map(|(i, _)| i)
+            .collect()
+    };
+    const SVELLA: usize = 0;
+    const BURNING_TREE: usize = 1;
+
+    // AGREES WITH SCRYFALL: both cards at one and two symbols, neither above their real devotion
+    // in the single-color lanes.
+    assert_eq!(hits(&hybrid_rg(1)), [SVELLA, BURNING_TREE], "devotion:{{r/g}} — both, and Scryfall answers both");
+    assert_eq!(hits(&hybrid_rg(2)), [SVELLA, BURNING_TREE], "devotion:{{r/g}}{{r/g}} — both, and Scryfall answers both");
+    // The per-color lanes are exact and were never what was approximate: Burning-Tree answers
+    // `devotion:{r}{r}` and `devotion:{g}{g}` on Scryfall, and Svella answers neither. A
+    // single-colour query is one bit, which one pip cannot match twice, so the correction is zero
+    // here by construction — and that is what keeps `compile_plane`'s exactness claim honest.
+    for sym in ["R", "G"] {
+        assert_eq!(hits(&bound(&[(sym, 2)])), [BURNING_TREE], "devotion:{{{sym}}}{{{sym}}} is a single-lane query and stays exact");
+    }
+
+    // WHERE THE RESIDUAL WAS. Scryfall answers NEITHER card at three symbols or more; the summed
+    // measure counted each {R/G} symbol twice and reached 4, so Burning-Tree matched both rows.
+    // With the double count backed out its measure is 2, and both cards drop out with Scryfall.
+    for n in 3..=4u8 {
+        assert_eq!(
+            hits(&hybrid_rg(n)),
+            Vec::<usize>::new(),
+            "devotion:{{r/g}}x{n}: Scryfall answers nothing, and neither card is a distinct-pip match"
+        );
+    }
+}
 
 /// `super::sigma_bound`'s Rust port must agree with the Python original
 /// (`scripts/bench_compose_card_visited_safety_bound.py`) it was translated from -- that Python side

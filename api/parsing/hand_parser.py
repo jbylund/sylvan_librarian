@@ -333,8 +333,8 @@ class ParseError(ValueError):
     """Raised when the parser encounters unexpected token structure."""
 
 
-def _name_node(value: str) -> CardBinaryOperatorNode:
-    return CardBinaryOperatorNode(CardAttributeNode("name", ParserClass.TEXT), ":", StringValueNode(value))
+def _name_node(value: str, literal: bool = False) -> CardBinaryOperatorNode:
+    return CardBinaryOperatorNode(CardAttributeNode("name", ParserClass.TEXT), ":", StringValueNode(value, literal=literal))
 
 
 class Parser:
@@ -443,7 +443,10 @@ class Parser:
             return self.parse_exact_name()
         if tok.type == TT.QUOTED:
             self.consume()
-            return _name_node(str(tok.value))
+            # A bare QUOTED term is `name:"..."`, and quoting still means "match this literally":
+            # measured on api.scryfall.com 2026-08-16, `q="ft"` answers 362 exactly as
+            # `q=name:"ft"` does, against the bare word `q=ft`'s 1,628.
+            return _name_node(str(tok.value), literal=True)
         if tok.type == TT.WORD:
             self.consume()
             return self.parse_word_primary(str(tok.value))
@@ -453,6 +456,13 @@ class Parser:
             # bare mana outside attribute context — treat as implicit name
             self.consume()
             return _name_node(str(tok.value))
+        if tok.type == TT.STAR:
+            # A term that STARTS with ``*`` is a name search whose first character collates away --
+            # ``q=*ft*`` answers 1,628 on Scryfall, exactly as ``q=ft`` does. Only reachable at the
+            # start of a primary, where a multiplication has no left operand and this was a
+            # parse error.
+            self.consume()
+            return self.parse_hyphenated_name("*")
         msg = f"Unexpected {tok.value!r} at position {tok.pos}"
         raise ParseError(msg)
 
@@ -635,17 +645,33 @@ class Parser:
     # ── implicit name (possibly hyphenated) ───────────────────────────────────
 
     def parse_hyphenated_name(self, first: str) -> CardBinaryOperatorNode:
-        """Build an implicit name node, greedily consuming no-space MINUS+WORD/NUMBER continuations."""
-        parts = [first]
-        while (
-            self.peek().type == TT.MINUS
-            and not self.peek().space_before
-            and self.peek(1).type in (TT.WORD, TT.NUMBER)
-            and not self.peek(1).space_before
-        ):
-            self.consume()  # MINUS
-            parts.append(str(self.consume().value))
-        return _name_node("-".join(parts))
+        """Build an implicit name node, greedily consuming no-space MINUS+WORD/NUMBER and STAR continuations.
+
+        A bare term is a ``name:`` search, so ``*`` reaches it for the same reason it reaches
+        parse_text_value(): the collation deletes it. Measured 2026-08-16 -- ``q=ft*``, ``q=*ft*`` and
+        ``q=ft`` all answer 1,628 on api.scryfall.com, and ``q=godzilla*`` answers ``q=godzilla``'s 8.
+        """
+        word = first
+        while True:
+            nxt = self.peek()
+            if nxt.space_before:
+                break
+            if nxt.type == TT.STAR:
+                self.consume()
+                word += "*"
+                continue
+            if nxt.type in (TT.WORD, TT.NUMBER):
+                # Only reachable ACROSS a star (``*ft``): the lexer scans adjacent word characters
+                # into one token, so two of them never touch on their own.
+                self.consume()
+                word += str(nxt.value)
+                continue
+            if nxt.type == TT.MINUS and self.peek(1).type in (TT.WORD, TT.NUMBER) and not self.peek(1).space_before:
+                self.consume()  # MINUS
+                word += "-" + str(self.consume().value)
+                continue
+            break
+        return _name_node(word)
 
     # ── value parsers ─────────────────────────────────────────────────────────
 
@@ -673,22 +699,43 @@ class Parser:
         tok = self.peek()
         if tok.type == TT.QUOTED:
             self.consume()
-            return StringValueNode(str(tok.value))
+            # QUOTED, and `name:` reads that as "match this literally" -- see StringValueNode.
+            return StringValueNode(str(tok.value), literal=True)
         if tok.type == TT.REGEX:
             self.consume()
             return RegexValueNode(str(tok.value))
-        if tok.type in (TT.WORD, TT.NUMBER):
+        if tok.type in (TT.WORD, TT.NUMBER, TT.STAR):
             self.consume()
-            word = str(tok.value)
-            # Greedily consume hyphenated continuation (no space on either side)
-            while (
-                self.peek().type == TT.MINUS
-                and not self.peek().space_before
-                and self.peek(1).type in (TT.WORD, TT.NUMBER)
-                and not self.peek(1).space_before
-            ):
-                self.consume()
-                word += "-" + str(self.consume().value)
+            word = "*" if tok.type == TT.STAR else str(tok.value)
+            # Greedily consume hyphenated and STARRED continuation (no space on either side).
+            #
+            # ``*`` IS AN ORDINARY CHARACTER IN A VALUE, not a wildcard and not an error. Scryfall
+            # answers ``name:ft*``, ``name:*ft*``, ``name:*ft`` and ``name:f*t`` with the same 1,628
+            # as ``name:ft`` -- because a bare ``name:`` value is COLLATED and ``*`` is one more
+            # non-alphanumeric character to delete, exactly like the ``-`` in
+            # ``name:lightning-bolt`` (2) and the ``,`` in ``name:lightning,bolt`` (2). It is not a
+            # tokenizer rule: the same ``*`` in a column that is NOT collated stays put and finds
+            # nothing, which is what ``o:ft*``, ``t:crea*ture``, ``ft:cro*ft`` and the QUOTED
+            # ``name:"ft*"`` all answer (404), and ``a:gu*ay`` matches ``a:guay`` because artist is
+            # collated too. All measured on api.scryfall.com 2026-08-16. This parser rejected the
+            # character outright, so every one of those raised instead.
+            while True:
+                nxt = self.peek()
+                if nxt.space_before:
+                    break
+                if nxt.type == TT.STAR:
+                    self.consume()
+                    word += "*"
+                    continue
+                if nxt.type in (TT.WORD, TT.NUMBER):
+                    self.consume()
+                    word += str(nxt.value)
+                    continue
+                if nxt.type == TT.MINUS and self.peek(1).type in (TT.WORD, TT.NUMBER) and not self.peek(1).space_before:
+                    self.consume()
+                    word += "-" + str(self.consume().value)
+                    continue
+                break
             return StringValueNode(word)
         msg = f"Expected value for {attr!r}, got {tok.value!r} at position {tok.pos}"
         raise ParseError(msg)

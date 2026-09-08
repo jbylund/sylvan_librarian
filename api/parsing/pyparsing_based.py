@@ -100,7 +100,10 @@ def create_value_node(value: object) -> QueryNode:
     if isinstance(value, str):
         return StringValueNode(value)
     if isinstance(value, tuple) and value[0] == "quoted":
-        return StringValueNode(value[1])
+        # QUOTED, which `name:` reads as "match this literally" -- see StringValueNode. The
+        # hand-rolled parser marks the same distinction from its own TT.QUOTED token; the two
+        # must agree or test_parser_parity fails.
+        return StringValueNode(value[1], literal=True)
     if isinstance(value, tuple) and value[0] == "regex":
         return RegexValueNode(value[1])
     return value  # Fallback for other types
@@ -518,8 +521,12 @@ def get_parse_expr() -> ParserElement:  # noqa: PLR0915
 
     def make_implicit_name(tokens: list[object]) -> BinaryOperatorNode:
         token = tokens[0]
-        value = token[1] if isinstance(token, tuple) and token[0] == "quoted" else str(token)
-        return BinaryOperatorNode(CardAttributeNode("name", ParserClass.TEXT), ":", StringValueNode(value))
+        quoted = isinstance(token, tuple) and token[0] == "quoted"
+        value = token[1] if quoted else str(token)
+        # A bare QUOTED term is `name:"..."`, and quoting still means literally: measured on
+        # api.scryfall.com 2026-08-16, `q="ft"` answers 362 exactly as `q=name:"ft"` does,
+        # against the bare word `q=ft`'s 1,628.
+        return BinaryOperatorNode(CardAttributeNode("name", ParserClass.TEXT), ":", StringValueNode(value, literal=quoted))
 
     implicit_name = _implicit_name_value.set_parse_action(make_implicit_name)
 

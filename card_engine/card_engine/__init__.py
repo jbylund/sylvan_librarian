@@ -48,6 +48,8 @@ ENGINE_COLUMNS: list[str] = [
     "card_border",
     "card_color_identity",
     "card_colors",
+    "card_compat_blob",
+    "card_faces",
     "card_frame_data",
     "card_is_tags",
     "card_keywords",
@@ -69,6 +71,11 @@ ENGINE_COLUMNS: list[str] = [
     "creature_toughness",
     "edhrec_rank",
     "flavor_text",
+    # `flavor_name`, the name a printing is SOLD under, and its folded lookup key — the columns
+    # api/db/2026-08-16-03-flavor-name.sql adds. `name:` containment, `exact=` and `is:flavorname`
+    # read them.
+    "flavor_name",
+    "flavor_name_folded",
     "mana_cost_jsonb",
     "mana_cost_text",
     "oracle_text",
@@ -84,4 +91,13 @@ ENGINE_COLUMNS: list[str] = [
     "type_line",
     "prefer_score",
     "cubecobra_score",
+    # The multilingual store's columns: the printed-language triple and its folded search key
+    # (per-face halves ride card_faces), and the canonical flag that routes a row into
+    # CardData.printings or the foreign annex. card_lang is deliberately absent — the engine
+    # reads lang from card_compat_blob, where it always has.
+    "printed_name",
+    "printed_type_line",
+    "printed_text",
+    "printed_name_folded",
+    "is_canonical",
 ]
