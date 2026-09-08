@@ -569,6 +569,16 @@ pub(crate) enum FilterExpr {
         mask: u8,
     },
 
+    /// Scryfall numeric color syntax (`id>=3`, `c=2`, `produces>=2`): compares
+    /// the NUMBER of values in the field against `count`. Five bits for the two
+    /// colour columns, SIX for produced_mana — whose array can hold "C" — see
+    /// the eval arm for the measurements behind that split.
+    ColorCountCmp {
+        field: ColorField,
+        op: CmpOp,
+        count: u8,
+    },
+
     TypeCmp {
         mask: u16,
         op: CmpOp,
@@ -719,6 +729,7 @@ pub(crate) fn verify_cost_tier(f: &FilterExpr) -> u32 {
         | FilterExpr::NumericCmp { .. }
         | FilterExpr::TextExact { .. }
         | FilterExpr::ColorCmp { .. }
+        | FilterExpr::ColorCountCmp { .. }
         | FilterExpr::TypeCmp { .. }
         | FilterExpr::Legality { .. }
         | FilterExpr::DateCmp { .. }
@@ -903,6 +914,7 @@ fn leaf_compares_printing_field(f: &FilterExpr) -> bool {
         | FilterExpr::NameMatch { .. }
         | FilterExpr::OracleMatch { .. }
         | FilterExpr::ColorCmp { .. }
+        | FilterExpr::ColorCountCmp { .. }
         | FilterExpr::TypeCmp { .. }
         | FilterExpr::ManaCostCmp { .. }
         | FilterExpr::Devotion { .. } => false,
@@ -1535,6 +1547,23 @@ impl FilterExpr {
 
             FilterExpr::ColorCmp { field, op, mask } => tri_bool(color_cmp_matches(*op, *mask, card_colors(card, *field))),
 
+            FilterExpr::ColorCountCmp { field, op, count } => {
+                // Colors are always present (colorless = 0 bits, not Null), so this is
+                // total and two-valued.
+                //
+                // WIDTH DEPENDS ON THE COLUMN, and the asymmetry is measured. For the two colour
+                // columns the C bit (32) is masked OFF before counting: colorless is ZERO colors
+                // on Scryfall (`c:all` = `c:wubrg` = `c=5` = 60, and `c=6` is not even a valid
+                // query there), matching the SQL path's magic.color_identity_mask. produced_mana
+                // keeps it: that array can literally contain "C" — Sol Ring produces ["C"] while
+                // its colors and color_identity are both [] — so `produces=6` = 106 = `produces:all`
+                // and the 481 cards producing colorless and nothing else answer `produces=1`.
+                // magic.produced_mana_mask is the six-bit twin of this line.
+                let mask = if matches!(field, ColorField::ProducedMana) { 0b11_1111 } else { 0b1_1111 };
+                let n = (card_colors(card, *field) & mask).count_ones() as u8;
+                tri_bool(num_cmp(*op, f64::from(n), f64::from(*count)))
+            }
+
             FilterExpr::TypeCmp { mask, op } => {
                 let bits = u16::from(card.card_types);
                 tri_bool(match op {
@@ -1876,6 +1905,22 @@ fn build_binary(kw: &Value) -> Result<FilterExpr, String> {
             "card_color_identity"  => ColorField::ColorIdentity,
             _                      => ColorField::ProducedMana,
         };
+        // Scryfall numeric color syntax (id>=3, c=2): the rhs arrives as a raw
+        // NumericValueNode instead of a color-letter list, and compares the
+        // NUMBER of colors in the field. ":" behaves like "=" here (verified
+        // against the live Scryfall API: id:2 and id=2 return identical sets),
+        // which is exactly what str_op_to_cmp yields.
+        //
+        // produced_mana counts here too, over SIX values rather than five, and
+        // the asymmetry is a MEASUREMENT rather than an oversight: Scryfall
+        // counts colorless among them, so `produces=1 produces:c` is 481 -- the
+        // cards that produce colorless and nothing else -- where a five-key
+        // WUBRG popcount would call those zero. See the ColorCountCmp eval arm,
+        // which reads the six-bit mask for this field and five for the others.
+        if rhs["node_type"].as_str() == Some("NumericValueNode") {
+            let count = rhs["kwargs"]["value"].as_f64().ok_or("NumericValueNode missing value")? as u8;
+            return Ok(FilterExpr::ColorCountCmp { field: color_field, op: str_op_to_cmp(op)?, count });
+        }
         let color_strs: Vec<&str> = rhs
             .as_array()
             .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
