@@ -147,7 +147,8 @@ def preprocess_card(card: dict[str, Any]) -> list[dict[str, Any]]:  # noqa: PLR0
         return [card]
 
     # Lift the card name before processing faces, because it shouldn't be clobbered by card_faces
-    if "card_name" not in card:
+    is_merged_face = "card_name" in card
+    if not is_merged_face:
         # Non-recursive case: first time seeing this card
         card["card_name"] = card.get("name")
     else:
@@ -191,9 +192,39 @@ def preprocess_card(card: dict[str, Any]) -> list[dict[str, Any]]:  # noqa: PLR0
     card["card_subtypes"] = card_subtypes
 
     card["planeswalker_loyalty"] = maybe_int(card.get("loyalty"))
-    if "Creature" in card_types or {"Vehicle", "Spacecraft"} & set(card_subtypes):
-        card["creature_power"] = maybe_int(card.get("power"))
-        card["creature_toughness"] = maybe_int(card.get("toughness"))
+    # The parsed type line is the ORDINARY reason a row carries stats. It is not the only one, and
+    # Scryfall does not treat it as one. Eighteen printings print a real power and toughness behind
+    # a type line that says neither Creature nor Vehicle nor Spacecraft: the pre-Sixth-Edition
+    # `Summon` template (Old Fogey `Summon — Dinosaur`, Flanking Licid `Summon Licid`,
+    # Shichifukujin Dragon `Summon Dragon`) and Atinlay Igpay's pig-latin `Eaturecray — Igpay`.
+    # Checked against the live API on 2026-08-17, `-t:creature -t:vehicle -t:spacecraft (pow>=0 or
+    # pow<0) include:extras` with unique=prints returns exactly those eighteen — and Scryfall
+    # answers each of them NUMERICALLY, so the printed keys, not the parsed type, are what decide
+    # whether a stat exists. A raw `power`/`toughness` key is sufficient on its own here.
+    #
+    # THE TYPE PARSE IS NOT WIDENED, which is the whole point of spelling it this way. `Summon` and
+    # `Eaturecray` stay the unrecognised words they are, so no row here starts answering
+    # `t:creature`; only the stat it actually prints becomes visible. Widening parse_type_line
+    # instead would have made the counts agree and quietly broken `t:creature`.
+    #
+    # Whole cards only, never a merged face: `merged = card | face_data` lets a face inherit the
+    # CARD-level `power`, and Scryfall publishes one there for adventures — Obyra's Attendants is
+    # `3`/`4` at the top level while its Adventure face prints none. For a face the parsed type
+    # line is the only trustworthy signal. Costs nothing: all eighteen printings are single-faced.
+    has_printed_stats = not is_merged_face and (card.get("power") is not None or card.get("toughness") is not None)
+    if "Creature" in card_types or {"Vehicle", "Spacecraft"} & set(card_subtypes) or has_printed_stats:
+        # Power and toughness are STRINGS in Scryfall's schema, and eleven cards print a HALF in
+        # them: /cards/named?exact=Little+Girl answers "power":".5", "toughness":".5", and the
+        # other ten are Unhinged's Ass cycle plus Fraction Jackson, Cardpecker, Stone-Cold
+        # Basilisk and Vile Bile. maybe_int here did `int(float(val))`, which rounded each onto
+        # its floor — where it then MATCHED that floor, so `power=2` picked up every 2.5. The
+        # columns are `real` as of 2026-08-17-01-fractional-power-toughness.sql, so keep the
+        # float. Non-numeric printings (`*`, `1+*`, `?`, `∞`) still fall through to None exactly
+        # as before: maybe_float and maybe_int reject them identically, via the same
+        # ValueError/TypeError in @maybeify. The printed string is preserved verbatim either way
+        # in creature_power_text/creature_toughness_text below.
+        card["creature_power"] = maybe_float(card.get("power"))
+        card["creature_toughness"] = maybe_float(card.get("toughness"))
         card["creature_power_text"] = card.get("power")
         card["creature_toughness_text"] = card.get("toughness")
     else:
@@ -256,8 +287,10 @@ def preprocess_card(card: dict[str, Any]) -> list[dict[str, Any]]:  # noqa: PLR0
     card["planeswalker_loyalty_text"] = card.get("loyalty")
     card["card_artist"] = card.get("artist")
 
-    # Handle CMC and edhrec_rank conversion using helper function
-    card["cmc"] = maybe_int(card.get("cmc"))
+    # Mana value is a Decimal in Scryfall's schema, not an Integer: {HW} gives Little Girl a
+    # cmc of exactly 0.5. maybe_int here did `int(float(val))`, which rounded that to 0 — the
+    # column is `real` as of 2026-08-12-01-fractional-mana-value.sql, so keep the float.
+    card["cmc"] = maybe_float(card.get("cmc"))
 
     # Handle rarity conversion - implement in Python to avoid SQL boilerplate
     rarity_text = card.get("rarity", "").lower()

@@ -15,7 +15,7 @@ from api.api_resource import APIResource
 from api.card_processing import preprocess_card
 from api.db.bulk_upsert import bulk_upsert
 from api.scryfall_bulk_data_fetcher import BulkDataKey
-from api.tests.helpers import make_raw_card
+from api.tests.helpers import make_raw_card, search_kwargs
 from api.tests.support import mock_app_context
 
 # ---------------------------------------------------------------------------
@@ -252,6 +252,274 @@ class TestBooleanIsTags:
         card["preview"] = {"source": "The Command Zone"}
         api_resource.admin._upsert_cards([card])
         assert "scryfallpreview" not in _is_tags_for(api_resource, card["id"])
+
+
+def _cmc_for(api_resource: APIResource, scryfall_id: str) -> float | None:
+    with api_resource.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+        cursor.execute("SELECT cmc FROM magic.cards WHERE scryfall_id = %(sid)s", {"sid": scryfall_id})
+        row = cursor.fetchone()
+    return row["cmc"] if row else None
+
+
+class TestFractionalManaValue:
+    """A fractional cmc survives the whole import round trip: cast, column, read back.
+
+    Scryfall types cmc Decimal — /cards/named?exact=Little+Girl answers "mana_cost":"{HW}",
+    "cmc":0.5 — and the column was `integer` until
+    2026-08-12-01-fractional-mana-value.sql. These write through the real _upsert_cards
+    path and read the stored column, so they cover the import cast and the schema
+    together; either one still being integer-shaped fails them.
+
+    The corpus itself is unchanged: the only card with a fractional mana value is in a
+    funny set, which preprocess_card still drops. These construct their own card.
+    """
+
+    def test_half_mana_value_stores_as_a_half(self, api_resource: APIResource) -> None:
+        card = make_raw_card(name="Half Mana Import Test")
+        card["mana_cost"] = "{HW}"
+        card["cmc"] = 0.5
+        api_resource.admin._upsert_cards([card])
+        assert _cmc_for(api_resource, card["id"]) == 0.5
+
+    def test_whole_mana_value_still_stores_whole(self, api_resource: APIResource) -> None:
+        """The ~31.5k rows that were already integral must read back unchanged."""
+        card = make_raw_card(name="Whole Mana Import Test")
+        card["mana_cost"] = "{2}{R}"
+        card["cmc"] = 3
+        api_resource.admin._upsert_cards([card])
+        assert _cmc_for(api_resource, card["id"]) == 3
+
+    def test_a_half_is_findable_through_the_sql_search_path(self, api_resource: APIResource) -> None:
+        """`mv=0.5` binds a Python float against the column and matches in real Postgres.
+
+        Membership rather than equality on the result set, as this fixture's session-shared
+        database requires — other tests in this class import half-mana cards of their own.
+        """
+        card = make_raw_card(name="Half Mana Search Test")
+        card["mana_cost"] = "{HW}"
+        card["cmc"] = 0.5
+        api_resource.admin._upsert_cards([card])
+
+        found = {c["name"] for c in api_resource._search_sql(**search_kwargs("mv=0.5", limit=100))["cards"]}
+        assert "Half Mana Search Test" in found
+        # ...and the whole-number predicate its floor would have collapsed into stays clean.
+        zero = {c["name"] for c in api_resource._search_sql(**search_kwargs("mv=0", limit=100))["cards"]}
+        assert "Half Mana Search Test" not in zero
+
+    def test_the_column_is_not_an_integer_type(self, api_resource: APIResource) -> None:
+        """The column type is asserted directly, not just inferred from a round trip.
+
+        A passing round trip alone would not distinguish a `real` column from an `integer`
+        one that happened to be handed whole numbers.
+        """
+        with api_resource.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+            cursor.execute(
+                """SELECT data_type FROM information_schema.columns
+                   WHERE table_schema = 'magic' AND table_name = 'cards' AND column_name = 'cmc'""",
+            )
+            row = cursor.fetchone()
+        assert row is not None
+        assert row["data_type"] == "real"
+
+
+def _stats_for(api_resource: APIResource, scryfall_id: str) -> tuple[float | None, float | None] | None:
+    with api_resource.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+        cursor.execute(
+            "SELECT creature_power, creature_toughness FROM magic.cards WHERE scryfall_id = %(sid)s",
+            {"sid": scryfall_id},
+        )
+        row = cursor.fetchone()
+    return (row["creature_power"], row["creature_toughness"]) if row else None
+
+
+def _creature(name: str, power: str, toughness: str) -> dict:
+    card = make_raw_card(name=name)
+    card["type_line"] = "Creature — Test"
+    card["power"] = power
+    card["toughness"] = toughness
+    return card
+
+
+class TestFractionalPowerAndToughness:
+    """A printed half survives the whole import round trip: parse, column, read back.
+
+    Power and toughness are STRINGS in Scryfall's schema and these columns are this project's
+    own parse of them. The parse was int(float(val)) into an `integer` column until
+    2026-08-17-01-fractional-power-toughness.sql, and eleven cards print a value it could not
+    hold — Little Girl ".5"/".5" and the rest of Unhinged's half-stat cards. These write
+    through the real _upsert_cards path and read the stored columns, so they cover the import
+    cast and the schema together; either one still being integer-shaped fails them.
+
+    The corpus itself is unchanged: every card with a fractional stat is in a funny set, which
+    preprocess_card still drops. These construct their own cards.
+    """
+
+    def test_a_half_stores_as_a_half(self, api_resource: APIResource) -> None:
+        card = _creature("Half Stat Import Test", ".5", ".5")
+        api_resource.admin._upsert_cards([card])
+        assert _stats_for(api_resource, card["id"]) == (0.5, 0.5)
+
+    def test_a_half_does_not_store_as_its_floor(self, api_resource: APIResource) -> None:
+        """The silent direction: 2.5 truncated onto 2 would then ANSWER `power=2`."""
+        card = _creature("Two And A Half Import Test", "2.5", "1")
+        api_resource.admin._upsert_cards([card])
+        assert _stats_for(api_resource, card["id"]) == (2.5, 1)
+
+    def test_whole_stats_still_store_whole(self, api_resource: APIResource) -> None:
+        """The rows that were already integral must read back unchanged."""
+        card = _creature("Whole Stat Import Test", "3", "4")
+        api_resource.admin._upsert_cards([card])
+        assert _stats_for(api_resource, card["id"]) == (3, 4)
+
+    def test_a_non_numeric_stat_is_still_null(self, api_resource: APIResource) -> None:
+        """`*` and its arithmetic forms were never numbers and are not now.
+
+        The printed string is what creature_power_text holds; the numeric column stays NULL,
+        and maybe_float rejects these exactly where maybe_int did.
+        """
+        card = _creature("Star Stat Import Test", "*", "1+*")
+        api_resource.admin._upsert_cards([card])
+        assert _stats_for(api_resource, card["id"]) == (None, None)
+
+    def test_a_half_is_findable_through_the_sql_search_path(self, api_resource: APIResource) -> None:
+        """`power=2.5` binds a Python float against the column and matches in real Postgres.
+
+        Membership rather than equality on the result set, as this fixture's session-shared
+        database requires — other tests in this class import half-stat cards of their own.
+        """
+        card = _creature("Half Stat Search Test", "2.5", "1")
+        api_resource.admin._upsert_cards([card])
+
+        found = {c["name"] for c in api_resource._search_sql(**search_kwargs("power=2.5", limit=100))["cards"]}
+        assert "Half Stat Search Test" in found
+        # ...and the whole-number predicate its floor would have collapsed into stays clean.
+        floor = {c["name"] for c in api_resource._search_sql(**search_kwargs("power=2", limit=100))["cards"]}
+        assert "Half Stat Search Test" not in floor
+
+    def test_the_columns_are_not_an_integer_type(self, api_resource: APIResource) -> None:
+        """The column types are asserted directly, not just inferred from a round trip.
+
+        A passing round trip alone would not distinguish a `real` column from an `integer`
+        one that happened to be handed whole numbers.
+        """
+        with api_resource.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+            cursor.execute(
+                """SELECT column_name, data_type FROM information_schema.columns
+                   WHERE table_schema = 'magic' AND table_name = 'cards'
+                     AND column_name IN ('creature_power', 'creature_toughness')
+                   ORDER BY column_name""",
+            )
+            rows = cursor.fetchall()
+        assert [(r["column_name"], r["data_type"]) for r in rows] == [
+            ("creature_power", "real"),
+            ("creature_toughness", "real"),
+        ]
+
+
+def _row_for(api_resource: APIResource, scryfall_id: str) -> dict | None:
+    with api_resource.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+        cursor.execute(
+            """SELECT card_types, creature_power, creature_toughness,
+                      creature_power_text, creature_toughness_text
+               FROM magic.cards WHERE scryfall_id = %(sid)s""",
+            {"sid": scryfall_id},
+        )
+        return cursor.fetchone()
+
+
+def _summoned(name: str, power: str, toughness: str, type_line: str = "Summon — Dinosaur") -> dict:
+    card = make_raw_card(name=name)
+    card["type_line"] = type_line
+    card["power"] = power
+    card["toughness"] = toughness
+    return card
+
+
+class TestPrintedStatsOnANoncanonicalTypeLine:
+    """A printed power/toughness survives a type line that does not say Creature.
+
+    Eighteen printings print one — checked against the live API on 2026-08-17,
+    `-t:creature -t:vehicle -t:spacecraft (pow>=0 or pow<0) include:extras` with unique=prints
+    returns exactly that many. Mostly the pre-Sixth-Edition `Summon` template, which Scryfall
+    preserves verbatim rather than rewriting to `Creature` (Old Fogey `Summon — Dinosaur` 7/7,
+    Flanking Licid `Summon Licid` 1/1); Atinlay Igpay's `Eaturecray — Igpay` 3/3 is the
+    pig-latin one. Scryfall searches all of them numerically, so the printed keys and not the
+    parsed type are what decide whether a stat exists.
+
+    These write through the real _upsert_cards path, which is the only way to cover BOTH halves
+    of the fix at once: creature_attributes_null_for_non_creatures would have rejected every
+    insert below, so a passing test here is also the evidence that
+    2026-08-17-02-printed-stats-on-any-type-line.sql applied.
+
+    The corpus itself is unchanged: all eighteen printings fail preprocess_card's legality
+    filter, and most also fail the funny-set, playtest or paper-games rules. These construct
+    their own cards, as the fractional-stat tests above do.
+    """
+
+    def test_a_summon_type_line_keeps_its_printed_stats(self, api_resource: APIResource) -> None:
+        """Old Fogey's shape: `Summon — Dinosaur`, 7/7, and Scryfall counts it under `tou>=3.5`."""
+        card = _summoned("Old Fogey Import Test", "7", "7")
+        api_resource.admin._upsert_cards([card])
+        assert _stats_for(api_resource, card["id"]) == (7, 7)
+
+    def test_an_unparseable_type_line_keeps_its_printed_stats(self, api_resource: APIResource) -> None:
+        """Atinlay Igpay's shape: not a word the parser knows in either position, still 3/3."""
+        card = _summoned("Atinlay Igpay Import Test", "3", "3", type_line="Eaturecray — Igpay")
+        api_resource.admin._upsert_cards([card])
+        assert _stats_for(api_resource, card["id"]) == (3, 3)
+
+    def test_the_stored_row_is_still_not_a_creature(self, api_resource: APIResource) -> None:
+        """The negative that makes this the right fix rather than a parser change.
+
+        Widening parse_type_line to read `Summon` as `Creature` would have kept the stats too,
+        and would have put eighteen printings into `t:creature` that print no such word. The
+        printed text columns come along with the numbers; the type does not.
+        """
+        card = _summoned("Summon Not A Creature Test", "7", "7")
+        api_resource.admin._upsert_cards([card])
+
+        row = _row_for(api_resource, card["id"])
+        assert row is not None
+        assert "Creature" not in row["card_types"]
+        assert row["creature_power_text"] == "7"
+        assert row["creature_toughness_text"] == "7"
+
+    def test_a_printed_stat_is_findable_through_the_sql_search_path(self, api_resource: APIResource) -> None:
+        """The stat is searchable, and searching it does not drag the row into `t:creature`.
+
+        Membership rather than equality on the result set, as this fixture's session-shared
+        database requires.
+        """
+        card = _summoned("Summon Search Test", "7", "7")
+        api_resource.admin._upsert_cards([card])
+
+        found = {c["name"] for c in api_resource._search_sql(**search_kwargs("power=7", limit=100))["cards"]}
+        assert "Summon Search Test" in found
+        # Conjoined with the stat rather than bare, so the assertion cannot pass merely by the
+        # row falling off the end of a truncated `t:creature` result set.
+        creatures = {c["name"] for c in api_resource._search_sql(**search_kwargs("power=7 t:creature", limit=100))["cards"]}
+        assert "Summon Search Test" not in creatures
+
+    def test_a_non_creature_row_without_a_printed_stat_is_still_rejected(self, api_resource: APIResource) -> None:
+        """The half of the old constraint the migration deliberately keeps.
+
+        The numeric columns are this project's parse of the printed text ones, so a number with
+        no printed string beside it on a row claiming no creature type is a derived value that
+        arrived from somewhere it should not have. Written as raw SQL because the import path
+        cannot produce it -- which is the point of asking the table to reject it.
+        """
+        card = make_raw_card(name="Bare Numeric Stat Test")
+        api_resource.admin._upsert_cards([card])
+
+        with (
+            pytest.raises(psycopg.errors.CheckViolation),
+            api_resource.app_context.reader_pool.connection() as conn,
+            conn.cursor() as cursor,
+        ):
+            cursor.execute(
+                "UPDATE magic.cards SET creature_power = 2 WHERE scryfall_id = %(sid)s",
+                {"sid": card["id"]},
+            )
 
 
 # ---------------------------------------------------------------------------
