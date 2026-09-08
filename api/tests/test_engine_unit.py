@@ -1125,6 +1125,62 @@ class TestTags:
         assert total == 0
 
 
+@pytest.fixture(scope="module", name="game_engine")
+def game_engine_fixture(fresh_engine: Callable[[], QueryEngine]) -> QueryEngine:
+    """Seven fixture rows re-tagged for game: -- paper-only, mtgo-only, both, and a BARE `paper`.
+
+    A private engine, not the shared one, whose card_is_tags carry only the synthetic
+    spell/permanent values. The bare `paper` is: key is the row game:paper must not see.
+    """
+    rows = json.loads(_FIXTURE.read_text())[:7]
+    tags = [
+        {"game_paper": True},
+        {"game_paper": True},
+        {"game_paper": True},
+        {"game_mtgo": True},
+        {"game_mtgo": True},
+        {"game_paper": True, "game_mtgo": True},
+        {"paper": True},
+    ]
+    for row, row_tags in zip(rows, tags, strict=True):
+        row["card_is_tags"] = row_tags
+    e = fresh_engine()
+    e.reload(rows)
+    return e
+
+
+class TestGame:
+    """game: is a prefixed card_is_tags lookup (api/parsing/rewrite.py's prefix_game_values)."""
+
+    def test_game_paper(self, game_engine: QueryEngine) -> None:
+        total, _ = _run(game_engine, "game:paper")
+        assert total == 4
+
+    def test_game_mtgo(self, game_engine: QueryEngine) -> None:
+        total, _ = _run(game_engine, "game:mtgo")
+        assert total == 3
+
+    def test_game_conjunction(self, game_engine: QueryEngine) -> None:
+        total, _ = _run(game_engine, "game:paper game:mtgo")
+        assert total == 1
+
+    def test_negated_game(self, game_engine: QueryEngine) -> None:
+        # The two mtgo-only rows plus the bare-`paper` row.
+        total, _ = _run(game_engine, "-game:paper")
+        assert total == 3
+
+    def test_unknown_game_matches_nothing(self, game_engine: QueryEngine) -> None:
+        # Scryfall warns "Unknown game `promo`" and drops the term; here game_promo is a key
+        # no row carries. Must never fall through to an is: tag of the same name.
+        total, _ = _run(game_engine, "game:promo")
+        assert total == 0
+
+    def test_bare_is_tag_is_not_a_game(self, game_engine: QueryEngine) -> None:
+        # The prefix is what keeps `is:paper` and `game:paper` apart on one column.
+        total, _ = _run(game_engine, "is:paper")
+        assert total == 1
+
+
 class TestCommonCardTypes:
     """Tests for engine.common_card_types().
 
