@@ -12989,7 +12989,18 @@ const FIELD_TABLE: &[(&str, FieldKey, FieldExtractor)] = &[
     ("layout", |py| intern!(py, "layout"), |py, c, _p, s, _v| Ok(str_at(s, u32::from(c.card_layout_id)).into_pyobject(py)?.into_any())),
     ("cmc", |py| intern!(py, "cmc"), |py, c, _p, _s, _v| Ok(c.cmc.as_ref().copied().into_pyobject(py)?.into_any())),
     ("rarity", |py| intern!(py, "rarity"), |py, _c, p, _s, _v| {
-        Ok(p.card_rarity_int.as_ref().and_then(|v| rarity_int_to_text(*v)).into_pyobject(py)?.into_any())
+        // Six values, so the words are interned rather than built per row -- the same argument as
+        // the legality status words. Order must track RARITY_NAMES; an int outside it is None, as
+        // `rarity_int_to_text` returns None there.
+        Ok(match p.card_rarity_int.as_ref().map(|v| u8::from(*v)) {
+            Some(0) => intern!(py, "common").clone().into_any(),
+            Some(1) => intern!(py, "uncommon").clone().into_any(),
+            Some(2) => intern!(py, "rare").clone().into_any(),
+            Some(3) => intern!(py, "mythic").clone().into_any(),
+            Some(4) => intern!(py, "special").clone().into_any(),
+            Some(5) => intern!(py, "bonus").clone().into_any(),
+            _ => py.None().into_bound(py),
+        })
     }),
     ("color_identity", |py| intern!(py, "color_identity"), |py, c, _p, _s, _v| Ok(identity_letters(c.card_color_identity).into_pyobject(py)?.into_any())),
     ("legalities", |py| intern!(py, "legalities"), |py, c, p, _s, _v| {
