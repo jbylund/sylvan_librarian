@@ -18,13 +18,14 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any, NoReturn
 
 import falcon
+import falcon.util
 import orjson
 import psycopg
 from cachebox import LRUCache, TTLCache
 
 from api.admin_resource import ADMIN_MOUNT_PREFIX, AdminContext, AdminResource
 from api.app_context import AppContext
-from api.enums import CardOrdering, PreferOrder, ResponseShape, SortDirection, UniqueOn
+from api.enums import CardOrdering, PreferOrder, ResponseShape, SortDirection, UniqueOn, resolve_direction
 from api.middlewares.timing import record_span
 from api.noscript_helpers import generate_results_count_html, generate_results_html
 from api.parsing import generate_sql_query, parse_scryfall_query
@@ -34,6 +35,7 @@ from api.parsing.query_budget import (
     QueryBudgetExceeded,
     bounded_query_log_context,
 )
+from api.scryfall_compat import ScryfallCardsRoutes, ScryfallReferenceRoutes
 from api.settings import settings
 from api.utils import db_utils, error_monitoring
 from api.utils.css_utils import build_critical_css
@@ -95,7 +97,39 @@ def _raise_query_bad_request(*, exc_name: str, query: str, description: str, err
 
 
 # Query parameters that must not be forwarded to action handlers.
-DISALLOWED_QUERY_ARGS: frozenset[str] = frozenset(["falcon_response", "request_host"])
+# The route keys that make up the SCRYFALL-COMPATIBLE surface.
+#
+# It decides one thing: which shape a DISPATCH-level error takes on that path -- Scryfall's
+# `{object, code, status, details}` or falcon's `{title, description}`. Everything a handler answers
+# for itself already knows which surface it is on.
+#
+# The split is by ROUTE KEY rather than by path prefix because the two surfaces interleave under one
+# namespace: `catalog` is Scryfall's `/catalog/:name` and `get_catalog` is this service's own, and
+# only the table can tell them apart. Keys for routes a given branch has not merged yet are harmless
+# -- an unregistered key is never resolved, so it is never consulted.
+#
+# What is deliberately NOT here: `_root`, `card`, `index`, `search` and `random_search` -- this
+# service's own surface, whose error bodies its web interface renders by reading `title` and
+# `description` -- plus `get_catalog`, `get_pid` and the admin handlers.
+SCRYFALL_SURFACE_ROUTES = frozenset(
+    {
+        "cards",
+        "cards/search",
+        "cards/named",
+        "cards/autocomplete",
+        "cards/random",
+        "cards/collection",
+        "catalog",
+        "sets",
+        "symbology",
+        "symbology/parse-mana",
+    },
+)
+
+# Scryfall's sentence for a path that addresses nothing, measured 2026-08-16.
+_SCRYFALL_NOT_FOUND_DETAILS = "The requested object or REST method was not found."
+
+DISALLOWED_QUERY_ARGS: frozenset[str] = frozenset(["falcon_response", "request", "request_host"])
 
 # Body for an unhandled exception. Fixed and content-free on purpose: the frames live at throw sites
 # inside query and import paths, so their locals can hold connection and query state. Diagnostics go
@@ -122,6 +156,25 @@ def pagination_ceiling() -> int:
     return int((time.time() - PAGINATION_BASE_TIMESTAMP) // PAGINATION_GROWTH_INTERVAL_SECONDS)
 
 
+# `order=color`, as SQL. The eleven buckets Scryfall sorts colour into, measured 2026-08-09 over 923
+# cards spanning every colour shape: mono WUBRG, then multicolour by HOW MANY colours (guild pairs
+# tie), then colourless, then lands. Two of those are not what a colour bitmask would give -- the
+# colourless bucket sorts last rather than first, and lands after it -- which is why this is a CASE
+# rather than an expression over card_colors. Mirrors color_sort_rank in card_engine/src/lib.rs; the
+# two must agree or the SQL and engine paths order the same query differently.
+_COLOR_ORDER_SQL = """
+        (CASE
+            WHEN card_colors = '{"W": true}'::jsonb THEN 0
+            WHEN card_colors = '{"U": true}'::jsonb THEN 1
+            WHEN card_colors = '{"B": true}'::jsonb THEN 2
+            WHEN card_colors = '{"R": true}'::jsonb THEN 3
+            WHEN card_colors = '{"G": true}'::jsonb THEN 4
+            WHEN (SELECT count(1) FROM jsonb_object_keys(card_colors)) > 1
+                THEN 3 + (SELECT count(1) FROM jsonb_object_keys(card_colors))
+            WHEN card_types ? 'Land' THEN 10
+            ELSE 9
+        END)"""
+
 RESULT_FIELD_COLUMNS: dict[str, str] = {
     "name": "card_name",
     "set_code": "card_set_code",
@@ -135,6 +188,11 @@ RESULT_FIELD_COLUMNS: dict[str, str] = {
     "illustration_id": "illustration_id",
     "scryfall_id": "scryfall_id",
     "price_usd": "price_usd",
+    # The other two currencies CardOrdering already sorts by (see the sql_orderby map's
+    # EUR/TIX entries). Without these a caller can rank a page by EUR or TIX and then have
+    # no way to read the number it was ranked on. Both are real magic.cards columns.
+    "price_eur": "price_eur",
+    "price_tix": "price_tix",
     "prefer_score": "prefer_score",
     # Card-data fields consumers need to run their own downstream filtering
     # (Scryfall JSON names and shapes): layout and rarity are plain text,
@@ -218,6 +276,29 @@ def rewrap(query: str) -> str:
     return " ".join(query.strip().split())
 
 
+def _request_injection(entry: BoundRoute | None, req: falcon.Request) -> dict[str, Any]:
+    """Return the `request` keyword for handlers that declare it, and nothing for the rest.
+
+    Only `POST /cards/collection` wants the request object: its identifiers arrive in the body,
+    which nothing else in the dispatch path reads. Injecting it unconditionally is not an option —
+    a non-string keyword a handler neither declares nor absorbs through `**kwargs` reaches it as a
+    TypeError, and `search` is one such handler.
+
+    Args:
+        entry: The resolved route, or None when the path identified nothing.
+        req: The request being dispatched.
+
+    Returns:
+        `{"request": req}` when the handler declares the parameter, otherwise an empty dict.
+    """
+    if entry is None:
+        return {}
+    binder = getattr(entry.action, "binder", None)
+    if binder is None or not binder.accepts("request"):
+        return {}
+    return {"request": req}
+
+
 def _columnarize_cards(cards: list[dict[str, Any]]) -> dict[str, list[Any]]:
     """Convert a list of card dicts into a dict of per-field value lists.
 
@@ -252,8 +333,16 @@ def _copy_query_result(result: dict[str, Any]) -> dict[str, Any]:
     return copied
 
 
-class APIResource:
-    """Class implementing request handling for our simple API."""
+class APIResource(ScryfallCardsRoutes, ScryfallReferenceRoutes):
+    """Class implementing request handling for our simple API.
+
+    The Scryfall-compatible routes live in the base classes rather than here: they are a
+    self-contained compatibility surface with their own response objects, and `iter_marked_routes`
+    scans inherited attributes, so they register exactly like the routes defined below. They are
+    two mixins rather than one because they answer from different places — `ScryfallCardsRoutes`
+    from the corpus and the engine, `ScryfallReferenceRoutes` from the tables mirrored off
+    api.scryfall.com — and share only the response plumbing in `ScryfallResponder`.
+    """
 
     def __init__(
         self,
@@ -341,6 +430,10 @@ class APIResource:
             Keyword arguments for the action call.
         """
         params = {k: v for k, v in req.params.items() if k not in DISALLOWED_QUERY_ARGS}
+        # The request object itself, for the one handler that declares it (POST /cards/collection
+        # reads its identifiers from the body). Only where declared: a non-string keyword reaches a
+        # handler that neither declares nor absorbs it as a TypeError.
+        params.update(_request_injection(entry, req))
         if entry is None:
             # Only _raise_not_found reads this; set after the query string so a request can't
             # spoof it via ?admin_authenticated=1 on a path that doesn't resolve to anything.
@@ -349,7 +442,7 @@ class APIResource:
         params["request_host"] = req.get_header("X-Proxy-Host") or req.host
         return params
 
-    def _handle(self, req: falcon.Request, resp: falcon.Response) -> None:
+    def _handle(self, req: falcon.Request, resp: falcon.Response) -> None:  # noqa: PLR0912
         """Handle a Falcon request and set the response.
 
         Args:
@@ -373,11 +466,31 @@ class APIResource:
 
         entry, action_args = self._resolve_action(path)
         action = self._raise_not_found
-        if entry is not None:
+        if entry is None and not req.context.get("admin_authenticated", False):
+            # AN UNKNOWN PATH ANSWERS IN SCRYFALL'S SHAPE, not with the route listing.
+            #
+            # The listing is a convenience for a human poking at the origin. A client is not a human:
+            # it parses `code` and `details`, and `{"title": ..., "description": {"routes": ...}}`
+            # gives it neither -- so a client pointed at this service instead of api.scryfall.com has
+            # to special-case this origin, which is exactly what it cannot do and still be pointable
+            # back at Scryfall. Status, wording and tier are measured (404, "The requested object or
+            # REST method was not found.", `no-cache`).
+            #
+            # A human still has the listing: every route is documented, and the route table is the
+            # source both this and `build_routes_listing` read -- and a caller who has proven they
+            # hold the admin secret (#966) still gets the full listing below, exactly as upstream
+            # answers them: the Scryfall shape is for the client that cannot present one.
+            self._respond_scryfall_error(resp, code="not_found", status=404, details=_SCRYFALL_NOT_FOUND_DETAILS)
+            return
+        if entry is None:
+            # Admin-authenticated unknown path: upstream's listing, the full one.
+            pass
+        elif req.method not in entry.spec.methods:
             # A route answers only the methods it declares. Checked after the path resolves, so a
             # path that identifies nothing stays a 404 rather than reporting what it would accept.
-            if req.method not in entry.spec.methods:
-                raise falcon.HTTPMethodNotAllowed(allowed_methods=sorted(entry.spec.methods))
+            self._reject_method(resp, path=path, allowed=sorted(entry.spec.methods))
+            return
+        else:
             action = entry.action
 
         res = None
@@ -448,6 +561,59 @@ class APIResource:
                 "routes": routes,
             },
         )
+
+    def _reject_method(self, resp: falcon.Response, *, path: str, allowed: list[str]) -> None:
+        """Answer a method this route does not accept.
+
+        On the Scryfall surface this is a 404 carrying the ordinary `not_found` object, with NO
+        `Allow` header -- which is what api.scryfall.com answers, measured 2026-08-16 across eight
+        requests: POST, PUT, DELETE and PATCH against `/cards/search`, `/cards/named`,
+        `/cards/collection`, `/cards/:id` and `/sets`. Not one of them carries `Allow`.
+
+        405 is the more correct HTTP answer in the abstract, and it is deliberately not used here.
+        Sending one would have meant inventing an error `code` for it, since Scryfall never emits a
+        405 and there is therefore nothing to measure -- and an error body nobody checked is the same
+        defect as a column set nobody checked. A client that branches on 404-versus-405 has to see
+        what Scryfall shows it.
+
+        This service's OWN routes keep falcon's 405 and its `Allow`: nothing there is mirroring
+        Scryfall, and 405 remains right for a route that genuinely declares its methods.
+
+        Args:
+            resp: The response to write to.
+            path: The resolved route key, which selects the answer.
+            allowed: The methods this route does accept, sorted.
+
+        Raises:
+            falcon.HTTPMethodNotAllowed: On this service's own surface, whose behaviour is unchanged.
+        """
+        if path not in SCRYFALL_SURFACE_ROUTES:
+            raise falcon.HTTPMethodNotAllowed(allowed_methods=allowed)
+        self._respond_scryfall_error(resp, code="not_found", status=404, details=_SCRYFALL_NOT_FOUND_DETAILS)
+
+    @staticmethod
+    def _respond_scryfall_error(resp: falcon.Response, *, code: str, status: int, details: str) -> None:
+        """Write a dispatch-level error in Scryfall's shape.
+
+        Written directly rather than raised: falcon's error serializer produces `{title,
+        description}` from an `HTTPError`, which is the shape this is replacing. Indented, like every
+        `object: "error"` body api.scryfall.com sends, and `no-cache`, which is the tier it sends on
+        a 404 about a PATH (a 404 about DATA, such as `/sets/zzzz`, keeps the data tier and is
+        answered by its own route rather than here).
+
+        Args:
+            resp: The response to write to.
+            code: Scryfall's error code.
+            status: The HTTP status, which the body repeats.
+            details: The human-readable sentence.
+        """
+        resp.status = falcon.util.code_to_http_status(status)
+        resp.content_type = "application/json; charset=utf-8"
+        resp.set_header("Cache-Control", "no-cache")
+        resp.text = orjson.dumps(
+            {"object": "error", "code": code, "status": status, "details": details},
+            option=orjson.OPT_INDENT_2,
+        ).decode()
 
     def _run_query(
         self,
@@ -820,6 +986,13 @@ class APIResource:
         offset: int = DEFAULT_OFFSET,
         fields: Sequence[str] | None = None,
     ) -> dict[str, Any]:
+        # AUTO is a request-level spelling neither search path knows, resolved on the way in so
+        # nothing downstream can see it. Resolved in each path rather than once in `_search`
+        # because what AUTO means depends on `orderby`: doing it here is necessarily after
+        # everything upstream that can still change `orderby` -- today nothing, once the in-query
+        # directives land their fold. Resolving before that fold would answer `order:usd` with the
+        # default ordering's direction and hand the engine the literal "auto".
+        direction = resolve_direction(direction, orderby)
         logger.info("Searching engine for %r", query)
         query_explanation = parsed_query.to_human_explanation() if query else ""
         try:
@@ -867,6 +1040,13 @@ class APIResource:
         offset: int = DEFAULT_OFFSET,
         fields: Sequence[str] | None = None,
     ) -> dict[str, Any]:
+        # AUTO is a request-level spelling neither search path knows, resolved on the way in so
+        # nothing downstream can see it. Resolved in each path rather than once in `_search`
+        # because what AUTO means depends on `orderby`: doing it here is necessarily after
+        # everything upstream that can still change `orderby` -- today nothing, once the in-query
+        # directives land their fold. Resolving before that fold would answer `order:usd` with the
+        # default ordering's direction and hand the engine the literal "auto".
+        direction = resolve_direction(direction, orderby)
         logger.info("Searching SQL for %r", query)
         resolved_fields = self._resolve_result_fields(fields)
         query_explanation = parsed_query.to_human_explanation() if query else ""
@@ -885,7 +1065,18 @@ class APIResource:
             CardOrdering.RARITY: "card_rarity_int",
             CardOrdering.TOUGHNESS: "creature_toughness",
             CardOrdering.USD: "price_usd",
+            CardOrdering.EUR: "price_eur",
+            CardOrdering.TIX: "price_tix",
             CardOrdering.CUBECOBRA: "cubecobra_score",
+            CardOrdering.RELEASED: "released_at",
+            # lower() for the same reason as name: the engine ranks the lowercased artist, and set
+            # codes are stored lowercase but nothing constrains them to be.
+            CardOrdering.ARTIST: "lower(card_artist)",
+            CardOrdering.SET: "lower(card_set_code)",
+            # Scryfall's colour order is eleven buckets, not the colour bitmask -- WUBRG, then
+            # multicolour by how many colours, then colourless, then lands. Measured 2026-08-09;
+            # mirrors color_sort_rank in card_engine/src/lib.rs, which the engine path uses.
+            CardOrdering.COLOR: _COLOR_ORDER_SQL,
         }.get(orderby, "edhrec_rank")
         sql_direction = {
             "asc": "ASC",

@@ -22,6 +22,19 @@ from api.tests.support import mock_app_context
 EXPECTED_PUBLIC_ROUTES = {
     "_root",
     "card",
+    # The Scryfall-compatible surface (ScryfallCardsRoutes, mixed into APIResource): public by
+    # design, a client points here by swapping its base URL.
+    "cards",
+    "cards/autocomplete",
+    "cards/collection",
+    "cards/named",
+    "cards/random",
+    "cards/search",
+    # The reference half of that surface (ScryfallReferenceRoutes): /sets, /catalog/*, /symbology.
+    "catalog",
+    "sets",
+    "symbology",
+    "symbology/parse-mana",
     "favicon.ico",
     "get_catalog",
     "get_common_keywords",
@@ -50,6 +63,12 @@ EXPECTED_ADMIN_ROUTES = {
     "import_cards_by_search",
     "import_data",
     "import_oracle_tags",
+    # The rulings bulk file, behind the mount with every other import (scryfall-cards-api).
+    "import_rulings",
+    # The reference tables, mirrored off api.scryfall.com (scryfall-sets-catalogs-symbology).
+    "import_catalogs",
+    "import_sets",
+    "import_symbology",
     "ingest_cubecobra",
     "prefer_score_tuner",
     "setup_schema",

@@ -157,6 +157,27 @@ class ScryfallBulkDataFetcher:
         response.raise_for_status()
         return response
 
+    def fetch_api_json(self, path: str, *, timeout: int = 30) -> dict:
+        """GET one Scryfall API endpoint and decode it.
+
+        The reference data — sets, catalogs, symbology — is published as ordinary API responses
+        rather than as bulk dumps, and is small enough to fetch whole. It goes through this session
+        so it inherits the same retry policy and error logging the dumps get, rather than opening a
+        second HTTP client with its own behaviour.
+
+        Args:
+            path: Path below the API root, with no leading slash (e.g. "catalog/creature-types").
+            timeout: Per-attempt request timeout in seconds.
+
+        Returns:
+            The decoded response body.
+
+        Raises:
+            requests.HTTPError: If the final response after retries is not 2xx.
+            requests.RequestException: If the request fails at the transport level.
+        """
+        return self._get(f"https://api.scryfall.com/{path}", timeout=timeout).json()
+
     @cachebox_cached(cache=TTLCache(maxsize=2, global_ttl=5 * MINUTE))
     def list_bulk_data(self) -> dict[BulkDataKey, dict]:
         """Fetch bulk data from Scryfall, ignoring bulk data types we don't recognize."""
