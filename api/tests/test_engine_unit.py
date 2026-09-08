@@ -1020,10 +1020,14 @@ class TestCardProperties:
         assert total == 2
         names = {c["name"] for c in results}
         assert names == {"UUID Card A", "UUID Card B"}
-        # scryfall_id and illustration_id are returned as uuid.UUID objects
+        # scryfall_id and illustration_id come back as canonical lowercase-hyphenated text, not
+        # uuid.UUID: the object cost 76 ns/row to build against 22 for the string, and orjson only
+        # turned it back into this text anyway. _search_sql casts both with ::text to match.
         for c in results:
-            assert isinstance(c["scryfall_id"], uuid.UUID)
-            assert isinstance(c["illustration_id"], uuid.UUID)
+            assert isinstance(c["scryfall_id"], str)
+            assert c["scryfall_id"] == str(uuid.UUID(c["scryfall_id"]))
+            assert isinstance(c["illustration_id"], str)
+            assert c["illustration_id"] == str(uuid.UUID(c["illustration_id"]))
         # unique=artwork groups by illustration_id *within an oracle card*. Scryfall
         # assigns each illustration_id to exactly one oracle_id, so two different
         # oracle cards sharing one (as this synthetic fixture does) is impossible in
