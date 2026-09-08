@@ -917,7 +917,42 @@ class APIResource:
         )
         _select_cols = "".join(f"\n                    {col}," for col in _cte_columns)
         _result_cols = ",\n                    ".join(f"{RESULT_FIELD_COLUMNS[name]} AS {name}" for name in resolved_fields)
-        _order_by = f"""sort_value {sql_direction} NULLS LAST,
+        # WHICH SIDE A MISSING SORT VALUE GOES depends on the COLUMN, and the two families
+        # disagree. Measured against api.scryfall.com, one page-1 request per (column, direction)
+        # over `e:khm unique=prints` on 2026-08-17, re-confirming the 2026-08-11 rows:
+        #
+        #     power       asc null,null,null…    desc "8","8","8"…     absent LOWEST  (19 nulls)
+        #     toughness   asc null,null,null…    desc "8","8","8"…     absent LOWEST  (20 nulls)
+        #     usd         asc null,null,null…    desc null,"66.82"…    absent LOWEST  (foil note)
+        #     edhrec      asc 199,378,378…       desc null,null,null…  absent HIGHEST (33 nulls)
+        #
+        # A missing MAGNITUDE behaves like a value below every real one; a missing RANK -- "this
+        # card is not ranked" -- behaves like a position after every real one. Both directions move
+        # it either way, so this is a per-column table and not a per-direction constant.
+        #
+        # `edhrec` matters more than its one row suggests: it is the DEFAULT `order=`, so treating
+        # its nulls as lowest puts every unranked card at the head of an unordered search.
+        #
+        # THE `usd` DESC HEAD IS NOT A COUNTEREXAMPLE, and reading only the ascending page would
+        # have recorded it as one: `khm/407` leads `order=usd dir=desc` with a NULL `prices.usd`
+        # because its `usd_foil` is $106.04 and Scryfall's price key coalesces the foil. The rows
+        # that are genuinely price-less (the Arena `A-*` printings) lead ASCENDING, which is the
+        # reading this table records.
+        #
+        # The clause has to stay explicit either way: Postgres' default is NULLS LAST for ASC and
+        # NULLS FIRST for DESC, which happens to be the RANK rule -- so dropping it would leave
+        # `order=edhrec` right and every other column wrong.
+        #
+        # The two tiebreaks below keep NULLS LAST unconditionally. `dir` does not apply to them --
+        # they are not the user's sort column, and card_engine's sort key encodes the same
+        # asymmetry (`sort_key_bits` negates only the primary). The `edhrec_rank` tiebreak has
+        # always read `ASC NULLS LAST`, which is this table's EDHREC row written out by hand.
+        _absent_sorts_highest = orderby == CardOrdering.EDHREC
+        if _absent_sorts_highest:
+            _sort_value_nulls = "LAST" if sql_direction == "ASC" else "FIRST"
+        else:
+            _sort_value_nulls = "FIRST" if sql_direction == "ASC" else "LAST"
+        _order_by = f"""sort_value {sql_direction} NULLS {_sort_value_nulls},
                     edhrec_rank ASC NULLS LAST,
                     prefer_score DESC NULLS LAST"""
         _count_nulls = ",\n                    ".join(f"null AS {name}" for name in resolved_fields)
