@@ -528,6 +528,15 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         field_type = field_infos[0].field_type if field_infos else None
 
         if field_type == FieldType.JSONB_ARRAY:
+            # A regex is a pattern over the printed type line, not a member of
+            # the type/subtype arrays. The `.title()` below would turn
+            # `t:/goblin|elf/` into the literal subtype "Goblin|Elf" and
+            # `t:/^drag/` into "^Drag", neither of which is a type any card
+            # has — the query then matches nothing, silently. Scryfall answers
+            # both as regexes, so pass the node through and let the engine run
+            # it against the type line (`type_line ~* …` on the SQL path).
+            if isinstance(self.rhs, RegexValueNode) and self.lhs.attribute_name.lower() in ("card_types", "card_subtypes", "type"):
+                return {"lhs": self.lhs.to_json(), "op": self.operator, "rhs": _node_to_json(self.rhs)}
             # Resolve type vs subtype without mutating self.lhs — build lhs JSON explicitly.
             rhs_val = self.rhs.value.strip().title()
             attr = self.lhs.attribute_name.lower()
@@ -555,8 +564,17 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         attr = self.lhs.attribute_name
 
         if field_type == FieldType.JSONB_OBJECT:
-            # Mana cost and devotion: pass raw ManaValueNode for Rust to parse pip counts
-            if field_info.parser_class == ParserClass.MANA:
+            # Two nodes pass through untouched. Mana cost and devotion: the raw ManaValueNode,
+            # for Rust to parse pip counts. And a REGEX, WHICH IS NOT A TAG NAME -- every
+            # comparison-key reader below takes a STRING and normalizes it into one key, so a
+            # RegexValueNode came out as whatever letters its pattern happens to contain:
+            # `otag:/^remov/` became the tag `^remov` and `kw:/f.y/` the keyword `f.y`. No such
+            # tag exists, so the engine and the SQL path BOTH answered a different query with
+            # confidence -- a silent empty result rather than a decline, which is the same shape
+            # the JSONB_ARRAY branch above was already fixed for (`t:/^drag/`). Passing the node
+            # through lets `build_text_filter` decline it (`regex not supported on
+            # card_oracle_tags`), which the route reports as a 400.
+            if field_info.parser_class == ParserClass.MANA or isinstance(self.rhs, RegexValueNode):
                 return _node_to_json(self.rhs)
             val = self.rhs.value.strip()
             if attr in ("card_colors", "card_color_identity", "produced_mana"):
@@ -752,6 +770,16 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
 
         # Special handling for mana attributes with comparison operators
         if attr in ("mana_cost_text", "mana_cost_jsonb"):
+            # `mana:/.../` runs against the printed cost STRING, not the pip multiset every other
+            # spelling of this column compiles to -- see hand_parser.parse_mana_value for the
+            # measurements. `mana_cost_text` is Scryfall's own top-level field, so a split card
+            # holds "{1}{R} // {1}{U}" here exactly as there, which is what makes `mana:/ /` (435)
+            # and `mana:/^$/` (1,350) reproduce without a per-face split. Without this arm the
+            # pattern reaches mana_cost_str_to_dict, which finds no symbols in it and emits the
+            # vacuously true `'{}'::jsonb <@ mana_cost_jsonb AND cmc >= 0` -- the whole filter
+            # thrown away silently.
+            if isinstance(self.rhs, RegexValueNode):
+                return f"(card.mana_cost_text ~* {context.add(self.rhs.value)})"
             return self._handle_mana_cost_comparison(context)
 
         # Special handling for date/year searches
@@ -1022,6 +1050,13 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         # Produce the query as a jsonb object
         lhs_sql = self.lhs.to_sql(context)
         attr = self.lhs.attribute_name
+        # Same guard as `_rhs_to_json`'s, and for the same reason: every reader below turns the
+        # rhs into a comparison KEY, so a pattern would be looked up as the tag it spells. This
+        # path is only reached when the engine has already declined the leaf, so refusing here
+        # turns a silently wrong answer into the 400 `_search_sql` raises for a ValueError.
+        if isinstance(self.rhs, RegexValueNode):
+            msg = f"regex is not supported on {attr}"
+            raise ValueError(msg)
         is_color_identity = False
         if attr in ("card_colors", "card_color_identity", "produced_mana"):
             rhs = get_colors_comparison_object(self.rhs.value.strip().lower(), attr)
@@ -1089,6 +1124,13 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         raise ValueError(msg)
 
     def _handle_jsonb_array(self, context: QueryContext) -> str:
+        # Regex over a type field reads the printed type line, for the reason
+        # spelled out in kwargs(): the containment tests below take a literal
+        # type name, and a pattern is not one. `type_line` is the column the
+        # type/subtype arrays are derived from, so this is the same text the
+        # engine's TextField::TypeLine sees.
+        if isinstance(self.rhs, RegexValueNode) and self.lhs.attribute_name.lower() in ("card_types", "card_subtypes", "type"):
+            return f"(card.type_line ~* {context.add(self.rhs.value)})"
         # TODO: this should produce the query as an array, not jsonb
         rhs_val = self.rhs.value.strip().title()
         if self.lhs.attribute_name.lower() in ("card_types", "card_subtypes", "type"):

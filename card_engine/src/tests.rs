@@ -1,7 +1,7 @@
 use super::{
     renumber_coll_vocab,
     and_child_rank, assign_name_ranks,
-    build_numeric_index, build_oracle_text_index, build_trigram_index,
+    build_numeric_index, build_oracle_text_index, build_trigram_index, build_type_line_index,
     build_rarity_index, build_flavor_index, build_hybrid_tag_index, build_layout_hybrid_index, bitmap_beats_postings, HybridTagIndex, build_sort_permutations,
     assign_artwork_groups, build_artwork_base_from, build_bit_planes, build_border_printing_planes, build_rarity_printing_planes, build_divergent_ids, build_name_bigram_index, build_name_unigram_index, build_printing_to_card, flavor_fingerprint, flavor_match_sets,
     cards_of_printings, count_common_keywords, count_common_types,
@@ -212,6 +212,7 @@ fn stub_card(oracle_id: u128, card_types: u16, subtypes: &[&str], vocab: &mut Vo
         card_name_id: NONE_STR,
         oracle_text_id: NONE_STR,
         oracle_text_lower_id: NONE_STR,
+        oracle_full_lower_id: NONE_STR,
         card_layout_id: NONE_STR,
         mana_cost_text_id: NONE_STR,
         type_line_id: NONE_STR,
@@ -1865,7 +1866,7 @@ fn fuzz_text_needle(rng: &mut rand::rngs::SmallRng, field: TextSearchField) -> S
         let t = corpus[rng.random_range(0..corpus.len())];
         let text = match field {
             TextSearchField::NameLower => t.0,
-            TextSearchField::OracleTextLower => t.1,
+            TextSearchField::OracleTextLower | TextSearchField::FullOracleTextLower => t.1,
             TextSearchField::FlavorTextLower => t.2,
             TextSearchField::ArtistLower => t.0, // artist has its own leaf; not reached here
         };
@@ -2184,6 +2185,9 @@ fn fuzz_describe(spec: &FuzzSpec) -> String {
             let f = match field {
                 TextSearchField::NameLower => "name",
                 TextSearchField::OracleTextLower => "oracle",
+                // Never generated (the fuzz corpus carries one oracle string per card), but the
+                // match is exhaustive so a new field has to be given an answer here.
+                TextSearchField::FullOracleTextLower => "fulloracle",
                 TextSearchField::FlavorTextLower => "flavor",
                 TextSearchField::ArtistLower => "artist",
             };
@@ -6645,6 +6649,7 @@ fn bench_checked_vs_unchecked_access() {
         name_trigram:   build_trigram_index(&cards, |c| c.card_name_folded.as_str()),
         name_unigrams:  build_name_unigram_index(&cards),
         oracle_trigram: build_oracle_text_index(&cards, &strings),
+        type_lines:     build_type_line_index(&cards, &strings),
         cmc:            build_numeric_index(&cards, |c| c.cmc.map(|v| v as i16)),
         power:          build_numeric_index(&cards, |c| c.creature_power.map(|v| v as i16)),
         toughness:      build_numeric_index(&cards, |c| c.creature_toughness.map(|v| v as i16)),
@@ -10641,14 +10646,14 @@ fn machinery_regex() -> FilterExpr {
 #[test]
 fn regex_tier_classifies_pattern_shapes() {
     use super::{regex_tier, REGEX_BACKTRACK_NS100, REGEX_MACHINERY_NS100, SET_LOOKUP_NS100};
-    assert_eq!(regex_tier("(?i)^flying$"), SET_LOOKUP_NS100);
+    assert_eq!(regex_tier("(?im)^flying$"), SET_LOOKUP_NS100);
     assert_eq!(regex_tier("dragon$"), SET_LOOKUP_NS100);
-    assert_eq!(regex_tier("(?i)^\\{t\\}: add"), SET_LOOKUP_NS100, "escaped punctuation is literal");
+    assert_eq!(regex_tier("(?im)^\\{t\\}: add"), SET_LOOKUP_NS100, "escaped punctuation is literal");
     assert_eq!(regex_tier("^gob"), SET_LOOKUP_NS100);
-    assert_eq!(regex_tier("(?i)flying"), REGEX_MACHINERY_NS100, "unanchored literal measures the same as machinery");
+    assert_eq!(regex_tier("(?im)flying"), REGEX_MACHINERY_NS100, "unanchored literal measures the same as machinery");
     assert_eq!(regex_tier("draw .* cards?"), REGEX_MACHINERY_NS100);
     assert_eq!(regex_tier("^[aeiou]"), REGEX_MACHINERY_NS100);
-    assert_eq!(regex_tier("(?i)^\\d+$"), REGEX_MACHINERY_NS100, "class escapes are machinery");
+    assert_eq!(regex_tier("(?im)^\\d+$"), REGEX_MACHINERY_NS100, "class escapes are machinery");
     assert_eq!(regex_tier("a|b"), REGEX_MACHINERY_NS100);
     assert_eq!(regex_tier("ends with backslash\\"), REGEX_MACHINERY_NS100, "dangling escape: not literal");
     assert_eq!(regex_tier("(?i)draw (?!two)"), REGEX_BACKTRACK_NS100);
@@ -10659,15 +10664,23 @@ fn regex_tier_classifies_pattern_shapes() {
 #[test]
 fn regex_backtrack_exhaustion_surfaces_as_match_failure() {
     use crate::filter::{
-        clear_regex_match_failed, regex_is_match_for_test, take_regex_match_failed, REGEX_MATCH_ERR_PREFIX,
+        clear_regex_match_failed, compile_search_regex_for_test, regex_is_match_for_test, take_regex_match_failed,
+        REGEX_MATCH_ERR_PREFIX,
     };
-    use fancy_regex::RegexBuilder;
 
     clear_regex_match_failed();
-    let re = RegexBuilder::new("(?i)(?=a)(a+)+b")
-        .backtrack_limit(8)
-        .build()
-        .expect("pattern compiles");
+    // Compiled through the real search path, so this pins the budget reaching
+    // the backtracking arm at REGEX_BACKTRACK_LIMIT rather than at some limit a
+    // test picked.
+    //
+    // The lookahead sits INSIDE the repetition on purpose. `(?=a)(a+)+b` — the
+    // obvious spelling — does not exhaust the budget at any length, because
+    // fancy-regex hands the plain `(a+)+b` tail to the linear engine and only
+    // the leading assertion backtracks. Nesting it makes every iteration of the
+    // outer loop an assertion the linear engine cannot take, which is what
+    // actually costs steps.
+    let re = compile_search_regex_for_test("((?=a)a+)+b");
+    assert!(re.is_backtracking(), "lookahead must decline the linear engine");
     let hay = format!("{}c", "a".repeat(40));
     assert!(!regex_is_match_for_test(&re, &hay));
     let msg = take_regex_match_failed().expect("backtrack exhaustion must set failure flag");
@@ -12942,8 +12955,8 @@ fn regex_required_factors_extracts_only_guaranteed() {
     assert_eq!(f("^flying$"), vec!["flying".to_string()]);
     assert_eq!(f("dragon$"), vec!["dragon".to_string()]);
     assert_eq!(f("^gob"), vec!["gob".to_string()]);
-    // the `(?i)` we prepend is stripped; factors come back lowercased
-    assert_eq!(f("(?i)Dragon"), vec!["dragon".to_string()]);
+    // the `QUERY_REGEX_FLAGS` we prepend are stripped; factors come back lowercased
+    assert_eq!(f("(?im)Dragon"), vec!["dragon".to_string()]);
     // optional tail char drops below the ≥3 threshold on its own but keeps the mandatory stem
     assert_eq!(f("colou?r"), vec!["colo".to_string()]); // "r" alone is <3 → dropped
     // escaped punctuation is a literal
@@ -12954,7 +12967,7 @@ fn regex_required_factors_extracts_only_guaranteed() {
     assert!(f(r"\d+").is_empty());
     assert!(f("a.b").is_empty(), "no run reaches 3 literal bytes");
     // a min≥1 repetition of a literal is still guaranteed
-    assert_eq!(f("(?i)aaa+"), vec!["aaa".to_string()]);
+    assert_eq!(f("(?im)aaa+"), vec!["aaa".to_string()]);
 }
 
 /// The arith-tuple key budget is a tripwire for adding a high-cardinality field to
@@ -13001,6 +13014,1045 @@ fn arith_tuple_key_budget_catches_a_blown_domain() {
 /// Above `ARITH_TUPLE_GUARD_MIN_CARDS`, and large enough that an all-distinct key space
 /// clears `10*sqrt(n)+32` by a wide margin.
 const ARITH_TUPLE_BLOWUP_CARDS: usize = 6_000;
+
+// ─── Regex dialect parity with the SQL path (see regex_compat.rs) ────────────
+
+/// Build the wire JSON for `<attr>:/<pattern>/`, the shape the Python parser
+/// emits for a regex leaf.
+fn regex_leaf(attr: &str, pattern: &str) -> serde_json::Value {
+    serde_json::json!({
+        "node_type": "CardBinaryOperatorNode",
+        "kwargs": {
+            "op": ":",
+            "lhs": {"node_type": "CardAttributeNode", "kwargs": {"attribute_name": attr, "original_attribute": attr}},
+            "rhs": {"node_type": "RegexValueNode", "kwargs": {"value": pattern}},
+        }
+    })
+}
+
+#[test]
+fn lookaround_compiles_instead_of_declining() {
+    // Each of these is accepted by PostgreSQL's `~*` and rejected by the
+    // `regex` crate; before CompiledRegex they were a build_filter error, which
+    // _search's blanket handler turned into a silent SQL fallback. Lookahead is
+    // on the documented feature list (docs/changelog/2025-02-02-regex-search.md).
+    for pattern in [r"draw (?!two)", r"(?=.*sacrifice)draw", r"(?<=draw )a card", r"(\w+) \1"] {
+        let re = super::regex_compat::CompiledRegex::new(pattern)
+            .unwrap_or_else(|e| panic!("{pattern:?} should compile, got {e}"));
+        assert!(re.is_backtracking(), "{pattern:?} needs the backtracking engine");
+    }
+}
+
+#[test]
+fn linear_patterns_do_not_reach_the_backtracking_engine() {
+    // The tiering is only worth having if ordinary patterns keep the linear
+    // engine — and with it their #734 trigram narrowing. A pattern that
+    // silently fell through to fancy_regex would lose the literal factor and
+    // scan, with nothing to signal it.
+    for pattern in ["flying", "^flying$", "draw .* cards?", r"\bizzet\b", "[aeiou]+", r"\s\+\d"] {
+        let re = super::regex_compat::CompiledRegex::new(pattern).unwrap();
+        assert!(!re.is_backtracking(), "{pattern:?} should stay on the linear engine");
+    }
+}
+
+/// A metacharacter next to a NON-ASCII literal must classify, not panic.
+///
+/// `pattern_requires_backtrack` byte-walks the pattern, and its `(?P=` probe used to slice
+/// `pattern[i..]` on the catch-all arm — i.e. at every byte position, including the continuation
+/// bytes of a multi-byte character:
+///
+///     byte index 2 is not a char boundary; it is inside '—' (bytes 1..4) of `.—`
+///
+/// Counts measured on api.scryfall.com 2026-08-28, every one an ordinary query: `o:/[a-z]—/` 245,
+/// `o:/\w—/` 382, `o:/[a-z]é/` 5, `o:/.—/` 3,461, `o:/—[^{]*$/` 2,846 — while `o:/[a-z]x/` (5,212)
+/// and `o:/x—/` (7) never took the failing path. A BARE non-ASCII literal is lowered to a
+/// substring leaf by `lower_literal_regexes` before the engine sees a pattern, so only the mixed
+/// shapes reached the walk at all.
+///
+/// On this tree the panic is MASKED — `_search`'s blanket handler turns an engine failure into a
+/// silent PostgreSQL fallback, so the query is answered, just not by the engine.
+#[test]
+fn metacharacters_beside_a_non_ascii_literal_classify_without_panicking() {
+    use super::regex_compat::CompiledRegex;
+    use super::{pattern_requires_backtrack, regex_tier, REGEX_MACHINERY_NS100};
+
+    // Every byte offset in each of these is visited by the scan, and in the failing shapes at
+    // least one of them is a UTF-8 continuation byte.
+    for pattern in [r"[a-z]—", r"\w—", "[a-z]é", ".—", r"—[^{]*$", "x—", "[a-z]x", "[a-z]*x"] {
+        assert!(!pattern_requires_backtrack(pattern), "{pattern:?} has no backtracking construct");
+
+        // The LINEAR engine takes all of them: the `regex` crate compiles `&str` patterns with
+        // Unicode on, so a class beside a multi-byte literal was never a compile problem — which
+        // is why the panic, not a decline, was the whole bug. The #734 trigram narrowing rides on
+        // this arm, so a pattern quietly moving to `fancy_regex` would be a silent slowdown.
+        let re = CompiledRegex::new(pattern).unwrap_or_else(|e| panic!("{pattern:?} should compile, got {e}"));
+        assert!(!re.is_backtracking(), "{pattern:?} should stay on the linear engine");
+
+        // Priced through the compiled pattern, `QUERY_REGEX_FLAGS` prefix and all — the shape
+        // `verify_cost_tier` actually passes.
+        assert_eq!(regex_tier(re.as_str()), REGEX_MACHINERY_NS100, "{pattern:?}");
+    }
+
+    // The matching half, so the fix is not merely "it no longer crashes". `—` is U+2014 EM DASH,
+    // three bytes (E2 80 94); `é` is U+00E9, two.
+    assert!(CompiledRegex::new(r"[a-z]—").unwrap().is_match("sacrifice—then draw"));
+    assert!(!CompiledRegex::new(r"[a-z]—").unwrap().is_match("sacrifice —then draw"));
+    assert!(CompiledRegex::new(".—").unwrap().is_match("kicker—{2}"));
+    assert!(CompiledRegex::new("[a-z]é").unwrap().is_match("fabergé egg"));
+    assert!(CompiledRegex::new(r"—[^{]*$").unwrap().is_match("landfall—whenever a land enters"));
+
+    // `(?P=` still reads as backtracking, now from the arm that can actually see it: on the
+    // catch-all it was unreachable, because a `(?P=name)` is met with `bytes[i] == b'('` and
+    // `bytes[i + 1] == b'?'`, which the group arm matches first.
+    assert!(pattern_requires_backtrack("(?P<n>a)(?P=n)"));
+    assert!(pattern_requires_backtrack("(?>a+)b"));
+}
+
+/// Both engines refuse these, so this tree must keep refusing them.
+///
+/// Measured on api.scryfall.com 2026-08-28: `o:/a+—/` and `o:/(a|b)—/` both answer 404 (`Your
+/// query didn't match any cards`), not a result set. They are negative controls — the non-ASCII
+/// fix must not turn a shared refusal into a divergence — and they still have to classify without
+/// panicking, which is the property the fix is actually about.
+#[test]
+fn non_ascii_shapes_scryfall_also_declines_still_classify() {
+    for pattern in [r"a+—", "(a|b)—"] {
+        assert!(!super::pattern_requires_backtrack(pattern), "{pattern:?}");
+        let re = super::regex_compat::CompiledRegex::new(pattern).unwrap();
+        assert!(!re.is_backtracking(), "{pattern:?}");
+    }
+}
+
+#[test]
+fn lookaround_matches_what_it_should() {
+    let re = super::regex_compat::CompiledRegex::new(r"draw (?!two)").unwrap();
+    assert!(re.is_match("draw a card"));
+    assert!(!re.is_match("draw two cards"));
+    // (?i) is applied to every query regex, the same as the SQL path's ~*.
+    assert!(re.is_match("DRAW A CARD"));
+}
+
+#[test]
+fn anchors_are_line_anchors_and_dot_is_not() {
+    use super::regex_compat::CompiledRegex;
+    // Firja, Judge of Valor (khm/209), verbatim: the case that made this a bug rather than a
+    // preference. `^Whenever you cast` and `lifelink$` both hit it on api.scryfall.com and both
+    // missed here, because `^`/`$` anchored to the whole string instead of to a line.
+    let firja = "Flying, lifelink\nWhenever you cast your second spell each turn, create a 1/1 white Human creature token.";
+    assert!(CompiledRegex::new("^Whenever you cast").unwrap().is_match(firja));
+    assert!(CompiledRegex::new("lifelink$").unwrap().is_match(firja));
+    // A whole line, exactly — `o:/^Flying$/` is a real query, and it must not need the card's
+    // oracle text to be nothing but "Flying".
+    assert!(CompiledRegex::new("^Flying$").unwrap().is_match("Flying\nVigilance"));
+    // ...and `$` still matches at the end of the string, with no trailing newline in sight, so
+    // the single-line columns (name, type line, artist) are untouched.
+    assert!(CompiledRegex::new("lifelink$").unwrap().is_match("First strike, lifelink"));
+    assert!(CompiledRegex::new("^Firja").unwrap().is_match("Firja, Judge of Valor"));
+
+    // `s` is deliberately NOT on: `.` stops at a newline. Measured on api.scryfall.com
+    // (2026-08-16), `o:/Flying.Whenever/ e:khm` is empty while `o:/Flying\nWhenever/ e:khm` is
+    // not — the same pair PostgreSQL ARE's `(?n)` gives, which is the dialect this mirrors.
+    assert!(!CompiledRegex::new("Flying.Whenever").unwrap().is_match("Flying\nWhenever you cast"));
+    assert!(CompiledRegex::new(r"Flying\nWhenever").unwrap().is_match("Flying\nWhenever you cast"));
+
+    // A negated anchor still means "no line starts with this", not "the string does not start
+    // with this" — the shape a `-o:/^…/` query leans on.
+    assert!(!CompiledRegex::new("^Vigilance").unwrap().is_match("Flying\nWhenever"));
+}
+
+#[test]
+fn query_regex_flags_stay_strippable() {
+    // regex_tier and regex_required_factors both recover the raw pattern by removing this exact
+    // prefix; a flag added without updating them costs the trigram narrow silently (the HIR of a
+    // case-folded pattern is classes, not literals, so no factor comes back and the query scans).
+    use super::regex_compat::{CompiledRegex, QUERY_REGEX_FLAGS};
+    let re = CompiledRegex::new("dragon").unwrap();
+    assert_eq!(re.as_str().strip_prefix(QUERY_REGEX_FLAGS), Some("dragon"));
+    assert_eq!(super::regex_required_factors(re.as_str()), vec!["dragon".to_string()]);
+    // An anchored literal must still price as a set lookup with the new flags in front of it.
+    let anchored = CompiledRegex::new("^flying$").unwrap();
+    assert_eq!(super::regex_tier(anchored.as_str()), super::SET_LOOKUP_NS100);
+}
+
+#[test]
+fn are_word_boundary_escapes_translate() {
+    use super::regex_compat::translate_query_escapes;
+    // \y and \Z have exact regex-crate spellings, so these stay linear.
+    assert_eq!(translate_query_escapes(r"\yizzet\y"), r"\bizzet\b");
+    assert_eq!(translate_query_escapes(r"\Yizzet"), r"\Bizzet");
+    assert_eq!(translate_query_escapes(r"card\Z"), r"card\z");
+    // \m and \M have none, so they become lookaround (and thus backtracking).
+    assert_eq!(translate_query_escapes(r"\mdraw"), r"(?<!\w)(?=\w)draw");
+    assert_eq!(translate_query_escapes(r"draw\M"), r"draw(?<=\w)(?!\w)");
+    // Untouched: anything that already means the same thing in both dialects.
+    assert_eq!(translate_query_escapes(r"\bfoo\d+\s"), r"\bfoo\d+\s");
+    assert_eq!(translate_query_escapes(r"\\y"), r"\\y");
+
+    let boundary = super::regex_compat::CompiledRegex::new(r"\yizzet\y").unwrap();
+    assert!(!boundary.is_backtracking(), r"\y should translate to \b, not force backtracking");
+    assert!(boundary.is_match("the izzet guildmage"));
+    assert!(!boundary.is_match("niv-mizzet"));
+}
+
+#[test]
+fn scryfall_regex_shorthands_expand() {
+    use super::regex_compat::{translate_query_escapes, CompiledRegex};
+
+    // The shorthand family is documented at https://scryfall.com/docs/regular-expressions and
+    // every count below was measured on api.scryfall.com, corpus-wide, 2026-08-28. The strings
+    // matched here are real oracle text: `{W/P}` is Blinding Souleater's, `{U}{U}{U}` is
+    // Aboshan's, `{H}` is Rage Extractor's, `{P}` is the Bloomburrow pawprint.
+    let m = |pattern: &str, haystack: &str| CompiledRegex::new(pattern).unwrap().is_match(haystack);
+
+    // \sm — any mana symbol (11,057). It is NOT whitespace followed by "m": that reading answers
+    // 10,791, a plausible wrong number.
+    assert!(m(r"\sm", "{t}: add {g}."));
+    assert!(m(r"\sm", "{h} in its mana cost"), "{{H}} is a mana symbol");
+    assert!(m(r"\sm", "put a {p} counter"), "{{P}} pawprint counts as mana for \\sm");
+    assert!(!m(r"\sm", "draw a card"));
+    // ...and "m" after it is a literal, so `\smana` is a symbol then "ana" and matches nothing —
+    // `o:/\smana/` is 404 on Scryfall where `o:/ mana/` is 2,782.
+    assert!(!m(r"\smana", "adds one mana of any color"));
+
+    // \smp — any Phyrexian card symbol (42). `{P}` is the PAWPRINT and is excluded, which
+    // contradicts Scryfall's own docs example and is what the count says.
+    assert!(m(r"\smp", "{w/p}, {t}: tap target creature."));
+    assert!(m(r"\smp", "a spell with {h} in its mana cost"));
+    assert!(!m(r"\smp", "put a {p} counter on it"));
+    assert!(!m(r"\smp", "{u}{u}{u}: tap all creatures"));
+
+    // \smr — the SAME mana symbol twice in a row (1,189), not merely two adjacent ones: on
+    // Scryfall `o:/\{g\}\{w\}/ -o:/\smr/` is 63.
+    assert!(m(r"\smr", "{u}{u}{u}: tap all creatures without flying."));
+    assert!(m(r"\smr", "{5}{r/g}{r/g}: put a +1/+1 counter"));
+    assert!(!m(r"\smr", "{g}{w}, {t}, sacrifice this land"), "two ADJACENT symbols are not enough");
+    assert!(m(r"\smr", "{g}{w}{w}, {t}, sacrifice this land"), "but {{w}}{{w}} inside the same run is");
+    assert!(!m(r"\smr", "{t}: add {g}."));
+    // The pawprint repeats in the `Season of …` mode lines and Scryfall does NOT count it:
+    // `o:/\smr/` is 1,189 there and is 1,194 when `\smr` reuses `\sm`'s vocabulary, the five
+    // extras being exactly those cards.
+    assert!(!m(r"\smr", "{p}{p} — draw a card for each creature that died"));
+    assert!(m(r"\sm", "{p} — draw a card"), "\\sm still counts the pawprint");
+
+    // \smh — hybrid, and monocolor Phyrexian is not hybrid (172 against 213 for every symbol
+    // carrying a slash).
+    assert!(m(r"\smh", "{r/g}: this creature gets +1/+0"));
+    assert!(!m(r"\smh", "{w/p}, {t}: tap target creature."));
+
+    // \sc — a COLORED mana symbol (6,676); the half-mana symbols are not colored, which is the
+    // single card separating 6,676 from 6,677.
+    assert!(m(r"\sc", "{t}: add {g}."));
+    assert!(!m(r"\sc", "{hr}, {t}: sacrifice a creature"));
+    assert!(!m(r"\sc", "{t}: add {c}."));
+
+    // \ss — any card symbol (12,446), the widest of the three.
+    assert!(m(r"\ss", "{t}: add {c}."));
+    assert!(m(r"\ss", "{chaos} roll the planar die"));
+    assert!(!m(r"\ss", "draw a card"));
+
+    // The power/toughness trio (3,185 / 7,160 / 841).
+    assert!(m(r"\spt", "create a 3/3 green hydra"));
+    assert!(m(r"\spp", "put a +1/+1 counter on it"));
+    assert!(!m(r"\spp", "create a 3/3 green hydra"));
+    assert!(m(r"\smm", "target creature gets -1/-1 until end of turn"));
+
+    // THE UPPERCASE CLASS ESCAPES ARE A DELIBERATE NON-REPRODUCTION. Scryfall downcases the whole
+    // pattern before compiling, so `\S` reaches its engine as `\s`: `o:/\Sdraw/` and `o:/\sdraw/`
+    // are BOTH 3,604 there (2026-08-28), which two patterns describing opposite things cannot be
+    // unless one is not being read. Here `\S` keeps its meaning, and `\Sm` is "non-whitespace,
+    // then m" rather than a mana symbol — the shorthands are lowercase-only for the same reason.
+    assert_eq!(translate_query_escapes(r"\Sdraw"), r"\Sdraw", "\\S is passed through, not folded to \\s");
+    assert_eq!(translate_query_escapes(r"\Sm"), r"\Sm", "and it is not the head of a shorthand");
+    assert!(m(r"\Sdraw", "you may redraw your opening hand"));
+    assert!(!m(r"\Sdraw", "draw a card"), "a string start is not non-whitespace");
+    assert!(!m(r"\Sdraw", "target player may draw a card"), "and neither is a space");
+    assert!(m(r"\sdraw", "target player may draw a card"), "which is what the lowercase one is for");
+    assert!(!m(r"\smm", "put a +1/+1 counter on it"));
+
+    // A quantifier binds to the WHOLE shorthand, which is why each expansion is parenthesized.
+    assert!(m(r"\sm{3}", "{u}{u}{u}: tap all creatures"));
+    assert!(!m(r"\sm{3}", "{t}: add {g}."));
+
+    // \s that is not a shorthand is still whitespace, and inside a class nothing is rewritten —
+    // Scryfall's own substitution breaks `[\sm]` into an unbalanced-parenthesis error there.
+    assert_eq!(translate_query_escapes(r"\sdraw"), r"\sdraw");
+    assert_eq!(translate_query_escapes(r"[\sm]"), r"[\sm]");
+    assert!(m(r"\sdraw", "flying\ndraw a card"));
+
+    // Only \smr needs the backtracking engine; the rest keep the linear one and with it the #734
+    // trigram narrow.
+    for pattern in [r"\sm", r"\sc", r"\ss", r"\smh", r"\smp", r"\spt", r"\spp", r"\smm"] {
+        assert!(
+            !CompiledRegex::new(pattern).unwrap().is_backtracking(),
+            "{pattern} must stay on the linear engine"
+        );
+    }
+    assert!(CompiledRegex::new(r"\smr").unwrap().is_backtracking(), r"\smr needs a backreference");
+
+    // Two \smr in one pattern get their own capture names, and a capture the USER wrote keeps its
+    // own number — the reason the group is named rather than numbered.
+    assert!(m(r"\smr.*\smr", "{u}{u} then later {g}{g}"));
+    assert!(m(r"(a)\smr", "a{u}{u}"));
+}
+
+#[test]
+fn are_escapes_are_literal_inside_bracket_expressions() {
+    use super::regex_compat::translate_query_escapes;
+    // Inside […] these are ordinary escapes, not constraints.
+    assert_eq!(translate_query_escapes(r"[\y\m]"), r"[\y\m]");
+    // A `]` in first position is a literal member (POSIX), so it does not close
+    // the class — the \y after it is still inside.
+    assert_eq!(translate_query_escapes(r"[]\y]"), r"[]\y]");
+    assert_eq!(translate_query_escapes(r"[^]\y]"), r"[^]\y]");
+    // ...and once the class really does close, translation resumes.
+    assert_eq!(translate_query_escapes(r"[abc]\y"), r"[abc]\b");
+}
+
+// `mana:/…/` IS A REGEX ON THE PRINTED COST STRING, not a pip multiset, and the rows below are
+// the ones a pip reading cannot produce. All measured on api.scryfall.com 2026-08-28:
+//
+//   mana:/^{2}/   400 "Invalid regular expression: quantifier operand invalid." — Scryfall
+//                     COMPILED it, which is the conclusive evidence for the reading
+//   mana:/}{/     26,815   every multi-symbol cost, a pure string artefact
+//   mana:/rr/        404   because "{R}{R}" has no "rr" in it
+//   mana:/2/       8,315   the CHARACTER, against mana:2's 19,692 generic reading
+//   mana:/^$/      1,350   the cards with no mana cost at all
+//   mana:/ /         435   = mana:/\/\// — a split cost is "{1}{R} // {1}{U}"
+//   mana:/^{r}$/     526   anchored, against mana:{r}'s 6,852
+//   mana:/{r}/     6,853   against mana:{r}'s 6,852 — one card wide, and a superset
+//   mana:/\smh/      605   Scryfall's own \s… shorthands apply on this column too
+//   mana:/p/ mv=1      9   every one Phyrexian, and identical to mana:/\smp/ mv=1
+#[test]
+fn mana_regex_runs_against_the_cost_string() {
+    let node = |attr: &str, op: &str, pattern: &str| {
+        serde_json::json!({
+            "node_type": "CardBinaryOperatorNode",
+            "kwargs": {
+                "lhs": {"node_type": "CardAttributeNode", "kwargs": {"attribute_name": attr, "original_attribute": "mana"}},
+                "op": op,
+                "rhs": {"node_type": "RegexValueNode", "kwargs": {"value": pattern}},
+            },
+        })
+    };
+
+    // The column routes to the cost STRING, not to ManaCostCmp.
+    let f = super::build_filter(&node("mana_cost_jsonb", ":", "p")).expect("mana:/p/ must build");
+    let regex = match f {
+        FilterExpr::TextRegex { field: TextField::ManaCostText, regex } => regex,
+        _ => panic!("mana:/p/ must be a cost-string regex"),
+    };
+    // Stored as PRINTED, and every query pattern carries (?i) — so a lowercase pattern finds the
+    // uppercase cost, which is the case-folding Scryfall applies to the whole pattern.
+    assert!(regex.is_match("{W/P}"), "the 9 mv=1 Phyrexian costs");
+    assert!(!regex.is_match("{1}{R}"));
+
+    let m = |pattern: &str, cost: &str| match super::build_filter(&node("mana_cost_jsonb", ":", pattern)).expect("must build") {
+        FilterExpr::TextRegex { regex, .. } => regex.is_match(cost),
+        _ => panic!("expected a cost-string regex"),
+    };
+    // `}{` — the artefact that exists only in the string form.
+    assert!(m("}{", "{1}{R}"));
+    assert!(!m("}{", "{R}"));
+    // ...and its mirror: "rr" is never in "{R}{R}", which is why mana:/rr/ is 404.
+    assert!(!m("rr", "{R}{R}"));
+    // A digit is the CHARACTER in the cost, not the generic component.
+    assert!(m("2", "{2}{W}"));
+    assert!(!m("2", "{1}{1}"), "no card prints {{1}}{{1}}, but the point is that 1+1 is not 2 here");
+    // Anchors bind to the whole cost, so `^{r}$` is the mono-{R} cards and not every card with an
+    // {R} pip — 526 against 6,852.
+    assert!(m("^{r}$", "{R}"));
+    assert!(!m("^{r}$", "{1}{R}"));
+    // An empty cost is a real value, and `^$` selects exactly the 1,350 cards that have one.
+    assert!(m("^$", ""));
+    assert!(!m("^$", "{R}"));
+    // A SPLIT card's cost carries Scryfall's own " // ", which is why mana:/ / is 435 rather than
+    // zero — and why this field is NOT split per face.
+    assert!(m(" ", "{1}{R} // {1}{U}"));
+    assert!(m(r"\/\/", "{1}{R} // {1}{U}"));
+    assert!(!m(" ", "{1}{R}"));
+    // Scryfall's own dialect shorthands apply on this column too.
+    assert!(m(r"\smh", "{R/G}"));
+    assert!(!m(r"\smh", "{R}{G}"));
+    // `=` is `:` here; every other operator never reaches this node (both parsers keep the
+    // slashes as value characters and then reject them), so only the two spellings a parser can
+    // emit are asserted.
+    let f = super::build_filter(&node("mana_cost_jsonb", "=", "^$")).expect("mana=/^$/ must build");
+    assert!(matches!(f, FilterExpr::TextRegex { field: TextField::ManaCostText, .. }));
+
+    // `devotion` shares the parser class and is NOT regex-capable on Scryfall
+    // (`Unknown regular expression keyword “devotion”`), so nothing should ever hand this arm a
+    // pattern for it — and if something did, the pip reader would see a RegexValueNode with no
+    // "value" string and build the empty cost rather than a regex.
+    assert!(
+        matches!(super::build_filter(&node("devotion", ":", "r")), Err(ref e) if e == "regex not supported on devotion"),
+        "devotion is not regex-capable on Scryfall either"
+    );
+}
+
+/// A regex on a tag/JSONB_OBJECT column DECLINES rather than answering a different query.
+///
+/// `card_keywords`, `card_frame_data`, `card_oracle_tags`, `card_art_tags` and `card_is_tags`
+/// reach the engine as the normalized comparison KEYS of a tag object, so a pattern used to
+/// arrive as the tag it spells — `otag:/^remov/` as the tag `^remov`, `kw:/f.y/` as the keyword
+/// `f.y`. Neither exists, so this answered nothing and reported nothing, the same shape
+/// `t:/dragon/` had before the RegexValueNode route in `build_binary`. With the parser passing the
+/// node through, the leaf lands here and this is the error that turns into a 400.
+#[test]
+fn a_regex_on_a_tag_column_declines() {
+    for attr in ["card_keywords", "card_frame_data", "card_oracle_tags", "card_art_tags", "card_is_tags"] {
+        let node = serde_json::json!({
+            "node_type": "CardBinaryOperatorNode",
+            "kwargs": {
+                "lhs": {"node_type": "CardAttributeNode", "kwargs": {"attribute_name": attr, "original_attribute": attr}},
+                "op": ":",
+                "rhs": {"node_type": "RegexValueNode", "kwargs": {"value": "^remov"}},
+            },
+        });
+        let want = format!("regex not supported on {attr}");
+        assert!(
+            matches!(super::build_filter(&node), Err(ref e) if *e == want),
+            "{attr} must decline a pattern, not answer one"
+        );
+    }
+}
+
+#[test]
+fn regex_builds_on_every_string_field_the_store_holds() {
+    // `~*` applies to all of these on the SQL path. Restricting the engine to
+    // name/oracle/flavor/artist made the rest declines, which is what kept the
+    // fallback load-bearing.
+    for (attr, field) in [
+        ("card_name", TextField::NameLower),
+        ("oracle_text", TextField::OracleTextLower),
+        ("flavor_text", TextField::FlavorTextLower),
+        ("card_artist", TextField::ArtistLower),
+        ("card_set_code", TextField::SetCode),
+        ("card_layout", TextField::Layout),
+        ("card_border", TextField::Border),
+        ("card_watermark", TextField::Watermark),
+        ("collector_number", TextField::CollectorNumber),
+        ("card_types", TextField::TypeLine),
+        ("card_subtypes", TextField::TypeLine),
+        ("mana_cost_jsonb", TextField::ManaCostText),
+    ] {
+        let built = super::build_filter(&regex_leaf(attr, "^drag")).unwrap_or_else(|e| panic!("{attr} regex should build, got {e}"));
+        match built {
+            FilterExpr::TextRegex { field: got, .. } => assert_eq!(
+                std::mem::discriminant(&got),
+                std::mem::discriminant(&field),
+                "{attr} regex bound to the wrong TextField"
+            ),
+            other => panic!("{attr} regex built a {:?} node, not TextRegex", std::mem::discriminant(&other)),
+        }
+    }
+}
+
+#[test]
+fn backtracking_regex_outranks_every_linear_verify_tier() {
+    // The cost model's only lever on a lookaround pattern is ordering it last
+    // in an And — it has no literal factor for the trigram narrow to read, so
+    // whatever reaches it is scanned. Measured at 77x the linear engine
+    // (bench_backtrack_engine); the tier has to reflect that or a cheap
+    // sibling gets evaluated second.
+    let backtracking = FilterExpr::TextRegex {
+        field: TextField::OracleTextLower,
+        regex: super::regex_compat::CompiledRegex::new(r"draw (?!two)").unwrap(),
+    };
+    let linear = FilterExpr::TextRegex {
+        field: TextField::OracleTextLower,
+        regex: super::regex_compat::CompiledRegex::new("draw .* cards?").unwrap(),
+    };
+    let contains = FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: "draw".to_string() };
+
+    assert!(verify_cost_tier(&backtracking) > verify_cost_tier(&linear));
+    assert!(verify_cost_tier(&linear) > verify_cost_tier(&contains));
+}
+
+#[test]
+fn a_type_value_matches_the_type_line_as_a_substring() {
+    // ONE RULE FOR EVERY `t:` VALUE — case-insensitive substring of the whole type line — measured
+    // against api.scryfall.com on 2026-08-16 over `e:khm` (323 prints):
+    //
+    //   t:creature 151 = t:creat 151 = t:reature 151 = t:eatur 151   unanchored both sides
+    //   t:snow 47 = t:no 47                                          "no" inside "Snow"
+    //   t:elf 22, t:lf 25                                            "lf" also inside "Wolf"
+    //   t:legend 42 = t:legendary 42                                 supertypes are in the line
+    //   -t:creat 172, and 151 + 172 = 323                            negation is a plain complement
+    //   t=creature 151, t="legendary creature" 32                    `=` is the same substring
+    //   t:artifactcreature 0, t:"artifact creature" 360              not a token-set test
+    //
+    // The single-token case used to compile to type/subtype MEMBERSHIP, which answered 0 for
+    // `t:creat cmc<=2 e:khm` where Scryfall answers 39; the quoted case had already been rerouted
+    // here. They are now the same path.
+    let type_leaf = |attr: &str, op: &str, value: &str| {
+        serde_json::json!({
+            "node_type": "CardBinaryOperatorNode",
+            "kwargs": {
+                "op": op,
+                "lhs": {"node_type": "CardAttributeNode", "kwargs": {"attribute_name": attr, "original_attribute": "type"}},
+                "rhs": [value],
+            }
+        })
+    };
+    // The compiled needle, checked the way `bind_type_lines` checks it: lowercase substring, or a
+    // type-word-anchored match when the needle names a type.
+    let matcher = |v: serde_json::Value| match super::build_filter(&v).unwrap() {
+        FilterExpr::TypeLineContains { needle, whole_word } => {
+            move |line: &str| super::filter::type_line_hit(&line.to_lowercase(), &needle, whole_word)
+        }
+        other => panic!("expected a type-line substring, got {:?}", std::mem::discriminant(&other)),
+    };
+    let is_word_anchored = |v: serde_json::Value| match super::build_filter(&v).unwrap() {
+        FilterExpr::TypeLineContains { whole_word, .. } => whole_word,
+        other => panic!("expected a type-line substring, got {:?}", std::mem::discriminant(&other)),
+    };
+
+    let re = matcher(type_leaf("card_types", ":", "Artifact Creature"));
+    assert!(re("Artifact Creature — Golem"));
+    assert!(re("Legendary Artifact Creature — Golem"));
+    // Order matters, exactly as it does on Scryfall (`t:"creature artifact"` is empty there).
+    assert!(!re("Creature — Artifact Golem"));
+    // Not word-anchored on either side: `t:"tifact creat"` returns the same 360 rows.
+    assert!(matcher(type_leaf("card_types", ":", "Tifact Creat"))("Artifact Creature — Golem"));
+    // Whitespace runs collapse — a doubled space is the same query on Scryfall.
+    assert!(matcher(type_leaf("card_types", ":", "Artifact  Creature"))("Artifact Creature — Golem"));
+    // The em dash is ordinary text, so a query that spells it matches and one that spells a
+    // hyphen does not (both measured).
+    assert!(matcher(type_leaf("card_subtypes", ":", "Creature — Human"))("Creature — Human Wizard"));
+    assert!(!matcher(type_leaf("card_subtypes", ":", "Creature - Human"))("Creature — Human Wizard"));
+    // A subtype pair resolves to card_subtypes upstream and takes the same path.
+    let pair = matcher(type_leaf("card_subtypes", ":", "Human Wizard"));
+    assert!(pair("Creature — Human Wizard"));
+    assert!(!pair("Creature — Wizard Human"));
+
+    // A SINGLE TOKEN TAKES THE SAME PATH, and this is the change: a partial word matches, a whole
+    // word matches wherever it appears in the line (supertype, type or subtype), and a token that
+    // is a known subtype still matches every OTHER word containing it.
+    let creat = matcher(type_leaf("card_subtypes", ":", "Creat"));
+    assert!(creat("Creature — Elf"));
+    assert!(creat("Legendary Artifact Creature — Golem"));
+    assert!(!creat("Instant"));
+    assert!(matcher(type_leaf("card_types", ":", "Legend"))("Legendary Creature — Elf"));
+    let lf = matcher(type_leaf("card_subtypes", ":", "Lf"));
+    assert!(lf("Creature — Elf"));
+    assert!(lf("Creature — Wolf")); // `t:lf` 25 vs `t:elf` 22 on khm
+
+    // A NEEDLE THAT NAMES A TYPE IS ANCHORED TO THE TYPE WORD. `t:god` is 96 on api.scryfall.com
+    // and was 104 here; the 8 extra were every Demigod. The catalog is Scryfall's own nine type
+    // catalogs — see `is_canonical_type_name` — and its boundary is a type-word boundary, so the
+    // needle still matches wherever in the line the word appears.
+    let god = matcher(type_leaf("card_subtypes", ":", "God"));
+    assert!(god("Legendary Creature — God"));
+    assert!(god("Creature — God Warrior")); // first word of the subtype run
+    assert!(!god("Creature — Demigod")); // the 8 rows the substring rule over-matched
+    // Not the leftmost occurrence: the anchored hit can come after a rejected one.
+    assert!(matcher(type_leaf("card_subtypes", ":", "Warrior"))("Creature — Demigod Warrior"));
+    // The punctuation the catalog spells INSIDE a name binds. `Urza` is a planeswalker type and
+    // `Urza's` a land type, two separate catalog entries, so the anchored `t:urza` must not reach
+    // the land — Scryfall's type array for `Land — Urza's Mine` holds `Urza's`, never `Urza`.
+    assert!(!is_word_anchored(type_leaf("card_subtypes", ":", "Worker"))); // in no catalog
+    assert!(matcher(type_leaf("card_subtypes", ":", "Worker"))("Artifact Creature — Assembly-Worker"));
+    assert!(matcher(type_leaf("card_subtypes", ":", "Assembly-Worker"))("Artifact Creature — Assembly-Worker"));
+    assert!(!matcher(type_leaf("card_subtypes", ":", "Urza"))("Land — Urza's Mine"));
+    assert!(matcher(type_leaf("card_subtypes", ":", "Urza's"))("Land — Urza's Mine"));
+    // A name in NO catalog stays a substring, and the two that prove it are printed types Scryfall
+    // publishes no catalog for: `t:ir` is 1,906 there (`Plane — Ir` exists and is not anchored) and
+    // `t:las` 43 (`Plane — Las Vegas`), both equal to this port's substring answer.
+    assert!(!is_word_anchored(type_leaf("card_subtypes", ":", "Ir")));
+    assert!(!is_word_anchored(type_leaf("card_subtypes", ":", "Las")));
+    assert!(matcher(type_leaf("card_subtypes", ":", "Ir"))("Creature — Bird"));
+    // Multi-word: `Time Lord` is the one catalog name with a space in it.
+    assert!(is_word_anchored(type_leaf("card_subtypes", ":", "Time Lord")));
+    assert!(!is_word_anchored(type_leaf("card_subtypes", ":", "Artifact Creature")));
+    // Supertypes and card types are catalogs too, so `t:creature` is anchored — and answers the
+    // same 18,753 either way, because "creature" never occurs inside another type word.
+    assert!(is_word_anchored(type_leaf("card_types", ":", "Creature")));
+    assert!(matcher(type_leaf("card_types", ":", "Creature"))("Legendary Artifact Creature — Golem"));
+    // `:` and `=` are the same substring test on Scryfall (`t=creature` 151 = `t:creature`;
+    // `t="legendary creature"` 32, where set equality would answer 0), and `>=` is containment.
+    for op in [":", ">=", "="] {
+        assert!(
+            matches!(super::build_filter(&type_leaf("card_types", op, "Creature")).unwrap(), FilterExpr::TypeLineContains { .. }),
+            "t{op}creature must be a type-line substring"
+        );
+    }
+    // `t:/…/` keeps the regex form — `bind_type_lines` resolves both against the same index.
+    assert!(matches!(
+        super::build_filter(&regex_leaf("card_types", "^drag")).unwrap(),
+        FilterExpr::TextRegex { field: TextField::TypeLine, .. }
+    ));
+    // The remaining set comparisons keep upstream's meaning: Scryfall returns zero rows for
+    // `t>=creature`-shaped queries in the other direction, so there is no measured behaviour to
+    // follow and this port's superset stays.
+    assert!(matches!(super::build_filter(&type_leaf("card_types", "<", "Creature")).unwrap(), FilterExpr::TypeCmp { .. }));
+    assert!(matches!(
+        super::build_filter(&type_leaf("card_subtypes", "!=", "Goblin")).unwrap(),
+        FilterExpr::CollectionCmp { field: CollField::Subtypes, .. }
+    ));
+}
+
+/// The catalog `is_canonical_type_name` binary-searches has to BE sorted and unique, and the
+/// generator that produced it is not in this repo — so the invariant is asserted here rather than
+/// trusted. The nine catalog sizes are recorded with it: a refresh that drops a catalog on the
+/// floor changes the total, and a total nobody checks is how `t:` would quietly go back to
+/// substring-matching every creature type at once.
+#[test]
+fn the_canonical_type_catalog_is_sorted_unique_and_lowercase() {
+    let names = super::filter::canonical_type_names();
+    assert_eq!(names.len(), 531, "9 catalogs, api.scryfall.com 2026-08-17");
+    for pair in names.windows(2) {
+        assert!(pair[0] < pair[1], "{} !< {} — binary_search needs sorted+unique", pair[0], pair[1]);
+    }
+    for n in names {
+        assert_eq!(*n, n.to_lowercase(), "the needle is lowercased before the lookup");
+    }
+    // One membership per catalog, so a dropped file is a failure and not a silent narrowing.
+    for name in ["legendary", "creature", "equipment", "siege", "god", "aura", "urza's", "urza", "arcane"] {
+        assert!(names.binary_search(&name).is_ok(), "{name} must be in the catalog");
+    }
+    // And the negatives that keep `t:` a substring where Scryfall keeps it one — plane types are
+    // published in no catalog at all, which is why this is a fixed list and not the corpus's own
+    // type-line vocabulary.
+    for name in ["ir", "las", "vegas", "art", "worker", "gob", "demi"] {
+        assert!(names.binary_search(&name).is_err(), "{name} must NOT be in the catalog");
+    }
+}
+
+#[test]
+fn fo_searches_the_unstripped_text_and_o_does_not() {
+    // `fo:`/`fulloracle:` share `oracle_text`'s column and are told apart by the spelling the
+    // user typed. Measured on api.scryfall.com 2026-08-16: `fo:lifelink` 713 where `o:` answers
+    // the stripped text, `fo:draw e:khm` 57 against `o:draw e:khm` 39, and `fo:/\(this creature/`
+    // 1,098 where `o:/\(/` is 0 corpus-wide.
+    let leaf = |orig: &str, value: &str| {
+        serde_json::json!({
+            "node_type": "CardBinaryOperatorNode",
+            "kwargs": {
+                "op": ":",
+                "lhs": {"node_type": "CardAttributeNode", "kwargs": {"attribute_name": "oracle_text", "original_attribute": orig}},
+                "rhs": {"node_type": "StringValueNode", "kwargs": {"value": value}},
+            }
+        })
+    };
+    for orig in ["fo", "fulloracle"] {
+        assert!(
+            matches!(
+                super::build_filter(&leaf(orig, "lifelink")).unwrap(),
+                FilterExpr::TextContains { field: TextSearchField::FullOracleTextLower, .. }
+            ),
+            "{orig}: must read the unstripped column"
+        );
+    }
+    assert!(matches!(
+        super::build_filter(&leaf("o", "lifelink")).unwrap(),
+        FilterExpr::TextContains { field: TextSearchField::OracleTextLower, .. }
+    ));
+    // A regex takes the same routing — the one shape that CANNOT work against the stripped
+    // form, since no parenthesis survives there.
+    let regex_leaf_orig = serde_json::json!({
+        "node_type": "CardBinaryOperatorNode",
+        "kwargs": {
+            "op": ":",
+            "lhs": {"node_type": "CardAttributeNode", "kwargs": {"attribute_name": "oracle_text", "original_attribute": "fo"}},
+            "rhs": {"node_type": "RegexValueNode", "kwargs": {"value": "\\(this creature"}},
+        }
+    });
+    assert!(matches!(
+        super::build_filter(&regex_leaf_orig).unwrap(),
+        FilterExpr::TextRegex { field: TextField::FullOracleTextLower, .. }
+    ));
+}
+
+#[test]
+fn strip_reminder_text_matches_scryfalls_measured_rule() {
+    use super::strip_reminder_text as strip;
+
+    // `o:` searches oracle text with reminder text removed; `fo:` searches the full text.
+    // Measured against api.scryfall.com on 2026-08-16 — `o:"damage dealt by this creature also
+    // causes"` 0 / `fo:` 71, `o:/\(/` 0 across the whole corpus / `fo:/\(/ e:khm` 148.
+    assert_eq!(strip("Flying"), "Flying");
+    assert_eq!(
+        strip("Lifelink (Damage dealt by this creature also causes you to gain that much life.)\nWhen this creature dies, draw a card."),
+        "Lifelink\nWhen this creature dies, draw a card."
+    );
+    // EXACTLY ONE SPACE survives a mid-line reminder: `o:/\{e\}\sequal/` matches Aetherflux
+    // Conduit and `o:/\{e\}\s\sequal/` does not, so the space BEFORE the parenthesis is the one
+    // that goes.
+    assert_eq!(
+        strip("you get an amount of {E} (energy counters) equal to the mana spent"),
+        "you get an amount of {E} equal to the mana spent"
+    );
+    // ...and the EMPTY LINE a leading reminder leaves behind stays, which is why the whitespace
+    // after the `)` is not eaten: `t:saga o:/^$/` returns 233 — every Saga.
+    assert_eq!(strip("(As this Saga enters, add a lore counter.)\nI — Draw a card."), "\nI — Draw a card.");
+    // Every parenthesized run, not just the trailing one.
+    assert_eq!(strip("A (one) B (two) C"), "A B C");
+    // Unclosed: no real card carries one, and Scryfall leaves no `(` standing anywhere.
+    assert_eq!(strip("Flying (this never closes"), "Flying");
+    // Untouched input is borrowed, not copied — this runs on every card at load.
+    assert!(matches!(strip("Flying"), std::borrow::Cow::Borrowed(_)));
+}
+
+#[test]
+fn type_regex_no_longer_builds_a_vacuous_mask() {
+    // Regression for the silent-empty-result bug this fix closes: `t:/…/` used
+    // to reach the card_types branch, whose `rhs.as_array()` is None for a
+    // RegexValueNode, folding to `TypeCmp { mask: 0, op: Ge }` — false for
+    // every card. No error meant no fallback, so the query just returned
+    // nothing while the SQL path returned dragons.
+    let built = super::build_filter(&regex_leaf("card_types", "^drag")).unwrap();
+    assert!(
+        matches!(built, FilterExpr::TextRegex { field: TextField::TypeLine, .. }),
+        "t:/^drag/ must compile to a type-line regex, not a type mask"
+    );
+}
+
+// `~` IS AN ALIAS FOR THE CARD'S OWN SELF-REFERENCE, and `o:/~/` answers 404 here against 19,228
+// on api.scryfall.com — a silent zero, the worst answer this API can give. Two things were wrong
+// and only one of them was the engine: `_regex_plain_literal` read `~` as an ordinary character
+// and lowered `o:/~/` to the substring search `o:~`, which no oracle text satisfies.
+//
+// THE RULE IS MEASURED CARD BY CARD, and the 27 rows below are the derivation, not a sample: each
+// is a real card, its stored text as this store holds it (reminder-stripped, lowercased), and
+// the verdict api.scryfall.com gives for `!"<name>" o:/~/` on 2026-08-28.
+//
+// `~` expands to an ALTERNATION of three things:
+//
+//   1. the card's own name                       lightning bolt deals 3 damage
+//   2. its LEGENDARY SHORT NAME — the name cut at the earliest of ",", " the ", " of "
+//                                                rankle / odric / eron / svyelun / storm
+//   3. a fixed list of "this <noun>" phrases     this creature / this spell / this land / …
+//
+// and each alternative is WORD-BOUNDED, which is the whole of why "On the Job", "Get the Point"
+// and "In the Presence of Ages" do NOT match: their short names ("on", "get", "in") appear only
+// inside "control", "target" and "into". "Hurska Sweet-Tooth" is the other half of the short-name
+// rule — its text says "whenever hurska attacks" and it still does not match, because its name
+// carries none of the three separators.
+//
+// The phrase list is TYPE-INDEPENDENT: Full Steam Ahead and Martyrdom are an instant and a
+// sorcery that never name themselves, and match on a "this creature" inside an ability they grant
+// to something ELSE. And it is not every "this <noun>": Surge of Brilliance ("this turn"), Mulch
+// ("this way"), Crown of Gondor ("this ability") and Eldrazi Temple ("this mana") are all misses.
+//
+// Four rows are the REMINDER-TEXT trap, and they are why the fixture stores the stripped text:
+// Iguana Parrot, Jungle Weaver, Waking the Trolls and Shields of Velis Vel each carry an alias
+// phrase, every one of them inside parentheses that `o:` does not search. All four are misses on
+// Scryfall, and a model built on the unstripped text calls all four matches.
+const TILDE_CASES: &[(&str, &str, bool)] = &[
+    ("lightning bolt", "lightning bolt deals 3 damage to any target.", true),
+    ("rankle, master of pranks", "flying, haste\nwhenever rankle deals combat damage to a player, choose any number —\n• each player discards a card.\n• each player loses 1 life and draws a card.\n• each player sacrifices a creature of their choice.", true),
+    ("odric, master tactician", "first strike\nwhenever odric and at least three other creatures attack, you choose which creatures block this combat and how those creatures block.", true),
+    ("eron the relentless", "haste\n{r}{r}{r}: regenerate eron.", true),
+    ("svyelun of sea and sky", "svyelun has indestructible as long as you control at least two other merfolk.\nwhenever svyelun attacks, draw a card.\nother merfolk you control have ward {1}.", true),
+    ("storm of memories", "storm\nexile an instant or sorcery card with mana value 3 or less from your graveyard at random. you may cast it without paying its mana cost. if that spell would be put into a graveyard, exile it instead.", true),
+    ("on the job", "creatures you control get +2/+1 until end of turn. investigate.", false),
+    ("get the point", "destroy target creature. scry 1.", false),
+    ("in the presence of ages", "reveal the top four cards of your library. you may put a creature card and/or a land card from among them into your hand. put the rest into your graveyard.", false),
+    ("hurska sweet-tooth", "whenever hurska attacks, create a food token.\nwhenever you gain life, you may pay {g/w}. when you do, target creature gets +x/+x until end of turn, where x is the amount of life you gained.", false),
+    ("kor outfitter", "when this creature enters, you may attach target equipment you control to target creature you control.", true),
+    ("altar's reap", "as an additional cost to cast this spell, sacrifice a creature.\ndraw two cards.", true),
+    ("orzhov guildgate", "this land enters tapped.\n{t}: add {w} or {b}.", true),
+    ("psychic venom", "enchant land\nwhenever enchanted land becomes tapped, this aura deals 2 damage to that land's controller.", true),
+    ("rogue class", "\nwhenever a creature you control deals combat damage to a player, exile the top card of that player's library face down. you may look at it for as long as it remains exiled.\n{1}{u}{b}: level 2\ncreatures you control have menace.\n{2}{u}{b}: level 3\nyou may play cards exiled with this class, and you may spend mana as though it were mana of any color to cast those spells.", true),
+    ("surge of brilliance", "paradox — draw a card for each spell you've cast this turn from anywhere other than your hand.\nforetell {1}{u}", false),
+    ("mulch", "reveal the top four cards of your library. put all land cards revealed this way into your hand and the rest into your graveyard.", false),
+    ("crown of gondor", "equipped creature gets +1/+1 for each creature you control.\nwhen a legendary creature you control enters, if there is no monarch, you become the monarch.\nequip {4}. this ability costs {3} less to activate if you're the monarch.", false),
+    ("eldrazi temple", "{t}: add {c}.\n{t}: add {c}{c}. spend this mana only to cast colorless eldrazi spells or activate abilities of colorless eldrazi.", false),
+    ("iguana parrot", "flying, vigilance\nprowess", false),
+    ("jungle weaver", "reach\ncycling {2}", false),
+    ("waking the trolls", "\ni — destroy target land.\nii — put target land card from a graveyard onto the battlefield under your control.\niii — choose target opponent. if they control fewer lands than you, create a number of 4/4 green troll warrior creature tokens with trample equal to the difference.", false),
+    ("shields of velis vel", "changeling\ncreatures target player controls get +0/+1 and gain all creature types until end of turn.", false),
+    ("full steam ahead", "until end of turn, each creature you control gets +2/+2 and gains trample and \"this creature can't be blocked by more than one creature.\"", true),
+    ("martyrdom", "until end of turn, target creature you control gains \"{0}: the next 1 damage that would be dealt to target creature, planeswalker, or player this turn is dealt to this creature instead.\" only you may activate this ability.", true),
+    ("vraska's fall", "each opponent sacrifices a creature or planeswalker of their choice and gets a poison counter.", false),
+    ("forest", "", false),
+    // ── the two edges the first implementation got wrong, each measured the same way ──
+    //
+    // THE `A-` PREFIX IS NOT PART OF THE SELF-REFERENCE. An Alchemy rebalance is named
+    // "A-Blood Artist" and its text says "Whenever Blood Artist or another creature dies", so the
+    // name as printed never appears at all — and `!"A-Blood Artist" o:/~/` is 1. Not a rounding
+    // error: `name:/^a-/ o:/~/` is 138 there, against a corpus-wide `o:/~/` gap of 144 before the
+    // unprefixed form was offered as an alternative.
+    ("a-blood artist", "whenever blood artist or another creature dies, target opponent loses 1 life and you gain 1 life.", true),
+    ("a-dragon's rage channeler", "whenever you cast a noncreature spell, surveil 1.\ndelirium — as long as there are four or more card types among cards in your graveyard, dragon's rage channeler gets +2/+0, has flying, and attacks each combat if able.", true),
+    // THE WORD BOUNDARY IS THE NAME'S, NOT THE SENTINEL'S. `\b(?:name|…)\b` demands a word
+    // character on the far side of a name that ends in punctuation, and "Kaboom! deals damage"
+    // has a space there — so `!"Kaboom!" o:/~/` is 404 despite the card naming itself in the
+    // plainest way imaginable. A sentinel wearing its own `\b` called it a match.
+    ("kaboom!", "choose any number of target players or planeswalkers. for each of them, reveal cards from the top of your library until you reveal a nonland card, kaboom! deals damage equal to that card's mana value to that player or planeswalker, then you put the revealed cards on the bottom of your library in any order.", false),
+    // Controls for that edge: names ending in a word character still match, one word and two.
+    ("shock", "shock deals 2 damage to any target.", true),
+    ("searing blaze", "searing blaze deals 1 damage to target player or planeswalker and 1 damage to target creature that player or that planeswalker's controller controls.", true),
+    ("flashback", "target instant or sorcery card in your graveyard gains flashback until end of turn. the flashback cost is equal to its mana cost.", true),
+    // The two phrases that were the largest block missing from the family — an Un-set Contraption
+    // and an Attraction, neither of which names itself anywhere.
+    ("arms depot", "whenever you crank this contraption, put two +1/+1 counters on target creature.", true),
+    ("ferris wheel", "visit — choose target creature that hasn't been phased out with this attraction. that creature phases out until you roll a 3 or less while rolling to visit your attractions.", true),
+    // ...and the control that says the phrase is `this <noun>` and not the bare noun: "your
+    // attractions" above is in the same sentence and is not what carries the match.
+    ("steamflogger boss", "other riggers you control get +1/+0 and have haste.\nif a rigger you control would assemble a contraption, it assembles two contraptions instead.", false),
+];
+
+/// THE RESIDUAL, CLOSED — the seven names Scryfall refuses to read as self-references, listed in
+/// `SELF_REF_NON_ALIASING_NAMES` and asserted here in Scryfall's direction rather than in the
+/// engine's old one.
+///
+/// Each is a card named after a keyword ability, a keyword action or a creature type, whose text
+/// spells that term because the term is what the card DOES. `!"<name>" o:/~/` is 404 on
+/// api.scryfall.com for every row, measured 2026-08-28, and the texts below are the STRIPPED
+/// forms `o:` searches — reminder text removed, which is what takes "this card" out of
+/// Dr. Julius Jumblemorph and "this creature" out of Manifest Dread.
+///
+/// CASE-SENSITIVITY IS THE CHEAP EXPLANATION AND IT IS FALSE, both ways. Regenerate and
+/// Assembly-Worker spell their names in EXACT case here and still do not match, so a
+/// case-sensitive alias would not exclude them; and "Flashback" in `TILDE_CASES` matches on
+/// nothing but a lowercase "flashback", while Sorry's `may say "sorry."` is what `o:/Say "~"/`
+/// (3 cards) lands on, so the alias is case-INSENSITIVE and a case-sensitive one would drop cards
+/// that match. Neither direction survives, which is what makes this a table rather than a rule.
+const TILDE_GAME_TERM_NAMES: &[(&str, &str)] = &[
+    ("assembly-worker", "{t}: target assembly-worker creature gets +1/+1 until end of turn."),
+    ("fear", "enchant creature\nenchanted creature has fear."),
+    ("lifelink", "enchant creature\nenchanted creature has lifelink."),
+    ("manifest dread", "manifest dread."),
+    ("regenerate", "regenerate target creature."),
+    ("suspend", "exile target creature and put two time counters on it. if it doesn't have suspend, it gains suspend."),
+    ("vigilance", "enchant creature\nenchanted creature has vigilance."),
+];
+
+/// A PERIOD IN AN ALIAS KILLS IT — the rule half of the same 2026-08-28 diff, and the reason
+/// `self_names_of` filters on `.` rather than carrying nine more table rows.
+///
+/// The `false` rows reach a period-bearing name form and nothing else; the `true` rows are the
+/// controls that keep the rule from being "a period in the NAME kills it", each matching through a
+/// short name the comma cut down to something with no period in it.
+const TILDE_PERIOD_ALIASES: &[(&str, &str, bool)] = &[
+    ("black waltz no. 3", "flying, deathtouch\nwhenever you cast a noncreature spell, black waltz no. 3 deals 2 damage to each opponent.", false),
+    ("devil k. nevil", "haste\nwhen devil k. nevil enters, jump it over any number of creatures. if it clears those creatures, put that many +1/+1 counters on it.", false),
+    ("dr. julius jumblemorph", "dr. julius jumblemorph is every creature type\nwhenever a host you control enters, you may search your library and/or graveyard for a card with augment and combine it with that host. if you search your library this way, shuffle.", false),
+    ("j. jonah jameson", "when j. jonah jameson enters, suspect up to one target creature.\nwhenever a creature you control with menace attacks, create a treasure token.", false),
+    ("mr. foxglove", "lifelink\nwhenever mr. foxglove attacks, draw cards equal to the number of cards in defending player's hand minus the number of cards in your hand. if you didn't draw cards this way, you may put a creature card from your hand onto the battlefield.", false),
+    ("ms. marvel, elastic ally", "reach\nwhen ms. marvel enters, target creature gets +2/+0 until end of turn.\nwhenever a creature you control with power greater than its base power deals combat damage to a player, draw a card. this ability triggers only once each turn.", false),
+    ("ms. marvel, kamala khan", "reach, vigilance\nyou have no maximum hand size.\nembiggen fist — whenever you cast a spell that targets a creature you control, draw a card. until end of turn, ms. marvel gains \"ms. marvel's base power is equal to the number of cards in your hand.\"", false),
+    ("u.s.agent, john walker", "when u.s.agent enters, create a colorless equipment artifact token named sturdy shield with \"equipped creature gets +1/+2\" and equip {2}. attach it to u.s.agent.", false),
+    ("u.s.s. enterprise-d, galaxy-class", "whenever one or more charge counters are put on u.s.s. enterprise-d for the first time each turn, exile the top card of your library. you may play that card this turn.\nstation\n7+ | flying, vigilance", false),
+    // The controls: a period in the NAME, no period in the alias the comma leaves behind. Both
+    // are 1 on api.scryfall.com (2026-08-28).
+    ("nick fury, agent of s.h.i.e.l.d.", "power-up — {w}{u}{b}{r}{g}: put two +1/+1 counters on nick fury, then look at the top seven cards of your library.", true),
+    ("phoebe, head of s.n.e.a.k.", "phoebe can't be blocked by creatures with flavor text.\n{2}{u}{b}: phoebe permanently steals target creature's text box.", true),
+];
+
+/// THE RESIDUAL'S OTHER HALF, CLOSED — `SELF_REF_CURATED_SHORT_NAMES`, asserted as MATCHES.
+///
+/// Every one is a legendary whose name carries none of the three separators
+/// `legendary_short_name` knows — no comma, no " the ", no " of " — and whose text uses the short
+/// name Wizards gave it. `!"<name>" o:/~/` is 1 on api.scryfall.com for all six (2026-08-28).
+///
+/// NO STRING RULE REACHES THEM, which is why the table exists and why it will drift. "First word"
+/// is refuted twice: "King Darien XLVIII" aliases at "King Darien", two words, and Hurska
+/// Sweet-Tooth in `TILDE_CASES` — legendary, in the corpus, its text reading "whenever hurska
+/// attacks" — does NOT match. Restricting a first-word rule to legendaries does not save it,
+/// because Hurska is one.
+const TILDE_CURATED_SHORT_NAMES: &[(&str, &str)] = &[
+    ("drizzt do'urden", "double strike\nwhen drizzt enters, create guenhwyvar, a legendary 4/1 green cat creature token with trample."),
+    ("hazezon tamar", "when hazezon enters, create x 1/1 sand warrior creature tokens."),
+    ("king darien xlviii", "other creatures you control get +1/+1.\nsacrifice king darien: creature tokens you control get +1/+1."),
+    ("rasputin dreamweaver", "rasputin enters with seven dream counters on it.\nremove a dream counter from rasputin: add {c}."),
+    ("ryan sinclair", "whenever ryan attacks, exile cards from the top of your library until you exile a nonland card."),
+    ("zurgo bellstriker", "zurgo can't block creatures with power 2 or greater.\ndash {1}{r}"),
+];
+
+
+/// Build a one-card-per-row store from `(name, oracle text)` pairs, the shape every table above
+/// is written in.
+fn tilde_store(rows: &[(&str, &str)]) -> CardData {
+    let mut vocab = VocabInterner::new();
+    let mut interner = Interner::new();
+    let cards: Vec<OracleCard> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, (name, text))| {
+            let mut c = stub_card(i as u128 + 1, TYPE_CREATURE, &[], &mut vocab);
+            c.card_name_lower = InlineStr::from_str(name);
+            c.oracle_text_lower_id = interner.intern((*text).to_string());
+            c
+        })
+        .collect();
+    let n = cards.len();
+    let mut data = store_of(cards, &vec![1usize; n], vocab);
+    for (i, (name, text)) in rows.iter().enumerate() {
+        data.cards[i].card_name_lower = InlineStr::from_str(name);
+        data.cards[i].oracle_text_lower_id = interner.intern((*text).to_string());
+    }
+    data.strings = interner.strings;
+    data
+}
+
+fn tilde_filter() -> FilterExpr {
+    FilterExpr::TextRegex {
+        field: TextField::OracleTextLower,
+        regex: super::filter::compile_search_regex_self_referential("~", super::regex_compat::SelfRefScope::Oracle)
+            .expect("~ must compile"),
+    }
+}
+
+#[test]
+fn self_reference_alias_matches_scryfall_card_for_card() {
+    let rows: Vec<(&str, &str)> = TILDE_CASES.iter().map(|(n, t, _)| (*n, *t)).collect();
+    let data = tilde_store(&rows);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let f = tilde_filter();
+    for (i, (name, _, expected)) in TILDE_CASES.iter().enumerate() {
+        let got = f.matches(&archived.cards[i], &archived.printings[i], &archived.strings);
+        assert_eq!(got, *expected, "o:/~/ on {name}");
+    }
+}
+
+/// The seven game-term names, now answered Scryfall's way — see `TILDE_GAME_TERM_NAMES`.
+#[test]
+fn self_reference_game_term_names_do_not_alias() {
+    let data = tilde_store(TILDE_GAME_TERM_NAMES);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let f = tilde_filter();
+    for (i, (name, _)) in TILDE_GAME_TERM_NAMES.iter().enumerate() {
+        assert!(
+            !f.matches(&archived.cards[i], &archived.printings[i], &archived.strings),
+            "{name} is named after a game term its own text uses; Scryfall answers 404 for o:/~/"
+        );
+    }
+}
+
+/// The period rule and its two controls — see `TILDE_PERIOD_ALIASES`.
+#[test]
+fn self_reference_alias_with_a_period_never_matches() {
+    let rows: Vec<(&str, &str)> = TILDE_PERIOD_ALIASES.iter().map(|(n, t, _)| (*n, *t)).collect();
+    let data = tilde_store(&rows);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let f = tilde_filter();
+    for (i, (name, _, expected)) in TILDE_PERIOD_ALIASES.iter().enumerate() {
+        let got = f.matches(&archived.cards[i], &archived.printings[i], &archived.strings);
+        assert_eq!(got, *expected, "o:/~/ on {name}");
+    }
+}
+
+/// The curated short names, now answered Scryfall's way — see `TILDE_CURATED_SHORT_NAMES`.
+#[test]
+fn self_reference_curated_short_names_match() {
+    let data = tilde_store(TILDE_CURATED_SHORT_NAMES);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let f = tilde_filter();
+    for (i, (name, _)) in TILDE_CURATED_SHORT_NAMES.iter().enumerate() {
+        assert!(
+            f.matches(&archived.cards[i], &archived.printings[i], &archived.strings),
+            "{name} uses a curated short name no separator finds; Scryfall answers 1 for o:/~/"
+        );
+    }
+}
+
+/// A TWO-FACED CARD IS TWO ROWS HERE, and both carry the COMBINED name.
+///
+/// `preprocess_card` lifts `card_name` before it expands `card_faces`, so the front-face row of
+/// Delver of Secrets is named "delver of secrets // insectile aberration" while its oracle text
+/// says "transform delver of secrets" — the combined string appears in no card's text, so the
+/// halves have to be offered separately or every DFC stops matching.
+///
+/// The cost is one shape of over-match: a face whose text names its TWIN and never itself, of
+/// which the 2026-05-31 corpus holds 4. That is asserted here too, in the direction this engine
+/// answers, so the day it is worth fixing a test says which cards moved.
+#[test]
+fn self_reference_offers_each_half_of_a_two_faced_name() {
+    let rows: &[(&str, &str)] = &[
+        ("delver of secrets // insectile aberration", "at the beginning of your upkeep, look at the top card of your library. you may reveal that card. if an instant or sorcery card is revealed this way, transform delver of secrets."),
+        // The back face, its own row, naming only itself.
+        ("delver of secrets // insectile aberration", "flying"),
+        // The over-match: a row whose text names ONLY the other half.
+        ("front half // back half", "sacrifice back half."),
+        // ...and the control, so this is a superset and not a blanket match on faced names.
+        ("front half // back half", "draw a card."),
+    ];
+    let data = tilde_store(rows);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let f = tilde_filter();
+    let hit = |i: usize| f.matches(&archived.cards[i], &archived.printings[i], &archived.strings);
+    assert!(hit(0), "a face naming itself must match through the half, not the joined name");
+    assert!(!hit(1), "\"flying\" carries no self-reference");
+    assert!(hit(2), "known superset: a row naming only its twin");
+    assert!(!hit(3), "and nothing else about a faced name matches");
+}
+
+/// The compile-time half: which patterns expand, which columns expand them, and the narrow.
+#[test]
+fn self_reference_expands_only_where_it_should_and_refuses_to_narrow() {
+    use super::filter::{compile_search_regex as re, compile_search_regex_self_referential};
+    use super::regex_compat::SelfRefScope;
+    let sre = |p: &str| compile_search_regex_self_referential(p, SelfRefScope::Oracle);
+
+    assert!(sre("~").expect("~ compiles").has_self_reference());
+    // An ESCAPED tilde expands too, which is Scryfall's: `o:/\~/` answers the same 19,228.
+    assert!(sre(r"\~").expect(r"\~ compiles").has_self_reference());
+    // Inside a bracket expression nothing is rewritten, the same rule the `\s…` shorthands follow.
+    assert!(!sre("[~]").expect("[~] compiles").has_self_reference());
+    // A pattern that asked for expansion and got none must not pay the substitution.
+    assert!(!sre("draw a card").expect("compiles").has_self_reference());
+    assert!(!re("~").expect("compiles").has_self_reference(), "the plain entry point never expands");
+
+    // ── THE #734 TRIGRAM NARROW MUST DECLINE ──
+    //
+    // The sentinel stands in for the card's own name, which the matcher writes into a COPY of the
+    // text at evaluation time. It is in no stored string and therefore in no trigram posting, so
+    // a factor taken from a `~` pattern would narrow to a candidate set that excludes the very
+    // cards this fix exists to find — the same silent zero, reintroduced one layer down.
+    //
+    // `o:/~ deals 3 damage/` is the shape that makes it concrete: " deals 3 damage" survives the
+    // substitution and would look like a perfectly good factor, and narrowing on it is still
+    // wrong, because the run is only guaranteed in the SUBSTITUTED text.
+    use super::regex_required_factors;
+    assert!(
+        regex_required_factors(sre("~ deals 3 damage").expect("compiles").as_str()).is_empty(),
+        "a ~ pattern must be unnarrowable"
+    );
+    assert!(regex_required_factors(sre("~").expect("compiles").as_str()).is_empty());
+    assert!(regex_required_factors(sre(r"\~").expect("compiles").as_str()).is_empty());
+    // ...and the SAME pattern without the alias still narrows, so this is a decline scoped to the
+    // sentinel rather than a regression in the narrower.
+    assert_eq!(
+        regex_required_factors(re("deals 3 damage").expect("compiles").as_str()),
+        vec!["deals 3 damage".to_string()]
+    );
+
+    // ── the columns that expand `~`, and the ones that do not ──
+    //
+    // `name:/~/` is 404 on api.scryfall.com (2026-08-28). If `~` were the card's name there, that
+    // query would be the whole corpus; it is nothing, so the alias is simply not expanded on
+    // `name:`. `t:/~/` and `mana:/~/` are 404 too, and `ft:/~/` is 2 — Blighted Agent and
+    // Urabrask the Hidden, whose Phyrexian-script flavor text carries a literal `~`, which the
+    // plain substring `ft:"~"` finds as well. Asserted through `build_filter`, which is what
+    // actually chooses the entry point.
+    let node = |attr: &str, orig: &str| {
+        serde_json::json!({
+            "node_type": "CardBinaryOperatorNode",
+            "kwargs": {
+                "lhs": {"node_type": "CardAttributeNode", "kwargs": {"attribute_name": attr, "original_attribute": orig}},
+                "op": ":",
+                "rhs": {"node_type": "RegexValueNode", "kwargs": {"value": "~"}},
+            },
+        })
+    };
+    let expands = |attr: &str, orig: &str| match super::build_filter(&node(attr, orig)) {
+        Ok(FilterExpr::TextRegex { regex, .. }) => regex.has_self_reference(),
+        other => panic!("{attr} should build a TextRegex, got {:?}", other.map(|f| std::mem::discriminant(&f))),
+    };
+    assert!(expands("oracle_text", "o"), "o:/~/ is 19,228");
+    assert!(expands("oracle_text", "fo"), "fo:/~/ is 22,037");
+    assert!(!expands("flavor_text", "ft"), "ft:/~/ is 2, and they are literal tildes");
+    assert!(!expands("card_name", "name"), "name:/~/ is 404");
+    assert!(!expands("card_types", "t"), "t:/~/ is 404");
+    assert!(!expands("mana_cost_jsonb", "mana"), "mana:/~/ is 404");
+}
 
 /// `super::sigma_bound`'s Rust port must agree with the Python original
 /// (`scripts/bench_compose_card_visited_safety_bound.py`) it was translated from -- that Python side

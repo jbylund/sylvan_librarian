@@ -81,6 +81,103 @@ class TestRegexPatternLimits:
         parse_scryfall_query(r"o:/\(\?=not a lookaround/")
 
 
+class TestAreWordBoundaryEscapes:
+    """`o:/.../` is PostgreSQL ARE, whose word boundaries Python's `re` cannot parse.
+
+    The budget measures patterns with `re._parser`, so without the same rewrite the
+    engine applies (`card_engine/src/regex_compat.rs`) every one of these would be
+    rejected at parse time as a malformed pattern -- a documented operator turned
+    into a user-visible error by its own security check.
+    """
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            r"o:/\yizzet\y/",
+            r"o:/\Ynot a boundary/",
+            r"name:/\mizzet\M/",
+            r"o:/lifelink\Z/",
+        ],
+    )
+    def test_accepts_are_escapes(self, query: str) -> None:
+        parse_scryfall_query(query)
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            r"o:/[\d]\yizzet\y/",
+            # `]` in the first position is a literal member (POSIX), so it does not
+            # close the class -- the `\y` after the real `]` is the one to rewrite.
+            r"o:/[]a]\yx/",
+            r"o:/[^]a]\mx/",
+        ],
+    )
+    def test_rewrite_reads_bracket_expressions(self, query: str) -> None:
+        # Inside `[...]` an escape is an ordinary member, not a constraint, so the
+        # rewrite must skip the class and resume after it. Verified against the
+        # engine's copy: both spell these the same way.
+        parse_scryfall_query(query)
+
+    def test_a_word_boundary_escape_inside_a_class_stays_malformed(self) -> None:
+        # `[\y]` is not a bracket expression either engine accepts -- the rewrite
+        # passes it through rather than inventing a meaning, and it fails here
+        # exactly as `CompiledRegex::new` fails on it.
+        with pytest.raises(InvalidRegexPatternError):
+            parse_scryfall_query(r"o:/[\y]lit/")
+
+    def test_word_start_escapes_spend_lookaround_budget(self) -> None:
+        # `\m`/`\M` have no linear spelling: they become lookaround on the engine,
+        # which is exactly what the lookaround cap is there to bound. Three of them
+        # is six lookarounds, past MAX_LOOKAROUNDS_PER_PATTERN.
+        with pytest.raises(QueryBudgetExceeded) as exc_info:
+            parse_scryfall_query(r"o:/\ma\mb\mc/")
+        assert exc_info.value.kind == "regex_pattern"
+
+    def test_still_rejects_a_genuinely_bad_escape(self) -> None:
+        with pytest.raises(InvalidRegexPatternError):
+            parse_scryfall_query(r"o:/\q/")
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            r"o:/\ss/",
+            r"o:/\sm/",
+            r"o:/\sc/",
+            r"o:/\smh/",
+            r"o:/\smp/",
+            r"o:/\smr/",
+            r"o:/\spt/",
+            r"o:/\spp/",
+            r"o:/\smm/",
+            # Seven mana symbols in a row: measured through its expansion this would be 70 AST
+            # nodes and 35 alternations, past both caps. A shorthand costs one token.
+            r"o:/\sm\sm\sm\sm\sm\sm\sm/",
+            # `\smr` is the one that becomes a backreference on the engine, which
+            # `metrics.backreferences > 0` would reject if the expansion were what got measured.
+            r"o:/\smr\smr/",
+            # A quantifier still binds to the folded token, so the bound is still checked.
+            r"o:/\sm{3}/",
+        ],
+    )
+    def test_accepts_scryfall_shorthands(self, query: str) -> None:
+        parse_scryfall_query(query)
+
+    def test_a_quantified_shorthand_still_spends_quantifier_budget(self) -> None:
+        # Folding the shorthand to one token must not fold away the `{n}` after it.
+        with pytest.raises(QueryBudgetExceeded) as exc_info:
+            parse_scryfall_query(r"o:/\sm{2000}/")
+        assert exc_info.value.kind == "regex_pattern"
+
+    def test_a_shorthand_inside_a_class_is_not_folded(self) -> None:
+        # Inside `[...]` nothing is rewritten, on either side of the seam: `[\sm]` is the class
+        # "whitespace or the letter m", which Python parses and the engine compiles unchanged.
+        parse_scryfall_query(r"o:/[\sm]/")
+
+    def test_a_bare_backslash_s_is_still_whitespace(self) -> None:
+        # `\s` followed by a letter that is not a shorthand suffix keeps its ordinary meaning.
+        parse_scryfall_query(r"o:/\sdraw/")
+
+
 class TestRegexOperatorCoverage:
     @pytest.mark.parametrize(
         "query",
