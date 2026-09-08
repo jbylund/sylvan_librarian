@@ -6,8 +6,9 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
+use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyString};
 use rkyv::Archived;
 
 const LEGALITY_NOT_LEGAL: u64 = 0;
@@ -112,16 +113,58 @@ pub(crate) fn jsonb_obj_to_legality_bits(d: &Bound<PyDict>, key: &str) -> u64 {
 /// format the registry knows, alphabetically — the field-extraction counterpart of
 /// `jsonb_obj_to_legality_bits`. A format absent from the imported JSONB round-trips
 /// as "not_legal", exactly as the encoder treated it.
+/// The format names as interned `PyString` keys, parallel to a `SortedFormats` snapshot.
+type FormatKeys = Arc<[Py<PyString>]>;
+
+/// The format names as interned `PyString` keys, positionally parallel to a
+/// `format_shifts_sorted()` snapshot of the same length.
+///
+/// Keyed on the snapshot's LENGTH rather than `FORMAT_COUNT` on purpose. The registry is
+/// append-only in its *shift* assignments, but `format_shifts_sorted()` is sorted
+/// ALPHABETICALLY, so a new format lands in the middle and moves every later entry's index.
+/// Positional correspondence therefore only holds against a snapshot of the same length --
+/// and because the registry is append-only, a given length pins a unique format set and so a
+/// unique sorted order. Matching lengths is exactly the condition under which `keys[i]`
+/// describes `entries[i]`.
+fn format_keys(py: Python<'_>, entries: &SortedFormats) -> FormatKeys {
+    static KEYS: OnceLock<RwLock<(usize, FormatKeys)>> = OnceLock::new();
+    let cache = KEYS.get_or_init(|| RwLock::new((usize::MAX, Arc::from([] as [Py<PyString>; 0]))));
+
+    if let Ok(guard) = cache.read()
+        && guard.0 == entries.len()
+    {
+        return guard.1.clone();
+    }
+    let Ok(mut guard) = cache.write() else { return Arc::from([]) };
+    if guard.0 == entries.len() {
+        return guard.1.clone(); // rebuilt by another thread while we waited for the write lock
+    }
+    let built: FormatKeys =
+        entries.iter().map(|(format, _)| PyString::intern(py, format.as_str()).unbind()).collect();
+    *guard = (entries.len(), built.clone());
+    built
+}
+
+/// Build one row's `{format: status}` dict.
+///
+/// Both halves are interned rather than built per row. `set_item` with a `&str` allocates a
+/// fresh `PyUnicode` every call, and this runs once per FORMAT per ROW -- 23 keys plus 23
+/// status words is 46 string allocations per row, for a vocabulary of 23 names and exactly
+/// four status words. The dict itself is still built per row: handing the same cached dict to
+/// several rows would let a caller mutating one row's legalities corrupt the others.
 pub(crate) fn legality_bits_to_pydict<'a>(py: Python<'a>, bits: u64) -> PyResult<pyo3::Bound<'a, PyDict>> {
     let dict = PyDict::new(py);
-    for (format, shift) in format_shifts_sorted().iter() {
+    let entries = format_shifts_sorted();
+    let keys = format_keys(py, &entries);
+    debug_assert_eq!(keys.len(), entries.len(), "format_keys snapshot is not parallel to entries");
+    for ((_, shift), key) in entries.iter().zip(keys.iter()) {
         let word = match (bits >> shift) & 0b11 {
-            LEGALITY_LEGAL => "legal",
-            LEGALITY_RESTRICTED => "restricted",
-            LEGALITY_BANNED => "banned",
-            _ => "not_legal",
+            LEGALITY_LEGAL => intern!(py, "legal"),
+            LEGALITY_RESTRICTED => intern!(py, "restricted"),
+            LEGALITY_BANNED => intern!(py, "banned"),
+            _ => intern!(py, "not_legal"),
         };
-        dict.set_item(format.as_str(), word)?;
+        dict.set_item(key.bind(py), word)?;
     }
     Ok(dict)
 }

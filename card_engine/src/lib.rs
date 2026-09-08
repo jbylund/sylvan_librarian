@@ -1,3 +1,4 @@
+use std::sync::OnceLock;
 use pyo3::create_exception;
 use pyo3::intern;
 use pyo3::exceptions::PyValueError;
@@ -12926,6 +12927,33 @@ type FieldExtractor =
 /// to amortize when the page holds one row.
 type FieldKey = for<'a> fn(Python<'a>) -> &'a Bound<'a, PyString>;
 
+/// Yields the interned string id a cacheable field reads, for `EmitStrCache`.
+type CachedStrId = for<'a> fn(&'a AOracleCard, &'a APrinting) -> u32;
+
+/// The result fields served from `EmitStrCache`, and the id each one caches on.
+///
+/// Membership is decided by measured distinct-values-per-row over 100-row pages, not by type: a
+/// field earns a slot by repeating within a page. `name` (1.00 distinct/row) and `oracle_text`
+/// (0.96) are absent deliberately — a cache never hits for them, and admitting them would hold the
+/// whole string payload live as Python objects. `set_code` is absent for a different reason: it is
+/// an `InlineStr` on the printing, not an interned id, so there is no id to key on.
+///
+/// Every entry here must read a field that `str_at` resolves against `CardData.strings`; an id from
+/// any other table would cache the wrong text.
+/// One resolved result field: its name, its interned dict key, its extractor, and — for a field
+/// served from `EmitStrCache` — the id to cache on.
+type ResolvedField = (&'static str, FieldKey, FieldExtractor, Option<CachedStrId>);
+
+const CACHED_STR_FIELDS: &[(&str, CachedStrId)] = &[
+    ("type_line", |c, _p| u32::from(c.type_line_id)),
+    ("set_name", |_c, p| u32::from(p.set_name_id)),
+    ("collector_number", |_c, p| u32::from(p.collector_number_id)),
+    ("power", |c, _p| u32::from(c.creature_power_text_id)),
+    ("toughness", |c, _p| u32::from(c.creature_toughness_text_id)),
+    ("mana_cost", |c, _p| u32::from(c.mana_cost_text_id)),
+    ("layout", |c, _p| u32::from(c.card_layout_id)),
+];
+
 const FIELD_TABLE: &[(&str, FieldKey, FieldExtractor)] = &[
     ("name", |py| intern!(py, "name"), |py, c, _p, s, _v| Ok(str_at(s, u32::from(c.card_name_id)).into_pyobject(py)?.into_any())),
     ("set_code", |py| intern!(py, "set_code"), |py, _c, p, _s, _v| Ok(p.card_set_code.as_str().into_pyobject(py)?.into_any())),
@@ -13004,7 +13032,7 @@ const DEFAULT_FIELDS: &[&str] =
 /// requested twice is only fetched/emitted once) and rejecting anything outside the vocabulary.
 /// `None` resolves to DEFAULT_FIELDS. Called once per query, before the per-row loop, so the
 /// per-row cost is a flat list of closure calls rather than a name comparison per field per card.
-fn resolve_fields(fields: Option<Vec<String>>) -> PyResult<Vec<(&'static str, FieldKey, FieldExtractor)>> {
+fn resolve_fields(fields: Option<Vec<String>>) -> PyResult<Vec<ResolvedField>> {
     let requested: Vec<&str> = match &fields {
         Some(v) => v.iter().map(String::as_str).collect(),
         None => DEFAULT_FIELDS.to_vec(),
@@ -13016,7 +13044,10 @@ fn resolve_fields(fields: Option<Vec<String>>) -> PyResult<Vec<(&'static str, Fi
             continue;
         }
         match FIELD_TABLE.iter().find(|(n, _, _)| *n == name) {
-            Some(entry) => resolved.push(*entry),
+            Some((n, key, extractor)) => {
+                let cached = CACHED_STR_FIELDS.iter().find(|(cn, _)| cn == n).map(|(_, id_of)| *id_of);
+                resolved.push((*n, *key, *extractor, cached));
+            }
             None => return Err(UnknownFieldError::new_err(format!("unknown field: {name:?}"))),
         }
     }
@@ -13029,11 +13060,16 @@ fn card_to_pydict<'py>(
     printing: &APrinting,
     strings: &AStrings,
     vocab: &AStrings,
-    fields: &[(&'static str, FieldKey, FieldExtractor)],
+    fields: &[ResolvedField],
+    str_cache: &EmitStrCache,
 ) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
-    for (_, key, extractor) in fields {
-        d.set_item(key(py), extractor(py, card, printing, strings, vocab)?)?;
+    for (_, key, extractor, cached) in fields {
+        let value = match cached {
+            Some(id_of) => str_cache.get(py, strings, id_of(card, printing))?,
+            None => extractor(py, card, printing, strings, vocab)?,
+        };
+        d.set_item(key(py), value)?;
     }
     Ok(d)
 }
@@ -13095,6 +13131,54 @@ fn archive_payload(mmap: &Mmap) -> &[u8] {
 struct CachedMmap {
     mmap: Arc<Mmap>,
     inode: u64,
+    /// Emit-path `PyString` cache for this mapping. Rebuilt with the mapping, which is what makes
+    /// it safe: interned string ids are archive-relative, so a cache outliving its archive would
+    /// hand out the wrong text.
+    str_cache: Arc<EmitStrCache>,
+}
+
+/// One `PyString` per interned string id, for the result fields whose values repeat within a page.
+///
+/// Measured over 100-row pages of real queries, distinct values per row: `layout` 0.02, `rarity`
+/// 0.04, `power` 0.07, `toughness` 0.09, `mana_cost` 0.42, `set_code`/`set_name` 0.58, `type_line`
+/// 0.63 — against `name` 1.00 and `oracle_text` 0.96. The low-cardinality ones are rebuilt from
+/// UTF-8 on nearly every row for a vocabulary in the hundreds or low thousands, so one `PyString`
+/// per distinct value converges to a ~100% hit rate for a few hundred KB. `name` and `oracle_text`
+/// are deliberately NOT routed here (see `FieldSource`): at ~1.0 distinct per row a cache never
+/// hits, and covering all 160k interned strings would hold the entire string payload live as
+/// Python objects.
+///
+/// `type_line` is the single biggest entry and the reason this exists: every MTG type line carries
+/// an em dash ("Creature — Bird"), so it is 100% non-ASCII and CPython cannot use its compact ASCII
+/// representation — 39.5 ns of value construction for 25 characters, against 14.5 ns for
+/// `set_name`'s 20 ASCII ones.
+///
+/// `OnceLock` per slot rather than a `Mutex` over the whole table: a hit is one atomic load, and a
+/// race on a miss just builds the string twice and keeps the first.
+#[derive(Default)]
+struct EmitStrCache {
+    /// Sized on first use, when the archive's string count is known.
+    cells: OnceLock<Box<[OnceLock<Py<PyString>>]>>,
+}
+
+impl EmitStrCache {
+    fn get<'py>(&self, py: Python<'py>, strings: &AStrings, id: u32) -> PyResult<Bound<'py, PyAny>> {
+        let Some(text) = str_at(strings, id) else {
+            return Ok(py.None().into_bound(py));
+        };
+        let cells = self.cells.get_or_init(|| (0..strings.len()).map(|_| OnceLock::new()).collect());
+        // An id past the table can only mean a cache built against a different archive, which the
+        // per-mapping lifetime rules out. Fall back rather than panic.
+        let Some(cell) = cells.get(id as usize) else {
+            return Ok(text.into_pyobject(py)?.into_any());
+        };
+        if let Some(hit) = cell.get() {
+            return Ok(hit.bind(py).clone().into_any());
+        }
+        let built = PyString::new(py, text);
+        let _ = cell.set(built.clone().unbind());
+        Ok(built.into_any())
+    }
 }
 
 /// In-progress staged reload: cards accumulated across add_batch() calls plus
@@ -13347,6 +13431,12 @@ impl QueryEngine {
     // the last remap (i.e. another worker wrote a new archive via rename).
     // One stat(2) per query; remap only when the inode actually changes.
     fn get_mmap(&self) -> PyResult<Arc<Mmap>> {
+        Ok(self.get_mapping()?.0)
+    }
+
+    /// The mapping plus its emit cache. Both come from the same `CachedMmap`, so a remap replaces
+    /// them together and a cache can never be read against an archive it was not built for.
+    fn get_mapping(&self) -> PyResult<(Arc<Mmap>, Arc<EmitStrCache>)> {
         let path_inode = std::fs::metadata(&self.shm_path)
             .map(|m| m.ino())
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("stat shm: {e}")))?;
@@ -13355,7 +13445,7 @@ impl QueryEngine {
         if let Some(ref c) = *guard
             && c.inode == path_inode
         {
-            return Ok(Arc::clone(&c.mmap));
+            return Ok((Arc::clone(&c.mmap), Arc::clone(&c.str_cache)));
         }
         // Inode changed (new reload) or first call: open and map the current file.
         let file = std::fs::File::open(&self.shm_path)
@@ -13379,8 +13469,9 @@ impl QueryEngine {
                 self.shm_path.display(),
             )));
         }
-        *guard = Some(CachedMmap { mmap: Arc::clone(&mmap), inode });
-        Ok(mmap)
+        let str_cache = Arc::new(EmitStrCache::default());
+        *guard = Some(CachedMmap { mmap: Arc::clone(&mmap), inode, str_cache: Arc::clone(&str_cache) });
+        Ok((mmap, str_cache))
     }
 }
 
@@ -13826,7 +13917,7 @@ impl QueryEngine {
         let resolved_fields = resolve_fields(fields)?;
         // get_mmap() remaps automatically if the on-disk inode has changed since
         // the last reload, keeping workers off stale (deleted) mappings.
-        let mmap = self.get_mmap()?;
+        let (mmap, str_cache) = self.get_mapping()?;
         // Safety: the archive is trusted by construction, so we skip validation.
         // This is the canonical justification for every access_unchecked in this
         // module (query_hashmap() and size() refer here):
@@ -13870,7 +13961,7 @@ impl QueryEngine {
 
         let matches: Vec<Bound<PyDict>> = page
             .iter()
-            .map(|(c, p)| card_to_pydict(py, c, p, &data.strings, &data.coll_vocab, &resolved_fields))
+            .map(|(c, p)| card_to_pydict(py, c, p, &data.strings, &data.coll_vocab, &resolved_fields, &str_cache))
             .collect::<PyResult<Vec<_>>>()?;
         let matches_list = PyList::new(py, matches)?;
         PyTuple::new(py, [total.into_pyobject(py)?.into_any(), matches_list.into_any()])
@@ -14060,7 +14151,7 @@ impl QueryEngine {
     #[pyo3(signature = (n, fields=None))]
     fn sample_preferred<'py>(&self, py: Python<'py>, n: usize, fields: Option<Vec<String>>) -> PyResult<Bound<'py, PyList>> {
         let resolved_fields = resolve_fields(fields)?;
-        let mmap = self.get_mmap()?;
+        let (mmap, str_cache) = self.get_mapping()?;
         // Safety: see the access_unchecked justification in query().
         let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
 
@@ -14078,7 +14169,7 @@ impl QueryEngine {
             .map(|&cid| {
                 let card = &data.cards[cid];
                 let preferred = u32::from(data.offsets[cid]) as usize;
-                card_to_pydict(py, card, &data.printings[preferred], &data.strings, &data.coll_vocab, &resolved_fields)
+                card_to_pydict(py, card, &data.printings[preferred], &data.strings, &data.coll_vocab, &resolved_fields, &str_cache)
             })
             .collect::<PyResult<_>>()?;
         PyList::new(py, dicts)
