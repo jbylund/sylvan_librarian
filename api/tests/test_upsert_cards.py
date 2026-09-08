@@ -10,7 +10,7 @@ from unittest.mock import patch
 import psycopg
 import pytest
 
-from api.admin_resource import AdminResource, _build_boolean_is_tags_sql
+from api.admin_resource import BOOLEAN_IS_TAGS, AdminResource, _build_boolean_is_tags_sql
 from api.api_resource import APIResource
 from api.card_processing import preprocess_card
 from api.db.bulk_upsert import bulk_upsert
@@ -75,6 +75,22 @@ class TestBuildBooleanIsTagsSql:
         assert "%(num_chunks)s" in sql
         assert "%(chunk_index)s" in sql
         assert "jsonb_object_agg" not in sql
+
+    def test_sql_never_passes_postgres_more_than_100_arguments_per_call(self) -> None:
+        """Postgres refuses a function call with more than 100 arguments, and a pair is two.
+
+        One `jsonb_build_object` over the whole table held until the table passed 50 rows
+        (2026-09-03, the promo_types enumeration), when every import failed with "cannot pass
+        more than 100 arguments to a function". The builder chunks the pairs; this pins the chunk
+        size to the cap, on a synthetic table and on the real one.
+        """
+        tags = {f"tag{i}": "cards.raw_card_blob->'reserved' = 'true'::jsonb" for i in range(101)}
+        calls = _build_boolean_is_tags_sql(tags).split("jsonb_build_object(")[1:]
+        assert len(calls) == 3
+        assert all(call.count("CASE WHEN") <= 50 for call in calls)
+        real_calls = _build_boolean_is_tags_sql(BOOLEAN_IS_TAGS).split("jsonb_build_object(")[1:]
+        assert len(real_calls) > 1
+        assert all(call.count("CASE WHEN") <= 50 for call in real_calls)
 
 
 def _is_tags_for(api_resource: APIResource, scryfall_id: str) -> dict:
@@ -208,6 +224,61 @@ class TestBooleanIsTags:
         tags = _is_tags_for(api_resource, card["id"])
         assert tags.get("instore") is True
         assert "fnm" not in tags
+
+    def test_undocumented_promo_type_lands_as_is_tag(self, api_resource: APIResource) -> None:
+        """A `promo_types` member Scryfall's syntax page never lists still becomes a tag.
+
+        `is:serialized` is 292 cards on api.scryfall.com (2026-09-03) and was a silent zero here
+        until the vocabulary was enumerated from the printings instead of read off the page.
+        """
+        card = make_raw_card(name="Serialized Import Test")
+        card["promo_types"] = ["serialized"]
+        api_resource.admin._upsert_cards([card])
+        assert _is_tags_for(api_resource, card["id"]).get("serialized") is True
+
+    @staticmethod
+    def _meld_all_parts(own_id: str, own_role: str) -> list[dict]:
+        """A meld card's `all_parts`: this card in `own_role`, plus the other two members."""
+        other_roles = ["meld_part", "meld_part", "meld_result"]
+        other_roles.remove(own_role)
+        parts = [{"object": "related_card", "id": own_id, "component": own_role, "name": "Own Half"}]
+        parts.extend(
+            {"object": "related_card", "id": str(uuid.uuid4()), "component": role, "name": f"Other {i}"}
+            for i, role in enumerate(other_roles)
+        )
+        return parts
+
+    def test_meld_part_reads_the_cards_own_all_parts_entry(self, api_resource: APIResource) -> None:
+        """Every meld card lists all three members, so the role must come from ITS OWN entry."""
+        card = make_raw_card(name="Meld Part Import Test")
+        card["layout"] = "meld"
+        card["all_parts"] = self._meld_all_parts(card["id"], "meld_part")
+        api_resource.admin._upsert_cards([card])
+        tags = _is_tags_for(api_resource, card["id"])
+        assert tags.get("meldpart") is True
+        assert "meldresult" not in tags
+
+    def test_meld_result_reads_the_cards_own_all_parts_entry(self, api_resource: APIResource) -> None:
+        card = make_raw_card(name="Meld Result Import Test")
+        card["layout"] = "meld"
+        card["all_parts"] = self._meld_all_parts(card["id"], "meld_result")
+        api_resource.admin._upsert_cards([card])
+        tags = _is_tags_for(api_resource, card["id"])
+        assert tags.get("meldresult") is True
+        assert "meldpart" not in tags
+
+    def test_other_cards_meld_roles_do_not_tag_this_card(self, api_resource: APIResource) -> None:
+        """`all_parts` naming OTHER cards' roles (a token maker, a combo piece) is not a meld role."""
+        card = make_raw_card(name="Meld Bystander Import Test")
+        card["all_parts"] = [
+            {"object": "related_card", "id": str(uuid.uuid4()), "component": "meld_part", "name": "Someone Else"},
+            {"object": "related_card", "id": str(uuid.uuid4()), "component": "meld_result", "name": "Someone Else Melded"},
+            {"object": "related_card", "id": card["id"], "component": "combo_piece", "name": "Meld Bystander Import Test"},
+        ]
+        api_resource.admin._upsert_cards([card])
+        tags = _is_tags_for(api_resource, card["id"])
+        assert "meldpart" not in tags
+        assert "meldresult" not in tags
         assert "buyabox" not in tags
 
     def test_partner_keyword_lands_as_is_tag(self, api_resource: APIResource) -> None:

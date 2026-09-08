@@ -154,6 +154,31 @@ _DERIVED_EXPANSIONS: dict[tuple[str, str], str] = {
     # from it") while missing modal cards worded otherwise (Sieges, Confluences).
     # Not an exact mirror of theirs, just a much closer one.
     ("is", "modal"): "otag:modal",
+    # ── Other spellings of the stored `is:` vocabulary ───────────────────
+    # The concatenated spellings of six tags BOOLEAN_IS_TAGS stores under Scryfall's
+    # syntax-page key -- the `promo_types` member itself, which Scryfall accepts alongside
+    # the underscored form. Measured 2026-09-03, each the same count as its target:
+    # `is:setpromo` 1,381, `is:mediainsert` 586, `is:planeswalkerdeck` 180, `is:judgegift`
+    # 164, `is:arenaleague` 40, `is:intropack` 40 -- every one a 200 there and a silent zero
+    # here, because the table knew only the underscored key. Aliases rather than rows: the
+    # tag under either spelling is the same tag, and a second copy is bytes for nothing.
+    ("is", "arenaleague"): "is:arena_league",
+    ("is", "intropack"): "is:intro_pack",
+    ("is", "judgegift"): "is:judge_gift",
+    ("is", "mediainsert"): "is:media_insert",
+    ("is", "planeswalkerdeck"): "is:planeswalker_deck",
+    ("is", "setpromo"): "is:set_promo",
+    # `rainbow` is Scryfall's short spelling of the `rainbowfoil` promo type, not a member of
+    # its own: `is:rainbow` and `is:rainbowfoil` are both 183 and both set differences are
+    # empty (2026-09-03). It never appears in `promo_types`, so it can only ever be an alias.
+    ("is", "rainbow"): "is:rainbowfoil",
+    # Two `is:` spellings of columns this parser already has, exact in both directions on
+    # 2026-09-03. `is:borderless` = `border:borderless` (3,611, both set differences empty).
+    # `is:tombstone` = `frame:tombstone` (113): a frame EFFECT, the one `is:` value of the 78
+    # the 2026-09-03 enumeration recovered that is not a promo type; the importer writes every
+    # frame_effects member into card_frame_data, so it reaches the column as colorshifted does.
+    ("is", "borderless"): "border:borderless",
+    ("is", "tombstone"): "frame:tombstone",
 }
 
 
