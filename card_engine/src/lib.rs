@@ -1,7 +1,8 @@
 use pyo3::create_exception;
+use pyo3::intern;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDate, PyDateAccess, PyDict, PyList, PyTuple};
+use pyo3::types::{PyDate, PyDateAccess, PyDict, PyList, PyString, PyTuple};
 use rkyv::{Archive, Archived, Deserialize, Serialize};
 use memmap2::Mmap;
 use memchr::memmem;
@@ -12912,45 +12913,58 @@ fn run_query_streamed<'a>(
 type FieldExtractor =
     for<'a> fn(Python<'a>, &'a AOracleCard, &'a APrinting, &'a AStrings, &'a AStrings) -> PyResult<Bound<'a, PyAny>>;
 
-const FIELD_TABLE: &[(&str, FieldExtractor)] = &[
-    ("name", |py, c, _p, s, _v| Ok(str_at(s, u32::from(c.card_name_id)).into_pyobject(py)?.into_any())),
-    ("set_code", |py, _c, p, _s, _v| Ok(p.card_set_code.as_str().into_pyobject(py)?.into_any())),
-    ("collector_number", |py, _c, p, s, _v| Ok(str_at(s, u32::from(p.collector_number_id)).into_pyobject(py)?.into_any())),
-    ("power", |py, c, _p, s, _v| Ok(str_at(s, u32::from(c.creature_power_text_id)).into_pyobject(py)?.into_any())),
-    ("toughness", |py, c, _p, s, _v| Ok(str_at(s, u32::from(c.creature_toughness_text_id)).into_pyobject(py)?.into_any())),
-    ("mana_cost", |py, c, _p, s, _v| Ok(str_at(s, u32::from(c.mana_cost_text_id)).into_pyobject(py)?.into_any())),
-    ("oracle_text", |py, c, _p, s, _v| Ok(str_at(s, u32::from(c.oracle_text_id)).into_pyobject(py)?.into_any())),
-    ("set_name", |py, _c, p, s, _v| Ok(str_at(s, u32::from(p.set_name_id)).into_pyobject(py)?.into_any())),
-    ("type_line", |py, c, _p, s, _v| Ok(str_at(s, u32::from(c.type_line_id)).into_pyobject(py)?.into_any())),
-    ("illustration_id", |py, _c, p, _s, _v| Ok(uuid_from_u128(u128::from(p.illustration_id)).into_pyobject(py)?.into_any())),
-    ("scryfall_id", |py, _c, p, _s, _v| Ok(uuid_from_u128(u128::from(p.scryfall_id)).into_pyobject(py)?.into_any())),
+/// The field's dict key, as the interpreter's one interned `PyString`.
+///
+/// `set_item` with a `&str` key builds a FRESH `PyUnicode` on every call: 9 allocations per row and
+/// 900 per 100-row page, for 9 constant strings, none of them shared -- measured 0 of 9 key objects
+/// identical across rows before this change, 24 of 24 after. `intern!` resolves through a static
+/// `GILOnceCell`, so the per-row cost is a cell read plus an incref.
+///
+/// The key fn belongs in the table rather than being interned once per query into a `Vec`: that
+/// revision was measured too, and it won the same ~12-16 ns/field on pages but cost +0.17-0.25 us on
+/// the 0-row and 1-row shapes, which is where most real traffic lands. Per-query setup has nowhere
+/// to amortize when the page holds one row.
+type FieldKey = for<'a> fn(Python<'a>) -> &'a Bound<'a, PyString>;
+
+const FIELD_TABLE: &[(&str, FieldKey, FieldExtractor)] = &[
+    ("name", |py| intern!(py, "name"), |py, c, _p, s, _v| Ok(str_at(s, u32::from(c.card_name_id)).into_pyobject(py)?.into_any())),
+    ("set_code", |py| intern!(py, "set_code"), |py, _c, p, _s, _v| Ok(p.card_set_code.as_str().into_pyobject(py)?.into_any())),
+    ("collector_number", |py| intern!(py, "collector_number"), |py, _c, p, s, _v| Ok(str_at(s, u32::from(p.collector_number_id)).into_pyobject(py)?.into_any())),
+    ("power", |py| intern!(py, "power"), |py, c, _p, s, _v| Ok(str_at(s, u32::from(c.creature_power_text_id)).into_pyobject(py)?.into_any())),
+    ("toughness", |py| intern!(py, "toughness"), |py, c, _p, s, _v| Ok(str_at(s, u32::from(c.creature_toughness_text_id)).into_pyobject(py)?.into_any())),
+    ("mana_cost", |py| intern!(py, "mana_cost"), |py, c, _p, s, _v| Ok(str_at(s, u32::from(c.mana_cost_text_id)).into_pyobject(py)?.into_any())),
+    ("oracle_text", |py| intern!(py, "oracle_text"), |py, c, _p, s, _v| Ok(str_at(s, u32::from(c.oracle_text_id)).into_pyobject(py)?.into_any())),
+    ("set_name", |py| intern!(py, "set_name"), |py, _c, p, s, _v| Ok(str_at(s, u32::from(p.set_name_id)).into_pyobject(py)?.into_any())),
+    ("type_line", |py| intern!(py, "type_line"), |py, c, _p, s, _v| Ok(str_at(s, u32::from(c.type_line_id)).into_pyobject(py)?.into_any())),
+    ("illustration_id", |py| intern!(py, "illustration_id"), |py, _c, p, _s, _v| Ok(uuid_from_u128(u128::from(p.illustration_id)).into_pyobject(py)?.into_any())),
+    ("scryfall_id", |py| intern!(py, "scryfall_id"), |py, _c, p, _s, _v| Ok(uuid_from_u128(u128::from(p.scryfall_id)).into_pyobject(py)?.into_any())),
     // Exact f64 dollars from the stored integer cents, not the old lossy f32 -- API consumers
     // now see the true price (e.g. 1.47, not the nearest f32 to 1.47) instead of an
     // approximation.
-    ("price_usd", |py, _c, p, _s, _v| Ok(p.price_usd.as_ref().map(|v| f64::from(u32::from(*v)) / 100.0).into_pyobject(py)?.into_any())),
-    ("prefer_score", |py, _c, p, _s, _v| Ok(p.prefer_score.as_ref().map(|v| f32::from(*v)).into_pyobject(py)?.into_any())),
+    ("price_usd", |py| intern!(py, "price_usd"), |py, _c, p, _s, _v| Ok(p.price_usd.as_ref().map(|v| f64::from(u32::from(*v)) / 100.0).into_pyobject(py)?.into_any())),
+    ("prefer_score", |py| intern!(py, "prefer_score"), |py, _c, p, _s, _v| Ok(p.prefer_score.as_ref().map(|v| f32::from(*v)).into_pyobject(py)?.into_any())),
     // card_subtypes preserves the printed order; the set-like collections are stored
     // sorted by vocab id (first-seen order), so they get re-sorted lexicographically
     // for deterministic output.
-    ("card_subtypes", |py, c, _p, _s, v| {
+    ("card_subtypes", |py| intern!(py, "card_subtypes"), |py, c, _p, _s, v| {
         let items: Vec<&str> = c.card_subtypes.iter().map(|id| coll_str(v, u16::from(*id))).collect();
         Ok(items.into_pyobject(py)?.into_any())
     }),
-    ("card_keywords", |py, c, _p, _s, v| Ok(sorted_strs(v, &c.card_keywords).into_pyobject(py)?.into_any())),
-    ("card_oracle_tags", |py, c, _p, _s, v| Ok(sorted_strs(v, &c.card_oracle_tags).into_pyobject(py)?.into_any())),
-    ("card_art_tags", |py, _c, p, _s, v| Ok(sorted_strs(v, &p.card_art_tags).into_pyobject(py)?.into_any())),
-    ("card_is_tags", |py, _c, p, _s, v| Ok(sorted_strs(v, &p.card_is_tags).into_pyobject(py)?.into_any())),
-    ("card_frame_data", |py, _c, p, _s, v| Ok(sorted_strs(v, &p.card_frame_data).into_pyobject(py)?.into_any())),
+    ("card_keywords", |py| intern!(py, "card_keywords"), |py, c, _p, _s, v| Ok(sorted_strs(v, &c.card_keywords).into_pyobject(py)?.into_any())),
+    ("card_oracle_tags", |py| intern!(py, "card_oracle_tags"), |py, c, _p, _s, v| Ok(sorted_strs(v, &c.card_oracle_tags).into_pyobject(py)?.into_any())),
+    ("card_art_tags", |py| intern!(py, "card_art_tags"), |py, _c, p, _s, v| Ok(sorted_strs(v, &p.card_art_tags).into_pyobject(py)?.into_any())),
+    ("card_is_tags", |py| intern!(py, "card_is_tags"), |py, _c, p, _s, v| Ok(sorted_strs(v, &p.card_is_tags).into_pyobject(py)?.into_any())),
+    ("card_frame_data", |py| intern!(py, "card_frame_data"), |py, _c, p, _s, v| Ok(sorted_strs(v, &p.card_frame_data).into_pyobject(py)?.into_any())),
     // Card-data fields for downstream filtering, in Scryfall JSON shapes (names and value
     // shapes match RESULT_FIELD_COLUMNS in api/api_resource.py, which reshapes the SQL
     // path's raw columns to agree with these).
-    ("layout", |py, c, _p, s, _v| Ok(str_at(s, u32::from(c.card_layout_id)).into_pyobject(py)?.into_any())),
-    ("cmc", |py, c, _p, _s, _v| Ok(c.cmc.as_ref().copied().into_pyobject(py)?.into_any())),
-    ("rarity", |py, _c, p, _s, _v| {
+    ("layout", |py| intern!(py, "layout"), |py, c, _p, s, _v| Ok(str_at(s, u32::from(c.card_layout_id)).into_pyobject(py)?.into_any())),
+    ("cmc", |py| intern!(py, "cmc"), |py, c, _p, _s, _v| Ok(c.cmc.as_ref().copied().into_pyobject(py)?.into_any())),
+    ("rarity", |py| intern!(py, "rarity"), |py, _c, p, _s, _v| {
         Ok(p.card_rarity_int.as_ref().and_then(|v| rarity_int_to_text(*v)).into_pyobject(py)?.into_any())
     }),
-    ("color_identity", |py, c, _p, _s, _v| Ok(identity_letters(c.card_color_identity).into_pyobject(py)?.into_any())),
-    ("legalities", |py, c, p, _s, _v| {
+    ("color_identity", |py| intern!(py, "color_identity"), |py, c, _p, _s, _v| Ok(identity_letters(c.card_color_identity).into_pyobject(py)?.into_any())),
+    ("legalities", |py| intern!(py, "legalities"), |py, c, p, _s, _v| {
         // Printing-level word only for the ~556 divergence cards, same rule the filters use.
         let bits = if c.legality_divergent { u64::from(p.card_legalities) } else { u64::from(c.card_legalities) };
         Ok(legality_bits_to_pydict(py, bits)?.into_any())
@@ -12990,7 +13004,7 @@ const DEFAULT_FIELDS: &[&str] =
 /// requested twice is only fetched/emitted once) and rejecting anything outside the vocabulary.
 /// `None` resolves to DEFAULT_FIELDS. Called once per query, before the per-row loop, so the
 /// per-row cost is a flat list of closure calls rather than a name comparison per field per card.
-fn resolve_fields(fields: Option<Vec<String>>) -> PyResult<Vec<(&'static str, FieldExtractor)>> {
+fn resolve_fields(fields: Option<Vec<String>>) -> PyResult<Vec<(&'static str, FieldKey, FieldExtractor)>> {
     let requested: Vec<&str> = match &fields {
         Some(v) => v.iter().map(String::as_str).collect(),
         None => DEFAULT_FIELDS.to_vec(),
@@ -13001,7 +13015,7 @@ fn resolve_fields(fields: Option<Vec<String>>) -> PyResult<Vec<(&'static str, Fi
         if !seen.insert(name) {
             continue;
         }
-        match FIELD_TABLE.iter().find(|(n, _)| *n == name) {
+        match FIELD_TABLE.iter().find(|(n, _, _)| *n == name) {
             Some(entry) => resolved.push(*entry),
             None => return Err(UnknownFieldError::new_err(format!("unknown field: {name:?}"))),
         }
@@ -13015,11 +13029,11 @@ fn card_to_pydict<'py>(
     printing: &APrinting,
     strings: &AStrings,
     vocab: &AStrings,
-    fields: &[(&'static str, FieldExtractor)],
+    fields: &[(&'static str, FieldKey, FieldExtractor)],
 ) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
-    for (name, extractor) in fields {
-        d.set_item(*name, extractor(py, card, printing, strings, vocab)?)?;
+    for (_, key, extractor) in fields {
+        d.set_item(key(py), extractor(py, card, printing, strings, vocab)?)?;
     }
     Ok(d)
 }
