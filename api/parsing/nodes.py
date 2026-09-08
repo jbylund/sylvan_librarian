@@ -309,8 +309,11 @@ class NaryOperatorNode(QueryNode):
             parts.append(explanation)
 
         # An operand that explains to "" is not a constraint and has no clause to contribute;
-        # joining it anyway leaves a dangling connector (e.g. is:vanilla's `t:creature o=""`
-        # explaining as "the type contains creature and " with nothing after the "and").
+        # joining it anyway leaves a dangling connector. A TrueNode is the common source -- an
+        # empty quoted string parses to one, so `urza''` rendered as "the name contains Urza and "
+        # with nothing after the "and", and is:vanilla's `t:creature o=""` as "the type contains
+        # creature and ". Filtering on the empty string rather than on TrueNode covers anything
+        # else that explains to nothing.
         parts = [part for part in parts if part]
         if not parts:
             return ""

@@ -56,6 +56,15 @@ import pytest
         ("set:war", "the set contains war"),
         # Artist
         ("artist:Nielsen", "the artist contains Nielsen"),
+        # A trailing apostrophe is a half-typed word, not a half-typed string: every keystroke on
+        # the way to "urza's" has to explain as one name clause. It used to lex-error, so the
+        # balancer appended a second apostrophe and the query became `urza` AND an empty string.
+        ("urza'", "the name contains urza'"),
+        ("urza's", "the name contains urza's"),
+        # An empty quoted string is a TrueNode: no constraint, so no clause and no connector.
+        # This rendered as "the name contains urza and " -- a dangling conjunction.
+        ("urza''", "the name contains urza"),
+        ("''", ""),
     ],
 )
 def test_explain_query(parse_query, query_str: str, expected_explanation: str) -> None:

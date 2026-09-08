@@ -457,9 +457,26 @@ class CardSearch {
   // The JS counterpart of no single Python function — spans.py's callers each make this same
   // three-way dispatch themselves, since hand_parser's lexer and parsing_f's balancer need the
   // unterminated case too.
+  // An apostrophe preceded by a word character and followed by either another word character or
+  // NOTHING is part of the word, not an opening quote — the same rule _scan_word_end applies in
+  // the tokenizer, and the two must agree exactly or this sends something the API rejects.
+  // Without the "or nothing", typing "urza'" on the way to "urza's" sent "urza''", which parses
+  // as `urza` AND an empty quoted string: results silently widened to every card containing
+  // "urza", and the count line read "35 cards where the name contains Urza and " — a dangling
+  // conjunction, with the apostrophe the user typed dropped from the search entirely.
+  isWordApostrophe(query, i) {
+    const wordChar = /[\p{L}\p{N}_.]/u;
+    return (
+      query[i] === "'" &&
+      i > 0 &&
+      wordChar.test(query[i - 1]) &&
+      (i + 1 >= query.length || wordChar.test(query[i + 1]))
+    );
+  }
+
   closedSpanEnd(query, i) {
     const char = query[i];
-    if (char === '"' || char === "'") {
+    if ((char === '"' || char === "'") && !this.isWordApostrophe(query, i)) {
       return this.quoteCloseIndex(query, i + 1, char);
     }
     if (char === '/' && this.opensRegex(query, i)) {
@@ -625,6 +642,12 @@ class CardSearch {
 
     for (let i = 0; i < query.length; i++) {
       const char = query[i];
+
+      // An apostrophe inside a word is content, not an opening quote — see isWordApostrophe.
+      if (this.isWordApostrophe(query, i)) {
+        blanked += char;
+        continue;
+      }
 
       // A quoted string, a /regex/ and a {mana symbol} are all opaque: the quotes and parens inside
       // them are content, not delimiters.
