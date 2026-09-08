@@ -386,6 +386,10 @@ pub(crate) fn color_cmp_matches(op: CmpOp, mask: u8, bits: u8) -> bool {
 #[derive(Clone, Copy)]
 pub(crate) enum CollField {
     Subtypes,
+    /// `in:` -- the per-card union Postgres writes to `card_in_tags` at import (`_sync_in_tags`)
+    /// and the loader reads onto `OracleCard.card_in_tags`. Card-space and id-sorted, so it takes
+    /// the binary-search arm of `contains` below, not Subtypes' printed-order scan.
+    InTags,
     Keywords,
     OracleTags,
     ArtTags,
@@ -403,6 +407,7 @@ fn collection<'a>(
 ) -> Option<&'a rkyv::vec::ArchivedVec<rkyv::rend::u16_le>> {
     match f {
         CollField::Subtypes   => Some(&card.card_subtypes),
+        CollField::InTags     => Some(&card.card_in_tags),
         CollField::Keywords   => Some(&card.card_keywords),
         CollField::OracleTags => Some(&card.card_oracle_tags),
         CollField::ArtTags    => printing.map(|p| &p.card_art_tags),
@@ -886,7 +891,7 @@ fn leaf_compares_printing_field(f: &FilterExpr) -> bool {
         // Exhaustive over CollField (no `matches!`), same reason as num_pdep.
         FilterExpr::CollectionCmp { field, .. } => match field {
             CollField::ArtTags | CollField::IsTags | CollField::FrameData => true,
-            CollField::Subtypes | CollField::Keywords | CollField::OracleTags => false,
+            CollField::Subtypes | CollField::InTags | CollField::Keywords | CollField::OracleTags => false,
         },
         // Divergent-legality cards defer to the printing, but they are a rare
         // exception (non-tournament reprints); rank by the common card-level case.
@@ -1916,6 +1921,14 @@ fn build_binary(kw: &Value) -> Result<FilterExpr, String> {
     if attr == "card_subtypes" {
         let value = rhs.as_array().and_then(|a| a.first()).and_then(|v| v.as_str()).unwrap_or("").to_string();
         return Ok(FilterExpr::CollectionCmp { field: CollField::Subtypes, op: op_to_collection_cmp(op), value, value_id: None });
+    }
+
+    if attr == "card_in_tags" {
+        // Lower-cased here as well as in the parser: `in:KHM`, `in:Rare` and `in:JA` are all
+        // honored on api.scryfall.com (323 / 10,883 / 30,545 cards, 2026-09-03), and every word
+        // `_sync_in_tags` writes into the column is lower-case.
+        let value = rhs.as_array().and_then(|a| a.first()).and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
+        return Ok(FilterExpr::CollectionCmp { field: CollField::InTags, op: op_to_collection_cmp(op), value, value_id: None });
     }
 
     if attr == "card_keywords" {

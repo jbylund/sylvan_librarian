@@ -423,6 +423,7 @@ fn estimate_leaf(f: &FilterExpr, indexes: &Archived<CardIndexes>, n_cards: u32, 
             // path that will actually run.
             let (idx, card_space, complete) = match field {
                 CollField::Subtypes => (&indexes.subtypes, true, true),
+                CollField::InTags => (&indexes.in_tags, true, true),
                 CollField::Keywords => (&indexes.keywords, true, true),
                 CollField::OracleTags => (&indexes.oracle_tags, true, true),
                 CollField::ArtTags => (&indexes.art_tags, false, true),

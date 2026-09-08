@@ -1125,6 +1125,56 @@ class TestTags:
         assert total == 0
 
 
+class TestInTags:
+    """in: reads card_in_tags, the per-card union _sync_in_tags wrote onto every row of the card.
+
+    The shared fixture predates the column, so these build their own store: card o1 has two
+    printings (aaa and khm) and every row carries the same union; card o2 has one, never in khm.
+    """
+
+    @staticmethod
+    def _store(fresh_engine: Callable[[], QueryEngine]) -> QueryEngine:
+        union = {"aaa": True, "khm": True, "paper": True, "rare": True}
+        e = fresh_engine()
+        e.reload(
+            [
+                {"card_name": "Twice Printed", "oracle_id": "o1", "card_set_code": "aaa", "card_in_tags": union},
+                {"card_name": "Twice Printed", "oracle_id": "o1", "card_set_code": "khm", "card_in_tags": union},
+                {
+                    "card_name": "Once Printed",
+                    "oracle_id": "o2",
+                    "card_set_code": "aaa",
+                    "card_in_tags": {"aaa": True, "paper": True},
+                },
+            ]
+        )
+        return e
+
+    def test_in_returns_every_printing_of_the_card(self, fresh_engine: Callable[[], QueryEngine]) -> None:
+        e = self._store(fresh_engine)
+        total, cards = _run(e, "in:khm")
+        # Both printings of the card, including the aaa one -- the card-level lift that separates
+        # in:khm (5,318 printings on api.scryfall.com, 2026-09-03) from set:khm (425).
+        assert total == 2
+        assert {c["set_code"] for c in cards} == {"aaa", "khm"}
+        assert _names(cards) == ["Twice Printed", "Twice Printed"]
+
+    def test_in_lowers_its_value(self, fresh_engine: Callable[[], QueryEngine]) -> None:
+        e = self._store(fresh_engine)
+        assert _run(e, "in:KHM")[0] == _run(e, "in:khm")[0] == 2
+
+    def test_negated_in_is_the_other_card(self, fresh_engine: Callable[[], QueryEngine]) -> None:
+        e = self._store(fresh_engine)
+        total, cards = _run(e, "-in:khm")
+        assert total == 1
+        assert _names(cards) == ["Once Printed"]
+
+    def test_unknown_value_matches_nothing(self, fresh_engine: Callable[[], QueryEngine]) -> None:
+        # in:nonsense is a 404 with no warning on api.scryfall.com: no validator, just no cards.
+        e = self._store(fresh_engine)
+        assert _run(e, "in:nonsense")[0] == 0
+
+
 class TestCommonCardTypes:
     """Tests for engine.common_card_types().
 

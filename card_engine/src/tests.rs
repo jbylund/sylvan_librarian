@@ -225,6 +225,7 @@ fn stub_card(oracle_id: u128, card_types: u16, subtypes: &[&str], vocab: &mut Vo
         card_subtypes: subtypes.iter().map(|s| vocab.intern(s.to_string()).unwrap()).collect(),
         card_keywords: Vec::new(),
         card_oracle_tags: Vec::new(),
+        card_in_tags: Vec::new(),
         card_legalities: 0,
         mana_cost: ManaCost { core: 0, hybrids: Vec::new(), devotion: 0, cmc: 0.0 },
         creature_power_text_id: NONE_STR,
@@ -2176,6 +2177,7 @@ fn fuzz_describe(spec: &FuzzSpec) -> String {
             let f = match field {
                 CollField::Subtypes => "subtypes", CollField::Keywords => "keywords", CollField::OracleTags => "oracle_tags",
                 CollField::ArtTags => "art_tags", CollField::IsTags => "is_tags", CollField::FrameData => "frame_data",
+                CollField::InTags => "in_tags",
             };
             format!("{f}{}{value}", fuzz_op_str(*op))
         }
@@ -6650,6 +6652,7 @@ fn bench_checked_vs_unchecked_access() {
         toughness:      build_numeric_index(&cards, |c| c.creature_toughness.map(|v| v as i16)),
         rarity:         build_rarity_index(&printings, &offsets),
         subtypes:       build_hybrid_tag_index(&cards, &vocab.strings, |c| &c.card_subtypes),
+        in_tags:        build_hybrid_tag_index(&cards, &vocab.strings, |c| &c.card_in_tags),
         keywords:       build_hybrid_tag_index(&cards, &vocab.strings, |c| &c.card_keywords),
         oracle_tags:    build_hybrid_tag_index(&cards, &vocab.strings, |c| &c.card_oracle_tags),
         layout:         build_layout_hybrid_index(&cards, &strings),
@@ -13353,4 +13356,62 @@ fn compose_perm_three_phase_order_only_fires_when_enabled_and_sparse() {
             "{label}: the promoted walk is Mode::Card-only, so this must never divert regardless of enabled"
         );
     }
+}
+
+#[test]
+fn in_tags_answer_for_every_printing_of_the_card_and_lower_case_the_value() {
+    // Two cards. Card 1 carries the union `_sync_in_tags` would have written for a card printed in
+    // khm as a paper rare -- the loader takes it from the first row and it lives on the CARD -- so
+    // `in:khm` must return BOTH of its printings, including the one that is not itself from khm.
+    // That card-level lift is the whole difference from `set:khm` (5,318 vs 425 printings under
+    // unique=prints on api.scryfall.com, 2026-09-03). Card 2 has never been in khm.
+    let mut vocab = VocabInterner::new();
+    let mut card1 = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
+    let card2 = stub_card(2, TYPE_CREATURE, &[], &mut vocab);
+    // An unused word interned FIRST, so the union's first-seen ids (1, 2, 3) are not already the
+    // lexicographic ids `store_of` renumbers them to (0, 1, 2). `renumber_coll_vocab` has to remap
+    // `card_in_tags` along with the other set-like collections; if it ever stops, the stored ids
+    // keep naming {paper, rare, zebra} and `in:khm` below finds nothing.
+    vocab.intern("zebra".to_string()).expect("vocab");
+    let mut union: Vec<u16> = ["khm", "paper", "rare"].iter().map(|w| vocab.intern(w.to_string()).expect("vocab")).collect();
+    // Sorted and deduped, as `jsonb_obj_to_ids` leaves it: the binary-search arm in `tri()` relies on it.
+    union.sort_unstable();
+    card1.card_in_tags = union;
+    let mut data = store_of(vec![card1, card2], &[2, 1], vocab); // pids 1,2 | 3
+    assert_eq!(data.coll_vocab, ["khm", "paper", "rare", "zebra"], "store_of renumbers the vocab lexicographically");
+    assert_eq!(data.cards[0].card_in_tags, vec![0, 1, 2], "card_in_tags was remapped with the vocab");
+    data.indexes.in_tags = build_hybrid_tag_index(&data.cards, &data.coll_vocab, |c| &c.card_in_tags);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    // Through `build_filter`, the way a parsed query arrives, so the `card_in_tags` arm of
+    // `build_binary` (and its lower-casing) is what is under test rather than a hand-built leaf.
+    let leaf = |value: &str| {
+        serde_json::json!({
+            "node_type": "CardBinaryOperatorNode",
+            "kwargs": {
+                "lhs": {"node_type": "CardAttributeNode", "kwargs": {"attribute_name": "card_in_tags", "original_attribute": "in"}},
+                "op": ":",
+                "rhs": [value],
+            },
+        })
+    };
+    let ids_for = |json: serde_json::Value| -> Vec<u128> {
+        let mut f = super::build_filter(&json).expect("build_filter");
+        f.bind(&archived.coll_vocab, &archived.artist_vocab, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
+        let (total, page) = run_query(&QueryCtx::from(archived), &mut f, None, "printing", "default", "edhrec", "asc", 100, 0);
+        let mut out: Vec<u128> = page.iter().map(|r| u128::from(r.1.scryfall_id)).collect();
+        assert_eq!(total, out.len(), "total must agree with the page for a page that holds every match");
+        out.sort_unstable();
+        out
+    };
+
+    assert_eq!(ids_for(leaf("khm")), vec![1, 2], "every printing of the card, not only the khm one");
+    // `in:KHM` is honored on api.scryfall.com (323 cards either way, 2026-09-03); the stored words
+    // are lower-case, so the leaf must lower its value or match nothing.
+    assert_eq!(ids_for(leaf("KHM")), vec![1, 2]);
+    assert_eq!(ids_for(leaf("rare")), vec![1, 2]);
+    assert_eq!(ids_for(leaf("nonsense")), Vec::<u128>::new(), "an unknown word is no cards, not an error");
+    let negated = serde_json::json!({"node_type": "NotNode", "kwargs": {"operand": leaf("khm")}});
+    assert_eq!(ids_for(negated), vec![3], "-in:khm is the card never printed there");
 }
