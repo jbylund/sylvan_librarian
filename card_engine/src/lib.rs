@@ -656,6 +656,53 @@ fn str_list_to_ids(d: &Bound<PyDict>, key: &str, vocab: &mut VocabInterner) -> P
 
 /// Interned vocab ids of a JSONB object's keys, sorted and deduped — the set-like
 /// collections (keywords, tags, frame data) as sorted `Vec<u16>`.
+/// Renumber the collection vocab into lexicographic order, remapping every row's ids, and return
+/// the sorted vocab. Called once at load, before any index is built from those ids.
+///
+/// `VocabInterner` hands out ids first-seen, which used to force two separate things: a
+/// string-sorted permutation for `bind` to binary-search, and a lexicographic re-sort of every
+/// row's strings at emit. Making id order BE string order retires both.
+///
+/// Three properties this establishes, each relied on downstream:
+///  - `coll_vocab` is alphabetically sorted, so `FilterExpr::bind` binary-searches it directly.
+///  - every set-like row vector stays sorted BY ID -- `jsonb_obj_to_ids` sorted and deduped it, and
+///    a remap plus re-sort preserves that -- which is what `filter.rs`'s `binary_search`
+///    containment test requires.
+///  - because id order is now string order, that same vector is ALSO alphabetically sorted, so
+///    emit returns a deterministic order without sorting anything (see `EmitStrCache::coll_list`).
+///
+/// `card_subtypes` is remapped but deliberately NOT re-sorted: it carries the printed order, which
+/// is why `filter.rs` linear-scans it instead of binary-searching.
+fn renumber_coll_vocab(cards: &mut [OracleCard], printings: &mut [Printing], coll_vocab: Vec<String>) -> Vec<String> {
+    let mut order: Vec<u16> = (0..coll_vocab.len() as u16).collect();
+    order.sort_unstable_by(|&a, &b| coll_vocab[a as usize].cmp(&coll_vocab[b as usize]));
+    // remap[old] = new. VocabInterner caps the vocab at u16::MAX so the cast cannot truncate.
+    let mut remap: Vec<u16> = vec![0; coll_vocab.len()];
+    for (new_id, &old_id) in order.iter().enumerate() {
+        remap[old_id as usize] = new_id as u16;
+    }
+    let sorted_vocab: Vec<String> = order.iter().map(|&old| coll_vocab[old as usize].clone()).collect();
+    let resort = |ids: &mut Vec<u16>| {
+        for id in ids.iter_mut() {
+            *id = remap[*id as usize];
+        }
+        ids.sort_unstable();
+    };
+    for card in cards.iter_mut() {
+        for id in card.card_subtypes.iter_mut() {
+            *id = remap[*id as usize];
+        }
+        resort(&mut card.card_keywords);
+        resort(&mut card.card_oracle_tags);
+    }
+    for printing in printings.iter_mut() {
+        resort(&mut printing.card_art_tags);
+        resort(&mut printing.card_is_tags);
+        resort(&mut printing.card_frame_data);
+    }
+    sorted_vocab
+}
+
 fn jsonb_obj_to_ids(d: &Bound<PyDict>, key: &str, vocab: &mut VocabInterner) -> PyResult<Vec<u16>> {
     let mut ids: Vec<u16> = d
         .get_item(key)
@@ -3821,9 +3868,6 @@ struct CardData {
     // Vocab table for the collection fields, indexed by their u16 ids
     // (see VocabInterner). ~16k entries / ~200 KB.
     coll_vocab: Vec<String>,
-    // Permutation of 0..coll_vocab.len() sorted by string, so query values
-    // resolve to vocab ids by binary search (FilterExpr::bind).
-    coll_vocab_sorted: Vec<u16>,
     // Distinct lowercase artist names, indexed by Printing.card_artist_vid.
     // Artist predicates (contains/exact/regex) evaluate against these ~2.2k
     // strings once per query instead of per printing.
@@ -12930,6 +12974,34 @@ type FieldKey = for<'a> fn(Python<'a>) -> &'a Bound<'a, PyString>;
 /// Yields the interned string id a cacheable field reads, for `EmitStrCache`.
 type CachedStrId = for<'a> fn(&'a AOracleCard, &'a APrinting) -> u32;
 
+/// Yields the `coll_vocab` id vector a collection field reads.
+type CollIds = for<'a> fn(&'a AOracleCard, &'a APrinting) -> &'a Archived<Vec<u16>>;
+
+/// Where a resolved field's value comes from.
+#[derive(Clone, Copy)]
+enum CachedSource {
+    /// Not cacheable; the table's own extractor runs.
+    Extractor,
+    /// A `CardData.strings` id, served as one cached `PyString`.
+    Str(CachedStrId),
+    /// A `coll_vocab` id vector, served as a list of cached `PyString`s.
+    Coll(CollIds),
+}
+
+/// The collection fields, and the id vector each one emits.
+///
+/// All six are cached: their elements come from `coll_vocab` (~16k entries), a bounded vocabulary
+/// that repeats heavily across rows -- 11,278 elements over 1,946 distinct values in one 500-row
+/// sample, with no sharing at all before this. None of them needs a sort any more; see `coll_list`.
+const CACHED_COLL_FIELDS: &[(&str, CollIds)] = &[
+    ("card_subtypes", |c, _p| &c.card_subtypes),
+    ("card_keywords", |c, _p| &c.card_keywords),
+    ("card_oracle_tags", |c, _p| &c.card_oracle_tags),
+    ("card_art_tags", |_c, p| &p.card_art_tags),
+    ("card_is_tags", |_c, p| &p.card_is_tags),
+    ("card_frame_data", |_c, p| &p.card_frame_data),
+];
+
 /// The result fields served from `EmitStrCache`, and the id each one caches on.
 ///
 /// Membership is decided by measured distinct-values-per-row over 100-row pages, not by type: a
@@ -12942,7 +13014,7 @@ type CachedStrId = for<'a> fn(&'a AOracleCard, &'a APrinting) -> u32;
 /// any other table would cache the wrong text.
 /// One resolved result field: its name, its interned dict key, its extractor, and — for a field
 /// served from `EmitStrCache` — the id to cache on.
-type ResolvedField = (&'static str, FieldKey, FieldExtractor, Option<CachedStrId>);
+type ResolvedField = (&'static str, FieldKey, FieldExtractor, CachedSource);
 
 const CACHED_STR_FIELDS: &[(&str, CachedStrId)] = &[
     ("type_line", |c, _p| u32::from(c.type_line_id)),
@@ -13056,7 +13128,14 @@ fn resolve_fields(fields: Option<Vec<String>>) -> PyResult<Vec<ResolvedField>> {
         }
         match FIELD_TABLE.iter().find(|(n, _, _)| *n == name) {
             Some((n, key, extractor)) => {
-                let cached = CACHED_STR_FIELDS.iter().find(|(cn, _)| cn == n).map(|(_, id_of)| *id_of);
+                let cached = CACHED_STR_FIELDS
+                    .iter()
+                    .find(|(cn, _)| cn == n)
+                    .map(|(_, id_of)| CachedSource::Str(*id_of))
+                    .or_else(|| {
+                        CACHED_COLL_FIELDS.iter().find(|(cn, _)| cn == n).map(|(_, ids_of)| CachedSource::Coll(*ids_of))
+                    })
+                    .unwrap_or(CachedSource::Extractor);
                 resolved.push((*n, *key, *extractor, cached));
             }
             None => return Err(UnknownFieldError::new_err(format!("unknown field: {name:?}"))),
@@ -13077,8 +13156,9 @@ fn card_to_pydict<'py>(
     let d = PyDict::new(py);
     for (_, key, extractor, cached) in fields {
         let value = match cached {
-            Some(id_of) => str_cache.get(py, strings, id_of(card, printing))?,
-            None => extractor(py, card, printing, strings, vocab)?,
+            CachedSource::Str(id_of) => str_cache.get(py, strings, id_of(card, printing))?,
+            CachedSource::Coll(ids_of) => str_cache.coll_list(py, vocab, ids_of(card, printing))?.into_any(),
+            CachedSource::Extractor => extractor(py, card, printing, strings, vocab)?,
         };
         d.set_item(key(py), value)?;
     }
@@ -13120,7 +13200,7 @@ const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 //
 // 2026082501 — `SortPermutations` gains per-order printing-span prefix sums, used to turn a bound on
 // cards visited into a sound O(1) bound on printings examined. Entirely inside `CardIndexes` again.
-const ARCHIVE_FORMAT_VERSION: u32 = 2026082501;
+const ARCHIVE_FORMAT_VERSION: u32 = 2026090801;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -13170,6 +13250,9 @@ struct CachedMmap {
 struct EmitStrCache {
     /// Sized on first use, when the archive's string count is known.
     cells: OnceLock<Box<[OnceLock<Py<PyString>>]>>,
+    /// The same, keyed by `coll_vocab` id, for the collection fields. A separate array because it
+    /// is a different id space and far smaller -- ~16k entries against ~160k.
+    coll_cells: OnceLock<Box<[OnceLock<Py<PyString>>]>>,
 }
 
 impl EmitStrCache {
@@ -13189,6 +13272,32 @@ impl EmitStrCache {
         let built = PyString::new(py, text);
         let _ = cell.set(built.clone().unbind());
         Ok(built.into_any())
+    }
+
+    /// One collection field as a list of cached `PyString`s, in stored order.
+    ///
+    /// No sort. The vocab is renumbered lexicographically at load, so a set-like collection's
+    /// id-sorted vector is already in alphabetical order -- the order this used to produce by
+    /// re-sorting every row's strings at emit. `card_subtypes` keeps its printed order for the same
+    /// reason it always did, and reaches this function the same way.
+    fn coll_list<'py>(&self, py: Python<'py>, vocab: &AStrings, ids: &Archived<Vec<u16>>) -> PyResult<Bound<'py, PyList>> {
+        let cells = self.coll_cells.get_or_init(|| (0..vocab.len()).map(|_| OnceLock::new()).collect());
+        let mut items: Vec<Bound<'py, PyString>> = Vec::with_capacity(ids.len());
+        for id in ids.iter() {
+            let idx = u16::from(*id) as usize;
+            let Some(text) = vocab.get(idx) else { continue };
+            match cells.get(idx).and_then(|cell| cell.get()) {
+                Some(hit) => items.push(hit.bind(py).clone()),
+                None => {
+                    let built = PyString::new(py, text.as_str());
+                    if let Some(cell) = cells.get(idx) {
+                        let _ = cell.set(built.clone().unbind());
+                    }
+                    items.push(built);
+                }
+            }
+        }
+        PyList::new(py, items)
     }
 }
 
@@ -13325,7 +13434,7 @@ fn bind_and_split_filter(
     sync_format_shifts(&data.format_shifts);
     clear_regex_match_failed();
     let mut filter_expr = build_filter(&json_val).map_err(map_build_filter_err)?;
-    filter_expr.bind(&data.coll_vocab, &data.coll_vocab_sorted, &data.artist_vocab, &data.mana_vocab, &data.indexes.flavor, &data.strings);
+    filter_expr.bind(&data.coll_vocab, &data.artist_vocab, &data.mana_vocab, &data.indexes.flavor, &data.strings);
     check_regex_match_failed()?;
 
     // Read before the split consumes the tree.
@@ -13709,10 +13818,22 @@ impl QueryEngine {
         drop(artists.map);
         let mana_vocab = mana.strings;
         drop(mana.map);
-        // String-sorted permutation of the vocab ids; VocabInterner caps the
-        // vocab at u16::MAX entries so the cast can't truncate.
-        let mut coll_vocab_sorted: Vec<u16> = (0..coll_vocab.len() as u16).collect();
-        coll_vocab_sorted.sort_unstable_by(|&a, &b| coll_vocab[a as usize].cmp(&coll_vocab[b as usize]));
+        // Renumber the collection vocab into lexicographic order, so a vocab id's numeric order IS
+        // its string's alphabetical order. `VocabInterner` hands out ids first-seen, which made two
+        // separate things necessary: a string-sorted permutation for `bind` to binary-search, and a
+        // lexicographic re-sort of every row's ids at emit. Renumbering here retires both.
+        //
+        // The three properties this establishes, all relied on downstream:
+        //  - `coll_vocab` is alphabetically sorted, so `bind` binary-searches it directly.
+        //  - every set-like row vector stays sorted BY ID (`jsonb_obj_to_ids` sorted+deduped it, and
+        //    a remap + re-sort preserves that), which is what `filter.rs`'s `binary_search`
+        //    containment test requires.
+        //  - because id order is now string order, that same vector is ALSO alphabetically sorted,
+        //    so emit hands back a list in a deterministic order without sorting anything.
+        //
+        // `card_subtypes` is remapped but NOT re-sorted: it carries the printed order deliberately,
+        // and `filter.rs` linear-scans it for exactly that reason.
+        let coll_vocab = renumber_coll_vocab(&mut cards, &mut printings, coll_vocab);
         // Assigns every printing's artwork_group_id in place; the returned counts
         // feed CardIndexes.artwork_groups below. Must run before printings is
         // borrowed by the builders in the CardIndexes literal.
@@ -13836,7 +13957,6 @@ impl QueryEngine {
             offsets,
             strings,
             coll_vocab,
-            coll_vocab_sorted,
             artist_vocab,
             mana_vocab,
             indexes,

@@ -109,12 +109,12 @@ fn bench_verify_cost_clusters() {
     let mut set_ns: Vec<f64> = Vec::new();
 
     let mut artist = FilterExpr::TextContains { field: TextSearchField::ArtistLower, word: "guay".to_string() };
-    artist.bind(&data.coll_vocab, &data.coll_vocab_sorted, &data.artist_vocab, &data.mana_vocab, &data.indexes.flavor, &data.strings);
+    artist.bind(&data.coll_vocab, &data.artist_vocab, &data.mana_vocab, &data.indexes.flavor, &data.strings);
     assert!(matches!(artist, FilterExpr::ArtistMatch { .. }), "bind() didn't rewrite to ArtistMatch");
     set_ns.push(run("ArtistMatch", &artist));
 
     let mut flavor = FilterExpr::TextContains { field: TextSearchField::FlavorTextLower, word: "dragon".to_string() };
-    flavor.bind(&data.coll_vocab, &data.coll_vocab_sorted, &data.artist_vocab, &data.mana_vocab, &data.indexes.flavor, &data.strings);
+    flavor.bind(&data.coll_vocab, &data.artist_vocab, &data.mana_vocab, &data.indexes.flavor, &data.strings);
     assert!(matches!(flavor, FilterExpr::FlavorMatch { .. }), "bind() didn't rewrite to FlavorMatch");
     set_ns.push(run("FlavorMatch", &flavor));
 
@@ -129,7 +129,7 @@ fn bench_verify_cost_clusters() {
     set_ns.push(run("OracleMatch", &oracle));
 
     let mut coll = FilterExpr::CollectionCmp { field: CollField::Keywords, op: CmpOp::Ge, value: "Flying".to_string(), value_id: None };
-    coll.bind(&data.coll_vocab, &data.coll_vocab_sorted, &data.artist_vocab, &data.mana_vocab, &data.indexes.flavor, &data.strings);
+    coll.bind(&data.coll_vocab, &data.artist_vocab, &data.mana_vocab, &data.indexes.flavor, &data.strings);
     set_ns.push(run("CollectionCmp", &coll));
 
     // ─── Cluster: text scan (current tier 2) ─────────────────────────────────
@@ -350,7 +350,7 @@ fn bench_price_and_range_verify_cost() {
 
     println!("\n-- price / range NumericCmp (mask/field compare tier) --");
     let mut usd = FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PriceUsd), op: CmpOp::Lt, rhs: NumExpr::Const(50.0) };
-    usd.bind(&data.coll_vocab, &data.coll_vocab_sorted, &data.artist_vocab, &data.mana_vocab, &data.indexes.flavor, &data.strings);
+    usd.bind(&data.coll_vocab, &data.artist_vocab, &data.mana_vocab, &data.indexes.flavor, &data.strings);
     run("NumericCmp (usd<50)", &usd);
     run(
         "NumericCmp (cn<100)",
