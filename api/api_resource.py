@@ -55,6 +55,8 @@ from card_engine import FatalQueryError as _FatalQueryError
 from card_engine import RetryableQueryError as _RetryableQueryError
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from api.parsing.nodes import Query
     from api.utils.routing import BoundRoute
 
@@ -180,6 +182,116 @@ DEFAULT_RESULT_FIELDS: tuple[str, ...] = (
     "set_name",
     "type_line",
 )
+
+# In-query result-shape directives: the parser strips these from the filter tree and records
+# them on the parsed Query; `_fold_directives` applies them over the request parameters. Each
+# table maps the spellings a directive accepts — Scryfall's inline vocabulary (unique:art,
+# unique:prints) alongside this API's own enum values — to the enum member. Semantics measured
+# against api.scryfall.com (2026-08-07): an inline directive overrides its query parameter, the
+# last occurrence of a repeated directive wins, and an unknown value warns and is ignored
+# rather than failing the search. NOTHING here is ever silent: a directive that looks scoped
+# (inside an or-group or negation) and a repeat that overrode a different earlier value each
+# add an explicit response warning saying what actually happened.
+_DIRECTIVE_UNIQUE: dict[str, UniqueOn] = {
+    "card": UniqueOn.CARD,
+    "cards": UniqueOn.CARD,
+    "printing": UniqueOn.PRINTING,
+    "printings": UniqueOn.PRINTING,
+    "prints": UniqueOn.PRINTING,
+    "art": UniqueOn.ARTWORK,
+    "artwork": UniqueOn.ARTWORK,
+}
+_DIRECTIVE_ORDER: dict[str, CardOrdering] = {str(member): member for member in CardOrdering}
+_DIRECTIVE_DIRECTION: dict[str, SortDirection] = {str(member): member for member in SortDirection}
+# Scryfall-shaped queries spell the price prefers with a hyphen and the Universes Beyond pair with
+# a short form too; the enum values use underscores. `default` is OVERRIDDEN: a written
+# `prefer:default` is Scryfall's "default Magic frame" preference (PreferOrder.DEFAULT_FRAME), not
+# this parameter's "no preference" -- see the enum's docstring for the measured difference.
+_DIRECTIVE_PREFER: dict[str, PreferOrder] = {str(member): member for member in PreferOrder} | {
+    "usd-low": PreferOrder.USD_LOW,
+    "usd-high": PreferOrder.USD_HIGH,
+    "eur-low": PreferOrder.EUR_LOW,
+    "eur-high": PreferOrder.EUR_HIGH,
+    "tix-low": PreferOrder.TIX_LOW,
+    "tix-high": PreferOrder.TIX_HIGH,
+    "ub": PreferOrder.UNIVERSESBEYOND,
+    "notub": PreferOrder.NOTUNIVERSESBEYOND,
+    "default": PreferOrder.DEFAULT_FRAME,
+}
+
+
+# Directive name -> (parameter it sets, vocabulary, noun used in warnings). Several directives
+# have more than one spelling and share a slot, so they override one another rather than each
+# setting a different parameter: sort/order, and direction/dir. Both pairs are spellings
+# api.scryfall.com accepts inline (measured 2026-08-09: `dir:desc` and `direction:desc` return
+# the same page, as do `dir:auto` and `direction:auto`).
+_DIRECTIVE_TABLES: dict[str, tuple[str, Mapping[str, Any], str]] = {
+    "unique": ("unique", _DIRECTIVE_UNIQUE, "unique mode"),
+    "sort": ("orderby", _DIRECTIVE_ORDER, "order choice"),
+    "order": ("orderby", _DIRECTIVE_ORDER, "order choice"),
+    "direction": ("direction", _DIRECTIVE_DIRECTION, "direction"),
+    "dir": ("direction", _DIRECTIVE_DIRECTION, "direction"),
+    "prefer": ("prefer", _DIRECTIVE_PREFER, "prefer choice"),
+}
+
+
+def _fold_directives(
+    directives: Sequence[tuple[str, str, bool]],
+    *,
+    unique: UniqueOn,
+    orderby: CardOrdering,
+    direction: SortDirection,
+    prefer: PreferOrder,
+) -> tuple[UniqueOn, CardOrdering, SortDirection, PreferOrder, list[str]]:
+    """Fold a parsed query's result-shape directives over the request parameters.
+
+    A directive always applies to the whole search, and anything surprising about that says
+    so in the returned warnings rather than happening silently: an unknown value is ignored
+    with a warning (Scryfall's behavior, message included), a directive written inside an
+    or-group or negation warns that it is not scoped to its group, and a repeat that
+    overrides a DIFFERENT earlier value warns which one won. A repeat of the same value
+    warns nothing — there is nothing surprising to report.
+
+    Args:
+        directives: (name, value, nested) triples in source order, from Query.directives.
+        unique: The unique mode from the query parameters.
+        orderby: The ordering from the query parameters.
+        direction: The sort direction from the query parameters.
+        prefer: The prefer order from the query parameters.
+
+    Returns:
+        The effective (unique, orderby, direction, prefer) after directives, plus warnings.
+    """
+    warnings: list[str] = []
+    effective: dict[str, Any] = {"unique": unique, "orderby": orderby, "direction": direction, "prefer": prefer}
+    written: dict[str, tuple[str, str]] = {}  # parameter -> (name, value) that last set it
+
+    for name, value, nested in directives:
+        target, table, noun = _DIRECTIVE_TABLES[name]
+        if value not in table:
+            warnings.append(f'Unknown {noun} "{value}" was ignored')
+            continue
+        if nested:
+            warnings.append(f"{name}:{value} applies to the whole search, not only its group")
+        previous = written.get(target)
+        if previous is not None and table[value] != effective[target]:
+            warnings.append(f"{name}:{value} overrode the earlier {previous[0]}:{previous[1]}")
+        effective[target] = table[value]
+        written[target] = (name, value)
+    return effective["unique"], effective["orderby"], effective["direction"], effective["prefer"], warnings
+
+
+def _with_warnings(result: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
+    """Return `result` with a "warnings" entry attached; unchanged when there are none.
+
+    A fresh dict rather than mutation: _search caches result dicts, and a cached result must
+    not grow keys after the fact.
+    """
+    if not warnings:
+        return result
+    return {**result, "warnings": warnings}
+
+
 
 # default/atypical are complementary and disjoint
 # so in theory we could query for one and build the other by
@@ -594,6 +706,11 @@ class APIResource:
     ) -> dict[str, Any]:
         """Run a search query and return results and metadata.
 
+        The query string may embed result-shape directives (unique:, sort:/order:, direction:,
+        prefer:), which override the parameter of the same meaning — Scryfall semantics, so
+        `q=bolt unique:art` dedups by artwork regardless of the `unique` parameter. A directive
+        with an unknown value adds a "warnings" entry to the response and is otherwise ignored.
+
         Args:
             falcon_response: The Falcon response object (unused).
             q: Query string (alternative to query parameter).
@@ -614,8 +731,10 @@ class APIResource:
             orderby: Field to sort by.
             shape: Shape of the "cards" list: 'rows' (list of card objects, default) or
                 'columnar' (one list per field, keyed by field name — smaller on the wire).
-            unique: Unique on field.
-            prefer: Prefer order (oldest, newest, usd-low, usd-high, promo).
+            unique: Unique on field (card, printing, artwork).
+            prefer: Prefer order (oldest, newest, usd_low, usd_high, eur_low, eur_high, tix_low,
+                tix_high, promo, default_frame, atypical, universesbeyond, notuniversesbeyond,
+                borderless).
 
         Returns:
             Dict containing search results and metadata.
@@ -718,6 +837,18 @@ class APIResource:
         except ValueError as err:
             _raise_query_bad_request(exc_name="ValueError", query=query, description=f'Failed to parse query: "{query}"', err=err)
 
+        # In-query directives override the query parameters (Scryfall semantics); both search
+        # paths below receive the effective values, so engine and SQL cannot disagree on them.
+        # The cache lookup above keys on the raw query string, which the directives are a pure
+        # function of.
+        unique, orderby, direction, prefer, warnings = _fold_directives(
+            parsed_query.directives,
+            unique=unique,
+            orderby=orderby,
+            direction=direction,
+            prefer=prefer,
+        )
+
         if not settings.enable_engine:
             pass  # feature-gated off: SQL serves everything, the store never loads
         elif self.app_context.engine.size() == 0:
@@ -786,6 +917,7 @@ class APIResource:
                     exc_info=not declined,
                 )
             else:
+                result = _with_warnings(result, warnings)
                 if settings.enable_cache:
                     search_cache[cache_key] = result
                 return result
@@ -802,6 +934,7 @@ class APIResource:
             timer=timer,
             fields=resolved_fields,
         )
+        result = _with_warnings(result, warnings)
         if settings.enable_cache:
             search_cache[cache_key] = result
         return result
@@ -903,8 +1036,20 @@ class APIResource:
             PreferOrder.NEWEST: ("released_at", "DESC"),
             PreferOrder.USD_LOW: ("price_usd", "ASC"),
             PreferOrder.USD_HIGH: ("price_usd", "DESC"),
+            PreferOrder.EUR_LOW: ("price_eur", "ASC"),
+            PreferOrder.EUR_HIGH: ("price_eur", "DESC"),
+            PreferOrder.TIX_LOW: ("price_tix", "ASC"),
+            PreferOrder.TIX_HIGH: ("price_tix", "DESC"),
             PreferOrder.PROMO: ("edhrec_rank", "ASC"),  # Use edhrec_rank as fallback for promo
             PreferOrder.DEFAULT: ("prefer_score", "DESC"),
+            # The class prefers need per-printing frame and tag facts this SQL path does not
+            # join; the engine path (card_engine's `PreferClassIds`, PR #912) answers them, and
+            # here they fall back to the default order rather than a wrong one.
+            PreferOrder.DEFAULT_FRAME: ("prefer_score", "DESC"),
+            PreferOrder.ATYPICAL: ("prefer_score", "DESC"),
+            PreferOrder.UNIVERSESBEYOND: ("prefer_score", "DESC"),
+            PreferOrder.NOTUNIVERSESBEYOND: ("prefer_score", "DESC"),
+            PreferOrder.BORDERLESS: ("prefer_score", "DESC"),
         }
         prefer_column, prefer_direction = prefer_mapping.get(
             prefer,

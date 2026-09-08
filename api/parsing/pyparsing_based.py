@@ -31,8 +31,10 @@ from api.parsing.db_info import (
 )
 from api.parsing.mana_symbols import first_invalid_mana_symbol
 from api.parsing.nodes import (
+    DIRECTIVE_NAMES,
     AndNode,
     BinaryOperatorNode,
+    DirectiveNode,
     ManaValueNode,
     NotNode,
     NumericValueNode,
@@ -104,6 +106,14 @@ def create_value_node(value: object) -> QueryNode:
     if isinstance(value, tuple) and value[0] == "regex":
         return RegexValueNode(value[1])
     return value  # Fallback for other types
+
+
+def make_directive_node(tokens: list[object]) -> DirectiveNode:
+    """Build a DirectiveNode from [name, ':', value]; quoted values arrive as ('quoted', text)."""
+    name, _colon, value = tokens
+    if isinstance(value, tuple):
+        value = value[1]
+    return DirectiveNode(str(name).lower(), str(value).lower())
 
 
 def make_binary_operator_node(tokens: list[object]) -> BinaryOperatorNode:
@@ -406,8 +416,21 @@ def create_all_condition_parsers(basic_parsers: dict, mana_parsers: dict, color_
     )
     attr_attr_condition.set_parse_action(make_binary_operator_node)
 
+    # Result-shape directives Scryfall accepts inside the query string
+    # (unique:art, sort:edhrec, order:name, direction:asc, prefer:oldest). They
+    # constrain presentation, not membership, so they parse to a DirectiveNode
+    # carrying the value; the extraction pass at the rewrite seam strips them from
+    # the filter tree and records them on the Query for the API layer to apply.
+    directive_condition = (
+        # DIRECTIVE_NAMES is ordered longest-spelling-first, so `direction` wins the alternation
+        # outright rather than relying on the lookahead to reject the `dir` prefix.
+        Regex(rf"(?i)(?:{'|'.join(DIRECTIVE_NAMES)})(?=:)") + Literal(":") + (quoted_string | string_value_word)
+    )
+    directive_condition.set_parse_action(make_directive_node)
+
     condition = (
-        mana_condition
+        directive_condition
+        | mana_condition
         | rarity_condition
         | legality_condition
         | color_condition
