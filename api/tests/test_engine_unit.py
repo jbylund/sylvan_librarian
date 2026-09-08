@@ -231,6 +231,44 @@ class TestFilters:
         total, _ = _run(engine, "produces:c")
         assert total == 5
 
+    def test_color_count_exactly_two(self, engine: QueryEngine) -> None:
+        # Scryfall numeric color syntax: c=2 is "exactly two printed colors" —
+        # Boggart Ram-Gang (4, RG) + Kitchen Finks (6, GW)
+        total, cards = _run(engine, "c=2")
+        assert total == 10
+        assert set(_names(cards)) == {"Boggart Ram-Gang", "Kitchen Finks"}
+
+    def test_color_count_colon_is_equality(self, engine: QueryEngine) -> None:
+        # : with a NUMBER is equality (id:2 == id=2 on the live Scryfall API),
+        # not the >= that letter values get
+        total_colon, _ = _run(engine, "c:2")
+        total_eq, _ = _run(engine, "c=2")
+        assert total_colon == total_eq == 10
+
+    def test_color_count_three_or_more(self, engine: QueryEngine) -> None:
+        # Monastery Messenger (1, RUW) + Nicol Bolas, Planeswalker (7, UBR)
+        total, cards = _run(engine, "c>=3")
+        assert total == 8
+        assert set(_names(cards)) == {"Monastery Messenger", "Nicol Bolas, Planeswalker"}
+
+    def test_identity_count_zero_is_colorless(self, engine: QueryEngine) -> None:
+        # id=0 counts zero colors in the identity: Black Lotus (5) + Sol Ring (5)
+        total, cards = _run(engine, "id=0")
+        assert total == 10
+        assert set(_names(cards)) == {"Black Lotus", "Sol Ring"}
+
+    def test_identity_count_less_than_two(self, engine: QueryEngine) -> None:
+        # Everything except the four multicolor-identity cards: 90 - Boggart (4)
+        # - Kitchen Finks (6) - Monastery Messenger (1) - Nicol Bolas (7) = 72
+        total, _ = _run(engine, "id<2")
+        assert total == 72
+
+    def test_negated_identity_count(self, engine: QueryEngine) -> None:
+        # Color counts are total (colorless is 0, never NULL), so negation is
+        # the exact complement: -id>=3 = 90 - 8 = 82
+        total, _ = _run(engine, "-id>=3")
+        assert total == 82
+
     def test_cmc_equals_zero(self, engine: QueryEngine) -> None:
         total, cards = _run(engine, "cmc=0")
         assert total == 5
@@ -1086,6 +1124,46 @@ class TestProduces:
         # Black Lotus (5) + Dark Ritual (5) both produce black mana
         total, _ = _run(engine, "produces:b")
         assert total == 10
+
+    def test_produces_any_is_at_least_one(self, engine: QueryEngine) -> None:
+        # `any` is a COUNT, not a colour: "produces some mana at all" = produces>=1.
+        total_any, cards = _run(engine, "produces:any")
+        total_ge1, _ = _run(engine, "produces>=1")
+        assert total_any == total_ge1
+        assert set(_names(cards)) == {"Black Lotus", "Dark Ritual", "Sol Ring"}
+
+    def test_produces_any_does_not_match_everything(self, engine: QueryEngine) -> None:
+        # The defect: the term used to be dropped, so the query answered its own base.
+        total_any, _ = _run(engine, "produces:any")
+        total_all, _ = _run(engine)
+        assert total_any < total_all
+
+    def test_produces_lt_any_is_zero(self, engine: QueryEngine) -> None:
+        # `<` is the only operator that flips it: the cards that produce nothing at all.
+        total_lt, _ = _run(engine, "produces<any")
+        total_eq0, _ = _run(engine, "produces=0")
+        total_any, _ = _run(engine, "produces:any")
+        total_all, _ = _run(engine)
+        assert total_lt == total_eq0
+        # Counts are total (no mana produced is 0, never NULL), so the two partition the fixture.
+        assert total_lt + total_any == total_all
+
+    def test_produces_lte_any_admits_one_kind(self, engine: QueryEngine) -> None:
+        # `<=` is `<=1`, not the tautology `c<=m` is on the colour columns: Sol Ring produces
+        # only {C} and is in; Black Lotus produces five kinds and is out.
+        total_lte, cards = _run(engine, "produces<=any")
+        total_lte1, _ = _run(engine, "produces<=1")
+        assert total_lte == total_lte1
+        names = set(_names(cards))
+        assert "Sol Ring" in names
+        assert "Black Lotus" not in names
+
+    def test_produces_any_negates_exactly(self, engine: QueryEngine) -> None:
+        # Lowered to an ordinary numeric count, so negation is the exact complement.
+        total_any, _ = _run(engine, "produces:any")
+        total_neg, _ = _run(engine, "-produces:any")
+        total_all, _ = _run(engine)
+        assert total_any + total_neg == total_all
 
 
 class TestTags:
