@@ -388,7 +388,11 @@ def create_all_condition_parsers(basic_parsers: dict, mana_parsers: dict, color_
     legality_condition = create_condition_parser(legality_attr_word, quoted_string | string_value_word)
     text_condition = create_condition_parser(text_attr_word, regex_pattern | quoted_string | string_value_word)
 
-    date_value = Regex(r"\d{4}(?:-\d{2}-\d{2})?")
+    # Not a date regex: Scryfall takes a set code here too (`date>=hob`, quoted or not, any case), and
+    # the shape check plus set-code lookup happen once for both parsers in rewrite.resolve_set_code_dates.
+    # A word-shaped value also carries a malformed date (`2021-2`) whole, so that pass can reject it by
+    # name instead of this grammar failing the whole query. Mirrors hand_parser.parse_date_value.
+    date_value = quoted_string | string_value_word
     date_condition = create_condition_parser(date_attr_word, date_value, operators=EQ_ALIAS_OPERATORS)
 
     year_value = Regex(r"\d{4}")

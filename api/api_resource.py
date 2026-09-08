@@ -34,6 +34,7 @@ from api.parsing.query_budget import (
     QueryBudgetExceeded,
     bounded_query_log_context,
 )
+from api.parsing.rewrite import InvalidDateValueError
 from api.settings import settings
 from api.utils import db_utils, error_monitoring
 from api.utils.css_utils import build_critical_css
@@ -90,7 +91,7 @@ def _raise_query_bad_request(*, exc_name: str, query: str, description: str, err
         description: The user-facing description for the HTTPBadRequest.
         err: The caught exception, chained onto the raised HTTPBadRequest via `from`.
     """
-    logger.info("%s caught for query '%s', raising BadRequest", exc_name, query)
+    logger.info("%s caught for query '%s' (%s), raising BadRequest", exc_name, query, err)
     raise falcon.HTTPBadRequest(title="Invalid Search Query", description=description) from err
 
 
@@ -658,7 +659,7 @@ class APIResource:
             )
         return limit
 
-    def _search(  # noqa: PLR0912, PLR0913, PLR0915
+    def _search(  # noqa: PLR0913
         self,
         *,
         direction: SortDirection = SortDirection.ASC,
@@ -691,32 +692,8 @@ class APIResource:
 
         timer = Timer()
 
-        parsed_query = None
         query = query or ""
-        try:
-            with timer("parse"):
-                parsed_query = parse_scryfall_query(query)
-        except QueryBudgetExceeded as err:
-            log_ctx = bounded_query_log_context(query)
-            logger.info(
-                "Query budget exceeded (%s) preview=%r digest=%s",
-                err.kind,
-                log_ctx["query_preview"],
-                log_ctx["query_digest"],
-            )
-            raise falcon.HTTPBadRequest(
-                title="Invalid Search Query",
-                description=err.user_message,
-            ) from err
-        except InvalidRegexPatternError as err:
-            _raise_query_bad_request(
-                exc_name="InvalidRegexPattern",
-                query=query,
-                description=err.user_message_for_query(query),
-                err=err,
-            )
-        except ValueError as err:
-            _raise_query_bad_request(exc_name="ValueError", query=query, description=f'Failed to parse query: "{query}"', err=err)
+        parsed_query = self._parse_search_query(query, timer)
 
         if not settings.enable_engine:
             pass  # feature-gated off: SQL serves everything, the store never loads
@@ -805,6 +782,40 @@ class APIResource:
         if settings.enable_cache:
             search_cache[cache_key] = result
         return result
+
+    def _parse_search_query(self, query: str, timer: Timer) -> Query:
+        """Parse a /search query string, turning every parse-time rejection into the 400 it deserves."""
+        try:
+            with timer("parse"):
+                # `date:<set code>` resolves against a registry this process fills from the database;
+                # a no-op after the first search per import, and never a reason for a search to fail.
+                self.app_context.ensure_set_release_dates()
+                return parse_scryfall_query(query)
+        except QueryBudgetExceeded as err:
+            log_ctx = bounded_query_log_context(query)
+            logger.info(
+                "Query budget exceeded (%s) preview=%r digest=%s",
+                err.kind,
+                log_ctx["query_preview"],
+                log_ctx["query_digest"],
+            )
+            raise falcon.HTTPBadRequest(
+                title="Invalid Search Query",
+                description=err.user_message,
+            ) from err
+        except InvalidRegexPatternError as err:
+            _raise_query_bad_request(
+                exc_name="InvalidRegexPattern",
+                query=query,
+                description=err.user_message_for_query(query),
+                err=err,
+            )
+        except InvalidDateValueError as err:
+            # Scryfall's own sentence for `date>=zzzz`; more useful than the generic parse failure
+            # below, and it discloses nothing but the value the user typed.
+            _raise_query_bad_request(exc_name="InvalidDateValue", query=query, description=err.user_message, err=err)
+        except ValueError as err:
+            _raise_query_bad_request(exc_name="ValueError", query=query, description=f'Failed to parse query: "{query}"', err=err)
 
     def _search_engine(  # noqa: PLR0913
         self,

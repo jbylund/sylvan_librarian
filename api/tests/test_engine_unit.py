@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from api.parsing import parse_scryfall_query
+from api.parsing import parse_scryfall_query, set_dates
 from card_engine import QueryEngine, UnknownFieldError
 
 if TYPE_CHECKING:
@@ -151,6 +151,15 @@ class TestFilters:
         t_upper, _ = _run(engine, "set:LEA")
         t_lower, _ = _run(engine, "set:lea")
         assert t_upper == t_lower == 7
+
+    def test_date_set_code_resolves_to_that_sets_release_date(self, engine: QueryEngine, monkeypatch) -> None:
+        # The fixture's three Shadowmoor printings all carry released_at 2008-05-02; the rewrite
+        # hands the engine that date, so the code and the date must count the same cards.
+        monkeypatch.setattr(set_dates, "_SET_RELEASE_DATES", {"shm": "2008-05-02"})
+        total_by_code, _ = _run(engine, "date>=shm")
+        total_by_date, _ = _run(engine, "date>=2008-05-02")
+        assert total_by_code == total_by_date
+        assert total_by_code > 0
 
     def test_collector_number_query_is_case_sensitive(self, fresh_engine: Callable[[], QueryEngine]) -> None:
         # collector_number is stored raw and mixed-case (e.g. The List's "10E-105"),
