@@ -1098,10 +1098,11 @@ class TestTags:
     """
 
     def test_is_spell(self, engine: QueryEngine) -> None:
-        # Instants (Lightning Bolt 10 + Counterspell 6 + Dark Ritual 5)
-        # + Sorceries (Spectral Procession 6)
+        # is:spell is rewritten to a type-union (api/parsing/rewrite.py), so it no longer consults
+        # the synthetic "spell" tag -- it matches every card with a castable primary type, which in
+        # this fixture is everything but the lands (hence 90, not the 27 tagged "spell").
         total, _ = _run(engine, "is:spell")
-        assert total == 27
+        assert total == 90
 
     def test_is_permanent(self, engine: QueryEngine) -> None:
         # is:permanent is rewritten to a type-union (api/parsing/rewrite.py), so it no longer
