@@ -487,6 +487,78 @@ fn text_field_value<'a>(
     }
 }
 
+// ─── Face-joined text ─────────────────────────────────────────────────────────
+
+/// The string `_merge_processed_faces` glues a card's face texts with — the exact value of
+/// `FACE_TEXT_SEPARATOR` in api/parsing/db_info.py, exported to Python and pinned to it by
+/// `test_the_engine_and_the_importer_hold_one_separator`.
+///
+/// THIS STORE INVENTED IT. Scryfall stores no such string and never joins: it matches each face
+/// separately. So every character of this separator is a position in our haystack and in nobody
+/// else's, and a pattern or a needle that reaches one of those positions answers from something no
+/// card says.
+pub(crate) const FACE_TEXT_SEPARATOR: &str = "\n//\n";
+
+/// Whether a field's stored value is a face JOIN rather than one face's text.
+///
+/// Two columns, not the three in `_FACE_JOINED_TEXTS` — because only two of the three use the
+/// INVENTED separator. `type_line` joins with " // ", which is Scryfall's own top-level field for
+/// a split card ("Instant // Instant"), so its separator is not ours to undo; it is also not a
+/// search column here at all (`t:` reads the `card_types` collection), which is why no
+/// `TextField` names it.
+fn field_joins_faces(field: TextField) -> bool {
+    matches!(field, TextField::OracleTextLower | TextField::FlavorTextLower)
+}
+
+/// The `TextSearchField` half of the same rule — same two columns, same reason.
+fn search_field_joins_faces(field: TextSearchField) -> bool {
+    matches!(field, TextSearchField::OracleTextLower | TextSearchField::FlavorTextLower)
+}
+
+/// `regex_is_match`, run PER FACE on the fields whose stored value is a join.
+///
+/// `o:/\ndraw/` was 389 where api.scryfall.com answers 381 (2026-08-28). The eight extras are
+/// every one a two-face card whose BACK face opens with "Draw": the separator ends in a newline,
+/// so "…\n//\nDraw…" contains "\ndraw" and the joined string answers a pattern no single face
+/// answers. `\s` reaches the same newlines (3,611 against 3,604), and so does any pattern spelling
+/// the separator's own characters.
+///
+/// Splitting is the whole of the fix: a single-face card has no separator, `split` yields the one
+/// segment, and the cost is one scan for a needle that is not there.
+///
+/// It is not purely subtractive here, and deliberately so. `compile_search_regex` builds with
+/// `(?i)` and nothing else, so `^`/`$` bind at the ends of the VALUE rather than of each line;
+/// after the split they bind at each face's ends, which is what Scryfall does (it anchors within
+/// the face it is matching). The direction that has to hold for the #734 narrow still holds
+/// regardless: a face is a substring of the join, so any literal factor the narrow requires of a
+/// survivor is still present in the joined text it indexed.
+fn regex_matches_faces(regex: &Regex, field: TextField, s: &str) -> bool {
+    if field_joins_faces(field) {
+        s.split(FACE_TEXT_SEPARATOR).any(|face| regex_is_match(regex, face))
+    } else {
+        regex_is_match(regex, s)
+    }
+}
+
+/// `str::contains`, PER FACE on the joined columns.
+///
+/// The substring path is not the exotic half of this bug, it is the half users reach: `o:/\/\//`
+/// is a plain literal, so `lower_literal_regexes` rewrites it to the contains-predicate `o:"//"`
+/// before the engine sees a pattern at all. It answered 849 against api.scryfall.com's 1 — the one
+/// real card being SP//dr — and a fix applied only to the regex arm would have left it there.
+fn contains_per_face(needle: &str, field: TextSearchField, s: &str) -> bool {
+    if search_field_joins_faces(field) {
+        s.split(FACE_TEXT_SEPARATOR).any(|face| face.contains(needle))
+    } else {
+        s.contains(needle)
+    }
+}
+
+/// The face split around a prebuilt `memmem::Finder`, for the two bind-time verifies that hold one.
+fn finder_finds_per_face(finder: &memmem::Finder<'_>, s: &str) -> bool {
+    s.split(FACE_TEXT_SEPARATOR).any(|face| finder.find(face.as_bytes()).is_some())
+}
+
 // ─── FilterExpr ───────────────────────────────────────────────────────────────
 
 /// verify_cost_tier() and printing_dependent() match on this enum
@@ -1080,7 +1152,11 @@ impl FilterExpr {
             FilterExpr::TextContains { field: TextSearchField::FlavorTextLower, word } => {
                 let mask = flavor_fingerprint(word.as_str());
                 let finder = memmem::Finder::new(word.as_bytes()); // built once, reused (see ArtistLower)
-                let (gids, dense_ids) = flavor_match_sets(flavor, strings, mask, |s| finder.find(s.as_bytes()).is_some());
+                // PER FACE: flavor text is joined with the separator this store invented, and this
+                // rewrite -- not the eval arm -- is the path a bare `ft:` actually takes, so
+                // leaving the value whole here would have left the bug where it was.
+                // `ft:"//"` was 262 against api.scryfall.com's 0 (2026-08-28).
+                let (gids, dense_ids) = flavor_match_sets(flavor, strings, mask, |s| finder_finds_per_face(&finder, s));
                 *self = FilterExpr::FlavorMatch { gids, dense_ids };
             }
             FilterExpr::TextExact { field: TextField::FlavorTextLower, op, value } => {
@@ -1099,7 +1175,10 @@ impl FilterExpr {
                 *self = FilterExpr::FlavorMatch { gids, dense_ids };
             }
             FilterExpr::TextRegex { field: TextField::FlavorTextLower, regex } => {
-                let (gids, dense_ids) = flavor_match_sets(flavor, strings, 0, |s| regex_is_match(regex, s));
+                // PER FACE, for the same reason the contains arm above is: `ft:/\/\//` was 262
+                // here against api.scryfall.com's 0 (2026-08-28).
+                let (gids, dense_ids) =
+                    flavor_match_sets(flavor, strings, 0, |s| regex_matches_faces(regex, TextField::FlavorTextLower, s));
                 *self = FilterExpr::FlavorMatch { gids, dense_ids };
             }
             _ => {}
@@ -1222,7 +1301,11 @@ impl FilterExpr {
                 let mut gids: Vec<u32> = Vec::with_capacity(dense.len());
                 for d in dense {
                     let gid = u32::from(oracle.gids[d as usize]);
-                    if str_at(strings, gid).is_some_and(|s| finder.find(s.as_bytes()).is_some()) {
+                    // PER FACE, like the unmemoized walk. The trigram narrow above reads the
+                    // joined text and stays a superset either way -- a face is a substring of the
+                    // join -- but this verify is the answer, so a needle straddling the invented
+                    // separator must not survive it.
+                    if str_at(strings, gid).is_some_and(|s| finder_finds_per_face(&finder, s)) {
                         gids.push(gid);
                     }
                 }
@@ -1465,7 +1548,7 @@ impl FilterExpr {
 
             FilterExpr::TextContains { field, word } => {
                 match text_search_field_value(card, printing, strings, *field) {
-                    StrVal::Known(s) => tri_bool(s.contains(word.as_str())),
+                    StrVal::Known(s) => tri_bool(contains_per_face(word.as_str(), *field, s)),
                     StrVal::Null => Tri::Null,
                     StrVal::PDep => Tri::PrintingDep,
                 }
@@ -1527,7 +1610,7 @@ impl FilterExpr {
 
             FilterExpr::TextRegex { field, regex } => {
                 match text_field_value(card, printing, strings, *field) {
-                    StrVal::Known(s) => tri_bool(regex_is_match(regex, s)),
+                    StrVal::Known(s) => tri_bool(regex_matches_faces(regex, *field, s)),
                     StrVal::Null => Tri::Null,
                     StrVal::PDep => Tri::PrintingDep,
                 }

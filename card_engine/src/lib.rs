@@ -14470,6 +14470,11 @@ mod card_engine {
         m.add("RetryableQueryError", m.py().get_type::<super::RetryableQueryError>())?;
         m.add("FatalQueryError", m.py().get_type::<super::FatalQueryError>())?;
         m.add("UnsupportedRegexError", m.py().get_type::<super::UnsupportedRegexError>())?;
+        // Exported so the importer's `_FACE_TEXT_SEPARATOR` and the matcher's can be asserted
+        // equal from Python. They are two spellings of one string in two languages, and nothing
+        // else would notice them drifting: the writer would keep joining with one and the reader
+        // would keep splitting on the other, silently answering from the seam again.
+        m.add("FACE_TEXT_SEPARATOR", super::filter::FACE_TEXT_SEPARATOR)?;
         m.add("UnknownFieldError", m.py().get_type::<super::UnknownFieldError>())
     }
 }

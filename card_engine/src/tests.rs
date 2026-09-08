@@ -9288,6 +9288,200 @@ fn oracle_match_none_str_mirrors_text_contains() {
     assert!(plain.eval_card(&archived.cards[0], &archived.strings) == Tri::Null);
 }
 
+// ─── Face-joined text: matching per face, not across the join ────────────────
+//
+// A PATTERN WAS MATCHING AT A SEPARATOR THIS BRANCH INVENTED. `_merge_processed_faces` joins a
+// card's face texts with `_FACE_TEXT_SEPARATOR` ("\n//\n") so one row is searchable by every face;
+// Scryfall never joins, because it matches each face separately. Every character of that separator
+// is therefore a position in our haystack and in nobody else's, and patterns were answering from
+// it. api.scryfall.com, 2026-08-28:
+//
+//   o:/\ndraw/        381    the joined column answers 389 -- the 8 extras every one a two-face
+//                            card whose BACK face opens with "Draw", reached through the
+//                            separator's trailing newline
+//   o:/\sdraw/      3,604    the same eight under another spelling
+//   o:/\nwhenever/  3,839    and 46 more of them
+//   o:/\/\//            1    the one real card is SP//dr
+//   o:"//"              1    the same query after `lower_literal_regexes` -- the spelling a
+//                            searcher actually types, and the one that skips the regex arm
+//   ft:/\/\//           0    flavor text is joined the same way
+//   t:/\/\//          930    and the type line is NOT, because ITS " // " is Scryfall's own
+//
+// The fix is to split the stored value back on the separator and match per segment.
+fn face_text_store(texts: &[&str]) -> CardData {
+    let mut vocab = VocabInterner::new();
+    let mut interner = Interner::new();
+    let cards: Vec<OracleCard> = texts
+        .iter()
+        .enumerate()
+        .map(|(i, text)| {
+            let mut c = stub_card(i as u128 + 1, TYPE_CREATURE, &[], &mut vocab);
+            c.oracle_text_lower_id = interner.intern((*text).to_string());
+            c
+        })
+        .collect();
+    let mut data = store_of(cards, &vec![1usize; texts.len()], vocab);
+    data.strings = interner.strings;
+    data.indexes.oracle_trigram = build_oracle_text_index(&data.cards, &data.strings);
+    data
+}
+
+/// The three shapes that separate the bug from everything that must not move:
+/// card 0 is the bug (two faces, the back opening on "draw"), card 1 is the single-face control
+/// whose own newline precedes "draw", card 2 is a two-face card with a REAL internal "\ndraw" on
+/// its back face -- the one that proves splitting does not throw the baby out.
+const FACE_TEXTS: [&str; 3] = ["flying\n//\ndraw a card.", "flying\ndraw a card.", "flying\n//\nhaste\ndraw a card."];
+
+#[test]
+fn face_joined_oracle_text_matches_per_face() {
+    let data = face_text_store(&FACE_TEXTS);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let hits = |f: &FilterExpr| -> Vec<usize> {
+        (0..FACE_TEXTS.len()).filter(|&i| f.matches(&archived.cards[i], &archived.printings[i], &archived.strings)).collect()
+    };
+    let rx = |p: &str| hits(&FilterExpr::TextRegex {
+        field: TextField::OracleTextLower,
+        regex: crate::filter::compile_search_regex_for_test(p),
+    });
+    let contains = |w: &str| hits(&FilterExpr::TextContains {
+        field: TextSearchField::OracleTextLower,
+        word: w.to_string(),
+    });
+
+    // THE BUG, and the whole of it: card 0 leaves, cards 1 and 2 stay.
+    assert_eq!(rx(r"\ndraw"), vec![1, 2], "a `\\n` matching the separator's own newline is not a match");
+    // `\s` reaches those newlines too -- the same cards under another spelling (3,611 against
+    // Scryfall's 3,604 on the real corpus).
+    assert_eq!(rx(r"\sdraw"), vec![1, 2]);
+    // The separator itself is unreachable now, in both spellings a user can type it. `o:/\/\//` is
+    // a plain literal, so `lower_literal_regexes` lowers it to the contains form BEFORE the engine
+    // sees a pattern: fixing only the regex arm would have left the 849 exactly where it was.
+    assert_eq!(rx(r"\/\/"), Vec::<usize>::new(), "the separator is not oracle text");
+    assert_eq!(contains("//"), Vec::<usize>::new(), "and it is not oracle text as a substring either");
+    assert_eq!(contains("\n//\n"), Vec::<usize>::new());
+
+    // CONTROLS: nothing that never touched the separator moves.
+    assert_eq!(rx("draw a card"), vec![0, 1, 2]);
+    assert_eq!(rx("flying"), vec![0, 1, 2]);
+    assert_eq!(rx("zzzqqq"), Vec::<usize>::new());
+    assert_eq!(contains("draw a card"), vec![0, 1, 2]);
+    assert_eq!(contains("flying"), vec![0, 1, 2]);
+    assert_eq!(contains("zzzqqq"), Vec::<usize>::new());
+
+    // ANCHORS NOW BIND AT EACH FACE'S ENDS, and that is the one place the split ADDS matches
+    // rather than removing them. `compile_search_regex` builds with `(?i)` and no `(?m)`, so
+    // before the split `^`/`$` bound at the ends of the JOIN -- i.e. at the front face's start and
+    // the back face's end, and nowhere else. Splitting binds them per face, which is what Scryfall
+    // does: it anchors inside the face it is matching. (It still does not bind per LINE the way
+    // Scryfall's Ruby anchors do -- `^haste` matches nothing below -- which is a separate,
+    // pre-existing divergence this change neither creates nor closes.)
+    assert_eq!(rx("^flying"), vec![0, 1, 2], "the front face still starts the value");
+    assert_eq!(rx("^draw"), vec![0], "card 0's BACK face starts with it, and Scryfall matches that");
+    assert_eq!(rx("^haste"), vec![2], "so does card 2's, on its own first line");
+    assert_eq!(rx("flying$"), vec![0, 2], "and their front faces are exactly that word");
+    // Card 2's back face is "haste\ndraw a card.", so "draw" opens its SECOND line and `^draw`
+    // still misses it: the split binds anchors per FACE, not per line. Scryfall's Ruby anchors do
+    // bind per line and would match it -- a separate, pre-existing divergence that this change
+    // neither creates nor closes.
+    assert!(!rx("^draw").contains(&2));
+    // `o:/^\/\/$/` is 848 on a store whose engine compiles `(?m)`; here it was already 0, because
+    // a value that is exactly "//" is what non-multiline anchors ask for. Asserted as a control:
+    // the split must not turn the separator's line into a match either.
+    assert_eq!(rx(r"^\/\/$"), Vec::<usize>::new());
+}
+
+/// FLAVOR TEXT IS JOINED THE SAME WAY, and it does NOT reach the evaluation arm: `ft:` is
+/// rewritten at bind time into a `FlavorMatch` id set, so a fix applied only to eval would have
+/// left the column exactly as broken as it was. `ft:/\/\//` and `ft:"//"` are both 0 on
+/// api.scryfall.com (2026-08-28).
+#[test]
+fn face_joined_flavor_text_matches_per_face() {
+    let mut vocab = VocabInterner::new();
+    let cards = vec![stub_card(1, TYPE_CREATURE, &[], &mut vocab), stub_card(2, TYPE_CREATURE, &[], &mut vocab)];
+    let mut data = store_of(cards, &[1, 1], vocab);
+    let mut interner = Interner::new();
+    // Printing 0: two faces, the back one opening on "draw" -- the bug's shape.
+    data.printings[0].flavor_text_lower_id = interner.intern("a quiet forest\n//\ndraw near, traveler".to_string());
+    // Printing 1: one face whose own newline precedes "draw" -- the control.
+    data.printings[1].flavor_text_lower_id = interner.intern("a quiet forest\ndraw near, traveler".to_string());
+    data.strings = interner.strings;
+    data.indexes.flavor = build_flavor_index(&data.printings, &data.strings);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let hits = |mut f: FilterExpr| -> Vec<usize> {
+        f.bind(&archived.coll_vocab, &archived.artist_vocab, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
+        // The rewrite is the point: were this still a TextRegex/TextContains, the arms under test
+        // never fired and the assertions below would be measuring the eval path instead.
+        assert!(matches!(f, FilterExpr::FlavorMatch { .. }), "ft: must bind to a FlavorMatch");
+        (0..2).filter(|&i| f.matches(&archived.cards[i], &archived.printings[i], &archived.strings)).collect()
+    };
+    let rx = |p: &str| hits(FilterExpr::TextRegex {
+        field: TextField::FlavorTextLower,
+        regex: crate::filter::compile_search_regex_for_test(p),
+    });
+    let contains = |w: &str| hits(FilterExpr::TextContains {
+        field: TextSearchField::FlavorTextLower,
+        word: w.to_string(),
+    });
+
+    assert_eq!(rx(r"\ndraw"), vec![1], "the separator's newline is not flavor text");
+    assert_eq!(rx(r"\/\/"), Vec::<usize>::new());
+    assert_eq!(contains("//"), Vec::<usize>::new());
+    // Controls: both real faces still answer, on both paths.
+    assert_eq!(rx("draw near"), vec![0, 1]);
+    assert_eq!(contains("draw near"), vec![0, 1]);
+    assert_eq!(contains("a quiet forest"), vec![0, 1]);
+    assert_eq!(rx("zzzqqq"), Vec::<usize>::new());
+}
+
+/// THE MEMOIZED `o:` SET IS A THIRD ANSWER TO THE SAME QUESTION and had to be split too. The
+/// trigram narrow above it reads the joined text and stays a superset either way -- a face is a
+/// substring of the join -- but the verify beneath it IS the answer, so a needle straddling the
+/// separator must not survive it. Without this the memoized and unmemoized readings of one query
+/// would disagree, which is exactly what `memoize_text_predicates_parity` forbids.
+#[test]
+fn face_joined_oracle_memoized_contains_verifies_per_face() {
+    // Twelve texts, because `memoize_pays` declines a needle whose candidate bound is a large
+    // fraction of the eval domain -- with a three-card store the memoizer would refuse and this
+    // test would silently be measuring the walk again (the `must memoize` assertions below are
+    // what catches that).
+    let mut texts = FACE_TEXTS.to_vec();
+    texts.extend([
+        "vigilance", "trample", "haste, first strike", "deathtouch", "lifelink",
+        "menace", "reach", "defender", "flash",
+    ]);
+    let data = face_text_store(&texts);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    // "\n//" is three bytes, so it has trigrams and the memoizer will take it -- unlike the bare
+    // "//" a user types, which stays on the walk. Both must answer the same nothing.
+    for needle in ["\n//", "//\n", "\n//\n", "flying\n//"] {
+        let plain = FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: needle.to_string() };
+        let mut memoized = plain.clone();
+        memoized.memoize_text_predicates(&archived.cards, &archived.strings, &archived.indexes.name_trigram, &archived.indexes.name_bigrams, &archived.indexes.oracle_trigram, archived.cards.len());
+        let FilterExpr::OracleMatch { ref gids } = memoized else { panic!("o:{needle:?} must memoize") };
+        assert!(gids.is_empty(), "the separator must not survive the memoized verify either");
+        for card in archived.cards.iter() {
+            assert!(memoized.eval_card(card, &archived.strings) == plain.eval_card(card, &archived.strings));
+        }
+    }
+
+    // The control needle memoizes to a non-empty set and agrees card for card, so the assertion
+    // above is about the separator and not about memoization having quietly stopped happening.
+    let plain = FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: "draw a card".to_string() };
+    let mut memoized = plain.clone();
+    memoized.memoize_text_predicates(&archived.cards, &archived.strings, &archived.indexes.name_trigram, &archived.indexes.name_bigrams, &archived.indexes.oracle_trigram, archived.cards.len());
+    let FilterExpr::OracleMatch { ref gids } = memoized else { panic!("the control must memoize too") };
+    assert_eq!(gids.len(), 3, "the three face-shaped texts all contain it, split or not");
+    for card in archived.cards.iter() {
+        assert!(memoized.eval_card(card, &archived.strings) == plain.eval_card(card, &archived.strings));
+    }
+}
+
 // ─── Oracle word index (docs/issues/00663-engine-oracle-word-index.md) ────────────
 
 /// 17 distinct oracle texts (n_texts=17, so words_per_plane=1 and the #639

@@ -9,6 +9,7 @@ from api.parsing import (
     RegexValueNode,
     generate_sql_query,
 )
+from api.parsing.db_info import FACE_JOINED_TEXT_COLUMNS, FACE_TEXT_SEPARATOR
 
 
 class TestRegexPatternParsing:
@@ -105,16 +106,23 @@ class TestRegexSQLGeneration:
     """Test SQL generation for regex patterns."""
 
     @pytest.mark.parametrize(
-        ("query", "expected_operator", "expected_pattern"),
+        ("query", "expected_operator", "expected_pattern", "face_joined"),
         [
-            ("name:/izz.t/", "~*", "izz.t"),
-            ("o:/^{T}:/", "~*", "^{T}:"),
-            (r"name:/\bizzet\b/", "~*", r"\bizzet\b"),
-            ("flavor:/.*flavor.*/", "~*", ".*flavor.*"),
+            ("name:/izz.t/", "~*", "izz.t", False),
+            ("o:/^{T}:/", "~*", "^{T}:", True),
+            (r"name:/\bizzet\b/", "~*", r"\bizzet\b", False),
+            ("flavor:/.*flavor.*/", "~*", ".*flavor.*", True),
         ],
     )
-    def test_regex_sql_generation(self, parse_query, query: str, expected_operator: str, expected_pattern: str) -> None:
-        """Test that regex patterns generate correct PostgreSQL regex SQL."""
+    def test_regex_sql_generation(
+        self, parse_query, query: str, expected_operator: str, expected_pattern: str, face_joined: bool
+    ) -> None:
+        """Test that regex patterns generate correct PostgreSQL regex SQL.
+
+        A face-joined column carries a second parameter, the separator its stored value is split
+        back apart on before the pattern runs; a column that is one face's text carries only the
+        pattern.
+        """
         result = parse_query(query)
         sql, params = generate_sql_query(result)
 
@@ -123,10 +131,9 @@ class TestRegexSQLGeneration:
         # Should not use ILIKE operator
         assert "ILIKE" not in sql
 
-        # Should have exactly one parameter containing the regex pattern
-        assert len(params) == 1
-        param_value = next(iter(params.values()))
-        assert param_value == expected_pattern
+        assert expected_pattern in params.values()
+        assert (FACE_TEXT_SEPARATOR in params.values()) is face_joined
+        assert len(params) == (2 if face_joined else 1)
 
     def test_regex_on_name_attribute(self, parse_query) -> None:
         """Test regex on name attribute generates correct SQL."""
@@ -138,22 +145,38 @@ class TestRegexSQLGeneration:
         assert r"\bizzet\b" in params.values()
 
     def test_regex_on_oracle_attribute(self, parse_query) -> None:
-        """Test regex on oracle text attribute generates correct SQL."""
+        r"""Test regex on oracle text attribute generates correct SQL.
+
+        The pattern runs against each FACE, not against the joined column: oracle text is stored
+        as a multi-face card's faces glued with a separator this project invented, and matching the
+        join answers from characters no card carries (`o:/\/\//` was 849 against Scryfall's 1).
+        """
         result = parse_query("o:/^{T}:/")
         sql, params = generate_sql_query(result)
 
-        assert "card.oracle_text ~*" in sql
-        assert len(params) == 1
-        assert "^{T}:" in params.values()
+        assert "string_to_array(card.oracle_text" in sql
+        assert "face_text ~*" in sql
+        assert "card.oracle_text ~*" not in sql, "the joined value must not be the haystack"
+        assert set(params.values()) == {"^{T}:", FACE_TEXT_SEPARATOR}
 
     def test_regex_on_flavor_attribute(self, parse_query) -> None:
-        """Test regex on flavor text attribute generates correct SQL."""
+        """Test regex on flavor text attribute generates correct SQL -- joined, so split."""
         result = parse_query("flavor:/mag.c/")
         sql, params = generate_sql_query(result)
 
-        assert "card.flavor_text ~*" in sql
-        assert len(params) == 1
-        assert "mag.c" in params.values()
+        assert "string_to_array(card.flavor_text" in sql
+        assert "face_text ~*" in sql
+        assert set(params.values()) == {"mag.c", FACE_TEXT_SEPARATOR}
+
+    def test_regex_on_a_face_joined_column_stays_three_valued(self, parse_query) -> None:
+        """A NULL column must stay NULL, not become False.
+
+        EXISTS is two-valued, and `flavor_text` is nullable: without the CASE guard, `-flavor:/x/`
+        would start matching every printing that has no flavor text at all -- rows the unsplit
+        `card.flavor_text ~* p` left as NULL, and rows the engine still evaluates to Null.
+        """
+        sql, _ = generate_sql_query(parse_query("flavor:/mag.c/"))
+        assert "CASE WHEN card.flavor_text IS NULL THEN NULL ELSE EXISTS" in sql
 
     def test_combined_regex_and_text_search_sql(self, parse_query) -> None:
         """Test SQL generation for combined regex and text searches."""
@@ -162,10 +185,10 @@ class TestRegexSQLGeneration:
 
         # Should contain both the type search and regex oracle search
         assert "card.card_types" in sql
-        assert "card.oracle_text ~*" in sql
+        assert "face_text ~*" in sql
 
-        # Should have two parameters
-        assert len(params) == 2
+        # The type value, the pattern, and the face separator
+        assert len(params) == 3
 
     def test_regular_text_search_uses_lower_like(self, parse_query) -> None:
         """Test that regular text searches use lower() LIKE, not regex."""
@@ -272,5 +295,6 @@ class TestRegexSupportedAttributes:
         assert expected_attribute in sql
         # Should use regex operator
         assert "~*" in sql
-        # Should have exactly one parameter
-        assert len(params) == 1
+        # The pattern, plus the face separator on the two columns that join faces
+        assert "te.t" in params.values()
+        assert len(params) == (2 if expected_attribute in FACE_JOINED_TEXT_COLUMNS else 1)

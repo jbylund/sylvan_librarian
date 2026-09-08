@@ -8,6 +8,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from api.parsing.card_query_nodes import calculate_devotion, fold_accents, mana_cost_str_to_dict
+from api.parsing.db_info import FACE_TEXT_SEPARATOR as _FACE_TEXT_SEPARATOR
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -112,11 +113,99 @@ def extract_frame_data_from_raw_card(raw_card: dict) -> dict[str, bool]:
     return frame_data
 
 
+# Face-merge policy for multi-face cards (#400, #873). Scryfall AND's search predicates at the
+# CARD level, each satisfiable by any face — measured against api.scryfall.com 2026-08-08:
+# `t:sorcery t:land` returns the MDFC lands (no single face is both), o: conjunctions match
+# across faces (Ral, Monsoon Mage), and `c:b` matches Westvale Abbey's back-face-only color.
+# One row per printing carrying any-face unions reproduces those semantics directly; one row
+# per face would instead break every cross-face conjunction (no face-row satisfies both terms)
+# on top of colliding on the scryfall_id primary key, which is how the back face silently won
+# until now. Front-face scalars (cmc, mana cost, illustration, image, prices) match Scryfall's
+# own top-level fields, verified on its card objects.
+# `illustration_ids` is here and not among the front-face scalars because a printing SHOWS every
+# face's art, and the art tags attached to it are the union over all of them (api/tag_import.py).
+# `illustration_id` stays the front's, matching Scryfall's own top-level field.
+_FACE_LIST_UNIONS = ("card_types", "card_subtypes", "illustration_ids")
+_FACE_FLAG_UNIONS = ("card_colors", "card_keywords", "produced_mana")
+# `type_line` and `mana_cost_text` join with " // " and the other two with _FACE_TEXT_SEPARATOR --
+# see _JOINED_WITH_SLASHES, which is also the line between the columns search may take apart and
+# the ones it may not (FACE_JOINED_TEXT_COLUMNS).
+_FACE_JOINED_TEXTS = ("oracle_text", "flavor_text", "type_line", "mana_cost_text")
+# The two columns whose separator is SCRYFALL's own rather than one this branch invented, so
+# matching must leave them whole.
+#
+# `type_line` is Scryfall's top-level field for a split card ("Instant // Instant") and `t:/\/\//`
+# answers 930 there. `mana_cost_text` is the same story and took a measurement to establish,
+# because Scryfall's CARD OBJECT is not the evidence: it carries a top-level `mana_cost` on the
+# one-image layouts only (split/adventure/prepare/flip -- 949 of 949 in the 2026-08-28
+# default_cards bulk) and NONE on the two-image ones, while its SEARCH index carries the join for
+# both. Probed on api.scryfall.com 2026-08-28, each as the card's own `!"..."` ANDed with the
+# pattern so the corpus filters cannot confound it:
+#
+#   !"Extus, Oriq Overlord // Awaken the Blood Avatar"  a modal DFC, with NO top-level mana_cost
+#     mana:/\/\//           1   the seam is in the haystack -- the decisive row
+#     mana:/{b}{b} \/\/ /   1   ...and a pattern spans it, so it is ONE string, not a set
+#   !"Fire // Ice" mana:/^{u}$/           0   the back half alone is not a value of its own
+#   !"Delver of Secrets // Insectile Aberration"
+#     mana:/^{u}$/          1   an EMPTY back face contributes nothing, not even a separator
+#     mana:/^{u} /          0
+#   !"Westvale Abbey // Ormendahl, Profane Prince"
+#     mana:/^$/             1   ...so an all-costless card is EMPTY, never " // "
+#     mana:/\/\//          0
+#
+# Corpus-wide the same day: `mana:/\/\// is:mdfc` is 40 of 100, and `mana:/^$/ is:artseries` is
+# 2,243 of 2,243.
+_JOINED_WITH_SLASHES = ("type_line", "mana_cost_text")
+# Copied per GROUP from the first face that has any of the group, so the numeric columns and
+# their _text twins always describe the same face (the schema's check constraints couple them).
+_FACE_STAT_GROUPS = (
+    ("creature_power", "creature_toughness", "creature_power_text", "creature_toughness_text"),
+    ("planeswalker_loyalty", "planeswalker_loyalty_text"),
+)
+# Joins face texts, and is defined in api/parsing/db_info.py because SEARCH has to know it too:
+# "in practice" was not good enough. The newline stops `.` crossing a face boundary and nothing
+# else -- `o:/\ndraw/` matched the separator's own newline and answered 389 where Scryfall answers
+# 381, and `o://` matched the "//" and answered 849 where Scryfall answers 1. Matching now splits
+# the value back on this constant, per face, on both the engine and SQL paths.
+
+
+def _merge_processed_faces(faces: list[dict[str, Any]]) -> dict[str, Any]:
+    """Collapse fully-processed per-face rows into the card's single searchable row.
+
+    The first face (the front) supplies the row and with it every identity and display
+    scalar; later faces fold in per the policy tables above. Known residual, sized in
+    the tests: when several faces carry a stat group (Brutal Cathar's 2/2 // 3/3), only
+    the first face's values are searchable — Scryfall also matches the back's.
+
+    Args:
+        faces: Non-empty list of processed rows, one per surviving face, front first.
+
+    Returns:
+        The merged row (the front face's dict, mutated in place).
+    """
+    merged, *rest = faces
+    for face in rest:
+        for key in _FACE_LIST_UNIONS:
+            seen = merged[key]
+            seen.extend(value for value in face[key] if value not in seen)
+        for key in _FACE_FLAG_UNIONS:
+            merged[key].update(face[key])
+        for key in _FACE_JOINED_TEXTS:
+            parts = [part for part in (merged.get(key), face.get(key)) if part]
+            merged[key] = (" // " if key in _JOINED_WITH_SLASHES else _FACE_TEXT_SEPARATOR).join(parts)
+        for group in _FACE_STAT_GROUPS:
+            if all(merged.get(field) is None for field in group) and any(face.get(field) is not None for field in group):
+                for field in group:
+                    merged[field] = face.get(field)
+    return merged
+
+
 def preprocess_card(card: dict[str, Any]) -> list[dict[str, Any]]:  # noqa: PLR0915,C901,PLR0912
     """Preprocess a card to remove invalid cards and add necessary fields.
 
-    For Double-Faced Cards (DFCs), returns multiple dictionaries (one per face).
-    For single-faced cards, returns a list with one dictionary.
+    A multi-face card (transform, MDFC, split, adventure, flip) is merged into ONE row
+    carrying the front face's identity and every face's searchable data — see
+    `_merge_processed_faces`. Single-faced cards return a list with one dictionary.
     Returns an empty list for invalid/filtered cards.
     """
     if not set(card["legalities"].values()) & {"legal", "restricted"}:
@@ -154,21 +243,64 @@ def preprocess_card(card: dict[str, Any]) -> list[dict[str, Any]]:  # noqa: PLR0
         # Recursive case: processing a face
         card["face_name"] = card.get("name")
 
-    # Handle cards with card_faces (DFCs)
+    # Handle cards with card_faces (DFCs): process each face through the full pipeline below,
+    # then collapse the per-face rows into the card's one searchable row.
     card_faces = card.get("card_faces")
     if card_faces:
         for creature_attribute in ["creature_power", "creature_toughness"]:
             card.pop(creature_attribute, None)
             card.pop(f"{creature_attribute}_text", None)
-        processed_faces = []
-        for face_idx, face_data in enumerate(card_faces, start=1):
+        face_rows = []
+        for face_data in card_faces:
             # Merge card-level data with face-specific data
-            # Precedence: face_idx override > face_data (name, type_line, etc.) > card (legalities, games, etc.)
-            merged = copy.deepcopy(card) | face_data | {"face_idx": face_idx}
+            # Precedence: face_data (name, type_line, etc.) > card (legalities, games, etc.)
+            merged = copy.deepcopy(card) | face_data
             merged.pop("card_faces", None)  # Don't keep recursing
-            processed_faces_for_face = preprocess_card(merged)
-            processed_faces.extend(processed_faces_for_face)
-        return processed_faces
+            face_rows.extend(preprocess_card(merged))
+        if not face_rows:
+            return []
+        merged_row = _merge_processed_faces(face_rows)
+        # ...and then the CARD's own type line outranks the join, because Scryfall's row is that
+        # line and not always the join. `type_line` here is the top-level field read off the card
+        # above, before any face was folded in.
+        #
+        # The join IS Scryfall's answer nearly everywhere -- measured over the 2026-08-31
+        # default_cards bulk, 5,110 of 5,112 faced printings that carry a top-level `type_line`
+        # carry exactly `" // ".join(face type lines)`: split (`Bind // Liberate` and `Fire // Ice`
+        # are both "Instant // Instant"), adventure (`Champions of Archery // Join the Group` is
+        # "Legendary Creature — Human Archer // Sorcery — Adventure"), flip, transform, MDFC. The
+        # two that differ are the two printings of the only five-faced card, `Who // What // When
+        # // Where // Why` (und/75 and unh/120): Scryfall says the bare "Instant" where the join
+        # says it five times. Neither reaches this line -- both are `not_legal` in every format --
+        # so this is the rule stated where the join is made rather than a change to today's rows.
+        #
+        # The FALLBACK is the live half. A reversible printing carries no top-level `type_line` at
+        # all (81 of 81 in the same bulk), and three of them survive the filters above -- tdm/378,
+        # tdm/379, tdm/381, the Tarkir omen dragons, whose doubled siblings the `X // X` name
+        # filter drops. Taking `card["type_line"]` unconditionally would null the type line on
+        # those three; the join is their only one, so it stands.
+        #
+        # `card_types`/`card_subtypes` are NOT recomputed from this string, deliberately: they are
+        # the per-face union built in `_merge_processed_faces` (`_FACE_LIST_UNIONS`), which is the
+        # only reading that survives a joined line. `parse_type_line` splits on the FIRST em dash,
+        # so parsing "Legendary Creature — Human Archer // Sorcery — Adventure" back would file
+        # "Sorcery" under SUBTYPES. The union is right and stays.
+        if type_line:
+            merged_row["type_line"] = type_line
+        # The blob is the card-level object with its faces re-attached — what Scryfall sent, not a
+        # face promoted to look like a card. Every searchable field is already merged onto the row
+        # above, so the blob has no derivation left to do, and keeping it verbatim is what makes it
+        # answerable: a card object cannot be rebuilt from a face (`card_faces` is gone, `name` and
+        # `type_line` are the front's, and which fields a real card carries at top level varies by
+        # layout — a split card has `mana_cost` and `image_uris` there, a transform card does not).
+        #
+        # The one consumer that read a *face* field off the blob is `image_uris`, which for a
+        # transform card now lives only under `card_faces`; every reader coalesces to
+        # `card_faces->0` (scripts/copy_images_to_s3.py, scripts/prefer_weights.py). Everything else
+        # read from the blob — lang, set_type, games, finishes, frame_effects, image_status,
+        # reserved, game_changer — is card-level and identical either way.
+        merged_row["raw_card_blob"] = copy.deepcopy(card) | {"card_faces": card_faces}
+        return [merged_row]
 
     # Single face case - set defaults
     card.setdefault("face_name", card.get("name"))
@@ -270,6 +402,12 @@ def preprocess_card(card: dict[str, Any]) -> list[dict[str, Any]]:  # noqa: PLR0
     card["collector_number"] = collector_number
     card["collector_number_int"] = extract_collector_number_int(collector_number)
     card["illustration_id"] = card.get("illustration_id")
+    # Every illustration this row SHOWS, front first. One entry here, and `_FACE_LIST_UNIONS`
+    # below appends the other faces' when the faces merge, so a merged row lists the front's
+    # (which is also `illustration_id`) followed by each later face's. A face carrying no art of
+    # its own -- split, adventure and flip cards put one `illustration_id` on the card and none on
+    # the faces -- inherits the card's here and dedupes back to one on merge.
+    card["illustration_ids"] = [card["illustration_id"]] if card["illustration_id"] else []
 
     # Handle legalities and produced_mana defaults
     card.setdefault("card_legalities", card.get("legalities", {}))

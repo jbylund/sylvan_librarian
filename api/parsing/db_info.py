@@ -4,6 +4,27 @@ from __future__ import annotations
 
 from enum import StrEnum
 
+# The string `_merge_processed_faces` glues a multi-face card's face texts with, so that one row
+# is searchable by every face. THIS PROJECT INVENTED IT: Scryfall stores no such string and never
+# joins, it matches each face separately -- so every character of this separator is a position in
+# our haystack and in nobody else's, and a pattern or a needle reaching one of those positions
+# answers from something no card says. Search therefore has to split the value back apart before
+# matching it (`FACE_JOINED_TEXT_COLUMNS`), which is why the constant lives here, where both the
+# importer and the SQL generator can reach it, rather than privately in api/card_processing.py.
+# The Rust engine holds its own copy and `test_the_engine_and_the_importer_hold_one_separator`
+# pins the two together.
+FACE_TEXT_SEPARATOR = "\n//\n"
+
+# The columns whose stored value is a face JOIN under the separator above, and must therefore be
+# matched per face rather than whole.
+#
+# Two, where `_FACE_JOINED_TEXTS` names three -- because only two of the three use the INVENTED
+# separator. `type_line` joins with " // ", which is Scryfall's own top-level field for a split
+# card ("Instant // Instant"): `t:/\/\//` answers 930 there (2026-08-28), so that separator is
+# not ours to undo. It is also not a search column here at all -- `t:` reads `card_types` -- which
+# is why splitting it would be inventing a bug rather than fixing one.
+FACE_JOINED_TEXT_COLUMNS = frozenset({"oracle_text", "flavor_text"})
+
 
 class FieldType(StrEnum):
     """Enumeration of supported database field types."""
@@ -320,6 +341,7 @@ CARD_SUPERTYPES = {
 
 CARD_TYPES = {
     "Artifact",
+    "Battle",  # reaches the corpus once faces merge (#400): every battle is a transform front
     "Conspiracy",
     "Creature",
     "Enchantment",

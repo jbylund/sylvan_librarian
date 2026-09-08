@@ -27,16 +27,19 @@ Card summary (name → printings):
 
 from __future__ import annotations
 
+import copy
 import datetime
 import json
 import tempfile
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import pytest
 
+import card_engine
 from api.parsing import parse_scryfall_query
+from api.parsing.db_info import FACE_TEXT_SEPARATOR
 from card_engine import QueryEngine, UnknownFieldError
 
 if TYPE_CHECKING:
@@ -1491,3 +1494,102 @@ class TestRouterDispatchScope:
                 assert picked[0] in scope, f"{query}@{limit}: picked {picked[0]}, which this acquire cannot run"
                 checked += 1
         assert checked, "no query in PLANE_QUERIES acquired through a plane or candidate list"
+
+
+class TestFaceJoinedText:
+    r"""End to end, through the parser: a joined column is matched PER FACE.
+
+    `_merge_processed_faces` glues a multi-face card's face texts with `FACE_TEXT_SEPARATOR`
+    ("\n//\n") so one row is searchable by every face. Scryfall stores no such string and never
+    joins -- it matches each face separately -- so every character of that separator is a position
+    in this haystack and in nobody else's, and patterns were answering from it. Measured against
+    api.scryfall.com, 2026-08-28:
+
+        o:/\ndraw/       381   the joined column answers 389, the 8 extras every one a two-face
+                               card whose BACK face opens with "Draw"
+        o:/\sdraw/     3,604   the same eight under another spelling
+        o:/\nwhenever/ 3,839   and 46 more of them
+        o:/\/\//           1   the one real card is SP//dr
+        o:"//"             1   the same query after `lower_literal_regexes` lowers the literal --
+                               the spelling a searcher types, and the one that skips the regex arm
+        ft:/\/\//          0   flavor text is joined the same way
+        t:/\/\//         930   and the type line is NOT, because ITS " // " is Scryfall's own
+
+    Going through `parse_scryfall_query` is the point: `o:/\/\//` never reaches the engine as a
+    regex at all, so a test that built the filter by hand would miss the path users take.
+    """
+
+    #: Card 0 is the bug: two faces, the back opening on "draw". Card 1 is the single-face control
+    #: whose OWN newline precedes "draw". Card 2 is a two-face card with a real internal "\ndraw",
+    #: which splitting must not throw out with the rest.
+    TEXTS: ClassVar[dict[str, str]] = {
+        "Faced Front // Faced Back": f"Flying{FACE_TEXT_SEPARATOR}Draw a card.",
+        "Single Face": "Flying\nDraw a card.",
+        "Deep Front // Deep Back": f"Flying{FACE_TEXT_SEPARATOR}Haste\nDraw a card.",
+    }
+
+    @pytest.fixture(scope="class", name="face_engine")
+    @classmethod
+    def face_engine_fixture(cls, fresh_engine: Callable[[], QueryEngine]) -> QueryEngine:
+        template = json.loads(_FIXTURE.read_text())[0]
+        cards = []
+        for i, (name, text) in enumerate(cls.TEXTS.items()):
+            card = copy.deepcopy(template)
+            card["scryfall_id"] = str(uuid.UUID(int=i + 1))
+            card["oracle_id"] = str(uuid.UUID(int=100 + i))
+            card["illustration_id"] = str(uuid.UUID(int=200 + i))
+            card["collector_number"] = str(i + 1)
+            card["collector_number_int"] = i + 1
+            card["card_name"] = name
+            card["card_name_folded"] = name.lower()
+            card["oracle_text"] = text
+            card["flavor_text"] = text
+            cards.append(card)
+        e = fresh_engine()
+        e.reload(cards)
+        return e
+
+    def _names(self, engine: QueryEngine, query: str) -> list[str]:
+        _, cards = _run(engine, query, unique="card")
+        return sorted(c["name"] for c in cards)
+
+    SEPARATOR_QUERIES: ClassVar[list[str]] = [
+        r"o:/\ndraw/",
+        r"o:/\sdraw/",
+        r"o:/\/\//",
+        r'o:"//"',
+        r"ft:/\/\//",
+        r'ft:"//"',
+    ]
+
+    def test_a_separator_is_not_text_any_card_says(self, face_engine: QueryEngine) -> None:
+        """The two-face card leaves every one of these; the single-face controls stay or stay out."""
+        assert self._names(face_engine, r"o:/\ndraw/") == ["Deep Front // Deep Back", "Single Face"]
+        assert self._names(face_engine, r"o:/\sdraw/") == ["Deep Front // Deep Back", "Single Face"]
+        assert self._names(face_engine, r"o:/\/\//") == []
+        assert self._names(face_engine, r'o:"//"') == []
+        assert self._names(face_engine, r"ft:/\/\//") == []
+        assert self._names(face_engine, r'ft:"//"') == []
+
+    def test_every_control_still_answers(self, face_engine: QueryEngine) -> None:
+        """A face match implies a joined match, so nothing that avoided the separator may move."""
+        every = sorted(self.TEXTS)
+        assert self._names(face_engine, "o:flying") == every
+        assert self._names(face_engine, 'o:"draw a card"') == every
+        assert self._names(face_engine, r"o:/draw a card/") == every
+        assert self._names(face_engine, 'ft:"draw a card"') == every
+        assert self._names(face_engine, "o:zzzqqq") == []
+
+    def test_negation_over_a_face_joined_column(self, face_engine: QueryEngine) -> None:
+        """`-o:"//"` is every card, because no card's text contains "//" once the join is undone."""
+        assert self._names(face_engine, r'-o:"//"') == sorted(self.TEXTS)
+        assert self._names(face_engine, r"-o:/\ndraw/") == ["Faced Front // Faced Back"]
+
+    def test_the_engine_and_the_importer_hold_one_separator(self) -> None:
+        """Two spellings of one string in two languages, and nothing else would notice them drift.
+
+        The importer would keep joining with one and the matcher would keep splitting on the
+        other, silently answering from the seam again -- with every test above still green,
+        because they all build their text from the Python constant.
+        """
+        assert card_engine.FACE_TEXT_SEPARATOR == FACE_TEXT_SEPARATOR

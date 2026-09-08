@@ -12,6 +12,8 @@ from api.parsing.db_info import (
     ALIAS_TO_FIELD_INFOS,
     CARD_SUPERTYPES,
     CARD_TYPES,
+    FACE_JOINED_TEXT_COLUMNS,
+    FACE_TEXT_SEPARATOR,
     FORMAT_CODE_TO_NAME,
     FieldType,
     ParserClass,
@@ -969,12 +971,46 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         msg = f"Unsupported operator for year search: {operator}"
         raise ValueError(msg)
 
+    @staticmethod
+    def _per_face(context: QueryContext, value_sql: str, predicate: str) -> str:
+        """Wrap a per-face `predicate` (written against the column alias `face_text`) in an EXISTS.
+
+        `CASE WHEN ... IS NULL` rather than a bare EXISTS because EXISTS is two-valued: it returns
+        False on a NULL column where `col ~* p` and `col LIKE p` return NULL, and the difference is
+        visible the moment the leaf sits under a NOT (`-ft:x` must not start matching the printings
+        that have no flavor text at all). The engine keeps the same three-valued reading.
+        """
+        separator = context.add(FACE_TEXT_SEPARATOR)
+        subquery = f"SELECT 1 FROM unnest(string_to_array({value_sql}, {separator})) AS face_text WHERE {predicate}"
+        return f"CASE WHEN {value_sql} IS NULL THEN NULL ELSE EXISTS ({subquery}) END"
+
     def _handle_text_field_pattern_matching(self, context: QueryContext, lhs_sql: str, attr: str) -> str:
-        """Handle pattern matching for regular text fields."""
+        r"""Handle pattern matching for regular text fields.
+
+        A FACE-JOINED column is matched per face rather than whole. `oracle_text` and
+        `flavor_text` store a multi-face card's faces glued with `FACE_TEXT_SEPARATOR`, a string
+        this project invented -- Scryfall never joins, it matches each face separately -- so a
+        pattern or a needle that reaches one of the separator's own characters answers from
+        something no card says. Measured against api.scryfall.com, 2026-08-28: `o:/\ndraw/` is 381
+        there and the joined column answers 389, the eight extras every one a two-face card whose
+        BACK face opens with "Draw"; `o:/\/\//` and `o://` are 1 there (SP//dr) against 849; and
+        `ft:/\/\//` is 0 against 262. The engine splits at match time for the same reason, and
+        these two paths answering one query differently would be its own bug.
+        """
+        joins_faces = attr in FACE_JOINED_TEXT_COLUMNS
+
         # Check if RHS is a regex pattern
         if isinstance(self.rhs, RegexValueNode):
             # Use PostgreSQL ~* operator for case-insensitive regex matching
-            return f"({lhs_sql} ~* {context.add(self.rhs.value)})"
+            pattern = context.add(self.rhs.value)
+            if joins_faces:
+                # No whole-value prefilter here, unlike the LIKE branch below: `~*` is not
+                # newline-sensitive by default, so `^`/`$` bind at the ends of the value, and after
+                # the split they bind at each face's ends. That is what Scryfall does -- it anchors
+                # inside the face it is matching -- but it means a face can match where the join
+                # does not, so ANDing the join's answer in would drop real matches.
+                return f"({self._per_face(context, lhs_sql, f'face_text ~* {pattern}')})"
+            return f"({lhs_sql} ~* {pattern})"
 
         if isinstance(self.rhs, StringValueNode | ManaValueNode):
             txt_val = self.rhs.value.strip()
@@ -993,8 +1029,15 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
             txt_val = fold_accents(txt_val)
 
         words = ["", *(_escape_like_pattern(w) for w in txt_val.lower().split()), ""]
-        pattern = "%".join(words)
-        return f"(lower({lhs_sql}) LIKE {context.add(pattern)})"
+        pattern = context.add("%".join(words))
+        if joins_faces:
+            # The whole-value LIKE stays as the leading conjunct so `gin_trgm_ops` still drives the
+            # scan and only the survivors pay for the split. It is sound here where it is not for
+            # the regex branch: a face is a SUBSTRING of the join, so anything a face contains the
+            # join contains, and the first conjunct can only ever be a superset.
+            per_face = self._per_face(context, f"lower({lhs_sql})", f"face_text LIKE {pattern}")
+            return f"(lower({lhs_sql}) LIKE {pattern} AND {per_face})"
+        return f"(lower({lhs_sql}) LIKE {pattern})"
 
     """
     col = query

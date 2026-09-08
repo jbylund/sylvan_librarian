@@ -12,6 +12,23 @@ from api.parsing.card_query_nodes import (
     get_legality_comparison_object,
 )
 
+# `oracle_text` and `flavor_text` store a multi-face card's faces glued with FACE_TEXT_SEPARATOR,
+# a string this project invented -- Scryfall never joins, it matches each face separately -- so a
+# `:` search on them is matched PER FACE. The whole-value LIKE stays as the leading conjunct
+# because `gin_trgm_ops` can drive it and a face is a substring of the join, so it can only ever be
+# a superset; the EXISTS beneath it is the answer. `CASE WHEN ... IS NULL` keeps the leaf
+# three-valued, which a bare EXISTS (always True or False) would not.
+_FACE_SEPARATOR_PARAM = "%(p_str_Ci8vCg)s"
+FACE_SEPARATOR_PARAMETER = {"p_str_Ci8vCg": "\n//\n"}
+
+
+def face_split_like(column: str, param: str) -> str:
+    """Expected SQL for a `:` substring search against a face-joined text column."""
+    subquery = (
+        f"SELECT 1 FROM unnest(string_to_array(lower({column}), {_FACE_SEPARATOR_PARAM})) AS face_text WHERE face_text LIKE {param}"
+    )
+    return f"(lower({column}) LIKE {param} AND CASE WHEN lower({column}) IS NULL THEN NULL ELSE EXISTS ({subquery}) END)"
+
 
 @pytest.mark.parametrize(
     argnames=("input_query", "expected_sql", "expected_parameters"),
@@ -391,24 +408,32 @@ def test_full_sql_translation_jsonb_card_types(parse_query, input_query: str, ex
 @pytest.mark.parametrize(
     argnames=("input_query", "expected_sql", "expected_parameters"),
     argvalues=[
-        # Oracle text search tests
-        ("oracle:flying", "(lower(card.oracle_text) LIKE %(p_str_JWZseWluZyU)s)", {"p_str_JWZseWluZyU": "%flying%"}),
+        # Oracle text search tests -- face-joined, so matched per face (see face_split_like)
+        (
+            "oracle:flying",
+            face_split_like("card.oracle_text", "%(p_str_JWZseWluZyU)s"),
+            {"p_str_JWZseWluZyU": "%flying%", **FACE_SEPARATOR_PARAMETER},
+        ),
         (
             "oracle:'gain life'",
-            "(lower(card.oracle_text) LIKE %(p_str_JWdhaW4lbGlmZSU)s)",
-            {"p_str_JWdhaW4lbGlmZSU": "%gain%life%"},
+            face_split_like("card.oracle_text", "%(p_str_JWdhaW4lbGlmZSU)s"),
+            {"p_str_JWdhaW4lbGlmZSU": "%gain%life%", **FACE_SEPARATOR_PARAMETER},
         ),
         (
             'oracle:"gain life"',
-            "(lower(card.oracle_text) LIKE %(p_str_JWdhaW4lbGlmZSU)s)",
-            {"p_str_JWdhaW4lbGlmZSU": "%gain%life%"},
+            face_split_like("card.oracle_text", "%(p_str_JWdhaW4lbGlmZSU)s"),
+            {"p_str_JWdhaW4lbGlmZSU": "%gain%life%", **FACE_SEPARATOR_PARAMETER},
         ),
-        ("oracle:haste", "(lower(card.oracle_text) LIKE %(p_str_JWhhc3RlJQ)s)", {"p_str_JWhhc3RlJQ": "%haste%"}),
+        (
+            "oracle:haste",
+            face_split_like("card.oracle_text", "%(p_str_JWhhc3RlJQ)s"),
+            {"p_str_JWhhc3RlJQ": "%haste%", **FACE_SEPARATOR_PARAMETER},
+        ),
         # Test oracle search with complex phrases
         (
             "oracle:'tap target creature'",
-            "(lower(card.oracle_text) LIKE %(p_str_JXRhcCV0YXJnZXQlY3JlYXR1cmUl)s)",
-            {"p_str_JXRhcCV0YXJnZXQlY3JlYXR1cmUl": "%tap%target%creature%"},
+            face_split_like("card.oracle_text", "%(p_str_JXRhcCV0YXJnZXQlY3JlYXR1cmUl)s"),
+            {"p_str_JXRhcCV0YXJnZXQlY3JlYXR1cmUl": "%tap%target%creature%", **FACE_SEPARATOR_PARAMETER},
         ),
     ],
 )
@@ -424,24 +449,32 @@ def test_oracle_text_sql_translation(parse_query, input_query: str, expected_sql
 @pytest.mark.parametrize(
     argnames=("input_query", "expected_sql", "expected_parameters"),
     argvalues=[
-        # Flavor text search tests
-        ("flavor:exile", "(lower(card.flavor_text) LIKE %(p_str_JWV4aWxlJQ)s)", {"p_str_JWV4aWxlJQ": "%exile%"}),
+        # Flavor text search tests -- joined the same way oracle text is, so split the same way
+        (
+            "flavor:exile",
+            face_split_like("card.flavor_text", "%(p_str_JWV4aWxlJQ)s"),
+            {"p_str_JWV4aWxlJQ": "%exile%", **FACE_SEPARATOR_PARAMETER},
+        ),
         (
             "flavor:'ancient power'",
-            "(lower(card.flavor_text) LIKE %(p_str_JWFuY2llbnQlcG93ZXIl)s)",
-            {"p_str_JWFuY2llbnQlcG93ZXIl": "%ancient%power%"},
+            face_split_like("card.flavor_text", "%(p_str_JWFuY2llbnQlcG93ZXIl)s"),
+            {"p_str_JWFuY2llbnQlcG93ZXIl": "%ancient%power%", **FACE_SEPARATOR_PARAMETER},
         ),
         (
             'flavor:"ancient power"',
-            "(lower(card.flavor_text) LIKE %(p_str_JWFuY2llbnQlcG93ZXIl)s)",
-            {"p_str_JWFuY2llbnQlcG93ZXIl": "%ancient%power%"},
+            face_split_like("card.flavor_text", "%(p_str_JWFuY2llbnQlcG93ZXIl)s"),
+            {"p_str_JWFuY2llbnQlcG93ZXIl": "%ancient%power%", **FACE_SEPARATOR_PARAMETER},
         ),
-        ("flavor:magic", "(lower(card.flavor_text) LIKE %(p_str_JW1hZ2ljJQ)s)", {"p_str_JW1hZ2ljJQ": "%magic%"}),
+        (
+            "flavor:magic",
+            face_split_like("card.flavor_text", "%(p_str_JW1hZ2ljJQ)s"),
+            {"p_str_JW1hZ2ljJQ": "%magic%", **FACE_SEPARATOR_PARAMETER},
+        ),
         # Test flavor search with complex phrases
         (
             "flavor:'power of darkness'",
-            "(lower(card.flavor_text) LIKE %(p_str_JXBvd2VyJW9mJWRhcmtuZXNzJQ)s)",
-            {"p_str_JXBvd2VyJW9mJWRhcmtuZXNzJQ": "%power%of%darkness%"},
+            face_split_like("card.flavor_text", "%(p_str_JXBvd2VyJW9mJWRhcmtuZXNzJQ)s"),
+            {"p_str_JXBvd2VyJW9mJWRhcmtuZXNzJQ": "%power%of%darkness%", **FACE_SEPARATOR_PARAMETER},
         ),
     ],
 )
