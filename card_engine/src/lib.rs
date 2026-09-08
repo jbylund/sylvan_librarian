@@ -13066,7 +13066,7 @@ const FIELD_TABLE: &[(&str, FieldKey, FieldExtractor)] = &[
             None => py.None().into_bound(py),
         })
     }),
-    ("color_identity", |py| intern!(py, "color_identity"), |py, c, _p, _s, _v| Ok(identity_letters(c.card_color_identity).into_pyobject(py)?.into_any())),
+    ("color_identity", |py| intern!(py, "color_identity"), |py, c, _p, _s, _v| color_identity_tuple(py, c.card_color_identity)),
     ("legalities", |py| intern!(py, "legalities"), |py, c, p, _s, _v| {
         // Printing-level word only for the ~556 divergence cards, same rule the filters use.
         let bits = if c.legality_divergent { u64::from(p.card_legalities) } else { u64::from(c.card_legalities) };
@@ -13087,6 +13087,35 @@ fn rarity_pystring(py: Python<'_>, value: u8) -> Option<&'static Py<PyString>> {
     static WORDS: OnceLock<Vec<Py<PyString>>> = OnceLock::new();
     WORDS.get_or_init(|| RARITY_NAMES.iter().map(|name| PyString::intern(py, name).unbind()).collect())
         .get(value as usize)
+}
+
+/// The WUBRG-ordered letters for a colour mask, as one shared tuple per mask.
+///
+/// The value is a pure function of the mask and there are six colour bits (`color_to_bit`: W=1 to
+/// C=32), so 64 tuples cover every value the field can hold. Building them once turns the field
+/// into an incref: `identity_letters` used to `collect()` into a Rust `Vec` and then build a
+/// `PyList`, two allocations on every emitted row, for one of 32 answers the corpus actually uses.
+///
+/// A tuple rather than a list, and that is the point rather than an incidental detail. A list
+/// cannot be shared -- one caller mutating a row's colour identity would change every other row
+/// carrying the same colours -- so a cache is only safe for an immutable type. Tuples also carry a
+/// GC property lists do not: CPython untracks a tuple whose items are all untracked, and a dict
+/// holding only untracked values stays untracked itself, so a row keeping this field out of GC
+/// tracking is possible where a list would force it in.
+///
+/// This is the first result field to return a tuple; the collection fields still return lists.
+fn color_identity_tuple<'py>(py: Python<'py>, mask: u8) -> PyResult<Bound<'py, PyAny>> {
+    /// Six colour bits, so every mask this field can hold indexes into the table.
+    const N_MASKS: u8 = 64;
+    static TUPLES: OnceLock<Vec<Py<PyTuple>>> = OnceLock::new();
+    let tuples = TUPLES.get_or_init(|| {
+        (0..N_MASKS).filter_map(|m| PyTuple::new(py, identity_letters(m)).ok().map(|t| t.unbind())).collect()
+    });
+    match tuples.get(mask as usize) {
+        Some(cached) => Ok(cached.bind(py).clone().into_any()),
+        // Only reachable if the one-time build above failed partway; correct, just uncached.
+        None => Ok(PyTuple::new(py, identity_letters(mask))?.into_any()),
+    }
 }
 
 /// Decode an identity bitmap into Scryfall's WUBRG-ordered letter list.
