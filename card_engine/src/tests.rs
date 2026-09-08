@@ -252,6 +252,7 @@ fn stub_printing(scryfall_id: u128, illustration_id: u128, prefer_score: Option<
         price_eur: None,
         price_tix: None,
         prefer_score,
+        scryfall_prefer_score: None,
         card_legalities: 0,
         card_art_tags: Vec::new(),
         card_is_tags: Vec::new(),

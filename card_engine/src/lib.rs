@@ -323,6 +323,10 @@ struct Printing {
     price_eur: Option<u32>,
     price_tix: Option<u32>,
     prefer_score: Option<f32>,
+    // Scryfall's own per-card printing preference (0 = the printing their oracle_cards dump
+    // shows for the card, counting down their prints-listing order), kept apart from the
+    // curated prefer_score above. Read only by Prefer::Scryfall.
+    scryfall_prefer_score: Option<f32>,
 
     // This printing's exact legality word; only consulted when the owning
     // card's legality_divergent flag is set.
@@ -383,6 +387,7 @@ struct CardRow {
     price_tix: Option<u32>,
     prefer_score: Option<f32>,
     cubecobra_score: Option<f32>,
+    scryfall_prefer_score: Option<f32>,
 
     card_subtypes: Vec<u16>,
     card_keywords: Vec<u16>,
@@ -890,6 +895,7 @@ fn card_from_pydict(d: &Bound<PyDict>, it: &mut Interner, vocab: &mut VocabInter
         price_tix: opt_price_cents(d, "price_tix"),
         prefer_score: opt_f32(d, "prefer_score"),
         cubecobra_score: opt_f32(d, "cubecobra_score"),
+        scryfall_prefer_score: opt_f32(d, "scryfall_prefer_score"),
 
         card_types,
         card_subtypes: str_list_to_ids(d, "card_subtypes", vocab)?,
@@ -5647,7 +5653,7 @@ fn narrow_rec(
 // ─── Sort / select / limit ────────────────────────────────────────────────────
 
 #[derive(Clone, Copy)]
-enum Prefer { Oldest, Newest, UsdLow, UsdHigh, Promo, Default }
+enum Prefer { Oldest, Newest, UsdLow, UsdHigh, Promo, Scryfall, Default }
 
 fn prefer_from_str(s: &str) -> Prefer {
     match s {
@@ -5656,6 +5662,7 @@ fn prefer_from_str(s: &str) -> Prefer {
         "usd_low"  => Prefer::UsdLow,
         "usd_high" => Prefer::UsdHigh,
         "promo"    => Prefer::Promo,
+        "scryfall" => Prefer::Scryfall,
         _          => Prefer::Default,
     }
 }
@@ -5685,6 +5692,10 @@ fn prefer_score(card: &AOracleCard, p: &APrinting, prefer: Prefer) -> f64 {
         // Card-level (edhrec is oracle-scoped): every printing ties, so the
         // first printing in store order is chosen — same as before the split.
         Prefer::Promo   => -(card.edhrec_rank.as_ref().map(|r| u32::from(*r) as f64).unwrap_or(f64::INFINITY)),
+        // Scryfall's own preference, its own score (0 = their pick, counting down their
+        // prints-listing order). Missing means "not yet backfilled" and loses to every scored
+        // printing, matching the SQL path's NULLS LAST.
+        Prefer::Scryfall => p.scryfall_prefer_score.as_ref().map(|v| f32::from(*v) as f64).unwrap_or(f64::NEG_INFINITY),
         Prefer::Default => p.prefer_score.as_ref().map(|v| f32::from(*v)).unwrap_or(0.0) as f64,
     }
 }
@@ -13297,7 +13308,15 @@ const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 //
 // 2026082501 — `SortPermutations` gains per-order printing-span prefix sums, used to turn a bound on
 // cards visited into a sound O(1) bound on printings examined. Entirely inside `CardIndexes` again.
-const ARCHIVE_FORMAT_VERSION: u32 = 2026090801;
+//
+// 2026090801 — `CardData` loses `coll_vocab_sorted`: the collection vocab is renumbered into
+// lexicographic order at load, so every stored vocab id changes meaning. Entirely inside `CardData`
+// and the ids the rows carry, so the header cannot catch it.
+//
+// 2026090805 — `Printing` gains `scryfall_prefer_score` (Scryfall's own printing preference, read
+// by `Prefer::Scryfall`). `APrinting`'s size moves, so the header would catch this one too; the
+// bump keeps the constant's history honest.
+const ARCHIVE_FORMAT_VERSION: u32 = 2026090805;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -13894,6 +13913,7 @@ impl QueryEngine {
                 price_eur: row.price_eur,
                 price_tix: row.price_tix,
                 prefer_score: row.prefer_score,
+                scryfall_prefer_score: row.scryfall_prefer_score,
                 card_legalities: row.card_legalities,
                 card_art_tags: row.card_art_tags,
                 card_is_tags: row.card_is_tags,

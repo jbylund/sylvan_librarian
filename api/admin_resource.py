@@ -50,6 +50,7 @@ from api.scryfall_bulk_data_fetcher import BulkDataKey, ScryfallBulkDataFetcher
 from api.settings import settings
 from api.tag_import import import_art_tags as _import_art_tags
 from api.tag_import import import_oracle_tags as _import_oracle_tags
+from api.tag_import import import_scryfall_representatives as _import_scryfall_representatives
 from api.utils import db_utils, multiprocessing_utils
 from api.utils.caching import cached
 from api.utils.http_utils import make_user_agent
@@ -397,6 +398,11 @@ class AdminResource:
             # rather than scoring, so their position relative to the backfill does not matter.
             _import_art_tags(self.app_context.writer_pool, self._bulk_data_fetcher)
             self.backfill_prefer_scores()
+            # Scryfall's own preference is its own score: the representative labels land first
+            # (they name each ordering's top printing), then the backfill ranks every printing.
+            # Both live apart from the curated prefer_score above, which this never touches.
+            _import_scryfall_representatives(self.app_context.writer_pool, self._bulk_data_fetcher)
+            self.backfill_scryfall_prefer_scores()
             self.backfill_cubecobra_scores()
             _import_oracle_tags(self.app_context.writer_pool, self._bulk_data_fetcher)
             self.app_context.reload_engine(force=True)
@@ -507,6 +513,56 @@ class AdminResource:
         return {
             "status": "success",
             "message": f"Successfully backfilled prefer scores for {updated_count} of {total_cards} cards",
+            **stats,
+        }
+
+    @route()
+    def backfill_scryfall_prefer_scores(self, **_: object) -> dict[str, Any]:
+        """Backfill scryfall_prefer_score: Scryfall's per-card printing ordering, as its own score.
+
+        Ranks every printing of each card by Scryfall's own preference -- the printing their
+        oracle_cards dump names as the card's representative first (synced into
+        magic.scryfall_representatives by import_scryfall_representatives), then the rest in their
+        prints-listing order (release date newest first, then set code and collector number, all
+        descending). The score is 0 for the top printing and counts down, so DESC reproduces the
+        full ordering.
+
+        Independent of backfill_prefer_scores: neither score reads the other.
+
+        Returns:
+            Dict with status and counts of cards updated/scored.
+        """
+        start = time.monotonic()
+        logger.info("Starting Scryfall prefer score backfill")
+
+        backfill_sql = db_utils.read_sql("backfill_scryfall_prefer_scores")
+        with self.app_context.writer_pool.connection() as conn, conn.cursor() as cursor:
+            db_utils.set_statement_timeout(cursor, settings.prefer_score_backfill_timeout_ms)
+            cursor.execute(backfill_sql)
+            updated_count = cursor.rowcount
+
+            # Distinguishes "ranked against Scryfall's labels" from "ranked an unlabelled corpus by
+            # release order alone", which otherwise look identical in the log.
+            cursor.execute("SELECT COUNT(*) as count FROM magic.scryfall_representatives")
+            result = cursor.fetchone()
+            labels = result["count"] if result else 0
+
+            cursor.execute("SELECT COUNT(*) as count FROM magic.cards WHERE scryfall_prefer_score IS NOT NULL")
+            result = cursor.fetchone()
+            total_cards = result["count"] if result else 0
+
+            conn.commit()
+
+        stats = {
+            "duration_seconds": round(time.monotonic() - start, 2),
+            "cards_updated": updated_count,
+            "cards_scored": total_cards,
+            "representative_labels": labels,
+        }
+        logger.info("Scryfall prefer score backfill complete: %s", stats)
+
+        return {
+            "status": "success",
             **stats,
         }
 

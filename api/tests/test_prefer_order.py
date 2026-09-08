@@ -63,6 +63,7 @@ class TestPreferOrder(unittest.TestCase):
         assert PreferOrder.USD_LOW == "usd_low"
         assert PreferOrder.USD_HIGH == "usd_high"
         assert PreferOrder.PROMO == "promo"
+        assert PreferOrder.SCRYFALL == "scryfall"
 
     def test_search_accepts_prefer_parameter(self) -> None:
         """Test that search method accepts prefer parameter without error."""
@@ -77,3 +78,4 @@ class TestPreferOrder(unittest.TestCase):
         assert "price_usd" in self._search_sql("cmc=3", PreferOrder.USD_LOW)["compiled"]
         assert "price_usd" in self._search_sql("cmc=3", PreferOrder.USD_HIGH)["compiled"]
         assert "prefer_score" in self._search_sql("cmc=3", PreferOrder.DEFAULT)["compiled"]
+        assert "scryfall_prefer_score" in self._search_sql("cmc=3", PreferOrder.SCRYFALL)["compiled"]

@@ -615,7 +615,7 @@ class APIResource:
             shape: Shape of the "cards" list: 'rows' (list of card objects, default) or
                 'columnar' (one list per field, keyed by field name — smaller on the wire).
             unique: Unique on field.
-            prefer: Prefer order (oldest, newest, usd-low, usd-high, promo).
+            prefer: Prefer order (oldest, newest, usd-low, usd-high, promo, scryfall).
 
         Returns:
             Dict containing search results and metadata.
@@ -905,6 +905,9 @@ class APIResource:
             PreferOrder.USD_HIGH: ("price_usd", "DESC"),
             PreferOrder.PROMO: ("edhrec_rank", "ASC"),  # Use edhrec_rank as fallback for promo
             PreferOrder.DEFAULT: ("prefer_score", "DESC"),
+            # Scryfall's own preference, a separate score: 0 = the printing their oracle_cards
+            # dump shows for the card, counting down their prints-listing order from there.
+            PreferOrder.SCRYFALL: ("scryfall_prefer_score", "DESC"),
         }
         prefer_column, prefer_direction = prefer_mapping.get(
             prefer,
