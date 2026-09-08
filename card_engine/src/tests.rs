@@ -3,10 +3,10 @@ use super::{
     and_child_rank, assign_name_ranks,
     build_numeric_index, build_oracle_text_index, build_trigram_index,
     build_rarity_index, build_flavor_index, build_hybrid_tag_index, build_layout_hybrid_index, bitmap_beats_postings, HybridTagIndex, build_sort_permutations,
-    assign_artwork_groups, build_artwork_base_from, build_bit_planes, build_border_printing_planes, build_rarity_printing_planes, build_divergent_ids, build_name_bigram_index, build_name_unigram_index, build_printing_to_card, flavor_fingerprint, flavor_match_sets,
+    assign_artwork_groups, assign_artist_ranks, build_artwork_base_from, build_bit_planes, build_border_printing_planes, build_rarity_printing_planes, build_divergent_ids, build_name_bigram_index, build_name_unigram_index, build_printing_to_card, flavor_fingerprint, flavor_match_sets,
     cards_of_printings, count_common_keywords, count_common_types,
     build_artist_index, build_printing_value_index, build_arith_tuple_index, is_arith_tuple_route, range_candidates, narrow_candidates, narrow_candidates_exact, rarity_candidates,
-    range_too_broad_to_narrow, run_query, run_query_routed, run_query_with_plan, explain, explain_analyze, AcquireFacts, PlanEstimate, PlanTrial,
+    perm_primary_key, range_too_broad_to_narrow, run_query, run_query_routed, run_query_with_plan, explain, explain_analyze, AcquireFacts, PlanEstimate, PlanTrial,
     acquire_plan_features, take_phase_stats, PagingTaken, CountSource, NarrowedRepr,
     EXACT_VALUE_TOTALS, RangeCardCounts, narrow_rec, ValueTotals, PairTotals, build_all_value_totals, build_pair_totals, build_range_card_counts, exact_result_total,
     PhysicalPlan, PlanScope, CandidatePlan, ComposePaging, trigram_candidates, finalize_trigram_index, PrintingValueIndex, NARROW_FLOOR,
@@ -241,6 +241,8 @@ fn stub_printing(scryfall_id: u128, illustration_id: u128, prefer_score: Option<
         flavor_text_lower_id: NONE_STR,
         card_artist_vid: ARTIST_NONE,
         card_set_code: InlineStr::from_str(""),
+        set_rank: 0,
+        artist_rank: 0,
         card_border_id: NONE_STR,
         card_watermark_id: NONE_STR,
         collector_number_id: NONE_STR,
@@ -13001,6 +13003,158 @@ fn arith_tuple_key_budget_catches_a_blown_domain() {
 /// Above `ARITH_TUPLE_GUARD_MIN_CARDS`, and large enough that an all-distinct key space
 /// clears `10*sqrt(n)+32` by a wide margin.
 const ARITH_TUPLE_BLOWUP_CARDS: usize = 6_000;
+
+// ─── Price orderings pick the group's cheapest printing ───────────────────────
+//
+// See `prefer_for_sort`. Scryfall ranks a card by its CHEAPEST printing in the ordered
+// currency and returns that printing, so under `unique=card`/`unique=artwork` the
+// representative has to be chosen by the ordered price rather than by `prefer_score`.
+
+/// One card whose three printings disagree about which is cheapest in each currency,
+/// plus a `prefer_score` order that agrees with none of them. `store_of` stores printings
+/// prefer-descending, so scryfall_id 1 is the default-preferred one.
+fn priced_store(prices: &[(Option<u32>, Option<u32>, Option<u32>)]) -> CardData {
+    let mut vocab = VocabInterner::new();
+    let card = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
+    let mut data = store_of(vec![card], &[prices.len()], vocab);
+    for (p, &(usd, eur, tix)) in data.printings.iter_mut().zip(prices) {
+        p.price_usd = usd;
+        p.price_eur = eur;
+        p.price_tix = tix;
+    }
+    // Built, not left at their empty defaults: an empty index makes `walk_value_orderby_page`
+    // decline and fall back to the gather, which would leave the walk's `rep == pid` emission
+    // test — the one place the representative choice and the page order have to agree —
+    // silently uncovered.
+    data.indexes.price_usd = build_printing_value_index(&data.printings, &data.cards, &data.offsets, |p| p.price_usd);
+    data.indexes.price_eur = build_printing_value_index(&data.printings, &data.cards, &data.offsets, |p| p.price_eur);
+    data.indexes.price_tix = build_printing_value_index(&data.printings, &data.cards, &data.offsets, |p| p.price_tix);
+    data
+}
+
+/// The representative `unique=card` returns for `orderby`/`direction`, as a scryfall_id.
+fn representative(data: &CardData, prefer: &str, orderby: &str, direction: &str) -> u128 {
+    let bytes = rkyv::to_bytes::<Error>(data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let mut filter = FilterExpr::True;
+    let (total, page) = run_query(&QueryCtx::from(archived), &mut filter, None, "card", prefer, orderby, direction, 100, 0);
+    assert_eq!(total, 1, "unique=card collapses the fixture to one row");
+    u128::from(page[0].1.scryfall_id)
+}
+
+#[test]
+// Prices are integer CENTS, written `dollars_cents` so `1827_00` reads as $1827.00 at a
+// glance. clippy wants `182_700` and `50`; both are what the column holds and neither says
+// what the money is. The grouping is the documentation here, so the lints are allowed on
+// these three rather than the literals being flattened.
+#[allow(clippy::inconsistent_digit_grouping, clippy::zero_prefixed_literal)]
+fn price_orderby_represents_the_card_by_its_cheapest_printing() {
+    // id 1 is prefer-best; the cheapest is a different printing in each currency.
+    let data = priced_store(&[
+        (Some(9_00), Some(1_00), Some(9_00)), // id 1 — cheapest in EUR
+        (Some(5_00), Some(5_00), Some(0_50)), // id 2 — cheapest in TIX
+        (Some(1_00), Some(3_00), Some(3_00)), // id 3 — cheapest in USD
+    ]);
+    // The non-price ordering is untouched: it still gets the prefer_score pick.
+    assert_eq!(representative(&data, "default", "edhrec", "asc"), 1);
+    assert_eq!(representative(&data, "default", "name", "desc"), 1);
+    // Each price ordering gets that currency's cheapest printing...
+    assert_eq!(representative(&data, "default", "usd", "desc"), 3);
+    assert_eq!(representative(&data, "default", "eur", "desc"), 1);
+    assert_eq!(representative(&data, "default", "tix", "desc"), 2);
+    // ...in BOTH directions. Direction reverses the page; it does not re-pick the printing.
+    assert_eq!(representative(&data, "default", "usd", "asc"), 3);
+    assert_eq!(representative(&data, "default", "eur", "asc"), 1);
+    assert_eq!(representative(&data, "default", "tix", "asc"), 2);
+}
+
+/// The Juzám Djinn shape: the prefer-best printing is an unpriced oversized promo, so
+/// leaving the pick to `prefer_score` gave the card no USD price at all and dropped it out
+/// of a price sort entirely. A missing price must lose to any real one.
+#[test]
+// Prices are integer CENTS, written `dollars_cents` so `1827_00` reads as $1827.00 at a
+// glance. clippy wants `182_700` and `50`; both are what the column holds and neither says
+// what the money is. The grouping is the documentation here, so the lints are allowed on
+// these three rather than the literals being flattened.
+#[allow(clippy::inconsistent_digit_grouping, clippy::zero_prefixed_literal)]
+fn price_orderby_skips_a_printing_with_no_price_in_that_currency() {
+    let data = priced_store(&[
+        (None, None, Some(1_00)),          // id 1 — prefer-best, but unpriced in USD and EUR
+        (Some(1827_00), Some(1775_40), None), // id 2 — the only printing with a USD/EUR price
+    ]);
+    assert_eq!(representative(&data, "default", "edhrec", "asc"), 1);
+    assert_eq!(representative(&data, "default", "usd", "desc"), 2);
+    assert_eq!(representative(&data, "default", "eur", "desc"), 2);
+    // TIX is the mirror image: only the prefer-best printing has one.
+    assert_eq!(representative(&data, "default", "tix", "desc"), 1);
+}
+
+/// When NOTHING is priced there is no cheaper printing to prefer, so the card keeps its
+/// ordinary representative rather than silently changing which printing it shows.
+#[test]
+fn price_orderby_keeps_the_default_representative_when_no_printing_is_priced() {
+    let data = priced_store(&[(None, None, None), (None, None, None)]);
+    assert_eq!(representative(&data, "default", "usd", "desc"), 1);
+    assert_eq!(representative(&data, "default", "eur", "asc"), 1);
+    assert_eq!(representative(&data, "default", "tix", "desc"), 1);
+}
+
+/// An explicit `prefer=` is the caller naming the printing they want, and it still wins —
+/// `prefer_for_sort` only fills in a pick for callers that did not make one.
+#[test]
+// Prices are integer CENTS, written `dollars_cents` so `1827_00` reads as $1827.00 at a
+// glance. clippy wants `182_700` and `50`; both are what the column holds and neither says
+// what the money is. The grouping is the documentation here, so the lints are allowed on
+// these three rather than the literals being flattened.
+#[allow(clippy::inconsistent_digit_grouping, clippy::zero_prefixed_literal)]
+fn an_explicit_prefer_still_beats_the_price_orderby() {
+    let data = priced_store(&[
+        (Some(9_00), Some(1_00), Some(9_00)), // id 1 — prefer-best, dearest in USD
+        (Some(5_00), Some(5_00), Some(0_50)),
+        (Some(1_00), Some(3_00), Some(3_00)), // id 3 — cheapest in USD
+    ]);
+    assert_eq!(representative(&data, "usd_high", "usd", "desc"), 1);
+    assert_eq!(representative(&data, "usd_low", "usd", "desc"), 3);
+    // `oldest`/`newest` are price-blind: store_of makes the LAST printing the oldest.
+    assert_eq!(representative(&data, "oldest", "usd", "desc"), 3);
+    assert_eq!(representative(&data, "newest", "usd", "desc"), 1);
+}
+
+/// `order=artist` treats an artistless printing the way every other ordering treats an absent
+/// value, rather than as a real rank at the far end.
+///
+/// `assign_artist_ranks` parks the artistless printings in a trailing rank block, and reporting
+/// that block as a VALUE made this the one ordering whose absent side moved with the direction in
+/// the wrong sense: last ascending (correct) but FIRST descending (not), because a real rank
+/// reflects under `desc` and an absent sentinel does not.
+#[test]
+fn an_artistless_printing_sorts_like_an_absent_value() {
+    let mut vocab = VocabInterner::new();
+    let cards = vec![stub_card(1, TYPE_CREATURE, &[], &mut vocab), stub_card(2, TYPE_CREATURE, &[], &mut vocab)];
+    let mut data = store_of(cards, &[1, 1], vocab);
+    let artist_vocab = vec!["aaa".to_string()];
+    data.printings[0].card_artist_vid = 0;
+    data.printings[1].card_artist_vid = ARTIST_NONE;
+    assign_artist_ranks(&mut data.printings, &artist_vocab);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    // Asserted RELATIVE to a column that is already nullable, not against a fixed direction, so
+    // this pins the property that matters -- artist's absent side behaves like everybody else's --
+    // without also pinning WHICH side that is. It therefore holds both before and after the
+    // nulls-sort-lowest change, and would fail if only one of the two were ever flipped.
+    for descending in [false, true] {
+        let artist_named = sort_key_bits(&archived.cards[0], &archived.printings[0], SortCol::Artist, descending);
+        let artist_absent = sort_key_bits(&archived.cards[1], &archived.printings[1], SortCol::Artist, descending);
+        let cmc_present = perm_primary_key(Some(1.0), descending);
+        let cmc_absent = perm_primary_key(None, descending);
+        assert_eq!(
+            artist_absent > artist_named,
+            cmc_absent > cmc_present,
+            "artist's absent side disagrees with cmc's (descending={descending})",
+        );
+    }
+}
 
 /// `super::sigma_bound`'s Rust port must agree with the Python original
 /// (`scripts/bench_compose_card_visited_safety_bound.py`) it was translated from -- that Python side

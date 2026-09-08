@@ -305,6 +305,13 @@ struct Printing {
     // strings live on the printing.
     card_artist_vid: u16,
     card_set_code: InlineStr<8>,
+    // Dense ranks of card_set_code and the artist name in byte order, assigned post-load by
+    // assign_set_ranks / assign_artist_ranks; the sort keys for SortCol::Set and SortCol::Artist.
+    // Neither can be derived at sort time: a set code is a string, and card_artist_vid is intern
+    // order (first seen), not alphabetical. Equal values share a rank so the sort secondaries break
+    // their ties, and both stay far below 2^24 so the f32 sort-key conversion is exact.
+    set_rank: u32,
+    artist_rank: u32,
     card_border_id: u32,
     card_watermark_id: u32,
     collector_number_id: u32,
@@ -2296,9 +2303,12 @@ struct SortPermutations {
 }
 
 impl ArchivedSortPermutations {
-    /// The permutation for a streamable column/direction; None for the
-    /// printing-keyed columns (rarity, usd), whose sort key depends on the
-    /// prefer-chosen printing and cannot be precomputed.
+    /// The permutation for a streamable column/direction; None for the columns that have none.
+    ///
+    /// Those are the printing-keyed ones -- rarity, the three prices, released, set and artist --
+    /// whose sort key depends on the prefer-chosen printing and so cannot be precomputed per card.
+    /// Colour is card-level and could have one; it does not yet, and returning None here costs only
+    /// the streaming fast path, not correctness.
     fn get(&self, col: SortCol, descending: bool) -> Option<&Archived<Vec<u32>>> {
         let pair = match col {
             SortCol::EdhrecRank => &self.edhrec,
@@ -2307,7 +2317,14 @@ impl ArchivedSortPermutations {
             SortCol::Power      => &self.power,
             SortCol::Toughness  => &self.toughness,
             SortCol::Name       => &self.name,
-            SortCol::Rarity | SortCol::PriceUsd => return None,
+            SortCol::Rarity
+            | SortCol::PriceUsd
+            | SortCol::PriceEur
+            | SortCol::PriceTix
+            | SortCol::Released
+            | SortCol::Color
+            | SortCol::Set
+            | SortCol::Artist => return None,
         };
         Some(&pair[descending as usize])
     }
@@ -2321,7 +2338,14 @@ impl ArchivedSortPermutations {
             SortCol::Power      => &self.power_inv,
             SortCol::Toughness  => &self.toughness_inv,
             SortCol::Name       => &self.name_inv,
-            SortCol::Rarity | SortCol::PriceUsd => return None,
+            SortCol::Rarity
+            | SortCol::PriceUsd
+            | SortCol::PriceEur
+            | SortCol::PriceTix
+            | SortCol::Released
+            | SortCol::Color
+            | SortCol::Set
+            | SortCol::Artist => return None,
         };
         Some(&pair[descending as usize])
     }
@@ -2334,7 +2358,14 @@ impl ArchivedSortPermutations {
             SortCol::Power      => &self.power_printings_prefix,
             SortCol::Toughness  => &self.toughness_printings_prefix,
             SortCol::Name       => &self.name_printings_prefix,
-            SortCol::Rarity | SortCol::PriceUsd => return None,
+            SortCol::Rarity
+            | SortCol::PriceUsd
+            | SortCol::PriceEur
+            | SortCol::PriceTix
+            | SortCol::Released
+            | SortCol::Color
+            | SortCol::Set
+            | SortCol::Artist => return None,
         };
         Some(&pair[descending as usize])
     }
@@ -2403,6 +2434,44 @@ fn assign_name_ranks(cards: &mut [OracleCard]) {
         }
         cards[ids[i] as usize].name_rank = rank;
     }
+}
+
+/// Dense-rank every printing by a key derived from it, writing the rank back through `set`.
+///
+/// The shape `assign_name_ranks` uses, lifted out because set code and artist need the same thing:
+/// sort an index permutation by the key, then walk it assigning a rank that advances only when the
+/// key changes, so equal keys tie and the sort secondaries decide between them.
+fn assign_printing_ranks<K: Ord>(
+    printings: &mut [Printing],
+    key: impl Fn(&Printing) -> K,
+    set: impl Fn(&mut Printing, u32),
+) {
+    let mut ids: Vec<u32> = (0..printings.len() as u32).collect();
+    ids.sort_unstable_by(|&a, &b| key(&printings[a as usize]).cmp(&key(&printings[b as usize])));
+    let mut rank = 0u32;
+    for i in 0..ids.len() {
+        if i > 0 && key(&printings[ids[i - 1] as usize]) != key(&printings[ids[i] as usize]) {
+            rank += 1;
+        }
+        set(&mut printings[ids[i] as usize], rank);
+    }
+}
+
+/// Rank printings by set code, the sort key for `order=set`.
+fn assign_set_ranks(printings: &mut [Printing]) {
+    assign_printing_ranks(printings, |p| p.card_set_code.as_str().to_owned(), |p, r| p.set_rank = r);
+}
+
+/// Rank printings by artist name, the sort key for `order=artist`.
+///
+/// Resolved through the vocab rather than sorting on `card_artist_vid`, which is intern order.
+/// A printing with no artist ranks last, matching how the absent side of every other order sorts.
+fn assign_artist_ranks(printings: &mut [Printing], artist_vocab: &[String]) {
+    let name_of = |p: &Printing| match p.card_artist_vid {
+        ARTIST_NONE => None,
+        vid => artist_vocab.get(vid as usize).cloned(),
+    };
+    assign_printing_ranks(printings, |p| (name_of(p).is_none(), name_of(p)), |p, r| p.artist_rank = r);
 }
 
 /// `inv[perm[i]] == i` — the position of each card within the permutation.
@@ -2506,8 +2575,8 @@ fn perm_primary_key(value: Option<f32>, descending: bool) -> u32 {
 }
 
 /// The sort column's value for one archived card, in the same units `build_sort_permutations` sorted
-/// on. Card-level columns only: `Rarity`/`PriceUsd` have no permutation (they depend on the
-/// prefer-chosen printing), which is why `ArchivedSortPermutations::get` returns `None` for them.
+/// on. Card-level columns only: every column `ArchivedSortPermutations::get` returns `None` for is
+/// unreachable here, because nothing walks a permutation that does not exist.
 fn sort_col_card_value(card: &AOracleCard, sort_col: SortCol) -> Option<f32> {
     match sort_col {
         SortCol::EdhrecRank => card.edhrec_rank.as_ref().map(|v| u32::from(*v) as f32),
@@ -2517,7 +2586,15 @@ fn sort_col_card_value(card: &AOracleCard, sort_col: SortCol) -> Option<f32> {
         SortCol::Power      => card.creature_power.as_ref().map(|v| f32::from(*v)),
         SortCol::Toughness  => card.creature_toughness.as_ref().map(|v| f32::from(*v)),
         SortCol::Name       => Some(u32::from(card.name_rank) as f32),
-        SortCol::Rarity | SortCol::PriceUsd => None,
+        // Unreachable: these have no permutation, so nothing walks them (see `get`).
+        SortCol::Rarity
+        | SortCol::PriceUsd
+        | SortCol::PriceEur
+        | SortCol::PriceTix
+        | SortCol::Released
+        | SortCol::Color
+        | SortCol::Set
+        | SortCol::Artist => None,
     }
 }
 
@@ -5646,8 +5723,11 @@ fn narrow_rec(
 
 // ─── Sort / select / limit ────────────────────────────────────────────────────
 
+/// `EurLow`/`TixLow` have no `prefer=` spelling — they are not user-selectable, and
+/// `prefer_from_str` cannot produce them. They exist only so `prefer_for_sort` can
+/// express "cheapest printing" for the two price columns that have no `usd_low` twin.
 #[derive(Clone, Copy)]
-enum Prefer { Oldest, Newest, UsdLow, UsdHigh, Promo, Default }
+enum Prefer { Oldest, Newest, UsdLow, UsdHigh, EurLow, TixLow, Promo, Default }
 
 fn prefer_from_str(s: &str) -> Prefer {
     match s {
@@ -5657,6 +5737,39 @@ fn prefer_from_str(s: &str) -> Prefer {
         "usd_high" => Prefer::UsdHigh,
         "promo"    => Prefer::Promo,
         _          => Prefer::Default,
+    }
+}
+
+/// A price ordering ranks each card by its CHEAPEST printing, and the row it returns is
+/// that printing — so under `unique=card`/`unique=artwork` the group's representative has
+/// to be chosen by the price being ordered on, not by `prefer_score`.
+///
+/// Measured against api.scryfall.com on 2026-08-11, `unique=cards`, both directions:
+///
+/// ```text
+/// Birds of Paradise  order=usd -> msc #170 $9.60   (min; the dearest is leb #187 $1000)
+/// Counterspell       order=usd -> brb #15  $2.30   (min; the dearest is leb #55  $919.92)
+/// Gandalf the White  order=usd -> ltr #19  $10.22  (min; the dearest is ltr #299 $2999.99)
+/// Gandalf the White  order=tix -> ltr #470 0.02    (min; ltr #19 at 0.03 is NOT chosen)
+/// Juzám Djinn        order=usd -> arn #29  $1827   (its only priced printing)
+/// ```
+///
+/// Direction does not enter into it: `dir=asc` and `dir=desc` return the same printing and
+/// only reverse the list. Nor is the choice `prefer_score`-shaped — the cheapest printing is
+/// systematically the *least* canonical one (world-championship decks, bulk reprints), so no
+/// amount of `prefer_score` tuning reaches this answer. Left on `Prefer::Default` the engine
+/// instead ranks each card by whatever its most canonical printing costs, which drops cards
+/// whose canonical printing is unpriced (Juzám Djinn's oversized promo) and floats cards
+/// whose canonical printing is a premium variant (Gandalf's $2999.99 serialized ltr #299).
+///
+/// An explicit `prefer=` still wins: it is the caller saying which printing they want, and
+/// `usd_low` already IS this rule spelled out by hand.
+fn prefer_for_sort(prefer: Prefer, sort_col: SortCol) -> Prefer {
+    match (prefer, sort_col) {
+        (Prefer::Default, SortCol::PriceUsd) => Prefer::UsdLow,
+        (Prefer::Default, SortCol::PriceEur) => Prefer::EurLow,
+        (Prefer::Default, SortCol::PriceTix) => Prefer::TixLow,
+        _ => prefer,
     }
 }
 
@@ -5680,8 +5793,13 @@ fn prefer_score(card: &AOracleCard, p: &APrinting, prefer: Prefer) -> f64 {
     match prefer {
         Prefer::Oldest  => -(p.released_at_int.as_ref().map(|v| u32::from(*v)).unwrap_or(99_999_999) as f64),
         Prefer::Newest  => p.released_at_int.as_ref().map(|v| u32::from(*v)).unwrap_or(0) as f64,
+        // The `*Low` arms negate, so a MISSING price scores -inf and loses to every priced
+        // printing — a group with any priced printing is represented by one, and a group with
+        // none keeps its first-in-store-order (highest `prefer_score`) printing.
         Prefer::UsdLow  => -p.price_usd.as_ref().map(|v| f64::from(u32::from(*v)) / 100.0).unwrap_or(f64::INFINITY),
         Prefer::UsdHigh => p.price_usd.as_ref().map(|v| f64::from(u32::from(*v)) / 100.0).unwrap_or(0.0),
+        Prefer::EurLow  => -p.price_eur.as_ref().map(|v| f64::from(u32::from(*v)) / 100.0).unwrap_or(f64::INFINITY),
+        Prefer::TixLow  => -p.price_tix.as_ref().map(|v| f64::from(u32::from(*v)) / 100.0).unwrap_or(f64::INFINITY),
         // Card-level (edhrec is oracle-scoped): every printing ties, so the
         // first printing in store order is chosen — same as before the split.
         Prefer::Promo   => -(card.edhrec_rank.as_ref().map(|r| u32::from(*r) as f64).unwrap_or(f64::INFINITY)),
@@ -5690,8 +5808,14 @@ fn prefer_score(card: &AOracleCard, p: &APrinting, prefer: Prefer) -> f64 {
 }
 
 #[derive(Clone, Copy)]
-enum SortCol { Cmc, Power, Toughness, Rarity, PriceUsd, Cubecobra, EdhrecRank, Name }
+enum SortCol {
+    Cmc, Power, Toughness, Rarity, PriceUsd, PriceEur, PriceTix,
+    Cubecobra, EdhrecRank, Name, Released, Color, Set, Artist,
+}
 
+/// Every arm here must have a `CardOrdering` member in api/enums.py and a `sql_orderby` entry in
+/// api_resource.py. The fallthrough is why: an order name the API knows and this does not sorts by
+/// edhrec here while SQL sorts by the real column, so the two paths disagree on identical input.
 fn orderby_to_col(orderby: &str) -> SortCol {
     match orderby {
         "cmc"       => SortCol::Cmc,
@@ -5699,9 +5823,47 @@ fn orderby_to_col(orderby: &str) -> SortCol {
         "rarity"    => SortCol::Rarity,
         "toughness" => SortCol::Toughness,
         "usd"       => SortCol::PriceUsd,
+        "eur"       => SortCol::PriceEur,
+        "tix"       => SortCol::PriceTix,
         "cubecobra" => SortCol::Cubecobra,
         "name"      => SortCol::Name,
+        "released"  => SortCol::Released,
+        "color"     => SortCol::Color,
+        "set"       => SortCol::Set,
+        "artist"    => SortCol::Artist,
         _           => SortCol::EdhrecRank,
+    }
+}
+
+/// Pack a `yyyymmdd` date into a small order-preserving integer.
+///
+/// The sort key rounds its primary through f32, which is exact only below 2^24 (see `name_rank`).
+/// A raw `yyyymmdd` is ~20,260,809 -- past that, so two dates a day apart can collide. This keeps
+/// the ordering and drops the magnitude: distinct years are 372 apart, which exceeds the largest
+/// in-year offset (11*31 + 30 = 371), so the packing is strictly monotonic for valid dates and
+/// tops out near 755,000 for 2030. `released_at_int` itself stays `yyyymmdd`, which is what the
+/// date and year filters compare against.
+fn released_sort_ord(yyyymmdd: u32) -> u32 {
+    let (y, m, d) = (yyyymmdd / 10_000, (yyyymmdd / 100) % 100, yyyymmdd % 100);
+    y * 372 + m.saturating_sub(1) * 31 + d.saturating_sub(1)
+}
+
+/// Scryfall's `order=color` bucketing, measured 2026-08-09 over 923 cards spanning every colour
+/// shape: `W U B R G`, then multicolour by HOW MANY colours (not which -- guild pairs tie and fall
+/// to the secondary sort), then colourless, then lands. Two parts of that are not what a popcount
+/// would give: colourless sorts last rather than first, and lands sort after it.
+fn color_sort_rank(colors: u8, type_bits: u16) -> u32 {
+    // WUBRG in Scryfall's order; the bit values are color_to_bit's. The C bit is masked off rather
+    // than counted: a colourless card ranks by being colourless, and C alongside a real colour
+    // would otherwise read as an extra colour.
+    const MONO_ORDER: [u8; 5] = [1, 2, 4, 8, 16];
+    const WUBRG: u8 = 1 | 2 | 4 | 8 | 16;
+    let colors = colors & WUBRG;
+    match colors.count_ones() {
+        0 if type_bits & TYPE_LAND != 0 => 10,
+        0 => 9,
+        1 => MONO_ORDER.iter().position(|&bit| colors == bit).unwrap_or(0) as u32,
+        n => 3 + n, // 2 colours -> 5, 3 -> 6, 4 -> 7, 5 -> 8
     }
 }
 
@@ -5736,9 +5898,27 @@ fn sort_key_bits(card: &AOracleCard, p: &APrinting, sort_col: SortCol, descendin
         // exposed value), and cents fit exactly in f32 (max real price 514,202 cents, f32
         // represents any integer up to 2^24 exactly), so skip the /100.0 dollars conversion.
         SortCol::PriceUsd   => p.price_usd.as_ref().map(|v| u32::from(*v) as f32),
+        SortCol::PriceEur   => p.price_eur.as_ref().map(|v| u32::from(*v) as f32),
+        SortCol::PriceTix   => p.price_tix.as_ref().map(|v| u32::from(*v) as f32),
         SortCol::Cubecobra  => card.cubecobra_score.as_ref().map(|v| f32::from(*v)),
         SortCol::EdhrecRank => card.edhrec_rank.as_ref().map(|v| u32::from(*v) as f32),
         SortCol::Name       => Some(u32::from(card.name_rank) as f32),
+        // Packed rather than raw: yyyymmdd exceeds the exact-f32 range (see released_sort_ord).
+        SortCol::Released   => p.released_at_int.as_ref().map(|v| released_sort_ord(u32::from(*v)) as f32),
+        SortCol::Color      => Some(color_sort_rank(card.card_colors, u16::from(card.card_types)) as f32),
+        // Dense ranks assigned post-load; the stored code and artist id do not sort alphabetically
+        // on their own (see assign_set_ranks / assign_artist_ranks).
+        SortCol::Set        => Some(u32::from(p.set_rank) as f32),
+        // Nullable, unlike `Set` beside it: `card_set_code` is non-null but an artist is not, and
+        // `assign_artist_ranks` puts the artistless printings in a trailing rank block keyed on
+        // `(name.is_none(), name)`. Reporting that block as a VALUE made `order=artist` the one
+        // ordering whose absent side moved with the direction in the wrong sense — artistless
+        // sorted last ascending (right) but FIRST descending (wrong), because a real rank reflects
+        // and the absent sentinel does not. Returning None puts it back under the same rule as
+        // every other column. No change to `assign_artist_ranks`: its trailing block is disjoint
+        // from every named rank, so it simply stops being read. 7 printings on the production
+        // corpus, so this is a correctness tidy rather than a visible reshuffle.
+        SortCol::Artist     => (p.card_artist_vid != ARTIST_NONE).then(|| u32::from(p.artist_rank) as f32),
     };
     let pk = primary.map_or(u32::MAX, |v| f32_sort_bits(if descending { -v } else { v }));
     let e = card.edhrec_rank.as_ref().map(|v| u32::from(*v)).unwrap_or(u32::MAX);
@@ -5977,10 +6157,14 @@ impl QueryParams {
     /// `orderby_to_col`/`== "desc"`/`prefer_from_str`/`mode_from_unique` block
     /// each used to repeat.
     fn from_strs(unique: &str, prefer: &str, orderby: &str, direction: &str, limit: usize, page_offset: usize) -> Self {
+        // `prefer` depends on `sort_col`, so bind the column first — see `prefer_for_sort`.
+        // This is the only `QueryParams` constructor, which is what makes one call here enough
+        // to cover `run_query`, `run_query_with_plan`, `explain_analyze` and `explain`.
+        let sort_col = orderby_to_col(orderby);
         QueryParams {
             mode: mode_from_unique(unique),
-            prefer: prefer_from_str(prefer),
-            sort_col: orderby_to_col(orderby),
+            prefer: prefer_for_sort(prefer_from_str(prefer), sort_col),
+            sort_col,
             descending: direction == "desc",
             limit,
             page_offset,
@@ -13110,6 +13294,10 @@ const FIELD_TABLE: &[(&str, FieldKey, FieldExtractor)] = &[
     // now see the true price (e.g. 1.47, not the nearest f32 to 1.47) instead of an
     // approximation.
     ("price_usd", |py| intern!(py, "price_usd"), |py, _c, p, _s, _v| Ok(p.price_usd.as_ref().map(|v| f64::from(u32::from(*v)) / 100.0).into_pyobject(py)?.into_any())),
+    // The other two currencies `order=` already sorts by. Without these a caller can rank a
+    // page by EUR or TIX and then have no way to read the number it was ranked on.
+    ("price_eur", |py| intern!(py, "price_eur"), |py, _c, p, _s, _v| Ok(p.price_eur.as_ref().map(|v| f64::from(u32::from(*v)) / 100.0).into_pyobject(py)?.into_any())),
+    ("price_tix", |py| intern!(py, "price_tix"), |py, _c, p, _s, _v| Ok(p.price_tix.as_ref().map(|v| f64::from(u32::from(*v)) / 100.0).into_pyobject(py)?.into_any())),
     ("prefer_score", |py| intern!(py, "prefer_score"), |py, _c, p, _s, _v| Ok(p.prefer_score.as_ref().map(|v| f32::from(*v)).into_pyobject(py)?.into_any())),
     // card_subtypes preserves the printed order; the set-like collections are stored
     // sorted by vocab id (first-seen order), so they get re-sorted lexicographically
@@ -13297,7 +13485,17 @@ const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 //
 // 2026082501 — `SortPermutations` gains per-order printing-span prefix sums, used to turn a bound on
 // cards visited into a sound O(1) bound on printings examined. Entirely inside `CardIndexes` again.
-const ARCHIVE_FORMAT_VERSION: u32 = 2026090801;
+//
+// 2026090801 — `CardData` drops `coll_vocab_sorted`: the collection vocab is renumbered into
+// lexicographic order at load (`renumber_coll_vocab`), so ids ARE the sorted order. Every stored
+// collection id vector changes meaning, and `CardData`'s own layout moves without either header
+// size moving.
+//
+// 2026090803 — `Printing` gains `set_rank` and `artist_rank`, the dense ranks the six new
+// `order=` values sort by (#913). Struct sizes DO move here, so the header would catch it on its
+// own — the bump is what says which layout an equal-sized future one was, and keeps this branch's
+// value ahead of main's rather than behind it after the merge.
+const ARCHIVE_FORMAT_VERSION: u32 = 2026090803;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -13883,6 +14081,10 @@ impl QueryEngine {
                 flavor_text_lower_id: row.flavor_text_lower_id,
                 card_artist_vid: row.card_artist_vid,
                 card_set_code: row.card_set_code,
+                // Both assigned once the whole printing list exists, by assign_set_ranks /
+                // assign_artist_ranks -- a dense rank cannot be known one row at a time.
+                set_rank: 0,
+                artist_rank: 0,
                 card_border_id: row.card_border_id,
                 card_watermark_id: row.card_watermark_id,
                 collector_number_id: row.collector_number_id,
@@ -13913,6 +14115,10 @@ impl QueryEngine {
         drop(vocab.map);
         let artist_vocab = artists.strings;
         drop(artists.map);
+        // After the vocab is final, before the printings are archived: both ranks are stored on the
+        // printing and must be in place when it is written out.
+        assign_set_ranks(&mut printings);
+        assign_artist_ranks(&mut printings, &artist_vocab);
         let mana_vocab = mana.strings;
         drop(mana.map);
         // Renumber the collection vocab into lexicographic order, so a vocab id's numeric order IS
