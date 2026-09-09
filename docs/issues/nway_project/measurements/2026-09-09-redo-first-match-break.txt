@@ -1,0 +1,42 @@
+THE SMALL-TOTAL REDO FEATURE IGNORES AN EXECUTOR OPTIMIZATION THAT ALREADY SHIPPED.
+
+Question asked: would teaching the executor to skip remaining printings of a card once a match is
+found make the plan faster AND the cost model tighter?
+
+It already does that, where doing it is sound. `push_card_matches`' Mode::Card arm under
+Prefer::Default is `(start..end).find(|&pid| satisfies(pid))`, and it records `examined` as the
+offset from `start` rather than the span -- printings are stored in descending default-prefer order,
+so the first match IS the chosen one (Round 68). Under a CUSTOM prefer it must score every printing,
+because the best-prefer printing cannot be known without seeing them all. Printing/artwork mode
+needs every matching printing by definition. So the fastpath exists exactly where it is available.
+
+WHAT WAS NEVER TOLD IS THE COST MODEL. `stream_redo_printings`' doc asserts the redo "walks the
+whole of offsets[cid]..offsets[cid + 1] for each card the redo loop finds with a nonzero count, so
+this is (matching cards) x (printings per card)", with the per-card count taken as the CORPUS ratio
+n_printings / n_cards. That is false for the dominant case.
+
+Measured, card-mode small-total rows, REDO feature against the realized `redo_examined`:
+
+  bucket                              n     p10     p50     p90
+  Prefer::Default (breaks early)    156    0.36    3.06    4.18
+  custom prefer (scores all)        588    0.16    0.82    2.33
+
+THE OVER-ESTIMATE IS EXACTLY THE REPRINT RATIO. n_printings / n_cards = 97,812 / 31,724 = 3.083,
+against a measured p50 of 3.06 on the rows where the executor breaks early. The feature charges the
+ratio per matching card; the executor examines about one. Under custom prefer, where the span really
+is walked, the same feature reads 0.82 -- roughly right. So this is not a calibration drift, it is
+one branch of a two-branch executor being priced with the other branch's formula.
+
+Plan-level effect on the same split (predicted / measured):
+  Prefer::Default   n=196   p10 0.63   p50 0.92   p90 9.62
+  custom prefer     n=721   p10 0.52   p50 0.87   p90 4.82
+
+THE DISCOUNT ALREADY EXISTS IN THIS CODEBASE. `scan_all(domain_cards, card_first_match_break)`
+applies this correction to `scan_units`, and `card_first_match_break` is already computed as
+`matches!(mode, Mode::Card) && matches!(prefer, Prefer::Default)` at lib.rs:18085.
+`stream_redo_printings` simply does not take the parameter.
+
+CAVEAT BEFORE BUILDING IT: Prefer::Default is ~85% of traffic by REALISTIC_PREFER_WEIGHTS but only
+196 of 917 card-mode small-total rows HERE, because the harness draws prefer uniformly with
+vary_prefer. So the row count understates the traffic weight of the fix, and the realistic-mode
+population is the one to size it on.

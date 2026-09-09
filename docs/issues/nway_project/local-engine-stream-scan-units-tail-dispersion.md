@@ -197,6 +197,23 @@ What the split shows instead is the sharpest localization this item has:
 
 So the missing quantity has a name: **the printing span of the matching subset.** That is a missing FEATURE, which is exactly the signature this item has shown throughout, and no refit of either redo constant reaches it.
 
+## The named gap, found: the redo feature ignores an executor fastpath that already shipped
+
+Asked whether teaching the executor to skip a card's remaining printings once a match is found would help. **It already does that, where sound** — `push_card_matches`' Mode::Card arm under `Prefer::Default` is `(start..end).find(..)` and records `examined` as the offset from `start`, not the span, because printings are stored in descending default-prefer order so the first match is the chosen one (Round 68). Custom prefer must score every printing; printing/artwork mode needs every matching printing by definition.
+
+**The cost model was never told.** `stream_redo_printings` takes the per-card printing count as the CORPUS ratio `n_printings / n_cards`. Measured against the realized `redo_examined`, card-mode small-total rows:
+
+| bucket | n | p10 | p50 | p90 |
+|---|---|---|---|---|
+| `Prefer::Default` (breaks early) | 156 | 0.36 | **3.06** | 4.18 |
+| custom prefer (scores all) | 588 | 0.16 | **0.82** | 2.33 |
+
+**The over-estimate is exactly the reprint ratio**: `n_printings / n_cards` = 97,812 / 31,724 = **3.083** against a measured 3.06. The feature charges the ratio per matching card and the executor examines about one. Under custom prefer the same feature reads 0.82. So this is not calibration drift — it is one branch of a two-branch executor being priced with the other branch's formula.
+
+**And the discount already exists here.** `scan_all(domain_cards, card_first_match_break)` applies exactly this correction to `scan_units`, and `card_first_match_break` is already computed at `lib.rs:18085` as `Mode::Card && Prefer::Default`. `stream_redo_printings` does not take the parameter.
+
+Caveat before building it: `Prefer::Default` is ~85% of traffic by `REALISTIC_PREFER_WEIGHTS` but only 196 of 917 card-mode small-total rows in this harness, because `vary_prefer` draws prefer uniformly. Size the fix on `--mode realistic`, not on these counts.
+
 ## The pair failure, which caps what this item can deliver
 
 `PrintingCompose` is under-predicted on the same rows — 0.30×, 0.63×, 0.67×, 0.77×, 0.81×, 0.87× — so these mis-picks are doubly wrong, and fixing one arm does not fully fix the comparison. Two of the six flips land on `PrintingCompose` rather than the measured best plan, because compose's own under-prediction still wins the argmin after StreamedSelect is corrected.
