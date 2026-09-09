@@ -85,21 +85,31 @@ Each stage is separately landable and separately measured.
 | 1 — enforce `estimate <= guaranteed` | **landed**, delta confined to the predicted 6,888 trace nodes |
 | 1½ — rename `best()`, add `proven()`, audit all 16 read sites | **landed**, byte-identical; not in the original plan |
 | 2 — seed the domain | **left the arc** — re-filed as queue item #7, a latency item gated on the measured 272→176 byte shrink. Consequence: `best()` is renamed, not deleted, which was the accepted trade |
-| 3 — carry both channels to the routing boundary | **open, and re-scoped much smaller — see below** |
+| 3 — carry both channels to the routing boundary | **CLOSED 2026-09-09, no consumer — see below** |
 | 4 — stop an unproven zero collapsing all three spaces | **landed** as a guard, not as unexpressibility — see below |
 | 5 — `narrow_floor` | **open**, fully designed as queue item #8 |
 
-### Stage 3, re-scoped: one bool, not a widened struct
+### Stage 3 is CLOSED: there is no consumer, and the site that looked like one is not
 
-The original plan widened everything `mk_plan_feats` accepts. The call-site audit undercut that: every consumer downstream of the routing boundary is an ACCURACY consumer, and for those the flattening to one scalar is correct — the cost model prices work and wants the best available number.
+The plan widened everything `mk_plan_feats` accepts. The call-site audit already undercut that — every consumer downstream of the routing boundary is an ACCURACY consumer, and for those, flattening to one scalar is correct: the cost model prices work and wants the best available number.
 
-There is exactly one exception, and it is the whole of stage 3's remaining justification. `cost.rs:1077` reads `f.matches == 0` as a STRUCTURAL fact:
+An earlier version of this section claimed one exception survived, `cost.rs:1077` reading `f.matches == 0` as a structural fact. **That was an over-read, corrected 2026-09-09.** It sits inside `stream_perm_steps`, a cost TERM that returns `0.0` for the walk contribution — a pricing decision, and pricing on an estimate is legitimate, which is the same argument this doc already makes about expected-versus-certain zeros. The clause is also redundant: when `matches == 0`, the `offset >= matches` clause beside it reduces to `offset >= 0`, which is always true.
 
-```rust
-if stream_runs_small_gather(f) || f.matches == 0 || u64::from(f.offset) >= u64::from(f.matches) {
-```
+Audited every `f.matches` read in `cost.rs`, and all of them are arithmetic turning cardinality into nanoseconds:
 
-Post-stage-4 that is sound, because a zero can now only come from the proven channel. But it is sound by a distant invariant rather than by the type, which is the situation this doc exists to end. The cheap fix is to carry Tier 1's existing `provably_empty` flag into `PlanFeatures` and branch on that — the flag is already computed in every acquire branch, so this is one field and one predicate, not a widening. (The `offset >= matches` clause beside it is pricing, not answering, and a guess is fine there.)
+| line | read | kind |
+|---|---|---|
+| 920 | `min(offset+limit, matches)` | arithmetic |
+| 921 | `matches / n_printings` | arithmetic |
+| 963-965 | `matches <= STREAM_MIN_MATCHES && matches > 0 && offset < matches` | threshold, prices which executor branch runs |
+| 1016, 1114-1116, 1181, 1193, 1200 | arithmetic | arithmetic |
+| 1077 | the redundant guard above | pricing |
+
+Only two hard returns exist in the file: the `0.0` at 1078, and `ComposePaging::Decline => f64::INFINITY` at 1266 — the latter keyed on the paging enum the acquire supplies, not on a cardinality, and already tracked as item A.
+
+So nothing at or below the routing boundary needs the channel distinction. Carrying it there — whether as both channels or as a single `provably_empty` bool — would add a hot-path field with no reader. The emptiness proof is needed at DISPATCH, not at costing, and Tier 1 already delivers it there.
+
+**The forward-looking question is a different one**, and belongs to acquire rather than to cost: today only `printing_compose` produces a `SpaceEstimate` at all, while `plane` has a `u32` popcount, `candidates` a `PreparedCandidates`, and the two bare ranges a `k`. Each of those COULD synthesize a real measure — plane's popcount is `known(count)`, the ranges' `k` likewise, candidates `known(in_space)` when `all_match_known` and `estimate_only` otherwise — which would make the channel distinction total instead of route-dependent. That is the honest end state and it is worth its own item; it is not a prerequisite for anything here, and it should not be justified by a `cost.rs` consumer, because there isn't one.
 
 ### Stage 4, landed as a guard rather than as unexpressibility
 
@@ -109,7 +119,7 @@ Post-stage-4 that is sound, because a zero can now only come from the proven cha
 1. **Enforce `estimate <= guaranteed` in the mutators.** Retires `best()`'s clamping job. Expected byte-identical on every value consumer — they already read `min(e, g)` — with the delta confined to the trace's `{space}_estimate` keys on the 6,888 nodes, which is precisely where it should show up and nowhere else. Same byte-identity guard as stage 0.
 2. **Seed the domain** (item #7 proper). Retires `best()`'s fallback job; both channels become total. Lands on a codebase where no consumer reads presence any more, so it is provably inert. Verification is necessarily weaker here — semantic scalars plus an explicit diff of the one behavioural site — which is exactly why stages 0 and 1 go first.
    - With 1 and 2 both done, **delete `best()`**: it is now identically `.estimate`. Each of the 23 `lib.rs` call sites becomes `.estimate` or `.guaranteed` according to which consumer it is, and the classification is forced by the code rather than by a prose contract. Retiring `SpaceMeasure::add`'s `best()`-summing asymmetry belongs here too.
-3. **Carry the emptiness PROOF to the routing boundary** (re-scoped, see above). Still a hot path, so it needs a paired A/B isolating this change, per `.claude/rules/benchmark-methodology-review.md` — one added `bool` is cheap but not free, and a measurement of a nearby change does not cover it.
+3. ~~**Carry both channels to the routing boundary.**~~ **CLOSED — no consumer exists; see above.**
 4. **Stop an unproven zero collapsing all three spaces.** Landed as a guard; see above for why the stronger form is its own round.
 5. **Revisit `narrow_floor`.** Finding 3, which by then has no way to spell itself — though note seeding alone does not reach it, so item #2's own fix is still required.
 
