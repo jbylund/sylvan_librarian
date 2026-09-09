@@ -22,6 +22,7 @@ inside one `explain_analyze` call, so their measurements are common-mode.
 from __future__ import annotations
 
 import argparse
+import collections
 import pathlib
 import random
 import statistics
@@ -43,6 +44,8 @@ TERM = "SCAN_PER_ROW"
 MIN_MEASURED_NS = 500.0
 DEFAULT_TOP = 20
 DEFAULT_N_QUERIES = 8000
+#: Below this an orderby cell is too small to read a percentile off.
+MIN_ORDERBY_ROWS = 20
 
 
 def decompose(row: dict, plan: str, *, oracle: bool) -> tuple[float, float] | None:
@@ -66,6 +69,30 @@ def decompose(row: dict, plan: str, *, oracle: bool) -> tuple[float, float] | No
         if name == TERM:
             term_ns = contribution
     return total, term_ns
+
+
+def report_by_orderby(rows: list[dict]) -> None:
+    """Does the dispersion track the PERMUTATION the walk steps through?
+
+    The shape hypothesis: the predicted segment diverges from what the executor examines when the
+    filter constrains a column the permutation is NOT ordered by, because `walk_bounds` can then
+    bound nothing and `perm_walk_span` collapses to the whole corpus.
+    """
+    by_ob: dict[str, list[float]] = collections.defaultdict(list)
+    for r in rows:
+        built = design_row(PLAN, r["acq"], r["limit"], r["offset"])
+        if not built or TERM not in built[0]:
+            continue
+        real = r["counters"][PLAN].get(TERM_ORACLE[(PLAN, TERM)][1])
+        if real:
+            by_ob[r["orderby"]].append(built[0][TERM] / real)
+    print("\nfeature/realized BY ORDERBY -- the permutation the walk steps through:")
+    print(f"  {'orderby':<14} {'n':>7} {'p10':>7} {'p50':>7} {'p90':>7}")
+    for ob, v in sorted(by_ob.items(), key=lambda kv: -statistics.median(kv[1])):
+        if len(v) < MIN_ORDERBY_ROWS:
+            continue
+        s = sorted(v)
+        print(f"  {ob:<14} {len(s):>7,} {s[len(s) // 10]:>7.2f} {statistics.median(s):>7.2f} {s[9 * len(s) // 10]:>7.2f}")
 
 
 def main() -> None:  # noqa: PLR0915 - one table, printed row by row
@@ -99,6 +126,7 @@ def main() -> None:  # noqa: PLR0915 - one table, printed row by row
         best = min(timed, key=lambda k: timed[k])
         rows.append({
             "q": sample.q, "unique": sample.kw["unique"], "limit": sample.kw["limit"], "offset": sample.kw["offset"],
+            "orderby": sample.kw["orderby"], "direction": sample.kw["direction"], "prefer": sample.kw.get("prefer", "default"),
             "acq": acq, "counters": counters, "timed": timed, "picked": picked, "best": best,
             "loss": timed[picked] - timed[best],
             "paging": (pc or {}).get("paging_taken") if picked == "PrintingCompose" else acq.get("compose_paging"),
@@ -114,7 +142,9 @@ def main() -> None:  # noqa: PLR0915 - one table, printed row by row
         shipped = decompose(r, PLAN, oracle=False)
         engine_pred = r["preds"].get(PLAN)
         trust = shipped and engine_pred and abs(shipped[0] / engine_pred - 1.0) < MIRROR_TOLERANCE
-        print(f"  {r['q'][:60]}   unique={r['unique']} off={r['offset']} paging={r['paging']}")
+        print(f"  {r['q'][:56]}")
+        print(f"      orderby={r['orderby']}/{r['direction']}  unique={r['unique']}  off={r['offset']} limit={r['limit']}  "
+              f"prefer={r['prefer']}  paging={r['paging']}")
         for plan in sorted(r["timed"], key=lambda k: r["timed"][k]):
             pred = r["preds"].get(plan)
             mark = " <-PICKED" if plan == r["picked"] else ("  <-best" if plan == r["best"] else "")
@@ -151,6 +181,8 @@ def main() -> None:  # noqa: PLR0915 - one table, printed row by row
         print(f"\nfeature/realized across ALL {len(s):,} rows charging the term: "
               f"p10 {q(0.10):.2f}  p50 {statistics.median(s):.2f}  p90 {q(0.90):.2f}")
         print("A refit scales the RATE, which moves every one of those rows. Read the p50 before proposing one.")
+
+    report_by_orderby(rows)
 
 
 if __name__ == "__main__":

@@ -20,16 +20,16 @@ Two independent sightings have now been read as a rate problem — Round 84's ta
 
 The eight costliest by LOSS (picked minus best measured). All eight had a mirror-exact rebuild, so the term breakdown is the router's own arithmetic, not a re-derivation.
 
-| query | unique / off | feature | realized | ratio | term's share of the prediction |
-|---|---|---|---|---|---|
-| `usd>=0.13 usd<=0.76 cmc>=2 cmc<=5 cn<=126` | card / 100 | 17,276 | 50,443 | **0.34×** | 34.0% |
-| `pow>=1 pow<=3 r>=common` | card / 0 | 31,196 | 12,256 | 2.55× | 56.2% |
-| `cmc>=6 usd<7.31 eur>=0.51 eur<=3.82` | card / 100 | 5,928 | 2,073 | 2.86× | 47.1% |
-| `tou>=1 tou<=2 tix>=0.22` | artwork / 100 | 19,261 | 4,713 | **4.09×** | 62.2% |
-| `id:bgu frame:2015 pow>=2 pow<=4` | artwork / 0 | 28,126 | 14,186 | 1.98× | 49.3% |
-| `pow<3 eur>2.55 tou<=6` | artwork / 100 | 25,344 | 5,861 | **4.32×** | 62.6% |
-| `eur<=2.80 pow>=1 pow<=3` | card / 0 | 31,196 | 14,469 | 2.16× | 56.2% |
-| `frame:showcase cmc>=4` | artwork / 0 | 6,226 | 4,547 | 1.37× | 55.9% |
+| query | orderby | unique | limit/off | feature | realized | ratio | term's share |
+|---|---|---|---|---|---|---|---|
+| `usd>=0.13 usd<=0.76 cmc>=2 cmc<=5 cn<=126` | cubecobra/desc | card | 175/100 | 17,276 | 50,443 | **0.34×** | 34.0% |
+| `pow>=1 pow<=3 r>=common` | toughness/desc | card | 10/0 | 31,196 | 12,256 | 2.55× | 56.2% |
+| `cmc>=6 usd<7.31 eur>=0.51 eur<=3.82` | cmc/asc | card | 10/100 | 5,928 | 2,073 | 2.86× | 47.1% |
+| `tou>=1 tou<=2 tix>=0.22` | cmc/desc | artwork | 175/100 | 19,261 | 4,713 | **4.09×** | 62.2% |
+| `id:bgu frame:2015 pow>=2 pow<=4` | edhrec/asc | artwork | 100/0 | 28,126 | 14,186 | 1.98× | 49.3% |
+| `pow<3 eur>2.55 tou<=6` | cmc/desc | artwork | 10/100 | 25,344 | 5,861 | **4.32×** | 62.6% |
+| `eur<=2.80 pow>=1 pow<=3` | toughness/asc | card | 10/0 | 31,196 | 14,469 | 2.16× | 56.2% |
+| `id:b tou>=1 tix>0.02` | cmc/desc | artwork | 175/100 | 27,345 | 9,013 | 3.03× | 62.5% |
 
 Four things fall out that the aggregates hide.
 
@@ -37,9 +37,24 @@ Four things fall out that the aggregates hide.
 
 **The error runs BOTH ways, and the single costliest row is the under-estimate.** `usd>=0.13 usd<=0.76 cmc>=2 cmc<=5 cn<=126` reads 17,276 against a realized 50,443 — **0.34×** — StreamedSelect was priced at 303 µs, ran in 1,021 µs, was picked, and lost. Every other row in the table is an over-estimate. "Over-charging StreamedSelect" describes seven of eight rows and inverts the worst one.
 
-**Correcting the FEATURE alone flips 6 of the 8 mis-picks.** Set `stream_scan_units` to its realized counter, leave every rate alone, re-run the argmin: six rows move to the plan that was actually fastest. So this is reachable by estimator work, which is the strongest thing that can be said for an item in this arc.
+**Correcting the FEATURE alone flips 7 of the 8 mis-picks.** Set `stream_scan_units` to its realized counter, leave every rate alone, re-run the argmin: six rows move to the plan that was actually fastest. So this is reachable by estimator work, which is the strongest thing that can be said for an item in this arc.
 
-**Every row is `paging=Perm` and every row carries an arithmetic range.** Seven of eight are two-sided or multi-range numeric conjunctions (`usd>=..usd<=..`, `cmc>=..cmc<=..`, `pow>=1 pow<=3`, `tou>=1 tou<=2`, `eur>=..eur<=..`), and the eighth pairs `frame:showcase` with `cmc>=4`. That is a shape hypothesis with a mechanism to look for, not a population artifact: it says the walked segment `stream_scan_units` predicts diverges from what the executor examines specifically when the filter constrains a numeric column that the permutation is not ordered by.
+**Every row is `paging=Perm` and every row carries an arithmetic range** — but the obvious reading of that is REFUTED, and it was in this doc for an hour before being checked.
+
+The hypothesis was that the segment diverges when the filter constrains a column the permutation is NOT ordered by, so `walk_bounds` can bound nothing. Two things kill it. **Row 3 constrains `cmc` and is ordered BY `cmc`** — the one row where the bound should be tight — and is still 2.86× over. And splitting the whole population by `orderby` is flat:
+
+| orderby | n | p10 | p50 | p90 |
+|---|---|---|---|---|
+| toughness | 408 | 0.15 | 1.00 | 2.35 |
+| cmc | 392 | 0.15 | 1.00 | 3.07 |
+| power | 405 | 0.12 | 1.00 | 2.71 |
+| edhrec | 440 | 0.15 | 1.00 | 2.42 |
+| cubecobra | 398 | 0.14 | 1.00 | 2.79 |
+| name | 401 | 0.10 | 1.00 | 2.92 |
+
+Every permutation carries the same perfect median and the same ~20× spread. `orderby` explains none of the dispersion, so this is not the walk-bounds story and no per-orderby constant reaches it either — which also rules out the fix that `printings-walked-per-sort` proposes for its own term.
+
+**What the rows still have in common is a large predicted segment against a small examined one**: the feature reads 19k-31k on six of eight while the executor examines 4.7k-14.5k. That points at early termination — the walk filling its page and stopping — rather than at a mis-bounded segment. It is a hypothesis and it is NOT yet tested; the split to run is feature/realized against page depth `(offset + limit) / matches`. Note `stream_perm_steps` already models page-fill for the PERM_STEP term, so if this is the mechanism, the two terms disagree about the same loop.
 
 ## The pair failure, which caps what this item can deliver
 
@@ -50,7 +65,7 @@ So `scan-per-row` is necessary and not sufficient. The remaining error belongs t
 ## What a fix has to do
 
 - **Not scale `STREAM_SCAN_PER_ROW_NS`.** The p50 is 1.00; there is no bias to remove.
-- **Predict the walked segment better on arith-range conjunctions**, which is where the dispersion lives. The shape hypothesis above is the place to start, and it is testable directly: regress the realized `printings_examined` against the filter's constrained columns versus the permutation's sort column.
+- **Find what the dispersion DOES track**, having ruled out `orderby`. The next split is page depth, on the large-segment-small-examination pattern above; the one after that is `unique`, which is 4 card / 4 artwork in the table and so unlikely on its own.
 - **Be graded on the pair, not the arm.** Single-arm accuracy is what let two independent sightings read this as a rate problem. The gate is `bench_pairwise_ordering.py` plus a picked-plan diff.
 
 ## Evidence trail
