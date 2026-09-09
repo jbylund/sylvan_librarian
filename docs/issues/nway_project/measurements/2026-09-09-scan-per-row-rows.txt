@@ -1,82 +1,59 @@
-Engine loaded: 97,812 printings in 3.6s
+Engine loaded: 97,812 printings in 3.1s
 
-4,478 queries with StreamedSelect timed against at least one other plan, mode=uniform
-showing the 8 costliest by LOSS (picked minus best measured)
+4,499 queries with StreamedSelect timed against at least one other plan, mode=uniform
+showing the 4 costliest by LOSS (picked minus best measured)
 
   usd>=0.13 usd<=0.76 cmc>=2 cmc<=5 cn<=126
       orderby=cubecobra/desc  unique=card  off=100 limit=175  prefer=newest  paging=Perm
-      PrintingCompose   pred    422.72 us   true    516.08 us     0.82x  <-best
-      StreamedSelect    pred    303.33 us   true   1028.33 us     0.29x <-PICKED
-      GatheredScan      pred    611.32 us   true   1575.12 us     0.39x
+      PrintingCompose   pred    422.72 us   true    538.12 us     0.79x  <-best
+      StreamedSelect    pred    303.33 us   true   1080.62 us     0.28x <-PICKED
+      GatheredScan      pred    611.32 us   true   1748.54 us     0.35x
       SCAN_PER_ROW: feature     17,276 vs realized     50,443 =  0.34x   term is 34.0% of StreamedSelect's prediction
       with the feature set to truth: StreamedSelect prices   586.53 us (was 303.33) -> argmin picks PrintingCompose
 
-  pow>=1 pow<=3 r>=common
-      orderby=toughness/desc  unique=card  off=0 limit=10  prefer=usd_high  paging=Perm
-      StreamedSelect    pred    331.13 us   true    188.62 us     1.76x  <-best
-      PrintingCompose   pred    210.00 us   true    400.21 us     0.52x <-PICKED
-      GatheredScan      pred    409.54 us   true    667.54 us     0.61x
-      SCAN_PER_ROW: feature     31,196 vs realized     12,256 =  2.55x   term is 56.2% of StreamedSelect's prediction
-      with the feature set to truth: StreamedSelect prices   218.31 us (was 331.12) -> argmin picks PrintingCompose
+  id:bgu frame:2015 pow>=2 pow<=4
+      orderby=edhrec/asc  unique=artwork  off=0 limit=100  prefer=oldest  paging=Perm
+      StreamedSelect    pred    340.26 us   true    194.79 us     1.75x  <-best
+      PrintingCompose   pred    339.39 us   true    393.92 us     0.86x <-PICKED
+      GatheredScan      pred    393.30 us   true    494.71 us     0.80x
+      SCAN_PER_ROW: feature     28,126 vs realized     14,186 =  1.98x   term is 49.3% of StreamedSelect's prediction
+      with the feature set to truth: StreamedSelect prices   193.55 us (was 340.26) -> argmin picks StreamedSelect
 
   cmc>=6 usd<7.31 eur>=0.51 eur<=3.82
       orderby=cmc/asc  unique=card  off=100 limit=10  prefer=newest  paging=Perm
-      StreamedSelect    pred     75.20 us   true    109.50 us     0.69x  <-best
-      GatheredScan      pred    117.00 us   true    159.83 us     0.73x
-      PrintingCompose   pred     74.06 us   true    285.75 us     0.26x <-PICKED
+      StreamedSelect    pred     75.20 us   true    120.29 us     0.63x  <-best
+      GatheredScan      pred    117.00 us   true    171.21 us     0.68x
+      PrintingCompose   pred     74.06 us   true    288.54 us     0.26x <-PICKED
       SCAN_PER_ROW: feature      5,928 vs realized      2,073 =  2.86x   term is 47.1% of StreamedSelect's prediction
       with the feature set to truth: StreamedSelect prices    27.45 us (was 75.20) -> argmin picks StreamedSelect
 
   tou>=1 tou<=2 tix>=0.22
       orderby=cmc/desc  unique=artwork  off=100 limit=175  prefer=oldest  paging=Perm
-      StreamedSelect    pred    184.77 us   true    102.83 us     1.80x  <-best
-      GatheredScan      pred    203.67 us   true    104.54 us     1.95x
-      PrintingCompose   pred    156.92 us   true    241.21 us     0.65x <-PICKED
+      GatheredScan      pred    203.67 us   true    113.42 us     1.80x  <-best
+      StreamedSelect    pred    184.77 us   true    116.62 us     1.58x
+      PrintingCompose   pred    156.92 us   true    262.83 us     0.60x <-PICKED
       SCAN_PER_ROW: feature     19,261 vs realized      4,713 =  4.09x   term is 62.2% of StreamedSelect's prediction
       with the feature set to truth: StreamedSelect prices    62.24 us (was 184.77) -> argmin picks StreamedSelect
 
-  id:bgu frame:2015 pow>=2 pow<=4
-      orderby=edhrec/asc  unique=artwork  off=0 limit=100  prefer=oldest  paging=Perm
-      StreamedSelect    pred    340.26 us   true    266.00 us     1.28x  <-best
-      PrintingCompose   pred    339.39 us   true    390.62 us     0.87x <-PICKED
-      GatheredScan      pred    393.30 us   true    405.08 us     0.97x
-      SCAN_PER_ROW: feature     28,126 vs realized     14,186 =  1.98x   term is 49.3% of StreamedSelect's prediction
-      with the feature set to truth: StreamedSelect prices   193.55 us (was 340.26) -> argmin picks StreamedSelect
+4 of 4 rows had a mirror-exact rebuild; correcting the FEATURE alone flips 3 mis-pick(s).
 
-  pow<3 eur>2.55 tou<=6
-      orderby=cmc/desc  unique=artwork  off=100 limit=10  prefer=usd_high  paging=Perm
-      StreamedSelect    pred    241.60 us   true    139.83 us     1.73x  <-best
-      GatheredScan      pred    264.60 us   true    148.33 us     1.78x
-      PrintingCompose   pred    167.73 us   true    262.96 us     0.64x <-PICKED
-      SCAN_PER_ROW: feature     25,344 vs realized      5,861 =  4.32x   term is 62.6% of StreamedSelect's prediction
-      with the feature set to truth: StreamedSelect prices    63.92 us (was 241.60) -> argmin picks StreamedSelect
-
-  eur<=2.80 pow>=1 pow<=3
-      orderby=toughness/asc  unique=card  off=0 limit=10  prefer=default  paging=Perm
-      StreamedSelect    pred    331.13 us   true    204.08 us     1.62x  <-best
-      GatheredScan      pred    409.54 us   true    290.50 us     1.41x
-      PrintingCompose   pred    243.82 us   true    318.29 us     0.77x <-PICKED
-      SCAN_PER_ROW: feature     31,196 vs realized     14,469 =  2.16x   term is 56.2% of StreamedSelect's prediction
-      with the feature set to truth: StreamedSelect prices   231.51 us (was 331.12) -> argmin picks StreamedSelect
-
-  id:b tou>=1 tix>0.02
-      orderby=cmc/desc  unique=artwork  off=100 limit=175  prefer=default  paging=Perm
-      StreamedSelect    pred    261.07 us   true    120.08 us     2.17x  <-best
-      GatheredScan      pred    281.60 us   true    132.92 us     2.12x
-      PrintingCompose   pred    180.26 us   true    209.08 us     0.86x <-PICKED
-      SCAN_PER_ROW: feature     27,345 vs realized      9,013 =  3.03x   term is 62.5% of StreamedSelect's prediction
-      with the feature set to truth: StreamedSelect prices   106.84 us (was 261.07) -> argmin picks StreamedSelect
-
-8 of 8 rows had a mirror-exact rebuild; correcting the FEATURE alone flips 7 mis-pick(s).
-
-feature/realized across ALL 2,444 rows charging the term: p10 0.13  p50 1.00  p90 2.71
+feature/realized across ALL 2,446 rows charging the term: p10 0.13  p50 1.00  p90 2.74
 A refit scales the RATE, which moves every one of those rows. Read the p50 before proposing one.
 
 feature/realized BY ORDERBY -- the permutation the walk steps through:
   orderby              n     p10     p50     p90
   toughness          408    0.15    1.00    2.35
-  cmc                392    0.15    1.00    3.07
+  cmc                392    0.16    1.00    3.07
   power              405    0.12    1.00    2.71
-  edhrec             440    0.15    1.00    2.42
-  cubecobra          398    0.14    1.00    2.79
-  name               401    0.10    1.00    2.92
+  edhrec             437    0.14    1.00    2.38
+  cubecobra          401    0.13    1.00    2.79
+  name               403    0.10    1.00    2.93
+
+feature/realized BY PAGE DEPTH (offset+limit)/matches -- the early-termination test:
+  depth                    n     p10     p50     p90
+  < 0.01 (shallow)       606    0.50    1.00    1.91
+  0.01 - 0.05            419    0.27    0.81    2.18
+  0.05 - 0.20            300    0.07    1.00    2.83
+  0.20 - 0.50            211    0.13    1.00    3.01
+  0.50 - 1.00            186    0.14    1.00    6.90
+  >= 1.00 (whole)        722    0.07    1.00    3.00

@@ -54,7 +54,24 @@ The hypothesis was that the segment diverges when the filter constrains a column
 
 Every permutation carries the same perfect median and the same ~20× spread. `orderby` explains none of the dispersion, so this is not the walk-bounds story and no per-orderby constant reaches it either — which also rules out the fix that `printings-walked-per-sort` proposes for its own term.
 
-**What the rows still have in common is a large predicted segment against a small examined one**: the feature reads 19k-31k on six of eight while the executor examines 4.7k-14.5k. That points at early termination — the walk filling its page and stopping — rather than at a mis-bounded segment. It is a hypothesis and it is NOT yet tested; the split to run is feature/realized against page depth `(offset + limit) / matches`. Note `stream_perm_steps` already models page-fill for the PERM_STEP term, so if this is the mechanism, the two terms disagree about the same loop.
+**What the rows have in common is a large predicted segment against a small examined one** — feature 19k-31k on six of eight while the executor examines 4.7k-14.5k. The reading was early termination: the walk fills its page and stops while the feature predicts the whole segment. **Tested, and refuted too.**
+
+feature/realized by page depth, `(offset + limit) / matches`:
+
+| depth | n | p10 | p50 | p90 |
+|---|---|---|---|---|
+| < 0.01 (shallow) | 606 | **0.50** | 1.00 | **1.91** |
+| 0.01 - 0.05 | 419 | 0.27 | 0.81 | 2.18 |
+| 0.05 - 0.20 | 300 | 0.07 | 1.00 | 2.83 |
+| 0.20 - 0.50 | 211 | 0.13 | 1.00 | 3.01 |
+| 0.50 - 1.00 | 186 | 0.14 | 1.00 | 6.90 |
+| **>= 1.00 (whole)** | 722 | **0.07** | 1.00 | **3.00** |
+
+The hypothesis predicted the worst over-estimate at shallow depth, settling to 1.00 as the page needs the whole result. The opposite happens: shallow depth has the TIGHTEST spread, and **at depth >= 1.00, where the page needs every match and early termination is impossible, the ratio still spans 0.07-3.00**. If the feature predicted the segment and the walk traversed all of it, that cell would read ~1.00. It does not. **So the error is not about when the walk stops — it is about what the segment IS.**
+
+**This search has precedent and it already concluded empty.** `stream_perm_steps`' own doc comment (`cost.rs:1074`) records for the sibling term: "nothing already on `PlanFeatures` predicts the residual (max |r| 0.12 against `match_rate`, page depth, and the estimate itself)". Page depth is named there explicitly. Two covariates are now ruled out for THIS term by direct measurement, and Round 69 ruled out the obvious set for the sibling — so the next person should not spend another round on covariate search.
+
+**That promotes the remaining reading:** the feature may be measuring the wrong quantity rather than measuring the right one badly. It is exactly the question [the queue](local-engine-nway-followup-queue.md)'s `walk-variable-check` asks of `printings_walked`, and it now generalizes to `stream_scan_units`. A perfect median with 20x dispersion that no available covariate predicts is the signature of a MISSING TERM, not of a mis-scaled one.
 
 ## The pair failure, which caps what this item can deliver
 
@@ -65,7 +82,7 @@ So `scan-per-row` is necessary and not sufficient. The remaining error belongs t
 ## What a fix has to do
 
 - **Not scale `STREAM_SCAN_PER_ROW_NS`.** The p50 is 1.00; there is no bias to remove.
-- **Find what the dispersion DOES track**, having ruled out `orderby`. The next split is page depth, on the large-segment-small-examination pattern above; the one after that is `unique`, which is 4 card / 4 artwork in the table and so unlikely on its own.
+- **Not search for another covariate.** `orderby` and page depth are both ruled out here by direct measurement, and Round 69 ruled out `match_rate`, page depth and the estimate itself for the sibling term at max |r| 0.12. Treat the shape as a missing term and go at the loop, which is what `walk-variable-check` proposes.
 - **Be graded on the pair, not the arm.** Single-arm accuracy is what let two independent sightings read this as a rate problem. The gate is `bench_pairwise_ordering.py` plus a picked-plan diff.
 
 ## Evidence trail

@@ -44,8 +44,18 @@ TERM = "SCAN_PER_ROW"
 MIN_MEASURED_NS = 500.0
 DEFAULT_TOP = 20
 DEFAULT_N_QUERIES = 8000
-#: Below this an orderby cell is too small to read a percentile off.
+#: Below this a cell is too small to read a percentile off.
 MIN_ORDERBY_ROWS = 20
+#: Page-depth cells, as `(offset + limit) / matches` lower bounds. Ordered high-to-low so the first
+#: match wins; the top cell is "the page needs the whole result, so the walk runs to the end".
+PAGE_DEPTH_BUCKETS = [
+    (1.0, ">= 1.00 (whole)"),
+    (0.5, "0.50 - 1.00"),
+    (0.2, "0.20 - 0.50"),
+    (0.05, "0.05 - 0.20"),
+    (0.01, "0.01 - 0.05"),
+    (0.0, "< 0.01 (shallow)"),
+]
 
 
 def decompose(row: dict, plan: str, *, oracle: bool) -> tuple[float, float] | None:
@@ -93,6 +103,38 @@ def report_by_orderby(rows: list[dict]) -> None:
             continue
         s = sorted(v)
         print(f"  {ob:<14} {len(s):>7,} {s[len(s) // 10]:>7.2f} {statistics.median(s):>7.2f} {s[9 * len(s) // 10]:>7.2f}")
+
+
+def report_by_page_depth(rows: list[dict]) -> None:
+    """Does the dispersion track PAGE DEPTH -- how much of the result the page actually needs?
+
+    The early-termination hypothesis: `stream_scan_units` predicts the whole walked segment while the
+    executor stops once the page is filled. If that is the mechanism, feature/realized should be
+    LARGEST where the page needs the smallest fraction of the matches, and settle toward 1.00 as the
+    page approaches the whole result -- because there the walk really does run to the end.
+
+    Depth is `(offset + limit) / matches`, the same quantity `page_span` is built from.
+    """
+    buckets: dict[str, list[float]] = collections.defaultdict(list)
+    for r in rows:
+        built = design_row(PLAN, r["acq"], r["limit"], r["offset"])
+        if not built or TERM not in built[0]:
+            continue
+        real = r["counters"][PLAN].get(TERM_ORACLE[(PLAN, TERM)][1])
+        matches = r["acq"].get("matches")
+        if not real or not matches:
+            continue
+        depth = (r["offset"] + r["limit"]) / matches
+        label = next(lab for lo, lab in PAGE_DEPTH_BUCKETS if depth >= lo)
+        buckets[label].append(built[0][TERM] / real)
+    print("\nfeature/realized BY PAGE DEPTH (offset+limit)/matches -- the early-termination test:")
+    print(f"  {'depth':<18} {'n':>7} {'p10':>7} {'p50':>7} {'p90':>7}")
+    for _lo, label in reversed(PAGE_DEPTH_BUCKETS):
+        v = buckets.get(label)
+        if not v or len(v) < MIN_ORDERBY_ROWS:
+            continue
+        s = sorted(v)
+        print(f"  {label:<18} {len(s):>7,} {s[len(s) // 10]:>7.2f} {statistics.median(s):>7.2f} {s[9 * len(s) // 10]:>7.2f}")
 
 
 def main() -> None:  # noqa: PLR0915 - one table, printed row by row
@@ -183,6 +225,7 @@ def main() -> None:  # noqa: PLR0915 - one table, printed row by row
         print("A refit scales the RATE, which moves every one of those rows. Read the p50 before proposing one.")
 
     report_by_orderby(rows)
+    report_by_page_depth(rows)
 
 
 if __name__ == "__main__":
