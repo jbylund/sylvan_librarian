@@ -4,6 +4,21 @@
 
 The term is `stream_scan_units * residual_on * STREAM_SCAN_PER_ROW_NS`, with `STREAM_SCAN_PER_ROW_NS = 5.97` against GatheredScan's `GATHER_SCAN_PER_ROW_NS = 2.06`.
 
+## CORRECTED 2026-09-09: the pooled p50 of 1.00 is two populations cancelling
+
+The section below says "the rate is already right, the p50 is 1.00, do not refit". That is correct about the POOLED number and it concealed the real structure. A systematic correlation of the residual against every exposed acquire field found the first covariates to clear Round 69's 0.12 ceiling — `prepare_plane_word_ops` at **r = 0.371** and `broadcast_printings` at **0.333** — and splitting on them separates the medians for the first time:
+
+| bucket | n | p10 | p50 | p90 |
+|---|---|---|---|---|
+| no plane | 1,128 | 0.13 | **0.81** | 1.91 |
+| plane split off + legality broadcast | 579 | 0.55 | **1.39** | **8.67** |
+
+**Opposite median bias — 0.81 under against 1.39 over.** The pooled 1.00 is their average, not a property of either, which is why six earlier splits (orderby, page depth, route, mode, prefer, card-invariance) all read 1.00 in every cell. **Two corrections are available in opposite directions, not none.** Full numbers in [measurements/2026-09-09-scan-per-row-plane-split.txt](measurements/2026-09-09-scan-per-row-plane-split.txt).
+
+The mechanism matches each sign: a plane captures part of the filter, so the residual left for `card_pass` is thinner and P3 settles more cards at card level while `scan_units` still spans the candidates — over-estimating. Without a plane the whole predicate is residual and P3 examines more than the candidate span predicts — under-estimating.
+
+**What it does not explain:** the spread WITHIN each bucket is still 14-16×. The split separates bias, not dispersion. `prepare_plane_word_ops` is already a `PlanFeatures` field, so a plane-aware correction needs no new plumbing.
+
 ## The refit trap, stated first because it is the whole point
 
 Feature over realized counter (`stream_scan_units` against `printings_examined`), across all **2,441** rows that charge the term, uniform sampler, 8,000 queries:

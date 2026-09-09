@@ -1,0 +1,39 @@
+THE POOLED p50 OF 1.00 WAS TWO POPULATIONS CANCELLING.
+
+Six covariate splits had come back flat -- orderby, page depth, acquire route within compose, mode,
+prefer, and the card-invariance extension -- every cell reading p50 ~1.00 with a 15-25x spread. A
+systematic correlation of log(feature/realized) against every exposed acquire field found the first
+covariates to clear Round 69's 0.12 ceiling for the sibling term:
+
+  prepare_plane_word_ops   r = 0.371
+  broadcast_printings      r = 0.333
+  realized                 r = -0.257
+  and_estimate_ns          r = 0.238
+  stream_scan_units        r = 0.176
+
+Both leaders are plane/broadcast signals. Splitting compose rows on them:
+
+  bucket                                    n     p10     p50     p90    spread
+  no plane                              1,128    0.13    0.81    1.91     14.3x
+  plane split off + legality broadcast    579    0.55    1.39    8.67     15.9x
+  no plane + legality broadcast            61    0.09    1.00    2.57     29.3x
+
+THE TWO DOMINANT BUCKETS HAVE OPPOSITE MEDIAN BIAS: 0.81 (UNDER) against 1.39 (OVER). The pooled
+p50 of 1.00 is their average, not a property of either. That is why every earlier median test read
+1.00 and why "the rate is already right, do not refit" -- correct as far as it went -- concealed that
+TWO corrections are available, in opposite directions, rather than none.
+
+The tail is in the plane bucket too: p90 8.67 against 1.91 without a plane.
+
+MECHANISM, and it is consistent with the direction of each bias. A plane captures part of the filter,
+so the residual left for `card_pass` is thinner and P3 settles more cards at card level while
+`scan_units` still spans the candidates -- hence OVER-estimating where a plane is split off. Without
+a plane the whole predicate is residual and P3 examines MORE than the candidate span predicts --
+hence UNDER-estimating. Two mechanisms, opposite signs, one feature.
+
+WHAT THIS DOES NOT EXPLAIN: the spread WITHIN each bucket is still 14-16x. The split separates the
+BIAS, not the dispersion. So a plane-aware correction would fix the median of each population and
+leave most of the variance.
+
+`prepare_plane_word_ops` is ALREADY a PlanFeatures field, so a plane-aware `stream_scan_units` needs
+no new plumbing.
