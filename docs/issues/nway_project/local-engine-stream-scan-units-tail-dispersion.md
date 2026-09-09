@@ -17,7 +17,14 @@ The section below says "the rate is already right, the p50 is 1.00, do not refit
 
 The mechanism matches each sign: a plane captures part of the filter, so the residual left for `card_pass` is thinner and P3 settles more cards at card level while `scan_units` still spans the candidates — over-estimating. Without a plane the whole predicate is residual and P3 examines more than the candidate span predicts — under-estimating.
 
-**What it does not explain:** the spread WITHIN each bucket is still 14-16×. The split separates bias, not dispersion. `prepare_plane_word_ops` is already a `PlanFeatures` field, so a plane-aware correction needs no new plumbing.
+**What it does not explain:** the spread WITHIN each bucket is still 14-16×, and **that part is not reachable.** Re-running the all-fields correlation inside each bucket — where the cancelling bias can no longer mask anything, and with derived ratios added — finds nothing worth acting on. The no-plane bucket's leaders (`stream_scan_units` 0.252, `eval_domain` 0.250, `match_rate` 0.245, `scan_units` 0.243) are mutually collinear size proxies: one weak signal at r ≈ 0.25, not six. The plane bucket has nothing above 0.19.
+
+**So the item's ceiling is now known.** The bias is fixable and the dispersion is not:
+
+- a plane-aware `stream_scan_units` can move each population's median to 1.00, from 0.81 and 1.39
+- the ~15× within-bucket spread survives, because no available feature predicts it
+
+Worth having anyway — a term whose median is right in BOTH populations is one a rate can be fitted against honestly, which the cancelling pair made impossible. But nobody should expect the 20× to close. Seven covariate splits and two systematic correlation searches stand behind that. `prepare_plane_word_ops` is already a `PlanFeatures` field, so the correction needs no new plumbing.
 
 ## The refit trap, stated first because it is the whole point
 

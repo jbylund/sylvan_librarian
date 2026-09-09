@@ -37,3 +37,39 @@ leave most of the variance.
 
 `prepare_plane_word_ops` is ALREADY a PlanFeatures field, so a plane-aware `stream_scan_units` needs
 no new plumbing.
+
+CHASING THE WITHIN-BUCKET RESIDUAL: nothing reachable.
+
+Re-ran the same all-fields correlation INSIDE each bucket, so the cancelling bias could no longer
+mask a covariate, and added derived ratios (match_rate, page_depth, span_per_card,
+matches_per_card, bcast_frac, plane_per_card).
+
+  no plane  (n=1,189, within-bucket 0.13 / 0.83 / 1.95)
+    stream_scan_units          0.252
+    residual_card_pass         0.250
+    eval_domain                0.250
+    match_rate                 0.245
+    scan_units                 0.243
+    printings_walked          -0.230
+
+  plane split off  (n=607, within-bucket 0.51 / 1.39 / 8.67)
+    collection_broadcast_printings  0.188
+    stream_perm_steps              -0.166
+    stream_redo_printings           0.163
+    matches_per_card               -0.141
+
+READING. The no-plane leaders are all mutually collinear SIZE proxies -- one weak signal at r ~ 0.25
+("bigger queries are estimated worse"), not six findings. The plane bucket has nothing above 0.19.
+So the within-bucket dispersion is not reachable from PlanFeatures, matching Round 69's max |r| 0.12
+for the sibling term (slightly higher here, still weak).
+
+WHAT THIS SETTLES ABOUT THE ITEM'S CEILING. The BIAS is fixable and the DISPERSION is not:
+
+  - a plane-aware `stream_scan_units` can move each population's median to 1.00 (from 0.81 and 1.39)
+  - the ~15x within-bucket spread survives, because no available feature predicts it
+
+That is still worth having: a term whose median is right in BOTH populations rather than only on
+average is a term a rate can be fitted against honestly. But this item cannot deliver a tight
+feature, and anyone expecting the 20x to close should read this section first.
+
+Seven covariate splits and two systematic correlation searches now stand behind that.
