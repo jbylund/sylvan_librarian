@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import boto3
+import botocore.session
 import psycopg
 import requests
 from botocore.exceptions import ClientError
@@ -55,6 +56,20 @@ ORIGINAL_KEY = "o"
 # Default face index for single-faced cards.
 # Double-faced cards will eventually use face "1" and "2" for their respective faces.
 DEFAULT_FACE = "1"
+
+# S3 image key layout: img/{set_code}/{collector_number}/{face}/{size}.webp
+IMAGE_PREFIX = "img/"
+# Parts after the img/ prefix: set code, collector number, face, size.webp
+IMAGE_KEY_PART_COUNT = 4
+
+# S3 caps ListObjectsV2 at 1000 keys per response regardless of MaxKeys, so a
+# full image listing is hundreds of round trips whose responses botocore has to
+# parse. That parsing is CPU-bound and holds the GIL, so the listing fans out
+# across processes; threads measured no better than listing sequentially. Kept
+# only modestly above core count because the sync host also serves API traffic.
+S3_LIST_WORKERS = 16
+# Prefixes handed to a listing worker per task.
+S3_LIST_CHUNKSIZE = 2
 
 
 class CardImage:
@@ -521,40 +536,178 @@ def get_db_cards(args: Args) -> set[tuple[str, str, str, str]]:
     }
 
 
+def make_listing_session() -> botocore.session.Session:
+    """Build a botocore session that leaves S3 timestamps unparsed.
+
+    botocore runs every LastModified value through dateutil's generic text
+    parser, which costs roughly 190 microseconds per key and accounts for about
+    two thirds of the CPU spent listing a few hundred thousand images. Listing
+    only needs object keys, so the timestamp is left as the string S3 sent.
+
+    This is scoped to listing rather than applied globally so that upload
+    clients keep parsing timestamps into datetime objects as usual.
+
+    Returns:
+        A botocore session whose response parsers skip timestamp parsing
+    """
+    session = botocore.session.get_session()
+    session.get_component("response_parser_factory").set_parser_defaults(
+        timestamp_parser=lambda value: value,
+    )
+    return session
+
+
+def make_listing_client() -> Any:  # noqa: ANN401
+    """Build an S3 client tuned for large listings.
+
+    Returns:
+        Boto3 S3 client that does not parse response timestamps
+    """
+    return boto3.Session(botocore_session=make_listing_session()).client("s3")
+
+
+def parse_image_key(key: str) -> tuple[str, str, str, str] | None:
+    """Parse an S3 image key into its component parts.
+
+    Args:
+        key: S3 object key, expected as img/{set}/{collector}/{face}/{size}.webp
+
+    Returns:
+        The (set_code, collector_number, face_idx, size) parts, or None if the
+        key is not a WebP image in that layout
+    """
+    if not key.endswith(".webp"):
+        return None
+
+    # Discard the img/ prefix
+    _img, _slash, obj_key = key.partition("/")
+    parts = obj_key.split("/")
+    if len(parts) != IMAGE_KEY_PART_COUNT:
+        return None
+
+    set_code, collector_number, face_idx, size_webp = parts
+    return set_code, collector_number, face_idx, size_webp.partition(".")[0]
+
+
+def list_prefix_keys(s3_client: Any, bucket: str, prefix: str) -> set[tuple[str, str, str, str]]:  # noqa: ANN401
+    """List every image key under one prefix.
+
+    Args:
+        s3_client: Boto3 S3 client
+        bucket: S3 bucket name
+        prefix: Key prefix to page through
+
+    Returns:
+        Set of (set_code, collector_number, face_idx, size) tuples
+    """
+    found = set()
+    paginator = s3_client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            parsed = parse_image_key(obj["Key"])
+            if parsed is not None:
+                found.add(parsed)
+    return found
+
+
+def list_image_prefixes(s3_client: Any, bucket: str, set_code: str | None) -> list[str]:  # noqa: ANN401
+    """Enumerate the per-set prefixes that the listing fans out over.
+
+    Args:
+        s3_client: Boto3 S3 client
+        bucket: S3 bucket name
+        set_code: Restrict to a single set, which skips prefix discovery
+
+    Returns:
+        List of key prefixes, one per set
+    """
+    if set_code:
+        return [f"{IMAGE_PREFIX}{set_code}/"]
+
+    prefixes = []
+    paginator = s3_client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=IMAGE_PREFIX, Delimiter="/"):
+        prefixes.extend(common["Prefix"] for common in page.get("CommonPrefixes", []))
+    return prefixes
+
+
+class S3ImageLister:
+    """Multiprocessing worker pool for listing images already in S3.
+
+    Mirrors CardProcessorPool: each worker builds one client in the initializer
+    rather than per task. Workers return plain tuples instead of CardImage
+    instances, because pickling several hundred thousand objects back to the
+    parent would cost more than the listing this parallelizes saves.
+    """
+
+    s3_client = None
+
+    @classmethod
+    def init_worker(cls) -> None:
+        """Initialize worker process with a listing-tuned S3 client.
+
+        This runs once per worker process when the pool is created.
+        Sets cls.s3_client which is separate per worker process.
+        """
+        cls.s3_client = make_listing_client()
+
+    @classmethod
+    def list_prefix_worker(cls, job_task: tuple[str, str]) -> set[tuple[str, str, str, str]]:
+        """Worker function for parallel listing of a single prefix.
+
+        Args:
+            job_task: The (bucket, prefix) pair to list
+
+        Returns:
+            Set of (set_code, collector_number, face_idx, size) tuples
+        """
+        bucket, prefix = job_task
+        return list_prefix_keys(cls.s3_client, bucket, prefix)
+
+
 def get_s3_cards(args: Args) -> set[CardImage]:
     """Get all cards in S3.
+
+    The listing is fanned out one task per set prefix. A single sequential
+    listing spends most of its time parsing responses rather than waiting on
+    the network, so splitting it across processes is what actually helps.
 
     Args:
         args: Command-line arguments
 
     Returns:
-        Set of tuples containing (set_code, collector_number, face_idx, size)
+        Set of CardImage objects already present in S3
     """
     s3_cards = set()
     if not args.skip_existing:
         # no point in populating if we're not going to use it
         return s3_cards
 
-    s3resource = boto3.resource("s3")
-    bucket = s3resource.Bucket(args.bucket)
+    s3_client = make_listing_client()
+    prefixes = list_image_prefixes(s3_client, args.bucket, args.set_code)
 
-    prefix = "img/"
-    if args.set_code:
-        prefix += f"{args.set_code}/"
-
-    for obj in bucket.objects.filter(Prefix=prefix, MaxKeys=9999999):
-        if not obj.key.endswith(".webp"):
-            continue
-
+    if len(prefixes) <= 1:
+        # One prefix cannot be split across workers, so skip the pool entirely.
+        key_parts = list_prefix_keys(s3_client, args.bucket, prefixes[0]) if prefixes else set()
+    else:
+        logger.info("Listing %d image prefixes using %d worker processes", len(prefixes), S3_LIST_WORKERS)
+        key_parts = set()
+        job_tasks = [(args.bucket, prefix) for prefix in prefixes]
+        pool = multiprocessing.Pool(processes=S3_LIST_WORKERS, initializer=S3ImageLister.init_worker)
         try:
-            # Discard the img/ prefix
-            _img, _slash, obj_key = obj.key.partition("/")
-            parts = obj_key.split("/")
-            try:
-                set_code, collector_number, face_idx, size_webp = parts
-            except ValueError:
-                continue
-            size = size_webp.partition(".")[0]
+            for found in pool.imap_unordered(
+                func=S3ImageLister.list_prefix_worker,
+                iterable=job_tasks,
+                chunksize=S3_LIST_CHUNKSIZE,
+            ):
+                key_parts |= found
+        finally:
+            # Properly clean up the pool to avoid weakref finalize errors
+            pool.close()  # Prevent new tasks from being submitted
+            pool.join()  # Wait for all worker processes to finish
+
+    for set_code, collector_number, face_idx, size in key_parts:
+        try:
             s3_cards.add(
                 CardImage(
                     set_code=set_code,
