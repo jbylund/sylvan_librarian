@@ -176,6 +176,27 @@ The gated rule was built — `filter_touches_divergent_format` over `BitPlanes::
 
 **The hypothesis was wrong regardless.** The chain was "compose grades 20.0× against candidates' 2.7× because compose's fix does not cover compose". The extension reaches under 1% of queries, so missing card-invariance is not what disperses compose's rows. **The dispersed compose rows have `tier > 0` and are NOT card-invariant** — genuinely printing-varying residuals where P3 does walk spans, and where `stream_scan_units` falls through to the big `else` branch: Round 30's redo-pass calibration, fit as a wall-clock RESIDUAL because no structural counter existed for the redo's real work. That is where the 20× lives.
 
+## Where the remaining error is: the small-total redo branch
+
+The counters needed to go after the `else` branch already exist — Round 31 added `PhaseStats::redo_examined` and refit directly against it, and a separate `REDO_SCAN_PER_ROW` term consumes it. So Round 30's wall-clock-residual chain is already superseded.
+
+A double-charge looked likely (the `else` branch adds `2.237 * redo_candidates` into `stream_scan_units` in CARD MODE only, while `REDO_SCAN_PER_ROW` charges the redo again at the same 5.97 rate) and is **refuted**: card mode and printing/artwork have nearly identical profiles, and small-total rows are UNDER-predicted at the median, the wrong direction for a double charge.
+
+What the split shows instead is the sharpest localization this item has:
+
+| bucket | n | p10 | p50 | p90 |
+|---|---|---|---|---|
+| printing/artwork + large | 2,317 | 0.44 | 1.10 | **1.62** |
+| card mode + large | 1,070 | 0.35 | 1.11 | **1.64** |
+| printing/artwork + small-total | 1,713 | 0.52 | 0.82 | **6.26** |
+| card mode + small-total | 917 | 0.55 | 0.86 | **6.76** |
+
+**All of StreamedSelect's dispersion is in the small-total redo branch.** Large-total rows predict at p90 1.62-1.64, which is fine; the small-total branch is p90 6.26-6.76.
+
+**And that branch's own term names the missing quantity.** `stream_redo_printings`' doc reads p10 0.19 / p50 0.93 / p90 3.38 against `redo_examined`, and says "the tail is the cardinality estimate arriving through `matches` rather than this shape" — its per-card printing count is the CORPUS ratio `n_printings / n_cards`, "because nothing on `PlanFeatures` describes the printing span of the MATCHING subset specifically — `scan_units` spans the candidates, not the matches."
+
+So the missing quantity has a name: **the printing span of the matching subset.** That is a missing FEATURE, which is exactly the signature this item has shown throughout, and no refit of either redo constant reaches it.
+
 ## The pair failure, which caps what this item can deliver
 
 `PrintingCompose` is under-predicted on the same rows — 0.30×, 0.63×, 0.67×, 0.77×, 0.81×, 0.87× — so these mis-picks are doubly wrong, and fixing one arm does not fully fix the comparison. Two of the six flips land on `PrintingCompose` rather than the measured best plan, because compose's own under-prediction still wins the argmin after StreamedSelect is corrected.

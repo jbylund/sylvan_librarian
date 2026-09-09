@@ -39,3 +39,41 @@ TWO CORRECTIONS THIS FORCES.
    place to look.
 
 KEPT OR NOT is a judgment call: correct on 69 rows, no measurable win, no measurable harm, one flip.
+
+FOLLOW-UP: ARE THE COUNTERS THERE, AND IS THE REDO DOUBLE-CHARGED?
+
+Counters: YES. Round 31 added `PhaseStats::redo_examined`, "the exact printing count the redo pass
+re-examines", and refit the else branch directly against it -- superseding Round 30's wall-clock
+residual chain. A separate `REDO_SCAN_PER_ROW` term (`stream_redo_printings`) now consumes that
+counter too.
+
+Double-charge hypothesis: REFUTED. The else branch adds `2.237 * redo_candidates` into
+stream_scan_units in CARD MODE ONLY, priced at STREAM_SCAN_PER_ROW_NS; REDO_SCAN_PER_ROW charges
+`stream_redo_printings * STREAM_REDO_SCAN_PER_ROW_NS` gated on stream_runs_small_gather, and the two
+rates are equal (both 5.97). If that were a double charge, card mode would be over-predicted
+relative to printing/artwork on small-total rows. It is not:
+
+  bucket                                          n     p10     p50     p90
+  printing/artwork + large                    2,317    0.44    1.10    1.62
+  card mode + large                           1,070    0.35    1.11    1.64
+  printing/artwork + small-total               1,713    0.52    0.82    6.26
+  card mode + small-total                       917    0.55    0.86    6.76
+
+Card mode (which gets the addend) and printing/artwork (which does not) have nearly identical
+profiles, and small-total rows are UNDER-predicted at the median -- the wrong direction for a
+double charge.
+
+WHAT THE SPLIT DOES SHOW, and it is the sharpest localization yet: ALL of StreamedSelect's
+prediction dispersion is in the SMALL-TOTAL branch. p90 6.26-6.76 there against 1.62-1.64 on
+large-total rows, in both modes. Large-total StreamedSelect is well predicted; the small-total redo
+branch is not.
+
+AND THAT BRANCH'S OWN TERM ALREADY DIAGNOSES ITSELF. `stream_redo_printings`' doc: it reads
+p10 0.19 / p50 0.93 / p90 3.38 against `redo_examined`, and "the tail is the cardinality estimate
+arriving through `matches` rather than this shape". Its per-card printing count is the CORPUS ratio
+`n_printings / n_cards`, "because nothing on `PlanFeatures` describes the printing span of the
+MATCHING subset specifically -- `scan_units` spans the candidates, not the matches."
+
+So the missing quantity is named: the printing span of the MATCHING subset. That is a missing
+FEATURE, consistent with the signature this whole item has shown (perfect median, wide dispersion,
+no covariate), and it is not reachable by refitting either redo constant.
