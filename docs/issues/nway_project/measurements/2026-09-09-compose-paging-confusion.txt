@@ -1,0 +1,48 @@
+`empty-page`'s COST-MODEL HALF, measured on both populations with the HEAD wheel.
+Harness: scripts/bench_compose_paging_confusion.py, 8,000 queries each, vary_prefer.
+
+PREDICTED ComposePaging x REALIZED PagingTaken (uniform, 3,583 rows where compose was costed):
+
+  predicted            Perm    EmptyPage   OrderbyWalk   Gather   GatherWalkDeclined
+  Decline                 3          862                     23
+  Gather                273           40            36        47
+  OrderbyWalk                        89           658        23         4
+  Perm                 1490           35
+
+The enums are asymmetric on purpose -- 4 predicted values against 19 realized exits -- so only the
+cross-tab shows the disagreement. Two populations fall out of it.
+
+                        wasted build          excluded, compose WINS    excluded, compose LOSES    ceiling
+  uniform  (rank)    54 q  1.26 ms  0.64%     77 rows   +1.02 ms  0.52%   757 rows  -21.51 ms       1.16%
+  realistic (value)  11 q  0.23 ms  0.16%     15 rows   +0.23 ms  0.16%   173 rows   -5.97 ms       0.32%
+
+  "ceiling" = a PERFECT gate that fires only on the winning rows and never pays a wasted build,
+  as a share of all picked-plan measured time.
+
+THREE FINDINGS.
+
+1. THE 3.59% DOES NOT REPRODUCE. Round 80 reported the wasted build at 74 queries and 3.59% of all
+   picked-plan measured time. Per-query this matches closely -- 54 queries, declined_ns p50 18.21 us
+   and p90 45.33 us against Round 80's 17.2 and 44.3 -- so the phenomenon is the same and the
+   DENOMINATOR differs. Which denominator Round 80 used is not established here, so this is recorded
+   as an unexplained discrepancy rather than as an error on its part. What is measured now is 0.64%
+   (uniform) and 0.16% (realistic).
+
+2. THE PREMISE IS TRUE FOR 9% OF THE POPULATION AND FALSE FOR 91%. The empty-page doc says
+   "`EmptyPage` returns the correct answer faster than anything else". On 77 of 834 timed rows it
+   does. On the other 757 compose is SLOWER despite taking the EmptyPage exit -- reaching that exit
+   still pays a build. So the INFINITY price is right far more often than it is wrong.
+
+3. THE NAIVE FIX IS A MEASURED REGRESSION. Stop pricing Decline at INFINITY and route all these to
+   compose: -21.51 ms on uniform, -5.97 ms on realistic. Do not do this.
+
+WHAT IS ACTUALLY ACTIONABLE, and it is narrow: 53 of the 54 wasted-build rows exit
+`DeclineSparseExact` (1 is `DeclineSparseEstimate`), and the model predicted `Perm` on most of them.
+So `compose_paging_for` does not model the executor's sparse-decline gate at all. That is a specific,
+nameable gap worth the 0.64%/0.16% -- a prediction fix, not a pricing fix, and it cannot regress the
+excluded side because it only stops compose being admitted where it will refuse.
+
+HARNESS BUG WORTH RECORDING. The first version of this script gated every row on `trials_ns` being
+non-empty and reported the wasted-build population as ZERO. A declining plan records `declined_ns`
+INSTEAD of `trials_ns`, not beside it, so that filter silently dropped exactly the rows the section
+existed to count -- the population-parity trap in .claude/rules/benchmark-methodology-review.md.
