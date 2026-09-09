@@ -13322,13 +13322,20 @@ impl EmitStrCache {
         Ok(built.into_any())
     }
 
-    /// One collection field as a list of cached `PyString`s, in stored order.
+    /// One collection field as a tuple of cached `PyString`s, in stored order.
     ///
     /// No sort. The vocab is renumbered lexicographically at load, so a set-like collection's
     /// id-sorted vector is already in alphabetical order -- the order this used to produce by
     /// re-sorting every row's strings at emit. `card_subtypes` keeps its printed order for the same
     /// reason it always did, and reaches this function the same way.
-    fn coll_list<'py>(&self, py: Python<'py>, vocab: &AStrings, ids: &Archived<Vec<u16>>) -> PyResult<Bound<'py, PyList>> {
+    ///
+    /// A tuple rather than a list, for the empty case. Three of these fields are mostly empty --
+    /// `card_is_tags` 91.0% of printings, `card_keywords` 56.4%, `card_subtypes` 38.4% -- and
+    /// CPython caches the empty tuple as a singleton while every empty list is a fresh 56-byte
+    /// allocation. So the dominant row costs an incref instead, with no cache and no special case
+    /// to write. It also keeps those rows out of GC tracking: an empty list is tracked and forces
+    /// the row dict to be tracked with it, the empty tuple is not.
+    fn coll_list<'py>(&self, py: Python<'py>, vocab: &AStrings, ids: &Archived<Vec<u16>>) -> PyResult<Bound<'py, PyTuple>> {
         let cells = self.coll_cells.get_or_init(|| (0..vocab.len()).map(|_| OnceLock::new()).collect());
         let mut items: Vec<Bound<'py, PyString>> = Vec::with_capacity(ids.len());
         for id in ids.iter() {
@@ -13345,7 +13352,7 @@ impl EmitStrCache {
                 }
             }
         }
-        PyList::new(py, items)
+        PyTuple::new(py, items)
     }
 }
 
