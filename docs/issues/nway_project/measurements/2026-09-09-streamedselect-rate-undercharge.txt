@@ -1,0 +1,34 @@
+THE COMPENSATING UNDER-CHARGE IS A RATE, NOT A FEATURE. (Chased on
+costcell/scan-per-row-plane-bias, which carries the plane-aware feature fix that exposed it.)
+
+The plane bias corrects `stream_scan_units` and regresses routing by +0.35 ms, because the feature's
+over-charge was masking an under-charge elsewhere in StreamedSelect's arm. To locate that
+under-charge, every gradeable feature in the arm was replaced by its realized counter (the same
+oracle `bench_error_attribution_weighted` uses, with its four substitutability gates) and the whole
+prediction rebuilt. Only mirror-exact rebuilds are counted.
+
+  compose rows, StreamedSelect prediction / measured:
+
+    bucket       which       n       p10     p50     p90
+    plane        shipped   1,602    0.37    0.89    2.31
+    plane        ORACLE    1,602    0.35    0.86    2.15
+    no plane     shipped   1,584    0.35    0.83    6.19
+    no plane     ORACLE    1,584    0.64    0.90    6.19
+
+PERFECT FEATURES DO NOT FIX IT. The median stays 0.86-0.90 in both buckets -- StreamedSelect is
+10-14% under-charged with every feature set to truth. The plane bucket's median even moves slightly
+the WRONG way (0.89 -> 0.86), because the oracle removes the very over-charge that was compensating.
+
+So the under-charge is a RATE or a MISSING TERM, and no amount of estimator work reaches it. That
+also explains the shape of the whole item: three correct feature fixes, two inert and one
+regressive, because the feature errors are load-bearing compensation for a rate error.
+
+ONE THING FEATURES DO REACH: the no-plane bucket's p10 goes 0.35 -> 0.64 under the oracle, so
+features matter for the low tail there even though the median is a rate problem. The plane bucket's
+p10 is unmoved (0.37 -> 0.35).
+
+NEXT: which rate. The candidates are StreamedSelect's own constants -- FIXED, LOOP_PER_CARD,
+SCAN_PER_ROW, CARD_PASS+FLOOR, EMIT_PER_MATCH, PERM_STEP, REDO_SCAN_PER_ROW,
+SMALL_TOTAL_FLOOR_PER_CARD, ARTWORK_SEEN_PER_CARD, CORPUS_PASS_PER_CARD -- and `fit_cost_model` is
+the tool that answers it. A uniform ~14% lift would move the median; the question is whether the fit
+wants one term or several, and whether it wants them differently per plane bucket.
