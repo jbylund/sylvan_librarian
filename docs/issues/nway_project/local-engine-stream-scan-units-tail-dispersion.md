@@ -73,6 +73,32 @@ The hypothesis predicted the worst over-estimate at shallow depth, settling to 1
 
 **That promotes the remaining reading:** the feature may be measuring the wrong quantity rather than measuring the right one badly. It is exactly the question [the queue](local-engine-nway-followup-queue.md)'s `walk-variable-check` asks of `printings_walked`, and it now generalizes to `stream_scan_units`. A perfect median with 20x dispersion that no available covariate predicts is the signature of a MISSING TERM, not of a mis-scaled one.
 
+## Where the defect is, after three splits
+
+Two covariate splits came back empty. A third comparison localizes it, and it rules OUT the two obvious next moves.
+
+**It is not the counter and it is not the loop.** `printings_examined` is a SHARED counter: GatheredScan's `SCAN_PER_ROW` maps to it too, through a different feature and rate. Each plan's feature against its own plan's counter:
+
+| plan | feature | rate | n | p10 | p50 | p90 | p10-p90 |
+|---|---|---|---|---|---|---|---|
+| GatheredScan | `scan_units` | 2.06 | 6,523 | 0.36 | 1.00 | 1.77 | **4.9×** |
+| StreamedSelect | `stream_scan_units` | 5.97 | 2,877 | 0.15 | 1.00 | 2.77 | **18.5×** |
+
+Both medians are exactly 1.00 and `scan_units` is **~4× tighter**. The quantity is predictable, the counter measures it, and one formula in this codebase already predicts it well. So instrumenting the loop is not the next step — the next step is asking what `stream_scan_units` does differently.
+
+**And the P3 override is the first place to look.** `stream_scan_units` defaults to `scan_units`; only an acquire that knows P3 examines fewer printings overrides it. Split on whether that override fired:
+
+| bucket | n | p10 | p50 | p90 | p10-p90 |
+|---|---|---|---|---|---|
+| override FIRED | 517 | 0.13 | 1.02 | 3.96 | **29.7×** |
+| override did NOT fire | 2,360 | 0.16 | 1.00 | 2.25 | 14.0× |
+
+The firing rows are **2.1× more dispersed**. And an anomaly sits inside them: when the override fires, `stream_scan_units / scan_units` runs p10 0.25 to **p90 3.00**. Its documented purpose is to lower the value — "only an acquire that knows P3 examines FEWER printings overrides it" — so a ratio of 3.00 on the top decile is the override RAISING it threefold, which the doc does not describe. Round 79's `stream_scan_base` note explains ratios below 1 (the broad guard overwrites `scan_units` with a corpus-wide ceiling afterwards, leaving `stream_scan_units` lower); it does not explain ratios above 1. **Check that before anything else — it may be a plain bug rather than a calibration gap.**
+
+The override is only 18% of rows and the remainder still spreads 14×, so it is a contributor rather than the whole defect. After it, the comparison to make is structural: what does `scan_units`' formula capture that `stream_scan_units`' does not?
+
+**Two moves this rules out:** folding into `walk-variable-check` (that item is `printings_walked`, PrintingCompose's `WALK_STEP` — a different plan and a different loop; the terms share a signature, not a mechanism), and instrumenting the scan loop (the counter and loop are fine, per the table above).
+
 ## The pair failure, which caps what this item can deliver
 
 `PrintingCompose` is under-predicted on the same rows — 0.30×, 0.63×, 0.67×, 0.77×, 0.81×, 0.87× — so these mis-picks are doubly wrong, and fixing one arm does not fully fix the comparison. Two of the six flips land on `PrintingCompose` rather than the measured best plan, because compose's own under-prediction still wins the argmin after StreamedSelect is corrected.
