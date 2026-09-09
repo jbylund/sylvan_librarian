@@ -114,7 +114,7 @@ Ranked by measured value first, then correctness, then unsized. **Cross-referenc
 
 ### 1. `scan-per-row`
 
-**StreamedSelect's `SCAN_PER_ROW` — the one term that is both LARGE and WRONG on the tail.** Decomposing the top-40-by-loss queries by which terms carry their predicted cost (both plans in each comparison), against the same decomposition on correctly-picked queries:
+**StreamedSelect's `SCAN_PER_ROW` — the one term that is both LARGE and WRONG on the tail.** — [own doc](local-engine-stream-scan-units-tail-dispersion.md), with the per-query table of every plan's predicted vs true cost. **Read it before proposing a refit:** feature/realized is p10 0.13 / **p50 1.00** / p90 2.71 across all 2,441 rows charging the term, so there is no bias to remove and scaling the rate trades the median for the tail. The term carries **34-63% of StreamedSelect's whole prediction** on the costly rows, the error runs BOTH ways (the single costliest row is **0.34x UNDER**, not over), correcting the FEATURE alone flips **6 of the 8** costliest mis-picks, and every one of those rows is `paging=Perm` with an arithmetic range in the filter. Compose is under-predicted on the same rows (0.30x-0.87x), so this is necessary and not sufficient. Decomposing the top-40-by-loss queries by which terms carry their predicted cost (both plans in each comparison), against the same decomposition on correctly-picked queries:
 
 | term | tail share | rest share | ratio | tail accuracy |
 |---|---|---|---|---|
