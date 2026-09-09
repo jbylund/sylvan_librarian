@@ -32,3 +32,42 @@ SCAN_PER_ROW, CARD_PASS+FLOOR, EMIT_PER_MATCH, PERM_STEP, REDO_SCAN_PER_ROW,
 SMALL_TOTAL_FLOOR_PER_CARD, ARTWORK_SEEN_PER_CARD, CORPUS_PASS_PER_CARD -- and `fit_cost_model` is
 the tool that answers it. A uniform ~14% lift would move the median; the question is whether the fit
 wants one term or several, and whether it wants them differently per plane bucket.
+
+WHICH RATE: ALL OF THEM. `fit_cost_model --n-queries 6000 --mode uniform` against this branch's build
+(which carries the plane-aware feature fix):
+
+  StreamedSelect (4,538 rows, 3,122 distinct shapes)
+    term                          current    fitted       x
+    LOOP_PER_CARD                    2.58      3.18    1.23
+    SCAN_PER_ROW                     5.97      8.43    1.41
+    CARD_PASS+FLOOR                  9.05     12.95    1.43
+    EMIT_PER_MATCH                   0.12      0.11    0.92
+    PERM_STEP                        1.00      1.39    1.39
+    ARTWORK_SEEN_PER_CARD            1.21      0.64    0.53
+    SMALL_TOTAL_FLOOR_PER_CARD       0.30      0.31    1.04
+    REDO_SCAN_PER_ROW                5.97      8.32    1.39
+    CORPUS_PASS_PER_CARD             0.02      0.01    0.61
+    FIXED                          217.00    187.81    0.87
+      current  median 0.93  p10 0.51  p90 1.71  within 25% 36%
+      fitted   median 0.94  p10 0.45  p90 1.35  within 25% 51%
+
+Every per-ROW rate wants to rise about 1.4x -- SCAN_PER_ROW 1.41, CARD_PASS+FLOOR 1.43, PERM_STEP
+1.39, REDO_SCAN_PER_ROW 1.39, LOOP_PER_CARD 1.23 -- while FIXED falls to 0.87. So the under-charge
+the oracle found is not one term: it is the whole per-unit rate vector, with the fixed cost absorbing
+the difference today.
+
+THIS MAKES THE PLANE BIAS COHERENT RATHER THAN WRONG. SCAN_PER_ROW's own rate wants 1.41x UP while
+its FEATURE wants 0.72x DOWN in the plane bucket. Changing only the feature strictly reduces the
+term and exposes the rate error, which is exactly the +0.35 ms measured. The two corrections are
+complementary and have to move together.
+
+The fit's own summary agrees the model form is adequate once the rates move: within-25% goes 36% ->
+51% for StreamedSelect at essentially the same median, i.e. it tightens the DISTRIBUTION rather than
+shifting it.
+
+Two things to note before acting on this.
+  - PrintingCompose was SKIPPED by the fit -- "fix the feature above before fitting rates to it" --
+    so compose's own rates cannot be refitted until its features are graded clean.
+  - GatheredScan's fit wants FIXED down hard (169.60 -> 69.66, 0.41x) and CARD_PASS+FLOOR up 1.76x,
+    so this is not confined to StreamedSelect. A rate change in one arm alone moves every pairwise
+    comparison it takes part in, which is the joint-refit problem this whole arc was cut to unblock.
