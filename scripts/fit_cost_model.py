@@ -601,8 +601,64 @@ def perm_step_check(samples: list[dict]) -> tuple[int, float, float, float] | No
     return (len(ratios), ratios[len(ratios) // 10], ratios[len(ratios) // 2], ratios[(9 * len(ratios)) // 10])
 
 
-def counter_check(samples: list[dict]) -> dict[str, list[tuple[str, float]]]:
-    """Realized counter vs the feature that should predict it, per plan. Ratios should be 1.00."""
+#: Realized compose exits that took the Gather branch. Its arm charges a different feature vector
+#: from the two page-filling walks, so which rows belong to which grading population is decided here
+#: once rather than by three inline tuples.
+GATHER_EXITS = ("Gather", "GatherWalkDeclined")
+
+#: (plan, counter) pairs whose ratio is REPORTED but does not veto the plan's rate fit.
+#:
+#: A veto exists to stop a rate absorbing a feature that MISCOUNTS the work its arm does. It is the
+#: wrong instrument for a feature that counts correctly and is handed an inaccurate ESTIMATE: nothing
+#: in the plan's arm can move that ratio, so the veto is unclearable by the work it is asking for.
+#:
+#: `PrintingCompose`/`matches_pushed` -- measured 2026-09-09, n=20,000 uniform. On Gather rows
+#: `matches_pushed` equals the realized total on 284 of 284 sampled rows, at every `prefer`, so this
+#: ratio is algebraically `result_total / matches`: a re-measurement of the acquire's estimate, not of
+#: compose's loop. The walk-order hypothesis it looks like (a `prefer`-ordered walk pushing only a
+#: card's first printing) predicts `pushed < total` and is refuted by those 284 rows.
+#:
+#: Its 0.80 is a SELECTION effect. `Gather` is taken when the estimated total is small (p50 65 against
+#: p50 1,007 on the branches that decline it), and the estimate over-shoots worst exactly there --
+#: conjunctions of printing-varying terms, where `matches` read 1,657 against a true total of 1.
+#: Paired on the same 180 queries, GatheredScan reads 0.83 and StreamedSelect 1.00, against a flat
+#: 1.00 on every other `printing_compose` acquire (n=9,479 and n=6,910). So both already-fitted arms
+#: carry the identical error, merely diluted by rows the compose arm never sees. Vetoing only the arm
+#: whose population is undiluted fits two arms through this error and refuses the third.
+NON_BLOCKING_COUNTERS = frozenset({("PrintingCompose", "matches_pushed")})
+
+
+def grading_groups(plan: str, counter: str, graded: list[dict]) -> list[tuple[str, list[dict]]]:
+    """Sub-populations to grade SEPARATELY, because one feature name covers two different loops.
+
+    Compose's `Perm` and `OrderbyWalk` branches are both priced entirely on `printings_walked` and
+    nothing else validates either. They do not walk the same thing: `Perm` steps printings in corpus
+    order, `OrderbyWalk` (#744) steps a value index whose matches clump by the sort key. Measured
+    2026-09-09 over 5,290 rows, realized/estimated reads **Perm 0.78** (n=4,445) against
+    **OrderbyWalk 2.32** (n=845) -- opposite signs, 3x apart -- and the pooled median is **0.89**,
+    inside `COUNTER_TOL` and reporting no defect at all. `WALK_LENGTH_BIAS` is a single constant
+    calibrated on that mix, so it sits near the 84% majority and leaves the orderby walk charged 2.3x
+    under; the implied per-branch values are 1.13 and 3.37.
+
+    Grading them together is the same pooling trap `feature_for` above documents for the
+    predicted-vs-realized paging mismatch, one level down: fixing that one took this cell from 1.20 to
+    a passing 0.89 by removing a real population error, which then hid this one.
+    """
+    if plan == "PrintingCompose" and counter == "printings_examined":
+        by_branch: dict[str, list[dict]] = collections.defaultdict(list)
+        for r in graded:
+            by_branch[str(r.get("paging_taken"))].append(r)
+        return [(f"[{branch}]", rows) for branch, rows in sorted(by_branch.items())]
+    return [("", graded)]
+
+
+def counter_check(samples: list[dict]) -> dict[str, list[tuple[str, float, int, bool]]]:
+    """Realized counter vs the feature that should predict it, per plan. Ratios should be 1.00.
+
+    Returns `(label, median, n, blocking)` per check. `n` is reported because two of compose's three
+    populations are a few hundred rows against tens of thousands for the other plans, and a median
+    that straddles the tolerance bar on n=182 is not the same finding as one on n=4,445.
+    """
     # `scan_units` pairs with `printings_examined`, not the `printing_span` this used to read: the span
     # is computed by the caller before the match kernel runs, so in card mode -- where every kernel
     # stops at the first qualifying printing -- it reports work that never happened.
@@ -620,12 +676,20 @@ def counter_check(samples: list[dict]) -> dict[str, list[tuple[str, float]]]:
         """
         if counter == "printings_examined":
             if plan == "PrintingCompose":
-                return "compose_scan_printings" if row["acq"].get("compose_paging") == "Gather" else "printings_walked"
+                # REALIZED paging, not the acquire's prediction. This read `acq["compose_paging"]`
+                # until 2026-09-09 while the row filter below keyed on `paging_taken`, so on a query
+                # where the two disagree -- predicted `Gather`, took `Perm` -- it graded the Perm
+                # walk's `printings_examined` against `compose_scan_printings`, the feature only the
+                # Gather branch multiplies. Measured: 223 of 1,594 non-Gather rows were mismatched
+                # that way and read a median 1117 (p10 100, p90 17,189), dragging the pooled median
+                # to 1.20 and vetoing PrintingCompose's whole rate fit. Selecting on the same field
+                # the filter uses is what makes the two consistent by construction.
+                return "compose_scan_printings" if row.get("paging_taken") in GATHER_EXITS else "printings_walked"
             if plan == "StreamedSelect":
                 return "stream_scan_units"
         return {"cards_visited": "eval_domain", "printings_examined": "scan_units", "matches_pushed": "matches"}[counter]
 
-    out: dict[str, list[tuple[str, float]]] = {}
+    out: dict[str, list[tuple[str, float, int, bool]]] = {}
     by_plan: dict[str, list[dict]] = collections.defaultdict(list)
     for s in samples:
         by_plan[s["plan"]].append(s)
@@ -650,13 +714,16 @@ def counter_check(samples: list[dict]) -> dict[str, list[tuple[str, float]]]:
             # not a total. Ungated, those read 0.02 and 0.01 and vetoed the plan's whole fit.
             if plan == "PrintingCompose":
                 gather_only = counter in ("cards_visited", "matches_pushed")
-                graded = [r for r in graded if (r.get("paging_taken") in ("Gather", "GatherWalkDeclined")) == gather_only]
+                graded = [r for r in graded if (r.get("paging_taken") in GATHER_EXITS) == gather_only]
             if not graded:
                 continue
-            got = [r[counter] / max(r["acq"][feature_for(plan, counter, r)], 1) for r in graded]
-            feature = feature_for(plan, counter, graded[0])
-            if got:
-                checks.append((f"{counter}/{feature}", statistics.median(got)))
+            blocking = (plan, counter) not in NON_BLOCKING_COUNTERS
+            for suffix, group in grading_groups(plan, counter, graded):
+                got = [r[counter] / max(r["acq"][feature_for(plan, counter, r)], 1) for r in group]
+                if got:
+                    checks.append(
+                        (f"{counter}/{feature_for(plan, counter, group[0])}{suffix}", statistics.median(got), len(got), blocking)
+                    )
         if checks:
             out[plan] = checks
     return out
@@ -932,14 +999,19 @@ def main() -> None:
         )
         return
 
-    print(f"\n{'plan':<20}{'counter / feature':<40}{'median':>9}")
+    print(f"\n{'plan':<20}{'counter / feature':<52}{'median':>9}{'n':>9}")
     suspect: set[str] = set()
     for plan, checks in counter_check(samples).items():
-        for label, ratio in checks:
-            flag = "" if abs(ratio - 1.0) <= COUNTER_TOL else "  <-- FEATURE, not rate"
-            if flag:
+        for label, ratio, n, blocking in checks:
+            if abs(ratio - 1.0) <= COUNTER_TOL:
+                flag = ""
+            elif blocking:
+                flag = "  <-- FEATURE, not rate"
                 suspect.add(plan)
-            print(f"{plan:<20}{label:<40}{ratio:>9.2f}{flag}")
+            else:
+                # Reported, not vetoed. `NON_BLOCKING_COUNTERS` carries the paired measurement.
+                flag = "  <-- estimate, not feature (see NON_BLOCKING_COUNTERS)"
+            print(f"{plan:<20}{label:<52}{ratio:>9.2f}{n:>9,}{flag}")
     print("  a ratio far from 1.00 is a miscounted feature; no rate can absorb it.")
     perm = perm_step_check(samples)
     if perm is not None:
