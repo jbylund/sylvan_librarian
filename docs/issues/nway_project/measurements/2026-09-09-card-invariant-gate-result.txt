@@ -1,0 +1,41 @@
+RESULT: the gated card-invariant rule is CORRECT and reaches 0.9% of queries. It does not narrow
+the spread, and it does not explain compose's 20x.
+
+IMPLEMENTED. `filter_touches_divergent_format(filter, planes.divergent_formats)` plus, in compose's
+stream_scan_units chain, ahead of the legality arm:
+
+    } else if composed_card_invariant && !filter_touches_divergent_format(..) { 0 }
+
+`BitPlanes::divergent_formats` already existed and needed no archive change; its own doc states the
+semantics the analysis had derived independently -- "a legality plane for a format outside this mask
+is card-invariant, so a card-level bit implies every printing of that card".
+
+REACH. stream_scan_units changed on 69 of 7,945 queries (0.9%), all on printing_compose, all to 0.
+Of the 1,840 rows with residual_card_invariant true, only 69 changed: the rest already received 0
+from the `tier == 0` arm, were not compose, or took the legality arm. Card-invariant AND tier > 0 is
+a rare combination.
+
+EFFECT.
+  StreamedSelect pred/measured   p50 0.91 -> 0.90,  p10-p90 spread 3.8x -> 3.8x
+  feature/realized pooled        0.13/1.00/2.71 -> 0.13/1.00/2.74
+  picked_plan flips              1 of 7,944 (GatheredScan -> StreamedSelect)
+  routing loss (picked - best)   2.49 ms -> 2.08 ms, but off ONE flip, so treat as noise
+  cargo test 310 debug, clippy -D warnings clean
+
+TWO CORRECTIONS THIS FORCES.
+
+1. THE METRIC WAS BLIND. "How much narrower can we get the spread" cannot see this fix at all: on a
+   card-invariant row the realized counter is 0, so the row is excluded from any feature/realized
+   ratio by the divide-by-zero guard. Setting the feature to 0 where truth is 0 is invisible to that
+   metric BY CONSTRUCTION. The spread being unchanged is not evidence the fix failed.
+
+2. THE HYPOTHESIS WAS WRONG ANYWAY. The chain was "compose grades 20.0x while candidates grades
+   2.7x, because compose's fix does not cover compose -- extend card-invariance to it". The extension
+   reaches 0.9% of queries, so missing card-invariance is NOT what makes compose's rows dispersed.
+   The dispersed compose rows have tier > 0 and are NOT card-invariant: genuinely printing-varying
+   residuals where P3 does walk spans, and where stream_scan_units falls through to the big `else`
+   branch -- Round 30's redo-pass calibration, fit as a wall-clock residual because no structural
+   counter existed for the redo's real work. THAT is where compose's 20x lives, and it is the next
+   place to look.
+
+KEPT OR NOT is a judgment call: correct on 69 rows, no measurable win, no measurable harm, one flip.

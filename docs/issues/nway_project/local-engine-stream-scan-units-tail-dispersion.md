@@ -164,6 +164,18 @@ if composed_card_invariant && !filter_touches_divergent_format { stream_scan_uni
 
 The 98.9% gets the measured-correct `0`, and oldschool falls through to the existing `scan_units` default rather than being actively charged zero for a plan that examines ~11k printings. The gate needs the FORMAT, not `residual_card_invariant` — that flag reads true for oldschool, because `Legality` returns false from `touches_printing_field`.
 
+## Implemented, and it reaches 0.9% of queries
+
+The gated rule was built — `filter_touches_divergent_format` over `BitPlanes::divergent_formats`, which already existed and needed no archive change. **It is correct and it is nearly a no-op**, which corrects the hypothesis above rather than confirming it. Full numbers in [measurements/2026-09-09-card-invariant-gate-result.txt](measurements/2026-09-09-card-invariant-gate-result.txt).
+
+`stream_scan_units` changed on **69 of 7,945 queries (0.9%)**, all compose, all to 0. Of the 1,840 rows with `residual_card_invariant` true only 69 moved — the rest already had 0 from the `tier == 0` arm. Card-invariant AND `tier > 0` turns out to be rare. Effect: StreamedSelect pred/measured p50 0.91 -> 0.90 with an unchanged 3.8× spread, one picked-plan flip in 7,944, and a routing-loss delta of 2.49 -> 2.08 ms that rests on that single flip and should be read as noise.
+
+**Two corrections follow.**
+
+**The metric was blind.** "How much narrower can we get the spread" cannot see this fix: on a card-invariant row the realized counter is 0, so the row is excluded from any feature/realized ratio by the divide-by-zero guard. Setting the feature to 0 where truth is 0 is invisible to that metric BY CONSTRUCTION, so the unchanged spread is not evidence of failure.
+
+**The hypothesis was wrong regardless.** The chain was "compose grades 20.0× against candidates' 2.7× because compose's fix does not cover compose". The extension reaches under 1% of queries, so missing card-invariance is not what disperses compose's rows. **The dispersed compose rows have `tier > 0` and are NOT card-invariant** — genuinely printing-varying residuals where P3 does walk spans, and where `stream_scan_units` falls through to the big `else` branch: Round 30's redo-pass calibration, fit as a wall-clock RESIDUAL because no structural counter existed for the redo's real work. That is where the 20× lives.
+
 ## The pair failure, which caps what this item can deliver
 
 `PrintingCompose` is under-predicted on the same rows — 0.30×, 0.63×, 0.67×, 0.77×, 0.81×, 0.87× — so these mis-picks are doubly wrong, and fixing one arm does not fully fix the comparison. Two of the six flips land on `PrintingCompose` rather than the measured best plan, because compose's own under-prediction still wins the argmin after StreamedSelect is corrected.

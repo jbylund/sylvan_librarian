@@ -8735,6 +8735,29 @@ fn filter_touches_legality(filter: &FilterExpr) -> bool {
     }
 }
 
+/// Whether any legality leaf in `filter` names a format whose printings DISAGREE.
+///
+/// `filter_touches_legality` above answers "is legality involved at all", which is the wrong question
+/// for `stream_scan_units`: what decides whether P3 has to examine printings is whether the format is
+/// card-invariant, and `BitPlanes::divergent_formats` already records that per format — "a legality
+/// plane for a format outside this mask is card-invariant, so a card-level bit implies every printing
+/// of that card" (its own doc). Measured against the corpus, exactly ONE format diverges
+/// (`oldschool`, 556 of 31,724 cards), so for every other format this returns false and the
+/// card-invariant shortcut applies.
+///
+/// `shift: None` means the format is absent from all loaded data and matches nothing, so it cannot
+/// diverge. Uses the same `>> shift & 0b11` test as `planes.rs`'s `needs_printing_verification`
+/// rather than a second spelling of it.
+fn filter_touches_divergent_format(filter: &FilterExpr, divergent_formats: u64) -> bool {
+    match filter {
+        FilterExpr::Legality { shift: Some(s), .. } => divergent_formats >> s & 0b11 != 0,
+        FilterExpr::Legality { shift: None, .. } => false,
+        FilterExpr::And(cs) | FilterExpr::Or(cs) => cs.iter().any(|c| filter_touches_divergent_format(c, divergent_formats)),
+        FilterExpr::Not(inner) => filter_touches_divergent_format(inner, divergent_formats),
+        _ => false,
+    }
+}
+
 /// Whether `filter` is a leaf shape `compile_plane` (`planes.rs`) can compile AND that is safe to
 /// broadcast card→printing: card-invariant fields only (color/color-identity/produced-mana, `cmc`/
 /// `power`/`toughness`, devotion). Recurses through `Not` since negating any of these is exact
@@ -18497,6 +18520,25 @@ fn acquire_plan_features_inner(
             // realized `printings_examined` (also 0) instead of against a scan that never happens. The
             // arm multiplies the term by zero on the same signal, so this changes no cost — only whether
             // the feature can be graded honestly.
+            0
+        } else if composed_card_invariant && !filter_touches_divergent_format(composed, u64::from(indexes.planes.divergent_formats)) {
+            // Measured 2026-09-09: on a card-invariant residual P3 examines NO printings -- 1,315 of
+            // 1,330 such rows read `printings_examined == 0`, p50 and p90 both 0. `card_match_count`
+            // settles every card from span arithmetic and never reaches a printing. This is the same
+            // rule the `candidates` acquire already applies (`residual_card_invariant` -> 0), and it is
+            // why that route grades a 2.7x p10-p90 spread against this one's 20.0x.
+            //
+            // Ahead of the legality arm below deliberately: a NON-divergent legality filter is
+            // card-invariant, so `f:modern` belongs here rather than on a divergent share that floors
+            // it at one printing per candidate. The gate is the FORMAT, not `residual_card_invariant`,
+            // which reads true for `oldschool` because `Legality` returns false from
+            // `touches_printing_field` -- see `filter_touches_divergent_format`.
+            //
+            // Divergent formats fall through, and that is a DECISION rather than an oversight: the
+            // divergent case is not fittable. Over 20,000 sampled queries its
+            // `printings_examined / eval_domain` runs min 0.00, p50 6.28, max 53.55, so no constant
+            // describes it, and it is 1 query of 14,473 in real traffic. Leaving it on the arms below
+            // is a coarser answer than zero rather than an actively wrong one.
             0
         } else if filter_touches_legality(composed) && !(*LEGALITY_SCAN_SCOPE && touches_printing_field(composed)) {
             // `&& !touches_printing_field` because the argument below is about what `card_pass` can
