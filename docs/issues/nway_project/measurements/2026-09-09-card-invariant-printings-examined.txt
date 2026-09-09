@@ -32,3 +32,37 @@ CONSEQUENCE FOR THE FIX. compose should take `composed_card_invariant -> 0` the 
 and divergent legality needs its own arm keyed on the FORMAT rather than a corpus-wide share. The
 current arm conflates them and lands between the two answers, which is why printing_compose measures
 a 20.0x p10-p90 spread against candidates' 2.7x.
+
+IS THE DIVERGENT CASE FITTABLE? No -- checked before designing an arm around it.
+
+Divergence is exactly one format, confirmed directly against the corpus rather than taken from the
+code comment: 556 of 31,724 cards (1.75%), ALL in `oldschool`, and no other format has a single
+card whose legality differs across its printings.
+
+Real-traffic exposure, wild-corpus (14,473 queries / 17,588 weight):
+  queries naming oldschool: 1  (0.007% of queries, 0.006% of weight)
+
+Stability of the 11.4x that prompted this, over 20,000 uniform queries -> 42 oldschool rows with
+StreamedSelect timed, 33 with a usable denominator:
+  printings_examined / eval_domain:  min 0.00   p50 6.28   max 53.55
+The 11.4x was one point in a 0-to-53x spread. There is no constant to fit, so an arm designed
+around it would repeat the global-share mistake one level down.
+
+Two further numbers:
+  residual_card_invariant true on 15 of 42 oldschool rows -- the flag's optimism depends on the
+    partner leaves, it is not uniform
+  StreamedSelect was the BEST plan on only 3 of 42 -- so charging 0 here would make a
+    usually-not-best plan look free and mis-route these queries
+
+DECISION (user, 2026-09-09): be willing to get oldschool wrong in order to get everything else more
+right. Supported by both numbers above -- it is rare AND unfittable.
+
+RECOMMENDED SHAPE, which is a cleaner way to be wrong than charging 0: gate the general rule on not
+touching a divergent format --
+
+    if composed_card_invariant && !filter_touches_divergent_format { stream_scan_units = 0 }
+
+-- so the 98.9% gets the measured-correct 0, and oldschool falls through to the existing
+`scan_units` default rather than being actively charged zero for a plan that examines ~11k
+printings. The divergent-format test wants the FORMAT, not `residual_card_invariant`, which reads
+true for oldschool because `Legality` returns false from `touches_printing_field`.

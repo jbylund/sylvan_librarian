@@ -140,6 +140,30 @@ Non-divergent legality is charged `eval_domain` where the truth is **0**; `f:old
 
 **A secondary finding constrains the fix:** `residual_card_invariant` reads TRUE for `f:oldschool`, because `Legality` returns false from `touches_printing_field` — its own comment says it "ranks by the common card-level case". The flag is optimistic exactly where divergence lives, so a fix keyed on the flag alone inherits that. Separating the two populations needs a FORMAT-aware divergence test, not the flag.
 
+## The divergent case is not fittable, so do not try
+
+Checked before designing an arm around the 11.4×. Divergence is exactly one format — confirmed against the corpus, not taken from the comment: **556 of 31,724 cards (1.75%), all `oldschool`**, and no other format has a single card whose legality differs across printings.
+
+Over 20,000 uniform queries, 42 rows name oldschool with StreamedSelect timed, 33 with a usable denominator:
+
+```
+printings_examined / eval_domain:   min 0.00    p50 6.28    max 53.55
+```
+
+**The 11.4× was one point in a 0-to-53× spread.** There is no constant to fit; an arm built on it would repeat the global-share mistake one level down. Two further numbers: `residual_card_invariant` reads true on only 15 of 42 (so the flag's optimism depends on the partner leaves), and **StreamedSelect is the best plan on just 3 of 42** — so charging 0 there would make a usually-not-best plan look free.
+
+Real-traffic exposure is **1 query of 14,473** (0.006% by weight).
+
+**Decision (2026-09-09): accept being wrong on oldschool to be right everywhere else.** Supported twice over — it is rare *and* unfittable.
+
+**The recommended shape, which is a cleaner way to be wrong than charging 0:**
+
+```rust
+if composed_card_invariant && !filter_touches_divergent_format { stream_scan_units = 0 }
+```
+
+The 98.9% gets the measured-correct `0`, and oldschool falls through to the existing `scan_units` default rather than being actively charged zero for a plan that examines ~11k printings. The gate needs the FORMAT, not `residual_card_invariant` — that flag reads true for oldschool, because `Legality` returns false from `touches_printing_field`.
+
 ## The pair failure, which caps what this item can deliver
 
 `PrintingCompose` is under-predicted on the same rows — 0.30×, 0.63×, 0.67×, 0.77×, 0.81×, 0.87× — so these mis-picks are doubly wrong, and fixing one arm does not fully fix the comparison. Two of the six flips land on `PrintingCompose` rather than the measured best plan, because compose's own under-prediction still wins the argmin after StreamedSelect is corrected.
