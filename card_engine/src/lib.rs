@@ -17448,6 +17448,11 @@ fn mk_plan_feats(
         eval_domain,
         scan_units,
         residual_card_invariant: false, // diagnostic; only the candidates acquire sets it
+        // A property of the QUERY, not of the acquire branch, so it is set once here and every branch
+        // gets it -- unlike `stream_scan_units`, which each branch has to be taught. Same predicate
+        // `scan_all` has taken since Round 68; see the field's own doc for why `cost.rs` needs it as a
+        // field rather than deriving it.
+        card_first_match_break: matches!(params.mode, Mode::Card) && matches!(params.prefer, Prefer::Default),
         // Defaults to `scan_units`: only an acquire that knows P3 examines fewer printings overrides it.
         stream_scan_units: scan_units,
         residual_tier_ns100,

@@ -130,6 +130,18 @@ pub(crate) struct PlanFeatures {
     /// Exposed so `matches`'s error can be split by population before any rate is touched. **Nothing in
     /// `plan_cost` reads this.**
     pub residual_card_invariant: bool,
+    /// `Mode::Card` AND `Prefer::Default`: the regime where the executor stops at a card's FIRST
+    /// matching printing instead of walking its span.
+    ///
+    /// Printings are stored in descending default-prefer order, so under that prefer the first match
+    /// IS the chosen one and `push_card_matches` is `(start..end).find(..)` (Round 68). Any other
+    /// prefer must score the whole span to find the max, and printing/artwork mode needs every
+    /// matching printing regardless. `PlanFeatures` carries neither `mode` nor `prefer`, so the one
+    /// bit that changes the depth is passed instead of the two fields it is derived from.
+    ///
+    /// `scan_all` has taken this as a parameter since Round 68; the field exists because
+    /// [`stream_redo_printings`] needs the same discount and is computed here rather than at acquire.
+    pub card_first_match_break: bool,
     /// Per-card verify cost of the residual, ns×100 (`verify_cost_tier`); `0`
     /// when `all_match_known` (the walk skips `card_pass` entirely).
     pub residual_tier_ns100: u32,
@@ -1040,6 +1052,14 @@ pub(crate) fn stream_redo_printings(f: &PlanFeatures) -> u32 {
     let cards = stream_redo_matching_cards(f);
     if cards == 0 || f.n_cards == 0 {
         return 0;
+    }
+    // One printing per matching card where the executor stops at the first match, rather than the
+    // corpus reprint ratio. Measured 2026-09-09 against the realized `redo_examined` on card-mode
+    // small-total rows: this feature graded p50 **3.06** where the break applies and **0.82** where
+    // it does not, and 3.06 IS the ratio (97,812 / 31,724 = 3.083). So the whole-span formula was
+    // pricing one branch of a two-branch executor with the other branch's shape.
+    if f.card_first_match_break {
+        return cards;
     }
     (f64::from(cards) * f64::from(f.n_printings) / f64::from(f.n_cards)).round() as u32
 }

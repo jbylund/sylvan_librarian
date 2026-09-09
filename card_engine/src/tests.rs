@@ -5168,7 +5168,8 @@ fn gathered_scan_zero_match_uses_the_lower_fixed_cost() {
     let base = PlanFeatures {
         n_cards: 30_000, n_printings: 90_000,
         matches: 0, eval_domain: 0, scan_units: 0, stream_scan_units: 0,
-        residual_card_invariant: false, residual_tier_ns100: 0,
+        residual_card_invariant: false,
+        card_first_match_break: false, residual_tier_ns100: 0,
         artwork_seen_cards: 0, artwork_seen_printings: 0, compose_scan_printings: 0,
         limit: 0, offset: 0, perm_walk_span: 30_000, // unbounded (no sort predicate in this fixture)
         broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0,
@@ -5434,7 +5435,8 @@ fn plan_cost_model_matches_gold() {
                     // No compose acquire in this fixture, so P3's estimate is the shared one.
                     stream_scan_units: su,
                     residual_tier_ns100,
-                    residual_card_invariant: false, // diagnostic only; nothing in plan_cost reads it
+                    residual_card_invariant: false,
+        card_first_match_break: false, // diagnostic only; nothing in plan_cost reads it
                     limit: limit as u32,
                     offset: offset as u32,
                     perm_walk_span: n_cards, // fixed orderby=edhrec, no query here bounds it
@@ -5681,7 +5683,8 @@ fn plan_cost_refit() {
                     scan_units: su,
                     stream_scan_units: su, // no compose acquire here, so P3's estimate is the shared one
                     residual_tier_ns100: if prep.all_match_known { 0 } else { verify_cost_tier(&res) },
-                    residual_card_invariant: false, // diagnostic only; nothing in plan_cost reads it
+                    residual_card_invariant: false,
+        card_first_match_break: false, // diagnostic only; nothing in plan_cost reads it
                     limit: limit as u32, offset: offset as u32,
                     perm_walk_span: n_cards, // fixed orderby=edhrec, no query here bounds it
                     broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0, compose_paging: ComposePaging::Gather, collection_broadcast_printings: 0,
@@ -5890,7 +5893,8 @@ fn printing_range_route_probe() {
                 scan_units: su,
                 stream_scan_units: su, // no compose acquire here, so P3's estimate is the shared one
                 residual_tier_ns100,
-                residual_card_invariant: false, // diagnostic only; nothing in plan_cost reads it
+                residual_card_invariant: false,
+        card_first_match_break: false, // diagnostic only; nothing in plan_cost reads it
                 limit: LIMIT as u32, offset: offset as u32,
                 perm_walk_span: n_cards, // fixed orderby=edhrec, no query here bounds it
                 broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0, compose_paging: ComposePaging::Gather, collection_broadcast_printings: 0,
@@ -6256,7 +6260,8 @@ fn plan_regret_report() {
                 scan_units: est.min(n_cards), // card-mode regret report ⇒ scan_units == eval_domain
                 stream_scan_units: est.min(n_cards),
                 residual_tier_ns100: tier,
-                residual_card_invariant: false, // diagnostic only; nothing in plan_cost reads it
+                residual_card_invariant: false,
+        card_first_match_break: false, // diagnostic only; nothing in plan_cost reads it
                 limit: limit as u32,
                 offset: offset as u32,
                 perm_walk_span: n_cards, // fixed orderby=edhrec, no query here bounds it
@@ -6391,7 +6396,8 @@ fn plan_regret_fuzz() {
                 n_cards, n_printings, matches, eval_domain: evd, scan_units: evd, // card mode ⇒ scan_units == eval_domain
                 stream_scan_units: evd,
                 residual_tier_ns100: tier,
-                residual_card_invariant: false, // diagnostic only; nothing in plan_cost reads it
+                residual_card_invariant: false,
+        card_first_match_break: false, // diagnostic only; nothing in plan_cost reads it
                 limit: limit as u32, offset: offset as u32,
                 perm_walk_span: n_cards, // fixed orderby=edhrec, no fuzz filter here bounds it
                 broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0, compose_paging: ComposePaging::Gather, collection_broadcast_printings: 0,
@@ -7667,7 +7673,8 @@ fn stream_perm_steps_gates_and_cap() {
     let base = PlanFeatures {
         n_cards: 30_000, n_printings: 90_000,
         matches: 0, eval_domain: 0, scan_units: 0, stream_scan_units: 0,
-        residual_card_invariant: false, residual_tier_ns100: 0,
+        residual_card_invariant: false,
+        card_first_match_break: false, residual_tier_ns100: 0,
         artwork_seen_cards: 0, artwork_seen_printings: 0, compose_scan_printings: 0,
         limit: 60, offset: 0, perm_walk_span: 30_000,
         broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0,
@@ -7753,7 +7760,8 @@ fn stream_residual_card_pass_adds_only_the_small_total_redo() {
     let base = PlanFeatures {
         n_cards: 30_000, n_printings: 90_000,
         matches: 0, eval_domain: 4_000, scan_units: 0, stream_scan_units: 0,
-        residual_card_invariant: false, residual_tier_ns100: 900,
+        residual_card_invariant: false,
+        card_first_match_break: false, residual_tier_ns100: 900,
         artwork_seen_cards: 0, artwork_seen_printings: 0, compose_scan_printings: 0,
         limit: 60, offset: 0, perm_walk_span: 30_000,
         broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0,
@@ -16180,7 +16188,8 @@ fn gather_page_counters_match_the_realized_page() {
 fn gather_page_feats() -> super::cost::PlanFeatures {
     super::cost::PlanFeatures {
         n_cards: 0, n_printings: 0, matches: 0, eval_domain: 0, scan_units: 0, stream_scan_units: 0,
-        residual_card_invariant: false, residual_tier_ns100: 0, limit: 0, offset: 0, perm_walk_span: 0,
+        residual_card_invariant: false,
+        card_first_match_break: false, residual_tier_ns100: 0, limit: 0, offset: 0, perm_walk_span: 0,
         broadcast_printings: 0, scatter_printings: 0, project_printings: 0, popcount_words: 0,
         compose_paging: ComposePaging::Gather, collection_broadcast_printings: 0,
         artwork_seen_cards: 0, artwork_seen_printings: 0, compose_scan_printings: 0, gather_group_printings: 0,

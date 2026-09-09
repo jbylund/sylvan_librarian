@@ -212,7 +212,14 @@ Asked whether teaching the executor to skip a card's remaining printings once a 
 
 **And the discount already exists here.** `scan_all(domain_cards, card_first_match_break)` applies exactly this correction to `scan_units`, and `card_first_match_break` is already computed at `lib.rs:18085` as `Mode::Card && Prefer::Default`. `stream_redo_printings` does not take the parameter.
 
-Caveat before building it: `Prefer::Default` is ~85% of traffic by `REALISTIC_PREFER_WEIGHTS` but only 196 of 917 card-mode small-total rows in this harness, because `vary_prefer` draws prefer uniformly. Size the fix on `--mode realistic`, not on these counts.
+**BUILT 2026-09-09.** `PlanFeatures::card_first_match_break`, set once in `mk_plan_feats`, and `stream_redo_printings` returns one printing per matching card on that branch. The feature goes **p50 3.06 -> 1.00, p90 4.18 -> 1.35** where the break applies, and is untouched where it does not. Zero picked-plan flips in 7,842; routing loss 6.66 -> 6.64 ms.
+
+Two limits are recorded honestly in [measurements/2026-09-09-redo-first-match-break.txt](measurements/2026-09-09-redo-first-match-break.txt):
+
+- **The plan number moved the wrong way** — StreamedSelect was already under-predicted on these rows, so removing a 3× over-charge pushed its median from 0.92 to 0.85. The over-charge was partly compensating other under-charges.
+- **This is NOT the item's headline defect.** The example queries and the pooled distribution are unchanged, because their error is in `SCAN_PER_ROW` (`stream_scan_units`) while the fix landed on `REDO_SCAN_PER_ROW` (`stream_redo_printings`). Two different terms. **`SCAN_PER_ROW`'s 20× compose dispersion remains unexplained.**
+
+Kept because `fit_cost_model` fits rates AGAINST these features, so a feature 3× wrong on a subpopulation corrupts any rate fitted on it. Also checked: `stream_redo_cards` does NOT share the blind spot — `CARD_PASS+FLOOR` grades p50 1.00 in both prefer buckets, since the break is per-printing within a card and the redo still visits every matching card.
 
 ## The pair failure, which caps what this item can deliver
 

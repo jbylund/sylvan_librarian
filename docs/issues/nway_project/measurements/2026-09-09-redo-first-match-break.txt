@@ -40,3 +40,40 @@ CAVEAT BEFORE BUILDING IT: Prefer::Default is ~85% of traffic by REALISTIC_PREFE
 196 of 917 card-mode small-total rows HERE, because the harness draws prefer uniformly with
 vary_prefer. So the row count understates the traffic weight of the fix, and the realistic-mode
 population is the one to size it on.
+
+FIX BUILT AND MEASURED.
+
+Added `PlanFeatures::card_first_match_break`, set once in `mk_plan_feats` from
+`Mode::Card && Prefer::Default` (a property of the QUERY, so every acquire branch gets it, unlike
+`stream_scan_units` which each branch must be taught). `stream_redo_printings` returns one printing
+per matching card on that branch instead of the corpus reprint ratio.
+
+  REDO feature / redo_examined, card-mode small-total rows:
+                                  before                   after
+    Prefer::Default        p50 3.06  p90 4.18      p50 1.00  p90 1.35
+    custom prefer          p50 0.82  p90 2.33      unchanged (correct -- discount does not apply)
+
+  StreamedSelect PLAN predicted/measured, Prefer::Default: p50 0.92 -> 0.85, p90 9.62 -> 9.23
+  picked_plan flips: 0 of 7,842
+  routing loss: 6.66 ms -> 6.64 ms (noise)
+  cargo test 310 debug, clippy -D warnings clean
+
+`stream_redo_printings` is exposed to Python by CALLING `cost::stream_redo_printings`, so
+fit_cost_model's mirror reads the one definition and cannot drift; its recompute fallback only fires
+on runs recorded before the feature existed.
+
+TWO HONEST LIMITS.
+
+1. THE PLAN NUMBER MOVED THE WRONG WAY. StreamedSelect was already under-predicted on these rows,
+   so removing a 3x over-charge pushed the plan's median from 0.92 to 0.85 -- further under. The
+   over-charge was partly compensating other under-charges. Feature accuracy improved and total
+   accuracy did not, which is the standard hazard of fixing one term in a fitted model.
+
+2. IT IS NOT THIS ITEM'S HEADLINE DEFECT. The example queries are UNCHANGED, and so is the pooled
+   distribution (p10 0.13 / p50 1.00 / p90 2.71). Their error lives in SCAN_PER_ROW, feature
+   `stream_scan_units`; the fix landed on REDO_SCAN_PER_ROW, feature `stream_redo_printings`. Two
+   different terms. SCAN_PER_ROW's 20x dispersion on the compose route remains unexplained.
+
+WHY KEEP IT ANYWAY: `fit_cost_model` fits rates AGAINST these features, so a feature 3x wrong on a
+subpopulation biases any rate fitted on it. The fix does not move picks today; it makes a future
+refit of the redo rate meaningful rather than corrupted.
