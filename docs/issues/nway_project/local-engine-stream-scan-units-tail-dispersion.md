@@ -108,6 +108,26 @@ Two smaller, cleaner defects sit beside it. `plane` reads feature 0.00 at every 
 
 **Two moves this rules out:** folding into `walk-variable-check` (that item is `printings_walked`, PrintingCompose's `WALK_STEP` — a different plan and a different loop; the terms share a signature, not a mechanism), and instrumenting the scan loop (the counter and loop are fine, per the table above).
 
+## The mechanism, and why the fix generalizes
+
+P4 walks each candidate card's whole printing span to push every match, so `scan_units` is real work for it. P3 uses `card_match_count`, which answers from SPAN ARITHMETIC for any card `card_pass` settles at card level, and examines printings only where `card_pass` returns `PrintingDep`.
+
+Legality is card-level for almost every card, so on a legality filter P3 settles the lot without touching a printing — except the divergent remainder, **556 of 31,508 cards, all in `oldschool`**. Hence 7,770 examined against P4's 73,783 on `f:modern`.
+
+**The correction is not really about divergence.** It is `share = |legal_divergent| / n_cards`, a GLOBAL constant of ~1.8% with no dependence on which format the filter names — so it is applied to `f:modern` and `f:pauper` as readily as to the one format that actually diverges. And it is floored: `max(scan_base * share, eval_domain)`. At 1.8% of a ~100k span the share term is ~1,800 while `eval_domain` is usually larger, so **the floor is the operative content — one printing per candidate card — and the share is dominated by it.** It is dressed as a divergence model and behaves as a per-card floor.
+
+The `!touches_printing_field` half of the gate is load-bearing and should not be confused with the share: one printing-varying partner makes `card_pass` return `PrintingDep` for EVERY card, so P3 walks the full span like P4. Scoped on legality alone the correction charged 2,755 for the whole `f:X border:white` family against a realized 5,353-19,737, and `f:modern border:white` measured 100.9 us on the plan it handed the query to against 44.3 us for the compose it passed over.
+
+**The general rule already exists, on the other branch.** The principle is "P3 examines printings only where `card_pass` cannot settle at card level", and legality is one card-level field among many — `cmc`, `power`, `toughness`, type and subtypes all qualify. `candidates` implements exactly that:
+
+```rust
+if feats.residual_card_invariant { feats.stream_scan_units = 0; }
+```
+
+— "the `all_match_known` gate one step weaker... this needs only that it cannot vary within a card, which `name:s`, `o:`, `t:` and `cmc` all satisfy". **That is why `candidates` measures 2.7x and compose 20x.** And compose HAS the signal: `lib.rs:18481` sets `feats.residual_card_invariant = composed_card_invariant` and then computes `stream_scan_units` from the legality special case instead of from it.
+
+So the fix is to make compose use its own card-invariance the way `candidates` does, with the legality-divergent share becoming a special case or disappearing. **One inconsistency to settle first:** `candidates` sets the feature to **0**, compose's floor sets it to **`eval_domain`**. The two branches disagree about whether a card-invariant residual examines no printings or one per matching card, and the `plane` route's 0-at-every-percentile against a nonzero counter says the disagreement is already observable.
+
 ## The pair failure, which caps what this item can deliver
 
 `PrintingCompose` is under-predicted on the same rows — 0.30×, 0.63×, 0.67×, 0.77×, 0.81×, 0.87× — so these mis-picks are doubly wrong, and fixing one arm does not fully fix the comparison. Two of the six flips land on `PrintingCompose` rather than the measured best plan, because compose's own under-prediction still wins the argmin after StreamedSelect is corrected.
