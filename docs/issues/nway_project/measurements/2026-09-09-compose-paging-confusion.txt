@@ -78,3 +78,24 @@ owing an exact unpaginated total ("total_cards is always the unpaginated count")
 
 NET: `empty-page` is exhausted except for the sparse-decline prediction gap. The pricing fix
 regresses, the proof-coverage extension buys nothing, and Tier 2 is contract-blocked.
+
+RECONCILED: THE 3.59% WAS A UNITS ERROR, NOT A POPULATION DIFFERENCE.
+
+Re-run at Round 80's own sample size (n=12,000, uniform) reproduces its population exactly:
+
+                                          this run     Round 80
+  compose rows exiting DeclineSparseExact     1,907        1,907
+  of those, compose was PICKED                   75           74
+  sum of ALL declined_ns entries            11.81 ms     11.66 ms
+
+So the phenomenon is identical and only the RATIO differs. Four conventions on the same data:
+
+  A  median / median   0.54%     <- consistent, and what the 0.64% at n=8,000 was
+  B  all / median      3.88%     <- Round 80's 3.59%
+  C  all / all         0.45%     <- also consistent
+  D  median / all      0.06%
+
+Round 80 divided a NINE-execution sum (NUM_WARMUPS 2 + NUM_TRIALS 7) by a single-execution
+denominator, inflating the ratio ~9x. The honest figure is ~0.5% on uniform and 0.16% on realistic.
+"The largest number in this arc" was an artifact of the numerator and denominator being counted over
+different numbers of executions.

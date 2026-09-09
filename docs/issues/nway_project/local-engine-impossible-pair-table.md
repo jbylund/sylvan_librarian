@@ -61,7 +61,7 @@ Tier 1 measured the payoff for converting a proof into a skipped dispatch at **p
 Two arguments could still justify it, and both are unmeasured:
 
 1. **Better cost-model input** — replacing a guess of 7 with an exact 0. Note the table only answers empty/not-empty, so it improves nothing anywhere else.
-2. **The decline population** — the 74 queries that pay an entire compose build before refusing, **3.59% of all measured time**, which is where the real time in this area is. Whether the table reaches them is the question to answer FIRST; it is the only version of this with a plausible latency case.
+2. **The decline population** — the 74 queries that pay an entire compose build before refusing, ~0.5% of all measured time on uniform and 0.16% on realistic (the 3.59% once quoted here was a units error, corrected 2026-09-09), so that is NOT where the real time is after all. Whether the table reaches them is the question to answer FIRST; it is the only version of this with a plausible latency case.
 
 Build cost is also unmeasured: an O(printings × pairs) scan at load, or a new archive section with the format-version bump that implies.
 

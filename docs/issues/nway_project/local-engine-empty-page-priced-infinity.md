@@ -25,7 +25,7 @@ So the schedulable claim is the first: **~12% of queries, 9.3% of routing loss, 
 
 ## Same gate, the other direction
 
-Round 80's completeness audit found the mirror failure: **74 queries where compose WAS picked and then refused after paying the entire build** — composing `pbits`, projecting `card_bits`, popcounting — before `return None`. `declined_ns` p50 **17.2 us**, p90 44.3 us, **summing to 11.66 ms = 3.59% of all picked-plan measured time**, thrown away before the fallback starts.
+Round 80's completeness audit found the mirror failure: **74 queries where compose WAS picked and then refused after paying the entire build** — composing `pbits`, projecting `card_bits`, popcounting — before `return None`. `declined_ns` p50 **17.2 us**, p90 44.3 us, **summing to 11.66 ms = 3.59% of all picked-plan measured time** **[CORRECTED 2026-09-09: this 3.59% is a units error — a nine-execution `declined_ns` sum over a single-execution denominator. Re-run at the same n=12,000 reproduces 1,907 rows / 75 picked / 11.81 ms exactly, and the consistent ratio is 0.54% uniform, 0.16% realistic. See measurements/2026-09-09-compose-paging-confusion.txt.]**, thrown away before the fallback starts.
 
 Both directions are the same root cause. One wastes a build; the other excludes the fastest plan. Any fix should address both or explain why not.
 
