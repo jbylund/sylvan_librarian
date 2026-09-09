@@ -5182,9 +5182,10 @@ fn gathered_scan_zero_match_uses_the_lower_fixed_cost() {
     // matches == 0: every other term is already zero by construction above, so the whole
     // prediction IS the fixed-cost term — must read the lower, zero-match constant.
     let zero_match = plan_cost(PhysicalPlan::GatheredScan, &base);
+    let want_zero = super::cost::GATHER_FIXED_COST_ZERO_MATCH_NS;
     assert!(
-        (zero_match - 42.0).abs() < 1e-9,
-        "zero-match GatheredScan should cost exactly GATHER_FIXED_COST_ZERO_MATCH_NS, got {zero_match}"
+        (zero_match - want_zero).abs() < 1e-9,
+        "zero-match GatheredScan should cost exactly GATHER_FIXED_COST_ZERO_MATCH_NS ({want_zero}), got {zero_match}"
     );
 
     // matches == 1, eval_domain/scan_units still 0 — the gate reads `matches` itself, not a
@@ -5199,10 +5200,16 @@ fn gathered_scan_zero_match_uses_the_lower_fixed_cost() {
     // quickselects over nothing. `GatherSelect` buffers that match and `select_page` runs over it, so
     // the realized input is 1. Asserted here rather than left to the sampled cells because it is the
     // smallest case where the old and new formulas visibly disagree.
+    //
+    // Composed from the constants rather than written as a literal: the literal broke on the
+    // 2026-09-09 joint refit, which is a false negative -- this test is about WHICH terms a
+    // single-match round is charged, not about what they currently cost. Every future refit would
+    // have failed it the same way.
     let one_match = plan_cost(PhysicalPlan::GatheredScan, &PlanFeatures { matches: 1, ..base });
+    let want_one = super::cost::GATHER_FIXED_COST_NS + super::cost::GATHER_PUSH_PER_MATCH_NS + super::cost::GATHER_SELECT_PER_PAGE_SLOT_NS;
     assert!(
-        (one_match - 175.35).abs() < 1e-9,
-        "a single-match round must use GATHER_FIXED_COST_NS (169.6) + push (2.24) + one select slot (3.51), got {one_match}"
+        (one_match - want_one).abs() < 1e-9,
+        "a single-match round must use GATHER_FIXED_COST_NS + push + one select slot ({want_one}), got {one_match}"
     );
 
     // A non-trivial, real-shaped `candidates` round (nonzero eval_domain/scan_units/matches) also

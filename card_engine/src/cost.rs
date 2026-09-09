@@ -736,12 +736,12 @@ const GATHER_SCAN_PER_ROW_NS: f64 = 2.06;
 /// P4's counterpart to STREAM_RESIDUAL_FLOOR_NS — see there for the form and its derivation.
 const GATHER_RESIDUAL_FLOOR_NS: f64 = 18.89;
 /// ns per match pushed into the sort-key Vec + quickselected.
-const GATHER_PUSH_PER_MATCH_NS: f64 = 2.24;
+pub(crate) const GATHER_PUSH_PER_MATCH_NS: f64 = 2.24;
 /// ns per page slot materialized. Fit from the deep-vs-shallow gap on broad
 /// queries (cmc>=0 card: 225708−216667 ≈ 9041ns over 10000 extra offset ≈ 0.9),
 /// bounded by matches: narrow deep pages (offset > matches) measured ≈ shallow
 /// (select_page returns early), so the term uses min(offset+limit, matches).
-const GATHER_SELECT_PER_PAGE_SLOT_NS: f64 = 3.51;
+pub(crate) const GATHER_SELECT_PER_PAGE_SLOT_NS: f64 = 3.51;
 /// ns per row actually collected into the page — `page_ids.into_iter().map(..)`, two random array
 /// derefs per row into `cards` and `printings`.
 ///
@@ -786,7 +786,7 @@ const GATHER_COLLECT_PER_PAGE_ROW_NS: f64 = 9.79;
 /// So 85 is compensation for curvature, not a fixed cost, and pasting it would fit today's query-size mix
 /// and drift as either query sizes or the corpus change. The fix is a term for the curvature -- see the
 /// corpus-size note in `bench_gather_loop` -- not a smaller constant.
-const GATHER_FIXED_COST_NS: f64 = 169.6;
+pub(crate) const GATHER_FIXED_COST_NS: f64 = 169.6;
 /// `GATHER_FIXED_COST_NS`'s own value when `matches == 0` -- a `Prep::Candidates`-acquired zero-match
 /// round, where every other term in this arm is already provably zero (`eval_domain`, `scan_units`,
 /// `page_span`/`page_rows`, `artwork_seen_printings` all vanish with the candidate list itself), so
@@ -814,7 +814,7 @@ const GATHER_FIXED_COST_NS: f64 = 169.6;
 /// (under-cost) -- roughly the same LOG-ratio magnitude, just flipped sign, and still a net win on
 /// absolute ns error (|84-169.6| = 85.6 -> |84-42| = 42.0). Splitting this properly by mode needs a
 /// `PlanFeatures` field this arm does not have; out of scope for a `cost.rs`-only round.
-const GATHER_FIXED_COST_ZERO_MATCH_NS: f64 = 42.0;
+pub(crate) const GATHER_FIXED_COST_ZERO_MATCH_NS: f64 = 42.0;
 
 // --- PrintingCompose's own rates -------------------------------------------------------------
 //
