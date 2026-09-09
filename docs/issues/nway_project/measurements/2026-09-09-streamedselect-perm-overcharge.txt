@@ -1,0 +1,38 @@
+SECOND SIGHTING of item B, reported independently against `main` and re-checked on
+engine-cost-model-cleanup (which contains main in full -- 0 behind, 204 ahead -- including #1066 as
+45b71b70). Measured with the HEAD wheel, uniform sampler, 8,000 queries, 2,542 rows carrying BOTH
+StreamedSelect and PrintingCompose.
+
+THE REPORT. "Switching into PrintingCompose post-#1066 is net strongly positive (62 rows faster,
+-24.7 ms) but 25 rows regressed, worst 4.8x; 24 of 25 use ComposePaging::Perm. Mechanism looks like
+over-charging the alternative: the model predicts StreamedSelect at 0.46-1.03 ms on rows where it
+actually ran in 0.086-0.13 ms."
+
+THE REGRESSION POPULATION REPRODUCES.
+                                    reported (main)      this branch
+    regressed rows                        25                 26
+    on ComposePaging::Perm             24 of 25           26 of 26
+    StreamedSelect measured           86-130 us        p50 109.6 us
+    worst ratio                          4.8x               3.01x
+    total time lost                        --              1.16 ms / 8,000 queries
+
+REFINEMENT 1 -- the mechanism holds for 22 of 26, not all.
+    StreamedSelect OVER-charged   22 rows   median 2.41x   (PrintingCompose 0.91x, about right)
+    StreamedSelect UNDER-charged   4 rows   median 0.83x   (PrintingCompose 0.29x -- the defect
+                                                            there is COMPOSE, not StreamedSelect,
+                                                            and no work on B reaches those rows)
+
+REFINEMENT 2, and it governs what may be done about it -- THIS IS A TAIL EFFECT, NOT A BIAS.
+StreamedSelect predicted/measured across ALL 1,766 Perm rows:
+    p10 0.44      p50 0.97      p90 1.46
+At the median it is ACCURATE. So "the model over-charges StreamedSelect on Perm" is true only in the
+upper tail, and scaling the coefficient down to fix these 26 rows would break the other 1,740. That
+is the same shape item B already records for `stream_scan_units` -- 20.1% of tail cost at 1.68x over
+while grading 1.00 in aggregate -- so this is a second sighting, not a new defect.
+
+NOT VERIFIED: the positive half ("62 rows faster, -24.7 ms"), which needs a pre-#1066 build.
+The 4.8x -> 3.01x softening is unexplained rather than an improvement -- it could be the 266 plan
+flips stage 4 introduced, or a different population slice, and it was not isolated.
+
+Harness: scratchpad check_ss_overcharge.py (not promoted to scripts/ -- bench_pick_quality.py
+--worst covers the same ground once pointed at the Perm slice).
