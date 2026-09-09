@@ -126,7 +126,19 @@ if feats.residual_card_invariant { feats.stream_scan_units = 0; }
 
 — "the `all_match_known` gate one step weaker... this needs only that it cannot vary within a card, which `name:s`, `o:`, `t:` and `cmc` all satisfy". **That is why `candidates` measures 2.7x and compose 20x.** And compose HAS the signal: `lib.rs:18481` sets `feats.residual_card_invariant = composed_card_invariant` and then computes `stream_scan_units` from the legality special case instead of from it.
 
-So the fix is to make compose use its own card-invariance the way `candidates` does, with the legality-divergent share becoming a special case or disappearing. **One inconsistency to settle first:** `candidates` sets the feature to **0**, compose's floor sets it to **`eval_domain`**. The two branches disagree about whether a card-invariant residual examines no printings or one per matching card, and the `plane` route's 0-at-every-percentile against a nonzero counter says the disagreement is already observable.
+So the fix is to make compose use its own card-invariance the way `candidates` does. **The 0-vs-`eval_domain` disagreement is now SETTLED by measurement: zero is right.** Over all 1,330 rows with `residual_card_invariant` true and StreamedSelect timed, P3 examines no printings on **1,315 (98.9%)** — p50 and p90 both 0 on both routes ([measurements/2026-09-09-card-invariant-printings-examined.txt](measurements/2026-09-09-card-invariant-printings-examined.txt)).
+
+The 15 exceptions are the divergent format itself, and they show compose's floor is wrong in BOTH directions at once:
+
+| row | `printings_examined` | `eval_domain` |
+|---|---|---|
+| `f:oldschool` / artwork | **10,991** | 961 |
+| `devotion:rrr f:oldschool` / printing | 15 | 5 |
+| `cmc+1<pow f:duel` / printing | 41 | 417 |
+
+Non-divergent legality is charged `eval_domain` where the truth is **0**; `f:oldschool` is charged `eval_domain` where the truth is **~11.4× it**. A single global share — `|legal_divergent| / n_cards`, format-blind — cannot be right for both, so the arm lands between the two answers. That is the 20.0× spread.
+
+**A secondary finding constrains the fix:** `residual_card_invariant` reads TRUE for `f:oldschool`, because `Legality` returns false from `touches_printing_field` — its own comment says it "ranks by the common card-level case". The flag is optimistic exactly where divergence lives, so a fix keyed on the flag alone inherits that. Separating the two populations needs a FORMAT-aware divergence test, not the flag.
 
 ## The pair failure, which caps what this item can deliver
 

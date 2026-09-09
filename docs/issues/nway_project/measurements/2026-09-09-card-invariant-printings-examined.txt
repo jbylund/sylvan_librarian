@@ -1,0 +1,34 @@
+SETTLING THE 0-vs-eval_domain DISAGREEMENT.
+
+`candidates` sets stream_scan_units = 0 on a card-invariant residual (lib.rs:17565); compose's
+legality arm floors it at eval_domain, i.e. one printing per candidate card (lib.rs:18494). Both
+feed the SAME executor, so at most one can be right. Measured over 8,000 uniform queries, all rows
+with residual_card_invariant = true and StreamedSelect timed:
+
+  route                       n   pe==0   pe p50   pe p90   pe/eval_domain p50
+  printing_compose        1,106   1,102        0        0                0.000
+  candidates                224     213        0        0                0.000
+
+ZERO IS RIGHT. P3 examines no printings at all on 1,315 of 1,330 such rows (98.9%), p50 and p90
+both 0 on both routes. `candidates` is correct; compose's eval_domain floor is not.
+
+THE 15 EXCEPTIONS ARE THE DIVERGENT FORMAT, WHICH IS THE WHOLE POINT:
+
+  pe=10,991  eval_domain=961    pushed=1,074   unique=artwork   f:oldschool
+  pe=15      eval_domain=5      pushed=12      unique=printing  devotion:rrr f:oldschool
+  pe=41      eval_domain=417    pushed=1,193   unique=printing  cmc+1<pow f:duel
+
+So compose's floor is wrong in BOTH directions at once:
+  - non-divergent legality (f:modern, f:pauper, ...): charges eval_domain where truth is 0
+  - divergent legality (f:oldschool):                 charges eval_domain where truth is ~11.4x it
+A single global share (|legal_divergent| / n_cards, ~1.8%, format-blind) cannot be right for both.
+
+SECONDARY FINDING. residual_card_invariant reads TRUE for f:oldschool, because `Legality` returns
+false from touches_printing_field -- its own comment says it "ranks by the common card-level case".
+So the flag is optimistic exactly where divergence lives, and any fix keyed on the flag alone
+inherits that. A format-aware divergence test, not the flag, is what separates the two populations.
+
+CONSEQUENCE FOR THE FIX. compose should take `composed_card_invariant -> 0` the way candidates does,
+and divergent legality needs its own arm keyed on the FORMAT rather than a corpus-wide share. The
+current arm conflates them and lands between the two answers, which is why printing_compose measures
+a 20.0x p10-p90 spread against candidates' 2.7x.
