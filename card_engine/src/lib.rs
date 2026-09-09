@@ -18519,22 +18519,7 @@ fn acquire_plan_features_inner(
         // engine holds the set: `legal_divergent`. For a filter with no legality leaf the share is 1.0 and
         // this reduces to `scan_units`, which the same sweep showed is right to 1.0-2.4x on `border:black`,
         // `r:mythic` and `watermark:*` -- so the correction is confined to the case that measured wrong.
-        // Round 89 WIP: the two arms below produce a nonzero estimate and BOTH are biased, in opposite
-        // directions, split by whether `split_planes` took a plane off the filter. Measured over 1,796
-        // compose rows against the realized `printings_examined`: 0.81 at the median with no plane,
-        // 1.39 with one. The pooled median is 1.00 -- their average, not a property of either.
-        //
-        // MEASURED AS A ROUTING REGRESSION AND NOT SHIPPED ON THE MAIN BRANCH. It fixes the feature
-        // (no-plane medians -> 1.00, plane p90 9.33 -> 6.71) and costs +0.35 ms over 32 picked-plan
-        // flips, 16 of which are slower. StreamedSelect's PLAN prediction is already under at the
-        // median (p50 0.85-0.92), so this feature's over-charge was compensating an under-charge
-        // elsewhere in the same arm. See
-        // docs/issues/nway_project/measurements/2026-09-09-scan-per-row-plane-split.txt.
-        /// Where `split_planes` took a plane: the feature over-estimates at a median 1.39.
-        const STREAM_SCAN_PLANE_SPLIT_BIAS: f64 = 1.0 / 1.39;
-        /// Where it did not: the feature under-estimates at a median 0.81.
-        const STREAM_SCAN_NO_PLANE_BIAS: f64 = 1.0 / 0.81;
-        let stream_scan_raw = if tier == 0 {
+        feats.stream_scan_units = if tier == 0 {
             // Nothing to verify: `card_match_count` answers every card from span arithmetic and examines
             // no printings whatsoever. Reported as 0 so `bench_feature_accuracy` grades this against the
             // realized `printings_examined` (also 0) instead of against a scan that never happens. The
@@ -18666,13 +18651,6 @@ fn acquire_plan_features_inner(
                 0
             };
             stream_scan_base.unwrap_or(scan_units) as u32 + redo
-        };
-        // A zero stays zero: those arms are structural claims, not estimates with a bias to divide out.
-        feats.stream_scan_units = if stream_scan_raw == 0 {
-            0
-        } else {
-            let bias = if plane.is_some() { STREAM_SCAN_PLANE_SPLIT_BIAS } else { STREAM_SCAN_NO_PLANE_BIAS };
-            (f64::from(stream_scan_raw) * bias).round() as u32
         };
         feats.broadcast_printings = broadcast as u32;
         feats.scatter_printings = scatter as u32;
