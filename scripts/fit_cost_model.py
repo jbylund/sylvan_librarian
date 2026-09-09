@@ -66,6 +66,44 @@ WALK_LENGTH_BIAS = 1.45
 # A realized counter this far from the feature meant to predict it is a FEATURE bug; refitting rates
 # on top of it just relocates the error.
 COUNTER_TOL = 0.15
+#: Beyond THIS factor the plan's fit is refused outright; between `COUNTER_TOL` and here it is
+#: reported, fitted anyway, and the affected rates marked provisional.
+#:
+#: The veto used to fire on anything past `COUNTER_TOL`, which meant PrintingCompose had never once
+#: been fitted -- three cells at 0.83 / 2.32 / 0.78 skipped an arm carrying 15.3% of all predicted
+#: time, including build terms whose own features are unflagged. Measured out-of-sample over 4
+#: shape-held-out splits, that cost **10.6 points** of time-weighted within-25% (51.9% -> 62.5%), and
+#: the veto's premise -- that a fit "will happily bury the error in whichever coefficient correlates
+#: with it" -- does not hold at these magnitudes: fitting through the flagged features moved
+#: `GATHER_CARD_PASS` 1.02x and `WALK_STEP` 0.79x, the latter almost exactly Perm's own 0.78 feature
+#: error, i.e. absorbed locally rather than spread. Holding them fixed as offsets instead measured
+#: WORSE (59.0%), because pinning forces the neighbours to compensate.
+#:
+#: A wide band rather than no band, because the class of bug the veto exists for is real and was
+#: caught here: a harness defect graded compose's Perm walk against the Gather branch's feature and
+#: read a median **1117** (p10 100, p90 17,189). 4x passes 2.32 and still refuses that.
+#: See docs/issues/nway_project/local-engine-compose-counter-flags.md.
+COUNTER_VETO_TOL = 4.0
+#: Cost terms whose rate multiplies each graded FEATURE, so a moderate flag can name the coefficients
+#: it makes provisional rather than leaving a reader to work out which of nine terms is affected.
+#:
+#: Keyed on the feature rather than the counter, because one counter is graded against different
+#: features on different rows: compose's `printings_examined` reads `printings_walked` on the two
+#: walk branches and `compose_scan_printings` on Gather. Keying on the counter marked
+#: `GATHER_BITTEST_PER_PRINTING` provisional whenever the WALK feature flagged, which is a term the
+#: flag says nothing about.
+COUNTER_TERMS: dict[tuple[str, str], tuple[str, ...]] = {
+    ("GatheredScan", "eval_domain"): ("LOOP_PER_CARD", "CARD_PASS+FLOOR"),
+    ("GatheredScan", "scan_units"): ("SCAN_PER_ROW",),
+    ("GatheredScan", "matches"): ("PUSH_PER_MATCH",),
+    ("StreamedSelect", "eval_domain"): ("LOOP_PER_CARD", "CARD_PASS+FLOOR"),
+    ("StreamedSelect", "stream_scan_units"): ("SCAN_PER_ROW",),
+    ("StreamedSelect", "matches"): ("EMIT_PER_MATCH",),
+    ("PrintingCompose", "eval_domain"): ("GATHER_CARD_PASS",),
+    ("PrintingCompose", "printings_walked"): ("WALK_STEP",),
+    ("PrintingCompose", "compose_scan_printings"): ("GATHER_BITTEST_PER_PRINTING",),
+    ("PrintingCompose", "matches"): ("GATHER_PUSH_PER_MATCH",),
+}
 # The mirror check's tolerance. This is a reimplementation of cost.rs in Python, so it can drift --
 # and did: the arms moved to `max(tier, floor)` and gained a residual-gated per-row term while
 # `design_row` still modelled the tier as a multiplier, which silently invalidated every coefficient
@@ -829,7 +867,9 @@ def mirror_matches_engine(samples: list[dict]) -> tuple[float, int]:
     return (ok / total if total else 0.0), total
 
 
-def fit_plan(plan: str, rows: list[dict], label: str | None = None) -> dict[str, float] | None:
+def fit_plan(
+    plan: str, rows: list[dict], label: str | None = None, provisional: frozenset[str] = frozenset()
+) -> dict[str, float] | None:
     """Fit and report one plan's arm: current vs fitted coefficient, and the agreement each gives.
 
     Returns the fitted rates keyed by term name, so a caller partitioning by distinct-on compares
@@ -875,7 +915,10 @@ def fit_plan(plan: str, rows: list[dict], label: str | None = None) -> dict[str,
     print(f"\n=== {label or plan} ({len(rows):,} rows, {len(design):,} distinct shapes) ===")
     print(f"{'term':<34}{'current':>12}{'fitted':>12}{'x':>8}")
     for name, cur, c in zip(names, current, coeffs, strict=True):
-        print(f"{name:<34}{cur:>12.2f}{c:>12.2f}{c / cur if cur else math.inf:>8.2f}")
+        # A term whose own feature is flagged: the rate fits the work the feature DESCRIBES, not the
+        # work the loop does, so it has to be refit once the feature is corrected.
+        mark = "  <-- PROVISIONAL (feature flagged)" if name in provisional else ""
+        print(f"{name:<34}{cur:>12.2f}{c:>12.2f}{c / cur if cur else math.inf:>8.2f}{mark}")
 
     # Both scored on the same deduplicated shapes, so the comparison is like for like.
     before, after = [], []
@@ -972,6 +1015,42 @@ def parse_args() -> tuple[argparse.Namespace, Budget]:
     return args, budget
 
 
+def report_counter_checks(samples: list[dict]) -> tuple[set[str], dict[str, set[str]]]:
+    """Print the counter-vs-feature table; return (arms whose fit is refused, provisional terms).
+
+    Two tiers, because one was too blunt. See `COUNTER_VETO_TOL` for the measurement: a flag past
+    that factor refuses the arm, a moderate one fits it and names the rates the flag makes
+    provisional.
+    """
+    print(f"\n{'plan':<20}{'counter / feature':<52}{'median':>9}{'n':>9}")
+    suspect: set[str] = set()
+    provisional: dict[str, set[str]] = collections.defaultdict(set)
+    for plan, checks in counter_check(samples).items():
+        for label, ratio, n, blocking in checks:
+            # `label` is "<counter>/<feature>[<branch>]"; the FEATURE is what a term multiplies.
+            feature = label.split("/", 1)[1].split("[", 1)[0]
+            gross = ratio > COUNTER_VETO_TOL or ratio < 1.0 / COUNTER_VETO_TOL
+            if abs(ratio - 1.0) <= COUNTER_TOL:
+                flag = ""
+            elif not blocking:
+                # Reported, never vetoed. `NON_BLOCKING_COUNTERS` carries the paired measurement.
+                flag = "  <-- estimate, not feature (see NON_BLOCKING_COUNTERS)"
+            elif gross:
+                flag = f"  <-- FEATURE, not rate (>{COUNTER_VETO_TOL:g}x: FIT REFUSED)"
+                suspect.add(plan)
+            else:
+                # Moderate: fit anyway, and say which rates the flag makes provisional. See
+                # COUNTER_VETO_TOL for the measurement that says this beats skipping the arm.
+                terms = COUNTER_TERMS.get((plan, feature), ())
+                provisional[plan].update(terms)
+                flag = f"  <-- FEATURE, not rate (fitted anyway; provisional: {', '.join(terms) or '?'})"
+            print(f"{plan:<20}{label:<52}{ratio:>9.2f}{n:>9,}{flag}")
+    print("  a ratio far from 1.00 is a miscounted feature; no rate can absorb it.")
+    print(f"  past {COUNTER_VETO_TOL:g}x the arm's fit is refused; between {COUNTER_TOL:g} and there it is fitted with")
+    print("  the affected rates marked PROVISIONAL -- they must be refit once the feature is corrected.")
+    return suspect, provisional
+
+
 def main() -> None:
     """Collect a sample, verify features track counters, then fit each scan plan's rates."""
     args, budget = parse_args()
@@ -999,20 +1078,7 @@ def main() -> None:
         )
         return
 
-    print(f"\n{'plan':<20}{'counter / feature':<52}{'median':>9}{'n':>9}")
-    suspect: set[str] = set()
-    for plan, checks in counter_check(samples).items():
-        for label, ratio, n, blocking in checks:
-            if abs(ratio - 1.0) <= COUNTER_TOL:
-                flag = ""
-            elif blocking:
-                flag = "  <-- FEATURE, not rate"
-                suspect.add(plan)
-            else:
-                # Reported, not vetoed. `NON_BLOCKING_COUNTERS` carries the paired measurement.
-                flag = "  <-- estimate, not feature (see NON_BLOCKING_COUNTERS)"
-            print(f"{plan:<20}{label:<52}{ratio:>9.2f}{n:>9,}{flag}")
-    print("  a ratio far from 1.00 is a miscounted feature; no rate can absorb it.")
+    suspect, provisional = report_counter_checks(samples)
     perm = perm_step_check(samples)
     if perm is not None:
         rows, p10, med, p90 = perm
@@ -1031,9 +1097,9 @@ def main() -> None:
         if len(rows) < MIN_ROWS_FOR_FIT or not fittable:
             continue
         if plan in suspect:
-            print(f"\n=== {plan} — SKIPPED: fix the feature above before fitting rates to it ===")
+            print(f"\n=== {plan} — SKIPPED: a feature above is off by more than {COUNTER_VETO_TOL:g}x; fix it first ===")
             continue
-        fit_plan(plan, rows)
+        fit_plan(plan, rows, provisional=frozenset(provisional[plan]))
         if args.by_mode:
             fit_by_mode(plan, rows)
 
