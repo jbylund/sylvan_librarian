@@ -86,16 +86,25 @@ Two covariate splits came back empty. A third comparison localizes it, and it ru
 
 Both medians are exactly 1.00 and `scan_units` is **~4× tighter**. The quantity is predictable, the counter measures it, and one formula in this codebase already predicts it well. So instrumenting the loop is not the next step — the next step is asking what `stream_scan_units` does differently.
 
-**And the P3 override is the first place to look.** `stream_scan_units` defaults to `scan_units`; only an acquire that knows P3 examines fewer printings overrides it. Split on whether that override fired:
+**The field's own doc already had the diagnosis, more precisely than any of the splits above.** `PlanFeatures::stream_scan_units` (`cost.rs:113-124`) records `scan_units` against realized `printings_examined` on the compose acquire: `f:modern`/artwork reads GatheredScan **1.38** against StreamedSelect **13.09**; `f:gladiator`/artwork **1.62** against **14.98**. "Right for P4 to within 1.4-1.6x, wrong for P3 by 13-15x... a FEATURE error, the one class no rate can absorb." `stream_scan_units` exists to fix that, and `mk_plan_feats` defaults it to `scan_units` "so a branch that has not been taught reads exactly as before."
 
-| bucket | n | p10 | p50 | p90 | p10-p90 |
-|---|---|---|---|---|---|
-| override FIRED | 517 | 0.13 | 1.02 | 3.96 | **29.7×** |
-| override did NOT fire | 2,360 | 0.16 | 1.00 | 2.25 | 14.0× |
+So the obvious next step is "teach the untaught branches" — and **that is wrong too.** Splitting by acquire route:
 
-The firing rows are **2.1× more dispersed**. And an anomaly sits inside them: when the override fires, `stream_scan_units / scan_units` runs p10 0.25 to **p90 3.00**. Its documented purpose is to lower the value — "only an acquire that knows P3 examines FEWER printings overrides it" — so a ratio of 3.00 on the top decile is the override RAISING it threefold, which the doc does not describe. Round 79's `stream_scan_base` note explains ratios below 1 (the broad guard overwrites `scan_units` with a corpus-wide ceiling afterwards, leaving `stream_scan_units` lower); it does not explain ratios above 1. **Check that before anything else — it may be a plain bug rather than a calibration gap.**
+| route | taught? | n | p10 | p50 | p90 | p10-p90 |
+|---|---|---|---|---|---|---|
+| `printing_compose` | **YES** (legality divergent share) | 1,797 | 0.18 | 1.00 | 3.58 | **20.0×** |
+| `candidates` | partly (`residual_card_invariant` -> 0) | 757 | 0.61 | 1.00 | 1.64 | **2.7×** |
+| `printing_range_scan` | no | 142 | 0.06 | 1.00 | 1.00 | 16.2× |
+| `card_range_popcount` | no | 114 | 0.13 | 0.70 | 1.16 | 8.9× |
+| `plane` | no | 67 | 0.00 | 0.00 | 0.00 | — |
 
-The override is only 18% of rows and the remainder still spreads 14×, so it is a contributor rather than the whole defect. After it, the comparison to make is structural: what does `scan_units`' formula capture that `stream_scan_units`' does not?
+**The taught branch is the worst, and it carries 62% of the population.** `candidates`, the least taught, is the tightest at 2.7×. The genuinely untaught routes are 323 rows between them. So the work is not spreading the fix — it is that compose's fix does not cover compose.
+
+That follows from the correction's own scope: it is the legality-divergent SHARE of the candidate span, and the field doc says "for a filter with no legality leaf the share is 1.0 and this reduces to `scan_units`". So on every compose row WITHOUT a legality leaf, `stream_scan_units` is still the value measured wrong by 13-15× for P3. **That is the target: compose rows with no legality leaf.**
+
+Two smaller, cleaner defects sit beside it. `plane` reads feature 0.00 at every percentile while the executor examines printings — a straightforwardly missing charge on 67 rows. And `card_range_popcount` sits at p50 **0.70**, the only route with a biased median rather than a dispersed one.
+
+**RETRACTED — the P3-override lead recorded earlier on 2026-09-09 was confounded.** It split on `stream_scan_units != scan_units` and reported the firing rows as 2.1× more dispersed (29.7× against 14.0×), with `stream_scan_units/scan_units` reaching p90 3.00. That bucket mixes compose's divergent-share correction with the deliberate `stream_scan_units = 0` writes at `lib.rs:17565` and the `tier == 0` arm at `lib.rs:18494`; the zeros drag its p10 to 0.13 and manufacture the spread. The p90 3.00 wants re-checking on the divergent-share rows alone before it is treated as an anomaly.
 
 **Two moves this rules out:** folding into `walk-variable-check` (that item is `printings_walked`, PrintingCompose's `WALK_STEP` — a different plan and a different loop; the terms share a signature, not a mechanism), and instrumenting the scan loop (the counter and loop are fine, per the table above).
 
