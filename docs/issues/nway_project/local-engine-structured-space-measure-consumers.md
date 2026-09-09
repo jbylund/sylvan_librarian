@@ -75,17 +75,45 @@ With both done, `best()` is not renamed but **deleted**: it becomes identically 
 
 ## Staging
 
-Each stage is separately landable and separately measured. Stage 1 unblocks the empty-page fastpath ([local-engine-empty-page-priced-infinity.md](local-engine-empty-page-priced-infinity.md)) without waiting for the rest.
+Each stage is separately landable and separately measured.
+
+**STATUS as of 2026-09-09.** Stages 0, 1 and 4 are landed, plus a rename that was not in the original list. Stage 2 left this arc. Stages 3 and 5 remain, and 3 is much smaller than written below.
+
+| stage | state |
+|---|---|
+| 0 — explicit exact-card-source flag | **landed** (`card_proven`), byte-identical |
+| 1 — enforce `estimate <= guaranteed` | **landed**, delta confined to the predicted 6,888 trace nodes |
+| 1½ — rename `best()`, add `proven()`, audit all 16 read sites | **landed**, byte-identical; not in the original plan |
+| 2 — seed the domain | **left the arc** — re-filed as queue item #7, a latency item gated on the measured 272→176 byte shrink. Consequence: `best()` is renamed, not deleted, which was the accepted trade |
+| 3 — carry both channels to the routing boundary | **open, and re-scoped much smaller — see below** |
+| 4 — stop an unproven zero collapsing all three spaces | **landed** as a guard, not as unexpressibility — see below |
+| 5 — `narrow_floor` | **open**, fully designed as queue item #8 |
+
+### Stage 3, re-scoped: one bool, not a widened struct
+
+The original plan widened everything `mk_plan_feats` accepts. The call-site audit undercut that: every consumer downstream of the routing boundary is an ACCURACY consumer, and for those the flattening to one scalar is correct — the cost model prices work and wants the best available number.
+
+There is exactly one exception, and it is the whole of stage 3's remaining justification. `cost.rs:1077` reads `f.matches == 0` as a STRUCTURAL fact:
+
+```rust
+if stream_runs_small_gather(f) || f.matches == 0 || u64::from(f.offset) >= u64::from(f.matches) {
+```
+
+Post-stage-4 that is sound, because a zero can now only come from the proven channel. But it is sound by a distant invariant rather than by the type, which is the situation this doc exists to end. The cheap fix is to carry Tier 1's existing `provably_empty` flag into `PlanFeatures` and branch on that — the flag is already computed in every acquire branch, so this is one field and one predicate, not a widening. (The `offset >= matches` clause beside it is pricing, not answering, and a guess is fine there.)
+
+### Stage 4, landed as a guard rather than as unexpressibility
+
+`raise_unproven_zero_estimate` plus `Candidate::BoundedEstimate` fixed the collapse and it is tested. But the DERIVATION is unchanged: `est_cards_before_and_arm` is still `calibrated_balls_into_bins(printing_matches, n_cards)`, so card is still derived FROM printing and the collapse is prevented rather than made impossible. Closing that properly needs a card estimator that does not derive from printing, and `est_cards`' own comment records why adopting `est.result.card` outright cannot be it — that regressed `id:ruw usd:0.50 cmc>=2` by two orders of magnitude, because the And-arm mechanism can cover a subset of children and be blind to a restrictive residual. Treat the unexpressibility goal as needing its own estimator round, not as a loose end here.
 
 0. **The explicit exact-card-source flag** (item #7's own prescribed first commit). Replaces the one genuine PRESENCE test, `is_and && card.guaranteed.is_some()`, with a signal recorded where the structure happens. Behaviour-neutral and byte-identical-verifiable, and it must land while that guard is still available.
 1. **Enforce `estimate <= guaranteed` in the mutators.** Retires `best()`'s clamping job. Expected byte-identical on every value consumer — they already read `min(e, g)` — with the delta confined to the trace's `{space}_estimate` keys on the 6,888 nodes, which is precisely where it should show up and nowhere else. Same byte-identity guard as stage 0.
 2. **Seed the domain** (item #7 proper). Retires `best()`'s fallback job; both channels become total. Lands on a codebase where no consumer reads presence any more, so it is provably inert. Verification is necessarily weaker here — semantic scalars plus an explicit diff of the one behavioural site — which is exactly why stages 0 and 1 go first.
    - With 1 and 2 both done, **delete `best()`**: it is now identically `.estimate`. Each of the 23 `lib.rs` call sites becomes `.estimate` or `.guaranteed` according to which consumer it is, and the classification is forced by the code rather than by a prose contract. Retiring `SpaceMeasure::add`'s `best()`-summing asymmetry belongs here too.
-3. **Carry both channels to the routing boundary.** Widen what `mk_plan_feats` accepts. This is a hot path: needs a paired A/B isolating *this* change, per `.claude/rules/benchmark-methodology-review.md` — a measurement of a nearby change does not cover it.
-4. **Re-derive the cross-space inference from `proven()` only.** Finding 2 should become unexpressible rather than fixed in place.
+3. **Carry the emptiness PROOF to the routing boundary** (re-scoped, see above). Still a hot path, so it needs a paired A/B isolating this change, per `.claude/rules/benchmark-methodology-review.md` — one added `bool` is cheap but not free, and a measurement of a nearby change does not cover it.
+4. **Stop an unproven zero collapsing all three spaces.** Landed as a guard; see above for why the stronger form is its own round.
 5. **Revisit `narrow_floor`.** Finding 3, which by then has no way to spell itself — though note seeding alone does not reach it, so item #2's own fix is still required.
 
-Finding the exact site of finding 2 is deliberately deferred: under stage 3 it either evaporates or becomes obvious, and locating it first would produce a patch against a boundary that is about to move.
+The site of finding 2 was located in the end rather than left to evaporate: card is derived from printing through `calibrated_balls_into_bins`, and the And arm's card bound is applied only as a `.min()` clamp, which can lower but never raise. That is why a printing estimate of zero took card and artwork with it.
 
 ## Measurement
 
