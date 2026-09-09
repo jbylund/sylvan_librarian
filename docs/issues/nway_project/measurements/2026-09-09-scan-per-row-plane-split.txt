@@ -73,3 +73,44 @@ average is a term a rate can be fitted against honestly. But this item cannot de
 feature, and anyone expecting the 20x to close should read this section first.
 
 Seven covariate splits and two systematic correlation searches now stand behind that.
+
+BUILT THE PLANE-AWARE CORRECTION, MEASURED IT, AND REVERTED IT.
+
+Applied `1/1.39` where `split_planes` took a plane and `1/0.81` where it did not, dividing out each
+population's measured median the way `printings_walked` handles its own bias.
+
+IT DID WHAT IT WAS DESIGNED TO DO. compose SCAN_PER_ROW feature/realized, before -> after:
+
+  no plane   artwork   0.89 -> 1.10     plane  artwork   1.40 -> 1.00
+  no plane   card      0.81 -> 1.00     plane  card      1.67 -> 1.20
+  no plane   printing  0.79 -> 1.00     plane  printing  1.14 -> 0.82
+
+and the plane bucket's p90 improved substantially: 9.33 -> 6.71 (artwork), 8.00 -> 5.67 (card),
+8.04 -> 5.79 (printing). The pooled residual is exactly as predicted -- card still 1.20 over and
+printing now 0.82 under, because the plane bucket's bias varies by mode (1.14 / 1.40 / 1.67) and a
+single constant cannot serve all three. Per-mode constants would close that.
+
+AND IT REGRESSED ROUTING, SO IT WAS REVERTED.
+
+  picked_plan flips: 32 of 7,842 -- 17 PrintingCompose -> StreamedSelect, 11 GatheredScan ->
+                     StreamedSelect, 4 the other way
+  of those flips, measured: 9 FASTER, 16 SLOWER, 7 inside timer noise
+  net time from the flips: +0.35 ms; total routing loss 6.64 ms -> 7.36 ms
+
+MECHANISM, and it is the third instance today. StreamedSelect's PLAN-level prediction is already
+under at the median (p50 0.85-0.92), so cutting its charge in the plane bucket makes it win queries
+it should lose. The feature's over-charge was COMPENSATING an under-charge elsewhere in the same
+arm. Correcting the feature in isolation removes the compensation and exposes the under-charge.
+
+This is the queue's own "the two arms' errors have opposite signs on the tail" one level down: inside
+StreamedSelect, a feature over-charge cancels a term under-charge, and the cancellation is load
+bearing.
+
+WHAT THIS MEANS FOR THE ITEM. The bias is real, measured, and fixable -- and it CANNOT be shipped
+alone. It has to land together with whatever removes the compensating under-charge in
+StreamedSelect's arm, and that under-charge has not been located. Anyone re-applying the constants
+above without doing that will reproduce the +0.35 ms.
+
+Three fixes have now been built for this item -- the card-invariance gate, the redo first-match
+break, and this -- and all three were correct in isolation. The first two were inert; this one
+regressed. That is the strongest evidence yet that the item is not reachable term-by-term.

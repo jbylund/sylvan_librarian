@@ -24,7 +24,13 @@ The mechanism matches each sign: a plane captures part of the filter, so the res
 - a plane-aware `stream_scan_units` can move each population's median to 1.00, from 0.81 and 1.39
 - the ~15× within-bucket spread survives, because no available feature predicts it
 
-Worth having anyway — a term whose median is right in BOTH populations is one a rate can be fitted against honestly, which the cancelling pair made impossible. But nobody should expect the 20× to close. Seven covariate splits and two systematic correlation searches stand behind that. `prepare_plane_word_ops` is already a `PlanFeatures` field, so the correction needs no new plumbing.
+**BUILT, MEASURED, AND REVERTED 2026-09-09.** Applying `1/1.39` and `1/0.81` did exactly what it was designed to do — no-plane medians went to 1.00/1.00/1.10 and the plane bucket's p90 improved from 9.33/8.00/8.04 to 6.71/5.67/5.79 — **and it regressed routing.** 32 picked-plan flips, of which 9 faster, **16 slower**, 7 inside noise; net **+0.35 ms**, total routing loss 6.64 -> 7.36 ms.
+
+The mechanism is the item's real obstacle: **StreamedSelect's PLAN prediction is already under at the median (p50 0.85-0.92), so the feature's over-charge was COMPENSATING an under-charge elsewhere in the same arm.** Correcting the feature alone removes the compensation and exposes the under-charge. That is the queue's "the two arms' errors have opposite signs on the tail" one level down — inside a single arm, and the cancellation is load bearing.
+
+So the bias is real, measured, fixable, and **cannot ship alone**. It has to land with whatever removes the compensating under-charge, and that under-charge has not been located. The constants are recorded in [measurements/2026-09-09-scan-per-row-plane-split.txt](measurements/2026-09-09-scan-per-row-plane-split.txt) so the work is not lost — but re-applying them without finding the under-charge reproduces the +0.35 ms.
+
+**Three fixes have now been built for this item** — the card-invariance gate, the redo first-match break, and the plane bias — all correct in isolation. The first two were inert; the third regressed. Nobody should expect the 20× to close. Seven covariate splits and two systematic correlation searches stand behind that. `prepare_plane_word_ops` is already a `PlanFeatures` field, so the correction needs no new plumbing.
 
 ## The refit trap, stated first because it is the whole point
 
