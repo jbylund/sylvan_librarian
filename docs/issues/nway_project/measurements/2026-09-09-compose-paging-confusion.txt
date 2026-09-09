@@ -46,3 +46,35 @@ HARNESS BUG WORTH RECORDING. The first version of this script gated every row on
 non-empty and reported the wasted-build population as ZERO. A declining plan records `declined_ns`
 INSTEAD of `trials_ns`, not beside it, so that filter silently dropped exactly the rows the section
 existed to count -- the population-parity trap in .claude/rules/benchmark-methodology-review.md.
+
+WHY DO THESE ROWS REACH THE ARGMIN AT ALL? (asked 2026-09-09; Tier 1 already short-circuits before
+`choose`, so a provably-empty query never invokes a plan and the plans never see the flag.)
+
+Splitting the 862 INFINITY-priced rows whose real exit is EmptyPage by WHY the page is empty:
+
+  bucket                                        rows   compose wins   win ms
+  TIER 1: total == 0, NOT PROVEN                 620      38 ( 6%)     0.39
+  TIER 2: offset >= total > 0                    234      52 (22%)     0.65
+  TIER 1: total == 0, already provably_empty       8       1            0.02
+
+The 8 proven rows are an artifact of the harness, not a gap: `explain_analyze` forces every plan for
+diagnostics and does not go through `run_query_routed`, so those queries DO short-circuit in
+production.
+
+THE LEVER WAS NEVER THE PRICING -- IT IS PROOF COVERAGE. 72% of these rows are Tier 1 cases whose
+emptiness the acquire could not prove. That is the compose-route coverage problem measured on
+2026-09-05: compose proves only 5.5% of its own empties, because it estimates from marginals and
+never looks at the intersection (see the tier1 measurement file).
+
+AND THAT CLOSES THE LOOP UNHAPPILY. Tier 1's paired A/B put the saving from short-circuiting at p50
++0.17 us and -0.7% total -- indistinguishable from zero, because the plan that runs on an empty
+result is already cheap. So extending the PROOF so Tier 1 fires on those 620 would make the fastpath
+fire far more often and still buy nothing measurable. Proof coverage is not worth chasing for
+latency either.
+
+ONE ASYMMETRY WORTH KEEPING: compose wins on 22% of Tier 2 rows against 6% of Tier 1 rows. The half
+deliberately NOT built is proportionally the better target, and it is blocked on the API contract
+owing an exact unpaginated total ("total_cards is always the unpaginated count"), not on the router.
+
+NET: `empty-page` is exhausted except for the sparse-decline prediction gap. The pricing fix
+regresses, the proof-coverage extension buys nothing, and Tier 2 is contract-blocked.
