@@ -7,6 +7,7 @@ from api.parsing import (
     AttributeNode,
     BinaryOperatorNode,
     RegexValueNode,
+    StringValueNode,
     generate_sql_query,
 )
 
@@ -23,7 +24,6 @@ class TestRegexPatternParsing:
             ("o:/exile|destroy/", "exile|destroy"),
             (r"o:/\spp/", r"\spp"),
             ("flavor:/.*flavor.*/", ".*flavor.*"),
-            ("t:/creature|instant/", "creature|instant"),
         ],
     )
     def test_parse_regex_patterns(self, parse_query, query: str, expected_pattern: str) -> None:
@@ -99,6 +99,48 @@ class TestRegexPatternParsing:
         assert isinstance(second, BinaryOperatorNode)
         assert isinstance(second.rhs, RegexValueNode)
         assert second.rhs.value == "^{T}:"
+
+
+class TestRegexOnNonTextFields:
+    """Only the free-text columns run a regex; elsewhere a `/.../` is a literal or an error.
+
+    `t:/elf|goblin/` used to be taken as the literal string `elf|goblin` -- a type nothing has --
+    and matched nothing without a word of complaint.
+    """
+
+    @pytest.mark.parametrize(
+        "query",
+        ["t:/elf|goblin/", "set:/m1./", "kw:/fl(y|i)ing/", "otag:/^ramp/", r"is:/\w+/"],
+        ids=["type_alternation", "set_dot", "keyword_group", "otag_anchor", "is_class"],
+    )
+    def test_live_regex_on_a_non_text_field_is_rejected(self, parse_query, query: str) -> None:
+        with pytest.raises(ValueError, match=r"Failed to parse query|regular expressions are only supported"):
+            parse_query(query)
+
+    @pytest.mark.parametrize(
+        ("query", "literal"),
+        [
+            ("t:/elf/", "elf"),
+            ("kw:/flying/", "flying"),
+            ("kw:/first strike/", "first strike"),  # exact-match field: whitespace is fine here
+            (r"set:/m1\./", "m1."),  # escaped punctuation is its literal
+            ("cn:/12a/", "12a"),
+        ],
+        ids=["type", "keyword", "keyword_two_words", "set_escaped_dot", "collector_number"],
+    )
+    def test_plain_literal_regex_on_a_non_text_field_is_that_literal(self, parse_query, query: str, literal: str) -> None:
+        result = parse_query(query)
+        assert isinstance(result.root, BinaryOperatorNode)
+        assert result.root.rhs == StringValueNode(literal)
+
+    def test_literal_regex_on_type_generates_the_same_sql_as_the_word(self, parse_query) -> None:
+        assert generate_sql_query(parse_query("t:/elf/")) == generate_sql_query(parse_query("t:elf"))
+
+    @pytest.mark.parametrize("query", ["o:/elf|goblin/", "name:/elf|goblin/", "ft:/elf|goblin/", "a:/elf|goblin/"])
+    def test_live_regex_on_a_text_field_stays_a_regex(self, parse_query, query: str) -> None:
+        result = parse_query(query)
+        assert isinstance(result.root.rhs, RegexValueNode)
+        assert result.root.rhs.value == "elf|goblin"
 
 
 class TestRegexSQLGeneration:

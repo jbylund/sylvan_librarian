@@ -6,6 +6,7 @@ import json
 import logging
 import multiprocessing
 import os
+import signal
 from typing import TYPE_CHECKING
 
 import falcon
@@ -24,6 +25,12 @@ logger = logging.getLogger(__name__)
 
 ALL_INTERFACES = "0.0.0.0"  # noqa: S104
 
+# How long a cross-worker response-cache entry lives, in seconds. The cache key carries the cache
+# generation, so an import already makes every earlier entry unreachable; the TTL is what bounds how
+# long those unreachable entries occupy the arena, and how long anything the generation does not
+# track (a corrected static file under a running process, say) keeps being served from cache.
+SHARED_CACHE_TTL_SECONDS = 300.0
+
 
 def json_error_serializer(request: falcon.Request, response: falcon.Response, exception: falcon.HTTPError) -> None:
     """An error serializer that formats Falcon HTTP errors as JSON responses.
@@ -38,6 +45,19 @@ def json_error_serializer(request: falcon.Request, response: falcon.Response, ex
     exception_dict = json.loads(json.dumps(exception_dict, default=str))  # Ensure all values are JSON serializable
     response.media = exception_dict  # Set the response body
     response.content_type = "application/json"  # Set the content type
+
+
+def forward_sigterm_to_sigint(signum: int, frame: object) -> None:
+    """Turn the SIGTERM the master sends on shutdown into the SIGINT bjoern shuts down gracefully on.
+
+    bjoern (3.2.2) installs a libev handler for SIGINT only: it stops accepting, lets the requests in
+    flight finish, and returns from bjoern.run. SIGTERM has no handler there, so its default
+    disposition killed the worker mid-request -- no better than the SIGKILL it replaces. bjoern also
+    calls PyErr_CheckSignals every 0.1 s from its loop, which is what lets this Python-level handler
+    run in an idle worker rather than waiting for the next request.
+    """
+    del signum, frame
+    os.kill(os.getpid(), signal.SIGINT)
 
 
 class ApiWorker(multiprocessing.Process):
@@ -114,12 +134,22 @@ class ApiWorker(multiprocessing.Process):
         )
         from api.settings import settings
 
+        if cache_generation is None:
+            # One counter for the middleware and the AppContext below: the response cache keys on
+            # it, and every write to magic.cards bumps it, so the two must be the same object.
+            cache_generation = multiprocessing.Value("i", 0, lock=True)
+
         shared_cache = None
         if settings.enable_cache:
             try:
                 from shared_cache import SharedCache
 
-                shared_cache = SharedCache(path=settings.shared_cache_path, maxsize=10_000, n_pages=3)
+                shared_cache = SharedCache(
+                    path=settings.shared_cache_path,
+                    maxsize=10_000,
+                    n_pages=3,
+                    default_ttl=SHARED_CACHE_TTL_SECONDS,
+                )
                 logger.info("SharedCache opened at %s pid=%d", settings.shared_cache_path, os.getpid())
             except (ImportError, OSError, TypeError):
                 logger.warning("SharedCache unavailable, falling back to per-process LRUCache", exc_info=True)
@@ -130,7 +160,7 @@ class ApiWorker(multiprocessing.Process):
                 AdminAuthMiddleware(),  # ahead of caching: a rejected admin request must never hit the cache
                 SearchBudgetMiddleware(),  # ahead of logging/caching: skip parser/handler on over-budget /search
                 QueryLogMiddleware(),  # process_response fires before TimingMiddleware's
-                CachingMiddleware(cache=shared_cache),
+                CachingMiddleware(cache=shared_cache, cache_generation=cache_generation),
                 CompressionMiddleware(),
                 SecurityHeadersMiddleware(),  # Add security headers to all responses
                 CORSMiddleware(),  # Handle CORS requests
@@ -180,13 +210,18 @@ class ApiWorker(multiprocessing.Process):
                 last_import_time=self.last_import_time,
                 schema_setup_event=self.schema_setup_event,
             )  # Get the Falcon app
-            bjoern.run(
-                wsgi_app=app,
-                host=self.host,
-                port=self.port,
-                reuse_port=True,
-                listen_backlog=1024 * 4,
-            )  # Start the Bjoern server
+            signal.signal(signal.SIGTERM, forward_sigterm_to_sigint)
+            try:
+                bjoern.run(
+                    wsgi_app=app,
+                    host=self.host,
+                    port=self.port,
+                    reuse_port=True,
+                    listen_backlog=1024 * 4,
+                )  # Start the Bjoern server
+            except KeyboardInterrupt:
+                # bjoern raises this once its loop has drained after a SIGINT: a clean shutdown.
+                logger.info("Worker %d stopped after draining in-flight requests", os.getpid())
         except Exception as oops:
             logger.error("Error running server: %s", oops, exc_info=True)
             if self.exit_flag:

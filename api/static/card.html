@@ -3,6 +3,18 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      // Apply the stored theme before first paint: the markup defaults to dark, and the deferred
+      // bundle re-reads the preference too late for light-theme users to avoid a dark flash.
+      try {
+        var storedTheme = localStorage.getItem('theme');
+        if (storedTheme === 'light' || storedTheme === 'dark') {
+          document.documentElement.dataset.theme = storedTheme;
+        }
+      } catch (e) {
+        // localStorage may be unavailable; keep the default theme
+      }
+    </script>
     <meta name="theme-color" content="#2b8fdf" />
     <!-- FAVICON -->
     <!-- PRECONNECTS -->

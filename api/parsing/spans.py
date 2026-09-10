@@ -11,6 +11,11 @@ import re
 
 QUOTE_CHARS = frozenset("'\"")
 
+# Characters after which a "'" opens a string: the start of a token. Whitespace, a group opener, the
+# negation and exact-name prefixes, and the tail of every comparison operator. Anywhere else -- inside
+# `can't`, after a closing paren -- an apostrophe is content. A '"' opens a string wherever it appears.
+QUOTE_OPENER_PRECEDERS = frozenset(" \t\r\n(-!:=<>")
+
 # A backslash escapes the character after it inside a quoted string, so '\'' is one string holding a
 # single quote. Anything that has to find the end of a string has to know that.
 _ESCAPED_CHAR = re.compile(r"\\(.)", re.DOTALL)
@@ -32,6 +37,19 @@ def opens_regex(query: str, slash_index: int) -> bool:
     while pos >= 0 and query[pos].isspace():
         pos -= 1
     return pos >= 0 and query[pos] in COMPARISON_TAIL_CHARS
+
+
+def opens_quote(query: str, quote_index: int) -> bool:
+    """Return True if the quote character at *quote_index* opens a string rather than being content.
+
+    A '"' always does. A "'" does only at the start of a token -- at the beginning of the query or after
+    one of QUOTE_OPENER_PRECEDERS -- because mid-word it is an apostrophe: `o:can't` is one word, not an
+    unterminated string. The lexer reads the same rule, so the balancer cannot close a quote the lexer
+    never opened (#905's failure class, with apostrophes in place of escapes).
+    """
+    if query[quote_index] == '"':
+        return True
+    return quote_index == 0 or query[quote_index - 1] in QUOTE_OPENER_PRECEDERS
 
 
 def brace_close_index(query: str, start: int) -> int | None:

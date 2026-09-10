@@ -22,6 +22,7 @@ from api.enums import ResponseShape
 from api.middlewares.caching_middleware import CachingMiddleware
 from api.settings import settings
 from api.tests.support import mock_app_context
+from api.utils.param_binding import ParamBindingError
 from api.utils.routing import BoundRoute, RouteSpec, route
 from api.utils.site_name import FALLBACK_SITE_NAME
 
@@ -446,26 +447,58 @@ class TestAPIResourceRequestHandling(unittest.TestCase):
 
         assert mock_resp.text is not None
 
-    def test_handle_handles_type_errors(self) -> None:
-        """Test _handle handles TypeError exceptions."""
+    def test_handle_turns_a_handler_type_error_into_a_500(self) -> None:
+        """A TypeError raised *inside* a handler is a server bug: 500, monitored, message not echoed.
+
+        This used to assert the opposite -- that any TypeError became a 400 -- which pinned the bug: the
+        dispatcher's `except TypeError` was meant for ParamBinder's positional-collision errors but
+        caught every TypeError below it, reflected the internal message to the client and skipped
+        error monitoring.
+        """
         mock_req = MagicMock()
         mock_req.method = "GET"
         mock_req.uri = mock_req.path = mock_req.relative_uri = "/search"
-        mock_req.params = {"invalid_param": "value"}
+        mock_req.params = {}
         mock_resp = MagicMock()
         mock_resp.complete = False
 
-        # Create a mock function that will raise TypeError when called with wrong args
-        def mock_action_that_raises_type_error(**kwargs: Any) -> Never:
-            # This simulates a function that expects specific argument types
-            # and fails even after our type conversion
-            msg = "Invalid parameter type after conversion"
+        def raise_type_error(**kwargs: Any) -> Never:
+            msg = "unsupported operand type(s): internal detail"
             raise TypeError(msg)
 
-        # Patch the action_map directly to include our mock
-        with patch.object(self.api_resource, "routes", {"search": make_bound_route(mock_action_that_raises_type_error)}):
-            with pytest.raises(falcon.HTTPBadRequest):
+        with (
+            patch.object(self.api_resource, "routes", {"search": make_bound_route(raise_type_error)}),
+            patch("api.api_resource.error_monitoring.error_handler") as mock_error_handler,
+        ):
+            with pytest.raises(falcon.HTTPInternalServerError) as excinfo:
                 self.api_resource._handle(mock_req, mock_resp)
+
+        mock_error_handler.assert_called_once()
+        assert excinfo.value.description == INTERNAL_ERROR_DESCRIPTION
+        assert "internal detail" not in repr(excinfo.value.to_dict())
+
+    def test_handle_turns_a_binding_error_into_a_400(self) -> None:
+        """ParamBinder's own TypeError subclass is the request's fault and stays a 400."""
+        mock_req = MagicMock()
+        mock_req.method = "GET"
+        mock_req.uri = mock_req.path = mock_req.relative_uri = "/search"
+        mock_req.params = {}
+        mock_resp = MagicMock()
+        mock_resp.complete = False
+
+        def raise_binding_error(**kwargs: Any) -> Never:
+            msg = "search() takes 0 positional arguments but 1 were given"
+            raise ParamBindingError(msg)
+
+        with (
+            patch.object(self.api_resource, "routes", {"search": make_bound_route(raise_binding_error)}),
+            patch("api.api_resource.error_monitoring.error_handler") as mock_error_handler,
+        ):
+            with pytest.raises(falcon.HTTPBadRequest) as excinfo:
+                self.api_resource._handle(mock_req, mock_resp)
+
+        mock_error_handler.assert_not_called()
+        assert "positional arguments" in str(excinfo.value.description)
 
     def test_handle_handles_general_exceptions(self) -> None:
         """Test _handle handles general exceptions."""
@@ -557,6 +590,14 @@ class TestSearchResponseShape(TestBaseAPIResourceTest):
         # Envelope fields pass through untouched
         assert result["total_cards"] == 2
         assert result["query"] == "test"
+
+    @pytest.mark.parametrize(argnames=["shape"], argvalues=[(ResponseShape.ROWS,), (ResponseShape.COLUMNAR,)])
+    def test_search_stashes_the_row_count_for_telemetry(self, shape: ResponseShape) -> None:
+        """The middlewares read the row count off resp.context; for columnar, len(cards) would be 3 fields."""
+        resp = falcon.Response()
+        with patch.object(self.api_resource, "_search", return_value=self.search_results):
+            self.api_resource.search(falcon_response=resp, q="test", shape=shape)
+        assert resp.context.result_count == 2
 
     def test_search_columnar_does_not_mutate_cached_results(self) -> None:
         """_search returns cached dicts, so columnarizing must not modify them in place."""
@@ -868,6 +909,45 @@ class TestAPIResourceStaticFileServing(unittest.TestCase):
         assert "id=statusMessage" in mock_response.text
         assert "<!-- SERVER_SIDE_RESULTS_COUNT -->" not in mock_response.text
         assert 'Found 1 card matching "elf"' in mock_response.text
+
+    def test_index_html_with_zero_results_says_so(self) -> None:
+        """A zero-hit query renders a `no-results` status, not a blank page, with the query escaped."""
+        mock_response = MagicMock()
+        hostile_query = "t:<script>alert(1)</script>"
+
+        with patch.object(self.api_resource, "_search", return_value={"cards": [], "total_cards": 0, "query": hostile_query}):
+            self.api_resource._root(falcon_response=mock_response, q=hostile_query)
+
+        text = mock_response.text
+        assert "no-results" in text
+        assert 'Found 0 cards matching "t:&lt;script&gt;alert(1)&lt;/script&gt;"' in text
+        assert "<script>alert(1)</script>" not in text
+        assert "<!-- SERVER_SIDE_RESULTS_COUNT -->" not in text
+
+    def test_index_html_with_rejected_query_shows_the_explanation(self) -> None:
+        """A rejected query renders an `error-message` status carrying the API's own explanation, escaped."""
+        mock_response = MagicMock()
+        hostile_query = "<script>alert(1)</script>"
+        rejection = falcon.HTTPBadRequest(title="Invalid Search Query", description=f'Failed to parse query: "{hostile_query}"')
+
+        with patch.object(self.api_resource, "_search", side_effect=rejection):
+            self.api_resource._root(falcon_response=mock_response, q=hostile_query)
+
+        text = mock_response.text
+        assert "error-message" in text
+        # escape_html also escapes the double quotes around the echoed query.
+        assert "Failed to parse query: &quot;&lt;script&gt;alert(1)&lt;/script&gt;&quot;" in text
+        assert "<script>alert(1)</script>" not in text
+        # No results were embedded, so the JS client still runs the search itself.
+        assert "window.EMBEDDED_SEARCH_RESULTS" not in text
+
+    def test_index_html_with_internal_failure_does_not_echo_the_error(self) -> None:
+        mock_response = MagicMock()
+        with patch.object(self.api_resource, "_search", side_effect=ValueError("internal detail about a column")):
+            self.api_resource._root(falcon_response=mock_response, q="elf")
+        assert "error-message" in mock_response.text
+        assert "internal detail" not in mock_response.text
+        assert "The search &quot;elf&quot; could not be run." in mock_response.text
 
     def test_favicon_ico_serves_binary_content(self) -> None:
         """Test favicon_ico serves binary content correctly."""

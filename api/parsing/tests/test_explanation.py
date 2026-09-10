@@ -146,12 +146,13 @@ def test_explain_equals_vs_contains(parse_query, query_str: str, expected_explan
         ("is:vanilla", "the type contains creature and the oracle text is empty"),
         ("not:vanilla", "not (the type contains creature and the oracle text is empty)"),
         ("-is:vanilla", "not (the type contains creature and the oracle text is empty)"),
-        # A typeahead balancer auto-closing a half-typed "urza'" produces `name:urza''`,
-        # which parses as `name:urza AND name:''` -- the second operand uses `:` against an
-        # empty value, which is always vacuous (LIKE '%' matches everything) and explains to
-        # "", so it must be filtered out of the AND join rather than left as a dangling
-        # connector.
-        ("name:urza''", "the name contains urza"),
+        # An empty quoted operand parses as `name:urza AND name:''` -- the second operand uses
+        # `:` against an empty value, which is always vacuous (LIKE '%' matches everything) and
+        # explains to "", so it must be filtered out of the AND join rather than left as a
+        # dangling connector. (This used to be spelled `name:urza''`, the balancer's output for
+        # a half-typed "urza'"; a mid-word apostrophe is now part of the word, so that query is
+        # a single name search and the balancer leaves it alone -- see spans.opens_quote.)
+        ("name:urza ''", "the name contains urza"),
     ],
 )
 def test_explain_filters_empty_string_operand(parse_query, query_str: str, expected_explanation: str) -> None:

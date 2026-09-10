@@ -11,8 +11,8 @@ import datetime
 from dataclasses import dataclass
 from enum import Enum, auto
 
-from api.parsing.card_query_nodes import CardAttributeNode, CardBinaryOperatorNode, ExactNameNode
-from api.parsing.colors import COLOR_ALIAS_TO_CODES
+from api.parsing.card_query_nodes import CardAttributeNode, CardBinaryOperatorNode, ExactNameNode, is_valid_rarity
+from api.parsing.colors import is_valid_color_value
 from api.parsing.db_info import ALIAS_TO_FIELD_INFOS, ParserClass
 from api.parsing.mana_symbols import first_invalid_mana_symbol
 from api.parsing.nodes import (
@@ -28,9 +28,10 @@ from api.parsing.nodes import (
     StringValueNode,
     TrueNode,
     flatten_nested_operations,
+    regex_plain_literal,
 )
 from api.parsing.query_budget import MAX_GROUP_DEPTH, QueryBudgetExceeded
-from api.parsing.spans import QUOTE_CHARS, brace_close_index, find_close_index, unescape
+from api.parsing.spans import QUOTE_CHARS, brace_close_index, find_close_index, opens_quote, unescape
 
 # ── Alias → parser-class lookup ──────────────────────────────────────────────
 
@@ -51,6 +52,12 @@ _DUAL_NUM_TEXT: frozenset[str] = frozenset(
 
 _NUMERIC_ALIASES: frozenset[str] = frozenset(alias for alias, pc in _ALIAS_TO_PC.items() if pc == ParserClass.NUMERIC)
 
+# Aliases whose field runs a `/regex/` as a regex (the free-text columns, flagged in db_info).
+_REGEX_CAPABLE_ALIASES: frozenset[str] = frozenset(
+    alias.lower() for alias, fis in ALIAS_TO_FIELD_INFOS.items() if any(fi.regex_capable for fi in fis)
+)
+REGEX_UNSUPPORTED_FIELD_MESSAGE = "regular expressions are only supported on name, oracle text, flavor text and artist"
+
 # On Scryfall '!' is an alias for '=' on these classes only (verified live, #903 cause C) — on
 # TEXT/LEGALITY it isn't an operator at all, and a trailing bang there falls through to the
 # existing exact-name-prefix reading of the next factor instead.
@@ -58,20 +65,42 @@ _BANG_ALIAS_CLASSES: frozenset[ParserClass] = frozenset(
     {ParserClass.COLOR, ParserClass.MANA, ParserClass.RARITY, ParserClass.YEAR, ParserClass.DATE}
 )
 
-_VALID_COLOR_NAMES: frozenset[str] = frozenset(COLOR_ALIAS_TO_CODES)
-_COLOR_LETTERS: frozenset[str] = frozenset("wubrgcWUBRGC")
 _MIN_MTG_YEAR: int = 1992
 _MAX_YEAR: int = 2040
+_MIN_FOUR_DIGIT_YEAR: int = 1000
+_MAX_FOUR_DIGIT_YEAR: int = 9999
+_EQUALITY_OPERATORS: frozenset[str] = frozenset({":", "="})
 
 
-def _validate_mtg_year(value: int | float, pos: int) -> int:
+def validate_year(value: int | float, pos: int, operator: str) -> int:
+    """Check a year value: four digits always, and for `=`/`:` one Magic could have a printing in.
+
+    `year:1500` and `date=2099` cannot match anything, so equality gets the sanity gate. A comparison
+    against any year is meaningful -- `year<1993` is "the first year", `date>=1990` is "everything",
+    `year!=1500` too -- so `<`, `<=`, `>`, `>=` and `!=` only require the value to be a year at all:
+    four digits, which is also the shape the SQL and engine date handling assume. Shared with the
+    pyparsing oracle so both parsers draw the same line.
+    """
     if isinstance(value, float):
         msg = f"Expected integer year, got {value!r} at position {pos}"
         raise ParseError(msg)
-    if not (_MIN_MTG_YEAR <= value <= _MAX_YEAR):
+    if not (_MIN_FOUR_DIGIT_YEAR <= value <= _MAX_FOUR_DIGIT_YEAR):
+        msg = f"Expected a four-digit year, got {value!r} at position {pos}"
+        raise ParseError(msg)
+    if operator in _EQUALITY_OPERATORS and not (_MIN_MTG_YEAR <= value <= _MAX_YEAR):
         msg = f"Year must be between {_MIN_MTG_YEAR} and {_MAX_YEAR}, got {value!r} at position {pos}"
         raise ParseError(msg)
     return value
+
+
+def validate_date(year: int, month: int, day: int, pos: int) -> str:
+    """Return the ISO form of a calendar date, or raise ParseError if it is not one (2020-02-30)."""
+    try:
+        datetime.date(year=year, month=month, day=day)
+    except ValueError as exc:
+        msg = f"Invalid date {year}-{month:02d}-{day:02d} at position {pos}: {exc}"
+        raise ParseError(msg) from exc
+    return f"{year}-{month:02d}-{day:02d}"
 
 
 # ── Token types ───────────────────────────────────────────────────────────────
@@ -98,17 +127,31 @@ class TT(Enum):
 
 @dataclass
 class Token:
-    """A single lexed token with its type, value, source position, and whitespace flag."""
+    """A single lexed token with its type, value, source position, whitespace flag, and source text.
+
+    `raw` is the exact slice of the query the token came from. It differs from `value` where lexing
+    normalises: a NUMBER's value is the parsed int/float, a QUOTED's is the unescaped content, a
+    REGEX's is the pattern without its slashes. Anything that echoes a token back as *text* -- a bare
+    expression becoming a name search -- reads `raw`, so the user's spelling survives.
+    """
 
     type: TT
     value: str | int | float
     pos: int
     space_before: bool
+    raw: str | None = None
+
+    def __post_init__(self) -> None:
+        """Default `raw` to the value's own text, which is exact for every token type but the three above."""
+        if self.raw is None:
+            self.raw = str(self.value)
 
 
 _ARITH_OPS: frozenset[TT] = frozenset({TT.PLUS, TT.MINUS, TT.STAR, TT.SLASH})
 _WORD_START = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_")
-_WORD_CONT = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789.")
+# An apostrophe continues a word (`can't`, `Urza's`); it opens a string only at token start, where
+# spans.opens_quote says so -- the lexer never reaches this set for one of those.
+_WORD_CONT = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789.'")
 _DIGIT = frozenset("0123456789")
 _SPACE = frozenset(" \t\r\n")
 
@@ -197,17 +240,19 @@ def tokenize(src: str) -> list[Token]:  # noqa: C901, PLR0912, PLR0915
             tokens.append(Token(TT.MANA, src[start:pos], start, sb))
             continue
 
-        # Quoted string. The escape-skipping walk here has to agree with the balancer's
-        # `spans.find_close_index` that a backslash escapes the next character, or the balancer
-        # reads the ' in 'don\'t' as the close and appends a quote the lexer never wanted (#905).
-        if c in QUOTE_CHARS:
+        # Quoted string. Whether a quote opens one at all is `spans.opens_quote` -- a "'" mid-word is
+        # an apostrophe, so `o:can't` is a word, not an unterminated string -- and the escape-skipping
+        # walk is `spans.find_close_index`; the balancer reads both. Where the two disagree, the
+        # balancer closes a quote the lexer never opened, or reads the ' in 'don\'t' as the close and
+        # appends one the lexer never wanted (#905).
+        if c in QUOTE_CHARS and opens_quote(src, pos):
             closed = _closed_quote(src, pos + 1, c)
             if closed is None:
                 msg = f"Unclosed quote at position {start}"
                 raise LexError(msg)
             close_index, content = closed
-            tokens.append(Token(TT.QUOTED, content, start, sb))
             pos = close_index + 1
+            tokens.append(Token(TT.QUOTED, content, start, sb, raw=src[start:pos]))
             continue
 
         # Operators >= <= != : = > <  and  ! (bang)
@@ -264,8 +309,8 @@ def tokenize(src: str) -> list[Token]:  # noqa: C901, PLR0912, PLR0915
                 pos += 1
             else:
                 close_index, content = closed
-                tokens.append(Token(TT.REGEX, content, start, sb))
                 pos = close_index + 1
+                tokens.append(Token(TT.REGEX, content, start, sb, raw=src[start:pos]))
             continue
 
         # Single-char arithmetic / grouping
@@ -304,9 +349,9 @@ def tokenize(src: str) -> list[Token]:  # noqa: C901, PLR0912, PLR0915
                     j += 1
                 tokens.append(Token(TT.WORD, src[pos:j], start, sb))
             elif "." in src[pos:j]:
-                tokens.append(Token(TT.NUMBER, float(src[pos:j]), start, sb))
+                tokens.append(Token(TT.NUMBER, float(src[pos:j]), start, sb, raw=src[pos:j]))
             else:
-                tokens.append(Token(TT.NUMBER, int(src[pos:j]), start, sb))
+                tokens.append(Token(TT.NUMBER, int(src[pos:j]), start, sb, raw=src[pos:j]))
             pos = j
             continue
 
@@ -333,8 +378,18 @@ class ParseError(ValueError):
     """Raised when the parser encounters unexpected token structure."""
 
 
+_ARITH_OPERATORS = frozenset("+-*/")
+
+
 def _name_node(value: str) -> CardBinaryOperatorNode:
     return CardBinaryOperatorNode(CardAttributeNode("name", ParserClass.TEXT), ":", StringValueNode(value))
+
+
+def _is_filter(node: QueryNode) -> bool:
+    """False for a bare numeric expression: a literal, a numeric attribute, or arithmetic over them."""
+    if isinstance(node, NumericValueNode | CardAttributeNode):
+        return False
+    return not (isinstance(node, BinaryOperatorNode) and node.operator in _ARITH_OPERATORS)
 
 
 class Parser:
@@ -383,24 +438,73 @@ class Parser:
 
     # ── expr: OR-level ────────────────────────────────────────────────────────
 
-    def parse_expr(self) -> QueryNode:
-        """Parse an OR-level expression."""
-        operands = [self.parse_and_expr()]
+    def parse_expr(self, *, bare_ok: bool = False) -> QueryNode:
+        """Parse an OR-level expression.
+
+        A factor that comes back as a bare numeric expression -- a literal, a numeric attribute, or
+        arithmetic over them with no comparison (`1996`, `cmc+1`, `power - cmc`) -- is a name search
+        for its source text, which is what Scryfall does with a bare number. Left as it was, it
+        reached SQL as `WHERE %(p)s` and 400ed on a type error. The one exception is *bare_ok*: a
+        parenthesised group whose whole content is one bare expression hands it back undecided,
+        because the caller may still be using the group as an arithmetic operand (`(2*power)-1>3`).
+        """
+        disjuncts = [self._parse_conjuncts()]
         while self.peek().type == TT.WORD and self.peek().value.upper() == "OR":
             self.consume()
-            operands.append(self.parse_and_expr())
+            disjuncts.append(self._parse_conjuncts())
+        if bare_ok and len(disjuncts) == 1 and len(disjuncts[0]) == 1:
+            return disjuncts[0][0][0]
+        operands = [self._conjunction(conjuncts) for conjuncts in disjuncts]
         return operands[0] if len(operands) == 1 else OrNode(operands)
 
     # ── and_expr: AND-level with implicit AND ─────────────────────────────────
 
-    def parse_and_expr(self) -> QueryNode:
-        """Parse an AND-level expression, inserting implicit AND between adjacent factors."""
-        operands = [self.parse_factor()]
+    def _parse_conjuncts(self) -> list[tuple[QueryNode, int, int]]:
+        """Parse an AND-level run of factors (implicit AND between adjacent ones), each with its token span."""
+        factors = [self._parse_spanned_factor()]
         while self._can_start_factor():
             if self.peek().type == TT.WORD and self.peek().value.upper() == "AND":
                 self.consume()
-            operands.append(self.parse_factor())
+            factors.append(self._parse_spanned_factor())
+        return factors
+
+    def _conjunction(self, factors: list[tuple[QueryNode, int, int]]) -> QueryNode:
+        operands = [self._as_filter(node, start, end) for node, start, end in factors]
         return operands[0] if len(operands) == 1 else AndNode(operands)
+
+    def _parse_spanned_factor(self) -> tuple[QueryNode, int, int]:
+        start = self.pos
+        node = self.parse_factor()
+        return node, start, self.pos
+
+    def _as_filter(self, node: QueryNode, start: int, end: int) -> QueryNode:
+        """Return *node* unless it is a bare numeric expression, which becomes a name search for its text."""
+        return node if _is_filter(node) else _name_node(self._span_text(start, end))
+
+    def _span_text(self, start: int, end: int) -> str:
+        """Source text of tokens[start:end], less the whitespace between tokens and any parentheses around the whole span.
+
+        Dropping the whitespace makes `power - cmc` and `power-cmc` the same name search (the
+        pyparsing oracle's preprocess already normalises them that way). Dropping enclosing
+        parentheses makes `(2*power)` a search for `2*power`: the parentheses were grouping, not name.
+        """
+        while end - start >= 2 and self._parens_enclose(start, end):  # noqa: PLR2004
+            start, end = start + 1, end - 1
+        return "".join(tok.raw for tok in self.tokens[start:end])
+
+    def _parens_enclose(self, start: int, end: int) -> bool:
+        """True if tokens[start] is a '(' whose matching ')' is tokens[end - 1]."""
+        if self.tokens[start].type is not TT.LPAREN or self.tokens[end - 1].type is not TT.RPAREN:
+            return False
+        depth = 0
+        for tok in self.tokens[start : end - 1]:
+            if tok.type is TT.LPAREN:
+                depth += 1
+            elif tok.type is TT.RPAREN:
+                depth -= 1
+                if depth == 0:
+                    return False  # the opener closed early: `(2*power)-(1)`, two groups
+        return True
 
     def _can_start_factor(self) -> bool:
         tok = self.peek()
@@ -415,14 +519,25 @@ class Parser:
     # ── factor: optional negation ─────────────────────────────────────────────
 
     def parse_factor(self) -> QueryNode:
-        """Parse an optionally-negated primary expression."""
+        """Parse an optionally-negated primary expression.
+
+        Negation is always a filter position, so a negated bare literal is resolved here rather than
+        at the expr level: `cmc>2 -1` negates a name search for "1", not the integer 1. Unparenthesised
+        arithmetic stays an error (`-cmc+1` reads as "negative cmc, plus one"), while a parenthesised
+        group is a factor like any other and becomes a name search: `-(2*power)`.
+        """
         if self.peek().type == TT.MINUS:
             self.consume()
+            start = self.pos
             operand = self.parse_primary()
-            if isinstance(operand, BinaryOperatorNode) and operand.operator in ("+", "-", "*", "/"):
+            if (
+                isinstance(operand, BinaryOperatorNode)
+                and operand.operator in _ARITH_OPERATORS
+                and not self._parens_enclose(start, self.pos)
+            ):
                 msg = "Cannot negate an arithmetic expression"
                 raise ParseError(msg)
-            return NotNode(operand)
+            return NotNode(self._as_filter(operand, start, self.pos))
         return self.parse_primary()
 
     # ── primary ───────────────────────────────────────────────────────────────
@@ -466,7 +581,7 @@ class Parser:
             if self.peek().type == TT.RPAREN:
                 msg = "Empty parentheses are not allowed"
                 raise ParseError(msg)
-            inner = self.parse_expr()
+            inner = self.parse_expr(bare_ok=True)
             self.expect(TT.RPAREN)
             return inner
         finally:
@@ -510,20 +625,21 @@ class Parser:
                 op = "=" if next_tok.type == TT.BANG else next_tok.value
                 self.consume()
                 return CardBinaryOperatorNode(CardAttributeNode(wl, ParserClass.NUMERIC), op, self.parse_num_expr_value())
+            lhs: QueryNode = CardAttributeNode(wl, ParserClass.NUMERIC)
             if next_tok.type in _ARITH_OPS and not next_tok.space_before:
-                lhs = self._arith_tail(CardAttributeNode(wl, ParserClass.NUMERIC))
-                lhs = self._spaced_arith_tail(lhs)
-                if self.peek().type == TT.OP:
-                    op = self.consume().value
-                    return CardBinaryOperatorNode(lhs, op, self.parse_num_expr_value())
-                return lhs  # standalone arith expression (e.g. cmc-power)
-            lhs = self._spaced_arith_tail(CardAttributeNode(wl, ParserClass.NUMERIC))
-            if isinstance(lhs, CardAttributeNode):
-                # no arithmetic consumed → implicit name
-                return _name_node(word)
+                lhs = self._arith_tail(lhs)
+                if isinstance(lhs, CardAttributeNode):
+                    # The operator had no numeric term after it, so this is not arithmetic at all:
+                    # `pow-wow`, `power-plant`, `mv-x` are hyphenated bare words, read exactly as they
+                    # would be if their first half were not an alias. Returning the bare attribute
+                    # here used to leave the '-' unconsumed and fail the whole query.
+                    return self.parse_hyphenated_name(word)
+            lhs = self._spaced_arith_tail(lhs)
             if self.peek().type == TT.OP:
                 op = self.consume().value
                 return CardBinaryOperatorNode(lhs, op, self.parse_num_expr_value())
+            # A bare attribute (`power`) or arithmetic expression (`cmc-power`): parse_expr turns it
+            # into a name search unless a parenthesised group is using it as an arithmetic operand.
             return lhs
 
         # ── known non-NUMERIC attribute ──
@@ -531,7 +647,7 @@ class Parser:
         if pc is not None and (next_tok.type == TT.OP or bang_alias):
             op = "=" if bang_alias else next_tok.value
             self.consume()
-            return CardBinaryOperatorNode(CardAttributeNode(wl, pc), op, self.parse_value_for_class(pc, wl))
+            return CardBinaryOperatorNode(CardAttributeNode(wl, pc), op, self.parse_value_for_class(pc, wl, op))
         if pc is not None:
             # alias recognised but no operator → might still be a hyphenated bare word (e.g. "a-b-c")
             return self.parse_hyphenated_name(word)
@@ -540,7 +656,11 @@ class Parser:
         return self.parse_hyphenated_name(word)
 
     def parse_number_primary(self) -> QueryNode:
-        """Parse a bare numeric literal, optionally followed by an arithmetic tail and comparison."""
+        """Parse a bare numeric literal, optionally followed by an arithmetic tail and comparison.
+
+        With no comparison the result is a bare numeric expression; parse_expr turns it into a name
+        search for its source text (`1996`, `1+1`) unless a group is using it as an operand.
+        """
         tok = self.consume()  # NUMBER
         lhs: QueryNode = NumericValueNode(tok.value)
         if self.peek().type in _ARITH_OPS and not self.peek().space_before and self._num_term_start(self.peek(1)):
@@ -549,7 +669,7 @@ class Parser:
         if self.peek().type == TT.OP:
             op = self.consume().value
             return CardBinaryOperatorNode(lhs, op, self.parse_num_expr_value())
-        return lhs  # standalone numeric literal
+        return lhs
 
     # ── arithmetic helpers ────────────────────────────────────────────────────
 
@@ -635,7 +755,11 @@ class Parser:
     # ── implicit name (possibly hyphenated) ───────────────────────────────────
 
     def parse_hyphenated_name(self, first: str) -> CardBinaryOperatorNode:
-        """Build an implicit name node, greedily consuming no-space MINUS+WORD/NUMBER continuations."""
+        """Build an implicit name node, greedily consuming no-space MINUS+WORD/NUMBER continuations.
+
+        Continuations are read as source text (`raw`), so `x-007` stays `x-007`: a NUMBER's parsed
+        value would have made it `x-7`.
+        """
         parts = [first]
         while (
             self.peek().type == TT.MINUS
@@ -644,12 +768,12 @@ class Parser:
             and not self.peek(1).space_before
         ):
             self.consume()  # MINUS
-            parts.append(str(self.consume().value))
+            parts.append(self.consume().raw)
         return _name_node("-".join(parts))
 
     # ── value parsers ─────────────────────────────────────────────────────────
 
-    def parse_value_for_class(self, pc: ParserClass, attr: str) -> QueryNode:
+    def parse_value_for_class(self, pc: ParserClass, attr: str, operator: str) -> QueryNode:
         """Route to the correct value parser based on the attribute's parser class."""
         if pc == ParserClass.TEXT:
             return self.parse_text_value(attr)
@@ -659,12 +783,14 @@ class Parser:
             return self.parse_color_value()
         if pc == ParserClass.MANA:
             return self.parse_mana_value()
-        if pc in (ParserClass.RARITY, ParserClass.LEGALITY):
+        if pc == ParserClass.RARITY:
+            return self.parse_rarity_value()
+        if pc == ParserClass.LEGALITY:
             return self.parse_string_value()
         if pc == ParserClass.DATE:
-            return self.parse_date_value()
+            return self.parse_date_value(operator)
         if pc == ParserClass.YEAR:
-            return self.parse_year_value()
+            return self.parse_year_value(operator)
         msg = f"Unknown parser class {pc!r}"
         raise ParseError(msg)
 
@@ -676,10 +802,22 @@ class Parser:
             return StringValueNode(str(tok.value))
         if tok.type == TT.REGEX:
             self.consume()
-            return RegexValueNode(str(tok.value))
+            pattern = str(tok.value)
+            if attr in _REGEX_CAPABLE_ALIASES:
+                return RegexValueNode(pattern)
+            # Only the free-text columns run a regex. Elsewhere a `/.../` used to be taken as the
+            # literal string it spelled, so `t:/elf|goblin/` matched nothing and said nothing. A
+            # pattern that IS a plain literal means the literal and works as one (`kw:/flying/`);
+            # anything with live metacharacters cannot be honoured and is an error worth reporting.
+            literal = regex_plain_literal(pattern)
+            if literal is None:
+                raise ParseError(REGEX_UNSUPPORTED_FIELD_MESSAGE)
+            return StringValueNode(literal)
         if tok.type in (TT.WORD, TT.NUMBER):
             self.consume()
-            word = str(tok.value)
+            # A number in text position is text: `set:001` means "001", `o:1.50` means "1.50". The
+            # token's parsed value would have made them "1" and "1.5".
+            word = tok.raw
             # Greedily consume hyphenated continuation (no space on either side)
             while (
                 self.peek().type == TT.MINUS
@@ -688,7 +826,7 @@ class Parser:
                 and not self.peek(1).space_before
             ):
                 self.consume()
-                word += "-" + str(self.consume().value)
+                word += "-" + self.consume().raw
             return StringValueNode(word)
         msg = f"Expected value for {attr!r}, got {tok.value!r} at position {tok.pos}"
         raise ParseError(msg)
@@ -707,7 +845,7 @@ class Parser:
                     if parts and t.space_before:
                         break
                     self.consume()
-                    parts.append(str(t.value))
+                    parts.append(t.raw)
                 else:
                     break
             if not parts:
@@ -737,11 +875,31 @@ class Parser:
         msg = f"Expected string value, got {tok.value!r} at position {tok.pos}"
         raise ParseError(msg)
 
+    def parse_rarity_value(self) -> QueryNode:
+        """Parse a rarity value and check it names a rarity.
+
+        Validated here, like mana and colour, rather than at SQL generation: an unknown rarity used to
+        parse and then fail inside the query engine, logging an engine-failure traceback for a typo.
+        """
+        tok = self.peek()
+        node = self.parse_string_value()
+        if not is_valid_rarity(node.value):
+            msg = f"Invalid rarity {node.value!r} at position {tok.pos}"
+            raise ParseError(msg)
+        return node
+
     def parse_color_value(self) -> QueryNode:
-        """Parse a color value: a recognized color name or a combination of color letters."""
+        """Parse a color value: a recognized color name or a combination of color letters.
+
+        Quoted values get the same vocabulary check as bare ones -- quoting is another way to type
+        the value, not an opt-out, and `c:"xyz"` used to reach the query engine before failing.
+        """
         tok = self.peek()
         if tok.type == TT.QUOTED:
             self.consume()
+            if not is_valid_color_value(str(tok.value)):
+                msg = f"Invalid color value {tok.value!r} at position {tok.pos}"
+                raise ParseError(msg)
             return StringValueNode(str(tok.value))
         if tok.type == TT.WORD:
             self.consume()
@@ -760,56 +918,58 @@ class Parser:
             ):
                 self.consume()
                 val += "-" + str(self.consume().value)
-            if val.lower() not in _VALID_COLOR_NAMES and not all(c in _COLOR_LETTERS for c in val):
+            if not is_valid_color_value(val):
                 msg = f"Invalid color value {val!r} at position {tok.pos}"
                 raise ParseError(msg)
             return StringValueNode(val)
         msg = f"Expected color value, got {tok.value!r} at position {tok.pos}"
         raise ParseError(msg)
 
-    def parse_date_value(self) -> QueryNode:
-        """Parse a date value: YYYY or YYYY-MM-DD (hyphens must have no surrounding spaces)."""
+    def _hyphen_number_follows(self) -> bool:
+        """True if the next tokens are '-' NUMBER with no space on either side of the '-'."""
+        return (
+            self.peek().type == TT.MINUS
+            and not self.peek().space_before
+            and self.peek(1).type == TT.NUMBER
+            and not self.peek(1).space_before
+        )
+
+    def parse_date_value(self, operator: str) -> QueryNode:
+        """Parse a date value: YYYY or YYYY-MM-DD (hyphens must have no surrounding spaces).
+
+        Anything between the two -- `date:2020-01` -- is an error: it used to consume the month and
+        then fall through to the bare year, silently searching for something other than what was
+        typed. A float where a month or day should be (`2020-1.5-01`) is an error for the same reason;
+        `int()` would have truncated it.
+        """
         tok = self.peek()
         if tok.type != TT.NUMBER:
             msg = f"Expected date, got {tok.value!r} at position {tok.pos}"
             raise ParseError(msg)
         self.consume()
-        year = _validate_mtg_year(tok.value, tok.pos)
-        # Consume YYYY-MM-DD: two MINUS+NUMBER pairs without spaces
-        if (
-            self.peek().type == TT.MINUS
-            and not self.peek().space_before
-            and self.peek(1).type == TT.NUMBER
-            and not self.peek(1).space_before
-        ):
-            self.consume()
-            month_tok = self.consume()
-            if (
-                self.peek().type == TT.MINUS
-                and not self.peek().space_before
-                and self.peek(1).type == TT.NUMBER
-                and not self.peek(1).space_before
-            ):
-                self.consume()
-                day_tok = self.consume()
-                month = int(month_tok.value)
-                day = int(day_tok.value)
-                try:
-                    datetime.date(year=year, month=month, day=day)
-                except ValueError as exc:
-                    msg = f"Invalid date {year}-{month:02d}-{day:02d} at position {tok.pos}: {exc}"
-                    raise ParseError(msg) from exc
-                return StringValueNode(f"{year}-{month:02d}-{day:02d}")
-        return StringValueNode(str(year))
+        year = validate_year(tok.value, tok.pos, operator)
+        if not self._hyphen_number_follows():
+            return StringValueNode(str(year))
+        self.consume()  # MINUS
+        month_tok = self.consume()
+        if not self._hyphen_number_follows():
+            msg = f"Expected a full date YYYY-MM-DD, got {year}-{month_tok.raw} at position {tok.pos}"
+            raise ParseError(msg)
+        self.consume()  # MINUS
+        day_tok = self.consume()
+        if isinstance(month_tok.value, float) or isinstance(day_tok.value, float):
+            msg = f"Expected integer month and day, got {year}-{month_tok.raw}-{day_tok.raw} at position {tok.pos}"
+            raise ParseError(msg)
+        return StringValueNode(validate_date(year, month_tok.value, day_tok.value, tok.pos))
 
-    def parse_year_value(self) -> QueryNode:
-        """Parse a year value: 4-digit integer >= 1992."""
+    def parse_year_value(self, operator: str) -> QueryNode:
+        """Parse a year value: a four-digit integer (see validate_year for the per-operator gate)."""
         tok = self.peek()
         if tok.type != TT.NUMBER:
             msg = f"Expected year, got {tok.value!r} at position {tok.pos}"
             raise ParseError(msg)
         self.consume()
-        year = _validate_mtg_year(tok.value, tok.pos)
+        year = validate_year(tok.value, tok.pos, operator)
         return StringValueNode(str(year))
 
 

@@ -439,3 +439,33 @@ def generate_results_count_html(total_cards: int, query: str) -> str:
     escaped_query = escape_html(query)
     card_word = "card" if total_cards == 1 else "cards"
     return f'Found {total_cards} {card_word} matching "{escaped_query}"'
+
+
+def generate_status_html(total_cards: int, query: str) -> str:
+    """The status line for a completed search, in the container the JS renders its own into.
+
+    Mirrors app.js's showResultsCount: `results-count` when there are cards, `no-results` when
+    there are none -- the no-JS page used to leave the status empty and the results empty for a
+    zero-hit query, indistinguishable from a search that never ran.
+
+    Args:
+        total_cards: Total number of cards found.
+        query: Search query string (escaped here).
+
+    Returns:
+        A single status div.
+    """
+    css_class = "results-count" if total_cards else "no-results"
+    return f'<div class="{css_class}">{generate_results_count_html(total_cards, query)}</div>'
+
+
+def generate_error_html(message: str) -> str:
+    """The status line for a search that was rejected, mirroring app.js's showError.
+
+    Args:
+        message: The explanation to show; escaped here, so it may quote the user's own query.
+
+    Returns:
+        A single error div.
+    """
+    return f'<div class="error-message">{escape_html(message)}</div>'

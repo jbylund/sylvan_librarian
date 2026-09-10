@@ -24,6 +24,11 @@ GIT_SHA := $(shell git rev-parse HEAD 2>/dev/null || echo "unknown")
 GIT_BRANCH := $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 MAYBENORUN := $(shell if echo | xargs --no-run-if-empty >/dev/null 2>/dev/null; then echo "--no-run-if-empty"; else echo ""; fi)
 BASE_COMPOSE := $(mkfile_dir)/docker-compose.yml
+DEV_COMPOSE := $(mkfile_dir)/docker-compose.dev.yml
+# The --file arguments for one stack. Only dev layers the override that bind-mounts the host
+# checkout's static files; blue and green serve the copy built into the image, otherwise a deploy
+# would have the old API serving the new JS (and both stacks always serving the same files).
+compose_files = --file $(BASE_COMPOSE)$(if $(filter dev,$(1)), --file $(DEV_COMPOSE))
 # The two per-host env files every compose invocation reads before the stack's own envs/<stack>.
 # They are separate files because they have separate writers: .env is rebuilt from env.json by a
 # truncating make rule, .env.generated is written by scripts/gen_postgres_conf.py. Later files
@@ -55,7 +60,7 @@ python_sources := $(shell find api client -type f -name "*.py")
 engine_sources := $(shell find card_engine/src -type f -name "*.rs") card_engine/Cargo.toml card_engine/Cargo.lock card_engine/pyproject.toml
 ENGINE_EXT_SUFFIX := $(shell $(PYTHON) -c "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX'))")
 ENGINE_SO := card_engine/card_engine/card_engine$(ENGINE_EXT_SUFFIX)
-image_sources := $(python_sources) api/Dockerfile client/Dockerfile $(requirements_sources) $(BASE_COMPOSE)
+image_sources := $(python_sources) api/Dockerfile client/Dockerfile $(requirements_sources) $(BASE_COMPOSE) $(DEV_COMPOSE)
 
 BUILD_STAMP_DIR := $(GIT_ROOT)/.tmp/build-stamps
 BUILD_HASH := $(shell { git rev-parse HEAD 2>/dev/null; git diff origin/main 2>/dev/null; } | md5sum | cut -d' ' -f1)
@@ -79,6 +84,7 @@ IMAGE_TAG := $(BUILD_HASH)
 	lint \
 	mplantin_font \
 	postgres-config \
+	prettier_check \
 	psql-dotfiles \
 	pull_images \
 	reset \
@@ -135,30 +141,48 @@ env.json: # @doc create env.json with generated local credentials if missing (ne
 	cat env.json | jq -r 'to_entries[] | "\(.key)=\(.value)"' | sort > $@
 
 %-up: deps-% # @doc start an environment in the foreground, e.g. make dev-up
-	cd $(GIT_ROOT) && docker compose --project-name sylvan_$* $(COMPOSE_ENV_FILES) --env-file envs/$* --file $(BASE_COMPOSE) up --remove-orphans --abort-on-container-exit
+	cd $(GIT_ROOT) && docker compose --project-name sylvan_$* $(COMPOSE_ENV_FILES) --env-file envs/$* $(call compose_files,$*) up --remove-orphans --abort-on-container-exit
 
 %-up-detach: deps-% # @doc start an environment in the background, e.g. make dev-up-detach
-	cd $(GIT_ROOT) && docker compose --project-name sylvan_$* $(COMPOSE_ENV_FILES) --env-file envs/$* --file $(BASE_COMPOSE) up --remove-orphans --detach
+	cd $(GIT_ROOT) && docker compose --project-name sylvan_$* $(COMPOSE_ENV_FILES) --env-file envs/$* $(call compose_files,$*) up --remove-orphans --detach
 
 %-down: | .env .env.generated # @doc stop an environment, e.g. make dev-down
-	cd $(GIT_ROOT) && docker compose --project-name sylvan_$* $(COMPOSE_ENV_FILES) --env-file envs/$* --file $(BASE_COMPOSE) down --remove-orphans
+	cd $(GIT_ROOT) && docker compose --project-name sylvan_$* $(COMPOSE_ENV_FILES) --env-file envs/$* $(call compose_files,$*) down --remove-orphans
 
 status: | .env .env.generated # @doc show container status for all environments
 	@$(foreach env,$(ENVS), \
 	  $(PYTHON) -c "import shutil; w=shutil.get_terminal_size().columns; print(' $(env) '.center(w, '='))" && \
-	  cd $(GIT_ROOT) && docker compose --project-name sylvan_$(env) $(COMPOSE_ENV_FILES) --env-file envs/$(env) --file $(BASE_COMPOSE) ps --all ; \
+	  cd $(GIT_ROOT) && docker compose --project-name sylvan_$(env) $(COMPOSE_ENV_FILES) --env-file envs/$(env) $(call compose_files,$(env)) ps --all ; \
 	)
 
-rolling-deploy: deps-blue deps-green # @doc rolling blue/green deploy — update blue (wait for healthy), then green
+# Hit the freshly started stack from the host, the way the reverse proxy will. `up --wait` only
+# proves the container's own healthcheck passed; a bad published port, a proxy-facing bind address,
+# or an engine that loads but cannot search would all still take green down with it. The port comes
+# from the stack's env file and the host side of the published port defaults as docker-compose.yml
+# does. `set -e` so a failing curl aborts the recipe (and, for blue, the whole deploy).
+define smoke_check
+set -e; port=$$(grep -E '^API_PORT=' envs/$(1) | cut -d= -f2); host=$${BIND_ADDR:-127.0.0.1}; \
+for path in ready 'search?q=t:elf'; do \
+  curl --fail --silent --show-error --max-time 30 --user-agent deploy-smoke --output /dev/null "http://$$host:$${port:-28080}/$$path" \
+    || { echo "=== $(1): smoke check on /$$path failed, aborting deploy"; exit 1; }; \
+done; echo "=== $(1): /ready and /search answered"
+endef
+
+rolling-deploy: pull_images deps-blue deps-green # @doc rolling blue/green deploy — update blue (wait for healthy + smoke check), then green
 	@echo "=== Deploying blue ==="
-	cd $(GIT_ROOT) && docker compose --project-name sylvan_blue $(COMPOSE_ENV_FILES) --env-file envs/blue --file $(BASE_COMPOSE) up --remove-orphans --detach --wait
+	cd $(GIT_ROOT) && docker compose --project-name sylvan_blue $(COMPOSE_ENV_FILES) --env-file envs/blue $(call compose_files,blue) up --remove-orphans --detach --wait
+	cd $(GIT_ROOT) && $(call smoke_check,blue)
 	@echo "=== Blue healthy. Deploying green ==="
-	cd $(GIT_ROOT) && docker compose --project-name sylvan_green $(COMPOSE_ENV_FILES) --env-file envs/green --file $(BASE_COMPOSE) up --remove-orphans --detach --wait
+	cd $(GIT_ROOT) && docker compose --project-name sylvan_green $(COMPOSE_ENV_FILES) --env-file envs/green $(call compose_files,green) up --remove-orphans --detach --wait
+	cd $(GIT_ROOT) && $(call smoke_check,green)
 	@echo "=== Rolling deploy complete ==="
 
 down: $(addsuffix -down,$(ENVS)) # @doc stop every environment
 
-images: build_images pull_images # @doc refresh images
+# Pulling is deliberately not part of `images` (and so not of every `make *-up`): the postgres:18
+# tag only moves on a point release, and a registry round-trip on each start is not worth it. The
+# deploy targets pull, so a deploy is what picks up a new point release.
+images: build_images # @doc refresh locally built images
 
 build_images: $(BUILD_STAMP) # @doc refresh locally built images
 
@@ -168,8 +192,10 @@ $(BUILD_STAMP): $(image_sources) | .env .env.generated
 	cd $(GIT_ROOT) && docker compose --progress=plain $(COMPOSE_ENV_FILES) --env-file envs/dev --file $(BASE_COMPOSE) build
 	touch $@
 
-pull_images: $(BASE_COMPOSE) | .env .env.generated # @doc pull images from remote repos
-	true || docker compose $(COMPOSE_ENV_FILES) --env-file envs/dev --file $(BASE_COMPOSE) pull
+# Only the services that come from a registry: apiservice and client are built here and marked
+# pull_policy: never, so a bare `pull` would try (and fail) to fetch them.
+pull_images: | .env .env.generated # @doc pull the postgres image (a moving major-version tag)
+	cd $(GIT_ROOT) && docker compose $(COMPOSE_ENV_FILES) --env-file envs/dev --file $(BASE_COMPOSE) pull postgres
 
 ensure_pydocker: ensure_uv
 	@$(PYTHON) -c "import docker" 2>/dev/null || \
@@ -184,8 +210,11 @@ ensure_uv:
 	$(PYTHON) -m pip install uv || \
 	uv pip install --python "$(PYTHON)" uv
 
-lint: ruff_lint prettier_lint # @doc lint all python files
-	true
+lint: ruff_lint prettier_lint # @doc lint (and auto-format) python, html and js
+
+# prettier_lint rewrites files; prettier_check is the read-only variant CI runs (lint.yml).
+prettier_check: # @doc fail if any html/js file is not prettier-formatted
+	npx prettier --check $(html_files) $(js_files)
 
 prettier_lint: /tmp/prettier.stamp
 	true
@@ -210,12 +239,12 @@ dockerclean:
 	docker images --format '{{.ID}}' | xargs $(MAYBENORUN) docker rmi --force
 
 dbconn-%: psql-dotfiles | .env .env.generated # @doc open psql against an environment, e.g. make dbconn-blue
-	cd $(GIT_ROOT) && docker compose --project-name sylvan_$* $(COMPOSE_ENV_FILES) --env-file envs/$* --file $(BASE_COMPOSE) \
+	cd $(GIT_ROOT) && docker compose --project-name sylvan_$* $(COMPOSE_ENV_FILES) --env-file envs/$* $(call compose_files,$*) \
 	  exec -e PSQLRC=/var/lib/postgresql/.psqlrc -e PSQL_HISTORY=/var/lib/postgresql/.psql_history \
 	  postgres psql -U $(XPGUSER) -d $(XPGDATABASE) --host=localhost
 
 reset-%: | .env .env.generated # @doc destroy an environment including its database volume
-	docker compose --project-name sylvan_$* $(COMPOSE_ENV_FILES) --env-file envs/$* --file $(BASE_COMPOSE) down --volumes --remove-orphans
+	docker compose --project-name sylvan_$* $(COMPOSE_ENV_FILES) --env-file envs/$* $(call compose_files,$*) down --volumes --remove-orphans
 	rm -rvf data/api/$* data/postgres/$*
 
 reset: $(addprefix reset-,$(ENVS)) # @doc destroy every environment including databases
@@ -287,5 +316,5 @@ compare-minification: # @doc compare file sizes: uncompressed, compressed, minif
 api/static/app.min.js: api/static/app.js # @doc minify app.js (used in both dev and prod)
 	@echo "Minifying $^..."
 	@npm install --no-save terser > /dev/null 2>&1 || true
-	@npx terser api/static/app.js --compress --mangle --output $@
+	@npx terser api/static/app.js --compress 'pure_funcs=["console.debug","console.log"]' --mangle --output $@
 	@echo "Created $@"

@@ -29,6 +29,7 @@ from api.parsing.nodes import (
     RegexValueNode,
     StringValueNode,
     flatten_nested_operations,
+    regex_plain_literal,
 )
 
 if TYPE_CHECKING:
@@ -189,8 +190,10 @@ def _clone_expansion(node: QueryNode) -> QueryNode:
     ``card_query_nodes.to_sql``, e.g. ``self.rhs.value = ...``, ``self.operator = ...``), which
     would otherwise corrupt ``_expanded_template``'s cached result for every future query that
     reuses the same synonym -- so each leaf needs its own node and its own ``rhs`` object.
-    ``lhs`` and each value node's own ``.value`` are never reassigned in place downstream, so
-    those are shared, not copied.
+    ``lhs`` is shared, not copied, which makes it a contract that nothing downstream writes to it:
+    ``_handle_jsonb_array`` resolves type-vs-subtype into a local for exactly this reason (it used
+    to assign ``lhs.attribute_name``, and through this sharing that was a write to the cached
+    template). ``test_rewrite`` pins the template's lhs across repeated SQL generation.
 
     Deliberately not ``copy.deepcopy``: measured ~20x slower than this on these subtrees (a
     6-leaf expansion: 32us vs 1.5us) because deepcopy's generic per-object reduce/memo machinery
@@ -277,24 +280,23 @@ def _regex_plain_literal(pattern: str) -> str | None:
     r"""The exact substring an unanchored, metacharacter-free regex matches, else None.
 
     A regex made only of literal characters (and escaped punctuation like ``\.``) is a plain
-    substring search, so ``o:/sacrifice a/`` == ``o:"sacrifice a"``. Escaped punctuation unescapes
-    to its literal; an alphanumeric escape (``\d`` / ``\w`` / ``\b``) is a character class -> None;
-    any anchor (``^`` / ``$``) or live metacharacter -> None. Mirrors the engine's ``regex_tier``
+    substring search, so ``o:/sacrifice/`` == ``o:sacrifice``. Escaped punctuation unescapes to its
+    literal; an alphanumeric escape (``\d`` / ``\w`` / ``\b``) is a character class -> None; any
+    anchor (``^`` / ``$``) or live metacharacter -> None. Mirrors the engine's ``regex_tier``
     classification (card_engine/src/filter.rs) so the two never disagree about "plain literal".
+
+    A literal containing whitespace is also None, even though it is a plain literal: the SQL path
+    renders a substring leaf as ``LIKE '%draw%a%card%'`` -- each word may match anywhere, in order,
+    with anything between -- while the regex ``draw a card`` is contiguous. Lowering it would change
+    what the query matches, so it stays a regex. Whether the quoted-phrase form should itself be
+    contiguous is a separate question, and not one this pass may answer. (That rule is specific to
+    the substring lowering; the parsers' literal-on-a-non-regex-field acceptance uses the plain
+    ``nodes.regex_plain_literal``, since an exact-match field has no gap to worry about.)
     """
-    out: list[str] = []
-    it = iter(pattern)
-    for c in it:
-        if c == "\\":
-            nxt = next(it, None)
-            if nxt is None or (nxt.isascii() and nxt.isalnum()):
-                return None  # class escape (\d \w \b …) or a dangling backslash
-            out.append(nxt)
-        elif c in ".*+?()[]{}|^$":
-            return None
-        else:
-            out.append(c)
-    return "".join(out) or None  # empty pattern matches everything -> leave it a regex
+    literal = regex_plain_literal(pattern)
+    if literal is None or any(c.isspace() for c in literal):
+        return None  # contiguous in a regex, gapped in the substring form -- not the same query
+    return literal
 
 
 def _lower_regex_leaves(node: QueryNode) -> None:
@@ -345,13 +347,17 @@ def expand_derived_predicates(query: Query) -> Query:
 
 
 def _operand_dedup_key(node: QueryNode) -> tuple:
-    """Hashable key for order-insensitive dedup within one AND/OR operand list."""
+    """Hashable key for order-insensitive dedup within one AND/OR operand list.
+
+    A leaf is keyed by the node itself, not its hash: every leaf class defines ``__eq__`` alongside
+    ``__hash__``, so set membership compares structurally and a hash collision cannot drop an operand.
+    """
     cls = node.__class__
     if cls is AndNode or cls is OrNode:
         return (cls.__name__, frozenset(_operand_dedup_key(op) for op in node.operands))
     if cls is NotNode:
         return ("NotNode", _operand_dedup_key(node.operand))
-    return ("leaf", hash(node))
+    return ("leaf", node)
 
 
 def _deduplicate_operand_list(operands: list[QueryNode]) -> list[QueryNode]:

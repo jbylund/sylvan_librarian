@@ -19,7 +19,8 @@ python -m pytest api/parsing/tests/test_parsing.py -vvv
 # Run a single test by name
 python -m pytest -vvv -k "test_my_test_name"
 
-# Unit tests only (no Docker required)
+# Everything except the testcontainers integration file. Docker is still required: an autouse
+# session fixture in api/tests/conftest.py starts a Postgres container for all of api/tests/.
 make test-unit
 
 # Integration tests only (requires Docker)
@@ -51,7 +52,7 @@ make dbconn-green # green environment
 ```
 Browser → GET /search?q=<query>
   → api/api_resource.py (Falcon sink handler)
-    → api/parsing/parsing_f.py (pyparsing DSL → AST)
+    → api/parsing/hand_parser.py (hand-written DSL parser → AST)
     → api/api_resource.py (AST → parameterized SQL)
     → PostgreSQL (magic schema)
   → JSON response (cached by CachingMiddleware)
@@ -59,14 +60,14 @@ Browser → GET /search?q=<query>
 
 ### Key Directories
 
-- **`api/parsing/`** — Core query parser (~2,500 lines). `parsing_f.py` drives the pyparsing grammar; `nodes.py` defines AST node types; `card_query_nodes.py` has card-specific nodes; `db_info.py` maps query fields to DB columns.
+- **`api/parsing/`** — Core query parser (~2,500 lines). `hand_parser.py` is the production parser (`api/parsing/__init__.py` binds `parse_scryfall_query` to it); `parsing_f.py` only holds `balance_partial_query`, and `pyparsing_based.py` is the older pyparsing grammar. `nodes.py` defines AST node types; `card_query_nodes.py` has card-specific nodes; `db_info.py` maps query fields to DB columns.
 - **`api/api_resource.py`** — Dispatch (Falcon sink), search logic, SQL generation from AST, and the public routes.
 - **`api/admin_resource.py`** — Data-management handlers (import, backfill, tagging), mounted by `APIResource` under a path prefix rather than sharing the public namespace. Holds no reference to its parent; state the two resources share (connection pools, the query engine, cross-worker cache/import signals) lives on the `AppContext` both take a reference to at construction (`api/app_context.py`).
 - **`api/utils/routing.py`** — The `@route` marker, route-table construction, and the 404 listing. A handler is reachable only if marked; the listing skips anything registered `advertise=False`, which is what makes the mount a boundary rather than a URL prefix.
 - **`api/utils/param_binding.py`** — Resolves each handler's annotations once at registration and binds request parameters against a fixed plan.
 - **`api/utils/page_rendering.py`**, **`api/utils/css_utils.py`**, **`api/utils/site_name.py`**, **`api/utils/caching.py`** — Page assembly, critical-CSS extraction, Host-header display names, and the settings-aware cache decorator.
 - **`api/entrypoint.py`** + **`api/api_worker.py`** — Multi-process Bjoern WSGI server startup.
-- **`api/db/`** — PostgreSQL schema SQL (`2025-09-29-great-reset.sql`). The `magic.cards` table has 22 specialized indices (trigram GIN for text, GIN for JSONB arrays, B-tree for numerics).
+- **`api/db/`** — PostgreSQL schema SQL: `2025-09-29-great-reset.sql` plus dated migrations. With every migration applied, `magic.cards` carries 32 specialized indices (trigram GIN for text, GIN for JSONB arrays, B-tree for numerics).
 - **`api/tests/`** — Integration tests using `testcontainers` (spins up a real PostgreSQL instance).
 - **`api/parsing/tests/`** — 544 parser unit tests.
 - **`api/static/`** — `app.js` (vanilla JS), `app.min.js` (minified for production).
@@ -79,7 +80,7 @@ Browser → GET /search?q=<query>
 
 ### Parser → SQL Pipeline
 
-1. `parsing_f.py` converts a query string into a tree of AST nodes (defined in `nodes.py` and `card_query_nodes.py`).
+1. `hand_parser.py` converts a query string into a tree of AST nodes (defined in `nodes.py` and `card_query_nodes.py`).
 2. Each node implements a method that emits a SQL fragment + bound parameters.
 3. `api_resource.py` wraps the fragment in a `SELECT` against `magic.cards` with `ORDER BY` scoring logic and a `LIMIT` clause.
 4. All user input reaches the database only via parameterized queries.
@@ -88,7 +89,7 @@ Browser → GET /search?q=<query>
 
 - PostgreSQL 17+, schema: `magic`
 - Primary table: `magic.cards` — `scryfall_id` (UUID PK), numeric columns (`cmc`, `creature_power`, `creature_toughness`, `planeswalker_loyalty`), JSONB columns (`card_colors`, `card_color_identity`, `card_keywords`, `card_legalities`, `mana_cost_jsonb`, etc.), text columns (`card_name`, `oracle_text`, `flavor_text`).
-- Tag system: `magic.tags` + `magic.tag_relationships` (with circular-reference trigger).
+- Tag system: `magic.oracle_tags` + `magic.oracle_tag_relationships` (renamed from `tags`/`tag_relationships` in `api/db/2026-06-21-01-bulk-tag-import.sql`; circular-reference trigger).
 - Custom DB functions: `rarity_text_to_int()`, `rarity_int_to_text()`, `extract_collector_number_int()`, `get_tag_ancestors()`, `get_tag_descendants()`.
 
 ## Linting / Style

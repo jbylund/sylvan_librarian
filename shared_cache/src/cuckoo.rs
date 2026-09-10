@@ -52,9 +52,16 @@ impl CuckooFilter {
     /// Insert the key hash. Silently drops on filter overfull (negligible at
     /// 50% load; results in false misses for that key, not incorrect data).
     /// Must be called under the spinlock.
+    ///
+    /// Idempotent: a fingerprint already present in either of its buckets is not stored again.
+    /// `set` calls this on every successful write, including in-place updates and re-sets of a
+    /// key into a new page, and the duplicate copies were what filled the filter up.
     pub fn insert(&self, hash: u64) {
         let mut fp = fingerprint(hash);
         let mut b = self.idx(hash);
+        if self.bucket_has(b, fp) || self.bucket_has(self.alt(b, fp), fp) {
+            return;
+        }
 
         // Try primary then alternate bucket.
         for _ in 0..2 {

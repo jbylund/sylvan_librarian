@@ -87,3 +87,17 @@ COLOR_ALIAS_TO_CODES = {
     "rainbow": "wubrg",
     "all": "wubrgc",
 }
+
+
+_COLOR_LETTERS = frozenset("wubrgc")
+
+
+def is_valid_color_value(value: str) -> bool:
+    """True for a colour name Scryfall accepts or a non-empty string of colour letters (`wubrgc`).
+
+    The one vocabulary check both parsers apply to a colour value, quoted or bare, so `c:"xyz"` is a
+    parse error rather than an engine failure at serialisation time (get_colors_comparison_object
+    raises the same way, but from inside the query engine, after the parser said yes).
+    """
+    value = value.strip().lower()
+    return value in COLOR_ALIAS_TO_CODES or (bool(value) and all(c in _COLOR_LETTERS for c in value))

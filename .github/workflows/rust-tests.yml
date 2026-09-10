@@ -20,7 +20,7 @@ jobs:
       relevant: ${{ steps.scope.outputs.changed }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Does this change touch Rust?
         id: scope
@@ -36,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # Pinned, not @stable, because the clippy steps below run with `-D warnings`:
       # every Rust release adds lints, so a floating toolchain turns release day into a
@@ -45,12 +45,13 @@ jobs:
       # Bumping is then a deliberate PR where the new lints get reviewed on purpose —
       # keep this in step with what contributors run locally (`rustup update stable`).
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.1
+        uses: dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
         with:
+          toolchain: 1.97.1
           components: clippy
 
       - name: Cache Cargo registry and build artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: |
             card_engine

@@ -20,7 +20,7 @@ jobs:
       relevant: ${{ steps.scope.outputs.changed }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Does this change touch Python or the Rust extensions?
         id: scope
@@ -41,51 +41,54 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Python 3.13
         id: setup-python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.13'
 
-      - name: Install system dependencies
+      - name: Install libev (needed to compile bjoern, the WSGI server)
         run: |
-          true || { sudo apt-get update -qqq && sudo apt-get install -qqq -y libev-dev ; }
+          sudo apt-get update -qqq
+          sudo apt-get install -qqq -y libev-dev
 
       - name: Install uv dependencies
         run: |
           # Try the official installer first, fallback to pip if needed
-          if curl -LsSf https://astral.sh/uv/install.sh | sh; then
-            source $HOME/.cargo/env
+          if curl -LsSf https://astral.sh/uv/0.12.12/install.sh | sh; then
+            source "$HOME/.cargo/env"
           else
             echo "Installing uv via pip as fallback..."
             python -m pip install --upgrade pip
             python -m pip install uv
           fi
-          uv pip install --system --break-system-packages -r requirements/base.txt -r requirements/test.txt
+          uv pip install --system --break-system-packages -r requirements/base.txt -r requirements/test.txt -r requirements/webserver.txt
 
       - name: Cache card_engine wheel
         id: ce-cache
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: /tmp/card-engine-wheel
           key: card-engine-${{ runner.os }}-${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('card_engine/**') }}
 
       - name: Cache shared_cache wheel
         id: sc-cache
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: /tmp/shared-cache-wheel
           key: shared-cache-${{ runner.os }}-${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('shared_cache/**') }}
 
       - name: Install Rust toolchain
         if: steps.ce-cache.outputs.cache-hit != 'true' || steps.sc-cache.outputs.cache-hit != 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
 
       - name: Cache Cargo registry and build artifacts
         if: steps.ce-cache.outputs.cache-hit != 'true' || steps.sc-cache.outputs.cache-hit != 'true'
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: |
             card_engine
@@ -103,6 +106,13 @@ jobs:
         run: |
           pip install /tmp/card-engine-wheel/card_engine*.whl
           pip install /tmp/shared-cache-wheel/shared_cache*.whl
+
+      # The production WSGI server is not exercised by the test suite: bjoern is a C extension that
+      # only builds where libev is present, and api.api_worker is what api.entrypoint actually runs.
+      # Importing both is the cheapest proof that a requirements or import-time change has not
+      # broken the container's entrypoint.
+      - name: Import the production server modules
+        run: python -c "import bjoern; import api.api_worker"
 
       - name: Run tests
         run: |

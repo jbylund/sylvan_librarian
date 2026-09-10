@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import pathlib
+import re
 
 import pytest
 
+from api.noscript_helpers import create_card_html
 from api.utils.css_utils import build_critical_css
 
 STYLES_PATH = pathlib.Path(__file__).parent.parent / "static" / "styles.css"
@@ -88,3 +90,33 @@ class TestMinification:
         assert result
         assert len(result) < len(STYLES_PATH.read_text())
         assert "body{" in result
+
+
+class TestServerRenderedCards:
+    """Every class the no-JS card renderer emits must be styled before styles.css arrives."""
+
+    def test_every_ssr_card_class_defined_in_styles_is_critical(self) -> None:
+        """Test no class on a server-rendered card is left to the full stylesheet.
+
+        A class that styles.css defines but the allowlist omits paints unstyled first and reflows
+        when the external stylesheet lands — the layout shift inlining exists to prevent. Classes
+        styles.css does not define at all (the mana-font `ms-*` icons) come from another sheet and
+        are out of scope.
+        """
+        card = {
+            "name": "Sunlit Archivist",
+            "mana_cost": "{2}{W}{W}",
+            "type_line": "Creature — Human Cleric",
+            "oracle_text": "Flying, vigilance\nWhenever Sunlit Archivist attacks, draw a card.",
+            "power": "2",
+            "toughness": "4",
+            "set_name": "Testament of Parity",
+            "set_code": "top",
+            "collector_number": "12",
+        }
+        html = create_card_html(card, 0)
+        emitted = {cls for attr in re.findall(r'class="([^"]*)"', html) for cls in attr.split()}
+        defined = set(re.findall(r"\.([A-Za-z_][\w-]*)", STYLES_PATH.read_text()))
+        critical = build_critical_css(STYLES_PATH)
+        missing = sorted(cls for cls in emitted & defined if not re.search(rf"\.{re.escape(cls)}(?![\w-])", critical))
+        assert missing == []

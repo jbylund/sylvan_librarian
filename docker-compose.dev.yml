@@ -1,0 +1,10 @@
+# Dev-only overrides, layered on docker-compose.yml by the makefile's dev targets
+# (`make dev-up`, `make dev-up-detach`, ...). Production stacks (blue/green) never load this file.
+#
+# Bind-mounting the host checkout's static files lets JS/HTML edits show up without an image
+# rebuild. It must stay out of production: with the mount, blue and green both serve whatever is
+# checked out on the host, so a deploy serves new JS from the old API until both stacks restart.
+services:
+  apiservice:
+    volumes:
+      - ./api/static:/app/api/static

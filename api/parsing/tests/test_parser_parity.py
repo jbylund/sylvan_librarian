@@ -155,3 +155,24 @@ def test_reserved_word_as_value_parity(query: str) -> None:
     value position, so e.g. 'o:or' silently lost its value and became 'o: OR'.
     """
     assert_parsers_agree(query)
+
+
+@pytest.mark.parametrize(
+    argnames=["query"],
+    argvalues=[("-c:c",), ("-id:c",), ("-r:r",), ("-mana:m",)],
+    ids=["negated_color", "negated_identity", "negated_rarity", "negated_mana"],
+)
+def test_negated_condition_whose_value_is_an_alias_parity(query: str) -> None:
+    """`-c:c` is a negated colour filter on both parsers.
+
+    The pyparsing oracle tried attr_attr_condition before condition under negation, so it read the
+    value `c` as the colour attribute alias and produced a node with no rhs value ('CardAttributeNode'
+    has no attribute 'value' at SQL generation). `-mana:m` stays a rejection on both: `m` is not a
+    mana symbol.
+    """
+    assert_parsers_agree(query)
+
+
+def test_negated_alias_value_is_a_string_on_the_oracle() -> None:
+    root = parse_with_pyparsing("-c:c").root
+    assert root.operand.rhs.value == "c"

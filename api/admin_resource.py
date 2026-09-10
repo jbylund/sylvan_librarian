@@ -90,6 +90,10 @@ IMPORT_LOCK_TIMEOUT = 2
 # total, and it halves the logged parameter too (see log_parameter_max_length in the pg config).
 _UPSERT_PAGE_SIZE = 3_000
 
+# Per-statement timeout for the import's upsert batches and the is: tag sync. Set LOCAL, inside the
+# transaction of each batch, so it never outlives the batch on the pooled connection.
+_IMPORT_STATEMENT_TIMEOUT_MS = 30_000
+
 # BOOLEAN_IS_TAGS sync runs once per import over the whole corpus, evaluating every
 # managed expression per row. Chunk by scryfall_id hash so each statement stays within
 # the import's statement_timeout as the tag list grows.
@@ -174,9 +178,7 @@ def _build_boolean_is_tags_sql(tags: dict[str, str]) -> str:
     ``hashtext(scryfall_id)`` falls in that slice are touched.
     """
     managed = ", ".join(f"'{tag}'" for tag in tags)
-    object_entries = ",\n            ".join(
-        f"'{tag}', CASE WHEN ({expr}) THEN true END" for tag, expr in tags.items()
-    )
+    object_entries = ",\n            ".join(f"'{tag}', CASE WHEN ({expr}) THEN true END" for tag, expr in tags.items())
     return f"""
 WITH proposed AS (
     SELECT
@@ -197,6 +199,7 @@ WHERE
     cards.scryfall_id = proposed.scryfall_id AND
     cards.card_is_tags IS DISTINCT FROM proposed.proposed_is_tags
 """
+
 
 CUSTOM_IS_TAGS = [
     "historic",  # artifact, legendary, saga
@@ -240,6 +243,82 @@ CARD_IS_TAGS = LAND_IS_TAGS + [  # noqa: RUF005
     "reserved",
     "vanilla",
 ]
+
+
+def plan_migrations(applied: list[dict[str, str]], on_disk: list[dict[str, str]]) -> tuple[set[str], bool]:
+    """Decide which migrations can be skipped, and whether the schema has to be rebuilt first.
+
+    Walks the applied rows and the on-disk files together, in order. While each applied row matches
+    its file (same name, same hash), the file is already applied and is skipped. At the first row
+    that does not match, the history has diverged: the whole `magic` schema is dropped and rebuilt,
+    so *nothing* counts as applied any more -- including the rows that matched before the
+    divergence, whose objects go with the schema. Rows after the divergence are not looked at, since
+    they cannot rescue anything: the old loop kept walking, re-added later matching rows to the
+    skip set, and then skipped their files even though their DDL had just been dropped.
+
+    Args:
+        applied: `file_name`/`file_sha256` rows from the migrations table, in application order.
+        on_disk: `db_utils.get_migrations()` output, in filename order.
+
+    Returns:
+        The hashes to skip, and whether to drop the schema and its migration rows before applying.
+    """
+    already_applied: set[str] = set()
+    for applied_row, fs_migration in zip(applied, on_disk, strict=False):
+        if applied_row.items() <= fs_migration.items():
+            already_applied.add(applied_row["file_sha256"])
+        else:
+            return set(), True
+    return already_applied, False
+
+
+# How many skipped-card ids the import's one WARNING quotes.
+_SKIPPED_IDS_TO_LOG = 5
+
+# What preprocess_card raises on a malformed upstream row: a missing key, a wrong-typed value, a
+# string where a list was expected. Anything else is a bug in preprocessing and still propagates.
+_PREPROCESS_ERRORS = (KeyError, TypeError, AttributeError, ValueError)
+
+
+class _CardStream:
+    """Preprocesses raw cards lazily, tracking stage counts and skipping rows preprocess_card rejects."""
+
+    def __init__(self, cards: Iterable[dict[str, Any]]) -> None:
+        self._cards = cards
+        self.raw = 0
+        self.preprocessed = 0
+        self.skipped = 0
+        self.skipped_ids: list[str] = []
+        self.first_error: str | None = None
+
+    def __iter__(self) -> Iterator[dict[str, Any]]:
+        for card in self._cards:
+            self.raw += 1
+            try:
+                processed = preprocess_card(card)
+            except _PREPROCESS_ERRORS as oops:
+                self.skipped += 1
+                if len(self.skipped_ids) < _SKIPPED_IDS_TO_LOG:
+                    card_id = card.get("id") if isinstance(card, dict) else None
+                    self.skipped_ids.append(str(card_id) if card_id is not None else "<no id>")
+                if self.first_error is None:
+                    self.first_error = f"{type(oops).__name__}: {oops}"
+                continue
+            for item in processed:
+                self.preprocessed += 1
+                yield item
+
+    def log_skips(self) -> None:
+        """One WARNING for every card preprocess_card rejected, so a bad upstream row is visible but not fatal."""
+        if not self.skipped:
+            return
+        logger.warning(
+            "Skipped %d of %d raw cards that failed preprocessing; first ids: %s; first error: %s",
+            self.skipped,
+            self.raw,
+            ", ".join(self.skipped_ids),
+            self.first_error,
+        )
 
 
 class AdminContext:
@@ -324,15 +403,12 @@ class AdminResource:
                 cursor.execute("SELECT file_name, file_sha256 FROM migrations ORDER BY date_applied")
                 applied_migrations = [dict(r) for r in cursor]
 
-                already_applied = set()
-                for applied_migration, fs_migration in zip(applied_migrations, filesystem_migrations, strict=False):
-                    if applied_migration.items() <= fs_migration.items():
-                        already_applied.add(applied_migration["file_sha256"])
-                    else:
-                        already_applied.clear()
-                        cursor.execute("DELETE FROM migrations")
-                        cursor.execute("DROP SCHEMA IF EXISTS magic CASCADE")
-                        conn.commit()
+                already_applied, needs_reset = plan_migrations(applied_migrations, filesystem_migrations)
+                if needs_reset:
+                    logger.warning("Applied migrations diverge from the files on disk; rebuilding the magic schema")
+                    cursor.execute("DELETE FROM migrations")
+                    cursor.execute("DROP SCHEMA IF EXISTS magic CASCADE")
+                    conn.commit()
 
                 for imigration in filesystem_migrations:
                     file_sha256 = imigration["file_sha256"]
@@ -820,6 +896,8 @@ class AdminResource:
         sync_sql = _build_boolean_is_tags_sql(BOOLEAN_IS_TAGS)
         with conn.cursor() as cursor:
             for chunk_index in range(_BOOLEAN_IS_TAGS_SYNC_CHUNK_COUNT):
+                # Each chunk commits, so each chunk is its own transaction and sets its own timeout.
+                db_utils.set_statement_timeout(cursor, _IMPORT_STATEMENT_TIMEOUT_MS)
                 cursor.execute(
                     sync_sql,
                     {
@@ -1201,39 +1279,35 @@ class AdminResource:
         is never held in memory. Each batch is upserted via bulk_upsert: new rows
         are inserted, changed rows are updated, and unchanged rows are skipped.
 
+        Each batch is committed on its own. One transaction across the whole import meant a lost
+        backend or a single bad row rolled back ~90k rows and held autovacuum off the table for the
+        duration; now a failure loses at most the batch in flight, and what was committed stays.
+
+        A raw card that preprocess_card cannot handle (a missing `type_line`, `legalities`, `colors`
+        or `id`, mostly) is skipped and counted rather than aborting the import: one malformed
+        upstream row should cost one row, not the whole load. Skips are summarised in one WARNING
+        with the first few ids.
+
         Returns a dict with:
             - cards_inserted: new cards added
             - cards_updated: existing cards with changed data
             - cards_loaded: cards_inserted + cards_updated
             - cards_sent: rows attempted (after preprocessing)
+            - cards_skipped: raw cards preprocess_card rejected with an exception
             - status: "success", "no_cards_before_preprocessing", "no_cards_after_preprocessing", "database_error"
             - message: descriptive message
         """
         self.setup_schema()
 
+        stream = _CardStream(cards)
+        cards_inserted = cards_updated = cards_sent = 0
+        committed_batches = 0
         try:
             with self.app_context.writer_pool.connection() as conn:
-                with conn.cursor() as cursor:
-                    db_utils.set_statement_timeout(cursor, 30_000)
-
-                class _CardStream:
-                    """Preprocesses raw cards lazily, tracking stage counts."""
-
-                    def __init__(self) -> None:
-                        self.raw = 0
-                        self.preprocessed = 0
-
-                    def __iter__(self) -> Iterator[dict[str, Any]]:
-                        for card in cards:
-                            self.raw += 1
-                            for processed in preprocess_card(card):
-                                self.preprocessed += 1
-                                yield processed
-
-                stream = _CardStream()
-                cards_inserted = cards_updated = cards_sent = 0
-
                 for page in itertools.batched(stream, page_size):
+                    with conn.cursor() as cursor:
+                        # LOCAL to this batch's transaction; nothing persists on the pooled connection.
+                        db_utils.set_statement_timeout(cursor, _IMPORT_STATEMENT_TIMEOUT_MS)
                     batch = _bulk_upsert(
                         conn,
                         "cards",
@@ -1242,6 +1316,8 @@ class AdminResource:
                         conflict_target=["scryfall_id"],
                         skip_columns=["card_oracle_tags", "card_art_tags", "card_is_tags"],
                     )
+                    conn.commit()
+                    committed_batches += 1
                     cards_sent += len(page)
                     cards_inserted += batch["inserted"]
                     cards_updated += batch["updated"]
@@ -1252,7 +1328,7 @@ class AdminResource:
                         cards_sent,
                     )
 
-                conn.commit()
+                stream.log_skips()
 
                 if cards_sent:
                     self._sync_boolean_is_tags(conn)
@@ -1273,15 +1349,22 @@ class AdminResource:
                     "cards_updated": cards_updated,
                     "cards_loaded": cards_loaded,
                     "cards_sent": cards_sent,
+                    "cards_skipped": stream.skipped,
                     "message": f"Successfully loaded {cards_loaded} cards ({cards_inserted} new, {cards_updated} updated)",
                 }
 
         except (psycopg.Error, ValueError, KeyError) as e:
             logger.exception("Error loading cards")
+            stream.log_skips()
+            if committed_batches:
+                # Rows from the batches before the failure are in the table; readers must not keep
+                # serving cached answers computed without them.
+                self._clear_caches()
             return {
                 "status": "database_error",
                 "cards_loaded": 0,
                 "cards_sent": 0,
+                "cards_skipped": stream.skipped,
                 "message": f"Error loading cards: {type(e).__name__}: {e}",
             }
 

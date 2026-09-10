@@ -20,15 +20,17 @@ from pyparsing import (
     Regex,
     ZeroOrMore,
     one_of,
+    original_text_for,
 )
 
-from api.parsing.card_query_nodes import CardAttributeNode, ExactNameNode, to_card_query_ast
-from api.parsing.colors import COLOR_ALIAS_TO_CODES
+from api.parsing.card_query_nodes import CardAttributeNode, ExactNameNode, is_valid_rarity, to_card_query_ast
+from api.parsing.colors import COLOR_ALIAS_TO_CODES, is_valid_color_value
 from api.parsing.db_info import (
     NUMERIC_CARD_ATTRIBUTES,
     PARSER_CLASS_TO_FIELD_INFOS,
     ParserClass,
 )
+from api.parsing.hand_parser import REGEX_UNSUPPORTED_FIELD_MESSAGE, validate_date, validate_year
 from api.parsing.mana_symbols import first_invalid_mana_symbol
 from api.parsing.nodes import (
     AndNode,
@@ -43,6 +45,7 @@ from api.parsing.nodes import (
     StringValueNode,
     TrueNode,
     flatten_nested_operations,
+    regex_plain_literal,
 )
 
 if TYPE_CHECKING:
@@ -110,6 +113,64 @@ def make_binary_operator_node(tokens: list[object]) -> BinaryOperatorNode:
     """Create a BinaryOperatorNode, properly wrapping attributes and values."""
     left, operator, right = tokens
     return BinaryOperatorNode(create_value_node(left), operator, create_value_node(right))
+
+
+def make_text_condition_node(tokens: list[object]) -> BinaryOperatorNode:
+    """Build a text condition, honouring a `/regex/` only on a field that can run one.
+
+    Mirrors hand_parser.parse_text_value: on a non-regex field a pattern that is a plain literal
+    becomes that literal, anything else is rejected rather than silently matched as a string.
+    """
+    left, operator, right = tokens
+    if isinstance(right, tuple) and right[0] == "regex" and not left.field_infos[0].regex_capable:
+        literal = regex_plain_literal(right[1])
+        if literal is None:
+            raise ValueError(REGEX_UNSUPPORTED_FIELD_MESSAGE)
+        right = ("quoted", literal)
+    return make_binary_operator_node([left, operator, right])
+
+
+def _value_text(value: object) -> str:
+    """The text of a condition's rhs token, whether it arrived bare or as a ("quoted", text) marker."""
+    return value[1] if isinstance(value, tuple) else str(value)
+
+
+def make_color_condition_node(tokens: list[object]) -> BinaryOperatorNode:
+    """Build a colour condition, rejecting a value outside the colour vocabulary (quoted values included).
+
+    Mirrors hand_parser.parse_color_value: the bare alternative is already vocabulary-shaped by its
+    grammar, but a quoted value used to pass straight through and fail inside the query engine.
+    """
+    if not is_valid_color_value(_value_text(tokens[2])):
+        msg = f"Invalid color value {_value_text(tokens[2])!r}"
+        raise ValueError(msg)
+    return make_binary_operator_node(tokens)
+
+
+def make_rarity_condition_node(tokens: list[object]) -> BinaryOperatorNode:
+    """Build a rarity condition, rejecting anything that does not name a rarity (hand_parser.parse_rarity_value)."""
+    if not is_valid_rarity(_value_text(tokens[2])):
+        msg = f"Invalid rarity {_value_text(tokens[2])!r}"
+        raise ValueError(msg)
+    return make_binary_operator_node(tokens)
+
+
+def make_year_condition_node(_s: str, loc: int, tokens: list[object]) -> BinaryOperatorNode:
+    """Build a year condition, applying hand_parser.validate_year's per-operator gate."""
+    _left, operator, right = tokens
+    validate_year(int(right), loc, operator)
+    return make_binary_operator_node(tokens)
+
+
+def make_date_condition_node(_s: str, loc: int, tokens: list[object]) -> BinaryOperatorNode:
+    """Build a date condition: the year passes validate_year's gate, a full date must be a real date."""
+    _left, operator, right = tokens
+    year_str, _, month_day = right.partition("-")
+    validate_year(int(year_str), loc, operator)
+    if month_day:
+        month, day = (int(part) for part in month_day.split("-"))
+        validate_date(int(year_str), month, day, loc)
+    return make_binary_operator_node(tokens)
 
 
 def create_attribute_parser(parser_class: ParserClass) -> ParserElement:
@@ -229,8 +290,9 @@ def create_basic_parsers() -> dict[str, ParserElement]:
     # [^\W\d] is "word char that's not a digit" — i.e. any Unicode letter or underscore
     # (Python 3 `re` treats `\w`/`\W` as Unicode-aware by default for str patterns), so
     # bare words can start with accented letters like "Éowyn" (#649) without also
-    # allowing a leading digit.
-    word = Regex(r"[^\W\d][\w-]*\w|[^\W\d]").set_parse_action(make_word)
+    # allowing a leading digit. An apostrophe continues a word (`can't`), mirroring the hand
+    # lexer, where a "'" opens a string only at token start (spans.opens_quote).
+    word = Regex(r"[^\W\d][\w'-]*[\w']|[^\W\d]").set_parse_action(make_word)
 
     literal_number = float_number | integer
     # Signed literals are wired into the right-hand side of a numeric comparison only (see
@@ -238,7 +300,7 @@ def create_basic_parsers() -> dict[str, ParserElement]:
     negative_float = Regex(r"-\d+\.\d*").set_parse_action(lambda t: float(t[0]))
     negative_integer = Regex(r"-\d+\b").set_parse_action(lambda t: int(t[0]))
     signed_literal_number = negative_float | negative_integer | literal_number
-    string_value_word = Regex(r"\w[\w.-]*")
+    string_value_word = Regex(r"\w[\w.'-]*")
 
     return {
         "attrop": attrop,
@@ -359,19 +421,25 @@ def create_all_condition_parsers(basic_parsers: dict, mana_parsers: dict, color_
 
     expr = Forward()
 
-    paren_expr_term = lparen + expr + rparen
-    arithmetic_term = numeric_attr_word | literal_number | paren_expr_term
+    # A parenthesised arithmetic operand. Deliberately NOT `lparen + expr + rparen`: `expr` turns a
+    # bare arithmetic factor into a name search (see get_parse_expr), which is right for `(cmc+1)`
+    # on its own and wrong for the `(cmc+1)` in `(cmc+1)*2>3`. Restricting the group to arithmetic
+    # content is how this grammar tells the two apart; the hand parser does the same by handing a
+    # group's single bare expression back to the caller undecided (parse_expr's bare_ok).
+    arith_paren = Forward()
+    arithmetic_term = numeric_attr_word | literal_number | arith_paren
     arithmetic_expr = Forward()
     arithmetic_expr <<= arithmetic_term + arithmetic_op + arithmetic_term + ZeroOrMore(arithmetic_op + arithmetic_term)
     arithmetic_expr.set_parse_action(make_chained_arithmetic)
+    arith_paren <<= lparen + (arithmetic_expr | arithmetic_term) + rparen
 
     # Only the leading term of the RHS may be signed — 'power>-1+cmc' is (-1)+cmc, while
     # 'power>cmc+-1' stays a parse error, matching parse_signed_num_term in the hand parser.
     signed_arithmetic_expr = signed_literal_number + arithmetic_op + arithmetic_term + ZeroOrMore(arithmetic_op + arithmetic_term)
     signed_arithmetic_expr.set_parse_action(make_chained_arithmetic)
 
-    numeric_comparison_lhs = arithmetic_expr | paren_expr_term | numeric_attr_word | literal_number
-    numeric_comparison_rhs = arithmetic_expr | signed_arithmetic_expr | paren_expr_term | numeric_attr_word | signed_literal_number
+    numeric_comparison_lhs = arithmetic_expr | arith_paren | numeric_attr_word | literal_number
+    numeric_comparison_rhs = arithmetic_expr | signed_arithmetic_expr | arith_paren | numeric_attr_word | signed_literal_number
     unified_numeric_comparison = numeric_comparison_lhs + EQ_ALIAS_OPERATORS + numeric_comparison_rhs
     unified_numeric_comparison.set_parse_action(make_binary_operator_node)
 
@@ -381,18 +449,23 @@ def create_all_condition_parsers(basic_parsers: dict, mana_parsers: dict, color_
     mana_value_or_string = mana_value | mana_quoted_value
     mana_condition = create_condition_parser(mana_attr_word, mana_value_or_string, operators=EQ_ALIAS_OPERATORS)
 
-    color_condition = create_condition_parser(color_attr_word, color_value | quoted_string, operators=EQ_ALIAS_OPERATORS)
+    color_condition = (color_attr_word + EQ_ALIAS_OPERATORS + (color_value | quoted_string)).set_parse_action(
+        make_color_condition_node
+    )
 
     regex_pattern = basic_parsers["regex_pattern"]
-    rarity_condition = create_condition_parser(rarity_attr_word, quoted_string | string_value_word, operators=EQ_ALIAS_OPERATORS)
+    rarity_condition = (rarity_attr_word + EQ_ALIAS_OPERATORS + (quoted_string | string_value_word)).set_parse_action(
+        make_rarity_condition_node
+    )
     legality_condition = create_condition_parser(legality_attr_word, quoted_string | string_value_word)
-    text_condition = create_condition_parser(text_attr_word, regex_pattern | quoted_string | string_value_word)
+    text_condition = text_attr_word + DEFAULT_OPERATORS + (regex_pattern | quoted_string | string_value_word)
+    text_condition.set_parse_action(make_text_condition_node)
 
     date_value = Regex(r"\d{4}(?:-\d{2}-\d{2})?")
-    date_condition = create_condition_parser(date_attr_word, date_value, operators=EQ_ALIAS_OPERATORS)
+    date_condition = (date_attr_word + EQ_ALIAS_OPERATORS + date_value).set_parse_action(make_date_condition_node)
 
     year_value = Regex(r"\d{4}")
-    year_condition = create_condition_parser(year_attr_word, year_value, operators=EQ_ALIAS_OPERATORS)
+    year_condition = (year_attr_word + EQ_ALIAS_OPERATORS + year_value).set_parse_action(make_year_condition_node)
 
     attr_attr_condition = (
         (numeric_attr_word + DEFAULT_OPERATORS + numeric_attr_word)
@@ -499,7 +572,6 @@ def get_parse_expr() -> ParserElement:  # noqa: PLR0915
     arithmetic_expr = condition_parsers["arithmetic_expr"]
     condition = condition_parsers["condition"]
     hyphenated_condition = condition_parsers["hyphenated_condition"]
-    attr_attr_condition = condition_parsers["attr_attr_condition"]
 
     _word_for_exact = word.copy()
     _quoted_string_for_exact = basic_parsers["quoted_string"]
@@ -523,11 +595,21 @@ def get_parse_expr() -> ParserElement:  # noqa: PLR0915
 
     implicit_name = _implicit_name_value.set_parse_action(make_implicit_name)
 
-    def make_numeric_literal(tokens: list[object]) -> NumericValueNode:
-        """Create a NumericValueNode for standalone numeric literals."""
-        return NumericValueNode(tokens[0])
+    def make_implicit_name_from_text(tokens: list[object]) -> BinaryOperatorNode:
+        """A bare numeric expression with no comparison is a name search for its text.
 
-    standalone_numeric = literal_number.set_parse_action(make_numeric_literal)
+        `1996` and `cmc+1` used to parse to a NumericValueNode / arithmetic node at the root, which
+        SQL renders as `WHERE %(p)s` and Postgres rejects with a type error. Scryfall treats a bare
+        number as a name search, and so does hand_parser (parse_expr), which reads the same source
+        text -- the preprocessed query has no whitespace inside an expression, so `power - cmc`
+        arrives here as `power-cmc`, the text the hand parser builds from its tokens.
+        """
+        return BinaryOperatorNode(CardAttributeNode("name", ParserClass.TEXT), ":", StringValueNode(str(tokens[0])))
+
+    # original_text_for wraps rather than mutates, so literal_number / arithmetic_expr keep producing
+    # numeric nodes everywhere they appear inside a comparison.
+    standalone_numeric = original_text_for(literal_number).add_parse_action(make_implicit_name_from_text)
+    bare_arithmetic = original_text_for(arithmetic_expr).add_parse_action(make_implicit_name_from_text)
 
     def make_group(tokens: list[object]) -> object:
         """Return the grouped expression inside parentheses."""
@@ -546,11 +628,14 @@ def get_parse_expr() -> ParserElement:  # noqa: PLR0915
             return NotNode(tokens[1])
         return tokens[0]
 
-    negatable_primary = attr_attr_condition | condition | group | exact_name | implicit_name
+    # `condition` first, as in `factor`: it already ends in attr_attr_condition, and trying that one
+    # ahead of it read `-c:c` as colour-attribute-vs-colour-attribute (the value `c` is also an
+    # alias), a node with no rhs value that crashed SQL generation instead of negating a colour filter.
+    negatable_primary = condition | group | exact_name | implicit_name | standalone_numeric
     negatable_factor = Optional(operator_not) + negatable_primary
     negatable_factor.set_parse_action(handle_negation)
 
-    factor = condition | hyphenated_condition | arithmetic_expr | negatable_factor | standalone_numeric
+    factor = condition | hyphenated_condition | bare_arithmetic | negatable_factor
 
     def handle_and(tokens: list[object]) -> object:
         """Group AND operands into an AndNode (AND binds tighter than OR)."""
@@ -620,7 +705,7 @@ def _get_implicit_and_tokenizer() -> ParserElement:
 
     float_tok = Regex(r"\b\d+\.\d*\b").set_parse_action(lambda t: t[0])
 
-    string_value_tok = Regex(r"\w([\w.-]*[\w.])?").set_parse_action(lambda t: t[0])
+    string_value_tok = Regex(r"\w([\w.'-]*[\w.'])?").set_parse_action(lambda t: t[0])
 
     curly_mana_symbol = Regex(r"\{[^}]+\}")
     # Mirrors create_mana_parsers' simple_mana_symbol (#954): any letter or digit, so a bare run

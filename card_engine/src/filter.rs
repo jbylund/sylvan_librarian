@@ -21,14 +21,59 @@ pub(crate) fn compile_search_regex(pattern: &str) -> Result<Regex, String> {
 }
 
 use std::cell::Cell;
+use std::time::{Duration, Instant};
+
+/// Wall-clock budget for ALL regex matching within one query. `REGEX_BACKTRACK_LIMIT` bounds a single
+/// `is_match`, not the query: a pattern that never backtracks past the cap but is expensive per
+/// text -- `(?=.*)(?=.*)(?=.*)(?=.*)[q-z]{4}` costs ~370 us per oracle text -- adds up to ~10 s
+/// over a full scan with the per-call cap never firing. The deadline is armed by
+/// `clear_regex_match_failed` (the per-query reset) and checked in `regex_is_match` every
+/// `REGEX_DEADLINE_CHECK_EVERY` calls, so the clock read is amortised; on expiry it raises the same
+/// failure flag the backtrack cap does, and the query surfaces the same `UnsupportedRegexError`.
+///
+/// A const rather than a `QueryParams` field: params are paging/sort inputs copied into every
+/// executor, and nothing about a regex budget is per-request. Tests shrink it via
+/// `arm_regex_deadline`.
+pub(crate) const REGEX_QUERY_BUDGET: Duration = Duration::from_secs(2);
+
+/// Calls between clock reads in `regex_is_match`. 64 matches at ~370 us each is ~24 ms of overrun
+/// at worst for the most expensive pattern measured; a cheap pattern overruns by microseconds.
+pub(crate) const REGEX_DEADLINE_CHECK_EVERY: u32 = 64;
 
 thread_local! {
     static REGEX_MATCH_FAILED: Cell<bool> = const { Cell::new(false) };
+    /// Instant at which regex matching for the current query gives up; `None` until a query arms it.
+    static REGEX_DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
+    /// `regex_is_match` calls since the deadline was armed -- the amortisation counter.
+    static REGEX_CALLS: Cell<u32> = const { Cell::new(0) };
 }
 
-/// Reset before bind/evaluate so a prior query on this thread cannot poison the next.
+/// Reset before bind/evaluate so a prior query on this thread cannot poison the next, and arm the
+/// per-query deadline.
 pub(crate) fn clear_regex_match_failed() {
     REGEX_MATCH_FAILED.with(|c| c.set(false));
+    arm_regex_deadline(REGEX_QUERY_BUDGET);
+}
+
+/// Start the per-query regex budget from now. Called with `REGEX_QUERY_BUDGET` by the per-query reset;
+/// tests pass a smaller budget to force the deadline path.
+pub(crate) fn arm_regex_deadline(budget: Duration) {
+    REGEX_DEADLINE.with(|c| c.set(Instant::now().checked_add(budget)));
+    REGEX_CALLS.with(|c| c.set(0));
+}
+
+/// Whether the current query's regex budget has run out. Reads the clock only every
+/// `REGEX_DEADLINE_CHECK_EVERY` calls; never fires on a thread that has not armed a deadline.
+fn regex_deadline_passed() -> bool {
+    let n = REGEX_CALLS.with(|c| {
+        let n = c.get().wrapping_add(1);
+        c.set(n);
+        n
+    });
+    if !n.is_multiple_of(REGEX_DEADLINE_CHECK_EVERY) {
+        return false;
+    }
+    REGEX_DEADLINE.with(|c| c.get().is_some_and(|deadline| Instant::now() >= deadline))
 }
 
 /// Take and clear the failure flag; `Some(message)` when a match aborted at runtime.
@@ -45,6 +90,10 @@ pub(crate) fn take_regex_match_failed() -> Option<String> {
 
 fn regex_is_match(re: &Regex, hay: &str) -> bool {
     if REGEX_MATCH_FAILED.with(|c| c.get()) {
+        return false;
+    }
+    if regex_deadline_passed() {
+        REGEX_MATCH_FAILED.with(|c| c.set(true));
         return false;
     }
     match re.is_match(hay) {
@@ -65,6 +114,50 @@ pub(crate) fn regex_is_match_for_test(re: &Regex, hay: &str) -> bool {
 #[cfg(test)]
 pub(crate) fn compile_search_regex_for_test(pattern: &str) -> Regex {
     compile_search_regex(pattern).expect("test regex should compile")
+}
+
+/// A lowercase substring needle with its `memmem::Finder` built once at construction.
+///
+/// `str::contains` builds a Two-Way searcher on every call, and the `TextContains` verify runs
+/// once per candidate; the bind-time scans already reused one `Finder` across a whole vocab
+/// (~1.3x, bench_substring_finders). The `String` stays alongside for everything that reads the
+/// needle as text -- length gates, trigram lookups, fingerprints -- via `Deref<Target = str>`.
+#[derive(Clone)]
+pub(crate) struct Needle {
+    word: String,
+    // Boxed so `FilterExpr` stays small: an owned `Finder` is ~300 bytes on x86_64 (its SIMD
+    // prefilters live inline), which would triple the enum for the sake of one variant.
+    finder: Box<memmem::Finder<'static>>,
+}
+
+impl Needle {
+    pub(crate) fn new(word: impl Into<String>) -> Self {
+        let word = word.into();
+        let finder = Box::new(memmem::Finder::new(word.as_bytes()).into_owned());
+        Needle { word, finder }
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.word
+    }
+
+    /// The prebuilt searcher, for scans that test many haystacks against this needle.
+    pub(crate) fn finder(&self) -> &memmem::Finder<'static> {
+        &self.finder
+    }
+
+    /// Whether `hay` contains the needle -- the per-candidate test.
+    #[inline]
+    pub(crate) fn is_in(&self, hay: &str) -> bool {
+        self.finder.find(hay.as_bytes()).is_some()
+    }
+}
+
+impl std::ops::Deref for Needle {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.word
+    }
 }
 
 // ─── Comparison / arithmetic operators ───────────────────────────────────────
@@ -516,7 +609,7 @@ pub(crate) enum FilterExpr {
 
     TextContains {
         field: TextSearchField,
-        word: String,
+        word: Needle,
     },
     /// An artist predicate (contains/exact/regex) after bind() resolved it
     /// against the ~2.2k-entry artist vocab: sorted vocab ids whose artist
@@ -774,6 +867,10 @@ pub(crate) fn regex_tier(pattern: &str) -> u32 {
 }
 
 /// True when *pattern* needs fancy-regex's backtracking VM (lookarounds, etc.).
+///
+/// `i` walks BYTES, so `pattern` may only be sliced at `i` where `bytes[i]` is ASCII (an ASCII byte
+/// is always a char boundary). The one slice here sits inside the `b'('` arm for that reason; a
+/// catch-all arm used to slice at every byte and panicked on the first multibyte char (`dûl`).
 pub(crate) fn pattern_requires_backtrack(pattern: &str) -> bool {
     const LOOKAROUNDS: &[&str] = &["(?=", "(?!", "(?<=", "(?<!"];
     let bytes = pattern.as_bytes();
@@ -788,7 +885,8 @@ pub(crate) fn pattern_requires_backtrack(pattern: &str) -> bool {
                 if LOOKAROUNDS.iter().any(|tok| rest.starts_with(tok)) {
                     return true;
                 }
-                if rest.starts_with("(?>") || rest.starts_with("(?(") {
+                // Atomic group, conditional, named backreference.
+                if rest.starts_with("(?>") || rest.starts_with("(?(") || rest.starts_with("(?P=") {
                     return true;
                 }
             }
@@ -799,7 +897,6 @@ pub(crate) fn pattern_requires_backtrack(pattern: &str) -> bool {
                 }
                 i += 1;
             }
-            _ if !in_class && pattern[i..].starts_with("(?P=") => return true,
             _ => {}
         }
         i += 1;
@@ -1055,9 +1152,9 @@ impl FilterExpr {
                     .filter(|&id| vocab.get(id as usize).is_some_and(|e| e.as_str() == value.as_str()));
             }
             FilterExpr::TextContains { field: TextSearchField::ArtistLower, word } => {
-                // memmem::Finder built once, reused across the vocab scan — its SIMD prefilter beats
-                // rebuilding str::contains's searcher per entry (~1.3x, bench_substring_finders). #734.
-                let finder = memmem::Finder::new(word.as_bytes());
+                // The needle's prebuilt memmem::Finder, reused across the vocab scan — its SIMD prefilter
+                // beats rebuilding str::contains's searcher per entry (~1.3x, bench_substring_finders). #734.
+                let finder = word.finder();
                 let ids = artist_match_ids(artist_vocab, |s| finder.find(s.as_bytes()).is_some());
                 *self = FilterExpr::ArtistMatch { ids };
             }
@@ -1079,7 +1176,7 @@ impl FilterExpr {
             }
             FilterExpr::TextContains { field: TextSearchField::FlavorTextLower, word } => {
                 let mask = flavor_fingerprint(word.as_str());
-                let finder = memmem::Finder::new(word.as_bytes()); // built once, reused (see ArtistLower)
+                let finder = word.finder(); // built once at construction, reused (see ArtistLower)
                 let (gids, dense_ids) = flavor_match_sets(flavor, strings, mask, |s| finder.find(s.as_bytes()).is_some());
                 *self = FilterExpr::FlavorMatch { gids, dense_ids };
             }
@@ -1202,7 +1299,7 @@ impl FilterExpr {
                     _ => return,
                 }
                 let Some(cand) = trigram_candidates(name_trigram, word) else { return };
-                let finder = memmem::Finder::new(word.as_bytes()); // built once, reused across the verify scan
+                let finder = word.finder(); // built once at construction, reused across the verify scan
                 let mut ids: Vec<u32> = cand
                     .into_iter()
                     .filter(|&cid| finder.find(cards[cid as usize].card_name_folded.as_str().as_bytes()).is_some())
@@ -1218,7 +1315,7 @@ impl FilterExpr {
                     _ => return,
                 }
                 let Some(dense) = trigram_candidates(&oracle.trigrams, word) else { return };
-                let finder = memmem::Finder::new(word.as_bytes()); // built once, reused across the verify scan
+                let finder = word.finder(); // built once at construction, reused across the verify scan
                 let mut gids: Vec<u32> = Vec::with_capacity(dense.len());
                 for d in dense {
                     let gid = u32::from(oracle.gids[d as usize]);
@@ -1465,7 +1562,7 @@ impl FilterExpr {
 
             FilterExpr::TextContains { field, word } => {
                 match text_search_field_value(card, printing, strings, *field) {
-                    StrVal::Known(s) => tri_bool(s.contains(word.as_str())),
+                    StrVal::Known(s) => tri_bool(word.is_in(s)),
                     StrVal::Null => Tri::Null,
                     StrVal::PDep => Tri::PrintingDep,
                 }
@@ -1987,7 +2084,7 @@ fn build_text_filter(attr: &str, op: &str, rhs: &Value) -> Result<FilterExpr, St
             "card_artist" => TextSearchField::ArtistLower,
             _ => return Err(format!("text substring not supported on {attr}")),
         };
-        return Ok(FilterExpr::TextContains { field: tsf, word: lower_word });
+        return Ok(FilterExpr::TextContains { field: tsf, word: Needle::new(lower_word) });
     }
 
     let field = match attr {

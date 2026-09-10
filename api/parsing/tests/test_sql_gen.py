@@ -978,21 +978,15 @@ def test_rarity_search_sql_translation(parse_query, input_query: str, expected_s
     assert context == expected_parameters, f"\nExpected params: {expected_parameters}\nObserved params: {context}"
 
 
-def test_rarity_invalid_values(parse_query) -> None:
-    """Test that invalid rarity values raise appropriate errors."""
-    # This should parse successfully but fail during SQL generation
+@pytest.mark.parametrize(argnames="query", argvalues=["rarity>invalid", "r<unknown"])
+def test_rarity_invalid_values(parse_query, query: str) -> None:
+    """An unknown rarity is rejected by the parser, before any SQL is generated.
 
-    parsed = parse_query("rarity>invalid")
-
-    # Should raise ValueError when generating SQL due to invalid rarity
-    with pytest.raises(ValueError, match="Invalid rarity in comparison"):
-        generate_sql_query(parsed)
-
-    # Test with another invalid rarity
-    parsed2 = parse_query("r<unknown")
-
-    with pytest.raises(ValueError, match="Invalid rarity in comparison"):
-        generate_sql_query(parsed2)
+    It used to parse and fail during SQL generation instead ("Invalid rarity in comparison"), which
+    on the engine path meant a logged engine-failure traceback for a typo.
+    """
+    with pytest.raises(ValueError, match=r"Failed to parse query|Invalid rarity"):
+        parse_query(query)
 
 
 def test_rarity_case_insensitive(parse_query) -> None:
@@ -1257,56 +1251,40 @@ def test_collector_number_numeric_comparison_sql_translation(
     assert param_value in expected_parameters, f"Expected parameter value in {expected_parameters}, got: {param_value}"
 
 
-def test_standalone_numeric_query_parses(parse_query) -> None:
-    """Test that standalone numeric queries like '1' parse to NumericValueNode.
+def test_standalone_numeric_query_is_a_name_search(parse_query) -> None:
+    """A standalone number is a name search for its text, rendered as a name LIKE, not a bare parameter.
 
-    Per issue #90, queries like '1' should parse successfully to a NumericValueNode,
-    but then fail at the database level with a datatype mismatch error since
-    PostgreSQL expects boolean values in WHERE clauses, not integers.
+    It used to parse to a NumericValueNode root, which rendered as `WHERE %(p)s` and failed at the
+    database with a datatype mismatch (issue #90 let the literal through; Scryfall reads it as a name).
     """
-    # Test integer
-    parsed_query = parse_query("1")
-    assert isinstance(parsed_query.root, parsing.NumericValueNode)
-    assert parsed_query.root.value == 1
+    for query, literal in (("1", "1"), ("2.5", "2.5")):
+        parsed_query = parse_query(query)
+        assert isinstance(parsed_query.root, parsing.BinaryOperatorNode)
+        assert parsed_query.root.lhs.attribute_name == "card_name"
+        assert parsed_query.root.rhs == parsing.StringValueNode(literal)
 
-    # Test float
-    parsed_query_float = parse_query("2.5")
-    assert isinstance(parsed_query_float.root, parsing.NumericValueNode)
-    assert parsed_query_float.root.value == 2.5
-
-    # Test SQL generation - this should produce a parameterized query
-    sql, context = generate_sql_query(parsed_query)
-
-    # Should be a parameterized value
-    assert sql.startswith("%(")
-    assert sql.endswith(")s")
-    # Context should contain the numeric value
-    assert 1 in context.values()
+        sql, context = generate_sql_query(parsed_query)
+        assert sql.startswith("(lower(card.card_name_folded) LIKE ")
+        assert f"%{literal}%" in context.values()
 
 
 @pytest.mark.parametrize(
-    argnames="semantically_invalid_query",
+    argnames="query",
     argvalues=[
-        "name:bolt and 1",  # Valid parse but semantically invalid: AND between boolean and integer
-        "cmc=3 and 2",  # Valid parse but semantically invalid: AND between boolean and integer
-        "power>1 or 5",  # Valid parse but semantically invalid: OR between boolean and integer
+        "name:bolt and 1",
+        "cmc=3 and 2",
+        "power>1 or 5",
     ],
 )
-def test_semantically_invalid_queries_parse_but_fail_at_db_level(parse_query, semantically_invalid_query: str) -> None:
-    """Test that queries with standalone numeric literals parse but would fail at DB level.
-
-    These queries are syntactically valid after issue #90 (allowing standalone numeric literals),
-    but they're semantically invalid because they combine boolean expressions with bare integers.
-    They should parse successfully but would fail at the database level with datatype mismatch errors.
-    """
-    # These should parse without errors
-    parsed_query = parse_query(semantically_invalid_query)
-
-    # Should be able to generate SQL (though it would fail at execution)
-    sql, context = generate_sql_query(parsed_query)
-
-    # SQL should be generated successfully (it's the execution that would fail)
-    assert isinstance(sql, str)
+def test_bare_numeric_operands_render_as_boolean_sql(parse_query, query: str) -> None:
+    """A bare number beside a real filter is a name search, so every operand renders as a predicate."""
+    sql, context = generate_sql_query(parse_query(query))
+    inner = sql[1:-1]  # strip the compound's own parentheses
+    operands = inner.split(" AND ") if " AND " in inner else inner.split(" OR ")
+    assert len(operands) == 2
+    for operand in operands:
+        assert operand.startswith("("), f"bare operand in {sql}"
+        assert operand.endswith(")"), f"bare operand in {sql}"
     assert isinstance(context, dict)
 
 

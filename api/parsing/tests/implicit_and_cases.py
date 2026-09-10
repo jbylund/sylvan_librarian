@@ -43,6 +43,11 @@ TESTCASES = [
     # Single-quoted strings
     {"query": "'full art'", "expected": "'full art'", "id": "single_quoted"},
     {"query": "a 'b c' d", "expected": "a AND 'b c' AND d", "id": "single_quoted_between"},
+    # A mid-word apostrophe is part of the word, not an unterminated string
+    {"query": "o:can't", "expected": "o:can't", "id": "apostrophe_in_value"},
+    {"query": "can't stop", "expected": "can't AND stop", "id": "apostrophe_in_bare_word"},
+    {"query": "o:can't t:elf", "expected": "o:can't AND t:elf", "id": "apostrophe_value_then_attr"},
+    {"query": "name:Urza's -o:can't", "expected": "name:Urza's AND -o:can't", "id": "apostrophe_with_negation"},
     # Regex patterns (slash-delimited, single token)
     {"query": "name:/bolt/", "expected": "name:/bolt/", "id": "regex_single"},
     # A regex only opens in value position, so two of them means two conditions. The bare form
@@ -50,6 +55,10 @@ TESTCASES = [
     # test_pyparsing_preprocess.py and test_regex_patterns.py.
     {"query": "name:/foo/ o:/bar/", "expected": "name:/foo/ AND o:/bar/", "id": "two_regex"},
     {"query": "name:/bolt/ type:instant", "expected": "name:/bolt/ AND type:instant", "id": "regex_and_attr"},
+    # A `/regex/` on a field that cannot run one: a plain literal is that literal, anything live is
+    # rejected by both parsers.
+    {"query": "t:/elf/ kw:/flying/", "expected": "t:/elf/ AND kw:/flying/", "id": "literal_regex_on_non_text_fields"},
+    {"query": "t:/elf|goblin/", "expected": "t:/elf|goblin/", "id": "live_regex_on_type_rejected"},
     # Regex with escaped slash (searching for "/" in pattern, e.g. "life/death")
     {"query": r"name:/life\/death/", "expected": r"name:/life\/death/", "id": "regex_escaped_slash"},
     {"query": r"name:/a\/b/ type:/c\/d/", "expected": r"name:/a\/b/ AND type:/c\/d/", "id": "two_regex_escaped_slash"},
@@ -60,6 +69,11 @@ TESTCASES = [
     {"query": "cmc>2 power<5", "expected": "cmc>2 AND power<5", "id": "cmp_gt_lt"},
     {"query": "cmc>=3 cmc<=5", "expected": "cmc>=3 AND cmc<=5", "id": "cmp_gte_lte"},
     {"query": "color!=W", "expected": "color!=W", "id": "cmp_neq"},
+    # Colour and rarity values are validated by the parser, quoted or bare
+    {"query": 'c:"azorius" r:"rare"', "expected": 'c:"azorius" AND r:"rare"', "id": "quoted_color_and_rarity"},
+    {"query": 'c:"xyz"', "expected": 'c:"xyz"', "id": "quoted_invalid_color_rejected"},
+    {"query": "r:foo", "expected": "r:foo", "id": "invalid_rarity_rejected"},
+    {"query": 'r:"foo"', "expected": 'r:"foo"', "id": "quoted_invalid_rarity_rejected"},
     # Arithmetic in comparison — no AND inside expression
     {"query": "power+toughness>cmc+cmc", "expected": "power+toughness>cmc+cmc", "id": "arithmetic_comparison"},
     {
@@ -157,6 +171,11 @@ TESTCASES = [
     {"query": "flying -cmc+5>1", "expected": "flying AND -cmc+5>1", "id": "word_then_arith_leading_minus_flying"},
     # Leading negation and multiple negations
     {"query": "-t:creature", "expected": "-t:creature", "id": "leading_negation"},
+    # A negated condition whose value spells an alias of the same class is still attr:value
+    {"query": "-c:c", "expected": "-c:c", "id": "negated_color_value_is_alias"},
+    {"query": "-id:c", "expected": "-id:c", "id": "negated_identity_value_is_alias"},
+    {"query": "t:elf -c:c", "expected": "t:elf AND -c:c", "id": "attr_then_negated_color_alias_value"},
+    {"query": "-r:r", "expected": "-r:r", "id": "negated_rarity_value_is_alias"},
     {"query": "a -b -c", "expected": "a AND -b AND -c", "id": "multiple_negations"},
     # Single item in parens then word
     {"query": "(a) b", "expected": "(a) AND b", "id": "single_in_parens_then_word"},
@@ -168,11 +187,22 @@ TESTCASES = [
     {"query": "old-growth-troll", "expected": "old-growth-troll", "id": "multi_hyphen_word"},
     {"query": "dual-land", "expected": "dual-land", "id": "dual_land_word"},
     {"query": "a-b-c", "expected": "a-b-c", "id": "multi_hyphen_a_b_c"},
+    # A hyphenated word whose first half is a numeric alias is still a word, not half an arithmetic
+    # expression; with a numeric term after the '-' it is arithmetic as before.
+    {"query": "pow-wow", "expected": "pow-wow", "id": "hyphenated_numeric_alias_prefix"},
+    {"query": "power-plant t:land", "expected": "power-plant AND t:land", "id": "hyphenated_numeric_alias_then_attr"},
+    {"query": "mv-x", "expected": "mv-x", "id": "hyphenated_numeric_alias_single_letter"},
+    {"query": "pow-tou>0", "expected": "pow-tou>0", "id": "numeric_alias_subtraction_comparison"},
     # Attribute value with hyphen (otag, is, oracle_tags, name)
     {"query": "name:Jace-the-mind", "expected": "name:Jace-the-mind", "id": "attr_value_hyphenated"},
     {"query": "name:test-word", "expected": "name:test-word", "id": "name_hyphenated_value"},
     {"query": "otag:dual-land", "expected": "otag:dual-land", "id": "otag_dual_land"},
     {"query": "otag:40k-model", "expected": "otag:40k-model", "id": "otag_40k_model"},
+    # A number in text position keeps its spelling: leading zeros and trailing decimals are text
+    {"query": "set:001", "expected": "set:001", "id": "text_value_leading_zeros"},
+    {"query": "x-007", "expected": "x-007", "id": "hyphenated_name_leading_zeros"},
+    {"query": "o:1.50", "expected": "o:1.50", "id": "text_value_trailing_decimal_zero"},
+    {"query": "name:007 t:elf", "expected": "name:007 AND t:elf", "id": "text_value_leading_zeros_then_attr"},
     {
         "query": "otag:cycle-shm-common-hybrid-1-drop",
         "expected": "otag:cycle-shm-common-hybrid-1-drop",
@@ -186,6 +216,18 @@ TESTCASES = [
     # Numerics
     {"query": "cmc:3.5", "expected": "cmc:3.5", "id": "numeric_float"},
     {"query": "1 2 3", "expected": "1 AND 2 AND 3", "id": "numeric_sequence"},
+    # A bare numeric expression with no comparison is a name search for its text (as on Scryfall),
+    # never a non-boolean root; inside a comparison it stays arithmetic.
+    {"query": "1996", "expected": "1996", "id": "bare_number_is_name"},
+    {"query": "2.5 t:elf", "expected": "2.5 AND t:elf", "id": "bare_float_then_attr"},
+    {"query": "cmc+1", "expected": "cmc+1", "id": "bare_arith_is_name"},
+    {"query": "cmc+1<power", "expected": "cmc+1<power", "id": "arith_lhs_comparison"},
+    {"query": "(2*power)", "expected": "(2*power)", "id": "bare_group_arith_is_name"},
+    {"query": "(cmc+1)*2>3", "expected": "(cmc+1)*2>3", "id": "group_arith_operand"},
+    {"query": "-1", "expected": "-1", "id": "negated_bare_number"},
+    {"query": "t:elf -1", "expected": "t:elf AND -1", "id": "attr_then_negated_bare_number"},
+    {"query": "cmc>2 -1", "expected": "cmc>2 AND -1", "id": "cmp_then_negated_bare_number"},
+    {"query": "-(2*power)", "expected": "-(2*power)", "id": "negated_bare_group_arith"},
     # Mana symbols / curly (including complex symbols with slash)
     {"query": "c:{w}{u}", "expected": "c:{w}{u}", "id": "mana_curly"},
     {"query": "c:{W/U}", "expected": "c:{W/U}", "id": "mana_complex_slash"},
@@ -197,6 +239,16 @@ TESTCASES = [
     # Date/year (numeric-looking values)
     {"query": "date:2025", "expected": "date:2025", "id": "date_value"},
     {"query": "year:2024", "expected": "year:2024", "id": "year_value"},
+    # A comparison against any four-digit year is meaningful; only `=`/`:` get the Magic-era gate.
+    {"query": "year<1991", "expected": "year<1991", "id": "year_before_magic_comparison"},
+    {"query": "date<1993", "expected": "date<1993", "id": "date_before_magic_comparison"},
+    {"query": "year>=2100", "expected": "year>=2100", "id": "year_far_future_comparison"},
+    {"query": "year:1500", "expected": "year:1500", "id": "year_before_magic_equality_rejected"},
+    {"query": "date=2099-01-01", "expected": "date=2099-01-01", "id": "date_far_future_equality_rejected"},
+    {"query": "year>99999", "expected": "year>99999", "id": "year_five_digits_rejected"},
+    # A partial or impossible date is an error, not a silent search for the year alone.
+    {"query": "date:2020-01", "expected": "date:2020-01", "id": "date_month_without_day_rejected"},
+    {"query": "date:2020-02-30", "expected": "date:2020-02-30", "id": "date_impossible_rejected"},
     # Dots in attribute values (e.g. sentence-ending period in oracle text search)
     {"query": "o:token.", "expected": "o:token.", "id": "oracle_value_trailing_dot"},
     {"query": "o:token. -o:counter", "expected": "o:token. AND -o:counter", "id": "oracle_value_trailing_dot_with_negation"},

@@ -1,20 +1,32 @@
 """Main entrypoint for the api container."""
 
+from __future__ import annotations
+
 import argparse
 import logging
 import multiprocessing
 import os
 import signal
-from types import FrameType
+import time
+from typing import TYPE_CHECKING, Protocol
 
 from api.api_worker import ApiWorker
 from api.utils.deployment_reporting import report_deployment
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from types import FrameType
 
 logger = logging.getLogger("api")
 
 ALL_INTERFACES = "0.0.0.0"  # noqa: S104
 DEFAULT_PORT = 8080
 DEFAULT_WORKERS = max(2, int((os.cpu_count() or 1) * 0.6))
+
+# How long the master waits for terminated workers to drain in-flight requests before killing the
+# rest. Below docker compose's default 10 s stop_grace_period, so the whole shutdown -- this wait
+# plus the kill and join -- finishes before compose gives up and SIGKILLs the container.
+SHUTDOWN_GRACE_SECONDS = 8.0
 
 
 def get_args() -> dict:
@@ -25,14 +37,43 @@ def get_args() -> dict:
     return vars(parser.parse_args())
 
 
-def _kill_workers(workers: list[ApiWorker]) -> None:
-    for iworker in workers:
-        if iworker.pid is None:
-            logger.warning("Worker %s has no pid", iworker)
-            continue
-        if iworker.is_alive():
-            logger.info("Killing worker %d", iworker.pid)
-            iworker.kill()
+class _StoppableWorker(Protocol):
+    """The slice of multiprocessing.Process that _stop_workers drives (so a test can use a stand-in)."""
+
+    pid: int | None
+
+    def is_alive(self) -> bool: ...
+    def terminate(self) -> None: ...
+    def kill(self) -> None: ...
+    def join(self, timeout: float | None = None) -> None: ...
+
+
+def _stop_workers(workers: Sequence[_StoppableWorker], grace_seconds: float = SHUTDOWN_GRACE_SECONDS) -> None:
+    """Stop every live worker: terminate them all, wait up to grace_seconds in total, kill the rest.
+
+    The previous shutdown was `Process.kill()` -- SIGKILL -- for every worker the moment the master
+    got its signal, so every deploy dropped whatever requests were in flight. terminate() sends
+    SIGTERM, which the worker forwards to bjoern's SIGINT handling (see ApiWorker.run): bjoern stops
+    accepting, lets its in-flight requests finish, and returns. The deadline is shared rather than
+    per worker so a stubborn one cannot stretch the shutdown past the container's stop grace period;
+    a worker still alive at the deadline (a keep-alive connection bjoern is waiting on, say) is
+    killed as before.
+    """
+    live = [iworker for iworker in workers if iworker.pid is not None and iworker.is_alive()]
+    for iworker in live:
+        logger.info("Terminating worker %d", iworker.pid)
+        iworker.terminate()
+
+    deadline = time.monotonic() + grace_seconds
+    for iworker in live:
+        iworker.join(timeout=max(0.0, deadline - time.monotonic()))
+
+    stragglers = [iworker for iworker in live if iworker.is_alive()]
+    for iworker in stragglers:
+        logger.warning("Worker %d did not exit within %.1fs, killing it", iworker.pid, grace_seconds)
+        iworker.kill()
+    for iworker in stragglers:
+        iworker.join(timeout=1)
 
 
 def _all_workers_alive(workers: list[ApiWorker], exit_flag: multiprocessing.Event) -> bool:
@@ -63,11 +104,12 @@ def run_server(
 
     exit_flag = multiprocessing.Event()
 
-    def graceful_shutdown(signum: int, frame: FrameType) -> None:
+    def graceful_shutdown(signum: int, frame: FrameType | None) -> None:
+        # Only sets the flag: the main loop below sees it and runs the one shutdown sequence, so a
+        # signal and a dead worker take the same path and the join/kill logic exists once.
         del frame
         logger.info("Received signal %d in pid %d, setting exit flag", signum, os.getpid())
-        _kill_workers(workers)
-        logger.info("Shutdown complete")
+        exit_flag.set()
 
     # Create shared objects for all workers
     import_guard = multiprocessing.RLock()
@@ -109,14 +151,10 @@ def run_server(
     except KeyboardInterrupt:
         graceful_shutdown(signal.SIGINT, None)
 
+    # A worker died, or a signal arrived: either way the master exits, and takes the remaining
+    # workers down with it (the container's restart policy brings the whole set back).
     exit_flag.set()
-    for iworker in workers:
-        if iworker.is_alive():
-            logger.warning("Worker %s is still alive, killing it", iworker)
-            iworker.kill()
-    for iworker in workers:
-        if iworker.is_alive():
-            iworker.join(timeout=1)
+    _stop_workers(workers)
 
     logger.info("Main server process exiting")
 

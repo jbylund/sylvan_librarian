@@ -14,7 +14,30 @@ if TYPE_CHECKING:
 
 MIN_SIZE: int = 200
 
+# Raster image formats carry their own compression; running brotli over the 105 KB social-preview
+# WebP burned CPU on every uncached hit for a payload that came out no smaller. SVG is text and the
+# two favicon MIME types are uncompressed bitmaps -- both shrink well and stay compressible.
+_COMPRESSIBLE_IMAGE_TYPES: frozenset[str] = frozenset({"image/svg+xml", "image/x-icon", "image/vnd.microsoft.icon"})
+
 logger = logging.getLogger(__name__)
+
+
+def is_compressible_content_type(content_type: str | None) -> bool:
+    """Whether a response of this Content-Type is worth compressing.
+
+    Args:
+        content_type: The response's Content-Type header, parameters included, or None.
+
+    Returns:
+        False for `image/*` other than SVG and the favicon types; True for everything else,
+        including an unset Content-Type.
+    """
+    if not content_type:
+        return True
+    mime = content_type.partition(";")[0].strip().lower()
+    if mime.startswith("image/"):
+        return mime in _COMPRESSIBLE_IMAGE_TYPES
+    return True
 
 
 class CompressionMiddleware:
@@ -56,7 +79,7 @@ class CompressionMiddleware:
                 continue
             compressor_candidates.append(compressor)
         compressor = min(compressor_candidates, key=lambda v: v.priority) if compressor_candidates else None
-        logger.info(
+        logger.debug(
             "Server priorities: %s / Accept encoding: %s / Selected compressor: %s",
             {k: v.priority for k, v in self._compressors.items()},
             accept_encoding_header,
@@ -91,20 +114,23 @@ class CompressionMiddleware:
         if resp.get_header("Content-Encoding"):
             return
 
+        if not is_compressible_content_type(resp.content_type):
+            return
+
         # my accept encoding is "gzip, deflate, br, zstd"
         compressor = self._get_compressor(accept_encoding)
         if compressor is None:
             return
 
         if resp.stream:
-            logger.info("Compressing stream")
+            logger.debug("Compressing stream")
             resp.stream = compressor.compress_stream(resp.stream)
             resp.content_length = None
         else:
             data = resp.render_body()
             # If there is no content or it is very short then don't compress.
             if data is None or len(data) < MIN_SIZE:
-                logger.info("Skipping compression for short response")
+                logger.debug("Skipping compression for short response")
                 return
             size_before_compression = len(data)
             before_compression = time.monotonic()
@@ -113,7 +139,9 @@ class CompressionMiddleware:
             resp.text = None
             size_after_compression = len(compressed)
             compress_ms = 1000 * (after_compression - before_compression)
-            logger.info(
+            # Per-request detail; the Server-Timing header carries the compress span for anyone who
+            # wants it per response, and TimingMiddleware's line is the one INFO record per request.
+            logger.debug(
                 "%s: Compressed %s bytes to %s bytes using %s (%.2f x compression) in %.2f ms - %s",
                 req.url,
                 f"{size_before_compression:,}",

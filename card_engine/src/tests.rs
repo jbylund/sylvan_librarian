@@ -1,5 +1,5 @@
 use super::{
-    renumber_coll_vocab,
+    Needle, renumber_coll_vocab,
     and_child_rank, assign_name_ranks,
     build_numeric_index, build_oracle_text_index, build_trigram_index,
     build_rarity_index, build_flavor_index, build_hybrid_tag_index, build_layout_hybrid_index, bitmap_beats_postings, HybridTagIndex, build_sort_permutations,
@@ -2095,10 +2095,10 @@ fn fuzz_build_filter(spec: &FuzzSpec) -> FilterExpr {
             FilterExpr::CollectionCmp { field: *field, op: *op, value: value.clone(), value_id: None }
         }
         FuzzSpec::Leaf(FuzzLeaf::Artist { word }) => {
-            FilterExpr::TextContains { field: TextSearchField::ArtistLower, word: word.clone() }
+            FilterExpr::TextContains { field: TextSearchField::ArtistLower, word: Needle::new(word.clone()) }
         }
         FuzzSpec::Leaf(FuzzLeaf::TextContains { field, needle }) => {
-            FilterExpr::TextContains { field: *field, word: needle.clone() }
+            FilterExpr::TextContains { field: *field, word: Needle::new(needle.clone()) }
         }
         FuzzSpec::Leaf(FuzzLeaf::NameExact { op, value }) => {
             FilterExpr::TextExact { field: TextField::NameLower, op: *op, value: value.clone() }
@@ -6797,7 +6797,7 @@ fn artist_predicates_bind_to_vocab_ids_and_narrow() {
 
     let mut f = FilterExpr::TextContains {
         field: super::TextSearchField::ArtistLower,
-        word: "rebecca".to_string(),
+        word: Needle::new("rebecca".to_string()),
     };
     f.bind(&archived.coll_vocab, &archived.artist_vocab, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
     // bind rewrites the contains into an id-set match
@@ -6820,7 +6820,7 @@ fn artist_predicates_bind_to_vocab_ids_and_narrow() {
     // an artist matching nothing narrows to the exact empty set
     let mut g = FilterExpr::TextContains {
         field: super::TextSearchField::ArtistLower,
-        word: "zzz".to_string(),
+        word: Needle::new("zzz".to_string()),
     };
     g.bind(&archived.coll_vocab, &archived.artist_vocab, &archived.mana_vocab, &archived.indexes.flavor, &archived.strings);
     match narrow_candidates(&g, &archived.indexes, &archived.offsets, &archived.cards) {
@@ -6871,7 +6871,7 @@ fn flavor_match_bind_eval_and_narrow() {
 
     let mut f = FilterExpr::TextContains {
         field: super::TextSearchField::FlavorTextLower,
-        word: "dream".to_string(),
+        word: Needle::new("dream".to_string()),
     };
     bound(&mut f);
     let FilterExpr::FlavorMatch { ref gids, ref dense_ids } = f else { panic!("expected FlavorMatch after bind") };
@@ -6892,7 +6892,7 @@ fn flavor_match_bind_eval_and_narrow() {
     // nor its negation.
     let mut inner = FilterExpr::TextContains {
         field: super::TextSearchField::FlavorTextLower,
-        word: "dream".to_string(),
+        word: Needle::new("dream".to_string()),
     };
     bound(&mut inner);
     let neg = FilterExpr::Not(Box::new(inner));
@@ -6931,7 +6931,7 @@ fn flavor_match_bind_eval_and_narrow() {
     // A needle matching nothing proves the empty candidate set.
     let mut none = FilterExpr::TextContains {
         field: super::TextSearchField::FlavorTextLower,
-        word: "zzzqqq".to_string(),
+        word: Needle::new("zzzqqq".to_string()),
     };
     bound(&mut none);
     match narrow_candidates(&none, &archived.indexes, &archived.offsets, &archived.cards) {
@@ -8198,6 +8198,11 @@ fn price_narrowing_bound_matches_direct_comparison_on_and_off_grid() {
         (50.00, Some(5000)), (49.99, Some(4999)), (0.01, Some(1)), (5142.02, Some(514202)),
         (100.00, Some(10000)), (0.28, Some(28)), (0.57, Some(57)), (0.0, Some(0)),
         (49.998, None), (50.003, None), (33.335, None), (0.005, None), (12.3456789, None),
+        // The top of the u32 cents domain and one past it. Off-grid on purpose: `u32::MAX` cents is
+        // the one value a half-open `[lo, hi)` cannot include, so the direct comparison below is only
+        // asked about the sampled prices, all of which sit far under it -- and every op must still
+        // return an ORDERED pair here rather than the wrapped `hi = 0` it used to.
+        (42_949_672.95, None), (42_949_672.96, None), (4_294_967_296.0, None),
     ];
     let ops = [
         (CmpOp::Lt, "Lt"),
@@ -8772,7 +8777,7 @@ fn split_planes_composition_rules() {
 
     let green = || FilterExpr::ColorCmp { field: ColorField::Colors, op: CmpOp::Ge, mask: 16 };
     let creature = || FilterExpr::TypeCmp { mask: TYPE_CREATURE, op: CmpOp::Ge };
-    let text = || FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: "draw".to_string() };
+    let text = || FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: Needle::new("draw".to_string()) };
 
     // And(plane, plane, text): planes consumed, the lone leftover unwraps.
     let (pe, residual) = split_planes(FilterExpr::And(vec![green(), creature(), text()]), bounds, words, true);
@@ -9188,8 +9193,8 @@ fn memoize_text_predicates_parity() {
         f.memoize_text_predicates(&archived.cards, &archived.strings, &archived.indexes.name_trigram, &archived.indexes.name_bigrams, &archived.indexes.oracle_trigram, archived.cards.len());
         f
     };
-    let oracle = |w: &str| FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: w.to_string() };
-    let name = |w: &str| FilterExpr::TextContains { field: TextSearchField::NameLower, word: w.to_string() };
+    let oracle = |w: &str| FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: Needle::new(w.to_string()) };
+    let name = |w: &str| FilterExpr::TextContains { field: TextSearchField::NameLower, word: Needle::new(w.to_string()) };
 
     for needle in ["damage", "draw", "goblin", "abcde", "card.", "zzz"] {
         let rewritten = memo(oracle(needle));
@@ -9227,12 +9232,12 @@ fn memoize_text_predicates_guards() {
         f.memoize_text_predicates(&archived.cards, &archived.strings, &archived.indexes.name_trigram, &archived.indexes.name_bigrams, &archived.indexes.oracle_trigram, archived.cards.len());
         f
     };
-    let short = memo(FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: "dr".to_string() });
+    let short = memo(FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: Needle::new("dr".to_string()) });
     assert!(matches!(short, FilterExpr::TextContains { .. }), "2-char needle has no trigrams");
-    let flavor = memo(FilterExpr::TextContains { field: TextSearchField::FlavorTextLower, word: "damage".to_string() });
+    let flavor = memo(FilterExpr::TextContains { field: TextSearchField::FlavorTextLower, word: Needle::new("damage".to_string()) });
     assert!(matches!(flavor, FilterExpr::TextContains { .. }), "flavor is printing-level, not ours");
     // "xyz" appears in 4 of the 6 distinct texts (> half): guard keeps the scan.
-    let broad = memo(FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: "xyz".to_string() });
+    let broad = memo(FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: Needle::new("xyz".to_string()) });
     assert!(matches!(broad, FilterExpr::TextContains { .. }), "broad needle stays unrewritten");
 }
 
@@ -9244,7 +9249,7 @@ fn run_query_memoizes_only_full_scans() {
     let data = text_fixture_store();
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
-    let oracle = |w: &str| FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: w.to_string() };
+    let oracle = |w: &str| FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: Needle::new(w.to_string()) };
     // Keywords <= "flying": no narrowing arm for Le, true for keyword-less cards.
     let broad_sibling = || FilterExpr::CollectionCmp {
         field: CollField::Keywords,
@@ -9283,7 +9288,7 @@ fn oracle_match_none_str_mirrors_text_contains() {
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
     let memoized = FilterExpr::OracleMatch { gids: Vec::new() };
-    let plain = FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: "draw".to_string() };
+    let plain = FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: Needle::new("draw".to_string()) };
     assert!(memoized.eval_card(&archived.cards[0], &archived.strings) == Tri::Null);
     assert!(plain.eval_card(&archived.cards[0], &archived.strings) == Tri::Null);
 }
@@ -9388,7 +9393,7 @@ fn oracle_word_index_exact_union_parity() {
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
     let rec = |f: &FilterExpr| super::narrow_rec(f, &archived.indexes, &archived.offsets, &archived.cards, true);
-    let oracle = |w: &str| FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: w.to_string() };
+    let oracle = |w: &str| FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: Needle::new(w.to_string()) };
 
     for needle in ["target", "creature", "cast", "zzzzz"] {
         let expected = brute_force_oracle_contains(archived, needle);
@@ -9407,7 +9412,7 @@ fn oracle_word_index_dispatch_shapes() {
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
     let rec = |f: &FilterExpr| super::narrow_rec(f, &archived.indexes, &archived.offsets, &archived.cards, true);
-    let oracle = |w: &str| FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: w.to_string() };
+    let oracle = |w: &str| FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: Needle::new(w.to_string()) };
 
     // Single dense hit, no sparse hit: the dense word's bitmap comes back
     // directly, no allocation-and-scatter round trip.
@@ -9446,7 +9451,7 @@ fn oracle_word_index_multi_dense_no_sparse() {
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
     let rec = |f: &FilterExpr| super::narrow_rec(f, &archived.indexes, &archived.offsets, &archived.cards, true);
-    let oracle = |w: &str| FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: w.to_string() };
+    let oracle = |w: &str| FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: Needle::new(w.to_string()) };
 
     let expected = brute_force_oracle_contains(archived, "word");
     let n = rec(&oracle("word")).expect("oracle:word must narrow");
@@ -9470,7 +9475,7 @@ fn compile_plane_word_bonus_composes_with_other_planes() {
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
     let bounds = &archived.indexes.planes;
     let words = &archived.indexes.oracle_trigram.words;
-    let oracle = |w: &str| FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: w.to_string() };
+    let oracle = |w: &str| FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: Needle::new(w.to_string()) };
 
     // Single-dense-hit needle: compile_plane must consume it directly.
     assert!(compile_plane(&oracle("target"), bounds, words).is_some(), "single dense hit must compile to a plane");
@@ -9875,7 +9880,7 @@ fn not_narrows_only_tight_children() {
     // 1-char: below even the bigram floor, so genuinely unindexable.
     // A sub-trigram ORACLE needle: names have unigram/bigram indexes (#858, #639) so they narrow
     // tightly, but oracle text has neither and still cannot narrow at all.
-    let name1 = || FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: "q".into() };
+    let name1 = || FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: Needle::new("q") };
 
     // Tight leaf → complement narrows, loose, and covers every ¬-match.
     let n = rec(&FilterExpr::Not(Box::new(goblin()))).expect("Not(subtype) must narrow");
@@ -9937,7 +9942,7 @@ fn or_composes_plane_and_complement_children() {
 
     // An unindexable child still vetoes: nothing can represent it. Oracle rather than name, since a
     // 1-byte name needle now resolves exactly through the unigram index (#858).
-    let or = FilterExpr::Or(vec![goblin(), FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: "q".into() }]);
+    let or = FilterExpr::Or(vec![goblin(), FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: Needle::new("q") }]);
     assert!(rec(&or).is_none());
 }
 
@@ -9999,7 +10004,7 @@ fn not_over_partial_and_is_blocked() {
     // the total below pins. Not a 1-byte needle any more -- those resolve exactly through the unigram
     // index now (#858) -- and not an oracle needle either, since this fixture leaves oracle text unset,
     // making it Null rather than False and changing what the negation matches.
-    let unindexable = || FilterExpr::TextContains { field: TextSearchField::NameLower, word: "qqqq".into() };
+    let unindexable = || FilterExpr::TextContains { field: TextSearchField::NameLower, word: Needle::new("qqqq") };
 
     // Static check: And with an unrepresentable child can't be tight → Not
     // must refuse to narrow at all.
@@ -10073,7 +10078,7 @@ fn name_bigrams_tiers_and_exactness() {
     assert!(idx.postings.get(b"qx").is_some(), "64-name bigram stays a posting list");
 
     let rec = |w: &str| {
-        let f = FilterExpr::TextContains { field: TextSearchField::NameLower, word: w.to_string() };
+        let f = FilterExpr::TextContains { field: TextSearchField::NameLower, word: Needle::new(w.to_string()) };
         super::narrow_rec(&f, &archived.indexes, &archived.offsets, &archived.cards, false)
     };
     // Dense tier: exact bitmap, tight.
@@ -10095,7 +10100,7 @@ fn name_bigrams_tiers_and_exactness() {
     assert_eq!(n.set.len(), 0);
     // 1-char is indexed too now (#858) -- see name_unigrams_tiers_and_exactness for its tiers. What
     // stays unindexable is a sub-trigram ORACLE needle, which has no unigram/bigram index.
-    let f = FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: "z".to_string() };
+    let f = FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: Needle::new("z".to_string()) };
     assert!(super::narrow_rec(&f, &archived.indexes, &archived.offsets, &archived.cards, false).is_none());
 }
 
@@ -10121,7 +10126,7 @@ fn not_over_unigram_is_tight_but_oracle_stays_loose() {
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
     let rec = |f: &FilterExpr| super::narrow_rec(f, &archived.indexes, &archived.offsets, &archived.cards, true);
 
-    let name_q = || FilterExpr::TextContains { field: TextSearchField::NameLower, word: "q".into() };
+    let name_q = || FilterExpr::TextContains { field: TextSearchField::NameLower, word: Needle::new("q") };
     let n = rec(&FilterExpr::Not(Box::new(name_q()))).expect("-name:q must narrow");
     assert!(n.tight, "name is never Null, so the complement of a tight 1-byte set is exact");
     let cand = n.set.into_cards(&archived.offsets, &archived.indexes.printing_to_card);
@@ -10135,14 +10140,14 @@ fn not_over_unigram_is_tight_but_oracle_stays_loose() {
     assert_eq!(cand, brute, "-name:q must be exactly the cards whose name lacks 'q'");
 
     // An absent byte complements to every card, and that must stay exact rather than trip a breadth guard.
-    let name_v = FilterExpr::TextContains { field: TextSearchField::NameLower, word: "v".into() };
+    let name_v = FilterExpr::TextContains { field: TextSearchField::NameLower, word: Needle::new("v") };
     let n = rec(&FilterExpr::Not(Box::new(name_v))).expect("-name:v must narrow");
     assert!(n.tight);
     assert_eq!(n.set.len(), archived.cards.len(), "no name contains 'v', so its negation is every card");
 
     // The other side of the gate: oracle text can be absent, so its complement is NOT exact. It cannot
     // narrow at all here (no sub-trigram oracle index), which is the conservative outcome either way.
-    let oracle_q = FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: "q".into() };
+    let oracle_q = FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: Needle::new("q") };
     assert!(!super::never_null(&oracle_q), "oracle text is nullable, so its negation must not be tight");
     assert!(rec(&FilterExpr::Not(Box::new(oracle_q))).is_none());
 }
@@ -10171,7 +10176,7 @@ fn name_unigrams_tiers_and_exactness() {
     assert!(idx.postings.get(&b'q').is_some(), "a byte in 64 names stays a posting list");
 
     let rec = |w: &str| {
-        let f = FilterExpr::TextContains { field: TextSearchField::NameLower, word: w.to_string() };
+        let f = FilterExpr::TextContains { field: TextSearchField::NameLower, word: Needle::new(w.to_string()) };
         super::narrow_rec(&f, &archived.indexes, &archived.offsets, &archived.cards, false)
     };
     // Dense tier: exact bitmap, tight.
@@ -10214,7 +10219,7 @@ fn name_bigrams_compose_and_memoize() {
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
-    let name2 = |w: &str| FilterExpr::TextContains { field: TextSearchField::NameLower, word: w.to_string() };
+    let name2 = |w: &str| FilterExpr::TextContains { field: TextSearchField::NameLower, word: Needle::new(w.to_string()) };
 
     // Or of two bigram children composes: "fi" → {0,1,4}, "dr" → {0,2}.
     let or = FilterExpr::Or(vec![name2("fi"), name2("dr")]);
@@ -10570,7 +10575,7 @@ fn accent_folded_name_search_matches_unaccented_query() {
 
     // A query word already folded by Python (whether the user typed "eowyn" or
     // "Éowyn") must find the accented card and only it.
-    let contains_eowyn = FilterExpr::TextContains { field: TextSearchField::NameLower, word: "eowyn".to_string() };
+    let contains_eowyn = FilterExpr::TextContains { field: TextSearchField::NameLower, word: Needle::new("eowyn".to_string()) };
     let matches: Vec<u32> = archived.cards.iter().enumerate()
         .filter(|(_, c)| contains_eowyn.eval_card(c, &archived.strings) == Tri::True)
         .map(|(i, _)| i as u32)
@@ -10627,7 +10632,7 @@ fn type_mask() -> FilterExpr {
 }
 
 fn contains_scan() -> FilterExpr {
-    FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: "draw".to_string() }
+    FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: Needle::new("draw".to_string()) }
 }
 
 fn machinery_regex() -> FilterExpr {
@@ -10656,6 +10661,21 @@ fn regex_tier_classifies_pattern_shapes() {
     assert_eq!(regex_tier("(?<=draw )a card"), REGEX_BACKTRACK_NS100);
 }
 
+/// `pattern_requires_backtrack` walks bytes; it used to slice `&pattern[i..]` at every byte in a
+/// catch-all arm, which panics at the first byte inside a multibyte char. The arm was also dead for
+/// its purpose -- `(` is consumed by the `b'('` arm first -- so the named-backreference test lives
+/// there now, where the slice is at an ASCII byte and therefore a char boundary.
+#[test]
+fn pattern_requires_backtrack_never_slices_inside_a_char() {
+    use crate::filter::pattern_requires_backtrack;
+    for pat in ["dûl", "—", "[dûl]+", "dû(?P<n>l)", "é\\.û", "[—(?P=x)]"] {
+        assert!(!pattern_requires_backtrack(pat), "{pat:?} has no backtracking construct");
+    }
+    for pat in ["(?P=x)", "dû(?P=x)", "(?=a)b", "û(?!b)", "(?<=û)a", "(?>a)", "(?(1)a|b)", "(a)\\1", "\\k<n>"] {
+        assert!(pattern_requires_backtrack(pat), "{pat:?} needs the backtracking VM");
+    }
+}
+
 #[test]
 fn regex_backtrack_exhaustion_surfaces_as_match_failure() {
     use crate::filter::{
@@ -10672,6 +10692,49 @@ fn regex_backtrack_exhaustion_surfaces_as_match_failure() {
     assert!(!regex_is_match_for_test(&re, &hay));
     let msg = take_regex_match_failed().expect("backtrack exhaustion must set failure flag");
     assert!(msg.starts_with(REGEX_MATCH_ERR_PREFIX));
+}
+
+/// The per-query wall-clock budget: a pattern that never trips the per-call backtrack cap but is
+/// expensive per text used to run unbounded over a full scan. The deadline is checked every
+/// `REGEX_DEADLINE_CHECK_EVERY` calls and raises the same failure flag the backtrack cap does, so the
+/// query surfaces the same error. Forced here with a zero budget rather than an expensive pattern.
+#[test]
+fn regex_query_deadline_surfaces_as_match_failure() {
+    use crate::filter::{
+        arm_regex_deadline, clear_regex_match_failed, compile_search_regex_for_test, regex_is_match_for_test,
+        take_regex_match_failed, REGEX_DEADLINE_CHECK_EVERY, REGEX_MATCH_ERR_PREFIX,
+    };
+    let re = compile_search_regex_for_test("(?=.*)(?=.*)(?=.*)(?=.*)[q-z]{4}");
+
+    // Under the default budget the pattern matches normally, however many times it is asked.
+    clear_regex_match_failed();
+    for _ in 0..4 * REGEX_DEADLINE_CHECK_EVERY {
+        assert!(regex_is_match_for_test(&re, "qrst"));
+    }
+    assert!(take_regex_match_failed().is_none(), "a two-second budget is not exhausted by a few hundred matches");
+
+    // A zero budget: the first clock read -- at call REGEX_DEADLINE_CHECK_EVERY, not before -- gives up.
+    clear_regex_match_failed();
+    arm_regex_deadline(std::time::Duration::ZERO);
+    let mut failed_at = None;
+    for i in 1..=2 * REGEX_DEADLINE_CHECK_EVERY {
+        if !regex_is_match_for_test(&re, "qrst") {
+            failed_at = Some(i);
+            break;
+        }
+    }
+    assert_eq!(failed_at, Some(REGEX_DEADLINE_CHECK_EVERY), "the deadline is read every {REGEX_DEADLINE_CHECK_EVERY} calls");
+    // Every later match short-circuits on the flag, exactly as after a backtrack exhaustion.
+    assert!(!regex_is_match_for_test(&re, "qrst"));
+    let msg = take_regex_match_failed().expect("deadline expiry must set the failure flag");
+    assert!(msg.starts_with(REGEX_MATCH_ERR_PREFIX), "same error class as the backtrack cap: {msg}");
+
+    // The reset re-arms the full budget: the next query on this thread is unaffected.
+    clear_regex_match_failed();
+    for _ in 0..2 * REGEX_DEADLINE_CHECK_EVERY {
+        assert!(regex_is_match_for_test(&re, "qrst"));
+    }
+    assert!(take_regex_match_failed().is_none());
 }
 
 // And children reorder cheapest-tier-first regardless of written order, and
@@ -12778,7 +12841,7 @@ fn printing_range_walk_matches_naive_page() {
                 let perm = archived.indexes.sort_perms.get(sc, desc).expect("perm exists");
                 for &(off, lim) in &[(0usize, 10usize), (0, 100), (5, 20), (50, 50), (300, 25)] {
                     let got = walk_printing_page(
-                        &QueryCtx::from(archived), &kernel_params(Mode::Printing, sc, desc, lim, off), &leaf, perm,
+                        &QueryCtx::from(archived), &kernel_params(Mode::Printing, sc, desc, lim, off), &leaf, perm, archived.printings.len(),
                     );
                     let want = naive_printing_page(archived, &leaf, sc, desc, off, lim);
                     assert_eq!(page_scryfall_ids(&got), want, "walk seed {seed} desc {desc} off {off} lim {lim}");
@@ -12813,7 +12876,7 @@ fn printing_range_aligned_page_matches_naive_incl_tie_buckets() {
                     if off >= k {
                         continue;
                     }
-                    let got = aligned_page(idx, 0, 5000, &archived.cards, &archived.printings, &archived.indexes.printing_to_card, desc, off, lim);
+                    let got = aligned_page(idx, 0, 5000, &archived.cards, &archived.printings, &archived.indexes.printing_to_card, desc, off, lim, k);
                     let want = naive_printing_page(archived, &leaf, SortCol::PriceUsd, desc, off, lim);
                     assert_eq!(page_scryfall_ids(&got), want, "aligned seed {seed} desc {desc} off {off} lim {lim} k {k}");
                 }
@@ -13353,4 +13416,470 @@ fn compose_perm_three_phase_order_only_fires_when_enabled_and_sparse() {
             "{label}: the promoted walk is Mode::Card-only, so this must never divert regardless of enabled"
         );
     }
+}
+
+/// `limit=0` is the count-only page: zero rows, and the same total every other page size reports.
+/// Every walk-style executor terminated on `page.len() == limit` after a push, so a zero limit never
+/// hit the condition and the walk ran to exhaustion, returning the entire result set. Checked through
+/// the router and through every forced plan, at offset 0 and at a deep offset, in all three modes —
+/// and then below the router, driving the fast paths and executors directly, so the guard at the
+/// entry point is not the only thing standing between a zero limit and a full walk.
+#[test]
+fn limit_zero_yields_no_rows_and_the_full_total() {
+    use rand::SeedableRng;
+    let mut rng = rand::rngs::SmallRng::seed_from_u64(9_000);
+    let data = fuzz_store_n(&mut rng, 1_500);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let ctx = QueryCtx::from(archived);
+    let full_limit = archived.printings.len().max(1);
+
+    // Hand-built to reach each executor family (see `force_plan_differential_agreement` for why each
+    // shape lands where it does), then random trees for breadth.
+    let mut cases: Vec<(FuzzSpec, &str, &str)> = vec![
+        (FuzzSpec::And(vec![fuzz_leaf_color(&mut rng), fuzz_leaf_type(&mut rng)]), "edhrec", "asc"), // PlanePopcountOrder
+        (FuzzSpec::Leaf(FuzzLeaf::Date { op: CmpOp::Gt, value: 1990_0000 }), "cmc", "asc"), // PrintingRangeScan walk / CardRangePopcount
+        (FuzzSpec::Leaf(FuzzLeaf::Price { field: NumField::PriceUsd, op: CmpOp::Lt, val: 100_000.0 }), "usd", "desc"), // aligned_page
+        (FuzzSpec::Leaf(FuzzLeaf::Cmc { op: CmpOp::Ge, val: 4.0 }), "cmc", "asc"), // StreamedSelect with a sort bound
+        (FuzzSpec::Leaf(FuzzLeaf::Border { value: "black".to_string() }), "edhrec", "asc"), // PrintingCompose perm walk
+        (FuzzSpec::Leaf(FuzzLeaf::Border { value: "black".to_string() }), "usd", "asc"), // PrintingCompose orderby walk
+    ];
+    for _ in 0..20 {
+        cases.push((fuzz_gen(&mut rng, 2), "edhrec", "asc"));
+    }
+    let all_plans = [
+        PhysicalPlan::PrintingRangeScan,
+        PhysicalPlan::PrintingCompose,
+        PhysicalPlan::PlanePopcountOrder,
+        PhysicalPlan::CardRangePopcount,
+        PhysicalPlan::StreamedSelect,
+        PhysicalPlan::GatheredScan,
+    ];
+
+    for (spec, orderby, direction) in &cases {
+        let sort_col = orderby_to_col(orderby);
+        let descending = *direction == "desc";
+        let sort_bound = sort_col_bound(&fuzz_bound_filter(spec, archived), sort_col);
+        for mode in ["card", "printing", "artwork"] {
+            let split = || {
+                split_planes(fuzz_bound_filter(spec, archived), &archived.indexes.planes, &archived.indexes.oracle_trigram.words, mode == "card")
+            };
+            let params_of = |limit: usize, offset: usize| {
+                QueryParams::from_strs(mode, "default", orderby, direction, limit, offset).with_sort_bound(sort_bound)
+            };
+            let what = |plan: &str, offset: usize| format!("{plan} (mode={mode}, orderby={orderby}, dir={direction}, offset={offset}, filter={})", fuzz_describe(spec));
+
+            let (pe, mut res) = split();
+            let (ref_total, _) = run_query_with_plan(PhysicalPlan::GatheredScan, &ctx, &params_of(full_limit, 0), &mut res, None, pe.as_ref())
+                .expect("GatheredScan is always applicable");
+
+            for offset in [0usize, 3] {
+                let (pe, mut res) = split();
+                let (total, page) = run_query_routed(&ctx, &params_of(0, offset), &mut res, None, pe.as_ref());
+                assert_eq!(total, ref_total, "routed total: {}", what("router", offset));
+                assert!(page.is_empty(), "routed returned {} rows for limit=0: {}", page.len(), what("router", offset));
+                for &plan in &all_plans {
+                    let (pe, mut res) = split();
+                    let Some((total, page)) = run_query_with_plan(plan, &ctx, &params_of(0, offset), &mut res, None, pe.as_ref()) else { continue };
+                    assert_eq!(total, ref_total, "forced total: {}", what(&format!("{plan:?}"), offset));
+                    assert!(page.is_empty(), "{plan:?} returned {} rows for limit=0: {}", page.len(), what(&format!("{plan:?}"), offset));
+                }
+            }
+
+            // Below the router: the executors and fast paths themselves.
+            let params = params_of(0, 0);
+            let (pe, res) = split();
+            if printing_range_scan_applicable(params.mode, pe.as_ref(), &archived.cards)
+                && let Some((total, page)) = printing_range_fastpath(&ctx, &params, &res)
+            {
+                assert_eq!(total, ref_total, "{}", what("printing_range_fastpath", 0));
+                assert!(page.is_empty(), "printing_range_fastpath returned {} rows: {}", page.len(), what("", 0));
+            }
+            if super::printing_compose_applicable(&res, None, &archived.cards, pe.as_ref(), &archived.indexes)
+                && let Some((total, page)) = printing_compose_fastpath(&ctx, &params, &res, false)
+            {
+                assert_eq!(total, ref_total, "{}", what("printing_compose_fastpath", 0));
+                assert!(page.is_empty(), "printing_compose_fastpath returned {} rows: {}", page.len(), what("", 0));
+            }
+            if let Some(pe) = pe.as_ref()
+                && plane_popcount_order_applicable(&res, params.mode, &archived.cards, Some(pe), sort_col, descending, &archived.indexes)
+            {
+                let (total, page) = super::exec_plane_popcount_order(&ctx, &params, pe);
+                assert_eq!(total, ref_total, "{}", what("exec_plane_popcount_order", 0));
+                assert!(page.is_empty(), "exec_plane_popcount_order returned {} rows: {}", page.len(), what("", 0));
+            }
+            let (pe, mut res) = split();
+            if streamed_select_applicable(&archived.cards, sort_col, descending, &archived.indexes) {
+                let prep = prepare_candidates(&ctx, &params, &mut res, pe.as_ref());
+                let (total, page) = super::exec_streamed_select(&ctx, &params, &res, &prep, pe.as_ref());
+                assert_eq!(total, ref_total, "{}", what("exec_streamed_select", 0));
+                assert!(page.is_empty(), "exec_streamed_select returned {} rows: {}", page.len(), what("", 0));
+            }
+        }
+    }
+}
+
+/// The top of the integer domain: `hi` is a u32, so `<= u32::MAX` cannot be expressed as
+/// `[0, u32::MAX + 1)` -- it used to be computed as exactly that and truncate to `[0, 0)`, and `Eq`
+/// at `u32::MAX` came back as `(u32::MAX, 0)`; consumers then wrapped on `e - s` and panicked on
+/// `pids[s..e]`. Every op now stays inside the domain with `lo <= hi`, treating `u32::MAX` itself as
+/// never present (it is the null sentinel, not a stored value).
+#[test]
+fn int_range_bounds_stay_inside_the_u32_domain_at_its_top() {
+    const TOP: f64 = u32::MAX as f64;
+    let bound = |op, v| super::int_range_bounds(op, v).expect("not Ne");
+    assert_eq!(bound(CmpOp::Le, TOP), Some((0, u32::MAX)));
+    assert_eq!(bound(CmpOp::Lt, TOP), Some((0, u32::MAX)));
+    assert_eq!(bound(CmpOp::Eq, TOP), None, "u32::MAX is not representable in a half-open u32 range");
+    assert_eq!(bound(CmpOp::Gt, TOP), None);
+    assert_eq!(bound(CmpOp::Ge, TOP), None);
+    // One below the top is the last value a bound can include.
+    assert_eq!(bound(CmpOp::Eq, TOP - 1.0), Some((u32::MAX - 1, u32::MAX)));
+    assert_eq!(bound(CmpOp::Ge, TOP - 1.0), Some((u32::MAX - 1, u32::MAX)));
+    assert_eq!(bound(CmpOp::Gt, TOP - 2.0), Some((u32::MAX - 1, u32::MAX)));
+    for v in [TOP + 1.0, TOP + 0.5, 1e12, f64::INFINITY] {
+        assert_eq!(bound(CmpOp::Le, v), Some((0, u32::MAX)), "Le({v})");
+        assert_eq!(bound(CmpOp::Lt, v), Some((0, u32::MAX)), "Lt({v})");
+        for op in [CmpOp::Eq, CmpOp::Gt, CmpOp::Ge] {
+            assert_eq!(bound(op, v), None, "{op:?}({v}) is provably empty");
+        }
+    }
+    for op in [CmpOp::Eq, CmpOp::Lt, CmpOp::Le, CmpOp::Gt, CmpOp::Ge] {
+        assert_eq!(bound(op, f64::NAN), None, "{op:?}(NaN) matches nothing");
+        assert_eq!(bound(op, f64::NEG_INFINITY), if matches!(op, CmpOp::Gt | CmpOp::Ge) { Some((0, u32::MAX)) } else { None });
+    }
+    assert_eq!(super::int_range_bounds(CmpOp::Ne, f64::NAN), None, "Ne never narrows, NaN or not");
+
+    // Through a real index: the bounds slice `pids[s..e]`, so the top of the domain must be a
+    // well-formed (empty or full) slice, never a wrapped length or an inverted range.
+    use rand::SeedableRng;
+    let mut rng = rand::rngs::SmallRng::seed_from_u64(4_294_967_295);
+    let data = fuzz_store_n(&mut rng, 300);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let idx = &archived.indexes.collector_number;
+    let n = idx.range_pids(0, u32::MAX).count();
+    assert_eq!(n, idx.len(), "every indexed printing sits below u32::MAX");
+    for v in [TOP, TOP - 1.0, TOP + 1.0, 1e12] {
+        for op in [CmpOp::Lt, CmpOp::Le, CmpOp::Gt, CmpOp::Ge, CmpOp::Eq] {
+            let count = match bound(op, v) {
+                None => 0,
+                Some((lo, hi)) => idx.range_pids(lo, hi).count(),
+            };
+            let expected = if matches!(op, CmpOp::Lt | CmpOp::Le) { n } else { 0 };
+            assert_eq!(count, expected, "{op:?}({v}) over the collector-number index");
+        }
+    }
+    // The inverted pair itself is an empty range, not a panic.
+    assert_eq!(idx.range_pids(10, 10).count(), 0);
+}
+
+/// `sync_format_shifts` reconciled the process-global registry with the archive by LENGTH, so an
+/// archive of the same size with different assignments was "already caught up": every legality bit
+/// was then read from the wrong 2-bit field, and the sorted snapshot stayed on the old assignment.
+/// Agreement is now by content, disagreement replaces the registry, and every change bumps the
+/// generation the snapshot is keyed on.
+#[test]
+fn sync_format_shifts_adopts_an_equal_length_reassignment() {
+    use super::legality::{format_shift, format_shift_or_assign, format_shifts_sorted, sync_format_shifts};
+    let archived_map = |pairs: &[(&str, u8)]| {
+        let m: HashMap<String, u8> = pairs.iter().map(|(f, s)| (f.to_string(), *s)).collect();
+        rkyv::to_bytes::<Error>(&m).expect("serialize")
+    };
+    let sorted_of = |names: &[&str]| -> Vec<(String, u8)> {
+        let snap = format_shifts_sorted();
+        snap.iter().filter(|(f, _)| names.contains(&f.as_str())).cloned().collect()
+    };
+    let names = ["sync_test_a", "sync_test_b", "sync_test_c"];
+
+    let a = archived_map(&[("sync_test_a", 0), ("sync_test_b", 2), ("sync_test_c", 4)]);
+    let a = rkyv::access::<Archived<HashMap<String, u8>>, Error>(&a).expect("access");
+    sync_format_shifts(a);
+    assert_eq!((format_shift("sync_test_a"), format_shift("sync_test_b"), format_shift("sync_test_c")), (Some(0), Some(2), Some(4)));
+    assert_eq!(sorted_of(&names), vec![("sync_test_a".to_string(), 0), ("sync_test_b".to_string(), 2), ("sync_test_c".to_string(), 4)]);
+
+    // Same length, a and b swapped. A length comparison sees nothing to do here.
+    let b = archived_map(&[("sync_test_a", 2), ("sync_test_b", 0), ("sync_test_c", 4)]);
+    let b = rkyv::access::<Archived<HashMap<String, u8>>, Error>(&b).expect("access");
+    sync_format_shifts(b);
+    assert_eq!(
+        (format_shift("sync_test_a"), format_shift("sync_test_b"), format_shift("sync_test_c")),
+        (Some(2), Some(0), Some(4)),
+        "an equal-length reassignment must be adopted"
+    );
+    assert_eq!(
+        sorted_of(&names),
+        vec![("sync_test_a".to_string(), 2), ("sync_test_b".to_string(), 0), ("sync_test_c".to_string(), 4)],
+        "the sorted snapshot is keyed on the generation, not the count"
+    );
+
+    // Agreement is a no-op: the same snapshot Arc keeps being served, so the derived caches keyed on
+    // its identity are not rebuilt either.
+    let before = format_shifts_sorted();
+    sync_format_shifts(b);
+    assert!(std::sync::Arc::ptr_eq(&before, &format_shifts_sorted()), "a sync that agrees must not move the generation");
+
+    // A reload after an adoption assigns the lowest FREE shift, not `len * 2`: with c at 4 and b
+    // gone, `len * 2` would have been 4 -- a collision with c.
+    let holed = archived_map(&[("sync_test_a", 0), ("sync_test_c", 4)]);
+    let holed = rkyv::access::<Archived<HashMap<String, u8>>, Error>(&holed).expect("access");
+    sync_format_shifts(holed);
+    assert_eq!(format_shift("sync_test_b"), None, "replaced, not merged: b is gone");
+    assert_eq!(format_shift_or_assign("sync_test_d"), Some(2));
+    assert_eq!(format_shift_or_assign("sync_test_e"), Some(6));
+    assert_eq!(format_shift_or_assign("sync_test_d"), Some(2), "already assigned");
+    assert_eq!(
+        sorted_of(&["sync_test_a", "sync_test_c", "sync_test_d", "sync_test_e"]),
+        vec![("sync_test_a".to_string(), 0), ("sync_test_c".to_string(), 4), ("sync_test_d".to_string(), 2), ("sync_test_e".to_string(), 6)],
+        "appends move the generation too"
+    );
+}
+
+/// A scratch directory under the system temp dir, unique per test and process, removed on drop.
+struct ScratchDir(std::path::PathBuf);
+
+impl ScratchDir {
+    fn new(tag: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("card_engine_{tag}_{}_{:?}", std::process::id(), std::thread::current().id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        ScratchDir(dir)
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// `reload_commit` writes the archive into `<archive>.<pid>.tmp` and renames it into place. Any error
+/// between `File::create` and the rename used to leave that file behind -- in /dev/shm, pinning RAM.
+/// The guard unlinks it on every exit but a successful publish.
+#[test]
+fn tmp_archive_guard_unlinks_unless_published() {
+    let scratch = ScratchDir::new("tmp_archive");
+    let dest = scratch.0.join("store.bin");
+
+    // Dropped without publishing (the error path): gone.
+    let tmp_path = scratch.0.join("store.bin.1.tmp");
+    {
+        let (guard, mut file) = super::TmpArchive::create(tmp_path.clone()).expect("create");
+        std::io::Write::write_all(&mut file, b"partial").expect("write");
+        assert!(tmp_path.exists());
+        drop(file);
+        drop(guard);
+    }
+    assert!(!tmp_path.exists(), "an unpublished tmp archive must be unlinked on drop");
+    assert!(!dest.exists());
+
+    // Published: renamed into place, nothing left at the tmp path.
+    let tmp_path = scratch.0.join("store.bin.2.tmp");
+    let (guard, mut file) = super::TmpArchive::create(tmp_path.clone()).expect("create");
+    std::io::Write::write_all(&mut file, b"complete").expect("write");
+    drop(file);
+    guard.publish(&dest).expect("publish");
+    assert!(!tmp_path.exists());
+    assert_eq!(std::fs::read(&dest).expect("read dest"), b"complete");
+}
+
+/// `reload_begin` sweeps sibling `<archive>.<pid>.tmp` files whose pid is dead: a crashed writer's
+/// leftover. Live pids (ours included), other archives' temp files and non-matching names stay.
+#[test]
+fn stale_tmp_archive_sweep_removes_only_dead_writers_of_this_archive() {
+    let scratch = ScratchDir::new("tmp_sweep");
+    let shm_path = scratch.0.join("store.bin");
+    // Far above any pid_max in use (Linux caps at 2^22, macOS at 99,999), so `kill(pid, 0)` is ESRCH.
+    const DEAD_PID: u32 = 2_000_000_000;
+    assert!(!super::pid_alive(DEAD_PID));
+    assert!(super::pid_alive(std::process::id()));
+    assert!(super::pid_alive(u32::MAX), "an unrepresentable pid must count as alive: never remove what cannot be proven abandoned");
+
+    let touch = |name: &str| std::fs::write(scratch.0.join(name), b"x").expect("touch");
+    let dead = format!("store.bin.{DEAD_PID}.tmp");
+    let mine = format!("store.bin.{}.tmp", std::process::id());
+    let other_archive = format!("other.bin.{DEAD_PID}.tmp");
+    let not_a_pid = "store.bin.notapid.tmp";
+    let not_tmp = format!("store.bin.{DEAD_PID}.bak");
+    for name in [dead.as_str(), mine.as_str(), other_archive.as_str(), not_a_pid, not_tmp.as_str()] {
+        touch(name);
+    }
+    std::fs::write(&shm_path, b"archive").expect("archive");
+
+    assert_eq!(super::sweep_stale_tmp_archives(&shm_path), 1);
+    assert!(!scratch.0.join(&dead).exists(), "the dead writer's tmp is swept");
+    for kept in [mine.as_str(), other_archive.as_str(), not_a_pid, not_tmp.as_str(), "store.bin"] {
+        assert!(scratch.0.join(kept).exists(), "{kept} must be left alone");
+    }
+    // Idempotent, and harmless on a directory that does not exist.
+    assert_eq!(super::sweep_stale_tmp_archives(&shm_path), 0);
+    assert_eq!(super::sweep_stale_tmp_archives(&scratch.0.join("missing").join("store.bin")), 0);
+}
+
+/// The 3+-byte `TextContains` narrowing arm called `trigram_candidates` without the "index built"
+/// guard the `TextRegex` arm has. On an archive whose trigram indexes are `Default` (a fixture, or
+/// any store built without them) `trigram_candidates` returns EMPTY rather than `None`, so the
+/// narrowing proved an empty result for every card. Unbuilt now means "no narrowing", as for regex.
+#[test]
+fn text_contains_narrowing_requires_a_built_trigram_index() {
+    let mut vocab = VocabInterner::new();
+    let cards = vec![stub_card(1, TYPE_CREATURE, &[], &mut vocab), stub_card(2, TYPE_CREATURE, &[], &mut vocab)];
+    let data = store_of(cards, &[1, 1], vocab);
+    assert_eq!(data.indexes.name_trigram.domain, 0, "the fixture leaves the trigram indexes unbuilt");
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    for (label, field) in [("name", TextSearchField::NameLower), ("oracle", TextSearchField::OracleTextLower)] {
+        for word in ["abc", "abcd"] {
+            let f = FilterExpr::TextContains { field, word: Needle::new(word) };
+            assert!(
+                narrow_candidates(&f, &archived.indexes, &archived.offsets, &archived.cards).is_none(),
+                "{label} contains {word:?}: an unbuilt trigram index must decline to narrow, not prove an empty set"
+            );
+        }
+    }
+}
+
+/// The numeric loaders saturated: `(dollars * 100.0).round() as u32` turned NaN into `Some(0)` and
+/// 1e12 into `Some(u32::MAX)`, and `v as i8`/`u8`/`u16`/`u32` clamped silently. A value that is not
+/// finite or does not fit is absent now, not the type's edge.
+#[test]
+fn numeric_loaders_reject_non_finite_and_out_of_range_values() {
+    use super::{int_of, price_cents_of};
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1e12, -1.0, 42_949_672.96] {
+        assert_eq!(price_cents_of(bad), None, "price {bad}");
+    }
+    assert_eq!(price_cents_of(0.28), Some(28));
+    assert_eq!(price_cents_of(5142.02), Some(514_202));
+    assert_eq!(price_cents_of(0.0), Some(0));
+    assert_eq!(price_cents_of(42_949_672.95), Some(u32::MAX), "the top of the cents domain still loads");
+
+    for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1e12, -1.0, 256.0] {
+        assert_eq!(int_of::<u8>(bad), None, "u8 {bad}");
+    }
+    assert_eq!(int_of::<u8>(255.0), Some(255));
+    assert_eq!(int_of::<u8>(2.7), Some(2), "truncation toward zero is unchanged for in-range values");
+    assert_eq!((int_of::<i8>(-128.0), int_of::<i8>(-129.0), int_of::<i8>(127.0), int_of::<i8>(128.0)), (Some(-128), None, Some(127), None));
+    assert_eq!(int_of::<i8>(-2.7), Some(-2));
+    assert_eq!((int_of::<u16>(65_535.0), int_of::<u16>(65_536.0), int_of::<u16>(f32::NAN)), (Some(65_535), None, None));
+    assert_eq!((int_of::<u32>(4_000_000_000.0), int_of::<u32>(1e12), int_of::<u32>(-1.0)), (Some(4_000_000_000), None, None));
+}
+
+/// `renumber_coll_vocab` iterated `(0..coll_vocab.len() as u16)`, which is the EMPTY range at exactly
+/// 65,536 entries -- the largest vocab `VocabInterner` allows -- so the sorted vocab came back empty
+/// and every row's ids pointed nowhere. The interner's own cap (ids up to `u16::MAX`) is exercised
+/// alongside: the 65,537th distinct value is refused rather than wrapped.
+#[test]
+fn coll_vocab_renumbers_at_exactly_u16_capacity_and_the_interner_refuses_past_it() {
+    let n = usize::from(u16::MAX) + 1;
+    let mut interner = VocabInterner::new();
+    // Descending insertion, so the lexicographic renumbering has real work to do.
+    for i in (0..n).rev() {
+        let id = interner.intern(format!("v{i:05}")).expect("65,536 distinct values fit u16 ids");
+        assert_eq!(usize::from(id), n - 1 - i);
+    }
+    assert!(interner.intern("one too many".to_string()).is_err(), "the 65,537th distinct value must be refused, not wrapped");
+    assert_eq!(interner.intern("v00007".to_string()).expect("existing"), (n - 1 - 7) as u16, "a repeat still resolves after the refusal");
+
+    let mut cards: Vec<OracleCard> = Vec::new();
+    let mut printings: Vec<Printing> = Vec::new();
+    let sorted = renumber_coll_vocab(&mut cards, &mut printings, interner.strings);
+    assert_eq!(sorted.len(), n, "the full vocab survives renumbering at capacity");
+    assert!(sorted.windows(2).all(|w| w[0] < w[1]), "renumbered vocab is strictly sorted");
+    assert_eq!((sorted[0].as_str(), sorted[n - 1].as_str()), ("v00000", "v65535"));
+}
+
+/// The per-symbol pip counter is a `u8`; a pathological cost text with more than 255 of one symbol
+/// used to wrap it to 0 (`{W}` x 256 = no white pips). It saturates now.
+#[test]
+fn mana_pip_counter_saturates_instead_of_wrapping() {
+    let pips = super::mana_pip_counts(&"{W}".repeat(300));
+    assert_eq!(pips.get("W"), Some(&u8::MAX));
+    let pips = super::mana_pip_counts(&"{W}".repeat(255));
+    assert_eq!(pips.get("W"), Some(&255));
+    let pips = super::mana_pip_counts(&format!("{}{{U}}", "{W}".repeat(256)));
+    assert_eq!((pips.get("W"), pips.get("U")), (Some(&255), Some(&1)));
+}
+
+/// `InlineStr::from_str` cuts silently at a char boundary; `truncates` is the loader's way of
+/// noticing that it did, so a name longer than the documented 61-byte width surfaces as a count.
+#[test]
+fn inline_str_reports_truncation_and_cuts_on_a_char_boundary() {
+    let fits = "a".repeat(61);
+    let long = "a".repeat(62);
+    assert!(!InlineStr::<61>::truncates(&fits));
+    assert!(InlineStr::<61>::truncates(&long));
+    assert_eq!(InlineStr::<61>::from_str(&fits).as_str(), fits);
+    assert_eq!(InlineStr::<61>::from_str(&long).as_str(), fits);
+    // 60 ASCII bytes + a 2-byte char: 62 bytes, cut before the char rather than through it.
+    let multibyte = format!("{}é", "a".repeat(60));
+    assert!(InlineStr::<61>::truncates(&multibyte));
+    assert_eq!(InlineStr::<61>::from_str(&multibyte).as_str(), "a".repeat(60));
+    assert!(!InlineStr::<8>::truncates("plst"));
+    assert!(InlineStr::<8>::truncates("nine-char"));
+}
+
+/// The emit caches (`EmitStrCache`, and the catalog counts beside it) belong to the MAPPING, not the
+/// engine: interned string ids are archive-relative, so after a reload the same id can name different
+/// text, and a cache that outlived its archive would hand out the old text under the new id. Archive
+/// A, then archive B published the way `reload_commit` publishes (`rename(2)`, a new inode) with the
+/// same string id and the same vocab id bound to different text: `get_mapping` must hand back a new
+/// mapping AND fresh caches, and the same archive asked for again must not.
+#[test]
+fn reload_replaces_the_emit_caches_with_the_mapping() {
+    let scratch = ScratchDir::new("emit_cache");
+    let shm_path = scratch.0.join("cards.bin");
+    let engine = super::QueryEngine {
+        shm_path: shm_path.clone(),
+        staging: std::sync::Mutex::new(None),
+        cached_mmap: std::sync::Mutex::new(None),
+    };
+
+    // One card whose `type_line` is string id 0 and whose one keyword is vocab id 0.
+    let store_with = |type_line: &str, keyword: &str| -> CardData {
+        let mut vocab = VocabInterner::new();
+        let kw = vocab.intern(keyword.to_string()).expect("intern");
+        let mut card = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
+        card.card_keywords = vec![kw];
+        let mut data = store_of(vec![card], &[1], vocab);
+        data.strings = vec![type_line.to_string()];
+        data
+    };
+    let publish = |data: &CardData, tag: &str| {
+        let mut bytes = archive_header().to_vec();
+        bytes.extend_from_slice(&rkyv::to_bytes::<Error>(data).expect("serialize"));
+        let tmp = shm_path.with_extension(format!("{tag}.tmp"));
+        std::fs::write(&tmp, &bytes).expect("write tmp");
+        std::fs::rename(&tmp, &shm_path).expect("publish"); // rename(2), as reload_commit does: a new inode
+    };
+    let texts_of = |mmap: &Mmap| -> (String, String) {
+        // Safety: written by `rkyv::to_bytes` in this build, behind the header `get_mapping` checked.
+        let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(mmap)) };
+        (data.strings[0].as_str().to_string(), data.coll_vocab[0].as_str().to_string())
+    };
+
+    publish(&store_with("Creature — Elf", "flying"), "a");
+    let a = engine.get_mapping().expect("map A");
+    assert_eq!(texts_of(&a.mmap), ("Creature — Elf".to_string(), "flying".to_string()));
+    // Stand in for a served page: the cell arrays are sized on first use (the `PyString`s inside need a
+    // `py`, the sizing does not), which is enough to tell a reused cache from a fresh one.
+    a.str_cache.cells.get_or_init(|| (0..1).map(|_| OnceLock::new()).collect());
+    a.str_cache.coll_cells.get_or_init(|| (0..1).map(|_| OnceLock::new()).collect());
+
+    publish(&store_with("Creature — Goblin", "haste"), "b");
+    let b = engine.get_mapping().expect("map B");
+    assert_eq!(
+        texts_of(&b.mmap),
+        ("Creature — Goblin".to_string(), "haste".to_string()),
+        "string id 0 and vocab id 0 name different text in B"
+    );
+    assert!(!std::sync::Arc::ptr_eq(&a.mmap, &b.mmap), "a new inode is a new mapping");
+    assert!(!std::sync::Arc::ptr_eq(&a.str_cache, &b.str_cache), "a cache built over A must never serve B");
+    assert!(!std::sync::Arc::ptr_eq(&a.catalog, &b.catalog), "the catalog counts are per mapping too");
+    assert!(b.str_cache.cells.get().is_none() && b.str_cache.coll_cells.get().is_none(), "B's caches start empty");
+    // In-flight readers of A keep A: the old mapping is immutable and still theirs.
+    assert_eq!(texts_of(&a.mmap).0, "Creature — Elf");
+
+    // The same archive again: no remap, the same caches.
+    let b2 = engine.get_mapping().expect("map B again");
+    assert!(std::sync::Arc::ptr_eq(&b.mmap, &b2.mmap) && std::sync::Arc::ptr_eq(&b.str_cache, &b2.str_cache));
 }

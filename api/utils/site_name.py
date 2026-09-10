@@ -85,8 +85,13 @@ def _split_words(s: str, words: frozenset[str]) -> list[str] | None:
 
 def hostname_to_site_name(raw_host: str) -> str:
     """Derive a display name from a Host header value, falling back to FALLBACK_SITE_NAME."""
-    # urlparse requires a scheme; .hostname strips the port and lowercases.
-    hostname = urllib.parse.urlparse(f"http://{raw_host}").hostname or ""
+    # urlparse requires a scheme; .hostname strips the port and lowercases. It raises ValueError for
+    # an unbalanced IPv6 bracket ("[abc", "a]b", "[::1"), and a Host header is whatever the client
+    # sent -- that is a request for the fallback name, not a 500.
+    try:
+        hostname = urllib.parse.urlparse(f"http://{raw_host}").hostname or ""
+    except ValueError:
+        return FALLBACK_SITE_NAME
     return _hostname_to_site_name(hostname[:64])
 
 

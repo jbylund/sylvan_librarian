@@ -26,7 +26,7 @@ from api.admin_resource import ADMIN_MOUNT_PREFIX, AdminContext, AdminResource
 from api.app_context import AppContext
 from api.enums import CardOrdering, PreferOrder, ResponseShape, SortDirection, UniqueOn
 from api.middlewares.timing import record_span
-from api.noscript_helpers import generate_results_count_html, generate_results_html
+from api.noscript_helpers import generate_error_html, generate_results_html, generate_status_html
 from api.parsing import generate_sql_query, parse_scryfall_query
 from api.parsing.query_budget import (
     QUERY_REGEX_REJECTED_MESSAGE,
@@ -47,7 +47,8 @@ from api.utils.page_rendering import (
     serialize_embedded_json,
     serve_static_file,
 )
-from api.utils.param_binding import ParamCoercionError
+from api.utils.param_binding import ParamBindingError, ParamCoercionError
+from api.utils.response_telemetry import note_result_count
 from api.utils.routing import build_route_table, build_routes_listing, route
 from api.utils.site_name import hostname_to_site_name
 from api.utils.timer import Timer
@@ -102,6 +103,9 @@ DISALLOWED_QUERY_ARGS: frozenset[str] = frozenset(["falcon_response", "request_h
 # to the log and the error monitor, which are not attacker-readable; the client gets this and nothing
 # more. Callers must not append exception detail to it.
 INTERNAL_ERROR_DESCRIPTION = "An internal error occurred."
+
+# Status codes from here up are the server's fault and keep their traceback in the log.
+HTTP_SERVER_ERROR_FLOOR = 500
 
 # Public field name -> magic.cards column. The `fields=` vocabulary for /search. This is
 # deliberately a subset of FIELD_TABLE in card_engine/src/lib.rs, not a mirror of it — not
@@ -265,6 +269,43 @@ def _copy_query_result(result: dict[str, Any]) -> dict[str, Any]:
     return copied
 
 
+def _rejected_query_message(err: Exception, query: str) -> str:
+    """What to tell a no-JS reader whose embedded search was rejected.
+
+    An HTTPBadRequest's description is already the user-facing explanation the JSON API returns
+    for the same query. Anything else is an internal message and is not echoed.
+    """
+    if isinstance(err, falcon.HTTPBadRequest) and isinstance(err.description, str) and err.description:
+        return err.description
+    return f'The search "{query}" could not be run.'
+
+
+def _log_http_error(path: str, oops: falcon.HTTPError) -> None:
+    """Log a handler's HTTPError at a level that matches whose fault it is.
+
+    A 4xx is the client's problem (a 404 from a scanner, a 400 from a typo) and logs as one line at
+    INFO; a traceback at ERROR for each made the log unreadable and paged on noise. A 5xx HTTPError --
+    the cold-start 503, mainly -- keeps the traceback.
+    """
+    if oops.status_code >= HTTP_SERVER_ERROR_FLOOR:
+        logger.error("Error handling request for %s: %s", path, oops, exc_info=True)
+    else:
+        logger.info("Rejected %s: %s %s", path, oops.status, oops.title)
+
+
+def _request_host(req: falcon.Request) -> str:
+    """The Host header's hostname, tolerating a malformed header.
+
+    `req.host` parses the port and raises ValueError for `Host: example.com:abc`, which made a
+    header any client can send a 500 (and an error-monitor notice) on every route. The raw header is
+    good enough for the one consumer, the site-name lookup, which validates it again itself.
+    """
+    try:
+        return req.host
+    except ValueError:
+        return req.env.get("HTTP_HOST", "")
+
+
 class APIResource:
     """Class implementing request handling for our simple API."""
 
@@ -359,7 +400,7 @@ class APIResource:
             # spoof it via ?admin_authenticated=1 on a path that doesn't resolve to anything.
             params["admin_authenticated"] = req.context.get("admin_authenticated", False)
         params["falcon_response"] = resp
-        params["request_host"] = req.get_header("X-Proxy-Host") or req.host
+        params["request_host"] = req.get_header("X-Proxy-Host") or _request_host(req)
         return params
 
     def _handle(self, req: falcon.Request, resp: falcon.Response) -> None:
@@ -377,7 +418,7 @@ class APIResource:
 
         path = req.path.strip("/") or "_root"
 
-        logger.info(
+        logger.debug(
             "Handling request for %s / |%s| / response id: %d",
             req.relative_uri,
             path,
@@ -404,11 +445,14 @@ class APIResource:
             # values, so it guides a fix without describing anything internal.
             logger.info("Rejected %s: %s", path, oops)
             raise falcon.HTTPBadRequest(title="Invalid Parameter", description=str(oops)) from oops
-        except TypeError as oops:
-            logger.error("Error handling request: %s", oops, exc_info=True)
+        except ParamBindingError as oops:
+            # The path's positional segments do not fit the handler (see ParamBinder.bind). Only this
+            # TypeError subclass: a bare `except TypeError` here also caught every TypeError a handler
+            # raised on its own, echoed its internal message as a 400, and bypassed error monitoring.
+            logger.info("Rejected %s: %s", path, oops)
             raise falcon.HTTPBadRequest(description=str(oops)) from oops
         except falcon.HTTPError as oops:
-            logger.error("Error handling request for %s: %s", path, oops, exc_info=True)
+            _log_http_error(path, oops)
             raise
         except falcon.HTTPStatus:
             # Not an error, so deliberately not folded into the HTTPError branch above and its
@@ -439,7 +483,7 @@ class APIResource:
             raise falcon.HTTPInternalServerError(title="Server Error", description=INTERNAL_ERROR_DESCRIPTION) from oops
         finally:
             duration = (time.monotonic() - before) * 1000
-            logger.info("Request duration: %.1f ms / %s", duration, resp.status)
+            logger.debug("Request duration: %.1f ms / %s", duration, resp.status)
             record_span(req, "handler", duration)
             if isinstance(res, dict):
                 for span_name, span_data in res.get("outer_timings", {}).items():
@@ -543,6 +587,28 @@ class APIResource:
         set_no_store_header(falcon_response)
         return os.getpid()
 
+    @route()
+    def ready(self, *, falcon_response: falcon.Response | None = None, **_: object) -> dict[str, Any]:
+        """Readiness probe: 200 only when this worker can actually answer a search.
+
+        /get_pid touches neither the database nor the engine, so a stack with zero cards imported
+        was "healthy" to anything polling it. This checks the two things a search needs -- the corpus
+        is imported (`setup_complete`) and the engine has a store loaded, or is disabled by settings
+        so SQL serves everything -- and answers 503 with the failed check(s) named otherwise.
+
+        Returns:
+            {"ready": bool, "checks": {name: bool}, "failed": [name, ...]}; status 503 when not ready.
+        """
+        set_no_store_header(falcon_response)
+        checks = {
+            "setup_complete": self.app_context.setup_complete(),
+            "engine_loaded": (not settings.enable_engine) or self.app_context.engine.size() > 0,
+        }
+        failed = [name for name, ok in checks.items() if not ok]
+        if failed and falcon_response is not None:
+            falcon_response.status = falcon.HTTP_503
+        return {"ready": not failed, "checks": checks, "failed": failed}
+
     def _require_setup_complete(self) -> None:
         """Require that setup is complete or raise a ServiceUnavailable error."""
         if not self.app_context.setup_complete():
@@ -633,7 +699,6 @@ class APIResource:
         Returns:
             Dict containing search results and metadata.
         """
-        set_cache_header(falcon_response, duration=timedelta(seconds=90))
         results = self._search(
             query=query or q,
             orderby=orderby,
@@ -644,6 +709,12 @@ class APIResource:
             unique=unique,
             prefer=prefer,
         )
+        # Only once there is a result to cache. Falcon keeps headers set before a handler raises, so
+        # setting this first stamped `public, max-age=90` on every cold-start 503 and every 500 from
+        # /search -- and a CDN in front would have served that failure for the next 90 seconds.
+        set_cache_header(falcon_response, duration=timedelta(seconds=90))
+        # Counted before the reshape: columnar `cards` is a dict of fields, whose len is not a row count.
+        note_result_count(falcon_response, len(results["cards"]))
         if shape == ResponseShape.COLUMNAR:
             # Shallow copy: _search returns cached dicts, which must stay row-shaped.
             results = {**results, "cards": _columnarize_cards(results["cards"])}
@@ -833,7 +904,7 @@ class APIResource:
         offset: int = DEFAULT_OFFSET,
         fields: Sequence[str] | None = None,
     ) -> dict[str, Any]:
-        logger.info("Searching engine for %r", query)
+        logger.debug("Searching engine for %r", query)
         query_explanation = parsed_query.to_human_explanation() if query else ""
         try:
             with timer("engine_query"):
@@ -880,7 +951,7 @@ class APIResource:
         offset: int = DEFAULT_OFFSET,
         fields: Sequence[str] | None = None,
     ) -> dict[str, Any]:
-        logger.info("Searching SQL for %r", query)
+        logger.debug("Searching SQL for %r", query)
         resolved_fields = self._resolve_result_fields(fields)
         query_explanation = parsed_query.to_human_explanation() if query else ""
         try:
@@ -1010,8 +1081,8 @@ class APIResource:
         params["limit"] = limit
         params["offset"] = offset
         query_sql = rewrap(query_sql)
-        logger.info("Full query: %s", query_sql)
-        logger.info("Params: %s", params)
+        logger.debug("Full query: %s", query_sql)
+        logger.debug("Params: %s", params)
         try:
             with timer("run_query"):
                 result_bag = self._run_query(query=query_sql, params=params, explain=False)
@@ -1123,22 +1194,16 @@ class APIResource:
                 cards = search_results.get("cards", [])
                 total_cards = search_results.get("total_cards", len(cards))
 
-                # Generate server-side HTML for cards (for no-JS support)
-                results_html = generate_results_html(cards) if cards else ""
-                results_count_html = generate_results_count_html(total_cards, search_query) if cards else ""
-
-                # Inject the server-side rendered HTML
+                # Server-side HTML for no-JS support: the cards, and a status line that says
+                # "found N" or "found none" -- a zero-hit search used to render a blank page.
                 html_content = html_content.replace(
                     "<!-- SERVER_SIDE_RESULTS -->",
-                    results_html,
+                    generate_results_html(cards),
                 )
-
-                # Inject the results count into the status message container
-                if results_count_html:
-                    html_content = html_content.replace(
-                        "<!-- SERVER_SIDE_RESULTS_COUNT -->",
-                        f'<div class="results-count">{results_count_html}</div>',
-                    )
+                html_content = html_content.replace(
+                    "<!-- SERVER_SIDE_RESULTS_COUNT -->",
+                    generate_status_html(total_cards, search_query),
+                )
 
                 # Convert search results to JSON and embed for JavaScript enhancement
                 search_results_json = serialize_embedded_json(search_results)
@@ -1153,8 +1218,13 @@ class APIResource:
                 # Disable caching for pages with search results
                 set_cache_header(falcon_response, duration=timedelta(seconds=90))
             except (ValueError, falcon.HTTPBadRequest, psycopg.errors.DatatypeMismatch) as err:
-                # If search fails, just serve the page without embedded results
+                # A rejected query. Serve the page without embedded results, but tell the no-JS
+                # reader why -- the JS client shows the same explanation; a blank page said nothing.
                 logger.warning("Failed to embed search results: %s", err)
+                html_content = html_content.replace(
+                    "<!-- SERVER_SIDE_RESULTS_COUNT -->",
+                    generate_error_html(_rejected_query_message(err, search_query)),
+                )
                 set_cache_header(falcon_response, duration=timedelta(hours=1))
         else:
             # Cache for 1 hour - improves repeat visit performance
@@ -1177,7 +1247,7 @@ class APIResource:
         falcon_response.data = contents
         falcon_response.content_type = "image/vnd.microsoft.icon"
         content_length = len(contents)
-        logger.info("Favicon content length: %d", content_length)
+        logger.debug("Favicon content length: %d", content_length)
         falcon_response.headers["content-length"] = content_length
         # Cache favicon for 7 days - it rarely changes
         set_cache_header(falcon_response, duration=timedelta(days=7))
@@ -1357,6 +1427,7 @@ class APIResource:
         else:
             cards = list(self.app_context.engine.sample_preferred(num_cards))
         total_cards = len(cards)
+        note_result_count(falcon_response, total_cards)
         if shape == ResponseShape.COLUMNAR:
             cards = _columnarize_cards(cards)
         return {"cards": cards, "total_cards": total_cards}

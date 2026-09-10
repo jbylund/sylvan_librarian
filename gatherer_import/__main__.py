@@ -1,16 +1,44 @@
 """Command-line interface for Gatherer import functionality."""
 
 import argparse
-import contextlib
 import json
+import logging
 import sys
 from pathlib import Path
 
 from .fetch_gatherer_data import GathererFetcher
 
+logger = logging.getLogger(__name__)
+
+
+def fetch_all(fetcher: GathererFetcher, output_dir: str) -> int:
+    """Fetch every set, one file each; keep going past a failed set and report them all at the end.
+
+    Returns:
+        0 if every set was written, 1 if any failed.
+    """
+    set_codes = fetcher.fetch_all_sets()
+    failed = []
+    for idx, set_code in enumerate(set_codes, 1):
+        try:
+            output_file = fetcher.save_set_to_json(set_code, output_dir)
+        except Exception:
+            logger.exception("[%d/%d] %s failed", idx, len(set_codes), set_code)
+            failed.append(set_code)
+            continue
+        logger.info("[%d/%d] %s -> %s", idx, len(set_codes), set_code, output_file)
+
+    logger.info("Fetched %d of %d sets", len(set_codes) - len(failed), len(set_codes))
+    if failed:
+        logger.error("Failed sets: %s", ", ".join(failed))
+        return 1
+    return 0
+
 
 def main() -> int:
     """Run the Gatherer import command-line interface."""
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
     parser = argparse.ArgumentParser(
         description="Import Magic: The Gathering card data from Gatherer",
     )
@@ -53,21 +81,9 @@ def main() -> int:
         fetcher.save_set_to_json(args.set_code, args.output)
 
     elif args.command == "fetch-all":
-        sets = fetcher.fetch_all_sets()
-
-        # Extract set codes from the sets data
-        for _idx, set_data in enumerate(sets, 1):
-            # The set_data structure may have different formats
-            # Try to extract the set code
-            set_code = None
-            if isinstance(set_data, dict):
-                set_code = set_data.get("code") or set_data.get("Code") or set_data.get("setCode")
-
-            if not set_code:
-                continue
-
-            with contextlib.suppress(Exception):
-                fetcher.save_set_to_json(set_code, args.output)
+        # fetch_all_sets() returns set-code strings; the previous loop looked for dicts and so
+        # skipped every one of them, exiting 0 having fetched nothing.
+        return fetch_all(fetcher, args.output)
 
     return 0
 

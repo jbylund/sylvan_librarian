@@ -137,7 +137,7 @@ def _normalize_environment(raw: Any) -> dict[str, str]:
     raise TypeError(msg)
 
 
-def _render_compose_config() -> dict[str, Any]:
+def _render_compose_config(extra_files: list[Path] | None = None) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="compose-env-test-") as tmpdir:
         tmp = Path(tmpdir)
         dot_env = tmp / ".env"
@@ -169,10 +169,10 @@ def _render_compose_config() -> dict[str, Any]:
             str(envs_dev),
             "--file",
             str(COMPOSE_FILE),
-            "config",
-            "--format",
-            "json",
         ]
+        for extra in extra_files or []:
+            cmd += ["--file", str(extra)]
+        cmd += ["config", "--format", "json"]
         proc = subprocess.run(
             cmd,
             check=False,

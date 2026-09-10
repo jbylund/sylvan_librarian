@@ -4,6 +4,16 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <script>
+      // Apply the stored theme before first paint: the markup defaults to dark, and the deferred
+      // bundle re-reads the preference too late for light-theme users to avoid a dark flash.
+      try {
+        var storedTheme = localStorage.getItem('theme');
+        if (storedTheme === 'light' || storedTheme === 'dark') {
+          document.documentElement.dataset.theme = storedTheme;
+        }
+      } catch (e) {
+        // localStorage may be unavailable; keep the default theme
+      }
       // Warm the autocomplete catalog WITHOUT joining the critical request chain:
       // the promise exists immediately (consumers await it), but the ~9KB /get_catalog
       // fetch - larger than app.min.js - starts only once the browser is idle or the
@@ -159,7 +169,13 @@
     </div>
 
     <div id="modalOverlay" class="modal-overlay">
-      <div id="modalContent" class="modal-content"></div>
+      <div
+        id="modalContent"
+        class="modal-content"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="modalCardName"
+      ></div>
     </div>
     <script>
       <!-- SERVER_SIDE_EMBEDDED_DATA -->

@@ -302,3 +302,36 @@ class TestRotation:
         # filler_0 and filler_1 were never accessed while sealed → evicted
         assert cache.get(fk(0)) is None
         assert cache.get(fk(1)) is None
+
+
+class TestArenaBoundWorkload:
+    def test_large_bodies_keep_being_admitted(self, tmp_path):
+        """Bodies of 3x the per-entry arena share fill a page long before its entry budget.
+
+        Arena exhaustion used to leave the active page write-dead (nothing else ever triggered a
+        rotation), so every later set was silently dropped.
+        """
+        cache = _make_cache(tmp_path / "c.cache", maxsize=64, n_pages=2)
+        body = b"\xab" * (3 * 8192)
+        for i in range(200):
+            key = f"key-{i}".encode()
+            cache[key] = SAMPLE._replace(body=body)
+            assert cache.get(key) is not None, f"key {i} was dropped"
+        assert 0 < len(cache) <= 64
+
+    def test_stats_reports_pages_and_rotations(self, tmp_path):
+        cache = _make_cache(tmp_path / "c.cache", maxsize=64, n_pages=2)
+        empty = cache.stats()
+        assert empty["gen_maxsize"] == 32
+        assert empty["rotations"] == 0
+        assert [p["entry_count"] for p in empty["pages"]] == [0, 0]
+        assert {p["sealed"] for p in empty["pages"]} == {False, True}
+
+        body = b"\xab" * (3 * 8192)
+        for i in range(200):
+            cache[f"key-{i}".encode()] = SAMPLE._replace(body=body)
+
+        stats = cache.stats()
+        assert stats["rotations"] > 0
+        assert all(0 < p["arena_used"] <= p["arena_capacity"] for p in stats["pages"])
+        assert sum(p["entry_count"] for p in stats["pages"]) == len(cache)

@@ -8,6 +8,14 @@ x-pg-conf: &pg-conf
 x-pg-init: &pg-init
   ./configs/postgres/init/:/docker-entrypoint-initdb.d
 
+# Log rotation. Without it the json-file driver keeps every line forever, and Postgres alone
+# writes an auto_explain plan per sampled statement to stderr.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: 50m
+    max-file: "5"
+
 volumes:
   pgdata:
 
@@ -28,6 +36,8 @@ services:
     security_opt:
       - no-new-privileges:true
     init: true
+    restart: unless-stopped
+    logging: *default-logging
     command:
       - /usr/local/bin/docker-entrypoint.sh
       - -c
@@ -77,6 +87,11 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    # The master exits when any worker dies (api/entrypoint.py) and nothing else restarts it.
+    restart: unless-stopped
+    logging: *default-logging
+    # SIGTERM is handled gracefully with an ~8s worker-join budget; leave headroom before SIGKILL.
+    stop_grace_period: 15s
     command:
       - dumb-init
       - --
@@ -109,7 +124,9 @@ services:
         - --fail
         - --user-agent
         - healthcheck
-        - localhost:8080/get_pid
+        # /ready answers 503 until setup is complete and the engine is loaded, so a rolling
+        # deploy's `up --wait` holds until the new API can actually serve a search.
+        - localhost:8080/ready
       interval: 5s
       timeout: 1s
       retries: 60
@@ -130,7 +147,8 @@ services:
     user: 1000:1000
     volumes:
       - ./data/api/${APP_ENV:-dev}/:/data/api
-      - ./api/static:/app/api/static
+      # The host checkout's static files are bind-mounted only in dev (docker-compose.dev.yml);
+      # production stacks serve the copy built into the image so blue and green stay independent.
 
   client:
     build:

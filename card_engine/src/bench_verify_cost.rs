@@ -108,22 +108,22 @@ fn bench_verify_cost_clusters() {
     println!("\n-- memoized-set binary search --");
     let mut set_ns: Vec<f64> = Vec::new();
 
-    let mut artist = FilterExpr::TextContains { field: TextSearchField::ArtistLower, word: "guay".to_string() };
+    let mut artist = FilterExpr::TextContains { field: TextSearchField::ArtistLower, word: crate::filter::Needle::new("guay".to_string()) };
     artist.bind(&data.coll_vocab, &data.artist_vocab, &data.mana_vocab, &data.indexes.flavor, &data.strings);
     assert!(matches!(artist, FilterExpr::ArtistMatch { .. }), "bind() didn't rewrite to ArtistMatch");
     set_ns.push(run("ArtistMatch", &artist));
 
-    let mut flavor = FilterExpr::TextContains { field: TextSearchField::FlavorTextLower, word: "dragon".to_string() };
+    let mut flavor = FilterExpr::TextContains { field: TextSearchField::FlavorTextLower, word: crate::filter::Needle::new("dragon".to_string()) };
     flavor.bind(&data.coll_vocab, &data.artist_vocab, &data.mana_vocab, &data.indexes.flavor, &data.strings);
     assert!(matches!(flavor, FilterExpr::FlavorMatch { .. }), "bind() didn't rewrite to FlavorMatch");
     set_ns.push(run("FlavorMatch", &flavor));
 
-    let mut name = FilterExpr::TextContains { field: TextSearchField::NameLower, word: "storm".to_string() };
+    let mut name = FilterExpr::TextContains { field: TextSearchField::NameLower, word: crate::filter::Needle::new("storm".to_string()) };
     name.memoize_text_predicates(&data.cards, &data.strings, &data.indexes.name_trigram, &data.indexes.name_bigrams, &data.indexes.oracle_trigram, n);
     assert!(matches!(name, FilterExpr::NameMatch { .. }), "memoize didn't rewrite to NameMatch (needle too common/rare?)");
     set_ns.push(run("NameMatch", &name));
 
-    let mut oracle = FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: "draw".to_string() };
+    let mut oracle = FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: crate::filter::Needle::new("draw".to_string()) };
     oracle.memoize_text_predicates(&data.cards, &data.strings, &data.indexes.name_trigram, &data.indexes.name_bigrams, &data.indexes.oracle_trigram, n);
     assert!(matches!(oracle, FilterExpr::OracleMatch { .. }), "memoize didn't rewrite to OracleMatch (needle too common/rare?)");
     set_ns.push(run("OracleMatch", &oracle));
@@ -134,7 +134,7 @@ fn bench_verify_cost_clusters() {
 
     // ─── Cluster: text scan (current tier 2) ─────────────────────────────────
     println!("\n-- text scan (unmemoized TextContains) --");
-    let scan_ns = run("TextContains", &FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: "draw".to_string() });
+    let scan_ns = run("TextContains", &FilterExpr::TextContains { field: TextSearchField::OracleTextLower, word: crate::filter::Needle::new("draw".to_string()) });
 
     // ─── Cluster: regex shapes (regex_tier 1 / 2 / 3) ────────────────────────
     println!("\n-- regex shapes --");

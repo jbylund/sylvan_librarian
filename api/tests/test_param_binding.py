@@ -18,7 +18,9 @@ from api.enums import CardOrdering, PreferOrder, SortDirection, UniqueOn
 from api.utils.param_binding import (
     MAX_ECHOED_VALUE_LEN,
     ParamBinder,
+    ParamBindingError,
     ParamCoercionError,
+    RepeatedParamError,
     UnresolvableAnnotationError,
     bind_params,
 )
@@ -177,7 +179,7 @@ class TestRejection:
 
     def test_too_many_positional_arguments_raises(self) -> None:
         """Test extra path segments are refused rather than silently ignored."""
-        with pytest.raises(TypeError, match="positional arguments"):
+        with pytest.raises(ParamBindingError, match="positional arguments"):
             ParamBinder(handler).bind(("eoc", "104", "extra"), {})
 
     def test_positional_and_keyword_for_one_parameter_raises(self) -> None:
@@ -186,8 +188,49 @@ class TestRejection:
         The previous implementation let the keyword win silently, so a request to a path that identified
         nothing still returned 200.
         """
-        with pytest.raises(TypeError, match="multiple values"):
+        with pytest.raises(ParamBindingError, match="multiple values"):
             ParamBinder(handler).bind(("eoc",), {"set_code": "blb"})
+
+    def test_binding_errors_are_a_distinct_type_error(self) -> None:
+        """The dispatcher catches exactly this subclass, so a handler's own TypeError stays a 500."""
+        assert issubclass(ParamBindingError, TypeError)
+        assert not issubclass(TypeError, ParamBindingError)
+
+
+class TestRepeatedParameters:
+    """Falcon delivers `?q=a&q=b` as a list; only a Sequence[str] parameter has a meaning for that.
+
+    Before this the list passed through the binder untouched (it is not a str), so `/search?q=a&q=b`
+    500ed on `list.encode` inside the parser and `?unique=cards&unique=art` 400ed with the internal
+    "unhashable type: 'list'" -- both for a malformed request the binder should have named.
+    """
+
+    @pytest.mark.parametrize(
+        argnames=["param", "raw"],
+        argvalues=[
+            ("q", ["a", "b"]),
+            ("unique", ["cards", "art"]),
+            ("limit", ["1", "2"]),
+            ("verbose", ["true", "false"]),
+        ],
+        ids=["str", "enum", "int", "bool"],
+    )
+    def test_scalar_given_twice_is_a_structured_400(self, param: str, raw: list[str]) -> None:
+        with pytest.raises(RepeatedParamError, match=f"parameter {param!r} was given more than once") as excinfo:
+            ParamBinder(handler).bind((), {param: raw})
+        # The same family _handle already turns into a 400, so no new except clause is needed there.
+        assert isinstance(excinfo.value, ParamCoercionError)
+        assert excinfo.value.param == param
+
+    def test_sequence_parameter_accepts_repetition(self) -> None:
+        """`?fields=name&fields=cmc,power` means the same as `?fields=name,cmc,power`."""
+        bound = ParamBinder(handler).bind((), {"fields": ["name", "cmc,power"]})
+        assert bound["fields"] == ["name", "cmc", "power"]
+
+    def test_repeated_unknown_parameter_is_query_noise(self) -> None:
+        """`?utm_source=a&utm_source=b` is dropped like the single-valued form, not passed to the handler."""
+        bound = ParamBinder(handler).bind((), {"utm_source": ["a", "b"]})
+        assert "utm_source" not in bound
 
 
 class TestAnnotationResolution:

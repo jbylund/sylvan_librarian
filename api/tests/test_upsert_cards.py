@@ -353,6 +353,70 @@ class TestErrorRecovery:
         assert recovered["cards_loaded"] == 1
 
 
+class TestCommitPerBatch:
+    """Batches committed before a failure stay committed; one transaction used to roll them all back."""
+
+    def test_rows_before_the_failing_batch_survive(self, api_resource: APIResource) -> None:
+        first = make_raw_card(name="Survives The Later Failure")
+        second = make_raw_card(name="Doomed Second Batch")
+        calls = {"n": 0}
+
+        def upsert_then_fail(*args: object, **kwargs: object) -> dict[str, int]:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return bulk_upsert(*args, **kwargs)
+            msg = "backend lost mid-import"
+            raise psycopg.OperationalError(msg)
+
+        with patch("api.admin_resource._bulk_upsert", side_effect=upsert_then_fail):
+            result = api_resource.admin._upsert_cards([first, second], page_size=1)
+
+        assert result["status"] == "database_error"
+        with api_resource.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+            cursor.execute("SELECT card_name FROM magic.cards WHERE scryfall_id = %(sid)s", {"sid": first["id"]})
+            assert cursor.fetchone() is not None, "the first batch was committed before the second failed"
+            cursor.execute("SELECT 1 FROM magic.cards WHERE scryfall_id = %(sid)s", {"sid": second["id"]})
+            assert cursor.fetchone() is None
+
+
+class TestMalformedCardsAreSkipped:
+    """One card preprocess_card cannot handle costs one card, not the import."""
+
+    def test_card_missing_type_line_is_skipped_and_the_rest_import(
+        self, api_resource: APIResource, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        good_one = make_raw_card(name="Imported Despite Neighbour One")
+        broken = make_raw_card(name="Broken Card")
+        del broken["type_line"]  # preprocess_card raises KeyError on card["type_line"]
+        good_two = make_raw_card(name="Imported Despite Neighbour Two")
+
+        with caplog.at_level(logging.WARNING, logger="api.admin_resource"):
+            result = api_resource.admin._upsert_cards([good_one, broken, good_two])
+
+        assert result["status"] == "success"
+        assert result["cards_sent"] == 2
+        assert result["cards_loaded"] == 2
+        assert result["cards_skipped"] == 1
+        with api_resource.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT scryfall_id::text FROM magic.cards WHERE scryfall_id = ANY(%(ids)s::uuid[])",
+                {"ids": [good_one["id"], broken["id"], good_two["id"]]},
+            )
+            assert {row["scryfall_id"] for row in cursor.fetchall()} == {good_one["id"], good_two["id"]}
+
+        warnings = [r for r in caplog.records if "failed preprocessing" in r.getMessage()]
+        assert len(warnings) == 1, "one summary line, not one per card"
+        assert broken["id"] in warnings[0].getMessage()
+        assert "KeyError" in warnings[0].getMessage()
+
+    def test_every_card_malformed_is_no_cards_after_preprocessing(self, api_resource: APIResource) -> None:
+        broken = make_raw_card(name="Only Broken Card")
+        del broken["legalities"]
+        result = api_resource.admin._upsert_cards([broken])
+        assert result["status"] == "no_cards_after_preprocessing"
+        assert result["cards_loaded"] == 0
+
+
 # ---------------------------------------------------------------------------
 # _run_import_under_lock streaming wiring (mocked — tests control flow only)
 # ---------------------------------------------------------------------------

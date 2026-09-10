@@ -167,7 +167,8 @@ pub(crate) fn mana_pip_counts(s: &str) -> HashMap<String, u8> {
                 // mana:{X} matches Fireball ({X}{R}) and excludes cards with
                 // no X pip, which this exclusion broke.
                 if in_brace && sym.parse::<u32>().is_err() {
-                    *pips.entry(sym.clone()).or_insert(0) += 1;
+                    let n = pips.entry(sym.clone()).or_insert(0);
+                    *n = n.saturating_add(1); // a u8 per symbol; a pathological cost must not wrap to 0
                 }
                 in_brace = false;
             }
@@ -510,7 +511,7 @@ impl ManaVocabInterner {
 
 // ─── Loading helpers ─────────────────────────────────────────────────────────
 
-fn opt_str(d: &Bound<PyDict>, key: &str) -> Option<String> {
+fn opt_str(d: &Bound<PyDict>, key: &Bound<'_, PyString>) -> Option<String> {
     d.get_item(key).ok().flatten().and_then(|v| v.extract::<String>().ok())
 }
 
@@ -554,7 +555,7 @@ fn parse_uuid_or_hash(s: &str) -> u128 {
     if h == 0 { 1 } else { h }
 }
 
-fn opt_uuid(d: &Bound<PyDict>, key: &str) -> u128 {
+fn opt_uuid(d: &Bound<PyDict>, key: &Bound<'_, PyString>) -> u128 {
     let Some(v) = d.get_item(key).ok().flatten() else { return 0 };
     // psycopg returns uuid.UUID objects natively; try that first.
     if let Ok(u) = v.extract::<uuid::Uuid>() {
@@ -603,7 +604,7 @@ fn uuid_from_u128(v: u128) -> Option<uuid::Uuid> {
 }
 
 // Accepts ISO strings or datetime.date (psycopg returns date columns as datetime.date).
-fn opt_date_str(d: &Bound<PyDict>, key: &str) -> Option<String> {
+fn opt_date_str(d: &Bound<PyDict>, key: &Bound<'_, PyString>) -> Option<String> {
     let v = d.get_item(key).ok().flatten()?;
     if let Ok(s) = v.extract::<String>() {
         return Some(s);
@@ -616,36 +617,59 @@ fn opt_date_str(d: &Bound<PyDict>, key: &str) -> Option<String> {
 /// the source value is a decimal price (from Scryfall's JSON via Python's json/psycopg, both
 /// already correctly-rounded f64), so rounding to the nearest cent recovers the exact intended
 /// value even if the f64 isn't bit-exact for the decimal (see Printing's price_usd doc comment).
-fn opt_price_cents(d: &Bound<PyDict>, key: &str) -> Option<u32> {
+fn opt_price_cents(d: &Bound<PyDict>, key: &Bound<'_, PyString>) -> Option<u32> {
     d.get_item(key).ok().flatten().and_then(|v| {
         v.extract::<f64>().ok().or_else(|| v.extract::<i64>().ok().map(|n| n as f64))
-    }).map(|dollars| (dollars * 100.0).round() as u32)
+    }).and_then(price_cents_of)
 }
 
-fn opt_f32(d: &Bound<PyDict>, key: &str) -> Option<f32> {
+/// Dollars to integer cents, or `None` when the value is not a finite number inside the u32 cents
+/// domain. `(dollars * 100.0).round() as u32` saturates: NaN loaded as `Some(0)` (a free card) and
+/// 1e12 as `Some(u32::MAX)` (the most expensive card in the store) rather than as no price at all.
+fn price_cents_of(dollars: f64) -> Option<u32> {
+    let cents = (dollars * 100.0).round();
+    (cents.is_finite() && (0.0..=f64::from(u32::MAX)).contains(&cents)).then_some(cents as u32)
+}
+
+/// A numeric field truncated toward zero to an integer type, or `None` when it is not finite or
+/// does not fit. `v as u8` and friends saturate silently, so an out-of-range or NaN value loaded as
+/// the type's edge (NaN as 0) instead of as absent.
+fn int_of<T: TryFrom<i64>>(v: f32) -> Option<T> {
+    if !v.is_finite() {
+        return None;
+    }
+    let t = v.trunc();
+    // `f32 as i64` saturates at the edges, and every T here is narrower than i64 anyway.
+    if t <= i64::MIN as f32 || t >= i64::MAX as f32 {
+        return None;
+    }
+    T::try_from(t as i64).ok()
+}
+
+fn opt_f32(d: &Bound<PyDict>, key: &Bound<'_, PyString>) -> Option<f32> {
     d.get_item(key).ok().flatten().and_then(|v| {
         v.extract::<f64>().ok().map(|n| n as f32)
             .or_else(|| v.extract::<i64>().ok().map(|n| n as f32))
     })
 }
 
-fn opt_i8(d: &Bound<PyDict>, key: &str) -> Option<i8> {
-    opt_f32(d, key).map(|v| v as i8)
+fn opt_i8(d: &Bound<PyDict>, key: &Bound<'_, PyString>) -> Option<i8> {
+    opt_f32(d, key).and_then(int_of)
 }
 
-fn opt_u8(d: &Bound<PyDict>, key: &str) -> Option<u8> {
-    opt_f32(d, key).map(|v| v as u8)
+fn opt_u8(d: &Bound<PyDict>, key: &Bound<'_, PyString>) -> Option<u8> {
+    opt_f32(d, key).and_then(int_of)
 }
 
-fn opt_u16(d: &Bound<PyDict>, key: &str) -> Option<u16> {
-    opt_f32(d, key).map(|v| v as u16)
+fn opt_u16(d: &Bound<PyDict>, key: &Bound<'_, PyString>) -> Option<u16> {
+    opt_f32(d, key).and_then(int_of)
 }
 
-fn opt_u32(d: &Bound<PyDict>, key: &str) -> Option<u32> {
-    opt_f32(d, key).map(|v| v as u32)
+fn opt_u32(d: &Bound<PyDict>, key: &Bound<'_, PyString>) -> Option<u32> {
+    opt_f32(d, key).and_then(int_of)
 }
 
-fn str_list(d: &Bound<PyDict>, key: &str) -> Vec<String> {
+fn str_list(d: &Bound<PyDict>, key: &Bound<'_, PyString>) -> Vec<String> {
     d.get_item(key)
         .ok()
         .flatten()
@@ -653,7 +677,7 @@ fn str_list(d: &Bound<PyDict>, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn jsonb_color_to_bits(d: &Bound<PyDict>, key: &str) -> u8 {
+fn jsonb_color_to_bits(d: &Bound<PyDict>, key: &Bound<'_, PyString>) -> u8 {
     let colors: Vec<String> = d
         .get_item(key)
         .ok()
@@ -669,7 +693,7 @@ fn jsonb_color_to_bits(d: &Bound<PyDict>, key: &str) -> u8 {
 
 /// Interned vocab ids of a JSON list of strings, preserving element order
 /// (card_subtypes keeps the printed subtype order).
-fn str_list_to_ids(d: &Bound<PyDict>, key: &str, vocab: &mut VocabInterner) -> PyResult<Vec<u16>> {
+fn str_list_to_ids(d: &Bound<PyDict>, key: &Bound<'_, PyString>, vocab: &mut VocabInterner) -> PyResult<Vec<u16>> {
     str_list(d, key).into_iter().map(|s| vocab.intern(s)).collect()
 }
 
@@ -693,9 +717,12 @@ fn str_list_to_ids(d: &Bound<PyDict>, key: &str, vocab: &mut VocabInterner) -> P
 /// `card_subtypes` is remapped but deliberately NOT re-sorted: it carries the printed order, which
 /// is why `filter.rs` linear-scans it instead of binary-searching.
 fn renumber_coll_vocab(cards: &mut [OracleCard], printings: &mut [Printing], coll_vocab: Vec<String>) -> Vec<String> {
-    let mut order: Vec<u16> = (0..coll_vocab.len() as u16).collect();
+    // `VocabInterner` caps ids at `u16::MAX`, so the vocab holds at most 65,536 entries and every
+    // INDEX fits a u16 -- but the LENGTH does not: `0..len as u16` is `0..0` at exactly 65,536.
+    debug_assert!(coll_vocab.len() <= usize::from(u16::MAX) + 1, "collection vocab ids are u16");
+    let mut order: Vec<u16> = (0..coll_vocab.len()).map(|i| i as u16).collect();
     order.sort_unstable_by(|&a, &b| coll_vocab[a as usize].cmp(&coll_vocab[b as usize]));
-    // remap[old] = new. VocabInterner caps the vocab at u16::MAX so the cast cannot truncate.
+    // remap[old] = new; both are indexes, so the casts cannot truncate.
     let mut remap: Vec<u16> = vec![0; coll_vocab.len()];
     for (new_id, &old_id) in order.iter().enumerate() {
         remap[old_id as usize] = new_id as u16;
@@ -722,7 +749,7 @@ fn renumber_coll_vocab(cards: &mut [OracleCard], printings: &mut [Printing], col
     sorted_vocab
 }
 
-fn jsonb_obj_to_ids(d: &Bound<PyDict>, key: &str, vocab: &mut VocabInterner) -> PyResult<Vec<u16>> {
+fn jsonb_obj_to_ids(d: &Bound<PyDict>, key: &Bound<'_, PyString>, vocab: &mut VocabInterner) -> PyResult<Vec<u16>> {
     let mut ids: Vec<u16> = d
         .get_item(key)
         .ok()
@@ -752,7 +779,7 @@ fn mana_cost_from_pydict(d: &Bound<PyDict>, cmc_val: Option<f32>, mana_vocab: &m
     let mut core = 0u64;
     let mut devotion = 0u64;
     let mut hybrids: Vec<(u8, u8)> = Vec::new();
-    if let Some(m) = d.get_item("mana_cost_jsonb").ok().flatten().and_then(|v| v.cast_into::<PyDict>().ok()) {
+    if let Some(m) = d.get_item(intern!(d.py(), "mana_cost_jsonb")).ok().flatten().and_then(|v| v.cast_into::<PyDict>().ok()) {
         for (k, v) in m.iter() {
             let Ok(sym) = k.extract::<String>() else { continue };
             let count = v.cast::<PyList>().ok().map(|l| l.len().min(127) as u8).unwrap_or(0);
@@ -784,28 +811,57 @@ fn mana_cost_from_pydict(d: &Bound<PyDict>, cmc_val: Option<f32>, mana_vocab: &m
     Ok(ManaCost { core, hybrids, devotion, cmc: cmc_val.unwrap_or(0.0) })
 }
 
-fn card_from_pydict(d: &Bound<PyDict>, it: &mut Interner, vocab: &mut VocabInterner, artists: &mut VocabInterner, mana: &mut ManaVocabInterner) -> PyResult<CardRow> {
-    let released_at = opt_date_str(d, "released_at").unwrap_or_default();
+/// Load-time counters that are not part of any row. `inline_truncations` counts `InlineStr`
+/// fields whose source text was longer than the field: `from_str` cuts silently, and the 61-byte
+/// name width is documented as covering every name in the dataset, so a non-zero count is a
+/// future longer name that would otherwise go unnoticed. Surfaced by `reload_commit` as a warning.
+#[derive(Default)]
+struct LoadStats {
+    inline_truncations: usize,
+}
+
+fn card_from_pydict(
+    d: &Bound<PyDict>,
+    it: &mut Interner,
+    vocab: &mut VocabInterner,
+    artists: &mut VocabInterner,
+    mana: &mut ManaVocabInterner,
+    stats: &mut LoadStats,
+) -> PyResult<CardRow> {
+    // Interned dict keys: ~45 `get_item`s per row, and a `&str` key builds and hashes a fresh
+    // `PyString` on every one of them; `intern!` resolves each name once per process.
+    macro_rules! k {
+        ($name:literal) => {
+            intern!(d.py(), $name)
+        };
+    }
+    let released_at = opt_date_str(d, k!("released_at")).unwrap_or_default();
     let released_at_int: Option<u32> = released_at.replace('-', "").parse().ok();
     // Raw strings from the dict; interned to ids as the struct is built below.
-    let card_name = opt_str(d, "card_name").unwrap_or_default();
-    let card_name_lower = InlineStr::<61>::from_str(&card_name.to_lowercase());
+    let card_name = opt_str(d, k!("card_name")).unwrap_or_default();
+    let name_lower = card_name.to_lowercase();
     // Already lowercased + accent-folded in Python (fold_accents(), #649); read as-is.
-    let card_name_folded = InlineStr::<61>::from_str(&opt_str(d, "card_name_folded").unwrap_or_default());
-    let oracle_text = opt_str(d, "oracle_text").unwrap_or_default();
+    let name_folded = opt_str(d, k!("card_name_folded")).unwrap_or_default();
+    let set_code = opt_str(d, k!("card_set_code")).unwrap_or_default();
+    stats.inline_truncations += usize::from(InlineStr::<61>::truncates(&name_lower))
+        + usize::from(InlineStr::<61>::truncates(&name_folded))
+        + usize::from(InlineStr::<8>::truncates(&set_code));
+    let card_name_lower = InlineStr::<61>::from_str(&name_lower);
+    let card_name_folded = InlineStr::<61>::from_str(&name_folded);
+    let oracle_text = opt_str(d, k!("oracle_text")).unwrap_or_default();
     let oracle_text_lower_id = it.intern(oracle_text.to_lowercase());
-    let flavor_text = opt_str(d, "flavor_text").unwrap_or_default();
+    let flavor_text = opt_str(d, k!("flavor_text")).unwrap_or_default();
     let flavor_text_lower_id = it.intern(flavor_text.to_lowercase());
-    let card_artist_vid = match opt_str(d, "card_artist") {
+    let card_artist_vid = match opt_str(d, k!("card_artist")) {
         Some(a) => artists.intern(a.to_lowercase())?,
         None => ARTIST_NONE,
     };
-    let card_types = card_types_list_to_bits(&str_list(d, "card_types"));
+    let card_types = card_types_list_to_bits(&str_list(d, k!("card_types")));
 
     Ok(CardRow {
-        scryfall_id: opt_uuid(d, "scryfall_id"),
-        oracle_id: opt_uuid(d, "oracle_id"),
-        illustration_id: opt_uuid(d, "illustration_id"),
+        scryfall_id: opt_uuid(d, k!("scryfall_id")),
+        oracle_id: opt_uuid(d, k!("oracle_id")),
+        illustration_id: opt_uuid(d, k!("illustration_id")),
 
         card_name_lower,
         card_name_folded,
@@ -815,46 +871,46 @@ fn card_from_pydict(d: &Bound<PyDict>, it: &mut Interner, vocab: &mut VocabInter
         flavor_text_lower_id,
         flavor_text_id: it.intern(flavor_text),
         card_artist_vid,
-        card_set_code: InlineStr::<8>::from_str(&opt_str(d, "card_set_code").unwrap_or_default()),
-        card_layout_id: it.intern(opt_str(d, "card_layout").unwrap_or_default()),
-        card_border_id: it.intern(opt_str(d, "card_border").unwrap_or_default()),
-        card_watermark_id: it.intern_opt(opt_str(d, "card_watermark")),
-        collector_number_id: it.intern(opt_str(d, "collector_number").unwrap_or_default()),
-        mana_cost_text_id: it.intern_opt(opt_str(d, "mana_cost_text")),
-        type_line_id: it.intern(opt_str(d, "type_line").unwrap_or_default()),
-        set_name_id: it.intern(opt_str(d, "set_name").unwrap_or_default()),
+        card_set_code: InlineStr::<8>::from_str(&set_code),
+        card_layout_id: it.intern(opt_str(d, k!("card_layout")).unwrap_or_default()),
+        card_border_id: it.intern(opt_str(d, k!("card_border")).unwrap_or_default()),
+        card_watermark_id: it.intern_opt(opt_str(d, k!("card_watermark"))),
+        collector_number_id: it.intern(opt_str(d, k!("collector_number")).unwrap_or_default()),
+        mana_cost_text_id: it.intern_opt(opt_str(d, k!("mana_cost_text"))),
+        type_line_id: it.intern(opt_str(d, k!("type_line")).unwrap_or_default()),
+        set_name_id: it.intern(opt_str(d, k!("set_name")).unwrap_or_default()),
         released_at_int,
 
-        card_colors: jsonb_color_to_bits(d, "card_colors"),
-        card_color_identity: jsonb_color_to_bits(d, "card_color_identity"),
-        produced_mana: jsonb_color_to_bits(d, "produced_mana"),
+        card_colors: jsonb_color_to_bits(d, k!("card_colors")),
+        card_color_identity: jsonb_color_to_bits(d, k!("card_color_identity")),
+        produced_mana: jsonb_color_to_bits(d, k!("produced_mana")),
 
-        cmc: opt_u8(d, "cmc"), // Un-set cards have fractional cmc, but we don't load those into the dataset
-        creature_power: opt_i8(d, "creature_power"),
-        creature_toughness: opt_i8(d, "creature_toughness"),
-        planeswalker_loyalty: opt_u8(d, "planeswalker_loyalty"),
-        card_rarity_int: opt_u8(d, "card_rarity_int"),
-        collector_number_int: opt_u16(d, "collector_number_int"),
-        edhrec_rank: opt_u32(d, "edhrec_rank"),
-        price_usd: opt_price_cents(d, "price_usd"),
-        price_eur: opt_price_cents(d, "price_eur"),
-        price_tix: opt_price_cents(d, "price_tix"),
-        prefer_score: opt_f32(d, "prefer_score"),
-        cubecobra_score: opt_f32(d, "cubecobra_score"),
+        cmc: opt_u8(d, k!("cmc")), // Un-set cards have fractional cmc, but we don't load those into the dataset
+        creature_power: opt_i8(d, k!("creature_power")),
+        creature_toughness: opt_i8(d, k!("creature_toughness")),
+        planeswalker_loyalty: opt_u8(d, k!("planeswalker_loyalty")),
+        card_rarity_int: opt_u8(d, k!("card_rarity_int")),
+        collector_number_int: opt_u16(d, k!("collector_number_int")),
+        edhrec_rank: opt_u32(d, k!("edhrec_rank")),
+        price_usd: opt_price_cents(d, k!("price_usd")),
+        price_eur: opt_price_cents(d, k!("price_eur")),
+        price_tix: opt_price_cents(d, k!("price_tix")),
+        prefer_score: opt_f32(d, k!("prefer_score")),
+        cubecobra_score: opt_f32(d, k!("cubecobra_score")),
 
         card_types,
-        card_subtypes: str_list_to_ids(d, "card_subtypes", vocab)?,
-        card_keywords: jsonb_obj_to_ids(d, "card_keywords", vocab)?,
-        card_legalities: jsonb_obj_to_legality_bits(d, "card_legalities"),
-        card_oracle_tags: jsonb_obj_to_ids(d, "card_oracle_tags", vocab)?,
-        card_art_tags: jsonb_obj_to_ids(d, "card_art_tags", vocab)?,
-        card_is_tags: jsonb_obj_to_ids(d, "card_is_tags", vocab)?,
-        card_frame_data: jsonb_obj_to_ids(d, "card_frame_data", vocab)?,
+        card_subtypes: str_list_to_ids(d, k!("card_subtypes"), vocab)?,
+        card_keywords: jsonb_obj_to_ids(d, k!("card_keywords"), vocab)?,
+        card_legalities: jsonb_obj_to_legality_bits(d, k!("card_legalities")),
+        card_oracle_tags: jsonb_obj_to_ids(d, k!("card_oracle_tags"), vocab)?,
+        card_art_tags: jsonb_obj_to_ids(d, k!("card_art_tags"), vocab)?,
+        card_is_tags: jsonb_obj_to_ids(d, k!("card_is_tags"), vocab)?,
+        card_frame_data: jsonb_obj_to_ids(d, k!("card_frame_data"), vocab)?,
 
-        mana_cost: mana_cost_from_pydict(d, opt_f32(d, "cmc"), mana, card_types)?,
+        mana_cost: mana_cost_from_pydict(d, opt_f32(d, k!("cmc")), mana, card_types)?,
 
-        creature_power_text_id: it.intern_opt(opt_str(d, "creature_power_text")),
-        creature_toughness_text_id: it.intern_opt(opt_str(d, "creature_toughness_text")),
+        creature_power_text_id: it.intern_opt(opt_str(d, k!("creature_power_text"))),
+        creature_toughness_text_id: it.intern_opt(opt_str(d, k!("creature_toughness_text"))),
     })
 }
 
@@ -3118,8 +3174,14 @@ impl ArchivedPrintingValueIndex {
 
     /// The half-open value range `[lo, hi)` as a `pids` offset pair — the `(s, e)` every filter
     /// consumer used to get from two `partition_point`s over the pair vec.
+    ///
+    /// Callers compute `e - s` and slice `pids[s..e]`, so the pair is kept ordered even for an inverted
+    /// `(lo, hi)`: an empty range, never a wrap or a panic. Every bound producer is meant to hand over
+    /// `lo <= hi` already -- the debug assertion is what says so.
     fn range(&self, lo: u32, hi: u32) -> (usize, usize) {
-        (self.offset_of(lo), self.offset_of(hi))
+        debug_assert!(lo <= hi, "value range must be ordered: [{lo}, {hi})");
+        let s = self.offset_of(lo);
+        (s, s.max(self.offset_of(hi)))
     }
 
     /// Printing ids whose key is in `[lo, hi)`, key-major.
@@ -3455,21 +3517,34 @@ fn snap_to_nearest_cent(cents: f64) -> f64 {
 /// are chosen so the range is exact for every op — `cn<100.5` means
 /// value <= 100. Outer None = Ne (never narrows); inner None = provably empty
 /// (an exact empty narrowing, not "no index").
+///
+/// `hi` never exceeds `u32::MAX`: a half-open bound cannot include `u32::MAX` itself (there is no
+/// `u32::MAX + 1`), so the top value of the domain is treated as never present -- it is the null
+/// sentinel in every sort key, never a stored value. Before this the `+ 1` after clamping to
+/// `u32::MAX` produced 2^32, truncated to `hi = 0`, and consumers computed `e - s` (wrapping) and
+/// sliced `pids[s..e]` (panicking) on any `<= 4294967295` query.
 fn int_range_bounds(op: CmpOp, value: f64) -> Option<Option<(u32, u32)>> {
     const TOP: i64 = u32::MAX as i64;
+    if value.is_nan() {
+        return match op {
+            CmpOp::Ne => None,
+            _ => Some(None), // nothing compares to NaN
+        };
+    }
     let (lo, hi): (i64, i64) = match op {
         CmpOp::Ne => return None,
         CmpOp::Eq => {
-            if value.fract() != 0.0 || value < 0.0 || value > TOP as f64 {
+            if value.fract() != 0.0 || value < 0.0 || value >= TOP as f64 {
                 return Some(None);
             }
             (value as i64, value as i64 + 1)
         }
         CmpOp::Lt => (0, value.ceil().clamp(0.0, TOP as f64) as i64),
-        CmpOp::Le => (0, value.floor().clamp(-1.0, TOP as f64) as i64 + 1),
-        CmpOp::Gt => (value.floor().clamp(-1.0, TOP as f64) as i64 + 1, TOP),
+        CmpOp::Le => (0, value.floor().clamp(-1.0, (TOP - 1) as f64) as i64 + 1),
+        CmpOp::Gt => (value.floor().clamp(-1.0, (TOP - 1) as f64) as i64 + 1, TOP),
         CmpOp::Ge => (value.ceil().clamp(0.0, TOP as f64) as i64, TOP),
     };
+    debug_assert!(hi <= TOP && lo >= 0, "int_range_bounds must stay inside the u32 domain: ({lo}, {hi})");
     if hi <= lo {
         return Some(None);
     }
@@ -4883,6 +4958,16 @@ fn narrow_rec(
             if word.len() >= 3
                 && matches!(field, TextSearchField::NameLower | TextSearchField::OracleTextLower) =>
         {
+            // Only narrow when the trigram index is actually built for this store -- fixtures (and any
+            // store without it) leave it `Default`, where `trigram_candidates` returns empty rather
+            // than None and would wrongly narrow to zero. Same guard as the `TextRegex` arm below.
+            let built = match field {
+                TextSearchField::NameLower => u32::from(indexes.name_trigram.domain) as usize == n_cards,
+                _ => u32::from(indexes.oracle_trigram.words.n_cards) as usize == n_cards,
+            };
+            if !built {
+                return None;
+            }
             // A needle of exactly 3 bytes is exactly ONE trigram, so the posting list IS the containment
             // set — no false positives to verify away. At 4+ bytes the intersection of several trigrams
             // really is a superset ("the" AND "her" without "ther"), so those stay loose. (#859)
@@ -5254,7 +5339,10 @@ fn narrow_rec(
                 .iter()
                 .map(|&d| (u32::from(flavor.offsets[d as usize + 1]) - u32::from(flavor.offsets[d as usize])) as usize)
                 .sum();
-            if range_too_broad_to_narrow(total, flavor.printings.len()) {
+            // `n_printings`, as the range arms pass: the breadth question is "what fraction of the
+            // store", and `flavor.printings.len()` (printings WITH flavor text) is a smaller
+            // denominator that made a broad flavor match look narrower than it is.
+            if range_too_broad_to_narrow(total, n_printings) {
                 return None;
             }
             Narrowed::tight(Candidates::Printings(expand_flavor_ids(flavor, dense_ids, n_printings)))
@@ -6622,11 +6710,17 @@ fn walk_printing_page<'a>(
     params: &QueryParams,
     leaf: &FilterExpr,
     perm: &Archived<Vec<u32>>,
+    total: usize,
 ) -> Vec<(&'a AOracleCard, &'a APrinting)> {
     let QueryCtx { cards, printings, offsets, strings, .. } = *ctx;
     let QueryParams { sort_col, descending, limit, page_offset, .. } = *params;
     let residual: [&FilterExpr; 1] = [leaf];
-    let mut page: Vec<(&AOracleCard, &APrinting)> = Vec::with_capacity(limit);
+    // Sized to the rows this page can actually hold, not the caller's `limit`: an internal caller
+    // passes 1,000,000 for "everything", which is 16 MB of buffer for a page of a few thousand.
+    let mut page: Vec<(&AOracleCard, &APrinting)> = Vec::with_capacity(limit.min(total.saturating_sub(page_offset)));
+    if limit == 0 {
+        return page;
+    }
     let mut scratch: Vec<Match> = Vec::new();
     let mut skip = page_offset;
     for cid in perm.iter().map(|x| u32::from(*x)) {
@@ -6650,7 +6744,7 @@ fn walk_printing_page<'a>(
         scratch.sort_unstable_by(page_cmp);
         for m in scratch.iter().skip(skip) {
             page.push((&cards[m.1 as usize], &printings[m.2 as usize]));
-            if page.len() == limit {
+            if page.len() >= limit {
                 return page;
             }
         }
@@ -6690,10 +6784,14 @@ fn aligned_page<'a>(
     descending: bool,
     page_offset: usize,
     limit: usize,
+    total: usize,
 ) -> Vec<(&'a AOracleCard, &'a APrinting)> {
     let ks = idx.keys.partition_point(|k| u32::from(*k) < lo);
     let ke = idx.keys.partition_point(|k| u32::from(*k) < hi);
-    let mut page: Vec<(&AOracleCard, &APrinting)> = Vec::with_capacity(limit);
+    let mut page: Vec<(&AOracleCard, &APrinting)> = Vec::with_capacity(limit.min(total.saturating_sub(page_offset)));
+    if limit == 0 {
+        return page;
+    }
     let mut skip = page_offset;
     for step in 0..ke.saturating_sub(ks) {
         let run = idx.run(if descending { ke - 1 - step } else { ks + step });
@@ -6705,7 +6803,7 @@ fn aligned_page<'a>(
             let pid = idx.pid_at(t);
             let cid = u32::from(printing_to_card[pid]) as usize;
             page.push((&cards[cid], &printings[pid]));
-            if page.len() == limit {
+            if page.len() >= limit {
                 return page;
             }
         }
@@ -6781,7 +6879,7 @@ fn printing_range_fastpath_inner<'a>(
             return None;
         }
         note_paging_taken(PagingTaken::RangeAligned);
-        let page = aligned_page(idx, lo, hi, cards, printings, &indexes.printing_to_card, descending, page_offset, limit);
+        let page = aligned_page(idx, lo, hi, cards, printings, &indexes.printing_to_card, descending, page_offset, limit, k);
         return Some((k, page));
     }
     // The walk reproduces run_query_streamed's *stream* emission (per-card-contiguous), which the
@@ -6804,7 +6902,7 @@ fn printing_range_fastpath_inner<'a>(
         return None;
     }
     note_paging_taken(PagingTaken::RangeWalk);
-    Some((k, walk_printing_page(ctx, params, filter, perm)))
+    Some((k, walk_printing_page(ctx, params, filter, perm, k)))
 }
 
 /// The exact `unique=printing` total for a bare `border:VALUE` leaf, from the #724 printing planes:
@@ -8309,8 +8407,11 @@ fn walk_value_orderby_page<'a>(
     let QueryCtx { cards, printings, offsets, indexes, .. } = *ctx;
     let QueryParams { mode, prefer, descending, limit, page_offset, .. } = *params;
     let printing_to_card = &indexes.printing_to_card;
-    let want = page_offset + limit;
-    let mut page: Vec<(&AOracleCard, &APrinting)> = Vec::with_capacity(limit);
+    let want = page_offset.saturating_add(limit);
+    let mut page: Vec<(&AOracleCard, &APrinting)> = Vec::with_capacity(limit.min(total.saturating_sub(page_offset)));
+    if limit == 0 {
+        return Some((page, ComposePageWork::default()));
+    }
     let mut seen = 0usize; // group rows passed: skipped for the offset, then emitted
     // The walk's real work: one `pbits` test per printing considered -- index entries and
     // representative-resolution probes alike. Not `seen`: the entries that miss are the cost
@@ -8337,7 +8438,7 @@ fn walk_value_orderby_page<'a>(
                 page.push((&cards[cid], &printings[pid]));
             }
             seen += 1;
-            if seen == want {
+            if seen >= want {
                 break 'walk;
             }
         }
@@ -9710,7 +9811,11 @@ fn walk_grouped_page<'a>(
     let QueryParams { mode, prefer, sort_col, descending, limit, page_offset, .. } = *params;
     let max_artwork_groups = u16::from(indexes.max_artwork_groups);
     let is_set = |pid: usize| pbits[pid >> 6] & (1u64 << (pid & 63)) != 0;
-    let mut page: Vec<(&AOracleCard, &APrinting)> = Vec::with_capacity(limit);
+    // Sized to the rows this page can hold rather than the caller's `limit` (1,000,000 from an
+    // internal "everything" caller is 16 MB of buffer). The set-printing count is the exact total in
+    // printing mode and an upper bound in the grouped modes; ~1.5k word popcounts against a walk.
+    let set_printings: usize = pbits.iter().map(|w| w.count_ones() as usize).sum();
+    let mut page: Vec<(&AOracleCard, &APrinting)> = Vec::with_capacity(limit.min(set_printings.saturating_sub(page_offset)));
     // per group key: (best matching pid, its prefer score). Pre-sized so the grouping loop needs no
     // per-printing resize check: Artwork needs one slot per group, Card collapses to a single group
     // (gid 0), Printing does no grouping. Card's fixed len 1 also keeps the loop safe if a
@@ -9728,6 +9833,9 @@ fn walk_grouped_page<'a>(
     // each one's whole printing span, stopping only when the page fills. `cost::printings_walked`
     // models that as `page_span / match_rate`, which nothing checked before these counters.
     let mut work = ComposePageWork::default();
+    if limit == 0 {
+        return (page, work);
+    }
     for cid in perm.iter().map(|x| u32::from(*x)) {
         let card = &cards[cid as usize];
         let start = u32::from(offsets[cid as usize]) as usize;
@@ -9784,7 +9892,7 @@ fn walk_grouped_page<'a>(
         scratch.sort_unstable_by(page_cmp);
         for m in scratch.iter().skip(skip) {
             page.push((&cards[m.1 as usize], &printings[m.2 as usize]));
-            if page.len() == limit {
+            if page.len() >= limit {
                 return (page, work);
             }
         }
@@ -9879,7 +9987,10 @@ fn walk_card_page_via_popcount_skip<'a>(
     // emitted card's span here, not during the scatter, is what keeps this bounded by `limit` rather
     // than by total matches -- the same reason `run_query_streamed_popcount`'s own emit phase does it.
     let is_set = |pid: usize| pbits[pid >> 6] & (1u64 << (pid & 63)) != 0;
-    let mut page: Vec<(&AOracleCard, &APrinting)> = Vec::with_capacity(limit);
+    let mut page: Vec<(&AOracleCard, &APrinting)> = Vec::with_capacity(limit.min(total.saturating_sub(page_offset)));
+    if limit == 0 {
+        return (page, work);
+    }
     'walk: while word_idx < permuted.len() {
         let mut w = permuted[word_idx];
         while w != 0 {
@@ -9909,7 +10020,7 @@ fn walk_card_page_via_popcount_skip<'a>(
             }
             let (bp, _) = best.expect("card_bits set this card because some printing of it matched");
             page.push((card, &printings[bp as usize]));
-            if page.len() == limit {
+            if page.len() >= limit {
                 break 'walk;
             }
         }
@@ -9991,7 +10102,10 @@ fn walk_printing_page_via_popcount_skip<'a>(
     // printings before pushing rows -- bounded by one block's worth of cards plus however many more
     // it takes to fill `limit`, not by how deep the walk would otherwise need to go.
     let is_set = |pid: usize| pbits[pid >> 6] & (1u64 << (pid & 63)) != 0;
-    let mut page: Vec<(&AOracleCard, &APrinting)> = Vec::with_capacity(limit);
+    let mut page: Vec<(&AOracleCard, &APrinting)> = Vec::with_capacity(limit.min((total as usize).saturating_sub(page_offset)));
+    if limit == 0 {
+        return (page, work);
+    }
     let start_rank = block_idx * 64;
     'walk: for rank in start_rank..n_cards {
         let cid = u32::from(order.perm[rank]) as usize;
@@ -10010,7 +10124,7 @@ fn walk_printing_page_via_popcount_skip<'a>(
                 continue;
             }
             page.push((card, &printings[pid]));
-            if page.len() == limit {
+            if page.len() >= limit {
                 break 'walk;
             }
         }
@@ -10114,7 +10228,10 @@ fn walk_artwork_page_via_popcount_skip<'a>(
     let mut touched: Vec<u16> = Vec::new();
     let mut scratch: Vec<Match> = Vec::new();
     let mut skip = skip as usize;
-    let mut page: Vec<(&AOracleCard, &APrinting)> = Vec::with_capacity(limit);
+    let mut page: Vec<(&AOracleCard, &APrinting)> = Vec::with_capacity(limit.min((total as usize).saturating_sub(page_offset)));
+    if limit == 0 {
+        return (page, work);
+    }
     let start_rank = block_idx * 64;
     for rank in start_rank..n_cards {
         let cid = u32::from(order.perm[rank]);
@@ -10156,7 +10273,7 @@ fn walk_artwork_page_via_popcount_skip<'a>(
         scratch.sort_unstable_by(page_cmp);
         for m in scratch.iter().skip(skip) {
             page.push((&cards[m.1 as usize], &printings[m.2 as usize]));
-            if page.len() == limit {
+            if page.len() >= limit {
                 return (page, work);
             }
         }
@@ -12016,7 +12133,7 @@ fn run_query_routed<'a>(
         }
     };
     phases.finish();
-    out
+    count_only_if_zero_limit(params, out)
 }
 
 /// In-process force/dispatch entry point (#702 step 2): run `plan` for this
@@ -12086,6 +12203,18 @@ fn run_query_with_plan<'a>(
             Some(exec_gathered_scan(ctx, params, filter, &prep, plane))
         }
     }
+    .map(|out| count_only_if_zero_limit(params, out))
+}
+
+/// `limit == 0` is the count-only page: the exact total, no rows. Every walk-style executor
+/// terminates on `page.len() >= limit` AFTER a push (and guards a zero limit before its walk), so
+/// the executors are individually safe; this is the one point every plan passes through, so no
+/// plan can drift on the contract and a zero limit can never run a walk to exhaustion again.
+fn count_only_if_zero_limit<'a>(
+    params: &QueryParams,
+    (total, page): (usize, Vec<(&'a AOracleCard, &'a APrinting)>),
+) -> (usize, Vec<(&'a AOracleCard, &'a APrinting)>) {
+    if params.limit == 0 { (total, Vec::new()) } else { (total, page) }
 }
 
 /// One applicable plan's predicted cost, as `explain` (#745) reports it — exposing
@@ -12649,8 +12778,8 @@ fn run_query_streamed_popcount<'a>(
         let existential = plane.is_some_and(|e| plane_expr_is_existential(e, u64::from(planes.divergent_formats)));
         // Ends `ns_loop` (the skip scan) and starts `ns_finish` (the emit walk).
         let t_finish = std::time::Instant::now();
-        let mut page: Vec<(&AOracleCard, &APrinting)> = Vec::with_capacity(limit);
-        'walk: while word_idx < permuted.len() {
+        let mut page: Vec<(&AOracleCard, &APrinting)> = Vec::with_capacity(limit.min(total.saturating_sub(page_offset)));
+        'walk: while limit > 0 && word_idx < permuted.len() {
             let mut w = permuted[word_idx];
             while w != 0 {
                 let bit = w.trailing_zeros();
@@ -12694,7 +12823,7 @@ fn run_query_streamed_popcount<'a>(
                 if let Some(pid) = chosen {
                     page.push((card, &printings[pid as usize]));
                 }
-                if page.len() == limit {
+                if page.len() >= limit {
                     break 'walk;
                 }
             }
@@ -12872,7 +13001,7 @@ fn run_query_streamed<'a>(
             });
         });
     };
-    if total == 0 || page_offset >= total {
+    if limit == 0 || total == 0 || page_offset >= total {
         publish(std::time::Instant::now(), 0);
         return (total, Vec::new());
     }
@@ -12923,7 +13052,7 @@ fn run_query_streamed<'a>(
     // narrowing the segment cannot change which rows come back — only how many entries are stepped to
     // find them.
     let mut skip = page_offset;
-    let mut page: Vec<(&AOracleCard, &APrinting)> = Vec::with_capacity(limit);
+    let mut page: Vec<(&AOracleCard, &APrinting)> = Vec::with_capacity(limit.min(total.saturating_sub(page_offset)));
     let mut scratch: Vec<Match> = Vec::new();
     // Counted for every entry the walk touches, including the ones skipped on a zero count -- that
     // skip IS the walk's cost, and it is what grows as matches thin out in a larger corpus. Entries
@@ -12957,7 +13086,7 @@ fn run_query_streamed<'a>(
         scratch.sort_unstable_by(page_cmp);
         for m in scratch.iter().skip(skip) {
             page.push((&cards[m.1 as usize], &printings[m.2 as usize]));
-            if page.len() == limit {
+            if page.len() >= limit {
                 break 'walk;
             }
         }
@@ -13000,10 +13129,11 @@ type CollIds = for<'a> fn(&'a AOracleCard, &'a APrinting) -> &'a Archived<Vec<u1
 #[derive(Clone, Copy)]
 enum CachedSource {
     /// Not cacheable; the table's own extractor runs.
-    Extractor,
+    Extractor(FieldExtractor),
     /// A `CardData.strings` id, served as one cached `PyString`.
     Str(CachedStrId),
-    /// A `coll_vocab` id vector, served as a list of cached `PyString`s.
+    /// A `coll_vocab` id vector, served as a tuple of cached `PyString`s (`EmitStrCache::coll_list`).
+    /// These fields have no `FIELD_TABLE` row: the cache is their only path.
     Coll(CollIds),
 }
 
@@ -13012,13 +13142,13 @@ enum CachedSource {
 /// All six are cached: their elements come from `coll_vocab` (~16k entries), a bounded vocabulary
 /// that repeats heavily across rows -- 11,278 elements over 1,946 distinct values in one 500-row
 /// sample, with no sharing at all before this. None of them needs a sort any more; see `coll_list`.
-const CACHED_COLL_FIELDS: &[(&str, CollIds)] = &[
-    ("card_subtypes", |c, _p| &c.card_subtypes),
-    ("card_keywords", |c, _p| &c.card_keywords),
-    ("card_oracle_tags", |c, _p| &c.card_oracle_tags),
-    ("card_art_tags", |_c, p| &p.card_art_tags),
-    ("card_is_tags", |_c, p| &p.card_is_tags),
-    ("card_frame_data", |_c, p| &p.card_frame_data),
+const CACHED_COLL_FIELDS: &[(&str, FieldKey, CollIds)] = &[
+    ("card_subtypes", |py| intern!(py, "card_subtypes"), |c, _p| &c.card_subtypes),
+    ("card_keywords", |py| intern!(py, "card_keywords"), |c, _p| &c.card_keywords),
+    ("card_oracle_tags", |py| intern!(py, "card_oracle_tags"), |c, _p| &c.card_oracle_tags),
+    ("card_art_tags", |py| intern!(py, "card_art_tags"), |_c, p| &p.card_art_tags),
+    ("card_is_tags", |py| intern!(py, "card_is_tags"), |_c, p| &p.card_is_tags),
+    ("card_frame_data", |py| intern!(py, "card_frame_data"), |_c, p| &p.card_frame_data),
 ];
 
 /// The result fields served from `EmitStrCache`, and the id each one caches on.
@@ -13033,7 +13163,7 @@ const CACHED_COLL_FIELDS: &[(&str, CollIds)] = &[
 /// any other table would cache the wrong text.
 /// One resolved result field: its name, its interned dict key, its extractor, and — for a field
 /// served from `EmitStrCache` — the id to cache on.
-type ResolvedField = (&'static str, FieldKey, FieldExtractor, CachedSource);
+type ResolvedField = (&'static str, FieldKey, CachedSource);
 
 const CACHED_STR_FIELDS: &[(&str, CachedStrId)] = &[
     ("type_line", |c, _p| u32::from(c.type_line_id)),
@@ -13062,18 +13192,6 @@ const FIELD_TABLE: &[(&str, FieldKey, FieldExtractor)] = &[
     // approximation.
     ("price_usd", |py| intern!(py, "price_usd"), |py, _c, p, _s, _v| Ok(p.price_usd.as_ref().map(|v| f64::from(u32::from(*v)) / 100.0).into_pyobject(py)?.into_any())),
     ("prefer_score", |py| intern!(py, "prefer_score"), |py, _c, p, _s, _v| Ok(p.prefer_score.as_ref().map(|v| f32::from(*v)).into_pyobject(py)?.into_any())),
-    // card_subtypes preserves the printed order; the set-like collections are stored
-    // sorted by vocab id (first-seen order), so they get re-sorted lexicographically
-    // for deterministic output.
-    ("card_subtypes", |py| intern!(py, "card_subtypes"), |py, c, _p, _s, v| {
-        let items: Vec<&str> = c.card_subtypes.iter().map(|id| coll_str(v, u16::from(*id))).collect();
-        Ok(items.into_pyobject(py)?.into_any())
-    }),
-    ("card_keywords", |py| intern!(py, "card_keywords"), |py, c, _p, _s, v| Ok(sorted_strs(v, &c.card_keywords).into_pyobject(py)?.into_any())),
-    ("card_oracle_tags", |py| intern!(py, "card_oracle_tags"), |py, c, _p, _s, v| Ok(sorted_strs(v, &c.card_oracle_tags).into_pyobject(py)?.into_any())),
-    ("card_art_tags", |py| intern!(py, "card_art_tags"), |py, _c, p, _s, v| Ok(sorted_strs(v, &p.card_art_tags).into_pyobject(py)?.into_any())),
-    ("card_is_tags", |py| intern!(py, "card_is_tags"), |py, _c, p, _s, v| Ok(sorted_strs(v, &p.card_is_tags).into_pyobject(py)?.into_any())),
-    ("card_frame_data", |py| intern!(py, "card_frame_data"), |py, _c, p, _s, v| Ok(sorted_strs(v, &p.card_frame_data).into_pyobject(py)?.into_any())),
     // Card-data fields for downstream filtering, in Scryfall JSON shapes (names and value
     // shapes match RESULT_FIELD_COLUMNS in api/api_resource.py, which reshapes the SQL
     // path's raw columns to agree with these).
@@ -13102,9 +13220,14 @@ const RARITY_NAMES: [&str; 6] = ["common", "uncommon", "rare", "mythic", "specia
 /// the legality status words, and cheaper still because there is nothing to invalidate. Built FROM
 /// `RARITY_NAMES` so the spellings exist in exactly one place; an `intern!` arm per word would be a
 /// second copy of the table with nothing checking the two agree.
+///
+/// A `PyOnceLock`, not a std `OnceLock`: the initializer allocates Python objects while holding the
+/// GIL, and a std cell blocks every other initializer for the duration -- the deadlock pyo3
+/// documents its cell for (a second thread holding the GIL and waiting on the cell while the first
+/// waits for the GIL). Same type the `intern!` keys already use.
 fn rarity_pystring(py: Python<'_>, value: u8) -> Option<&'static Py<PyString>> {
-    static WORDS: OnceLock<Vec<Py<PyString>>> = OnceLock::new();
-    WORDS.get_or_init(|| RARITY_NAMES.iter().map(|name| PyString::intern(py, name).unbind()).collect())
+    static WORDS: pyo3::sync::PyOnceLock<Vec<Py<PyString>>> = pyo3::sync::PyOnceLock::new();
+    WORDS.get_or_init(py, || RARITY_NAMES.iter().map(|name| PyString::intern(py, name).unbind()).collect())
         .get(value as usize)
 }
 
@@ -13126,13 +13249,17 @@ fn rarity_pystring(py: Python<'_>, value: u8) -> Option<&'static Py<PyString>> {
 fn color_identity_tuple<'py>(py: Python<'py>, mask: u8) -> PyResult<Bound<'py, PyAny>> {
     /// Six colour bits, so every mask this field can hold indexes into the table.
     const N_MASKS: u8 = 64;
-    static TUPLES: OnceLock<Vec<Py<PyTuple>>> = OnceLock::new();
-    let tuples = TUPLES.get_or_init(|| {
-        (0..N_MASKS).filter_map(|m| PyTuple::new(py, identity_letters(m)).ok().map(|t| t.unbind())).collect()
+    // A `PyOnceLock` (see `rarity_pystring`): the initializer allocates Python objects under the GIL.
+    static TUPLES: pyo3::sync::PyOnceLock<Vec<Py<PyTuple>>> = pyo3::sync::PyOnceLock::new();
+    // All 64 or nothing. A `filter_map(.ok())` build used to drop a failed mask and shift every
+    // later tuple one slot down, so `mask` indexed the wrong identity for the rest of the process.
+    // A failed build is not cached (`get_or_try_init` leaves the cell empty); the field is then
+    // built per call, correct and merely slower.
+    let tuples = TUPLES.get_or_try_init(py, || {
+        (0..N_MASKS).map(|m| PyTuple::new(py, identity_letters(m)).map(|t| t.unbind())).collect::<PyResult<Vec<_>>>()
     });
-    match tuples.get(mask as usize) {
+    match tuples.ok().and_then(|tuples| tuples.get(mask as usize)) {
         Some(cached) => Ok(cached.bind(py).clone().into_any()),
-        // Only reachable if the one-time build above failed partway; correct, just uncached.
         None => Ok(PyTuple::new(py, identity_letters(mask))?.into_any()),
     }
 }
@@ -13146,14 +13273,6 @@ fn identity_letters(mask: u8) -> Vec<&'static str> {
 /// Every id is a real entry (there is no absent sentinel for collection elements).
 pub(crate) fn coll_str(vocab: &AStrings, id: u16) -> &str {
     vocab[id as usize].as_str()
-}
-
-/// Resolves interned collection ids to a lexicographically sorted `Vec<&str>` for
-/// deterministic field output.
-fn sorted_strs<'a>(vocab: &'a AStrings, ids: &Archived<Vec<u16>>) -> Vec<&'a str> {
-    let mut v: Vec<&str> = ids.iter().map(|id| coll_str(vocab, u16::from(*id))).collect();
-    v.sort_unstable();
-    v
 }
 
 const DEFAULT_FIELDS: &[&str] =
@@ -13174,19 +13293,18 @@ fn resolve_fields(fields: Option<Vec<String>>) -> PyResult<Vec<ResolvedField>> {
         if !seen.insert(name) {
             continue;
         }
-        match FIELD_TABLE.iter().find(|(n, _, _)| *n == name) {
-            Some((n, key, extractor)) => {
-                let cached = CACHED_STR_FIELDS
-                    .iter()
-                    .find(|(cn, _)| cn == n)
-                    .map(|(_, id_of)| CachedSource::Str(*id_of))
-                    .or_else(|| {
-                        CACHED_COLL_FIELDS.iter().find(|(cn, _)| cn == n).map(|(_, ids_of)| CachedSource::Coll(*ids_of))
-                    })
-                    .unwrap_or(CachedSource::Extractor);
-                resolved.push((*n, *key, *extractor, cached));
-            }
-            None => return Err(UnknownFieldError::new_err(format!("unknown field: {name:?}"))),
+        // The collection fields live only in `CACHED_COLL_FIELDS`: they had `FIELD_TABLE` rows too,
+        // whose extractors were unreachable once resolution routed them to the cache.
+        if let Some((n, key, extractor)) = FIELD_TABLE.iter().find(|(n, _, _)| *n == name) {
+            let cached = CACHED_STR_FIELDS
+                .iter()
+                .find(|(cn, _)| cn == n)
+                .map_or(CachedSource::Extractor(*extractor), |(_, id_of)| CachedSource::Str(*id_of));
+            resolved.push((*n, *key, cached));
+        } else if let Some((n, key, ids_of)) = CACHED_COLL_FIELDS.iter().find(|(n, _, _)| *n == name) {
+            resolved.push((*n, *key, CachedSource::Coll(*ids_of)));
+        } else {
+            return Err(UnknownFieldError::new_err(format!("unknown field: {name:?}")));
         }
     }
     Ok(resolved)
@@ -13202,11 +13320,11 @@ fn card_to_pydict<'py>(
     str_cache: &EmitStrCache,
 ) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
-    for (_, key, extractor, cached) in fields {
+    for (_, key, cached) in fields {
         let value = match cached {
             CachedSource::Str(id_of) => str_cache.get(py, strings, id_of(card, printing))?,
             CachedSource::Coll(ids_of) => str_cache.coll_list(py, vocab, ids_of(card, printing))?.into_any(),
-            CachedSource::Extractor => extractor(py, card, printing, strings, vocab)?,
+            CachedSource::Extractor(extractor) => extractor(py, card, printing, strings, vocab)?,
         };
         d.set_item(key(py), value)?;
     }
@@ -13267,6 +13385,7 @@ fn archive_payload(mmap: &Mmap) -> &[u8] {
 
 // ─── PyO3 bindings ───────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 struct CachedMmap {
     mmap: Arc<Mmap>,
     inode: u64,
@@ -13274,6 +13393,23 @@ struct CachedMmap {
     /// it safe: interned string ids are archive-relative, so a cache outliving its archive would
     /// hand out the wrong text.
     str_cache: Arc<EmitStrCache>,
+    /// `/get_catalog`'s count dicts for this mapping, same lifetime rule as `str_cache`.
+    catalog: Arc<CatalogCounts>,
+}
+
+/// The `common_card_types` / `common_card_keywords` answers, each a pure function of the mapping.
+/// Both used to be recomputed from scratch -- a full pass over every card -- on every
+/// `/get_catalog`. Built once per mapping in a `PyOnceLock` (Python allocation under the GIL) and
+/// handed out as a `.copy()`, so a caller mutating its dict cannot change the next caller's.
+struct CatalogCounts {
+    types: pyo3::sync::PyOnceLock<Py<PyDict>>,
+    keywords: pyo3::sync::PyOnceLock<Py<PyDict>>,
+}
+
+impl CatalogCounts {
+    const fn new() -> Self {
+        CatalogCounts { types: pyo3::sync::PyOnceLock::new(), keywords: pyo3::sync::PyOnceLock::new() }
+    }
 }
 
 /// One `PyString` per interned string id, for the result fields whose values repeat within a page.
@@ -13337,23 +13473,98 @@ impl EmitStrCache {
     /// the row dict to be tracked with it, the empty tuple is not.
     fn coll_list<'py>(&self, py: Python<'py>, vocab: &AStrings, ids: &Archived<Vec<u16>>) -> PyResult<Bound<'py, PyTuple>> {
         let cells = self.coll_cells.get_or_init(|| (0..vocab.len()).map(|_| OnceLock::new()).collect());
-        let mut items: Vec<Bound<'py, PyString>> = Vec::with_capacity(ids.len());
-        for id in ids.iter() {
-            let idx = u16::from(*id) as usize;
-            let Some(text) = vocab.get(idx) else { continue };
-            match cells.get(idx).and_then(|cell| cell.get()) {
-                Some(hit) => items.push(hit.bind(py).clone()),
-                None => {
-                    let built = PyString::new(py, text.as_str());
-                    if let Some(cell) = cells.get(idx) {
+        // Straight into the tuple: `PyTuple::new` takes an exact-size iterator, so the intermediate
+        // `Vec<Bound<PyString>>` per row is gone. Ids are in-vocab by construction (the same
+        // assumption `coll_str` indexes on), so there is no skip path to break the exact size.
+        debug_assert_eq!(cells.len(), vocab.len(), "coll_cells is sized to this archive's vocab");
+        PyTuple::new(
+            py,
+            ids.iter().map(|id| {
+                let idx = u16::from(*id) as usize;
+                let cell = &cells[idx];
+                match cell.get() {
+                    Some(hit) => hit.bind(py).clone(),
+                    None => {
+                        let built = PyString::new(py, coll_str(vocab, idx as u16));
                         let _ = cell.set(built.clone().unbind());
+                        built
                     }
-                    items.push(built);
                 }
-            }
-        }
-        PyTuple::new(py, items)
+            }),
+        )
     }
+}
+
+/// A per-PID `.tmp` archive being written by `reload_commit`. Unlinked on drop unless `publish`
+/// renamed it into place, so no error path between `File::create` and the rename can leave the
+/// file behind. `publish` consumes the guard: after the rename there is nothing at `path` to unlink.
+struct TmpArchive {
+    path: PathBuf,
+    published: bool,
+}
+
+impl TmpArchive {
+    fn create(path: PathBuf) -> std::io::Result<(Self, std::fs::File)> {
+        let file = std::fs::File::create(&path)?;
+        Ok((TmpArchive { path, published: false }, file))
+    }
+
+    /// `rename(2)` the finished archive over `dest` -- atomic, and the only way out that keeps the file.
+    fn publish(mut self, dest: &std::path::Path) -> std::io::Result<()> {
+        std::fs::rename(&self.path, dest)?;
+        self.published = true;
+        Ok(())
+    }
+}
+
+impl Drop for TmpArchive {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// Whether `pid` names a live process: `kill(pid, 0)` succeeds, or fails with anything but ESRCH
+/// (EPERM means it exists and belongs to someone else). Unrepresentable pids count as alive -- the
+/// sweep must only ever remove what it can prove abandoned.
+fn pid_alive(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else { return true };
+    // Safety: `kill` with signal 0 sends nothing; it only reports whether the pid is deliverable.
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+/// Remove `<archive>.<pid>.tmp` siblings of `shm_path` whose writer pid is no longer alive, and
+/// return how many went. The name shape is exactly what `reload_commit` writes; anything else in
+/// the directory, another archive's temp files included, is left alone, as is our own pid's.
+/// Meant to run under the reload flock, where no live writer can be between create and rename.
+fn sweep_stale_tmp_archives(shm_path: &std::path::Path) -> usize {
+    let (Some(dir), Some(base)) = (shm_path.parent(), shm_path.file_name().and_then(|n| n.to_str())) else { return 0 };
+    let prefix = format!("{base}.");
+    let me = std::process::id();
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix(&prefix))
+            .and_then(|rest| rest.strip_suffix(".tmp"))
+            .and_then(|pid| pid.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid == me || pid_alive(pid) {
+            continue;
+        }
+        if std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 /// In-progress staged reload: cards accumulated across add_batch() calls plus
@@ -13367,6 +13578,7 @@ struct Staging {
     vocab: VocabInterner,
     artists: VocabInterner,
     mana: ManaVocabInterner,
+    stats: LoadStats,
     #[allow(dead_code)] // held for its flock; released on drop
     lock_file: std::fs::File,
 }
@@ -13408,6 +13620,15 @@ pub(crate) fn count_common_types(data: &Archived<CardData>) -> HashMap<String, u
         result.insert(coll_str(&data.coll_vocab, id).to_string(), count);
     }
     result
+}
+
+/// A `{name: count}` dict, unbound, for `CatalogCounts` to hold.
+fn counts_dict(py: Python<'_>, counts: &HashMap<String, u32>) -> PyResult<Py<PyDict>> {
+    let d = PyDict::new(py);
+    for (name, count) in counts {
+        d.set_item(name, count)?;
+    }
+    Ok(d.unbind())
 }
 
 /// Count keyword occurrences across oracle cards (one per oracle id).
@@ -13475,10 +13696,11 @@ fn bind_and_split_filter(
     sort_col: SortCol,
 ) -> PyResult<(Option<PlaneExpr>, FilterExpr, SortBound, FilterExpr)> {
     let to_json = filters.call_method0("to_json")?;
-    let json_bytes: Vec<u8> = py
-        .import("orjson")?
-        .call_method1("dumps", (to_json,))?
-        .extract()?;
+    // `orjson.dumps` resolved once per process: `py.import` is a dict lookup plus an attribute walk
+    // on every query otherwise. A `PyOnceLock` because the initializer runs Python under the GIL.
+    static ORJSON_DUMPS: pyo3::sync::PyOnceLock<Py<PyAny>> = pyo3::sync::PyOnceLock::new();
+    let dumps = ORJSON_DUMPS.get_or_try_init(py, || py.import("orjson")?.getattr("dumps").map(Bound::unbind))?;
+    let json_bytes: Vec<u8> = dumps.bind(py).call1((to_json,))?.extract()?;
     let json_str = std::str::from_utf8(&json_bytes)
         .map_err(|e| RetryableQueryError::new_err(format!("bad UTF-8 from orjson: {e}")))?;
     let json_val: Value = serde_json::from_str(json_str)
@@ -13606,12 +13828,12 @@ impl QueryEngine {
     // the last remap (i.e. another worker wrote a new archive via rename).
     // One stat(2) per query; remap only when the inode actually changes.
     fn get_mmap(&self) -> PyResult<Arc<Mmap>> {
-        Ok(self.get_mapping()?.0)
+        Ok(self.get_mapping()?.mmap)
     }
 
-    /// The mapping plus its emit cache. Both come from the same `CachedMmap`, so a remap replaces
-    /// them together and a cache can never be read against an archive it was not built for.
-    fn get_mapping(&self) -> PyResult<(Arc<Mmap>, Arc<EmitStrCache>)> {
+    /// The mapping plus its per-mapping caches. All come from the same `CachedMmap`, so a remap
+    /// replaces them together and a cache can never be read against an archive it was not built for.
+    fn get_mapping(&self) -> PyResult<CachedMmap> {
         let path_inode = std::fs::metadata(&self.shm_path)
             .map(|m| m.ino())
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("stat shm: {e}")))?;
@@ -13620,7 +13842,7 @@ impl QueryEngine {
         if let Some(ref c) = *guard
             && c.inode == path_inode
         {
-            return Ok((Arc::clone(&c.mmap), Arc::clone(&c.str_cache)));
+            return Ok(c.clone());
         }
         // Inode changed (new reload) or first call: open and map the current file.
         let file = std::fs::File::open(&self.shm_path)
@@ -13644,130 +13866,23 @@ impl QueryEngine {
                 self.shm_path.display(),
             )));
         }
-        let str_cache = Arc::new(EmitStrCache::default());
-        *guard = Some(CachedMmap { mmap: Arc::clone(&mmap), inode, str_cache: Arc::clone(&str_cache) });
-        Ok((mmap, str_cache))
-    }
-}
-
-#[pymethods]
-impl QueryEngine {
-    #[new]
-    #[pyo3(signature = (shm_path=None))]
-    fn new(shm_path: Option<&str>) -> Self {
-        // Use /dev/shm on Linux (shared memory), fall back to /tmp on macOS.
-        let default_path = if cfg!(target_os = "linux") {
-            "/dev/shm/sylvan_librarian_cards"
-        } else {
-            "/tmp/sylvan_librarian_cards"
-        };
-        QueryEngine {
-            shm_path: PathBuf::from(shm_path.unwrap_or(default_path)),
-            staging: Mutex::new(None),
-            cached_mmap: Mutex::new(None),  // populated by first reload()
-        }
+        let cached = CachedMmap { mmap, inode, str_cache: Arc::new(EmitStrCache::default()), catalog: Arc::new(CatalogCounts::new()) };
+        *guard = Some(cached.clone());
+        Ok(cached)
     }
 
-    fn remap(&self) -> PyResult<()> {
-        // Force a remap by clearing the cached inode so get_mmap() re-opens.
-        if let Some(ref mut c) = *self.cached_mmap.lock().unwrap() {
-            c.inode = 0;
-        }
-        self.get_mmap().map(|_| ())
-    }
-
-    /// Start a staged reload: acquire the cross-process write lock and reset
-    /// the staging buffer. Returns false (and refreshes the local mapping) if
-    /// another worker published a new archive while we waited for the lock —
-    /// the caller should skip fetching entirely. Any staging abandoned by a
-    /// previous failed cycle is discarded here.
-    fn reload_begin(&self) -> PyResult<bool> {
-        let mut staging = self.staging.lock().unwrap();
-        // Drop an abandoned cycle's buffer and its flock before re-acquiring.
-        *staging = None;
-
-        // Snapshot the archive's identity before contending for the cross-process
-        // lock, so we can detect whether another worker published a new archive
-        // while we were blocked. Publish is rename-only, so a publish always
-        // changes the inode — unlike mtime, which is subject to filesystem
-        // timestamp granularity and clock steps.
-        let inode_before = std::fs::metadata(&self.shm_path).ok().map(|m| m.ino());
-
-        // Cross-process exclusive lock: only one worker writes per reload cycle.
-        // The lock file is separate so it persists across archive replacements.
-        // Held until reload_commit()/reload_abort() drops the Staging.
-        let lock_path = self.shm_path.with_extension("lock");
-        // truncate(false) is explicit, not incidental: nothing is ever written to this file — it
-        // exists only as an flock target — so opening it must never disturb whatever is already
-        // there, including for a worker that already holds it open.
-        let lock_file = std::fs::OpenOptions::new()
-            .write(true).create(true).truncate(false).open(&lock_path)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("open lock: {e}")))?;
-        // LOCK_EX blocks until we hold the lock; released automatically on drop.
-        loop {
-            if unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) } == 0 {
-                break;
-            }
-            let err = std::io::Error::last_os_error();
-            if err.kind() != std::io::ErrorKind::Interrupted {
-                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!("flock: {err}")));
-            }
-        }
-
-        // If another worker published a new archive while we were waiting (the
-        // inode changed, or a file appeared), skip the rebuild and just remap
-        // our local handle.
-        let inode_after = std::fs::metadata(&self.shm_path).ok().map(|m| m.ino());
-        if inode_after.is_some() && inode_after != inode_before {
-            self.get_mmap().map(|_| ())?;
-            return Ok(false);
-        }
-
-        #[cfg(feature = "alloc-counter")]
-        alloc_stats::reset_peak();
-
-        *staging = Some(Staging { rows: Vec::new(), interner: Interner::new(), vocab: VocabInterner::new(), artists: VocabInterner::new(), mana: ManaVocabInterner::new(), lock_file });
-        Ok(true)
-    }
-
-    /// Append one batch of card dicts to the staging buffer.
-    fn add_batch(&self, db_rows: &Bound<PyList>) -> PyResult<()> {
-        let mut guard = self.staging.lock().unwrap();
-        let staging = guard.as_mut().ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("add_batch called without reload_begin")
-        })?;
-        for item in db_rows.iter() {
-            if let Ok(d) = item.cast::<PyDict>() {
-                staging.rows.push(card_from_pydict(d, &mut staging.interner, &mut staging.vocab, &mut staging.artists, &mut staging.mana)?);
-            }
-        }
-        Ok(())
-    }
-
-    /// Discard an in-progress staged reload, releasing the cross-process lock.
-    fn reload_abort(&self) -> PyResult<()> {
-        self.staging.lock().unwrap().take();
-        Ok(())
-    }
-
-    /// Sort, index, serialize, and atomically publish the staged cards, then
-    /// release the cross-process lock. Queries keep serving the old archive
-    /// until the rename lands.
-    fn reload_commit(&self) -> PyResult<()> {
-        let staging = self.staging.lock().unwrap().take().ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("reload_commit called without reload_begin")
-        })?;
-        let Staging { mut rows, interner, vocab, artists, mana, lock_file } = staging;
-
-        // The store groups printings by oracle_id, so rows without one would all
-        // collapse into a single card. The DB enforces NOT NULL; fail loudly here
-        // for any other caller (e.g. hand-built test dicts).
-        if let Some((idx, row)) = rows.iter().enumerate().find(|(_, r)| r.oracle_id == 0) {
-            let name = interner.strings.get(row.card_name_id as usize).map_or("", |s| s.as_str());
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "card {idx} ({name:?}) is missing oracle_id (required for card grouping)"
-            )));
-        }
+    /// Sort, index and serialize the staged rows, then publish the archive with `rename(2)`.
+    ///
+    /// Plain Rust over plain data, split out of `reload_commit` so it can run under `py.detach`:
+    /// nothing here needs the GIL, and the build takes seconds on the full corpus.
+    fn build_and_publish(
+        &self,
+        mut rows: Vec<CardRow>,
+        interner: Interner,
+        vocab: VocabInterner,
+        artists: VocabInterner,
+        mana: ManaVocabInterner,
+    ) -> PyResult<()> {
         // Equal oracle ids end up adjacent (making each card's printings one
         // contiguous range), and within a card printings order by descending
         // default prefer_score so the default-prefer walk takes the first
@@ -14030,10 +14145,12 @@ impl QueryEngine {
             self.shm_path.file_name().unwrap_or_default().to_string_lossy(),
             std::process::id(),
         );
-        let tmp_path = self.shm_path.with_file_name(tmp_name);
+        // The guard unlinks the .tmp on every exit below except a successful `publish`: an error
+        // after `File::create` (a full /dev/shm, a serialization failure) used to leave a
+        // multi-hundred-MB file behind, pinning RAM until something noticed.
+        let (tmp, f) = TmpArchive::create(self.shm_path.with_file_name(tmp_name))
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("create tmp: {e}")))?;
         {
-            let f = std::fs::File::create(&tmp_path)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("create tmp: {e}")))?;
             let mut buf = std::io::BufWriter::with_capacity(1 << 20, f);
             buf.write_all(&archive_header())
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("write header: {e}")))?;
@@ -14051,7 +14168,7 @@ impl QueryEngine {
             // Snapshot the build peak before the component-size diagnostics
             // below re-serialize pieces into heap buffers and inflate it.
             let build_peak = alloc_stats::peak();
-            let archive_len = std::fs::metadata(&tmp_path)
+            let archive_len = std::fs::metadata(&tmp.path)
                 .map(|m| m.len() as usize)
                 .unwrap_or(0)
                 .saturating_sub(ARCHIVE_HEADER_LEN);
@@ -14064,8 +14181,164 @@ impl QueryEngine {
             alloc_stats::record_reload(stats_after_cards, stats_after_indexes, component_bytes, archive_len, build_peak);
         }
 
-        std::fs::rename(&tmp_path, &self.shm_path)
+        tmp.publish(&self.shm_path)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("rename shm: {e}")))?;
+        Ok(())
+    }
+}
+
+#[pymethods]
+impl QueryEngine {
+    #[new]
+    #[pyo3(signature = (shm_path=None))]
+    fn new(shm_path: Option<&str>) -> Self {
+        // Use /dev/shm on Linux (shared memory), fall back to /tmp on macOS.
+        let default_path = if cfg!(target_os = "linux") {
+            "/dev/shm/sylvan_librarian_cards"
+        } else {
+            "/tmp/sylvan_librarian_cards"
+        };
+        QueryEngine {
+            shm_path: PathBuf::from(shm_path.unwrap_or(default_path)),
+            staging: Mutex::new(None),
+            cached_mmap: Mutex::new(None),  // populated by first reload()
+        }
+    }
+
+    fn remap(&self) -> PyResult<()> {
+        // Force a remap by clearing the cached inode so get_mmap() re-opens.
+        if let Some(ref mut c) = *self.cached_mmap.lock().unwrap() {
+            c.inode = 0;
+        }
+        self.get_mmap().map(|_| ())
+    }
+
+    /// Start a staged reload: acquire the cross-process write lock and reset
+    /// the staging buffer. Returns false (and refreshes the local mapping) if
+    /// another worker published a new archive while we waited for the lock —
+    /// the caller should skip fetching entirely. Any staging abandoned by a
+    /// previous failed cycle is discarded here.
+    fn reload_begin(&self, py: Python<'_>) -> PyResult<bool> {
+        let mut staging = self.staging.lock().unwrap();
+        // Drop an abandoned cycle's buffer and its flock before re-acquiring.
+        *staging = None;
+
+        // Snapshot the archive's identity before contending for the cross-process
+        // lock, so we can detect whether another worker published a new archive
+        // while we were blocked. Publish is rename-only, so a publish always
+        // changes the inode — unlike mtime, which is subject to filesystem
+        // timestamp granularity and clock steps.
+        let inode_before = std::fs::metadata(&self.shm_path).ok().map(|m| m.ino());
+
+        // Cross-process exclusive lock: only one worker writes per reload cycle.
+        // The lock file is separate so it persists across archive replacements.
+        // Held until reload_commit()/reload_abort() drops the Staging.
+        let lock_path = self.shm_path.with_extension("lock");
+        // truncate(false) is explicit, not incidental: nothing is ever written to this file — it
+        // exists only as an flock target — so opening it must never disturb whatever is already
+        // there, including for a worker that already holds it open.
+        let lock_file = std::fs::OpenOptions::new()
+            .write(true).create(true).truncate(false).open(&lock_path)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("open lock: {e}")))?;
+        // LOCK_EX blocks until we hold the lock; released automatically on drop. Blocked with the
+        // GIL released: another worker may hold the lock for the length of a whole rebuild, and this
+        // worker's other threads should keep serving queries meanwhile.
+        py.detach(|| loop {
+            if unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+                return Ok(());
+            }
+            let err = std::io::Error::last_os_error();
+            if err.kind() != std::io::ErrorKind::Interrupted {
+                return Err(err);
+            }
+        })
+        .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(format!("flock: {err}")))?;
+
+        // Under the flock no live writer can be mid-write, so any sibling `<archive>.<pid>.tmp`
+        // whose pid is dead is a crashed writer's leftover pinning RAM in /dev/shm. Swept here, once
+        // per cycle, rather than on a timer nothing owns.
+        sweep_stale_tmp_archives(&self.shm_path);
+
+        // If another worker published a new archive while we were waiting (the
+        // inode changed, or a file appeared), skip the rebuild and just remap
+        // our local handle.
+        let inode_after = std::fs::metadata(&self.shm_path).ok().map(|m| m.ino());
+        if inode_after.is_some() && inode_after != inode_before {
+            self.get_mmap().map(|_| ())?;
+            return Ok(false);
+        }
+
+        #[cfg(feature = "alloc-counter")]
+        alloc_stats::reset_peak();
+
+        *staging = Some(Staging {
+            rows: Vec::new(),
+            interner: Interner::new(),
+            vocab: VocabInterner::new(),
+            artists: VocabInterner::new(),
+            mana: ManaVocabInterner::new(),
+            stats: LoadStats::default(),
+            lock_file,
+        });
+        Ok(true)
+    }
+
+    /// Append one batch of card dicts to the staging buffer.
+    fn add_batch(&self, db_rows: &Bound<PyList>) -> PyResult<()> {
+        let mut guard = self.staging.lock().unwrap();
+        let staging = guard.as_mut().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("add_batch called without reload_begin")
+        })?;
+        for item in db_rows.iter() {
+            if let Ok(d) = item.cast::<PyDict>() {
+                staging.rows.push(card_from_pydict(
+                    d, &mut staging.interner, &mut staging.vocab, &mut staging.artists, &mut staging.mana, &mut staging.stats,
+                )?);
+            }
+        }
+        Ok(())
+    }
+
+    /// Discard an in-progress staged reload, releasing the cross-process lock.
+    fn reload_abort(&self) -> PyResult<()> {
+        self.staging.lock().unwrap().take();
+        Ok(())
+    }
+
+    /// Sort, index, serialize, and atomically publish the staged cards, then
+    /// release the cross-process lock. Queries keep serving the old archive
+    /// until the rename lands.
+    fn reload_commit(&self, py: Python<'_>) -> PyResult<()> {
+        let staging = self.staging.lock().unwrap().take().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("reload_commit called without reload_begin")
+        })?;
+        let Staging { rows, interner, vocab, artists, mana, stats, lock_file } = staging;
+
+        // A silent truncation is a wrong answer for exact-name and set-code queries on that row. The
+        // widths are documented as covering the whole dataset; the day one stops, this is how the
+        // operator hears about it (the API logs warnings) without the reload itself failing.
+        if stats.inline_truncations > 0 {
+            let msg = std::ffi::CString::new(format!(
+                "card_engine: {} inline string field(s) exceeded their width (card_name_lower/card_name_folded 61 bytes, card_set_code 8) and were truncated; widen InlineStr",
+                stats.inline_truncations,
+            ))
+            .expect("no NUL in message");
+            PyErr::warn(py, &py.get_type::<pyo3::exceptions::PyRuntimeWarning>(), &msg, 1)?;
+        }
+
+        // The store groups printings by oracle_id, so rows without one would all
+        // collapse into a single card. The DB enforces NOT NULL; fail loudly here
+        // for any other caller (e.g. hand-built test dicts).
+        if let Some((idx, row)) = rows.iter().enumerate().find(|(_, r)| r.oracle_id == 0) {
+            let name = interner.strings.get(row.card_name_id as usize).map_or("", |s| s.as_str());
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "card {idx} ({name:?}) is missing oracle_id (required for card grouping)"
+            )));
+        }
+        // Everything from the sort to the rename is CPU-bound Rust over plain data -- no Python object
+        // is touched -- so it runs with the GIL released and this worker's other threads keep serving
+        // queries for the duration of the build (seconds on the full corpus).
+        py.detach(|| self.build_and_publish(rows, interner, vocab, artists, mana))?;
 
         // The new archive is published; release the cross-process write lock.
         drop(lock_file);
@@ -14075,15 +14348,15 @@ impl QueryEngine {
 
     /// One-shot reload: the staged API as a single call. Kept for tests and
     /// for callers that already hold the full corpus in memory.
-    fn reload(&self, db_rows: &Bound<PyList>) -> PyResult<()> {
-        if !self.reload_begin()? {
+    fn reload(&self, py: Python<'_>, db_rows: &Bound<PyList>) -> PyResult<()> {
+        if !self.reload_begin(py)? {
             return Ok(()); // another worker just published; we picked up theirs
         }
         if let Err(e) = self.add_batch(db_rows) {
             self.reload_abort()?;
             return Err(e);
         }
-        self.reload_commit()
+        self.reload_commit(py)
     }
 
     #[allow(clippy::too_many_arguments)] // the PyO3 keyword surface; `run_query` behind it takes 9
@@ -14103,7 +14376,7 @@ impl QueryEngine {
         let resolved_fields = resolve_fields(fields)?;
         // get_mmap() remaps automatically if the on-disk inode has changed since
         // the last reload, keeping workers off stale (deleted) mappings.
-        let (mmap, str_cache) = self.get_mapping()?;
+        let CachedMmap { mmap, str_cache, .. } = self.get_mapping()?;
         // Safety: the archive is trusted by construction, so we skip validation.
         // This is the canonical justification for every access_unchecked in this
         // module (query_hashmap() and size() refer here):
@@ -14337,7 +14610,7 @@ impl QueryEngine {
     #[pyo3(signature = (n, fields=None))]
     fn sample_preferred<'py>(&self, py: Python<'py>, n: usize, fields: Option<Vec<String>>) -> PyResult<Bound<'py, PyList>> {
         let resolved_fields = resolve_fields(fields)?;
-        let (mmap, str_cache) = self.get_mapping()?;
+        let CachedMmap { mmap, str_cache, .. } = self.get_mapping()?;
         // Safety: see the access_unchecked justification in query().
         let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
 
@@ -14366,29 +14639,25 @@ impl QueryEngine {
     /// Returns {type_name: count} covering both supertypes/types (decoded from
     /// the card_types bitmask) and subtypes (from card_subtypes strings).
     fn common_card_types<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let mmap = self.get_mmap()?;
-        // Safety: see the access_unchecked justification in query().
-        let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
-        let counts = count_common_types(data);
-        let d = PyDict::new(py);
-        for (name, count) in &counts {
-            d.set_item(name, count)?;
-        }
-        Ok(d)
+        let mapping = self.get_mapping()?;
+        let dict = mapping.catalog.types.get_or_try_init(py, || {
+            // Safety: see the access_unchecked justification in query().
+            let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mapping.mmap)) };
+            counts_dict(py, &count_common_types(data))
+        })?;
+        dict.bind(py).copy()
     }
 
     /// Count keyword occurrences across oracle cards.
     /// Returns {keyword_name: count} for all keywords present on preferred cards.
     fn common_card_keywords<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let mmap = self.get_mmap()?;
-        // Safety: see the access_unchecked justification in query().
-        let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mmap)) };
-        let counts = count_common_keywords(data);
-        let d = PyDict::new(py);
-        for (name, count) in &counts {
-            d.set_item(name, count)?;
-        }
-        Ok(d)
+        let mapping = self.get_mapping()?;
+        let dict = mapping.catalog.keywords.get_or_try_init(py, || {
+            // Safety: see the access_unchecked justification in query().
+            let data = unsafe { rkyv::access_unchecked::<Archived<CardData>>(archive_payload(&mapping.mmap)) };
+            counts_dict(py, &count_common_keywords(data))
+        })?;
+        dict.bind(py).copy()
     }
 
     /// Rust-heap allocator stats and reload() memory breakdown.

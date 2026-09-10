@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList};
 
 mod cuckoo;
 mod gen_cache;
@@ -99,7 +99,28 @@ impl SharedCache {
         self.inner.entry_count() as usize
     }
 
-    fn __contains__(&self, key: &[u8]) -> bool {
+    /// Occupancy snapshot: per-page entry counts and arena usage, the entry budget per page and
+    /// the rotation count. A page with `arena_used` near `arena_capacity` and `entry_count` well
+    /// under `gen_maxsize` is arena-bound (bodies larger than the per-entry share).
+    fn stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let pages = PyList::empty(py);
+        for (index, page) in self.inner.page_stats().into_iter().enumerate() {
+            let d = PyDict::new(py);
+            d.set_item("index", index)?;
+            d.set_item("entry_count", page.entry_count)?;
+            d.set_item("arena_used", page.arena_used)?;
+            d.set_item("arena_capacity", page.arena_capacity)?;
+            d.set_item("sealed", page.sealed)?;
+            pages.append(d)?;
+        }
+        let stats = PyDict::new(py);
+        stats.set_item("pages", pages)?;
+        stats.set_item("gen_maxsize", self.inner.gen_maxsize())?;
+        stats.set_item("rotations", self.inner.rotation_count())?;
+        Ok(stats)
+    }
+
+    fn __contains__(&mut self, key: &[u8]) -> bool {
         self.inner.contains(key)
     }
 

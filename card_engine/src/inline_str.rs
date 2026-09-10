@@ -47,6 +47,12 @@ unsafe impl<const N: usize, C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck:
 }
 
 impl<const N: usize> InlineStr<N> {
+    /// Whether `from_str(s)` would cut `s`: its byte length exceeds the field. `from_str` itself
+    /// stays silent (a fixed-width field has nowhere to report), so the loader asks first and counts.
+    pub(crate) fn truncates(s: &str) -> bool {
+        s.len() > N
+    }
+
     pub(crate) fn from_str(s: &str) -> Self {
         let max = s.len().min(N);
         // Walk back from max to ensure we don't split a multi-byte char.

@@ -101,6 +101,14 @@ pub fn bump_page_generation(base: *mut u8) {
     unsafe { (*ptr).fetch_add(1, Ordering::AcqRel) };
 }
 
+/// Store a page's generation outright (Release). Used when re-initialising after a lock steal:
+/// the parity a dead writer left behind is unknown, and a bump from odd would land on even while
+/// the page is still being zeroed.
+pub fn set_page_generation(base: *mut u8, value: u32) {
+    let ptr = unsafe { base.add(GENERATION_OFFSET) as *const AtomicU32 };
+    unsafe { (*ptr).store(value, Ordering::Release) };
+}
+
 /// Atomic Relaxed read of a slot's visited field. Pairs with set_visited()'s Relaxed store.
 pub fn read_visited(slot: *const u8) -> u8 {
     let ptr = unsafe { slot.add(VISITED_OFFSET) as *const AtomicU8 };
@@ -156,20 +164,31 @@ fn current_pid() -> u32 {
     *PID.get_or_init(std::process::id) // u32; PID 0 is unused on POSIX, safe as unlocked sentinel
 }
 
-pub fn try_lock(mmap: &MmapMut) -> bool {
+/// Outcome of a lock attempt. `Stolen` means the previous holder was a process that no longer
+/// exists: the caller now owns the lock, but whatever that process was doing under it — a
+/// rotation half-way through zeroing a page, a generation left odd, an insert with the arena head
+/// already moved — was cut short, and the shared state must be re-initialised before it is trusted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LockOutcome {
+    Acquired,
+    Stolen,
+    Busy,
+}
+
+pub fn try_lock_outcome(mmap: &MmapMut) -> LockOutcome {
     let lock = unsafe { &*(mmap.as_ptr() as *const AtomicU32) };
     let my_pid = current_pid();
 
     // Uncontended fast path: no clock read. The overwhelming majority of calls land here, and
     // `Instant::now()` is only needed to police a timeout on the contended path below.
     if lock.compare_exchange(0, my_pid, Ordering::Acquire, Ordering::Relaxed).is_ok() {
-        return true;
+        return LockOutcome::Acquired;
     }
 
     let deadline = Instant::now() + LOCK_TIMEOUT;
     loop {
         if lock.compare_exchange(0, my_pid, Ordering::Acquire, Ordering::Relaxed).is_ok() {
-            return true;
+            return LockOutcome::Acquired;
         }
         if Instant::now() >= deadline {
             // Timed out. Check whether the owner process is still alive before giving up.
@@ -180,16 +199,23 @@ pub fn try_lock(mmap: &MmapMut) -> bool {
                     && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
                 if dead {
                     // Owner is gone; steal the lock. If the CAS fails another worker got
-                    // here first — return false and let the caller retry next time.
+                    // here first — report busy and let the caller retry next time.
                     if lock.compare_exchange(owner, my_pid, Ordering::Acquire, Ordering::Relaxed).is_ok() {
-                        return true;
+                        return LockOutcome::Stolen;
                     }
                 }
             }
-            return false;
+            return LockOutcome::Busy;
         }
         std::hint::spin_loop();
     }
+}
+
+/// Bench-only wrapper: production callers go through `GenerationalSharedCache::lock`, which
+/// re-initialises the cache when the lock had to be stolen.
+#[cfg(test)]
+pub fn try_lock(mmap: &MmapMut) -> bool {
+    try_lock_outcome(mmap) != LockOutcome::Busy
 }
 
 pub fn unlock(mmap: &MmapMut) {
@@ -239,6 +265,42 @@ pub fn open_mmap(
     under_lock(&mut mmap);
     unsafe { libc::flock(fd, libc::LOCK_UN) };
     Ok(mmap)
+}
+
+#[cfg(test)]
+mod steal_tests {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use memmap2::MmapMut;
+
+    use super::{LockOutcome, try_lock_outcome, unlock};
+
+    /// Beyond every platform's pid range (Linux pid_max tops out at 4194304, macOS at 99998), so
+    /// kill(pid, 0) reliably answers ESRCH.
+    const DEAD_PID: u32 = i32::MAX as u32;
+
+    #[test]
+    fn a_dead_owners_lock_is_stolen_and_reported() {
+        let mmap = MmapMut::map_anon(4096).expect("anon mmap");
+        let word = unsafe { &*(mmap.as_ptr() as *const AtomicU32) };
+        word.store(DEAD_PID, Ordering::Relaxed);
+
+        assert_eq!(try_lock_outcome(&mmap), LockOutcome::Stolen);
+        assert_eq!(word.load(Ordering::Relaxed), std::process::id());
+        unlock(&mmap);
+        assert_eq!(try_lock_outcome(&mmap), LockOutcome::Acquired);
+    }
+
+    #[test]
+    fn a_live_owners_lock_is_not_stolen() {
+        // pid 1 always exists; kill(1, 0) answers 0 or EPERM, never ESRCH.
+        let mmap = MmapMut::map_anon(4096).expect("anon mmap");
+        let word = unsafe { &*(mmap.as_ptr() as *const AtomicU32) };
+        word.store(1, Ordering::Relaxed);
+
+        assert_eq!(try_lock_outcome(&mmap), LockOutcome::Busy);
+        assert_eq!(word.load(Ordering::Relaxed), 1);
+    }
 }
 
 /// Perf-audit finding #6: `try_lock` computed `std::process::id()` and `Instant::now()`

@@ -80,14 +80,9 @@ from api.parsing.db_info import ParserClass
                 BinaryOperatorNode(CardAttributeNode("power", ParserClass.NUMERIC), "+", NumericValueNode(2)),
             ),
         ),
-        (
-            "cmc+power",
-            BinaryOperatorNode(CardAttributeNode("cmc", ParserClass.NUMERIC), "+", CardAttributeNode("power", ParserClass.NUMERIC)),
-        ),
-        (
-            "cmc-power",
-            BinaryOperatorNode(CardAttributeNode("cmc", ParserClass.NUMERIC), "-", CardAttributeNode("power", ParserClass.NUMERIC)),
-        ),
+        # A bare arithmetic expression with no comparison is a name search for its text.
+        ("cmc+power", BinaryOperatorNode(CardAttributeNode("name", ParserClass.TEXT), ":", StringValueNode("cmc+power"))),
+        ("cmc-power", BinaryOperatorNode(CardAttributeNode("name", ParserClass.TEXT), ":", StringValueNode("cmc-power"))),
         (
             "cmc + 1 < power",
             BinaryOperatorNode(
@@ -352,24 +347,15 @@ class TestNodes:
 
 def test_arithmetic_vs_negation_ambiguity() -> None:
     """Test that the ambiguity between arithmetic and negation is resolved correctly."""
-    # These should be treated as arithmetic operations (both sides are known attributes)
+    # Both sides are known numeric attributes, so the '-' is subtraction, not negation -- and with no
+    # comparison following, the whole expression is a name search for its text (one factor, not two).
     arithmetic_cases = [
-        (
-            "cmc-power",
-            BinaryOperatorNode(CardAttributeNode("cmc", ParserClass.NUMERIC), "-", CardAttributeNode("power", ParserClass.NUMERIC)),
-        ),
+        ("cmc-power", BinaryOperatorNode(CardAttributeNode("name", ParserClass.TEXT), ":", StringValueNode("cmc-power"))),
         (
             "power-toughness",
-            BinaryOperatorNode(
-                CardAttributeNode("power", ParserClass.NUMERIC),
-                "-",
-                CardAttributeNode("toughness", ParserClass.NUMERIC),
-            ),
+            BinaryOperatorNode(CardAttributeNode("name", ParserClass.TEXT), ":", StringValueNode("power-toughness")),
         ),
-        (
-            "cmc+power",
-            BinaryOperatorNode(CardAttributeNode("cmc", ParserClass.NUMERIC), "+", CardAttributeNode("power", ParserClass.NUMERIC)),
-        ),
+        ("cmc+power", BinaryOperatorNode(CardAttributeNode("name", ParserClass.TEXT), ":", StringValueNode("cmc+power"))),
     ]
 
     for query, expected in arithmetic_cases:
@@ -476,52 +462,40 @@ def test_invalid_queries_with_trailing_content_fail(invalid_query: str) -> None:
 
     This addresses issue #86 where invalid trailing content was being silently ignored.
 
-    Note: Since issue #90, standalone numeric literals like "1" are now valid parse targets,
-    so queries like "name:bolt and 1" now parse successfully (though they fail at DB level
-    with datatype mismatch errors).
+    Note: a standalone numeric literal like "1" is a valid parse target (a name search for "1"),
+    so queries like "name:bolt and 1" parse successfully.
     """
     with pytest.raises(ValueError, match="Failed to parse query"):
         parsing.parse_scryfall_query(invalid_query)
 
 
 @pytest.mark.parametrize(
-    argnames="semantically_invalid_query",
+    argnames=("query", "operand_index", "literal"),
     argvalues=[
-        "name:bolt and 1",  # Valid parse but semantically invalid: AND between boolean and integer
-        "cmc=3 and 2",  # Valid parse but semantically invalid: AND between boolean and integer
-        "power>1 or 5",  # Valid parse but semantically invalid: OR between boolean and integer
+        ("name:bolt and 1", 1, "1"),
+        ("cmc=3 and 2", 1, "2"),
+        ("power>1 or 5", 1, "5"),
     ],
 )
-def test_semantically_invalid_queries_parse_but_fail_at_db_level(semantically_invalid_query: str) -> None:
-    """Test that queries with standalone numeric literals parse but would fail at DB level.
+def test_bare_numeric_operand_is_a_name_search(query: str, operand_index: int, literal: str) -> None:
+    """A bare number next to a real filter is a name search, so the compound stays boolean throughout.
 
-    These queries are syntactically valid after issue #90 (allowing standalone numeric literals),
-    but they're semantically invalid because they combine boolean expressions with bare integers.
-    They should parse successfully but would fail at the database level with datatype mismatch errors.
+    These used to parse to a boolean AND/OR'd with a bare integer (issue #90 allowed the literal
+    through) and then fail at the database with a datatype mismatch.
     """
-    # These should parse without errors
-    parsed_query = parsing.parse_scryfall_query(semantically_invalid_query)
-
-    # These should parse successfully (SQL generation would be tested in test_sql_gen.py)
-    assert parsed_query is not None
+    parsed_query = parsing.parse_scryfall_query(query)
+    operand = parsed_query.root.operands[operand_index]
+    assert operand == BinaryOperatorNode(CardAttributeNode("name", ParserClass.TEXT), ":", StringValueNode(literal))
 
 
-def test_standalone_numeric_query_parses() -> None:
-    """Test that standalone numeric queries like '1' parse to NumericValueNode.
-
-    Per issue #90, queries like '1' should parse successfully to a NumericValueNode,
-    but then fail at the database level with a datatype mismatch error since
-    PostgreSQL expects boolean values in WHERE clauses, not integers.
-    """
-    # Test integer
-    parsed_query = parsing.parse_scryfall_query("1")
-    assert isinstance(parsed_query.root, NumericValueNode)
-    assert parsed_query.root.value == 1
-
-    # Test float
-    parsed_query_float = parsing.parse_scryfall_query("2.5")
-    assert isinstance(parsed_query_float.root, NumericValueNode)
-    assert parsed_query_float.root.value == 2.5
+def test_standalone_numeric_query_is_a_name_search() -> None:
+    """A standalone number is a name search for its text, as on Scryfall, not a bare NumericValueNode."""
+    assert parsing.parse_scryfall_query("1").root == BinaryOperatorNode(
+        CardAttributeNode("name", ParserClass.TEXT), ":", StringValueNode("1")
+    )
+    assert parsing.parse_scryfall_query("2.5").root == BinaryOperatorNode(
+        CardAttributeNode("name", ParserClass.TEXT), ":", StringValueNode("2.5")
+    )
 
 
 @pytest.mark.parametrize(

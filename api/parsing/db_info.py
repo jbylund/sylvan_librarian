@@ -31,7 +31,15 @@ class ParserClass(StrEnum):
 class FieldInfo:
     """Information about a database field and its search aliases."""
 
-    def __init__(self, *, db_column_name: str, field_type: FieldType, search_aliases: list[str], parser_class: ParserClass) -> None:
+    def __init__(
+        self,
+        *,
+        db_column_name: str,
+        field_type: FieldType,
+        search_aliases: list[str],
+        parser_class: ParserClass,
+        regex_capable: bool = False,
+    ) -> None:
         """Initialize field information.
 
         Args:
@@ -39,10 +47,15 @@ class FieldInfo:
             field_type: The type of the field.
             search_aliases: List of search aliases for this field.
             parser_class: The parser class to use for this field. If None, defaults based on field_type.
+            regex_capable: Whether a `/regex/` value runs as a regex against this field. Only the
+                free-text columns can; everywhere else the parsers accept a `/.../` that spells a
+                plain literal as that literal and reject anything with live metacharacters, rather
+                than silently matching the pattern text as a string.
         """
         self.db_column_name = db_column_name
         self.field_type = field_type
         self.search_aliases = search_aliases
+        self.regex_capable = regex_capable
         # Default parser class based on field type if not specified
         if parser_class is None:
             parser_class = ParserClass.NUMERIC if field_type == FieldType.NUMERIC else ParserClass.TEXT
@@ -55,7 +68,8 @@ class FieldInfo:
             f"db_column_name={self.db_column_name}, "
             f"field_type={self.field_type}, "
             f"search_aliases={self.search_aliases}, "
-            f"parser_class={self.parser_class}"
+            f"parser_class={self.parser_class}, "
+            f"regex_capable={self.regex_capable}"
             ")"
         )
 
@@ -66,6 +80,7 @@ DB_COLUMNS = [
         field_type=FieldType.TEXT,
         search_aliases=["artist", "a"],
         parser_class=ParserClass.TEXT,
+        regex_capable=True,
     ),
     FieldInfo(
         db_column_name="card_colors",
@@ -98,6 +113,7 @@ DB_COLUMNS = [
         field_type=FieldType.TEXT,
         search_aliases=["name"],
         parser_class=ParserClass.TEXT,
+        regex_capable=True,
     ),
     FieldInfo(
         db_column_name="card_subtypes",
@@ -188,12 +204,14 @@ DB_COLUMNS = [
         field_type=FieldType.TEXT,
         search_aliases=["oracle", "o"],
         parser_class=ParserClass.TEXT,
+        regex_capable=True,
     ),
     FieldInfo(
         db_column_name="flavor_text",
         field_type=FieldType.TEXT,
         search_aliases=["flavor", "ft"],
         parser_class=ParserClass.TEXT,
+        regex_capable=True,
     ),
     FieldInfo(
         db_column_name="card_oracle_tags",
@@ -329,6 +347,18 @@ CARD_TYPES = {
     "Planeswalker",
     "Sorcery",
     "Tribal",
+}
+
+# The legality aliases share one column but do not ask the same question of it: the alias picks the
+# status the value is checked against. Everything that reads an alias's meaning goes through this
+# table, so "same field" and "same predicate" cannot drift apart (CardAttributeNode equality, and the
+# SQL / engine rhs builders in card_query_nodes).
+LEGALITY_ALIAS_TO_STATUS = {
+    "format": "legal",
+    "f": "legal",
+    "legal": "legal",
+    "banned": "banned",
+    "restricted": "restricted",
 }
 
 FORMAT_CODE_TO_NAME = {

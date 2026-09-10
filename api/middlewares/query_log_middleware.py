@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 import psycopg
 
 from api.utils.db_utils import get_pg_creds
+from api.utils.response_telemetry import result_count_of, search_execute_ms, search_fetch_ms
 
 if TYPE_CHECKING:
     import falcon
@@ -179,10 +180,10 @@ class QueryLogMiddleware:
             if not isinstance(media, dict):
                 logger.warning("QueryLogMiddleware: unexpected response media type %s for %s", type(media), req.path)
                 return
-            children = (media.get("inner_timings") or {}).get("_children") or {}
-            execute_ms = (children.get("execute_query") or children.get("engine_query", {})).get("_meta", {}).get("duration_ms")
-            fetch_ms = children.get("fetch_results", {}).get("_meta", {}).get("duration_ms")
-            result_count = len(media.get("cards") or [])
+            inner_timings = media.get("inner_timings")
+            execute_ms = search_execute_ms(inner_timings)
+            fetch_ms = search_fetch_ms(inner_timings)
+            result_count = result_count_of(resp, media)
             total_cards = media.get("total_cards")
 
         start = req.context.get("_start_time")

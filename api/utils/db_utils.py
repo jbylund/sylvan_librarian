@@ -9,10 +9,9 @@ import pathlib
 import random
 import time
 
-import docker
-import docker.errors
 import orjson
 import psycopg
+import psycopg.conninfo
 import psycopg.types.json
 import psycopg_pool
 
@@ -32,6 +31,11 @@ def get_pg_creds() -> dict[str, str]:
 def get_testcontainers_creds() -> dict[str, str]:
     """Get postgres credentials from the testcontainers environment."""
     logger.warning("Using an ephemeral postgres container...")
+    # Imported here, not at module level: this is the fallback for a process with no PG* variables,
+    # and every production worker was paying the docker SDK's import (and its transitive requests/
+    # urllib3 setup) at startup for a path it never takes.
+    import docker  # noqa: PLC0415
+    import docker.errors  # noqa: PLC0415
     from testcontainers.postgres import PostgresContainer  # noqa: PLC0415
 
     exposed_port = random.randint(1024, 49151)
@@ -74,8 +78,33 @@ def get_testcontainers_creds() -> dict[str, str]:
         connection_info["port"] = network_settings["Ports"].popitem()[1][0]["HostPort"]
     else:
         connection_info["port"] = container.get_exposed_port(5432)
-    logger.info("Connection info in pid %d: %s", os.getpid(), connection_info)
+    logger.info("Connection info in pid %d: %s", os.getpid(), redact_credentials(connection_info))
     return connection_info
+
+
+REDACTED = "[REDACTED]"
+
+# Connection-parameter names whose values must never reach a log line.
+_SECRET_CONNECTION_KEYS = frozenset({"password", "sslpassword", "passfile"})
+
+
+def redact_credentials(params: dict[str, object]) -> dict[str, object]:
+    """Return a copy of connection parameters with every secret value masked."""
+    return {k: (REDACTED if k in _SECRET_CONNECTION_KEYS else v) for k, v in params.items()}
+
+
+def redact_conninfo(conninfo: str) -> str:
+    """Render a libpq conninfo string for a log line, with the password masked.
+
+    Parsed with psycopg's own conninfo parser rather than a regex, so a password containing spaces or
+    quotes is masked whole. An unparseable string is not echoed either: it may still hold the secret.
+    """
+    try:
+        params = psycopg.conninfo.conninfo_to_dict(conninfo)
+    except psycopg.ProgrammingError:
+        return "<unparseable conninfo>"
+    # Sorted: conninfo_to_dict does not keep the input order, and a stable line greps better.
+    return " ".join(f"{k}={v}" for k, v in sorted(redact_credentials(params).items()))
 
 
 def configure_connection(conn: psycopg.Connection) -> None:
@@ -84,10 +113,18 @@ def configure_connection(conn: psycopg.Connection) -> None:
 
 
 def set_statement_timeout(cursor: psycopg.Cursor, statement_timeout: int) -> None:
-    """Validate and set the statement timeout for a database cursor.
+    """Set the statement timeout for the rest of the cursor's current transaction.
 
-    PostgreSQL SET commands don't support parameterized values, so we must
-    validate the value before using it in string interpolation.
+    `SET LOCAL`, not `SET`: pooled connections outlive the request that borrowed them, and a
+    session-level SET persisted past commit -- a writer connection kept a backfill's 600 s timeout for
+    every later statement, and the reader pool paid a round trip per SQL search to re-assert 10 s on
+    a connection that already had it. A LOCAL setting reverts at commit or rollback, so each borrower
+    starts clean. Pool connections are not autocommit, so the first statement opens the transaction
+    and this call, issued before the statement it guards, lands inside it. Re-issue it after every
+    commit in a loop that commits per batch.
+
+    PostgreSQL SET commands don't support parameterized values, so the value is validated before it
+    is interpolated.
 
     Args:
         cursor: Database cursor to execute the SET command on
@@ -99,7 +136,7 @@ def set_statement_timeout(cursor: psycopg.Cursor, statement_timeout: int) -> Non
     if not isinstance(statement_timeout, int) or statement_timeout < 0:
         msg = f"statement_timeout must be a non-negative integer, got: {statement_timeout}"
         raise ValueError(msg)
-    cursor.execute(f"set statement_timeout = {statement_timeout}")
+    cursor.execute(f"SET LOCAL statement_timeout = {statement_timeout}")
 
 
 def make_pool() -> psycopg_pool.ConnectionPool:
@@ -115,7 +152,8 @@ def make_pool() -> psycopg_pool.ConnectionPool:
         "min_size": 1,
         "open": True,
     }
-    logger.info("Pool args: %s", pool_args)
+    # The conninfo carries PGPASSWORD; never log it verbatim.
+    logger.info("Pool args: %s", {**pool_args, "conninfo": redact_conninfo(conninfo)})
     pool = psycopg_pool.ConnectionPool(**pool_args)
 
     def cleanup() -> None:

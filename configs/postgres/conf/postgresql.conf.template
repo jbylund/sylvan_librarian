@@ -41,7 +41,9 @@
 
 #data_directory = 'ConfigDir'		# use data in another directory
 					# (change requires restart)
-#hba_file = 'ConfigDir/pg_hba.conf'	# host-based authentication file
+# docker-compose.yml bind-mounts configs/postgres/conf/pg_hba.conf here; without this line the
+# mounted file is dead config and the initdb-generated one in PGDATA is what actually applies.
+hba_file = '/pg_hba.conf'	# host-based authentication file
 					# (change requires restart)
 #ident_file = 'ConfigDir/pg_ident.conf'	# ident configuration file
 					# (change requires restart)
@@ -842,7 +844,9 @@ maintenance_work_mem = ${maintenance_work_mem}
 # --- WAL and Checkpoints ---
 wal_buffers = 16MB
 checkpoint_completion_target = 0.9
-max_wal_size = 512MB
+# 512MB forced a checkpoint every few seconds during an import's whole-table UPDATEs; 2GB keeps
+# checkpoints on the completion-target schedule at the cost of a longer crash recovery.
+max_wal_size = 2GB
 min_wal_size = 256MB
 
 # --- Parallelism ---
@@ -852,7 +856,10 @@ max_parallel_workers_per_gather = 4
 max_parallel_maintenance_workers = 4
 
 # --- Other Performance Tweaks ---
-default_statistics_target = 10000
+# 10000 is the hard maximum and makes ANALYZE (and planning against the resulting MCV lists)
+# expensive for every column. 500 is plenty for the skewed columns here; raise per column with
+# ALTER TABLE magic.cards ALTER COLUMN <col> SET STATISTICS <n> where an estimate is measured bad.
+default_statistics_target = 500
 random_page_cost = 1.1
 seq_page_cost = 1.0
 
@@ -882,14 +889,20 @@ pg_stat_statements.track_utility = on
 pg_stat_statements.track_planning = on
 
 # auto_explain configuration
+# log_analyze instruments every statement it *might* log, whatever log_min_duration says, and
+# with sample_rate = 1 that was every statement on the server (api/db/bulk_upsert.py already
+# carries a SET LOCAL auto_explain.log_min_duration = -1 to keep it off the upsert path). Sample 5%
+# of statements instead, and
+# leave per-node timing off: the gettimeofday per plan node is most of the overhead and the row
+# counts and buffer numbers are what the sampled plans are read for.
 auto_explain.log_min_duration = 30
 auto_explain.log_analyze = on
 auto_explain.log_buffers = on
-auto_explain.log_timing = on
+auto_explain.log_timing = off
 auto_explain.log_triggers = on
 auto_explain.log_verbose = on
 auto_explain.log_nested_statements = on
-auto_explain.sample_rate = 1
+auto_explain.sample_rate = 0.05
 # Separate from the core log_parameter_max_length above and defaulting to -1, so capping that one
 # alone leaves auto_explain still dumping every bind parameter in full. The bulk-upsert path sends one
 # JSON array per batch as a single parameter, which is what made import logs unreadable.

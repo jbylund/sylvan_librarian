@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from api.parsing.spans import QUOTE_CHARS, brace_close_index, find_close_index, opens_regex
+from api.parsing.spans import QUOTE_CHARS, brace_close_index, find_close_index, opens_quote, opens_regex
 
 
 def _closer_for_partial_span(dangling_escape: bool, closer: str) -> str:
@@ -36,8 +36,9 @@ def balance_partial_query(query: str) -> str:
         # A quoted string, a /regex/ and a {mana symbol} are all opaque: the quotes and parens inside
         # them are content, not delimiters. The span rules come from api.parsing.spans so the balancer
         # and the lexer cannot drift apart — where they disagree, the balancer "fixes" a quote the
-        # lexer never saw (#905).
-        if char in QUOTE_CHARS:
+        # lexer never saw (#905). That includes which quotes open a span at all: the ' in `o:can't` is
+        # an apostrophe to the lexer, so closing it here would hand the server a query nobody typed.
+        if char in QUOTE_CHARS and opens_quote(query, pos - 1):
             close_index, dangling_escape, _ = find_close_index(query, pos, char)
             if close_index is None:
                 span_suffix = _closer_for_partial_span(dangling_escape, char)

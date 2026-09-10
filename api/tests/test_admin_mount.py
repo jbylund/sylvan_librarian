@@ -29,6 +29,7 @@ EXPECTED_PUBLIC_ROUTES = {
     "index",
     "index.html",
     "random_search",
+    "ready",
     "robots.txt",
     "search",
     "static/app.js",

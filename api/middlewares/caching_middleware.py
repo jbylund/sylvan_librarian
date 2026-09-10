@@ -11,9 +11,11 @@ import orjson
 from cachebox import LRUCache
 
 from api.settings import settings
+from api.utils.response_telemetry import result_count_of
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from multiprocessing.sharedctypes import Synchronized
 
     import falcon
 
@@ -95,28 +97,47 @@ class CachedResponse(NamedTuple):
 class CachingMiddleware:
     """Middleware to cache the request and response."""
 
-    def __init__(self: CachingMiddleware, cache: _CacheProtocol | None = None) -> None:
+    def __init__(
+        self: CachingMiddleware,
+        cache: _CacheProtocol | None = None,
+        cache_generation: Synchronized | None = None,
+    ) -> None:
         """Initialize the caching middleware with an optional cache instance.
 
         Args:
             cache: Optional cache instance. If None, creates an LRUCache with maxsize 10,000.
                 Any object supporting .get(), __contains__, and __setitem__ is accepted.
+            cache_generation: The shared counter `AppContext.bump_cache_generation` increments after
+                every write to magic.cards (see api/app_context.py). Its current value is part of
+                every cache key, so an import makes every entry stored before it unreachable in
+                every worker at once -- the same mechanism the in-process query caches use. None
+                means the key carries a constant 0 and nothing ever invalidates it, which is only
+                right for a test that builds the middleware on its own.
         """
         if cache is None:
             cache = LRUCache(maxsize=10_000)
         self.cache: _CacheProtocol = cache
+        self._cache_generation = cache_generation
         logger.info("CachingMiddleware init pid=%d cache=%s", os.getpid(), type(cache).__name__)
 
     def invalidate(self: CachingMiddleware) -> None:
-        """Clear all cached entries, delegating to the inner cache's own method."""
-        # Not yet wired into APIResource._clear_caches() — bulk imports do not currently
-        # flush the HTTP response cache. Stale responses are served until natural eviction.
-        # Wiring this up requires passing the middleware instance into APIResource at
-        # construction time (or exposing it through the app). Tracked for a follow-up PR.
+        """Clear all cached entries, delegating to the inner cache's own method.
+
+        Not what an import calls: imports bump the shared cache generation, which is part of every
+        key, so the entries written before the import are simply never looked up again and age out
+        under the cache's TTL. This is for a caller that holds the instance and wants the memory back
+        now rather than at expiry.
+        """
         if hasattr(self.cache, "invalidate"):
             self.cache.invalidate()
         elif hasattr(self.cache, "clear"):
             self.cache.clear()
+
+    def _generation(self: CachingMiddleware) -> int:
+        """The current cache generation, or 0 when no shared counter was given."""
+        if self._cache_generation is None:
+            return 0
+        return self._cache_generation.value
 
     def _cache_key(self: CachingMiddleware, req: falcon.Request) -> CacheKey:
         cached_headers = [
@@ -131,6 +152,7 @@ class CachingMiddleware:
                 tuple(sorted(req.params.items())),
                 tuple(sorted({k: req.headers.get(k) for k in cached_headers}.items())),
                 host,
+                self._generation(),
             )
         )
 
@@ -160,10 +182,11 @@ class CachingMiddleware:
             req.context["cache_hit"] = True
             req.context["cached_result_count"] = cached.result_count
             req.context["cached_total_cards"] = cached.total_cards
-            logger.info("Cache hit pid=%d: %s / %s", os.getpid(), req.relative_uri, resp.status)
+            logger.debug("Cache hit pid=%d: %s / %s", os.getpid(), req.relative_uri, resp.status)
             return
         resp.set_header("X-Cache", "miss")
-        logger.info("Cache miss pid=%d: %s", os.getpid(), req.relative_uri)
+        # The X-Cache header is the machine-readable hit/miss signal; nothing consumes these lines.
+        logger.debug("Cache miss pid=%d: %s", os.getpid(), req.relative_uri)
 
     def process_response(
         self: CachingMiddleware,
@@ -206,7 +229,7 @@ class CachingMiddleware:
             status=resp.status,
             headers=cacheable_headers(resp._headers),
             body=resp.render_body(),
-            result_count=len(media.get("cards") or []) if is_dict_media else None,
+            result_count=result_count_of(resp, media) if is_dict_media else None,
             total_cards=media.get("total_cards") if is_dict_media else None,
         )
-        logger.info("Cache updated pid=%d: %s", os.getpid(), req.relative_uri)
+        logger.debug("Cache updated pid=%d: %s", os.getpid(), req.relative_uri)

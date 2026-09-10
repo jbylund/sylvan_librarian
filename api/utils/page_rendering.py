@@ -110,7 +110,23 @@ def _static_hash(filename: str) -> str | None:
 # running process keeps its old hash — which is correct, since the process serves the old bytes too.
 _STYLES_CSS_HASH = _static_hash("styles.css")
 _APP_MIN_JS_HASH = _static_hash("app.min.js")
+_APP_JS_HASH = _static_hash("app.js")
 _CARD_JS_HASH = _static_hash("card.js")
+
+
+def _app_script_url() -> str:
+    """The URL index.html's script tag should load, given what this checkout actually has.
+
+    app.min.js is a build artifact (gitignored, produced by a Makefile rule), while index.html
+    references it by name. An image built from a checkout that never ran the minifier therefore
+    shipped a script tag for a file the route table could not serve, and the page loaded with no
+    JavaScript at all. When there is no minified file, point at the committed app.js instead.
+    """
+    if _APP_MIN_JS_HASH:
+        return f"/static/app.min.js?v={_APP_MIN_JS_HASH}"
+    if _APP_JS_HASH:
+        return f"/static/app.js?v={_APP_JS_HASH}"
+    return "/static/app.js"
 
 
 def _inject_shared_fragments(html: str) -> str:
@@ -150,8 +166,7 @@ def build_base_html(critical_css: str, site_name: str) -> str:
     html = html.replace("<!-- CRITICAL_CSS -->", critical_css)
     if _STYLES_CSS_HASH:
         html = html.replace("/static/styles.css", f"/static/styles.css?v={_STYLES_CSS_HASH}")
-    if _APP_MIN_JS_HASH:
-        html = html.replace("/static/app.min.js", f"/static/app.min.js?v={_APP_MIN_JS_HASH}")
+    html = html.replace("/static/app.min.js", _app_script_url())
     return _minify_html(html.replace(SITE_NAME_PLACEHOLDER, site_name))
 
 

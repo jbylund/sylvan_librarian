@@ -1241,6 +1241,10 @@ fn and_of_checked_for_shared_witness(children: Vec<PlaneExpr>, divergent_formats
 pub(crate) fn compile_plane(filter: &FilterExpr, bounds: &rkyv::Archived<BitPlanes>, words: &rkyv::Archived<OracleWordIndex>) -> Option<PlaneExpr> {
     match filter {
         FilterExpr::True => Some(PlaneExpr::Const(true)),
+        // `u64::MAX`, not `bounds.divergent_formats`, on purpose: this answer decides whether the filter
+        // CONSUMES to a plane, and a consumed filter takes `PrintingCompose` out of the running (a
+        // measured 54x loss on `f:commander`/printing). The mask is for decisions below applicability;
+        // `legality_and_of_two_formats_declines_but_or_compiles` pins this.
         FilterExpr::And(children) => {
             and_of_checked_for_shared_witness(compile_plane_children(children, bounds, words)?, u64::MAX)
         }
@@ -1355,6 +1359,7 @@ fn compile_plane_neg(filter: &FilterExpr, bounds: &rkyv::Archived<BitPlanes>, wo
         FilterExpr::And(children) => compile_plane_neg_children(children, bounds, words).map(or_of),
         // Not(Or(cs)) = And(Not(c) for c in cs) -- THIS does have the
         // shared-witness exposure (see and_of_checked_for_shared_witness).
+        // `u64::MAX` deliberately, as in `compile_plane`'s `And` arm: an applicability decision.
         FilterExpr::Or(children) => and_of_checked_for_shared_witness(compile_plane_neg_children(children, bounds, words)?, u64::MAX),
         FilterExpr::Not(inner) => compile_plane(inner, bounds, words), // double negation
         FilterExpr::True => Some(PlaneExpr::Const(false)),

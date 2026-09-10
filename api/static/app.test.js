@@ -28,6 +28,9 @@ function buildDOM() {
     <input id="directionInput" value="asc" />
     <div id="results"></div>
     <div id="statusMessage"></div>
+    <div id="modalOverlay" class="modal-overlay">
+      <div id="modalContent" class="modal-content" role="dialog" aria-modal="true" aria-labelledby="modalCardName"></div>
+    </div>
   `;
 }
 
@@ -42,8 +45,8 @@ Object.defineProperty(global, 'performance', {
 
 const appCode = fs.readFileSync(path.resolve(__dirname, 'app.js'), 'utf8');
 // eslint-disable-next-line no-new-func
-const { CardSearch, CatalogMap, columnsToRows } = Function(
-  appCode + '; return {CardSearch, CatalogMap, columnsToRows};'
+const { CardSearch, CatalogMap, columnsToRows, ThemeManager } = Function(
+  appCode + '; return {CardSearch, CatalogMap, columnsToRows, ThemeManager};'
 )();
 
 // ---------------------------------------------------------------------------
@@ -60,7 +63,8 @@ const ACCEPTED_QUERIES = require('./fixtures/accepted_queries.json');
 const cardCode = fs.readFileSync(path.resolve(__dirname, 'card.js'), 'utf8');
 const cardModuleCode = cardCode.replace(/\(function initTheme[\s\S]*?\}\)\(\);/, '').replace(/\bmain\(\);/, '');
 const cardModule = Function(
-  cardModuleCode + '; return { formatCardText, convertManaSymbols, formatOracleText, renderCardFace, escapeHtml };'
+  cardModuleCode +
+    '; return { formatCardText, convertManaSymbols, formatOracleText, renderCardFace, renderPrintingsStrip, escapeHtml };'
 )();
 
 // Derived fixture: new catalog format expected by the /get_catalog endpoint
@@ -473,6 +477,41 @@ describe('card.js formatting and rendering', () => {
   });
 });
 
+// Collector numbers are not URL-safe by construction: Scryfall uses ★ for promo variants, and the
+// value is user-visible data that reaches an href. Path segments are percent-encoded and the
+// finished URL HTML-escaped, so neither a ★ nor a hostile quote can leave the attribute.
+describe('card page URLs encode their path segments', () => {
+  const starCard = { name: 'Promo', set_code: 'PLST', collector_number: 'MH1-27★', set_name: 'The List' };
+  const hostileCard = { name: 'Hostile', set_code: 'tst', collector_number: '1" onmouseover="alert(1)' };
+
+  it('renderCardFace encodes and escapes the manapool href', () => {
+    expect(cardModule.renderCardFace(starCard)).toContain(
+      'href="https://manapool.com/card/plst/MH1-27%E2%98%85?ref=sylvan-librarian"'
+    );
+    const hostile = cardModule.renderCardFace(hostileCard);
+    expect(hostile).not.toContain('onmouseover="alert(1)"');
+    expect(hostile).toContain(
+      'href="https://manapool.com/card/tst/1%22%20onmouseover%3D%22alert(1)?ref=sylvan-librarian"'
+    );
+  });
+
+  it('renderPrintingsStrip encodes the /card/ href', () => {
+    const strip = cardModule.renderPrintingsStrip([{ representative: starCard, count: 1 }]);
+    expect(strip).toContain('href="/card/PLST/MH1-27%E2%98%85"');
+    expect(cardModule.renderPrintingsStrip([{ representative: hostileCard, count: 1 }])).not.toContain(
+      'onmouseover="alert(1)"'
+    );
+  });
+
+  it('showCardModal encodes and escapes the manapool href', () => {
+    window.scrollTo = jest.fn();
+    search.showCardModal(starCard);
+    const link = document.getElementById('modalContent').querySelector('.modal-image-link');
+    expect(link.getAttribute('href')).toBe('https://manapool.com/card/plst/MH1-27%E2%98%85?ref=sylvan-librarian');
+    search.closeModal();
+  });
+});
+
 describe('CardSearch convertManaSymbolsToText', () => {
   it('converts mana symbols to emoji', () => {
     expect(search.convertManaSymbolsToText('{W}{U}{B}{R}{G}')).toBe('☀️💧💀🔥🌳');
@@ -717,6 +756,73 @@ describe('CardSearch performSearch', () => {
 
     expect(global.fetch).toHaveBeenCalled();
   });
+
+  // Typing `t:elf`, then `)`, then backspacing to `t:elf` again used to leave the validation error
+  // on screen over an empty grid: showError cleared the grid but not lastCompletedUrl, so the
+  // reverted query was skipped as "already displayed" and no fetch was issued.
+  it('re-fetches the last successful query after a validation error cleared the grid', async () => {
+    delete search.showError; // use the real one, which clears the grid
+    global.fetch.mockClear();
+    global.fetch.mockResolvedValue({ ok: true, json: async () => ({ cards: [], total_cards: 0 }) });
+
+    await search.performSearch('t:elf');
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(search.lastCompletedUrl).not.toBeNull();
+
+    await search.performSearch('t:elf)');
+    expect(search.statusMessage.innerHTML).toContain('error-message');
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+
+    await search.performSearch('t:elf');
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('CardSearch card modal accessibility', () => {
+  const card = {
+    name: 'Lightning Bolt',
+    set_code: 'm11',
+    collector_number: '149',
+    mana_cost: '{R}',
+    type_line: 'Instant',
+    oracle_text: 'Lightning Bolt deals 3 damage to any target.',
+    set_name: 'Magic 2011',
+  };
+
+  beforeEach(() => {
+    window.scrollTo = jest.fn(); // restoreBackgroundScroll calls it; jsdom does not implement it
+  });
+
+  it('is a labelled dialog that takes focus on open and gives it back on close', () => {
+    const input = document.getElementById('searchInput');
+    input.focus();
+    expect(document.activeElement).toBe(input);
+
+    search.showCardModal(card);
+
+    const modalContent = document.getElementById('modalContent');
+    expect(modalContent.getAttribute('role')).toBe('dialog');
+    expect(modalContent.getAttribute('aria-modal')).toBe('true');
+    const label = document.getElementById(modalContent.getAttribute('aria-labelledby'));
+    expect(label.textContent).toBe('Lightning Bolt');
+    expect(document.activeElement).toBe(modalContent.querySelector('.modal-close'));
+
+    search.closeModal();
+
+    expect(document.getElementById('modalOverlay').style.display).toBe('none');
+    expect(document.activeElement).toBe(input);
+  });
+
+  it('closes on Escape and restores focus', () => {
+    const input = document.getElementById('searchInput');
+    input.focus();
+    search.showCardModal(card);
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+
+    expect(document.getElementById('modalOverlay').style.display).toBe('none');
+    expect(document.activeElement).toBe(input);
+  });
 });
 
 describe('CardSearch getColumnsFromViewportWidth', () => {
@@ -737,5 +843,88 @@ describe('CardSearch getColumnsFromViewportWidth', () => {
   ])('at width %p returns %p columns', (width, expectedColumns) => {
     window.innerWidth = width;
     expect(search.getColumnsFromViewportWidth()).toBe(expectedColumns);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// localStorage can throw on access (blocked third-party storage, some privacy modes). Both the
+// card page's initTheme and the search page's ThemeManager run before anything renders, so an
+// unguarded read used to strand the card page on "Loading..." and abort the search page's init.
+// ---------------------------------------------------------------------------
+
+// Blocked storage throws either at the property (`localStorage` itself) or at the call
+// (`getItem`/`setItem`), depending on the browser. Break both: the property override covers the
+// bare `localStorage` identifier the scripts use, and the prototype spies cover any path that
+// still reaches a Storage instance -- on Node 26's jsdom, `window.localStorage` resolves through
+// a different accessor than the bare global and does not see the override.
+async function withThrowingLocalStorage(fn) {
+  const boom = () => {
+    throw new Error('SecurityError: localStorage is not available');
+  };
+  const descriptor = Object.getOwnPropertyDescriptor(window, 'localStorage');
+  Object.defineProperty(window, 'localStorage', { configurable: true, get: boom });
+  const spies = ['getItem', 'setItem', 'removeItem'].map(m =>
+    jest.spyOn(Storage.prototype, m).mockImplementation(boom)
+  );
+  try {
+    return await fn();
+  } finally {
+    spies.forEach(s => s.mockRestore());
+    if (descriptor) Object.defineProperty(window, 'localStorage', descriptor);
+    else delete window.localStorage;
+  }
+}
+
+describe('card.js with unavailable localStorage', () => {
+  function buildCardDOM() {
+    document.body.innerHTML = `
+      <button id="themeToggle"><span id="themeIcon">☀️</span></button>
+      <h1 id="site-title"><a href="/">Sylvan Librarian</a></h1>
+      <div id="card-loading">Loading...</div>
+      <div id="card-face" style="display: none"></div>
+      <div id="other-printings" style="display: none"><div id="printings-list"></div></div>
+    `;
+  }
+
+  afterEach(() => {
+    window.history.pushState({}, '', '/');
+    global.fetch.mockReset();
+  });
+
+  it('still renders the card when reading localStorage throws', async () => {
+    expect(() => localStorage.getItem('theme')).not.toThrow();
+    buildCardDOM();
+    window.history.pushState({}, '', '/card/m11/149');
+    const card = {
+      name: 'Lightning Bolt',
+      set_code: 'm11',
+      collector_number: '149',
+      mana_cost: '{R}',
+      type_line: 'Instant',
+      oracle_text: 'Lightning Bolt deals 3 damage to any target.',
+    };
+    global.fetch.mockResolvedValue({ json: async () => ({ cards: [card] }) });
+
+    await withThrowingLocalStorage(async () => {
+      expect(() => localStorage.getItem('theme')).toThrow();
+      Function(cardCode)(); // the full script, initTheme and main() included
+      for (let i = 0; i < 5; i++) await flushPromises();
+    });
+
+    expect(document.getElementById('card-face').innerHTML).toContain('Lightning Bolt');
+    expect(document.getElementById('card-loading').style.display).toBe('none');
+  });
+});
+
+describe('ThemeManager with unavailable localStorage', () => {
+  it('applies the default theme and toggles without throwing', async () => {
+    document.body.innerHTML += '<button id="themeToggle"><span id="themeIcon"></span></button>';
+    await withThrowingLocalStorage(() => {
+      const manager = new ThemeManager();
+      expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
+      expect(() => manager.toggleTheme()).not.toThrow();
+      expect(document.documentElement.getAttribute('data-theme')).toBe('light');
+    });
+    document.documentElement.setAttribute('data-theme', 'dark');
   });
 });

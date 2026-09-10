@@ -10,8 +10,10 @@ import pytest
 from api.parsing import hand_parser
 from api.parsing.spans import (
     COMPARISON_TAIL_CHARS,
+    QUOTE_OPENER_PRECEDERS,
     brace_close_index,
     find_close_index,
+    opens_quote,
     opens_regex,
     unescape,
 )
@@ -78,6 +80,69 @@ def test_comparison_tail_chars_covers_every_operator_the_lexer_emits() -> None:
 def test_opens_regex(query: str, slash_index: int, expected: bool) -> None:
     """A regex opens only in value position, directly after a comparison operator."""
     assert opens_regex(query, slash_index) is expected
+
+
+@pytest.mark.parametrize(
+    argnames=["query", "quote_index", "expected"],
+    argvalues=[
+        ("'hello", 0, True),
+        ("o:'draw a card'", 2, True),
+        ("a 'b c'", 2, True),
+        ("(o:'a", 3, True),
+        ("-'bolt'", 1, True),
+        ("!'Lightning Bolt'", 1, True),
+        ("name='x'", 5, True),
+        ("o:can't", 5, False),  # mid-word: an apostrophe, not a string
+        ("Urza's", 4, False),
+        ('o:"can\'t"', 2, True),  # a double quote always opens
+        ("(t:elf)'x'", 7, False),  # after a closing paren: not a token start
+    ],
+    ids=[
+        "start_of_query",
+        "after_colon",
+        "after_space",
+        "after_paren_and_colon",
+        "after_negation",
+        "after_bang",
+        "after_equals",
+        "mid_word",
+        "possessive",
+        "double_quote_always",
+        "after_close_paren",
+    ],
+)
+def test_opens_quote(query: str, quote_index: int, expected: bool) -> None:
+    """A "'" opens a string only at token start; a '"' always does."""
+    assert opens_quote(query, quote_index) is expected
+
+
+def test_quote_opener_preceders_cover_every_comparison_tail() -> None:
+    """A "'" directly after any comparison operator is a value, so every operator tail must be a preceder."""
+    assert COMPARISON_TAIL_CHARS <= QUOTE_OPENER_PRECEDERS
+
+
+@pytest.mark.parametrize(
+    argnames=["query", "expected_types"],
+    argvalues=[
+        ("o:can't", ["WORD", "OP", "WORD"]),
+        ("can't stop", ["WORD", "WORD"]),
+        ("o:'draw a card'", ["WORD", "OP", "QUOTED"]),
+        ("a 'b c' d", ["WORD", "QUOTED", "WORD"]),
+        ("!'Urza Saga'", ["BANG", "QUOTED"]),
+        ("-'bolt'", ["MINUS", "QUOTED"]),
+    ],
+    ids=["mid_word", "bare_mid_word", "value_string", "bare_string", "exact_name", "negated_string"],
+)
+def test_lexer_reads_apostrophes_by_the_shared_rule(query: str, expected_types: list[str]) -> None:
+    """`o:can't` lexes to one text value; a "'" at token start still opens a string."""
+    tokens = hand_parser.tokenize(query)
+    assert [tok.type.name for tok in tokens[:-1]] == expected_types
+
+
+def test_lexer_keeps_the_apostrophe_in_the_word() -> None:
+    tokens = hand_parser.tokenize("o:can't")
+    assert tokens[2].value == "can't"
+    assert tokens[2].raw == "can't"
 
 
 @pytest.mark.parametrize(

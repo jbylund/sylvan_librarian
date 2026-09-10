@@ -1,13 +1,16 @@
-// Legalities pack into a u64: 2 bits per format, positions handed out append-only
-// by a global registry the first time a format name appears in loaded data, so
-// bit assignments stay stable across reloads and engine instances. A format the
-// card's JSONB omits reads as not_legal. 32 formats fit; Scryfall ships 22.
+// Legalities pack into a u64: 2 bits per format, positions handed out by a global
+// registry the first time a format name appears in loaded data, so bit assignments
+// stay stable across reloads within a process. Every query first adopts the archive's
+// own assignments (`sync_format_shifts`), so a worker that never ran the load path --
+// or ran it against a different archive -- reads the bits the archive was built with.
+// A format the card's JSONB omits reads as not_legal. 32 formats fit; Scryfall ships 22.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use pyo3::intern;
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyDict, PyString};
 use rkyv::Archived;
 
@@ -19,42 +22,52 @@ pub(crate) const MAX_FORMATS: usize = 32;
 
 static FORMAT_SHIFTS: OnceLock<RwLock<HashMap<String, u8>>> = OnceLock::new();
 
-/// Mirrors `format_shifts().len()`, updated under the same write lock that grows the map.
-/// Lets `format_shifts_sorted()` detect staleness without taking a lock on the map itself.
-static FORMAT_COUNT: AtomicUsize = AtomicUsize::new(0);
+/// Bumped under the registry's write lock on EVERY change -- a format appended by the load path or
+/// an archive's assignments adopted by `sync_format_shifts` -- so `format_shifts_sorted()` can
+/// detect staleness without taking a lock on the map itself. It used to be the registry's LENGTH,
+/// which is blind to an equal-length reassignment: an archive whose formats sit at different
+/// shifts than the registry's read every 2-bit field from the wrong position, and the sorted
+/// snapshot, the interned keys and the template dicts all kept serving the old assignment.
+static FORMAT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn format_shifts() -> &'static RwLock<HashMap<String, u8>> {
     FORMAT_SHIFTS.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
 /// Alphabetically sorted `(format, shift)` snapshot of the registry, rebuilt only when
-/// `FORMAT_COUNT` has moved since the last build. The registry is append-only (new formats
-/// get the next free shift; existing ones never change), so a stale-but-shorter snapshot is
-/// simply missing the newest formats, never wrong about the ones it has -- safe to keep
-/// serving while a concurrent rebuild is in flight.
+/// `FORMAT_GENERATION` has moved since the last build. A snapshot is one `Arc`, and the two caches
+/// derived from it (`format_keys`, `legality_templates`) are keyed on that `Arc`'s identity rather
+/// than on any count: they are positionally parallel to exactly the snapshot they were built from,
+/// and a new snapshot -- however similar in size -- is a new `Arc` they cannot match.
 type SortedFormats = Arc<[(String, u8)]>;
 
-fn format_shifts_sorted() -> SortedFormats {
-    static SORTED: OnceLock<RwLock<(usize, SortedFormats)>> = OnceLock::new();
+pub(crate) fn format_shifts_sorted() -> SortedFormats {
+    static SORTED: OnceLock<RwLock<(u64, SortedFormats)>> = OnceLock::new();
     let cache = SORTED.get_or_init(|| RwLock::new((0, Arc::from([] as [(String, u8); 0]))));
-    let current = FORMAT_COUNT.load(Ordering::Acquire);
+    let current = FORMAT_GENERATION.load(Ordering::Acquire);
 
     if let Ok(guard) = cache.read()
-        && guard.0 == current
+        && guard.0 >= current
     {
         return guard.1.clone();
     }
     let Ok(mut guard) = cache.write() else { return Arc::from([]) };
-    if guard.0 == current {
+    if guard.0 >= current {
         return guard.1.clone(); // rebuilt by another thread while we waited for the write lock
     }
-    let mut entries: Vec<(String, u8)> = format_shifts()
-        .read()
-        .map(|m| m.iter().map(|(k, v)| (k.clone(), *v)).collect())
-        .unwrap_or_default();
+    // Generation and contents read under the same lock the writers bump under, so the label can
+    // never be paired with another generation's map. `>=` above: a thread that loaded `current`
+    // before a concurrent change must not overwrite the newer snapshot with an older label.
+    let (generation, mut entries): (u64, Vec<(String, u8)>) = match format_shifts().read() {
+        Ok(m) => (FORMAT_GENERATION.load(Ordering::Acquire), m.iter().map(|(k, v)| (k.clone(), *v)).collect()),
+        Err(_) => return guard.1.clone(),
+    };
+    if guard.0 >= generation {
+        return guard.1.clone();
+    }
     entries.sort();
     let built: Arc<[(String, u8)]> = Arc::from(entries);
-    *guard = (current, built.clone());
+    *guard = (generation, built.clone());
     built
 }
 
@@ -63,7 +76,10 @@ pub(crate) fn format_shift(format: &str) -> Option<u8> {
     format_shifts().read().ok()?.get(format).copied()
 }
 
-/// Bit shift for a format, assigning the next free slot if unseen (reload path).
+/// Bit shift for a format, assigning the lowest free slot if unseen (reload path).
+///
+/// The lowest FREE slot, not `len * 2`: the registry mirrors whichever archive was last adopted,
+/// and nothing guarantees that archive's shifts are dense from zero.
 pub(crate) fn format_shift_or_assign(format: &str) -> Option<u8> {
     if let Some(shift) = format_shift(format) {
         return Some(shift);
@@ -75,9 +91,9 @@ pub(crate) fn format_shift_or_assign(format: &str) -> Option<u8> {
     if shifts.len() >= MAX_FORMATS {
         return None;
     }
-    let shift = (shifts.len() * 2) as u8;
+    let shift = (0..MAX_FORMATS as u8).map(|slot| slot * 2).find(|s| !shifts.values().any(|v| v == s))?;
     shifts.insert(format.to_string(), shift);
-    FORMAT_COUNT.store(shifts.len(), Ordering::Release);
+    FORMAT_GENERATION.fetch_add(1, Ordering::AcqRel);
     Some(shift)
 }
 
@@ -90,7 +106,7 @@ fn legality_code(status: &str) -> u64 {
     }
 }
 
-pub(crate) fn jsonb_obj_to_legality_bits(d: &Bound<PyDict>, key: &str) -> u64 {
+pub(crate) fn jsonb_obj_to_legality_bits(d: &Bound<PyDict>, key: &Bound<'_, PyString>) -> u64 {
     d.get_item(key)
         .ok()
         .flatten()
@@ -116,32 +132,37 @@ pub(crate) fn jsonb_obj_to_legality_bits(d: &Bound<PyDict>, key: &str) -> u64 {
 /// The format names as interned `PyString` keys, parallel to a `SortedFormats` snapshot.
 type FormatKeys = Arc<[Py<PyString>]>;
 
-/// The format names as interned `PyString` keys, positionally parallel to a
-/// `format_shifts_sorted()` snapshot of the same length.
+/// The format names as interned `PyString` keys, positionally parallel to the
+/// `format_shifts_sorted()` snapshot they were built from.
 ///
-/// Keyed on the snapshot's LENGTH rather than `FORMAT_COUNT` on purpose. The registry is
-/// append-only in its *shift* assignments, but `format_shifts_sorted()` is sorted
-/// ALPHABETICALLY, so a new format lands in the middle and moves every later entry's index.
-/// Positional correspondence therefore only holds against a snapshot of the same length --
-/// and because the registry is append-only, a given length pins a unique format set and so a
-/// unique sorted order. Matching lengths is exactly the condition under which `keys[i]`
-/// describes `entries[i]`.
+/// Keyed on the snapshot `Arc`'s IDENTITY. `keys[i]` describes `entries[i]` only for the exact
+/// entries the keys were built from: the snapshot is sorted alphabetically, so a registered format
+/// lands in the middle and moves every later index, and an adopted reassignment changes shifts
+/// without changing the length. Neither a count nor a length can tell those apart; the `Arc` the
+/// snapshot cache hands out can, because it only ever allocates a new one when the registry moved.
+/// The cached clone keeps the old snapshot alive, so a pointer can never be reused for a new one.
+///
+/// A `PyOnceLock`, as the `intern!` keys use: Python objects are built while holding the GIL, and
+/// a std cell would block every other initializer for the duration -- pyo3's documented deadlock.
 fn format_keys(py: Python<'_>, entries: &SortedFormats) -> FormatKeys {
-    static KEYS: OnceLock<RwLock<(usize, FormatKeys)>> = OnceLock::new();
-    let cache = KEYS.get_or_init(|| RwLock::new((usize::MAX, Arc::from([] as [Py<PyString>; 0]))));
+    static KEYS: PyOnceLock<RwLock<Option<(SortedFormats, FormatKeys)>>> = PyOnceLock::new();
+    let cache = KEYS.get_or_init(py, || RwLock::new(None));
 
     if let Ok(guard) = cache.read()
-        && guard.0 == entries.len()
+        && let Some((built_for, keys)) = &*guard
+        && Arc::ptr_eq(built_for, entries)
     {
-        return guard.1.clone();
+        return keys.clone();
     }
     let Ok(mut guard) = cache.write() else { return Arc::from([]) };
-    if guard.0 == entries.len() {
-        return guard.1.clone(); // rebuilt by another thread while we waited for the write lock
+    if let Some((built_for, keys)) = &*guard
+        && Arc::ptr_eq(built_for, entries)
+    {
+        return keys.clone(); // rebuilt by another thread while we waited for the write lock
     }
     let built: FormatKeys =
         entries.iter().map(|(format, _)| PyString::intern(py, format.as_str()).unbind()).collect();
-    *guard = (entries.len(), built.clone());
+    *guard = Some((entries.clone(), built.clone()));
     built
 }
 
@@ -152,12 +173,18 @@ fn format_keys(py: Python<'_>, entries: &SortedFormats) -> FormatKeys {
 /// builder still returns correct dicts, just uncached.
 const MAX_CACHED_LEGALITY_WORDS: usize = 4096;
 
-/// Template dicts by legality word, valid for a `SortedFormats` snapshot of the recorded length.
-type LegalityTemplates = (usize, HashMap<u64, Py<PyDict>>);
+/// Template dicts by legality word, valid for exactly the recorded `SortedFormats` snapshot (by
+/// `Arc` identity, as `format_keys`).
+type LegalityTemplates = (Option<SortedFormats>, HashMap<u64, Py<PyDict>>);
 
 fn legality_templates() -> &'static RwLock<LegalityTemplates> {
     static DICTS: OnceLock<RwLock<LegalityTemplates>> = OnceLock::new();
-    DICTS.get_or_init(|| RwLock::new((usize::MAX, HashMap::new())))
+    DICTS.get_or_init(|| RwLock::new((None, HashMap::new())))
+}
+
+/// Whether a derived cache recorded as built for `built_for` is valid for `entries`.
+fn same_snapshot(built_for: &Option<SortedFormats>, entries: &SortedFormats) -> bool {
+    built_for.as_ref().is_some_and(|b| Arc::ptr_eq(b, entries))
 }
 
 /// Build one row's `{format: status}` dict.
@@ -175,7 +202,7 @@ pub(crate) fn legality_bits_to_pydict<'a>(py: Python<'a>, bits: u64) -> PyResult
     let entries = format_shifts_sorted();
 
     if let Ok(guard) = legality_templates().read()
-        && guard.0 == entries.len()
+        && same_snapshot(&guard.0, &entries)
         && let Some(template) = guard.1.get(&bits)
     {
         return template.bind(py).copy();
@@ -196,11 +223,12 @@ pub(crate) fn legality_bits_to_pydict<'a>(py: Python<'a>, bits: u64) -> PyResult
 
     let mut cached = false;
     if let Ok(mut guard) = legality_templates().write() {
-        // A snapshot of a different length means a format was registered since these templates were
-        // built, so every one of them is missing a key. Drop the lot rather than serve short dicts.
-        if guard.0 != entries.len() {
+        // A different snapshot means the registry moved since these templates were built -- a format
+        // registered (every template short a key) or a reassignment adopted (every status under the
+        // wrong key). Drop the lot rather than serve them.
+        if !same_snapshot(&guard.0, &entries) {
             guard.1.clear();
-            guard.0 = entries.len();
+            guard.0 = Some(entries.clone());
         }
         if guard.1.len() < MAX_CACHED_LEGALITY_WORDS {
             guard.1.insert(bits, dict.clone().unbind());
@@ -215,17 +243,26 @@ pub(crate) fn legality_bits_to_pydict<'a>(py: Python<'a>, bits: u64) -> PyResult
 }
 
 /// Adopt the archive's format→shift assignments into this process's registry.
-/// Cheap no-op (one read lock) once the registry has caught up.
+/// Cheap no-op (one read lock) once the registry agrees with the archive.
+///
+/// Agreement is by CONTENT -- every archived `(format, shift)` pair present in the registry at that
+/// shift -- and disagreement REPLACES the registry with the archive's map. It used to compare
+/// lengths, so an archive of the same size with different assignments was "already caught up" and
+/// every legality bit was read from the wrong 2-bit field. Formats the registry has beyond the
+/// archive's are left alone when everything the archive has agrees: their bits are zero in every
+/// printing of this archive, which reads as not_legal, exactly what an omitted format means.
 pub(crate) fn sync_format_shifts(archived: &Archived<HashMap<String, u8>>) {
-    let behind = format_shifts().read().map(|m| m.len() < archived.len()).unwrap_or(false);
-    if !behind {
+    let agrees = |m: &HashMap<String, u8>| archived.iter().all(|(format, shift)| m.get(format.as_str()) == Some(shift));
+    if format_shifts().read().map(|m| agrees(&m)).unwrap_or(true) {
         return;
     }
     if let Ok(mut shifts) = format_shifts().write() {
-        for (format, shift) in archived.iter() {
-            shifts.insert(format.as_str().to_string(), *shift);
+        if agrees(&shifts) {
+            return; // adopted by another thread while we waited for the write lock
         }
-        FORMAT_COUNT.store(shifts.len(), Ordering::Release);
+        shifts.clear();
+        shifts.extend(archived.iter().map(|(format, shift)| (format.as_str().to_string(), *shift)));
+        FORMAT_GENERATION.fetch_add(1, Ordering::AcqRel);
     }
 }
 

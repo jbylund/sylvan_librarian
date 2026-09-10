@@ -164,7 +164,7 @@ fn bench_expand_materialize() {
     println!("\n-- expand_artist_ids: artist -> printings, domain {n_printings} --");
     let ai: &Archived<ArtistIndex> = &data.indexes.artists;
     for needle in ["guay", "john", "a", "e", "rebecca", "wayne"] {
-        let mut f = FilterExpr::TextContains { field: TextSearchField::ArtistLower, word: needle.to_string() };
+        let mut f = FilterExpr::TextContains { field: TextSearchField::ArtistLower, word: crate::filter::Needle::new(needle.to_string()) };
         f.bind(&data.coll_vocab, &data.artist_vocab, &data.mana_vocab, &data.indexes.flavor, &data.strings);
         let FilterExpr::ArtistMatch { ids } = &f else {
             println!("  {needle:<30} (bind did not produce ArtistMatch)");
@@ -183,7 +183,7 @@ fn bench_expand_materialize() {
     println!("\n-- expand_flavor_ids: flavor text -> printings, domain {n_printings} --");
     let fi: &Archived<FlavorIndex> = &data.indexes.flavor;
     for needle in ["dragon", "death", "the", "war", "life"] {
-        let mut f = FilterExpr::TextContains { field: TextSearchField::FlavorTextLower, word: needle.to_string() };
+        let mut f = FilterExpr::TextContains { field: TextSearchField::FlavorTextLower, word: crate::filter::Needle::new(needle.to_string()) };
         f.bind(&data.coll_vocab, &data.artist_vocab, &data.mana_vocab, &data.indexes.flavor, &data.strings);
         let FilterExpr::FlavorMatch { dense_ids, .. } = &f else {
             println!("  {needle:<30} (bind did not produce FlavorMatch)");

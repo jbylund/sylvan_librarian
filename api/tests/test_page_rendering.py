@@ -168,3 +168,48 @@ class TestSerializeEmbeddedJson(unittest.TestCase):
 
         assert "<" not in serialized
         assert json.loads(serialized) == payload
+
+
+class TestAppScriptFallsBackToTheUnminifiedSource(unittest.TestCase):
+    """index.html names app.min.js, a gitignored build artifact; a checkout without it must still ship JS.
+
+    Neither hash is read per request (both are computed at import), so the tests patch the module
+    constants rather than the filesystem. The cache is off in the suite, so build_base_html is
+    rebuilt per call.
+    """
+
+    def _routes(self) -> set[str]:
+        return set(APIResource(app_context=mock_app_context()).routes)
+
+    def test_without_the_minified_file_the_page_loads_app_js(self) -> None:
+        with (
+            patch.object(page_rendering, "_APP_MIN_JS_HASH", None),
+            patch.object(page_rendering, "_APP_JS_HASH", "abc123def456"),
+        ):
+            html = page_rendering.build_base_html("", "Site")
+        assert "/static/app.js?v=abc123def456" in html
+        assert "/static/app.min.js" not in html
+        # The route table serves what the page references.
+        assert "static/app.js" in self._routes()
+
+    def test_with_the_minified_file_the_page_loads_it(self) -> None:
+        with (
+            patch.object(page_rendering, "_APP_MIN_JS_HASH", "0123456789ab"),
+            patch.object(page_rendering, "_APP_JS_HASH", "abc123def456"),
+        ):
+            html = page_rendering.build_base_html("", "Site")
+        assert "/static/app.min.js?v=0123456789ab" in html
+        assert "/static/app.js?v=" not in html
+        assert "static/app.min.js" in self._routes()
+
+    def test_with_neither_hash_the_page_still_names_a_servable_script(self) -> None:
+        with (
+            patch.object(page_rendering, "_APP_MIN_JS_HASH", None),
+            patch.object(page_rendering, "_APP_JS_HASH", None),
+        ):
+            html = page_rendering.build_base_html("", "Site")
+        assert "/static/app.js" in html
+
+    def test_the_committed_source_always_has_a_hash(self) -> None:
+        """app.js is committed, so the fallback is never hashless in a real checkout."""
+        assert page_rendering._APP_JS_HASH is not None

@@ -89,7 +89,7 @@ fn bench_iter_dispatch_cost() {
     // ─── realistic: the real oracle:token per-card predicate, via the exact
     // card_pass() call the real match-phase loop makes (same residual/
     // residual_is_or plumbing) ───
-    let filter = FilterExpr::TextContains { field: super::TextSearchField::OracleTextLower, word: "token".to_string() };
+    let filter = FilterExpr::TextContains { field: super::TextSearchField::OracleTextLower, word: crate::filter::Needle::new("token".to_string()) };
     let strings = &data.strings;
 
     let boxed_real = time_ns(|| {

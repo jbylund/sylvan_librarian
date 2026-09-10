@@ -16,30 +16,63 @@ jobs:
       github.event.comment.user.login == 'jbylund'
     runs-on: ubuntu-latest
     steps:
+      # issue_comment carries no head-repository information, so the fork check has to be a
+      # step rather than a job-level `if`. For a fork PR, `git push origin HEAD:<branch>` would
+      # not update the contributor's branch at all — it would create a branch of that name in
+      # THIS repo from the fork's tree, with a write token, from a tree nobody here reviewed.
+      - name: Resolve the PR head
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          json=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefName,isCrossRepository)
+          echo "branch=$(jq -r .headRefName <<<"$json")" >> "$GITHUB_OUTPUT"
+          echo "fork=$(jq -r .isCrossRepository <<<"$json")" >> "$GITHUB_OUTPUT"
+
+      - name: Skip fork PRs
+        if: steps.pr.outputs.fork == 'true'
+        env:
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          echo "::notice::PR #${PR_NUMBER} comes from a fork; /fix-lint only pushes to branches in this repository. Run 'make lint' locally instead."
+
       - name: Checkout PR branch
-        uses: actions/checkout@v4
+        if: steps.pr.outputs.fork != 'true'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: refs/pull/${{ github.event.issue.number }}/head
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python 3.13
-        uses: actions/setup-python@v5
+        if: steps.pr.outputs.fork != 'true'
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.13'
 
       - name: Install ruff
+        if: steps.pr.outputs.fork != 'true'
         run: pip install ruff
 
       - name: Run ruff fix and format
+        if: steps.pr.outputs.fork != 'true'
         run: |
           python -m ruff check --fix --unsafe-fixes .
           python -m ruff format .
 
       - name: Commit and push if changed
+        if: steps.pr.outputs.fork != 'true'
+        env:
+          BRANCH: ${{ steps.pr.outputs.branch }}
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          branch=$(gh pr view ${{ github.event.issue.number }} --repo ${{ github.repository }} --json headRefName -q .headRefName)
-          git diff --exit-code && echo "No changes to commit" || (git add -u && git commit -m "style: auto-fix ruff" && git push origin HEAD:"$branch")
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          if git diff --quiet; then
+            echo "No changes to commit"
+          else
+            git add -u
+            git commit -m "style: auto-fix ruff"
+            git push origin HEAD:"$BRANCH"
+          fi

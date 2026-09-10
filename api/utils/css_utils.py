@@ -50,6 +50,7 @@ _CRITICAL_SELECTORS = frozenset(
         # Results grid — needed for SSR search result pages
         ".results-container",
         ".card-item",
+        ".card-page-link",  # wraps .card-image; display:block/line-height:0 sizes the image box
         ".card-image",
         ".card-name-mana-row",
         ".card-name",

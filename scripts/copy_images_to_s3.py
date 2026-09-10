@@ -75,6 +75,10 @@ S3_LIST_CHUNKSIZE = 2
 class CardImage:
     """A card image."""
 
+    # One instance per (card, face, size): ~400k of them for a full sync. Slots drop the per-instance
+    # __dict__, which was most of each object's footprint; nothing sets attributes beyond these.
+    __slots__ = ("collector_number", "face_idx", "png_url", "set_code", "size")
+
     def __init__(self, set_code: str, collector_number: str, face_idx: str, size: str, png_url: str | None = None) -> None:
         """Initialize a card image."""
         self.set_code = set_code
@@ -507,8 +511,8 @@ def check_cwebp() -> None:
         sys.exit(1)
 
 
-def get_db_cards(args: Args) -> set[tuple[str, str, str, str]]:
-    """Get all cards in the database."""
+def get_db_cards(args: Args) -> set[CardImage]:
+    """Get every image the database says should exist; empty when no card matches the filters."""
     logger.info("Connecting to database...")
     conn = get_database_connection()
 
@@ -519,7 +523,7 @@ def get_db_cards(args: Args) -> set[tuple[str, str, str, str]]:
 
     if not db_cards:
         logger.warning("No cards found to process")
-        return None
+        return set()
 
     sizes = [SMALL_KEY, MEDIUM_KEY, LARGE_KEY, XLARGE_KEY]
     logger.info("Found %d cards in database, should create %d images", len(db_cards), len(db_cards) * len(sizes))
@@ -736,6 +740,9 @@ def main() -> None:
     configure_env()
 
     db_cards = get_db_cards(args)
+    if not db_cards:
+        # Nothing to diff against S3 (and nothing to list it for). get_db_cards has already said why.
+        return
     s3_cards = get_s3_cards(args)
 
     missing_cards = db_cards - s3_cards

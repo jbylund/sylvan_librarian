@@ -61,11 +61,24 @@ class TimingMiddleware:
             os.getpid(),
             resp.status,
             req.relative_uri,
-            req.get_header("User-Agent", "-"),
+            # `req.user_agent`, not `req.get_header("User-Agent", "-")`: get_header's second positional
+            # parameter is `required`, so that spelling made a missing User-Agent a 400 from the last
+            # middleware to run -- after the body had already been compressed and Content-Encoding set.
+            req.user_agent or "-",
         )
         spans = req.context.get("_timing_spans", [])
         spans.append(("total", duration_ms))
         resp.set_header("Server-Timing", ", ".join(f"{name};dur={dur:.1f}" for name, dur in spans))
+        if is_server_error(resp.status) and "no-store" not in (resp.get_header("Cache-Control") or ""):
+            # Last line of defence, in the middleware whose process_response runs last: a handler
+            # that set Cache-Control and then failed must not have that failure cached downstream.
+            # An explicit no-store (a readiness 503, say) already says so and is kept.
+            resp.delete_header("Cache-Control")
+
+
+def is_server_error(status: str | int | None) -> bool:
+    """Whether a response status line (or code) is a 5xx."""
+    return str(status or "").startswith("5")
 
 
 class ProfilingMiddleware:

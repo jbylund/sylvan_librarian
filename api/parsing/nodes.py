@@ -132,6 +132,34 @@ class RegexValueNode(ValueNode):
         return {"value": self.value}
 
 
+def regex_plain_literal(pattern: str) -> str | None:
+    r"""The exact string an unanchored, metacharacter-free regex matches, else None.
+
+    A regex made only of literal characters (and escaped punctuation like ``\.``) matches exactly
+    one string, so it can stand in for that string wherever a literal is wanted. Escaped punctuation
+    unescapes to its literal; an alphanumeric escape (``\d`` / ``\w`` / ``\b``) is a character
+    class -> None; any anchor (``^`` / ``$``) or live metacharacter -> None; the empty pattern
+    matches everything -> None. Mirrors the engine's ``regex_tier`` classification
+    (card_engine/src/filter.rs) so the two never disagree about "plain literal".
+
+    Both parsers use this to accept a literal ``/.../`` on a field that cannot run a regex, and
+    ``rewrite.lower_literal_regexes`` builds on it (with one extra rule) to lower substring searches.
+    """
+    out: list[str] = []
+    it = iter(pattern)
+    for c in it:
+        if c == "\\":
+            nxt = next(it, None)
+            if nxt is None or (nxt.isascii() and nxt.isalnum()):
+                return None  # class escape (\d \w \b …) or a dangling backslash
+            out.append(nxt)
+        elif c in ".*+?()[]{}|^$":
+            return None
+        else:
+            out.append(c)
+    return "".join(out) or None
+
+
 class AttributeNode(LeafNode):
     """Represents an attribute of a card, such as 'cmc' or 'power'."""
 

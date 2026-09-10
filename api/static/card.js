@@ -108,9 +108,10 @@ function renderCardFace(card) {
   const imgTag = `<img class="modal-image" src="${escapeHtml(imageLarge)}" width="745" height="1040" alt="${escapeHtml(card.name || '')}" />`;
   let imageHtml;
   if (card.set_code && card.collector_number) {
-    // Build manapool.com referral URL — set codes and collector numbers from our database are safe for URLs
-    const manapoolUrl = `https://manapool.com/card/${card.set_code.toLowerCase()}/${card.collector_number}?ref=sylvan-librarian`;
-    imageHtml = `<div class="modal-image-wrapper"><a href="${manapoolUrl}" target="_blank" rel="noopener" class="modal-image-link">${imgTag}</a></div>`;
+    // Build manapool.com referral URL — collector numbers can carry ★ and other non-URL characters,
+    // so the path segments are encoded and the href escaped like every other attribute
+    const manapoolUrl = `https://manapool.com/card/${encodeURIComponent(card.set_code.toLowerCase())}/${encodeURIComponent(card.collector_number)}?ref=sylvan-librarian`;
+    imageHtml = `<div class="modal-image-wrapper"><a href="${escapeHtml(manapoolUrl)}" target="_blank" rel="noopener" class="modal-image-link">${imgTag}</a></div>`;
   } else {
     imageHtml = `<div class="modal-image-wrapper">${imgTag}</div>`;
   }
@@ -177,7 +178,7 @@ function renderPrintingsStrip(groups) {
   return groups
     .map(({ representative: card, count }) => {
       const thumb = buildImageUrl(card, '280');
-      const url = `/card/${card.set_code}/${card.collector_number}`;
+      const url = `/card/${encodeURIComponent(card.set_code)}/${encodeURIComponent(card.collector_number)}`;
       const label = escapeHtml(`${card.set_name || card.set_code || ''}${formatUsd(card.price_usd)}`);
       const badge = count > 1 ? `<span class="printing-thumb-count">+${count - 1}</span>` : '';
       return `<a href="${escapeHtml(url)}" class="printing-thumb" title="${label}"><img src="${escapeHtml(thumb)}" alt="${label}" loading="lazy" />${badge}</a>`;
@@ -237,7 +238,12 @@ async function main() {
 }
 
 (function initTheme() {
-  const saved = localStorage.getItem('theme');
+  let saved = null;
+  try {
+    saved = localStorage.getItem('theme');
+  } catch (e) {
+    // localStorage may be unavailable (blocked storage, privacy mode); keep the default theme
+  }
   if (saved) document.documentElement.setAttribute('data-theme', saved);
   const toggle = document.getElementById('themeToggle');
   const icon = document.getElementById('themeIcon');
@@ -249,7 +255,11 @@ async function main() {
   toggle.addEventListener('click', () => {
     const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
     document.documentElement.setAttribute('data-theme', next);
-    localStorage.setItem('theme', next);
+    try {
+      localStorage.setItem('theme', next);
+    } catch (e) {
+      // localStorage may be unavailable; the theme still applies for this page view
+    }
     updateIcon();
   });
 })();

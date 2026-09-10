@@ -2,13 +2,20 @@
 
 import tempfile
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import Mock, patch
 
+import pytest
 import requests
 
+from scripts import copy_images_to_s3
 from scripts.copy_images_to_s3 import (
+    Args,
+    CardImage,
     download_image,
     fetch_cards_from_db,
+    get_db_cards,
+    get_s3_cards,
     list_image_prefixes,
     list_prefix_keys,
     make_listing_session,
@@ -106,11 +113,25 @@ def test_make_listing_session_skips_timestamp_parsing() -> None:
     """The listing session leaves LastModified as the raw string S3 sent.
 
     Parsing it costs about two thirds of the CPU in a large listing, and no
-    caller reads the value.
+    caller reads the value. Asserted by parsing a real ListObjectsV2 body
+    through the session's parser rather than by inspecting a private attribute.
     """
     raw = "2026-01-01T00:00:00.000Z"
-    parser = make_listing_session().get_component("response_parser_factory").create_parser("rest-xml")
-    assert parser._timestamp_parser(raw) == raw
+    session = make_listing_session()
+    parser = session.get_component("response_parser_factory").create_parser("rest-xml")
+    operation = session.get_service_model("s3").operation_model("ListObjectsV2")
+    body = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
+        "<Name>bucket</Name><IsTruncated>false</IsTruncated>"
+        f"<Contents><Key>img/iko/1/1/280.webp</Key><LastModified>{raw}</LastModified><Size>1</Size></Contents>"
+        "</ListBucketResult>"
+    ).encode()
+
+    parsed = parser.parse({"status_code": 200, "headers": {}, "body": body}, operation.output_shape)
+
+    assert parsed["Contents"][0]["LastModified"] == raw
+    assert isinstance(parsed["Contents"][0]["LastModified"], str)
 
 
 def test_list_prefix_keys_pages_and_skips_unparseable() -> None:
@@ -146,3 +167,89 @@ def test_list_image_prefixes_collects_common_prefixes() -> None:
     ]
 
     assert list_image_prefixes(client, "bucket", None) == ["img/iko/", "img/akh/", "img/plst/"]
+
+
+def _args(**overrides: object) -> Args:
+    values: dict = {
+        "bucket": "bucket",
+        "set_code": None,
+        "limit": None,
+        "skip_existing": True,
+        "dry_run": True,
+        "verbose": False,
+        "workers": 1,
+    }
+    values.update(overrides)
+    return Args(**values)
+
+
+class _FakePool:
+    """Stands in for multiprocessing.Pool: yields one worker result, then a worker failure."""
+
+    instances: ClassVar[list] = []
+
+    def __init__(self, *_: object, **__: object) -> None:
+        self.closed = self.joined = False
+        _FakePool.instances.append(self)
+
+    def imap_unordered(self, func: object, iterable: object, chunksize: int = 1) -> object:  # noqa: ARG002
+        del func, iterable
+        yield {("iko", "1", "1", "280")}
+        msg = "listing worker died"
+        raise RuntimeError(msg)
+
+    def close(self) -> None:
+        self.closed = True
+
+    def join(self) -> None:
+        self.joined = True
+
+
+def test_get_s3_cards_propagates_a_failed_listing_rather_than_returning_a_partial_set() -> None:
+    """A partial S3 set would make every unlisted image look missing and get re-uploaded."""
+    _FakePool.instances.clear()
+    with (
+        patch("scripts.copy_images_to_s3.make_listing_client", return_value=Mock()),
+        patch("scripts.copy_images_to_s3.list_image_prefixes", return_value=["img/iko/", "img/akh/", "img/thb/"]),
+        patch.object(copy_images_to_s3.multiprocessing, "Pool", _FakePool),
+        pytest.raises(RuntimeError, match="listing worker died"),
+    ):
+        get_s3_cards(_args())
+
+    (pool,) = _FakePool.instances
+    assert pool.closed
+    assert pool.joined
+
+
+def test_get_db_cards_returns_an_empty_set_when_nothing_matches() -> None:
+    """main() diffs this against the S3 set; None used to raise TypeError there."""
+    with (
+        patch("scripts.copy_images_to_s3.get_database_connection", return_value=Mock()),
+        patch("scripts.copy_images_to_s3.fetch_cards_from_db", return_value=[]),
+    ):
+        result = get_db_cards(_args(set_code="nope"))
+
+    assert result == set()
+    assert isinstance(result, set)
+
+
+def test_main_stops_before_listing_s3_when_the_database_has_no_cards() -> None:
+    with (
+        patch("scripts.copy_images_to_s3.get_args", return_value=_args(set_code="nope")),
+        patch("scripts.copy_images_to_s3.check_cwebp"),
+        patch("scripts.copy_images_to_s3.configure_env"),
+        patch("scripts.copy_images_to_s3.get_db_cards", return_value=set()),
+        patch("scripts.copy_images_to_s3.get_s3_cards") as get_s3,
+    ):
+        copy_images_to_s3.main()
+
+    get_s3.assert_not_called()
+
+
+def test_card_image_uses_slots() -> None:
+    image = CardImage(set_code="iko", collector_number="1", face_idx="1", size="280", png_url="u")
+    assert not hasattr(image, "__dict__")
+    with pytest.raises(AttributeError):
+        image.extra = 1  # type: ignore[attr-defined]
+    assert image.get_s3_key() == "img/iko/1/1/280.webp"
+    assert image == CardImage(set_code="iko", collector_number="1", face_idx="1", size="280")

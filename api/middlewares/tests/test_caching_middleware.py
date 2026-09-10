@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import multiprocessing
+import types
 from unittest.mock import MagicMock, patch
 
 import orjson
@@ -31,7 +33,7 @@ class TestCachingMiddleware:
         resp.render_body.return_value = b"rendered body"
         return resp
 
-    def _cache_key(self, host: str | None = None, method: str = "GET") -> bytes:
+    def _cache_key(self, host: str | None = None, method: str = "GET", generation: int = 0) -> bytes:
         return orjson.dumps(
             (
                 method,
@@ -39,6 +41,7 @@ class TestCachingMiddleware:
                 (("q", "lightning bolt"),),
                 (("ACCEPT-ENCODING", None),),
                 host,
+                generation,
             )
         )
 
@@ -285,3 +288,54 @@ class TestCachingMiddleware:
             middleware.process_response(self._make_req(method="HEAD"), self._make_resp(), None, True)
 
         assert sorted(cache) == sorted([self._cache_key(method="GET"), self._cache_key(method="HEAD")])
+
+    def test_cache_generation_is_part_of_the_key(self) -> None:
+        """Bumping the shared generation makes every earlier entry unreachable.
+
+        Imports bump `AppContext.cache_generation` rather than reaching into every worker's response
+        cache; the middleware honours that by keying on the current value, the same way the in-process
+        query caches do. Without it a /search response stayed servable until LRU eviction -- indefinitely
+        on a quiet deployment -- after the corpus underneath it had changed.
+        """
+        cache = {}
+        generation = multiprocessing.Value("i", 0, lock=True)
+        middleware = CachingMiddleware(cache=cache, cache_generation=generation)
+
+        with patch("api.middlewares.caching_middleware.settings") as mock_settings:
+            mock_settings.enable_cache = True
+            middleware.process_response(self._make_req(), self._make_resp(), None, True)
+
+            hit_req = self._make_req()
+            middleware.process_request(hit_req, self._make_resp())
+            assert hit_req.context.get("cache_hit") is True
+
+            with generation.get_lock():
+                generation.value += 1
+
+            miss_req = self._make_req()
+            miss_resp = self._make_resp()
+            middleware.process_request(miss_req, miss_resp)
+
+        assert miss_req.context.get("cache_hit") is None
+        miss_resp.set_header.assert_called_once_with("X-Cache", "miss")
+        assert set(cache) == {self._cache_key(generation=0)}
+
+    def test_no_generation_keys_on_a_constant(self) -> None:
+        """A middleware built without the shared counter still produces a stable key."""
+        middleware = CachingMiddleware(cache={})
+        assert middleware._cache_key(self._make_req()) == self._cache_key(generation=0)
+
+    def test_columnar_result_count_comes_from_the_handler(self) -> None:
+        """For shape=columnar, len(media["cards"]) is the field count; the stashed row count is stored."""
+        cache = {}
+        middleware = CachingMiddleware(cache=cache)
+        req = self._make_req()
+        resp = self._make_resp()
+        resp.media = {"cards": {"name": ["a", "b", "c"], "cmc": [1, 2, 3]}, "total_cards": 3}
+        resp.context = types.SimpleNamespace(result_count=3)
+
+        with patch("api.middlewares.caching_middleware.settings") as mock_settings:
+            mock_settings.enable_cache = True
+            middleware.process_response(req, resp, None, True)
+
+        assert cache[self._cache_key()].result_count == 3

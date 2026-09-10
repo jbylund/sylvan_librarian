@@ -99,7 +99,7 @@ class CardSearch {
     this.searchInput.setAttribute('autocomplete', 'off');
 
     this.debounceTimeout = null;
-    this.debounceDelay = 50; // milliseconds
+    this.debounceDelay = 120; // milliseconds
     this.resizeTimeout = null;
     this.currentController = null;
     this.currentRequestUrl = null; // URL of the in-flight request, if any
@@ -1148,21 +1148,21 @@ class CardSearch {
     if (imageLarge) {
       const imgTag = `<img class="modal-image" src="${this.escapeHtml(imageLarge)}" width="745" height="1040" alt="${this.escapeHtml(card.name || 'Card Image')}" />`;
       if (card.set_code && card.collector_number) {
-        // Build manapool.com referral URL
-        // Set codes and collector numbers from our database are safe for URLs
-        const manapoolUrl = `https://manapool.com/card/${card.set_code.toLowerCase()}/${card.collector_number}?ref=sylvan-librarian`;
-        imageHtml = `<div class="modal-image-wrapper"><a href="${manapoolUrl}" target="_blank" rel="noopener" class="modal-image-link">${imgTag}</a></div>`;
+        // Build manapool.com referral URL; collector numbers can carry ★ and other non-URL characters,
+        // so the path segments are encoded and the href escaped like every other attribute
+        const manapoolUrl = `https://manapool.com/card/${encodeURIComponent(card.set_code.toLowerCase())}/${encodeURIComponent(card.collector_number)}?ref=sylvan-librarian`;
+        imageHtml = `<div class="modal-image-wrapper"><a href="${this.escapeHtml(manapoolUrl)}" target="_blank" rel="noopener" class="modal-image-link">${imgTag}</a></div>`;
       } else {
         imageHtml = `<div class="modal-image-wrapper">${imgTag}</div>`;
       }
     }
 
     modalContent.innerHTML = `
-      <button class="modal-close" onclick="cardSearch.closeModal()">&times;</button>
+      <button class="modal-close" onclick="cardSearch.closeModal()" aria-label="Close">&times;</button>
       ${imageHtml}
       <div class="modal-card-info">
         <div class="modal-card-name-mana-row">
-          <div class="modal-card-name">${this.escapeHtml(card.name || 'Unknown Card')}</div>
+          <div class="modal-card-name" id="modalCardName">${this.escapeHtml(card.name || 'Unknown Card')}</div>
           ${card.mana_cost ? `<div class="modal-card-mana">${this.formatCardText(card.mana_cost, true, false)}</div>` : ''}
         </div>
         ${card.type_line ? `<div class="modal-card-type">${this.escapeHtml(card.type_line)}</div>` : ''}
@@ -1184,6 +1184,10 @@ class CardSearch {
 
     // Show modal
     modalOverlay.style.display = 'flex';
+
+    // Move focus into the dialog, remembering where it came from so closeModal can put it back
+    this.previouslyFocusedElement = document.activeElement;
+    modalContent.querySelector('.modal-close')?.focus({ preventScroll: true });
 
     // Reset scroll position to top for both modal content and card info
     // (different elements scroll on different viewport sizes)
@@ -1213,6 +1217,13 @@ class CardSearch {
     this.restoreBackgroundScroll();
 
     document.removeEventListener('keydown', this.handleEscapeKey);
+
+    // Return focus to the element that had it before the dialog opened
+    const previouslyFocused = this.previouslyFocusedElement;
+    this.previouslyFocusedElement = null;
+    if (previouslyFocused?.isConnected && typeof previouslyFocused.focus === 'function') {
+      previouslyFocused.focus({ preventScroll: true });
+    }
   }
 
   handleEscapeKey = e => {
@@ -1275,6 +1286,9 @@ class CardSearch {
       this.statusMessage.innerHTML = `<div class="error-message">${this.escapeHtml(message)}</div>`;
     }
     this.clearResultsContainer();
+    // The grid is empty now, so no URL's results are showing: without this, reverting the query to
+    // the last successful one is skipped as "already displayed" and the error banner never clears.
+    this.lastCompletedUrl = null;
   }
 
   clearResultsContainer() {
@@ -1592,7 +1606,13 @@ class ThemeManager {
   constructor() {
     this.themeToggle = document.getElementById('themeToggle');
     this.themeIcon = document.getElementById('themeIcon');
-    this.currentTheme = localStorage.getItem('theme') || 'dark';
+    let savedTheme = null;
+    try {
+      savedTheme = localStorage.getItem('theme');
+    } catch (e) {
+      // localStorage may be unavailable (blocked storage, privacy mode); fall back to the default
+    }
+    this.currentTheme = savedTheme || 'dark';
 
     this.init();
   }
@@ -1629,7 +1649,11 @@ class ThemeManager {
   }
 
   saveTheme() {
-    localStorage.setItem('theme', this.currentTheme);
+    try {
+      localStorage.setItem('theme', this.currentTheme);
+    } catch (e) {
+      // localStorage may be unavailable; the theme still applies for this page view
+    }
   }
 }
 

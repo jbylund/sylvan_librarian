@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import types
 from unittest.mock import MagicMock
 
 from api.middlewares.query_log_middleware import QueryLogMiddleware
@@ -99,6 +100,42 @@ class TestQueryLogMiddlewareProcessResponse:
         entry = mw._queue.get_nowait()
         assert entry["execute_ms"] == 100.0
         assert entry["fetch_ms"] == 50.0
+
+    def test_engine_path_timing_is_read_from_the_top_level_span(self) -> None:
+        """The engine path times its query as a top-level `engine_query`, not under `_children`.
+
+        The old reader only knew the SQL shape, so execute_ms was NULL for every engine-served search.
+        """
+        mw = _make_middleware()
+        resp = _make_resp(
+            media={
+                "cards": [],
+                "total_cards": 0,
+                "inner_timings": {
+                    "parse": {"_meta": {"duration_ms": 0.4}},
+                    "engine_query": {"_meta": {"duration_ms": 12.5}},
+                },
+            }
+        )
+        mw.process_response(_make_req(), resp, None, True)
+        entry = mw._queue.get_nowait()
+        assert entry["execute_ms"] == 12.5
+        assert entry["fetch_ms"] is None
+
+    def test_columnar_result_count_is_the_row_count_not_the_field_count(self) -> None:
+        """shape=columnar makes `cards` a dict of fields; the handler's stashed row count wins."""
+        mw = _make_middleware()
+        resp = _make_resp(media={"cards": {"name": ["a", "b", "c"], "cmc": [1, 2, 3]}, "total_cards": 3})
+        resp.context = types.SimpleNamespace(result_count=3)
+        mw.process_response(_make_req(), resp, None, True)
+        assert mw._queue.get_nowait()["result_count"] == 3
+
+    def test_row_shaped_result_count_falls_back_to_len_cards(self) -> None:
+        mw = _make_middleware()
+        resp = _make_resp(media={"cards": [1, 2, 3, 4], "total_cards": 4})
+        resp.context = types.SimpleNamespace()
+        mw.process_response(_make_req(), resp, None, True)
+        assert mw._queue.get_nowait()["result_count"] == 4
 
     def test_had_error_when_req_succeeded_false(self) -> None:
         mw = _make_middleware()

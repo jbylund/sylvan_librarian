@@ -56,6 +56,32 @@ def test_quotes_inside_a_regex_survive_balancing(parse_query, original_query: st
 
 @pytest.mark.parametrize(
     argnames="original_query",
+    argvalues=["o:can't", "can't stop", "o:can't t:elf", "name:Urza's", "o:can't -t:elf"],
+)
+def test_mid_word_apostrophes_are_not_quotes(parse_query, original_query: str) -> None:
+    """`o:can't` used to balance to `o:can't'` -- and then fail to lex as an unclosed quote either way.
+
+    The lexer now reads a mid-word "'" as part of the word (spans.opens_quote), so the balancer must
+    leave it alone, and the result parses to a text value holding the apostrophe.
+    """
+    assert balance_partial_query(original_query) == original_query
+    parsed = parse_query(original_query)
+    assert parsed is not None
+    leaf = parsed.root.operands[0] if hasattr(parsed.root, "operands") else parsed.root
+    assert "'" in leaf.rhs.value
+
+
+@pytest.mark.parametrize(
+    argnames=["original_query", "expected"],
+    argvalues=[("o:can't (t:elf", "o:can't (t:elf)"), ("(o:can't", "(o:can't)"), ("o:'can", "o:'can'")],
+)
+def test_balancing_around_a_mid_word_apostrophe(original_query: str, expected: str) -> None:
+    """Parentheses still balance across an apostrophe, and a "'" at token start still opens a string."""
+    assert balance_partial_query(original_query) == expected
+
+
+@pytest.mark.parametrize(
+    argnames="original_query",
     argvalues=[
         "(mana:{W}) or t:elf",
         "mana:{2/W}{U}",

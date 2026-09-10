@@ -63,6 +63,25 @@ _HOSTNAME_TESTCASES = {
         "expected": FALLBACK_SITE_NAME,
         "raw_host": "...",
     },
+    # urlparse raises ValueError ("Invalid IPv6 URL") for these rather than returning a hostname.
+    "unclosed_ipv6_bracket_returns_fallback": {
+        "expected": FALLBACK_SITE_NAME,
+        "raw_host": "[abc",
+    },
+    "stray_closing_bracket_returns_fallback": {
+        "expected": FALLBACK_SITE_NAME,
+        "raw_host": "a]b",
+    },
+    "unclosed_ipv6_literal_returns_fallback": {
+        "expected": FALLBACK_SITE_NAME,
+        "raw_host": "[::1",
+    },
+    # urlparse only rejects the port on access, so this still names the host; it is `req.host` that
+    # raises on it, which api_resource handles by passing the raw header through to here.
+    "non_numeric_port_still_names_the_host": {
+        "expected": "Example",
+        "raw_host": "example.com:abc",
+    },
 }
 
 
