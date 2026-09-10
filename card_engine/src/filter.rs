@@ -21,14 +21,59 @@ pub(crate) fn compile_search_regex(pattern: &str) -> Result<Regex, String> {
 }
 
 use std::cell::Cell;
+use std::time::{Duration, Instant};
+
+/// Wall-clock budget for ALL regex matching within one query. `REGEX_BACKTRACK_LIMIT` bounds a single
+/// `is_match`, not the query: a pattern that never backtracks past the cap but is expensive per
+/// text -- `(?=.*)(?=.*)(?=.*)(?=.*)[q-z]{4}` costs ~370 us per oracle text -- adds up to ~10 s
+/// over a full scan with the per-call cap never firing. The deadline is armed by
+/// `clear_regex_match_failed` (the per-query reset) and checked in `regex_is_match` every
+/// `REGEX_DEADLINE_CHECK_EVERY` calls, so the clock read is amortised; on expiry it raises the same
+/// failure flag the backtrack cap does, and the query surfaces the same `UnsupportedRegexError`.
+///
+/// A const rather than a `QueryParams` field: params are paging/sort inputs copied into every
+/// executor, and nothing about a regex budget is per-request. Tests shrink it via
+/// `arm_regex_deadline`.
+pub(crate) const REGEX_QUERY_BUDGET: Duration = Duration::from_secs(2);
+
+/// Calls between clock reads in `regex_is_match`. 64 matches at ~370 us each is ~24 ms of overrun
+/// at worst for the most expensive pattern measured; a cheap pattern overruns by microseconds.
+pub(crate) const REGEX_DEADLINE_CHECK_EVERY: u32 = 64;
 
 thread_local! {
     static REGEX_MATCH_FAILED: Cell<bool> = const { Cell::new(false) };
+    /// Instant at which regex matching for the current query gives up; `None` until a query arms it.
+    static REGEX_DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
+    /// `regex_is_match` calls since the deadline was armed -- the amortisation counter.
+    static REGEX_CALLS: Cell<u32> = const { Cell::new(0) };
 }
 
-/// Reset before bind/evaluate so a prior query on this thread cannot poison the next.
+/// Reset before bind/evaluate so a prior query on this thread cannot poison the next, and arm the
+/// per-query deadline.
 pub(crate) fn clear_regex_match_failed() {
     REGEX_MATCH_FAILED.with(|c| c.set(false));
+    arm_regex_deadline(REGEX_QUERY_BUDGET);
+}
+
+/// Start the per-query regex budget from now. Called with `REGEX_QUERY_BUDGET` by the per-query reset;
+/// tests pass a smaller budget to force the deadline path.
+pub(crate) fn arm_regex_deadline(budget: Duration) {
+    REGEX_DEADLINE.with(|c| c.set(Instant::now().checked_add(budget)));
+    REGEX_CALLS.with(|c| c.set(0));
+}
+
+/// Whether the current query's regex budget has run out. Reads the clock only every
+/// `REGEX_DEADLINE_CHECK_EVERY` calls; never fires on a thread that has not armed a deadline.
+fn regex_deadline_passed() -> bool {
+    let n = REGEX_CALLS.with(|c| {
+        let n = c.get().wrapping_add(1);
+        c.set(n);
+        n
+    });
+    if !n.is_multiple_of(REGEX_DEADLINE_CHECK_EVERY) {
+        return false;
+    }
+    REGEX_DEADLINE.with(|c| c.get().is_some_and(|deadline| Instant::now() >= deadline))
 }
 
 /// Take and clear the failure flag; `Some(message)` when a match aborted at runtime.
@@ -45,6 +90,10 @@ pub(crate) fn take_regex_match_failed() -> Option<String> {
 
 fn regex_is_match(re: &Regex, hay: &str) -> bool {
     if REGEX_MATCH_FAILED.with(|c| c.get()) {
+        return false;
+    }
+    if regex_deadline_passed() {
+        REGEX_MATCH_FAILED.with(|c| c.set(true));
         return false;
     }
     match re.is_match(hay) {

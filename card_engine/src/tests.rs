@@ -10674,6 +10674,49 @@ fn regex_backtrack_exhaustion_surfaces_as_match_failure() {
     assert!(msg.starts_with(REGEX_MATCH_ERR_PREFIX));
 }
 
+/// The per-query wall-clock budget: a pattern that never trips the per-call backtrack cap but is
+/// expensive per text used to run unbounded over a full scan. The deadline is checked every
+/// `REGEX_DEADLINE_CHECK_EVERY` calls and raises the same failure flag the backtrack cap does, so the
+/// query surfaces the same error. Forced here with a zero budget rather than an expensive pattern.
+#[test]
+fn regex_query_deadline_surfaces_as_match_failure() {
+    use crate::filter::{
+        arm_regex_deadline, clear_regex_match_failed, compile_search_regex_for_test, regex_is_match_for_test,
+        take_regex_match_failed, REGEX_DEADLINE_CHECK_EVERY, REGEX_MATCH_ERR_PREFIX,
+    };
+    let re = compile_search_regex_for_test("(?=.*)(?=.*)(?=.*)(?=.*)[q-z]{4}");
+
+    // Under the default budget the pattern matches normally, however many times it is asked.
+    clear_regex_match_failed();
+    for _ in 0..4 * REGEX_DEADLINE_CHECK_EVERY {
+        assert!(regex_is_match_for_test(&re, "qrst"));
+    }
+    assert!(take_regex_match_failed().is_none(), "a two-second budget is not exhausted by a few hundred matches");
+
+    // A zero budget: the first clock read -- at call REGEX_DEADLINE_CHECK_EVERY, not before -- gives up.
+    clear_regex_match_failed();
+    arm_regex_deadline(std::time::Duration::ZERO);
+    let mut failed_at = None;
+    for i in 1..=2 * REGEX_DEADLINE_CHECK_EVERY {
+        if !regex_is_match_for_test(&re, "qrst") {
+            failed_at = Some(i);
+            break;
+        }
+    }
+    assert_eq!(failed_at, Some(REGEX_DEADLINE_CHECK_EVERY), "the deadline is read every {REGEX_DEADLINE_CHECK_EVERY} calls");
+    // Every later match short-circuits on the flag, exactly as after a backtrack exhaustion.
+    assert!(!regex_is_match_for_test(&re, "qrst"));
+    let msg = take_regex_match_failed().expect("deadline expiry must set the failure flag");
+    assert!(msg.starts_with(REGEX_MATCH_ERR_PREFIX), "same error class as the backtrack cap: {msg}");
+
+    // The reset re-arms the full budget: the next query on this thread is unaffected.
+    clear_regex_match_failed();
+    for _ in 0..2 * REGEX_DEADLINE_CHECK_EVERY {
+        assert!(regex_is_match_for_test(&re, "qrst"));
+    }
+    assert!(take_regex_match_failed().is_none());
+}
+
 // And children reorder cheapest-tier-first regardless of written order, and
 // equal-tier children keep their written order (stable sort).
 #[test]
