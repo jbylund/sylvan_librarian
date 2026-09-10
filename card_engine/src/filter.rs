@@ -774,6 +774,10 @@ pub(crate) fn regex_tier(pattern: &str) -> u32 {
 }
 
 /// True when *pattern* needs fancy-regex's backtracking VM (lookarounds, etc.).
+///
+/// `i` walks BYTES, so `pattern` may only be sliced at `i` where `bytes[i]` is ASCII (an ASCII byte
+/// is always a char boundary). The one slice here sits inside the `b'('` arm for that reason; a
+/// catch-all arm used to slice at every byte and panicked on the first multibyte char (`dûl`).
 pub(crate) fn pattern_requires_backtrack(pattern: &str) -> bool {
     const LOOKAROUNDS: &[&str] = &["(?=", "(?!", "(?<=", "(?<!"];
     let bytes = pattern.as_bytes();
@@ -788,7 +792,8 @@ pub(crate) fn pattern_requires_backtrack(pattern: &str) -> bool {
                 if LOOKAROUNDS.iter().any(|tok| rest.starts_with(tok)) {
                     return true;
                 }
-                if rest.starts_with("(?>") || rest.starts_with("(?(") {
+                // Atomic group, conditional, named backreference.
+                if rest.starts_with("(?>") || rest.starts_with("(?(") || rest.starts_with("(?P=") {
                     return true;
                 }
             }
@@ -799,7 +804,6 @@ pub(crate) fn pattern_requires_backtrack(pattern: &str) -> bool {
                 }
                 i += 1;
             }
-            _ if !in_class && pattern[i..].starts_with("(?P=") => return true,
             _ => {}
         }
         i += 1;

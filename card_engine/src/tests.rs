@@ -10656,6 +10656,21 @@ fn regex_tier_classifies_pattern_shapes() {
     assert_eq!(regex_tier("(?<=draw )a card"), REGEX_BACKTRACK_NS100);
 }
 
+/// `pattern_requires_backtrack` walks bytes; it used to slice `&pattern[i..]` at every byte in a
+/// catch-all arm, which panics at the first byte inside a multibyte char. The arm was also dead for
+/// its purpose -- `(` is consumed by the `b'('` arm first -- so the named-backreference test lives
+/// there now, where the slice is at an ASCII byte and therefore a char boundary.
+#[test]
+fn pattern_requires_backtrack_never_slices_inside_a_char() {
+    use crate::filter::pattern_requires_backtrack;
+    for pat in ["dûl", "—", "[dûl]+", "dû(?P<n>l)", "é\\.û", "[—(?P=x)]"] {
+        assert!(!pattern_requires_backtrack(pat), "{pat:?} has no backtracking construct");
+    }
+    for pat in ["(?P=x)", "dû(?P=x)", "(?=a)b", "û(?!b)", "(?<=û)a", "(?>a)", "(?(1)a|b)", "(a)\\1", "\\k<n>"] {
+        assert!(pattern_requires_backtrack(pat), "{pat:?} needs the backtracking VM");
+    }
+}
+
 #[test]
 fn regex_backtrack_exhaustion_surfaces_as_match_failure() {
     use crate::filter::{
