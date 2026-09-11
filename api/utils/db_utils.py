@@ -13,11 +13,66 @@ import docker
 import docker.errors
 import orjson
 import psycopg
+import psycopg.conninfo
 import psycopg.types.json
 import psycopg_pool
 
 logger = logging.getLogger(__name__)
 CONFLICT = 409
+
+
+class CredentialRedactingFilter(logging.Filter):
+    """Mask credentials in a log record's args before any handler formats them.
+
+    Install on the logger of the module holding the credentials, not on a handler: a logger's
+    filters survive `logging.basicConfig(force=True)` and do not depend on how any entry point
+    configured logging. Every call site in that module is covered, including ones added later.
+
+    Reaches `record.args` only. `logger.info(f"...{secret}")` has already formatted the secret into
+    `record.msg`, where no structure is left to find it by.
+    """
+
+    REDACTED = "[REDACTED]"
+    SECRET_KEYS = frozenset({"password", "sslpassword", "passfile"})
+    # Prefix-matched rather than `"://" in text`, which would catch every ordinary URL -- the
+    # conninfo parser rejects those, and they would be replaced wholesale below.
+    DSN_SCHEMES = ("postgresql://", "postgres://")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Replace the record's args with a masked copy. Always keeps the record."""
+        if record.args:
+            record.args = self._redact(record.args)  # type: ignore[assignment]
+        return True
+
+    def _redact(self, value: object) -> object:
+        if isinstance(value, dict):
+            return self._mask({k: self._redact(v) for k, v in value.items()})
+        if isinstance(value, tuple):
+            return tuple(self._redact(v) for v in value)
+        if isinstance(value, str):
+            return self._redact_connection_string(value)
+        return value
+
+    def _redact_connection_string(self, text: str) -> str:
+        """Mask the password in a conninfo string or DSN, and leave every other string alone."""
+        if not (text.startswith(self.DSN_SCHEMES) or any(f"{k}=" in text for k in self.SECRET_KEYS)):
+            return text
+        try:
+            params = psycopg.conninfo.conninfo_to_dict(text)
+        except psycopg.ProgrammingError:
+            return "<redacted: unparseable connection string>"
+        # _mask, not _redact: these values are atomic, and re-inspecting them mangles a legitimate
+        # `sslrootcert=file:///...`, which parses as a connection string in its own right.
+        return " ".join(f"{k}={v}" for k, v in sorted(self._mask(params).items()))
+
+    def _mask(self, params: dict[str, object]) -> dict[str, object]:
+        return {k: (self.REDACTED if k in self.SECRET_KEYS else v) for k, v in params.items()}
+
+
+# Installed once, at import. Guarded by class name rather than isinstance: a reload of this module
+# rebuilds the class, and the filter already on the logger would be an instance of the old one.
+if not any(type(f).__name__ == CredentialRedactingFilter.__name__ for f in logger.filters):
+    logger.addFilter(CredentialRedactingFilter())
 
 
 def get_pg_creds() -> dict[str, str]:
@@ -115,6 +170,8 @@ def make_pool() -> psycopg_pool.ConnectionPool:
         "min_size": 1,
         "open": True,
     }
+    # The conninfo carries PGPASSWORD. Passed as an arg, not formatted in, so CredentialRedactingFilter
+    # masks it before any handler sees the record.
     logger.info("Pool args: %s", pool_args)
     pool = psycopg_pool.ConnectionPool(**pool_args)
 
