@@ -32,6 +32,7 @@ import requests
 from botocore.exceptions import ClientError
 
 from api.utils.db_utils import configure_connection, get_pg_creds
+from api.utils.http_utils import make_user_agent
 
 logger = logging.getLogger(__name__)
 
@@ -53,9 +54,11 @@ SMALL_KEY = "280"
 
 ORIGINAL_KEY = "o"
 
-# Default face index for single-faced cards.
-# Double-faced cards will eventually use face "1" and "2" for their respective faces.
+# Face index for single-faced cards. Multi-face cards use "1" and "2" for their
+# respective faces, which is the face_idx the card rows carry.
 DEFAULT_FACE = "1"
+# Every face index the S3 layout accepts.
+VALID_FACES = (DEFAULT_FACE, "2")
 
 # S3 image key layout: img/{set_code}/{collector_number}/{face}/{size}.webp
 IMAGE_PREFIX = "img/"
@@ -85,7 +88,7 @@ class CardImage:
         if size not in [SMALL_KEY, MEDIUM_KEY, LARGE_KEY, XLARGE_KEY, ORIGINAL_KEY]:
             msg = f"Invalid size: {size}"
             raise ValueError(msg)
-        if face_idx not in [DEFAULT_FACE, "2"]:
+        if face_idx not in VALID_FACES:
             msg = f"Invalid face index: {face_idx}"
             raise ValueError(msg)
 
@@ -197,7 +200,9 @@ def download_image(url: str, output_path: Path) -> bool:
         True if successful, False otherwise
     """
     try:
-        response = requests.get(url, timeout=30, stream=True)
+        # Scryfall rejects HTTP-library default User-Agents with 400 generic_user_agent, and
+        # rejects a request that sends no User-Agent at all.
+        response = requests.get(url, timeout=30, stream=True, headers={"User-Agent": make_user_agent()})
         response.raise_for_status()
 
         with output_path.open("wb") as f:
@@ -311,7 +316,7 @@ def process_card(
     """Process a single card: download, convert, and upload.
 
     Args:
-        card: Card data dict with card_set_code, collector_number, image_location_uuid
+        card: Card data dict with card_set_code, collector_number, face_idx, png_url
         s3_client: Boto3 S3 client
         bucket: S3 bucket name
         dry_run: If True, skip actual downloads and uploads
@@ -321,16 +326,23 @@ def process_card(
     """
     set_code = card["card_set_code"]
     collector_number = card["collector_number"]
+    face_idx = card["face_idx"]
     png_url = card["png_url"]
 
     if not set_code or not collector_number or not png_url:
         logger.warning("Skipping card with missing data: %s", card)
         return {SMALL_KEY: False, MEDIUM_KEY: False, LARGE_KEY: False, XLARGE_KEY: False}
 
-    logger.info("Processing %s/%s", set_code, collector_number)
+    if face_idx not in VALID_FACES:
+        # Writing an unknown face would land at a key get_s3_cards cannot parse back, so the
+        # image would be re-uploaded on every subsequent run.
+        logger.warning("Skipping card with unexpected face index %r: %s", face_idx, card)
+        return {SMALL_KEY: False, MEDIUM_KEY: False, LARGE_KEY: False, XLARGE_KEY: False}
+
+    logger.info("Processing %s/%s face %s", set_code, collector_number, face_idx)
 
     if dry_run:
-        logger.info("[DRY RUN] Would process %s/%s", set_code, collector_number)
+        logger.info("[DRY RUN] Would process %s/%s face %s", set_code, collector_number, face_idx)
         return {SMALL_KEY: True, MEDIUM_KEY: True, LARGE_KEY: True, XLARGE_KEY: True}
 
     results = {SMALL_KEY: False, MEDIUM_KEY: False, LARGE_KEY: False, XLARGE_KEY: False}
@@ -359,13 +371,13 @@ def process_card(
                 continue
 
             # Face-aware key structure: img/{set_code}/{collector_number}/{face}/{size}.webp
-            s3_key = f"img/{set_code}/{collector_number}/{DEFAULT_FACE}/{size_name}.webp"
+            s3_key = f"img/{set_code}/{collector_number}/{face_idx}/{size_name}.webp"
 
             if upload_to_s3(s3_client, webp_path, bucket, s3_key):
                 results[size_name] = True
 
     success_count = sum(results.values())
-    logger.info("Completed %s/%s: %d/4 sizes uploaded", set_code, collector_number, success_count)
+    logger.info("Completed %s/%s face %s: %d/4 sizes uploaded", set_code, collector_number, face_idx, success_count)
 
     return results
 

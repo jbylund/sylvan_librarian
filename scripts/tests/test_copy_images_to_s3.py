@@ -13,6 +13,7 @@ from scripts.copy_images_to_s3 import (
     list_prefix_keys,
     make_listing_session,
     parse_image_key,
+    process_card,
 )
 
 
@@ -49,6 +50,21 @@ def test_download_image_failure() -> None:
 
         assert result is False
         assert not output_path.exists()
+
+
+def test_download_image_sends_explicit_user_agent() -> None:
+    """Scryfall answers 400 generic_user_agent to a library-default or absent User-Agent."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        mock_response = Mock()
+        mock_response.raise_for_status = Mock()
+        mock_response.iter_content = Mock(return_value=[b"png"])
+
+        with patch("scripts.copy_images_to_s3.requests.get", return_value=mock_response) as mock_get:
+            download_image("https://example.com/image.png", Path(temp_dir) / "test.png")
+
+        user_agent = mock_get.call_args.kwargs["headers"]["User-Agent"]
+        assert user_agent
+        assert "requests" not in user_agent
 
 
 def test_fetch_cards_from_db() -> None:
@@ -146,3 +162,56 @@ def test_list_image_prefixes_collects_common_prefixes() -> None:
     ]
 
     assert list_image_prefixes(client, "bucket", None) == ["img/iko/", "img/akh/", "img/plst/"]
+
+
+def _face_card(face_idx: str) -> dict[str, str]:
+    return {
+        "card_set_code": "isd",
+        "collector_number": "51",
+        "face_idx": face_idx,
+        "png_url": "https://example.com/image.png",
+    }
+
+
+def _uploaded_keys(face_idx: str) -> tuple[list[str], dict[str, bool]]:
+    """Run process_card against stubbed download/convert/upload, returning the keys it wrote."""
+    client = Mock()
+    with (
+        patch("scripts.copy_images_to_s3.download_image", return_value=True),
+        patch("scripts.copy_images_to_s3.convert_to_webp", return_value=True),
+        patch("scripts.copy_images_to_s3.upload_to_s3", return_value=True) as mock_upload,
+    ):
+        results = process_card(_face_card(face_idx), client, "bucket")
+    return [call.args[3] for call in mock_upload.call_args_list], results
+
+
+def test_process_card_keys_each_face_under_its_own_index() -> None:
+    """A back face must not be written over face 1, which would clobber the front face."""
+    front_keys, front_results = _uploaded_keys("1")
+    back_keys, back_results = _uploaded_keys("2")
+
+    assert all(front_results.values())
+    assert all(back_results.values())
+    assert front_keys == [
+        "img/isd/51/1/280.webp",
+        "img/isd/51/1/388.webp",
+        "img/isd/51/1/538.webp",
+        "img/isd/51/1/745.webp",
+    ]
+    assert back_keys == [key.replace("/1/", "/2/") for key in front_keys]
+
+
+def test_process_card_keys_round_trip_through_the_listing_parser() -> None:
+    """Whatever the writer emits must parse back, or the image re-uploads on every run."""
+    for face_idx in ("1", "2"):
+        for key in _uploaded_keys(face_idx)[0]:
+            assert parse_image_key(key) is not None
+            assert parse_image_key(key)[2] == face_idx
+
+
+def test_process_card_refuses_an_unknown_face() -> None:
+    """An unparseable face index is skipped rather than written to a key no run can find again."""
+    keys, results = _uploaded_keys("3")
+
+    assert keys == []
+    assert not any(results.values())
