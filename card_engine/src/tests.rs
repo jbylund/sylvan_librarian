@@ -8198,6 +8198,11 @@ fn price_narrowing_bound_matches_direct_comparison_on_and_off_grid() {
         (50.00, Some(5000)), (49.99, Some(4999)), (0.01, Some(1)), (5142.02, Some(514202)),
         (100.00, Some(10000)), (0.28, Some(28)), (0.57, Some(57)), (0.0, Some(0)),
         (49.998, None), (50.003, None), (33.335, None), (0.005, None), (12.3456789, None),
+        // The top of the u32 cents domain and one past it. Off-grid on purpose: `u32::MAX` cents is
+        // the one value a half-open `[lo, hi)` cannot include, so the direct comparison below is only
+        // asked about the sampled prices, all of which sit far under it -- and every op must still
+        // return an ORDERED pair here rather than the wrapped `hi = 0` it used to.
+        (42_949_672.95, None), (42_949_672.96, None), (4_294_967_296.0, None),
     ];
     let ops = [
         (CmpOp::Lt, "Lt"),
@@ -13454,4 +13459,59 @@ fn limit_zero_yields_no_rows_and_the_full_total() {
             }
         }
     }
+}
+
+/// The top of the integer domain: `hi` is a u32, so `<= u32::MAX` cannot be expressed as
+/// `[0, u32::MAX + 1)` -- it used to be computed as exactly that and truncate to `[0, 0)`, and `Eq`
+/// at `u32::MAX` came back as `(u32::MAX, 0)`; consumers then wrapped on `e - s` and panicked on
+/// `pids[s..e]`. Every op now stays inside the domain with `lo <= hi`, treating `u32::MAX` itself as
+/// never present (it is the null sentinel, not a stored value).
+#[test]
+fn int_range_bounds_stay_inside_the_u32_domain_at_its_top() {
+    const TOP: f64 = u32::MAX as f64;
+    let bound = |op, v| super::int_range_bounds(op, v).expect("not Ne");
+    assert_eq!(bound(CmpOp::Le, TOP), Some((0, u32::MAX)));
+    assert_eq!(bound(CmpOp::Lt, TOP), Some((0, u32::MAX)));
+    assert_eq!(bound(CmpOp::Eq, TOP), None, "u32::MAX is not representable in a half-open u32 range");
+    assert_eq!(bound(CmpOp::Gt, TOP), None);
+    assert_eq!(bound(CmpOp::Ge, TOP), None);
+    // One below the top is the last value a bound can include.
+    assert_eq!(bound(CmpOp::Eq, TOP - 1.0), Some((u32::MAX - 1, u32::MAX)));
+    assert_eq!(bound(CmpOp::Ge, TOP - 1.0), Some((u32::MAX - 1, u32::MAX)));
+    assert_eq!(bound(CmpOp::Gt, TOP - 2.0), Some((u32::MAX - 1, u32::MAX)));
+    for v in [TOP + 1.0, TOP + 0.5, 1e12, f64::INFINITY] {
+        assert_eq!(bound(CmpOp::Le, v), Some((0, u32::MAX)), "Le({v})");
+        assert_eq!(bound(CmpOp::Lt, v), Some((0, u32::MAX)), "Lt({v})");
+        for op in [CmpOp::Eq, CmpOp::Gt, CmpOp::Ge] {
+            assert_eq!(bound(op, v), None, "{op:?}({v}) is provably empty");
+        }
+    }
+    for op in [CmpOp::Eq, CmpOp::Lt, CmpOp::Le, CmpOp::Gt, CmpOp::Ge] {
+        assert_eq!(bound(op, f64::NAN), None, "{op:?}(NaN) matches nothing");
+        assert_eq!(bound(op, f64::NEG_INFINITY), if matches!(op, CmpOp::Gt | CmpOp::Ge) { Some((0, u32::MAX)) } else { None });
+    }
+    assert_eq!(super::int_range_bounds(CmpOp::Ne, f64::NAN), None, "Ne never narrows, NaN or not");
+
+    // Through a real index: the bounds slice `pids[s..e]`, so the top of the domain must be a
+    // well-formed (empty or full) slice, never a wrapped length or an inverted range.
+    use rand::SeedableRng;
+    let mut rng = rand::rngs::SmallRng::seed_from_u64(4_294_967_295);
+    let data = fuzz_store_n(&mut rng, 300);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let idx = &archived.indexes.collector_number;
+    let n = idx.range_pids(0, u32::MAX).count();
+    assert_eq!(n, idx.len(), "every indexed printing sits below u32::MAX");
+    for v in [TOP, TOP - 1.0, TOP + 1.0, 1e12] {
+        for op in [CmpOp::Lt, CmpOp::Le, CmpOp::Gt, CmpOp::Ge, CmpOp::Eq] {
+            let count = match bound(op, v) {
+                None => 0,
+                Some((lo, hi)) => idx.range_pids(lo, hi).count(),
+            };
+            let expected = if matches!(op, CmpOp::Lt | CmpOp::Le) { n } else { 0 };
+            assert_eq!(count, expected, "{op:?}({v}) over the collector-number index");
+        }
+    }
+    // The inverted pair itself is an empty range, not a panic.
+    assert_eq!(idx.range_pids(10, 10).count(), 0);
 }
