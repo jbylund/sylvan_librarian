@@ -46,6 +46,7 @@ from cachebox import TTLCache
 
 from api.card_processing import preprocess_card
 from api.db.bulk_upsert import bulk_upsert as _bulk_upsert
+from api.rulings_import import import_rulings as _import_rulings
 from api.scryfall_bulk_data_fetcher import BulkDataKey, ScryfallBulkDataFetcher
 from api.settings import settings
 from api.tag_import import import_art_tags as _import_art_tags
@@ -374,7 +375,16 @@ class AdminResource:
 
         before = time.monotonic()
 
-        result = self._upsert_cards(self._bulk_data_fetcher.stream_data_for_key(BulkDataKey.DEFAULT_CARDS))
+        # all_cards is default_cards plus every foreign-language printing (~540k rows against
+        # ~114k). The canonical marking is id-membership in default_cards — Scryfall's own
+        # selection, fetched alongside rather than re-derived — so the engine can keep its
+        # canonical (English-default) spaces exactly as before and route the rest to the
+        # foreign annex.
+        canonical_ids = {card["id"] for card in self._bulk_data_fetcher.stream_data_for_key(BulkDataKey.DEFAULT_CARDS)}
+        result = self._upsert_cards(
+            self._bulk_data_fetcher.stream_data_for_key(BulkDataKey.ALL_CARDS),
+            canonical_ids=canonical_ids,
+        )
 
         after_transfer = time.monotonic()
 
@@ -399,6 +409,9 @@ class AdminResource:
             self.backfill_prefer_scores()
             self.backfill_cubecobra_scores()
             _import_oracle_tags(self.app_context.writer_pool, self._bulk_data_fetcher)
+            # Rulings feed only /cards/*/rulings, so nothing above or below depends on them; they
+            # sit here rather than in their own pass so one bulk fetch cycle refreshes everything.
+            self._import_rulings_quietly()
             self.app_context.reload_engine(force=True)
             self._clear_caches()
             self.app_context.last_import_time.value = time.time()
@@ -932,6 +945,27 @@ class AdminResource:
         return _import_art_tags(self.app_context.writer_pool, self._bulk_data_fetcher)
 
     @route()
+    def import_rulings(self, **_: object) -> dict[str, Any]:
+        """Import Scryfall rulings bulk data into magic.rulings, backing the /cards/*/rulings routes.
+
+        Returns:
+            The number of rulings loaded.
+        """
+        return {"rulings_loaded": _import_rulings(self.app_context.writer_pool, self._bulk_data_fetcher)}
+
+    def _import_rulings_quietly(self) -> None:
+        """Refresh the rulings during a bulk import, logging rather than failing on error.
+
+        Rulings are the only data in the import sequence nothing else reads: a card search, the
+        prefer scores and the engine reload all work without them. Letting a bad rulings file
+        abort the import would cost the corpus refresh to save a rulings refresh.
+        """
+        try:
+            _import_rulings(self.app_context.writer_pool, self._bulk_data_fetcher)
+        except Exception:
+            logger.exception("Rulings import failed; continuing with the rest of the import")
+
+    @route()
     def import_all_is_tags(self, **_: object) -> dict[str, Any]:
         """Discover and import all is: tags from Scryfall syntax documentation.
 
@@ -1194,12 +1228,19 @@ class AdminResource:
         self,
         cards: Iterable[dict[str, Any]],
         page_size: int = _UPSERT_PAGE_SIZE,
+        canonical_ids: set[str] | None = None,
     ) -> dict[str, Any]:
         """Preprocess and upsert an iterable of raw card dicts into magic.cards.
 
         Preprocessing is applied lazily as cards flow through, so the full dataset
         is never held in memory. Each batch is upserted via bulk_upsert: new rows
         are inserted, changed rows are updated, and unchanged rows are skipped.
+
+        `canonical_ids` is the id-membership set that decides `is_canonical` — Scryfall's OWN
+        selection (the ids in default_cards), never re-derived from per-row facts, because
+        re-deriving Scryfall's choice is a drift class of its own. None (the pre-multilingual
+        callers, and the tests) marks every row canonical: a default_cards-only feed IS the
+        canonical set.
 
         Returns a dict with:
             - cards_inserted: new cards added
@@ -1228,6 +1269,11 @@ class AdminResource:
                             self.raw += 1
                             for processed in preprocess_card(card):
                                 self.preprocessed += 1
+                                # Stamped AFTER preprocessing so the flag is a column and only a
+                                # column: raw_card_blob and card_compat_blob are snapshotted
+                                # inside preprocess_card, and neither should grow a key Scryfall
+                                # never sent.
+                                processed["is_canonical"] = canonical_ids is None or processed["scryfall_id"] in canonical_ids
                                 yield processed
 
                 stream = _CardStream()

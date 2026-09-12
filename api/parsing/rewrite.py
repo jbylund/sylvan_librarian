@@ -23,11 +23,13 @@ from api.parsing.hand_parser import parse_str_to_query as _parse_str_to_query
 from api.parsing.nodes import (
     AndNode,
     BinaryOperatorNode,
+    DirectiveNode,
     NotNode,
     OrNode,
     Query,
     RegexValueNode,
     StringValueNode,
+    TrueNode,
     flatten_nested_operations,
 )
 
@@ -228,10 +230,38 @@ def _expand(node: QueryNode, in_progress: frozenset[tuple[str, str]]) -> tuple[Q
         return (NotNode(new_op), True) if changed else (node, False)
     key = _leaf_key(node)
     if key is not None and key in _DERIVED_EXPANSIONS and key not in in_progress:
-        return _clone_expansion(_expanded_template(key)), True
+        subtree = _clone_expansion(_expanded_template(key))
+        # Every leaf in the CLONE remembers the term it came from -- never the cached template,
+        # whose leaves would then carry one query's provenance into every later query that reuses
+        # the synonym. The OUTERMOST expansion wins, because it is marked last: `is:watermark`
+        # expands to `has:watermark`, which expands again to `watermark:/./`, and the term the
+        # caller wrote is the first of the three (the inner marks the template carries are dropped
+        # by `_clone_expansion` rebuilding each leaf, and overwritten here regardless).
+        _mark_derived(subtree, f"{key[0]}:{key[1]}")
+        return subtree, True
     return node, False
 
 
+def _mark_derived(node: QueryNode, term: str) -> None:
+    """Record on every comparison leaf under `node` that `term`'s expansion is what put it there.
+
+    NOT bookkeeping. The rewrite makes `is:split` and `layout:split` the same tree, and Scryfall's
+    `include_extras` auto-enable fires for one and not the other -- so the fact has to survive to
+    the one consumer that applies that rule. It rides on the node rather than beside the query for
+    the same reason `regex_derived` does: nothing serializes it, so the wire tree the engine reads
+    is unchanged byte for byte.
+
+    Args:
+        node: The root of an expansion's subtree.
+        term: The `alias:value` the caller actually wrote, e.g. `is:split`.
+    """
+    if isinstance(node, (AndNode, OrNode)):
+        for operand in node.operands:
+            _mark_derived(operand, term)
+    elif isinstance(node, NotNode):
+        _mark_derived(node.operand, term)
+    elif isinstance(node, BinaryOperatorNode):
+        node.derived_from = term
 def _swap_not_leaves(node: QueryNode) -> tuple[QueryNode, bool]:
     """Replace `not:value` leaves with `NotNode(is:value)`; return `(node, changed)`.
 
@@ -313,7 +343,17 @@ def _lower_regex_leaves(node: QueryNode) -> None:
     elif isinstance(node, BinaryOperatorNode) and node.operator == ":" and isinstance(node.rhs, RegexValueNode):
         literal = _regex_plain_literal(node.rhs.value)
         if literal is not None:
-            node.rhs = StringValueNode(literal)
+            # LITERAL, not a bare word: a regex matches the stored name as written, so the
+            # lowered form must keep the quoted spelling's semantics rather than pick up the
+            # bare word's separator/diacritic fold. Measured on api.scryfall.com 2026-08-16:
+            # `name:/lim-dul/` answers 0 and `name:/Lim-D.l/` answers 8, so `/lim-dul/` is NOT
+            # the fold that `name:limdul` (8) applies.
+            #
+            # `regex_derived` records that this leaf WAS a regex, because one consumer above the
+            # parser still has to tell the two spellings apart after this rewrite has made them
+            # identical: Scryfall forces `include_extras` on for a `name:` regex and not for a
+            # quoted literal. See `StringValueNode`.
+            node.rhs = StringValueNode(literal, literal=True, regex_derived=True)
 
 
 def lower_literal_regexes(query: Query) -> Query:
@@ -342,6 +382,57 @@ def expand_derived_predicates(query: Query) -> Query:
     if not changed:
         return query
     return flatten_nested_operations(Query(root))
+
+
+def _strip_directives(node: QueryNode, found: list[tuple[str, str, bool]], *, nested: bool) -> QueryNode | None:
+    """Return `node` with directive leaves removed, appending (name, value, nested) in source order.
+
+    Returns None when the node vanishes entirely (it was a directive, or a compound made only
+    of directives); the original object when nothing changed. A directive is removed from the
+    structure as if it had never been written — inside an Or it does not make the Or true, and
+    a negated directive is still just a directive (Scryfall ignores the negation, measured
+    2026-08-07: `-unique:art` dedups by artwork exactly as `unique:art` does).
+
+    `nested` marks directives found under an Or or a negation: a directive always applies to
+    the WHOLE search, so one written inside such a group looks scoped but is not — the API
+    layer turns the flag into an explicit response warning rather than a silent surprise.
+    Parenthesized AND groups do not count: conjunction is flat, so `(t:goblin sort:x) t:elf`
+    means exactly `t:goblin sort:x t:elf`.
+    """
+    cls = node.__class__
+    if cls is DirectiveNode:
+        found.append((node.name, node.value, nested))
+        return None
+    if cls in (AndNode, OrNode):
+        inner_nested = nested or cls is OrNode
+        ops = [_strip_directives(op, found, nested=inner_nested) for op in node.operands]
+        kept = [op for op in ops if op is not None]
+        if not kept:
+            return None
+        if len(kept) == 1:
+            return kept[0]
+        return cls(kept) if kept != list(node.operands) else node
+    if cls is NotNode:
+        inner = _strip_directives(node.operand, found, nested=True)
+        if inner is None:
+            return None
+        return NotNode(inner) if inner is not node.operand else node
+    return node
+
+
+def extract_directives(query: Query) -> tuple[Query, tuple[tuple[str, str, bool], ...]]:
+    """Strip result-shape directives from the filter tree, returning (name, value, nested) triples.
+
+    A directive like `sort:edhrec` constrains presentation, not membership; without this pass a
+    query carrying one would serialize with a vestigial residue, making `t:goblin sort:edhrec`
+    compare unequal to `t:goblin` despite filtering identically. A query that is nothing but
+    directives filters as the empty query does.
+    """
+    found: list[tuple[str, str, bool]] = []
+    root = _strip_directives(query.root, found, nested=False)
+    if not found:
+        return query, ()
+    return Query(root if root is not None else TrueNode()), tuple(found)
 
 
 def _operand_dedup_key(node: QueryNode) -> tuple:
@@ -420,8 +511,10 @@ _REWRITE_PASSES = (negate_not_prefix, expand_derived_predicates, lower_literal_r
 def rewrite_query(query: Query) -> Query:
     """Apply every post-parse AST rewrite, in order. The single seam both parsers call.
 
-    Order is significant: `negate_not_prefix` runs first (a `not:`-spelled leaf becomes
-    `NotNode(is:...)`, so it reads as a plain `is:` leaf to everything after it), then
+    Directive extraction runs first so no later pass sees a DirectiveNode, and the collected
+    pairs are attached to the final Query afterward because each pass returns a fresh Query.
+    Order among the passes is significant: `negate_not_prefix` runs first (a `not:`-spelled leaf
+    becomes `NotNode(is:...)`, so it reads as a plain `is:` leaf to everything after it), then
     `expand_derived_predicates` (a synonym may expand into a subtree that itself contains a
     regex or other rewritable leaf), then `lower_literal_regexes`, then any future pass
     appended to `_REWRITE_PASSES`.
@@ -430,6 +523,8 @@ def rewrite_query(query: Query) -> Query:
     regex-budget validation — so duplicate identical regex leaves still count toward the public
     leaf limit.
     """
+    query, directives = extract_directives(query)
     for rewrite_pass in _REWRITE_PASSES:
         query = rewrite_pass(query)
+    query.directives = directives
     return query

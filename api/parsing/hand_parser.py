@@ -16,8 +16,10 @@ from api.parsing.colors import COLOR_ALIAS_TO_CODES
 from api.parsing.db_info import ALIAS_TO_FIELD_INFOS, ParserClass
 from api.parsing.mana_symbols import first_invalid_mana_symbol
 from api.parsing.nodes import (
+    DIRECTIVE_NAMES,
     AndNode,
     BinaryOperatorNode,
+    DirectiveNode,
     ManaValueNode,
     NotNode,
     NumericValueNode,
@@ -62,6 +64,8 @@ _VALID_COLOR_NAMES: frozenset[str] = frozenset(COLOR_ALIAS_TO_CODES)
 _COLOR_LETTERS: frozenset[str] = frozenset("wubrgcWUBRGC")
 _MIN_MTG_YEAR: int = 1992
 _MAX_YEAR: int = 2040
+_MIN_MONTH: int = 1
+_MAX_MONTH: int = 12
 
 
 def _validate_mtg_year(value: int | float, pos: int) -> int:
@@ -333,8 +337,8 @@ class ParseError(ValueError):
     """Raised when the parser encounters unexpected token structure."""
 
 
-def _name_node(value: str) -> CardBinaryOperatorNode:
-    return CardBinaryOperatorNode(CardAttributeNode("name", ParserClass.TEXT), ":", StringValueNode(value))
+def _name_node(value: str, literal: bool = False) -> CardBinaryOperatorNode:
+    return CardBinaryOperatorNode(CardAttributeNode("name", ParserClass.TEXT), ":", StringValueNode(value, literal=literal))
 
 
 class Parser:
@@ -443,7 +447,10 @@ class Parser:
             return self.parse_exact_name()
         if tok.type == TT.QUOTED:
             self.consume()
-            return _name_node(str(tok.value))
+            # A bare QUOTED term is `name:"..."`, and quoting still means "match this literally":
+            # measured on api.scryfall.com 2026-08-16, `q="ft"` answers 362 exactly as
+            # `q=name:"ft"` does, against the bare word `q=ft`'s 1,628.
+            return _name_node(str(tok.value), literal=True)
         if tok.type == TT.WORD:
             self.consume()
             return self.parse_word_primary(str(tok.value))
@@ -453,6 +460,13 @@ class Parser:
             # bare mana outside attribute context — treat as implicit name
             self.consume()
             return _name_node(str(tok.value))
+        if tok.type == TT.STAR:
+            # A term that STARTS with ``*`` is a name search whose first character collates away --
+            # ``q=*ft*`` answers 1,628 on Scryfall, exactly as ``q=ft`` does. Only reachable at the
+            # start of a primary, where a multiplication has no left operand and this was a
+            # parse error.
+            self.consume()
+            return self.parse_hyphenated_name("*")
         msg = f"Unexpected {tok.value!r} at position {tok.pos}"
         raise ParseError(msg)
 
@@ -487,6 +501,43 @@ class Parser:
 
     # ── word dispatch ─────────────────────────────────────────────────────────
 
+    def parse_directive_primary(self, word: str, wl: str, next_tok: Token) -> QueryNode | None:
+        """Consume a result-shape directive (unique:/sort:/order:/direction:/dir:/prefer:), or return None.
+
+        Scryfall accepts these inside the query string itself; they constrain presentation,
+        not membership, so a directive parses to a DirectiveNode carrying its value, and the
+        extraction pass in rewrite.py strips it from the filter tree and records it on the
+        Query for the API layer to apply.
+
+        `dir` is Scryfall's short spelling of `direction` and sets the same parameter (measured
+        2026-08-09: `dir:desc` and `direction:desc` return the same page, as do `dir:auto` and
+        `direction:auto`). Matching is on the whole word, so `direct:` is unaffected.
+        """
+        if wl not in DIRECTIVE_NAMES or next_tok.type != TT.OP or next_tok.value != ":":
+            return None
+        self.consume()  # ':'
+        val_tok = self.peek()
+        if val_tok.type in (TT.WORD, TT.QUOTED, TT.NUMBER):
+            self.consume()
+            value = str(val_tok.value)
+            # Glue hyphenated continuations, exactly as parse_text_value does. `-` is not a word
+            # character, so `usd-low` lexes as WORD MINUS WORD; consuming a single token stopped
+            # at `usd` and left `-low` to fail the parse. That made the hyphenated spellings
+            # Scryfall accepts -- and that _DIRECTIVE_PREFER in api_resource enumerates --
+            # unreachable from inside a query by any input. A QUOTED value is already one token.
+            if val_tok.type is not TT.QUOTED:
+                while (
+                    self.peek().type == TT.MINUS
+                    and not self.peek().space_before
+                    and self.peek(1).type in (TT.WORD, TT.NUMBER)
+                    and not self.peek(1).space_before
+                ):
+                    self.consume()
+                    value += f"-{self.consume().value}"
+            return DirectiveNode(wl, value.lower())
+        msg = f"Expected value after '{word}:' at position {val_tok.pos}"
+        raise ParseError(msg)
+
     def parse_word_primary(self, word: str) -> QueryNode:
         """Dispatch on whether word is a known attribute alias, keyword, or implicit name."""
         wl = word.lower()
@@ -496,6 +547,10 @@ class Parser:
 
         pc = _ALIAS_TO_PC.get(wl)
         next_tok = self.peek()
+
+        directive = self.parse_directive_primary(word, wl, next_tok)
+        if directive is not None:
+            return directive
 
         # ── dual-class alias (cn / number): dispatch on value shape ──
         if wl in _DUAL_NUM_TEXT and next_tok.type == TT.OP:
@@ -635,17 +690,33 @@ class Parser:
     # ── implicit name (possibly hyphenated) ───────────────────────────────────
 
     def parse_hyphenated_name(self, first: str) -> CardBinaryOperatorNode:
-        """Build an implicit name node, greedily consuming no-space MINUS+WORD/NUMBER continuations."""
-        parts = [first]
-        while (
-            self.peek().type == TT.MINUS
-            and not self.peek().space_before
-            and self.peek(1).type in (TT.WORD, TT.NUMBER)
-            and not self.peek(1).space_before
-        ):
-            self.consume()  # MINUS
-            parts.append(str(self.consume().value))
-        return _name_node("-".join(parts))
+        """Build an implicit name node, greedily consuming no-space MINUS+WORD/NUMBER and STAR continuations.
+
+        A bare term is a ``name:`` search, so ``*`` reaches it for the same reason it reaches
+        parse_text_value(): the collation deletes it. Measured 2026-08-16 -- ``q=ft*``, ``q=*ft*`` and
+        ``q=ft`` all answer 1,628 on api.scryfall.com, and ``q=godzilla*`` answers ``q=godzilla``'s 8.
+        """
+        word = first
+        while True:
+            nxt = self.peek()
+            if nxt.space_before:
+                break
+            if nxt.type == TT.STAR:
+                self.consume()
+                word += "*"
+                continue
+            if nxt.type in (TT.WORD, TT.NUMBER):
+                # Only reachable ACROSS a star (``*ft``): the lexer scans adjacent word characters
+                # into one token, so two of them never touch on their own.
+                self.consume()
+                word += str(nxt.value)
+                continue
+            if nxt.type == TT.MINUS and self.peek(1).type in (TT.WORD, TT.NUMBER) and not self.peek(1).space_before:
+                self.consume()  # MINUS
+                word += "-" + str(self.consume().value)
+                continue
+            break
+        return _name_node(word)
 
     # ── value parsers ─────────────────────────────────────────────────────────
 
@@ -673,22 +744,43 @@ class Parser:
         tok = self.peek()
         if tok.type == TT.QUOTED:
             self.consume()
-            return StringValueNode(str(tok.value))
+            # QUOTED, and `name:` reads that as "match this literally" -- see StringValueNode.
+            return StringValueNode(str(tok.value), literal=True)
         if tok.type == TT.REGEX:
             self.consume()
             return RegexValueNode(str(tok.value))
-        if tok.type in (TT.WORD, TT.NUMBER):
+        if tok.type in (TT.WORD, TT.NUMBER, TT.STAR):
             self.consume()
-            word = str(tok.value)
-            # Greedily consume hyphenated continuation (no space on either side)
-            while (
-                self.peek().type == TT.MINUS
-                and not self.peek().space_before
-                and self.peek(1).type in (TT.WORD, TT.NUMBER)
-                and not self.peek(1).space_before
-            ):
-                self.consume()
-                word += "-" + str(self.consume().value)
+            word = "*" if tok.type == TT.STAR else str(tok.value)
+            # Greedily consume hyphenated and STARRED continuation (no space on either side).
+            #
+            # ``*`` IS AN ORDINARY CHARACTER IN A VALUE, not a wildcard and not an error. Scryfall
+            # answers ``name:ft*``, ``name:*ft*``, ``name:*ft`` and ``name:f*t`` with the same 1,628
+            # as ``name:ft`` -- because a bare ``name:`` value is COLLATED and ``*`` is one more
+            # non-alphanumeric character to delete, exactly like the ``-`` in
+            # ``name:lightning-bolt`` (2) and the ``,`` in ``name:lightning,bolt`` (2). It is not a
+            # tokenizer rule: the same ``*`` in a column that is NOT collated stays put and finds
+            # nothing, which is what ``o:ft*``, ``t:crea*ture``, ``ft:cro*ft`` and the QUOTED
+            # ``name:"ft*"`` all answer (404), and ``a:gu*ay`` matches ``a:guay`` because artist is
+            # collated too. All measured on api.scryfall.com 2026-08-16. This parser rejected the
+            # character outright, so every one of those raised instead.
+            while True:
+                nxt = self.peek()
+                if nxt.space_before:
+                    break
+                if nxt.type == TT.STAR:
+                    self.consume()
+                    word += "*"
+                    continue
+                if nxt.type in (TT.WORD, TT.NUMBER):
+                    self.consume()
+                    word += str(nxt.value)
+                    continue
+                if nxt.type == TT.MINUS and self.peek(1).type in (TT.WORD, TT.NUMBER) and not self.peek(1).space_before:
+                    self.consume()
+                    word += "-" + str(self.consume().value)
+                    continue
+                break
             return StringValueNode(word)
         msg = f"Expected value for {attr!r}, got {tok.value!r} at position {tok.pos}"
         raise ParseError(msg)
@@ -768,7 +860,7 @@ class Parser:
         raise ParseError(msg)
 
     def parse_date_value(self) -> QueryNode:
-        """Parse a date value: YYYY or YYYY-MM-DD (hyphens must have no surrounding spaces)."""
+        """Parse a date value: YYYY, YYYY-MM or YYYY-MM-DD (hyphens must have no surrounding spaces)."""
         tok = self.peek()
         if tok.type != TT.NUMBER:
             msg = f"Expected date, got {tok.value!r} at position {tok.pos}"
@@ -784,6 +876,7 @@ class Parser:
         ):
             self.consume()
             month_tok = self.consume()
+            month = int(month_tok.value)
             if (
                 self.peek().type == TT.MINUS
                 and not self.peek().space_before
@@ -792,7 +885,6 @@ class Parser:
             ):
                 self.consume()
                 day_tok = self.consume()
-                month = int(month_tok.value)
                 day = int(day_tok.value)
                 try:
                     datetime.date(year=year, month=month, day=day)
@@ -800,6 +892,27 @@ class Parser:
                     msg = f"Invalid date {year}-{month:02d}-{day:02d} at position {tok.pos}: {exc}"
                     raise ParseError(msg) from exc
                 return StringValueNode(f"{year}-{month:02d}-{day:02d}")
+            # YEAR-MONTH, with NO day: the month tokens are already consumed, and returning the
+            # bare year below dropped them on the floor -- silently, so `date:2021-02` answered
+            # the whole of `date:2021`.
+            #
+            # A partial date names a WINDOW, and the engine's released_at arm already reads six
+            # digits as [yyyymm01, yyyymm31] and picks each operator's end of it; this only has to
+            # hand it the six digits. The oracle is the one the bare-year fix used, a precision
+            # down: a year-month must equal the range its own ends describe. Measured on
+            # api.scryfall.com 2026-08-16, `date:2021-02` is 504 and `date>=2021-02 date<2021-03`
+            # is 504, against `date:2021`'s 3,834 -- the answer this used to give.
+            #
+            # A month outside 1..12 raises, exactly as an impossible DAY already does above.
+            # Scryfall 400s on `date:2021-13`, where this answered all of 2021.
+            #
+            # NOT zero-padding-strict: Scryfall 400s on `date:2021-2` and this reads it as
+            # 2021-02. That gap is pre-existing and shared with the day path (`date:2021-2-5` is a
+            # 400 there and answers here), and is left alone rather than widened.
+            if not _MIN_MONTH <= month <= _MAX_MONTH:
+                msg = f"Invalid date {year}-{month:02d} at position {tok.pos}: month must be in {_MIN_MONTH}..{_MAX_MONTH}"
+                raise ParseError(msg)
+            return StringValueNode(f"{year}-{month:02d}")
         return StringValueNode(str(year))
 
     def parse_year_value(self) -> QueryNode:

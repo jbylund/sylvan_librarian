@@ -65,31 +65,45 @@ def test_exact_name_combined_with_other_conditions(parse_query, query: str) -> N
     argvalues=[
         (
             '!"Lightning Bolt"',
-            "(lower(card.card_name) LIKE %(p_str_bGlnaHRuaW5nIGJvbHQ)s)",
-            {"p_str_bGlnaHRuaW5nIGJvbHQ": "lightning bolt"},
+            "(lower(regexp_replace(card.card_name_folded, '[^[:alnum:]]', '', 'g')) LIKE %(p_str_bGlnaHRuaW5nYm9sdA)s)",
+            {"p_str_bGlnaHRuaW5nYm9sdA": "lightningbolt"},
         ),
         (
             "!bolt",
-            "(lower(card.card_name) LIKE %(p_str_Ym9sdA)s)",
+            "(lower(regexp_replace(card.card_name_folded, '[^[:alnum:]]', '', 'g')) LIKE %(p_str_Ym9sdA)s)",
             {"p_str_Ym9sdA": "bolt"},
         ),
         (
             '-!"Lightning Bolt"',
-            "NOT ((lower(card.card_name) LIKE %(p_str_bGlnaHRuaW5nIGJvbHQ)s))",
-            {"p_str_bGlnaHRuaW5nIGJvbHQ": "lightning bolt"},
+            "NOT ((lower(regexp_replace(card.card_name_folded, '[^[:alnum:]]', '', 'g')) LIKE %(p_str_bGlnaHRuaW5nYm9sdA)s))",
+            {"p_str_bGlnaHRuaW5nYm9sdA": "lightningbolt"},
         ),
-        # #649: exact name search stays accent-sensitive (compares against the
-        # unfolded card_name, not card_name_folded) so typing the accent is required.
-        # Both quoted and bare/unquoted accented spellings parse and produce the same SQL.
+        # Exact name search is COLLATED: diacritics folded and every non-alphanumeric character
+        # removed, on both sides. Measured on api.scryfall.com 2026-08-16, all four of
+        # !"Lim-Dûl's Vault", !"lim-dul's vault", !"limduls vault" and !"Lim-Dul's Vault" answer
+        # the same one card, and !"eowyn, lady of rohan" answers "Éowyn, Lady of Rohan" — so the
+        # accent-SENSITIVE reading #649 left here found nothing for anyone who typed the name off
+        # the card. Both quoted and bare accented spellings produce the same SQL, as before.
         (
             '!"Éowyn"',
-            "(lower(card.card_name) LIKE %(p_str_w6lvd3lu)s)",
-            {"p_str_w6lvd3lu": "éowyn"},
+            "(lower(regexp_replace(card.card_name_folded, '[^[:alnum:]]', '', 'g')) LIKE %(p_str_ZW93eW4)s)",
+            {"p_str_ZW93eW4": "eowyn"},
         ),
         (
             "!Éowyn",
-            "(lower(card.card_name) LIKE %(p_str_w6lvd3lu)s)",
-            {"p_str_w6lvd3lu": "éowyn"},
+            "(lower(regexp_replace(card.card_name_folded, '[^[:alnum:]]', '', 'g')) LIKE %(p_str_ZW93eW4)s)",
+            {"p_str_ZW93eW4": "eowyn"},
+        ),
+        # The punctuation a searcher skips no longer decides the answer.
+        (
+            '!"lim-dul\'s vault"',
+            "(lower(regexp_replace(card.card_name_folded, '[^[:alnum:]]', '', 'g')) LIKE %(p_str_bGltZHVsc3ZhdWx0)s)",
+            {"p_str_bGltZHVsc3ZhdWx0": "limdulsvault"},
+        ),
+        (
+            '!"limduls vault"',
+            "(lower(regexp_replace(card.card_name_folded, '[^[:alnum:]]', '', 'g')) LIKE %(p_str_bGltZHVsc3ZhdWx0)s)",
+            {"p_str_bGltZHVsc3ZhdWx0": "limdulsvault"},
         ),
     ],
 )

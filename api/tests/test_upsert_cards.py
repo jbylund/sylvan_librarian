@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 import multiprocessing
+import pathlib
 import uuid
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import psycopg
 import pytest
@@ -368,7 +369,7 @@ class TestRunImportUnderLockStreaming:
         with patch.object(AdminResource, "setup_schema"), patch.object(AdminResource, "import_data"):
             return APIResource(app_context=app_context)
 
-    def test_calls_stream_data_for_key(self) -> None:
+    def test_streams_default_cards_for_the_canonical_set_then_all_cards(self) -> None:
         api = self._make_api()
         with (
             patch.object(api.admin, "_import_recent", return_value=False),
@@ -380,18 +381,23 @@ class TestRunImportUnderLockStreaming:
             ),
             patch.object(api.admin._bulk_data_fetcher, "stream_data_for_key") as mock_stream,
         ):
-            mock_stream.return_value = iter([])
+            mock_stream.side_effect = lambda _key: iter([])
             api.admin._run_import_under_lock()
-        mock_stream.assert_called_once_with(BulkDataKey.DEFAULT_CARDS)
+        # default_cards is streamed only to collect the canonical id set; all_cards is the feed.
+        assert mock_stream.call_args_list == [call(BulkDataKey.DEFAULT_CARDS), call(BulkDataKey.ALL_CARDS)]
 
-    def test_stream_iterator_passed_directly_to_upsert_cards(self) -> None:
-        """The exact iterator returned by stream_data_for_key is forwarded to _upsert_cards."""
+    def test_all_cards_iterator_passed_directly_to_upsert_cards(self) -> None:
+        """The ALL_CARDS iterator is forwarded as-is, the DEFAULT_CARDS ids as the canonical set."""
         api = self._make_api()
         sentinel = iter([{"id": "sentinel"}])
+        streams = {
+            BulkDataKey.DEFAULT_CARDS: iter([{"id": "canonical-id"}]),
+            BulkDataKey.ALL_CARDS: sentinel,
+        }
         with (
             patch.object(api.admin, "_import_recent", return_value=False),
             patch.object(api.admin, "setup_schema"),
-            patch.object(api.admin._bulk_data_fetcher, "stream_data_for_key", return_value=sentinel),
+            patch.object(api.admin._bulk_data_fetcher, "stream_data_for_key", side_effect=streams.__getitem__),
             patch.object(
                 api.admin,
                 "_upsert_cards",
@@ -399,8 +405,9 @@ class TestRunImportUnderLockStreaming:
             ) as mock_staging,
         ):
             api.admin._run_import_under_lock()
-        args, _ = mock_staging.call_args
+        args, kwargs = mock_staging.call_args
         assert args[0] is sentinel
+        assert kwargs["canonical_ids"] == {"canonical-id"}
 
 
 # ---------------------------------------------------------------------------
@@ -482,3 +489,70 @@ class TestUpsertBehavior:
             row = cursor.fetchone()
         assert row["prefer_score"] == 42.0
         assert row["card_is_tags"] == {"is:instant": True}
+
+
+# ---------------------------------------------------------------------------
+# illustration_ids: the column the art-tag join reads
+# ---------------------------------------------------------------------------
+
+
+def _dfc_raw_card(front: str, back: str) -> dict:
+    card = make_raw_card(name=f"Illustration Front {uuid.uuid4()} // Illustration Back")
+    card["layout"] = "transform"
+    card["card_faces"] = [
+        {"name": "Illustration Front", "type_line": "Creature — Human", "illustration_id": front},
+        {"name": "Illustration Back", "type_line": "Creature — Insect", "illustration_id": back},
+    ]
+    return card
+
+
+class TestIllustrationIds:
+    """`illustration_ids` is every illustration the row shows, and it must survive an import.
+
+    It is what `card_art_tags` is joined on (api/tag_import.py), so a row that loses it stops
+    answering art-tag queries entirely -- and a merged double-faced row is the only place the
+    back's illustration exists at all, `illustration_id` being the front's.
+    """
+
+    FRONT = "cccccccc-0000-4000-8000-000000000001"
+    BACK = "cccccccc-0000-4000-8000-000000000002"
+
+    @staticmethod
+    def _stored(api_resource: APIResource, scryfall_id: str) -> list[str]:
+        with api_resource.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+            cursor.execute("SELECT illustration_ids FROM magic.cards WHERE scryfall_id = %s", (scryfall_id,))
+            return cursor.fetchone()["illustration_ids"]
+
+    def test_a_merged_row_stores_both_faces(self, api_resource: APIResource) -> None:
+        card = _dfc_raw_card(self.FRONT, self.BACK)
+        api_resource.admin._upsert_cards([card])
+        assert self._stored(api_resource, card["id"]) == [self.FRONT, self.BACK]
+
+    def test_a_single_faced_row_stores_its_one(self, api_resource: APIResource) -> None:
+        card = make_raw_card()
+        card["illustration_id"] = "cccccccc-0000-4000-8000-000000000003"
+        api_resource.admin._upsert_cards([card])
+        assert self._stored(api_resource, card["id"]) == ["cccccccc-0000-4000-8000-000000000003"]
+
+    def test_the_migration_backfill_agrees_with_preprocessing(self, api_resource: APIResource) -> None:
+        """The one-shot backfill must land where the next import would, or art tags go dark until it.
+
+        It reads `raw_card_blob->'card_faces'`, which is the only record of the back's illustration
+        on an already-imported row. Runs the migration's last statement -- the backfill -- against
+        rows written by the real import path.
+        """
+        dfc = _dfc_raw_card(self.FRONT, self.BACK)
+        solo = make_raw_card()
+        solo["illustration_id"] = "cccccccc-0000-4000-8000-000000000004"
+        api_resource.admin._upsert_cards([dfc, solo])
+
+        migration = (pathlib.Path(__file__).parent.parent / "db" / "2026-08-16-01-illustration-ids.sql").read_text()
+        backfill = migration[migration.index("WITH shown") :]
+
+        with api_resource.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+            cursor.execute("UPDATE magic.cards SET illustration_ids = '[]'::jsonb")
+            cursor.execute(backfill)
+            conn.commit()
+
+        assert self._stored(api_resource, dfc["id"]) == [self.FRONT, self.BACK]
+        assert self._stored(api_resource, solo["id"]) == ["cccccccc-0000-4000-8000-000000000004"]

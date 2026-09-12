@@ -68,10 +68,10 @@ RARITY_TO_NUMBER = {
     "u": 1,
     "rare": 2,
     "r": 2,
-    "mythic": 3,
-    "m": 3,
-    "special": 4,
-    "s": 4,
+    "special": 3,
+    "s": 3,
+    "mythic": 4,
+    "m": 4,
     "bonus": 5,
     "b": 5,
 }
@@ -472,6 +472,21 @@ def fold_accents(value: str) -> str:
     return "".join(c for c in decomposed if not unicodedata.combining(c))
 
 
+def collate_name(value: str) -> str:
+    """Strip every non-alphanumeric character, so separators stop deciding a name match.
+
+    The SEPARATOR half of the fold a bare ``name:`` word gets (fold_accents() is the other half).
+    Scryfall compares a bare name word with diacritics folded and separators gone, which is what
+    lets ``ft`` find "Sword **of the** Ages" (1,628 results against ``name:"ft"``'s 362) and
+    ``limdul`` find "Lim-Dul's Vault". ``!"..."`` is compared the same way, which is why
+    ``!"limduls vault"`` and ``!"Lim-Dul's Vault"`` both find the card that only the fully
+    accented, fully punctuated spelling used to.
+
+    The engine's ``collate_name`` (card_engine/src/lib.rs) is the twin that folds the STORED side.
+    """
+    return "".join(c for c in value if c.isalnum())
+
+
 class ExactNameNode(QueryNode):
     """Represents an exact card name search using the ! prefix syntax from Scryfall.
 
@@ -483,18 +498,30 @@ class ExactNameNode(QueryNode):
         self.value = value
 
     def kwargs(self) -> dict:
-        """Return this node's kwargs dict for Rust engine JSON serialization."""
-        return {"value": self.value.lower()}
+        """Return this node's kwargs dict for Rust engine JSON serialization.
+
+        COLLATED -- lowercased, diacritics folded, every non-alphanumeric character removed --
+        because that is the name Scryfall compares ``!`` against. Measured on api.scryfall.com
+        2026-08-16, all four of ``!"Lim-Dul's Vault"`` (with and without the circumflex),
+        ``!"lim-dul's vault"`` and ``!"limduls vault"`` answer the same single card, and
+        ``!"eowyn, lady of rohan"`` answers "Eowyn, Lady of Rohan". Comparing the literal lowercase
+        name -- what this emitted before -- answered only the first of those, so typing a card's
+        name without its accent or its punctuation found nothing.
+        """
+        return {"value": collate_name(fold_accents(self.value.lower()))}
 
     def to_sql(self, context: QueryContext) -> str:
         """Generate SQL for exact name matching (case-insensitive, no wildcards).
 
-        LIKE special characters (backslash, %, _) are escaped so the value is matched
-        literally rather than as a pattern.
+        COLLATED on both sides, matching kwargs() and the engine: Scryfall answers ``!"limduls
+        vault"`` with the same card as ``!"Lim-Dul's Vault"``. There is no stored column for the
+        collated name, so the fold is expressed inline; see the card_name: branch of
+        CardBinaryOperatorNode.to_sql for the indexing note. LIKE special characters (backslash,
+        %, _) are escaped so the value is matched literally rather than as a pattern.
         """
-        escaped = _escape_like_pattern(self.value.lower())
+        escaped = _escape_like_pattern(collate_name(fold_accents(self.value.lower())))
         placeholder = context.add(escaped)
-        return f"(lower(card.card_name) LIKE {placeholder})"
+        return f"(lower(regexp_replace(card.card_name_folded, '[^[:alnum:]]', '', 'g')) LIKE {placeholder})"
 
     def __repr__(self) -> str:
         """Return a string representation of the ExactNameNode."""
@@ -513,6 +540,39 @@ class ExactNameNode(QueryNode):
     def to_human_explanation(self) -> str:
         """Return a human-readable explanation for an exact name search."""
         return f'exact name is "{self.value}"'
+
+
+# `_date_window`'s three shapes, named because ruff refuses the bare literals.
+_YEAR_DIGITS = 4
+_YEAR_MONTH_PARTS = 2
+_DECEMBER = 12
+
+
+def _date_window(value: str) -> tuple[str, str] | None:
+    """The half-open [start, after_end) a PARTIAL date value covers, or None for a full date.
+
+    `2021` is the whole of 2021 and `2021-02` is the whole of February; a `YYYY-MM-DD` names one
+    day and needs no window. Half-open rather than inclusive so no month-length or leap-year table
+    is needed, and so the SQL matches the shape `_handle_year_search` already emits.
+
+    Args:
+        value: The date value as the parser produced it.
+
+    Returns:
+        `(start, after_end)` as ISO date strings, or None when the value is a full date.
+    """
+    parts = value.split("-")
+    if not all(part.isdigit() for part in parts):
+        return None
+    if len(parts) == 1 and len(parts[0]) == _YEAR_DIGITS:
+        year = int(parts[0])
+        return f"{year}-01-01", f"{year + 1}-01-01"
+    if len(parts) == _YEAR_MONTH_PARTS:
+        year, month = int(parts[0]), int(parts[1])
+        if month == _DECEMBER:
+            return f"{year}-12-01", f"{year + 1}-01-01"
+        return f"{year}-{month:02d}-01", f"{year}-{month + 1:02d}-01"
+    return None
 
 
 class CardBinaryOperatorNode(BinaryOperatorNode):
@@ -546,7 +606,7 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
 
         return {"lhs": self.lhs.to_json(), "op": self.operator, "rhs": self._rhs_to_json()}
 
-    def _rhs_to_json(self) -> object:  # noqa: PLR0912
+    def _rhs_to_json(self) -> object:  # noqa: PLR0911, PLR0912
         """Compute the JSON-serializable rhs for non-JSONB_ARRAY CardAttributeNode LHS."""
         if not self.lhs.field_infos:
             return _node_to_json(self.rhs)
@@ -579,11 +639,26 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
 
         if attr in ("card_name", "card_artist") and isinstance(self.rhs, StringValueNode):
             value = titlecase(self.rhs.value)
-            # Fold diacritics for fuzzy card_name: search so the Rust engine's
-            # TextContains matches the same way the SQL path does via card_name_folded
-            # (#649); exact/comparison ops keep the literal value, accent-sensitive.
-            if attr == "card_name" and self.operator == ":":
-                value = fold_accents(value)
+            # A BARE card_name: word is COLLATED -- diacritics folded (#649) AND every
+            # non-alphanumeric character removed -- because that is the string Scryfall matches a
+            # bare word against. A QUOTED value (and a plain-literal regex lowered to one) is
+            # matched literally instead, so it keeps neither fold; see StringValueNode. Measured on
+            # api.scryfall.com 2026-08-16: `name:ft` 1,628 against `name:"ft"` 362, `name:ofthe`
+            # 1,109 against `name:"ofthe"` 0, `name:limdul` 8 against `name:"limdul"` 0.
+            #
+            # `=` IS `:` HERE -- it is not a comparison on a string column, it carries no
+            # information of its own, and the bare/quoted split survives it INTACT. Measured on
+            # api.scryfall.com 2026-08-16: `name=ft` answers `name:ft`'s 1,628 (not `name:"ft"`'s
+            # 362), `name="ft"` answers `name:"ft"`'s 362, and `name=limdul` answers
+            # `name:limdul`'s 8. Gating on `:` alone sent `name=ft` down the literal path, where a
+            # whole-string equality then answered nothing at all. `!=` is NOT in this class -- it
+            # is the empty set on every string column.
+            # `a:` gets the SAME split, on the same kind of evidence (api.scryfall.com, 2026-08-16):
+            # `a:gawel` answers 10 exactly as `a:gaweł` does, `a:rebecca-guay` answers
+            # `a:"rebecca guay"`'s 166, and `a:gu*ay` answers `a:guay`'s 197. An artist could only be
+            # found under their own diacritics and punctuation before this.
+            if attr in ("card_name", "card_artist") and self.operator in (":", "=") and not self.rhs.literal:
+                return {"node_type": "CollatedNameValueNode", "kwargs": {"value": collate_name(fold_accents(value))}}
             return {"node_type": "StringValueNode", "kwargs": {"value": value}}
 
         return _node_to_json(self.rhs)
@@ -772,7 +847,18 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         if field_type == FieldType.JSONB_ARRAY:
             return self._handle_jsonb_array(context)
 
-        if self.operator == ":":
+        # `=` IS `:` ON A TEXT COLUMN -- a substring test, not an equality. It is the one operator
+        # on these columns that carries no information of its own. Measured on api.scryfall.com
+        # 2026-08-16 over the whole default corpus, `X=v` against `X:v`: `o=flying` 4,574 =
+        # `o:flying` 4,574 (this answered the cards whose oracle text IS the word), `ft=aether` 80
+        # = `ft:aether` 80, `name=ft` 1,628 = `name:ft` 1,628, `fo=lifelink` 713 = `fo:lifelink`
+        # 713. The columns stored exact rather than searched -- set code, layout, border,
+        # watermark, collector number -- are claimed inside `_handle_colon_operator` and keep a
+        # genuine equality, because equality IS the meaning there; routing `=` through the same
+        # door reaches them by the path that also lowercases the value, which `e=KHM` needed.
+        #
+        # `!=` and the ordered comparisons are NOT in this class and still fall through below.
+        if self.operator in (":", "="):
             return self._handle_colon_operator(context, field_type, lhs_sql, attr)
 
         if field_type == FieldType.TEXT:
@@ -811,7 +897,7 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         return super().to_sql(context)
 
     def _handle_colon_operator(self, context: QueryContext, field_type: str, lhs_sql: str, attr: str) -> str:
-        """Handle colon operator for different field types."""
+        """Handle the containment operators -- `:` and its synonym `=` -- for different field types."""
         if field_type == FieldType.TEXT:
             # Handle fields that need exact matching instead of pattern matching
             if attr in ("card_set_code", "card_layout", "card_border", "card_watermark", "collector_number"):
@@ -856,34 +942,55 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         mana_jsonb_sql = "card.mana_cost_jsonb"
         cmc_sql = "card.cmc"
 
+        # NO PRINTED COST IS NOT A COST OF ZERO, and this lane could not tell them apart either.
+        # A land and Ornithopter both store `mana_cost_jsonb = '{}'`, because `{0}` is a number and
+        # so is not a pip; the difference survives only in `mana_cost_text`, which is '' on the
+        # land and '{0}' on Ornithopter (card_processing copies Scryfall's `mana_cost` straight
+        # across, and Scryfall emits both). Without this clause `m:{0}` is `'{}' <@ mana_cost_jsonb
+        # AND cmc >= 0`, which is every card in the table.
+        #
+        # Measured on api.scryfall.com 2026-08-17 at unique=prints: `m:{0} t:land` is 195 — the
+        # cards that print a literal {0} — against the whole land corpus, and `m:{0}` is 93,355
+        # against 105,839. The engine lane gates the same way, on the interned string.
+        #
+        # `<> ''` also excludes NULL, which is what a row with no `mana_cost` key at all stores:
+        # `NULL <> ''` is NULL, and a NULL conjunct is not TRUE, so both spellings of "no cost"
+        # fall out together and neither needs its own branch.
+        #
+        # `!=` IS THE EXCEPTION on the engine lane — an absent cost differs from every queried
+        # cost, so `m!={w} t:land` is 12,249 there — but `!=` never reaches this method: the
+        # caller admits only `<= < >= > =` and asserts on anything else. There is nothing to carry
+        # until this lane grows a `!=`.
+        costed = "card.mana_cost_text <> ''"
+
         if self.operator == "=":
-            return f"({mana_jsonb_sql} = {mana} AND {cmc_sql} = {cmc})"
+            return f"({costed} AND {mana_jsonb_sql} = {mana} AND {cmc_sql} = {cmc})"
 
         if self.operator == "<=":
             # Card costs <= query if:
             # 1. Card doesn't have more colored pips (card mana <@ query mana)
             # 2. Card doesn't cost more total (card cmc <= query cmc)
-            return f"({mana_jsonb_sql} <@ {mana} AND {cmc_sql} <= {cmc})"
+            return f"({costed} AND {mana_jsonb_sql} <@ {mana} AND {cmc_sql} <= {cmc})"
 
         if self.operator == "<":
             # Card costs < query if:
             # 1. Card doesn't have more colored pips (card mana <@ query mana)
             # 2. Card doesn't cost more total (card cmc <= query cmc)
             # 3. Costs are not identical
-            return f"({mana_jsonb_sql} <@ {mana} AND {cmc_sql} <= {cmc} AND {mana_jsonb_sql} <> {mana})"
+            return f"({costed} AND {mana_jsonb_sql} <@ {mana} AND {cmc_sql} <= {cmc} AND {mana_jsonb_sql} <> {mana})"
 
         if self.operator == ">=":
             # Card costs >= query if:
             # 1. Card has at least the colored pips (card mana @> query mana)
             # 2. Card costs at least as much total (card cmc >= query cmc)
-            return f"({mana} <@ {mana_jsonb_sql} AND {cmc_sql} >= {cmc})"
+            return f"({costed} AND {mana} <@ {mana_jsonb_sql} AND {cmc_sql} >= {cmc})"
 
         if self.operator == ">":
             # Card costs > query if:
             # 1. Card has at least the colored pips (card mana @> query mana)
             # 2. Card costs at least as much total (card cmc >= query cmc)
             # 3. Costs are not identical
-            return f"({mana} <@ {mana_jsonb_sql} AND {cmc_sql} >= {cmc} AND {mana_jsonb_sql} <> {mana})"
+            return f"({costed} AND {mana} <@ {mana_jsonb_sql} AND {cmc_sql} >= {cmc} AND {mana_jsonb_sql} <> {mana})"
 
         msg = f"Unsupported mana cost operator: {self.operator}"
         raise ValueError(msg)
@@ -891,8 +998,24 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
     def _handle_date_search(self, context: QueryContext) -> str:
         """Handle date search queries.
 
-        For 'date:' searches, compares against the full released_at date.
-        Accepts either YYYY or YYYY-MM-DD format.
+        A PARTIAL DATE IS A RANGE, NOT A POINT. `date:2021` means "released in 2021", so each
+        operator reads off the end of that window it needs; comparing one padded value answers a
+        different question for four of the six. Measured against api.scryfall.com 2026-08-16 over
+        the whole default corpus, `date:<year>` against `year:<year>` -- the same column under its
+        other spelling, whose handler below has had the window all along::
+
+                          Scryfall   a point comparison answers
+            date:2021        3,834   0 (released_at == 2021-01-01)
+            date=2021        3,834   0
+            date<2021       20,966   20,966 ok
+            date<=2021      22,888   20,966
+            date>2021       18,639   20,086
+            date>=2021      20,086   20,086 ok
+            date!=2021      32,774   33,599 (the whole corpus, nothing was ever equal)
+
+        Month precision is the same rule one level down: `date:2021-02` is 504 and equals
+        `date>=2021-02 date<2021-03`, and `date>=2021-02` is 20,085. A FULL date is its own window
+        and still compiles to the single comparison it always did.
 
         Args:
             context: SQL parameter context.
@@ -905,10 +1028,24 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         # Normalize : operator to =
         operator = "=" if self.operator == ":" else self.operator
 
-        # For date searches, compare against the full date
-        # The value should be in YYYY-MM-DD or YYYY format
-        placeholder = context.add(search_value)
-        return f"(card.released_at {operator} {placeholder})"
+        window = _date_window(str(search_value))
+        if window is None:
+            # A full date, or a spelling this handler does not model: one point, as before.
+            placeholder = context.add(search_value)
+            return f"(card.released_at {operator} {placeholder})"
+
+        start, after_end = window
+        if operator == "=":
+            return f"({context.add(start)} <= card.released_at AND card.released_at < {context.add(after_end)})"
+        if operator == "!=":
+            return f"(card.released_at < {context.add(start)} OR card.released_at >= {context.add(after_end)})"
+        if operator == ">":
+            return f"(card.released_at >= {context.add(after_end)})"
+        if operator == "<=":
+            return f"(card.released_at < {context.add(after_end)})"
+        # `<` and `>=` are the two the point comparison already got right: both read the START of
+        # the window, which is exactly what the unpadded value meant.
+        return f"(card.released_at {operator} {context.add(start)})"
 
     def _handle_year_search(self, context: QueryContext) -> str:
         """Handle year search queries.
@@ -984,13 +1121,30 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
             msg = f"Unknown type: {type(self.rhs)}, {locals()}"
             raise TypeError(msg)
 
-        # card_name fuzzy search is accent-folded so "eowyn" matches "Éowyn" (#649);
-        # card_name_folded is precomputed at import time from the same fold_accents().
-        # Exact-match paths (ExactNameNode, name=) deliberately keep using card_name/
-        # card_name_lower so typing the accent still finds only the accented spelling.
-        if attr == "card_name":
-            lhs_sql = "card.card_name_folded"
-            txt_val = fold_accents(txt_val)
+        # card_name: is TWO searches, and which one this is was decided by the quotes.
+        #
+        # A BARE word is compared against the name with diacritics folded (#649, card_name_folded,
+        # precomputed at import) AND every non-alphanumeric character removed -- the separator fold
+        # Scryfall applies, which is what makes `name:ft` answer 1,628 rather than `name:"ft"`'s
+        # 362 by reaching "Sword of the Ages" through the vanished space. There is no stored column
+        # for that string, so the fold is expressed inline; a deployment that wants it indexed
+        # wants a trigram index on the same expression (or a generated card_name_collated column),
+        # which is what the Rust engine stores.
+        #
+        # A QUOTED value is compared against the name AS WRITTEN: `name:"eowyn"` answers 0 on
+        # api.scryfall.com while `name:"eowyn"` with the accent answers 3.
+        #
+        # `name=` REACHES THIS, and the bare/quoted split survives it intact rather than being
+        # flattened to one side: `name=ft` is 1,628 on api.scryfall.com (exactly `name:ft`, NOT
+        # `name:"ft"`'s 362) and `name="ft"` is 362 (exactly `name:"ft"`), measured 2026-08-16. The
+        # split is carried by `self.rhs.literal`, which the quotes set and the operator does not
+        # touch, so routing `=` here preserves it for free. `name!=` is not in this class and
+        # still takes the exact-match path on card_name.
+        if attr == "card_name" and isinstance(self.rhs, StringValueNode) and self.rhs.literal:
+            lhs_sql = "card.card_name"
+        elif attr == "card_name":
+            lhs_sql = "regexp_replace(card.card_name_folded, '[^[:alnum:]]', '', 'g')"
+            txt_val = collate_name(fold_accents(txt_val))
 
         words = ["", *(_escape_like_pattern(w) for w in txt_val.lower().split()), ""]
         pattern = "%".join(words)
@@ -1022,6 +1176,22 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         # Produce the query as a jsonb object
         lhs_sql = self.lhs.to_sql(context)
         attr = self.lhs.attribute_name
+        # `=` IS `:` ON A COLLECTION COLUMN -- set EQUALITY is not a meaning Scryfall gives it, and
+        # a card whose keyword list is exactly ["Flying"] is not what anyone asking `kw=flying`
+        # wants. Measured on api.scryfall.com 2026-08-16, `X=v` against `X:v` on the same corpus,
+        # identical on every row::
+        #
+        #     kw=flying e:khm             28 = kw:flying 28
+        #     otag=ramp e:khm             35 = otag:ramp 35
+        #     is=foil e:khm t:creature   129 = is:foil 129
+        #     f=modern e:khm             304 = f:modern 304
+        #
+        # The boundary is real and lies elsewhere: the COLOR columns in this same handler keep a
+        # genuine equality, because equality is the meaning there -- `c=rg e:khm t:creature` is 1
+        # against `c:rg`'s 2, and `id=rg` is 1 against `id:rg`'s 52. So does `devotion`, whose `=`
+        # is a count comparison rather than a set one (`devotion={r} e:khm t:creature` is 20
+        # against `devotion:{r}`'s 27). Probed in both directions before this changed.
+        is_containment_collection = attr not in ("card_colors", "card_color_identity", "produced_mana", "devotion")
         is_color_identity = False
         if attr in ("card_colors", "card_color_identity", "produced_mana"):
             rhs = get_colors_comparison_object(self.rhs.value.strip().lower(), attr)
@@ -1073,9 +1243,9 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
             msg = f"Unknown attribute: {attr}"
             raise ValueError(msg)
 
-        if self.operator == "=":
+        if self.operator == "=" and not is_containment_collection:
             return f"({lhs_sql} = {placeholder})"
-        if self.operator in (">=", ":"):
+        if self.operator in (">=", ":", "="):
             return f"({lhs_sql} @> {placeholder})"
         if self.operator == "<=":
             return f"({lhs_sql} <@ {placeholder})"
@@ -1099,17 +1269,19 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         col = self.lhs.to_sql(context)
 
         query = context.add([rhs_val])
-        if self.operator == "=":
-            return f"({col} <@ {query}) AND ({query} <@ {col})"
-        if self.operator in (">=", ":"):
+        # `=` IS `:` HERE TOO, for the same reason and on the same evidence: `t=creature e:khm` is
+        # 151 and `t:creature e:khm` is 151, `t=legendary e:khm` is 42 and `t:legendary e:khm` is
+        # 42 (api.scryfall.com, 2026-08-16). A set equality answered only the cards whose whole
+        # type list is the one word, which is never what a type query means.
+        if self.operator in (">=", ":", "="):
             return f"({query} <@ {col})"
         if self.operator == "<=":
             return f"({col} <@ {query})"
         if self.operator == ">":
             return f"({query} <@ {col}) AND NOT({col} <@ {query})"
-        # < and != use the same order-insensitive set semantics as = above
-        # (containment both ways), not jsonb literal equality, which is
-        # order-sensitive for arrays.
+        # < and != express set equality as containment BOTH WAYS, not as jsonb literal equality,
+        # which is order-sensitive for arrays. `=` used to be spelled this way as well and is now
+        # the containment above; these two are the only readers of the two-way form left.
         if self.operator == "<":
             return f"({col} <@ {query}) AND NOT({query} <@ {col})"
         if self.operator in ("!=", "<>"):
