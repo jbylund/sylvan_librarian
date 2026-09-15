@@ -1275,6 +1275,9 @@ class CardSearch {
       this.statusMessage.innerHTML = `<div class="error-message">${this.escapeHtml(message)}</div>`;
     }
     this.clearResultsContainer();
+    // The grid is empty now, so no URL's results are showing: without this, reverting the query to
+    // the last successful one is skipped as "already displayed" and the error banner never clears.
+    this.lastCompletedUrl = null;
   }
 
   clearResultsContainer() {
