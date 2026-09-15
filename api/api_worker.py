@@ -24,6 +24,12 @@ logger = logging.getLogger(__name__)
 
 ALL_INTERFACES = "0.0.0.0"  # noqa: S104
 
+# How long a cross-worker response-cache entry lives, in seconds. The cache key carries the cache
+# generation, so an import already makes every earlier entry unreachable; the TTL is what bounds how
+# long those unreachable entries occupy the arena, and how long anything the generation does not
+# track (a corrected static file under a running process, say) keeps being served from cache.
+SHARED_CACHE_TTL_SECONDS = 300.0
+
 
 def json_error_serializer(request: falcon.Request, response: falcon.Response, exception: falcon.HTTPError) -> None:
     """An error serializer that formats Falcon HTTP errors as JSON responses.
@@ -114,12 +120,22 @@ class ApiWorker(multiprocessing.Process):
         )
         from api.settings import settings
 
+        if cache_generation is None:
+            # One counter for the middleware and the AppContext below: the response cache keys on
+            # it, and every write to magic.cards bumps it, so the two must be the same object.
+            cache_generation = multiprocessing.Value("i", 0, lock=True)
+
         shared_cache = None
         if settings.enable_cache:
             try:
                 from shared_cache import SharedCache
 
-                shared_cache = SharedCache(path=settings.shared_cache_path, maxsize=10_000, n_pages=3)
+                shared_cache = SharedCache(
+                    path=settings.shared_cache_path,
+                    maxsize=10_000,
+                    n_pages=3,
+                    default_ttl=SHARED_CACHE_TTL_SECONDS,
+                )
                 logger.info("SharedCache opened at %s pid=%d", settings.shared_cache_path, os.getpid())
             except (ImportError, OSError, TypeError):
                 logger.warning("SharedCache unavailable, falling back to per-process LRUCache", exc_info=True)
@@ -130,7 +146,7 @@ class ApiWorker(multiprocessing.Process):
                 AdminAuthMiddleware(),  # ahead of caching: a rejected admin request must never hit the cache
                 SearchBudgetMiddleware(),  # ahead of logging/caching: skip parser/handler on over-budget /search
                 QueryLogMiddleware(),  # process_response fires before TimingMiddleware's
-                CachingMiddleware(cache=shared_cache),
+                CachingMiddleware(cache=shared_cache, cache_generation=cache_generation),
                 CompressionMiddleware(),
                 SecurityHeadersMiddleware(),  # Add security headers to all responses
                 CORSMiddleware(),  # Handle CORS requests
