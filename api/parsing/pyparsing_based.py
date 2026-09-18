@@ -29,6 +29,7 @@ from api.parsing.db_info import (
     PARSER_CLASS_TO_FIELD_INFOS,
     ParserClass,
 )
+from api.parsing.hand_parser import fold_typographic_quotes
 from api.parsing.mana_symbols import first_invalid_mana_symbol
 from api.parsing.nodes import (
     AndNode,
@@ -580,6 +581,9 @@ def parse_str_to_query(query: str | None) -> Query:
     if query is None or not query.strip():
         return Query(TrueNode())
 
+    # The same pre-lex fold `parse_query` applies, for the same reason and in the same position:
+    # the two parsers must agree about which characters are quotes (test_parser_parity).
+    query = fold_typographic_quotes(query)
     query = preprocess_implicit_and(query)
     expr = get_parse_expr()
 

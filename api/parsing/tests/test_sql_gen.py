@@ -658,13 +658,18 @@ def test_art_tag_sql_translation(parse_query, input_query: str, expected_sql: st
             r"(card.card_is_tags @> %(p_dict_eydtb2RhbC1kZmMnOiBUcnVlfQ)s)",
             {"p_dict_eydtb2RhbC1kZmMnOiBUcnVlfQ": {"modal-dfc": True}},
         ),
-        # Generic is: fallback for tags with no rewrite (is:spell is deferred, so still
-        # lowers to a raw card_is_tags lookup). Rewritten tags (is:permanent, is:party,
-        # the layout family, …) are covered by test_rewrite.py.
+        # The stored booleans (api_resource.BOOLEAN_IS_TAGS) lower to a raw card_is_tags lookup —
+        # they ARE the column, so there is nothing to rewrite them into. Derived tags
+        # (is:permanent, is:spell, is:party, the layout family, …) are covered by test_rewrite.py.
         (
-            "is:spell",
-            r"(card.card_is_tags @> %(p_dict_eydzcGVsbCc6IFRydWV9)s)",
-            {"p_dict_eydzcGVsbCc6IFRydWV9": {"spell": True}},
+            "is:reprint",
+            r"(card.card_is_tags @> %(p_dict_eydyZXByaW50JzogVHJ1ZX0)s)",
+            {"p_dict_eydyZXByaW50JzogVHJ1ZX0": {"reprint": True}},
+        ),
+        (
+            "is:foil",
+            r"(card.card_is_tags @> %(p_dict_eydmb2lsJzogVHJ1ZX0)s)",
+            {"p_dict_eydmb2lsJzogVHJ1ZX0": {"foil": True}},
         ),
     ],
 )

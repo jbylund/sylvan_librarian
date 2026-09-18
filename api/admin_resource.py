@@ -46,6 +46,10 @@ from cachebox import TTLCache
 
 from api.card_processing import preprocess_card
 from api.db.bulk_upsert import bulk_upsert as _bulk_upsert
+
+# BOOLEAN_IS_TAGS lives in db_info because the parser reads it too (rewrite.SUPPORTED_IS_VALUES)
+# and cannot import this module.
+from api.parsing.db_info import BOOLEAN_IS_TAGS
 from api.scryfall_bulk_data_fetcher import BulkDataKey, ScryfallBulkDataFetcher
 from api.settings import settings
 from api.tag_import import import_art_tags as _import_art_tags
@@ -92,69 +96,13 @@ _UPSERT_PAGE_SIZE = 3_000
 
 # BOOLEAN_IS_TAGS sync runs once per import over the whole corpus, evaluating every
 # managed expression per row. Chunk by scryfall_id hash so each statement stays within
-# the import's statement_timeout as the tag list grows.
+# the import's statement_timeout as the tag list grows. The tag table itself lives in
+# api.parsing.db_info (imported above) because the parser reads it too.
 _BOOLEAN_IS_TAGS_SYNC_CHUNK_COUNT = 4
 
-# is: values derivable from a single boolean SQL expression against a card's own row,
-# synced in chunked set-based statements after each import (see _sync_boolean_is_tags) -- no
-# per-tag API sweep, unlike CUSTOM_IS_TAGS below, and no accumulation in the import loop.
-# Each expression must reference the row alias `cards` -- adding a tag here is the whole
-# change. Most read
-# `cards.raw_card_blob`; hybrid/phyrexian read `cards.mana_cost_text` instead, per
-# docs/issues/done/00713-is-tag-recovery.md's own reasoning for putting them here rather
-# than in the query-rewrite table: the DSL only does exact-symbol containment, so a
-# rewrite would be a brittle ~15-term OR over an open, growing symbol set. Density-gated
-# at ~2% of the corpus (see docs/issues/00985): reserved (1.1%) and gamechanger (0.4%)
-# were the original two; the rest were added after a corpus-wide survey of every is: tag
-# on Scryfall's syntax page found these sitting at or under masterpiece's 1.8%.
-# foil/nonfoil/reprint/booster/hires/universesbeyond/promo/full/datestamped/prerelease
-# were excluded here too ("higher cardinality, memory check first") but are now included:
-# the Postgres row-growth cost is accepted, and #1003 made a dense value cost a bitmap
-# instead of a posting list on the engine side, so density no longer argues against them.
-BOOLEAN_IS_TAGS: dict[str, str] = {
-    # Alphabetized by key. Expressions read either a plain top-level boolean (reserved,
-    # gamechanger, spotlight), promo_types/keywords/finishes array membership, or a
-    # single-field lookup (set_type, preview.source).
-    "arena_league": "cards.raw_card_blob->'promo_types' @> '\"arenaleague\"'",
-    "booster": "cards.raw_card_blob->'booster' = 'true'::jsonb",
-    "buyabox": "cards.raw_card_blob->'promo_types' @> '\"buyabox\"'",
-    "convention": "cards.raw_card_blob->'promo_types' @> '\"convention\"'",
-    "datestamped": "cards.raw_card_blob->'promo_types' @> '\"datestamped\"'",
-    "etched": "cards.raw_card_blob->'finishes' @> '\"etched\"'",
-    "fnm": "cards.raw_card_blob->'promo_types' @> '\"fnm\"'",
-    "foil": "cards.raw_card_blob->'foil' = 'true'::jsonb",
-    "full": "cards.raw_card_blob->'full_art' = 'true'::jsonb",
-    "gamechanger": "cards.raw_card_blob->'game_changer' = 'true'::jsonb",
-    "gameday": "cards.raw_card_blob->'promo_types' @> '\"gameday\"'",
-    "giftbox": "cards.raw_card_blob->'promo_types' @> '\"giftbox\"'",
-    "glossy": "cards.raw_card_blob->'promo_types' @> '\"glossy\"'",
-    "hires": "cards.raw_card_blob->'highres_image' = 'true'::jsonb",
-    # Matches color/color, 2/color, colorless/color, and color/color/phyrexian.
-    "hybrid": r"cards.mana_cost_text ~ '\{[2CWUBRG]/[WUBRG]'",
-    "instore": "cards.raw_card_blob->'promo_types' @> '\"instore\"'",
-    "intro_pack": "cards.raw_card_blob->'promo_types' @> '\"intropack\"'",
-    "judge_gift": "cards.raw_card_blob->'promo_types' @> '\"judgegift\"'",
-    "league": "cards.raw_card_blob->'promo_types' @> '\"league\"'",
-    "masterpiece": "cards.raw_card_blob->>'set_type' = 'masterpiece'",
-    "media_insert": "cards.raw_card_blob->'promo_types' @> '\"mediainsert\"'",
-    "nonfoil": "cards.raw_card_blob->'nonfoil' = 'true'::jsonb",
-    # "Partner with <name>" cards carry a plain "Partner" keyword alongside it (verified
-    # against the corpus), so checking for "Partner" alone already covers both.
-    "partner": "cards.raw_card_blob->'keywords' @> '\"Partner\"'",
-    # Search for `/P}` in mana costs and oracle texts.
-    "phyrexian": r"(cards.mana_cost_text ~ '/P\}' OR cards.oracle_text ~ '/P\}')",
-    "planeswalker_deck": "cards.raw_card_blob->'promo_types' @> '\"planeswalkerdeck\"'",
-    "player_rewards": "cards.raw_card_blob->'promo_types' @> '\"playerrewards\"'",
-    "prerelease": "cards.raw_card_blob->'promo_types' @> '\"prerelease\"'",
-    "promo": "cards.raw_card_blob->'promo' = 'true'::jsonb",
-    "release": "cards.raw_card_blob->'promo_types' @> '\"release\"'",
-    "reprint": "cards.raw_card_blob->'reprint' = 'true'::jsonb",
-    "reserved": "cards.raw_card_blob->'reserved' = 'true'::jsonb",
-    "scryfallpreview": "cards.raw_card_blob->'preview'->>'source' = 'Scryfall'",
-    "set_promo": "cards.raw_card_blob->'promo_types' @> '\"setpromo\"'",
-    "spotlight": "cards.raw_card_blob->'story_spotlight' = 'true'::jsonb",
-    "universesbeyond": "cards.raw_card_blob->'promo_types' @> '\"universesbeyond\"'",
-}
+# Key/value pairs per jsonb_build_object call in the sync statement: Postgres's FUNC_MAX_ARGS is
+# 100 arguments, and every pair is two. See _build_boolean_is_tags_sql.
+_JSONB_BUILD_OBJECT_MAX_PAIRS = 50
 
 
 def _build_boolean_is_tags_sql(tags: dict[str, str]) -> str:
@@ -172,10 +120,19 @@ def _build_boolean_is_tags_sql(tags: dict[str, str]) -> str:
     Callers pass ``num_chunks`` and ``chunk_index`` as query parameters. Use
     ``num_chunks=1, chunk_index=0`` to scan the whole corpus; otherwise only cards whose
     ``hashtext(scryfall_id)`` falls in that slice are touched.
+
+    The object is built as several ``jsonb_build_object`` calls concatenated with ``||`` rather
+    than one: Postgres caps any function call at 100 arguments (FUNC_MAX_ARGS), which is 50
+    key/value pairs, and the table passed 50 when the 2026-09-03 enumeration of Scryfall's
+    ``promo_types`` vocabulary took it past 100 rows. As one call the statement failed every
+    import with "cannot pass more than 100 arguments to a function", so the cap is enforced here
+    rather than remembered.
     """
     managed = ", ".join(f"'{tag}'" for tag in tags)
-    object_entries = ",\n            ".join(
-        f"'{tag}', CASE WHEN ({expr}) THEN true END" for tag, expr in tags.items()
+    pairs = [f"'{tag}', CASE WHEN ({expr}) THEN true END" for tag, expr in tags.items()]
+    chunks = [pairs[i : i + _JSONB_BUILD_OBJECT_MAX_PAIRS] for i in range(0, max(len(pairs), 1), _JSONB_BUILD_OBJECT_MAX_PAIRS)]
+    built_objects = "\n                || ".join(
+        "jsonb_build_object(\n            " + ",\n            ".join(chunk) + "\n                )" for chunk in chunks
     )
     return f"""
 WITH proposed AS (
@@ -183,9 +140,7 @@ WITH proposed AS (
         cards.scryfall_id,
         (cards.card_is_tags - ARRAY[{managed}]::text[])
             || jsonb_strip_nulls(
-                jsonb_build_object(
-            {object_entries}
-                )
+                {built_objects}
             ) AS proposed_is_tags
     FROM magic.cards cards
     WHERE (abs(hashtext(cards.scryfall_id::text)) %% %(num_chunks)s) = %(chunk_index)s
@@ -197,6 +152,7 @@ WHERE
     cards.scryfall_id = proposed.scryfall_id AND
     cards.card_is_tags IS DISTINCT FROM proposed.proposed_is_tags
 """
+
 
 CUSTOM_IS_TAGS = [
     "historic",  # artifact, legendary, saga
@@ -797,7 +753,7 @@ class AdminResource:
         }
 
     def _sync_boolean_is_tags(self, conn: Connection) -> int:
-        """Sync the boolean-backed is: tags (BOOLEAN_IS_TAGS) from raw_card_blob.
+        """Sync the row-derived is: tags (BOOLEAN_IS_TAGS) from each card's own columns.
 
         Rebuilds each card's managed keys as (existing minus managed) plus the keys whose
         blob-derived expression is true, touching only rows whose result actually differs
@@ -830,7 +786,7 @@ class AdminResource:
                 updated_count += cursor.rowcount
                 conn.commit()
         if updated_count:
-            logger.info("Synced boolean is: tags on %d printings", updated_count)
+            logger.info("Synced blob-backed is: tags on %d printings", updated_count)
         return updated_count
 
     def _add_is_tag_to_printings(self, *, is_tag: str) -> dict[str, Any]:

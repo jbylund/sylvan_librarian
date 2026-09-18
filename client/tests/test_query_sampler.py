@@ -211,6 +211,10 @@ class TestParams:
 
         Same reason as the orderby list: the sampler cannot import `api/`, so the agreement is
         asserted here rather than derived.
+
+        The three `rewrite.ENGINE_IS_VALUES` are the exception and are deliberately OUTSIDE this
+        set: they expand to nothing and are answered by the engine off a field, so the equality
+        below is with the expansion table alone.
         """
         expandable = {f"is:{value}" for alias, value in _DERIVED_EXPANSIONS if alias == "is"}
         assert set(STATIC_VALUES["tag"]) == expandable

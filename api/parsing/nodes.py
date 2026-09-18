@@ -449,8 +449,15 @@ class Query(QueryNode):
     """Top-level query container node for the AST."""
 
     def __init__(self: Query, root: QueryNode) -> None:
-        """Initialize a Query with the root QueryNode."""
+        """Initialize a Query with the root QueryNode.
+
+        `warnings` holds the notes the rewrite passes want the API layer to surface — today, the
+        `is:` values this server has no data for, which would otherwise leave a caller looking at
+        zero results with nothing to distinguish "no such card" from "no such predicate".
+        `rewrite_query` populates it.
+        """
         self.root = root
+        self.warnings: tuple[str, ...] = ()
 
     def to_json(self) -> dict:
         """Delegate to the root node."""
