@@ -46,6 +46,7 @@ from cachebox import TTLCache
 
 from api.card_processing import preprocess_card
 from api.db.bulk_upsert import bulk_upsert as _bulk_upsert
+from api.parsing.db_info import GAME_IS_TAG_PREFIX
 from api.scryfall_bulk_data_fetcher import BulkDataKey, ScryfallBulkDataFetcher
 from api.settings import settings
 from api.tag_import import import_art_tags as _import_art_tags
@@ -124,6 +125,19 @@ BOOLEAN_IS_TAGS: dict[str, str] = {
     "fnm": "cards.raw_card_blob->'promo_types' @> '\"fnm\"'",
     "foil": "cards.raw_card_blob->'foil' = 'true'::jsonb",
     "full": "cards.raw_card_blob->'full_art' = 'true'::jsonb",
+    # `game:` membership off the printing's `games` array. Keys carry GAME_IS_TAG_PREFIX
+    # because `game:` and `is:` share this column: stored bare, `game:promo` would answer
+    # is:promo's 6,126 promos instead of matching nothing, which is what Scryfall does for
+    # an unknown game (it warns "Unknown game `promo`" and drops the term). All five values
+    # Scryfall accepts, measured on api.scryfall.com 2026-09-03: paper 32,729, mtgo 30,707,
+    # arena 16,070, and astral/sega (12 cards between them under include_extras) -- two old
+    # digital-only releases that are valid there, so they are valid here. Unrelated to
+    # `gamechanger` one line down, which reads the `game_changer` boolean.
+    f"{GAME_IS_TAG_PREFIX}arena": "cards.raw_card_blob->'games' @> '\"arena\"'",
+    f"{GAME_IS_TAG_PREFIX}astral": "cards.raw_card_blob->'games' @> '\"astral\"'",
+    f"{GAME_IS_TAG_PREFIX}mtgo": "cards.raw_card_blob->'games' @> '\"mtgo\"'",
+    f"{GAME_IS_TAG_PREFIX}paper": "cards.raw_card_blob->'games' @> '\"paper\"'",
+    f"{GAME_IS_TAG_PREFIX}sega": "cards.raw_card_blob->'games' @> '\"sega\"'",
     "gamechanger": "cards.raw_card_blob->'game_changer' = 'true'::jsonb",
     "gameday": "cards.raw_card_blob->'promo_types' @> '\"gameday\"'",
     "giftbox": "cards.raw_card_blob->'promo_types' @> '\"giftbox\"'",

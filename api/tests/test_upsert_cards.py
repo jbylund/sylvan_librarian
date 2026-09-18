@@ -253,6 +253,33 @@ class TestBooleanIsTags:
         api_resource.admin._upsert_cards([card])
         assert "scryfallpreview" not in _is_tags_for(api_resource, card["id"])
 
+    def test_games_array_lands_as_prefixed_is_tags(self, api_resource: APIResource) -> None:
+        """Each `games` entry becomes a game_<name> key.
+
+        Prefixed because game: and is: share the column: a bare `paper` key would let
+        `game:promo` answer is:promo.
+        """
+        card = make_raw_card(name="Paper And MTGO Import Test")
+        card["games"] = ["paper", "mtgo"]
+        api_resource.admin._upsert_cards([card])
+        tags = _is_tags_for(api_resource, card["id"])
+        assert tags.get("game_paper") is True
+        assert tags.get("game_mtgo") is True
+        assert "game_arena" not in tags
+        assert "paper" not in tags
+
+    def test_default_fixture_card_is_paper_only(self, api_resource: APIResource) -> None:
+        """make_raw_card sets `games: ["paper"]`, so every imported test card carries game_paper.
+
+        Only that game key, though -- the other four stay absent.
+        """
+        card = make_raw_card(name="Default Games Import Test")
+        api_resource.admin._upsert_cards([card])
+        tags = _is_tags_for(api_resource, card["id"])
+        assert tags.get("game_paper") is True
+        assert "game_mtgo" not in tags
+        assert "game_arena" not in tags
+
 
 # ---------------------------------------------------------------------------
 # _CardStream counting tests
@@ -481,4 +508,7 @@ class TestUpsertBehavior:
             cursor.execute("SELECT prefer_score, card_is_tags FROM magic.cards WHERE scryfall_id = %s", (card_id,))
             row = cursor.fetchone()
         assert row["prefer_score"] == 42.0
-        assert row["card_is_tags"] == {"is:instant": True}
+        # The hand-set key survives; game_paper rides in on every import because make_raw_card
+        # sets `games: ["paper"]` and BOOLEAN_IS_TAGS syncs the games array (managed keys are
+        # rebuilt, unmanaged ones kept).
+        assert row["card_is_tags"] == {"is:instant": True, "game_paper": True}

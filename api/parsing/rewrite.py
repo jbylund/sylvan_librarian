@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 import cachebox
 
 from api.parsing.card_query_nodes import CardAttributeNode
+from api.parsing.db_info import GAME_IS_TAG_PREFIX
 from api.parsing.hand_parser import parse_str_to_query as _parse_str_to_query
 from api.parsing.nodes import (
     AndNode,
@@ -273,6 +274,41 @@ def negate_not_prefix(query: Query) -> Query:
     return flatten_nested_operations(Query(root))
 
 
+def _prefix_game_leaves(node: QueryNode) -> None:
+    """Rewrite the rhs of every `game:value` leaf to `game_<value>`, in place.
+
+    Only the rhs changes; the lhs stays the `game` CardAttributeNode (its attribute_name is
+    already card_is_tags, so SQL and the engine read the right column, and the explanation
+    can still say "game"). In place rather than rebuilt, for the same reason as
+    `_lower_regex_leaves`: the leaf's concrete class survives. A RegexValueNode rhs becomes
+    the PLAIN string `game_<pattern>` -- `game:/^pap/` then names a tag no row carries and
+    matches nothing, where a live pattern could have matched `game_paper` and answered a
+    query Scryfall rejects.
+    """
+    if isinstance(node, (AndNode, OrNode)):
+        for op in node.operands:
+            _prefix_game_leaves(op)
+    elif isinstance(node, NotNode):
+        _prefix_game_leaves(node.operand)
+    elif isinstance(node, BinaryOperatorNode) and isinstance(node.lhs, CardAttributeNode) and node.lhs.original_attribute == "game":
+        value = getattr(node.rhs, "value", None)
+        if isinstance(value, str):
+            node.rhs = StringValueNode(GAME_IS_TAG_PREFIX + value.strip().lower())
+
+
+def prefix_game_values(query: Query) -> Query:
+    """Rewrite `game:paper` into a lookup of the prefixed `game_paper` is: tag.
+
+    `game:` is stored in card_is_tags (see api/admin_resource.py's BOOLEAN_IS_TAGS) under
+    GAME_IS_TAG_PREFIX, so an unknown game never aliases an unrelated is: tag: `game:promo`
+    looks up `game_promo`, which no row carries, and matches nothing -- Scryfall's behaviour
+    for a value outside its five (it warns "Unknown game `promo`" and drops the term) --
+    rather than returning is:promo's promos.
+    """
+    _prefix_game_leaves(query.root)
+    return query
+
+
 def _regex_plain_literal(pattern: str) -> str | None:
     r"""The exact substring an unanchored, metacharacter-free regex matches, else None.
 
@@ -414,17 +450,18 @@ def flatten_and_deduplicate_compounds(query: Query) -> Query:
 # The post-parse rewrite pipeline, applied in order at the shared parse seam. Add future AST
 # rewrites to this tuple — both parsers call `rewrite_query`, so a new pass lands in exactly one
 # place and is guaranteed identical treatment across parsers (enforced by test_parser_parity).
-_REWRITE_PASSES = (negate_not_prefix, expand_derived_predicates, lower_literal_regexes)
+_REWRITE_PASSES = (prefix_game_values, negate_not_prefix, expand_derived_predicates, lower_literal_regexes)
 
 
 def rewrite_query(query: Query) -> Query:
     """Apply every post-parse AST rewrite, in order. The single seam both parsers call.
 
-    Order is significant: `negate_not_prefix` runs first (a `not:`-spelled leaf becomes
-    `NotNode(is:...)`, so it reads as a plain `is:` leaf to everything after it), then
-    `expand_derived_predicates` (a synonym may expand into a subtree that itself contains a
-    regex or other rewritable leaf), then `lower_literal_regexes`, then any future pass
-    appended to `_REWRITE_PASSES`.
+    Order is significant: `prefix_game_values` runs first (it touches only `game:` leaves,
+    including a regex rhs that `lower_literal_regexes` must never see as a pattern), then
+    `negate_not_prefix` (a `not:`-spelled leaf becomes `NotNode(is:...)`, so it reads as a
+    plain `is:` leaf to everything after it), then `expand_derived_predicates` (a synonym may
+    expand into a subtree that itself contains a regex or other rewritable leaf), then
+    `lower_literal_regexes`, then any future pass appended to `_REWRITE_PASSES`.
 
     ``flatten_and_deduplicate_compounds`` runs later in ``post_parse.finalize_query`` — after
     regex-budget validation — so duplicate identical regex leaves still count toward the public
