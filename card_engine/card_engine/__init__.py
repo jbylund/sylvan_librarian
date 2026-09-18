@@ -84,4 +84,5 @@ ENGINE_COLUMNS: list[str] = [
     "type_line",
     "prefer_score",
     "cubecobra_score",
+    "scryfall_prefer_score",
 ]
