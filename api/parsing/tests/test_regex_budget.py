@@ -81,6 +81,63 @@ class TestRegexPatternLimits:
         parse_scryfall_query(r"o:/\(\?=not a lookaround/")
 
 
+class TestAreWordBoundaryEscapes:
+    """`o:/.../` is PostgreSQL ARE, whose word boundaries Python's `re` cannot parse.
+
+    The budget measures patterns with `re._parser`, so without the same rewrite the
+    engine applies (`card_engine/src/regex_compat.rs`) every one of these would be
+    rejected at parse time as a malformed pattern -- a documented operator turned
+    into a user-visible error by its own security check.
+    """
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            r"o:/\yizzet\y/",
+            r"o:/\Ynot a boundary/",
+            r"name:/\mizzet\M/",
+            r"o:/lifelink\Z/",
+        ],
+    )
+    def test_accepts_are_escapes(self, query: str) -> None:
+        parse_scryfall_query(query)
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            r"o:/[\d]\yizzet\y/",
+            # `]` in the first position is a literal member (POSIX), so it does not
+            # close the class -- the `\y` after the real `]` is the one to rewrite.
+            r"o:/[]a]\yx/",
+            r"o:/[^]a]\mx/",
+        ],
+    )
+    def test_rewrite_reads_bracket_expressions(self, query: str) -> None:
+        # Inside `[...]` an escape is an ordinary member, not a constraint, so the
+        # rewrite must skip the class and resume after it. Verified against the
+        # engine's copy: both spell these the same way.
+        parse_scryfall_query(query)
+
+    def test_a_word_boundary_escape_inside_a_class_stays_malformed(self) -> None:
+        # `[\y]` is not a bracket expression either engine accepts -- the rewrite
+        # passes it through rather than inventing a meaning, and it fails here
+        # exactly as `CompiledRegex::new` fails on it.
+        with pytest.raises(InvalidRegexPatternError):
+            parse_scryfall_query(r"o:/[\y]lit/")
+
+    def test_word_start_escapes_spend_lookaround_budget(self) -> None:
+        # `\m`/`\M` have no linear spelling: they become lookaround on the engine,
+        # which is exactly what the lookaround cap is there to bound. Three of them
+        # is six lookarounds, past MAX_LOOKAROUNDS_PER_PATTERN.
+        with pytest.raises(QueryBudgetExceeded) as exc_info:
+            parse_scryfall_query(r"o:/\ma\mb\mc/")
+        assert exc_info.value.kind == "regex_pattern"
+
+    def test_still_rejects_a_genuinely_bad_escape(self) -> None:
+        with pytest.raises(InvalidRegexPatternError):
+            parse_scryfall_query(r"o:/\q/")
+
+
 class TestRegexOperatorCoverage:
     @pytest.mark.parametrize(
         "query",
