@@ -1,7 +1,7 @@
 """Tests for tag import module."""
 
 from api.api_resource import APIResource
-from api.tag_import import _build_all_ancestors, _build_uuid_to_slug
+from api.tag_import import _build_all_ancestors, _build_slug_to_aliases, _build_tag_keys, _build_uuid_to_slug
 
 
 class TestBuildAllAncestors:
@@ -56,6 +56,61 @@ class TestBuildUuidToSlug:
 
     def test_empty_list(self) -> None:
         assert _build_uuid_to_slug([]) == {}
+
+
+class TestBuildSlugToAliases:
+    def test_aliases_are_slugified(self) -> None:
+        # The real shape: `loose-lips` carries a spaced alias Scryfall resolves for art:"open mouth".
+        tags = [{"id": "u1", "slug": "loose-lips", "aliases": ["open mouth", "mouth open"]}]
+        assert _build_slug_to_aliases(tags) == {"loose-lips": frozenset({"open-mouth", "mouth-open"})}
+
+    def test_tags_without_aliases_are_absent(self) -> None:
+        tags = [{"id": "u1", "slug": "fire"}, {"id": "u2", "slug": "flying", "aliases": []}]
+        assert _build_slug_to_aliases(tags) == {}
+
+    def test_alias_colliding_with_a_slug_is_dropped(self) -> None:
+        # An alias that is also a real tag's slug would silently merge two tags; the slug wins.
+        tags = [
+            {"id": "u1", "slug": "fire", "aliases": ["flying"]},
+            {"id": "u2", "slug": "flying", "aliases": []},
+        ]
+        assert _build_slug_to_aliases(tags) == {}
+
+    def test_alias_claimed_by_two_tags_is_dropped(self) -> None:
+        tags = [
+            {"id": "u1", "slug": "fire", "aliases": ["open flame"]},
+            {"id": "u2", "slug": "campfire", "aliases": ["open-flame"]},
+        ]
+        assert _build_slug_to_aliases(tags) == {}
+
+    def test_alias_repeated_by_one_tag_is_kept(self) -> None:
+        # Two spellings of one alias collapse to the same slug -- not a conflict.
+        tags = [{"id": "u1", "slug": "loose-lips", "aliases": ["open mouth", "Open Mouth"]}]
+        assert _build_slug_to_aliases(tags) == {"loose-lips": frozenset({"open-mouth"})}
+
+
+class TestBuildTagKeys:
+    def test_slug_ancestors_and_their_aliases(self) -> None:
+        # `flames` is an alias of `fire`, which has `campfire` under it. Scryfall resolves the
+        # alias before expanding the hierarchy, so art:flames must reach the descendant too.
+        tags = [
+            {"id": "u1", "slug": "fire", "parent_ids": [], "aliases": ["flames"]},
+            {"id": "u2", "slug": "campfire", "parent_ids": ["u1"], "aliases": ["camp fire"]},
+        ]
+        uuid_to_slug = {"u1": "fire", "u2": "campfire"}
+        result = _build_tag_keys(tags, uuid_to_slug)
+        assert result["fire"] == frozenset({"fire", "flames"})
+        assert result["campfire"] == frozenset({"campfire", "camp-fire", "fire", "flames"})
+
+    def test_no_aliases_is_slug_plus_ancestors(self) -> None:
+        tags = [
+            {"id": "u1", "slug": "permanent", "parent_ids": []},
+            {"id": "u2", "slug": "land-type", "parent_ids": ["u1"]},
+        ]
+        uuid_to_slug = {"u1": "permanent", "u2": "land-type"}
+        result = _build_tag_keys(tags, uuid_to_slug)
+        assert result["land-type"] == frozenset({"land-type", "permanent"})
+        assert result["permanent"] == frozenset({"permanent"})
 
 
 class TestAPIResourceEndpoints:
