@@ -89,9 +89,12 @@ pub(crate) const PLANE_RESTRICTED_ABSENT: usize = PLANE_RESTRICTED_EXISTS + MAX_
 /// range [0,12] — hundreds-to-thousands of cards per value — plus a shared
 /// "13+" high-tail bucket per field (all three have a genuine spread of rare
 /// high values, e.g. toughness up to 30) and a shared "<0" low-tail bucket
-/// for power/toughness only (`cmc: Option<u8>` is type-guaranteed
-/// non-negative, so it never needs one). Buckets are cumulative planes built
-/// with the exact same machinery as the interior values — "power<=0" is
+/// for power/toughness only (a mana value is never negative, so cmc never
+/// needs one). The interior is a lattice of INTEGER points, so a fractional
+/// value in ANY of the three goes to a bucket however small it is — see
+/// `set_numeric_plane`.
+/// Buckets are cumulative planes built with the exact same machinery as the
+/// interior values — "power<=0" is
 /// just another plane, no different from "power==5" — which is what lets a
 /// sparse tail (power has 2 cards at -1) get absorbed automatically instead
 /// of needing a side table or a live re-query. See
@@ -190,20 +193,27 @@ pub(crate) const RARITY_PRINTING_PLANE_INTS: [u8; RARITY_INTERIOR] = [0, 1, 2, 3
 /// bucket sentinel: no card has ever been observed there, so the bucket
 /// contributes nothing to any comparison, in either direction — see
 /// `bucket_verdict`.
+///
+/// f32, not i16: cmc is fractional (Scryfall types it Decimal — {HW} is 0.5), and a
+/// bucket's bounds have to be able to say so. Rounding a fractional observation to an
+/// integer would not merely be imprecise, it would be UNSOUND in one direction — a
+/// bucket holding only 16.5 whose max rounded down to 16 reports `cmc>16` FullyExcluded,
+/// dropping the very card that satisfies it. Widening the two fields costs 4 bytes per
+/// bucket across the five buckets in the whole store.
 #[derive(Archive, Serialize, Deserialize, Clone, Copy)]
 pub(crate) struct BucketBounds {
-    pub(crate) min: i16,
-    pub(crate) max: i16,
+    pub(crate) min: f32,
+    pub(crate) max: f32,
 }
 
 impl Default for BucketBounds {
     fn default() -> Self {
-        BucketBounds { min: i16::MAX, max: i16::MIN }
+        BucketBounds { min: f32::INFINITY, max: f32::NEG_INFINITY }
     }
 }
 
 impl BucketBounds {
-    fn observe(&mut self, v: i16) {
+    fn observe(&mut self, v: f32) {
         self.min = self.min.min(v);
         self.max = self.max.max(v);
     }
@@ -264,27 +274,48 @@ fn devotion_count(card: &OracleCard, lane: usize) -> u8 {
 }
 
 /// One card's cmc/power/toughness value against one field's plane layout:
-/// set the interior one-hot plane for values in [0,12], or a bucket plane
-/// (tracking its live [min,max]) for values outside it. `lo_bucket` is
-/// `None` for cmc (`Option<u8>` is type-guaranteed non-negative, so no card
-/// can ever land below the interior).
+/// set the interior one-hot plane for whole-number values in [0,12], or a
+/// bucket plane (tracking its live [min,max]) for anything else. `lo_bucket`
+/// is `None` for cmc: a mana value is a sum of per-symbol contributions that
+/// are each non-negative, so no card can land below the interior. (That used
+/// to be argued from `Option<u8>`; the type is `Option<f32>` now, and the
+/// reason it still holds is the domain, not the type.)
+///
+/// "Whole-number" is the added condition, and it is what keeps the interior
+/// sound now that a value can be fractional. The interior planes are a LATTICE
+/// of single integer points: there is a plane meaning "cmc == 0" and one
+/// meaning "cmc == 1", and none that can hold 0.5. Letting 0.5 fall into the
+/// `v <= NUM_INTERIOR_HI` arm would truncate it onto the "cmc == 0" plane and
+/// make `cmc=0` match Little Girl. Off-lattice values go to the hi bucket
+/// instead, which retains no per-card value at all — only [min,max] — so
+/// `bucket_verdict` resolves it exactly when the endpoints settle the question
+/// and declines otherwise. That widens the hi bucket's observed range down
+/// past the interior, which costs some plane-compiled queries their fast path
+/// (they fall back to `numeric_candidates`) but can never make one answer
+/// wrongly: `bucket_verdict` reasons only from the endpoints and monotonicity,
+/// which holds wherever in the number line the bucket's members sit.
+///
+/// Power and toughness reach this the same way cmc does, and a fraction there
+/// picks whichever bucket it is nearest: a NEGATIVE off-lattice value goes to
+/// the lo bucket by the first arm, which tracks its own [min,max] and so is
+/// sound for the same reason. Only the interior lattice is closed to them.
 fn set_numeric_plane(
     set: &mut impl FnMut(usize),
-    v: Option<i32>,
+    v: Option<f32>,
     interior_base: usize,
     lo_bucket: Option<(usize, &mut BucketBounds)>,
     hi_bucket: (usize, &mut BucketBounds),
 ) {
     let Some(v) = v else { return }; // missing value: no bit set anywhere, correctly excluded from any comparison
-    if v < NUM_INTERIOR_LO {
+    if v < NUM_INTERIOR_LO as f32 {
         let (plane, bounds) = lo_bucket.expect("value below the interior range with no low bucket configured");
-        bounds.observe(v as i16);
+        bounds.observe(v);
         set(plane);
-    } else if v <= NUM_INTERIOR_HI {
-        set(interior_base + (v - NUM_INTERIOR_LO) as usize);
+    } else if v <= NUM_INTERIOR_HI as f32 && v.fract() == 0.0 {
+        set(interior_base + (v as i32 - NUM_INTERIOR_LO) as usize);
     } else {
         let (plane, bounds) = hi_bucket;
-        bounds.observe(v as i16);
+        bounds.observe(v);
         set(plane);
     }
 }
@@ -429,20 +460,19 @@ pub(crate) fn build_bit_planes(cards: &[OracleCard], printings: &[Printing], off
                 }
             }
         }
-        // #655: cmc is Option<u8>, type-guaranteed non-negative, so it has no
-        // low bucket. Power/toughness are Option<i8> and do (Char-Rumbler and
-        // similar).
-        set_numeric_plane(&mut set, card.cmc.map(i32::from), PLANE_CMC, None, (PLANE_CMC_HI, &mut cmc_hi));
+        // #655: a mana value is never negative, so cmc has no low bucket.
+        // Power/toughness are signed and do (Char-Rumbler and similar).
+        set_numeric_plane(&mut set, card.cmc, PLANE_CMC, None, (PLANE_CMC_HI, &mut cmc_hi));
         set_numeric_plane(
             &mut set,
-            card.creature_power.map(i32::from),
+            card.creature_power,
             PLANE_POWER,
             Some((PLANE_POWER_LO, &mut power_lo)),
             (PLANE_POWER_HI, &mut power_hi),
         );
         set_numeric_plane(
             &mut set,
-            card.creature_toughness.map(i32::from),
+            card.creature_toughness,
             PLANE_TOUGHNESS,
             Some((PLANE_TOUGHNESS_LO, &mut toughness_lo)),
             (PLANE_TOUGHNESS_HI, &mut toughness_hi),
@@ -770,15 +800,17 @@ struct NumericLayout {
 }
 
 /// A bucket's live-observed range. `min > max` means empty (no card has ever
-/// landed there) — see `bucket_verdict`.
+/// landed there) — see `bucket_verdict`. f64 because the bounds it reads are
+/// f32 and the thresholds it is compared against are f64; widening once here
+/// keeps `bucket_verdict` free of casts.
 #[derive(Clone, Copy)]
 struct Bucket {
-    min: i32,
-    max: i32,
+    min: f64,
+    max: f64,
 }
 
 fn numeric_layout(field: NumField, bounds: &rkyv::Archived<BitPlanes>) -> Option<NumericLayout> {
-    let bucket = |b: &rkyv::Archived<BucketBounds>| Bucket { min: i16::from(b.min) as i32, max: i16::from(b.max) as i32 };
+    let bucket = |b: &rkyv::Archived<BucketBounds>| Bucket { min: f32::from(b.min) as f64, max: f32::from(b.max) as f64 };
     match field {
         NumField::Cmc => Some(NumericLayout {
             interior_base: PLANE_CMC,
@@ -836,7 +868,7 @@ fn bucket_verdict(op: CmpOp, threshold: f64, bucket: Bucket) -> BucketVerdict {
     if bucket.min > bucket.max {
         return BucketVerdict::FullyExcluded; // empty: no observed member at all
     }
-    let (min, max) = (bucket.min as f64, bucket.max as f64);
+    let (min, max) = (bucket.min, bucket.max);
     match op {
         CmpOp::Ge => {
             if min >= threshold {
@@ -889,7 +921,9 @@ fn bucket_verdict(op: CmpOp, threshold: f64, bucket: Bucket) -> BucketVerdict {
 
 /// Compile `field <op> threshold` for cmc/power/toughness. Interior values
 /// are never ambiguous (a one-hot plane is a single integer point — either
-/// fully in or fully out); only the bucket planes can force a decline.
+/// fully in or fully out, and that stays true against a fractional threshold:
+/// `matches_op(op, 0.0, 0.5)` is a decided answer, not a guess); only the
+/// bucket planes can force a decline.
 /// Missing values (non-creature power/toughness, an unset cmc) set no bit
 /// anywhere in the field's planes, so they're correctly excluded from any
 /// `Or` here — the Null-collapses-to-false semantics `filter.rs`'s

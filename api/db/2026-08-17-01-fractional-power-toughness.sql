@@ -1,0 +1,67 @@
+-- The companion to 2026-08-12-01-fractional-mana-value.sql, one column family over, and the
+-- reason it is a separate migration is that the two defects are not the same defect. That one
+-- was about a column typed against Scryfall's own schema: cmc is a Decimal there, and `integer`
+-- could not hold the value the schema promised. This one is about a column typed against an
+-- assumption the corpus happened to satisfy. Power and toughness are STRINGS in Scryfall's
+-- schema — creature_power_text/creature_toughness_text hold them verbatim — and the numeric
+-- columns beside them are this project's own parse of those strings. The parse used
+-- int(float(val)), and eleven cards print a value it cannot hold:
+--
+--   $ curl -s 'https://api.scryfall.com/cards/named?exact=Little+Girl'
+--       "power": ".5",
+--       "toughness": ".5",
+--
+--   Little Girl .5/.5, Fraction Jackson 1/1.5, Smart Ass 2.5/1, Stone-Cold Basilisk 2.5/5,
+--   Vile Bile 2.5/2.5, Assquatch 3.5/3.5, Bad Ass 3.5/1, Dumb Ass 3.5/2, Cheap Ass 1/3.5,
+--   Fat Ass 2/3.5, Cardpecker 1.5/1
+--
+-- (Checked against the live API on 2026-08-17: `(power=.5 or power=1.5 or power=2.5 or
+-- power=3.5 or toughness=.5 or toughness=1.5 or toughness=2.5 or toughness=3.5)
+-- include:extras` returns exactly those eleven, all Unhinged.)
+--
+-- THE FAILURE DIRECTION IS THE POINT, and it is the opposite of what "a value was lost" suggests.
+-- Truncation cannot make `toughness<1` MISS a half-toughness card — 0 satisfies that predicate
+-- exactly as 0.5 does. It makes `toughness=0` and `power=2` MATCH cards that print .5 and 2.5.
+-- The rounding does not lose rows from a query, it adds them to the wrong one, and the query it
+-- adds them to is a common one nobody would think to check.
+--
+-- This is a CAPABILITY change, not a corpus change, on exactly the same terms as the mana value
+-- migration. api/card_processing.py still drops set_type == "funny", and all eleven cards are
+-- Unhinged, which is legal in no format and would be dropped by the legality filter anyway.
+-- After this migration every row in the table is still integral and no query answer over the
+-- real corpus moves. What changes is that the column stops being the thing that would lose the
+-- fraction if the corpus filter were ever relaxed.
+--
+-- `real` rather than `numeric`, for the reasons 2026-08-12-01 sets out at length and which apply
+-- unchanged here — exact over the domain (every printed fraction in Magic is a half step, and a
+-- half is exact in binary floating point), the same 4 bytes as `integer` so neither the row nor
+-- idx_cards_creature_power_btree / idx_cards_creature_toughness_btree grows, and the same type
+-- card_engine holds (OracleCard::creature_power is Option<f32>, arriving from psycopg as a
+-- Python float straight into opt_f32, where `numeric` would arrive as a decimal.Decimal).
+--
+-- Two columns, so `real` also has to stay wide enough for the extremes at the OTHER end of the
+-- domain: B.F.M. is 99/99, Impervious Greatwurm is 16/16, and the corpus maximum is well inside
+-- f32's exact-integer range (2^24). The alternative encoding considered and rejected — a scaled
+-- integer at half-unit granularity, which every printed fraction being a half would have made
+-- arithmetically sufficient — fails here specifically: doubling 99 leaves `smallint` territory
+-- fine but the engine's matching column could not have stayed an `i8`, and every read site would
+-- have needed a matching unscale, with a missed one silently mis-ordering rather than visibly
+-- miscounting.
+--
+-- ALTER ... TYPE rewrites the table and rebuilds the two dependent btree indexes, holding an
+-- ACCESS EXCLUSIVE lock for the duration. Sized against the corpus (~31.5k oracle rows) that is
+-- a sub-second rewrite, well inside what the import path's own upsert already blocks for. Both
+-- columns are altered in ONE statement so the table is rewritten once rather than twice.
+--
+-- creature_attributes_null_for_non_creatures is a CHECK over NULL-ness only, so the type change
+-- does not touch it; it is revalidated against the rewritten rows regardless, and every existing
+-- row satisfies it before and after because the widening cannot turn a NULL into a value or the
+-- reverse.
+--
+-- The USING clauses are spelled out rather than left implicit, for the same reason the mana
+-- value migration spells its one out: integer -> real is an assignment cast Postgres would do on
+-- its own, and writing it makes the widening the migration's stated intent rather than a
+-- coincidence of cast rules.
+ALTER TABLE magic.cards
+    ALTER COLUMN creature_power TYPE real USING creature_power::real,
+    ALTER COLUMN creature_toughness TYPE real USING creature_toughness::real;
