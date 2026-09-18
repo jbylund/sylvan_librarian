@@ -223,6 +223,16 @@ DB_COLUMNS = [
         search_aliases=["not"],
         parser_class=ParserClass.TEXT,
     ),
+    # `in:` -- cards that have EVER been printed in a set code / set type / game / language /
+    # rarity / frame year / foil, nonfoil / booster. A CARD-level union decided at import
+    # (admin_resource._sync_in_tags) and stored on every row of the card, because no per-row
+    # predicate can see the card's other printings.
+    FieldInfo(
+        db_column_name="card_in_tags",
+        field_type=FieldType.JSONB_OBJECT,
+        search_aliases=["in"],
+        parser_class=ParserClass.TEXT,
+    ),
     FieldInfo(
         db_column_name="card_rarity_int",
         field_type=FieldType.NUMERIC,

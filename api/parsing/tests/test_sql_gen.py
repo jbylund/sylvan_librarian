@@ -678,6 +678,40 @@ def test_is_tag_sql_translation(parse_query, input_query: str, expected_sql: str
 
 
 @pytest.mark.parametrize(
+    argnames=("input_query", "expected_sql", "expected_parameters"),
+    argvalues=[
+        # in: is a containment probe of the per-card union _sync_in_tags stores on every row of
+        # the card, so it lowers exactly like a card_is_tags lookup against its own column.
+        (
+            "in:khm",
+            r"(card.card_in_tags @> %(p_dict_eydraG0nOiBUcnVlfQ)s)",
+            {"p_dict_eydraG0nOiBUcnVlfQ": {"khm": True}},
+        ),
+        # Values are case-insensitive on api.scryfall.com (in:KHM = in:khm = 323 cards, 2026-09-03);
+        # the union is stored lower-case, so the probe must lower too.
+        (
+            "in:KHM",
+            r"(card.card_in_tags @> %(p_dict_eydraG0nOiBUcnVlfQ)s)",
+            {"p_dict_eydraG0nOiBUcnVlfQ": {"khm": True}},
+        ),
+        # Set TYPE, negated: "never printed in a core set".
+        (
+            "-in:core",
+            r"NOT ((card.card_in_tags @> %(p_dict_eydjb3JlJzogVHJ1ZX0)s))",
+            {"p_dict_eydjb3JlJzogVHJ1ZX0": {"core": True}},
+        ),
+    ],
+)
+def test_in_tag_sql_translation(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
+    """in: probes card_in_tags with a lower-cased single-key containment object."""
+    parsed = parse_query(input_query)
+    context = QueryContext()
+    observed_sql = parsed.to_sql(context)
+    assert observed_sql == expected_sql, f"\nExpected: {expected_sql}\nObserved: {observed_sql}"
+    assert context == expected_parameters, f"\nExpected params: {expected_parameters}\nObserved params: {context}"
+
+
+@pytest.mark.parametrize(
     argnames="tag_value",
     argvalues=["creature", "modal-dfc", "spell"],
 )
