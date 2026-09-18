@@ -1,0 +1,1175 @@
+{
+  "_comment": [
+    "CROSS-LANGUAGE PARITY FIXTURE for the Scryfall card object.",
+    "",
+    "The same card JSON is built twice: card_engine/src/card_object.rs serves the engine path and",
+    "api/scryfall_compat/objects.py serves the SQL path. Both answer /cards/*, so a difference",
+    "between them is a difference a client can see, and nothing else compares them.",
+    "",
+    "Each case is an engine row plus the object BOTH implementations produce from it, built with",
+    "base_url 'https://api.example/v1'. card_object.rs asserts it in Rust and",
+    "test_scryfall_compat_objects.py asserts it in Python, so either one drifting turns its own",
+    "CI job red.",
+    "",
+    "Values and key PRESENCE are what this pins; key ORDER is not (both sides are compared as",
+    "parsed objects). Scryfall's key order is pinned separately by the position assertions in",
+    "card_object.rs, which is the only place the wire order is observable.",
+    "",
+    "To add a case: add the row, run both suites, and paste the object they agree on. If they do",
+    "not agree, that is the bug this file exists to find."
+  ],
+  "base_url": "https://api.example/v1",
+  "cases": [
+    {
+      "case": "a plain single-faced card",
+      "row": {
+        "scryfall_id": "01000000-0000-0000-0000-000000000001",
+        "oracle_id": "11111111-2222-3333-4444-555555555555",
+        "name": "Lightning Bolt",
+        "mana_cost": "{R}",
+        "cmc": 1,
+        "type_line": "Instant",
+        "oracle_text": "Lightning Bolt deals 3 damage to any target.",
+        "colors": [
+          "R"
+        ],
+        "color_identity": [
+          "R"
+        ],
+        "set_code": "lea",
+        "set_name": "Limited Edition Alpha",
+        "collector_number": "161",
+        "rarity": "common",
+        "lang": "en",
+        "layout": "normal",
+        "artist": "Christopher Rush",
+        "released_at": "1993-08-05",
+        "multiverse_ids": [
+          209
+        ],
+        "games": [
+          "paper"
+        ],
+        "tcgplayer_id": 1234
+      },
+      "expected": {
+        "artist": "Christopher Rush",
+        "booster": false,
+        "border_color": null,
+        "card_back_id": "0aeebaf5-8c7d-4636-9e82-8c27447861f7",
+        "cmc": 1.0,
+        "collector_number": "161",
+        "color_identity": [
+          "R"
+        ],
+        "colors": [
+          "R"
+        ],
+        "digital": false,
+        "finishes": [],
+        "full_art": false,
+        "games": [
+          "paper"
+        ],
+        "highres_image": false,
+        "id": "01000000-0000-0000-0000-000000000001",
+        "illustration_id": null,
+        "image_status": null,
+        "image_uris": {
+          "art": "https://cards.scryfall.io/art/front/0/1/01000000-0000-0000-0000-000000000001.webp",
+          "art_crop": "https://cards.scryfall.io/art_crop/front/0/1/01000000-0000-0000-0000-000000000001.jpg",
+          "border_crop": "https://cards.scryfall.io/border_crop/front/0/1/01000000-0000-0000-0000-000000000001.jpg",
+          "crop": "https://cards.scryfall.io/crop/front/0/1/01000000-0000-0000-0000-000000000001.webp",
+          "display": "https://cards.scryfall.io/display/front/0/1/01000000-0000-0000-0000-000000000001.webp",
+          "grid": "https://cards.scryfall.io/grid/front/0/1/01000000-0000-0000-0000-000000000001.webp",
+          "large": "https://cards.scryfall.io/large/front/0/1/01000000-0000-0000-0000-000000000001.jpg",
+          "normal": "https://cards.scryfall.io/normal/front/0/1/01000000-0000-0000-0000-000000000001.jpg",
+          "png": "https://cards.scryfall.io/png/front/0/1/01000000-0000-0000-0000-000000000001.png",
+          "small": "https://cards.scryfall.io/small/front/0/1/01000000-0000-0000-0000-000000000001.jpg",
+          "thumb": "https://cards.scryfall.io/thumb/front/0/1/01000000-0000-0000-0000-000000000001.webp"
+        },
+        "keywords": [],
+        "lang": "en",
+        "layout": "normal",
+        "mana_cost": "{R}",
+        "multiverse_ids": [
+          209
+        ],
+        "name": "Lightning Bolt",
+        "object": "card",
+        "oracle_id": "11111111-2222-3333-4444-555555555555",
+        "oracle_text": "Lightning Bolt deals 3 damage to any target.",
+        "oversized": false,
+        "prices": {
+          "eur": null,
+          "eur_foil": null,
+          "tix": null,
+          "usd": null,
+          "usd_etched": null,
+          "usd_foil": null
+        },
+        "prints_search_uri": "https://api.example/v1/cards/search?order=released&q=oracleid%3A11111111-2222-3333-4444-555555555555&unique=prints",
+        "promo": false,
+        "purchase_uris": {
+          "cardhoarder": "https://www.cardhoarder.com/cards?data%5Bsearch%5D=Lightning+Bolt",
+          "cardmarket": "https://www.cardmarket.com/en/Magic/Products/Search?searchString=Lightning+Bolt",
+          "tcgplayer": "https://www.tcgplayer.com/product/1234?page=1"
+        },
+        "rarity": "common",
+        "related_uris": {
+          "edhrec": "https://edhrec.com/route/?cc=Lightning+Bolt",
+          "gatherer": "https://gatherer.wizards.com/Pages/Card/Details.aspx?multiverseid=209&printed=false",
+          "tcgplayer_infinite_articles": "https://www.tcgplayer.com/search/articles?productLineName=magic&q=Lightning+Bolt",
+          "tcgplayer_infinite_decks": "https://www.tcgplayer.com/search/decks?productLineName=magic&q=Lightning+Bolt"
+        },
+        "released_at": "1993-08-05",
+        "reprint": false,
+        "reserved": false,
+        "rulings_uri": "https://api.example/v1/cards/01000000-0000-0000-0000-000000000001/rulings",
+        "scryfall_set_uri": "https://scryfall.com/sets/lea?utm_source=api",
+        "scryfall_uri": "https://scryfall.com/card/lea/161/lightning-bolt?utm_source=api",
+        "set": "lea",
+        "set_id": null,
+        "set_name": "Limited Edition Alpha",
+        "set_search_uri": "https://api.example/v1/cards/search?order=set&q=e%3Alea&unique=prints",
+        "set_type": null,
+        "set_uri": null,
+        "story_spotlight": false,
+        "tcgplayer_id": 1234,
+        "textless": false,
+        "type_line": "Instant",
+        "uri": "https://api.example/v1/cards/01000000-0000-0000-0000-000000000001",
+        "variation": false
+      }
+    },
+    {
+      "case": "a slug that deletes rather than hyphenates",
+      "row": {
+        "scryfall_id": "01000000-0000-0000-0000-000000000002",
+        "name": "Erayo's Essence",
+        "set_code": "chk",
+        "collector_number": "1",
+        "lang": "en",
+        "layout": "normal",
+        "games": [
+          "paper"
+        ]
+      },
+      "expected": {
+        "artist": null,
+        "booster": false,
+        "border_color": null,
+        "card_back_id": "0aeebaf5-8c7d-4636-9e82-8c27447861f7",
+        "cmc": null,
+        "collector_number": "1",
+        "color_identity": [],
+        "colors": [],
+        "digital": false,
+        "finishes": [],
+        "full_art": false,
+        "games": [
+          "paper"
+        ],
+        "highres_image": false,
+        "id": "01000000-0000-0000-0000-000000000002",
+        "illustration_id": null,
+        "image_status": null,
+        "image_uris": {
+          "art": "https://cards.scryfall.io/art/front/0/1/01000000-0000-0000-0000-000000000002.webp",
+          "art_crop": "https://cards.scryfall.io/art_crop/front/0/1/01000000-0000-0000-0000-000000000002.jpg",
+          "border_crop": "https://cards.scryfall.io/border_crop/front/0/1/01000000-0000-0000-0000-000000000002.jpg",
+          "crop": "https://cards.scryfall.io/crop/front/0/1/01000000-0000-0000-0000-000000000002.webp",
+          "display": "https://cards.scryfall.io/display/front/0/1/01000000-0000-0000-0000-000000000002.webp",
+          "grid": "https://cards.scryfall.io/grid/front/0/1/01000000-0000-0000-0000-000000000002.webp",
+          "large": "https://cards.scryfall.io/large/front/0/1/01000000-0000-0000-0000-000000000002.jpg",
+          "normal": "https://cards.scryfall.io/normal/front/0/1/01000000-0000-0000-0000-000000000002.jpg",
+          "png": "https://cards.scryfall.io/png/front/0/1/01000000-0000-0000-0000-000000000002.png",
+          "small": "https://cards.scryfall.io/small/front/0/1/01000000-0000-0000-0000-000000000002.jpg",
+          "thumb": "https://cards.scryfall.io/thumb/front/0/1/01000000-0000-0000-0000-000000000002.webp"
+        },
+        "keywords": [],
+        "lang": "en",
+        "layout": "normal",
+        "mana_cost": null,
+        "multiverse_ids": [],
+        "name": "Erayo's Essence",
+        "object": "card",
+        "oracle_id": "",
+        "oracle_text": null,
+        "oversized": false,
+        "prices": {
+          "eur": null,
+          "eur_foil": null,
+          "tix": null,
+          "usd": null,
+          "usd_etched": null,
+          "usd_foil": null
+        },
+        "prints_search_uri": "https://api.example/v1/cards/search?order=released&q=oracleid%3A&unique=prints",
+        "promo": false,
+        "purchase_uris": {
+          "cardhoarder": "https://www.cardhoarder.com/cards?data%5Bsearch%5D=Erayo%27s+Essence",
+          "cardmarket": "https://www.cardmarket.com/en/Magic/Products/Search?searchString=Erayo%27s+Essence",
+          "tcgplayer": "https://www.tcgplayer.com/search/magic/product?productLineName=magic&q=Erayo%27s+Essence&view=grid"
+        },
+        "rarity": null,
+        "related_uris": {
+          "edhrec": "https://edhrec.com/route/?cc=Erayo%27s+Essence",
+          "tcgplayer_infinite_articles": "https://www.tcgplayer.com/search/articles?productLineName=magic&q=Erayo%27s+Essence",
+          "tcgplayer_infinite_decks": "https://www.tcgplayer.com/search/decks?productLineName=magic&q=Erayo%27s+Essence"
+        },
+        "released_at": null,
+        "reprint": false,
+        "reserved": false,
+        "rulings_uri": "https://api.example/v1/cards/01000000-0000-0000-0000-000000000002/rulings",
+        "scryfall_set_uri": "https://scryfall.com/sets/chk?utm_source=api",
+        "scryfall_uri": "https://scryfall.com/card/chk/1/erayos-essence?utm_source=api",
+        "set": "chk",
+        "set_id": null,
+        "set_name": null,
+        "set_search_uri": "https://api.example/v1/cards/search?order=set&q=e%3Achk&unique=prints",
+        "set_type": null,
+        "set_uri": null,
+        "story_spotlight": false,
+        "textless": false,
+        "type_line": null,
+        "uri": "https://api.example/v1/cards/01000000-0000-0000-0000-000000000002",
+        "variation": false
+      }
+    },
+    {
+      "case": "a foreign printing takes the language path segment",
+      "row": {
+        "scryfall_id": "01000000-0000-0000-0000-000000000003",
+        "name": "Unmoored Ego",
+        "set_code": "grn",
+        "collector_number": "212",
+        "lang": "pt",
+        "layout": "normal",
+        "multiverse_ids": [
+          454775
+        ],
+        "games": [
+          "paper"
+        ]
+      },
+      "expected": {
+        "artist": null,
+        "booster": false,
+        "border_color": null,
+        "card_back_id": "0aeebaf5-8c7d-4636-9e82-8c27447861f7",
+        "cmc": null,
+        "collector_number": "212",
+        "color_identity": [],
+        "colors": [],
+        "digital": false,
+        "finishes": [],
+        "full_art": false,
+        "games": [
+          "paper"
+        ],
+        "highres_image": false,
+        "id": "01000000-0000-0000-0000-000000000003",
+        "illustration_id": null,
+        "image_status": null,
+        "image_uris": {
+          "art": "https://cards.scryfall.io/art/front/0/1/01000000-0000-0000-0000-000000000003.webp",
+          "art_crop": "https://cards.scryfall.io/art_crop/front/0/1/01000000-0000-0000-0000-000000000003.jpg",
+          "border_crop": "https://cards.scryfall.io/border_crop/front/0/1/01000000-0000-0000-0000-000000000003.jpg",
+          "crop": "https://cards.scryfall.io/crop/front/0/1/01000000-0000-0000-0000-000000000003.webp",
+          "display": "https://cards.scryfall.io/display/front/0/1/01000000-0000-0000-0000-000000000003.webp",
+          "grid": "https://cards.scryfall.io/grid/front/0/1/01000000-0000-0000-0000-000000000003.webp",
+          "large": "https://cards.scryfall.io/large/front/0/1/01000000-0000-0000-0000-000000000003.jpg",
+          "normal": "https://cards.scryfall.io/normal/front/0/1/01000000-0000-0000-0000-000000000003.jpg",
+          "png": "https://cards.scryfall.io/png/front/0/1/01000000-0000-0000-0000-000000000003.png",
+          "small": "https://cards.scryfall.io/small/front/0/1/01000000-0000-0000-0000-000000000003.jpg",
+          "thumb": "https://cards.scryfall.io/thumb/front/0/1/01000000-0000-0000-0000-000000000003.webp"
+        },
+        "keywords": [],
+        "lang": "pt",
+        "layout": "normal",
+        "mana_cost": null,
+        "multiverse_ids": [
+          454775
+        ],
+        "name": "Unmoored Ego",
+        "object": "card",
+        "oracle_id": "",
+        "oracle_text": null,
+        "oversized": false,
+        "prices": {
+          "eur": null,
+          "eur_foil": null,
+          "tix": null,
+          "usd": null,
+          "usd_etched": null,
+          "usd_foil": null
+        },
+        "prints_search_uri": "https://api.example/v1/cards/search?order=released&q=oracleid%3A&unique=prints",
+        "promo": false,
+        "purchase_uris": {
+          "cardhoarder": "https://www.cardhoarder.com/cards?data%5Bsearch%5D=Unmoored+Ego",
+          "cardmarket": "https://www.cardmarket.com/en/Magic/Products/Search?searchString=Unmoored+Ego",
+          "tcgplayer": "https://www.tcgplayer.com/search/magic/product?productLineName=magic&q=Unmoored+Ego&view=grid"
+        },
+        "rarity": null,
+        "related_uris": {
+          "edhrec": "https://edhrec.com/route/?cc=Unmoored+Ego",
+          "gatherer": "https://gatherer.wizards.com/Pages/Card/Details.aspx?multiverseid=454775&printed=true",
+          "tcgplayer_infinite_articles": "https://www.tcgplayer.com/search/articles?productLineName=magic&q=Unmoored+Ego",
+          "tcgplayer_infinite_decks": "https://www.tcgplayer.com/search/decks?productLineName=magic&q=Unmoored+Ego"
+        },
+        "released_at": null,
+        "reprint": false,
+        "reserved": false,
+        "rulings_uri": "https://api.example/v1/cards/01000000-0000-0000-0000-000000000003/rulings",
+        "scryfall_set_uri": "https://scryfall.com/sets/grn?utm_source=api",
+        "scryfall_uri": "https://scryfall.com/card/grn/212/pt/unmoored-ego?utm_source=api",
+        "set": "grn",
+        "set_id": null,
+        "set_name": null,
+        "set_search_uri": "https://api.example/v1/cards/search?order=set&q=e%3Agrn&unique=prints",
+        "set_type": null,
+        "set_uri": null,
+        "story_spotlight": false,
+        "textless": false,
+        "type_line": null,
+        "uri": "https://api.example/v1/cards/01000000-0000-0000-0000-000000000003",
+        "variation": false
+      }
+    },
+    {
+      "case": "a two-image layout keeps colors and pictures on its faces",
+      "row": {
+        "scryfall_id": "01000000-0000-0000-0000-000000000004",
+        "name": "Delver of Secrets // Insectile Aberration",
+        "layout": "transform",
+        "colors": [
+          "U"
+        ],
+        "color_identity": [
+          "U"
+        ],
+        "set_code": "isd",
+        "collector_number": "51",
+        "lang": "en",
+        "illustration_id": "22222222-3333-4444-5555-666666666666",
+        "games": [
+          "paper"
+        ],
+        "card_faces": [
+          {
+            "name": "Delver of Secrets",
+            "mana_cost": "{U}",
+            "oracle_text": "Front."
+          },
+          {
+            "name": "Insectile Aberration",
+            "mana_cost": "",
+            "oracle_text": "Back.",
+            "power": "3"
+          }
+        ]
+      },
+      "expected": {
+        "artist": null,
+        "booster": false,
+        "border_color": null,
+        "card_faces": [
+          {
+            "image_uris": {
+              "art": "https://cards.scryfall.io/art/front/0/1/01000000-0000-0000-0000-000000000004.webp",
+              "art_crop": "https://cards.scryfall.io/art_crop/front/0/1/01000000-0000-0000-0000-000000000004.jpg",
+              "border_crop": "https://cards.scryfall.io/border_crop/front/0/1/01000000-0000-0000-0000-000000000004.jpg",
+              "crop": "https://cards.scryfall.io/crop/front/0/1/01000000-0000-0000-0000-000000000004.webp",
+              "display": "https://cards.scryfall.io/display/front/0/1/01000000-0000-0000-0000-000000000004.webp",
+              "grid": "https://cards.scryfall.io/grid/front/0/1/01000000-0000-0000-0000-000000000004.webp",
+              "large": "https://cards.scryfall.io/large/front/0/1/01000000-0000-0000-0000-000000000004.jpg",
+              "normal": "https://cards.scryfall.io/normal/front/0/1/01000000-0000-0000-0000-000000000004.jpg",
+              "png": "https://cards.scryfall.io/png/front/0/1/01000000-0000-0000-0000-000000000004.png",
+              "small": "https://cards.scryfall.io/small/front/0/1/01000000-0000-0000-0000-000000000004.jpg",
+              "thumb": "https://cards.scryfall.io/thumb/front/0/1/01000000-0000-0000-0000-000000000004.webp"
+            },
+            "mana_cost": "{U}",
+            "name": "Delver of Secrets",
+            "object": "card_face",
+            "oracle_text": "Front."
+          },
+          {
+            "image_uris": {
+              "art": "https://cards.scryfall.io/art/back/0/1/01000000-0000-0000-0000-000000000004.webp",
+              "art_crop": "https://cards.scryfall.io/art_crop/back/0/1/01000000-0000-0000-0000-000000000004.jpg",
+              "border_crop": "https://cards.scryfall.io/border_crop/back/0/1/01000000-0000-0000-0000-000000000004.jpg",
+              "crop": "https://cards.scryfall.io/crop/back/0/1/01000000-0000-0000-0000-000000000004.webp",
+              "display": "https://cards.scryfall.io/display/back/0/1/01000000-0000-0000-0000-000000000004.webp",
+              "grid": "https://cards.scryfall.io/grid/back/0/1/01000000-0000-0000-0000-000000000004.webp",
+              "large": "https://cards.scryfall.io/large/back/0/1/01000000-0000-0000-0000-000000000004.jpg",
+              "normal": "https://cards.scryfall.io/normal/back/0/1/01000000-0000-0000-0000-000000000004.jpg",
+              "png": "https://cards.scryfall.io/png/back/0/1/01000000-0000-0000-0000-000000000004.png",
+              "small": "https://cards.scryfall.io/small/back/0/1/01000000-0000-0000-0000-000000000004.jpg",
+              "thumb": "https://cards.scryfall.io/thumb/back/0/1/01000000-0000-0000-0000-000000000004.webp"
+            },
+            "mana_cost": "",
+            "name": "Insectile Aberration",
+            "object": "card_face",
+            "oracle_text": "Back.",
+            "power": "3"
+          }
+        ],
+        "cmc": null,
+        "collector_number": "51",
+        "color_identity": [
+          "U"
+        ],
+        "digital": false,
+        "finishes": [],
+        "full_art": false,
+        "games": [
+          "paper"
+        ],
+        "highres_image": false,
+        "id": "01000000-0000-0000-0000-000000000004",
+        "image_status": null,
+        "keywords": [],
+        "lang": "en",
+        "layout": "transform",
+        "multiverse_ids": [],
+        "name": "Delver of Secrets // Insectile Aberration",
+        "object": "card",
+        "oracle_id": "",
+        "oversized": false,
+        "prices": {
+          "eur": null,
+          "eur_foil": null,
+          "tix": null,
+          "usd": null,
+          "usd_etched": null,
+          "usd_foil": null
+        },
+        "prints_search_uri": "https://api.example/v1/cards/search?order=released&q=oracleid%3A&unique=prints",
+        "promo": false,
+        "purchase_uris": {
+          "cardhoarder": "https://www.cardhoarder.com/cards?data%5Bsearch%5D=Delver+of+Secrets",
+          "cardmarket": "https://www.cardmarket.com/en/Magic/Products/Search?searchString=Delver+of+Secrets",
+          "tcgplayer": "https://www.tcgplayer.com/search/magic/product?productLineName=magic&q=Delver+of+Secrets&view=grid"
+        },
+        "rarity": null,
+        "related_uris": {
+          "edhrec": "https://edhrec.com/route/?cc=Delver+of+Secrets",
+          "tcgplayer_infinite_articles": "https://www.tcgplayer.com/search/articles?productLineName=magic&q=Delver+of+Secrets+%2F%2F+Insectile+Aberration",
+          "tcgplayer_infinite_decks": "https://www.tcgplayer.com/search/decks?productLineName=magic&q=Delver+of+Secrets+%2F%2F+Insectile+Aberration"
+        },
+        "released_at": null,
+        "reprint": false,
+        "reserved": false,
+        "rulings_uri": "https://api.example/v1/cards/01000000-0000-0000-0000-000000000004/rulings",
+        "scryfall_set_uri": "https://scryfall.com/sets/isd?utm_source=api",
+        "scryfall_uri": "https://scryfall.com/card/isd/51/delver-of-secrets-insectile-aberration?utm_source=api",
+        "set": "isd",
+        "set_id": null,
+        "set_name": null,
+        "set_search_uri": "https://api.example/v1/cards/search?order=set&q=e%3Aisd&unique=prints",
+        "set_type": null,
+        "set_uri": null,
+        "story_spotlight": false,
+        "textless": false,
+        "type_line": null,
+        "uri": "https://api.example/v1/cards/01000000-0000-0000-0000-000000000004",
+        "variation": false
+      }
+    },
+    {
+      "case": "a one-image multi-face card joins its cost at top level",
+      "row": {
+        "scryfall_id": "01000000-0000-0000-0000-000000000005",
+        "name": "Fire // Ice",
+        "layout": "split",
+        "set_code": "apc",
+        "collector_number": "128",
+        "lang": "en",
+        "games": [
+          "paper"
+        ],
+        "card_faces": [
+          {
+            "name": "Fire",
+            "mana_cost": "{1}{R}",
+            "oracle_text": "Two damage."
+          },
+          {
+            "name": "Ice",
+            "mana_cost": "{1}{U}",
+            "oracle_text": "Tap target."
+          }
+        ]
+      },
+      "expected": {
+        "artist": null,
+        "booster": false,
+        "border_color": null,
+        "card_back_id": "0aeebaf5-8c7d-4636-9e82-8c27447861f7",
+        "card_faces": [
+          {
+            "mana_cost": "{1}{R}",
+            "name": "Fire",
+            "object": "card_face",
+            "oracle_text": "Two damage."
+          },
+          {
+            "mana_cost": "{1}{U}",
+            "name": "Ice",
+            "object": "card_face",
+            "oracle_text": "Tap target."
+          }
+        ],
+        "cmc": null,
+        "collector_number": "128",
+        "color_identity": [],
+        "colors": [],
+        "digital": false,
+        "finishes": [],
+        "full_art": false,
+        "games": [
+          "paper"
+        ],
+        "highres_image": false,
+        "id": "01000000-0000-0000-0000-000000000005",
+        "illustration_id": null,
+        "image_status": null,
+        "image_uris": {
+          "art": "https://cards.scryfall.io/art/front/0/1/01000000-0000-0000-0000-000000000005.webp",
+          "art_crop": "https://cards.scryfall.io/art_crop/front/0/1/01000000-0000-0000-0000-000000000005.jpg",
+          "border_crop": "https://cards.scryfall.io/border_crop/front/0/1/01000000-0000-0000-0000-000000000005.jpg",
+          "crop": "https://cards.scryfall.io/crop/front/0/1/01000000-0000-0000-0000-000000000005.webp",
+          "display": "https://cards.scryfall.io/display/front/0/1/01000000-0000-0000-0000-000000000005.webp",
+          "grid": "https://cards.scryfall.io/grid/front/0/1/01000000-0000-0000-0000-000000000005.webp",
+          "large": "https://cards.scryfall.io/large/front/0/1/01000000-0000-0000-0000-000000000005.jpg",
+          "normal": "https://cards.scryfall.io/normal/front/0/1/01000000-0000-0000-0000-000000000005.jpg",
+          "png": "https://cards.scryfall.io/png/front/0/1/01000000-0000-0000-0000-000000000005.png",
+          "small": "https://cards.scryfall.io/small/front/0/1/01000000-0000-0000-0000-000000000005.jpg",
+          "thumb": "https://cards.scryfall.io/thumb/front/0/1/01000000-0000-0000-0000-000000000005.webp"
+        },
+        "keywords": [],
+        "lang": "en",
+        "layout": "split",
+        "mana_cost": "{1}{R} // {1}{U}",
+        "multiverse_ids": [],
+        "name": "Fire // Ice",
+        "object": "card",
+        "oracle_id": "",
+        "oversized": false,
+        "prices": {
+          "eur": null,
+          "eur_foil": null,
+          "tix": null,
+          "usd": null,
+          "usd_etched": null,
+          "usd_foil": null
+        },
+        "prints_search_uri": "https://api.example/v1/cards/search?order=released&q=oracleid%3A&unique=prints",
+        "promo": false,
+        "purchase_uris": {
+          "cardhoarder": "https://www.cardhoarder.com/cards?data%5Bsearch%5D=Fire+%2F%2F+Ice",
+          "cardmarket": "https://www.cardmarket.com/en/Magic/Products/Search?searchString=Fire+%2F%2F+Ice",
+          "tcgplayer": "https://www.tcgplayer.com/search/magic/product?productLineName=magic&q=Fire+%2F%2F+Ice&view=grid"
+        },
+        "rarity": null,
+        "related_uris": {
+          "edhrec": "https://edhrec.com/route/?cc=Fire+%2F%2F+Ice",
+          "tcgplayer_infinite_articles": "https://www.tcgplayer.com/search/articles?productLineName=magic&q=Fire+%2F%2F+Ice",
+          "tcgplayer_infinite_decks": "https://www.tcgplayer.com/search/decks?productLineName=magic&q=Fire+%2F%2F+Ice"
+        },
+        "released_at": null,
+        "reprint": false,
+        "reserved": false,
+        "rulings_uri": "https://api.example/v1/cards/01000000-0000-0000-0000-000000000005/rulings",
+        "scryfall_set_uri": "https://scryfall.com/sets/apc?utm_source=api",
+        "scryfall_uri": "https://scryfall.com/card/apc/128/fire-ice?utm_source=api",
+        "set": "apc",
+        "set_id": null,
+        "set_name": null,
+        "set_search_uri": "https://api.example/v1/cards/search?order=set&q=e%3Aapc&unique=prints",
+        "set_type": null,
+        "set_uri": null,
+        "story_spotlight": false,
+        "textless": false,
+        "type_line": null,
+        "uri": "https://api.example/v1/cards/01000000-0000-0000-0000-000000000005",
+        "variation": false
+      }
+    },
+    {
+      "case": "a flipped back face with no cost is skipped in the join",
+      "row": {
+        "scryfall_id": "01000000-0000-0000-0000-000000000006",
+        "name": "Erayo // Erayo's Essence",
+        "layout": "flip",
+        "set_code": "chk",
+        "collector_number": "2",
+        "lang": "en",
+        "games": [
+          "paper"
+        ],
+        "card_faces": [
+          {
+            "name": "Erayo",
+            "mana_cost": "{1}{U}",
+            "oracle_text": "Front."
+          },
+          {
+            "name": "Erayo's Essence",
+            "mana_cost": "",
+            "oracle_text": "Back."
+          }
+        ]
+      },
+      "expected": {
+        "artist": null,
+        "booster": false,
+        "border_color": null,
+        "card_back_id": "0aeebaf5-8c7d-4636-9e82-8c27447861f7",
+        "card_faces": [
+          {
+            "mana_cost": "{1}{U}",
+            "name": "Erayo",
+            "object": "card_face",
+            "oracle_text": "Front."
+          },
+          {
+            "mana_cost": "",
+            "name": "Erayo's Essence",
+            "object": "card_face",
+            "oracle_text": "Back."
+          }
+        ],
+        "cmc": null,
+        "collector_number": "2",
+        "color_identity": [],
+        "colors": [],
+        "digital": false,
+        "finishes": [],
+        "full_art": false,
+        "games": [
+          "paper"
+        ],
+        "highres_image": false,
+        "id": "01000000-0000-0000-0000-000000000006",
+        "illustration_id": null,
+        "image_status": null,
+        "image_uris": {
+          "art": "https://cards.scryfall.io/art/front/0/1/01000000-0000-0000-0000-000000000006.webp",
+          "art_crop": "https://cards.scryfall.io/art_crop/front/0/1/01000000-0000-0000-0000-000000000006.jpg",
+          "border_crop": "https://cards.scryfall.io/border_crop/front/0/1/01000000-0000-0000-0000-000000000006.jpg",
+          "crop": "https://cards.scryfall.io/crop/front/0/1/01000000-0000-0000-0000-000000000006.webp",
+          "display": "https://cards.scryfall.io/display/front/0/1/01000000-0000-0000-0000-000000000006.webp",
+          "grid": "https://cards.scryfall.io/grid/front/0/1/01000000-0000-0000-0000-000000000006.webp",
+          "large": "https://cards.scryfall.io/large/front/0/1/01000000-0000-0000-0000-000000000006.jpg",
+          "normal": "https://cards.scryfall.io/normal/front/0/1/01000000-0000-0000-0000-000000000006.jpg",
+          "png": "https://cards.scryfall.io/png/front/0/1/01000000-0000-0000-0000-000000000006.png",
+          "small": "https://cards.scryfall.io/small/front/0/1/01000000-0000-0000-0000-000000000006.jpg",
+          "thumb": "https://cards.scryfall.io/thumb/front/0/1/01000000-0000-0000-0000-000000000006.webp"
+        },
+        "keywords": [],
+        "lang": "en",
+        "layout": "flip",
+        "mana_cost": "{1}{U}",
+        "multiverse_ids": [],
+        "name": "Erayo // Erayo's Essence",
+        "object": "card",
+        "oracle_id": "",
+        "oversized": false,
+        "prices": {
+          "eur": null,
+          "eur_foil": null,
+          "tix": null,
+          "usd": null,
+          "usd_etched": null,
+          "usd_foil": null
+        },
+        "prints_search_uri": "https://api.example/v1/cards/search?order=released&q=oracleid%3A&unique=prints",
+        "promo": false,
+        "purchase_uris": {
+          "cardhoarder": "https://www.cardhoarder.com/cards?data%5Bsearch%5D=Erayo",
+          "cardmarket": "https://www.cardmarket.com/en/Magic/Products/Search?searchString=Erayo",
+          "tcgplayer": "https://www.tcgplayer.com/search/magic/product?productLineName=magic&q=Erayo&view=grid"
+        },
+        "rarity": null,
+        "related_uris": {
+          "edhrec": "https://edhrec.com/route/?cc=Erayo",
+          "tcgplayer_infinite_articles": "https://www.tcgplayer.com/search/articles?productLineName=magic&q=Erayo+%2F%2F+Erayo%27s+Essence",
+          "tcgplayer_infinite_decks": "https://www.tcgplayer.com/search/decks?productLineName=magic&q=Erayo+%2F%2F+Erayo%27s+Essence"
+        },
+        "released_at": null,
+        "reprint": false,
+        "reserved": false,
+        "rulings_uri": "https://api.example/v1/cards/01000000-0000-0000-0000-000000000006/rulings",
+        "scryfall_set_uri": "https://scryfall.com/sets/chk?utm_source=api",
+        "scryfall_uri": "https://scryfall.com/card/chk/2/erayo-erayos-essence?utm_source=api",
+        "set": "chk",
+        "set_id": null,
+        "set_name": null,
+        "set_search_uri": "https://api.example/v1/cards/search?order=set&q=e%3Achk&unique=prints",
+        "set_type": null,
+        "set_uri": null,
+        "story_spotlight": false,
+        "textless": false,
+        "type_line": null,
+        "uri": "https://api.example/v1/cards/01000000-0000-0000-0000-000000000006",
+        "variation": false
+      }
+    },
+    {
+      "case": "a reversible printing drops the three keys its faces carry",
+      "row": {
+        "scryfall_id": "01000000-0000-0000-0000-000000000007",
+        "oracle_id": "33333333-4444-5555-6666-777777777777",
+        "name": "Propaganda // Propaganda",
+        "layout": "reversible_card",
+        "cmc": 3,
+        "type_line": "Enchantment",
+        "set_code": "sld",
+        "collector_number": "500",
+        "lang": "en",
+        "games": [
+          "paper"
+        ],
+        "card_faces": [
+          {
+            "name": "Propaganda",
+            "mana_cost": "{2}{U}",
+            "oracle_text": "Front."
+          },
+          {
+            "name": "Propaganda",
+            "mana_cost": "{2}{U}",
+            "oracle_text": "Back."
+          }
+        ]
+      },
+      "expected": {
+        "artist": null,
+        "booster": false,
+        "border_color": null,
+        "card_faces": [
+          {
+            "cmc": 3.0,
+            "image_uris": {
+              "art": "https://cards.scryfall.io/art/front/0/1/01000000-0000-0000-0000-000000000007.webp",
+              "art_crop": "https://cards.scryfall.io/art_crop/front/0/1/01000000-0000-0000-0000-000000000007.jpg",
+              "border_crop": "https://cards.scryfall.io/border_crop/front/0/1/01000000-0000-0000-0000-000000000007.jpg",
+              "crop": "https://cards.scryfall.io/crop/front/0/1/01000000-0000-0000-0000-000000000007.webp",
+              "display": "https://cards.scryfall.io/display/front/0/1/01000000-0000-0000-0000-000000000007.webp",
+              "grid": "https://cards.scryfall.io/grid/front/0/1/01000000-0000-0000-0000-000000000007.webp",
+              "large": "https://cards.scryfall.io/large/front/0/1/01000000-0000-0000-0000-000000000007.jpg",
+              "normal": "https://cards.scryfall.io/normal/front/0/1/01000000-0000-0000-0000-000000000007.jpg",
+              "png": "https://cards.scryfall.io/png/front/0/1/01000000-0000-0000-0000-000000000007.png",
+              "small": "https://cards.scryfall.io/small/front/0/1/01000000-0000-0000-0000-000000000007.jpg",
+              "thumb": "https://cards.scryfall.io/thumb/front/0/1/01000000-0000-0000-0000-000000000007.webp"
+            },
+            "mana_cost": "{2}{U}",
+            "name": "Propaganda",
+            "object": "card_face",
+            "oracle_id": "33333333-4444-5555-6666-777777777777",
+            "oracle_text": "Front."
+          },
+          {
+            "cmc": 3.0,
+            "image_uris": {
+              "art": "https://cards.scryfall.io/art/back/0/1/01000000-0000-0000-0000-000000000007.webp",
+              "art_crop": "https://cards.scryfall.io/art_crop/back/0/1/01000000-0000-0000-0000-000000000007.jpg",
+              "border_crop": "https://cards.scryfall.io/border_crop/back/0/1/01000000-0000-0000-0000-000000000007.jpg",
+              "crop": "https://cards.scryfall.io/crop/back/0/1/01000000-0000-0000-0000-000000000007.webp",
+              "display": "https://cards.scryfall.io/display/back/0/1/01000000-0000-0000-0000-000000000007.webp",
+              "grid": "https://cards.scryfall.io/grid/back/0/1/01000000-0000-0000-0000-000000000007.webp",
+              "large": "https://cards.scryfall.io/large/back/0/1/01000000-0000-0000-0000-000000000007.jpg",
+              "normal": "https://cards.scryfall.io/normal/back/0/1/01000000-0000-0000-0000-000000000007.jpg",
+              "png": "https://cards.scryfall.io/png/back/0/1/01000000-0000-0000-0000-000000000007.png",
+              "small": "https://cards.scryfall.io/small/back/0/1/01000000-0000-0000-0000-000000000007.jpg",
+              "thumb": "https://cards.scryfall.io/thumb/back/0/1/01000000-0000-0000-0000-000000000007.webp"
+            },
+            "mana_cost": "{2}{U}",
+            "name": "Propaganda",
+            "object": "card_face",
+            "oracle_id": "33333333-4444-5555-6666-777777777777",
+            "oracle_text": "Back."
+          }
+        ],
+        "collector_number": "500",
+        "color_identity": [],
+        "digital": false,
+        "finishes": [],
+        "full_art": false,
+        "games": [
+          "paper"
+        ],
+        "highres_image": false,
+        "id": "01000000-0000-0000-0000-000000000007",
+        "image_status": null,
+        "keywords": [],
+        "lang": "en",
+        "layout": "reversible_card",
+        "multiverse_ids": [],
+        "name": "Propaganda // Propaganda",
+        "object": "card",
+        "oversized": false,
+        "prices": {
+          "eur": null,
+          "eur_foil": null,
+          "tix": null,
+          "usd": null,
+          "usd_etched": null,
+          "usd_foil": null
+        },
+        "prints_search_uri": "https://api.example/v1/cards/search?order=released&q=oracleid%3A33333333-4444-5555-6666-777777777777&unique=prints",
+        "promo": false,
+        "purchase_uris": {
+          "cardhoarder": "https://www.cardhoarder.com/cards?data%5Bsearch%5D=Propaganda+%2F%2F+Propaganda",
+          "cardmarket": "https://www.cardmarket.com/en/Magic/Products/Search?searchString=Propaganda+%2F%2F+Propaganda",
+          "tcgplayer": "https://www.tcgplayer.com/search/magic/product?productLineName=magic&q=Propaganda+%2F%2F+Propaganda&view=grid"
+        },
+        "rarity": null,
+        "related_uris": {
+          "edhrec": "https://edhrec.com/route/?cc=Propaganda+%2F%2F+Propaganda",
+          "tcgplayer_infinite_articles": "https://www.tcgplayer.com/search/articles?productLineName=magic&q=Propaganda+%2F%2F+Propaganda",
+          "tcgplayer_infinite_decks": "https://www.tcgplayer.com/search/decks?productLineName=magic&q=Propaganda+%2F%2F+Propaganda"
+        },
+        "released_at": null,
+        "reprint": false,
+        "reserved": false,
+        "rulings_uri": "https://api.example/v1/cards/01000000-0000-0000-0000-000000000007/rulings",
+        "scryfall_set_uri": "https://scryfall.com/sets/sld?utm_source=api",
+        "scryfall_uri": "https://scryfall.com/card/sld/500/propaganda-propaganda?utm_source=api",
+        "set": "sld",
+        "set_id": null,
+        "set_name": null,
+        "set_search_uri": "https://api.example/v1/cards/search?order=set&q=e%3Asld&unique=prints",
+        "set_type": null,
+        "set_uri": null,
+        "story_spotlight": false,
+        "textless": false,
+        "uri": "https://api.example/v1/cards/01000000-0000-0000-0000-000000000007",
+        "variation": false
+      }
+    },
+    {
+      "case": "no marketplace ids means a name search per key",
+      "row": {
+        "scryfall_id": "01000000-0000-0000-0000-000000000008",
+        "name": "Invasion of Alara // Awaken the Maelstrom",
+        "layout": "modal_dfc",
+        "set_code": "mom",
+        "collector_number": "195",
+        "lang": "en",
+        "games": [
+          "paper"
+        ],
+        "card_faces": [
+          {
+            "name": "Invasion of Alara",
+            "mana_cost": "{W}{U}{B}{R}{G}",
+            "oracle_text": "Front."
+          },
+          {
+            "name": "Awaken the Maelstrom",
+            "mana_cost": "",
+            "oracle_text": "Back."
+          }
+        ]
+      },
+      "expected": {
+        "artist": null,
+        "booster": false,
+        "border_color": null,
+        "card_faces": [
+          {
+            "image_uris": {
+              "art": "https://cards.scryfall.io/art/front/0/1/01000000-0000-0000-0000-000000000008.webp",
+              "art_crop": "https://cards.scryfall.io/art_crop/front/0/1/01000000-0000-0000-0000-000000000008.jpg",
+              "border_crop": "https://cards.scryfall.io/border_crop/front/0/1/01000000-0000-0000-0000-000000000008.jpg",
+              "crop": "https://cards.scryfall.io/crop/front/0/1/01000000-0000-0000-0000-000000000008.webp",
+              "display": "https://cards.scryfall.io/display/front/0/1/01000000-0000-0000-0000-000000000008.webp",
+              "grid": "https://cards.scryfall.io/grid/front/0/1/01000000-0000-0000-0000-000000000008.webp",
+              "large": "https://cards.scryfall.io/large/front/0/1/01000000-0000-0000-0000-000000000008.jpg",
+              "normal": "https://cards.scryfall.io/normal/front/0/1/01000000-0000-0000-0000-000000000008.jpg",
+              "png": "https://cards.scryfall.io/png/front/0/1/01000000-0000-0000-0000-000000000008.png",
+              "small": "https://cards.scryfall.io/small/front/0/1/01000000-0000-0000-0000-000000000008.jpg",
+              "thumb": "https://cards.scryfall.io/thumb/front/0/1/01000000-0000-0000-0000-000000000008.webp"
+            },
+            "mana_cost": "{W}{U}{B}{R}{G}",
+            "name": "Invasion of Alara",
+            "object": "card_face",
+            "oracle_text": "Front."
+          },
+          {
+            "image_uris": {
+              "art": "https://cards.scryfall.io/art/back/0/1/01000000-0000-0000-0000-000000000008.webp",
+              "art_crop": "https://cards.scryfall.io/art_crop/back/0/1/01000000-0000-0000-0000-000000000008.jpg",
+              "border_crop": "https://cards.scryfall.io/border_crop/back/0/1/01000000-0000-0000-0000-000000000008.jpg",
+              "crop": "https://cards.scryfall.io/crop/back/0/1/01000000-0000-0000-0000-000000000008.webp",
+              "display": "https://cards.scryfall.io/display/back/0/1/01000000-0000-0000-0000-000000000008.webp",
+              "grid": "https://cards.scryfall.io/grid/back/0/1/01000000-0000-0000-0000-000000000008.webp",
+              "large": "https://cards.scryfall.io/large/back/0/1/01000000-0000-0000-0000-000000000008.jpg",
+              "normal": "https://cards.scryfall.io/normal/back/0/1/01000000-0000-0000-0000-000000000008.jpg",
+              "png": "https://cards.scryfall.io/png/back/0/1/01000000-0000-0000-0000-000000000008.png",
+              "small": "https://cards.scryfall.io/small/back/0/1/01000000-0000-0000-0000-000000000008.jpg",
+              "thumb": "https://cards.scryfall.io/thumb/back/0/1/01000000-0000-0000-0000-000000000008.webp"
+            },
+            "mana_cost": "",
+            "name": "Awaken the Maelstrom",
+            "object": "card_face",
+            "oracle_text": "Back."
+          }
+        ],
+        "cmc": null,
+        "collector_number": "195",
+        "color_identity": [],
+        "digital": false,
+        "finishes": [],
+        "full_art": false,
+        "games": [
+          "paper"
+        ],
+        "highres_image": false,
+        "id": "01000000-0000-0000-0000-000000000008",
+        "image_status": null,
+        "keywords": [],
+        "lang": "en",
+        "layout": "modal_dfc",
+        "multiverse_ids": [],
+        "name": "Invasion of Alara // Awaken the Maelstrom",
+        "object": "card",
+        "oracle_id": "",
+        "oversized": false,
+        "prices": {
+          "eur": null,
+          "eur_foil": null,
+          "tix": null,
+          "usd": null,
+          "usd_etched": null,
+          "usd_foil": null
+        },
+        "prints_search_uri": "https://api.example/v1/cards/search?order=released&q=oracleid%3A&unique=prints",
+        "promo": false,
+        "purchase_uris": {
+          "cardhoarder": "https://www.cardhoarder.com/cards?data%5Bsearch%5D=Invasion+of+Alara",
+          "cardmarket": "https://www.cardmarket.com/en/Magic/Products/Search?searchString=Invasion+of+Alara",
+          "tcgplayer": "https://www.tcgplayer.com/search/magic/product?productLineName=magic&q=Invasion+of+Alara&view=grid"
+        },
+        "rarity": null,
+        "related_uris": {
+          "edhrec": "https://edhrec.com/route/?cc=Invasion+of+Alara",
+          "tcgplayer_infinite_articles": "https://www.tcgplayer.com/search/articles?productLineName=magic&q=Invasion+of+Alara+%2F%2F+Awaken+the+Maelstrom",
+          "tcgplayer_infinite_decks": "https://www.tcgplayer.com/search/decks?productLineName=magic&q=Invasion+of+Alara+%2F%2F+Awaken+the+Maelstrom"
+        },
+        "released_at": null,
+        "reprint": false,
+        "reserved": false,
+        "rulings_uri": "https://api.example/v1/cards/01000000-0000-0000-0000-000000000008/rulings",
+        "scryfall_set_uri": "https://scryfall.com/sets/mom?utm_source=api",
+        "scryfall_uri": "https://scryfall.com/card/mom/195/invasion-of-alara-awaken-the-maelstrom?utm_source=api",
+        "set": "mom",
+        "set_id": null,
+        "set_name": null,
+        "set_search_uri": "https://api.example/v1/cards/search?order=set&q=e%3Amom&unique=prints",
+        "set_type": null,
+        "set_uri": null,
+        "story_spotlight": false,
+        "textless": false,
+        "type_line": null,
+        "uri": "https://api.example/v1/cards/01000000-0000-0000-0000-000000000008",
+        "variation": false
+      }
+    },
+    {
+      "case": "an arena-only printing omits purchase_uris entirely",
+      "row": {
+        "scryfall_id": "01000000-0000-0000-0000-000000000009",
+        "name": "Alrund's Epiphany",
+        "set_code": "khm",
+        "collector_number": "A-198",
+        "lang": "en",
+        "layout": "normal",
+        "digital": true,
+        "games": [
+          "arena"
+        ]
+      },
+      "expected": {
+        "artist": null,
+        "booster": false,
+        "border_color": null,
+        "card_back_id": "0aeebaf5-8c7d-4636-9e82-8c27447861f7",
+        "cmc": null,
+        "collector_number": "A-198",
+        "color_identity": [],
+        "colors": [],
+        "digital": true,
+        "finishes": [],
+        "full_art": false,
+        "games": [
+          "arena"
+        ],
+        "highres_image": false,
+        "id": "01000000-0000-0000-0000-000000000009",
+        "illustration_id": null,
+        "image_status": null,
+        "image_uris": {
+          "art": "https://cards.scryfall.io/art/front/0/1/01000000-0000-0000-0000-000000000009.webp",
+          "art_crop": "https://cards.scryfall.io/art_crop/front/0/1/01000000-0000-0000-0000-000000000009.jpg",
+          "border_crop": "https://cards.scryfall.io/border_crop/front/0/1/01000000-0000-0000-0000-000000000009.jpg",
+          "crop": "https://cards.scryfall.io/crop/front/0/1/01000000-0000-0000-0000-000000000009.webp",
+          "display": "https://cards.scryfall.io/display/front/0/1/01000000-0000-0000-0000-000000000009.webp",
+          "grid": "https://cards.scryfall.io/grid/front/0/1/01000000-0000-0000-0000-000000000009.webp",
+          "large": "https://cards.scryfall.io/large/front/0/1/01000000-0000-0000-0000-000000000009.jpg",
+          "normal": "https://cards.scryfall.io/normal/front/0/1/01000000-0000-0000-0000-000000000009.jpg",
+          "png": "https://cards.scryfall.io/png/front/0/1/01000000-0000-0000-0000-000000000009.png",
+          "small": "https://cards.scryfall.io/small/front/0/1/01000000-0000-0000-0000-000000000009.jpg",
+          "thumb": "https://cards.scryfall.io/thumb/front/0/1/01000000-0000-0000-0000-000000000009.webp"
+        },
+        "keywords": [],
+        "lang": "en",
+        "layout": "normal",
+        "mana_cost": null,
+        "multiverse_ids": [],
+        "name": "Alrund's Epiphany",
+        "object": "card",
+        "oracle_id": "",
+        "oracle_text": null,
+        "oversized": false,
+        "prices": {
+          "eur": null,
+          "eur_foil": null,
+          "tix": null,
+          "usd": null,
+          "usd_etched": null,
+          "usd_foil": null
+        },
+        "prints_search_uri": "https://api.example/v1/cards/search?order=released&q=oracleid%3A&unique=prints",
+        "promo": false,
+        "rarity": null,
+        "related_uris": {
+          "edhrec": "https://edhrec.com/route/?cc=Alrund%27s+Epiphany",
+          "tcgplayer_infinite_articles": "https://www.tcgplayer.com/search/articles?productLineName=magic&q=Alrund%27s+Epiphany",
+          "tcgplayer_infinite_decks": "https://www.tcgplayer.com/search/decks?productLineName=magic&q=Alrund%27s+Epiphany"
+        },
+        "released_at": null,
+        "reprint": false,
+        "reserved": false,
+        "rulings_uri": "https://api.example/v1/cards/01000000-0000-0000-0000-000000000009/rulings",
+        "scryfall_set_uri": "https://scryfall.com/sets/khm?utm_source=api",
+        "scryfall_uri": "https://scryfall.com/card/khm/A-198/alrunds-epiphany?utm_source=api",
+        "set": "khm",
+        "set_id": null,
+        "set_name": null,
+        "set_search_uri": "https://api.example/v1/cards/search?order=set&q=e%3Akhm&unique=prints",
+        "set_type": null,
+        "set_uri": null,
+        "story_spotlight": false,
+        "textless": false,
+        "type_line": null,
+        "uri": "https://api.example/v1/cards/01000000-0000-0000-0000-000000000009",
+        "variation": false
+      }
+    },
+    {
+      "case": "an empty string is a value, not an absence",
+      "row": {
+        "scryfall_id": "01000000-0000-0000-0000-00000000000a",
+        "name": "Island",
+        "mana_cost": "",
+        "cmc": 0,
+        "type_line": "Basic Land — Island",
+        "oracle_text": "",
+        "artist": "",
+        "set_code": "lea",
+        "collector_number": "288",
+        "lang": "en",
+        "layout": "normal",
+        "games": [
+          "paper"
+        ]
+      },
+      "expected": {
+        "artist": "",
+        "booster": false,
+        "border_color": null,
+        "card_back_id": "0aeebaf5-8c7d-4636-9e82-8c27447861f7",
+        "cmc": 0.0,
+        "collector_number": "288",
+        "color_identity": [],
+        "colors": [],
+        "digital": false,
+        "finishes": [],
+        "full_art": false,
+        "games": [
+          "paper"
+        ],
+        "highres_image": false,
+        "id": "01000000-0000-0000-0000-00000000000a",
+        "illustration_id": null,
+        "image_status": null,
+        "image_uris": {
+          "art": "https://cards.scryfall.io/art/front/0/1/01000000-0000-0000-0000-00000000000a.webp",
+          "art_crop": "https://cards.scryfall.io/art_crop/front/0/1/01000000-0000-0000-0000-00000000000a.jpg",
+          "border_crop": "https://cards.scryfall.io/border_crop/front/0/1/01000000-0000-0000-0000-00000000000a.jpg",
+          "crop": "https://cards.scryfall.io/crop/front/0/1/01000000-0000-0000-0000-00000000000a.webp",
+          "display": "https://cards.scryfall.io/display/front/0/1/01000000-0000-0000-0000-00000000000a.webp",
+          "grid": "https://cards.scryfall.io/grid/front/0/1/01000000-0000-0000-0000-00000000000a.webp",
+          "large": "https://cards.scryfall.io/large/front/0/1/01000000-0000-0000-0000-00000000000a.jpg",
+          "normal": "https://cards.scryfall.io/normal/front/0/1/01000000-0000-0000-0000-00000000000a.jpg",
+          "png": "https://cards.scryfall.io/png/front/0/1/01000000-0000-0000-0000-00000000000a.png",
+          "small": "https://cards.scryfall.io/small/front/0/1/01000000-0000-0000-0000-00000000000a.jpg",
+          "thumb": "https://cards.scryfall.io/thumb/front/0/1/01000000-0000-0000-0000-00000000000a.webp"
+        },
+        "keywords": [],
+        "lang": "en",
+        "layout": "normal",
+        "mana_cost": "",
+        "multiverse_ids": [],
+        "name": "Island",
+        "object": "card",
+        "oracle_id": "",
+        "oracle_text": "",
+        "oversized": false,
+        "prices": {
+          "eur": null,
+          "eur_foil": null,
+          "tix": null,
+          "usd": null,
+          "usd_etched": null,
+          "usd_foil": null
+        },
+        "prints_search_uri": "https://api.example/v1/cards/search?order=released&q=oracleid%3A&unique=prints",
+        "promo": false,
+        "purchase_uris": {
+          "cardhoarder": "https://www.cardhoarder.com/cards?data%5Bsearch%5D=Island",
+          "cardmarket": "https://www.cardmarket.com/en/Magic/Products/Search?searchString=Island",
+          "tcgplayer": "https://www.tcgplayer.com/search/magic/product?productLineName=magic&q=Island&view=grid"
+        },
+        "rarity": null,
+        "related_uris": {
+          "edhrec": "https://edhrec.com/route/?cc=Island",
+          "tcgplayer_infinite_articles": "https://www.tcgplayer.com/search/articles?productLineName=magic&q=Island",
+          "tcgplayer_infinite_decks": "https://www.tcgplayer.com/search/decks?productLineName=magic&q=Island"
+        },
+        "released_at": null,
+        "reprint": false,
+        "reserved": false,
+        "rulings_uri": "https://api.example/v1/cards/01000000-0000-0000-0000-00000000000a/rulings",
+        "scryfall_set_uri": "https://scryfall.com/sets/lea?utm_source=api",
+        "scryfall_uri": "https://scryfall.com/card/lea/288/island?utm_source=api",
+        "set": "lea",
+        "set_id": null,
+        "set_name": null,
+        "set_search_uri": "https://api.example/v1/cards/search?order=set&q=e%3Alea&unique=prints",
+        "set_type": null,
+        "set_uri": null,
+        "story_spotlight": false,
+        "textless": false,
+        "type_line": "Basic Land — Island",
+        "uri": "https://api.example/v1/cards/01000000-0000-0000-0000-00000000000a",
+        "variation": false
+      }
+    }
+  ]
+}

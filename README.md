@@ -392,6 +392,34 @@ python -m client.query_runner
 - **GET /search** - Card search with query parameter support
 - **GET /favicon.ico** - Favicon for web interface
 
+### Scryfall-Compatible Endpoints
+
+Every route Scryfall documents under `/cards`, answering with Scryfall's own response objects and
+175-per-page pagination, so a client can be pointed here by swapping its base URL:
+
+- **GET /cards** and **GET /cards/search** - list routes (`format=json|csv`)
+- **GET /cards/named**, **/cards/autocomplete**, **/cards/random** - single-card and catalog lookups
+- **POST /cards/collection** - up to 75 identifiers at once
+- **GET /cards/:id**, **/cards/:code/:number(/:lang)**, and the multiverse / mtgo / arena /
+  tcgplayer / cardmarket id namespaces
+- **GET /cards/:id/rulings** and its four sibling addressings
+
+`format=text` and `format=image` are available on the single-card routes. What is *not* identical —
+chiefly that the corpus is a filtered subset of Scryfall's — is recorded in
+[docs/issues/local-scryfall-cards-api.md](docs/issues/local-scryfall-cards-api.md).
+
+The reference half of the API, mirrored from Scryfall rather than derived from the corpus:
+
+- **GET /sets**, **/sets/:code**, **/sets/:id**, **/sets/tcgplayer/:id** - 1,047 Set objects
+- **GET /catalog/:name** - all twenty catalogs, 62,187 values
+- **GET /symbology** - 84 card symbols
+- **GET /symbology/parse-mana?cost=** - computed, not stored, so it answers before the first import
+
+These are mirrored because the corpus cannot answer them: a Set object carries eight fields no card
+carries, `card_count` counts printings this instance never imported, and a symbol's `svg_uri` exists
+nowhere in the card data. Details in
+[docs/issues/local-scryfall-sets-catalogs-symbology.md](docs/issues/local-scryfall-sets-catalogs-symbology.md).
+
 ### Admin Endpoints
 
 Data-management routes — importing card data, running score/tag backfills, applying schema

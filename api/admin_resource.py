@@ -46,7 +46,11 @@ from cachebox import TTLCache
 
 from api.card_processing import preprocess_card
 from api.db.bulk_upsert import bulk_upsert as _bulk_upsert
+from api.rulings_import import import_rulings as _import_rulings
 from api.scryfall_bulk_data_fetcher import BulkDataKey, ScryfallBulkDataFetcher
+from api.scryfall_reference_import import import_catalogs as _import_catalogs
+from api.scryfall_reference_import import import_sets as _import_sets
+from api.scryfall_reference_import import import_symbology as _import_symbology
 from api.settings import settings
 from api.tag_import import import_art_tags as _import_art_tags
 from api.tag_import import import_oracle_tags as _import_oracle_tags
@@ -399,6 +403,13 @@ class AdminResource:
             self.backfill_prefer_scores()
             self.backfill_cubecobra_scores()
             _import_oracle_tags(self.app_context.writer_pool, self._bulk_data_fetcher)
+            # Rulings feed only /cards/*/rulings, so nothing above or below depends on them; they
+            # sit here rather than in their own pass so one bulk fetch cycle refreshes everything.
+            self._import_rulings_quietly()
+            # Alongside the rulings and for the same reason: reference data nothing else in this
+            # sequence reads, refreshed on the same cycle so one pass brings the whole surface up
+            # to date rather than leaving /sets and /catalog to age until a manual call.
+            self._import_reference_quietly()
             self.app_context.reload_engine(force=True)
             self._clear_caches()
             self.app_context.last_import_time.value = time.time()
@@ -930,6 +941,72 @@ class AdminResource:
     def import_art_tags(self, **_: object) -> dict[str, Any]:
         """Import art tags from Scryfall bulk data into art_tags, art_tag_relationships, and card_art_tags."""
         return _import_art_tags(self.app_context.writer_pool, self._bulk_data_fetcher)
+
+    @route()
+    def import_rulings(self, **_: object) -> dict[str, Any]:
+        """Import Scryfall rulings bulk data into magic.rulings, backing the /cards/*/rulings routes.
+
+        Returns:
+            The number of rulings loaded.
+        """
+        return {"rulings_loaded": _import_rulings(self.app_context.writer_pool, self._bulk_data_fetcher)}
+
+    def _import_rulings_quietly(self) -> None:
+        """Refresh the rulings during a bulk import, logging rather than failing on error.
+
+        Rulings are the only data in the import sequence nothing else reads: a card search, the
+        prefer scores and the engine reload all work without them. Letting a bad rulings file
+        abort the import would cost the corpus refresh to save a rulings refresh.
+        """
+        try:
+            _import_rulings(self.app_context.writer_pool, self._bulk_data_fetcher)
+        except Exception:
+            logger.exception("Rulings import failed; continuing with the rest of the import")
+
+    @route()
+    def import_sets(self, **_: object) -> dict[str, Any]:
+        """Mirror Scryfall's set list into magic.sets, backing the /sets routes.
+
+        Returns:
+            A summary of the load.
+        """
+        return _import_sets(self.app_context.writer_pool, self._bulk_data_fetcher)
+
+    @route()
+    def import_catalogs(self, **_: object) -> dict[str, Any]:
+        """Mirror the twenty Scryfall catalogs into magic.catalogs, backing /catalog/*.
+
+        Returns:
+            A summary of the load.
+        """
+        return _import_catalogs(self.app_context.writer_pool, self._bulk_data_fetcher)
+
+    @route()
+    def import_symbology(self, **_: object) -> dict[str, Any]:
+        """Mirror Scryfall's card symbols into magic.card_symbols, backing /symbology.
+
+        Returns:
+            A summary of the load.
+        """
+        return _import_symbology(self.app_context.writer_pool, self._bulk_data_fetcher)
+
+    def _import_reference_quietly(self) -> None:
+        """Refresh sets, catalogs and symbology during a bulk import, logging rather than failing.
+
+        Each of the three is independent of the other two and of everything else in the sequence,
+        so one failing upstream endpoint must not cost the other two their refresh — nor the corpus
+        its. This is the rulings argument applied three more times: nothing downstream reads any of
+        these tables, so a stale one degrades three endpoints rather than breaking the import.
+        """
+        for name, step in (
+            ("Set", _import_sets),
+            ("Catalog", _import_catalogs),
+            ("Symbology", _import_symbology),
+        ):
+            try:
+                step(self.app_context.writer_pool, self._bulk_data_fetcher)
+            except Exception:
+                logger.exception("%s import failed; continuing with the rest of the import", name)
 
     @route()
     def import_all_is_tags(self, **_: object) -> dict[str, Any]:
