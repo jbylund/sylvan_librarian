@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import re
+import typing
 import unicodedata
 
 from titlecase import titlecase
 
-from api.parsing.colors import COLOR_ALIAS_TO_CODES, COLOR_CODE_TO_NAME
+from api.parsing.colors import COLOR_ALIAS_TO_CODES, COLOR_CODE_TO_NAME, COLOR_COUNT_NAMES, COUNT_NAME_TO_COLUMN
 from api.parsing.db_info import (
     ALIAS_TO_FIELD_INFOS,
     CARD_SUPERTYPES,
@@ -201,6 +202,33 @@ def _color_codes_to_explanation(color_codes: str, *, name: str | None = None) ->
 
 def _color_dict_to_mask(color_dict: dict[str, bool]) -> int:
     return sum(bit for color, bit in _COLOR_BITS.items() if color_dict.get(color))
+
+
+def _compare_ints(lhs: int, operator: str, rhs: int) -> bool:
+    if operator == "=":
+        return lhs == rhs
+    if operator in ("!=", "<>"):
+        return lhs != rhs
+    if operator == ">=":
+        return lhs >= rhs
+    if operator == "<=":
+        return lhs <= rhs
+    if operator == ">":
+        return lhs > rhs
+    if operator == "<":
+        return lhs < rhs
+    msg = f"Unknown operator: {operator}"
+    raise ValueError(msg)
+
+
+def _color_count_masks(operator: str, count: int, bits: int = 5) -> list[int]:
+    """Bitmask values whose popcount satisfies `popcount <op> count`.
+
+    `bits` is 5 for the colour columns and SIX for produced_mana, whose array can literally hold
+    "C" (Sol Ring produces ["C"] while its colors and color_identity are both []). See the
+    2026-08-16-03 migration for the measurements that pin the difference.
+    """
+    return [v for v in range(1 << bits) if _compare_ints(v.bit_count(), operator, count)]
 
 
 def _subset_masks(query_mask: int) -> list[int]:
@@ -515,8 +543,117 @@ class ExactNameNode(QueryNode):
         return f'exact name is "{self.value}"'
 
 
+# What a colour-COUNT name (`c:m`, `id:gold`) means, per operator, as the (operator, count) pair
+# the numeric colour-count comparison is built from. Measured; the evidence and the two surprises
+# in it are written out at colors.COLOR_COUNT_NAMES.
+_COLOR_COUNT_BY_OPERATOR: typing.Final = {
+    ":": (">=", 2),
+    "=": (">=", 2),
+    ">": (">=", 2),
+    ">=": (">=", 2),
+    "<": ("<", 2),
+    "!=": ("<", 2),
+    "<=": (">=", 0),  # a tautology, spelled as a count so it stays one leaf
+}
+
+# produced_mana is NOT here, and the reason is measured rather than conservative: Scryfall counts
+# SIX values on that column, colorless among them. `produces=1 produces:c` is 481 -- exactly the
+# cards that produce colorless and nothing else -- so a C-only producer counts ONE there, where
+# `magic.color_identity_mask` and the engine's popcount both read the five WUBRG keys and would
+# call it zero. `produces:m` is therefore a count this column cannot answer yet, and it stays the
+# error it already was rather than becoming a silently different one.
+# The same table for produced_mana, intersected with "produces at least one value". A card that
+# makes no mana at all is not a producer of anything, and Scryfall keeps it out of every one of
+# these: `produces<m` = `produces!=m` = 1,143 = `produces=1`, NOT `produces<2` (32,139) or
+# `produces!=2` (33,095), both of which sweep in the 30,996 cards that produce nothing; and
+# `produces<=m` = 2,603 = `produces>=1` rather than every card. The extra conjunct collapses into
+# the count itself (`<2` and `>=1` is `=1`; `>=0` and `>=1` is `>=1`), so this stays one
+# (operator -> operator, count) table and no AND node is needed.
+_PRODUCED_COUNT_BY_OPERATOR: typing.Final = {
+    ":": (">=", 2),
+    "=": (">=", 2),
+    ">": (">=", 2),
+    ">=": (">=", 2),
+    "<": ("=", 1),
+    "!=": ("=", 1),
+    "<=": (">=", 1),
+}
+
+# `any` on produced_mana, per operator. Same shape as the two tables above, and kept as its own
+# table because it does NOT read like `m` on the same column: `produces!=m` groups with
+# `produces<m`, while `produces!=any` groups with `produces:any`. Measured on both a corpus-wide
+# and a `t:creature` base; the counts and that asymmetry are written out at
+# colors.COUNT_NAME_TO_COLUMN. `<` and `<=` are the two that need operators the tables above never
+# emit -- `produces<any` is `produces=0` (the cards that make no mana at all, 30,996) and
+# `produces<=any` is `produces<=1` (32,139), neither of which is expressible as a `>=` count.
+_ANY_COUNT_BY_OPERATOR: typing.Final = {
+    ":": (">=", 1),
+    "=": (">=", 1),
+    ">": (">=", 1),
+    ">=": (">=", 1),
+    "!=": (">=", 1),
+    "<": ("=", 0),
+    "<=": ("<=", 1),
+}
+
+# The single-column count names, as name -> its operator table. The COLUMN each one is legal on
+# lives in colors.COUNT_NAME_TO_COLUMN, which is what the value parsers resolve against, so a name
+# is never accepted for a column that has no table for it here.
+_SINGLE_COLUMN_COUNT_TABLES: typing.Final = {
+    "any": _ANY_COUNT_BY_OPERATOR,
+}
+
+_COLOR_COUNT_ATTRIBUTES: typing.Final = ("card_colors", "card_color_identity", "produced_mana")
+
+
+def _count_lowering(attribute_name: str, value: str, operator: str) -> tuple[str, int] | None:
+    """Return the (operator, count) a colour-COUNT *value* means on *attribute_name*, if it is one.
+
+    Returns None for an ordinary colour value, and for a single-column count name asked of a column
+    that does not accept it -- `c:any` resolves to produced_mana and so is left alone here, exactly
+    as it was before `any` existed. The value parsers reject that case before it ever gets this far;
+    this stays the same shape anyway so the two tables cannot drift apart.
+    """
+    if value in COLOR_COUNT_NAMES:
+        table = _PRODUCED_COUNT_BY_OPERATOR if attribute_name == "produced_mana" else _COLOR_COUNT_BY_OPERATOR
+    elif COUNT_NAME_TO_COLUMN.get(value) == attribute_name:
+        table = _SINGLE_COLUMN_COUNT_TABLES[value]
+    else:
+        return None
+    return table.get(operator)
+
+
 class CardBinaryOperatorNode(BinaryOperatorNode):
     """Card-specific binary operator node with custom SQL generation."""
+
+    def __init__(self, lhs: QueryNode, operator: str, rhs: QueryNode) -> None:
+        """Initialize the node, lowering a colour-COUNT name to a numeric colour-count comparison.
+
+        `c:m` and its five synonyms are a NUMBER of colours, not a set of them, so the value has no
+        letters to compare and the operator does not survive verbatim either (`c>m` is `c>=2` and
+        `c!=m` is `c<2`). Both parsers reach this constructor -- the hand parser builds the node
+        directly, the pyparsing one via `to_card_query_ast` -- so lowering it here is what keeps
+        them from disagreeing, and the node the rest of the pipeline sees is the ordinary numeric
+        one that `c>=2` already produces, on every path: engine JSON, SQL and explanation alike.
+
+        `produces:any` is the same kind of value on a column of its own -- "produces some mana at
+        all", `produces>=1` -- and takes the same route for the same reason.
+
+        Args:
+            lhs: The left-hand side operand.
+            operator: The binary operator.
+            rhs: The right-hand side operand.
+        """
+        if (
+            isinstance(lhs, CardAttributeNode)
+            and isinstance(rhs, StringValueNode)
+            and lhs.attribute_name in _COLOR_COUNT_ATTRIBUTES
+        ):
+            lowered = _count_lowering(lhs.attribute_name, rhs.value.strip().lower(), operator)
+            if lowered is not None:
+                operator, count = lowered
+                rhs = NumericValueNode(count)
+        super().__init__(lhs, operator, rhs)
 
     def kwargs(self) -> dict:
         """Return this node's kwargs dict for Rust engine JSON serialization."""
@@ -546,7 +683,17 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
 
         return {"lhs": self.lhs.to_json(), "op": self.operator, "rhs": self._rhs_to_json()}
 
-    def _rhs_to_json(self) -> object:  # noqa: PLR0912
+    # JSONB_OBJECT attrs whose engine rhs is the normalized keys of a comparison
+    # object built by a single-argument normalizer, shared by _rhs_to_json.
+    _TAG_COMPARISON_BUILDERS: typing.ClassVar = {
+        "card_keywords": get_keywords_comparison_object,
+        "card_frame_data": get_frame_data_comparison_object,
+        "card_oracle_tags": get_oracle_tags_comparison_object,
+        "card_art_tags": get_art_tags_comparison_object,
+        "card_is_tags": get_is_tags_comparison_object,
+    }
+
+    def _rhs_to_json(self) -> object:
         """Compute the JSON-serializable rhs for non-JSONB_ARRAY CardAttributeNode LHS."""
         if not self.lhs.field_infos:
             return _node_to_json(self.rhs)
@@ -558,19 +705,15 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
             # Mana cost and devotion: pass raw ManaValueNode for Rust to parse pip counts
             if field_info.parser_class == ParserClass.MANA:
                 return _node_to_json(self.rhs)
+            # Numeric color syntax (id>=3 / c=2): pass the raw NumericValueNode so the
+            # Rust engine builds a color-count comparison instead of a mask compare.
+            if isinstance(self.rhs, NumericValueNode):
+                return _node_to_json(self.rhs)
             val = self.rhs.value.strip()
             if attr in ("card_colors", "card_color_identity", "produced_mana"):
                 return list(get_colors_comparison_object(val.lower(), attr).keys())
-            if attr == "card_keywords":
-                return list(get_keywords_comparison_object(val).keys())
-            if attr == "card_frame_data":
-                return list(get_frame_data_comparison_object(val).keys())
-            if attr == "card_oracle_tags":
-                return list(get_oracle_tags_comparison_object(val).keys())
-            if attr == "card_art_tags":
-                return list(get_art_tags_comparison_object(val).keys())
-            if attr == "card_is_tags":
-                return list(get_is_tags_comparison_object(val).keys())
+            if attr in self._TAG_COMPARISON_BUILDERS:
+                return list(self._TAG_COMPARISON_BUILDERS[attr](val).keys())
             if attr == "card_legalities":
                 return list(get_legality_comparison_object(val, self.lhs.original_attribute).keys())
 
@@ -647,6 +790,17 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         """Format explanation for card attribute comparisons."""
         db_column_name = attr_node.attribute_name.lower()
 
+        # Numeric color syntax compares the count of colors, not the colors themselves. produced_mana
+        # belongs here too: `produces>=2` is a count, and so is every `produces:any` / `produces:m`
+        # the constructor lowered into one -- without it those explain as "produced mana ≥ 1", which
+        # reads as a quantity of mana rather than a number of kinds.
+        if db_column_name in _COLOR_COUNT_ATTRIBUTES and isinstance(self.rhs, NumericValueNode):
+            noun = {
+                "card_color_identity": "colors in the color identity",
+                "produced_mana": "kinds of mana produced",  # SIX kinds: colorless is one of them
+            }.get(db_column_name, "colors")
+            count_op = "is" if self.operator == ":" else operator_str  # : compares counts as equality
+            return f"the number of {noun} {count_op} {rhs_str}"
         # `=` against an empty value reaches here (see to_human_explanation) as a real
         # constraint, not the vacuous `:` case -- state it plainly rather than falling into
         # "the X contains " with nothing after it.
@@ -654,12 +808,11 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
             return f"the {attr_node.to_human_explanation()} is empty"
 
         # Special formatting for certain attributes
-        if db_column_name == "card_color_identity" and self.operator in ("=", ":"):
-            return f"the color identity is {rhs_str}"
+        if db_column_name in ("card_color_identity", "card_colors") and self.operator in ("=", ":"):
+            noun = "color identity" if db_column_name == "card_color_identity" else "color"
+            return f"the {noun} is {rhs_str}"
         if db_column_name == "card_legalities" and self.operator in ("=", ":"):
             return f"it's legal in {rhs_str}"
-        if db_column_name == "card_colors" and self.operator in ("=", ":"):
-            return f"the color is {rhs_str}"
         if db_column_name == "creature_power":
             return f"the power {operator_str} {rhs_str}"
         if db_column_name == "creature_toughness":
@@ -1018,11 +1171,34 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
     query ?& col AND not(col ?& query) # as array
     """
 
+    def _handle_color_count_comparison(self, lhs_sql: str, attr: str, context: QueryContext) -> str:
+        """SQL for Scryfall numeric color syntax (id>=3 / c=2): compare the NUMBER of colors.
+
+        Generates the same indexed mask expression the letter-valued subset queries
+        use — magic.color_identity_mask reads only the five WUBRG keys — with the
+        mask set restricted to values whose popcount satisfies the comparison.
+        ":" with a number behaves like "=" (verified against the live Scryfall API).
+
+        produced_mana counts SIX values, colorless among them, and so uses its
+        own six-bit mask function: `produces=1 produces:c` = 481 (the cards that
+        produce colorless and nothing else) and `produces=6` = 106, neither of
+        which a five-key count can express. The colour columns keep counting
+        five -- `c=5` = `c:all` = 60 and `c=6` is not a valid query at all.
+        """
+        produced = attr == "produced_mana"
+        operator = "=" if self.operator == ":" else self.operator
+        masks = IntArray(_color_count_masks(operator, int(self.rhs.value), bits=6 if produced else 5))
+        pmask = context.add(masks)
+        mask_fn = "magic.produced_mana_mask" if produced else "magic.color_identity_mask"
+        return f"({mask_fn}({lhs_sql}) = ANY({pmask}::smallint[]))"
+
     def _handle_jsonb_object(self, context: QueryContext) -> str:  # noqa: PLR0912, C901
         # Produce the query as a jsonb object
         lhs_sql = self.lhs.to_sql(context)
         attr = self.lhs.attribute_name
         is_color_identity = False
+        if attr in ("card_colors", "card_color_identity", "produced_mana") and isinstance(self.rhs, NumericValueNode):
+            return self._handle_color_count_comparison(lhs_sql, attr, context)
         if attr in ("card_colors", "card_color_identity", "produced_mana"):
             rhs = get_colors_comparison_object(self.rhs.value.strip().lower(), attr)
             is_color_identity = attr == "card_color_identity"

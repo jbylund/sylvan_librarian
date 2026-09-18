@@ -288,6 +288,50 @@ def test_full_sql_translation_jsonb_colors(parse_query, input_query: str, expect
             r"(card.card_color_identity = %(p_dict_e30)s)",
             {"p_dict_e30": {}},
         ),  # equality with colorless name
+        (
+            "id>=3",
+            r"(magic.color_identity_mask(card.card_color_identity) = ANY(%(p_IntArray_WzcsIDExLCAxMywgMTQsIDE1LCAxOSwgMjEsIDIyLCAyMywgMjUsIDI2LCAyNywgMjgsIDI5LCAzMCwgMzFd)s::smallint[]))",
+            {
+                "p_IntArray_WzcsIDExLCAxMywgMTQsIDE1LCAxOSwgMjEsIDIyLCAyMywgMjUsIDI2LCAyNywgMjgsIDI5LCAzMCwgMzFd": [
+                    7,
+                    11,
+                    13,
+                    14,
+                    15,
+                    19,
+                    21,
+                    22,
+                    23,
+                    25,
+                    26,
+                    27,
+                    28,
+                    29,
+                    30,
+                    31,
+                ],
+            },
+        ),  # numeric: three or more colors in the identity — masks with popcount >= 3
+        (
+            "id=2",
+            r"(magic.color_identity_mask(card.card_color_identity) = ANY(%(p_IntArray_WzMsIDUsIDYsIDksIDEwLCAxMiwgMTcsIDE4LCAyMCwgMjRd)s::smallint[]))",
+            {"p_IntArray_WzMsIDUsIDYsIDksIDEwLCAxMiwgMTcsIDE4LCAyMCwgMjRd": [3, 5, 6, 9, 10, 12, 17, 18, 20, 24]},
+        ),  # numeric: exactly two colors — the C(5,2)=10 masks with popcount 2
+        (
+            "id:2",
+            r"(magic.color_identity_mask(card.card_color_identity) = ANY(%(p_IntArray_WzMsIDUsIDYsIDksIDEwLCAxMiwgMTcsIDE4LCAyMCwgMjRd)s::smallint[]))",
+            {"p_IntArray_WzMsIDUsIDYsIDksIDEwLCAxMiwgMTcsIDE4LCAyMCwgMjRd": [3, 5, 6, 9, 10, 12, 17, 18, 20, 24]},
+        ),  # : with a number behaves like = (verified against the live Scryfall API)
+        (
+            "id<2",
+            r"(magic.color_identity_mask(card.card_color_identity) = ANY(%(p_IntArray_WzAsIDEsIDIsIDQsIDgsIDE2XQ)s::smallint[]))",
+            {"p_IntArray_WzAsIDEsIDIsIDQsIDgsIDE2XQ": [0, 1, 2, 4, 8, 16]},
+        ),  # numeric: fewer than two colors — colorless (0) plus the five mono masks
+        (
+            "id=0",
+            r"(magic.color_identity_mask(card.card_color_identity) = ANY(%(p_IntArray_WzBd)s::smallint[]))",
+            {"p_IntArray_WzBd": [0]},
+        ),  # numeric zero = colorless, same mask set as id:c
     ],
 )
 def test_color_identity_sql_translation(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
@@ -351,6 +395,19 @@ def test_color_identity_sql_translation(parse_query, input_query: str, expected_
             r"(card.produced_mana @> %(p_dict_eydDJzogVHJ1ZX0)s)",
             {"p_dict_eydDJzogVHJ1ZX0": {"C": True}},
         ),
+        # Numeric color syntax works on printed colors too: the value is the
+        # NUMBER of colors, and the same WUBRG mask expression serves both
+        # fields (magic.color_identity_mask only reads the five color keys).
+        (
+            "c=2",
+            r"(magic.color_identity_mask(card.card_colors) = ANY(%(p_IntArray_WzMsIDUsIDYsIDksIDEwLCAxMiwgMTcsIDE4LCAyMCwgMjRd)s::smallint[]))",
+            {"p_IntArray_WzMsIDUsIDYsIDksIDEwLCAxMiwgMTcsIDE4LCAyMCwgMjRd": [3, 5, 6, 9, 10, 12, 17, 18, 20, 24]},
+        ),
+        (
+            "c:3",
+            r"(magic.color_identity_mask(card.card_colors) = ANY(%(p_IntArray_WzcsIDExLCAxMywgMTQsIDE5LCAyMSwgMjIsIDI1LCAyNiwgMjhd)s::smallint[]))",
+            {"p_IntArray_WzcsIDExLCAxMywgMTQsIDE5LCAyMSwgMjIsIDI1LCAyNiwgMjhd": [7, 11, 13, 14, 19, 21, 22, 25, 26, 28]},
+        ),  # : with a number is equality, NOT the >= that letter values get
     ],
 )
 def test_color_and_produces_sql_translation(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
