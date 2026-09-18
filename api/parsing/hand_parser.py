@@ -8,6 +8,7 @@ pyparsing-based parse_search_query pipeline.
 from __future__ import annotations
 
 import datetime
+import re
 from dataclasses import dataclass
 from enum import Enum, auto
 
@@ -62,6 +63,13 @@ _VALID_COLOR_NAMES: frozenset[str] = frozenset(COLOR_ALIAS_TO_CODES)
 _COLOR_LETTERS: frozenset[str] = frozenset("wubrgcWUBRGC")
 _MIN_MTG_YEAR: int = 1992
 _MAX_YEAR: int = 2040
+# The date shapes Scryfall honors for `date:`, zero-padding strict: `date:2021-02` is a month there
+# and `date:2021-2` is `Invalid date or unknown set code` (measured 2026-09-03). Same shape the
+# post-parse rewrite tests (rewrite._DATE_SHAPE_RE), where a non-date value gets its set-code lookup.
+_DATE_SHAPE_RE = re.compile(r"\d{4}(?:-\d{2}(?:-\d{2})?)?")
+# The raw source run a date value occupies once the lexer has handed it over as NUMBER (MINUS NUMBER)*;
+# a float NUMBER (`2025.5`) is swept up whole so it is rejected by name, not truncated to its year.
+_DATE_RUN_RE = re.compile(r"[\d.]+(?:-[\d.]+)*")
 
 
 def _validate_mtg_year(value: int | float, pos: int) -> int:
@@ -340,11 +348,16 @@ def _name_node(value: str) -> CardBinaryOperatorNode:
 class Parser:
     """Recursive descent parser for Scryfall query syntax."""
 
-    __slots__ = ("group_depth", "pos", "tokens")
+    __slots__ = ("group_depth", "pos", "src", "tokens")
 
-    def __init__(self, tokens: list[Token]) -> None:
-        """Initialise the parser with the token list produced by tokenize()."""
+    def __init__(self, tokens: list[Token], src: str = "") -> None:
+        """Initialise the parser with the token list produced by tokenize() and the text it came from.
+
+        `src` is consulted only where a token's value has already lost something the grammar needs:
+        `parse_date_value` reads the raw digits back because `int("02")` is `2`.
+        """
         self.tokens = tokens
+        self.src = src
         self.pos = 0
         self.group_depth = 0
 
@@ -768,39 +781,49 @@ class Parser:
         raise ParseError(msg)
 
     def parse_date_value(self) -> QueryNode:
-        """Parse a date value: YYYY or YYYY-MM-DD (hyphens must have no surrounding spaces)."""
+        """Parse a date value: YYYY, YYYY-MM, YYYY-MM-DD (no spaces around hyphens), or a set code.
+
+        A WORD or QUOTED value (`hob`, `HOB`, `"hob"`, and the leading-digit codes the lexer already
+        keeps whole: `40k`, `2x2`, `3ed`, `10e`) is handed over as-is; whether it names a set is
+        decided by `rewrite.resolve_set_code_dates`, the one place with the release-date registry.
+        A NUMBER run that is not one of the three date shapes (`2021-2`, `2025-2-2`) is handed over
+        the same way, as its raw text, so the rewrite can reject it by name the way Scryfall does
+        rather than the lexer's `int()` silently repairing the padding. Only a value that IS a date
+        shape is validated here: year range, and that the month/day exist.
+        """
         tok = self.peek()
+        if tok.type in (TT.WORD, TT.QUOTED):
+            self.consume()
+            return StringValueNode(str(tok.value))
         if tok.type != TT.NUMBER:
-            msg = f"Expected date, got {tok.value!r} at position {tok.pos}"
+            msg = f"Expected date or set code, got {tok.value!r} at position {tok.pos}"
             raise ParseError(msg)
         self.consume()
-        year = _validate_mtg_year(tok.value, tok.pos)
-        # Consume YYYY-MM-DD: two MINUS+NUMBER pairs without spaces
-        if (
+        # Consume the whole NUMBER(-NUMBER)* run without spaces, then read it back from the source:
+        # the tokens carry `2` for both `02` and `2`, and the padding is what separates the accepted
+        # `2021-02` from the rejected `2021-2`.
+        while (
             self.peek().type == TT.MINUS
             and not self.peek().space_before
             and self.peek(1).type == TT.NUMBER
             and not self.peek(1).space_before
         ):
             self.consume()
-            month_tok = self.consume()
-            if (
-                self.peek().type == TT.MINUS
-                and not self.peek().space_before
-                and self.peek(1).type == TT.NUMBER
-                and not self.peek(1).space_before
-            ):
-                self.consume()
-                day_tok = self.consume()
-                month = int(month_tok.value)
-                day = int(day_tok.value)
-                try:
-                    datetime.date(year=year, month=month, day=day)
-                except ValueError as exc:
-                    msg = f"Invalid date {year}-{month:02d}-{day:02d} at position {tok.pos}: {exc}"
-                    raise ParseError(msg) from exc
-                return StringValueNode(f"{year}-{month:02d}-{day:02d}")
-        return StringValueNode(str(year))
+            self.consume()
+        run = _DATE_RUN_RE.match(self.src, tok.pos)
+        raw = run.group(0) if run is not None else str(tok.value)
+        if not _DATE_SHAPE_RE.fullmatch(raw):
+            return StringValueNode(raw)
+        year_text, *month_day = raw.split("-")
+        year = _validate_mtg_year(int(year_text), tok.pos)
+        if month_day:
+            month, *day = month_day
+            try:
+                datetime.date(year=year, month=int(month), day=int(day[0]) if day else 1)
+            except ValueError as exc:
+                msg = f"Invalid date {raw} at position {tok.pos}: {exc}"
+                raise ParseError(msg) from exc
+        return StringValueNode(raw)
 
     def parse_year_value(self) -> QueryNode:
         """Parse a year value: 4-digit integer >= 1992."""
@@ -828,7 +851,7 @@ def parse_str_to_query(src: str | None) -> Query:
     except QueryBudgetExceeded:
         raise
     try:
-        result = Parser(tokens).parse()
+        result = Parser(tokens, src).parse()
     except QueryBudgetExceeded:
         raise
     except ParseError as exc:

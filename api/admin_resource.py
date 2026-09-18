@@ -400,6 +400,10 @@ class AdminResource:
             self.backfill_cubecobra_scores()
             _import_oracle_tags(self.app_context.writer_pool, self._bulk_data_fetcher)
             self.app_context.reload_engine(force=True)
+            # Other workers pick the new sets up on their next search via last_import_time (set
+            # below); this one would too, but a `date:<new set>` typed right after the import
+            # should not have to wait for that.
+            self.app_context.refresh_set_release_dates()
             self._clear_caches()
             self.app_context.last_import_time.value = time.time()
             self.app_context.invalidate_setup_complete()
