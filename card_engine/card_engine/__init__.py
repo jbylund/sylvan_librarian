@@ -2,6 +2,7 @@
 
 import enum
 
+from .card_engine import FACE_TEXT_SEPARATOR as FACE_TEXT_SEPARATOR
 from .card_engine import FatalQueryError as FatalQueryError
 from .card_engine import QueryEngine as QueryEngine
 from .card_engine import QueryError as QueryError

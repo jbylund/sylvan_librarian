@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import multiprocessing
+import pathlib
 import uuid
 from unittest.mock import patch
 
@@ -482,3 +483,70 @@ class TestUpsertBehavior:
             row = cursor.fetchone()
         assert row["prefer_score"] == 42.0
         assert row["card_is_tags"] == {"is:instant": True}
+
+
+# ---------------------------------------------------------------------------
+# illustration_ids: the column the art-tag join reads
+# ---------------------------------------------------------------------------
+
+
+def _dfc_raw_card(front: str, back: str) -> dict:
+    card = make_raw_card(name=f"Illustration Front {uuid.uuid4()} // Illustration Back")
+    card["layout"] = "transform"
+    card["card_faces"] = [
+        {"name": "Illustration Front", "type_line": "Creature — Human", "illustration_id": front},
+        {"name": "Illustration Back", "type_line": "Creature — Insect", "illustration_id": back},
+    ]
+    return card
+
+
+class TestIllustrationIds:
+    """`illustration_ids` is every illustration the row shows, and it must survive an import.
+
+    It is what `card_art_tags` is joined on (api/tag_import.py), so a row that loses it stops
+    answering art-tag queries entirely -- and a merged double-faced row is the only place the
+    back's illustration exists at all, `illustration_id` being the front's.
+    """
+
+    FRONT = "cccccccc-0000-4000-8000-000000000001"
+    BACK = "cccccccc-0000-4000-8000-000000000002"
+
+    @staticmethod
+    def _stored(api_resource: APIResource, scryfall_id: str) -> list[str]:
+        with api_resource.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+            cursor.execute("SELECT illustration_ids FROM magic.cards WHERE scryfall_id = %s", (scryfall_id,))
+            return cursor.fetchone()["illustration_ids"]
+
+    def test_a_merged_row_stores_both_faces(self, api_resource: APIResource) -> None:
+        card = _dfc_raw_card(self.FRONT, self.BACK)
+        api_resource.admin._upsert_cards([card])
+        assert self._stored(api_resource, card["id"]) == [self.FRONT, self.BACK]
+
+    def test_a_single_faced_row_stores_its_one(self, api_resource: APIResource) -> None:
+        card = make_raw_card()
+        card["illustration_id"] = "cccccccc-0000-4000-8000-000000000003"
+        api_resource.admin._upsert_cards([card])
+        assert self._stored(api_resource, card["id"]) == ["cccccccc-0000-4000-8000-000000000003"]
+
+    def test_the_migration_backfill_agrees_with_preprocessing(self, api_resource: APIResource) -> None:
+        """The one-shot backfill must land where the next import would, or art tags go dark until it.
+
+        It reads `raw_card_blob->'card_faces'`, which is the only record of the back's illustration
+        on an already-imported row. Runs the migration's last statement -- the backfill -- against
+        rows written by the real import path.
+        """
+        dfc = _dfc_raw_card(self.FRONT, self.BACK)
+        solo = make_raw_card()
+        solo["illustration_id"] = "cccccccc-0000-4000-8000-000000000004"
+        api_resource.admin._upsert_cards([dfc, solo])
+
+        migration = (pathlib.Path(__file__).parent.parent / "db" / "2026-08-16-01-illustration-ids.sql").read_text()
+        backfill = migration[migration.index("WITH shown") :]
+
+        with api_resource.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+            cursor.execute("UPDATE magic.cards SET illustration_ids = '[]'::jsonb")
+            cursor.execute(backfill)
+            conn.commit()
+
+        assert self._stored(api_resource, dfc["id"]) == [self.FRONT, self.BACK]
+        assert self._stored(api_resource, solo["id"]) == ["cccccccc-0000-4000-8000-000000000004"]

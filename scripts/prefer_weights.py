@@ -133,7 +133,28 @@ COUNTED_PRINTING_SQL = """
 # Sourced from Scryfall's `normal` rather than the project CDN: the CDN 403s on
 # printings the site does not carry (e.g. pw26/20), which would leave the reviewer
 # comparing a broken image against a card. Scryfall covers 94,718/94,718.
-LEVELS_EXTRA_IMAGE = "raw_card_blob -> 'image_uris' ->> 'normal'"
+
+
+def front_image(size: str, alias: str = "") -> str:
+    """Build the SQL for a printing's front-face image URL at one size.
+
+    `raw_card_blob` holds Scryfall's own card object, and where a card carries its images decides
+    on layout: a single-face or split printing has `image_uris` at top level, a transform or MDFC
+    one has them only under `card_faces`. Reading the front therefore has to try both, which is
+    what every image read in this file goes through.
+
+    Args:
+        size: An `image_uris` key -- "normal", "art_crop", and so on.
+        alias: Table alias to qualify the column with, or "" for an unqualified column.
+
+    Returns:
+        A SQL expression yielding the URL, or NULL when the printing has no image of that size.
+    """
+    column = f"{alias}.raw_card_blob" if alias else "raw_card_blob"
+    return f"COALESCE({column} -> 'image_uris' ->> '{size}', {column} -> 'card_faces' -> 0 -> 'image_uris' ->> '{size}')"
+
+
+LEVELS_EXTRA_IMAGE = front_image("normal")
 
 LEVELS_SQL = """
 SELECT c.scryfall_id::text AS sid,
@@ -168,8 +189,8 @@ SELECT c.scryfall_id::text AS sid,
        ((c.card_art_tags ? 'external-ip' AND NOT (c.card_art_tags ?| {exempt}))
          OR c.card_art_tags ?| {departure})                           AS off_style,
        c.card_set_code, c.collector_number,
-       c.raw_card_blob -> 'image_uris' ->> 'art_crop'                 AS art_url,
-       c.raw_card_blob -> 'image_uris' ->> 'normal'                   AS card_url
+       {art_crop_url}                                                 AS art_url,
+       {normal_url}                                                   AS card_url
 FROM magic.cards c
 WHERE {where}
 """
@@ -275,7 +296,12 @@ def load(where: str) -> list[dict[str, str]]:
     """Fetch component levels for every printing matching `where`."""
     return run_query(
         LEVELS_SQL.format(
-            exempt=pg_arr(STYLE_EXEMPT_TAGS), departure=pg_arr(STYLE_DEPARTURE_TAGS), counted=COUNTED_PRINTING_SQL, where=where
+            exempt=pg_arr(STYLE_EXEMPT_TAGS),
+            departure=pg_arr(STYLE_DEPARTURE_TAGS),
+            counted=COUNTED_PRINTING_SQL,
+            where=where,
+            art_crop_url=front_image("art_crop", "c"),
+            normal_url=front_image("normal", "c"),
         )
     )
 
@@ -330,10 +356,7 @@ def cmd_swaps(sets: list[str], scales: list[str], out: Path, limit: int) -> None
     for k, a, b in changed:
         print(f"  {k:20s} {a:7.2f} -> {b:7.2f}")
 
-    rows = load(
-        "c.raw_card_blob ->> 'lang' = 'en' AND c.prefer_score IS NOT NULL "
-        "AND c.raw_card_blob -> 'image_uris' ->> 'art_crop' IS NOT NULL"
-    )
+    rows = load(f"c.raw_card_blob ->> 'lang' = 'en' AND c.prefer_score IS NOT NULL AND {front_image('art_crop', 'c')} IS NOT NULL")
     by_card: dict[str, list[dict[str, str]]] = {}
     for r in rows:
         by_card.setdefault(r["card_name"], []).append(r)
@@ -485,10 +508,7 @@ def cmd_step(comp: str, direction: str, out: Path) -> None:
     """Find the smallest change to one component that moves TARGET_SWAPS cards."""
     if comp not in WEIGHTS:
         sys.exit(f"unknown component {comp!r}; known: {', '.join(sorted(WEIGHTS))}")
-    rows = load(
-        "c.raw_card_blob ->> 'lang' = 'en' AND c.prefer_score IS NOT NULL "
-        "AND c.raw_card_blob -> 'image_uris' ->> 'art_crop' IS NOT NULL"
-    )
+    rows = load(f"c.raw_card_blob ->> 'lang' = 'en' AND c.prefer_score IS NOT NULL AND {front_image('art_crop', 'c')} IS NOT NULL")
     by: dict[str, list[dict[str, str]]] = {}
     for r in rows:
         by.setdefault(r["card_name"], []).append(r)
@@ -816,7 +836,7 @@ WITH e AS (
   SELECT c.card_name, c.illustration_id, c.card_set_code, c.card_frame_data, c.card_border,
          c.card_rarity_int, c.raw_card_blob ->> 'image_status' AS img,
          c.raw_card_blob ->> 'collector_number' AS cn,
-         c.raw_card_blob -> 'image_uris' ->> 'normal' AS url,
+         {normal_url} AS url,
          CASE WHEN c.raw_card_blob -> 'finishes' ? 'nonfoil' THEN 'nonfoil'
               WHEN c.raw_card_blob -> 'finishes' ? 'foil' THEN 'foil' ELSE 'etched' END AS fin,
          -- Sorted, so ["showcase","legendary"] and ["legendary","showcase"] compare equal --
@@ -836,7 +856,7 @@ WITH e AS (
          COALESCE(c.raw_card_blob ->> 'promo', 'f')         AS promo
   FROM magic.cards c
   WHERE c.raw_card_blob ->> 'lang' = 'en' AND c.illustration_id IS NOT NULL
-    AND c.raw_card_blob -> 'image_uris' ->> 'normal' IS NOT NULL),
+    AND {normal_url} IS NOT NULL),
 -- Grouped rather than self-joined: a self-join on jsonb frame data over 94k rows does not
 -- finish, while one pass bucketing by the same key does. A bucket qualifies when it holds
 -- both finishes, and everything in the key is by construction identical between them.
@@ -863,7 +883,7 @@ def cmd_finishtest(out: Path, n: int) -> None:
     dominated by the 7th-10th Edition `*` foils -- a verdict drawn only from those would
     say something about 2003-era foil stock, not about foil in general.
     """
-    rows = run_query(FINISH_PAIR_SQL)
+    rows = run_query(FINISH_PAIR_SQL.format(normal_url=front_image("normal", "c")))
     by_set: dict[str, list[dict[str, str]]] = {}
     for r in rows:
         by_set.setdefault(r["card_set_code"], []).append(r)

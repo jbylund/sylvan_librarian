@@ -100,7 +100,8 @@ _BOOLEAN_IS_TAGS_SYNC_CHUNK_COUNT = 4
 # per-tag API sweep, unlike CUSTOM_IS_TAGS below, and no accumulation in the import loop.
 # Each expression must reference the row alias `cards` -- adding a tag here is the whole
 # change. Most read
-# `cards.raw_card_blob`; hybrid/phyrexian read `cards.mana_cost_text` instead, per
+# `cards.raw_card_blob`; `phyrexian` reads `cards.mana_cost_text` and `hybrid` the front face's
+# cost out of the blob (see its own note), per
 # docs/issues/done/00713-is-tag-recovery.md's own reasoning for putting them here rather
 # than in the query-rewrite table: the DSL only does exact-symbol containment, so a
 # rewrite would be a brittle ~15-term OR over an open, growing symbol set. Density-gated
@@ -130,7 +131,24 @@ BOOLEAN_IS_TAGS: dict[str, str] = {
     "glossy": "cards.raw_card_blob->'promo_types' @> '\"glossy\"'",
     "hires": "cards.raw_card_blob->'highres_image' = 'true'::jsonb",
     # Matches color/color, 2/color, colorless/color, and color/color/phyrexian.
-    "hybrid": r"cards.mana_cost_text ~ '\{[2CWUBRG]/[WUBRG]'",
+    #
+    # THE FRONT FACE'S COST, not the row's `mana_cost_text` -- which now holds every face's,
+    # joined. Scryfall's `is:hybrid` asks only about the front, and the difference is EXACTLY two
+    # cards: replaying both readings over the 2026-08-28 default_cards bulk and diffing against
+    # all 603 of api.scryfall.com's `is:hybrid` (fetched card for card), the front-face reading
+    # answers 617 and the joined one 619, the two extras being `Abigale, Poet Laureate // Heroic
+    # Stanza` and `Lluwen, Exchange Student // Pest Friend` -- `prepare` printings whose only
+    # hybrid pip is on the back, and Scryfall calls neither hybrid. Both readings miss 0 of the
+    # 603; the 14 the front reading adds are all from sets outside Scryfall's default filters.
+    #
+    # A layout-gated reading (front face on a two-sided layout, whole cost otherwise) is the rule
+    # stated exactly, and it answers 617 too -- no split, adventure or flip card in the corpus
+    # carries a hybrid pip only on its back -- so the coalesce below is the same set for less SQL.
+    #
+    # `phyrexian` below needs no such care and is left reading the column: the same replay gives
+    # 76 either way, 0 misses of Scryfall's 73, because its `/P}` pips never sit on a back face
+    # alone and its `oracle_text` half already spans every face.
+    "hybrid": r"COALESCE(cards.raw_card_blob->'card_faces'->0->>'mana_cost', cards.raw_card_blob->>'mana_cost', '') ~ '\{[2CWUBRG]/[WUBRG]'",
     "instore": "cards.raw_card_blob->'promo_types' @> '\"instore\"'",
     "intro_pack": "cards.raw_card_blob->'promo_types' @> '\"intropack\"'",
     "judge_gift": "cards.raw_card_blob->'promo_types' @> '\"judgegift\"'",
