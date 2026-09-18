@@ -43,8 +43,8 @@ BEGIN
         WHEN 0 THEN 'common'
         WHEN 1 THEN 'uncommon'
         WHEN 2 THEN 'rare'
-        WHEN 3 THEN 'mythic'
-        WHEN 4 THEN 'special'
+        WHEN 3 THEN 'special'
+        WHEN 4 THEN 'mythic'
         WHEN 5 THEN 'bonus'
         ELSE NULL
     END;
@@ -63,8 +63,8 @@ BEGIN
         WHEN 'common' THEN 0
         WHEN 'uncommon' THEN 1
         WHEN 'rare' THEN 2
-        WHEN 'mythic' THEN 3
-        WHEN 'special' THEN 4
+        WHEN 'special' THEN 3
+        WHEN 'mythic' THEN 4
         WHEN 'bonus' THEN 5
         ELSE -1
     END;
@@ -283,8 +283,8 @@ COMMENT ON COLUMN magic.cards.card_artist IS 'Artist name for the card artwork -
 COMMENT ON COLUMN magic.cards.card_border IS 'Card border color (black, white, borderless, silver, gold) - stored in lowercase';
 COMMENT ON COLUMN magic.cards.card_layout IS 'Card layout type (normal, split, flip, transform, etc.) - stored in lowercase';
 COMMENT ON COLUMN magic.cards.card_legalities IS 'Card legality status in different formats stored as JSONB object, e.g. {"standard": "legal", "modern": "banned", "legacy": "restricted"}';
-COMMENT ON COLUMN magic.cards.card_rarity_int IS 'Card rarity as integer for efficient ordering and comparison: common=0, uncommon=1, rare=2, mythic=3, special=4, bonus=5';
-COMMENT ON COLUMN magic.cards.card_rarity_text IS 'Card rarity as text: common, uncommon, rare, mythic, special, bonus';
+COMMENT ON COLUMN magic.cards.card_rarity_int IS 'Card rarity as integer for efficient ordering and comparison: common=0, uncommon=1, rare=2, special=3, mythic=4, bonus=5 -- Scryfall''s ladder, which puts special BELOW mythic';
+COMMENT ON COLUMN magic.cards.card_rarity_text IS 'Card rarity as text: common, uncommon, rare, special, mythic, bonus';
 COMMENT ON COLUMN magic.cards.card_set_code IS 'Set code (e.g. "iko", "thb") - will be null for cards without set information';
 COMMENT ON COLUMN magic.cards.card_watermark IS 'Card watermark (guild symbols, set symbols, etc.) - stored in lowercase';
 COMMENT ON COLUMN magic.cards.collector_number IS 'Card collector number as text exactly as it appears on the card (can be numeric or contain letters like "123a")';
@@ -338,8 +338,8 @@ INSERT INTO magic.valid_rarities (card_rarity_int, card_rarity_text) VALUES
     (0, 'common'),
     (1, 'uncommon'),
     (2, 'rare'),
-    (3, 'mythic'),
-    (4, 'special'),
+    (3, 'special'),
+    (4, 'mythic'),
     (5, 'bonus');
 
 COMMENT ON TABLE magic.valid_rarities IS 'Lookup table for valid card rarities with integer and text representations';

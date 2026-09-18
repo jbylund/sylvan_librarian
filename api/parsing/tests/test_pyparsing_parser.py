@@ -861,19 +861,26 @@ def test_mana_cost_approximate_comparisons() -> None:
 
 
 def test_mana_cost_sql_generation() -> None:
-    """Test SQL generation for mana cost comparisons."""
+    """Test SQL generation for mana cost comparisons.
+
+    Every operator leads with `card.mana_cost_text <> ''` because NO PRINTED COST IS NOT A COST OF
+    {0}: a land and Ornithopter both store `mana_cost_jsonb = '{}'` (`{0}` is a number, so it is
+    not a pip), and without that clause `mana:{0}` is `'{}' <@ mana_cost_jsonb AND cmc >= 0`, which
+    is every row. Measured on api.scryfall.com 2026-08-17 at unique=prints: `m:{0} t:land` is 195,
+    the cards printing a literal {0}, not the 12,254 lands.
+    """
     # Test basic equality (colon operator) - use scryfall parser for proper node types
     result1 = parsing.parse_scryfall_query("mana:{1}{G}")
     context1 = QueryContext()
     sql1 = result1.to_sql(context1)
-    assert sql1 == "(%(p_dict_eydHJzogWzFdfQ)s <@ card.mana_cost_jsonb AND card.cmc >= %(p_int_Mg)s)"
+    assert sql1 == "(card.mana_cost_text <> '' AND %(p_dict_eydHJzogWzFdfQ)s <@ card.mana_cost_jsonb AND card.cmc >= %(p_int_Mg)s)"
     assert mana_cost_str_to_dict("{1}{G}") in context1.values()
     assert calculate_cmc("{1}{G}") in context1.values()
 
     result1 = parsing.parse_scryfall_query("mana={1}{G}")
     context1 = QueryContext()
     sql1 = result1.to_sql(context1)
-    assert sql1 == "(card.mana_cost_jsonb = %(p_dict_eydHJzogWzFdfQ)s AND card.cmc = %(p_int_Mg)s)"
+    assert sql1 == "(card.mana_cost_text <> '' AND card.mana_cost_jsonb = %(p_dict_eydHJzogWzFdfQ)s AND card.cmc = %(p_int_Mg)s)"
     assert mana_cost_str_to_dict("{1}{G}") in context1.values()
     assert calculate_cmc("{1}{G}") in context1.values()
 
@@ -905,6 +912,8 @@ def test_mana_cost_sql_generation() -> None:
     result5 = parsing.parse_scryfall_query("mana>{0}")
     context5 = QueryContext()
     sql5 = result5.to_sql(context5)
+    # `mana>{0}` is the query the guard was found on: a costless row must not answer it.
+    assert "card.mana_cost_text <> ''" in sql5
     assert "<@ card.mana_cost_jsonb" in sql5
     assert "card.cmc >=" in sql5
     assert "card.mana_cost_jsonb <>" in sql5
@@ -1258,3 +1267,24 @@ def test_hyphenated_words_edge_cases_fail(invalid_query: str) -> None:
     """
     with pytest.raises(ValueError, match="Failed to parse query"):
         hand_parser.parse_str_to_query(invalid_query)
+
+
+class TestBattleTypeRouting:
+    """`t:battle` routes to card_types, matching every other card type.
+
+    Battle was absent from CARD_TYPES, so it fell through to the subtype arm on both the
+    SQL and engine paths — invisible while the corpus stored every battle as its back face
+    (#400), a guaranteed zero-match once the face merge put Battle into card_types.
+    """
+
+    def test_battle_routes_like_a_card_type(self) -> None:
+        """t:battle generates card_types SQL binding ['Battle'], as t:creature does for its type."""
+        sql, params = parsing.generate_sql_query(parsing.parse_scryfall_query("t:battle"))
+        assert "card_types" in sql
+        assert "card_subtypes" not in sql
+        assert ["Battle"] in params.values()
+
+    def test_siege_still_routes_as_a_subtype(self) -> None:
+        """t:siege stays on the subtype arm; only the card type moved."""
+        siege_sql = str(parsing.generate_sql_query(parsing.parse_scryfall_query("t:siege")))
+        assert "card_subtypes" in siege_sql
