@@ -231,6 +231,44 @@ class TestFilters:
         total, _ = _run(engine, "produces:c")
         assert total == 5
 
+    def test_color_count_exactly_two(self, engine: QueryEngine) -> None:
+        # Scryfall numeric color syntax: c=2 is "exactly two printed colors" —
+        # Boggart Ram-Gang (4, RG) + Kitchen Finks (6, GW)
+        total, cards = _run(engine, "c=2")
+        assert total == 10
+        assert set(_names(cards)) == {"Boggart Ram-Gang", "Kitchen Finks"}
+
+    def test_color_count_colon_is_equality(self, engine: QueryEngine) -> None:
+        # : with a NUMBER is equality (id:2 == id=2 on the live Scryfall API),
+        # not the >= that letter values get
+        total_colon, _ = _run(engine, "c:2")
+        total_eq, _ = _run(engine, "c=2")
+        assert total_colon == total_eq == 10
+
+    def test_color_count_three_or_more(self, engine: QueryEngine) -> None:
+        # Monastery Messenger (1, RUW) + Nicol Bolas, Planeswalker (7, UBR)
+        total, cards = _run(engine, "c>=3")
+        assert total == 8
+        assert set(_names(cards)) == {"Monastery Messenger", "Nicol Bolas, Planeswalker"}
+
+    def test_identity_count_zero_is_colorless(self, engine: QueryEngine) -> None:
+        # id=0 counts zero colors in the identity: Black Lotus (5) + Sol Ring (5)
+        total, cards = _run(engine, "id=0")
+        assert total == 10
+        assert set(_names(cards)) == {"Black Lotus", "Sol Ring"}
+
+    def test_identity_count_less_than_two(self, engine: QueryEngine) -> None:
+        # Everything except the four multicolor-identity cards: 90 - Boggart (4)
+        # - Kitchen Finks (6) - Monastery Messenger (1) - Nicol Bolas (7) = 72
+        total, _ = _run(engine, "id<2")
+        assert total == 72
+
+    def test_negated_identity_count(self, engine: QueryEngine) -> None:
+        # Color counts are total (colorless is 0, never NULL), so negation is
+        # the exact complement: -id>=3 = 90 - 8 = 82
+        total, _ = _run(engine, "-id>=3")
+        assert total == 82
+
     def test_cmc_equals_zero(self, engine: QueryEngine) -> None:
         total, cards = _run(engine, "cmc=0")
         assert total == 5

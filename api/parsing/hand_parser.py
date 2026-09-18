@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 
 from api.parsing.card_query_nodes import CardAttributeNode, CardBinaryOperatorNode, ExactNameNode
-from api.parsing.colors import COLOR_ALIAS_TO_CODES
+from api.parsing.colors import COLOR_ALIAS_TO_CODES, COLOR_COUNT_NAMES
 from api.parsing.db_info import ALIAS_TO_FIELD_INFOS, ParserClass
 from api.parsing.mana_symbols import first_invalid_mana_symbol
 from api.parsing.nodes import (
@@ -58,7 +58,11 @@ _BANG_ALIAS_CLASSES: frozenset[ParserClass] = frozenset(
     {ParserClass.COLOR, ParserClass.MANA, ParserClass.RARITY, ParserClass.YEAR, ParserClass.DATE}
 )
 
-_VALID_COLOR_NAMES: frozenset[str] = frozenset(COLOR_ALIAS_TO_CODES)
+# The set-valued names (`white`, `azorius`) and the COUNT-valued ones (`m`, `gold`, `multicolored`) are
+# one vocabulary as far as the value parser is concerned: both are words rather than letter
+# strings. What separates them is what CardBinaryOperatorNode does with the result, not whether
+# this parser will accept it.
+_VALID_COLOR_NAMES: frozenset[str] = frozenset(COLOR_ALIAS_TO_CODES) | COLOR_COUNT_NAMES
 _COLOR_LETTERS: frozenset[str] = frozenset("wubrgcWUBRGC")
 _MIN_MTG_YEAR: int = 1992
 _MAX_YEAR: int = 2040
@@ -738,11 +742,19 @@ class Parser:
         raise ParseError(msg)
 
     def parse_color_value(self) -> QueryNode:
-        """Parse a color value: a recognized color name or a combination of color letters."""
+        """Parse a color value: a color name, a combination of color letters, or a bare integer color count."""
         tok = self.peek()
         if tok.type == TT.QUOTED:
             self.consume()
             return StringValueNode(str(tok.value))
+        if tok.type == TT.NUMBER:
+            # Scryfall numeric color syntax: id>=3 / c=2 compare the NUMBER of
+            # colors in the field, so a bare integer is a valid color value.
+            if isinstance(tok.value, float):
+                msg = f"Expected integer color count, got {tok.value!r} at position {tok.pos}"
+                raise ParseError(msg)
+            self.consume()
+            return NumericValueNode(tok.value)
         if tok.type == TT.WORD:
             self.consume()
             val = str(tok.value)
