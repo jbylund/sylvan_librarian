@@ -30,25 +30,30 @@ def test_escape_like_pattern(expected: str, value: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# ExactNameNode — special characters are escaped literally (no wildcard bleed)
+# ExactNameNode — special characters cannot bleed into the pattern at all
 # ---------------------------------------------------------------------------
+#
+# The value is COLLATED before it is escaped (every non-alphanumeric character removed, matching
+# Scryfall — !"limduls vault" and !"Lim-Dul's Vault" are one search), so a LIKE metacharacter is
+# GONE rather than escaped. The escape stays in the code as the second lock; these cases now pin
+# that no wildcard survives the collation to need it.
 
 testcases_exact_name = {
     "percent_does_not_become_wildcard": {
         "input_value": "50%",
-        "expected_param": r"50\%",
+        "expected_param": "50",
     },
     "underscore_does_not_match_any_char": {
         "input_value": "A_B",
-        "expected_param": r"a\_b",
+        "expected_param": "ab",
     },
     "backslash_does_not_corrupt_escape_sequence": {
         "input_value": "A\\B",
-        "expected_param": "a\\\\b",
+        "expected_param": "ab",
     },
     "backslash_then_percent_both_escaped": {
         "input_value": "\\%",
-        "expected_param": r"\\\%",
+        "expected_param": "",
     },
 }
 

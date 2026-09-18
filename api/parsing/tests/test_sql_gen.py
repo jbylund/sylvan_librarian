@@ -31,42 +31,47 @@ from api.parsing.card_query_nodes import (
             r"(((card.cmc + card.cmc) + %(p_int_Mg)s) < (card.creature_power + card.creature_toughness))",
             {"p_int_Mg": 2},
         ),
-        # Test field-specific : operator behavior
+        # Test field-specific : operator behavior. A BARE name: word is COLLATED — diacritics
+        # folded (#649) AND every non-alphanumeric character removed — because that is the string
+        # Scryfall matches a bare word against (measured 2026-08-16: `name:ft` 1,628 against
+        # `name:"ft"` 362, because "Sword of the Ages" reads as "swordoftheages").
         (
             "name:lightning",
-            r"(lower(card.card_name_folded) LIKE %(p_str_JWxpZ2h0bmluZyU)s)",
+            r"(lower(regexp_replace(card.card_name_folded, '[^[:alnum:]]', '', 'g')) LIKE %(p_str_JWxpZ2h0bmluZyU)s)",
             {"p_str_JWxpZ2h0bmluZyU": r"%lightning%"},
         ),
+        # A QUOTED value is matched LITERALLY instead — against card_name, with neither fold:
+        # `name:"eowyn"` answers 0 on api.scryfall.com while `name:"éowyn"` answers 3.
         (
             "name:'lightning bolt'",
-            r"(lower(card.card_name_folded) LIKE %(p_str_JWxpZ2h0bmluZyVib2x0JQ)s)",
+            r"(lower(card.card_name) LIKE %(p_str_JWxpZ2h0bmluZyVib2x0JQ)s)",
             {"p_str_JWxpZ2h0bmluZyVib2x0JQ": r"%lightning%bolt%"},
         ),
-        # #649: fuzzy name: search folds diacritics and matches against card_name_folded,
-        # so an unaccented query still finds the accented card...
+        # An unaccented bare word still finds the accented card...
         (
             "name:eowyn",
-            r"(lower(card.card_name_folded) LIKE %(p_str_JWVvd3luJQ)s)",
+            r"(lower(regexp_replace(card.card_name_folded, '[^[:alnum:]]', '', 'g')) LIKE %(p_str_JWVvd3luJQ)s)",
             {"p_str_JWVvd3luJQ": r"%eowyn%"},
         ),
-        # ...and typing the accent folds to the exact same SQL/parameters, whether quoted...
-        (
-            'name:"éowyn"',
-            r"(lower(card.card_name_folded) LIKE %(p_str_JWVvd3luJQ)s)",
-            {"p_str_JWVvd3luJQ": r"%eowyn%"},
-        ),
-        # ...or bare/unquoted (both parsers' tokenizers accept non-ASCII bare words, #649).
+        # ...and so does the bare accented spelling (both parsers' tokenizers accept non-ASCII
+        # bare words, #649), folding to the identical SQL and parameters.
         (
             "name:éowyn",
-            r"(lower(card.card_name_folded) LIKE %(p_str_JWVvd3luJQ)s)",
+            r"(lower(regexp_replace(card.card_name_folded, '[^[:alnum:]]', '', 'g')) LIKE %(p_str_JWVvd3luJQ)s)",
             {"p_str_JWVvd3luJQ": r"%eowyn%"},
         ),
-        # Exact match (!"...") deliberately stays accent-sensitive: it compares against
-        # the unfolded card_name, not card_name_folded.
+        # Quoted, the accent is required and kept.
+        (
+            'name:"éowyn"',
+            r"(lower(card.card_name) LIKE %(p_str_JcOpb3d5biU)s)",
+            {"p_str_JcOpb3d5biU": r"%éowyn%"},
+        ),
+        # Exact match (!"...") is COLLATED too: !"eowyn, lady of rohan" answers "Éowyn, Lady of
+        # Rohan" on api.scryfall.com, and !"limduls vault" answers Lim-Dûl's Vault.
         (
             '!"Éowyn"',
-            r"(lower(card.card_name) LIKE %(p_str_w6lvd3lu)s)",
-            {"p_str_w6lvd3lu": "éowyn"},
+            r"(lower(regexp_replace(card.card_name_folded, '[^[:alnum:]]', '', 'g')) LIKE %(p_str_ZW93eW4)s)",
+            {"p_str_ZW93eW4": "eowyn"},
         ),
         ("cmc:3", "(card.cmc = %(p_int_Mw)s)", {"p_int_Mw": 3}),  # Numeric field uses exact equality
         ("power:5", "(card.creature_power = %(p_int_NQ)s)", {"p_int_NQ": 5}),  # Numeric field uses exact equality
@@ -163,34 +168,39 @@ def test_full_sql_translation(parse_query, input_query: str, expected_sql: str, 
         # mana: tests — unlike devotion, every op ANDs in a cmc compare
         # alongside jsonb containment/equality (see
         # _handle_mana_cost_approximate_comparison), and ":" normalizes to ">=".
+        #
+        # Every op also leads with `card.mana_cost_text <> ''`: NO PRINTED COST IS NOT A COST OF
+        # {0}. A land and Ornithopter both store `mana_cost_jsonb = '{}'`, so without that clause
+        # `m:{0}` is every row in the table. Measured on api.scryfall.com 2026-08-17 at
+        # unique=prints, `m:{0} t:land` is 195 and `m:{0}` is 93,355 of 105,839.
         (
             "mana:{g}",
-            r"(%(p_dict_eydHJzogWzFdfQ)s <@ card.mana_cost_jsonb AND card.cmc >= %(p_int_MQ)s)",
+            r"(card.mana_cost_text <> '' AND %(p_dict_eydHJzogWzFdfQ)s <@ card.mana_cost_jsonb AND card.cmc >= %(p_int_MQ)s)",
             {"p_dict_eydHJzogWzFdfQ": {"G": [1]}, "p_int_MQ": 1},
         ),
         (
             "mana={g}",
-            r"(card.mana_cost_jsonb = %(p_dict_eydHJzogWzFdfQ)s AND card.cmc = %(p_int_MQ)s)",
+            r"(card.mana_cost_text <> '' AND card.mana_cost_jsonb = %(p_dict_eydHJzogWzFdfQ)s AND card.cmc = %(p_int_MQ)s)",
             {"p_dict_eydHJzogWzFdfQ": {"G": [1]}, "p_int_MQ": 1},
         ),
         (
             "mana<={g}",
-            r"(card.mana_cost_jsonb <@ %(p_dict_eydHJzogWzFdfQ)s AND card.cmc <= %(p_int_MQ)s)",
+            r"(card.mana_cost_text <> '' AND card.mana_cost_jsonb <@ %(p_dict_eydHJzogWzFdfQ)s AND card.cmc <= %(p_int_MQ)s)",
             {"p_dict_eydHJzogWzFdfQ": {"G": [1]}, "p_int_MQ": 1},
         ),
         (
             "mana<{g}",
-            r"(card.mana_cost_jsonb <@ %(p_dict_eydHJzogWzFdfQ)s AND card.cmc <= %(p_int_MQ)s AND card.mana_cost_jsonb <> %(p_dict_eydHJzogWzFdfQ)s)",
+            r"(card.mana_cost_text <> '' AND card.mana_cost_jsonb <@ %(p_dict_eydHJzogWzFdfQ)s AND card.cmc <= %(p_int_MQ)s AND card.mana_cost_jsonb <> %(p_dict_eydHJzogWzFdfQ)s)",
             {"p_dict_eydHJzogWzFdfQ": {"G": [1]}, "p_int_MQ": 1},
         ),
         (
             "mana>={g}{r}",
-            r"(%(p_dict_eydHJzogWzFdLCAnUic6IFsxXX0)s <@ card.mana_cost_jsonb AND card.cmc >= %(p_int_Mg)s)",
+            r"(card.mana_cost_text <> '' AND %(p_dict_eydHJzogWzFdLCAnUic6IFsxXX0)s <@ card.mana_cost_jsonb AND card.cmc >= %(p_int_Mg)s)",
             {"p_dict_eydHJzogWzFdLCAnUic6IFsxXX0": {"G": [1], "R": [1]}, "p_int_Mg": 2},
         ),
         (
             "mana>{g}",
-            r"(%(p_dict_eydHJzogWzFdfQ)s <@ card.mana_cost_jsonb AND card.cmc >= %(p_int_MQ)s AND card.mana_cost_jsonb <> %(p_dict_eydHJzogWzFdfQ)s)",
+            r"(card.mana_cost_text <> '' AND %(p_dict_eydHJzogWzFdfQ)s <@ card.mana_cost_jsonb AND card.cmc >= %(p_int_MQ)s AND card.mana_cost_jsonb <> %(p_dict_eydHJzogWzFdfQ)s)",
             {"p_dict_eydHJzogWzFdfQ": {"G": [1]}, "p_int_MQ": 1},
         ),
         # X is its own pip symbol, not a hybrid, and contributes 0 to cmc
@@ -199,23 +209,23 @@ def test_full_sql_translation(parse_query, input_query: str, expected_sql: str, 
         # treats them the same.
         (
             "mana:{X}{R}",
-            r"(%(p_dict_eydYJzogWzFdLCAnUic6IFsxXX0)s <@ card.mana_cost_jsonb AND card.cmc >= %(p_int_MQ)s)",
+            r"(card.mana_cost_text <> '' AND %(p_dict_eydYJzogWzFdLCAnUic6IFsxXX0)s <@ card.mana_cost_jsonb AND card.cmc >= %(p_int_MQ)s)",
             {"p_dict_eydYJzogWzFdLCAnUic6IFsxXX0": {"X": [1], "R": [1]}, "p_int_MQ": 1},
         ),
         (
             "mana:xr",
-            r"(%(p_dict_eydYJzogWzFdLCAnUic6IFsxXX0)s <@ card.mana_cost_jsonb AND card.cmc >= %(p_int_MQ)s)",
+            r"(card.mana_cost_text <> '' AND %(p_dict_eydYJzogWzFdLCAnUic6IFsxXX0)s <@ card.mana_cost_jsonb AND card.cmc >= %(p_int_MQ)s)",
             {"p_dict_eydYJzogWzFdLCAnUic6IFsxXX0": {"X": [1], "R": [1]}, "p_int_MQ": 1},
         ),
         # Snow, likewise: bare 's' means the same thing as braced '{s}' (#954).
         (
             "mana:{S}",
-            r"(%(p_dict_eydTJzogWzFdfQ)s <@ card.mana_cost_jsonb AND card.cmc >= %(p_int_MQ)s)",
+            r"(card.mana_cost_text <> '' AND %(p_dict_eydTJzogWzFdfQ)s <@ card.mana_cost_jsonb AND card.cmc >= %(p_int_MQ)s)",
             {"p_dict_eydTJzogWzFdfQ": {"S": [1]}, "p_int_MQ": 1},
         ),
         (
             "mana:s",
-            r"(%(p_dict_eydTJzogWzFdfQ)s <@ card.mana_cost_jsonb AND card.cmc >= %(p_int_MQ)s)",
+            r"(card.mana_cost_text <> '' AND %(p_dict_eydTJzogWzFdfQ)s <@ card.mana_cost_jsonb AND card.cmc >= %(p_int_MQ)s)",
             {"p_dict_eydTJzogWzFdfQ": {"S": [1]}, "p_int_MQ": 1},
         ),
     ],
@@ -475,10 +485,12 @@ def test_flavor_text_sql_translation(parse_query, input_query: str, expected_sql
             r"(card.card_keywords @> %(p_dict_eydoYXN0ZSc6IFRydWV9)s)",
             {"p_dict_eydoYXN0ZSc6IFRydWV9": {"haste": True}},
         ),
-        # Keyword equality
+        # `keyword=` is `keyword:`, not set equality -- `kw=flying e:khm` is 28 on
+        # api.scryfall.com (2026-08-16), exactly `kw:flying`'s 28, where set equality answers only
+        # the cards whose whole keyword list is that one word.
         (
             "keyword=vigilance",
-            r"(card.card_keywords = %(p_dict_eyd2aWdpbGFuY2UnOiBUcnVlfQ)s)",
+            r"(card.card_keywords @> %(p_dict_eyd2aWdpbGFuY2UnOiBUcnVlfQ)s)",
             {"p_dict_eyd2aWdpbGFuY2UnOiBUcnVlfQ": {"vigilance": True}},
         ),
         # Custom keyword (not in the predefined list)
@@ -526,7 +538,7 @@ def test_flavor_text_sql_translation(parse_query, input_query: str, expected_sql
         ),
         (
             "kw=haste",
-            r"(card.card_keywords = %(p_dict_eydoYXN0ZSc6IFRydWV9)s)",
+            r"(card.card_keywords @> %(p_dict_eydoYXN0ZSc6IFRydWV9)s)",
             {"p_dict_eydoYXN0ZSc6IFRydWV9": {"haste": True}},
         ),
         # Multi-word keywords lowercase whole, whatever the caller typed -- `.title()` used to look
@@ -841,13 +853,13 @@ def test_set_search_sql_translation(parse_query, input_query: str, expected_sql:
         ),
         (
             "rarity:mythic",
-            "(card.card_rarity_int = %(p_int_Mw)s)",
-            {"p_int_Mw": 3},
+            "(card.card_rarity_int = %(p_int_NA)s)",
+            {"p_int_NA": 4},
         ),
         (
             "rarity:special",
-            "(card.card_rarity_int = %(p_int_NA)s)",
-            {"p_int_NA": 4},
+            "(card.card_rarity_int = %(p_int_Mw)s)",
+            {"p_int_Mw": 3},
         ),
         (
             "rarity:bonus",
@@ -862,8 +874,8 @@ def test_set_search_sql_translation(parse_query, input_query: str, expected_sql:
         ),
         (
             "r:mythic",
-            "(card.card_rarity_int = %(p_int_Mw)s)",
-            {"p_int_Mw": 3},
+            "(card.card_rarity_int = %(p_int_NA)s)",
+            {"p_int_NA": 4},
         ),
         # Short form rarity values (single-letter abbreviations)
         (
@@ -898,23 +910,23 @@ def test_set_search_sql_translation(parse_query, input_query: str, expected_sql:
         ),
         (
             "r:m",
-            "(card.card_rarity_int = %(p_int_Mw)s)",
-            {"p_int_Mw": 3},
+            "(card.card_rarity_int = %(p_int_NA)s)",
+            {"p_int_NA": 4},
         ),
         (
             "rarity:m",
+            "(card.card_rarity_int = %(p_int_NA)s)",
+            {"p_int_NA": 4},
+        ),
+        (
+            "r:s",
             "(card.card_rarity_int = %(p_int_Mw)s)",
             {"p_int_Mw": 3},
         ),
         (
-            "r:s",
-            "(card.card_rarity_int = %(p_int_NA)s)",
-            {"p_int_NA": 4},
-        ),
-        (
             "rarity:s",
-            "(card.card_rarity_int = %(p_int_NA)s)",
-            {"p_int_NA": 4},
+            "(card.card_rarity_int = %(p_int_Mw)s)",
+            {"p_int_Mw": 3},
         ),
         (
             "r:b",
@@ -1029,20 +1041,25 @@ def test_rarity_case_insensitive(parse_query) -> None:
         ),
         ("artist:nielsen", r"(lower(card.card_artist) LIKE %(p_str_JW5pZWxzZW4l)s)", {"p_str_JW5pZWxzZW4l": r"%nielsen%"}),
         ("ARTIST:moeller", r"(lower(card.card_artist) LIKE %(p_str_JW1vZWxsZXIl)s)", {"p_str_JW1vZWxsZXIl": r"%moeller%"}),
+        # `a=` is `a:`, not an equality against the credit line. Measured on api.scryfall.com
+        # 2026-08-16: `a="todd lockwood"` is 87, exactly `a:"todd lockwood"`'s 87, and a strict
+        # fragment answers in the hundreds under `=` just as it does under `:`. A whole-string
+        # equality answered these queries with the cards whose ENTIRE credit is that name, which
+        # is not a distinction Scryfall draws and which loses every joint credit outright.
         (
             'artist="todd lockwood"',
-            r"(card.card_artist = %(p_str_VG9kZCBMb2Nrd29vZA)s)",
-            {"p_str_VG9kZCBMb2Nrd29vZA": r"Todd Lockwood"},
+            r"(lower(card.card_artist) LIKE %(p_str_JXRvZGQlbG9ja3dvb2Ql)s)",
+            {"p_str_JXRvZGQlbG9ja3dvb2Ql": r"%todd%lockwood%"},
         ),
         (
             'artist="TODD LOCKWOOD"',
-            r"(card.card_artist = %(p_str_VG9kZCBMb2Nrd29vZA)s)",
-            {"p_str_VG9kZCBMb2Nrd29vZA": r"Todd Lockwood"},
+            r"(lower(card.card_artist) LIKE %(p_str_JXRvZGQlbG9ja3dvb2Ql)s)",
+            {"p_str_JXRvZGQlbG9ja3dvb2Ql": r"%todd%lockwood%"},
         ),
         (
             'a="TODD LOCKWOOD"',
-            r"(card.card_artist = %(p_str_VG9kZCBMb2Nrd29vZA)s)",
-            {"p_str_VG9kZCBMb2Nrd29vZA": r"Todd Lockwood"},
+            r"(lower(card.card_artist) LIKE %(p_str_JXRvZGQlbG9ja3dvb2Ql)s)",
+            {"p_str_JXRvZGQlbG9ja3dvb2Ql": r"%todd%lockwood%"},
         ),
     ],
 )
@@ -1426,12 +1443,76 @@ def test_frame_sql_translation(parse_query, input_query: str, expected_sql: str,
 
 
 def test_name_titlecasing(parse_query) -> None:
-    """Test that name is titlecased."""
-    parsed = parse_query(""" name="Urza's Saga" """.strip())
+    """Test that name is titlecased on the exact-match path.
+
+    Written against `name!=` because `name=` no longer reaches that path: `=` is a synonym for `:`
+    on a string column, so the value is lowercased into a LIKE pattern where titlecasing is not
+    observable. `!=` is the exact-match path that remains.
+    """
+    parsed = parse_query(""" name!="Urza's Saga" """.strip())
     observed_params = QueryContext()
     observed_sql = parsed.to_sql(observed_params)
     assert observed_params == {"p_str_VXJ6YSdzIFNhZ2E": r"Urza's Saga"}
-    assert observed_sql == r"(card.card_name = %(p_str_VXJ6YSdzIFNhZ2E)s)"
+    assert observed_sql == r"(card.card_name != %(p_str_VXJ6YSdzIFNhZ2E)s)"
+
+
+@pytest.mark.parametrize(
+    argnames=("colon_query", "equals_query"),
+    argvalues=[
+        # BARE and QUOTED are two different searches, and `=` preserves the distinction rather
+        # than flattening it to one side. Measured on api.scryfall.com 2026-08-16: `name=ft` is
+        # 1,628 (exactly `name:ft`, NOT `name:"ft"`'s 362) and `name="ft"` is 362 (exactly
+        # `name:"ft"`). Before this, `name=ft` was a whole-string equality and answered nothing.
+        ("name:ft", "name=ft"),
+        ('name:"ft"', 'name="ft"'),
+        ('name:"Urza\'s Saga"', 'name="Urza\'s Saga"'),
+        # And the rest of the text columns, where `=` carried no information of its own either:
+        # `o=flying` is 4,574 = `o:flying` 4,574, `ft=aether` is 80 = `ft:aether` 80.
+        ("o:flying", "o=flying"),
+        ("ft:aether", "ft=aether"),
+        ("a:moeller", "a=moeller"),
+        # The collection columns, same rule: `kw=flying e:khm` 28 = `kw:flying` 28, `otag=ramp
+        # e:khm` 35 = `otag:ramp` 35, `t=creature e:khm` 151 = `t:creature` 151.
+        ("kw:flying", "kw=flying"),
+        ("otag:ramp", "otag=ramp"),
+        ("t:creature", "t=creature"),
+        ("f:modern", "f=modern"),
+        # The columns stored exact rather than searched already agreed, and still do -- `=` is
+        # kept there because equality IS the meaning, not because it was rewritten.
+        ("e:khm", "e=khm"),
+        ("layout:normal", "layout=normal"),
+    ],
+)
+def test_equals_is_a_synonym_for_colon(parse_query, colon_query: str, equals_query: str) -> None:
+    """`=` on a text or collection column asks exactly what `:` asks."""
+    colon_context = QueryContext()
+    colon_sql = parse_query(colon_query).to_sql(colon_context)
+    equals_context = QueryContext()
+    equals_sql = parse_query(equals_query).to_sql(equals_context)
+
+    assert equals_sql == colon_sql
+    assert equals_context == colon_context
+
+
+@pytest.mark.parametrize(
+    argnames=("colon_query", "equals_query"),
+    argvalues=[
+        # THE BOUNDARY, probed in the other direction rather than assumed. `=` stays a real
+        # equality on the set-valued COLOR columns and on devotion. Measured on api.scryfall.com
+        # 2026-08-16 over `e:khm t:creature`: `c=rg` 1 against `c:rg`'s 2, `id=rg` 1 against
+        # `id:rg`'s 52, `devotion={r}` 20 against `devotion:{r}`'s 27.
+        ("c:rg", "c=rg"),
+        ("id:rg", "id=rg"),
+        ("produces:rg", "produces=rg"),
+        ("devotion:{r}", "devotion={r}"),
+    ],
+)
+def test_equals_is_still_an_equality_where_equality_is_the_meaning(parse_query, colon_query: str, equals_query: str) -> None:
+    """The columns whose `=` differs from `:` on Scryfall keep it here."""
+    colon_sql = parse_query(colon_query).to_sql(QueryContext())
+    equals_sql = parse_query(equals_query).to_sql(QueryContext())
+
+    assert equals_sql != colon_sql
 
 
 @pytest.mark.parametrize(
