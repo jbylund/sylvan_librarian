@@ -15,6 +15,7 @@ import time
 # unnecessary once handlers carry a route decorator.
 from collections.abc import Sequence  # noqa: TC003
 from datetime import timedelta
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any, NoReturn
 
 import falcon
@@ -24,18 +25,21 @@ from cachebox import LRUCache, TTLCache
 
 from api.admin_resource import ADMIN_MOUNT_PREFIX, AdminContext, AdminResource
 from api.app_context import AppContext
-from api.enums import CardOrdering, PreferOrder, ResponseShape, SortDirection, UniqueOn
+from api.card_processing import EXTRA_IS_TAG
+from api.enums import CardOrdering, PreferOrder, ResponseShape, SortDirection, UniqueOn, resolve_direction
 from api.middlewares.timing import record_span
 from api.noscript_helpers import generate_results_count_html, generate_results_html
-from api.parsing import generate_sql_query, parse_scryfall_query
+from api.parsing import AndNode, NotNode, Query, QueryNode, TrueNode, generate_sql_query, parse_scryfall_query
 from api.parsing.query_budget import (
     QUERY_REGEX_REJECTED_MESSAGE,
     InvalidRegexPatternError,
     QueryBudgetExceeded,
     bounded_query_log_context,
 )
+from api.scryfall_compat import ScryfallCardsRoutes
 from api.settings import settings
 from api.utils import db_utils, error_monitoring
+from api.utils.caching import cached
 from api.utils.css_utils import build_critical_css
 from api.utils.generation_cache import GenerationCache
 from api.utils.page_rendering import (
@@ -55,6 +59,8 @@ from card_engine import FatalQueryError as _FatalQueryError
 from card_engine import RetryableQueryError as _RetryableQueryError
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from api.parsing.nodes import Query
     from api.utils.routing import BoundRoute
 
@@ -95,7 +101,7 @@ def _raise_query_bad_request(*, exc_name: str, query: str, description: str, err
 
 
 # Query parameters that must not be forwarded to action handlers.
-DISALLOWED_QUERY_ARGS: frozenset[str] = frozenset(["falcon_response", "request_host"])
+DISALLOWED_QUERY_ARGS: frozenset[str] = frozenset(["falcon_response", "request", "request_host"])
 
 # Body for an unhandled exception. Fixed and content-free on purpose: the frames live at throw sites
 # inside query and import paths, so their locals can hold connection and query state. Diagnostics go
@@ -121,6 +127,25 @@ def pagination_ceiling() -> int:
     """Return the continuously growing pagination ceiling for limit and offset."""
     return int((time.time() - PAGINATION_BASE_TIMESTAMP) // PAGINATION_GROWTH_INTERVAL_SECONDS)
 
+
+# `order=color`, as SQL. The eleven buckets Scryfall sorts colour into, measured 2026-08-09 over 923
+# cards spanning every colour shape: mono WUBRG, then multicolour by HOW MANY colours (guild pairs
+# tie), then colourless, then lands. Two of those are not what a colour bitmask would give -- the
+# colourless bucket sorts last rather than first, and lands after it -- which is why this is a CASE
+# rather than an expression over card_colors. Mirrors color_sort_rank in card_engine/src/lib.rs; the
+# two must agree or the SQL and engine paths order the same query differently.
+_COLOR_ORDER_SQL = """
+        (CASE
+            WHEN card_colors = '{"W": true}'::jsonb THEN 0
+            WHEN card_colors = '{"U": true}'::jsonb THEN 1
+            WHEN card_colors = '{"B": true}'::jsonb THEN 2
+            WHEN card_colors = '{"R": true}'::jsonb THEN 3
+            WHEN card_colors = '{"G": true}'::jsonb THEN 4
+            WHEN (SELECT count(1) FROM jsonb_object_keys(card_colors)) > 1
+                THEN 3 + (SELECT count(1) FROM jsonb_object_keys(card_colors))
+            WHEN card_types ? 'Land' THEN 10
+            ELSE 9
+        END)"""
 
 RESULT_FIELD_COLUMNS: dict[str, str] = {
     "name": "card_name",
@@ -194,6 +219,206 @@ DEFAULT_RESULT_FIELDS: tuple[str, ...] = (
     "type_line",
 )
 
+# In-query result-shape directives: the parser strips these from the filter tree and records
+# them on the parsed Query; `_fold_directives` applies them over the request parameters. Each
+# table maps the spellings a directive accepts — Scryfall's inline vocabulary (unique:art,
+# unique:prints) alongside this API's own enum values — to the enum member. Semantics measured
+# against api.scryfall.com (2026-08-07): an inline directive overrides its query parameter, the
+# last occurrence of a repeated directive wins, and an unknown value warns and is ignored
+# rather than failing the search. NOTHING here is ever silent: a directive that looks scoped
+# (inside an or-group or negation) and a repeat that overrode a different earlier value each
+# add an explicit response warning saying what actually happened.
+_DIRECTIVE_UNIQUE: dict[str, UniqueOn] = {
+    "card": UniqueOn.CARD,
+    "cards": UniqueOn.CARD,
+    "printing": UniqueOn.PRINTING,
+    "printings": UniqueOn.PRINTING,
+    "prints": UniqueOn.PRINTING,
+    "art": UniqueOn.ARTWORK,
+    "artwork": UniqueOn.ARTWORK,
+}
+_DIRECTIVE_ORDER: dict[str, CardOrdering] = {str(member): member for member in CardOrdering}
+_DIRECTIVE_DIRECTION: dict[str, SortDirection] = {str(member): member for member in SortDirection}
+# Scryfall-shaped queries spell the usd prefers with a hyphen; the enum values use underscores.
+_DIRECTIVE_PREFER: dict[str, PreferOrder] = {str(member): member for member in PreferOrder} | {
+    "usd-low": PreferOrder.USD_LOW,
+    "usd-high": PreferOrder.USD_HIGH,
+}
+
+
+# Directive name -> (parameter it sets, vocabulary, noun used in warnings). Several directives
+# have more than one spelling and share a slot, so they override one another rather than each
+# setting a different parameter: sort/order, and direction/dir. Both pairs are spellings
+# api.scryfall.com accepts inline (measured 2026-08-09: `dir:desc` and `direction:desc` return
+# the same page, as do `dir:auto` and `direction:auto`).
+_DIRECTIVE_TABLES: dict[str, tuple[str, Mapping[str, Any], str]] = {
+    "unique": ("unique", _DIRECTIVE_UNIQUE, "unique mode"),
+    "sort": ("orderby", _DIRECTIVE_ORDER, "order choice"),
+    "order": ("orderby", _DIRECTIVE_ORDER, "order choice"),
+    "direction": ("direction", _DIRECTIVE_DIRECTION, "direction"),
+    "dir": ("direction", _DIRECTIVE_DIRECTION, "direction"),
+    "prefer": ("prefer", _DIRECTIVE_PREFER, "prefer choice"),
+}
+
+
+def _fold_directives(
+    directives: Sequence[tuple[str, str, bool]],
+    *,
+    unique: UniqueOn,
+    orderby: CardOrdering,
+    direction: SortDirection,
+    prefer: PreferOrder,
+) -> tuple[UniqueOn, CardOrdering, SortDirection, PreferOrder, list[str]]:
+    """Fold a parsed query's result-shape directives over the request parameters.
+
+    A directive always applies to the whole search, and anything surprising about that says
+    so in the returned warnings rather than happening silently: an unknown value is ignored
+    with a warning (Scryfall's behavior, message included), a directive written inside an
+    or-group or negation warns that it is not scoped to its group, and a repeat that
+    overrides a DIFFERENT earlier value warns which one won. A repeat of the same value
+    warns nothing — there is nothing surprising to report.
+
+    Args:
+        directives: (name, value, nested) triples in source order, from Query.directives.
+        unique: The unique mode from the query parameters.
+        orderby: The ordering from the query parameters.
+        direction: The sort direction from the query parameters.
+        prefer: The prefer order from the query parameters.
+
+    Returns:
+        The effective (unique, orderby, direction, prefer) after directives, plus warnings.
+    """
+    warnings: list[str] = []
+    effective: dict[str, Any] = {"unique": unique, "orderby": orderby, "direction": direction, "prefer": prefer}
+    written: dict[str, tuple[str, str]] = {}  # parameter -> (name, value) that last set it
+
+    for name, value, nested in directives:
+        target, table, noun = _DIRECTIVE_TABLES[name]
+        if value not in table:
+            warnings.append(f'Unknown {noun} "{value}" was ignored')
+            continue
+        if nested:
+            warnings.append(f"{name}:{value} applies to the whole search, not only its group")
+        previous = written.get(target)
+        if previous is not None and table[value] != effective[target]:
+            warnings.append(f"{name}:{value} overrode the earlier {previous[0]}:{previous[1]}")
+        effective[target] = table[value]
+        written[target] = (name, value)
+    return effective["unique"], effective["orderby"], effective["direction"], effective["prefer"], warnings
+
+
+# Parsed once rather than constructed by hand: the `is:` rewrite expands a tag term into the shape
+# the engine and the SQL generator both expect, and building that node literally here would be a
+# fourth place for it to drift. Cached because the node is immutable in use -- the splice below
+# wraps it, never mutates it.
+@lru_cache(maxsize=1)
+def _extras_predicate() -> QueryNode:
+    """The `is:extra` filter node, parsed once and shared."""
+    return parse_scryfall_query(f"is:{EXTRA_IS_TAG}").root
+
+
+# The `is:` value behind `include_variations`. Not beside EXTRA_IS_TAG in card_processing because
+# it is not the same kind of thing: `extra` is COMPUTED by the import, while `variation` is one of
+# Scryfall's own booleans synced straight off the bulk row.
+VARIATION_IS_TAG = "variation"
+
+
+@lru_cache(maxsize=1)
+def _variations_predicate() -> QueryNode:
+    """The `is:variation` filter node, parsed once and shared."""
+    return parse_scryfall_query(f"is:{VARIATION_IS_TAG}").root
+
+
+@lru_cache(maxsize=1)
+def _default_lane_exclusions() -> Query:
+    """The default-lane exclusions ALONE, with no caller query under them.
+
+    What a route searches with when it has no query at all and still must not answer from the two
+    classes the default lane hides. `/random_search` is the caller, and it is the case the TrueNode
+    exemption in `_apply_extras_default` deliberately does NOT cover -- those are two different
+    questions that look like one:
+
+      - `/cards/search?q=` and `/cards/random` with no `q` ask for EVERYTHING, and the exemption
+        keeps that meaning. Whether Scryfall's own bare `/cards/random` hides the class was never
+        established (it echoes nothing back), so narrowing it would be an inference.
+      - `/random_search` asks for "some random cards" and has no query language to say anything
+        else. Its answer contained no extras at all until #927 stopped dropping the class on
+        import, so restoring that is not a new policy for the route; it is the route's own prior
+        behaviour, and the alternative is a front page that opens on tokens and art-series cards.
+
+    Built from the same two predicate nodes the two splices conjoin, so there is still exactly one
+    definition of each exclusion rather than a third spelling of the tags.
+
+    Returns:
+        A Query whose root is `-is:extra -is:variation`, cached because nothing mutates it.
+    """
+    query = parse_scryfall_query("")
+    query.root = AndNode([NotNode(_extras_predicate()), NotNode(_variations_predicate())])
+    return query
+
+
+def _apply_variations_default(parsed_query: Query, *, include_variations: bool) -> None:
+    """Conjoin `-is:variation` onto a parsed query in place unless the caller asked for them.
+
+    THE THIRD OF SCRYFALL'S THREE SEARCH PARAMETERS, and the last one this API only echoed.
+    Measured on api.scryfall.com 2026-08-16 with queries that fire no auto-enable at all, so the
+    default is visible rather than overridden: `t:creature` answers 51,473 bare and 51,523 with
+    `include_variations=true`, `cmc=3` 22,832 against 22,854, `o:draw` 12,301 against 12,303.
+
+    Independent of the extras gate, and measurably so: `t:creature` is 55,454 with extras alone
+    and 55,506 with both, and the two classes overlap by only 4 printings (`is:variation` is 93
+    with variations forced on and 97 once extras are on as well). So the two conjuncts compose;
+    neither subsumes the other.
+
+    Same splice-not-append reasoning as `_apply_extras_default`, and the same TrueNode exemption.
+
+    Args:
+        parsed_query: The parsed query, whose root is replaced unless it is a TrueNode.
+        include_variations: True leaves the query exactly as written.
+    """
+    if include_variations or isinstance(parsed_query.root, TrueNode):
+        return
+    parsed_query.root = AndNode([parsed_query.root, NotNode(_variations_predicate())])
+
+
+def _apply_extras_default(parsed_query: Query, *, include_extras: bool) -> None:
+    """Conjoin `-is:extra` onto a parsed query in place unless the caller asked for extras.
+
+    The extras class -- tokens and emblems, the art-series and "Card" type-line families,
+    memorabilia, the playtest promos, and the handful of content-warning cards -- is IMPORTED
+    (#927 stopped dropping it) and hidden at QUERY time instead, because hiding it by absence
+    cannot reproduce the flag: there would be nothing left for `include_extras=true` to include.
+
+    Conjoined onto the TREE rather than appended to the query string, and that is why this is a
+    node splice rather than an `f"({query}) -is:extra"`. Wrapping the caller's query in
+    parentheses would make every directive inside it read as nested, which `_fold_directives`
+    warns about; appending without parentheses binds to the last `or` branch instead of to the
+    whole query. Splicing has neither problem.
+
+    An empty query (TrueNode) is left ALONE: it is what the by-name and random lanes search with,
+    and they do their own scoping.
+
+    Args:
+        parsed_query: The parsed query, whose root is replaced unless it is a TrueNode.
+        include_extras: True leaves the query exactly as written.
+    """
+    if include_extras or isinstance(parsed_query.root, TrueNode):
+        return
+    parsed_query.root = AndNode([parsed_query.root, NotNode(_extras_predicate())])
+
+
+def _with_warnings(result: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
+    """Return `result` with a "warnings" entry attached; unchanged when there are none.
+
+    A fresh dict rather than mutation: _search caches result dicts, and a cached result must
+    not grow keys after the fact.
+    """
+    if not warnings:
+        return result
+    return {**result, "warnings": warnings}
+
+
+
 # default/atypical are complementary and disjoint
 # so in theory we could query for one and build the other by
 # querying and inverting
@@ -219,6 +444,42 @@ def set_no_store_header(falcon_response: falcon.Response | None) -> None:
     falcon_response.set_header("Cache-Control", "no-store")
 
 
+@cached(cache=LRUCache(maxsize=10_000))
+def get_where_clause(query: str) -> tuple[str, dict]:
+    """Generate SQL WHERE clause and parameters from a search query.
+
+    Args:
+        query: The search query string to parse.
+
+    Returns:
+        Tuple of (SQL WHERE clause, parameter dictionary).
+    """
+    parsed_query = parse_scryfall_query(query)
+    where_clause, params = generate_sql_query(parsed_query)
+    return _canonical_guard(where_clause), params
+
+
+def _canonical_guard(where_clause: str) -> str:
+    """Restrict a SQL lane to canonical printings unless the query names a language.
+
+    magic.cards now holds every printing of all_cards, foreign languages included; Scryfall's
+    default result space is English/canonical unless the query itself asks otherwise. The engine
+    path widens on a LangMatch leaf in the compiled filter; the SQL twin of that trigger is the
+    card_lang column appearing in the generated clause (only the lang: operator emits it), so the
+    two lanes cannot widen differently. include_multilingual is a /cards/* surface concern and is
+    threaded there, not here.
+
+    Args:
+        where_clause: The clause `generate_sql_query` produced.
+
+    Returns:
+        The clause, AND'd with is_canonical when no language was named.
+    """
+    if "card_lang" in where_clause:
+        return where_clause
+    return f"(({where_clause}) AND is_canonical)"
+
+
 def rewrap(query: str) -> str:
     """Normalize whitespace in a SQL query string.
 
@@ -229,6 +490,29 @@ def rewrap(query: str) -> str:
         The query with normalized whitespace.
     """
     return " ".join(query.strip().split())
+
+
+def _request_injection(entry: BoundRoute | None, req: falcon.Request) -> dict[str, Any]:
+    """Return the `request` keyword for handlers that declare it, and nothing for the rest.
+
+    Only `POST /cards/collection` wants the request object: its identifiers arrive in the body,
+    which nothing else in the dispatch path reads. Injecting it unconditionally is not an option —
+    a non-string keyword a handler neither declares nor absorbs through `**kwargs` reaches it as a
+    TypeError, and `search` is one such handler.
+
+    Args:
+        entry: The resolved route, or None when the path identified nothing.
+        req: The request being dispatched.
+
+    Returns:
+        `{"request": req}` when the handler declares the parameter, otherwise an empty dict.
+    """
+    if entry is None:
+        return {}
+    binder = getattr(entry.action, "binder", None)
+    if binder is None or not binder.accepts("request"):
+        return {}
+    return {"request": req}
 
 
 def _columnarize_cards(cards: list[dict[str, Any]]) -> dict[str, list[Any]]:
@@ -265,8 +549,13 @@ def _copy_query_result(result: dict[str, Any]) -> dict[str, Any]:
     return copied
 
 
-class APIResource:
-    """Class implementing request handling for our simple API."""
+class APIResource(ScryfallCardsRoutes):
+    """Class implementing request handling for our simple API.
+
+    The Scryfall-compatible `/cards/*` routes live in the base class rather than here: they are a
+    self-contained compatibility surface with their own response objects, and `iter_marked_routes`
+    scans inherited attributes, so they register exactly like the routes defined below.
+    """
 
     def __init__(
         self,
@@ -354,6 +643,10 @@ class APIResource:
             Keyword arguments for the action call.
         """
         params = {k: v for k, v in req.params.items() if k not in DISALLOWED_QUERY_ARGS}
+        # The request object itself, for the one handler that declares it (POST /cards/collection
+        # reads its identifiers from the body). Only where declared: a non-string keyword reaches a
+        # handler that neither declares nor absorbs it as a TypeError.
+        params.update(_request_injection(entry, req))
         if entry is None:
             # Only _raise_not_found reads this; set after the query string so a request can't
             # spoof it via ?admin_authenticated=1 on a path that doesn't resolve to anything.
@@ -607,6 +900,11 @@ class APIResource:
     ) -> dict[str, Any]:
         """Run a search query and return results and metadata.
 
+        The query string may embed result-shape directives (unique:, sort:/order:, direction:,
+        prefer:), which override the parameter of the same meaning — Scryfall semantics, so
+        `q=bolt unique:art` dedups by artwork regardless of the `unique` parameter. A directive
+        with an unknown value adds a "warnings" entry to the response and is otherwise ignored.
+
         Args:
             falcon_response: The Falcon response object (unused).
             q: Query string (alternative to query parameter).
@@ -627,8 +925,8 @@ class APIResource:
             orderby: Field to sort by.
             shape: Shape of the "cards" list: 'rows' (list of card objects, default) or
                 'columnar' (one list per field, keyed by field name — smaller on the wire).
-            unique: Unique on field.
-            prefer: Prefer order (oldest, newest, usd-low, usd-high, promo).
+            unique: Unique on field (card, printing, artwork).
+            prefer: Prefer order (oldest, newest, usd_low, usd_high, promo).
 
         Returns:
             Dict containing search results and metadata.
@@ -676,6 +974,9 @@ class APIResource:
         *,
         direction: SortDirection = SortDirection.ASC,
         fields: Sequence[str] | None = None,
+        include_extras: bool = True,
+        include_multilingual: bool = False,
+        include_variations: bool = True,
         limit: int = 100,
         offset: int = DEFAULT_OFFSET,
         orderby: CardOrdering = CardOrdering.EDHREC,
@@ -692,7 +993,25 @@ class APIResource:
         resolved_fields = self._resolve_result_fields(fields)
 
         if settings.enable_cache:
-            cache_key = (direction, limit, offset, orderby, prefer, query, unique, tuple(resolved_fields))
+            # `include_multilingual` is part of the key: the same query widened to the foreign
+            # annex is a different result set, and serving one for the other from cache would be
+            # exactly the kind of wrong answer the flag exists to prevent.
+            # `include_extras` joins it for the same reason: excluding the extras class is a
+            # different result set, and it is the DEFAULT on /cards/search, so a cache that
+            # confused the two would serve tokens and art series into an ordinary page.
+            cache_key = (
+                direction,
+                include_extras,
+                include_multilingual,
+                include_variations,
+                limit,
+                offset,
+                orderby,
+                prefer,
+                query,
+                unique,
+                tuple(resolved_fields),
+            )
             gen = self.app_context.cache_generation.value
             try:
                 search_cache = self._search_gen_cache[gen]
@@ -731,6 +1050,24 @@ class APIResource:
         except ValueError as err:
             _raise_query_bad_request(exc_name="ValueError", query=query, description=f'Failed to parse query: "{query}"', err=err)
 
+        # In-query directives override the query parameters (Scryfall semantics); both search
+        # paths below receive the effective values, so engine and SQL cannot disagree on them.
+        # The cache lookup above keys on the raw query string, which the directives are a pure
+        # function of.
+        unique, orderby, direction, prefer, warnings = _fold_directives(
+            parsed_query.directives,
+            unique=unique,
+            orderby=orderby,
+            direction=direction,
+            prefer=prefer,
+        )
+
+        # Scryfall's `include_extras=false` and `include_variations=false` defaults, spliced onto
+        # the tree UPSTREAM of the engine/SQL dispatch so both paths honor them by construction --
+        # see the helpers. Two independent gates; a query may close both.
+        _apply_extras_default(parsed_query, include_extras=include_extras)
+        _apply_variations_default(parsed_query, include_variations=include_variations)
+
         if not settings.enable_engine:
             pass  # feature-gated off: SQL serves everything, the store never loads
         elif self.app_context.engine.size() == 0:
@@ -749,6 +1086,7 @@ class APIResource:
                     offset=offset,
                     timer=timer,
                     fields=resolved_fields,
+                    include_multilingual=include_multilingual,
                 )
             except BaseException as e:
                 # BaseException, not Exception: a Rust panic anywhere under `self.app_context.engine.query`
@@ -799,6 +1137,7 @@ class APIResource:
                     exc_info=not declined,
                 )
             else:
+                result = _with_warnings(result, warnings)
                 if settings.enable_cache:
                     search_cache[cache_key] = result
                 return result
@@ -814,7 +1153,9 @@ class APIResource:
             offset=offset,
             timer=timer,
             fields=resolved_fields,
+            include_multilingual=include_multilingual,
         )
+        result = _with_warnings(result, warnings)
         if settings.enable_cache:
             search_cache[cache_key] = result
         return result
@@ -832,7 +1173,15 @@ class APIResource:
         timer: Timer,
         offset: int = DEFAULT_OFFSET,
         fields: Sequence[str] | None = None,
+        include_multilingual: bool = False,
     ) -> dict[str, Any]:
+        # AUTO is a request-level spelling neither search path knows, resolved on the way in so
+        # nothing downstream can see it. Resolved in each path rather than once in `_search`
+        # because what AUTO means depends on `orderby`: doing it here is necessarily after
+        # everything upstream that can still change `orderby` -- today nothing, once the in-query
+        # directives land their fold. Resolving before that fold would answer `order:usd` with the
+        # default ordering's direction and hand the engine the literal "auto".
+        direction = resolve_direction(direction, orderby)
         logger.info("Searching engine for %r", query)
         query_explanation = parsed_query.to_human_explanation() if query else ""
         try:
@@ -847,6 +1196,7 @@ class APIResource:
                     limit=limit if limit is not None else 1_000_000,
                     offset=offset,
                     fields=fields,
+                    include_multilingual=include_multilingual,
                 )
         except _RetryableQueryError:
             logger.info("RetryableQueryError caught for query '%s', declining to SQL", query)
@@ -879,13 +1229,26 @@ class APIResource:
         timer: Timer,
         offset: int = DEFAULT_OFFSET,
         fields: Sequence[str] | None = None,
+        include_multilingual: bool = False,
     ) -> dict[str, Any]:
+        # AUTO is a request-level spelling neither search path knows, resolved on the way in so
+        # nothing downstream can see it. Resolved in each path rather than once in `_search`
+        # because what AUTO means depends on `orderby`: doing it here is necessarily after
+        # everything upstream that can still change `orderby` -- today nothing, once the in-query
+        # directives land their fold. Resolving before that fold would answer `order:usd` with the
+        # default ordering's direction and hand the engine the literal "auto".
+        direction = resolve_direction(direction, orderby)
         logger.info("Searching SQL for %r", query)
         resolved_fields = self._resolve_result_fields(fields)
         query_explanation = parsed_query.to_human_explanation() if query else ""
         try:
             with timer("get_where_clause"):
                 where_clause, params = generate_sql_query(parsed_query)
+                # Same default-canonical rule as get_where_clause: foreign rows join the result
+                # space only when the query names a language — or when the caller widened with
+                # include_multilingual, the SQL twin of the engine driver's second trigger.
+                if not include_multilingual:
+                    where_clause = _canonical_guard(where_clause)
         except ValueError as err:
             _raise_query_bad_request(exc_name="ValueError", query=query, description=f'Failed to parse query: "{query}"', err=err)
         sql_orderby: str = {
@@ -898,7 +1261,18 @@ class APIResource:
             CardOrdering.RARITY: "card_rarity_int",
             CardOrdering.TOUGHNESS: "creature_toughness",
             CardOrdering.USD: "price_usd",
+            CardOrdering.EUR: "price_eur",
+            CardOrdering.TIX: "price_tix",
             CardOrdering.CUBECOBRA: "cubecobra_score",
+            CardOrdering.RELEASED: "released_at",
+            # lower() for the same reason as name: the engine ranks the lowercased artist, and set
+            # codes are stored lowercase but nothing constrains them to be.
+            CardOrdering.ARTIST: "lower(card_artist)",
+            CardOrdering.SET: "lower(card_set_code)",
+            # Scryfall's colour order is eleven buckets, not the colour bitmask -- WUBRG, then
+            # multicolour by how many colours, then colourless, then lands. Measured 2026-08-09;
+            # mirrors color_sort_rank in card_engine/src/lib.rs, which the engine path uses.
+            CardOrdering.COLOR: _COLOR_ORDER_SQL,
         }.get(orderby, "edhrec_rank")
         sql_direction = {
             "asc": "ASC",
@@ -1339,6 +1713,14 @@ class APIResource:
     ) -> dict[str, Any]:
         """Return one or more random cards in the same envelope shape as search().
 
+        The draw is SCOPED to the default lane, and it could not be until the engine's sampler took
+        a filter: the pool lives inside the store, so a route holding no filter argument had
+        nothing to exclude with. Every other surface hides the extras class by default -- the
+        splices in `_search` for `/cards/search` and `/search`, the two flags on `/cards/random` --
+        and this one drew tokens, art-series cards and memorabilia from the moment #927 stopped
+        dropping them, on the request the front page makes on every load. See
+        `_default_lane_exclusions` for why an empty query is left alone and this is not.
+
         Args:
             falcon_response: The Falcon response object.
             num_cards: The number of random cards to return (default is 1).
@@ -1355,7 +1737,7 @@ class APIResource:
             self._trigger_background_reload_if_needed()
             cards = []
         else:
-            cards = list(self.app_context.engine.sample_preferred(num_cards))
+            cards = list(self.app_context.engine.sample_preferred(num_cards, filters=_default_lane_exclusions()))
         total_cards = len(cards)
         if shape == ResponseShape.COLUMNAR:
             cards = _columnarize_cards(cards)

@@ -18,8 +18,10 @@ import pytest
 import api.api_resource as api_resource_module
 from api.admin_resource import AdminContext
 from api.api_resource import INTERNAL_ERROR_DESCRIPTION, APIResource
-from api.enums import ResponseShape
+from api.card_processing import EXTRA_IS_TAG
+from api.enums import ResponseShape, UniqueOn
 from api.middlewares.caching_middleware import CachingMiddleware
+from api.parsing import AndNode, NotNode, OrNode, TrueNode, parse_scryfall_query
 from api.settings import settings
 from api.tests.support import mock_app_context
 from api.utils.routing import BoundRoute, RouteSpec, route
@@ -762,6 +764,165 @@ class TestIdentityLetters(unittest.TestCase):
         assert api_resource_module._identity_letters(None) == ()
 
 
+class TestExtrasDefault:
+    """`_apply_extras_default`, the tree splice behind `include_extras=false`."""
+
+    def test_the_conjunct_is_spliced_onto_the_tree(self) -> None:
+        """`-is:extra` is ANDed on, so both search paths get it from one place.
+
+        Spliced rather than appended to the query string: `f"({query}) -is:extra"` would make
+        every directive inside the query read as nested (a warning `_fold_directives` emits), and
+        appending without the parentheses would bind to the last `or` branch instead of the whole
+        query.
+        """
+        parsed = parse_scryfall_query("t:creature or t:land")
+        api_resource_module._apply_extras_default(parsed, include_extras=False)
+        assert isinstance(parsed.root, AndNode)
+        original, excluded = parsed.root.operands
+        assert isinstance(original, OrNode)
+        assert excluded == NotNode(parse_scryfall_query("is:extra").root)
+
+    def test_include_extras_leaves_the_query_exactly_as_written(self) -> None:
+        parsed = parse_scryfall_query("t:creature")
+        before = repr(parsed.root)
+        api_resource_module._apply_extras_default(parsed, include_extras=True)
+        assert repr(parsed.root) == before
+
+    def test_an_empty_query_is_left_alone(self) -> None:
+        """A TrueNode is what the by-name and random lanes search with, and they scope themselves.
+
+        Wrapping it would change what `/cards/random` and the collection lookups answer, which is
+        a different surface from the one the flag belongs to.
+        """
+        parsed = parse_scryfall_query("")
+        api_resource_module._apply_extras_default(parsed, include_extras=False)
+        assert isinstance(parsed.root, TrueNode)
+
+    def test_the_predicate_is_the_parsers_own_is_extra_node(self) -> None:
+        """The predicate is parsed, never hand-built.
+
+        The `is:` rewrite decides the node shape the engine and the SQL generator both read, and a
+        literal here would be a fourth place for it to drift.
+        """
+        assert api_resource_module._extras_predicate() == parse_scryfall_query(f"is:{EXTRA_IS_TAG}").root
+
+
+class TestSearchQueryDirectives(TestBaseAPIResourceTest):
+    """In-query directives (unique:/sort:/order:/direction:/prefer:) apply before either search path.
+
+    The fold happens in _search, upstream of the engine/SQL dispatch, so both paths receive the
+    same effective parameters by construction. Scryfall semantics throughout (measured
+    2026-08-07): a directive overrides its query parameter, the last repeat wins, and an unknown
+    value warns and is ignored.
+    """
+
+    @contextmanager
+    def _search_flags(self, *, enable_engine: bool) -> Generator[None]:
+        """Force the engine gate and disable caching, restoring both afterward."""
+        saved = (settings.enable_engine, settings.enable_cache)
+        settings.enable_engine = enable_engine
+        settings.enable_cache = False
+        try:
+            yield
+        finally:
+            settings.enable_engine, settings.enable_cache = saved
+
+    def _engine_search(self, q: str, **params: Any) -> tuple[MagicMock, dict[str, Any]]:
+        """Run _search against a stubbed engine; return the engine mock and the result."""
+        mock_engine = MagicMock()
+        mock_engine.size.return_value = 90
+        mock_engine.query.return_value = (0, iter([]))
+        with (
+            patch.object(self.api_resource.app_context, "setup_complete", lambda: True),
+            patch.object(self.api_resource.app_context, "engine", mock_engine),
+            self._search_flags(enable_engine=True),
+        ):
+            result = self.api_resource._search(query=q, **params)
+        return mock_engine, result
+
+    def test_unique_directive_reaches_engine(self) -> None:
+        """`unique:art` in the query string turns into the artwork mode the engine sees."""
+        mock_engine, _ = self._engine_search("t:goblin unique:art")
+        assert mock_engine.query.call_args.kwargs["unique"] == "artwork"
+
+    def test_directive_overrides_parameter(self) -> None:
+        """An inline directive beats the query parameter of the same meaning."""
+        mock_engine, _ = self._engine_search("t:goblin unique:prints", unique=UniqueOn.ARTWORK)
+        assert mock_engine.query.call_args.kwargs["unique"] == "printing"
+
+    def test_last_repeated_directive_wins(self) -> None:
+        """`unique:cards unique:art` dedups by artwork, matching Scryfall."""
+        mock_engine, _ = self._engine_search("t:goblin unique:cards unique:art")
+        assert mock_engine.query.call_args.kwargs["unique"] == "artwork"
+
+    def test_every_directive_kind_applies(self) -> None:
+        """sort:, direction:, and prefer: all reach the engine as their enum values."""
+        mock_engine, _ = self._engine_search("t:goblin sort:usd direction:desc prefer:oldest")
+        kwargs = mock_engine.query.call_args.kwargs
+        assert kwargs["orderby"] == "usd"
+        assert kwargs["direction"] == "desc"
+        assert kwargs["prefer"] == "oldest"
+
+    def test_dir_is_the_short_spelling_of_direction(self) -> None:
+        """`dir:desc` reaches the engine exactly as `direction:desc` does (Scryfall accepts both)."""
+        mock_engine, _ = self._engine_search("t:goblin sort:usd dir:desc")
+        assert mock_engine.query.call_args.kwargs["direction"] == "desc"
+
+    def test_the_two_direction_spellings_override_one_another(self) -> None:
+        """They set one parameter, so the later wins rather than each applying independently."""
+        mock_engine, _ = self._engine_search("t:goblin direction:desc dir:asc")
+        assert mock_engine.query.call_args.kwargs["direction"] == "asc"
+
+    def test_unknown_directive_value_warns_and_keeps_parameter(self) -> None:
+        """An unknown value is ignored with a Scryfall-shaped warning; the search still runs."""
+        mock_engine, result = self._engine_search("t:goblin unique:bogus")
+        assert mock_engine.query.call_args.kwargs["unique"] == "card"
+        assert result["warnings"] == ['Unknown unique mode "bogus" was ignored']
+
+    def test_directive_free_search_has_no_warnings_key(self) -> None:
+        """The warnings key appears only when there is something to say."""
+        _, result = self._engine_search("t:goblin")
+        assert "warnings" not in result
+
+    def test_overriding_repeat_warns_with_both_values(self) -> None:
+        """`(cmc=5 prefer:oldest) (cmc=4 prefer:newest)` applies newest and SAYS so.
+
+        The grouped-scope ambiguity from #872: a directive always applies to the whole
+        search, so the losing spelling is named in a warning rather than silently dropped.
+        """
+        mock_engine, result = self._engine_search("(cmc=5 prefer:oldest) (cmc=4 prefer:newest)")
+        assert mock_engine.query.call_args.kwargs["prefer"] == "newest"
+        assert result["warnings"] == ["prefer:newest overrode the earlier prefer:oldest"]
+
+    def test_sort_and_order_spellings_override_each_other(self) -> None:
+        """sort: and order: set the same parameter, so a later one warns about the earlier."""
+        mock_engine, result = self._engine_search("t:goblin sort:usd order:name")
+        assert mock_engine.query.call_args.kwargs["orderby"] == "name"
+        assert result["warnings"] == ["order:name overrode the earlier sort:usd"]
+
+    def test_same_value_repeat_warns_nothing(self) -> None:
+        """Repeating a directive with the same value has nothing surprising to report."""
+        _, result = self._engine_search("t:goblin unique:art unique:art")
+        assert "warnings" not in result
+
+    def test_directive_inside_a_group_warns_about_its_scope(self) -> None:
+        """A directive under an or-group applies globally, and the response says so."""
+        mock_engine, result = self._engine_search("t:goblin or unique:art")
+        assert mock_engine.query.call_args.kwargs["unique"] == "artwork"
+        assert result["warnings"] == ["unique:art applies to the whole search, not only its group"]
+
+    def test_sql_path_receives_effective_values(self) -> None:
+        """The fold happens before dispatch, so the SQL fallback sees the same effective unique."""
+        with (
+            patch.object(self.api_resource.app_context, "setup_complete", lambda: True),
+            self._search_flags(enable_engine=False),
+            patch.object(self.api_resource, "_search_sql", return_value={"cards": [], "total_cards": 0}) as mock_sql,
+        ):
+            result = self.api_resource._search(query="t:goblin unique:art unique:bogus")
+        assert mock_sql.call_args.kwargs["unique"] == UniqueOn.ARTWORK
+        assert result["warnings"] == ['Unknown unique mode "bogus" was ignored']
+
+
 class TestAPIResourceStaticFileServing(unittest.TestCase):
     """Test static file serving methods."""
 
@@ -1023,9 +1184,35 @@ class TestAPIResourceCaching(unittest.TestCase):
         with patch.object(self.api_resource.app_context, "engine", mock_engine):
             result = self.api_resource.random_search(num_cards=2)
 
-        mock_engine.sample_preferred.assert_called_once_with(2)
+        mock_engine.sample_preferred.assert_called_once_with(2, filters=api_resource_module._default_lane_exclusions())
         assert result["cards"] == fake_cards
         assert result["total_cards"] == 2
+
+    def test_random_search_scopes_the_draw_to_the_default_lane(self) -> None:
+        """The draw is filtered, and by the same two exclusions every other surface applies.
+
+        Asserted on the TREE the route hands the engine rather than on the identity of a cached
+        object: what matters is that the pool the sampler draws from is `-is:extra -is:variation`,
+        which is what the front page's grid stopped being when #927 imported the class.
+        """
+        from unittest.mock import MagicMock  # noqa: PLC0415
+
+        mock_engine = MagicMock()
+        mock_engine.size.return_value = 2
+        mock_engine.sample_preferred.return_value = []
+
+        with patch.object(self.api_resource.app_context, "engine", mock_engine):
+            self.api_resource.random_search(num_cards=1)
+
+        sent = mock_engine.sample_preferred.call_args.kwargs["filters"].to_json()
+        assert sent["node_type"] == "AndNode"
+        operands = sent["kwargs"]["operands"]
+        assert [node["node_type"] for node in operands] == ["NotNode", "NotNode"]
+        negated = [node["kwargs"]["operand"] for node in operands]
+        assert {node["kwargs"]["lhs"]["kwargs"]["attribute_name"] for node in negated} == {"card_is_tags"}
+        assert sorted(tag for node in negated for tag in node["kwargs"]["rhs"]) == sorted(
+            [EXTRA_IS_TAG, api_resource_module.VARIATION_IS_TAG]
+        )
 
     def test_random_search_returns_empty_when_engine_not_loaded(self) -> None:
         """random_search returns empty result when the engine has no cards."""
