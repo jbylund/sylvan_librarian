@@ -202,12 +202,45 @@ Prefix a name with `!` to match only that card:
 
 ### Regular Expressions
 
-Use `/pattern/` with `name:`, `type:`, or `oracle:`. Standard regex syntax applies.
+Use `/pattern/` with `name:`, `type:`, `oracle:`, `flavor:`, `artist:`, `set:`, `layout:`,
+`border:`, `watermark:`, `number:`, and `mana:`. Standard regex syntax applies, plus the three
+extensions below.
 
 ```
 name:/^Lightning/
 o:/(flying|trample)/
+mana:/^\{R\}$/       mono-red costs, exactly
 ```
+
+**`~` is the card's own self-reference**, on `oracle:` only. It matches the card's name, the short
+form a legendary's rules text uses ("Rankle" for *Rankle, Master of Pranks*), and the "this
+creature" / "this spell" / "this land" family of phrases. Elsewhere — on `name:`, `type:`,
+`flavor:`, `mana:` — it is the literal character.
+
+```
+o:/~ deals/          cards that damage something by naming themselves
+o:/~/ -o:/this/      the ones that use their own name rather than a phrase
+```
+
+**`\s…` shorthands** name a symbol class, and are not the whitespace escape:
+
+| | | | |
+| --- | --- | --- | --- |
+| `\ss` | any card symbol | `\smr` | the same mana symbol twice |
+| `\sm` | any mana symbol | `\spt` | an X/X power/toughness |
+| `\sc` | any coloured mana symbol | `\spp` | a +X/+X |
+| `\smh` | any hybrid symbol | `\smm` | a -X/-X |
+| `\smp` | any Phyrexian symbol | | |
+
+```
+o:/\smh/             cards whose text prints a hybrid symbol
+o:/\spp/             cards that put a +X/+X counter somewhere
+```
+
+Inside a character class nothing is expanded: `[\sm]` is still "whitespace or the letter m".
+
+**Word boundaries** may be spelled the PostgreSQL way — `\y` and `\Y` for a boundary and a
+non-boundary, `\m` and `\M` for the start and end of a word — as well as the usual `\b`/`\B`.
 
 ---
 

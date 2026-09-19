@@ -197,6 +197,76 @@ def test_nonliteral_regex_stays_regex(parse_query, query: str) -> None:
     assert isinstance(parse_query(query).root.rhs, RegexValueNode)
 
 
+# A NON-ASCII literal is exactly where the engine's byte-walking pattern classifier used to
+# panic, and this table is the split that decided which queries reached it. A pattern that is
+# nothing but literals is lowered here and never becomes a regex leaf at all; one that mixes a
+# metacharacter with a multi-byte character stays a regex and goes to the engine. Counts on
+# api.scryfall.com 2026-08-28: `o:/x—/` 7 (lowered), `o:/.—/` 3,461 and `o:/[a-z]—/` 245 (not).
+NON_ASCII_LOWERED = [("o:/x—/", 'o:"x—"'), ("o:/é/", 'o:"é"')]
+NON_ASCII_STAY_REGEX = ["o:/.—/", "o:/[a-z]—/", r"o:/\w—/", "o:/[a-z]é/", "o:/—[^{]*$/"]
+
+
+@pytest.mark.parametrize(
+    argnames=["regex_query", "substring_query"],
+    argvalues=NON_ASCII_LOWERED,
+    ids=[r for r, _ in NON_ASCII_LOWERED],
+)
+def test_bare_non_ascii_literal_still_lowers(parse_query, regex_query: str, substring_query: str) -> None:
+    """A pattern of nothing but a non-ASCII literal is a substring, and never reaches the engine."""
+    assert parse_query(regex_query) == parse_query(substring_query)
+
+
+@pytest.mark.parametrize(argnames=["query"], argvalues=[(q,) for q in NON_ASCII_STAY_REGEX], ids=NON_ASCII_STAY_REGEX)
+def test_metacharacter_beside_non_ascii_stays_regex(parse_query, query: str) -> None:
+    """Mixed shapes stay regex leaves — the engine has to classify them without panicking."""
+    assert isinstance(parse_query(query).root.rhs, RegexValueNode)
+
+
+# THE LOWERING IS TEXT-COLUMNS-ONLY, because "the substring this pattern spells" is only a legal
+# value where a bare value IS a substring test. `mana:` is the one non-text column that can carry
+# a pattern, and there the two readings are different queries: `mana:/p/ mv=1` is 9 on
+# api.scryfall.com (2026-08-28), every one Phyrexian, while the lowered `mana:p` is `Invalid
+# expression "mana:p" was ignored. Unknown mana symbols "P".` and answers the unfiltered 3,244.
+@pytest.mark.parametrize(argnames=["query"], argvalues=[("mana:/p/",), ("m:/rr/",), ("mana:/2/",)], ids=["mana-p", "m-rr", "mana-2"])
+def test_plain_literal_mana_regex_does_not_lower(parse_query, query: str) -> None:
+    """A plain-literal pattern on the mana column stays a regex — lowering it discards the filter."""
+    assert isinstance(parse_query(query).root.rhs, RegexValueNode)
+
+
+# `~` IS A METACHARACTER in Scryfall's dialect — an automatic alias for the card's own
+# self-reference, which the engine expands into a word-bounded alternation of the card's names and
+# a fixed "this <noun>" phrase family. Reading it as the literal tilde turns `o:/~/` into the
+# substring search `o:~`, which no oracle text on earth satisfies: 404 against 19,228 on
+# api.scryfall.com (2026-08-28). The escaped form is not protected either — `o:/\~/` answers the
+# same 19,228 there.
+@pytest.mark.parametrize(
+    argnames=["query"],
+    argvalues=[("o:/~/",), (r"o:/\~/",), ("o:/~ deals 3 damage/",), ("ft:/~/",), ("name:/~/",), ("t:/~/",)],
+    ids=["oracle", "escaped", "with-literal", "flavor", "name", "type"],
+)
+def test_tilde_is_not_a_plain_literal(parse_query, query: str) -> None:
+    """A `~` pattern stays a regex on EVERY column, including the ones that do not expand it.
+
+    Lowering is a parser-side decision and the alias is an engine-side one, so the parser cannot
+    take the column into account here — and it does not need to: on `ft:`/`name:` the engine
+    compiles the tilde as the literal it looks like, which is exactly what `ft:/~/`'s 2 cards
+    (Blighted Agent and Urabrask the Hidden, whose Phyrexian-script flavor text contains one) and
+    `name:/~/`'s 404 say it should be.
+    """
+    assert isinstance(parse_query(query).root.rhs, RegexValueNode)
+
+
+def test_tilde_costs_one_token_in_the_regex_budget() -> None:
+    r"""`~` is one piece of user-written structure, the same call the `\\s…` shorthands get.
+
+    Its expansion is a 17-way alternation, so measuring that instead would put `o:/~~/` past
+    MAX_ALTERNATIONS_PER_PATTERN — and the expansion is a fixed constant this codebase chose, not
+    something the searcher typed. Python's `re` already reads `~` as an ordinary literal, so this
+    needs no rewrite; the test is here so a later one is a deliberate change.
+    """
+    parse_scryfall_query("o:/~~~~~~~~/")
+
+
 _PLAIN_LITERAL_CASES = {
     "bare_literal": {"pattern": "sacrifice a", "expected": "sacrifice a"},
     "escaped_dot": {"pattern": r"foo\.bar", "expected": "foo.bar"},

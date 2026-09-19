@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 import cachebox
 
 from api.parsing.card_query_nodes import CardAttributeNode
+from api.parsing.db_info import ParserClass
 from api.parsing.hand_parser import parse_str_to_query as _parse_str_to_query
 from api.parsing.nodes import (
     AndNode,
@@ -289,12 +290,32 @@ def _regex_plain_literal(pattern: str) -> str | None:
             nxt = next(it, None)
             if nxt is None or (nxt.isascii() and nxt.isalnum()):
                 return None  # class escape (\d \w \b …) or a dangling backslash
+            # `\~` is still the self-reference alias, not an escaped tilde: `o:/\~/` answers the
+            # same 19,228 as `o:/~/` on api.scryfall.com (2026-08-28), so the backslash does not
+            # turn it back into a character.
+            if nxt == "~":
+                return None
             out.append(nxt)
-        elif c in ".*+?()[]{}|^$":
+        # `~` IS A METACHARACTER in Scryfall's dialect -- an automatic alias for the card's own
+        # name. Reading it as the literal tilde turns `o:/~/` into the substring search `o:~`,
+        # which no oracle text on earth satisfies: 404 against 19,228 there.
+        elif c in ".*+?()[]{}|^$~":
             return None
         else:
             out.append(c)
     return "".join(out) or None  # empty pattern matches everything -> leave it a regex
+
+
+def _is_text_column_leaf(node: BinaryOperatorNode) -> bool:
+    """Whether a leaf's LHS names a column where a bare value is a SUBSTRING test.
+
+    An unresolvable attribute (no field infos) keeps the old behaviour of lowering, so nothing
+    that used to answer stops.
+    """
+    if not isinstance(node.lhs, CardAttributeNode):
+        return True
+    field_infos = node.lhs.field_infos
+    return not field_infos or any(fi.parser_class == ParserClass.TEXT for fi in field_infos)
 
 
 def _lower_regex_leaves(node: QueryNode) -> None:
@@ -311,6 +332,15 @@ def _lower_regex_leaves(node: QueryNode) -> None:
     elif isinstance(node, NotNode):
         _lower_regex_leaves(node.operand)
     elif isinstance(node, BinaryOperatorNode) and node.operator == ":" and isinstance(node.rhs, RegexValueNode):
+        # TEXT COLUMNS ONLY, because "the substring this pattern spells" is only a legal value
+        # where a bare value IS a substring test. `mana:` is the one non-text column that can
+        # carry a pattern (see hand_parser.parse_mana_value), and there the two readings are
+        # different queries: measured on api.scryfall.com 2026-08-28, `mana:/p/ mv=1` is 9 --
+        # every one Phyrexian, the pattern run against the cost STRING -- while the lowered
+        # `mana:p` is `Invalid expression "mana:p" was ignored. Unknown mana symbols "P".` and
+        # answers the unfiltered 3,244. Lowering it throws the whole filter away silently.
+        if not _is_text_column_leaf(node):
+            return
         literal = _regex_plain_literal(node.rhs.value)
         if literal is not None:
             node.rhs = StringValueNode(literal)

@@ -74,12 +74,109 @@ def _collect_regex_patterns(node: QueryNode) -> list[str]:
     return []
 
 
+def _translate_are_escapes(pattern: str) -> str:
+    r"""Rewrite the escapes Python's ``re`` cannot spell, and fold each ``\s…`` shorthand to one token.
+
+    ``o:/.../`` is documented against PostgreSQL's ``~*``, whose word-boundary
+    escapes are ``\y``/``\Y``/``\m``/``\M``. Python's ``re`` rejects all four
+    outright, so measuring a pattern's budget with ``re._parser`` requires the
+    same rewrite ``CompiledRegex`` applies before handing the pattern to the
+    engine -- keep this table and the one in ``card_engine/src/regex_compat.rs``
+    in step, or a pattern the engine runs is one this module cannot cost.
+
+    ``\m``/``\M`` have no Python spelling either and become lookaround, which is
+    what the engine does with them. They therefore COST lookaround budget here,
+    and that is the honest accounting: they are exactly what puts the pattern on
+    the backtracking engine that ``MAX_LOOKAROUNDS_PER_PATTERN`` exists to bound.
+
+    ``\Z`` needs no entry -- Python and ARE agree it is end-of-string.
+
+    THE ``\s…`` SHORTHANDS ARE MEASURED AS ONE TOKEN EACH, not as the expansions
+    ``card_engine/src/regex_compat.rs`` substitutes. Python's ``re`` would otherwise read ``\sm``
+    as whitespace-then-``m`` and cost a pattern that never runs, and expanding them would charge
+    the searcher for a constant this codebase chose: ``\sm`` alone expands to five alternations
+    and ten AST nodes, so ``o:/\sm\sm\sm\sm\sm\sm\sm/`` — seven mana symbols in a row, a
+    perfectly ordinary query — would exceed both ``MAX_REGEX_AST_NODES`` and
+    ``MAX_ALTERNATIONS_PER_PATTERN``. One shorthand is one piece of user-written structure, and
+    that is what the budget is bounding.
+
+    Costing it that way is safe because of where the expansions run: every one but ``\smr``
+    compiles on the linear engine, which has no backtracking to blow up, and ``\smr``'s
+    backreference is bounded at runtime by ``REGEX_BACKTRACK_LIMIT``. Note that this is also what
+    lets ``\smr`` through at all — the backreference the engine synthesises for it is never the
+    user's, and ``metrics.backreferences > 0`` below would otherwise reject every use of it.
+
+    Only the returned string is measured; the pattern stored on the node is left
+    alone, because the SQL path hands it to PostgreSQL, which speaks ARE natively.
+    """
+    out: list[str] = []
+    # Position within the current bracket expression, if any: `None` outside one,
+    # else the count of characters consumed since `[`. A `]` in the first position
+    # is a literal member (POSIX), not the close, which is why this is a count and
+    # not a flag.
+    class_pos: int | None = None
+    i = 0
+    while i < len(pattern):
+        char = pattern[i]
+        if char == "\\":
+            if i + 1 >= len(pattern):
+                out.append("\\")
+                break
+            nxt = pattern[i + 1]
+            if class_pos is not None:
+                out.append("\\" + nxt)
+                class_pos += 2
+                i += 2
+                continue
+            if nxt == "s":
+                suffix = next((sfx for sfx in _SHORTHAND_SUFFIXES if pattern.startswith(sfx, i + 2)), None)
+                if suffix is not None:
+                    out.append(_SHORTHAND_TOKEN)
+                    i += 2 + len(suffix)
+                    continue
+            out.append(_ARE_ESCAPES.get(nxt, "\\" + nxt))
+            i += 2
+            continue
+        if class_pos is None:
+            if char == "[":
+                class_pos = 0
+        elif class_pos == 0 and char == "^":
+            pass
+        elif class_pos == 0 and char == "]":
+            class_pos = 1
+        elif char == "]":
+            class_pos = None
+        else:
+            class_pos += 1
+        out.append(char)
+        i += 1
+    return "".join(out)
+
+
+# Scryfall's `\s…` shorthands, LONGEST FIRST so `\smm` is the -X/-X shorthand rather than `\sm`
+# followed by a literal `m`. The table mirrors SCRYFALL_SHORTHANDS in
+# card_engine/src/regex_compat.rs, which carries the measured expansions and the counts behind
+# them; only the spellings matter here, because each one costs a single token.
+_SHORTHAND_SUFFIXES = ("mh", "mp", "mm", "mr", "pt", "pp", "m", "s", "c")
+
+# U+E000, the first private-use codepoint: a character `re` parses as an ordinary literal and no
+# card text contains, so folding a shorthand to it changes the measured structure and nothing else.
+_SHORTHAND_TOKEN = "\ue000"
+
+_ARE_ESCAPES = {
+    "y": r"\b",
+    "Y": r"\B",
+    "m": r"(?<!\w)(?=\w)",
+    "M": r"(?<=\w)(?!\w)",
+}
+
+
 def _enforce_pattern_limits(pattern: str) -> None:
     if len(pattern.encode("utf-8")) > MAX_PATTERN_UTF8_BYTES:
         raise QueryBudgetExceeded(kind="regex_pattern")
 
     try:
-        parsed = sre_parser.parse(pattern, re.IGNORECASE)
+        parsed = sre_parser.parse(_translate_are_escapes(pattern), re.IGNORECASE)
     except re.error as exc:
         raise InvalidRegexPatternError(reason=_python_regex_error_reason(exc)) from None
 
