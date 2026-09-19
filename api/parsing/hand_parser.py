@@ -107,8 +107,23 @@ class Token:
 
 
 _ARITH_OPS: frozenset[TT] = frozenset({TT.PLUS, TT.MINUS, TT.STAR, TT.SLASH})
-_WORD_START = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_")
-_WORD_CONT = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789.")
+# `~` is an ordinary value character. Leaving it out of both sets makes every spelling of it a LEX
+# ERROR rather than a search -- `o:~` falls through to "Unexpected character" below and the whole
+# query dies before a field or a value is read, where api.scryfall.com answers it.
+#
+# Measured on api.scryfall.com 2026-09-18: EVERY shape parses there and only the rules-text one
+# matches -- `o:~` 19,407, while `o:~x`, `o:a~b`, `name:~`, `t:~` and a bare `~` are each 0 WITHOUT
+# a query error. So it is word-START and word-CONTINUATION both, and not a token of its own;
+# `o:a~b` is what settles the continuation half, being a valid empty search there rather than two
+# terms.
+#
+# What the tilde MEANS is a separate question this does not answer. Scryfall reads it in rules text
+# as the card's own name, which is why `o:~` is 19,407 there and 0 here even after this change; on
+# every other column it is the literal character, which is exactly what `name:~`, `t:~` and `a:~`
+# already agree on at 0. The quoted spellings never hit this at all -- `o:"~"` lexes as a string
+# token and always reached the rest of the parser intact.
+_WORD_START = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_~")
+_WORD_CONT = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789.~")
 _DIGIT = frozenset("0123456789")
 _SPACE = frozenset(" \t\r\n")
 
