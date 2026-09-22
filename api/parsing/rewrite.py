@@ -138,6 +138,22 @@ _DERIVED_EXPANSIONS: dict[tuple[str, str], str] = {
         "is",
         "commander",
     ): '((t:legendary (toughness>=0 or t:background)) or o:"can be your commander") -banned:commander',
+    # is:partner is "pairs as a commander", not "has the Partner keyword".
+    # Scryfall counts every pairing mechanic on a LEGENDARY card: Partner and
+    # its `Partner with` / `Partner--<group>` / Friends forever variants (all
+    # of which carry the plain `Partner` keyword), `Choose a background` and
+    # the Backgrounds it pairs with, and `Doctor's companion` and the Time
+    # Lord Doctors it pairs with. The non-legendary Battlebond `Partner with`
+    # pairs (Blaring Captain, Chakram Slinger, ...) are OUT:
+    # `is:partner -t:legendary` is 0 there. Measured against api.scryfall.com
+    # on 2026-09-22: 228 cards / 823 printings, and this expression's set
+    # differences against it are empty both ways at both grains. The stored
+    # `partner` tag (admin_resource, keywords @> Partner) answered 134; this
+    # expansion shadows it.
+    ("is", "partner"): (
+        't:legendary (keyword:partner or keyword:"choose a background" or keyword:"doctor\'s companion" or '
+        't:background or (t:"time lord" t:doctor))'
+    ),
     ("is", "companion"): "kw:companion",  # 10, name-verified
     ("is", "class"): "t:class",  # 34, equals Scryfall's paper count exactly
     # is:adventure is LAYOUT semantics by Scryfall's own definition -- it
