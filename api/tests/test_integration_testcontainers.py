@@ -92,13 +92,28 @@ class TestContainerIntegration:
         cards = result["cards"]
         assert {c["name"] for c in cards} == {"Éowyn, Fearless Knight"}
 
-        # Exact match stays accent-sensitive: typing the accent finds it...
+        # A BARE word also crosses the separators, which is what makes `ft` answer 1,628 on
+        # api.scryfall.com rather than `name:"ft"`'s 362 (measured 2026-08-16).
+        collated = api_resource._search_sql(**search_kwargs("name:eowynfearless", limit=10))
+        assert {c["name"] for c in collated["cards"]} == {"Éowyn, Fearless Knight"}
+
+        # A QUOTED value is LITERAL: the accent is required and the separators count.
+        quoted_accented = api_resource._search_sql(**search_kwargs('name:"éowyn, fearless"', limit=10))
+        assert {c["name"] for c in quoted_accented["cards"]} == {"Éowyn, Fearless Knight"}
+        quoted_unaccented = api_resource._search_sql(**search_kwargs('name:"eowyn"', limit=10))
+        assert quoted_unaccented["cards"] == []
+
+        # Exact match is COLLATED: typing the accent finds it...
         exact_accented = api_resource._search_sql(**search_kwargs('!"Éowyn, Fearless Knight"', limit=10))
         assert {c["name"] for c in exact_accented["cards"]} == {"Éowyn, Fearless Knight"}
 
-        # ...typing without the accent does not.
-        exact_unaccented = api_resource._search_sql(**search_kwargs('!"Eowyn, Fearless Knight"', limit=10))
-        assert exact_unaccented["cards"] == []
+        # ...and so does typing it without the accent, or without the comma. api.scryfall.com
+        # answers `!"eowyn, lady of rohan"` with "Éowyn, Lady of Rohan" and `!"limduls vault"`
+        # with "Lim-Dûl's Vault" (measured 2026-08-16); requiring the exact printed spelling
+        # found nothing for anyone reading the name off the card.
+        for spelling in ('!"Eowyn, Fearless Knight"', '!"eowyn fearless knight"', "!eowynfearlessknight"):
+            unaccented = api_resource._search_sql(**search_kwargs(spelling, limit=10))
+            assert {c["name"] for c in unaccented["cards"]} == {"Éowyn, Fearless Knight"}, spelling
 
     def test_color_search(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """Test searching for cards by color."""

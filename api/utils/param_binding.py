@@ -186,6 +186,21 @@ class ParamBinder:
         self._positional_names = tuple(positional)
         self._known = frozenset(name for name, *_ in plan)
 
+    def accepts(self, name: str) -> bool:
+        """Return whether the handler declares a parameter by this name.
+
+        Lets a caller inject an object only into the handlers that asked for it. Injecting one
+        unconditionally is not an option: a non-string keyword a handler neither declares nor
+        absorbs through `**kwargs` reaches it as a TypeError, and most handlers declare neither.
+
+        Args:
+            name: The parameter name to look for.
+
+        Returns:
+            True when the handler has a parameter of that name.
+        """
+        return name in self._known
+
     def bind(self, args: Sequence[Any], kwargs: Mapping[str, Any]) -> dict[str, Any]:
         """Map positional and raw keyword arguments onto typed keyword arguments.
 
