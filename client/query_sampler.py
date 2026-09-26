@@ -136,16 +136,42 @@ REALISTIC_UNIQUE_WEIGHTS: dict[str, float] = {"card": 75, "printing": 20, "artwo
 # ships in the client image, which contains no `api/`. Anything outside this set is accepted by the
 # engine and silently sorted by edhrec, so callers mapping external orderbys should fall back
 # explicitly rather than pass an unknown value through and mislabel the result.
-ENGINE_ORDERBYS = frozenset({"cmc", "cubecobra", "edhrec", "name", "power", "rarity", "toughness", "usd"})
+ENGINE_ORDERBYS = frozenset(
+    {
+        "artist",
+        "cmc",
+        "color",
+        "cubecobra",
+        "edhrec",
+        "eur",
+        "name",
+        "power",
+        "rarity",
+        "released",
+        "set",
+        "tix",
+        "toughness",
+        "usd",
+    },
+)
 REALISTIC_ORDERBY_WEIGHTS: dict[str, float] = {
     "edhrec": 40,
     "name": 15,
     "cmc": 10,
-    "usd": 10,
-    "rarity": 8,
-    "power": 6,
-    "toughness": 5,
-    "cubecobra": 6,
+    "usd": 8,
+    "rarity": 7,
+    "power": 5,
+    "toughness": 4,
+    "cubecobra": 5,
+    # The orders added with the Scryfall vocabulary. Weighted low because they are new rather than
+    # because they are known to be rare -- and non-zero because none of them has a precomputed sort
+    # permutation, so they exercise the general sort path the streaming plans skip.
+    "released": 2,
+    "set": 1,
+    "color": 1,
+    "artist": 1,
+    "eur": 0.5,
+    "tix": 0.5,
 }
 # Non-default result parameters skew hard to their defaults but are sampled so the paths that only
 # run off-default stay on the radar.
@@ -250,7 +276,7 @@ VOCAB_PREFIXES: dict[str, str] = {
     "watermark": "watermark",
 }
 # Indexed by the corpus's `card_rarity_int`; mirrors magic.rarity_int_to_text in the schema.
-RARITIES = ("common", "uncommon", "rare", "mythic", "special", "bonus")
+RARITIES = ("common", "uncommon", "rare", "special", "mythic", "bonus")
 # Rarity is ordered, so it gets the comparison forms too — `r>=rare` is a different plan from `r:rare`.
 RARITY_OPS = (":", ">=", "<=")
 # Corpus values carry apostrophes, parentheses and spaces ("O'Connor", "First Strike"), none of

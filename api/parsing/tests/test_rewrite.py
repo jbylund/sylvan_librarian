@@ -155,7 +155,9 @@ LOWERED_EQUIVALENCES = [
     (r"o:/foo\.bar/", 'o:"foo.bar"'),  # escaped punctuation unescapes to its literal
     (r"o:/\{t\}/", 'o:"{t}"'),  # escaped braces
     ("ft:/dragon/", "ft:dragon"),
-    ("a:/guay/", "a:guay"),  # artist field
+    # `a:` is COLLATED for a bare word and literal for a quoted one, exactly as `name:` is -- so the
+    # lowered regex equals the QUOTED spelling, not the bare one.
+    ("a:/guay/", 'a:"guay"'),  # artist field
 ]
 
 

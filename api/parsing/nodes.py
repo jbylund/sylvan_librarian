@@ -85,11 +85,31 @@ class ValueNode(LeafNode):
 
 
 class StringValueNode(ValueNode):
-    """Represents a string value node, such as 'flying' or 'Lightning Bolt'."""
+    """Represents a string value node, such as 'flying' or 'Lightning Bolt'.
 
-    def __init__(self: StringValueNode, value: str) -> None:
+    `literal` records WHETHER THE USER QUOTED IT. It is parser metadata and is deliberately not
+    serialized -- every field but ``name:`` treats a quoted value and a bare word identically, so
+    emitting it everywhere would churn the wire for nothing. ``name:`` is the exception, and it is
+    the reason this flag exists. Measured on api.scryfall.com 2026-08-16::
+
+        name:ft        1,628      name:"ft"        362      name:'ft'        362
+        name:ofthe     1,109      name:"ofthe"       0      name:"of the"  1,109
+        name:eowyn         3      name:"eowyn"       0      name:"eowyn"       3   (accented)
+        name:limdul        8      name:"limdul"      0      name:"lim-dul"     8   (circumflex)
+
+    A BARE word is matched against the name with diacritics folded AND every non-alphanumeric
+    character removed, which is why ``ft`` reaches "Sword **of the** Ages" and ``limdul`` reaches
+    "Lim-Dul's Vault". A QUOTED value is matched literally, case-insensitively and nothing else.
+
+    `literal` is therefore true for a quoted value AND for a plain-literal regex lowered to a
+    substring (``lower_literal_regexes``) -- ``name:/lim-dul/`` answers 0 on Scryfall, exactly as
+    the quoted spelling does.
+    """
+
+    def __init__(self: StringValueNode, value: str, literal: bool = False) -> None:
         """Initialize a StringValueNode with a string value."""
         self.value = value
+        self.literal = literal
 
     def kwargs(self) -> dict:
         """Return this node's kwargs dict for Rust engine JSON serialization."""

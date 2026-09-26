@@ -102,5 +102,7 @@ apply to (1), which is a correctness question regardless of how often the query 
   the `frame_data` hybrid that shipped, and the threshold-conflation fix.
 - [local-engine-layout-postings.md](../local-engine-layout-postings.md) — item 4 of the same audit,
   deprioritized separately.
-- [local-engine-empty-text-narrowing.md](../local-engine-empty-text-narrowing.md) — `is:vanilla` /
+- [local-engine-vanilla-face-narrowing.md](../local-engine-vanilla-face-narrowing.md) — `is:vanilla` /
   `is:permanent` from the other direction: a plane-composable `Or` falling back to the general path.
+  (Renamed from `local-engine-empty-text-narrowing.md` when `is:vanilla` stopped expanding to a text
+  equality — see that doc's opening.)
