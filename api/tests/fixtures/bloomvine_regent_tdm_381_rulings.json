@@ -1,0 +1,83 @@
+{
+ "data": [
+  {
+   "comment": "If Bloomvine Regent enters at the same time as one or more other Dragons you control, its triggered ability will trigger for each of those Dragons, including itself.",
+   "object": "ruling",
+   "oracle_id": "da1e019c-2ffb-412d-90d7-f2e5e5c44c4b",
+   "published_at": "2025-04-04",
+   "source": "wotc"
+  },
+  {
+   "comment": "As a player casts an omen card, the player chooses whether they cast the card normally or as an Omen.",
+   "object": "ruling",
+   "oracle_id": "da1e019c-2ffb-412d-90d7-f2e5e5c44c4b",
+   "published_at": "2025-04-04",
+   "source": "wotc"
+  },
+  {
+   "comment": "An omen card is a creature card in every zone except the stack, as well as while on the stack if not cast as an Omen. Ignore its alternative characteristics in those cases. For example, while it’s in your graveyard, Twinmaw Stormbrood is a white creature card whose mana value is 6. It can’t be the target of the reflexive ability created by Kishla Trawlers’s triggered ability (“…When you do, return target instant or sorcery card from your graveyard to your hand.”).",
+   "object": "ruling",
+   "oracle_id": "da1e019c-2ffb-412d-90d7-f2e5e5c44c4b",
+   "published_at": "2025-04-04",
+   "source": "wotc"
+  },
+  {
+   "comment": "When casting a spell as an Omen, use the alternative characteristics and ignore all of the card’s normal characteristics. The spell’s color, mana cost, mana value, and so on are determined by only those alternative characteristics. If the spell leaves the stack, it immediately resumes using its normal characteristics.",
+   "object": "ruling",
+   "oracle_id": "da1e019c-2ffb-412d-90d7-f2e5e5c44c4b",
+   "published_at": "2025-04-04",
+   "source": "wotc"
+  },
+  {
+   "comment": "If you cast an omen card as an Omen, use only its alternative characteristics to determine whether it’s legal to cast that spell. For example, if you control Thundermane Dragon (“You may cast creature spells with power 4 or greater from the top of your library.”) and Twinmaw Stormbrood is on top of your library, you can cast Twinmaw Stormbrood, but not Charring Bite.",
+   "object": "ruling",
+   "oracle_id": "da1e019c-2ffb-412d-90d7-f2e5e5c44c4b",
+   "published_at": "2025-04-04",
+   "source": "wotc"
+  },
+  {
+   "comment": "If a spell is cast as an Omen, its controller shuffles it into its owner’s library instead of putting it into its owner’s graveyard as it resolves.",
+   "object": "ruling",
+   "oracle_id": "da1e019c-2ffb-412d-90d7-f2e5e5c44c4b",
+   "published_at": "2025-04-04",
+   "source": "wotc"
+  },
+  {
+   "comment": "If an Omen spell has one or more targets and all of those targets are illegal when the spell tries to resolve, it won’t resolve. None of its effects will happen, and it will be put into its owner’s graveyard. It won’t be shuffled into its owner’s library.",
+   "object": "ruling",
+   "oracle_id": "da1e019c-2ffb-412d-90d7-f2e5e5c44c4b",
+   "published_at": "2025-04-04",
+   "source": "wotc"
+  },
+  {
+   "comment": "If an Omen spell is countered or an effect causes it to otherwise leave the stack, it won’t be shuffled into its owner’s library.",
+   "object": "ruling",
+   "oracle_id": "da1e019c-2ffb-412d-90d7-f2e5e5c44c4b",
+   "published_at": "2025-04-04",
+   "source": "wotc"
+  },
+  {
+   "comment": "If an Omen spell is copied, that copy is also an Omen and is shuffled into its owner’s library as it resolves. Its owner still shuffles their library, but the copy ceases to exist as a state-based action.",
+   "object": "ruling",
+   "oracle_id": "da1e019c-2ffb-412d-90d7-f2e5e5c44c4b",
+   "published_at": "2025-04-04",
+   "source": "wotc"
+  },
+  {
+   "comment": "If an effect instructs you to choose a card name, you may choose the alternative Omen name. Consider only the alternative characteristics to determine whether that is an appropriate name to choose.",
+   "object": "ruling",
+   "oracle_id": "da1e019c-2ffb-412d-90d7-f2e5e5c44c4b",
+   "published_at": "2025-04-04",
+   "source": "wotc"
+  },
+  {
+   "comment": "Casting a card as an Omen isn’t casting it for an alternative cost. Effects that allow you to cast a spell for an alternative cost or without paying its mana cost may allow you to apply those to the Omen.",
+   "object": "ruling",
+   "oracle_id": "da1e019c-2ffb-412d-90d7-f2e5e5c44c4b",
+   "published_at": "2025-04-04",
+   "source": "wotc"
+  }
+ ],
+ "has_more": false,
+ "object": "list"
+}

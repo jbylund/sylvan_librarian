@@ -1,0 +1,170 @@
+{
+ "artist": "Antonio José Manzanedo",
+ "artist_ids": [
+  "74986d28-0001-4a78-827c-e490b325d0e3"
+ ],
+ "booster": false,
+ "border_color": "borderless",
+ "card_faces": [
+  {
+   "artist": "Antonio José Manzanedo",
+   "artist_id": "74986d28-0001-4a78-827c-e490b325d0e3",
+   "cmc": 7.0,
+   "colors": [],
+   "illustration_id": "8eb05036-4950-4a47-b2ff-72e8250bd155",
+   "image_uris": {
+    "art": "https://cards.scryfall.io/art/front/5/3/53b11c30-1c4e-4238-9d42-2e1480df60c1.webp?1783907226",
+    "art_crop": "https://cards.scryfall.io/art_crop/front/5/3/53b11c30-1c4e-4238-9d42-2e1480df60c1.jpg?1783907226",
+    "border_crop": "https://cards.scryfall.io/border_crop/front/5/3/53b11c30-1c4e-4238-9d42-2e1480df60c1.jpg?1783907226",
+    "crop": "https://cards.scryfall.io/crop/front/5/3/53b11c30-1c4e-4238-9d42-2e1480df60c1.webp?1783907226",
+    "display": "https://cards.scryfall.io/display/front/5/3/53b11c30-1c4e-4238-9d42-2e1480df60c1.webp?1783907226",
+    "grid": "https://cards.scryfall.io/grid/front/5/3/53b11c30-1c4e-4238-9d42-2e1480df60c1.webp?1783907226",
+    "large": "https://cards.scryfall.io/large/front/5/3/53b11c30-1c4e-4238-9d42-2e1480df60c1.jpg?1783907226",
+    "normal": "https://cards.scryfall.io/normal/front/5/3/53b11c30-1c4e-4238-9d42-2e1480df60c1.jpg?1783907226",
+    "png": "https://cards.scryfall.io/png/front/5/3/53b11c30-1c4e-4238-9d42-2e1480df60c1.png?1783907226",
+    "small": "https://cards.scryfall.io/small/front/5/3/53b11c30-1c4e-4238-9d42-2e1480df60c1.jpg?1783907226",
+    "thumb": "https://cards.scryfall.io/thumb/front/5/3/53b11c30-1c4e-4238-9d42-2e1480df60c1.webp?1783907226"
+   },
+   "layout": "normal",
+   "loyalty": "7",
+   "mana_cost": "{7}",
+   "name": "Ugin, Eye of the Storms",
+   "object": "card_face",
+   "oracle_id": "5c58353a-fd60-4528-bf0d-669626cda0b2",
+   "oracle_text": "When you cast this spell, exile up to one target permanent that's one or more colors.\nWhenever you cast a colorless spell, exile up to one target permanent that's one or more colors.\n+2: You gain 3 life and draw a card.\n0: Add {C}{C}{C}.\n−11: Search your library for any number of colorless nonland cards, exile them, then shuffle. Until end of turn, you may cast those cards without paying their mana costs.",
+   "type_line": "Legendary Planeswalker — Ugin"
+  },
+  {
+   "artist": "Antonio José Manzanedo",
+   "artist_id": "74986d28-0001-4a78-827c-e490b325d0e3",
+   "cmc": 7.0,
+   "colors": [],
+   "illustration_id": "c223daa8-2696-4a3b-b0ce-8293971ade71",
+   "image_uris": {
+    "art": "https://cards.scryfall.io/art/back/5/3/53b11c30-1c4e-4238-9d42-2e1480df60c1.webp?1783907226",
+    "art_crop": "https://cards.scryfall.io/art_crop/back/5/3/53b11c30-1c4e-4238-9d42-2e1480df60c1.jpg?1783907226",
+    "border_crop": "https://cards.scryfall.io/border_crop/back/5/3/53b11c30-1c4e-4238-9d42-2e1480df60c1.jpg?1783907226",
+    "crop": "https://cards.scryfall.io/crop/back/5/3/53b11c30-1c4e-4238-9d42-2e1480df60c1.webp?1783907226",
+    "display": "https://cards.scryfall.io/display/back/5/3/53b11c30-1c4e-4238-9d42-2e1480df60c1.webp?1783907226",
+    "grid": "https://cards.scryfall.io/grid/back/5/3/53b11c30-1c4e-4238-9d42-2e1480df60c1.webp?1783907226",
+    "large": "https://cards.scryfall.io/large/back/5/3/53b11c30-1c4e-4238-9d42-2e1480df60c1.jpg?1783907226",
+    "normal": "https://cards.scryfall.io/normal/back/5/3/53b11c30-1c4e-4238-9d42-2e1480df60c1.jpg?1783907226",
+    "png": "https://cards.scryfall.io/png/back/5/3/53b11c30-1c4e-4238-9d42-2e1480df60c1.png?1783907226",
+    "small": "https://cards.scryfall.io/small/back/5/3/53b11c30-1c4e-4238-9d42-2e1480df60c1.jpg?1783907226",
+    "thumb": "https://cards.scryfall.io/thumb/back/5/3/53b11c30-1c4e-4238-9d42-2e1480df60c1.webp?1783907226"
+   },
+   "layout": "normal",
+   "loyalty": "7",
+   "mana_cost": "{7}",
+   "name": "Ugin, Eye of the Storms",
+   "object": "card_face",
+   "oracle_id": "5c58353a-fd60-4528-bf0d-669626cda0b2",
+   "oracle_text": "When you cast this spell, exile up to one target permanent that's one or more colors.\nWhenever you cast a colorless spell, exile up to one target permanent that's one or more colors.\n+2: You gain 3 life and draw a card.\n0: Add {C}{C}{C}.\n−11: Search your library for any number of colorless nonland cards, exile them, then shuffle. Until end of turn, you may cast those cards without paying their mana costs.",
+   "type_line": "Legendary Planeswalker — Ugin"
+  }
+ ],
+ "cardmarket_id": 817991,
+ "collector_number": "382",
+ "color_identity": [],
+ "digital": false,
+ "edhrec_rank": 1841,
+ "finishes": [
+  "nonfoil",
+  "foil"
+ ],
+ "foil": true,
+ "frame": "2015",
+ "full_art": true,
+ "game_changer": false,
+ "games": [
+  "paper",
+  "mtgo"
+ ],
+ "highres_image": false,
+ "id": "53b11c30-1c4e-4238-9d42-2e1480df60c1",
+ "image_status": "lowres",
+ "image_updated_at": "2026-07-13T01:47:06Z",
+ "keywords": [],
+ "lang": "en",
+ "layout": "reversible_card",
+ "legalities": {
+  "alchemy": "legal",
+  "brawl": "legal",
+  "commander": "legal",
+  "competitivebrawl": "legal",
+  "duel": "legal",
+  "future": "legal",
+  "gladiator": "legal",
+  "historic": "legal",
+  "legacy": "legal",
+  "modern": "legal",
+  "oathbreaker": "legal",
+  "oldschool": "not_legal",
+  "pauper": "not_legal",
+  "paupercommander": "not_legal",
+  "penny": "not_legal",
+  "pioneer": "legal",
+  "predh": "not_legal",
+  "premodern": "not_legal",
+  "standard": "legal",
+  "standardbrawl": "legal",
+  "timeless": "legal",
+  "tlr": "not_legal",
+  "vintage": "legal"
+ },
+ "mtgo_id": 139635,
+ "multiverse_ids": [
+  695177,
+  695178
+ ],
+ "name": "Ugin, Eye of the Storms // Ugin, Eye of the Storms",
+ "nonfoil": true,
+ "object": "card",
+ "oversized": false,
+ "prices": {
+  "eur": "42.91",
+  "eur_foil": "55.88",
+  "tix": "25.04",
+  "usd": "44.75",
+  "usd_etched": null,
+  "usd_foil": "46.62"
+ },
+ "prints_search_uri": "https://api.scryfall.com/cards/search?order=released&q=oracleid%3A5c58353a-fd60-4528-bf0d-669626cda0b2&unique=prints",
+ "produced_mana": [
+  "C"
+ ],
+ "promo": false,
+ "promo_types": [
+  "boosterfun"
+ ],
+ "purchase_uris": {
+  "cardhoarder": "https://www.cardhoarder.com/cards/139635?affiliate_id=scryfall&ref=card-profile&utm_campaign=affiliate&utm_medium=card&utm_source=scryfall",
+  "cardmarket": "https://www.cardmarket.com/en/Magic/Products?idProduct=817991&referrer=scryfall&utm_campaign=card_prices&utm_medium=text&utm_source=scryfall",
+  "tcgplayer": "https://partner.tcgplayer.com/c/4931599/1830156/21018?subId1=api&u=https%3A%2F%2Fwww.tcgplayer.com%2Fproduct%2F624036%3Fpage%3D1"
+ },
+ "rarity": "mythic",
+ "related_uris": {
+  "edhrec": "https://edhrec.com/route/?cc=Ugin%2C+Eye+of+the+Storms+%2F%2F+Ugin%2C+Eye+of+the+Storms",
+  "gatherer": "https://gatherer.wizards.com/Pages/Card/Details.aspx?multiverseid=695177&printed=false",
+  "tcgplayer_infinite_articles": "https://partner.tcgplayer.com/c/4931599/1830156/21018?subId1=api&trafcat=tcgplayer.com%2Fsearch%2Farticles&u=https%3A%2F%2Fwww.tcgplayer.com%2Fsearch%2Farticles%3FproductLineName%3Dmagic%26q%3DUgin%252C%2BEye%2Bof%2Bthe%2BStorms%2B%252F%252F%2BUgin%252C%2BEye%2Bof%2Bthe%2BStorms",
+  "tcgplayer_infinite_decks": "https://partner.tcgplayer.com/c/4931599/1830156/21018?subId1=api&trafcat=tcgplayer.com%2Fsearch%2Fdecks&u=https%3A%2F%2Fwww.tcgplayer.com%2Fsearch%2Fdecks%3FproductLineName%3Dmagic%26q%3DUgin%252C%2BEye%2Bof%2Bthe%2BStorms%2B%252F%252F%2BUgin%252C%2BEye%2Bof%2Bthe%2BStorms"
+ },
+ "released_at": "2025-04-11",
+ "reprint": false,
+ "reserved": false,
+ "rulings_uri": "https://api.scryfall.com/cards/53b11c30-1c4e-4238-9d42-2e1480df60c1/rulings",
+ "scryfall_set_uri": "https://scryfall.com/sets/tdm?utm_source=api",
+ "scryfall_uri": "https://scryfall.com/card/tdm/382/ugin-eye-of-the-storms-ugin-eye-of-the-storms?utm_source=api",
+ "security_stamp": "oval",
+ "set": "tdm",
+ "set_id": "1361ca81-1304-49a8-b2e6-e76a4aa4a8c3",
+ "set_name": "Tarkir: Dragonstorm",
+ "set_search_uri": "https://api.scryfall.com/cards/search?order=set&q=e%3Atdm&unique=prints",
+ "set_type": "expansion",
+ "set_uri": "https://api.scryfall.com/sets/1361ca81-1304-49a8-b2e6-e76a4aa4a8c3",
+ "story_spotlight": false,
+ "tcgplayer_id": 624036,
+ "textless": false,
+ "uri": "https://api.scryfall.com/cards/53b11c30-1c4e-4238-9d42-2e1480df60c1",
+ "variation": false
+}

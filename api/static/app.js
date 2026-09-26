@@ -105,6 +105,7 @@ class CardSearch {
     this.currentRequestUrl = null; // URL of the in-flight request, if any
     this.imageObserver = null;
     this.cardsData = new Map(); // Store card data by ID
+    this.backFaceKeys = new Map(); // "set/collector" -> bool, cached back-face image probes
     this.lastCompletedUrl = null; // URL whose results are currently displayed; null when results are cleared
     this.isAscending = true; // Track order direction
     this.currentCardCount = 0; // Track current number of cards displayed for resize handling
@@ -962,6 +963,9 @@ class CardSearch {
         .join('');
     }
 
+    // Runs against the DOM, so it enhances SSR-rendered and JS-rendered cards alike.
+    this.enhanceDoubleFacedCards();
+
     // Record arrival time; we only push this state when leaving if they stayed > DWELL_MS and it's not already saved (updateURL)
     const url = this.buildCurrentSearchUrl();
     window.history.replaceState({ arrivalTime: Date.now() }, '', url);
@@ -1008,9 +1012,134 @@ class CardSearch {
     this.resultsContainer.style.gridTemplateColumns = `repeat(${actualColumns}, 1fr)`;
   }
 
-  buildImageUrl(card, size) {
-    const face = card.face_idx || 1;
-    return `https://d1hot9ps2xugbc.cloudfront.net/img/${card.set_code}/${card.collector_number}/${face}/${size}.webp`;
+  buildImageUrl(card, size, face) {
+    const resolvedFace = face || card.face_idx || 1;
+    return `https://d1hot9ps2xugbc.cloudfront.net/img/${card.set_code}/${card.collector_number}/${resolvedFace}/${size}.webp`;
+  }
+
+  buildSrcset(card, face) {
+    return ['280', '388', '538', '745'].map(size => `${this.buildImageUrl(card, size, face)} ${size}w`).join(', ');
+  }
+
+  // ── Double-faced cards: flip button (progressive enhancement) ──
+  // The rendered card HTML is shared with the no-JS server renderer (parity fixture), so the
+  // flip button is injected AFTER render rather than templated in. A card gets one when a
+  // face-2 image exists on the CDN — which is exactly the set of cards with a physical back
+  // face (transform/MDFC), since the image sync only uploads face 2 for those. Split and
+  // adventure cards share a "//" name but have no face-2 image, so they correctly get none.
+
+  cardBackFaceKey(card) {
+    return `${card.set_code}/${card.collector_number}`;
+  }
+
+  probeBackFace(card, onExists) {
+    if (!card.name || !card.name.includes(' // ') || !card.set_code || !card.collector_number) {
+      return;
+    }
+    const key = this.cardBackFaceKey(card);
+    if (this.backFaceKeys.has(key)) {
+      if (this.backFaceKeys.get(key)) onExists();
+      return;
+    }
+    const probe = new Image();
+    probe.onload = () => {
+      this.backFaceKeys.set(key, true);
+      onExists();
+    };
+    probe.onerror = () => this.backFaceKeys.set(key, false);
+    probe.src = this.buildImageUrl(card, '280', 2);
+  }
+
+  enhanceDoubleFacedCards() {
+    for (const [cardId, card] of this.cardsData) {
+      this.probeBackFace(card, () => this.attachGridFlipButton(cardId, card));
+    }
+  }
+
+  // The button is positioned as a percentage of the CARD IMAGE, so it needs a
+  // containing block that is exactly the image's box. Neither natural parent is:
+  // a grid tile is the image plus the name/type/text rows, and the modal's image
+  // wrapper is a flex area far wider than the picture inside it — which is how
+  // the button ended up floating in the margin beside a large card.
+  //
+  // The frame cannot be the <a> that already wraps the image: a <button> inside
+  // an <a> is interactive content nested in interactive content, which is invalid
+  // and breaks keyboard traversal. So JS inserts a plain <div> around the link.
+  // Injecting it here rather than in the server markup keeps the no-JS render —
+  // and its parity fixture — untouched, and the frame only ever exists on the
+  // cards that actually get a button.
+  frameFor(container, imageSelector) {
+    const existing = container.querySelector('.card-image-frame');
+    if (existing) return existing;
+    const img = container.querySelector(imageSelector);
+    if (!img) return null;
+    // Frame the link if the image is wrapped in one, so the whole clickable area
+    // stays inside the frame; otherwise frame the bare image.
+    const node = img.closest('a') || img;
+    const frame = document.createElement('div');
+    frame.className = 'card-image-frame';
+    node.parentNode.insertBefore(frame, node);
+    frame.appendChild(node);
+    return frame;
+  }
+
+  createFlipButton(onFlip) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'card-flip-button';
+    button.title = 'Transform';
+    button.setAttribute('aria-label', 'Show other face');
+    button.setAttribute('aria-pressed', 'false');
+    // An SVG, not a text glyph: a glyph's ink box is not its em box, so no amount of
+    // flex centring puts it in the middle of the disc. currentColor means the inverted
+    // back-face state restyles it with no extra rule.
+    button.innerHTML =
+      '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true" focusable="false"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" /></svg>';
+    button.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      onFlip();
+    });
+    return button;
+  }
+
+  attachGridFlipButton(cardId, card) {
+    // cardId is the numeric grid index (displayCards), safe to interpolate directly.
+    const item = this.resultsContainer && this.resultsContainer.querySelector(`.card-item[data-card-id="${cardId}"]`);
+    if (!item || item.querySelector('.card-flip-button')) {
+      return;
+    }
+    const frame = this.frameFor(item, '.card-image');
+    if (!frame) {
+      return;
+    }
+    frame.appendChild(
+      this.createFlipButton(() => this.flipCardImage(item.querySelector('.card-image'), card, frame, '388', true))
+    );
+  }
+
+  flipCardImage(img, card, faceHolder, size, withSrcset) {
+    if (!img) {
+      return;
+    }
+    const nextFace = faceHolder.dataset.shownFace === '2' ? 1 : 2;
+    faceHolder.dataset.shownFace = String(nextFace);
+    // The button inverts while the back is showing: once the art has changed it is
+    // the only thing that still says which face this is. Toggled immediately, not
+    // inside the timeout, so the control answers the click rather than lagging it.
+    const flipButton = faceHolder.querySelector('.card-flip-button');
+    if (flipButton) {
+      flipButton.classList.toggle('showing-back', nextFace === 2);
+      flipButton.setAttribute('aria-pressed', nextFace === 2 ? 'true' : 'false');
+    }
+    img.classList.add('card-image-flipping');
+    setTimeout(() => {
+      img.src = this.buildImageUrl(card, size, nextFace);
+      if (withSrcset) {
+        img.srcset = this.buildSrcset(card, nextFace);
+      }
+      img.classList.remove('card-image-flipping');
+    }, 150);
   }
 
   createCardHTML(card, index, isFirstRow = false) {
@@ -1181,6 +1310,23 @@ class CardSearch {
         })()}
       </div>
     `;
+
+    // Flip button for cards with a physical back face (cached probe from the grid, or fresh)
+    this.probeBackFace(card, () => {
+      const wrapper = modalContent.querySelector('.modal-image-wrapper');
+      if (!wrapper || wrapper.querySelector('.card-flip-button')) {
+        return;
+      }
+      const frame = this.frameFor(wrapper, '.modal-image');
+      if (!frame) {
+        return;
+      }
+      frame.appendChild(
+        this.createFlipButton(() =>
+          this.flipCardImage(wrapper.querySelector('.modal-image'), card, frame, '745', false)
+        )
+      );
+    });
 
     // Show modal
     modalOverlay.style.display = 'flex';
