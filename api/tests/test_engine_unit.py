@@ -36,8 +36,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from api.card_processing import preprocess_card
 from api.parsing import parse_scryfall_query
-from card_engine import QueryEngine, UnknownFieldError
+from card_engine import ENGINE_COLUMNS, QueryEngine, UnknownFieldError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
@@ -945,6 +946,62 @@ class TestCardProperties:
         total, _ = _run(engine, "border:borderless")
         assert total == 10
 
+    def test_is_atypical_and_is_default_partition_the_fixture(self, engine: QueryEngine) -> None:
+        # The fixture rows carry no compat blob, so only what the class reads OUTSIDE it can answer:
+        # the 10 borderless printings and Tarmogoyf's 3 future-frame ones (`card_frame_data`). The
+        # point here is the partition over every printing, not the count.
+        atypical, atypical_cards = _run(engine, "is:atypical", fields=["scryfall_id"])
+        default, default_cards = _run(engine, "is:default", fields=["scryfall_id"])
+        assert atypical == 13
+        assert atypical + default == 90
+        both, _ = _run(engine, "is:atypical is:default")
+        assert both == 0
+        ids = {c["scryfall_id"] for c in atypical_cards} | {c["scryfall_id"] for c in default_cards}
+        assert len(ids) == 90
+
+    def test_is_atypical_reads_the_printing_compat_fields(self, fresh_engine: Callable[[], QueryEngine]) -> None:
+        """`is:atypical` is the class `prefer:atypical` ranks by, read off each printing's own compat fields.
+
+        The fixture has no compat blobs, so this builds five printings of one card with every marker the class
+        reads set on exactly one printing each -- and the two look-alikes that must NOT count: a white border
+        and a bare `promo` flag (an FNM foil is the standard frame).
+        """
+        rows = json.loads(_FIXTURE.read_text())[:5]
+        assert {r["card_name"] for r in rows} == {"Black Lotus"}
+        blobs = [
+            # id 0: plain black border, nonfoil, a rules frame effect -- the default frame.
+            {"finishes": ["nonfoil"], "frame_effects": ["legendary"], "promo_types": []},
+            # id 1: a prerelease date stamp on the standard frame -- a promo TREATMENT, atypical.
+            {"finishes": ["foil"], "frame_effects": [], "promo_types": ["datestamped"]},
+            # id 2: white border and a bare promo flag -- neither counts.
+            {"finishes": ["nonfoil", "foil"], "frame_effects": [], "promo_types": [], "promo": True},
+            # id 3: showcase frame -- atypical.
+            {"finishes": ["nonfoil", "foil"], "frame_effects": ["showcase"], "promo_types": ["boosterfun"]},
+            # id 4: surge foil as the ONLY finish -- atypical; the same word on a nonfoil row would not be.
+            {"finishes": ["foil"], "frame_effects": [], "promo_types": ["surgefoil"]},
+        ]
+        for row, blob in zip(rows, blobs, strict=True):
+            row["card_compat_blob"] = blob
+            row["card_border"] = "black"
+        rows[2]["card_border"] = "white"
+        e = fresh_engine()
+        e.reload(rows)
+        fields = ["scryfall_id"]
+        _, atypical = _run(e, "is:atypical", fields=fields)
+        _, default = _run(e, "is:default", fields=fields)
+        by_id = {rows[i]["scryfall_id"]: i for i in range(5)}
+        assert sorted(by_id[str(c["scryfall_id"])] for c in atypical) == [1, 3, 4]
+        assert sorted(by_id[str(c["scryfall_id"])] for c in default) == [0, 2]
+        # Textless and full art each count alone; a nonfoil finish takes the surge-foil row out.
+        rows[0]["card_compat_blob"]["textless"] = True
+        rows[2]["card_compat_blob"]["full_art"] = True
+        rows[4]["card_compat_blob"]["finishes"] = ["nonfoil", "foil"]
+        e.reload(rows)
+        _, atypical = _run(e, "is:atypical", fields=fields)
+        _, default = _run(e, "is:default", fields=fields)
+        assert sorted(by_id[str(c["scryfall_id"])] for c in atypical) == [0, 1, 2, 3]
+        assert sorted(by_id[str(c["scryfall_id"])] for c in default) == [4]
+
     def test_layout_normal(self, engine: QueryEngine) -> None:
         # All fixture cards are normal layout
         total, _ = _run(engine, "layout:normal")
@@ -1240,6 +1297,209 @@ class TestFieldSelection:
             "set_name",
             "type_line",
         }
+
+    def test_loyalty_is_the_printed_string_from_the_engine(self, engine: QueryEngine) -> None:
+        """`loyalty` comes from planeswalker_loyalty_text, not the u8 the planner filters on.
+
+        The numeric column is an `Option<u8>` -- "always 1-12" -- so it cannot carry "X" (Nissa,
+        Steward of Elements) or "1+*". Before this field existed the key was served by nothing, and
+        every planeswalker's card object came back without it.
+        """
+        _, cards = _run(engine, "t:planeswalker", unique="card", fields=["name", "loyalty"])
+        assert cards, "the fixture corpus has planeswalkers"
+        assert all(c["loyalty"] for c in cards), f"every planeswalker reports a loyalty: {cards}"
+        assert {c["name"]: c["loyalty"] for c in cards} == {
+            "Jace, the Mind Sculptor": "3",
+            "Nicol Bolas, Planeswalker": "5",
+        }
+
+        # A card with no loyalty reports none, rather than a zero the u8 would have implied.
+        _, bolt = _run(engine, 'name="Lightning Bolt"', unique="card", limit=1, fields=["name", "loyalty"])
+        assert bolt[0]["loyalty"] is None
+
+    @pytest.mark.parametrize(
+        "listed",
+        [
+            ["arena", "paper", "mtgo"],  # khm/1 on api.scryfall.com, 2026-10-01
+            ["paper", "arena", "mtgo"],  # one/1
+            ["paper", "mtgo", "arena"],  # mom/1
+            ["mtgo", "paper"],
+            ["paper"],
+            [],
+        ],
+    )
+    def test_games_keep_the_order_scryfall_listed_them_in(self, fresh_engine: Callable[[], QueryEngine], listed: list[str]) -> None:
+        """`games` is an ordered array on Scryfall and the order is not fixed per card.
+
+        The store held it as a bare bitset and emitted paper/mtgo/arena whatever the payload said.
+        `card_compat_blob` is the column that carries it, and ENGINE_COLUMNS already selects it.
+        """
+        assert "card_compat_blob" in ENGINE_COLUMNS
+        card = json.loads(_FIXTURE.read_text())[0] | {"card_compat_blob": {"lang": "en", "games": listed}}
+        e = fresh_engine()
+        e.reload([{column: card.get(column) for column in ENGINE_COLUMNS}])
+        _, cards = _run(e, fields=["games"])
+        assert cards[0]["games"] == listed
+
+    def test_artist_is_the_printed_string_on_a_store_of_any_size(self, fresh_engine: Callable[[], QueryEngine]) -> None:
+        """`artist` is the credit as printed, and asking for it never indexes past a small vocab.
+
+        The emitter resolved the printing's ARTIST-vocab id against the COLLECTION vocab. On a
+        one-card store with no collection words that read index 0 of an empty table and panicked
+        ("index out of bounds: the len is 0 but the index is 0"); on this 90-card fixture it read
+        index 35 of 30; on a full corpus it answered some unrelated collection word. And the artist
+        vocab itself holds only the lowercased search form, so no vocab lookup could have been right.
+        """
+        card = json.loads(_FIXTURE.read_text())[0] | {
+            "card_artist": "Milivoj Ćeran",
+            # No collection words at all: the smallest vocab the cross-read could meet.
+            "card_keywords": {},
+            "card_is_tags": {},
+            "card_frame_data": {},
+            "card_subtypes": [],
+            "card_faces": [{"name": "Front", "artist": "Nils Hamm"}, {"name": "Back"}],
+        }
+        e = fresh_engine()
+        e.reload([{column: card.get(column) for column in ENGINE_COLUMNS}])
+        _, cards = _run(e, fields=["artist", "card_faces"])
+        assert cards[0]["artist"] == "Milivoj Ćeran"
+        assert [face["artist"] for face in cards[0]["card_faces"]] == ["Nils Hamm", None]
+        # Search still narrows through the lowercased vocab.
+        assert _run(e, 'artist:"ćeran"')[0] == 1
+
+        # The shared fixture, where the same read used to run off the end of a 30-word vocab.
+        e.reload(json.loads(_FIXTURE.read_text()))
+        _, lotus = _run(e, 'name="Black Lotus" set:lea', fields=["artist"])
+        assert lotus[0]["artist"] == "Christopher Rush"
+        artistless = fresh_engine()
+        artistless.reload([{column: card.get(column) for column in ENGINE_COLUMNS} | {"card_artist": None, "card_faces": None}])
+        assert _run(artistless, fields=["artist"])[1][0]["artist"] is None
+
+    def test_image_updated_at_is_read_from_scryfalls_iso_string(self, fresh_engine: Callable[[], QueryEngine]) -> None:
+        """`card_compat_blob` keeps Scryfall's string; the loader read it as a number and stored nothing.
+
+        So on the engine lane no card object had `image_updated_at` and every image URL lost its
+        cache-buster. Lightning Bolt msc/806's value, as api.scryfall.com sends it.
+        """
+        card = json.loads(_FIXTURE.read_text())[0] | {"card_compat_blob": {"image_updated_at": "2026-07-13T00:36:48Z"}}
+        e = fresh_engine()
+        e.reload([{column: card.get(column) for column in ENGINE_COLUMNS}])
+        _, cards = _run(e, fields=["image_updated_at"])
+        assert cards[0]["image_updated_at"] == 1783903008
+
+    def test_the_residue_prices_are_read_from_scryfalls_strings(self, fresh_engine: Callable[[], QueryEngine]) -> None:
+        """`card_compat_blob.prices` is Scryfall's object as sent, and Scryfall sends prices as strings.
+
+        The loader read them as numbers, so `usd_foil`, `usd_etched` and `eur_foil` -- the three
+        with no column -- were null on every card object. Vadrok iko/214's values.
+        """
+        prices = {"usd": "0.62", "usd_foil": "0.73", "usd_etched": None, "eur": "0.61", "eur_foil": "0.87", "tix": "0.02"}
+        card = json.loads(_FIXTURE.read_text())[0] | {"card_compat_blob": {"prices": prices}}
+        e = fresh_engine()
+        e.reload([{column: card.get(column) for column in ENGINE_COLUMNS}])
+        _, cards = _run(e, fields=["price_usd_foil", "price_usd_etched", "price_eur_foil"])
+        assert cards[0] == {"price_usd_foil": 0.73, "price_usd_etched": None, "price_eur_foil": 0.87}
+
+    def test_keywords_emit_as_printed_and_search_folded(self, fresh_engine: Callable[[], QueryEngine]) -> None:
+        """`keywords` is Scryfall's list as sent; `keyword:` keeps matching the lowercased set.
+
+        Vadrok iko/214 sends `["Flying", "Mutate", "First strike"]`. The importer lowercases
+        `card_keywords` so search reaches "first strike", and a jsonb object keeps no order, so
+        the card object answered `["first strike", "flying", "mutate"]`. The printed list rides in
+        `card_compat_blob`, which ENGINE_COLUMNS already selects.
+        """
+        printed = ["Flying", "Mutate", "First strike"]
+        base = json.loads(_FIXTURE.read_text())[0]
+        card = base | {
+            "card_keywords": {"first strike": True, "flying": True, "mutate": True},
+            "card_compat_blob": {"keywords": printed},
+        }
+        e = fresh_engine()
+        e.reload([{column: card.get(column) for column in ENGINE_COLUMNS}])
+        _, cards = _run(e, "keyword:flying", fields=["keywords", "card_keywords"])
+        assert cards[0]["keywords"] == printed
+        assert list(cards[0]["card_keywords"]) == ["first strike", "flying", "mutate"], "the search set is untouched"
+        for query in ('keyword:"first strike"', 'keyword:"First Strike"', "keyword:MUTATE"):
+            assert _run(e, query)[0] == 1, query
+        assert _run(e, "keyword:Flyin")[0] == _run(e, "keyword:flyin")[0]
+
+        # A row whose residue carries no list falls back to the search set rather than to nothing.
+        older = fresh_engine()
+        older.reload([{column: (card | {"card_compat_blob": {}}).get(column) for column in ENGINE_COLUMNS}])
+        assert _run(older, fields=["keywords"])[1][0]["keywords"] == ["first strike", "flying", "mutate"]
+
+    def test_a_split_cards_joined_credit_answers_for_either_artist(self, fresh_engine: Callable[[], QueryEngine]) -> None:
+        """Fire // Ice dmr/215, importer to engine: `artist` is the card's joined credit and `artist:` finds both names.
+
+        The merged row used to carry the front face's artist alone, so `artist:vohwinkel` missed the
+        card and its object said "David Martin".
+        """
+        live = json.loads((_FIXTURE.parent / "fire_ice_dmr_215.json").read_text(encoding="utf-8"))
+        e = fresh_engine()
+        e.reload([{column: row.get(column) for column in ENGINE_COLUMNS} for row in preprocess_card(live)])
+        for query in ("artist:vohwinkel", 'artist:"david martin"', 'artist:"Franz Vohwinkel"'):
+            total, cards = _run(e, query, fields=["artist", "card_faces"])
+            assert total == 1, query
+            assert cards[0]["artist"] == "David Martin & Franz Vohwinkel"
+            assert [face["artist"] for face in cards[0]["card_faces"]] == ["David Martin", "Franz Vohwinkel"]
+        assert _run(e, "artist:rush")[0] == 0
+
+    def test_the_remaining_card_object_keys_come_out_of_the_store(self, fresh_engine: Callable[[], QueryEngine]) -> None:
+        """Four things a card object carries that the engine lane dropped or reordered.
+
+        `produced_mana` was stored and never emitted; a card-level `color_indicator` and a meld
+        part's own `card_back_id` were not stored; `promo_types` and `frame_effects` were stored in
+        Scryfall's order and sorted on the way out (Burst Lightning pw26/20, Fable neo/141).
+        """
+        promo = ["playpromo", "wizardsplaynetwork", "standardshowdown", "universesbeyond"]
+        card = json.loads(_FIXTURE.read_text())[0] | {
+            "produced_mana": {"G": True},
+            "card_compat_blob": {
+                "color_indicator": ["G"],
+                "card_back_id": "5353eb15-86a9-42fb-87e6-10d0b2fda365",
+                "promo_types": promo,
+                "frame_effects": ["fandfc", "enchantment"],
+            },
+        }
+        e = fresh_engine()
+        e.reload([{column: card.get(column) for column in ENGINE_COLUMNS}])
+        _, cards = _run(e, fields=["produced_mana", "color_indicator", "card_back_id", "promo_types", "frame_effects"])
+        assert cards[0] == {
+            "produced_mana": ["G"],
+            "color_indicator": ["G"],
+            "card_back_id": "5353eb15-86a9-42fb-87e6-10d0b2fda365",
+            "promo_types": promo,
+            "frame_effects": ["fandfc", "enchantment"],
+        }
+        # Absent stays absent: no indicator, no production, and the shared back is not stored.
+        plain = fresh_engine()
+        plain.reload([{column: (card | {"produced_mana": {}, "card_compat_blob": {}}).get(column) for column in ENGINE_COLUMNS}])
+        _, cards = _run(plain, fields=["produced_mana", "color_indicator", "card_back_id"])
+        assert cards[0] == {"produced_mana": [], "color_indicator": [], "card_back_id": None}
+
+    def test_engine_columns_feed_every_key_the_loader_reads(self, fresh_engine: Callable[[], QueryEngine]) -> None:
+        """A reload from rows projected to exactly ENGINE_COLUMNS still answers `loyalty`.
+
+        The production reload SELECTs ENGINE_COLUMNS and nothing else, so a key card_from_pydict()
+        reads that is missing from the list is silently None on every card -- the archive builds,
+        every query answers, and the field is just absent. The test above cannot see that: it
+        reloads from the raw fixture dicts, which carry every key regardless of the list.
+
+        This one simulates the SQL row shape -- each fixture card cut down to ENGINE_COLUMNS, with
+        None where the fixture has no value, exactly as psycopg returns a row -- and asserts the
+        printed loyalty survives. It failed before planeswalker_loyalty_text joined the list: the
+        column existed, the import filled it, and the SELECT never fetched it.
+        """
+        cards = json.loads(_FIXTURE.read_text())
+        projected = [{col: card.get(col) for col in ENGINE_COLUMNS} for card in cards]
+        e = fresh_engine()
+        e.reload(projected)
+
+        _, walkers = _run(e, "t:planeswalker", unique="card", fields=["name", "loyalty"])
+        assert {c["name"]: c["loyalty"] for c in walkers} == {
+            "Jace, the Mind Sculptor": "3",
+            "Nicol Bolas, Planeswalker": "5",
+        }, "a field the SELECT list does not fetch is silently absent from every card object"
 
     def test_requested_fields_returned_exactly(self, engine: QueryEngine) -> None:
         _, cards = _run(

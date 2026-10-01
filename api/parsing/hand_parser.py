@@ -104,6 +104,20 @@ class Token:
     value: str | int | float
     pos: int
     space_before: bool
+    # A NUMBER's spelling in the query, which `value` does not keep: `0796` lexes as the int 796 and
+    # `1.50` as the float 1.5. Only NUMBER tokens set it; see `text`.
+    raw: str | None = None
+
+    @property
+    def text(self) -> str:
+        """The token read as TEXT: a NUMBER as the query spelled it, anything else as its value.
+
+        A text value is glued back together from the lexer's pieces, and a hyphen splits a UUID into
+        WORD and NUMBER tokens -- `9afd8f12-0796-4500-aaa3-10b4a46ef6ec` lexes WORD MINUS NUMBER MINUS
+        NUMBER MINUS WORD MINUS WORD. Gluing `str(tok.value)` dropped `0796`'s leading zero and searched
+        for `9afd8f12-796-...`, an id that does not exist. Numeric contexts keep reading `value`.
+        """
+        return self.raw if self.raw is not None else str(self.value)
 
 
 _ARITH_OPS: frozenset[TT] = frozenset({TT.PLUS, TT.MINUS, TT.STAR, TT.SLASH})
@@ -304,9 +318,9 @@ def tokenize(src: str) -> list[Token]:  # noqa: C901, PLR0912, PLR0915
                     j += 1
                 tokens.append(Token(TT.WORD, src[pos:j], start, sb))
             elif "." in src[pos:j]:
-                tokens.append(Token(TT.NUMBER, float(src[pos:j]), start, sb))
+                tokens.append(Token(TT.NUMBER, float(src[pos:j]), start, sb, raw=src[pos:j]))
             else:
-                tokens.append(Token(TT.NUMBER, int(src[pos:j]), start, sb))
+                tokens.append(Token(TT.NUMBER, int(src[pos:j]), start, sb, raw=src[pos:j]))
             pos = j
             continue
 
@@ -644,7 +658,7 @@ class Parser:
             and not self.peek(1).space_before
         ):
             self.consume()  # MINUS
-            parts.append(str(self.consume().value))
+            parts.append(self.consume().text)
         return _name_node("-".join(parts))
 
     # ── value parsers ─────────────────────────────────────────────────────────
@@ -679,7 +693,7 @@ class Parser:
             return RegexValueNode(str(tok.value))
         if tok.type in (TT.WORD, TT.NUMBER):
             self.consume()
-            word = str(tok.value)
+            word = tok.text
             # Greedily consume hyphenated continuation (no space on either side)
             while (
                 self.peek().type == TT.MINUS
@@ -688,7 +702,7 @@ class Parser:
                 and not self.peek(1).space_before
             ):
                 self.consume()
-                word += "-" + str(self.consume().value)
+                word += "-" + self.consume().text
             return StringValueNode(word)
         msg = f"Expected value for {attr!r}, got {tok.value!r} at position {tok.pos}"
         raise ParseError(msg)

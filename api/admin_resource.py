@@ -46,6 +46,7 @@ from cachebox import TTLCache
 
 from api.card_processing import preprocess_card
 from api.db.bulk_upsert import bulk_upsert as _bulk_upsert
+from api.rulings_import import import_rulings as _import_rulings
 from api.scryfall_bulk_data_fetcher import BulkDataKey, ScryfallBulkDataFetcher
 from api.settings import settings
 from api.tag_import import import_art_tags as _import_art_tags
@@ -399,6 +400,9 @@ class AdminResource:
             self.backfill_prefer_scores()
             self.backfill_cubecobra_scores()
             _import_oracle_tags(self.app_context.writer_pool, self._bulk_data_fetcher)
+            # Rulings feed only /cards/*/rulings, so nothing above or below depends on them; they
+            # sit here rather than in their own pass so one bulk fetch cycle refreshes everything.
+            self._import_rulings_quietly()
             self.app_context.reload_engine(force=True)
             self._clear_caches()
             self.app_context.last_import_time.value = time.time()
@@ -930,6 +934,27 @@ class AdminResource:
     def import_art_tags(self, **_: object) -> dict[str, Any]:
         """Import art tags from Scryfall bulk data into art_tags, art_tag_relationships, and card_art_tags."""
         return _import_art_tags(self.app_context.writer_pool, self._bulk_data_fetcher)
+
+    @route()
+    def import_rulings(self, **_: object) -> dict[str, Any]:
+        """Import Scryfall rulings bulk data into magic.rulings, backing the /cards/*/rulings routes.
+
+        Returns:
+            The number of rulings loaded.
+        """
+        return {"rulings_loaded": _import_rulings(self.app_context.writer_pool, self._bulk_data_fetcher)}
+
+    def _import_rulings_quietly(self) -> None:
+        """Refresh the rulings during a bulk import, logging rather than failing on error.
+
+        Rulings are the only data in the import sequence nothing else reads: a card search, the
+        prefer scores and the engine reload all work without them. Letting a bad rulings file
+        abort the import would cost the corpus refresh to save a rulings refresh.
+        """
+        try:
+            _import_rulings(self.app_context.writer_pool, self._bulk_data_fetcher)
+        except Exception:
+            logger.exception("Rulings import failed; continuing with the rest of the import")
 
     @route()
     def import_all_is_tags(self, **_: object) -> dict[str, Any]:
