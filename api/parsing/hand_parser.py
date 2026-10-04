@@ -659,17 +659,24 @@ class Parser:
     # ── implicit name (possibly hyphenated) ───────────────────────────────────
 
     def parse_hyphenated_name(self, first: str) -> CardBinaryOperatorNode:
-        """Build an implicit name node, greedily consuming no-space MINUS+WORD/NUMBER continuations."""
-        parts = [first]
-        while (
-            self.peek().type == TT.MINUS
-            and not self.peek().space_before
-            and self.peek(1).type in (TT.WORD, TT.NUMBER)
-            and not self.peek(1).space_before
-        ):
-            self.consume()  # MINUS
-            parts.append(self.consume().text)
-        return _name_node("-".join(parts))
+        """Build an implicit name node, greedily consuming no-space hyphens+WORD/NUMBER continuations.
+
+        A run of hyphens glues what follows it the way a single hyphen does: `some--word` is one name
+        word, as it is in pyparsing_based.py (whose word pattern allows any run of hyphens between two
+        word characters) and on Scryfall, where `fire--ice` answers what `fire-ice` does. The hyphens
+        are kept in the value. A run with no word or number directly behind it is left unconsumed.
+        """
+        word = first
+        while self.peek().type == TT.MINUS and not self.peek().space_before:
+            hyphens = 1
+            while self.peek(hyphens).type == TT.MINUS and not self.peek(hyphens).space_before:
+                hyphens += 1
+            after = self.peek(hyphens)
+            if after.type not in (TT.WORD, TT.NUMBER) or after.space_before:
+                break
+            self.pos += hyphens  # the MINUS run
+            word += "-" * hyphens + self.consume().text
+        return _name_node(word)
 
     # ── value parsers ─────────────────────────────────────────────────────────
 

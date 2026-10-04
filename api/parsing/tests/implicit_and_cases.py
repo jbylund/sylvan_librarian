@@ -176,6 +176,17 @@ TESTCASES = [
     {"query": "power-word-kill", "expected": "power-word-kill", "id": "multi_hyphen_numeric_alias"},
     {"query": "cn-a", "expected": "cn-a", "id": "hyphenated_dual_class_alias"},
     {"query": "usd-a t:creature", "expected": "usd-a AND t:creature", "id": "hyphenated_price_alias_and_attr"},
+    # A run of hyphens glues what follows it the way one hyphen does. pyparsing's word pattern takes
+    # any run of hyphens between two word characters; the hand parser stopped at the second one and
+    # failed the query. api.scryfall.com 2026-10-04: `fire--ice` and `fire---ice` are Fire // Ice,
+    # `power--sink` is Power Sink, `usd--a` is `usd-a`'s 4.
+    {"query": "some--word", "expected": "some--word", "id": "double_hyphen_word"},
+    {"query": "fire--ice", "expected": "fire--ice", "id": "double_hyphen_card_like"},
+    {"query": "fire---ice other", "expected": "fire---ice AND other", "id": "triple_hyphen_and_word"},
+    {"query": "old-growth--troll", "expected": "old-growth--troll", "id": "single_then_double_hyphen"},
+    {"query": "power--sink", "expected": "power--sink", "id": "double_hyphen_numeric_alias"},
+    {"query": "cmc--1", "expected": "cmc--1", "id": "double_hyphen_numeric_alias_number"},
+    {"query": "-fire--ice t:instant", "expected": "-fire--ice AND t:instant", "id": "negated_double_hyphen_and_attr"},
     # Attribute value with hyphen (otag, is, oracle_tags, name)
     {"query": "name:Jace-the-mind", "expected": "name:Jace-the-mind", "id": "attr_value_hyphenated"},
     {"query": "name:test-word", "expected": "name:test-word", "id": "name_hyphenated_value"},
