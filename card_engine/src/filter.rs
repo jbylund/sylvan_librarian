@@ -123,6 +123,12 @@ pub(crate) enum NumField {
     PriceEur,
     PriceTix,
     PreferScore,
+    /// Scryfall's `usdfoil` — the printing's own `prices.usd_foil`, which `CompatFields` already
+    /// holds in integer cents for the card object. A different number from `usd` on the same
+    /// printing: measured on api.scryfall.com 2026-10-04, `usdfoil>=0 e:khm` is 285 of the set's
+    /// 305 cards, `usdfoil>usd e:khm` is 247. Printing-level, NULL when the printing has no foil
+    /// price, and unindexed (verified per candidate, like `edhrec`).
+    PriceUsdFoil,
 }
 
 fn attr_to_num_field(attr: &str) -> Option<NumField> {
@@ -137,6 +143,7 @@ fn attr_to_num_field(attr: &str) -> Option<NumField> {
         "price_usd"            => Some(NumField::PriceUsd),
         "price_eur"            => Some(NumField::PriceEur),
         "price_tix"            => Some(NumField::PriceTix),
+        "price_usd_foil"       => Some(NumField::PriceUsdFoil),
         "prefer_score"         => Some(NumField::PreferScore),
         _ => None,
     }
@@ -179,7 +186,37 @@ fn field_num(card: &AOracleCard, printing: Option<&APrinting>, f: NumField) -> N
         NumField::PriceEur           => printing.map_or(NumVal::PDep, |p| known_cents(p.price_eur.as_ref().map(|v| u32::from(*v)))),
         NumField::PriceTix           => printing.map_or(NumVal::PDep, |p| known_cents(p.price_tix.as_ref().map(|v| u32::from(*v)))),
         NumField::PreferScore        => printing.map_or(NumVal::PDep, |p| known(p.prefer_score.as_ref().map(|v| f32::from(*v)))),
+        NumField::PriceUsdFoil       => printing.map_or(NumVal::PDep, |p| known_cents(p.compat.price_usd_foil.as_ref().map(|v| v.get()))),
     }
+}
+
+/// Which of Scryfall's external integer ids an `ExternalIdMatch` compares, and so which field(s)
+/// of `CompatFields` it reads.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ExternalIdKind {
+    /// `mtgo_id` OR `mtgo_foil_id`.
+    Mtgo,
+    /// `arena_id`.
+    Arena,
+    /// `tcgplayer_id` OR `tcgplayer_etched_id`.
+    Tcgplayer,
+    /// Membership in `multiverse_ids`.
+    Multiverse,
+}
+
+/// The integer a Scryfall id keyword's value names: its leading decimal digits, 0 when it has
+/// none or overflows.
+///
+/// Measured on api.scryfall.com 2026-10-03: `mtgoid:87321`, `mtgoid:"87321"` (the parser hands
+/// the unquoted text), `mtgoid:87321.0` and `mtgoid:87321a` are each the one printing, the same
+/// for `arenaid:75036a`, `tcgplayerid:230675a` and `multiverseid:503605a`; `mtgoid:abc`,
+/// `mtgoid:-1` and `mtgoid:0` match nothing, with no warning. That is a string-to-integer
+/// conversion that stops at the first non-digit. 0 is returned for "no number" because no card
+/// carries id 0 — every stored id is a NonZeroU32 or a member of a list that never holds one.
+/// `leading_external_id` in api/parsing/card_query_nodes.py is the SQL path's copy.
+fn leading_external_id(value: &str) -> u32 {
+    let digits: &str = &value[..value.bytes().take_while(u8::is_ascii_digit).count()];
+    digits.parse().unwrap_or(0)
 }
 
 #[derive(Clone)]
@@ -443,7 +480,7 @@ fn text_search_field_value<'a>(
     match field {
         // Accent-folded (#649): the query word is folded the same way in Python
         // before it reaches TextContains/NameMatch, so this must match.
-        TextSearchField::NameLower       => StrVal::Known(card.card_name_folded.as_str()),
+        TextSearchField::NameLower       => StrVal::Known(crate::folded_name(card, strings)),
         TextSearchField::OracleTextLower => opt_sv(str_at(strings, u32::from(card.oracle_text_lower_id))),
         TextSearchField::FlavorTextLower => printing.map_or(StrVal::PDep, |p| opt_sv(str_at(strings, u32::from(p.flavor_text_lower_id)))),
         // Rewritten to ArtistMatch by bind(); printings carry no artist strings.
@@ -474,7 +511,10 @@ fn text_field_value<'a>(
     field: TextField,
 ) -> StrVal<'a> {
     match field {
-        TextField::NameLower       => StrVal::Known(card.card_name_lower.as_str()),
+        // `lower_name`, not the inline field: the inline is a CUT for the 36 names past its bound,
+        // and the surfaces reading this one -- `name:` as an exact text compare, and `name:/…/` --
+        // must see the whole string or they answer about a prefix no card is called.
+        TextField::NameLower       => StrVal::Known(crate::lower_name(card, strings)),
         TextField::OracleTextLower => opt_sv(str_at(strings, u32::from(card.oracle_text_lower_id))),
         TextField::Layout          => opt_sv(str_at(strings, u32::from(card.card_layout_id))),
         TextField::FlavorTextLower => printing.map_or(StrVal::PDep, |p| opt_sv(str_at(strings, u32::from(p.flavor_text_lower_id)))),
@@ -625,6 +665,76 @@ pub(crate) enum FilterExpr {
         op: CmpOp,
         year: i32,
     },
+
+    /// `mtgoid:` / `arenaid:` / `tcgplayerid:` / `multiverseid:` — the printing(s) carrying one of
+    /// Scryfall's external integer ids, read off the `CompatFields` the card object is already
+    /// emitted from. No archive change and no index: one or two integer compares per printing (a
+    /// short slice walk for `multiverseid:`).
+    ///
+    /// Measured on api.scryfall.com 2026-10-04 (khm/1 Axgard Braggart: arena 75036, mtgo 87321,
+    /// tcgplayer 230675, multiverse 503605; usg/306 Phyrexian Processor: mtgo 12345, foil 12346):
+    ///
+    ///   mtgoid:87321  arenaid:75036  tcgplayerid:230675  multiverseid:503605     1 card each
+    ///   mtgoid:12346                 1 — the FOIL id names the printing too
+    ///
+    /// NEGATION IS SQL'S, AND IT DIFFERS PER KEYWORD because the columns behind them do:
+    ///
+    ///   -arenaid:75036 e:khm          304   one column, set on every khm printing
+    ///   -multiverseid:503605 e:khm    304   an array, never NULL: a plain complement
+    ///   -mtgoid:87321 e:khm           nothing, and so is -mtgoid:99999999 e:khm — an id no card has
+    ///   -mtgoid:12346 e:usg           331 of 335
+    ///   -tcgplayerid:230675 e:khm     nothing
+    ///
+    /// The last three are `NOT (id = x OR foil_id = x)` over a pair of columns where the second
+    /// is usually absent: no Kaldheim printing has an `mtgo_foil_id` or a `tcgplayer_etched_id`,
+    /// so the disjunction is NULL for every printing that does not match and its negation keeps
+    /// none of them; Urza's Saga printings carry both MTGO ids, so there the negation is real.
+    /// `tri()` reproduces exactly that: a match is True, a printing holding EVERY column of the
+    /// keyword and matching none is False, anything else is Null. The SQL path writes the same
+    /// disjunction (`CardBinaryOperatorNode._handle_external_id`), so the two lanes agree.
+    ExternalIdMatch {
+        kind: ExternalIdKind,
+        id: u32,
+    },
+
+    /// `stamp:<name>` — the printing's `security_stamp` equals `value`. The stamp interns into
+    /// `coll_vocab` as `CompatFields.security_stamp_id` and is resolved to an id in `bind()`.
+    /// Unlike the ids above it is TWO-valued, and that is measured: on api.scryfall.com
+    /// (2026-10-04) `stamp:oval e:khm` is 94 cards and `-stamp:oval e:khm` is 216 — the unstamped
+    /// commons and uncommons — where a NULL would have left the negation nearly empty. So a
+    /// printing with NO stamp is a plain False.
+    StampMatch {
+        value: String,
+        /// None: no loaded printing carries the stamp, which matches nothing.
+        vid: Option<u16>,
+    },
+
+    /// `is:atypical` — the printing is an ATYPICAL frame in Scryfall's sense; `is:default` is its
+    /// `Not`. The SAME predicate `prefer:atypical` ranks by (`printing_is_atypical`, lib.rs), over
+    /// the same class ids, so the two spellings can never disagree about which printings are the
+    /// class. Carries its ids UNBOUND from `build` and gets them in `bind()`, exactly as
+    /// `QueryParams::bind_prefer` does for the prefer — under UNBOUND every vocab test is false
+    /// and only full-art / textless / borderless would count, which is why bind is not optional.
+    ///
+    /// Measured against api.scryfall.com 2026-09-03: `is:default` 33,267 and `is:atypical`
+    /// 10,423 over the default corpus, `is:atypical is:default` 0 and `is:default -is:atypical`
+    /// 33,267 — exact complements per printing, which is what makes `default` a `Not` rather
+    /// than a second class table that could drift from this one.
+    ///
+    /// RESIDUAL, MEASURED AND NOT CLOSED. Against a store built the same day: `is:atypical`
+    /// 10,319 here (99.0%), `is:default` 33,284 (100.05%), and the two exact complements here
+    /// too; `is:default e:khm` 323 = 323, `is:atypical e:khm` 91 = 91, `is:default t:goblin`
+    /// 559 = 559, `is:atypical is:borderless` 3,612 against 3,611. The 1% is the CLASS, not the
+    /// plumbing: subtract every marker `PreferClassIds` knows from `is:atypical` and Scryfall
+    /// still answers 3,045 cards where this answers 933, and asking those 3,045 what they carry
+    /// says `is:reprint` 1,818, `is:foil` 1,258, `frame:1997` 549, `-lang:en` 452,
+    /// `-is:nonfoil` 421, `frame:2003` 420, `frame:legendary` 160, `frame:1993` 149 — the shape
+    /// of a rule that is partly RELATIVE to the card's own default printing (an old-frame,
+    /// foreign-only or foil-only row of a card whose default is none of those), which the class
+    /// as fitted on 450 cards for the prefer never had to model: a prefer only ever shows the
+    /// best member of the class, a filter shows every member. Closing it is a study with a
+    /// holdout, the same kind that produced the class, and it moves the prefer too.
+    Atypical(super::PreferClassIds),
 }
 
 /// Verifier per-candidate cost estimates, in hundredths of a nanosecond
@@ -702,6 +812,9 @@ pub(crate) fn verify_cost_tier(f: &FilterExpr) -> u32 {
     match f {
         FilterExpr::TextRegex { regex, .. } => regex_tier(regex.as_str()),
         FilterExpr::TextContains { .. } => TEXT_SCAN_NS100,
+        // Two flag bits, one interned-border read, then a handful of short `Vec<u16>` scans over
+        // the printing's frame effects and promo types — a few lookups, no text.
+        FilterExpr::Atypical(_) => SET_LOOKUP_NS100,
         FilterExpr::Devotion { .. } | FilterExpr::ManaCostCmp { .. } => SET_LOOKUP_NS100,
         FilterExpr::ArtistMatch { .. }
         | FilterExpr::FlavorMatch { .. }
@@ -721,6 +834,10 @@ pub(crate) fn verify_cost_tier(f: &FilterExpr) -> u32 {
         | FilterExpr::ColorCmp { .. }
         | FilterExpr::TypeCmp { .. }
         | FilterExpr::Legality { .. }
+        // A StampMatch is one interned-id equality; an ExternalIdMatch one or two integer
+        // compares (or a walk of the printing's one-or-two multiverse ids).
+        | FilterExpr::StampMatch { .. }
+        | FilterExpr::ExternalIdMatch { .. }
         | FilterExpr::DateCmp { .. }
         | FilterExpr::YearCmp { .. } => MASK_COMPARE_NS100,
     }
@@ -863,6 +980,7 @@ fn leaf_compares_printing_field(f: &FilterExpr) -> bool {
                 | NumField::PriceUsd
                 | NumField::PriceEur
                 | NumField::PriceTix
+                | NumField::PriceUsdFoil
                 | NumField::PreferScore => true,
                 NumField::Cmc | NumField::Power | NumField::Toughness | NumField::Loyalty | NumField::EdhrEc => false,
             },
@@ -872,6 +990,8 @@ fn leaf_compares_printing_field(f: &FilterExpr) -> bool {
     match f {
         FilterExpr::NumericCmp { lhs, rhs, .. } => num_pdep(lhs) || num_pdep(rhs),
         FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. } => true,
+        // A printing's marketplace ids and its security stamp (CompatFields): per-printing facts.
+        FilterExpr::ExternalIdMatch { .. } | FilterExpr::StampMatch { .. } => true,
         FilterExpr::ArtistMatch { .. } | FilterExpr::FlavorMatch { .. } => true,
         // Exhaustive over TextSearchField (no `matches!`), same reason as num_pdep.
         FilterExpr::TextContains { field, .. } => match field {
@@ -893,6 +1013,9 @@ fn leaf_compares_printing_field(f: &FilterExpr) -> bool {
         // Divergent-legality cards defer to the printing, but they are a rare
         // exception (non-tournament reprints); rank by the common card-level case.
         FilterExpr::Legality { .. } => false,
+        // The frame class is read entirely off the PRINTING (its compat flags, border, frame
+        // effects, promo types, finishes) — a card's plain printing and its borderless one differ.
+        FilterExpr::Atypical(_) => true,
         // Composites are composed by the two callers, which differ on `all` vs `any`; reaching here with
         // one is a bug in whichever caller forgot to handle it, not a case to answer silently.
         FilterExpr::And(_) | FilterExpr::Or(_) | FilterExpr::Not(_) => {
@@ -1104,6 +1227,17 @@ impl FilterExpr {
                 let (gids, dense_ids) = flavor_match_sets(flavor, strings, 0, |s| regex_is_match(regex, s));
                 *self = FilterExpr::FlavorMatch { gids, dense_ids };
             }
+            // The security stamp interns into the same vocab (CompatFields.security_stamp_id),
+            // so it resolves exactly as a CollectionCmp value does.
+            FilterExpr::StampMatch { value, vid } => {
+                let i = vocab.partition_point(|entry| entry.as_str() < value.as_str());
+                *vid = u16::try_from(i)
+                    .ok()
+                    .filter(|&id| vocab.get(id as usize).is_some_and(|e| e.as_str() == value.as_str()));
+            }
+            // The class prefer binds the same ids the same way (`QueryParams::bind_prefer`); `vocab`
+            // here IS `coll_vocab`, which is where the frame-effect / promo-type words live.
+            FilterExpr::Atypical(ids) => *ids = super::PreferClassIds::bind(vocab),
             _ => {}
         }
     }
@@ -1207,7 +1341,7 @@ impl FilterExpr {
                 let finder = memmem::Finder::new(word.as_bytes()); // built once, reused across the verify scan
                 let mut ids: Vec<u32> = cand
                     .into_iter()
-                    .filter(|&cid| finder.find(cards[cid as usize].card_name_folded.as_str().as_bytes()).is_some())
+                    .filter(|&cid| finder.find(crate::folded_name(&cards[cid as usize], strings).as_bytes()).is_some())
                     .map(|cid| u32::from(cards[cid as usize].card_name_id))
                     .collect();
                 ids.sort_unstable();
@@ -1459,7 +1593,10 @@ impl FilterExpr {
                 Tri::PrintingDep => Tri::PrintingDep,
             },
 
-            FilterExpr::ExactName(lower) => tri_bool(card.card_name_lower.as_str() == lower.as_str()),
+            // WHOLE name, not the inline: `!"curse of the fire penguin // curse of the fire penguin
+            // creature"` compares against a 63-byte string the inline field cannot hold, so
+            // reading the cut answered `false` for it -- and `true` for the cut spelling.
+            FilterExpr::ExactName(lower) => tri_bool(crate::lower_name(card, strings) == lower.as_str()),
 
             FilterExpr::NumericCmp { lhs, op, rhs } => {
                 numeric_cmp_tri(lhs, *op, rhs, &|f| field_num(card, printing, f))
@@ -1673,6 +1810,52 @@ impl FilterExpr {
                     CmpOp::Le => card_year <= *year,
                 })
             }
+
+            // Two-valued: a printing with no stamp is False, so `-stamp:oval` keeps it — see the
+            // variant's doc for the measurement. `vid` None = no loaded printing carries the stamp.
+            FilterExpr::StampMatch { vid, .. } => {
+                let Some(p) = printing else { return Tri::PrintingDep };
+                tri_bool(vid.is_some_and(|v| u16::from(p.compat.security_stamp_id) == v))
+            }
+
+            // Three-valued over the keyword's column(s) — see the variant's doc. An absent id is
+            // archived as 0 (the NonZero niche), which is also what an unparseable value binds
+            // to, so `id == 0` is refused before any compare.
+            FilterExpr::ExternalIdMatch { kind, id } => {
+                let Some(p) = printing else { return Tri::PrintingDep };
+                let c = &p.compat;
+                let pair = |a: u32, b: u32| -> Tri {
+                    if *id != 0 && (a == *id || b == *id) {
+                        Tri::True
+                    } else if a != 0 && b != 0 {
+                        Tri::False
+                    } else {
+                        Tri::Null
+                    }
+                };
+                match kind {
+                    ExternalIdKind::Mtgo => pair(
+                        c.mtgo_id.as_ref().map_or(0, |v| v.get()),
+                        c.mtgo_foil_id.as_ref().map_or(0, |v| v.get()),
+                    ),
+                    ExternalIdKind::Tcgplayer => pair(
+                        c.tcgplayer_id.as_ref().map_or(0, |v| v.get()),
+                        c.tcgplayer_etched_id.as_ref().map_or(0, |v| v.get()),
+                    ),
+                    ExternalIdKind::Arena => {
+                        let a = c.arena_id.as_ref().map_or(0, |v| v.get());
+                        pair(a, a)
+                    }
+                    ExternalIdKind::Multiverse => tri_bool(*id != 0 && c.multiverse_ids.iter().any(|m| u32::from(*m) == *id)),
+                }
+            }
+
+            // Two-valued per printing: every input is a flag, a vocab-id list or an interned
+            // border, none of which is ever NULL.
+            FilterExpr::Atypical(ids) => {
+                let Some(p) = printing else { return Tri::PrintingDep };
+                tri_bool(super::printing_is_atypical(p, ids, strings))
+            }
         }
     }
 }
@@ -1831,6 +2014,28 @@ fn build_binary(kw: &Value) -> Result<FilterExpr, String> {
         return Ok(FilterExpr::DateCmp { op: cmp_op, value });
     }
 
+    // Scryfall's external-id keywords and `stamp:`. Equality only: on api.scryfall.com every
+    // comparison operator on them matches nothing (`mtgoid>5 e:khm`, `stamp>oval e:khm`), which
+    // the SQL path answers as a constant FALSE, so a comparison is declined to it.
+    if let Some(kind) = match attr {
+        "mtgo_id" => Some(ExternalIdKind::Mtgo),
+        "arena_id" => Some(ExternalIdKind::Arena),
+        "tcgplayer_id" => Some(ExternalIdKind::Tcgplayer),
+        "multiverse_id" => Some(ExternalIdKind::Multiverse),
+        _ => None,
+    } {
+        if !matches!(op, ":" | "=") {
+            return Err(format!("operator {op:?} is not supported on {attr}"));
+        }
+        return Ok(FilterExpr::ExternalIdMatch { kind, id: leading_external_id(rhs_value_str(rhs)) });
+    }
+    if attr == "security_stamp" {
+        if !matches!(op, ":" | "=") {
+            return Err(format!("operator {op:?} is not supported on stamp"));
+        }
+        return Ok(FilterExpr::StampMatch { value: rhs_value_str(rhs).to_lowercase(), vid: None });
+    }
+
     if attr == "mana_cost_jsonb" {
         let mana_str = rhs_value_str(rhs);
         let mut core = 0u64;
@@ -1934,6 +2139,16 @@ fn build_binary(kw: &Value) -> Result<FilterExpr, String> {
             _                  => CollField::FrameData,
         };
         let value  = rhs.as_array().and_then(|a| a.first()).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        // The parser sends these two as ordinary `is:` tags; the engine claims them because the
+        // class lives here (`printing_is_atypical`), not in a stored tag — no row carries an
+        // `atypical` tag, so the collection lookup below answered zero for both.
+        if attr == "card_is_tags" {
+            match value.as_str() {
+                "atypical" => return Ok(FilterExpr::Atypical(super::PreferClassIds::UNBOUND)),
+                "default" => return Ok(FilterExpr::Not(Box::new(FilterExpr::Atypical(super::PreferClassIds::UNBOUND)))),
+                _ => {}
+            }
+        }
         let cmp_op = op_to_collection_cmp(op);
         return Ok(FilterExpr::CollectionCmp { field: coll_field, op: cmp_op, value, value_id: None });
     }

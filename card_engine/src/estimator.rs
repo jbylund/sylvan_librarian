@@ -87,6 +87,7 @@ pub(crate) fn has_printing_varying_leaf(f: &FilterExpr) -> bool {
                     | NumField::PriceUsd
                     | NumField::PriceEur
                     | NumField::PriceTix
+                    | NumField::PriceUsdFoil
                     | NumField::PreferScore
             ),
             NumExpr::Arith(lhs, _, rhs) => num_varying(lhs) || num_varying(rhs),
@@ -95,6 +96,8 @@ pub(crate) fn has_printing_varying_leaf(f: &FilterExpr) -> bool {
     match f {
         FilterExpr::NumericCmp { lhs, rhs, .. } => num_varying(lhs) || num_varying(rhs),
         FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. } => true,
+        // A printing's marketplace ids and its security stamp are per-printing facts.
+        FilterExpr::ExternalIdMatch { .. } | FilterExpr::StampMatch { .. } => true,
         FilterExpr::ArtistMatch { .. } | FilterExpr::FlavorMatch { .. } => true,
         FilterExpr::TextContains { field, .. } => matches!(field, TextSearchField::FlavorTextLower),
         FilterExpr::TextExact { field, .. } | FilterExpr::TextRegex { field, .. } => matches!(
@@ -105,6 +108,9 @@ pub(crate) fn has_printing_varying_leaf(f: &FilterExpr) -> bool {
             matches!(field, CollField::ArtTags | CollField::IsTags | CollField::FrameData)
         }
         FilterExpr::Legality { .. } => true,
+        // ...and so is the frame class (`is:atypical` / `is:default`): flags, border and promo
+        // types are all the printing's.
+        FilterExpr::Atypical(_) => true,
         FilterExpr::And(children) | FilterExpr::Or(children) => children.iter().any(has_printing_varying_leaf),
         FilterExpr::Not(inner) => has_printing_varying_leaf(inner),
         // Exhaustive, not `_ => false`: a new variant must get a considered
@@ -391,7 +397,8 @@ fn estimate_leaf(f: &FilterExpr, indexes: &Archived<CardIndexes>, n_cards: u32, 
                     Some(Some((lo, hi))) => project(range_count(&indexes.collector_number, lo, hi), n_cards, n_printings),
                 },
                 // Unindexed fields (loyalty/edhrec/prefer_score) → sound unknown.
-                NumField::Loyalty | NumField::EdhrEc | NumField::PreferScore => unknown(n),
+                // Unindexed: `usdfoil` reads CompatFields, which has no range index.
+                NumField::Loyalty | NumField::EdhrEc | NumField::PreferScore | NumField::PriceUsdFoil => unknown(n),
             }
         }
 
@@ -481,6 +488,10 @@ fn estimate_leaf(f: &FilterExpr, indexes: &Archived<CardIndexes>, n_cards: u32, 
         FilterExpr::NameMatch { ids } => exact(ids.len() as u32),
         FilterExpr::OracleMatch { gids } => exact(gids.len() as u32),
 
+        // An external id names a printing or two and a stamp a class of them; neither has an
+        // index to count through, so "unknown" is the sound answer.
+        FilterExpr::ExternalIdMatch { .. } | FilterExpr::StampMatch { .. } => unknown(n),
+
         FilterExpr::DateCmp { op, value } => match date_range_bounds(*op, *value) {
             None => unknown(n),
             Some((lo, hi)) => project(range_count(&indexes.released_at, lo, hi), n_cards, n_printings),
@@ -548,6 +559,8 @@ fn estimate_leaf(f: &FilterExpr, indexes: &Archived<CardIndexes>, n_cards: u32, 
         FilterExpr::TextExact { .. }
         | FilterExpr::TextRegex { .. }
         | FilterExpr::TextContains { .. } // flavor/artist contains (bind usually rewrites these)
+        // No index answers the frame class; it is a per-printing field read.
+        | FilterExpr::Atypical(_)
         | FilterExpr::ManaCostCmp { .. } => unknown(n),
 
         // Composites are handled in estimate_rec; reaching here is a bug.

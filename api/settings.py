@@ -26,6 +26,26 @@ def _is_truthy(value: str | None) -> bool:
     return value.lower() in ("true", "1", "yes")
 
 
+def _parse_host_allowlist(raw: str | None) -> frozenset[str]:
+    """Parse a comma-separated proxy-host allowlist into a set of exact match keys.
+
+    Each entry is trimmed and lowercased; blanks are dropped. The result is compared against an
+    incoming header with an exact, whole-string, case-insensitive match -- deliberately NOT a
+    suffix match, which is the classic way an allowlist meant for ``cards.example.com`` also lets
+    ``evil-cards.example.com`` through. Include the port when the proxy sends one (the header value
+    is matched verbatim).
+
+    Args:
+        raw: The raw ``TRUSTED_PROXY_HOSTS`` value, or None when unset.
+
+    Returns:
+        The lowercased host keys, empty when unset or blank.
+    """
+    if not raw:
+        return frozenset()
+    return frozenset(entry.strip().lower() for entry in raw.split(",") if entry.strip())
+
+
 def _non_negative_int(name: str, default: int) -> int:
     """Read a non-negative integer from the environment, falling back to a default.
 
@@ -70,6 +90,15 @@ class Settings:
             DEFAULT_PREFER_SCORE_BACKFILL_TIMEOUT_MS,
         )
         self._admin_password: str = os.environ.get("ADMIN_PASSWORD", "")
+        # Hosts a reverse proxy in front of this service is allowed to name in `X-Proxy-Host` (and,
+        # coupled to it, a scheme in `X-Forwarded-Proto` / `Forwarded`). UNSET IS THE DEFAULT and
+        # means "no rewriting proxy in front": both headers are then ignored and a self-URL is built
+        # from the request's own host and scheme. That is the correct default for a deployment
+        # fronted directly (a real hostname, or workers.dev in the sibling port) rather than by a
+        # proxy that rewrites the origin. Set this only when such a proxy really exists -- see
+        # `_self_base_url` in scryfall_compat/routes.py for why trusting the header unconditionally
+        # is a cache-poisoning vector once `/cards/*` answers are cacheable.
+        self._trusted_proxy_hosts: frozenset[str] = _parse_host_allowlist(os.environ.get("TRUSTED_PROXY_HOSTS"))
 
     @property
     def enable_cache(self) -> bool:
@@ -124,6 +153,30 @@ class Settings:
     def admin_password(self, value: str) -> None:
         """Set the admin password, for tests -- no process re-reads ADMIN_PASSWORD after startup."""
         self._admin_password = value
+
+    @property
+    def trusted_proxy_hosts(self) -> frozenset[str]:
+        """The `X-Proxy-Host` values a reverse proxy in front of this service is allowed to name.
+
+        Read from TRUSTED_PROXY_HOSTS (comma-separated), lowercased for case-insensitive exact
+        matching. Empty means "no proxy in front" -- the safe default -- in which case the proxy
+        headers are ignored entirely. See `_self_base_url` in scryfall_compat/routes.py.
+        """
+        return self._trusted_proxy_hosts
+
+    @trusted_proxy_hosts.setter
+    def trusted_proxy_hosts(self, value: str | frozenset[str] | set[str] | list[str]) -> None:
+        """Set the allowlist, for tests -- no process re-reads TRUSTED_PROXY_HOSTS after startup.
+
+        Accepts either the raw comma-separated string an operator configures or an already-parsed
+        iterable of hosts; both are normalized the same way the environment value is. Accepting the
+        iterable form keeps `monkeypatch.setattr(settings, "trusted_proxy_hosts", ...)` symmetric
+        with the frozenset the getter returns, so its restore does not re-split a set into letters.
+        """
+        if isinstance(value, str):
+            self._trusted_proxy_hosts = _parse_host_allowlist(value)
+        else:
+            self._trusted_proxy_hosts = frozenset(entry.strip().lower() for entry in value if entry.strip())
 
 
 # Global settings instance

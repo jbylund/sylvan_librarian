@@ -171,6 +171,16 @@ DB_COLUMNS = [
         search_aliases=["tix"],
         parser_class=ParserClass.NUMERIC,
     ),
+    # Scryfall's `usdfoil`: the printing's own `prices.usd_foil` (measured on api.scryfall.com
+    # 2026-10-04: `usdfoil>=1 e:khm` 68, `usdfoil>usd e:khm` 247). There is no `price_usd_foil`
+    # column: the SQL path reads it out of `raw_card_blob` (CardAttributeNode.to_sql) and the engine
+    # off the card-object fields it already holds.
+    FieldInfo(
+        db_column_name="price_usd_foil",
+        field_type=FieldType.NUMERIC,
+        search_aliases=["usdfoil"],
+        parser_class=ParserClass.NUMERIC,
+    ),
     FieldInfo(
         db_column_name="produced_mana",
         field_type=FieldType.JSONB_OBJECT,
@@ -181,6 +191,35 @@ DB_COLUMNS = [
         db_column_name="raw_card_blob",
         field_type=FieldType.JSONB_OBJECT,
         search_aliases=[],
+        parser_class=ParserClass.TEXT,
+    ),
+    # Scryfall's four EXTERNAL-id keywords, three spellings each (measured on api.scryfall.com
+    # 2026-10-04: `mtgoid:87321`, `mtgo_id:87321` and `mtgo:87321` are each Axgard Braggart, khm/1).
+    # None is a column of its own: the ids live in `raw_card_blob`, and `mtgo` also names
+    # `mtgo_foil_id` and `tcgplayer` `tcgplayer_etched_id`. Equality only -- see
+    # CardBinaryOperatorNode._handle_external_id.
+    FieldInfo(
+        db_column_name="mtgo_id",
+        field_type=FieldType.TEXT,
+        search_aliases=["mtgoid", "mtgo_id", "mtgo"],
+        parser_class=ParserClass.TEXT,
+    ),
+    FieldInfo(
+        db_column_name="arena_id",
+        field_type=FieldType.TEXT,
+        search_aliases=["arenaid", "arena_id", "arena"],
+        parser_class=ParserClass.TEXT,
+    ),
+    FieldInfo(
+        db_column_name="tcgplayer_id",
+        field_type=FieldType.TEXT,
+        search_aliases=["tcgplayerid", "tcgplayer_id", "tcgplayer"],
+        parser_class=ParserClass.TEXT,
+    ),
+    FieldInfo(
+        db_column_name="multiverse_id",
+        field_type=FieldType.TEXT,
+        search_aliases=["multiverseid", "multiverse_id", "multiverse"],
         parser_class=ParserClass.TEXT,
     ),
     FieldInfo(
@@ -271,6 +310,14 @@ DB_COLUMNS = [
         search_aliases=["watermark", "wm"],
         parser_class=ParserClass.TEXT,
     ),
+    # Scryfall's `stamp:`, the printing's security stamp (`stamp:oval e:khm` 94). Read out of
+    # `raw_card_blob` on the SQL path, like the external ids above.
+    FieldInfo(
+        db_column_name="security_stamp",
+        field_type=FieldType.TEXT,
+        search_aliases=["stamp"],
+        parser_class=ParserClass.TEXT,
+    ),
     FieldInfo(
         db_column_name="released_at",
         field_type=FieldType.DATE,
@@ -320,6 +367,7 @@ CARD_SUPERTYPES = {
 
 CARD_TYPES = {
     "Artifact",
+    "Battle",  # reaches the corpus once faces merge (#400): every battle is a transform front
     "Conspiracy",
     "Creature",
     "Enchantment",

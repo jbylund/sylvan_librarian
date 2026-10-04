@@ -9,6 +9,7 @@ import time
 import uuid
 from typing import TYPE_CHECKING
 
+import orjson
 import pytest
 
 from api.admin_resource import AdminContext
@@ -48,6 +49,54 @@ def api_resource(postgres_container: None) -> Generator[APIResource]:
     yield api
     api.app_context.reader_pool.close()
     api.app_context.writer_pool.close()
+
+
+# (query, the cards among Lightning Bolt / Serra Angel / Black Lotus that BOTH lanes must answer) for
+# test_external_ids_stamp_and_usdfoil_agree_on_both_lanes, which shapes those three cards.
+_BOLT, _ANGEL, _LOTUS = "Lightning Bolt", "Serra Angel", "Black Lotus"
+_EXTERNAL_ID_LANE_CASES: list[tuple[str, set[str]]] = [
+    # One printing per id, by every spelling; the foil and etched ids name it too.
+    ("mtgoid:87321", {_BOLT}),
+    ("mtgo_id=87321", {_BOLT}),
+    ("mtgo:87321", {_BOLT}),
+    ("mtgoid:87321a", {_BOLT}),
+    ('mtgoid:"87321"', {_BOLT}),
+    ("mtgoid:12346", {_ANGEL}),
+    ("arenaid:75036", {_BOLT}),
+    ("arena:75036", {_BOLT}),
+    ("tcgplayerid:230675", {_BOLT}),
+    ("tcgplayer_id:401", {_ANGEL}),
+    ("multiverseid:503605", {_BOLT}),
+    ("multiverse:2", {_ANGEL}),
+    # A value with no leading digits, a zero, an overflow, and an id from another namespace.
+    ("mtgoid:abc", set()),
+    ("mtgoid:0", set()),
+    ("tcgplayerid:99999999999", set()),
+    ("multiverseid:abc", set()),
+    ("mtgoid:75036", set()),
+    # Three-valued: a card missing either MTGO id is NULL under the negation.
+    ("-mtgoid:87321", {_ANGEL, _LOTUS}),
+    ("-mtgoid:12346", {_LOTUS}),
+    ("-mtgoid:99999999", {_ANGEL, _LOTUS}),
+    ("-mtgoid:abc", {_ANGEL, _LOTUS}),
+    ("-tcgplayerid:230675", {_ANGEL}),
+    ("-arenaid:75036", {_LOTUS}),
+    ("-multiverseid:503605", {_ANGEL, _LOTUS}),
+    # Two-valued: no stamp is FALSE, so the negation keeps Black Lotus.
+    ("stamp:oval", {_BOLT}),
+    ("stamp=OVAL", {_BOLT}),
+    ("stamp:triangle", {_ANGEL}),
+    ("-stamp:oval", {_ANGEL, _LOTUS}),
+    ("-stamp:triangle", {_BOLT, _LOTUS}),
+    # The foil price: NULL where there is none, and a different number from usd.
+    ("usdfoil>=1", {_BOLT}),
+    ("usdfoil<1", {_LOTUS}),
+    ("usdfoil=0.25", {_LOTUS}),
+    ("usdfoil>=0", {_BOLT, _LOTUS}),
+    ("-usdfoil>=0", set()),
+    ("usdfoil>usd", {_BOLT}),
+    ("usd>usdfoil", {_LOTUS}),
+]
 
 
 class TestContainerIntegration:
@@ -461,6 +510,110 @@ class TestContainerIntegration:
             names = [card["name"] for card in result["cards"] if card["name"] in scores]
             assert names == ["Serra Angel", "Black Lotus", "Lightning Bolt"]
         finally:
+            api_resource.app_context.engine = saved_engine
+            shm_path.unlink(missing_ok=True)
+            shm_path.with_suffix(".lock").unlink(missing_ok=True)
+
+    @pytest.mark.usefixtures("engine_enabled")
+    def test_external_ids_stamp_and_usdfoil_agree_on_both_lanes(self: TestContainerIntegration, api_resource: APIResource) -> None:
+        """`mtgoid:`, `arenaid:`, `tcgplayerid:`, `multiverseid:`, `stamp:` and `usdfoil` answer alike in SQL and the engine.
+
+        None of them is a column. The SQL path reads each out of `raw_card_blob` -- the casts, the
+        jsonb containment and the COALESCE are what only a real database can check -- and the
+        engine reads the same values off `card_compat_blob`. Three cards are shaped like the
+        printings Scryfall was measured on (2026-10-04): Lightning Bolt like khm/1 (no foil or
+        etched id), Serra Angel like usg/306 (both MTGO ids), Black Lotus with both MTGO ids and
+        an arena id.
+        """
+        blobs = {
+            _BOLT: {
+                "mtgo_id": 87321,
+                "arena_id": 75036,
+                "tcgplayer_id": 230675,
+                "multiverse_ids": [503605],
+                "security_stamp": "oval",
+                "prices": {"usd": "1.00", "usd_foil": "1.25"},
+            },
+            _ANGEL: {
+                "mtgo_id": 12345,
+                "mtgo_foil_id": 12346,
+                "tcgplayer_id": 400,
+                "tcgplayer_etched_id": 401,
+                "multiverse_ids": [1, 2],
+                "security_stamp": "triangle",
+                "prices": {"usd": "1.00", "usd_foil": None},
+            },
+            _LOTUS: {
+                "mtgo_id": 500,
+                "mtgo_foil_id": 501,
+                "arena_id": 600,
+                "multiverse_ids": [],
+                "prices": {"usd": "1.00", "usd_foil": "0.25"},
+            },
+        }
+        known = set(blobs)
+
+        with api_resource.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT card_name, raw_card_blob, card_compat_blob, price_usd FROM magic.cards WHERE card_name = ANY(%s)",
+                (list(known),),
+            )
+            saved_rows = cursor.fetchall()
+            for name, blob in blobs.items():
+                cursor.execute(
+                    "UPDATE magic.cards SET raw_card_blob = raw_card_blob || %s::jsonb,"
+                    " card_compat_blob = card_compat_blob || %s::jsonb, price_usd = 1.0 WHERE card_name = %s",
+                    (orjson.dumps(blob).decode(), orjson.dumps(blob).decode(), name),
+                )
+            conn.commit()
+
+        # Private store for the same reason test_cubecobra_ordering swaps one in.
+        shm_path = pathlib.Path(tempfile.gettempdir()) / f"sylvan_librarian_it_{uuid.uuid4().hex}"
+        saved_engine = api_resource.app_context.engine
+        api_resource.app_context.engine = QueryEngine(shm_path=str(shm_path))
+        try:
+            api_resource.app_context.reload_engine(force=True)
+
+            def sql(query: str) -> set[str]:
+                return {card["name"] for card in api_resource._search_sql(**search_kwargs(query, limit=100))["cards"]}
+
+            def engine(query: str) -> set[str]:
+                return {card["name"] for card in api_resource._search_engine(**search_kwargs(query, limit=100))["cards"]}
+
+            def both(query: str) -> set[str]:
+                """What both lanes answer, restricted to the three cards this test shaped."""
+                answer = sql(query) & known
+                assert engine(query) & known == answer, query
+                return answer
+
+            for query, expected in _EXTERNAL_ID_LANE_CASES:
+                assert both(query) == expected, query
+
+            # Two-valued: the cards with no stamp at all are kept by the negation, in both lanes.
+            unstamped = sql("-stamp:oval")
+            assert unstamped == engine("-stamp:oval")
+            assert len(unstamped - known) > 0
+
+            # A comparison on an id or a stamp: the engine declines it and SQL answers FALSE, in
+            # either polarity, so the public search returns nothing rather than an error.
+            for query in ("mtgoid>5", "arenaid<5", "tcgplayerid>=5", "multiverseid!=5", "stamp>oval"):
+                assert sql(query) == set(), query
+                assert api_resource.search(q=query)["cards"] == [], query
+                assert known <= sql(f"-{query}"), query
+        finally:
+            with api_resource.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+                for row in saved_rows:
+                    cursor.execute(
+                        "UPDATE magic.cards SET raw_card_blob = %s::jsonb, card_compat_blob = %s::jsonb, price_usd = %s"
+                        " WHERE card_name = %s",
+                        (
+                            orjson.dumps(row["raw_card_blob"]).decode(),
+                            orjson.dumps(row["card_compat_blob"]).decode(),
+                            row["price_usd"],
+                            row["card_name"],
+                        ),
+                    )
+                conn.commit()
             api_resource.app_context.engine = saved_engine
             shm_path.unlink(missing_ok=True)
             shm_path.with_suffix(".lock").unlink(missing_ok=True)

@@ -98,6 +98,53 @@ def get_rarity_number(rarity: str) -> int:
     return int_val
 
 
+# The bigint expression(s) behind each external-id keyword. None of these ids is a column: they
+# live in `raw_card_blob`, and each expression is spelled exactly as the partial index over it in
+# api/db/2026-08-09-01-scryfall-cards-api.sql, so the planner can use that index. `mtgoid:` and
+# `tcgplayerid:` each name TWO ids -- on Scryfall `mtgoid:12346`, Phyrexian Processor's
+# `mtgo_foil_id`, finds the printing just as its `mtgo_id` 12345 does.
+EXTERNAL_ID_EXPRESSIONS: dict[str, tuple[str, ...]] = {
+    "mtgo_id": (
+        "((card.raw_card_blob ->> 'mtgo_id')::bigint)",
+        "((card.raw_card_blob ->> 'mtgo_foil_id')::bigint)",
+    ),
+    "arena_id": ("((card.raw_card_blob ->> 'arena_id')::bigint)",),
+    "tcgplayer_id": (
+        "((card.raw_card_blob ->> 'tcgplayer_id')::bigint)",
+        "((card.raw_card_blob ->> 'tcgplayer_etched_id')::bigint)",
+    ),
+}
+# `multiverseid:` is membership in an array, the expression idx_cards_multiverse_ids indexes.
+MULTIVERSE_IDS_EXPRESSION = "(card.raw_card_blob -> 'multiverse_ids')"
+EXTERNAL_ID_ATTRIBUTES = (*EXTERNAL_ID_EXPRESSIONS, "multiverse_id")
+
+# Attributes that are not a column of magic.cards and render as an expression over raw_card_blob.
+# `usdfoil` is cast to `real`, the type of the price columns it is compared against.
+BLOB_ATTRIBUTE_EXPRESSIONS: dict[str, str] = {
+    "price_usd_foil": "((card.raw_card_blob -> 'prices' ->> 'usd_foil')::real)",
+    "security_stamp": "(card.raw_card_blob ->> 'security_stamp')",
+}
+
+# The largest id the engine's u32 holds; a longer run of digits names nothing, there and here.
+_MAX_EXTERNAL_ID = 2**32 - 1
+
+
+def leading_external_id(value: str) -> int:
+    """The integer an external-id keyword's value names: its leading decimal digits, else 0.
+
+    Measured on api.scryfall.com 2026-10-03: `mtgoid:87321`, `mtgoid:"87321"`, `mtgoid:87321.0` and
+    `mtgoid:87321a` are each the one printing, and `mtgoid:abc`, `mtgoid:-1` and `mtgoid:0` match
+    nothing with no warning -- a string-to-integer conversion that stops at the first non-digit.
+    0 stands for "no number" because no card carries id 0. Mirrors `leading_external_id` in
+    card_engine/src/filter.rs.
+    """
+    digits = value[: len(value) - len(value.lstrip("0123456789"))]
+    if not digits.isascii() or not digits:
+        return 0
+    number = int(digits)
+    return number if number <= _MAX_EXTERNAL_ID else 0
+
+
 class CardAttributeNode(AttributeNode):
     """Card-specific attribute node with field mapping."""
 
@@ -136,6 +183,9 @@ class CardAttributeNode(AttributeNode):
             SQL string for the attribute reference.
         """
         del context
+        # usd_foil and the security stamp have no column: they are read out of raw_card_blob.
+        if self.attribute_name in BLOB_ATTRIBUTE_EXPRESSIONS:
+            return BLOB_ATTRIBUTE_EXPRESSIONS[self.attribute_name]
         # attribute_name is already set to the correct db_column_name in __init__
         return f"card.{self.attribute_name}"
 
@@ -169,6 +219,12 @@ class CardAttributeNode(AttributeNode):
             "price_usd": "price (USD)",
             "price_eur": "price (EUR)",
             "price_tix": "price (TIX)",
+            "price_usd_foil": "foil price (USD)",
+            "mtgo_id": "MTGO ID",
+            "arena_id": "Arena ID",
+            "tcgplayer_id": "TCGplayer ID",
+            "multiverse_id": "multiverse ID",
+            "security_stamp": "security stamp",
             "edhrec_rank": "EDHREC rank",
         }
         return name_map.get(self.attribute_name, self.attribute_name.replace("_", " "))
@@ -772,6 +828,12 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         if field_type == FieldType.JSONB_ARRAY:
             return self._handle_jsonb_array(context)
 
+        if attr in EXTERNAL_ID_ATTRIBUTES:
+            return self._handle_external_id(context, attr)
+
+        if attr == "security_stamp":
+            return self._handle_security_stamp(context, lhs_sql)
+
         if self.operator == ":":
             return self._handle_colon_operator(context, field_type, lhs_sql, attr)
 
@@ -791,6 +853,42 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         elif attr in ("set", "card_set_code"):
             self.rhs.value = self.rhs.value.lower()
         return super().to_sql(context)
+
+    def _handle_external_id(self, context: QueryContext, attr: str) -> str:
+        """`mtgoid:` / `arenaid:` / `tcgplayerid:` / `multiverseid:` -- the printing carrying one id.
+
+        Equality only. On api.scryfall.com (2026-10-04) `mtgoid>5 e:khm` matches nothing and
+        `-mtgoid>5 e:khm` is all 305: a comparison is a plain FALSE.
+
+        The equality is deliberately left THREE-valued, because Scryfall's is: `-arenaid:75036 e:khm`
+        is 304, but `-mtgoid:87321 e:khm` matches nothing, and so does `-mtgoid:99999999 e:khm`. No
+        Kaldheim printing has an `mtgo_foil_id`, so `id = x OR foil_id = x` is NULL for every
+        printing that does not match, and its negation keeps none of them; Urza's Saga printings
+        carry both ids and `-mtgoid:12346 e:usg` is 331 of 335. That is exactly what the OR of two
+        nullable comparisons answers in SQL, and what `FilterExpr::ExternalIdMatch` answers in the
+        engine. `multiverse_ids` is an array Scryfall always sends, so its negation is a complement.
+        """
+        if self.operator not in (":", "=") or not isinstance(self.rhs, ValueNode):
+            return "FALSE"
+        external_id = leading_external_id(str(self.rhs.value))
+        if attr == "multiverse_id":
+            placeholder = context.add(str(external_id))
+            return f"({MULTIVERSE_IDS_EXPRESSION} @> {placeholder}::jsonb)"
+        placeholder = context.add(external_id)
+        return "(" + " OR ".join(f"{expression} = {placeholder}" for expression in EXTERNAL_ID_EXPRESSIONS[attr]) + ")"
+
+    def _handle_security_stamp(self, context: QueryContext, lhs_sql: str) -> str:
+        """`stamp:<name>` -- the printing's security stamp, exact and case-insensitive.
+
+        TWO-valued, unlike the ids above, and measured: `stamp:oval e:khm` is 94 cards on Scryfall
+        and `-stamp:oval e:khm` is 216 -- the unstamped commons and uncommons -- so a printing with
+        no stamp is FALSE rather than NULL, hence the COALESCE. A comparison is FALSE
+        (`stamp>oval e:khm` matches nothing, `-stamp>oval e:khm` is all 305).
+        """
+        if self.operator not in (":", "=") or not isinstance(self.rhs, ValueNode):
+            return "FALSE"
+        placeholder = context.add(str(self.rhs.value).lower())
+        return f"(COALESCE({lhs_sql}, '') = {placeholder})"
 
     def _handle_rarity_comparison(self, context: QueryContext) -> str:
         # Special handling for rarity - convert text values to numeric

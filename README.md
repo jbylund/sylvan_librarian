@@ -83,7 +83,7 @@ Sylvan Librarian is an open source implementation of Scryfall, a Magic: The Gath
 | **Mana Production**        | `produces:`                                   | ✔        | ✔           | Search for lands and mana-producing cards                 |
 | **Numeric Attributes**     | `cmc:`, `power:`, `toughness:`, `loyalty:`    | ✔        | ✔           | Complete with all comparison operators                    |
 | **Colors & Identity**      | `color:`, `identity:`, `c:`, `id:`            | ✔        | ✔           | JSONB-based with complex color logic                      |
-| **Pricing Data**           | `usd:`, `eur:`, `tix:`                        | ✔        | ✔           | Complete with all comparison operators                    |
+| **Pricing Data**           | `usd:`, `eur:`, `tix:`, `usdfoil:`            | ✔        | ✔           | Complete with all comparison operators                    |
 | **Advanced Logic**         | `AND`, `OR`, `NOT`, `()`                      | ✔        | ✔           | Full boolean logic support                                |
 | **Keywords**               | `keyword:`                                    | ✔        | ✔           | JSONB object storage                                      |
 | **Mana Costs**             | `mana:`, `m:`                                 | ✔        | ✔           | Both JSONB and text representations                       |
@@ -92,6 +92,8 @@ Sylvan Librarian is an open source implementation of Scryfall, a Magic: The Gath
 | **Devotion Search**        | `devotion:`                                   | ✔        | ✔           | Mana cost devotion calculations with split mana support   |
 | **Format Legality**        | `format:`, `legal:`, `banned:`, `restricted:` | ✔        | ✔           | Competitive play support                                  |
 | **Collector Numbers**      | `number:`, `cn:`                              | ✔        | ✔           | Card collector number search                              |
+| **External IDs**           | `mtgoid:`, `arenaid:`, `tcgplayerid:`         | ✔        | ✔           | One printing by its MTGO, Arena, TCGplayer or multiverse ID |
+| **Security Stamp**         | `stamp:`                                      | ✔        | ✔           | Printing security stamp (oval, triangle, acorn, ...)      |
 | **Card Layout**            | `layout:`                                     | ✔        | ✔           | Card layout types (normal, split, transform, etc.)        |
 | **Card Border**            | `border:`                                     | ✔        | ✔           | Border colors (black, white, borderless, etc.)            |
 | **Special Properties**     | `is:`                                         | ✔        | ✔           | Card classifications (creature, spell, permanent, etc.)   |
@@ -391,6 +393,22 @@ python -m client.query_runner
 - **GET /** - Web interface (serves `index.html`)
 - **GET /search** - Card search with query parameter support
 - **GET /favicon.ico** - Favicon for web interface
+
+### Scryfall-Compatible Endpoints
+
+Every route Scryfall documents under `/cards`, answering with Scryfall's own response objects and
+175-per-page pagination, so a client can be pointed here by swapping its base URL:
+
+- **GET /cards** and **GET /cards/search** - list routes (`format=json|csv`)
+- **GET /cards/named**, **/cards/autocomplete**, **/cards/random** - single-card and catalog lookups
+- **POST /cards/collection** - up to 75 identifiers at once
+- **GET /cards/:id**, **/cards/:code/:number(/:lang)**, and the multiverse / mtgo / arena /
+  tcgplayer / cardmarket id namespaces
+- **GET /cards/:id/rulings** and its four sibling addressings
+
+`format=text` and `format=image` are available on the single-card routes. What is *not* identical —
+chiefly that the corpus is a filtered subset of Scryfall's — is recorded in
+[docs/issues/local-scryfall-cards-api.md](docs/issues/local-scryfall-cards-api.md).
 
 ### Admin Endpoints
 
