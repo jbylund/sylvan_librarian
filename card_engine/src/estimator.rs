@@ -105,6 +105,13 @@ pub(crate) fn has_printing_varying_leaf(f: &FilterExpr) -> bool {
             matches!(field, CollField::ArtTags | CollField::IsTags | CollField::FrameData)
         }
         FilterExpr::Legality { .. } => true,
+        // ...and so is the frame class (`is:atypical` / `is:default`): flags, border and promo
+        // types are all the printing's.
+        FilterExpr::Atypical(_) => true,
+        // ...and the printing half of `lore:`, the flavor text and flavor name. Its card half
+        // (name, rules text, type line) is the card's.
+        FilterExpr::LorePrinting { .. } => true,
+        FilterExpr::LoreCard { .. } => false,
         FilterExpr::And(children) | FilterExpr::Or(children) => children.iter().any(has_printing_varying_leaf),
         FilterExpr::Not(inner) => has_printing_varying_leaf(inner),
         // Exhaustive, not `_ => false`: a new variant must get a considered
@@ -548,6 +555,11 @@ fn estimate_leaf(f: &FilterExpr, indexes: &Archived<CardIndexes>, n_cards: u32, 
         FilterExpr::TextExact { .. }
         | FilterExpr::TextRegex { .. }
         | FilterExpr::TextContains { .. } // flavor/artist contains (bind usually rewrites these)
+        // No index answers the frame class; it is a per-printing field read.
+        | FilterExpr::Atypical(_)
+        // ...nor either half of `lore:`, a substring scan over five fields.
+        | FilterExpr::LoreCard { .. }
+        | FilterExpr::LorePrinting { .. }
         | FilterExpr::ManaCostCmp { .. } => unknown(n),
 
         // Composites are handled in estimate_rec; reaching here is a bug.

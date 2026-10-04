@@ -453,6 +453,48 @@ def calculate_devotion(mana_cost_str: str) -> dict:
     return {color: color_devotion for color, color_devotion in devotion.items() if color_devotion}
 
 
+# The five places `lore:` reads, as SQL over the row. Each is lowercased and matched with LIKE
+# against one pattern (see CardBinaryOperatorNode._handle_lore): the name as printed -- not
+# `card_name_folded`, accents count -- the oracle text WITHOUT its reminder text, the printing's
+# flavor text, the type line as a string, and the flavor name, which a printing carries on the
+# card or on its faces and never both.
+#
+# The reminder text goes with the whitespace before it, every `( ... )` run (an unclosed one to
+# the end of the text): `lore:ft e:khm` is 22 cards on api.scryfall.com (2026-10-04) and would be
+# 41 with the Sagas' "(As this Saga enters and after your draw step, ...)" left in. Mirrors
+# `without_reminder_text` in card_engine/src/filter.rs. `[ \t\n\r\f]` rather than `\s`: the engine
+# walks back over ASCII whitespace only.
+LORE_SQL_TEMPLATE = (
+    "COALESCE("
+    "lower(card.card_name) LIKE {pattern}"
+    r" OR lower(regexp_replace(card.oracle_text, '[ \t\n\r\f]*\([^)]*(\)|$)', '', 'g')) LIKE {pattern}"
+    " OR lower(card.flavor_text) LIKE {pattern}"
+    " OR lower(card.type_line) LIKE {pattern}"
+    " OR lower(card.flavor_name) LIKE {pattern}"
+    " OR EXISTS (SELECT 1 FROM jsonb_array_elements(card.card_faces) AS lore_face"
+    " WHERE lower(lore_face ->> 'flavor_name') LIKE {pattern})"
+    ", FALSE)"
+)
+
+
+def lore_needle(value: str) -> str:
+    """The string `lore:` searches for, from the value as typed.
+
+    Measured on api.scryfall.com 2026-10-04: case is ignored (`lore:JACE` and `lore:jace` are both
+    171); `æ` reads as `ae` (`lore:æther -lore:aether` and its converse both match nothing); a run
+    of spaces is one space and an edge space is kept (`lore:"god  of" e:khm` is 17, the same as
+    `lore:"god of"`, while `lore:" of " e:khm` is 174, `lore:"of "` 176 and `lore:" of"` 175).
+    Mirrors `lore_needle` in card_engine/src/filter.rs.
+
+    Args:
+        value: The value of a `lore:` term.
+
+    Returns:
+        The lowercased needle, compared as a literal substring.
+    """
+    return re.sub(" {2,}", " ", value.lower().replace("æ", "ae"))
+
+
 def _escape_like_pattern(value: str) -> str:
     # Backslash must be escaped first; otherwise the \ added for % and _ would be re-escaped.
     return value.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
@@ -546,7 +588,7 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
 
         return {"lhs": self.lhs.to_json(), "op": self.operator, "rhs": self._rhs_to_json()}
 
-    def _rhs_to_json(self) -> object:  # noqa: PLR0912
+    def _rhs_to_json(self) -> object:  # noqa: PLR0911, PLR0912
         """Compute the JSON-serializable rhs for non-JSONB_ARRAY CardAttributeNode LHS."""
         if not self.lhs.field_infos:
             return _node_to_json(self.rhs)
@@ -576,6 +618,11 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
 
         if field_info.parser_class == ParserClass.RARITY and isinstance(self.rhs, StringValueNode):
             return NumericValueNode(get_rarity_number(self.rhs.value)).to_json()
+
+        # `lore:` reaches the engine as the needle the SQL path searches for, so the two lanes
+        # compare one string. A regex is passed through for the engine to decline.
+        if attr == "lore" and isinstance(self.rhs, StringValueNode):
+            return {"node_type": "StringValueNode", "kwargs": {"value": lore_needle(self.rhs.value)}}
 
         if attr in ("card_name", "card_artist") and isinstance(self.rhs, StringValueNode):
             value = titlecase(self.rhs.value)
@@ -683,6 +730,9 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
             return f"the artist is {rhs_str}" if self.operator == "=" else f"the artist contains {rhs_str}"
         if db_column_name == "card_set_code" and self.operator in (":", "="):
             return f"the set contains {rhs_str}"
+        # `lore=x` is `lore:x`: both are a substring search, so both read "contains".
+        if db_column_name == "lore" and self.operator in (":", "="):
+            return f"the lore contains {rhs_str}"
 
         # Default format using attribute name
         lhs_str = attr_node.to_human_explanation()
@@ -754,6 +804,9 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         if attr in ("mana_cost_text", "mana_cost_jsonb"):
             return self._handle_mana_cost_comparison(context)
 
+        if attr == "lore":
+            return self._handle_lore(context)
+
         # Special handling for date/year searches
         if field_info.parser_class == ParserClass.DATE:
             return self._handle_date_search(context)
@@ -780,6 +833,32 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
 
         msg = f"Unknown field type: {field_type}"
         raise NotImplementedError(msg)
+
+    def _handle_lore(self, context: QueryContext) -> str:
+        """`lore:<text>` -- the value as a literal substring of any of five fields.
+
+        Measured on api.scryfall.com 2026-10-04 by reading which fields of every matched printing
+        hold the needle, and by set difference against the keyword for each field: the name as
+        printed, joined ` // `, accents kept (`lore:"lim-dul"` 0, `lore:"lim-dûl"` 35); the flavor
+        name, the printing's or one face's (`lore:godzilla` 8, `lore:dracula` 9 against the 4 a
+        name search finds); the printing's flavor text; the oracle text; and the type line as a
+        plain substring rather than a type word (`lore:god` has every Demigod).
+
+        One pattern, unlike `oracle:`, whose words may be separated by anything: the value is a
+        phrase. TWO-valued -- `-lore:zzzzqq e:khm` is all 305 -- so the OR is COALESCE'd: a row with
+        no oracle text or no flavor name is a plain FALSE, not NULL. `=` reads as `:`; any other
+        operator matches nothing there (`lore>jace`, `lore!=jace`) and is FALSE here.
+
+        Raises:
+            ValueError: If the value is a regular expression, which `lore:` does not take.
+        """
+        if isinstance(self.rhs, RegexValueNode):
+            msg = "lore: takes text, not a regular expression"
+            raise ValueError(msg)
+        if self.operator not in (":", "=") or not isinstance(self.rhs, ValueNode):
+            return "FALSE"
+        pattern = context.add(f"%{_escape_like_pattern(lore_needle(str(self.rhs.value)))}%")
+        return f"({LORE_SQL_TEMPLATE.format(pattern=pattern)})"
 
     def _handle_text_comparison(self, context: QueryContext, attr: str) -> str:
         """Handle text comparisons."""

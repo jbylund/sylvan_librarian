@@ -1,0 +1,181 @@
+{
+ "artist": "Brooklyn Smith",
+ "artist_ids": [
+  "96edae9b-b40b-47cc-82fd-9e45e43a8bec"
+ ],
+ "booster": false,
+ "border_color": "borderless",
+ "card_faces": [
+  {
+   "artist": "Brooklyn Smith",
+   "artist_id": "96edae9b-b40b-47cc-82fd-9e45e43a8bec",
+   "cmc": 5.0,
+   "colors": [
+    "G"
+   ],
+   "illustration_id": "aa5a72a0-ce4b-4eed-b400-28efabbbbc19",
+   "image_uris": {
+    "art": "https://cards.scryfall.io/art/front/0/8/081f2de5-251a-41c9-a62f-11487f54d355.webp?1783907226",
+    "art_crop": "https://cards.scryfall.io/art_crop/front/0/8/081f2de5-251a-41c9-a62f-11487f54d355.jpg?1783907226",
+    "border_crop": "https://cards.scryfall.io/border_crop/front/0/8/081f2de5-251a-41c9-a62f-11487f54d355.jpg?1783907226",
+    "crop": "https://cards.scryfall.io/crop/front/0/8/081f2de5-251a-41c9-a62f-11487f54d355.webp?1783907226",
+    "display": "https://cards.scryfall.io/display/front/0/8/081f2de5-251a-41c9-a62f-11487f54d355.webp?1783907226",
+    "grid": "https://cards.scryfall.io/grid/front/0/8/081f2de5-251a-41c9-a62f-11487f54d355.webp?1783907226",
+    "large": "https://cards.scryfall.io/large/front/0/8/081f2de5-251a-41c9-a62f-11487f54d355.jpg?1783907226",
+    "normal": "https://cards.scryfall.io/normal/front/0/8/081f2de5-251a-41c9-a62f-11487f54d355.jpg?1783907226",
+    "png": "https://cards.scryfall.io/png/front/0/8/081f2de5-251a-41c9-a62f-11487f54d355.png?1783907226",
+    "small": "https://cards.scryfall.io/small/front/0/8/081f2de5-251a-41c9-a62f-11487f54d355.jpg?1783907226",
+    "thumb": "https://cards.scryfall.io/thumb/front/0/8/081f2de5-251a-41c9-a62f-11487f54d355.webp?1783907226"
+   },
+   "layout": "adventure",
+   "mana_cost": "{3}{G}{G}",
+   "name": "Bloomvine Regent",
+   "object": "card_face",
+   "oracle_id": "da1e019c-2ffb-412d-90d7-f2e5e5c44c4b",
+   "oracle_text": "Flying\nWhenever this creature or another Dragon you control enters, you gain 3 life.",
+   "power": "4",
+   "toughness": "5",
+   "type_line": "Creature — Dragon"
+  },
+  {
+   "artist": "Brooklyn Smith",
+   "artist_id": "96edae9b-b40b-47cc-82fd-9e45e43a8bec",
+   "cmc": 5.0,
+   "colors": [
+    "G"
+   ],
+   "illustration_id": "da9be627-fa9e-4d99-b641-4168c0bc41ca",
+   "image_uris": {
+    "art": "https://cards.scryfall.io/art/back/0/8/081f2de5-251a-41c9-a62f-11487f54d355.webp?1783907226",
+    "art_crop": "https://cards.scryfall.io/art_crop/back/0/8/081f2de5-251a-41c9-a62f-11487f54d355.jpg?1783907226",
+    "border_crop": "https://cards.scryfall.io/border_crop/back/0/8/081f2de5-251a-41c9-a62f-11487f54d355.jpg?1783907226",
+    "crop": "https://cards.scryfall.io/crop/back/0/8/081f2de5-251a-41c9-a62f-11487f54d355.webp?1783907226",
+    "display": "https://cards.scryfall.io/display/back/0/8/081f2de5-251a-41c9-a62f-11487f54d355.webp?1783907226",
+    "grid": "https://cards.scryfall.io/grid/back/0/8/081f2de5-251a-41c9-a62f-11487f54d355.webp?1783907226",
+    "large": "https://cards.scryfall.io/large/back/0/8/081f2de5-251a-41c9-a62f-11487f54d355.jpg?1783907226",
+    "normal": "https://cards.scryfall.io/normal/back/0/8/081f2de5-251a-41c9-a62f-11487f54d355.jpg?1783907226",
+    "png": "https://cards.scryfall.io/png/back/0/8/081f2de5-251a-41c9-a62f-11487f54d355.png?1783907226",
+    "small": "https://cards.scryfall.io/small/back/0/8/081f2de5-251a-41c9-a62f-11487f54d355.jpg?1783907226",
+    "thumb": "https://cards.scryfall.io/thumb/back/0/8/081f2de5-251a-41c9-a62f-11487f54d355.webp?1783907226"
+   },
+   "layout": "adventure",
+   "mana_cost": "{2}{G}",
+   "name": "Claim Territory",
+   "object": "card_face",
+   "oracle_id": "da1e019c-2ffb-412d-90d7-f2e5e5c44c4b",
+   "oracle_text": "Flying\nWhenever this creature or another Dragon you control enters, you gain 3 life.",
+   "power": "4",
+   "toughness": "5",
+   "type_line": "Sorcery — Omen"
+  }
+ ],
+ "cardmarket_id": 819515,
+ "collector_number": "381",
+ "color_identity": [
+  "G"
+ ],
+ "digital": false,
+ "edhrec_rank": 3492,
+ "finishes": [
+  "nonfoil",
+  "foil"
+ ],
+ "foil": true,
+ "frame": "2015",
+ "frame_effects": [
+  "inverted"
+ ],
+ "full_art": false,
+ "game_changer": false,
+ "games": [
+  "paper",
+  "mtgo"
+ ],
+ "highres_image": false,
+ "id": "081f2de5-251a-41c9-a62f-11487f54d355",
+ "image_status": "lowres",
+ "image_updated_at": "2026-07-13T01:47:06Z",
+ "keywords": [
+  "Flying"
+ ],
+ "lang": "en",
+ "layout": "reversible_card",
+ "legalities": {
+  "alchemy": "legal",
+  "brawl": "legal",
+  "commander": "legal",
+  "competitivebrawl": "legal",
+  "duel": "legal",
+  "future": "legal",
+  "gladiator": "legal",
+  "historic": "legal",
+  "legacy": "legal",
+  "modern": "legal",
+  "oathbreaker": "legal",
+  "oldschool": "not_legal",
+  "pauper": "not_legal",
+  "paupercommander": "not_legal",
+  "penny": "legal",
+  "pioneer": "legal",
+  "predh": "not_legal",
+  "premodern": "not_legal",
+  "standard": "legal",
+  "standardbrawl": "legal",
+  "timeless": "legal",
+  "tlr": "not_legal",
+  "vintage": "legal"
+ },
+ "mtgo_id": 139629,
+ "multiverse_ids": [
+  695125,
+  695126
+ ],
+ "name": "Bloomvine Regent // Claim Territory // Bloomvine Regent",
+ "nonfoil": true,
+ "object": "card",
+ "oversized": false,
+ "penny_rank": 4820,
+ "prices": {
+  "eur": "1.20",
+  "eur_foil": "1.79",
+  "tix": "0.12",
+  "usd": "1.66",
+  "usd_etched": null,
+  "usd_foil": "2.47"
+ },
+ "prints_search_uri": "https://api.scryfall.com/cards/search?order=released&q=oracleid%3Ada1e019c-2ffb-412d-90d7-f2e5e5c44c4b&unique=prints",
+ "promo": false,
+ "promo_types": [
+  "boosterfun"
+ ],
+ "purchase_uris": {
+  "cardhoarder": "https://www.cardhoarder.com/cards/139629?affiliate_id=scryfall&ref=card-profile&utm_campaign=affiliate&utm_medium=card&utm_source=scryfall",
+  "cardmarket": "https://www.cardmarket.com/en/Magic/Products?idProduct=819515&referrer=scryfall&utm_campaign=card_prices&utm_medium=text&utm_source=scryfall",
+  "tcgplayer": "https://partner.tcgplayer.com/c/4931599/1830156/21018?subId1=api&u=https%3A%2F%2Fwww.tcgplayer.com%2Fproduct%2F624144%3Fpage%3D1"
+ },
+ "rarity": "rare",
+ "related_uris": {
+  "edhrec": "https://edhrec.com/route/?cc=Bloomvine+Regent",
+  "gatherer": "https://gatherer.wizards.com/Pages/Card/Details.aspx?multiverseid=695125&printed=false",
+  "tcgplayer_infinite_articles": "https://partner.tcgplayer.com/c/4931599/1830156/21018?subId1=api&trafcat=tcgplayer.com%2Fsearch%2Farticles&u=https%3A%2F%2Fwww.tcgplayer.com%2Fsearch%2Farticles%3FproductLineName%3Dmagic%26q%3DBloomvine%2BRegent%2B%252F%252F%2BClaim%2BTerritory%2B%252F%252F%2BBloomvine%2BRegent",
+  "tcgplayer_infinite_decks": "https://partner.tcgplayer.com/c/4931599/1830156/21018?subId1=api&trafcat=tcgplayer.com%2Fsearch%2Fdecks&u=https%3A%2F%2Fwww.tcgplayer.com%2Fsearch%2Fdecks%3FproductLineName%3Dmagic%26q%3DBloomvine%2BRegent%2B%252F%252F%2BClaim%2BTerritory%2B%252F%252F%2BBloomvine%2BRegent"
+ },
+ "released_at": "2025-04-11",
+ "reprint": false,
+ "reserved": false,
+ "rulings_uri": "https://api.scryfall.com/cards/081f2de5-251a-41c9-a62f-11487f54d355/rulings",
+ "scryfall_set_uri": "https://scryfall.com/sets/tdm?utm_source=api",
+ "scryfall_uri": "https://scryfall.com/card/tdm/381/bloomvine-regent-claim-territory-bloomvine-regent?utm_source=api",
+ "security_stamp": "oval",
+ "set": "tdm",
+ "set_id": "1361ca81-1304-49a8-b2e6-e76a4aa4a8c3",
+ "set_name": "Tarkir: Dragonstorm",
+ "set_search_uri": "https://api.scryfall.com/cards/search?order=set&q=e%3Atdm&unique=prints",
+ "set_type": "expansion",
+ "set_uri": "https://api.scryfall.com/sets/1361ca81-1304-49a8-b2e6-e76a4aa4a8c3",
+ "story_spotlight": false,
+ "tcgplayer_id": 624144,
+ "textless": false,
+ "uri": "https://api.scryfall.com/cards/081f2de5-251a-41c9-a62f-11487f54d355",
+ "variation": false
+}

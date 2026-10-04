@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import multiprocessing
 import pathlib
 import tempfile
@@ -421,6 +422,131 @@ class TestContainerIntegration:
                 break
 
         assert brainstorm_in_combined, "Brainstorm should be found by combined search"
+
+    @pytest.mark.usefixtures("engine_enabled")
+    def test_lore_agrees_on_both_lanes(self: TestContainerIntegration, api_resource: APIResource) -> None:
+        """`lore:` answers alike in SQL and the engine: five fields, one literal needle, two values.
+
+        `lore` is not a column. The SQL path is a COALESCE'd OR of LIKEs over five that are -- the
+        `regexp_replace` that drops reminder text, the `jsonb_array_elements` over the faces and
+        the LIKE escaping are what only a real database can check -- and the engine scans the same
+        five. Three cards are given the shapes the keyword was measured on (api.scryfall.com
+        2026-10-04): Lightning Bolt a card-level flavor name with an accent, Serra Angel a flavor
+        name on a FACE and reminder text, Black Lotus a flavor text and a Demigod's type line.
+        """
+        bolt, angel, lotus = "Lightning Bolt", "Serra Angel", "Black Lotus"
+        known = {bolt, angel, lotus}
+        shapes = {
+            bolt: {"flavor_name": "Théoden, Strength Restored"},
+            angel: {
+                "card_faces": json.dumps(
+                    [{"name": "Serra Angel", "flavor_name": "Dracula, Lord of Blood"}, {"name": "Serra Angel"}]
+                ),
+                "oracle_text": "Flying (It soars past the 100% mark.)\nVigilance",
+            },
+            lotus: {"flavor_text": "Jace was here. 100% pure_gold.", "type_line": "Legendary Artifact \u2014 Demigod"},
+        }
+        # (query, the cards among the three that BOTH lanes must answer)
+        cases: list[tuple[str, set[str]]] = [
+            # The name, as printed.
+            ('lore:"lightning bolt"', {bolt}),
+            ("lore=LIGHTNING", {bolt}),
+            # The flavor name: the card's, or one face's. Accents are compared; case is not.
+            ("lore:théoden", {bolt}),
+            ("lore:THÉODEN", {bolt}),
+            ("lore:theoden", set()),
+            ('lore:"strength restored"', {bolt}),
+            ("lore:dracula", {angel}),
+            ('lore:"lord of blood"', {angel}),
+            # The flavor text.
+            ('lore:"was here"', {lotus}),
+            # The type line, as a plain substring.
+            ("lore:demigod", {lotus}),
+            ('lore:"artifact — demigod"', {lotus}),
+            # The oracle text, without its reminder text -- and with what follows the reminder.
+            ("lore:flying", {angel}),
+            ("lore:vigilance", {angel}),
+            ("lore:soars", set()),
+            ('o:"soars"', {angel}),
+            # One phrase: a run of spaces is one space, and nothing may sit between the words.
+            ('lore:"jace   was"', {lotus}),
+            ('lore:"jace here"', set()),
+            # LIKE's metacharacters are literal. Serra Angel's only "100%" is reminder text.
+            ('lore:"100%"', {lotus}),
+            ('lore:"pure_gold"', {lotus}),
+            ('lore:"pure%gold"', set()),
+            ('lore:"p_re"', set()),
+            # Two-valued: the negation is the complement.
+            ("-lore:théoden", {angel, lotus}),
+            ("-lore:dracula", {bolt, lotus}),
+            ('-lore:"was here"', {bolt, angel}),
+            ("-lore:zzzzqq", known),
+            ("lore:zzzzqq", set()),
+            ("lore:dracula or lore:demigod", {angel, lotus}),
+        ]
+        columns = ("flavor_name", "card_faces", "oracle_text", "flavor_text", "type_line")
+
+        with api_resource.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+            cursor.execute(
+                f"SELECT card_name, {', '.join(columns)} FROM magic.cards WHERE card_name = ANY(%s)",
+                (list(known),),
+            )
+            saved_rows = cursor.fetchall()
+            for name, shape in shapes.items():
+                assignments = ", ".join(f"{column} = %s{'::jsonb' if column == 'card_faces' else ''}" for column in shape)
+                cursor.execute(f"UPDATE magic.cards SET {assignments} WHERE card_name = %s", (*shape.values(), name))
+            conn.commit()
+
+        # Private store for the same reason test_cubecobra_ordering swaps one in.
+        shm_path = pathlib.Path(tempfile.gettempdir()) / f"sylvan_librarian_it_{uuid.uuid4().hex}"
+        saved_engine = api_resource.app_context.engine
+        api_resource.app_context.engine = QueryEngine(shm_path=str(shm_path))
+        try:
+            api_resource.app_context.reload_engine(force=True)
+
+            # Every query is scoped to the three cards, so the page holds the whole answer whatever
+            # else the session's other tests have left in the table.
+            scope = '(name:"lightning bolt" or name:"serra angel" or name:"black lotus")'
+
+            def sql(query: str) -> set[str]:
+                result = api_resource._search_sql(**search_kwargs(f"({query}) {scope}", limit=100))
+                return {card["name"] for card in result["cards"]}
+
+            def engine(query: str) -> set[str]:
+                result = api_resource._search_engine(**search_kwargs(f"({query}) {scope}", limit=100))
+                return {card["name"] for card in result["cards"]}
+
+            assert sql("cmc>=0") == engine("cmc>=0") == known
+
+            for query, expected in cases:
+                assert sql(query) == expected, query
+                assert engine(query) == expected, query
+
+            # A comparison: the engine declines it and SQL answers FALSE, in either polarity, so the
+            # public search returns nothing rather than an error.
+            for query in ("lore>jace", "lore!=jace", "lore<=jace"):
+                assert sql(query) == set(), query
+                assert api_resource.search(q=query)["cards"] == [], query
+                assert sql(f"-{query}") == known, query
+        finally:
+            with api_resource.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+                for row in saved_rows:
+                    cursor.execute(
+                        "UPDATE magic.cards SET flavor_name = %s, card_faces = %s::jsonb, oracle_text = %s,"
+                        " flavor_text = %s, type_line = %s WHERE card_name = %s",
+                        (
+                            row["flavor_name"],
+                            None if row["card_faces"] is None else json.dumps(row["card_faces"]),
+                            row["oracle_text"],
+                            row["flavor_text"],
+                            row["type_line"],
+                            row["card_name"],
+                        ),
+                    )
+                conn.commit()
+            api_resource.app_context.engine = saved_engine
+            shm_path.unlink(missing_ok=True)
+            shm_path.with_suffix(".lock").unlink(missing_ok=True)
 
     @pytest.mark.usefixtures("engine_enabled")
     def test_cubecobra_ordering(self: TestContainerIntegration, api_resource: APIResource) -> None:

@@ -82,11 +82,15 @@ pow>tou
 
 Use `o:` or `oracle:` to search rules text. Quote phrases with spaces or punctuation. Use `flavor:` or `ft:` for flavor text.
 
+Use `lore:` to search the name, the flavor name, the flavor text, the rules text (without reminder text) and the type line at once, for an exact phrase.
+
 ```
 o:flying
 o:"draw a card"
 o:"enters the battlefield"
 flavor:brother
+lore:godzilla
+lore:"god of"
 ```
 
 ### Format Legality

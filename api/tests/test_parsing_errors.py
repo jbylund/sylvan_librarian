@@ -48,6 +48,18 @@ class TestParsingErrorHandling:
         assert exc_info.value.title == "Invalid Search Query"
         assert exc_info.value.description == f'Failed to parse query: "{query}"'
 
+    def test_a_regular_expression_on_lore_raises_bad_request(self) -> None:
+        """`lore:` takes text, so a real regular expression is a 400 rather than a silent nothing.
+
+        It parses -- the grammar allows a regex after any keyword -- and is refused where the SQL
+        is generated, which is also where the engine declines it to.
+        """
+        query = "lore:/^jace$/"
+        with pytest.raises(falcon.HTTPBadRequest) as exc_info:
+            self.api_resource._search(query=query)
+        assert exc_info.value.title == "Invalid Search Query"
+        assert exc_info.value.description == f'Failed to parse query: "{query}"'
+
 
 @pytest.mark.usefixtures("engine_enabled")
 class TestSearchRouting:
@@ -369,6 +381,23 @@ class TestResultFieldSelection:
         from api.api_resource import DEFAULT_RESULT_FIELDS  # noqa: PLC0415
 
         assert self.api_resource._resolve_result_fields(None) == list(DEFAULT_RESULT_FIELDS)
+
+    def test_every_price_ordering_is_also_a_readable_field(self) -> None:
+        """An `order=` you can rank by is an `order=` whose number you can read back.
+
+        Asserted over CardOrdering rather than over a literal list, so a currency added to
+        the ordering vocabulary without a matching result field fails here rather than
+        shipping a page nobody can interpret.
+        """
+        from api.api_resource import RESULT_FIELD_COLUMNS  # noqa: PLC0415
+        from api.enums import CardOrdering  # noqa: PLC0415
+
+        for ordering in (CardOrdering.USD, CardOrdering.EUR, CardOrdering.TIX):
+            assert f"price_{ordering}" in RESULT_FIELD_COLUMNS
+
+    def test_price_fields_resolve_in_order(self) -> None:
+        resolved = self.api_resource._resolve_result_fields(["price_usd", "price_eur", "price_tix"])
+        assert resolved == ["price_usd", "price_eur", "price_tix"]
 
 
 @pytest.mark.usefixtures("engine_enabled")

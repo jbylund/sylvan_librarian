@@ -195,6 +195,16 @@ DB_COLUMNS = [
         search_aliases=["flavor", "ft"],
         parser_class=ParserClass.TEXT,
     ),
+    # Scryfall's `lore:` -- the value as a literal substring of the name, the flavor name, the
+    # flavor text, the oracle text or the type line (measured on api.scryfall.com 2026-10-04:
+    # `lore:jace` 171, `lore:godzilla` 8). Not a column of magic.cards: both lanes compose it from
+    # five columns that are -- see CardBinaryOperatorNode._handle_lore and FilterExpr::LoreCard.
+    FieldInfo(
+        db_column_name="lore",
+        field_type=FieldType.TEXT,
+        search_aliases=["lore"],
+        parser_class=ParserClass.TEXT,
+    ),
     FieldInfo(
         db_column_name="card_oracle_tags",
         field_type=FieldType.JSONB_OBJECT,
@@ -320,6 +330,7 @@ CARD_SUPERTYPES = {
 
 CARD_TYPES = {
     "Artifact",
+    "Battle",  # reaches the corpus once faces merge (#400): every battle is a transform front
     "Conspiracy",
     "Creature",
     "Enchantment",

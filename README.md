@@ -75,6 +75,7 @@ Sylvan Librarian is an open source implementation of Scryfall, a Magic: The Gath
 | **Basic Search**           | `name:`, `oracle:`                            | ✔        | ✔           | Full substring search with pattern matching               |
 | **Type Search**            | `type:`, `t:`                                 | ✔        | ✔           | Exact matching with intelligent autocomplete              |
 | **Flavor Text**            | `flavor:`                                     | ✔        | ✔           | Full text search with pattern matching                    |
+| **Lore**                   | `lore:`                                       | ✔        | ✔           | Name, flavor name, flavor text, oracle text or type line  |
 | **Artist Search**          | `artist:`, `a:`                               | ✔        | ✔           | Full text search with trigram indexing                    |
 | **Set Search**             | `set:`, `s:`                                  | ✔        | ✔           | Dedicated indexed column with exact matching              |
 | **Rarity Search**          | `rarity:`, `r:`                               | ✔        | ✔           | Integer-based ordering with all comparison operators      |
@@ -391,6 +392,22 @@ python -m client.query_runner
 - **GET /** - Web interface (serves `index.html`)
 - **GET /search** - Card search with query parameter support
 - **GET /favicon.ico** - Favicon for web interface
+
+### Scryfall-Compatible Endpoints
+
+Every route Scryfall documents under `/cards`, answering with Scryfall's own response objects and
+175-per-page pagination, so a client can be pointed here by swapping its base URL:
+
+- **GET /cards** and **GET /cards/search** - list routes (`format=json|csv`)
+- **GET /cards/named**, **/cards/autocomplete**, **/cards/random** - single-card and catalog lookups
+- **POST /cards/collection** - up to 75 identifiers at once
+- **GET /cards/:id**, **/cards/:code/:number(/:lang)**, and the multiverse / mtgo / arena /
+  tcgplayer / cardmarket id namespaces
+- **GET /cards/:id/rulings** and its four sibling addressings
+
+`format=text` and `format=image` are available on the single-card routes. What is *not* identical —
+chiefly that the corpus is a filtered subset of Scryfall's — is recorded in
+[docs/issues/local-scryfall-cards-api.md](docs/issues/local-scryfall-cards-api.md).
 
 ### Admin Endpoints
 
