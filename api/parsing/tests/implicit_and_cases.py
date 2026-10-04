@@ -168,6 +168,14 @@ TESTCASES = [
     {"query": "old-growth-troll", "expected": "old-growth-troll", "id": "multi_hyphen_word"},
     {"query": "dual-land", "expected": "dual-land", "id": "dual_land_word"},
     {"query": "a-b-c", "expected": "a-b-c", "id": "multi_hyphen_a_b_c"},
+    # A hyphenated word that OPENS with a numeric alias is still one name word: the hyphen has no
+    # numeric term after it, so it is not arithmetic (the hand parser returned the bare attribute
+    # and failed on the dangling `-`). api.scryfall.com 2026-10-04: `power-sink` is Power Sink.
+    {"query": "power-sink", "expected": "power-sink", "id": "hyphenated_numeric_alias"},
+    {"query": "pow-sink other", "expected": "pow-sink AND other", "id": "hyphenated_numeric_alias_and_word"},
+    {"query": "power-word-kill", "expected": "power-word-kill", "id": "multi_hyphen_numeric_alias"},
+    {"query": "cn-a", "expected": "cn-a", "id": "hyphenated_dual_class_alias"},
+    {"query": "usd-a t:creature", "expected": "usd-a AND t:creature", "id": "hyphenated_price_alias_and_attr"},
     # Attribute value with hyphen (otag, is, oracle_tags, name)
     {"query": "name:Jace-the-mind", "expected": "name:Jace-the-mind", "id": "attr_value_hyphenated"},
     {"query": "name:test-word", "expected": "name:test-word", "id": "name_hyphenated_value"},
