@@ -13,6 +13,8 @@ from psycopg.types.json import Jsonb
 from api.scryfall_bulk_data_fetcher import BulkDataKey, ScryfallBulkDataFetcher
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     import psycopg
     import psycopg_pool
 
@@ -141,6 +143,54 @@ def _sync_card_tags(
     return cards_updated, len(to_clear)
 
 
+def _fetch_illustrations_shown(conn: psycopg.Connection) -> list[tuple[str, list[str]]]:
+    """Return (scryfall_id, illustration_ids) for every card that shows any illustration.
+
+    Narrow on purpose: `illustration_ids` is a small maintained column (api/card_processing.py), so
+    this reads no `raw_card_blob` and detoasts nothing. Cards showing no illustration are excluded
+    because they can never carry an art tag, which keeps the result at the size of the tagged
+    corpus rather than the whole table.
+    """
+    with conn.cursor() as cursor:
+        cursor.execute("SELECT scryfall_id, illustration_ids FROM magic.cards WHERE illustration_ids <> '[]'::jsonb")
+        return [(str(row["scryfall_id"]), row["illustration_ids"]) for row in cursor.fetchall()]
+
+
+def _union_art_tags(
+    illustrations_shown: Iterable[tuple[str, list[str]]],
+    illustration_id_to_tags: dict[str, dict[str, bool]],
+) -> dict[str, dict[str, bool]]:
+    """Map each card to the UNION of the art tags of every illustration it shows.
+
+    A printing shows all of its art, so the tags on it are every illustration's, not the front
+    face's alone. Measured against api.scryfall.com on 2026-08-16: `arttag:snow e:khm` is 75 there
+    and was 73 with the front-only reading -- Birgi // Harnfel and Esika // The Prismatic Bridge
+    carry their snow on the BACK face's art -- and `-art:human e:khm t:creature` is 135 there
+    against 136, the surplus being Valki // Tibalt, whose human is Tibalt and whose Tibalt is the
+    back.
+
+    Cards with no tagged illustration are omitted rather than mapped to `{}`: _sync_card_tags reads
+    absence as "clear this row", which is the same outcome and a much smaller payload.
+
+    The overwhelming majority of rows show exactly ONE illustration, and those reference the
+    existing tag dict rather than copying it -- only a genuinely multi-illustration row (9,368 of
+    them on the 2026-08-16 bulk, of which 5,491 gain a tag from a non-front face) allocates.
+    """
+    card_id_to_tags: dict[str, dict[str, bool]] = {}
+    for scryfall_id, illustration_ids in illustrations_shown:
+        tagged = [tags for tags in (illustration_id_to_tags.get(iid) for iid in illustration_ids) if tags]
+        if not tagged:
+            continue
+        if len(tagged) == 1:
+            card_id_to_tags[scryfall_id] = tagged[0]
+            continue
+        union: dict[str, bool] = {}
+        for tags in tagged:
+            union.update(tags)
+        card_id_to_tags[scryfall_id] = union
+    return card_id_to_tags
+
+
 def import_oracle_tags(
     conn_pool: psycopg_pool.ConnectionPool,
     bulk_data_fetcher: ScryfallBulkDataFetcher,
@@ -204,12 +254,19 @@ def import_art_tags(
     logger.info("Syncing %d art tags covering %d illustrations", len(tags), len(illustration_id_to_tags))
     with conn_pool.connection() as conn:
         _sync_hierarchy(conn, "art_tags", "art_tag_relationships", tags, uuid_to_slug)
-        cards_updated, cards_cleared = _sync_card_tags(conn, "illustration_id", "card_art_tags", illustration_id_to_tags)
+        # Keyed on scryfall_id, not illustration_id: a card's tags are the union over the
+        # illustrations it shows (see _union_art_tags), so the row -- not the illustration -- is
+        # the only thing a single incoming record can fully determine. Resolving the union here
+        # rather than in SQL is also what keeps _sync_card_tags batchable: a batch of illustration
+        # ids can split a card's illustrations across two statements, a batch of cards cannot.
+        card_id_to_tags = _union_art_tags(_fetch_illustrations_shown(conn), illustration_id_to_tags)
+        cards_updated, cards_cleared = _sync_card_tags(conn, "scryfall_id", "card_art_tags", card_id_to_tags)
 
     result = {
         "duration_seconds": round(time.monotonic() - start, 2),
         "tags_imported": len(tags),
-        "cards_with_tags": len(illustration_id_to_tags),
+        "illustrations_with_tags": len(illustration_id_to_tags),
+        "cards_with_tags": len(card_id_to_tags),
         "cards_updated": cards_updated,
         "cards_cleared": cards_cleared,
     }

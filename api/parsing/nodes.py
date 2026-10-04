@@ -85,11 +85,40 @@ class ValueNode(LeafNode):
 
 
 class StringValueNode(ValueNode):
-    """Represents a string value node, such as 'flying' or 'Lightning Bolt'."""
+    """Represents a string value node, such as 'flying' or 'Lightning Bolt'.
 
-    def __init__(self: StringValueNode, value: str) -> None:
+    `literal` records WHETHER THE USER QUOTED IT. It is parser metadata and is deliberately not
+    serialized -- every field but ``name:`` treats a quoted value and a bare word identically, so
+    emitting it everywhere would churn the wire for nothing. ``name:`` is the exception, and it is
+    the reason this flag exists. Measured on api.scryfall.com 2026-08-16::
+
+        name:ft        1,628      name:"ft"        362      name:'ft'        362
+        name:ofthe     1,109      name:"ofthe"       0      name:"of the"  1,109
+        name:eowyn         3      name:"eowyn"       0      name:"eowyn"       3   (accented)
+        name:limdul        8      name:"limdul"      0      name:"lim-dul"     8   (circumflex)
+
+    A BARE word is matched against the name with diacritics folded AND every non-alphanumeric
+    character removed, which is why ``ft`` reaches "Sword **of the** Ages" and ``limdul`` reaches
+    "Lim-Dul's Vault". A QUOTED value is matched literally, case-insensitively and nothing else.
+
+    `literal` is therefore true for a quoted value AND for a plain-literal regex lowered to a
+    substring (``lower_literal_regexes``) -- ``name:/lim-dul/`` answers 0 on Scryfall, exactly as
+    the quoted spelling does.
+
+    `regex_derived` is the second, narrower half of the same story, and it is not serialized
+    either. The two spellings match the same rows, so the wire tree is right to forget which one
+    was typed -- but Scryfall's ``include_extras`` auto-enable fires on ``name:/.../`` and NOT on
+    ``name:"..."``, and the lowering erases exactly that difference. Measured on api.scryfall.com
+    2026-08-16: ``name:/bolt/`` answers 175 with ``include_extras=false`` sent explicitly, which is
+    its ``include_extras=true`` count, while ``name:"bolt"`` answers 157 against the same 175. Set
+    by ``lower_literal_regexes``; read by ``_extras_triggers_of_term``.
+    """
+
+    def __init__(self: StringValueNode, value: str, literal: bool = False, regex_derived: bool = False) -> None:
         """Initialize a StringValueNode with a string value."""
         self.value = value
+        self.literal = literal
+        self.regex_derived = regex_derived
 
     def kwargs(self) -> dict:
         """Return this node's kwargs dict for Rust engine JSON serialization."""
@@ -172,7 +201,17 @@ class AttributeNode(LeafNode):
 
 
 class BinaryOperatorNode(QueryNode):
-    """Represents a binary operator node (e.g., '=', '!=', '<', '>', etc.)."""
+    """Represents a binary operator node (e.g., '=', '!=', '<', '>', etc.).
+
+    `derived_from` is the same kind of fact `StringValueNode.regex_derived` is, and it is not
+    serialized either: it names the `is:`/`has:`/`frame:` term whose expansion PUT this leaf here,
+    or None when the caller wrote the leaf themselves. `expand_derived_predicates` replaces
+    `is:split` with `layout:split`, and the two are then the same node -- while Scryfall's
+    `include_extras` auto-enable separates them (`is:split` echoes false and answers 327,
+    `layout:split` echoes true and answers 347). One consumer above the parser has to be able to
+    tell an invented term from a written one; `_expand` sets this, and `_extras_triggers_of_term`
+    is what reads it.
+    """
 
     def __init__(self: BinaryOperatorNode, lhs: QueryNode, operator: str, rhs: QueryNode) -> None:
         """Initialize a BinaryOperatorNode with left/right operands and an operator.
@@ -185,6 +224,7 @@ class BinaryOperatorNode(QueryNode):
         self.lhs = lhs
         self.operator = operator
         self.rhs = rhs
+        self.derived_from: str | None = None
         bin_ops = {
             "-",
             "!=",
@@ -445,12 +485,61 @@ class TrueNode(LeafNode):
         return ""
 
 
+# The directive names both parsers recognize, longest spelling first so an alternation built from
+# this list matches `direction` outright rather than leaning on a lookahead to reject the `dir`
+# prefix. One list rather than one per parser: the two spell the same vocabulary and a name added
+# to only one of them is a parity divergence that the shared cases would not catch, because a
+# query nobody wrote cannot fail.
+#
+# `sort`/`order` and `direction`/`dir` are pairs of spellings for one parameter each; both pairs
+# are accepted by api.scryfall.com inline (measured 2026-08-09).
+DIRECTIVE_NAMES: tuple[str, ...] = ("unique", "sort", "order", "direction", "dir", "prefer")
+
+
+class DirectiveNode(LeafNode):
+    """A result-shape directive written inside the query string (unique:art, sort:usd).
+
+    Carries the directive's name and value so `extract_directives` at the rewrite seam can
+    record them on the Query and strip the node from the filter tree — a directive constrains
+    presentation, not membership, so one never reaches SQL generation or the engine. `to_sql`
+    still renders the always-true condition as a backstop for a tree that skipped the seam.
+    """
+
+    def __init__(self: DirectiveNode, name: str, value: str) -> None:
+        """Initialize a DirectiveNode with the directive's lowercased name and value."""
+        self.name = name
+        self.value = value
+
+    def kwargs(self) -> dict:
+        """Return this node's kwargs dict for Rust engine JSON serialization."""
+        return {}
+
+    def to_sql(self: DirectiveNode, context: QueryContext) -> str:
+        """Serialize this node to the SQL literal TRUE."""
+        del context
+        return "TRUE"
+
+    def to_human_explanation(self: DirectiveNode) -> str:
+        """Return an empty explanation; a directive does not constrain matching."""
+        return ""
+
+    def __repr__(self: DirectiveNode) -> str:
+        """Return a string representation of the DirectiveNode."""
+        return f"DirectiveNode({self.name!r}, {self.value!r})"
+
+
 class Query(QueryNode):
     """Top-level query container node for the AST."""
 
     def __init__(self: Query, root: QueryNode) -> None:
-        """Initialize a Query with the root QueryNode."""
+        """Initialize a Query with the root QueryNode.
+
+        `directives` holds (name, value, nested) triples for the result-shape directives the
+        query carried, in source order — `nested` marks one written inside an Or or a negation.
+        `rewrite_query` populates it after stripping their nodes from the filter tree.
+        """
         self.root = root
+        self.directives: tuple[tuple[str, str, bool], ...] = ()
 
     def to_json(self) -> dict:
         """Delegate to the root node."""

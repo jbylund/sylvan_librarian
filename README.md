@@ -392,6 +392,22 @@ python -m client.query_runner
 - **GET /search** - Card search with query parameter support
 - **GET /favicon.ico** - Favicon for web interface
 
+### Scryfall-Compatible Endpoints
+
+Every route Scryfall documents under `/cards`, answering with Scryfall's own response objects and
+175-per-page pagination, so a client can be pointed here by swapping its base URL:
+
+- **GET /cards** and **GET /cards/search** - list routes (`format=json|csv`)
+- **GET /cards/named**, **/cards/autocomplete**, **/cards/random** - single-card and catalog lookups
+- **POST /cards/collection** - up to 75 identifiers at once
+- **GET /cards/:id**, **/cards/:code/:number(/:lang)**, and the multiverse / mtgo / arena /
+  tcgplayer / cardmarket id namespaces
+- **GET /cards/:id/rulings** and its four sibling addressings
+
+`format=text` and `format=image` are available on the single-card routes. What is *not* identical —
+chiefly that the corpus is a filtered subset of Scryfall's — is recorded in
+[docs/issues/local-scryfall-cards-api.md](docs/issues/local-scryfall-cards-api.md).
+
 ### Admin Endpoints
 
 Data-management routes — importing card data, running score/tag backfills, applying schema
