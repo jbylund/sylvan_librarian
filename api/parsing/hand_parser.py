@@ -28,6 +28,7 @@ from api.parsing.nodes import (
     StringValueNode,
     TrueNode,
     flatten_nested_operations,
+    mark_parenthesised,
 )
 from api.parsing.query_budget import MAX_GROUP_DEPTH, QueryBudgetExceeded
 from api.parsing.spans import QUOTE_CHARS, brace_close_index, find_close_index, unescape
@@ -468,7 +469,7 @@ class Parser:
                 raise ParseError(msg)
             inner = self.parse_expr()
             self.expect(TT.RPAREN)
-            return inner
+            return mark_parenthesised(inner)
         finally:
             self.group_depth -= 1
 

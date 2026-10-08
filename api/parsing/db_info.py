@@ -235,6 +235,16 @@ DB_COLUMNS = [
         search_aliases=["set", "s", "e"],
         parser_class=ParserClass.TEXT,
     ),
+    # `g:` / `group:` name a set's RELEASE GROUP, which is a list of sets and not a column: the
+    # leaf is parsed like `e:` and rewrite.expand_release_groups replaces it with the `e:` leaves
+    # it means before any SQL or engine JSON is built (the `not` FieldInfo above works the same
+    # way). A distinct FieldInfo so the rewrite can tell the two by original_attribute.
+    FieldInfo(
+        db_column_name="card_set_code",
+        field_type=FieldType.TEXT,
+        search_aliases=["group", "g"],
+        parser_class=ParserClass.TEXT,
+    ),
     FieldInfo(
         db_column_name="collector_number",
         field_type=FieldType.TEXT,
@@ -320,6 +330,7 @@ CARD_SUPERTYPES = {
 
 CARD_TYPES = {
     "Artifact",
+    "Battle",  # reaches the corpus once faces merge (#400): every battle is a transform front
     "Conspiracy",
     "Creature",
     "Enchantment",

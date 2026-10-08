@@ -1134,11 +1134,13 @@ def to_card_query_ast(node: QueryNode) -> QueryNode:
         return node
 
     if isinstance(node, BinaryOperatorNode):
-        return CardBinaryOperatorNode(
+        converted = CardBinaryOperatorNode(
             to_card_query_ast(node.lhs),
             node.operator,
             to_card_query_ast(node.rhs),
         )
+        converted.parenthesised = node.parenthesised
+        return converted
     if isinstance(node, AttributeNode):
         return CardAttributeNode(
             attribute_name=node.attribute_name,

@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 
 import psycopg_pool
 
+from api.parsing.set_groups import SET_GROUPS_SQL, replace_set_groups
 from api.settings import settings
 from api.utils import db_utils
 from card_engine import ENGINE_COLUMNS as _ENGINE_COLUMNS
@@ -101,6 +102,11 @@ class AppContext:
         # Per-process only -- a local TTL cache keyed off the shared last_import_time, not itself a
         # cross-worker signal (a fresh worker starts with no cached opinion and checks for real).
         self._setup_complete_cache: tuple[bool, float, float] | None = None
+        # Same shape and same reasoning for the release-group registry the parser reads (`g:fin`):
+        # (expires_at, last_import_time it was loaded under). A fresh worker starts empty and loads
+        # on its first query; an import bumps last_import_time and the next query reloads, so a set
+        # mirrored since joins its group without a restart.
+        self._set_groups_cache: tuple[float, float] | None = None
 
     def setup_complete(self) -> bool:
         """Return True if the setup is complete."""
@@ -149,6 +155,51 @@ class AppContext:
         waiting for the TTL to expire.
         """
         self._setup_complete_cache = None
+
+    def refresh_set_groups(self) -> None:
+        """Load the mirrored set list's release groups into the parser's registry (`api.parsing.set_groups`).
+
+        One read of magic.sets (about a thousand rows of three short columns) on `reader_pool`.
+        Raises on a database error -- callers that must not fail on one (a search) go through
+        `ensure_set_groups`, which is every caller today.
+        """
+        now = time.monotonic()
+        current_import_time = self.last_import_time.get_obj().value
+        with self.reader_pool.connection() as conn, conn.cursor() as cursor:
+            cursor.execute(SET_GROUPS_SQL)
+            rows = cursor.fetchall()
+        replace_set_groups(rows)
+        self._set_groups_cache = (now + _SETUP_COMPLETE_TTL, current_import_time)
+        logger.info("Loaded release groups for %d sets (pid %d)", len(rows), os.getpid())
+
+    def ensure_set_groups(self, *, force: bool = False) -> None:
+        """Make sure this process's release-group registry reflects the last import; never raises.
+
+        `force` skips the cache: the import path passes it right after it has rewritten magic.sets.
+
+        Cached per process off the shared `last_import_time` with the same TTL as `setup_complete`,
+        so the table is read once per worker per import rather than once per query. A database
+        error is logged and swallowed: a search must not fail because this lookup table could not be
+        refreshed, and the registry keeps whatever it last loaded (possibly nothing, in which case
+        `g:<code>` answers that one set -- see `rewrite.expand_release_groups`). Nothing is cached on
+        failure, so the next query tries again.
+        """
+        now = time.monotonic()
+        current_import_time = self.last_import_time.get_obj().value
+        if not force and self._set_groups_cache is not None:
+            expires_at, cached_import_time = self._set_groups_cache
+            if now < expires_at and current_import_time == cached_import_time:
+                return
+        try:
+            self.refresh_set_groups()
+        except Exception as oops:
+            logger.error(
+                "Error loading set release groups (pid %d): %s: %s",
+                os.getpid(),
+                type(oops).__name__,
+                oops,
+                exc_info=True,
+            )
 
     def bump_cache_generation(self) -> None:
         """Invalidate every worker's query-result cache. Call after any write to magic.cards."""

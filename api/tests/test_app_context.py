@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import multiprocessing
 import unittest
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from api.app_context import MIN_IMPORT_CARDS, AppContext
+from api.parsing.set_groups import SET_GROUPS_SQL, release_group, replace_set_groups
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 
 def _mock_pool_returning(num_cards: int) -> MagicMock:
@@ -133,6 +138,79 @@ class TestReloadEngine(unittest.TestCase):
         with patch("api.app_context.settings") as mock_settings:
             mock_settings.enable_engine = True
             ctx.reload_engine(force=True)
+
+
+class TestSetGroups:
+    """The release-group registry (`g:<set>`) is read once per process per import, and never fails a search."""
+
+    ROWS = (
+        {"code": "ecl", "parent_set_code": None, "name": "Lorwyn Eclipsed"},
+        {"code": "ecc", "parent_set_code": "ecl", "name": "Lorwyn Eclipsed Commander"},
+    )
+
+    @pytest.fixture(autouse=True)
+    def _empty_registry(self) -> Generator[None]:
+        replace_set_groups([])
+        yield
+        replace_set_groups([])
+
+    def _make_context(self) -> tuple[AppContext, MagicMock]:
+        pool = MagicMock()
+        cursor = pool.connection.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value
+        cursor.fetchall.return_value = list(self.ROWS)
+        ctx = AppContext(
+            reader_pool=pool,
+            writer_pool=MagicMock(),
+            engine=MagicMock(),
+            last_import_time=multiprocessing.Value("d", 1.0, lock=True),
+        )
+        return ctx, cursor
+
+    def test_loads_the_registry_from_the_set_table(self) -> None:
+        ctx, cursor = self._make_context()
+        ctx.ensure_set_groups()
+        cursor.execute.assert_called_once_with(SET_GROUPS_SQL)
+        assert release_group("ecc") == ("ecc", ("ecl",))
+
+    def test_a_second_call_within_the_ttl_does_not_read_again(self) -> None:
+        ctx, cursor = self._make_context()
+        ctx.ensure_set_groups()
+        ctx.ensure_set_groups()
+        assert cursor.execute.call_count == 1
+
+    def test_a_completed_import_reloads(self) -> None:
+        ctx, cursor = self._make_context()
+        ctx.ensure_set_groups()
+        cursor.fetchall.return_value = [
+            *self.ROWS,
+            {"code": "tecc", "parent_set_code": "ecc", "name": "Lorwyn Eclipsed Commander Tokens"},
+        ]
+        ctx.last_import_time.value = 2.0
+        ctx.ensure_set_groups()
+        assert cursor.execute.call_count == 2
+        assert release_group("ecc") == ("ecc", ("ecl", "tecc"))
+
+    def test_force_reloads_within_the_ttl(self) -> None:
+        ctx, cursor = self._make_context()
+        ctx.ensure_set_groups()
+        ctx.ensure_set_groups(force=True)
+        assert cursor.execute.call_count == 2
+
+    def test_a_database_error_is_swallowed_and_retried(self) -> None:
+        ctx, cursor = self._make_context()
+        cursor.execute.side_effect = RuntimeError("relation magic.sets does not exist")
+        ctx.ensure_set_groups()  # must not raise: a search would fail with it
+        assert release_group("ecc") is None
+        cursor.execute.side_effect = None
+        ctx.ensure_set_groups()
+        assert release_group("ecc") == ("ecc", ("ecl",))
+
+    def test_a_failed_reload_keeps_the_last_good_registry(self) -> None:
+        ctx, cursor = self._make_context()
+        ctx.ensure_set_groups()
+        cursor.execute.side_effect = RuntimeError("connection lost")
+        ctx.ensure_set_groups(force=True)
+        assert release_group("ecc") == ("ecc", ("ecl",))
 
 
 if __name__ == "__main__":

@@ -131,6 +131,14 @@ set:MH2
 set:DMU
 ```
 
+Use `g:` (or `group:`) for a set together with the sets released around it: its children (tokens,
+promos, commander decks), its parent, and its parent's other children.
+
+```
+g:ecl
+group:"Lorwyn Eclipsed Commander"
+```
+
 ### Price
 
 Use `usd` or `eur` with a comparison operator.

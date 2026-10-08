@@ -43,6 +43,7 @@ from api.parsing.nodes import (
     StringValueNode,
     TrueNode,
     flatten_nested_operations,
+    mark_parenthesised,
 )
 
 if TYPE_CHECKING:
@@ -531,7 +532,10 @@ def get_parse_expr() -> ParserElement:  # noqa: PLR0915
 
     def make_group(tokens: list[object]) -> object:
         """Return the grouped expression inside parentheses."""
-        return tokens[0]
+        inner = tokens[0]
+        if len(inner) == 1:
+            mark_parenthesised(inner[0])
+        return inner
 
     group = Group(lparen + expr + rparen).set_parse_action(make_group)
 

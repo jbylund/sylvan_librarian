@@ -174,6 +174,13 @@ class AttributeNode(LeafNode):
 class BinaryOperatorNode(QueryNode):
     """Represents a binary operator node (e.g., '=', '!=', '<', '>', etc.)."""
 
+    # True when the term was written alone inside parentheses: `(g:ecc)`. Parentheses around one
+    # term change nothing about what it matches, so the tree does not keep them -- but Scryfall
+    # reads a minus on `g:` differently from a minus on parentheses around it, and this is all
+    # that is left to tell `-g:ecc` from `-(g:ecc)` by. Set by `mark_parenthesised`, read by
+    # `rewrite.expand_release_groups`, and part of neither equality nor serialization.
+    parenthesised = False
+
     def __init__(self: BinaryOperatorNode, lhs: QueryNode, operator: str, rhs: QueryNode) -> None:
         """Initialize a BinaryOperatorNode with left/right operands and an operator.
 
@@ -477,6 +484,16 @@ class Query(QueryNode):
     def __hash__(self: Query) -> int:
         """Return a hash based on the root node."""
         return hash(("Query", self.root))
+
+
+def mark_parenthesised(node: QueryNode) -> QueryNode:
+    """Record that *node* is what a pair of parentheses held, if it is a single term; return it.
+
+    Both parsers call this where they close a group. See `BinaryOperatorNode.parenthesised`.
+    """
+    if isinstance(node, BinaryOperatorNode):
+        node.parenthesised = True
+    return node
 
 
 def flatten_nested_operations(node: QueryNode) -> QueryNode:

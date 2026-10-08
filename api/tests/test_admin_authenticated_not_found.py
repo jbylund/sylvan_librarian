@@ -31,6 +31,18 @@ if TYPE_CHECKING:
 
 TEST_PASSWORD = "correct-horse-battery-staple"
 
+# What an UNAUTHENTICATED caller gets for a path that addresses nothing: Scryfall's error object,
+# not the route listing (scryfall-sets-catalogs-symbology) -- a client pointed here instead of
+# api.scryfall.com parses `code` and `details`, and a listing carries neither. Trivially, no admin
+# route can leak through a body that names no routes at all. The listing -- the full one -- is
+# still what an authenticated caller gets, which is the half of #966 this surface keeps.
+_SCRYFALL_NOT_FOUND = {
+    "object": "error",
+    "code": "not_found",
+    "status": 404,
+    "details": "The requested object or REST method was not found.",
+}
+
 _AUTH_HEADERS = {"Authorization": "Basic d2hvZXZlcjpjb3JyZWN0LWhvcnNlLWJhdHRlcnktc3RhcGxl"}  # whoever:TEST_PASSWORD
 
 
@@ -65,7 +77,7 @@ class TestAuthenticatedNotFoundListing:
         del admin_password
         result = _client(resource).simulate_get("/totally/bogus")
         assert result.status == falcon.HTTP_404
-        assert "setup_schema" not in result.json["description"]["routes"]
+        assert result.json == _SCRYFALL_NOT_FOUND
 
     def test_authenticated_404_includes_admin_routes(self, resource: APIResource, admin_password: str) -> None:
         del admin_password
@@ -78,7 +90,7 @@ class TestAuthenticatedNotFoundListing:
         wrong = {"Authorization": "Basic d2hvZXZlcjp3cm9uZw=="}  # whoever:wrong
         result = _client(resource).simulate_get("/totally/bogus", headers=wrong)
         assert result.status == falcon.HTTP_404
-        assert "setup_schema" not in result.json["description"]["routes"]
+        assert result.json == _SCRYFALL_NOT_FOUND
 
     def test_authenticated_404_under_the_mount_also_gets_the_full_listing(
         self, resource: APIResource, admin_password: str
@@ -106,7 +118,7 @@ class TestNotFoundIsNeverCached:
 
         assert first.headers.get("X-Cache") == "miss"
         assert second.headers.get("X-Cache") == "miss"
-        assert "setup_schema" not in second.json["description"]["routes"]
+        assert second.json == _SCRYFALL_NOT_FOUND
 
     def test_repeated_authenticated_404_is_never_a_cache_hit(self, resource: APIResource, admin_password: str) -> None:
         del admin_password
@@ -127,7 +139,7 @@ class TestNotFoundIsNeverCached:
         unauthed = client.simulate_get("/totally/bogus")
 
         assert f"{ADMIN_MOUNT_PREFIX}/setup_schema" in authed.json["description"]["routes"]
-        assert "setup_schema" not in unauthed.json["description"]["routes"]
+        assert unauthed.json == _SCRYFALL_NOT_FOUND
         assert unauthed.headers.get("X-Cache") != "hit"
 
     def test_unauthenticated_404_does_not_mask_a_later_authenticated_caller(
@@ -138,7 +150,7 @@ class TestNotFoundIsNeverCached:
         unauthed = client.simulate_get("/totally/bogus")
         authed = client.simulate_get("/totally/bogus", headers=_AUTH_HEADERS)
 
-        assert "setup_schema" not in unauthed.json["description"]["routes"]
+        assert unauthed.json == _SCRYFALL_NOT_FOUND
         assert f"{ADMIN_MOUNT_PREFIX}/setup_schema" in authed.json["description"]["routes"]
         assert authed.headers.get("X-Cache") != "hit"
 
