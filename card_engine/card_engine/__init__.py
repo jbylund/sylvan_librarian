@@ -84,4 +84,21 @@ ENGINE_COLUMNS: list[str] = [
     "type_line",
     "prefer_score",
     "cubecobra_score",
+    # The count keywords (`prints`, `sets`, `paperprints`, `papersets`, `illustrations`,
+    # `artists`): six smallints _sync_print_counts writes at import. The first five are per card
+    # and identical on every row of it; `artist_count` is the printing's own.
+    "card_print_count",
+    "card_set_count",
+    "card_paper_print_count",
+    "card_paper_set_count",
+    "card_illustration_count",
+    "artist_count",
+    # `cheapest:usd` / `cheapest:eur` / `cheapest:tix`: the printing's stored answers, one
+    # smallint _sync_cheapest_codes writes at import.
+    "cheapest_codes",
+    # `new:rarity`: the printing's stored answer, one boolean _sync_new_rarity writes at import.
+    "new_rarity",
+    # `new:card` / `new:frame` / `new:foil` / `new:nonfoil` / `new:art`: the printing's stored
+    # answers, one smallint _sync_new_flags writes at import.
+    "new_flags",
 ]
