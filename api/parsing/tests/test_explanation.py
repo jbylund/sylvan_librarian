@@ -141,11 +141,12 @@ def test_explain_equals_vs_contains(parse_query, query_str: str, expected_explan
 @pytest.mark.parametrize(
     argnames=["query_str", "expected_explanation"],
     argvalues=[
-        # is:vanilla expands to `t:creature o=""`. `o=""` is a real, narrow constraint (the
-        # oracle text is exactly empty) and must render as its own clause, not vanish.
-        ("is:vanilla", "the type contains creature and the oracle text is empty"),
-        ("not:vanilla", "not (the type contains creature and the oracle text is empty)"),
-        ("-is:vanilla", "not (the type contains creature and the oracle text is empty)"),
+        # `o=""` is a real, narrow constraint (the oracle text is exactly empty) and must render as
+        # its own clause, not vanish. Upstream reaches this through is:vanilla's expansion to
+        # `t:creature o=""`; on this branch is:vanilla is an engine predicate (see rewrite.py), so
+        # the expansion is spelled out.
+        ('t:creature o=""', "the type contains creature and the oracle text is empty"),
+        ('-(t:creature o="")', "not (the type contains creature and the oracle text is empty)"),
         # A typeahead balancer auto-closing a half-typed "urza'" produces `name:urza''`,
         # which parses as `name:urza AND name:''` -- the second operand uses `:` against an
         # empty value, which is always vacuous (LIKE '%' matches everything) and explains to

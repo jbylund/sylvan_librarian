@@ -23,6 +23,7 @@ import pytest
 
 from api.parsing import generate_sql_query, parse_query, parse_scryfall_query
 from api.parsing.colors import COLOR_ALIAS_TO_CODES
+from api.parsing.db_info import ALIAS_TO_FIELD_INFOS
 from api.parsing.pyparsing_based import parse_str_to_query as pyparsing_parse_str_to_query
 
 parse_with_pyparsing = partial(parse_query, parser_fn=pyparsing_parse_str_to_query)
@@ -30,6 +31,13 @@ parse_with_pyparsing = partial(parse_query, parser_fn=pyparsing_parse_str_to_que
 # (name query, the letter query it must mean). Every pair verified live before landing.
 COLOR_NAME_CASES = [
     ("c:azorius", "c:wu"),
+    # the alias spellings Scryfall accepts for each colour column, on letter values. Its vocabulary
+    # is a BOUNDARY: `cid`, `commanderidentity`, `colouridentity` and `colour_identity` all come
+    # back "Unknown keyword", so only these join.
+    ("colour:wu", "c:wu"),
+    ("colours:wu", "c:wu"),
+    ("commander:wu", "id:wu"),
+    ("commander<=jund", "ci<=brg"),
     ("c:dimir", "c:ub"),
     ("c:rakdos", "c:br"),
     ("c:gruul", "c:rg"),
@@ -129,6 +137,19 @@ def test_rejected_color_names_still_fail(invalid_query: str) -> None:
     """A name outside Scryfall's table is still a parse error rather than a silent widening."""
     with pytest.raises(ValueError, match="Failed to parse query"):
         parse_scryfall_query(invalid_query)
+
+
+@pytest.mark.parametrize(
+    argnames="alias",
+    argvalues=["cid", "commanderidentity", "colouridentity", "colour_identity"],
+)
+def test_identity_aliases_scryfall_refuses_are_not_keywords(alias: str) -> None:
+    """Scryfall's identity vocabulary is a boundary, so these stay bare-word NAME searches.
+
+    Each comes back "Unknown keyword" from api.scryfall.com (measured 2026-08-16). Adding one
+    would answer a query Scryfall does not, which for an identity filter means a WIDER result.
+    """
+    assert alias not in ALIAS_TO_FIELD_INFOS
 
 
 def test_every_alias_spells_only_color_codes() -> None:

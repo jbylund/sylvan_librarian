@@ -25,6 +25,26 @@ from api.parsing.card_query_nodes import fold_accents
         ("Arwen Undómiel", "Arwen Undomiel"),
         ("Song of Eärendil", "Song of Earendil"),
         ("Déjà Vu", "Deja Vu"),
+        # THE LETTERS NFKD LEAVES WHOLE. A decomposition can only separate a base letter from its
+        # marks, and "æ" is not "a" with a mark on it -- so every one of these survived untouched
+        # and `name:ætherling` found nothing. Each pair was measured against api.scryfall.com on
+        # 2026-08-16, needle against expansion, equal totals both ways: æ/ae 90, œ/oe 167,
+        # ß/ss 2051, ø/o 22111, ł/l 18748, đ/d 14591, þ/th 5689, ð/d 14591, ħ/h 14176, ŋ/ng 4834,
+        # ŧ/t 22261, U+0131/i 22954, ĸ/k 6616.
+        ("Ætherling", "AEtherling"),
+        ("ÆTHER VIAL", "AETHER VIAL"),
+        ("Cœur", "Coeur"),
+        ("Straße", "Strasse"),
+        ("Ørjan Ruttenborg Svendsen", "Orjan Ruttenborg Svendsen"),
+        ("Bartłomiej Gaweł", "Bartlomiej Gawel"),
+        ("Đilo", "Dilo"),
+        ("Þorbjörn", "Thorbjorn"),
+        ("Ðagr", "Dagr"),
+        ("Ħaġar", "Hagar"),
+        ("Ŋombe", "NGombe"),
+        # ...and the ones deliberately NOT in the table: U+00D7 and U+00F7 are symbols rather than
+        # letters, both answer 404 on Scryfall, and collate_name() deletes them anyway.
+        ("2\u00d72", "2\u00d72"),
     ],
 )
 def test_fold_accents(value: str, expected: str) -> None:

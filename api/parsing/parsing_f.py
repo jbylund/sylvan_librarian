@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from api.parsing.hand_parser import fold_typographic_quotes
 from api.parsing.spans import QUOTE_CHARS, brace_close_index, find_close_index, opens_regex
 
 
@@ -21,6 +22,11 @@ def balance_partial_query(query: str) -> str:
     The opaque spans never go on it: each one is resolved to its closer and stepped over whole, which
     is what keeps the quotes, parens and metacharacters inside them from being read as structure.
     """
+    # The balancer and the lexer must agree about which characters are quotes, or a typed
+    # `name:<U+2018>` balances to nothing here and then fails to lex as an unclosed `name:'` after
+    # parse_query folds it. Same fold, same position: before anything reads a character as a
+    # delimiter.
+    query = fold_typographic_quotes(query)
     open_parens = 0
     # Closer for whichever span is still open at the end of the query. Only one is ever needed,
     # because everything after an unterminated opener is span content — there is nothing left to open,

@@ -136,6 +136,11 @@ class CardAttributeNode(AttributeNode):
             SQL string for the attribute reference.
         """
         del context
+        # oracle_id is the one searchable UUID column; every bound parameter arrives as text, and
+        # `uuid = text` has no operator in Postgres. Comparing the column's canonical text form
+        # keeps the generic comparison path and never raises on an unparseable search value.
+        if self.attribute_name == "oracle_id":
+            return "card.oracle_id::text"
         # attribute_name is already set to the correct db_column_name in __init__
         return f"card.{self.attribute_name}"
 
@@ -161,6 +166,8 @@ class CardAttributeNode(AttributeNode):
             "type_line": "type line",
             "flavor_text": "flavor text",
             "card_keywords": "keyword",
+            "oracle_id": "oracle ID",
+            "card_lang": "language",
             "card_layout": "layout",
             "card_border": "border",
             "card_watermark": "watermark",
@@ -458,18 +465,63 @@ def _escape_like_pattern(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
 
 
+# The Latin letters NFKD leaves WHOLE, and the spellings a name comparison has to read them as.
+#
+# NFKD is a decomposition, and a decomposition can only ever separate a base letter from its marks.
+# "æ" is not "a" with a mark on it — it is its own letter with no decomposition at all — so every
+# one of these survived fold_accents() untouched and `name:æther` found nothing where Scryfall
+# finds 90. MEASURED against api.scryfall.com on 2026-08-16, one probe per character, each against
+# its expanded spelling: æ/ae 90, œ/oe 167, ß/ss 2051, ø/o 22111, ł/l 18748, đ/d 14591, þ/th 5689,
+# ð/d 14591, ħ/h 14176, ŋ/ng 4834, ŧ/t 22261, U+0131/i 22954, ĸ/k 6616 — equal totals on both
+# every pair. (ĳ folds too, at 22 — NFKD already reaches that one, so it is not listed here.)
+#
+# The three characters DELIBERATELY ABSENT, each measured to 404 on Scryfall: U+00D7 and U+00F7,
+# which are symbols rather than letters and which collate_name() would delete anyway; and U+017F
+# (long s), which Scryfall does not fold and NFKD does. Known residual divergences, all on
+# characters no card in the corpus contains: U+017F, the presentation ligatures U+FB00..U+FB02,
+# "½", "№" and "ǽ" — NFKD folds each of them and Scryfall folds none.
+_LIGATURE_FOLD = str.maketrans(
+    {
+        "Æ": "AE",
+        "æ": "ae",
+        "Œ": "OE",
+        "œ": "oe",
+        "ß": "ss",
+        "Ø": "O",
+        "ø": "o",
+        "Ł": "L",
+        "ł": "l",
+        "Đ": "D",
+        "đ": "d",
+        "Ð": "D",
+        "ð": "d",
+        "Þ": "Th",
+        "þ": "th",
+        "Ħ": "H",
+        "ħ": "h",
+        "Ŋ": "NG",
+        "ŋ": "ng",
+        "Ŧ": "T",
+        "ŧ": "t",
+        "ı": "i",  # noqa: RUF001 -- U+0131 DOTLESS I is the point of the entry
+        "ĸ": "k",
+    }
+)
+
+
 def fold_accents(value: str) -> str:
     """Strip Latin diacritics so accented and unaccented spellings compare equal.
 
     NFKD-decomposes each character into base letter + combining marks, then drops
-    the marks (unicodedata.combining(c) != 0). This is the single source of truth
+    the marks (unicodedata.combining(c) != 0), then expands the undecomposable
+    Latin letters through _LIGATURE_FOLD. This is the single source of truth
     for accent folding: it's used to precompute card_name_folded at import time
     (see preprocess_card()) and to fold the search term for fuzzy card_name:
     queries in both the SQL and Rust engine paths, so the two sides never diverge
     on what counts as "the same" name (#649).
     """
     decomposed = unicodedata.normalize("NFKD", value)
-    return "".join(c for c in decomposed if not unicodedata.combining(c))
+    return "".join(c for c in decomposed if not unicodedata.combining(c)).translate(_LIGATURE_FOLD)
 
 
 class ExactNameNode(QueryNode):
@@ -814,11 +866,28 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         """Handle colon operator for different field types."""
         if field_type == FieldType.TEXT:
             # Handle fields that need exact matching instead of pattern matching
-            if attr in ("card_set_code", "card_layout", "card_border", "card_watermark", "collector_number"):
-                # set_code/layout/border/watermark are lowercased at import, so lowercasing the
-                # search value gives case-insensitive matching with a plain equality.
+            if attr in (
+                "card_set_code",
+                "card_lang",
+                "card_layout",
+                "card_border",
+                "card_watermark",
+                "collector_number",
+                "oracle_id",
+            ):
+                # set_code/lang/layout/border/watermark are lowercased at import, so lowercasing the
+                # search value gives case-insensitive matching with a plain equality. oracle_id is a
+                # UUID rendered lowercase by ::text, so the same lowercasing makes the id
+                # case-insensitive the way Scryfall's oracleid: is.
                 # collector_number is stored raw and mixed-case (e.g. "10E-105"): compare exactly.
-                if attr in ("card_set_code", "card_layout", "card_border", "card_watermark") and hasattr(self.rhs, "value"):
+                if attr in (
+                    "card_set_code",
+                    "card_lang",
+                    "card_layout",
+                    "card_border",
+                    "card_watermark",
+                    "oracle_id",
+                ) and hasattr(self.rhs, "value"):
                     self.rhs.value = self.rhs.value.lower()
 
                 if self.operator == ":":
@@ -1089,6 +1158,14 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         raise ValueError(msg)
 
     def _handle_jsonb_array(self, context: QueryContext) -> str:
+        # A quoted multi-word type is a substring of the printed type line, not a member of either
+        # array — see _multi_word_type_line_needle. `type_line` is the column those arrays are
+        # derived from, and `~*` over the escaped literal is the same predicate the engine compiles
+        # (card_engine/src/filter.rs). Containment operators only: `=`/`<`/`>` compare SETS, and a
+        # substring is not one, so those keep the membership path and its (empty) answer.
+        needle = _multi_word_type_line_needle(self.lhs.attribute_name, self.rhs.value)
+        if needle is not None and self.operator in (">=", ":"):
+            return f"(card.type_line ~* {context.add(re.escape(needle))})"
         # TODO: this should produce the query as an array, not jsonb
         rhs_val = self.rhs.value.strip().title()
         if self.lhs.attribute_name.lower() in ("card_types", "card_subtypes", "type"):
@@ -1116,6 +1193,30 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
             return f"NOT(({col} <@ {query}) AND ({query} <@ {col}))"
         msg = f"Unknown operator: {self.operator}"
         raise ValueError(msg)
+
+
+# The type/subtype aliases, and the whitespace-collapsing rule a quoted multi-word value takes.
+_TYPE_ATTRS = ("card_types", "card_subtypes", "type")
+
+
+def _multi_word_type_line_needle(attribute_name: str, value: str) -> str | None:
+    """The type-line substring `t:"…"` means, or None when the value is a single type word.
+
+    A quoted multi-word type is NOT a member of the type/subtype vocabulary — `t:"artifact
+    creature"` arrives as the one token "Artifact Creature", which is neither a type nor a subtype,
+    so the containment tests below answer false for every card. Scryfall matches the quoted string
+    against the whole type line as a case-insensitive substring instead: measured on
+    api.scryfall.com 2026-08-16, `t:"artifact creature" cmc<=2` is 360 rows here and 0 before this,
+    and the rule is a plain substring rather than an and-over-words — order matters
+    (`t:"creature artifact"` is empty), neither side is word-anchored (`t:"tifact creat"` and
+    `t:"ifact creature"` both return the same 360), whitespace runs collapse (a doubled space is the
+    same query), and the em dash is ordinary text (`t:"creature — human"` matches; the hyphen
+    spelling does not). Subtype pairs behave identically: `t:"human wizard"` 6, reversed 0.
+    """
+    if attribute_name.lower() not in _TYPE_ATTRS:
+        return None
+    words = value.split()
+    return " ".join(words) if len(words) > 1 else None
 
 
 def to_card_query_ast(node: QueryNode) -> QueryNode:
