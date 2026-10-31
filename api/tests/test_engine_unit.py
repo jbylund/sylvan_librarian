@@ -27,7 +27,7 @@ Card summary (name → printings):
 
 from __future__ import annotations
 
-import datetime
+import datetime as dt
 import json
 import tempfile
 import uuid
@@ -978,8 +978,8 @@ class TestCardProperties:
         e = fresh_engine()
         e.reload(
             [
-                {**base, "oracle_id": "a", "released_at": datetime.date(2026, 3, 15)},
-                {**base, "oracle_id": "b", "released_at": datetime.date(2024, 1, 1)},
+                {**base, "oracle_id": "a", "released_at": dt.date(2026, 3, 15)},
+                {**base, "oracle_id": "b", "released_at": dt.date(2024, 1, 1)},
                 {**base, "oracle_id": "c", "released_at": "2026-07-04"},
             ]
         )
