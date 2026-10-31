@@ -10,6 +10,10 @@ from api.parsing import balance_partial_query
     argvalues=[
         'name:"hydr',
         '(name:"lightning',
+        # Typing toward "urza's": the trailing apostrophe must survive the balancer untouched
+        # and still parse, rather than being closed into an empty quoted string.
+        "urza'",
+        "o'",
     ],
 )
 def test_balanced_queries_still_parse(parse_query, original_query: str) -> None:

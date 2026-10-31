@@ -111,6 +111,11 @@ _WORD_START = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_")
 _WORD_CONT = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789.")
 _DIGIT = frozenset("0123456789")
 _SPACE = frozenset(" \t\r\n")
+# A comma standing on its own is a natural-language separator, skipped like whitespace
+# (Scryfall: "rograkh , son" filters exactly as "rograkh son"). A comma ATTACHED to a word
+# stays part of that word's token — see _scan_word_end — so a field value keeps it verbatim
+# (Scryfall: "t:goblin," matches nothing) while a bare name sheds it in _name_node.
+_SKIPPED = _SPACE | {","}
 
 
 def _is_word_start(c: str) -> bool:
@@ -121,6 +126,35 @@ def _is_word_start(c: str) -> bool:
 def _is_word_cont(c: str) -> bool:
     """ASCII identifier continuation, or any Unicode letter (#649)."""
     return c in _WORD_CONT or c.isalpha()
+
+
+def _scan_word_end(src: str, n: int, j: int) -> int:
+    """Advance j past word-continuation characters and return the word's end.
+
+    Beyond `_is_word_cont`, a word carries commas ("rograkh," — Scryfall keeps them on the
+    token, and bare names shed them later in `_name_node`) and apostrophes that follow a word
+    character ("urza's", and "urza'" mid-type).
+
+    The apostrophe rule is "a word character BEFORE it", not "on both sides". Requiring a word
+    character after it too meant a TRAILING apostrophe ended the word and opened a quoted string,
+    so "urza'" — every typeahead keystroke on the way to "urza's" — was a lex error, and the
+    balancer's only way to rescue it was to append a second apostrophe. That parsed, but as
+    `urza` AND an empty quoted string: the search silently widened to every card containing
+    "urza" and the explanation rendered "the name contains Urza and " with nothing after the
+    "and". A leading quote is still a quote, because there is no word character before it —
+    name:'power' and 'hello' lex as QUOTED exactly as before.
+    """
+    while j < n:
+        c = src[j]
+        # End of input counts as "followed by more word", not as "followed by a quote": it is a
+        # half-typed word, not a half-typed string. Deliberately NOT "preceded by a word char",
+        # which would also swallow the first apostrophe of "urza''" and leave the second one
+        # opening a string that never closes.
+        apostrophe_in_word = c == "'" and (j + 1 >= n or _is_word_cont(src[j + 1]))
+        if not (_is_word_cont(c) or c == "," or apostrophe_in_word):
+            break
+        j += 1
+    return j
 
 
 # ── Lexer ─────────────────────────────────────────────────────────────────────
@@ -173,8 +207,8 @@ def tokenize(src: str) -> list[Token]:  # noqa: C901, PLR0912, PLR0915
     space_before = False
 
     while pos < n:
-        if src[pos] in _SPACE:
-            while pos < n and src[pos] in _SPACE:
+        if src[pos] in _SKIPPED:
+            while pos < n and src[pos] in _SKIPPED:
                 pos += 1
             space_before = True
             continue
@@ -300,8 +334,7 @@ def tokenize(src: str) -> list[Token]:  # noqa: C901, PLR0912, PLR0915
                 while j < n and src[j] in _DIGIT:
                     j += 1
             if j < n and _is_word_cont(src[j]):
-                while j < n and _is_word_cont(src[j]):
-                    j += 1
+                j = _scan_word_end(src, n, j)
                 tokens.append(Token(TT.WORD, src[pos:j], start, sb))
             elif "." in src[pos:j]:
                 tokens.append(Token(TT.NUMBER, float(src[pos:j]), start, sb))
@@ -312,9 +345,7 @@ def tokenize(src: str) -> list[Token]:  # noqa: C901, PLR0912, PLR0915
 
         # Word
         if _is_word_start(c):
-            j = pos + 1
-            while j < n and _is_word_cont(src[j]):
-                j += 1
+            j = _scan_word_end(src, n, pos + 1)
             tokens.append(Token(TT.WORD, src[pos:j], start, sb))
             pos = j
             continue
@@ -335,6 +366,16 @@ class ParseError(ValueError):
 
 def _name_node(value: str) -> CardBinaryOperatorNode:
     return CardBinaryOperatorNode(CardAttributeNode("name", ParserClass.TEXT), ":", StringValueNode(value))
+
+
+def _bare_name_node(value: str) -> CardBinaryOperatorNode:
+    """Implicit name filter for a BARE word, which sheds its natural-language commas.
+
+    Scryfall filters "son," exactly as "son" (measured 2026-08-08: identical totals), so
+    "rograkh, son of rograkh" finds the card. Quoted names stay verbatim — only bare words
+    route here.
+    """
+    return _name_node(value.rstrip(","))
 
 
 class Parser:
@@ -520,7 +561,7 @@ class Parser:
             lhs = self._spaced_arith_tail(CardAttributeNode(wl, ParserClass.NUMERIC))
             if isinstance(lhs, CardAttributeNode):
                 # no arithmetic consumed → implicit name
-                return _name_node(word)
+                return _bare_name_node(word)
             if self.peek().type == TT.OP:
                 op = self.consume().value
                 return CardBinaryOperatorNode(lhs, op, self.parse_num_expr_value())
@@ -645,7 +686,7 @@ class Parser:
         ):
             self.consume()  # MINUS
             parts.append(str(self.consume().value))
-        return _name_node("-".join(parts))
+        return _bare_name_node("-".join(parts))
 
     # ── value parsers ─────────────────────────────────────────────────────────
 
