@@ -302,6 +302,46 @@ class TestFilters:
         assert total_colon > 0
         assert all(c["set_code"] == "lea" for c in cards_colon)
 
+    def test_keyword_spellings_reach_the_engine(self, engine: QueryEngine) -> None:
+        """`edition`, `collector` and `collectornumber` are answered by the engine.
+
+        The engine keys its predicates off the column, not the spelling, so each added spelling
+        must return exactly the printings the established one does.
+        """
+        for spelling, canonical in [
+            ("edition:lea", "e:lea"),
+            ("collector>=200", "cn>=200"),
+            ("collectornumber<100", "number<100"),
+            ("pow<collectornumber", "pow<cn"),
+        ]:
+            expected_total, expected = _run(engine, canonical)
+            total, cards = _run(engine, spelling)
+            assert expected_total > 0, canonical
+            assert total == expected_total, spelling
+            assert [(c["set_code"], c["collector_number"]) for c in cards] == [
+                (c["set_code"], c["collector_number"]) for c in expected
+            ], spelling
+
+    def test_edhrec_rank_is_searchable(self, engine: QueryEngine) -> None:
+        """`edhrec:` compares the rank the default ordering already sorted on."""
+        for spelling in ("edhrec:1", "edhrecrank:1", "edhrec_rank=1"):
+            total, cards = _run(engine, spelling)
+            assert total == 5, spelling
+            assert set(_names(cards)) == {"Sol Ring"}, spelling
+
+        # Ranks 1, 16 and 34 are the three at or under 100 in the fixture.
+        total, cards = _run(engine, "edhrec<=100")
+        assert total == 16
+        assert set(_names(cards)) == {"Sol Ring", "Counterspell", "Dark Ritual"}
+        assert _run(engine, "edhrec>100")[0] == 66
+
+        # 8 of the 90 printings have no rank: NULL survives neither a comparison nor its negation.
+        assert _run(engine, "edhrec>=0")[0] == 82
+        assert _run(engine, "-edhrec>=0")[0] == 0
+
+        # A column on either side.
+        assert _run(engine, "cmc<edhrec")[0] == _run(engine, "edhrecrank>cmc")[0] == 77
+
     def test_and_filter(self, engine: QueryEngine) -> None:
         # Red instants: only Lightning Bolt
         total, _ = _run(engine, "c:r t:instant")

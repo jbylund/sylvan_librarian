@@ -135,10 +135,13 @@ DB_COLUMNS = [
         search_aliases=["loyalty", "loy"],
         parser_class=ParserClass.NUMERIC,
     ),
+    # Scryfall's three spellings of the EDHREC-rank keyword (measured on api.scryfall.com
+    # 2026-10-03: `edhrec:1`, `edhrecrank:1` and `edhrec_rank:1` are each Sol Ring). The column was
+    # sorted on and had no alias, so it could not be searched.
     FieldInfo(
         db_column_name="edhrec_rank",
         field_type=FieldType.NUMERIC,
-        search_aliases=[],
+        search_aliases=["edhrec", "edhrecrank", "edhrec_rank"],
         parser_class=ParserClass.NUMERIC,
     ),
     FieldInfo(
@@ -232,7 +235,8 @@ DB_COLUMNS = [
     FieldInfo(
         db_column_name="card_set_code",
         field_type=FieldType.TEXT,
-        search_aliases=["set", "s", "e"],
+        # `edition` is Scryfall's fourth spelling of `set` (`edition:khm t:god` = `e:khm t:god`).
+        search_aliases=["set", "s", "e", "edition"],
         parser_class=ParserClass.TEXT,
     ),
     FieldInfo(
@@ -241,10 +245,14 @@ DB_COLUMNS = [
         search_aliases=["number", "cn"],
         parser_class=ParserClass.TEXT,
     ),
+    # `collector` / `collectornumber` are Scryfall's spellings of the NUMERIC collector number only.
+    # They are deliberately absent from the TEXT row above: on api.scryfall.com (2026-10-03)
+    # `collector>=390` = `cn>=390`, but `collector:abc` is an unknown keyword where `cn:abc` is a
+    # string comparison that matches nothing.
     FieldInfo(
         db_column_name="collector_number_int",
         field_type=FieldType.NUMERIC,
-        search_aliases=["number", "cn"],
+        search_aliases=["number", "cn", "collector", "collectornumber"],
         parser_class=ParserClass.NUMERIC,
     ),  # No direct aliases - will be routed
     FieldInfo(
