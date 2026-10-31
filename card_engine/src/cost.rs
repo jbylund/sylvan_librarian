@@ -210,6 +210,11 @@ pub(crate) struct PlanFeatures {
     /// in ~`page_span/selectivity` steps), while the permutation-free gather visits every match — so
     /// the formula branches on this rather than assuming one. Ignored by every other plan.
     pub compose_paging: super::ComposePaging,
+    /// Printings a CARD-SPACE collection leaf's build broadcasts (`ids_of` +
+    /// `broadcast_card_ids_to_printings`). See `ComposeEstimate::collection_broadcast`'s doc for why
+    /// this is not just folded into `scatter_printings`. `0` for everything except `PrintingCompose`
+    /// on a card-space `subtypes`/`keywords`/`oracle_tags` leaf.
+    pub collection_broadcast_printings: u32,
 }
 
 // ─── P1: PrintingRangeScan ──────────────────────────────────────────────────
@@ -637,6 +642,22 @@ const GATHER_FIXED_COST_NS: f64 = 169.6;
 pub(crate) const COMPOSE_LINEAR_PASS_PER_PRINTING_NS: f64 = 1.93;
 /// Range-slice scatter into the printing bitmap during build.
 pub(crate) const COMPOSE_SCATTER_PER_PRINTING_NS: f64 = 0.48;
+
+/// A CARD-SPACE collection leaf's build (`ids_of` + `broadcast_card_ids_to_printings`) used to ride
+/// `COMPOSE_SCATTER_PER_PRINTING_NS`, on the assumption that it was the same shape of operation as a
+/// range's contiguous slice-scatter. It measurably is not: a card-cursor lookup per id (`offsets[c]`/
+/// `offsets[c+1]`) plus a variable-width printing-range fill, against a range's single contiguous
+/// write.
+///
+/// Backed out of `otag:triggered-ability`/`otag:cycle`/`otag:activated-ability` (`unique=printing`,
+/// EDHREC): with `printings_walked` corrected (`WalkCheckpoints`) and every other term in
+/// `PhysicalPlan::PrintingCompose`'s formula computed from measured features, the residual against real
+/// wall time scaled cleanly with `collection_broadcast_printings` (not a flat offset), implying 1.41,
+/// 1.30, and 1.31 ns/printing -- tight enough (2.7-2.9x `COMPOSE_SCATTER_PER_PRINTING_NS`, all three
+/// within 8% of each other) to be a real rate and not sampling noise, but from 3 points on one corpus
+/// size, not the corpus-scaling sweep the rates above this comment were fit with. Revisit if a wider
+/// measurement disagrees.
+pub(crate) const COMPOSE_COLLECTION_BROADCAST_PER_PRINTING_NS: f64 = 1.34;
 /// Result-space bitmap words popcounted for the total.
 const COMPOSE_POPCOUNT_PER_WORD_NS: f64 = 1.07;
 /// Per printing stepped over by the Perm / OrderbyWalk page fill.
@@ -758,6 +779,7 @@ pub(crate) fn plan_cost(plan: PhysicalPlan, f: &PlanFeatures) -> f64 {
         PhysicalPlan::PrintingCompose => {
             let build = f64::from(f.broadcast_printings) * COMPOSE_LINEAR_PASS_PER_PRINTING_NS  // legality broadcast-down into the printing bitmap (border/rarity read a plane → 0)
                 + f64::from(f.scatter_printings) * COMPOSE_SCATTER_PER_PRINTING_NS  // range-slice scatter into the printing bitmap (cheap: no card cursor)
+                + f64::from(f.collection_broadcast_printings) * COMPOSE_COLLECTION_BROADCAST_PER_PRINTING_NS  // card-space collection leaf's build (ids_of + broadcast_card_ids_to_printings) — a card cursor per id, pricier than a range's contiguous scatter
                 + f64::from(f.project_printings) * COMPOSE_LINEAR_PASS_PER_PRINTING_NS  // second pass: project printing→card/artwork (0 for printing mode) — the pass CardRangePopcount fuses away
                 + f64::from(f.popcount_words) * COMPOSE_POPCOUNT_PER_WORD_NS; // popcount the result-space bitmap for the total (printing/card/artwork words)
             let page = match f.compose_paging {
