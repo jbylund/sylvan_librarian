@@ -198,6 +198,92 @@ WHERE
     cards.card_is_tags IS DISTINCT FROM proposed.proposed_is_tags
 """
 
+
+# The set types whose RARITY does not count toward `in:<rarity>` on api.scryfall.com.
+# Measured 2026-09-03 with `r:rare st:<type> -in:rare` over all 23 set types: box 466,
+# promo 550, masterpiece 47, memorabilia 18, from_the_vault 2, and zero for the other
+# eighteen -- the rule is the set TYPE, not the booster flag (`is:booster` residual 0).
+# These are the set types where rarity is decorative (every Secret Lair card is "rare",
+# every masterpiece "mythic"): Kutzil, Malamet Exemplar is rare only in sld/2782 and is
+# not `in:rare`.
+IN_TAGS_RARITY_EXCLUDED_SET_TYPES = ("box", "promo", "masterpiece", "memorabilia", "from_the_vault")
+
+# Same chunking motive as _BOOLEAN_IS_TAGS_SYNC_CHUNK_COUNT, but by ORACLE id, not printing:
+# a per-card union is only chunkable if every row of a card lands in the same chunk.
+_IN_TAGS_SYNC_CHUNK_COUNT = 4
+
+
+def _build_in_tags_sql() -> str:
+    """Build the `in:` sync statement: the per-card union written onto every row of the card.
+
+    `in:X` is "cards that have EVER been printed in X" -- a CARD-level existential over all of a
+    card's printings, answered with all of them (`in:khm` is 5,318 printings under unique=prints
+    on api.scryfall.com, 2026-09-03, where `e:khm` is 425). No per-row predicate can say that, so
+    it is decided here, once per import, from `raw_card_blob`, and stored as a jsonb object of
+    {word: true} so the parser's JSONB_OBJECT `@>` path and the engine loader read it as they read
+    card_is_tags. Nine namespaces, each measured against api.scryfall.com on 2026-09-03:
+
+    - set code (`in:khm` 323 cards), set type (`in:core` 3,578, `in:promo` 5,959 -- set TYPES,
+      not the promo flag), game (`in:paper` 32,729, `in:arena` 16,090), language (`in:ja`
+      30,545), frame (`in:2015` 24,916, `in:1997` 6,803, `in:future` 232 -- Scryfall's `frame`
+      strings, so only 1993/1997/2003/2015/future), booster (`in:booster` 28,307 = `is:booster`):
+      EVERY printing counts.
+    - rarity (`in:rare` 10,883): every printing EXCEPT those in IN_TAGS_RARITY_EXCLUDED_SET_TYPES.
+    - foil / nonfoil (28,730 / 32,828): non-digital printings only -- `is:foil is:digital -in:foil`
+      is 1,197 there (MTGO-only and Arena-only sets). `in:etched` is 0, so the finishes list is
+      not copied wholesale.
+
+    Values are compared lower-cased (`in:KHM`, `in:Rare`, `in:JA` are all honored there), and
+    the set code is lower-cased here to match; every other word is already lower-case in the blob.
+
+    Callers pass ``num_chunks`` and ``chunk_index`` as query parameters. Chunking is by
+    ``hashtext(oracle_id)`` rather than scryfall_id: the aggregate is per card, so every row of a
+    card must fall in the same chunk or the union computed inside a chunk would be partial.
+    Rows with a NULL oracle_id (no card to belong to) are left at the column default.
+    """
+    excluded = ", ".join(f"'{t}'" for t in IN_TAGS_RARITY_EXCLUDED_SET_TYPES)
+    return f"""
+WITH per_row AS (
+    SELECT
+        cards.oracle_id,
+        lower(cards.card_set_code) AS set_code,
+        cards.raw_card_blob->>'set_type' AS set_type,
+        cards.raw_card_blob->>'lang' AS lang,
+        COALESCE(cards.raw_card_blob->'games', '[]'::jsonb) AS games,
+        CASE WHEN COALESCE(cards.raw_card_blob->>'set_type', '') NOT IN ({excluded})
+             THEN cards.raw_card_blob->>'rarity' END AS rarity,
+        CASE WHEN cards.raw_card_blob->>'frame' IN ('1993', '1997', '2003', '2015', 'future')
+             THEN cards.raw_card_blob->>'frame' END AS frame,
+        CASE WHEN COALESCE(cards.raw_card_blob->'digital', 'false'::jsonb) <> 'true'::jsonb
+             THEN COALESCE(cards.raw_card_blob->'finishes', '[]'::jsonb) ELSE '[]'::jsonb END AS finishes,
+        COALESCE(cards.raw_card_blob->'booster', 'false'::jsonb) = 'true'::jsonb AS booster
+    FROM magic.cards cards
+    WHERE cards.oracle_id IS NOT NULL
+      AND (abs(hashtext(cards.oracle_id::text)) %% %(num_chunks)s) = %(chunk_index)s
+), words AS (
+    SELECT per_row.oracle_id, v.w
+    FROM per_row, LATERAL (VALUES
+        (per_row.set_code), (per_row.set_type), (per_row.lang), (per_row.rarity), (per_row.frame),
+        (CASE WHEN per_row.booster THEN 'booster' END)
+    ) AS v(w)
+    WHERE v.w IS NOT NULL AND v.w <> ''
+    UNION
+    SELECT per_row.oracle_id, g FROM per_row, jsonb_array_elements_text(per_row.games) AS g
+    UNION
+    SELECT per_row.oracle_id, f FROM per_row, jsonb_array_elements_text(per_row.finishes) AS f
+    WHERE f IN ('foil', 'nonfoil')
+), agg AS (
+    SELECT oracle_id, jsonb_object_agg(w, true) AS in_tags FROM words GROUP BY oracle_id
+)
+UPDATE magic.cards
+SET card_in_tags = agg.in_tags
+FROM agg
+WHERE
+    cards.oracle_id = agg.oracle_id AND
+    cards.card_in_tags IS DISTINCT FROM agg.in_tags
+"""
+
+
 CUSTOM_IS_TAGS = [
     "historic",  # artifact, legendary, saga
     "permanent",  # ...
@@ -833,6 +919,40 @@ class AdminResource:
             logger.info("Synced boolean is: tags on %d printings", updated_count)
         return updated_count
 
+    def _sync_in_tags(self, conn: Connection) -> int:
+        """Sync `in:` (card_in_tags) -- the per-card union over every printing, on every row.
+
+        Runs after every import because a new printing changes the union of EVERY row of its
+        card: the khm reprint of a 1997 card makes all of that card's rows `in:khm`, and only a
+        whole-card recompute reaches them. Touches only rows whose union differs, so a re-import
+        that adds nothing writes nothing. See _build_in_tags_sql for the per-namespace rules.
+
+        Args:
+        ----
+            conn (Connection): open connection; committed here once per chunk.
+
+        Returns:
+        -------
+            int: rows whose card_in_tags changed.
+
+        """
+        updated_count = 0
+        sync_sql = _build_in_tags_sql()
+        with conn.cursor() as cursor:
+            for chunk_index in range(_IN_TAGS_SYNC_CHUNK_COUNT):
+                cursor.execute(
+                    sync_sql,
+                    {
+                        "num_chunks": _IN_TAGS_SYNC_CHUNK_COUNT,
+                        "chunk_index": chunk_index,
+                    },
+                )
+                updated_count += cursor.rowcount
+                conn.commit()
+        if updated_count:
+            logger.info("Synced in: tags on %d printings", updated_count)
+        return updated_count
+
     def _add_is_tag_to_printings(self, *, is_tag: str) -> dict[str, Any]:
         """Add a specific is: tag to all printings matching that tag using Scryfall search.
 
@@ -1240,7 +1360,9 @@ class AdminResource:
                         list(page),
                         schema="magic",
                         conflict_target=["scryfall_id"],
-                        skip_columns=["card_oracle_tags", "card_art_tags", "card_is_tags"],
+                        # card_in_tags is import-derived too (_sync_in_tags), so a re-import of one
+                        # printing must not reset the union its siblings contributed to.
+                        skip_columns=["card_oracle_tags", "card_art_tags", "card_is_tags", "card_in_tags"],
                     )
                     cards_sent += len(page)
                     cards_inserted += batch["inserted"]
@@ -1256,6 +1378,7 @@ class AdminResource:
 
                 if cards_sent:
                     self._sync_boolean_is_tags(conn)
+                    self._sync_in_tags(conn)
 
                 if cards_sent == 0:
                     if stream.raw == 0:

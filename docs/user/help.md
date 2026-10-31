@@ -131,6 +131,13 @@ set:MH2
 set:DMU
 ```
 
+`set:` matches the printings in that set. `in:` matches cards that have *ever* been printed in a set, set type, game, language, or rarity (also a frame year, `foil`/`nonfoil`, or `booster`), and returns all of their printings -- so `in:khm` finds every printing of every card that appeared in Kaldheim, while `set:khm` finds only the Kaldheim printings.
+
+```
+in:khm
+-in:paper
+```
+
 ### Price
 
 Use `usd` or `eur` with a comparison operator.

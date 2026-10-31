@@ -165,6 +165,7 @@ class CardAttributeNode(AttributeNode):
             "card_border": "border",
             "card_watermark": "watermark",
             "released_at": "release date",
+            "card_in_tags": "ever printed in",
             "collector_number": "collector number",
             "price_usd": "price (USD)",
             "price_eur": "price (EUR)",
@@ -322,6 +323,21 @@ def get_is_tags_comparison_object(val: str) -> dict[str, bool]:
     # is: tags are stored in lowercase
     normalized_tag = val.strip().lower()
     return {normalized_tag: True}
+
+
+def get_in_tags_comparison_object(val: str) -> dict[str, bool]:
+    """Convert an in: value to the containment object for card_in_tags.
+
+    Lower-cased: `in:KHM`, `in:Rare` and `in:JA` are all honored on api.scryfall.com
+    (2026-09-03), and every word _sync_in_tags stores is lower-case.
+
+    Args:
+        val: in: value (set code, set type, game, language, rarity, frame year, finish, booster).
+
+    Returns:
+        Dictionary mapping the normalized value to True.
+    """
+    return {val.strip().lower(): True}
 
 
 def get_legality_comparison_object(val: str, attr: str) -> dict[str, str]:
@@ -546,7 +562,7 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
 
         return {"lhs": self.lhs.to_json(), "op": self.operator, "rhs": self._rhs_to_json()}
 
-    def _rhs_to_json(self) -> object:  # noqa: PLR0912
+    def _rhs_to_json(self) -> object:  # noqa: PLR0911, PLR0912
         """Compute the JSON-serializable rhs for non-JSONB_ARRAY CardAttributeNode LHS."""
         if not self.lhs.field_infos:
             return _node_to_json(self.rhs)
@@ -571,6 +587,8 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
                 return list(get_art_tags_comparison_object(val).keys())
             if attr == "card_is_tags":
                 return list(get_is_tags_comparison_object(val).keys())
+            if attr == "card_in_tags":
+                return list(get_in_tags_comparison_object(val).keys())
             if attr == "card_legalities":
                 return list(get_legality_comparison_object(val, self.lhs.original_attribute).keys())
 
@@ -1063,6 +1081,9 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         elif attr == "card_is_tags":
             # is: tags are stored in lowercase, similar to oracle tags
             rhs = get_is_tags_comparison_object(self.rhs.value.strip())
+            placeholder = context.add(rhs)
+        elif attr == "card_in_tags":
+            rhs = get_in_tags_comparison_object(self.rhs.value.strip())
             placeholder = context.add(rhs)
         elif attr == "card_legalities":
             # Handle legality searches - need original search attribute for status mapping
