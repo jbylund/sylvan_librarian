@@ -134,3 +134,67 @@ def test_rejected_color_names_still_fail(invalid_query: str) -> None:
 def test_every_alias_spells_only_color_codes() -> None:
     """Every entry in the table expands to letters `get_colors_comparison_object` can read."""
     assert all(set(codes) <= set("wubrgc") for codes in COLOR_ALIAS_TO_CODES.values())
+
+
+# ── slash-delimited colour values ────────────────────────────────────────────
+#
+# `/.../` is NOT a regex on a colour column. Scryfall reads it as ordinary value text with the
+# delimiters skipped, and every pair below is an exact equality measured on api.scryfall.com
+# 2026-08-28 — pinned as a TREE identity rather than as a count, which is the stronger claim:
+# not merely "answers something", but "is that query".
+#
+# The discriminating evidence is the failure mode, which quotes the term AS TYPED and names the
+# letter from WITHOUT the slashes: `c:/xyz/` is `400 All of your terms were ignored.` with
+# `Invalid expression "c:/xyz/" was ignored. Unknown color "x"`, the same sentence `c:xyz` gets.
+# A regex reading has nothing to say about `/white/` or `/yore-tiller/` at all.
+SLASHED_COLOR_CASES = [
+    ("c:/w/", "c:w", "7,105"),
+    ("c:/wu/", "c:wu", "718"),
+    ("c:/white/", "c:white", "7,105"),
+    ("c:/yore-tiller/", "c:yore-tiller", "62"),
+    ("color:/w/", "color:w", "7,105"),
+    ("colour:/w/", "colour:w", "7,105"),
+    ("colors:/w/", "colors:w", "7,105"),
+    ("colours:/w/", "colours:w", "7,105"),
+    ("id:/w/", "id:w", "7,993"),
+    ("identity:/w/", "identity:w", "7,993"),
+    ("ci:/w/", "ci:w", "7,993"),
+    ("commander:/w/", "commander:w", "7,993"),
+    ("produces:/g/", "produces:g", "1,274"),
+    ("c>=/w/", "c>=w", "—"),
+]
+
+
+@pytest.mark.parametrize(
+    argnames=["slashed", "plain", "scryfall_count"],
+    argvalues=SLASHED_COLOR_CASES,
+    ids=[s for s, _, _ in SLASHED_COLOR_CASES],
+)
+def test_slashed_color_value_is_the_undelimited_query(parse_query, slashed: str, plain: str, scryfall_count: str) -> None:
+    """The delimited spelling parses to exactly the same AST as the plain one (both parsers)."""
+    assert scryfall_count  # documentation, carried so the measured number lives beside the case
+    assert parse_query(slashed) == parse_query(plain)
+
+
+@pytest.mark.parametrize(
+    argnames=["slashed", "plain", "scryfall_count"],
+    argvalues=SLASHED_COLOR_CASES,
+    ids=[s for s, _, _ in SLASHED_COLOR_CASES],
+)
+def test_slashed_color_value_generates_the_same_sql(slashed: str, plain: str, scryfall_count: str) -> None:
+    """...and the SQL path answers it as a value too, so the fallback cannot diverge."""
+    assert scryfall_count
+    assert generate_sql_query(parse_scryfall_query(slashed)) == generate_sql_query(parse_scryfall_query(plain))
+    assert generate_sql_query(parse_with_pyparsing(slashed)) == generate_sql_query(parse_scryfall_query(plain))
+
+
+@pytest.mark.parametrize(
+    argnames="invalid_query",
+    argvalues=["c:/xyz/", "id:/xyz/", "produces:/xyz/", "c:/azorius-senate/"],
+)
+def test_slashed_color_value_fails_like_the_undelimited_one(invalid_query: str) -> None:
+    """The delimiters buy no leniency: an unknown colour is still a parse error, not a regex."""
+    with pytest.raises(ValueError, match="Failed to parse query"):
+        parse_scryfall_query(invalid_query)
+    with pytest.raises(ValueError, match=r"Parse error|Failed to parse query"):
+        parse_with_pyparsing(invalid_query)

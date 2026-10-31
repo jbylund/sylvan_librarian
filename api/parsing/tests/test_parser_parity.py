@@ -155,3 +155,66 @@ def test_reserved_word_as_value_parity(query: str) -> None:
     value position, so e.g. 'o:or' silently lost its value and became 'o: OR'.
     """
     assert_parsers_agree(query)
+
+
+# ── mana:/…/ is a REGEX over the printed cost string ─────────────────────────
+#
+# Not, as the slash form's colour twin is, a value with the delimiters skipped. `mana:` is not on
+# https://scryfall.com/docs/regular-expressions' keyword list; the page is incomplete, and these
+# rows are what settles it — every one measured on api.scryfall.com 2026-08-28, and every one a
+# result a pip-multiset reading cannot produce:
+#
+#   mana:/^{2}/   400 "Invalid regular expression: quantifier operand invalid." (it COMPILED it)
+#   mana:/g|w/ mv=1  1,276    alternation, which is not a mana symbol
+#   mana:/[wu]/ mv=1 1,193    a character class, likewise
+#   mana:/}{/       26,815    every multi-symbol cost, a pure string artefact
+#   mana:/rr/          404    because "{R}{R}" has no "rr" in it
+#   mana:/2/         8,315    the CHARACTER, against mana:2's 19,692
+#   mana:/^$/        1,350    the cards with no mana cost at all
+#   mana:/^{r}$/       526    anchored, against mana:{r}'s 6,852
+#   mana:/ /           435    = mana:/\/\// — a split cost is "{1}{R} // {1}{U}"
+MANA_REGEX_ACCEPTED = [
+    "mana:/p/",
+    "mana:/}{/",
+    "mana:/rr/",
+    "mana:/^$/",
+    "mana:/^{r}$/",
+    r"mana:/\smh/",
+    "mana:/g|w/",
+    "mana:/[wu]/",
+    "mana=/{r}/",
+    "m:/rr/",
+    "m=/2/",
+]
+
+# The scope is `mana`/`m` and `:`/`=`, because Scryfall's is: elsewhere the slashes go back to
+# being value characters and its symbol lexer quotes them back — `mana!=/^tap/` is `Unknown mana
+# symbols "/^TAP/"`, `mana>=/{r}/` is `Unknown mana symbols "//"`, and `devotion:/r/` is `Unknown
+# regular expression keyword "devotion"` while `devotion:{r}` still answers 5,290.
+MANA_REGEX_REFUSED = ["mana>=/{r}/", "mana!=/^tap/", "mana</{r}/", "mana<=/{r}/", "devotion:/r/", "devotion=/r/"]
+
+
+@pytest.mark.parametrize(argnames=["query"], argvalues=[[q] for q in MANA_REGEX_ACCEPTED], ids=MANA_REGEX_ACCEPTED)
+def test_mana_regex_parity(query: str) -> None:
+    """Both parsers read `mana:/…/` as a pattern, and both emit the same `mana_cost_text ~*` SQL."""
+    assert_parsers_agree(query)
+
+
+@pytest.mark.parametrize(argnames=["query"], argvalues=[[q] for q in MANA_REGEX_REFUSED], ids=MANA_REGEX_REFUSED)
+def test_mana_regex_scope_parity(query: str) -> None:
+    """Outside the scope both parsers refuse, rather than one of them inventing a reading."""
+    assert_parsers_agree(query)
+    with pytest.raises(ValueError, match="Failed to parse query"):
+        parse_scryfall_query(query)
+
+
+def test_mana_regex_reaches_the_cost_text_column() -> None:
+    """The SQL fallback runs the pattern against `mana_cost_text`, the same string the engine reads.
+
+    Without this the pattern falls into `mana_cost_str_to_dict`, which finds no symbols in it and
+    emits the vacuously true `'{}'::jsonb <@ mana_cost_jsonb AND cmc >= 0` — every card, and the
+    filter silently gone.
+    """
+    sql, params = generate_sql_query(parse_scryfall_query("mana:/^{r}$/"))
+    assert "card.mana_cost_text ~* " in sql
+    assert list(params.values()) == ["^{r}$"]

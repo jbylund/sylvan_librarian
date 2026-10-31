@@ -6,7 +6,7 @@ import pytest
 
 from api.parsing import parse_scryfall_query
 from api.parsing.query_budget import QUERY_REGEX_REJECTED_MESSAGE, InvalidRegexPatternError, QueryBudgetExceeded
-from api.parsing.regex_budget import MAX_PATTERN_UTF8_BYTES, MAX_REGEX_LEAVES_PER_QUERY
+from api.parsing.regex_budget import MAX_PATTERN_UTF8_BYTES, MAX_REGEX_LEAVES_PER_QUERY, _translate_are_escapes
 
 
 class TestRegexBudgetAcceptsLegitPatterns:
@@ -79,6 +79,125 @@ class TestRegexPatternLimits:
 
     def test_accepts_escaped_lookaround_literal(self) -> None:
         parse_scryfall_query(r"o:/\(\?=not a lookaround/")
+
+
+class TestAreWordBoundaryEscapes:
+    """`o:/.../` is PostgreSQL ARE, whose word boundaries Python's `re` cannot parse.
+
+    The budget measures patterns with `re._parser`, so without the same rewrite the
+    engine applies (`card_engine/src/regex_compat.rs`) every one of these would be
+    rejected at parse time as a malformed pattern -- a documented operator turned
+    into a user-visible error by its own security check.
+    """
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            r"o:/\yizzet\y/",
+            r"o:/\Ynot a boundary/",
+            r"name:/\mizzet\M/",
+            r"o:/lifelink\Z/",
+        ],
+    )
+    def test_accepts_are_escapes(self, query: str) -> None:
+        parse_scryfall_query(query)
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            r"o:/[\d]\yizzet\y/",
+            # `]` in the first position is a literal member (POSIX), so it does not
+            # close the class -- the `\y` after the real `]` is the one to rewrite.
+            r"o:/[]a]\yx/",
+            r"o:/[^]a]\mx/",
+        ],
+    )
+    def test_rewrite_reads_bracket_expressions(self, query: str) -> None:
+        # Inside `[...]` an escape is an ordinary member, not a constraint, so the
+        # rewrite must skip the class and resume after it. Verified against the
+        # engine's copy: both spell these the same way.
+        parse_scryfall_query(query)
+
+    def test_a_word_boundary_escape_inside_a_class_stays_malformed(self) -> None:
+        # `[\y]` is not a bracket expression either engine accepts -- the rewrite
+        # passes it through rather than inventing a meaning, and it fails here
+        # exactly as `CompiledRegex::new` fails on it.
+        with pytest.raises(InvalidRegexPatternError):
+            parse_scryfall_query(r"o:/[\y]lit/")
+
+    def test_word_start_escapes_spend_lookaround_budget(self) -> None:
+        # `\m` has no linear spelling: it becomes lookaround on the engine, which is
+        # exactly what the lookaround cap is there to bound. Three of them is six
+        # lookarounds, past MAX_LOOKAROUNDS_PER_PATTERN.
+        with pytest.raises(QueryBudgetExceeded) as exc_info:
+            parse_scryfall_query(r"o:/\ma\mb\mc/")
+        assert exc_info.value.kind == "regex_pattern"
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            # `\X20` is `\x20` once folded; Python's `re` has no `\X` and called it a bad escape.
+            r"o:/destroy\X20target/",
+            # `\Sm` is the `\sm` mana-symbol shorthand once folded, a literal token each. Read with
+            # its case kept it is seventy non-whitespace classes, past MAX_REGEX_AST_NODES.
+            "o:/" + r"\Sm" * 70 + "/",
+        ],
+    )
+    def test_the_pattern_is_measured_lowercased(self, query: str) -> None:
+        # api.scryfall.com lowercases the query before it reads it and so does the engine
+        # (`fold_query_case` in card_engine/src/regex_compat.rs), so the pattern costed here
+        # has to be the folded one or a pattern the engine runs is refused at parse time.
+        parse_scryfall_query(query)
+
+    def test_end_of_text_survives_the_fold(self) -> None:
+        # `\Z` folds to `\z`, which the engine reads as end-of-text and `re` only learned in
+        # 3.14: it is measured as `\Z` rather than refused as a bad escape.
+        assert _translate_are_escapes(r"lifelink\Z".lower()) == r"lifelink\Z"
+        parse_scryfall_query(r"o:/lifelink\Z/")
+
+    def test_still_rejects_a_genuinely_bad_escape(self) -> None:
+        with pytest.raises(InvalidRegexPatternError):
+            parse_scryfall_query(r"o:/\q/")
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            r"o:/\ss/",
+            r"o:/\sm/",
+            r"o:/\sc/",
+            r"o:/\smh/",
+            r"o:/\smp/",
+            r"o:/\smr/",
+            r"o:/\spt/",
+            r"o:/\spp/",
+            r"o:/\smm/",
+            # Seven mana symbols in a row: measured through its expansion this would be 70 AST
+            # nodes and 35 alternations, past both caps. A shorthand costs one token.
+            r"o:/\sm\sm\sm\sm\sm\sm\sm/",
+            # `\smr` is the one that becomes a backreference on the engine, which
+            # `metrics.backreferences > 0` would reject if the expansion were what got measured.
+            r"o:/\smr\smr/",
+            # A quantifier still binds to the folded token, so the bound is still checked.
+            r"o:/\sm{3}/",
+        ],
+    )
+    def test_accepts_scryfall_shorthands(self, query: str) -> None:
+        parse_scryfall_query(query)
+
+    def test_a_quantified_shorthand_still_spends_quantifier_budget(self) -> None:
+        # Folding the shorthand to one token must not fold away the `{n}` after it.
+        with pytest.raises(QueryBudgetExceeded) as exc_info:
+            parse_scryfall_query(r"o:/\sm{2000}/")
+        assert exc_info.value.kind == "regex_pattern"
+
+    def test_a_shorthand_inside_a_class_is_not_folded(self) -> None:
+        # Inside `[...]` nothing is rewritten, on either side of the seam: `[\sm]` is the class
+        # "whitespace or the letter m", which Python parses and the engine compiles unchanged.
+        parse_scryfall_query(r"o:/[\sm]/")
+
+    def test_a_bare_backslash_s_is_still_whitespace(self) -> None:
+        # `\s` followed by a letter that is not a shorthand suffix keeps its ordinary meaning.
+        parse_scryfall_query(r"o:/\sdraw/")
 
 
 class TestRegexOperatorCoverage:
