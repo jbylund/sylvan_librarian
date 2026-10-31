@@ -179,6 +179,42 @@ def import_oracle_tags(
     return result
 
 
+def import_scryfall_representatives(
+    conn_pool: psycopg_pool.ConnectionPool,
+    bulk_data_fetcher: ScryfallBulkDataFetcher,
+) -> dict:
+    """Replace magic.scryfall_representatives from the oracle_cards dump.
+
+    That dump is one card object per oracle_id, and the object IS the printing Scryfall shows for
+    the card -- so its ids are exactly the representative choices the prefer_score backfill pins to.
+
+    Written wholesale (DELETE + INSERT in one transaction) rather than diffed: the dump is the whole
+    truth each time, and a partial table would silently pin yesterday's choices for the cards that
+    moved. A failure here leaves the previous contents in place and the import continues -- the
+    backfill LEFT JOINs this table, so the worst case is scoring without the pin, never a failed
+    import.
+    """
+    start = time.monotonic()
+    logger.info("Downloading representative labels (oracle_cards)")
+    ids = [
+        card["id"]
+        for card in bulk_data_fetcher.stream_data_for_key(BulkDataKey.ORACLE_CARDS)
+        if card.get("id")
+    ]
+    if not ids:
+        logger.warning("oracle_cards yielded no ids; leaving scryfall_representatives unchanged")
+        return {"status": "error", "message": "no ids in oracle_cards", "representatives": 0}
+
+    with conn_pool.connection() as conn, conn.cursor() as cursor:
+        cursor.execute("DELETE FROM magic.scryfall_representatives")
+        cursor.executemany(
+            "INSERT INTO magic.scryfall_representatives (scryfall_id) VALUES (%s) ON CONFLICT DO NOTHING",
+            [(i,) for i in ids],
+        )
+    logger.info("Synced %d representative labels in %.2f seconds", len(ids), time.monotonic() - start)
+    return {"status": "success", "representatives": len(ids)}
+
+
 def import_art_tags(
     conn_pool: psycopg_pool.ConnectionPool,
     bulk_data_fetcher: ScryfallBulkDataFetcher,

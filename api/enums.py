@@ -20,6 +20,9 @@ class PreferOrder(enum.StrEnum):
     USD_LOW = enum.auto()
     USD_HIGH = enum.auto()
     PROMO = enum.auto()
+    # Scryfall's own printing preference (their representative first, then their prints-listing
+    # order) -- a separate score, not a reweighting of DEFAULT's.
+    SCRYFALL = enum.auto()
 
 
 class CardOrdering(enum.StrEnum):
