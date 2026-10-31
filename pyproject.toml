@@ -18,6 +18,7 @@ ignore = [
     "SIM117",
     "COM812", # trailing comma - enforced by ruff format
     "S311",   # random is fine for non-cryptographic use in this codebase
+    "ICN001", # prefer the unaliased module name (numpy, datetime) over np/dt-style aliases
 ]
 per-file-ignores = {"**/tests/**/*.py" = ["ANN001", "ANN201", "ANN401", "ARG001", "D101", "D102", "D103", "PLR2004", "PT004", "PT006", "S101"], "conftest.py" = ["ANN001", "ANN201", "ANN401", "ARG001", "D101", "D102", "D103", "PLR2004", "PT004", "PT006", "S101"], "api_worker.py" = ["PLC0415"], "**/scripts/**/*.py" = ["T201", "S603", "S607", "PTH123"]}
 
