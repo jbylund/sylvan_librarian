@@ -23,7 +23,7 @@ from pyparsing import (
 )
 
 from api.parsing.card_query_nodes import CardAttributeNode, ExactNameNode, to_card_query_ast
-from api.parsing.colors import COLOR_ALIAS_TO_CODES
+from api.parsing.colors import COLOR_ALIAS_TO_CODES, COLOR_COUNT_NAMES, COUNT_NAME_TO_COLUMN, count_name_rejected_for_column
 from api.parsing.db_info import (
     NUMERIC_CARD_ATTRIBUTES,
     PARSER_CLASS_TO_FIELD_INFOS,
@@ -316,14 +316,33 @@ def create_color_parsers() -> dict[str, ParserElement]:
     """
     # The same vocabulary the hand parser's _VALID_COLOR_NAMES draws from — one table, so a name
     # added for one parser cannot be missing from the other (test_parser_parity asserts they agree
-    # on validity, and a colour name accepted by only one of them is exactly that failure).
-    color_word = make_regex_pattern(COLOR_ALIAS_TO_CODES)
+    # on validity, and a colour name accepted by only one of them is exactly that failure). The
+    # column-specific names are in the word list too; which COLUMN accepts each of them is decided
+    # once the attribute is known, in _color_value_allowed_for_attribute.
+    color_word = make_regex_pattern({*COLOR_ALIAS_TO_CODES, *COLOR_COUNT_NAMES, *COUNT_NAME_TO_COLUMN})
     color_letter_pattern = Regex(r"[wubrgcWUBRGC]+")
-    color_value = color_word | color_letter_pattern
+    # Scryfall numeric color syntax: id>=3 / c=2 compare the NUMBER of colors in
+    # the field. A bare integer is a valid color value; the negative lookahead
+    # keeps mixed tokens like "2rr" or floats out (the hand parser rejects both).
+    color_count = Regex(r"\d+(?![\w.])").set_parse_action(lambda tokens: NumericValueNode(int(tokens[0])))
+    color_value = color_word | color_letter_pattern | color_count
 
     return {
         "color_value": color_value,
     }
+
+
+def _color_value_allowed_for_attribute(tokens: list[object]) -> bool:
+    """Whether the colour value in a just-built colour condition is legal on that condition's column.
+
+    Only the column-specific count names can fail here (`any`, which counts on produced_mana alone);
+    everything else the grammar matched is a colour value on every colour column. The shared
+    predicate lives in `colors` so the hand parser answers this question identically.
+    """
+    node = tokens[0]
+    if not isinstance(node.lhs, CardAttributeNode) or not isinstance(node.rhs, StringValueNode):
+        return True
+    return not count_name_rejected_for_column(node.rhs.value, node.lhs.attribute_name)
 
 
 def create_all_condition_parsers(basic_parsers: dict, mana_parsers: dict, color_parsers: dict) -> dict[str, ParserElement]:
@@ -382,6 +401,12 @@ def create_all_condition_parsers(basic_parsers: dict, mana_parsers: dict, color_
     mana_condition = create_condition_parser(mana_attr_word, mana_value_or_string, operators=EQ_ALIAS_OPERATORS)
 
     color_condition = create_condition_parser(color_attr_word, color_value | quoted_string, operators=EQ_ALIAS_OPERATORS)
+    # One colour word is column-specific, so the grammar alone cannot decide whether the value is
+    # legal: `any` is a produced_mana count and nothing else, and Scryfall rejects `c:any` / `id:any`
+    # outright. The condition runs after the node is built, where the attribute is known, and fails
+    # the alternative the same way an unmatched value would -- which is what keeps the rejection
+    # identical to the hand parser's, down to the "Failed to parse query" the caller sees.
+    color_condition.add_condition(_color_value_allowed_for_attribute)
 
     regex_pattern = basic_parsers["regex_pattern"]
     rarity_condition = create_condition_parser(rarity_attr_word, quoted_string | string_value_word, operators=EQ_ALIAS_OPERATORS)
