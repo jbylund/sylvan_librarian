@@ -345,13 +345,17 @@ def expand_derived_predicates(query: Query) -> Query:
 
 
 def _operand_dedup_key(node: QueryNode) -> tuple:
-    """Hashable key for order-insensitive dedup within one AND/OR operand list."""
+    """Hashable key for order-insensitive dedup within one AND/OR operand list.
+
+    A leaf is keyed by the node itself, not its hash: every leaf class defines ``__eq__`` alongside
+    ``__hash__``, so set membership compares structurally and a hash collision cannot drop an operand.
+    """
     cls = node.__class__
     if cls is AndNode or cls is OrNode:
         return (cls.__name__, frozenset(_operand_dedup_key(op) for op in node.operands))
     if cls is NotNode:
         return ("NotNode", _operand_dedup_key(node.operand))
-    return ("leaf", hash(node))
+    return ("leaf", node)
 
 
 def _deduplicate_operand_list(operands: list[QueryNode]) -> list[QueryNode]:
