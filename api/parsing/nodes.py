@@ -190,6 +190,9 @@ class BinaryOperatorNode(QueryNode):
             "!=",
             "*",
             "/",
+            # The remainder, which the lexer never produces: the parser writes it for `mv:even`
+            # and `mv:odd` (see hand_parser._MANA_VALUE_PARITY), and nothing else reaches it.
+            "%",
             "+",
             "<",
             "<=",
@@ -211,6 +214,14 @@ class BinaryOperatorNode(QueryNode):
         sql_operator = self.operator
         if sql_operator == ":":
             sql_operator = "="
+        if sql_operator == "%":
+            # The remainder is taken by `mod` over `numeric`, for two reasons. PostgreSQL defines
+            # `%` for the integer types and `numeric` only, and a mana value is `real` -- a half
+            # is a mana value -- so `card.cmc % 2` is "operator does not exist: real % integer".
+            # And the statement runs with named parameters, where a bare `%` opens a placeholder.
+            # `0.5::numeric` is exactly a half, so a fractional mana value is neither remainder
+            # here as it is neither in the engine.
+            return f"mod(({self.lhs.to_sql(context)})::numeric, {self.rhs.to_sql(context)})"
         return f"({self.lhs.to_sql(context)} {sql_operator} {self.rhs.to_sql(context)})"
 
     def to_human_explanation(self: BinaryOperatorNode) -> str:

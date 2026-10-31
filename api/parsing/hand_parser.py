@@ -51,6 +51,39 @@ _DUAL_NUM_TEXT: frozenset[str] = frozenset(
 
 _NUMERIC_ALIASES: frozenset[str] = frozenset(alias for alias, pc in _ALIAS_TO_PC.items() if pc == ParserClass.NUMERIC)
 
+# The spellings of mana value -- every alias db_info maps onto the `cmc` column, so a spelling
+# added there takes `even`/`odd` on the same commit.
+_MANA_VALUE_ALIASES: frozenset[str] = frozenset(
+    alias.lower()
+    for alias, fis in ALIAS_TO_FIELD_INFOS.items()
+    if any(fi.parser_class == ParserClass.NUMERIC and fi.db_column_name.lower() == "cmc" for fi in fis)
+)
+
+# `mv:even` and `mv:odd` -- the two WORDS Scryfall takes where a mana value goes, and the
+# remainder each one asks of `mana value mod 2`.
+#
+# Measured on api.scryfall.com 2026-10-03, corpus 33,649 (`mv>=0`):
+#
+#   mv:even  17,331   = cmc:even = manavalue=even = mv=even = mv:EVEN = mv:"even"
+#   mv:odd   16,317   = manavalue:odd = mv=odd = cmc=odd
+#   mv:even or mv:odd   33,648 -- one short, and `-(mv:even or mv:odd)` is the one: Little Girl,
+#                       whose mana value is 0.5 and is NEITHER (`mv:even mv=0.5` and
+#                       `mv:odd mv=0.5` are both 404)
+#
+# It is the CARD's mana value, the same one `mv=` compares: a land is even (`mv:even mv=0` is all
+# 1,432 of `mv=0`), Fire // Ice is even on its joined 4, Delver of Secrets is odd on its front's
+# 1, the meld result Brisela is odd on its own 11, and Fireball's X is 0 so it is odd on the 1.
+#
+# So it is lowered to arithmetic the engine already evaluates -- `(mv % 2) = 0` -- rather than
+# given a node of its own: a half is neither remainder, a card with no mana value is neither, and
+# negation, `or` and the planner's joint-tuple narrowing all compose as they do for `cmc+1<pow`.
+# `%` is NOT lexed: nothing a user types reaches it but these two words.
+#
+# `:` and `=` only. Under `>` `>=` `<` `<=` `!=` Scryfall keeps the term and matches nothing
+# (`mv>even` 404, `-mv>even` 33,649), which is not a parity at all, and here it stays the parse
+# error it was.
+_MANA_VALUE_PARITY: dict[str, int] = {"even": 0, "odd": 1}
+
 # On Scryfall '!' is an alias for '=' on these classes only (verified live, #903 cause C) — on
 # TEXT/LEGALITY it isn't an operator at all, and a trailing bang there falls through to the
 # existing exact-name-prefix reading of the next factor instead.
@@ -509,6 +542,9 @@ class Parser:
             if next_tok.type in (TT.OP, TT.BANG):
                 op = "=" if next_tok.type == TT.BANG else next_tok.value
                 self.consume()
+                parity = self._parse_mana_value_parity(wl, op)
+                if parity is not None:
+                    return parity
                 return CardBinaryOperatorNode(CardAttributeNode(wl, ParserClass.NUMERIC), op, self.parse_num_expr_value())
             if next_tok.type in _ARITH_OPS and not next_tok.space_before:
                 lhs = self._arith_tail(CardAttributeNode(wl, ParserClass.NUMERIC))
@@ -538,6 +574,29 @@ class Parser:
 
         # ── unknown alias → implicit name, possibly hyphenated ──
         return self.parse_hyphenated_name(word)
+
+    def _parse_mana_value_parity(self, alias: str, op: str) -> QueryNode | None:
+        """`mv:even` / `mv:odd`, lowered to `(mv % 2) = 0|1`; None when the value is anything else.
+
+        Called with the operator already consumed, and consumes the word only when it IS one of
+        the two -- so every other value falls through to the numeric expression parser untouched.
+        A quoted word is the same word (`mv:"even"` is 17,331 on api.scryfall.com, as `mv:even`
+        is). See _MANA_VALUE_PARITY for the measurements.
+        """
+        if op not in (":", "=") or alias not in _MANA_VALUE_ALIASES:
+            return None
+        tok = self.peek()
+        if tok.type not in (TT.WORD, TT.QUOTED):
+            return None
+        remainder = _MANA_VALUE_PARITY.get(str(tok.value).lower())
+        if remainder is None:
+            return None
+        self.consume()
+        return CardBinaryOperatorNode(
+            CardBinaryOperatorNode(CardAttributeNode(alias, ParserClass.NUMERIC), "%", NumericValueNode(2)),
+            "=",
+            NumericValueNode(remainder),
+        )
 
     def parse_number_primary(self) -> QueryNode:
         """Parse a bare numeric literal, optionally followed by an arithmetic tail and comparison."""
