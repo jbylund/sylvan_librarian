@@ -37,7 +37,8 @@ from typing import TYPE_CHECKING
 import pytest
 
 from api.parsing import parse_scryfall_query
-from card_engine import QueryEngine, UnknownFieldError
+from api.parsing.db_info import CHEAPEST_NEGATED_TERM, CHEAPEST_SHIFTS, CHEAPEST_TERM, CHEAPEST_UNKNOWN
+from card_engine import ENGINE_COLUMNS, QueryEngine, UnknownFieldError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
@@ -318,6 +319,283 @@ class TestFilters:
         # Finks (6) + Monastery Messenger (1) + Cathedral Membrane (1)
         assert total == 28
         assert all(c["name"] != "Serra Angel" for c in cards)
+
+
+@pytest.fixture(scope="module", name="counted")
+def counted_fixture(fresh_engine: Callable[[], QueryEngine]) -> QueryEngine:
+    """The fixture store with the count columns stamped on four cards, as `_sync_print_counts` would."""
+    rows = json.loads(_FIXTURE.read_text())
+    per_card = {
+        # Each tuple is prints, sets, paperprints, papersets, illustrations.
+        "Black Lotus": (5, 5, 5, 5, 1),
+        "Sol Ring": (5, 4, 3, 2, 5),
+        "Lightning Bolt": (10, 9, 10, 9, 4),
+        # A digital-only card: zero is a value.
+        "Shivan Dragon": (5, 5, 0, 0, 2),
+    }
+    seen: dict[str, int] = {}
+    for row in rows:
+        name = row["card_name"]
+        nth = seen[name] = seen.get(name, 0) + 1
+        if name in per_card:
+            (
+                row["card_print_count"],
+                row["card_set_count"],
+                row["card_paper_print_count"],
+                row["card_paper_set_count"],
+                row["card_illustration_count"],
+            ) = per_card[name]
+            # The first printing of each credits two artists, the second none, the rest one.
+            row["artist_count"] = {1: 2, 2: 0}.get(nth, 1)
+    e = fresh_engine()
+    e.reload([{column: row.get(column) for column in ENGINE_COLUMNS} for row in rows])
+    return e
+
+
+class TestCountKeywords:
+    """`prints`, `sets`, `paperprints`, `papersets`, `illustrations` and `artists` through the parser.
+
+    The engine does not count anything: the six numbers are columns `_sync_print_counts` writes at
+    import and ENGINE_COLUMNS selects. The fixture rows predate the columns, so the counts are
+    stamped on here the way the sync would -- five identical on every row of a card, one per row.
+    """
+
+    def test_the_count_columns_are_selected_for_the_engine(self) -> None:
+        """A Rust field is inert until ENGINE_COLUMNS selects its column."""
+        for column in (
+            "card_print_count",
+            "card_set_count",
+            "card_paper_print_count",
+            "card_paper_set_count",
+            "card_illustration_count",
+            "artist_count",
+        ):
+            assert column in ENGINE_COLUMNS
+
+    @pytest.mark.parametrize(
+        ("query", "expected"),
+        [
+            ("prints=5", {"Black Lotus", "Sol Ring", "Shivan Dragon"}),
+            ("prints:10", {"Lightning Bolt"}),
+            ("prints>=5", {"Black Lotus", "Sol Ring", "Shivan Dragon", "Lightning Bolt"}),
+            ("prints>5", {"Lightning Bolt"}),
+            ("prints<10", {"Black Lotus", "Sol Ring", "Shivan Dragon"}),
+            ("prints!=5", {"Lightning Bolt"}),
+            ("sets=4", {"Sol Ring"}),
+            ("sets>=5", {"Black Lotus", "Shivan Dragon", "Lightning Bolt"}),
+            ("paperprints=3", {"Sol Ring"}),
+            ("papersets=2", {"Sol Ring"}),
+            # Zero is a value: the digital-only card, and only it.
+            ("paperprints=0", {"Shivan Dragon"}),
+            ("papersets=0", {"Shivan Dragon"}),
+            ("illustrations=1", {"Black Lotus"}),
+            ("illustrations>=4", {"Sol Ring", "Lightning Bolt"}),
+            # A column on either side.
+            ("prints>sets", {"Sol Ring", "Lightning Bolt"}),
+            ("prints=sets", {"Black Lotus", "Shivan Dragon"}),
+            ("prints>paperprints", {"Sol Ring", "Shivan Dragon"}),
+            ("illustrations>=prints", {"Sol Ring"}),
+            ("cmc<prints", {"Black Lotus", "Sol Ring", "Lightning Bolt"}),
+            # Composed with another term.
+            ("prints>=5 t:artifact", {"Black Lotus", "Sol Ring"}),
+        ],
+    )
+    def test_card_level_counts(self, counted: QueryEngine, query: str, expected: set[str]) -> None:
+        _, cards = _run(counted, query, unique="card")
+        assert set(_names(cards)) == expected
+
+    def test_an_uncounted_card_is_null(self, counted: QueryEngine) -> None:
+        """Rows the sync has not reached hold NULL: neither the comparison nor its negation."""
+        counted_names = {"Black Lotus", "Sol Ring", "Lightning Bolt", "Shivan Dragon"}
+        for keyword in ("prints", "sets", "paperprints", "papersets", "illustrations", "artists"):
+            _, cards = _run(counted, f"{keyword}>=0", unique="card")
+            assert set(_names(cards)) == counted_names, keyword
+            total, _ = _run(counted, f"-{keyword}>=0", unique="card")
+            assert total == 0, keyword
+
+    def test_artists_is_the_printings_own_count(self, counted: QueryEngine) -> None:
+        # One printing of each of the four counted cards credits two artists, one credits none.
+        total, cards = _run(counted, "artists=2")
+        assert total == 4
+        assert sorted(_names(cards)) == ["Black Lotus", "Lightning Bolt", "Shivan Dragon", "Sol Ring"]
+        assert _run(counted, "artists=0")[0] == 4
+        assert _run(counted, "artists=1")[0] == 5 + 5 + 10 + 5 - 8
+        assert _run(counted, "artists=3")[0] == 0
+        # Under unique=card a card matches when some printing of it does.
+        assert _run(counted, "artists=2", unique="card")[0] == 4
+        # The card-level counts, by contrast, are the same on every printing of the card.
+        assert _run(counted, "prints=10")[0] == 10
+        assert _run(counted, "artists>=prints")[0] == 0
+
+
+def _cheapest_codes(usd: int, eur: int, tix: int) -> int:
+    """`cheapest_codes` as `_sync_cheapest_codes` packs it, from the PYTHON copy of the bit layout."""
+    return usd << CHEAPEST_SHIFTS["usd"] | eur << CHEAPEST_SHIFTS["eur"] | tix << CHEAPEST_SHIFTS["tix"]
+
+
+_BOTH = CHEAPEST_TERM | CHEAPEST_NEGATED_TERM
+
+
+@pytest.fixture(scope="module", name="priced")
+def priced_fixture(fresh_engine: Callable[[], QueryEngine]) -> QueryEngine:
+    """The fixture store with `cheapest_codes` stamped on two cards, as `_sync_cheapest_codes` would.
+
+    Lightning Bolt's ten printings (in fixture order):
+      1     usd: the plain price is the lowest; eur: only the foil price is (in both lists); tix: the lowest
+      2     usd: not the lowest; eur: priced both ways, neither the lowest (in neither list); tix: not
+      3     usd: only the foil price is the lowest (in both lists); eur, tix: not
+      4-10  not the lowest in any currency
+    Black Lotus's five: priced, and the card has no lowest price in usd or eur (NULL); unpriced in tix.
+    Every other row keeps a NULL column -- the sync has not reached it.
+    """
+    rows = json.loads(_FIXTURE.read_text())
+    bolt = {
+        1: _cheapest_codes(CHEAPEST_TERM, _BOTH, CHEAPEST_TERM),
+        2: _cheapest_codes(CHEAPEST_NEGATED_TERM, 0, CHEAPEST_NEGATED_TERM),
+        3: _cheapest_codes(_BOTH, CHEAPEST_NEGATED_TERM, CHEAPEST_NEGATED_TERM),
+    }
+    seen = 0
+    for row in rows:
+        if row["card_name"] == "Lightning Bolt":
+            seen += 1
+            row["cheapest_codes"] = bolt.get(
+                seen, _cheapest_codes(CHEAPEST_NEGATED_TERM, CHEAPEST_NEGATED_TERM, CHEAPEST_NEGATED_TERM)
+            )
+        elif row["card_name"] == "Black Lotus":
+            row["cheapest_codes"] = _cheapest_codes(CHEAPEST_UNKNOWN, CHEAPEST_UNKNOWN, CHEAPEST_NEGATED_TERM)
+    e = fresh_engine()
+    e.reload([{column: row.get(column) for column in ENGINE_COLUMNS} for row in rows])
+    return e
+
+
+class TestCheapest:
+    """`cheapest:usd` / `cheapest:eur` / `cheapest:tix` through the parser and the loader.
+
+    The engine decides nothing: the answers are one smallint `_sync_cheapest_codes` writes at
+    import and ENGINE_COLUMNS selects. The codes are packed here with the Python constants
+    (api/parsing/db_info.py) and read by the Rust ones, so this is also what pins the two copies
+    of the bit layout to each other.
+    """
+
+    def test_the_codes_column_is_selected_for_the_engine(self) -> None:
+        """A Rust field is inert until ENGINE_COLUMNS selects its column."""
+        assert "cheapest_codes" in ENGINE_COLUMNS
+
+    @pytest.mark.parametrize(
+        ("query", "total"),
+        [
+            # The term.
+            ("cheapest:usd", 2),
+            ("cheapest:eur", 1),
+            ("cheapest:tix", 1),
+            # Every word for a currency, any case, `=` as `:`.
+            ("cheapest:$", 2),
+            ("cheapest=dollar", 2),
+            ("CHEAPEST:USD", 2),
+            ("cheapest:euro", 1),
+            ("cheapest:€", 1),
+            ("cheapest:mtgo", 1),
+            # The negated TERM is its own answer: Bolt's printing 3 is in both dollar lists, its
+            # printing 2 in neither euro list.
+            ("-cheapest:usd", 9),
+            ("-cheapest:eur", 9),
+            ("-cheapest:tix", 9 + 5),
+            # The negated GROUP is the complement of whichever it wraps, and Black Lotus's NULL
+            # stays out of both.
+            ("-(cheapest:usd)", 8),
+            ("-(-cheapest:usd)", 1),
+            ("-(cheapest:eur)", 9),
+            ("-(-cheapest:eur)", 1),
+            ("-(cheapest:tix)", 9 + 5),
+            ("-(-cheapest:tix)", 1),
+            # A row the sync has not reached is in neither a term nor its complement.
+            ("cheapest:usd or -(cheapest:usd)", 10),
+            ("-cheapest:usd or -(-cheapest:usd)", 10),
+            ("cheapest:tix or -(cheapest:tix)", 10 + 5),
+            # Composed with other terms.
+            ("cheapest:usd cheapest:eur", 1),
+            ("cheapest:usd -cheapest:usd", 1),
+            ("cheapest:usd t:instant", 2),
+            ("cheapest:usd t:artifact", 0),
+            ("-cheapest:tix t:artifact", 5),
+        ],
+    )
+    def test_printings(self, priced: QueryEngine, query: str, total: int) -> None:
+        assert _run(priced, query)[0] == total
+
+    def test_under_unique_card_a_card_matches_when_some_printing_does(self, priced: QueryEngine) -> None:
+        assert set(_names(_run(priced, "cheapest:usd", unique="card")[1])) == {"Lightning Bolt"}
+        assert set(_names(_run(priced, "-cheapest:tix", unique="card")[1])) == {"Lightning Bolt", "Black Lotus"}
+        assert _run(priced, "cheapest:usd", unique="card")[0] == 1
+        # The unknown bit: Black Lotus answers no dollar question at all.
+        for query in ("cheapest:usd", "-cheapest:usd", "-(cheapest:usd)", "-(-cheapest:usd)"):
+            assert "Black Lotus" not in _names(_run(priced, query, unique="card")[1]), query
+
+
+@pytest.fixture(scope="module", name="firsts")
+def firsts_fixture(fresh_engine: Callable[[], QueryEngine]) -> QueryEngine:
+    """The fixture store with `new_rarity` stamped on two cards, as `_sync_new_rarity` would.
+
+    Lightning Bolt's ten printings (in fixture order): the 1st and the 4th are the first of their
+    card at their rarity, the rest are not. Black Lotus's five: the 1st is, the rest are not.
+    Every other row keeps a NULL column -- the sync has not reached it.
+    """
+    rows = json.loads(_FIXTURE.read_text())
+    seen = {"Lightning Bolt": 0, "Black Lotus": 0}
+    for row in rows:
+        name = row["card_name"]
+        if name in seen:
+            seen[name] += 1
+            row["new_rarity"] = seen[name] == 1 or (name == "Lightning Bolt" and seen[name] == 4)
+    e = fresh_engine()
+    e.reload([{column: row.get(column) for column in ENGINE_COLUMNS} for row in rows])
+    return e
+
+
+class TestNewRarity:
+    """`new:rarity` through the parser and the loader.
+
+    The engine decides nothing: the answer is one boolean `_sync_new_rarity` writes at import and
+    ENGINE_COLUMNS selects.
+    """
+
+    def test_the_column_is_selected_for_the_engine(self) -> None:
+        """A Rust field is inert until ENGINE_COLUMNS selects its column."""
+        assert "new_rarity" in ENGINE_COLUMNS
+
+    @pytest.mark.parametrize(
+        ("query", "total"),
+        [
+            ("new:rarity", 3),
+            # Every spelling of the term.
+            ("new=rarity", 3),
+            ("NEW:RARITY", 3),
+            ('new:"rarity"', 3),
+            # The negation is the plain complement of the computed rows; the rest are NULL.
+            ("-new:rarity", 12),
+            ("-(new:rarity)", 12),
+            ("-(-new:rarity)", 3),
+            # A row the sync has not reached is in neither the term nor its complement.
+            ("new:rarity or -new:rarity", 15),
+            ("new:rarity -new:rarity", 0),
+            # Composed with other terms.
+            ("new:rarity t:instant", 2),
+            ("new:rarity t:artifact", 1),
+            ("-new:rarity t:artifact", 4),
+        ],
+    )
+    def test_printings(self, firsts: QueryEngine, query: str, total: int) -> None:
+        assert _run(firsts, query)[0] == total
+
+    def test_under_unique_card_a_card_matches_when_some_printing_does(self, firsts: QueryEngine) -> None:
+        assert set(_names(_run(firsts, "new:rarity", unique="card")[1])) == {"Lightning Bolt", "Black Lotus"}
+        assert set(_names(_run(firsts, "-new:rarity", unique="card")[1])) == {"Lightning Bolt", "Black Lotus"}
+        assert _run(firsts, "new:rarity", unique="card")[0] == 2
+
+    @pytest.mark.parametrize("query", ["new:language", "new:art", "new:", "new>rarity", "new!=rarity"])
+    def test_a_value_that_is_not_answered_does_not_parse(self, firsts: QueryEngine, query: str) -> None:
+        with pytest.raises(ValueError, match="arse"):
+            _run(firsts, query)
 
 
 class TestArithmetic:

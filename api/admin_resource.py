@@ -46,6 +46,8 @@ from cachebox import TTLCache
 
 from api.card_processing import preprocess_card
 from api.db.bulk_upsert import bulk_upsert as _bulk_upsert
+from api.parsing.db_info import CHEAPEST_NEGATED_TERM, CHEAPEST_SHIFTS, CHEAPEST_TERM, CHEAPEST_UNKNOWN
+from api.release_batches import RELEASE_BATCHES
 from api.scryfall_bulk_data_fetcher import BulkDataKey, ScryfallBulkDataFetcher
 from api.settings import settings
 from api.tag_import import import_art_tags as _import_art_tags
@@ -197,6 +199,353 @@ WHERE
     cards.scryfall_id = proposed.scryfall_id AND
     cards.card_is_tags IS DISTINCT FROM proposed.proposed_is_tags
 """
+
+# Same chunking motive as _BOOLEAN_IS_TAGS_SYNC_CHUNK_COUNT, but by ORACLE id, not printing: a
+# per-card count is only chunkable if every row of a card lands in the same chunk.
+_PRINT_COUNTS_SYNC_CHUNK_COUNT = 4
+
+# The six columns _sync_print_counts maintains, in the order the statement writes them.
+PRINT_COUNT_COLUMNS = (
+    "card_print_count",
+    "card_set_count",
+    "card_paper_print_count",
+    "card_paper_set_count",
+    "card_illustration_count",
+    "artist_count",
+)
+
+
+def _build_print_counts_sql() -> str:
+    """Build the count-keyword sync statement: five per-card counts written onto every row of the card.
+
+    Scryfall's `prints`, `sets`, `paperprints`, `papersets` and `illustrations` each compare a
+    count over ALL of a card's printings, and `artists` a count on the printing itself. A SQL row
+    is one printing and the engine's `tri()` holds one card and one printing, so neither can count
+    siblings at query time; the numbers are decided here, once per import.
+
+    The rules, measured on api.scryfall.com 2026-10-03 and 2026-10-04 by reading every printing of
+    a card and binary-searching the value Scryfall holds (`!"Lightning Bolt" prints>=K`):
+
+    - `prints`: distinct (set, collector number) SLOTS -- not rows, so a slot printed in eleven
+      languages counts once -- over every printing, extras, promos and memorabilia included.
+    - A VARIATION is not a print. Embermage Goblin is ons/200 and the foil-only ons/200★, which
+      Scryfall marks `variation: true`, and is `prints=1`, `paperprints=1`. The slot is what is
+      skipped, when ANY row of it carries the flag: Monstrous Growth's por/173† is flagged in
+      four languages and not in Japanese, and the card is `prints=9` of its ten slots. Its
+      artwork and its set still count (`!"Embermage Goblin" illustrations=2`).
+    - `sets`: distinct set codes over every row (`sets=1` is `is:unique`).
+    - `paperprints` / `papersets`: the same two counts over the rows of PAPER SETS. The set
+      decides, not the row's own `games`: "Name Sticker" Goblin's only printing, unf/107m, is
+      `games: [mtgo]` in a paper set and is `paperprints=1`; Rakshasa Vizier's Arena-only
+      ktk/193y makes it 4, not 3. Zero is a value: a card printed only in digital sets is
+      `paperprints=0`.
+    - `illustrations`: distinct artworks; a printing with no illustration id contributes none.
+    - `artists`: how many artists the PRINTING credits, the length of its `artist_ids`.
+
+    A PAPER SET is one with any row on paper. That is Scryfall's `digital` flag on the Set object
+    read off the rows: over the 1,052 sets in the default_cards bulk file of 2026-10-03, "no card
+    of the set has paper in `games`" and `/sets`' `digital` agree on every one. Derived rather
+    than stored because this schema has no sets table.
+
+    They are counts over the rows this table holds, so they are exact for a card whose every
+    printing is imported and low by the printings `preprocess_card` drops.
+
+    Callers pass ``num_chunks`` and ``chunk_index`` as query parameters. Chunking is by
+    ``hashtext(oracle_id)`` rather than scryfall_id: the counts are per card, so every row of a
+    card must fall in the same chunk or a count taken inside a chunk would be partial. `paper_sets`
+    is the one CTE that is NOT chunked: whether a set is on paper is a fact about every card in
+    it. Rows with a NULL oracle_id (no card to belong to) keep NULL counts.
+
+    api/db/2026-10-04-01-print-counts.sql carries the same statement, unchunked, as its backfill.
+    """
+    columns = ", ".join(PRINT_COUNT_COLUMNS)
+    return f"""
+WITH paper_sets AS (
+    SELECT DISTINCT lower(cards.card_set_code) AS set_code
+    FROM magic.cards cards
+    WHERE COALESCE(cards.raw_card_blob->'games', '[]'::jsonb) ? 'paper'
+), card_rows AS (
+    SELECT
+        cards.oracle_id,
+        lower(cards.card_set_code) AS set_code,
+        cards.collector_number,
+        cards.illustration_id,
+        paper_sets.set_code IS NOT NULL AS in_paper_set,
+        bool_or(COALESCE(cards.raw_card_blob->>'variation', 'false') = 'true') OVER (
+            PARTITION BY cards.oracle_id, lower(cards.card_set_code), cards.collector_number
+        ) AS slot_is_variation
+    FROM magic.cards cards
+    LEFT JOIN paper_sets ON paper_sets.set_code = lower(cards.card_set_code)
+    WHERE cards.oracle_id IS NOT NULL
+      AND (abs(hashtext(cards.oracle_id::text)) %% %(num_chunks)s) = %(chunk_index)s
+), per_card AS (
+    SELECT
+        card_rows.oracle_id,
+        count(DISTINCT (card_rows.set_code, card_rows.collector_number))
+            FILTER (WHERE NOT card_rows.slot_is_variation) AS prints,
+        count(DISTINCT card_rows.set_code) AS sets,
+        count(DISTINCT (card_rows.set_code, card_rows.collector_number))
+            FILTER (WHERE NOT card_rows.slot_is_variation AND card_rows.in_paper_set) AS paper_prints,
+        count(DISTINCT card_rows.set_code) FILTER (WHERE card_rows.in_paper_set) AS paper_sets,
+        count(DISTINCT card_rows.illustration_id) AS illustrations
+    FROM card_rows
+    GROUP BY card_rows.oracle_id
+), proposed AS (
+    SELECT
+        cards.scryfall_id,
+        LEAST(per_card.prints, 32767)::smallint AS card_print_count,
+        LEAST(per_card.sets, 32767)::smallint AS card_set_count,
+        LEAST(per_card.paper_prints, 32767)::smallint AS card_paper_print_count,
+        LEAST(per_card.paper_sets, 32767)::smallint AS card_paper_set_count,
+        LEAST(per_card.illustrations, 32767)::smallint AS card_illustration_count,
+        LEAST(
+            CASE WHEN jsonb_typeof(cards.raw_card_blob->'artist_ids') = 'array'
+                 THEN jsonb_array_length(cards.raw_card_blob->'artist_ids') ELSE 0 END,
+            32767
+        )::smallint AS artist_count
+    FROM magic.cards cards
+    JOIN per_card ON per_card.oracle_id = cards.oracle_id
+)
+UPDATE magic.cards
+SET ({columns}) = (
+    proposed.card_print_count, proposed.card_set_count, proposed.card_paper_print_count,
+    proposed.card_paper_set_count, proposed.card_illustration_count, proposed.artist_count
+)
+FROM proposed
+WHERE
+    cards.scryfall_id = proposed.scryfall_id AND
+    ({", ".join(f"cards.{column}" for column in PRINT_COUNT_COLUMNS)})
+    IS DISTINCT FROM
+    ({", ".join(f"proposed.{column}" for column in PRINT_COUNT_COLUMNS)})
+"""
+
+
+# By ORACLE id for the same reason as _PRINT_COUNTS_SYNC_CHUNK_COUNT: a card's lowest price is only
+# its lowest if every row of the card is in the chunk that takes the minimum.
+_CHEAPEST_CODES_SYNC_CHUNK_COUNT = 4
+
+# A Scryfall price is a decimal string ("0.38") or null. Anything else is treated as no price
+# rather than cast, so one malformed blob cannot fail the import's sync.
+_PRICE_TEXT_PATTERN = r"^[0-9]+(\.[0-9]+)?$"
+
+
+def _blob_price_sql(key: str) -> str:
+    """SQL for `raw_card_blob.prices.<key>` as an exact numeric, NULL when absent."""
+    text = f"cards.raw_card_blob->'prices'->>'{key}'"
+    return f"CASE WHEN {text} ~ '{_PRICE_TEXT_PATTERN}' THEN ({text})::numeric END"
+
+
+def _cheapest_code_sql(plain: str, foil: str, minimum: str) -> str:
+    """SQL for one currency's three bits of `cheapest_codes` (see CHEAPEST_TERM in api/parsing/db_info.py)."""
+    return f"""CASE
+            WHEN {minimum} IS NULL THEN
+                CASE WHEN {plain} IS NOT NULL OR {foil} IS NOT NULL THEN {CHEAPEST_UNKNOWN} ELSE {CHEAPEST_NEGATED_TERM} END
+            ELSE
+                CASE WHEN {plain} = {minimum} OR {foil} = {minimum} THEN {CHEAPEST_TERM} ELSE 0 END
+                + CASE WHEN ({plain} IS NULL OR {plain} <> {minimum}) AND ({foil} IS NULL OR {foil} = {minimum})
+                       THEN {CHEAPEST_NEGATED_TERM} ELSE 0 END
+        END"""
+
+
+def _build_cheapest_codes_sql() -> str:
+    """Build the `cheapest:` sync statement: each printing's answers, against its card's lowest price.
+
+    Scryfall's `cheapest:usd`, `cheapest:eur` and `cheapest:tix` find the printings carrying their
+    card's lowest price. The lowest price is over the card's other printings, so neither a SQL
+    row nor the engine's `tri()` can decide it at query time; it is decided here, once per import,
+    and prices move on every import.
+
+    The rule, measured on api.scryfall.com 2026-10-04 by reading every priced printing, the three
+    `cheapest:` lists and the three `-cheapest:` lists, and simulating the rule on Scryfall's own
+    prices (108,901 of 108,901 rows agree per currency, in both polarities):
+
+    - M, the card's lowest price, is taken over its printings OUTSIDE MEMORABILIA SETS
+      (`set_type = 'memorabilia'`: World Championship decks, Collectors' Edition, 30th
+      Anniversary Edition), a printing's price being
+        usd   `prices.usd`, or `prices.usd_foil` when it has no plain price -- never `usd_etched`
+        eur   `prices.eur` alone: a foil-only printing does not enter M
+        tix   `prices.tix`
+    - `cheapest:usd` is `usd = M OR usd_foil = M`. Ties all match (eld/1 at 0.38 / 0.38). A foil
+      price EQUAL to M matches on a printing whose plain price does not (m21/130 at 0.20 / 0.03
+      beside roe/136's 0.03); a foil price BELOW the plain one does not lower M (khm/73 is
+      2.94 / 1.59 and the cheapest is the foil-only khm/400 at 1.77). A memorabilia printing is
+      outside M and still matches when it equals it (wc04/jn13sb at 0.17 beside ice/15's 0.17).
+    - `-cheapest:usd`, the negated TERM, is NOT the complement. It is
+      `(usd IS NULL OR usd <> M) AND (usd_foil IS NULL OR usd_foil = M)`: 5 printings of Kaldheim
+      where the term is 222 of 407, and khm/400 is in both. Only the negated GROUP
+      `-(cheapest:usd)` is the complement (185). So the two answers are stored separately.
+    - `cheapest:eur` and its negation are the same two expressions over `eur` / `eur_foil`;
+      `cheapest:tix` is `tix = M`, which has no foil price, so its negated term is the complement.
+    - NO M (every priced printing of the card is memorabilia, or in euros foil-only): a PRICED
+      printing is SQL NULL, in neither the term nor its complement
+      (`cheapest:usd st:memorabilia` 4, `-(cheapest:usd) st:memorabilia` 5,662 of 5,847); an
+      UNPRICED printing is plain false for the term and true for the negated term.
+
+    Prices are read from `raw_card_blob->'prices'` as exact numerics -- the strings `price_usd`,
+    `price_eur` and `price_tix` were parsed from, plus the two foil prices no column holds -- so
+    "equal to the minimum" is a decimal comparison and not one between `real`s.
+
+    M is over the rows this table holds, so it is Scryfall's M for a card whose every printing
+    is imported, and can be higher for one whose cheapest printing `preprocess_card` dropped.
+
+    Each currency's answers are three bits of one smallint (CHEAPEST_TERM, CHEAPEST_NEGATED_TERM,
+    CHEAPEST_UNKNOWN at CHEAPEST_SHIFTS[currency]). Rows with a NULL oracle_id keep a NULL column.
+
+    Callers pass ``num_chunks`` and ``chunk_index`` as query parameters; chunking is by
+    ``hashtext(oracle_id)`` so a card's rows share a chunk. api/db/2026-10-04-02-cheapest-codes.sql
+    carries the same statement, unchunked, as its backfill.
+    """
+    prices = ",\n        ".join(f"{_blob_price_sql(key)} AS {key}" for key in ("usd", "usd_foil", "eur", "eur_foil", "tix"))
+    usd_code, eur_code, tix_code = (
+        _cheapest_code_sql(f"priced.{currency}", f"priced.{currency}_foil", f"card_minimum.{currency}")
+        for currency in CHEAPEST_SHIFTS
+    )
+    return f"""
+WITH priced AS (
+    SELECT
+        cards.scryfall_id,
+        cards.oracle_id,
+        COALESCE(cards.raw_card_blob->>'set_type', '') = 'memorabilia' AS is_memorabilia,
+        {prices},
+        NULL::numeric AS tix_foil
+    FROM magic.cards cards
+    WHERE cards.oracle_id IS NOT NULL
+      AND (abs(hashtext(cards.oracle_id::text)) %% %(num_chunks)s) = %(chunk_index)s
+), card_minimum AS (
+    SELECT
+        priced.oracle_id,
+        min(COALESCE(priced.usd, priced.usd_foil)) FILTER (WHERE NOT priced.is_memorabilia) AS usd,
+        min(priced.eur) FILTER (WHERE NOT priced.is_memorabilia) AS eur,
+        min(priced.tix) FILTER (WHERE NOT priced.is_memorabilia) AS tix
+    FROM priced
+    GROUP BY priced.oracle_id
+), proposed AS (
+    SELECT
+        priced.scryfall_id,
+        (
+        ({usd_code}) * {1 << CHEAPEST_SHIFTS["usd"]}
+        + ({eur_code}) * {1 << CHEAPEST_SHIFTS["eur"]}
+        + ({tix_code}) * {1 << CHEAPEST_SHIFTS["tix"]}
+        )::smallint AS cheapest_codes
+    FROM priced
+    JOIN card_minimum ON card_minimum.oracle_id = priced.oracle_id
+)
+UPDATE magic.cards
+SET cheapest_codes = proposed.cheapest_codes
+FROM proposed
+WHERE
+    cards.scryfall_id = proposed.scryfall_id AND
+    cards.cheapest_codes IS DISTINCT FROM proposed.cheapest_codes
+"""
+
+
+# By ORACLE id, as the two syncs above: a card's first printing at a rarity is only its first if
+# every row of the card is in the chunk that ranks them.
+_NEW_RARITY_SYNC_CHUNK_COUNT = 4
+
+# Set types whose printings are never `new:rarity` on Scryfall, and the one masterpiece set that is.
+# See _build_new_rarity_sql.
+_NEW_RARITY_EXCLUDED_SET_TYPES = ("promo", "memorabilia", "from_the_vault", "treasure_chest")
+_NEW_RARITY_MASTERPIECE_EXCEPTION = "wot"
+
+
+def _build_new_rarity_sql(*, chunked: bool = True) -> str:
+    """Build the `new:rarity` sync statement: is each printing the first of its card at its rarity?
+
+    Scryfall's `new:rarity` finds the printings that are the first of their card at their rarity.
+    "First" is over the card's other printings, so neither a SQL row nor the engine's `tri()` can
+    decide it at query time; it is decided here, once per import.
+
+    The rule, measured on api.scryfall.com 2026-10-04 by reading the whole list (`new:rarity`,
+    `unique=prints`, extras in: 38,943 printings) against the same day's `default_cards` bulk file,
+    and exact there -- 38,943 of 38,943, nothing missing, nothing over:
+
+        per card (oracle id) and RARITY, the one printing that is least by
+          (release date, release batch, first integer of the collector number, variation last,
+           Scryfall id)
+        among the printings OUTSIDE the set types promo, memorabilia, from_the_vault and
+        treasure_chest, and outside every masterpiece set but `wot`
+
+    Each clause is evidence, not a reading of the name (groups are (card, rarity) pairs; the count
+    is how many pick a different printing than Scryfall's without the clause):
+
+    - the release BATCH is the order Scryfall gives sets that released the same day
+      (api/release_batches.py): 18 groups wrong without it.
+    - the collector number compares as its FIRST INTEGER (`236s` is 236, `GRN-103` is 103, a lone
+      star is 0), not as the string: 2,230 groups wrong the other way. The set code is no key
+      between it and the id: with one, 15 groups are wrong.
+    - `variation: true` sorts after its plain twin: 33 groups wrong without that key.
+    - the excluded set types: Scryfall's list holds no printing of a promo, memorabilia,
+      from_the_vault or treasure_chest set (4,761 groups wrong without the exclusion). A
+      masterpiece printing is on it only in `wot` (16 printings, every one this order picks); no
+      other masterpiece set has one (`e:mps` is 0, though 54 of its printings would be the first
+      of their card at their rarity). No field of a card or of `/sets` tells `wot` from the other
+      masterpiece sets, so it is a measured exception, kept as one.
+    - SERIALIZED printings count (4 of the 38,943), and promo TYPES other than the set types
+      above exclude nothing.
+    - the negated term is the plain complement (79,532: with 38,943 that is all 118,475 printings
+      Scryfall holds, extras in), and `new:rarity` neither opens extras nor widens the search to
+      other languages.
+
+    The ranking is over the rows this table holds. Scryfall's is over every printing of the card,
+    including the digital-only ones `preprocess_card` drops, so a card whose first printing at a
+    rarity was dropped has its first PAPER printing flagged here instead, and a printing Scryfall
+    flags that was dropped is simply not here.
+
+    NOT `new:language`: the same order over every row of a (card, language) pair answers 285,528
+    of Scryfall's 285,760 rows, 232 short by one shape (two sets released the same day, where
+    Scryfall takes one set first and nothing published says which), so it is not stored.
+
+    Rows with a NULL oracle_id keep a NULL column. Callers pass ``num_chunks`` and ``chunk_index``
+    as query parameters unless ``chunked`` is false, which is the unchunked statement
+    api/db/2026-10-04-03-new-rarity.sql backfills with; chunking is by ``hashtext(oracle_id)`` so
+    a card's rows share a chunk.
+    """
+    excluded = ", ".join(f"'{set_type}'" for set_type in _NEW_RARITY_EXCLUDED_SET_TYPES)
+    batches = ",\n    ".join(f"({date}, '{set_code}', {batch})" for date, set_code, batch in RELEASE_BATCHES)
+    chunk = "\n      AND (abs(hashtext(cards.oracle_id::text)) %% %(num_chunks)s) = %(chunk_index)s" if chunked else ""
+    return f"""
+WITH release_batches (released_on, set_code, batch) AS (
+    VALUES
+    {batches}
+), candidates AS (
+    SELECT
+        cards.scryfall_id,
+        cards.oracle_id,
+        cards.card_rarity_text AS rarity,
+        cards.released_at,
+        COALESCE(release_batches.batch, 0) AS batch,
+        COALESCE(NULLIF(substring(cards.collector_number FROM '[0-9]+'), '')::numeric, 0) AS first_number,
+        COALESCE(cards.raw_card_blob->>'variation', 'false') = 'true' AS is_variation,
+        COALESCE(cards.raw_card_blob->>'set_type', '') NOT IN ({excluded})
+            AND (COALESCE(cards.raw_card_blob->>'set_type', '') <> 'masterpiece' OR cards.card_set_code = '{_NEW_RARITY_MASTERPIECE_EXCEPTION}') AS is_eligible
+    FROM magic.cards cards
+    LEFT JOIN release_batches
+        ON release_batches.released_on = to_char(cards.released_at, 'YYYYMMDD')::int
+        AND release_batches.set_code = cards.card_set_code
+    WHERE cards.oracle_id IS NOT NULL{chunk}
+), ranked AS (
+    SELECT
+        candidates.scryfall_id,
+        row_number() OVER (
+            PARTITION BY candidates.oracle_id, candidates.rarity
+            ORDER BY candidates.released_at, candidates.batch, candidates.first_number, candidates.is_variation, candidates.scryfall_id
+        ) AS place
+    FROM candidates
+    WHERE candidates.is_eligible
+), proposed AS (
+    SELECT candidates.scryfall_id, COALESCE(ranked.place = 1, false) AS new_rarity
+    FROM candidates
+    LEFT JOIN ranked ON ranked.scryfall_id = candidates.scryfall_id
+)
+UPDATE magic.cards
+SET new_rarity = proposed.new_rarity
+FROM proposed
+WHERE
+    cards.scryfall_id = proposed.scryfall_id AND
+    cards.new_rarity IS DISTINCT FROM proposed.new_rarity
+"""
+
 
 CUSTOM_IS_TAGS = [
     "historic",  # artifact, legendary, saga
@@ -833,6 +1182,110 @@ class AdminResource:
             logger.info("Synced boolean is: tags on %d printings", updated_count)
         return updated_count
 
+    def _sync_print_counts(self, conn: Connection) -> int:
+        """Sync the count-keyword columns (PRINT_COUNT_COLUMNS) -- per-card counts, on every row.
+
+        Runs after every import because a new printing changes the counts of EVERY row of its
+        card: a reprint makes all of that card's older rows `prints` + 1, and only a whole-card
+        recount reaches them. Touches only rows whose numbers differ, so a re-import that adds
+        nothing writes nothing. See _build_print_counts_sql for the rules.
+
+        Args:
+        ----
+            conn (Connection): open connection; committed here once per chunk.
+
+        Returns:
+        -------
+            int: rows whose counts changed.
+
+        """
+        updated_count = 0
+        sync_sql = _build_print_counts_sql()
+        with conn.cursor() as cursor:
+            for chunk_index in range(_PRINT_COUNTS_SYNC_CHUNK_COUNT):
+                cursor.execute(
+                    sync_sql,
+                    {
+                        "num_chunks": _PRINT_COUNTS_SYNC_CHUNK_COUNT,
+                        "chunk_index": chunk_index,
+                    },
+                )
+                updated_count += cursor.rowcount
+                conn.commit()
+        if updated_count:
+            logger.info("Synced print counts on %d printings", updated_count)
+        return updated_count
+
+    def _sync_cheapest_codes(self, conn: Connection) -> int:
+        """Sync `cheapest_codes` -- each printing's answers to `cheapest:usd` / `:eur` / `:tix`.
+
+        Runs after every import, and not only when a card gains a printing: prices change on
+        every import, and one printing's new price changes the answer on the card's OTHER rows
+        (yesterday's cheapest is no longer it). Only a whole-card recompute reaches them. Touches
+        only rows whose code differs, so a re-import that moved no price writes nothing. See
+        _build_cheapest_codes_sql for the rule.
+
+        Args:
+        ----
+            conn (Connection): open connection; committed here once per chunk.
+
+        Returns:
+        -------
+            int: rows whose code changed.
+
+        """
+        updated_count = 0
+        sync_sql = _build_cheapest_codes_sql()
+        with conn.cursor() as cursor:
+            for chunk_index in range(_CHEAPEST_CODES_SYNC_CHUNK_COUNT):
+                cursor.execute(
+                    sync_sql,
+                    {
+                        "num_chunks": _CHEAPEST_CODES_SYNC_CHUNK_COUNT,
+                        "chunk_index": chunk_index,
+                    },
+                )
+                updated_count += cursor.rowcount
+                conn.commit()
+        if updated_count:
+            logger.info("Synced cheapest codes on %d printings", updated_count)
+        return updated_count
+
+    def _sync_new_rarity(self, conn: Connection) -> int:
+        """Sync `new_rarity` -- each printing's answer to Scryfall's `new:rarity`.
+
+        Runs after every import, and not only when a card gains a printing: a new printing can be
+        the card's first at its rarity and take the flag from a printing that held it, so only a
+        whole-card recompute reaches the rows the import did not touch. Touches only rows whose
+        flag differs, so a re-import that moved nothing writes nothing. See _build_new_rarity_sql
+        for the rule.
+
+        Args:
+        ----
+            conn (Connection): open connection; committed here once per chunk.
+
+        Returns:
+        -------
+            int: rows whose flag changed.
+
+        """
+        updated_count = 0
+        sync_sql = _build_new_rarity_sql()
+        with conn.cursor() as cursor:
+            for chunk_index in range(_NEW_RARITY_SYNC_CHUNK_COUNT):
+                cursor.execute(
+                    sync_sql,
+                    {
+                        "num_chunks": _NEW_RARITY_SYNC_CHUNK_COUNT,
+                        "chunk_index": chunk_index,
+                    },
+                )
+                updated_count += cursor.rowcount
+                conn.commit()
+        if updated_count:
+            logger.info("Synced new:rarity on %d printings", updated_count)
+        return updated_count
+
     def _add_is_tag_to_printings(self, *, is_tag: str) -> dict[str, Any]:
         """Add a specific is: tag to all printings matching that tag using Scryfall search.
 
@@ -1256,6 +1709,9 @@ class AdminResource:
 
                 if cards_sent:
                     self._sync_boolean_is_tags(conn)
+                    self._sync_print_counts(conn)
+                    self._sync_cheapest_codes(conn)
+                    self._sync_new_rarity(conn)
 
                 if cards_sent == 0:
                     if stream.raw == 0:

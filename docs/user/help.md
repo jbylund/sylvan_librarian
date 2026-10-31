@@ -122,6 +122,13 @@ r:common
 r>=rare
 ```
 
+Use `new:rarity` to find the printings that are the first of their card at their rarity. `-new:rarity` finds the rest.
+
+```
+new:rarity set:KHM
+t:dragon new:rarity r:mythic
+```
+
 ### Set
 
 Use `set:` with the set code.
@@ -139,6 +146,13 @@ Use `usd` or `eur` with a comparison operator.
 usd<5
 usd>=10
 eur<2
+```
+
+Use `cheapest:` with `usd`, `eur` or `tix` to find the printings that carry their card's lowest price.
+
+```
+cheapest:usd set:KHM
+t:dragon cheapest:eur
 ```
 
 ### Loyalty
