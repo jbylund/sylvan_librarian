@@ -505,7 +505,11 @@ def configure_env() -> None:
     """Load environment variables from env.json file."""
     with Path("env.json").open("r") as f:
         env = json.load(f)
-    os.environ.update(env)
+    # setdefault, not update: env.json supplies defaults, so an explicitly exported PGHOST or
+    # PGPORT still wins. `update` silently discarded them, which left editing env.json as the
+    # only way to point the script at a database.
+    for key, value in env.items():
+        os.environ.setdefault(key, str(value))
 
 
 def check_cwebp() -> None:
