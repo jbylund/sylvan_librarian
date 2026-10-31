@@ -13071,6 +13071,7 @@ const FIELD_TABLE: &[(&str, FieldKey, FieldExtractor)] = &[
     ("type_line", |py| intern!(py, "type_line"), |py, c, _p, s, _v| Ok(str_at(s, u32::from(c.type_line_id)).into_pyobject(py)?.into_any())),
     ("illustration_id", |py| intern!(py, "illustration_id"), |py, _c, p, _s, _v| uuid_to_pyobject(py, u128::from(p.illustration_id))),
     ("scryfall_id", |py| intern!(py, "scryfall_id"), |py, _c, p, _s, _v| uuid_to_pyobject(py, u128::from(p.scryfall_id))),
+    ("oracle_id", |py| intern!(py, "oracle_id"), |py, c, _p, _s, _v| uuid_to_pyobject(py, u128::from(c.oracle_id))),
     // Exact f64 dollars from the stored integer cents, not the old lossy f32 -- API consumers
     // now see the true price (e.g. 1.47, not the nearest f32 to 1.47) instead of an
     // approximation.

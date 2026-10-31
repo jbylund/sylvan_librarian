@@ -1273,6 +1273,20 @@ class TestFieldSelection:
         assert cards[0]["set_code"] == "m11"
         assert cards[0]["price_usd"] == pytest.approx(1.47)
 
+    def test_oracle_id_is_the_cards_id_as_canonical_text(self, engine: QueryEngine) -> None:
+        # The card page asks for oracle_id to list a card's other printings by it, so every
+        # printing must carry the one card-level id, as the lowercase-hyphenated text the SQL
+        # path's oracle_id::text renders (not uuid.UUID).
+        _, cards = _run(
+            engine,
+            'name="Lightning Bolt"',
+            unique="printing",
+            fields=["set_code", "oracle_id"],
+        )
+        assert len(cards) == 10
+        assert {c["oracle_id"] for c in cards} == {"4457ed35-7c10-48c8-9776-456485fdf070"}
+        assert all(isinstance(c["oracle_id"], str) for c in cards)
+
     def test_unknown_field_raises(self, engine: QueryEngine) -> None:
         with pytest.raises(UnknownFieldError):
             _run(engine, unique="printing", fields=["not_a_real_field"])

@@ -30,6 +30,7 @@ class EngineField(enum.StrEnum):
     TYPE_LINE = enum.auto()
     ILLUSTRATION_ID = enum.auto()
     SCRYFALL_ID = enum.auto()
+    ORACLE_ID = enum.auto()
     CARD_SUBTYPES = enum.auto()
     CARD_KEYWORDS = enum.auto()
     CARD_ORACLE_TAGS = enum.auto()

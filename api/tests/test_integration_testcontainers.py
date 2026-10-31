@@ -209,6 +209,26 @@ class TestContainerIntegration:
         assert cards[0].keys() == {"name", "illustration_id", "price_usd", "prefer_score"}
         assert cards[0]["name"] == "Lightning Bolt"
 
+    def test_oracle_id_field_matches_across_paths(self: TestContainerIntegration, api_resource: APIResource) -> None:
+        """fields=oracle_id is the card's id as lowercase-hyphenated text on the SQL and engine paths alike."""
+        expected = [{"name": "Lightning Bolt", "oracle_id": "52b91fa6-7562-501c-a1b7-5d41f0c00020"}]
+        sql = api_resource._search_sql(**search_kwargs("name:bolt", limit=10), fields=["name", "oracle_id"])
+        assert sql["cards"] == expected
+
+        # A private store, as in test_cubecobra_ordering: the default archive path is shared
+        # machine-wide, so another process's store could otherwise answer the engine half.
+        shm_path = pathlib.Path(tempfile.gettempdir()) / f"sylvan_librarian_it_{uuid.uuid4().hex}"
+        saved_engine = api_resource.app_context.engine
+        api_resource.app_context.engine = QueryEngine(shm_path=str(shm_path))
+        try:
+            api_resource.app_context.reload_engine(force=True)
+            engine = api_resource._search_engine(**search_kwargs("name:bolt", limit=10), fields=["name", "oracle_id"])
+            assert engine["cards"] == expected
+        finally:
+            api_resource.app_context.engine = saved_engine
+            shm_path.unlink(missing_ok=True)
+            shm_path.with_suffix(".lock").unlink(missing_ok=True)
+
     def test_database_operations_isolation(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """Test that database operations are properly isolated."""
         # This test verifies that we're working with the test database
