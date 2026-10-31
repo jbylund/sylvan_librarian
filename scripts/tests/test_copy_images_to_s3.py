@@ -9,6 +9,7 @@ import pytest
 import requests
 
 from scripts.copy_images_to_s3 import (
+    _get_session,
     download_image,
     fetch_cards_from_db,
     get_session,
@@ -67,7 +68,7 @@ def test_download_image_failure() -> None:
 
 def test_get_session_sends_explicit_user_agent() -> None:
     """Scryfall answers 400 generic_user_agent to a library-default or absent User-Agent."""
-    user_agent = get_session(os.getpid()).headers["User-Agent"]
+    user_agent = get_session().headers["User-Agent"]
 
     assert user_agent
     assert "requests" not in user_agent
@@ -75,18 +76,18 @@ def test_get_session_sends_explicit_user_agent() -> None:
 
 def test_get_session_is_reused_within_a_process() -> None:
     """Repeated calls with the same pid hand back one session, so connections are pooled."""
-    assert get_session(os.getpid()) is get_session(os.getpid())
+    assert get_session() is get_session()
 
 
 def test_get_session_holds_only_the_current_pid() -> None:
     """maxsize=1: a new pid evicts the old entry rather than accumulating sessions."""
-    get_session.cache_clear()
+    _get_session.cache_clear()
 
-    first = get_session(1)
-    second = get_session(2)
+    first = _get_session(1)
+    second = _get_session(2)
 
     assert second is not first
-    assert get_session.cache_info().currsize == 1
+    assert _get_session.cache_info().currsize == 1
 
 
 # pytest itself is multi-threaded, so fork() warns. Safe here because the child only builds a
@@ -94,8 +95,8 @@ def test_get_session_holds_only_the_current_pid() -> None:
 @pytest.mark.filterwarnings("ignore:This process .* is multi-threaded:DeprecationWarning")
 def test_get_session_is_rebuilt_after_fork() -> None:
     """A forked child builds its own session instead of sharing the parent's open sockets."""
-    get_session.cache_clear()
-    parent_session = get_session(os.getpid())
+    _get_session.cache_clear()
+    parent_session = get_session()
 
     read_fd, write_fd = os.pipe()
     child_pid = os.fork()
@@ -103,7 +104,7 @@ def test_get_session_is_rebuilt_after_fork() -> None:
         # Child: report a verdict and exit without unwinding back into pytest.
         os.close(read_fd)
         try:
-            reused = get_session(os.getpid()) is parent_session
+            reused = get_session() is parent_session
             os.write(write_fd, CHILD_REUSED_PARENT_SESSION if reused else CHILD_BUILT_OWN_SESSION)
         finally:
             os._exit(0)

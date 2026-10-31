@@ -190,13 +190,22 @@ def fetch_cards_from_db(
     return cards
 
 
-@lru_cache(maxsize=1)
-def get_session(_pid: int) -> requests.Session:
+def get_session() -> requests.Session:
     """Return the requests Session for the calling process, creating it on first use.
 
     Connections are pooled per process rather than per request. The sync makes one request
     per image over tens of thousands of images, and without a Session each one pays a fresh
     TCP handshake plus a TLS negotiation to the same host.
+
+    Returns:
+        A Session identifying itself to Scryfall, reused for the life of the process.
+    """
+    return _get_session(os.getpid())
+
+
+@lru_cache(maxsize=1)
+def _get_session(_pid: int) -> requests.Session:
+    """Build the Session for one process; the pid argument exists only as the cache key.
 
     Keyed on pid because the worker pool forks: a Session created in the parent would hand
     every child a copy of the same open sockets, and concurrent use of a shared TLS connection
@@ -205,10 +214,10 @@ def get_session(_pid: int) -> requests.Session:
     session, so the inherited parent entry is evicted rather than held for the whole run.
 
     Args:
-        _pid: The calling process's id, from os.getpid(). Used only as the cache key.
+        _pid: The calling process's id, from os.getpid().
 
     Returns:
-        A Session identifying itself to Scryfall, reused for the life of the process.
+        A new Session identifying itself to Scryfall.
     """
     session = requests.Session()
     # Scryfall rejects HTTP-library default User-Agents with 400 generic_user_agent, and
@@ -228,7 +237,7 @@ def download_image(url: str, output_path: Path) -> bool:
         True if successful, False otherwise
     """
     try:
-        response = get_session(os.getpid()).get(url, timeout=30, stream=True)
+        response = get_session().get(url, timeout=30, stream=True)
         response.raise_for_status()
 
         with output_path.open("wb") as f:
