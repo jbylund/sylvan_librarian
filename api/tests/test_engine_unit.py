@@ -168,6 +168,63 @@ class TestFilters:
         total_wrong_case, _ = _run(e, "cn:10e-105")
         assert total_wrong_case == 0
 
+    def test_collector_number_above_65535_is_the_number_it_is(self, fresh_engine: Callable[[], QueryEngine]) -> None:
+        # collector_number_int is a Postgres integer and the dated promos run past 200,000
+        # ("2024-10" -> 202410). The engine held it in a u16 filled by a saturating cast, so
+        # each of these was stored as 65535: cn>65535 matched nothing and cn:65535 matched them all.
+        numbers = {"62501": 62501, "65535": 65535, "65536": 65536, "80937": 80937, "2024-10": 202410, "2026-25": 202625}
+        rows = [
+            {"card_name": f"Card {cn}", "oracle_id": f"o{i}", "collector_number": cn, "collector_number_int": n}
+            for i, (cn, n) in enumerate(numbers.items())
+        ]
+        # A digit-free number has no integer, and matches no comparison at all.
+        rows.append({"card_name": "Card ★", "oracle_id": "o-star", "collector_number": "★", "collector_number_int": None})
+        e = fresh_engine()
+        e.reload(rows)
+
+        def answer(q: str) -> list[str]:
+            total, cards = _run(e, q, fields=["collector_number"])
+            assert total == len(cards)
+            return sorted(c["collector_number"] for c in cards)
+
+        assert answer("cn:80937") == ["80937"]
+        assert answer("cn:65535") == ["65535"]
+        assert answer("cn=65536") == ["65536"]
+        assert answer("cn=202410") == ["2024-10"]
+        assert answer("cn>65535") == ["2024-10", "2026-25", "65536", "80937"]
+        assert answer("cn>=65535") == ["2024-10", "2026-25", "65535", "65536", "80937"]
+        assert answer("cn<65536") == ["62501", "65535"]
+        assert answer("cn<=65536") == ["62501", "65535", "65536"]
+        assert answer("cn>=202410") == ["2024-10", "2026-25"]
+        assert answer("cn>202625") == []
+        assert answer("cn!=65535") == ["2024-10", "2026-25", "62501", "65536", "80937"]
+        # ...its negation included, as NOT over a NULL is in SQL.
+        assert answer("-cn>65535") == ["62501", "65535"]
+
+    @pytest.mark.parametrize(
+        argnames=("value", "expected"),
+        argvalues=[
+            (202410, "cn=202410"),
+            (202410.0, "cn=202410"),  # a whole float is the integer it is
+            (2**31 - 1, "cn=2147483647"),  # the top of the column's own range
+        ],
+    )
+    def test_collector_number_int_loads_exactly(self, fresh_engine: Callable[[], QueryEngine], value: float, expected: str) -> None:
+        e = fresh_engine()
+        e.reload([{"card_name": "Dated Promo", "oracle_id": "o1", "collector_number": "x", "collector_number_int": value}])
+        assert _run(e, expected)[0] == 1
+        assert _run(e, "cn>=0")[0] == 1
+
+    @pytest.mark.parametrize(argnames="value", argvalues=[None, -1, 80937.5, "80937"])
+    def test_collector_number_int_that_is_not_a_whole_number_is_absent(
+        self, fresh_engine: Callable[[], QueryEngine], value: object
+    ) -> None:
+        e = fresh_engine()
+        e.reload([{"card_name": "Odd Row", "oracle_id": "o1", "collector_number": "x", "collector_number_int": value}])
+        assert _run(e, "cn>=0")[0] == 0
+        assert _run(e, "cn<65536")[0] == 0
+        assert _run(e, "")[0] == 1
+
     def test_name_exact_titlecase_normalized(self, engine: QueryEngine) -> None:
         # name= should be case-insensitive (titlecase normalization applied on both paths)
         t_lower, _ = _run(engine, 'name="lightning bolt"')
