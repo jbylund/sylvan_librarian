@@ -8,6 +8,7 @@ pyparsing-based parse_search_query pipeline.
 from __future__ import annotations
 
 import datetime
+import string
 from dataclasses import dataclass
 from enum import Enum, auto
 
@@ -107,9 +108,11 @@ class Token:
 
 
 _ARITH_OPS: frozenset[TT] = frozenset({TT.PLUS, TT.MINUS, TT.STAR, TT.SLASH})
-_WORD_START = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_")
-_WORD_CONT = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789.")
-_DIGIT = frozenset("0123456789")
+# `~` is an ordinary value character, at the start of a word and inside one, as on Scryfall. What it
+# means in rules text (the card's own name) is not handled here.
+_WORD_START = frozenset(string.ascii_letters + "_~")
+_WORD_CONT = frozenset(string.ascii_letters + string.digits + "_.~")
+_DIGIT = frozenset(string.digits)
 _SPACE = frozenset(" \t\r\n")
 
 
