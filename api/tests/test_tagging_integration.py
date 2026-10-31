@@ -155,6 +155,93 @@ class TestAncestorPropagation:
         assert captured["id_to_tags"]["card-b"] == {"flying": True}
 
 
+class TestAliasPropagation:
+    """Alias spellings must be written alongside the slug at import time.
+
+    Scryfall's tagger resolves an alias to its tag before matching, so art:flames returns the same
+    3564 artworks art:fire does. The dumps carry those spellings in an `aliases` field that was
+    previously skipped, so every alias spelling matched nothing here.
+    """
+
+    def test_card_carries_the_alias_spellings(self) -> None:
+        fixture = [
+            {
+                "id": "uuid-loose-lips",
+                "slug": "loose-lips",
+                "parent_ids": [],
+                "child_ids": [],
+                "aliases": ["open mouth", "mouth open"],
+                "taggings": [{"illustration_id": "illus-x", "weight": "strong"}],
+            },
+        ]
+        pool, _ = _make_mock_conn_pool()
+        fetcher = MagicMock()
+        fetcher.stream_data_for_key.return_value = iter(fixture)
+
+        captured: dict = {}
+
+        def capture(conn, id_column, tag_column, id_to_tags) -> tuple[int, int]:
+            captured["id_to_tags"] = id_to_tags
+            return (0, 0)
+
+        with patch("api.tag_import._sync_card_tags", side_effect=capture), patch("api.tag_import._sync_hierarchy"):
+            import_art_tags(pool, fetcher)
+
+        # "open mouth" is stored slugified, which is the form slugify_tag() turns the query into.
+        assert captured["id_to_tags"]["illus-x"] == {"loose-lips": True, "open-mouth": True, "mouth-open": True}
+
+    def test_descendant_carries_an_ancestors_alias(self) -> None:
+        # A card tagged only `campfire` must answer art:flames, since Scryfall resolves flames ->
+        # fire first and then expands the hierarchy.
+        fixture = [
+            {
+                "id": "uuid-fire",
+                "slug": "fire",
+                "parent_ids": [],
+                "child_ids": ["uuid-campfire"],
+                "aliases": ["flames"],
+                "taggings": [],
+            },
+            {
+                "id": "uuid-campfire",
+                "slug": "campfire",
+                "parent_ids": ["uuid-fire"],
+                "child_ids": [],
+                "taggings": [{"illustration_id": "illus-y", "weight": "strong"}],
+            },
+        ]
+        pool, _ = _make_mock_conn_pool()
+        fetcher = MagicMock()
+        fetcher.stream_data_for_key.return_value = iter(fixture)
+
+        captured: dict = {}
+
+        def capture(conn, id_column, tag_column, id_to_tags) -> tuple[int, int]:
+            captured["id_to_tags"] = id_to_tags
+            return (0, 0)
+
+        with patch("api.tag_import._sync_card_tags", side_effect=capture), patch("api.tag_import._sync_hierarchy"):
+            import_art_tags(pool, fetcher)
+
+        assert captured["id_to_tags"]["illus-y"] == {"campfire": True, "fire": True, "flames": True}
+
+    def test_tagging_without_aliases_is_unchanged(self) -> None:
+        pool, _ = _make_mock_conn_pool()
+        fetcher = MagicMock()
+        fetcher.stream_data_for_key.return_value = iter(ART_TAGS_FIXTURE)
+
+        captured: dict = {}
+
+        def capture(conn, id_column, tag_column, id_to_tags) -> tuple[int, int]:
+            captured["id_to_tags"] = id_to_tags
+            return (0, 0)
+
+        with patch("api.tag_import._sync_card_tags", side_effect=capture), patch("api.tag_import._sync_hierarchy"):
+            import_art_tags(pool, fetcher)
+
+        assert captured["id_to_tags"]["illus-x"] == {"dragon": True}
+
+
 class TestImportArtTags:
     def test_calls_stream_for_art_tags(self) -> None:
         pool, _ = _make_mock_conn_pool()
