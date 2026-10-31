@@ -25,8 +25,7 @@ EQUIVALENCES = [
     ("is:party", "t:creature (t:cleric or t:rogue or t:warrior or t:wizard or kw:changeling)"),
     (
         "is:partner",
-        't:legendary (keyword:partner or keyword:"choose a background" or keyword:"doctor\'s companion" or '
-        't:background or (t:"time lord" t:doctor))',
+        't:legendary (kw:partner or kw:"choose a background" or kw:"doctor\'s companion" or t:background or (t:time t:doctor))',
     ),
     ("is:outlaw", "t:assassin or t:mercenary or t:pirate or t:rogue or t:warlock or kw:changeling"),
     ("is:vanilla", 't:creature o=""'),
