@@ -375,6 +375,12 @@ class Parser:
         """Parse the full token stream into a Query AST."""
         if self.peek().type == TT.EOF:
             return Query(TrueNode())
+        self._skip_stray_slashes()
+        if self.peek().type == TT.EOF:
+            # Nothing but slashes. Scryfall answers `/` and `//` with "All of your terms were
+            # ignored." (400); matching every card instead would be the widest possible answer.
+            msg = "A query of nothing but '/' has no terms"
+            raise ParseError(msg)
         node = self.parse_expr()
         if self.peek().type != TT.EOF:
             msg = f"Unexpected {self.peek().value!r} at position {self.peek().pos}"
@@ -395,12 +401,65 @@ class Parser:
 
     def parse_and_expr(self) -> QueryNode:
         """Parse an AND-level expression, inserting implicit AND between adjacent factors."""
+        self._skip_stray_slashes()
         operands = [self.parse_factor()]
+        self._skip_stray_slashes()
         while self._can_start_factor():
             if self.peek().type == TT.WORD and self.peek().value.upper() == "AND":
                 self.consume()
+                self._skip_stray_slashes()
             operands.append(self.parse_factor())
+            self._skip_stray_slashes()
         return operands[0] if len(operands) == 1 else AndNode(operands)
+
+    def _skip_stray_slashes(self) -> None:
+        """Skip a `/` that no term has taken: between terms it is nothing, as it is on Scryfall.
+
+        Measured on api.scryfall.com 2026-10-04, one request per query, none carrying a `warnings`
+        key -- each answers what it does with the slashes taken out:
+
+            fire // ice    fire / ice    fire /ice    fire/ ice    fire/ice    (fire // ice)
+            -fire // ice   fire or // ice    fire / or ice    //fire    fire //    /fire/
+            t:goblin // fire    t:goblin /    o:fire /    o:"fire" /    e:khm /    cmc>=3 /    !fire /
+
+        `fire // ice` is what a user gets by pasting the name of a split or double-faced card.
+
+        Only a slash the term before it did not take reaches here. Division is consumed inside its
+        own numeric term (`power/2>1`, `cmc / 2 > 1`), a regex is one token and opens only directly
+        after a comparison operator (`o:/fire/`), and a slash glued to a text value or an exact name
+        is a character of it (`o:1/1`, `!fire//ice` -- see `_glued_slashes`). So every slash skipped
+        here was a parse error before, and nothing that parsed changes.
+        """
+        while self.peek().type == TT.SLASH:
+            self.consume()
+
+    def _glued_slashes(self) -> str:
+        """Consume the slashes glued behind a value just read, and the words glued behind them.
+
+        `o:1/1` is the 1,432 cards with "1/1" in their text on api.scryfall.com (2026-10-04) and
+        `o:fire/ice` a 404: behind a text value or an exact name, with no space before it, a slash
+        is a character of the value rather than the end of the term. A slash with a space before it
+        is not glued (`o:fire / ice` is `o:fire ice`), and nothing here opens a value with one:
+        directly after an operator a slash still opens a regex, which must be closed.
+        """
+        glued = ""
+        while self.peek().type == TT.SLASH and not self.peek().space_before:
+            self.consume()
+            glued += "/"
+            nxt = self.peek()
+            if nxt.type in (TT.WORD, TT.NUMBER) and not nxt.space_before:
+                self.consume()
+                glued += str(nxt.value)
+                # ...and that word's own hyphenated continuation: `o:a/b-c` is one value.
+                while (
+                    self.peek().type == TT.MINUS
+                    and not self.peek().space_before
+                    and self.peek(1).type in (TT.WORD, TT.NUMBER)
+                    and not self.peek(1).space_before
+                ):
+                    self.consume()
+                    glued += "-" + str(self.consume().value)
+        return glued
 
     def _can_start_factor(self) -> bool:
         tok = self.peek()
@@ -409,7 +468,9 @@ class Parser:
         if tok.type == TT.WORD:
             return tok.value.upper() != "OR"  # AND is consumed inline; OR ends the and_expr
         if tok.type == TT.MINUS:
-            return tok.space_before  # space before - = negation prefix; no-space = trailing arith
+            # space before - = negation prefix; no-space = trailing arith. Directly behind a stray
+            # slash it is a prefix too: the slash separated the terms (`fire/-ice` is `fire -ice`).
+            return tok.space_before or self.tokens[self.pos - 1].type == TT.SLASH
         return tok.type in (TT.NUMBER, TT.QUOTED, TT.REGEX, TT.MANA, TT.LPAREN, TT.BANG)
 
     # ── factor: optional negation ─────────────────────────────────────────────
@@ -481,7 +542,7 @@ class Parser:
             return ExactNameNode(str(tok.value))
         if tok.type == TT.WORD:
             self.consume()
-            return ExactNameNode(str(tok.value))
+            return ExactNameNode(str(tok.value) + self._glued_slashes())
         msg = f"Expected word or quoted string after '!' at position {tok.pos}"
         raise ParseError(msg)
 
@@ -516,6 +577,11 @@ class Parser:
                 if self.peek().type == TT.OP:
                     op = self.consume().value
                     return CardBinaryOperatorNode(lhs, op, self.parse_num_expr_value())
+                if isinstance(lhs, CardAttributeNode):
+                    # No arithmetic was consumed: `power/sink` is the name word `power` with a
+                    # stray slash behind it, exactly as `fire/ice` is. The operator stays for the
+                    # caller, so `power-sink` is rejected as before.
+                    return _name_node(word)
                 return lhs  # standalone arith expression (e.g. cmc-power)
             lhs = self._spaced_arith_tail(CardAttributeNode(wl, ParserClass.NUMERIC))
             if isinstance(lhs, CardAttributeNode):
@@ -680,15 +746,21 @@ class Parser:
         if tok.type in (TT.WORD, TT.NUMBER):
             self.consume()
             word = str(tok.value)
-            # Greedily consume hyphenated continuation (no space on either side)
-            while (
-                self.peek().type == TT.MINUS
-                and not self.peek().space_before
-                and self.peek(1).type in (TT.WORD, TT.NUMBER)
-                and not self.peek(1).space_before
-            ):
-                self.consume()
-                word += "-" + str(self.consume().value)
+            # Greedily consume hyphenated and slashed continuation (no space on either side)
+            while True:
+                if (
+                    self.peek().type == TT.MINUS
+                    and not self.peek().space_before
+                    and self.peek(1).type in (TT.WORD, TT.NUMBER)
+                    and not self.peek(1).space_before
+                ):
+                    self.consume()
+                    word += "-" + str(self.consume().value)
+                    continue
+                glued = self._glued_slashes()
+                if not glued:
+                    break
+                word += glued
             return StringValueNode(word)
         msg = f"Expected value for {attr!r}, got {tok.value!r} at position {tok.pos}"
         raise ParseError(msg)

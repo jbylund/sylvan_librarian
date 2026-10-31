@@ -47,17 +47,21 @@ def test_regex_opens_after_every_operator(op: str, ws: str) -> None:
     ids=["bare_word", "closing_paren", "and_keyword"],
 )
 def test_regex_does_not_open_outside_value_position(prefix: str, ws: str) -> None:
-    """Anywhere but directly after an operator, spans.opens_regex and pyparsing must both say no."""
+    """Anywhere but directly after an operator, spans.opens_regex and pyparsing must both say no.
+
+    pyparsing says no by not producing a regex token: the slashes are stray and dropped (a slash no
+    term has taken is nothing, as on Scryfall), and what stood between them is a plain word.
+    """
     query = f"{prefix}{ws}/abc/"
     slash_index = query.index("/")
     assert opens_regex(query, slash_index) is False
-    with pytest.raises(ValueError, match="Unmatched"):
-        _tokenize_for_implicit_and(query)
+    tokens = _tokenize_for_implicit_and(query)
+    assert tokens[-1] == "abc"
+    assert not any("/" in tok for tok in tokens)
 
 
 def test_regex_does_not_open_at_start_of_query() -> None:
     """A bare regex with nothing before it is the other non-value-position case (#908)."""
     query = "/abc/"
     assert opens_regex(query, 0) is False
-    with pytest.raises(ValueError, match="Unmatched"):
-        _tokenize_for_implicit_and(query)
+    assert _tokenize_for_implicit_and(query) == ["abc"]

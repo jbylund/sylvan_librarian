@@ -60,6 +60,15 @@ DEFAULT_OPERATORS = one_of(": > < >= <= = !=")
 EQ_ALIAS_OPERATORS = DEFAULT_OPERATORS | Literal("!").set_parse_action(lambda: "=")
 
 _NUMERIC_LITERAL_RE = re.compile(r"^\d+(\.\d+)?$")
+# A text value with a slash glued in it, in the shape hand_parser.parse_text_value reads one: a word,
+# then any run of `-word` and of slashes with an optional word glued behind them. The lookahead is
+# what makes it a SLASHED value -- without a slash glued to its first run this matches nothing, and
+# the value is read as it always was.
+_SLASHED_VALUE_PATTERN = r"(?=[\w.-]*/)\w[\w.]*(?:-\w[\w.]*|/+(?:\w[\w.]*)?)*"
+# Aliases that are text and nothing else: `cn` / `number` are numeric too, and stay arithmetic.
+_TEXT_ONLY_ALIASES = frozenset(
+    alias for field in PARSER_CLASS_TO_FIELD_INFOS[ParserClass.TEXT] for alias in field.search_aliases
+) - frozenset(NUMERIC_CARD_ATTRIBUTES)
 _COMPARISON_OPERATORS = frozenset({">", "<", ">=", "<=", "=", "!=", ":"})
 
 # Characters that make a query ineligible for the fast preprocess_implicit_and path.
@@ -232,6 +241,9 @@ def create_basic_parsers() -> dict[str, ParserElement]:
     # allowing a leading digit.
     word = Regex(r"[^\W\d][\w-]*\w|[^\W\d]").set_parse_action(make_word)
 
+    # An exact name keeps the slashes glued behind its word, as a text value does: `!fire//ice`.
+    exact_name_word = Regex(r"(?:[^\W\d][\w-]*\w|[^\W\d])(?:/+(?:\w+(?:-\w+)*)?)*").set_parse_action(make_word)
+
     literal_number = float_number | integer
     # Signed literals are wired into the right-hand side of a numeric comparison only (see
     # numeric_comparison_rhs): everywhere else a leading '-' is filter negation or subtraction.
@@ -239,6 +251,9 @@ def create_basic_parsers() -> dict[str, ParserElement]:
     negative_integer = Regex(r"-\d+\b").set_parse_action(lambda t: int(t[0]))
     signed_literal_number = negative_float | negative_integer | literal_number
     string_value_word = Regex(r"\w[\w.-]*")
+    # A text value keeps the slashes glued inside or behind it: `o:1/1` is the cards with "1/1" in
+    # their text. It never OPENS with one -- directly after the operator a slash is a regex.
+    text_value_word = Regex(_SLASHED_VALUE_PATTERN + r"|\w[\w.-]*")
 
     return {
         "attrop": attrop,
@@ -253,9 +268,11 @@ def create_basic_parsers() -> dict[str, ParserElement]:
         "quoted_string": quoted_string,
         "regex_pattern": regex_pattern,
         "word": word,
+        "exact_name_word": exact_name_word,
         "literal_number": literal_number,
         "signed_literal_number": signed_literal_number,
         "string_value_word": string_value_word,
+        "text_value_word": text_value_word,
     }
 
 
@@ -339,6 +356,7 @@ def create_all_condition_parsers(basic_parsers: dict, mana_parsers: dict, color_
     """
     quoted_string = basic_parsers["quoted_string"]
     string_value_word = basic_parsers["string_value_word"]
+    text_value_word = basic_parsers["text_value_word"]
     literal_number = basic_parsers["literal_number"]
     signed_literal_number = basic_parsers["signed_literal_number"]
     arithmetic_op = basic_parsers["arithmetic_op"]
@@ -386,7 +404,7 @@ def create_all_condition_parsers(basic_parsers: dict, mana_parsers: dict, color_
     regex_pattern = basic_parsers["regex_pattern"]
     rarity_condition = create_condition_parser(rarity_attr_word, quoted_string | string_value_word, operators=EQ_ALIAS_OPERATORS)
     legality_condition = create_condition_parser(legality_attr_word, quoted_string | string_value_word)
-    text_condition = create_condition_parser(text_attr_word, regex_pattern | quoted_string | string_value_word)
+    text_condition = create_condition_parser(text_attr_word, regex_pattern | quoted_string | text_value_word)
 
     date_value = Regex(r"\d{4}(?:-\d{2}-\d{2})?")
     date_condition = create_condition_parser(date_attr_word, date_value, operators=EQ_ALIAS_OPERATORS)
@@ -501,7 +519,7 @@ def get_parse_expr() -> ParserElement:  # noqa: PLR0915
     hyphenated_condition = condition_parsers["hyphenated_condition"]
     attr_attr_condition = condition_parsers["attr_attr_condition"]
 
-    _word_for_exact = word.copy()
+    _word_for_exact = basic_parsers["exact_name_word"]
     _quoted_string_for_exact = basic_parsers["quoted_string"]
     exact_name_prefix = Literal("!").suppress()
 
@@ -639,8 +657,25 @@ def _get_implicit_and_tokenizer() -> ParserElement:
     # as a standalone keyword. Mirrors regex_after_op's same trick for the same reason.
     word_after_op = comparison_tok + string_value_tok
 
+    # A slash glued inside or behind a TEXT value is a character of it (`o:1/1`, `t:elf/warrior`),
+    # so the attribute, the operator and the whole value are matched as a unit -- otherwise the
+    # value would be cut at its slash and the slash read as division or dropped as stray. Text
+    # attributes only: behind a numeric one a slash is division (`cmc>power/2`). The value cannot
+    # open with a slash, which leaves `o:/fire/` to regex_after_op.
+    text_attr_tok = make_regex_pattern(_TEXT_ONLY_ALIASES).set_parse_action(lambda t: t[0])
+    slashed_value_tok = Regex(_SLASHED_VALUE_PATTERN).set_parse_action(lambda t: t[0])
+    text_value_after_op = text_attr_tok + comparison_tok + slashed_value_tok
+
+    # The same for an exact name (`!fire//ice`). The lookbehind keeps this to a `!` that opens a
+    # term: glued behind an attribute it is the `=` alias (`cmc!3`), and a slash there is division.
+    exact_slashed = Regex(r"(?<![\w)])!").set_parse_action(lambda t: t[0]) + Regex(
+        r"[^\W\d](?:[\w-]*\w)?(?:/+(?:\w+(?:-\w+)*)?)+"
+    ).set_parse_action(lambda t: t[0])
+
     one_token = (
         quoted_raw
+        | text_value_after_op
+        | exact_slashed
         | regex_after_op
         | word_after_op
         | lparen_tok
@@ -660,8 +695,18 @@ def _get_implicit_and_tokenizer() -> ParserElement:
 
 def _tokenize_for_implicit_and(query: str) -> list[str]:
     """Tokenize a query string for implicit AND preprocessing. Raises ValueError on invalid input."""
+    return _tokenize_with_term_breaks(query)[0]
+
+
+def _tokenize_with_term_breaks(query: str) -> tuple[list[str], set[int]]:
+    """Tokenize *query*; also return the indexes of the tokens a stray slash stood directly behind.
+
+    The tokens carry no whitespace, so a dropped slash would otherwise glue its neighbours together:
+    `pow>=2/-1` must not become the subtraction `pow>=2-1`. The caller treats each index as the end
+    of a term.
+    """
     if not query.strip():
-        return []
+        return [], set()
     tokenizer = _get_implicit_and_tokenizer()
     try:
         result = tokenizer.parse_string(query, parse_all=True).asList()
@@ -676,14 +721,46 @@ def _tokenize_for_implicit_and(query: str) -> list[str]:
         msg = f"Invalid query syntax{location_suffix}: {msg_text}"
         raise ValueError(msg) from e
 
+    kept: list[str] = []
+    term_breaks: set[int] = set()
     for idx, tok in enumerate(result):
         if tok != "/":
+            kept.append(tok)
             continue
-        prev_tok = result[idx - 1] if idx > 0 else None
-        if idx == 0 or (not _is_numeric_operand(prev_tok) and prev_tok != ")"):
+        prev_tok = kept[-1] if kept else None
+        next_tok = result[idx + 1] if idx + 1 < len(result) else None
+        if prev_tok is not None and (prev_tok == "!" or is_operator(prev_tok)):
+            # Directly behind an operator a slash opens a regex, and this one never closed
+            # (`name:/unclosed`); behind `-`, `!` or another arithmetic operator it has no reading.
             msg = "Unmatched / in regex pattern in query"
             raise ValueError(msg)
-    return result
+        if result[idx - 1] != "/" and _is_division(kept, next_tok):
+            kept.append(tok)
+        elif kept:
+            # No term has taken it, and between terms a slash is nothing: `fire // ice` is
+            # `fire ice`, as it is on Scryfall. Mirrors hand_parser.Parser._skip_stray_slashes.
+            term_breaks.add(len(kept) - 1)
+    if not kept:
+        # Nothing but slashes: Scryfall's "All of your terms were ignored.", not every card.
+        msg = "Unmatched / in regex pattern in query"
+        raise ValueError(msg)
+    return kept, term_breaks
+
+
+def _is_division(before: list[str], next_tok: str | None) -> bool:
+    """Return True if a `/` between *before* and *next_tok* divides two numeric terms.
+
+    Both sides must be numeric terms, as hand_parser's arithmetic tails require, and the left one
+    must not be the value of a non-numeric attribute: in `o:1 / 2` the `1` is text.
+    """
+    if not before or not (_is_numeric_operand(before[-1]) or before[-1] == ")"):
+        return False
+    if next_tok is None or not (_is_numeric_operand(next_tok) or next_tok == "("):
+        return False
+    if len(before) >= 3 and before[-2] in _COMPARISON_OPERATORS:  # noqa: PLR2004
+        attr = before[-3]
+        return _is_numeric_operand(attr) or attr == ")"
+    return True
 
 
 def _is_implicit_and_operand(t: str) -> bool:
@@ -743,7 +820,7 @@ def preprocess_implicit_and(query: str) -> str:
                     out.append("AND")
             return " ".join(out)
 
-    tokens = _tokenize_for_implicit_and(query)
+    tokens, term_breaks = _tokenize_with_term_breaks(query)
     if not tokens:
         return ""
 
@@ -770,6 +847,7 @@ def preprocess_implicit_and(query: str) -> str:
             and (_is_numeric_operand(tok) or tok == ")")
             and (_is_numeric_operand(tokens[i + 2]) or tokens[i + 2] == "(")
             and not (prev_is_comparison and _rhs_introduces_comparison(tokens, i + 2))
+            and i not in term_breaks
         )
 
         need_and = (

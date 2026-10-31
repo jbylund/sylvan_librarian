@@ -70,16 +70,24 @@ class TestRegexPatternParsing:
         argvalues=[("/bolt/",), ("/foo/ /bar/",), ("(t:elf) /foo/",)],
         ids=["bare_regex", "two_bare_regexes", "bare_regex_after_group"],
     )
-    def test_bare_regex_is_not_a_supported_shape(self, parse_query, query: str) -> None:
-        """A regex only opens in value position, so a bare one is rejected — as it was before #908.
+    def test_bare_regex_is_a_plain_name_search(self, parse_query, query: str) -> None:
+        """A regex only opens in value position, so a bare one is not a regex — it is its words.
 
-        Scryfall does not treat these as regexes either: it strips the slashes and runs a plain
-        name search, so /bolt/ == bolt == name:bolt (41 cards) while the real regex form
-        name:/bolt/ gives 48, and /^Lightning/ matches nothing because there is no anchoring to
-        apply. Giving the bare form regex semantics would be an extension beyond Scryfall, not
-        parity with it, so it stays unsupported.
+        Scryfall does not treat these as regexes: it strips the slashes and runs a plain name
+        search, so /bolt/ == bolt == name:bolt (41 cards) while the real regex form name:/bolt/
+        gives 48. Giving the bare form regex semantics would be an extension beyond Scryfall, not
+        parity with it. These were rejected outright; they are now answered the way Scryfall
+        answers them, as the query with its slashes taken out (measured 2026-10-04: /fire/, //fire
+        and fire // are all `fire`'s 324).
         """
-        with pytest.raises(ValueError, match=r"(Failed to parse query|Unmatched)"):
+        parsed = parse_query(query)
+        assert parsed.to_json() == parse_query(query.replace("/", " ")).to_json()
+        assert "RegexValueNode" not in str(parsed.to_json())
+
+    @pytest.mark.parametrize(argnames=["query"], argvalues=[("/^Lightning/",), ("/a.*b/",), ("/[ab]/",)])
+    def test_bare_regex_with_metacharacters_is_still_rejected(self, parse_query, query: str) -> None:
+        """Dropping the slashes leaves characters no bare word holds, so these stay errors."""
+        with pytest.raises(ValueError, match=r"(Failed to (parse|lex) query|Invalid query syntax|Unmatched)"):
             parse_query(query)
 
     def test_combined_regex_and_regular_search(self, parse_query) -> None:
