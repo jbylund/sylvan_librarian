@@ -7,7 +7,7 @@ pyparsing-based parse_search_query pipeline.
 
 from __future__ import annotations
 
-import datetime as dt
+import datetime
 from dataclasses import dataclass
 from enum import Enum, auto
 
@@ -795,7 +795,7 @@ class Parser:
                 month = int(month_tok.value)
                 day = int(day_tok.value)
                 try:
-                    dt.date(year=year, month=month, day=day)
+                    datetime.date(year=year, month=month, day=day)
                 except ValueError as exc:
                     msg = f"Invalid date {year}-{month:02d}-{day:02d} at position {tok.pos}: {exc}"
                     raise ParseError(msg) from exc

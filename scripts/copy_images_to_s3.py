@@ -12,7 +12,7 @@ This script:
 from __future__ import annotations
 
 import argparse
-import datetime as dt
+import datetime
 import json
 import logging
 import multiprocessing
@@ -323,7 +323,7 @@ def upload_to_s3(
     Returns:
         True if successful or skipped, False otherwise
     """
-    cache_duration = dt.timedelta(days=105)
+    cache_duration = datetime.timedelta(days=105)
     duration_seconds = int(cache_duration.total_seconds())
     try:
         s3_client.upload_file(
@@ -835,7 +835,7 @@ def main() -> None:
                 elapsed_time = time.monotonic() - start_time
                 fraction_complete = idx / len(cards_with_missing_images)
                 estimated_time_remaining = (elapsed_time / fraction_complete) - elapsed_time
-                estimated_remaining_duration = dt.timedelta(seconds=round(estimated_time_remaining, 1))
+                estimated_remaining_duration = datetime.timedelta(seconds=round(estimated_time_remaining, 1))
                 logger.info(
                     "Progress: %d / %d cards processed (ETA: %s)",
                     idx,
