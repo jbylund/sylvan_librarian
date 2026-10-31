@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from api.admin_resource import AdminContext
+from api.admin_resource import PRINT_COUNT_COLUMNS, AdminContext
 from api.api_resource import APIResource
 from api.app_context import AppContext
 from api.enums import CardOrdering, ResponseShape, SortDirection
@@ -48,6 +48,42 @@ def api_resource(postgres_container: None) -> Generator[APIResource]:
     yield api
     api.app_context.reader_pool.close()
     api.app_context.writer_pool.close()
+
+
+# (query, the cards among Lightning Bolt / Serra Angel / Black Lotus BOTH lanes must answer) for
+# test_count_keywords_agree_on_both_lanes, which writes the six count columns on those three.
+_BOLT, _ANGEL, _LOTUS = "Lightning Bolt", "Serra Angel", "Black Lotus"
+_COUNT_KEYWORD_LANE_CASES: list[tuple[str, set[str]]] = [
+    ("prints=77", {_BOLT}),
+    ("prints:3", {_ANGEL}),
+    ("prints>=3", {_BOLT, _ANGEL}),
+    ("prints<3", {_LOTUS}),
+    ("prints!=1", {_BOLT, _ANGEL}),
+    ("sets=46", {_BOLT}),
+    ("sets=1", {_LOTUS}),
+    ("paperprints=68", {_BOLT}),
+    ("papersets=41", {_BOLT}),
+    ("illustrations=33", {_BOLT}),
+    ("illustrations>=2", {_BOLT, _ANGEL}),
+    ("artists=2", {_ANGEL}),
+    ("artists=1", {_BOLT}),
+    # Zero is a value, not NULL: the digital-only card that credits nobody.
+    ("paperprints=0", {_LOTUS}),
+    ("papersets=0", {_LOTUS}),
+    ("illustrations=0", {_LOTUS}),
+    ("artists=0", {_LOTUS}),
+    # A column on either side.
+    ("prints>sets", {_BOLT}),
+    ("prints=sets", {_ANGEL, _LOTUS}),
+    ("prints>paperprints", {_BOLT, _ANGEL, _LOTUS}),
+    ("illustrations>=prints", set()),
+    ("cmc<prints", {_BOLT, _LOTUS}),
+    # NULL on every card the sync has not reached: neither the comparison nor its negation.
+    ("prints>=0", {_BOLT, _ANGEL, _LOTUS}),
+    ("-prints>=0", set()),
+    ("-artists>=0", set()),
+    ("-prints=77", {_ANGEL, _LOTUS}),
+]
 
 
 class TestContainerIntegration:
@@ -461,6 +497,50 @@ class TestContainerIntegration:
             names = [card["name"] for card in result["cards"] if card["name"] in scores]
             assert names == ["Serra Angel", "Black Lotus", "Lightning Bolt"]
         finally:
+            api_resource.app_context.engine = saved_engine
+            shm_path.unlink(missing_ok=True)
+            shm_path.with_suffix(".lock").unlink(missing_ok=True)
+
+    @pytest.mark.usefixtures("engine_enabled")
+    def test_count_keywords_agree_on_both_lanes(self: TestContainerIntegration, api_resource: APIResource) -> None:
+        """`prints`, `sets`, `paperprints`, `papersets`, `illustrations` and `artists` answer alike in SQL and the engine.
+
+        Both lanes read the same six columns, written here as `_sync_print_counts` writes them, so
+        what this checks is the plumbing a unit test cannot: that the migration added the columns,
+        that ENGINE_COLUMNS selects them and the loader reads them, and that NULL (a card the sync
+        has not reached -- every other row of the fixture data) behaves the same on both sides.
+        """
+        counts = {
+            # Each tuple is prints, sets, paperprints, papersets, illustrations, artists.
+            _BOLT: (77, 46, 68, 41, 33, 1),
+            _ANGEL: (3, 3, 2, 2, 2, 2),
+            # A digital-only card that credits no artist: zero is a value.
+            _LOTUS: (1, 1, 0, 0, 0, 0),
+        }
+        known = set(counts)
+        assignment = ", ".join(f"{column} = %s" for column in PRINT_COUNT_COLUMNS)
+
+        def write(values: dict[str, tuple]) -> None:
+            with api_resource.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+                for name, numbers in values.items():
+                    cursor.execute(f"UPDATE magic.cards SET {assignment} WHERE card_name = %s", (*numbers, name))
+                conn.commit()
+
+        # Private store for the same reason test_cubecobra_ordering swaps one in.
+        shm_path = pathlib.Path(tempfile.gettempdir()) / f"sylvan_librarian_it_{uuid.uuid4().hex}"
+        saved_engine = api_resource.app_context.engine
+        write(counts)
+        api_resource.app_context.engine = QueryEngine(shm_path=str(shm_path))
+        try:
+            api_resource.app_context.reload_engine(force=True)
+
+            for query, expected in _COUNT_KEYWORD_LANE_CASES:
+                sql = {card["name"] for card in api_resource._search_sql(**search_kwargs(query, limit=100))["cards"]}
+                engine = {card["name"] for card in api_resource._search_engine(**search_kwargs(query, limit=100))["cards"]}
+                assert sql == engine, query
+                assert sql & known == expected, query
+        finally:
+            write(dict.fromkeys(counts, (None,) * len(PRINT_COUNT_COLUMNS)))
             api_resource.app_context.engine = saved_engine
             shm_path.unlink(missing_ok=True)
             shm_path.with_suffix(".lock").unlink(missing_ok=True)

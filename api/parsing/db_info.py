@@ -141,6 +141,47 @@ DB_COLUMNS = [
         search_aliases=[],
         parser_class=ParserClass.NUMERIC,
     ),
+    # Scryfall's six COUNT keywords (measured on api.scryfall.com 2026-10-03: Lightning Bolt is
+    # `prints=77`, `sets=46`, `paperprints=68`, `papersets=41`, `illustrations=33`). Five are
+    # counts over all of the card's printings and `artists` is the printing's own; none can be
+    # computed from one row at query time, so each is a column _sync_print_counts
+    # (api/admin_resource.py) writes at import. Ordinary numeric columns from here on.
+    FieldInfo(
+        db_column_name="card_print_count",
+        field_type=FieldType.NUMERIC,
+        search_aliases=["prints"],
+        parser_class=ParserClass.NUMERIC,
+    ),
+    FieldInfo(
+        db_column_name="card_set_count",
+        field_type=FieldType.NUMERIC,
+        search_aliases=["sets"],
+        parser_class=ParserClass.NUMERIC,
+    ),
+    FieldInfo(
+        db_column_name="card_paper_print_count",
+        field_type=FieldType.NUMERIC,
+        search_aliases=["paperprints"],
+        parser_class=ParserClass.NUMERIC,
+    ),
+    FieldInfo(
+        db_column_name="card_paper_set_count",
+        field_type=FieldType.NUMERIC,
+        search_aliases=["papersets"],
+        parser_class=ParserClass.NUMERIC,
+    ),
+    FieldInfo(
+        db_column_name="card_illustration_count",
+        field_type=FieldType.NUMERIC,
+        search_aliases=["illustrations"],
+        parser_class=ParserClass.NUMERIC,
+    ),
+    FieldInfo(
+        db_column_name="artist_count",
+        field_type=FieldType.NUMERIC,
+        search_aliases=["artists"],
+        parser_class=ParserClass.NUMERIC,
+    ),
     FieldInfo(
         db_column_name="mana_cost_jsonb",
         field_type=FieldType.JSONB_OBJECT,
