@@ -41,6 +41,10 @@ Expected: LCP 3.1s → ~1.9–2.2s simulated. FCP regresses slightly (+15–30KB
 
 ## Image bytes: quality ladder + fidelity budget (designed 2026-07-06)
 
+> Ladder *geometry* — how many rungs, how they're spaced, and which fidelity target the budget
+> aims at — moved to [local-image-ladder-geometry.md](./local-image-ladder-geometry.md). This
+> section keeps the per-rung quality design and the `sizes="auto"` findings.
+
 Today: WEBP_QUALITY=75 flat across all four sizes, and real phones (DPR 2.5–3)
 fetch 745s for grid cells (~133KB/card) because srcset maximizes fidelity within
 the offered candidates. Two multiplying changes, validated visually:
