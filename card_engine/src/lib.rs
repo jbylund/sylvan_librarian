@@ -12488,6 +12488,9 @@ fn explain_analyze(
         order.shuffle(&mut rng);
         for &participant in &order {
             let mut round_filter = filter.clone();
+            // Each participant runs the query afresh, so each gets the escalation pool a real query
+            // gets; otherwise plans x rounds runs would share one query's worth of regex retries.
+            refill_regex_escalation_pool();
             // Bound rather than consumed, so the clock read below excludes every participant's own
             // deallocation — otherwise the plans, which hold their result, would be measured on
             // different terms from the two that discard it.
@@ -13502,6 +13505,7 @@ fn bind_and_split_filter(
     // never executed the load path themselves.
     sync_format_shifts(&data.format_shifts);
     clear_regex_match_failed();
+    size_regex_escalation_pool(data.cards.len());
     let mut filter_expr = build_filter(&json_val).map_err(map_build_filter_err)?;
     filter_expr.bind(&data.coll_vocab, &data.artist_vocab, &data.mana_vocab, &data.indexes.flavor, &data.strings);
     check_regex_match_failed()?;

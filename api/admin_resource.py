@@ -25,7 +25,7 @@ to construct and forward it, but nothing outside this module reads or writes its
 
 from __future__ import annotations
 
-import datetime
+import datetime as dt
 import itertools
 import logging
 import os
@@ -975,7 +975,7 @@ class AdminResource:
                     elapsed_time = time.monotonic() - start_time
                     fraction_complete = idx / len(all_is_tags)
                     estimated_time_remaining = (elapsed_time / fraction_complete) - elapsed_time
-                    estimated_duration = datetime.timedelta(seconds=round(estimated_time_remaining, 1))
+                    estimated_duration = dt.timedelta(seconds=round(estimated_time_remaining, 1))
                     logger.info(
                         "Importing is: tag %d of %d: %20s (ETA: %s)",
                         idx + 1,

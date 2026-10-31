@@ -10678,15 +10678,255 @@ fn regex_backtrack_exhaustion_surfaces_as_match_failure() {
     };
     use fancy_regex::RegexBuilder;
 
+    // The repeated group holds the lookahead, so the whole `(...)+` runs on the backtracking VM and
+    // stays exponential at every rung of the escalation ladder. (`(?=a)(a+)+b` no longer does here:
+    // fancy-regex hands its `(a+)+b` to the linear engine, so the first rung answers it, correctly,
+    // with no match.) The `(?!b)b` tail and the haystack ending in `b` are for the seek prefilter
+    // (`build_search_regex`): the VM only runs where the pattern's lookaround-free approximation,
+    // `(a+)+b`, matches, so exhausting the budget needs a text that approximation accepts and the
+    // lookarounds refuse.
     clear_regex_match_failed();
-    let re = RegexBuilder::new("(?i)(?=a)(a+)+b")
+    let re = RegexBuilder::new("(?i)((?=a)a+)+(?!b)b")
         .backtrack_limit(8)
+        .seek(true)
         .build()
         .expect("pattern compiles");
-    let hay = format!("{}c", "a".repeat(40));
+    let re = crate::filter::SearchRegex::from_base_for_test(re);
+    let hay = format!("{}b", "a".repeat(40));
     assert!(!regex_is_match_for_test(&re, &hay));
     let msg = take_regex_match_failed().expect("backtrack exhaustion must set failure flag");
     assert!(msg.starts_with(REGEX_MATCH_ERR_PREFIX));
+
+    // No candidate position, no budget spent: the same repeat against a text the approximation
+    // cannot match never enters the VM, even at a limit of 8.
+    clear_regex_match_failed();
+    assert!(!regex_is_match_for_test(&re, &format!("{}c", "a".repeat(40))));
+    assert!(take_regex_match_failed().is_none(), "a text with no candidate position must not cost budget");
+}
+
+/// A candidate that needs more than `REGEX_BACKTRACK_LIMIT` steps is retried up
+/// `REGEX_ESCALATION_LIMITS` instead of refusing the whole query.
+///
+/// A class loop followed by a lookahead loop that can take the same characters makes the VM try
+/// every split between the two — quadratic in the sentence, not exponential. Each text below is a
+/// real oracle text that the engine's own base regex (seek prefilter on, 8,192 steps) runs out on —
+/// checked first, so the test fails if a text stops needing a retry. On sylvan-librarian.com both
+/// queries were a 400 "Search query contains an unsupported regular expression." where
+/// api.scryfall.com answers 15 and 2,200 cards. Voice of Resurgence needs the 32,768 retry and
+/// Triplicate Titan the 65,536 one; the texts the second pattern does NOT match need retries too,
+/// and still answer no.
+#[test]
+fn regex_budget_escalates_for_a_quadratic_candidate() {
+    use crate::filter::{clear_regex_match_failed, regex_is_match_for_test, take_regex_match_failed};
+
+    const SACRIFICE: &str = r"whenever you sacrifice[^.]*((?!\. whenever).)*?create";
+    const TRIGGER: &str = r"(when|whenever) [^.]*((?!\.)(.))*?(create|draw) a";
+    let effluence_devourer = "whenever you sacrifice effluence devourer or another creature, it perpetually gains \"{2}, exile this card from your graveyard: create an x/x green ooze creature token, where x is this card's power. activate only as a sorcery.\"\nblitz {b}{r}{g} (if you cast this spell for its blitz cost, it gains haste and \"when this creature dies, draw a card.\" sacrifice it at the beginning of the next end step.)";
+    let ashling = "elemental permanent spells you cast from your hand gain evoke {4} as you cast them. (if you cast a spell for its evoke cost, it's sacrificed when it enters.)\nwhenever you sacrifice a nontoken elemental, create a token that's a copy of it. the token gains haste until end of turn. at the beginning of your next end step, sacrifice it unless you pay {w}{u}{b}{r}{g}.";
+    let undead_servant = "when this creature enters, create a 2/2 black zombie creature token for each card named undead servant in your graveyard.";
+    let voice_of_resurgence = "whenever an opponent casts a spell during your turn and when this creature dies, create a green and white elemental creature token with \"this token's power and toughness are each equal to the number of creatures you control.\"";
+    let triplicate_titan = "flying, vigilance, trample\nwhen this creature dies, create a 3/3 colorless golem artifact creature token with flying, a 3/3 colorless golem artifact creature token with vigilance, and a 3/3 colorless golem artifact creature token with trample.";
+    let pondering_mage = "when this creature enters, look at the top three cards of your library, then put them back in any order. you may shuffle. draw a card.";
+    let archon_of_cruelty = "flying\nwhenever this creature enters or attacks, target opponent sacrifices a creature or planeswalker of their choice, discards a card, and loses 3 life. you draw a card and gain 3 life.";
+    let sharp_eyed_rookie = "vigilance\nwhenever a creature you control enters, if its power is greater than this creature's power or its toughness is greater than this creature's toughness, put a +1/+1 counter on this creature and investigate. (create a clue token. it's an artifact with \"{2}, sacrifice this token: draw a card.\")";
+    let cases = [
+        (SACRIFICE, effluence_devourer, true),
+        (SACRIFICE, ashling, true),
+        (TRIGGER, undead_servant, true),
+        (TRIGGER, voice_of_resurgence, true),
+        (TRIGGER, triplicate_titan, true),
+        (TRIGGER, pondering_mage, false),
+        (TRIGGER, archon_of_cruelty, false),
+        (TRIGGER, sharp_eyed_rookie, false),
+    ];
+    for (pattern, text, expected) in cases {
+        let re = crate::filter::compile_search_regex_for_test(pattern);
+        assert!(
+            matches!(re.base().is_match(text), Err(fancy_regex::Error::RuntimeError(_))),
+            "{pattern:?} must exhaust the base budget on {text:?}, or this case tests nothing"
+        );
+        clear_regex_match_failed();
+        assert_eq!(regex_is_match_for_test(&re, text), expected, "{pattern:?} on {text:?}");
+        assert!(take_regex_match_failed().is_none(), "{pattern:?} refused a quadratic candidate");
+    }
+    // The answer is the pattern's, not the ladder's: a candidate it does not match still does not.
+    let re = crate::filter::compile_search_regex_for_test(SACRIFICE);
+    clear_regex_match_failed();
+    let no_match = "whenever you sacrifice another creature or artifact, put a +1/+1 counter on target creature you control and it gains trample until end of turn. whenever a creature dies, create a 1/1 black rat creature token.";
+    assert!(!regex_is_match_for_test(&re, no_match));
+    assert!(take_regex_match_failed().is_none());
+}
+
+const ASHLING_LOWER: &str = "elemental permanent spells you cast from your hand gain evoke {4} as you cast them. (if you cast a spell for its evoke cost, it's sacrificed when it enters.)\nwhenever you sacrifice a nontoken elemental, create a token that's a copy of it. the token gains haste until end of turn. at the beginning of your next end step, sacrifice it unless you pay {w}{u}{b}{r}{g}.";
+
+/// The ladder draws on a per-query pool, so an exponential pattern still exhausts it and is
+/// refused — and `clear_regex_match_failed`, which every query runs before it binds its filter,
+/// refills it, so one refused query does not leave the next one without.
+#[test]
+fn regex_escalation_pool_is_per_query() {
+    use crate::filter::{clear_regex_match_failed, regex_is_match_for_test, take_regex_match_failed};
+
+    let exponential = crate::filter::compile_search_regex_for_test("((?=a)a+)+(?!b)b");
+    let quadratic = crate::filter::compile_search_regex_for_test(r"whenever you sacrifice[^.]*((?!\. whenever).)*?create");
+    let hay = format!("{}b", "a".repeat(60));
+
+    clear_regex_match_failed();
+    // One climb to the top rung takes all but 16,384 of the smallest pool; the second exponential
+    // candidate spends that, and the rest climb nothing.
+    for _ in 0..8 {
+        assert!(!regex_is_match_for_test(&exponential, &hay));
+        assert!(take_regex_match_failed().is_some(), "an exponential candidate must still exhaust the budget");
+    }
+    // The flag was taken, but the pool is still empty within this query: a quadratic candidate that
+    // needs a rung now has nothing to climb with, and is refused rather than answered `false`.
+    assert!(!regex_is_match_for_test(&quadratic, ASHLING_LOWER));
+    assert!(take_regex_match_failed().is_some(), "an emptied pool must refuse, not answer false");
+
+    clear_regex_match_failed();
+    assert!(regex_is_match_for_test(&quadratic, ASHLING_LOWER), "the next query starts with a full pool");
+    assert!(take_regex_match_failed().is_none());
+}
+
+/// The pool is `REGEX_ESCALATION_POOL_PER_CARD` per card in the corpus, never less than
+/// `REGEX_ESCALATION_POOL_MIN`, and a query that does not size it gets the minimum.
+#[test]
+fn regex_escalation_pool_scales_with_the_corpus() {
+    use crate::filter::{
+        clear_regex_match_failed, regex_is_match_for_test, size_regex_escalation_pool, take_regex_match_failed,
+        REGEX_ESCALATION_LIMITS, REGEX_ESCALATION_POOL_MIN, REGEX_ESCALATION_POOL_PER_CARD,
+    };
+
+    let climb: usize = REGEX_ESCALATION_LIMITS.iter().sum();
+    assert!(climb <= REGEX_ESCALATION_POOL_MIN, "the smallest pool pays for one climb to the top rung");
+    let exponential = crate::filter::compile_search_regex_for_test("((?=a)a+)+(?!b)b");
+    let quadratic = crate::filter::compile_search_regex_for_test(r"whenever you sacrifice[^.]*((?!\. whenever).)*?create");
+    let hay = format!("{}b", "a".repeat(60));
+    // Three full climbs, then a candidate that needs the first rung.
+    let three_climbs_then_one = || {
+        for _ in 0..3 {
+            assert!(!regex_is_match_for_test(&exponential, &hay));
+            assert!(take_regex_match_failed().is_some());
+        }
+        let m = regex_is_match_for_test(&quadratic, ASHLING_LOWER);
+        (m, take_regex_match_failed().is_none())
+    };
+
+    // 32,011 cards (the 2026-10-09 bulk file): 16,389,632 steps, room for three climbs and more.
+    clear_regex_match_failed();
+    size_regex_escalation_pool(32_011);
+    assert!(32_011 * REGEX_ESCALATION_POOL_PER_CARD > 3 * climb + REGEX_ESCALATION_LIMITS[0]);
+    assert_eq!(three_climbs_then_one(), (true, true));
+
+    // A small corpus gets the minimum, which three climbs empty.
+    clear_regex_match_failed();
+    size_regex_escalation_pool(50);
+    assert_eq!(three_climbs_then_one(), (false, false));
+
+    // And `clear_regex_match_failed` puts the pool back to the minimum until the query sizes it.
+    clear_regex_match_failed();
+    size_regex_escalation_pool(32_011);
+    clear_regex_match_failed();
+    assert_eq!(three_climbs_then_one(), (false, false));
+}
+
+/// A text that needed a retry is charged once per query, however many times it is checked: the
+/// executors check a matching card again when it lands on the page, and cards can share a text.
+#[test]
+fn regex_retry_is_charged_once_per_text_per_query() {
+    use crate::filter::{clear_regex_match_failed, regex_is_match_for_test, take_regex_match_failed};
+
+    let exponential = crate::filter::compile_search_regex_for_test("((?=a)a+)+(?!b)b");
+    let quadratic = crate::filter::compile_search_regex_for_test(r"whenever you sacrifice[^.]*((?!\. whenever).)*?create");
+    let effluence_devourer = "whenever you sacrifice effluence devourer or another creature, it perpetually gains \"{2}, exile this card from your graveyard: create an x/x green ooze creature token, where x is this card's power. activate only as a sorcery.\"\nblitz {b}{r}{g} (if you cast this spell for its blitz cost, it gains haste and \"when this creature dies, draw a card.\" sacrifice it at the beginning of the next end step.)";
+
+    clear_regex_match_failed();
+    // One climb leaves exactly the first rung's 16,384 in the smallest pool...
+    assert!(!regex_is_match_for_test(&exponential, &format!("{}b", "a".repeat(60))));
+    assert!(take_regex_match_failed().is_some());
+    // ...which Ashling's first check spends.
+    assert!(regex_is_match_for_test(&quadratic, ASHLING_LOWER));
+    // Checked again (a clone of the leaf, as `explain_analyze` makes, and a fresh copy of the text),
+    // it is answered from this query's own result rather than climbing on an empty pool.
+    let again = ASHLING_LOWER.to_owned();
+    for _ in 0..3 {
+        assert!(regex_is_match_for_test(&quadratic.clone(), &again));
+    }
+    assert!(take_regex_match_failed().is_none(), "a text already answered must not be charged again");
+    // A different text that needs a retry has nothing to climb with.
+    assert!(!regex_is_match_for_test(&quadratic, effluence_devourer));
+    assert!(take_regex_match_failed().is_some());
+    // And the next query remembers nothing: with a full pool it answers Effluence Devourer.
+    clear_regex_match_failed();
+    assert!(regex_is_match_for_test(&quadratic, effluence_devourer));
+    assert!(take_regex_match_failed().is_none());
+}
+
+/// The seek prefilter (`build_search_regex`) changes WHERE the backtracking VM is entered, never what
+/// a pattern answers.
+///
+/// fancy_regex ships seek switched off and calls it experimental. Its promise is that the
+/// approximation it seeks with only over-matches; a prefilter that under-matched would drop cards
+/// silently. So the promise is checked rather than taken: every pattern below, against every other
+/// line of `testdata/text_corpus.txt` (real oracle and flavor text, run together into lines of up to
+/// 1,234 characters), must answer exactly what the same pattern answers on the UNSEEKED VM with no budget
+/// at all, and must not be refused. (The same battery, and more, was run against all 38,791 oracle
+/// texts of the 2026-10-09 bulk file: no difference on any of them.)
+#[test]
+fn seeked_regex_answers_what_the_unseeked_one_does() {
+    use crate::filter::{clear_regex_match_failed, regex_is_match_for_test, size_regex_escalation_pool, take_regex_match_failed};
+
+    const PATTERNS: &[&str] = &[
+        r"(?<!any )(number of|for each)[^.,\n]*\b(lands|land cards|forests|islands|swamps|mountains|plains)\b|for each land card|whenever[^,\n]*\bland[^,\n]*graveyard|lands than",
+        r"(?<!a )b|c|d|e",
+        r"(?<!a )zq|zx|zw|zv|zu|zt|zs",
+        r"zq(?!a)|zx|zw|zv|zu",
+        r"(?<=a )zq|zx|zw|zv|zu",
+        r"x(?!y)",
+        r"(?<!non)creature(?!s)",
+        r"^(?!when)[a-z]+ (?=target)",
+        r"(?<=\n)whenever",
+        r"whenever(?=[^\n]*draw)",
+        r"^(?!.*\bdraw\b).*\bdiscard\b",
+        r"destroy (?!target)(all|each)",
+        r"(?<![a-z])fly(?![a-z])",
+        r"(?<=\{)[wubrg](?=\})",
+        r"(\{[wubrg]\})\1",
+        r"(\w+) \1",
+        r"(?<!first |double )strike",
+        r"(?<!\d)[2-9](?!\d)",
+        r"(?=.*flying)(?=.*lifelink)",
+        r"\b(?!the\b)\w+ of \w+\b",
+        r"(?:(?<=you )gain|(?<=you )lose) \d+ life",
+        r"(?>a+)b",
+        r"(t)(?(1)arget|x)",
+        r"$(?<!\.)",
+        r"^(?=.{200,})",
+        r"(?=(\w{6,}))\1.*\1",
+        r"\bcreate\b(?=[^.]*\btoken\b)",
+        r"sacrifice(?:(?!\.).)*draw",
+        r"whenever you sacrifice[^.]*((?!\. whenever).)*?create",
+    ];
+
+    let corpus = include_str!("../testdata/text_corpus.txt");
+    // Every other line, to keep a debug-build run to a few seconds.
+    let texts: Vec<&str> = corpus.lines().filter(|t| !t.is_empty()).step_by(2).collect();
+    assert!(texts.len() > 1_500 && texts.iter().any(|t| t.len() > 1_200));
+
+    let mut matched = 0usize;
+    for pattern in PATTERNS {
+        let seeked = crate::filter::compile_search_regex_for_test(pattern);
+        let reference = fancy_regex::RegexBuilder::new(seeked.as_str()).backtrack_limit(usize::MAX).build().unwrap();
+        for text in &texts {
+            clear_regex_match_failed();
+            size_regex_escalation_pool(32_011);
+            let got = regex_is_match_for_test(&seeked, text);
+            assert!(take_regex_match_failed().is_none(), "{pattern:?} was refused on {} characters", text.len());
+            assert_eq!(got, reference.is_match(text).unwrap(), "{pattern:?} on {text:?}");
+            matched += usize::from(got);
+        }
+    }
+    // Not vacuous: the battery matches, and refuses, plenty.
+    assert!(matched > 2_500 && matched < PATTERNS.len() * texts.len() - 2_500, "{matched}");
 }
 
 // And children reorder cheapest-tier-first regardless of written order, and

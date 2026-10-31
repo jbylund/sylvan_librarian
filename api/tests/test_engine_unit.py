@@ -27,7 +27,7 @@ Card summary (name → printings):
 
 from __future__ import annotations
 
-import datetime
+import datetime as dt
 import json
 import tempfile
 import uuid
@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from api.parsing import parse_scryfall_query
-from card_engine import QueryEngine, UnknownFieldError
+from card_engine import QueryEngine, UnknownFieldError, UnsupportedRegexError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
@@ -978,8 +978,8 @@ class TestCardProperties:
         e = fresh_engine()
         e.reload(
             [
-                {**base, "oracle_id": "a", "released_at": datetime.date(2026, 3, 15)},
-                {**base, "oracle_id": "b", "released_at": datetime.date(2024, 1, 1)},
+                {**base, "oracle_id": "a", "released_at": dt.date(2026, 3, 15)},
+                {**base, "oracle_id": "b", "released_at": dt.date(2024, 1, 1)},
                 {**base, "oracle_id": "c", "released_at": "2026-07-04"},
             ]
         )
@@ -1495,3 +1495,116 @@ class TestRouterDispatchScope:
                 assert picked[0] in scope, f"{query}@{limit}: picked {picked[0]}, which this acquire cannot run"
                 checked += 1
         assert checked, "no query in PLANE_QUERIES acquired through a plane or candidate list"
+
+
+class TestRegexEscalation:
+    """A regex candidate that exhausts the per-candidate backtrack limit is retried at higher limits.
+
+    `[^.]*` followed by a lookahead loop that can take the same characters is quadratic in the
+    sentence, and on these real oracle texts it takes more than the flat 8,192 steps to prove a
+    match (or a miss), even with the seek prefilter. Each such card used to refuse the whole query:
+    both queries below were a 400 "Search query contains an unsupported regular expression." on
+    sylvan-librarian.com while api.scryfall.com answers 15 and 2,200 cards. The retries are paid from
+    a per-query pool, so an exponential pattern is still refused, and the next query starts with the
+    pool full.
+    """
+
+    ASHLING = (
+        "Elemental permanent spells you cast from your hand gain evoke {4} as you cast them. (If you cast a spell for "
+        "its evoke cost, it's sacrificed when it enters.)\nWhenever you sacrifice a nontoken Elemental, create a token "
+        "that's a copy of it. The token gains haste until end of turn. At the beginning of your next end step, "
+        "sacrifice it unless you pay {W}{U}{B}{R}{G}."
+    )
+    EFFLUENCE_DEVOURER = (
+        'Whenever you sacrifice Effluence Devourer or another creature, it perpetually gains "{2}, Exile this card '
+        "from your graveyard: Create an X/X green Ooze creature token, where X is this card's power. Activate only as "
+        'a sorcery."\nBlitz {B}{R}{G} (If you cast this spell for its blitz cost, it gains haste and "When this '
+        'creature dies, draw a card." Sacrifice it at the beginning of the next end step.)'
+    )
+    UNDEAD_SERVANT = (
+        "When this creature enters, create a 2/2 black Zombie creature token for each card named Undead Servant in your graveyard."
+    )
+    VOICE_OF_RESURGENCE = (
+        "Whenever an opponent casts a spell during your turn and when this creature dies, create a green and white "
+        "Elemental creature token with \"This token's power and toughness are each equal to the number of creatures "
+        'you control."'
+    )
+    TRIPLICATE_TITAN = (
+        "Flying, vigilance, trample\nWhen this creature dies, create a 3/3 colorless Golem artifact creature token "
+        "with flying, a 3/3 colorless Golem artifact creature token with vigilance, and a 3/3 colorless Golem "
+        "artifact creature token with trample."
+    )
+    PONDERING_MAGE = (
+        "When this creature enters, look at the top three cards of your library, then put them back in any order. "
+        "You may shuffle. Draw a card."
+    )
+    TEMPERED_SACRIFICE = r"o:/whenever you sacrifice[^.]*((?!\. whenever).)*?create/"
+    TEMPERED_TRIGGER = r"o:/(when|whenever) [^.]*((?!\.)(.))*?(create|draw) a/"
+    # Each `a` can be either branch, and `(?!c)c` never matches, so every way of splitting the run is
+    # tried; the seek prefilter's approximation, `(a|a)*c`, does match, so the VM is entered.
+    EXPONENTIAL = r"o:/((?=a)a|a)*(?!c)c/"
+
+    @staticmethod
+    def _load(engine: QueryEngine, cards: list[tuple[str, str]]) -> QueryEngine:
+        engine.reload([{"card_name": name, "oracle_id": f"o{i}", "oracle_text": text} for i, (name, text) in enumerate(cards)])
+        return engine
+
+    def test_a_quadratic_candidate_is_answered_not_refused(self, fresh_engine: Callable[[], QueryEngine]) -> None:
+        e = self._load(
+            fresh_engine(),
+            [
+                ("Ashling, the Limitless", self.ASHLING),
+                ("Effluence Devourer", self.EFFLUENCE_DEVOURER),
+                ("Undead Servant", self.UNDEAD_SERVANT),
+                ("Voice of Resurgence", self.VOICE_OF_RESURGENCE),
+                ("Triplicate Titan", self.TRIPLICATE_TITAN),
+                ("Pondering Mage", self.PONDERING_MAGE),
+                ("Lightning Bolt", "Lightning Bolt deals 3 damage to any target."),
+            ],
+        )
+        for unique in ("card", "printing"):
+            total, cards = _run(e, self.TEMPERED_SACRIFICE, unique=unique)
+            assert total == 2
+            assert sorted(_names(cards)) == ["Ashling, the Limitless", "Effluence Devourer"]
+            # Pondering Mage needs a retry too, and is still not a match: its "draw a" follows a period.
+            total, cards = _run(e, self.TEMPERED_TRIGGER, unique=unique)
+            assert total == 5
+            assert sorted(_names(cards)) == [
+                "Ashling, the Limitless",
+                "Effluence Devourer",
+                "Triplicate Titan",
+                "Undead Servant",
+                "Voice of Resurgence",
+            ]
+
+    def test_the_retry_pool_is_per_query(self, fresh_engine: Callable[[], QueryEngine]) -> None:
+        # A corpus this small gets the smallest pool, 4,194,304 steps. One exponential candidate's climb
+        # through every retry takes all but 16,384 of it, less than these two cards' first retries.
+        e = self._load(
+            fresh_engine(),
+            [
+                ("Ashling, the Limitless", self.ASHLING),
+                ("Effluence Devourer", self.EFFLUENCE_DEVOURER),
+                ("Long A", "a" * 60 + "c"),
+            ],
+        )
+        for _ in range(3):
+            # An exponential pattern still climbs every retry and is refused...
+            with pytest.raises(UnsupportedRegexError, match="regex execution limit exceeded"):
+                _run(e, self.EXPONENTIAL, unique="card")
+            # ...and leaves nothing behind for the next query, which is answered only because the pool
+            # refills when a query starts.
+            total, _ = _run(e, self.TEMPERED_SACRIFICE, unique="card")
+            assert total == 2
+
+    def test_explain_analyze_gives_each_run_its_own_pool(self, fresh_engine: Callable[[], QueryEngine]) -> None:
+        # explain_analyze binds once and then runs every plan, the acquire and the router for each of
+        # its rounds. Each of these 50 distinct texts needs a retry, so one run's retries fit in the pool
+        # and all the runs' together would not: each run gets a full pool (and forgets the answers it
+        # did not pay for), as a real query would.
+        cards = [(f"Ashling Copy {i:02d}", f"{self.ASHLING}\nCopy {i}.") for i in range(50)]
+        e = self._load(fresh_engine(), cards)
+        result = e.explain_analyze(
+            filters=parse_scryfall_query(self.TEMPERED_SACRIFICE), unique="card", num_warmups=1, num_trials=3
+        )
+        assert result["plans"]

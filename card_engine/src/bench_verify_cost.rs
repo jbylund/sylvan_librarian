@@ -218,7 +218,7 @@ fn bench_regex_backtrack_tier() {
         assert_eq!(pattern_requires_backtrack(pat), expect_backtrack, "{pat}");
         let re = compile_search_regex_for_test(pat);
         let ns = time_kernel(&format!("  {pat:<28}"), n, || {
-            texts.iter().filter(|s| re.is_match(s).unwrap_or(false)).count() as u32
+            texts.iter().filter(|s| re.base().is_match(s).unwrap_or(false)).count() as u32
         });
         if expect_backtrack {
             backtrack_ns = backtrack_ns.max(ns);
