@@ -512,6 +512,11 @@ class Parser:
                 return CardBinaryOperatorNode(CardAttributeNode(wl, ParserClass.NUMERIC), op, self.parse_num_expr_value())
             if next_tok.type in _ARITH_OPS and not next_tok.space_before:
                 lhs = self._arith_tail(CardAttributeNode(wl, ParserClass.NUMERIC))
+                if isinstance(lhs, CardAttributeNode):
+                    # The operator has no numeric term after it, so this is not arithmetic: `power-sink`
+                    # is the hyphenated name word `some-word` is. Returning the bare attribute left the
+                    # `-` unconsumed and failed the parse.
+                    return self.parse_hyphenated_name(word)
                 lhs = self._spaced_arith_tail(lhs)
                 if self.peek().type == TT.OP:
                     op = self.consume().value
@@ -635,17 +640,24 @@ class Parser:
     # ── implicit name (possibly hyphenated) ───────────────────────────────────
 
     def parse_hyphenated_name(self, first: str) -> CardBinaryOperatorNode:
-        """Build an implicit name node, greedily consuming no-space MINUS+WORD/NUMBER continuations."""
-        parts = [first]
-        while (
-            self.peek().type == TT.MINUS
-            and not self.peek().space_before
-            and self.peek(1).type in (TT.WORD, TT.NUMBER)
-            and not self.peek(1).space_before
-        ):
-            self.consume()  # MINUS
-            parts.append(str(self.consume().value))
-        return _name_node("-".join(parts))
+        """Build an implicit name node, greedily consuming no-space hyphens+WORD/NUMBER continuations.
+
+        A run of hyphens glues what follows it the way a single hyphen does: `some--word` is one name
+        word, as it is in pyparsing_based.py (whose word pattern allows any run of hyphens between two
+        word characters) and on Scryfall, where `fire--ice` answers what `fire-ice` does. The hyphens
+        are kept in the value. A run with no word or number directly behind it is left unconsumed.
+        """
+        word = first
+        while self.peek().type == TT.MINUS and not self.peek().space_before:
+            hyphens = 1
+            while self.peek(hyphens).type == TT.MINUS and not self.peek(hyphens).space_before:
+                hyphens += 1
+            after = self.peek(hyphens)
+            if after.type not in (TT.WORD, TT.NUMBER) or after.space_before:
+                break
+            self.pos += hyphens  # the MINUS run
+            word += "-" * hyphens + str(self.consume().value)
+        return _name_node(word)
 
     # ── value parsers ─────────────────────────────────────────────────────────
 
