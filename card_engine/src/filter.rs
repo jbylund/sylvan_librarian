@@ -616,6 +616,25 @@ pub(crate) enum FilterExpr {
         pips: u64,
     },
 
+    /// `scryfallid:<uuid>` — the ONE printing whose `scryfall_id` equals `id` — and
+    /// `illustrationid:<uuid>` — every printing carrying that artwork. Both are Scryfall search
+    /// keywords (measured on api.scryfall.com 2026-10-03: `scryfallid:860aa0fe-…` and
+    /// `illustrationid:9e42d409-…` are each 1 card, the second 2 under `unique=prints`).
+    ///
+    /// Printing-level. `id` is `parse_uuid_or_hash`'s u128; 0 (an empty value) is refused
+    /// outright, because 0 is also how a printing with no illustration id stores "none" and the
+    /// two must not meet. `scryfallid:` is two-valued; `illustrationid:` is not — see its `tri()`
+    /// arm for what its negation answers.
+    ///
+    /// No narrowing arm: the predicate is one integer compare per printing, the cost of any
+    /// unindexed printing predicate.
+    ScryfallIdMatch {
+        id: u128,
+    },
+    IllustrationIdMatch {
+        id: u128,
+    },
+
     DateCmp {
         op: CmpOp,
         value: u32, // yyyymmdd, partial dates zero-padded (e.g. "2026-07" → 20260700)
@@ -721,6 +740,10 @@ pub(crate) fn verify_cost_tier(f: &FilterExpr) -> u32 {
         | FilterExpr::ColorCmp { .. }
         | FilterExpr::TypeCmp { .. }
         | FilterExpr::Legality { .. }
+        // The two printing-id matches are one 128-bit integer equality against a field already
+        // in the printing.
+        | FilterExpr::ScryfallIdMatch { .. }
+        | FilterExpr::IllustrationIdMatch { .. }
         | FilterExpr::DateCmp { .. }
         | FilterExpr::YearCmp { .. } => MASK_COMPARE_NS100,
     }
@@ -872,6 +895,8 @@ fn leaf_compares_printing_field(f: &FilterExpr) -> bool {
     match f {
         FilterExpr::NumericCmp { lhs, rhs, .. } => num_pdep(lhs) || num_pdep(rhs),
         FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. } => true,
+        // A printing's own id, and the artwork it carries: per-printing by definition.
+        FilterExpr::ScryfallIdMatch { .. } | FilterExpr::IllustrationIdMatch { .. } => true,
         FilterExpr::ArtistMatch { .. } | FilterExpr::FlavorMatch { .. } => true,
         // Exhaustive over TextSearchField (no `matches!`), same reason as num_pdep.
         FilterExpr::TextContains { field, .. } => match field {
@@ -1640,6 +1665,32 @@ impl FilterExpr {
                 })
             }
 
+            // Two-valued per printing. Id 0 is "empty" on the query side and "absent" on the
+            // stored side, so it matches nothing rather than every printing without an id.
+            FilterExpr::ScryfallIdMatch { id } => {
+                let Some(p) = printing else { return Tri::PrintingDep };
+                tri_bool(*id != 0 && u128::from(p.scryfall_id) == *id)
+            }
+            // THREE-valued, and the third value is measured rather than assumed: on api.scryfall.com
+            // (2026-10-03) `-illustrationid:<id>` does NOT answer "every other printing". It answers
+            // only the printings with NO top-level illustration id — `-illustrationid:9e42d409-…
+            // layout:split` is 0 of 137 and `-illustrationid:<id> !"Reset"` is a 404 though none of
+            // Reset's three printings carries that artwork, and the same for an id no card has. So
+            // a printing whose own id is some OTHER artwork is SQL NULL (it survives neither the
+            // term nor its negation), and one that has none at all is a real False. The SQL path
+            // spells the same three values as a CASE (`CardBinaryOperatorNode._handle_colon_operator`).
+            FilterExpr::IllustrationIdMatch { id } => {
+                let Some(p) = printing else { return Tri::PrintingDep };
+                let own = u128::from(p.illustration_id);
+                if *id != 0 && own == *id {
+                    Tri::True
+                } else if own == 0 {
+                    Tri::False
+                } else {
+                    Tri::Null
+                }
+            }
+
             FilterExpr::DateCmp { op, value } => {
                 // value is a zero-padded yyyymmdd (see build_binary); zero-padding a
                 // partial date reproduces the old lexicographic-prefix semantics exactly,
@@ -1829,6 +1880,21 @@ fn build_binary(kw: &Value) -> Result<FilterExpr, String> {
         }
         let value: u32 = format!("{digits:0<8}").parse().map_err(|_| format!("bad date: {val_str}"))?;
         return Ok(FilterExpr::DateCmp { op: cmp_op, value });
+    }
+
+    // Equality only: an id has no order, and Scryfall answers `scryfallid!=<id>` and
+    // `scryfallid><id>` with a plain 404. Refusing here sends those to the SQL path, which
+    // compares the id's text.
+    if attr == "scryfall_id" || attr == "illustration_id" {
+        if !matches!(op, ":" | "=") {
+            return Err(format!("operator {op:?} is not supported on {attr}"));
+        }
+        let id = super::parse_uuid_or_hash(rhs_value_str(rhs));
+        return Ok(if attr == "scryfall_id" {
+            FilterExpr::ScryfallIdMatch { id }
+        } else {
+            FilterExpr::IllustrationIdMatch { id }
+        });
     }
 
     if attr == "mana_cost_jsonb" {

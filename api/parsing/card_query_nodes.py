@@ -98,6 +98,10 @@ def get_rarity_number(rarity: str) -> int:
     return int_val
 
 
+# The two printing-id columns `scryfallid:` and `illustrationid:` search. Both are UUIDs.
+PRINTING_ID_ATTRIBUTES = ("scryfall_id", "illustration_id")
+
+
 class CardAttributeNode(AttributeNode):
     """Card-specific attribute node with field mapping."""
 
@@ -136,6 +140,11 @@ class CardAttributeNode(AttributeNode):
             SQL string for the attribute reference.
         """
         del context
+        # scryfall_id and illustration_id are UUID columns; every bound parameter arrives as text,
+        # and `uuid = text` has no operator in Postgres. Comparing the column's canonical text form
+        # keeps the generic comparison path and never raises on an unparseable search value.
+        if self.attribute_name in PRINTING_ID_ATTRIBUTES:
+            return f"card.{self.attribute_name}::text"
         # attribute_name is already set to the correct db_column_name in __init__
         return f"card.{self.attribute_name}"
 
@@ -161,6 +170,8 @@ class CardAttributeNode(AttributeNode):
             "type_line": "type line",
             "flavor_text": "flavor text",
             "card_keywords": "keyword",
+            "scryfall_id": "Scryfall ID",
+            "illustration_id": "illustration ID",
             "card_layout": "layout",
             "card_border": "border",
             "card_watermark": "watermark",
@@ -772,6 +783,9 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         if field_type == FieldType.JSONB_ARRAY:
             return self._handle_jsonb_array(context)
 
+        if attr in PRINTING_ID_ATTRIBUTES and self.operator in (":", "="):
+            return self._handle_printing_id_equality(context, lhs_sql, attr)
+
         if self.operator == ":":
             return self._handle_colon_operator(context, field_type, lhs_sql, attr)
 
@@ -788,9 +802,30 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         # set is lowercased
         if attr in ("card_artist", "card_name"):
             self.rhs.value = titlecase(self.rhs.value)
-        elif attr in ("set", "card_set_code"):
+        elif attr in ("set", "card_set_code") or attr in PRINTING_ID_ATTRIBUTES:
+            # A uuid renders lowercase through ::text.
             self.rhs.value = self.rhs.value.lower()
         return super().to_sql(context)
+
+    def _handle_printing_id_equality(self, context: QueryContext, lhs_sql: str, attr: str) -> str:
+        """`scryfallid:` / `illustrationid:` under `:` or `=`: one exact, case-insensitive id.
+
+        A uuid renders lowercase through `::text`, so lowercasing the search value gives the
+        case-insensitive equality Scryfall's keywords have, and a value that is not a uuid at all
+        simply equals no stored id.
+
+        `illustrationid:` is THREE-valued, the same three values the engine's
+        `FilterExpr::IllustrationIdMatch` answers: measured on api.scryfall.com 2026-10-03,
+        `-illustrationid:<id>` is not "every other printing" -- `-illustrationid:<id> !"Reset"` is
+        a 404 though none of Reset's printings carries that artwork. A printing whose own id is some
+        OTHER artwork is NULL (it survives neither the term nor its negation), and one with no
+        illustration id is FALSE. `scryfall_id` is NOT NULL, so `scryfallid:` is plain equality and
+        its negation the other printings.
+        """
+        placeholder = context.add(self.rhs.value.lower())
+        if attr == "illustration_id":
+            return f"(CASE WHEN card.illustration_id IS NULL THEN FALSE WHEN {lhs_sql} = {placeholder} THEN TRUE END)"
+        return f"({lhs_sql} = {placeholder})"
 
     def _handle_rarity_comparison(self, context: QueryContext) -> str:
         # Special handling for rarity - convert text values to numeric

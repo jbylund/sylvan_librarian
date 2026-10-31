@@ -13470,3 +13470,79 @@ fn limit_zero_yields_no_rows_and_the_full_total() {
         }
     }
 }
+
+/// `scryfallid:` names ONE printing and `illustrationid:` every printing carrying an artwork —
+/// Scryfall's two printing-id keywords, measured on api.scryfall.com 2026-10-03.
+#[test]
+fn scryfall_and_illustration_ids_match_printings() {
+    let leaf = |attr: &str, op: &str, value: &str| {
+        super::build_filter(&serde_json::json!({
+            "node_type": "CardBinaryOperatorNode",
+            "kwargs": {
+                "op": op,
+                "lhs": {"node_type": "CardAttributeNode", "kwargs": {"attribute_name": attr, "original_attribute": attr}},
+                "rhs": {"node_type": "StringValueNode", "kwargs": {"value": value}},
+            }
+        }))
+    };
+    const PRINT_A: &str = "860aa0fe-0337-458c-b864-5ef5733fbae6";
+    const PRINT_B: &str = "1c829d83-d5b8-4be7-80f7-55b42f52b309";
+    const ART: &str = "9e42d409-161d-4e63-8982-71e313f27b2f";
+    const NOBODY: &str = "11111111-1111-4111-8111-111111111111";
+
+    let mut vocab = VocabInterner::new();
+    let card = stub_card(1, TYPE_CREATURE, &[], &mut vocab);
+    let mut data = store_of(vec![card], &[3], vocab);
+    // Two printings sharing one artwork, and a third with no illustration id at all.
+    data.printings[0].scryfall_id = super::parse_uuid_or_hash(PRINT_A);
+    data.printings[0].illustration_id = super::parse_uuid_or_hash(ART);
+    data.printings[1].scryfall_id = super::parse_uuid_or_hash(PRINT_B);
+    data.printings[1].illustration_id = super::parse_uuid_or_hash(ART);
+    data.printings[2].scryfall_id = 0x77;
+    data.printings[2].illustration_id = 0;
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let matches = |f: &FilterExpr| -> Vec<bool> {
+        (0..3).map(|i| f.matches(&archived.cards[0], &archived.printings[i], &archived.strings)).collect()
+    };
+    let negated = |f: FilterExpr| matches(&FilterExpr::Not(Box::new(f)));
+
+    // One printing, under `:` and `=`, and whatever case the hex is written in.
+    let by_id = leaf("scryfall_id", ":", PRINT_A).expect("scryfallid: must build");
+    assert!(matches!(by_id, FilterExpr::ScryfallIdMatch { .. }));
+    assert_eq!(matches(&by_id), [true, false, false]);
+    assert_eq!(matches(&leaf("scryfall_id", "=", &PRINT_A.to_uppercase()).unwrap()), [true, false, false]);
+    assert!(
+        by_id.eval_card(&archived.cards[0], &archived.strings) == Tri::PrintingDep,
+        "a printing's id cannot settle at card level"
+    );
+    // Two-valued, so a negation is the other printings: `-scryfallid:<id> !"Reset"` is the card's
+    // other 2 printings on Scryfall.
+    assert_eq!(negated(by_id), [false, true, true]);
+
+    // Every printing of the artwork.
+    let by_art = leaf("illustration_id", ":", ART).expect("illustrationid: must build");
+    assert!(matches!(by_art, FilterExpr::IllustrationIdMatch { .. }));
+    assert_eq!(matches(&by_art), [true, true, false]);
+    assert!(by_art.eval_card(&archived.cards[0], &archived.strings) == Tri::PrintingDep);
+    // Its negation is Scryfall's, not the complement: a printing whose own id is some OTHER
+    // artwork is SQL NULL (`-illustrationid:<id> !"Reset"` is a 404 there, though none of Reset's
+    // printings carries that artwork), while one with no illustration id is a real False and so
+    // survives the negation.
+    let other = leaf("illustration_id", ":", NOBODY).unwrap();
+    assert_eq!(matches(&other), [false; 3]);
+    assert_eq!(negated(other), [false, false, true]);
+    assert_eq!(negated(by_art), [false, false, true]);
+
+    // An id no printing has matches nothing; so does an empty value, whose 0 must not meet the 0
+    // a printing without artwork stores.
+    assert_eq!(matches(&leaf("scryfall_id", ":", NOBODY).unwrap()), [false; 3]);
+    assert!(matches!(leaf("illustration_id", ":", "").unwrap(), FilterExpr::IllustrationIdMatch { id: 0 }));
+    assert_eq!(matches(&leaf("illustration_id", ":", "").unwrap()), [false; 3]);
+    assert!(matches!(leaf("scryfall_id", ":", "").unwrap(), FilterExpr::ScryfallIdMatch { id: 0 }));
+    assert_eq!(matches(&leaf("scryfall_id", ":", "").unwrap()), [false; 3]);
+
+    // Equality only: an id has no order.
+    assert!(leaf("scryfall_id", ">", PRINT_A).is_err());
+    assert!(leaf("illustration_id", "!=", ART).is_err());
+}

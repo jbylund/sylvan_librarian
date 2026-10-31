@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import multiprocessing
 import pathlib
 import tempfile
@@ -20,7 +21,7 @@ from api.tests.support import override_attr
 from card_engine import QueryEngine
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Callable, Generator
 
 
 @pytest.fixture(scope="class")
@@ -48,6 +49,11 @@ def api_resource(postgres_container: None) -> Generator[APIResource]:
     yield api
     api.app_context.reader_pool.close()
     api.app_context.writer_pool.close()
+
+
+def _names_matching(lane: Callable[..., dict], query: str) -> set[str]:
+    """The card names one search lane (`_search_sql` or `_search_engine`) answers a query with."""
+    return {card["name"] for card in lane(**search_kwargs(query, limit=100))["cards"]}
 
 
 class TestContainerIntegration:
@@ -461,6 +467,59 @@ class TestContainerIntegration:
             names = [card["name"] for card in result["cards"] if card["name"] in scores]
             assert names == ["Serra Angel", "Black Lotus", "Lightning Bolt"]
         finally:
+            api_resource.app_context.engine = saved_engine
+            shm_path.unlink(missing_ok=True)
+            shm_path.with_suffix(".lock").unlink(missing_ok=True)
+
+    @pytest.mark.usefixtures("engine_enabled")
+    def test_printing_id_keywords_agree_on_both_lanes(self: TestContainerIntegration, api_resource: APIResource) -> None:
+        """`scryfallid:` and `illustrationid:` answer the same through SQL and through the engine.
+
+        The SQL half is the one only a real database can check: both columns are UUIDs, the bound
+        parameter is text, and `illustrationid:` is a three-valued CASE.
+        """
+        bolt_id = "00000000-0000-0000-0000-000000000001"
+        bolt_art = "9e42d409-161d-4e63-8982-71e313f27b2f"
+        angel_art = "f661d604-e956-43b7-89f0-ac7ba7389924"
+        artwork = {"Lightning Bolt": bolt_art, "Serra Angel": angel_art}
+
+        def set_artwork(values: dict[str, str | None]) -> None:
+            with api_resource.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+                for name, illustration_id in values.items():
+                    cursor.execute("UPDATE magic.cards SET illustration_id = %s WHERE card_name = %s", (illustration_id, name))
+                conn.commit()
+
+        # Private store for the same reason test_cubecobra_ordering swaps one in.
+        shm_path = pathlib.Path(tempfile.gettempdir()) / f"sylvan_librarian_it_{uuid.uuid4().hex}"
+        saved_engine = api_resource.app_context.engine
+        set_artwork(artwork)
+        api_resource.app_context.engine = QueryEngine(shm_path=str(shm_path))
+        try:
+            api_resource.app_context.reload_engine(force=True)
+
+            for lane in (api_resource._search_sql, api_resource._search_engine):
+                names = functools.partial(_names_matching, lane)
+
+                # One printing, quoted or not, in either case, under `:` and `=`.
+                assert names(f'scryfallid:"{bolt_id}"') == {"Lightning Bolt"}
+                assert names(f'scryfall_id="{bolt_id.upper()}"') == {"Lightning Bolt"}
+                assert names("scryfallid:abc") == set()
+                # Two-valued: the negation is every other printing.
+                others = names(f'-scryfallid:"{bolt_id}"')
+                assert "Lightning Bolt" not in others
+                assert {"Serra Angel", "Black Lotus"} <= others
+
+                # Every printing of the artwork.
+                assert names(f"illustrationid:{bolt_art}") == {"Lightning Bolt"}
+                assert names(f"illustration_id={bolt_art.upper()}") == {"Lightning Bolt"}
+                # Three-valued: another artwork is NULL and survives neither the term nor its
+                # negation; no illustration id at all is FALSE, so the negation keeps it.
+                negated = names(f"-illustrationid:{bolt_art}")
+                assert "Lightning Bolt" not in negated
+                assert "Serra Angel" not in negated
+                assert "Black Lotus" in negated
+        finally:
+            set_artwork(dict.fromkeys(artwork))
             api_resource.app_context.engine = saved_engine
             shm_path.unlink(missing_ok=True)
             shm_path.with_suffix(".lock").unlink(missing_ok=True)
