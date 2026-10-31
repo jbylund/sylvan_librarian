@@ -44,7 +44,7 @@ import psycopg
 import requests
 from cachebox import TTLCache
 
-from api.card_processing import preprocess_card
+from api.card_processing import merge_dfc_faces, preprocess_card
 from api.db.bulk_upsert import bulk_upsert as _bulk_upsert
 from api.scryfall_bulk_data_fetcher import BulkDataKey, ScryfallBulkDataFetcher
 from api.settings import settings
@@ -1226,7 +1226,11 @@ class AdminResource:
                     def __iter__(self) -> Iterator[dict[str, Any]]:
                         for card in cards:
                             self.raw += 1
-                            for processed in preprocess_card(card):
+                            # merge_dfc_faces collapses a double-faced card's per-face rows (all
+                            # sharing one scryfall_id) into the single row magic.cards stores, so
+                            # o:/t:/kw: search sees every face instead of losing one to the upsert's
+                            # last-value-wins dedup (#873, #400). A no-op for single-faced cards.
+                            for processed in merge_dfc_faces(preprocess_card(card)):
                                 self.preprocessed += 1
                                 yield processed
 

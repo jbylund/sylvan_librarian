@@ -1,0 +1,589 @@
+[
+  {
+    "arena_id": 90820,
+    "artist": "Dmitry Burmak",
+    "artist_ids": [
+      "9872f5c0-274a-48ce-a9ad-6f0d5654e29c"
+    ],
+    "booster": true,
+    "border_color": "black",
+    "card_faces": [
+      {
+        "artist": "Dmitry Burmak",
+        "artist_id": "9872f5c0-274a-48ce-a9ad-6f0d5654e29c",
+        "colors": [
+          "R"
+        ],
+        "illustration_id": "019e46ae-f886-418a-b90c-7149c0e03ae1",
+        "image_uris": {
+          "art": "https://cards.scryfall.io/art/front/4/3/438d8a26-ddc9-4829-8aff-22d6af6575cf.webp?1783911228",
+          "art_crop": "https://cards.scryfall.io/art_crop/front/4/3/438d8a26-ddc9-4829-8aff-22d6af6575cf.jpg?1783911228",
+          "border_crop": "https://cards.scryfall.io/border_crop/front/4/3/438d8a26-ddc9-4829-8aff-22d6af6575cf.jpg?1783911228",
+          "crop": "https://cards.scryfall.io/crop/front/4/3/438d8a26-ddc9-4829-8aff-22d6af6575cf.webp?1783911228",
+          "display": "https://cards.scryfall.io/display/front/4/3/438d8a26-ddc9-4829-8aff-22d6af6575cf.webp?1783911228",
+          "grid": "https://cards.scryfall.io/grid/front/4/3/438d8a26-ddc9-4829-8aff-22d6af6575cf.webp?1783911228",
+          "large": "https://cards.scryfall.io/large/front/4/3/438d8a26-ddc9-4829-8aff-22d6af6575cf.jpg?1783911228",
+          "normal": "https://cards.scryfall.io/normal/front/4/3/438d8a26-ddc9-4829-8aff-22d6af6575cf.jpg?1783911228",
+          "png": "https://cards.scryfall.io/png/front/4/3/438d8a26-ddc9-4829-8aff-22d6af6575cf.png?1783911228",
+          "small": "https://cards.scryfall.io/small/front/4/3/438d8a26-ddc9-4829-8aff-22d6af6575cf.jpg?1783911228",
+          "thumb": "https://cards.scryfall.io/thumb/front/4/3/438d8a26-ddc9-4829-8aff-22d6af6575cf.webp?1783911228"
+        },
+        "mana_cost": "{1}{R}",
+        "name": "Ral, Monsoon Mage",
+        "object": "card_face",
+        "oracle_text": "Instant and sorcery spells you cast cost {1} less to cast.\nWhenever you cast an instant or sorcery spell during your turn, flip a coin. If you lose the flip, Ral deals 1 damage to you. If you win the flip, you may exile Ral. If you do, return him to the battlefield transformed under his owner's control.",
+        "power": "1",
+        "toughness": "3",
+        "type_line": "Legendary Creature \u2014 Human Wizard"
+      },
+      {
+        "artist": "Dmitry Burmak",
+        "artist_id": "9872f5c0-274a-48ce-a9ad-6f0d5654e29c",
+        "color_indicator": [
+          "R",
+          "U"
+        ],
+        "colors": [
+          "R",
+          "U"
+        ],
+        "illustration_id": "e92d928c-0771-4868-9457-abb86072ad55",
+        "image_uris": {
+          "art": "https://cards.scryfall.io/art/back/4/3/438d8a26-ddc9-4829-8aff-22d6af6575cf.webp?1783911228",
+          "art_crop": "https://cards.scryfall.io/art_crop/back/4/3/438d8a26-ddc9-4829-8aff-22d6af6575cf.jpg?1783911228",
+          "border_crop": "https://cards.scryfall.io/border_crop/back/4/3/438d8a26-ddc9-4829-8aff-22d6af6575cf.jpg?1783911228",
+          "crop": "https://cards.scryfall.io/crop/back/4/3/438d8a26-ddc9-4829-8aff-22d6af6575cf.webp?1783911228",
+          "display": "https://cards.scryfall.io/display/back/4/3/438d8a26-ddc9-4829-8aff-22d6af6575cf.webp?1783911228",
+          "grid": "https://cards.scryfall.io/grid/back/4/3/438d8a26-ddc9-4829-8aff-22d6af6575cf.webp?1783911228",
+          "large": "https://cards.scryfall.io/large/back/4/3/438d8a26-ddc9-4829-8aff-22d6af6575cf.jpg?1783911228",
+          "normal": "https://cards.scryfall.io/normal/back/4/3/438d8a26-ddc9-4829-8aff-22d6af6575cf.jpg?1783911228",
+          "png": "https://cards.scryfall.io/png/back/4/3/438d8a26-ddc9-4829-8aff-22d6af6575cf.png?1783911228",
+          "small": "https://cards.scryfall.io/small/back/4/3/438d8a26-ddc9-4829-8aff-22d6af6575cf.jpg?1783911228",
+          "thumb": "https://cards.scryfall.io/thumb/back/4/3/438d8a26-ddc9-4829-8aff-22d6af6575cf.webp?1783911228"
+        },
+        "loyalty": "2",
+        "mana_cost": "",
+        "name": "Ral, Leyline Prodigy",
+        "object": "card_face",
+        "oracle_text": "Ral enters with an additional loyalty counter on him for each instant and sorcery spell you've cast this turn.\n+1: Until your next turn, instant and sorcery spells you cast cost {1} less to cast.\n\u22122: Ral deals 2 damage divided as you choose among one or two targets. Draw a card if you control a blue permanent other than Ral.\n\u22128: Exile the top eight cards of your library. You may cast instant and sorcery spells from among them this turn without paying their mana costs.",
+        "type_line": "Legendary Planeswalker \u2014 Ral"
+      }
+    ],
+    "cardmarket_id": 771208,
+    "cmc": 2.0,
+    "collector_number": "247",
+    "color_identity": [
+      "R",
+      "U"
+    ],
+    "digital": false,
+    "edhrec_rank": 3582,
+    "finishes": [
+      "nonfoil",
+      "foil"
+    ],
+    "foil": true,
+    "frame": "2015",
+    "frame_effects": [
+      "legendary"
+    ],
+    "full_art": false,
+    "game_changer": false,
+    "games": [
+      "paper",
+      "mtgo",
+      "arena"
+    ],
+    "highres_image": true,
+    "id": "438d8a26-ddc9-4829-8aff-22d6af6575cf",
+    "image_status": "highres_scan",
+    "image_updated_at": "2026-07-13T02:53:48Z",
+    "keywords": [
+      "Transform"
+    ],
+    "lang": "en",
+    "layout": "transform",
+    "legalities": {
+      "alchemy": "not_legal",
+      "brawl": "legal",
+      "commander": "legal",
+      "competitivebrawl": "legal",
+      "duel": "legal",
+      "future": "not_legal",
+      "gladiator": "legal",
+      "historic": "legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "oathbreaker": "legal",
+      "oldschool": "not_legal",
+      "pauper": "not_legal",
+      "paupercommander": "not_legal",
+      "penny": "not_legal",
+      "pioneer": "not_legal",
+      "predh": "not_legal",
+      "premodern": "not_legal",
+      "standard": "not_legal",
+      "standardbrawl": "not_legal",
+      "timeless": "legal",
+      "tlr": "legal",
+      "vintage": "legal"
+    },
+    "mtgo_id": 126533,
+    "multiverse_ids": [
+      661773,
+      661774
+    ],
+    "name": "Ral, Monsoon Mage // Ral, Leyline Prodigy",
+    "nonfoil": true,
+    "object": "card",
+    "oracle_id": "16d40f56-691b-42a7-a5ab-157568921e03",
+    "oversized": false,
+    "prices": {
+      "eur": "4.26",
+      "eur_foil": "6.02",
+      "tix": "1.25",
+      "usd": "6.93",
+      "usd_etched": null,
+      "usd_foil": "8.20"
+    },
+    "prints_search_uri": "https://api.scryfall.com/cards/search?order=released&q=oracleid%3A16d40f56-691b-42a7-a5ab-157568921e03&unique=prints",
+    "promo": false,
+    "purchase_uris": {
+      "cardhoarder": "https://www.cardhoarder.com/cards/126533?affiliate_id=scryfall&ref=card-profile&utm_campaign=affiliate&utm_medium=card&utm_source=scryfall",
+      "cardmarket": "https://www.cardmarket.com/en/Magic/Products?idProduct=771208&referrer=scryfall&utm_campaign=card_prices&utm_medium=text&utm_source=scryfall",
+      "tcgplayer": "https://partner.tcgplayer.com/c/4931599/1830156/21018?subId1=api&u=https%3A%2F%2Fwww.tcgplayer.com%2Fproduct%2F552330%3Fpage%3D1"
+    },
+    "rarity": "mythic",
+    "related_uris": {
+      "edhrec": "https://edhrec.com/route/?cc=Ral%2C+Monsoon+Mage",
+      "gatherer": "https://gatherer.wizards.com/Pages/Card/Details.aspx?multiverseid=661773&printed=false",
+      "tcgplayer_infinite_articles": "https://partner.tcgplayer.com/c/4931599/1830156/21018?subId1=api&trafcat=tcgplayer.com%2Fsearch%2Farticles&u=https%3A%2F%2Fwww.tcgplayer.com%2Fsearch%2Farticles%3FproductLineName%3Dmagic%26q%3DRal%252C%2BMonsoon%2BMage%2B%252F%252F%2BRal%252C%2BLeyline%2BProdigy",
+      "tcgplayer_infinite_decks": "https://partner.tcgplayer.com/c/4931599/1830156/21018?subId1=api&trafcat=tcgplayer.com%2Fsearch%2Fdecks&u=https%3A%2F%2Fwww.tcgplayer.com%2Fsearch%2Fdecks%3FproductLineName%3Dmagic%26q%3DRal%252C%2BMonsoon%2BMage%2B%252F%252F%2BRal%252C%2BLeyline%2BProdigy"
+    },
+    "released_at": "2024-06-14",
+    "reprint": false,
+    "reserved": false,
+    "rulings_uri": "https://api.scryfall.com/cards/438d8a26-ddc9-4829-8aff-22d6af6575cf/rulings",
+    "scryfall_set_uri": "https://scryfall.com/sets/mh3?utm_source=api",
+    "scryfall_uri": "https://scryfall.com/card/mh3/247/ral-monsoon-mage-ral-leyline-prodigy?utm_source=api",
+    "security_stamp": "oval",
+    "set": "mh3",
+    "set_id": "3ed80bb6-77e8-4aa7-8262-95377a38aba1",
+    "set_name": "Modern Horizons 3",
+    "set_search_uri": "https://api.scryfall.com/cards/search?order=set&q=e%3Amh3&unique=prints",
+    "set_type": "draft_innovation",
+    "set_uri": "https://api.scryfall.com/sets/3ed80bb6-77e8-4aa7-8262-95377a38aba1",
+    "story_spotlight": false,
+    "tcgplayer_id": 552330,
+    "textless": false,
+    "type_line": "Legendary Creature \u2014 Human Wizard // Legendary Planeswalker \u2014 Ral",
+    "uri": "https://api.scryfall.com/cards/438d8a26-ddc9-4829-8aff-22d6af6575cf",
+    "variation": false
+  },
+  {
+    "all_parts": [
+      {
+        "component": "combo_piece",
+        "id": "f3dcc7b5-c911-44c9-be5a-087298ddb492",
+        "name": "Magic Origins Checklist",
+        "object": "related_card",
+        "type_line": "Card",
+        "uri": "https://api.scryfall.com/cards/f3dcc7b5-c911-44c9-be5a-087298ddb492"
+      },
+      {
+        "component": "combo_piece",
+        "id": "02d6d693-f1f3-4317-bcc0-c21fa8490d38",
+        "name": "Jace, Vryn's Prodigy // Jace, Telepath Unbound",
+        "object": "related_card",
+        "type_line": "Legendary Creature \u2014 Human Wizard // Legendary Planeswalker \u2014 Jace",
+        "uri": "https://api.scryfall.com/cards/02d6d693-f1f3-4317-bcc0-c21fa8490d38"
+      },
+      {
+        "component": "combo_piece",
+        "id": "458e37b1-a849-41ae-b63c-3e09ffd814e4",
+        "name": "Jace, Telepath Unbound Emblem",
+        "object": "related_card",
+        "type_line": "Emblem \u2014 Jace",
+        "uri": "https://api.scryfall.com/cards/458e37b1-a849-41ae-b63c-3e09ffd814e4"
+      }
+    ],
+    "artist": "Jaime Jones",
+    "artist_ids": [
+      "92f6c2c1-fa57-4b52-99c4-0fd866c13dc9"
+    ],
+    "booster": true,
+    "border_color": "black",
+    "card_faces": [
+      {
+        "artist": "Jaime Jones",
+        "artist_id": "92f6c2c1-fa57-4b52-99c4-0fd866c13dc9",
+        "colors": [
+          "U"
+        ],
+        "flavor_text": "\"People's thoughts just come to me. Sometimes I don't know if it's them or me thinking.\"",
+        "illustration_id": "ea8de167-ee93-4282-95b4-d82291dbfe1f",
+        "image_uris": {
+          "art": "https://cards.scryfall.io/art/front/0/2/02d6d693-f1f3-4317-bcc0-c21fa8490d38.webp?1783938353",
+          "art_crop": "https://cards.scryfall.io/art_crop/front/0/2/02d6d693-f1f3-4317-bcc0-c21fa8490d38.jpg?1783938353",
+          "border_crop": "https://cards.scryfall.io/border_crop/front/0/2/02d6d693-f1f3-4317-bcc0-c21fa8490d38.jpg?1783938353",
+          "crop": "https://cards.scryfall.io/crop/front/0/2/02d6d693-f1f3-4317-bcc0-c21fa8490d38.webp?1783938353",
+          "display": "https://cards.scryfall.io/display/front/0/2/02d6d693-f1f3-4317-bcc0-c21fa8490d38.webp?1783938353",
+          "grid": "https://cards.scryfall.io/grid/front/0/2/02d6d693-f1f3-4317-bcc0-c21fa8490d38.webp?1783938353",
+          "large": "https://cards.scryfall.io/large/front/0/2/02d6d693-f1f3-4317-bcc0-c21fa8490d38.jpg?1783938353",
+          "normal": "https://cards.scryfall.io/normal/front/0/2/02d6d693-f1f3-4317-bcc0-c21fa8490d38.jpg?1783938353",
+          "png": "https://cards.scryfall.io/png/front/0/2/02d6d693-f1f3-4317-bcc0-c21fa8490d38.png?1783938353",
+          "small": "https://cards.scryfall.io/small/front/0/2/02d6d693-f1f3-4317-bcc0-c21fa8490d38.jpg?1783938353",
+          "thumb": "https://cards.scryfall.io/thumb/front/0/2/02d6d693-f1f3-4317-bcc0-c21fa8490d38.webp?1783938353"
+        },
+        "mana_cost": "{1}{U}",
+        "name": "Jace, Vryn's Prodigy",
+        "object": "card_face",
+        "oracle_text": "{T}: Draw a card, then discard a card. If there are five or more cards in your graveyard, exile Jace, then return him to the battlefield transformed under his owner's control.",
+        "power": "0",
+        "toughness": "2",
+        "type_line": "Legendary Creature \u2014 Human Wizard"
+      },
+      {
+        "artist": "Jaime Jones",
+        "artist_id": "92f6c2c1-fa57-4b52-99c4-0fd866c13dc9",
+        "color_indicator": [
+          "U"
+        ],
+        "colors": [
+          "U"
+        ],
+        "illustration_id": "8ce7af86-2a0b-426b-8f7b-a49d6c956141",
+        "image_uris": {
+          "art": "https://cards.scryfall.io/art/back/0/2/02d6d693-f1f3-4317-bcc0-c21fa8490d38.webp?1783938353",
+          "art_crop": "https://cards.scryfall.io/art_crop/back/0/2/02d6d693-f1f3-4317-bcc0-c21fa8490d38.jpg?1783938353",
+          "border_crop": "https://cards.scryfall.io/border_crop/back/0/2/02d6d693-f1f3-4317-bcc0-c21fa8490d38.jpg?1783938353",
+          "crop": "https://cards.scryfall.io/crop/back/0/2/02d6d693-f1f3-4317-bcc0-c21fa8490d38.webp?1783938353",
+          "display": "https://cards.scryfall.io/display/back/0/2/02d6d693-f1f3-4317-bcc0-c21fa8490d38.webp?1783938353",
+          "grid": "https://cards.scryfall.io/grid/back/0/2/02d6d693-f1f3-4317-bcc0-c21fa8490d38.webp?1783938353",
+          "large": "https://cards.scryfall.io/large/back/0/2/02d6d693-f1f3-4317-bcc0-c21fa8490d38.jpg?1783938353",
+          "normal": "https://cards.scryfall.io/normal/back/0/2/02d6d693-f1f3-4317-bcc0-c21fa8490d38.jpg?1783938353",
+          "png": "https://cards.scryfall.io/png/back/0/2/02d6d693-f1f3-4317-bcc0-c21fa8490d38.png?1783938353",
+          "small": "https://cards.scryfall.io/small/back/0/2/02d6d693-f1f3-4317-bcc0-c21fa8490d38.jpg?1783938353",
+          "thumb": "https://cards.scryfall.io/thumb/back/0/2/02d6d693-f1f3-4317-bcc0-c21fa8490d38.webp?1783938353"
+        },
+        "loyalty": "5",
+        "mana_cost": "",
+        "name": "Jace, Telepath Unbound",
+        "object": "card_face",
+        "oracle_text": "+1: Up to one target creature gets -2/-0 until your next turn.\n\u22123: You may cast target instant or sorcery card from your graveyard this turn. If that spell would be put into your graveyard, exile it instead.\n\u22129: You get an emblem with \"Whenever you cast a spell, target opponent mills five cards.\"",
+        "type_line": "Legendary Planeswalker \u2014 Jace"
+      }
+    ],
+    "cardmarket_id": 283370,
+    "cmc": 2.0,
+    "collector_number": "60",
+    "color_identity": [
+      "U"
+    ],
+    "digital": false,
+    "edhrec_rank": 6422,
+    "finishes": [
+      "nonfoil",
+      "foil"
+    ],
+    "foil": true,
+    "frame": "2015",
+    "frame_effects": [
+      "originpwdfc"
+    ],
+    "full_art": false,
+    "game_changer": false,
+    "games": [
+      "paper",
+      "mtgo"
+    ],
+    "highres_image": true,
+    "id": "02d6d693-f1f3-4317-bcc0-c21fa8490d38",
+    "image_status": "highres_scan",
+    "image_updated_at": "2026-07-13T10:25:53Z",
+    "keywords": [
+      "Transform",
+      "Mill"
+    ],
+    "lang": "en",
+    "layout": "transform",
+    "legalities": {
+      "alchemy": "not_legal",
+      "brawl": "legal",
+      "commander": "legal",
+      "competitivebrawl": "legal",
+      "duel": "legal",
+      "future": "not_legal",
+      "gladiator": "legal",
+      "historic": "legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "oathbreaker": "legal",
+      "oldschool": "not_legal",
+      "pauper": "not_legal",
+      "paupercommander": "not_legal",
+      "penny": "not_legal",
+      "pioneer": "legal",
+      "predh": "not_legal",
+      "premodern": "not_legal",
+      "standard": "not_legal",
+      "standardbrawl": "not_legal",
+      "timeless": "legal",
+      "tlr": "legal",
+      "vintage": "legal"
+    },
+    "mtgo_foil_id": 57881,
+    "mtgo_id": 57880,
+    "multiverse_ids": [
+      398434,
+      398435
+    ],
+    "name": "Jace, Vryn's Prodigy // Jace, Telepath Unbound",
+    "nonfoil": true,
+    "object": "card",
+    "oracle_id": "594f6881-c059-46f8-aa4e-7151d502de73",
+    "oversized": false,
+    "prices": {
+      "eur": "4.35",
+      "eur_foil": "9.55",
+      "tix": "0.20",
+      "usd": "6.34",
+      "usd_etched": null,
+      "usd_foil": "14.76"
+    },
+    "prints_search_uri": "https://api.scryfall.com/cards/search?order=released&q=oracleid%3A594f6881-c059-46f8-aa4e-7151d502de73&unique=prints",
+    "promo": false,
+    "purchase_uris": {
+      "cardhoarder": "https://www.cardhoarder.com/cards/57880?affiliate_id=scryfall&ref=card-profile&utm_campaign=affiliate&utm_medium=card&utm_source=scryfall",
+      "cardmarket": "https://www.cardmarket.com/en/Magic/Products?idProduct=283370&referrer=scryfall&utm_campaign=card_prices&utm_medium=text&utm_source=scryfall",
+      "tcgplayer": "https://partner.tcgplayer.com/c/4931599/1830156/21018?subId1=api&u=https%3A%2F%2Fwww.tcgplayer.com%2Fproduct%2F100191%3Fpage%3D1"
+    },
+    "rarity": "mythic",
+    "related_uris": {
+      "edhrec": "https://edhrec.com/route/?cc=Jace%2C+Vryn%27s+Prodigy",
+      "gatherer": "https://gatherer.wizards.com/Pages/Card/Details.aspx?multiverseid=398434&printed=false",
+      "tcgplayer_infinite_articles": "https://partner.tcgplayer.com/c/4931599/1830156/21018?subId1=api&trafcat=tcgplayer.com%2Fsearch%2Farticles&u=https%3A%2F%2Fwww.tcgplayer.com%2Fsearch%2Farticles%3FproductLineName%3Dmagic%26q%3DJace%252C%2BVryn%2527s%2BProdigy%2B%252F%252F%2BJace%252C%2BTelepath%2BUnbound",
+      "tcgplayer_infinite_decks": "https://partner.tcgplayer.com/c/4931599/1830156/21018?subId1=api&trafcat=tcgplayer.com%2Fsearch%2Fdecks&u=https%3A%2F%2Fwww.tcgplayer.com%2Fsearch%2Fdecks%3FproductLineName%3Dmagic%26q%3DJace%252C%2BVryn%2527s%2BProdigy%2B%252F%252F%2BJace%252C%2BTelepath%2BUnbound"
+    },
+    "released_at": "2015-07-17",
+    "reprint": false,
+    "reserved": false,
+    "rulings_uri": "https://api.scryfall.com/cards/02d6d693-f1f3-4317-bcc0-c21fa8490d38/rulings",
+    "scryfall_set_uri": "https://scryfall.com/sets/ori?utm_source=api",
+    "scryfall_uri": "https://scryfall.com/card/ori/60/jace-vryns-prodigy-jace-telepath-unbound?utm_source=api",
+    "security_stamp": "oval",
+    "set": "ori",
+    "set_id": "0eeb9a9a-20ac-404d-b55f-aeb7a43a7f62",
+    "set_name": "Magic Origins",
+    "set_search_uri": "https://api.scryfall.com/cards/search?order=set&q=e%3Aori&unique=prints",
+    "set_type": "core",
+    "set_uri": "https://api.scryfall.com/sets/0eeb9a9a-20ac-404d-b55f-aeb7a43a7f62",
+    "story_spotlight": false,
+    "tcgplayer_id": 100191,
+    "textless": false,
+    "type_line": "Legendary Creature \u2014 Human Wizard // Legendary Planeswalker \u2014 Jace",
+    "uri": "https://api.scryfall.com/cards/02d6d693-f1f3-4317-bcc0-c21fa8490d38",
+    "variation": false
+  },
+  {
+    "all_parts": [
+      {
+        "component": "combo_piece",
+        "id": "c62490ac-4838-4b68-baff-18d9823a2a7f",
+        "name": "Tibalt, Cosmic Impostor Emblem",
+        "object": "related_card",
+        "type_line": "Emblem",
+        "uri": "https://api.scryfall.com/cards/c62490ac-4838-4b68-baff-18d9823a2a7f"
+      },
+      {
+        "component": "combo_piece",
+        "id": "e3e5c965-a689-4726-b8c2-63b836895939",
+        "name": "Valki, God of Lies // Tibalt, Cosmic Impostor",
+        "object": "related_card",
+        "type_line": "Legendary Creature \u2014 God // Legendary Planeswalker \u2014 Tibalt",
+        "uri": "https://api.scryfall.com/cards/e3e5c965-a689-4726-b8c2-63b836895939"
+      }
+    ],
+    "arena_id": 75155,
+    "artist": "Yongjae Choi",
+    "artist_ids": [
+      "5ab91c3b-a6da-4751-a56e-81d0f61a67ab"
+    ],
+    "booster": true,
+    "border_color": "black",
+    "card_faces": [
+      {
+        "artist": "Yongjae Choi",
+        "artist_id": "5ab91c3b-a6da-4751-a56e-81d0f61a67ab",
+        "colors": [
+          "B"
+        ],
+        "illustration_id": "25af817b-39a3-4b56-af19-fc1688cb4bc1",
+        "image_uris": {
+          "art": "https://cards.scryfall.io/art/front/e/a/ea7e4c65-b4c4-4795-9475-3cba71c50ea5.webp?1783928244",
+          "art_crop": "https://cards.scryfall.io/art_crop/front/e/a/ea7e4c65-b4c4-4795-9475-3cba71c50ea5.jpg?1783928244",
+          "border_crop": "https://cards.scryfall.io/border_crop/front/e/a/ea7e4c65-b4c4-4795-9475-3cba71c50ea5.jpg?1783928244",
+          "crop": "https://cards.scryfall.io/crop/front/e/a/ea7e4c65-b4c4-4795-9475-3cba71c50ea5.webp?1783928244",
+          "display": "https://cards.scryfall.io/display/front/e/a/ea7e4c65-b4c4-4795-9475-3cba71c50ea5.webp?1783928244",
+          "grid": "https://cards.scryfall.io/grid/front/e/a/ea7e4c65-b4c4-4795-9475-3cba71c50ea5.webp?1783928244",
+          "large": "https://cards.scryfall.io/large/front/e/a/ea7e4c65-b4c4-4795-9475-3cba71c50ea5.jpg?1783928244",
+          "normal": "https://cards.scryfall.io/normal/front/e/a/ea7e4c65-b4c4-4795-9475-3cba71c50ea5.jpg?1783928244",
+          "png": "https://cards.scryfall.io/png/front/e/a/ea7e4c65-b4c4-4795-9475-3cba71c50ea5.png?1783928244",
+          "small": "https://cards.scryfall.io/small/front/e/a/ea7e4c65-b4c4-4795-9475-3cba71c50ea5.jpg?1783928244",
+          "thumb": "https://cards.scryfall.io/thumb/front/e/a/ea7e4c65-b4c4-4795-9475-3cba71c50ea5.webp?1783928244"
+        },
+        "mana_cost": "{1}{B}",
+        "name": "Valki, God of Lies",
+        "object": "card_face",
+        "oracle_text": "When Valki enters, each opponent reveals their hand. For each opponent, exile a creature card they revealed this way until Valki leaves the battlefield.\n{X}: Choose a creature card exiled with Valki with mana value X. Valki becomes a copy of that card.",
+        "power": "2",
+        "toughness": "1",
+        "type_line": "Legendary Creature \u2014 God"
+      },
+      {
+        "artist": "Yongjae Choi",
+        "artist_id": "5ab91c3b-a6da-4751-a56e-81d0f61a67ab",
+        "colors": [
+          "B",
+          "R"
+        ],
+        "illustration_id": "1c9bcbf6-513d-4a50-aa91-3ab0b74ad7b2",
+        "image_uris": {
+          "art": "https://cards.scryfall.io/art/back/e/a/ea7e4c65-b4c4-4795-9475-3cba71c50ea5.webp?1783928244",
+          "art_crop": "https://cards.scryfall.io/art_crop/back/e/a/ea7e4c65-b4c4-4795-9475-3cba71c50ea5.jpg?1783928244",
+          "border_crop": "https://cards.scryfall.io/border_crop/back/e/a/ea7e4c65-b4c4-4795-9475-3cba71c50ea5.jpg?1783928244",
+          "crop": "https://cards.scryfall.io/crop/back/e/a/ea7e4c65-b4c4-4795-9475-3cba71c50ea5.webp?1783928244",
+          "display": "https://cards.scryfall.io/display/back/e/a/ea7e4c65-b4c4-4795-9475-3cba71c50ea5.webp?1783928244",
+          "grid": "https://cards.scryfall.io/grid/back/e/a/ea7e4c65-b4c4-4795-9475-3cba71c50ea5.webp?1783928244",
+          "large": "https://cards.scryfall.io/large/back/e/a/ea7e4c65-b4c4-4795-9475-3cba71c50ea5.jpg?1783928244",
+          "normal": "https://cards.scryfall.io/normal/back/e/a/ea7e4c65-b4c4-4795-9475-3cba71c50ea5.jpg?1783928244",
+          "png": "https://cards.scryfall.io/png/back/e/a/ea7e4c65-b4c4-4795-9475-3cba71c50ea5.png?1783928244",
+          "small": "https://cards.scryfall.io/small/back/e/a/ea7e4c65-b4c4-4795-9475-3cba71c50ea5.jpg?1783928244",
+          "thumb": "https://cards.scryfall.io/thumb/back/e/a/ea7e4c65-b4c4-4795-9475-3cba71c50ea5.webp?1783928244"
+        },
+        "loyalty": "5",
+        "mana_cost": "{5}{B}{R}",
+        "name": "Tibalt, Cosmic Impostor",
+        "object": "card_face",
+        "oracle_text": "As Tibalt enters, you get an emblem with \"You may play cards exiled with Tibalt, Cosmic Impostor, and you may spend mana as though it were mana of any color to cast those spells.\"\n+2: Exile the top card of each player's library.\n\u22123: Exile target artifact or creature.\n\u22128: Exile all graveyards. Add {R}{R}{R}.",
+        "type_line": "Legendary Planeswalker \u2014 Tibalt"
+      }
+    ],
+    "cardmarket_id": 529302,
+    "cmc": 2.0,
+    "collector_number": "114",
+    "color_identity": [
+      "B",
+      "R"
+    ],
+    "digital": false,
+    "edhrec_rank": 6201,
+    "finishes": [
+      "nonfoil",
+      "foil"
+    ],
+    "foil": true,
+    "frame": "2015",
+    "frame_effects": [
+      "legendary"
+    ],
+    "full_art": false,
+    "game_changer": false,
+    "games": [
+      "arena",
+      "paper",
+      "mtgo"
+    ],
+    "highres_image": true,
+    "id": "ea7e4c65-b4c4-4795-9475-3cba71c50ea5",
+    "image_status": "highres_scan",
+    "image_updated_at": "2026-07-13T07:37:24Z",
+    "keywords": [],
+    "lang": "en",
+    "layout": "modal_dfc",
+    "legalities": {
+      "alchemy": "not_legal",
+      "brawl": "legal",
+      "commander": "legal",
+      "competitivebrawl": "legal",
+      "duel": "legal",
+      "future": "not_legal",
+      "gladiator": "legal",
+      "historic": "legal",
+      "legacy": "legal",
+      "modern": "legal",
+      "oathbreaker": "legal",
+      "oldschool": "not_legal",
+      "pauper": "not_legal",
+      "paupercommander": "not_legal",
+      "penny": "not_legal",
+      "pioneer": "legal",
+      "predh": "not_legal",
+      "premodern": "not_legal",
+      "standard": "not_legal",
+      "standardbrawl": "not_legal",
+      "timeless": "legal",
+      "tlr": "not_legal",
+      "vintage": "legal"
+    },
+    "mtgo_id": 87559,
+    "multiverse_ids": [
+      503724,
+      503725
+    ],
+    "name": "Valki, God of Lies // Tibalt, Cosmic Impostor",
+    "nonfoil": true,
+    "object": "card",
+    "oracle_id": "907ae517-22d5-4ac7-bc3a-3f4d5eaeeb57",
+    "oversized": false,
+    "preview": {
+      "previewed_at": "2021-01-07",
+      "source": "Wizards of the Coast",
+      "source_uri": ""
+    },
+    "prices": {
+      "eur": "3.23",
+      "eur_foil": "4.63",
+      "tix": "0.15",
+      "usd": "3.25",
+      "usd_etched": null,
+      "usd_foil": "3.94"
+    },
+    "prints_search_uri": "https://api.scryfall.com/cards/search?order=released&q=oracleid%3A907ae517-22d5-4ac7-bc3a-3f4d5eaeeb57&unique=prints",
+    "produced_mana": [
+      "R"
+    ],
+    "promo": false,
+    "purchase_uris": {
+      "cardhoarder": "https://www.cardhoarder.com/cards/87559?affiliate_id=scryfall&ref=card-profile&utm_campaign=affiliate&utm_medium=card&utm_source=scryfall",
+      "cardmarket": "https://www.cardmarket.com/en/Magic/Products?idProduct=529302&referrer=scryfall&utm_campaign=card_prices&utm_medium=text&utm_source=scryfall",
+      "tcgplayer": "https://partner.tcgplayer.com/c/4931599/1830156/21018?subId1=api&u=https%3A%2F%2Fwww.tcgplayer.com%2Fproduct%2F230113%3Fpage%3D1"
+    },
+    "rarity": "mythic",
+    "related_uris": {
+      "edhrec": "https://edhrec.com/route/?cc=Valki%2C+God+of+Lies",
+      "gatherer": "https://gatherer.wizards.com/Pages/Card/Details.aspx?multiverseid=503724&printed=false",
+      "tcgplayer_infinite_articles": "https://partner.tcgplayer.com/c/4931599/1830156/21018?subId1=api&trafcat=tcgplayer.com%2Fsearch%2Farticles&u=https%3A%2F%2Fwww.tcgplayer.com%2Fsearch%2Farticles%3FproductLineName%3Dmagic%26q%3DValki%252C%2BGod%2Bof%2BLies%2B%252F%252F%2BTibalt%252C%2BCosmic%2BImpostor",
+      "tcgplayer_infinite_decks": "https://partner.tcgplayer.com/c/4931599/1830156/21018?subId1=api&trafcat=tcgplayer.com%2Fsearch%2Fdecks&u=https%3A%2F%2Fwww.tcgplayer.com%2Fsearch%2Fdecks%3FproductLineName%3Dmagic%26q%3DValki%252C%2BGod%2Bof%2BLies%2B%252F%252F%2BTibalt%252C%2BCosmic%2BImpostor"
+    },
+    "released_at": "2021-02-05",
+    "reprint": false,
+    "reserved": false,
+    "rulings_uri": "https://api.scryfall.com/cards/ea7e4c65-b4c4-4795-9475-3cba71c50ea5/rulings",
+    "scryfall_set_uri": "https://scryfall.com/sets/khm?utm_source=api",
+    "scryfall_uri": "https://scryfall.com/card/khm/114/valki-god-of-lies-tibalt-cosmic-impostor?utm_source=api",
+    "security_stamp": "oval",
+    "set": "khm",
+    "set_id": "43057fad-b1c1-437f-bc48-0045bce6d8c9",
+    "set_name": "Kaldheim",
+    "set_search_uri": "https://api.scryfall.com/cards/search?order=set&q=e%3Akhm&unique=prints",
+    "set_type": "expansion",
+    "set_uri": "https://api.scryfall.com/sets/43057fad-b1c1-437f-bc48-0045bce6d8c9",
+    "story_spotlight": false,
+    "tcgplayer_id": 230113,
+    "textless": false,
+    "type_line": "Legendary Creature \u2014 God // Legendary Planeswalker \u2014 Tibalt",
+    "uri": "https://api.scryfall.com/cards/ea7e4c65-b4c4-4795-9475-3cba71c50ea5",
+    "variation": false
+  }
+]

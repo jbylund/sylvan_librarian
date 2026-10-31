@@ -7,7 +7,7 @@ import pathlib
 import uuid
 from typing import Any
 
-from api.card_processing import extract_frame_data_from_raw_card, preprocess_card
+from api.card_processing import extract_frame_data_from_raw_card, merge_dfc_faces, preprocess_card
 
 # Project root directory for accessing sample data
 _PROJECT_ROOT = pathlib.Path(__file__).parent.parent.parent
@@ -443,3 +443,66 @@ class TestCardProcessing:
         assert back.get("creature_power") is None
         assert front["card_types"] == ["Creature"]
         assert back["card_types"] == ["Instant"]
+
+
+class TestMergeDfcFaces:
+    """merge_dfc_faces unions the fields `o:`/`t:`/`kw:` search across a card's faces.
+
+    `magic.cards` stores one row per scryfall_id, shared by every face, so without this a query
+    matches only whichever face survived the collapse instead of ANY face (Scryfall's own rule)
+    -- see #873 and #400.
+    """
+
+    def test_single_face_card_passes_through_unchanged(self) -> None:
+        """A normal (non-DFC) card has exactly one row; merge is a no-op."""
+        rows = preprocess_card(create_test_card(name="Lightning Bolt"))
+        assert merge_dfc_faces(rows) == rows
+
+    def test_hound_tamer_unions_types_subtypes_and_oracle_text(self) -> None:
+        """Hound Tamer // Untamed Pup: both faces are Creature but differ otherwise.
+
+        Subtypes differ (Human Werewolf vs. Werewolf) and so does oracle text (Daybound vs.
+        Nightbound) -- both must survive the collapse to one row.
+        """
+        sample_file = _SAMPLE_DATA_DIR / "hound_tamer.json"
+        rows = preprocess_card(json.loads(sample_file.read_text()))
+        assert len(rows) == 2  # preprocess_card itself is unchanged
+
+        merged = merge_dfc_faces(rows)
+        assert len(merged) == 1
+        (card,) = merged
+
+        assert card["card_types"] == ["Creature"]
+        assert card["card_subtypes"] == ["Human", "Werewolf"]
+        assert "Daybound" in card["oracle_text"]
+        assert "Nightbound" in card["oracle_text"]
+
+    def test_obyras_attendants_unions_types_across_different_card_types(self) -> None:
+        """Obyra's Attendants // Desperate Parry (adventure) spans two different card types.
+
+        Front is a Creature whose only rules text is "Flying"; back is an Instant. Before this
+        fix, the single stored row kept only the last-processed face's type and oracle text, so
+        `t:creature` and `o:flying` missed this card.
+        """
+        sample_file = _SAMPLE_DATA_DIR / "obyras_attendants.json"
+        rows = preprocess_card(json.loads(sample_file.read_text()))
+
+        merged = merge_dfc_faces(rows)
+        (card,) = merged
+
+        assert set(card["card_types"]) == {"Creature", "Instant"}
+        assert "Flying" in card["oracle_text"]
+        assert "-4/-0" in card["oracle_text"]
+
+    def test_merge_does_not_touch_shared_keywords(self) -> None:
+        """card_keywords is already identical across faces, so merge must leave it alone.
+
+        It comes from Scryfall's card-level `keywords` list (never per-face), so every face's
+        row already carries the same value -- this guards against dropping it while rebuilding
+        the other fields.
+        """
+        sample_file = _SAMPLE_DATA_DIR / "obyras_attendants.json"
+        rows = preprocess_card(json.loads(sample_file.read_text()))
+
+        (card,) = merge_dfc_faces(rows)
+        assert card["card_keywords"] == {"flying": True}
