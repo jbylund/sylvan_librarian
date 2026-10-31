@@ -123,21 +123,13 @@ _DERIVED_EXPANSIONS: dict[tuple[str, str], str] = {
     ("is", "triland"): "otag:cycle-ala-shardland or otag:cycle-ktk-wedgeland",  # 10, name-verified
     ("is", "triome"): "otag:cycle-iko-triome or otag:cycle-snc-triland",  # 10, name-verified
     # ── Non-land derivables ──────────────────────────────────────────────
-    # Commander eligibility, refined per review: legendary permanents with a
-    # printed toughness (creatures, Vehicles, Spacecraft -- toughness>=0, the
-    # parser-friendly spelling of toughness>-1; no legendary prints negative
-    # toughness and * compares as 0 on both engines) plus Backgrounds, plus
-    # rules text granting eligibility outright, MINUS the commander banlist:
-    # diffing the eligibility shape against Scryfall's is:commander showed it
-    # excludes banned cards (Griselbrand, Golos, Emrakul, Erayo were the
-    # over-catch) while keeping 329 casual not-legal legends. Residual is the
-    # face-evaluation cluster from docs/issues/00713: back-face legendaries
-    # over-match on combined type lines, and face-granted eligibility text
-    # under-matches until faces are searchable.
-    (
-        "is",
-        "commander",
-    ): '((t:legendary (toughness>=0 or t:background)) or o:"can be your commander") -banned:commander',
+    # NO `is:commander` HERE -- it is a STORED tag now, with `is:brawler`, `is:duelcommander`,
+    # `is:oathbreaker` and `is:spell` (BOOLEAN_IS_TAGS, decided by card_processing.role_classes
+    # at import). Its rewrite composed `t:legendary`, `toughness>=0` and `o:` over a ROW, and a
+    # faced card's row is one of its faces: who can lead a deck is a question about the face you
+    # cast, so the row answered for a transform card's legendary back (Westvale Abbey //
+    # Ormendahl), a flip card's flipped legend (Budoka Pupil // Ichiga) and a meld result
+    # (Brisela), and missed a legendary front whose back is not a creature (Kytheon // Gideon).
     ("is", "companion"): "kw:companion",  # 10, name-verified
     ("is", "class"): "t:class",  # 34, equals Scryfall's paper count exactly
     # is:adventure is LAYOUT semantics by Scryfall's own definition -- it
@@ -154,6 +146,31 @@ _DERIVED_EXPANSIONS: dict[tuple[str, str], str] = {
     # from it") while missing modal cards worded otherwise (Sieges, Confluences).
     # Not an exact mirror of theirs, just a much closer one.
     ("is", "modal"): "otag:modal",
+    # ── Other spellings of the stored `is:` vocabulary ───────────────────
+    # The concatenated spellings of six tags BOOLEAN_IS_TAGS stores under Scryfall's
+    # syntax-page key -- the `promo_types` member itself, which Scryfall accepts alongside
+    # the underscored form. Measured 2026-09-03, each the same count as its target:
+    # `is:setpromo` 1,381, `is:mediainsert` 586, `is:planeswalkerdeck` 180, `is:judgegift`
+    # 164, `is:arenaleague` 40, `is:intropack` 40 -- every one a 200 there and a silent zero
+    # here, because the table knew only the underscored key. Aliases rather than rows: the
+    # tag under either spelling is the same tag, and a second copy is bytes for nothing.
+    ("is", "arenaleague"): "is:arena_league",
+    ("is", "intropack"): "is:intro_pack",
+    ("is", "judgegift"): "is:judge_gift",
+    ("is", "mediainsert"): "is:media_insert",
+    ("is", "planeswalkerdeck"): "is:planeswalker_deck",
+    ("is", "setpromo"): "is:set_promo",
+    # `rainbow` is Scryfall's short spelling of the `rainbowfoil` promo type, not a member of
+    # its own: `is:rainbow` and `is:rainbowfoil` are both 183 and both set differences are
+    # empty (2026-09-03). It never appears in `promo_types`, so it can only ever be an alias.
+    ("is", "rainbow"): "is:rainbowfoil",
+    # Two `is:` spellings of columns this parser already has, exact in both directions on
+    # 2026-09-03. `is:borderless` = `border:borderless` (3,611, both set differences empty).
+    # `is:tombstone` = `frame:tombstone` (113): a frame EFFECT, the one `is:` value of the 78
+    # the 2026-09-03 enumeration recovered that is not a promo type; the importer writes every
+    # frame_effects member into card_frame_data, so it reaches the column as colorshifted does.
+    ("is", "borderless"): "border:borderless",
+    ("is", "tombstone"): "frame:tombstone",
 }
 
 

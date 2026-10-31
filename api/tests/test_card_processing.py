@@ -7,7 +7,9 @@ import pathlib
 import uuid
 from typing import Any
 
-from api.card_processing import extract_frame_data_from_raw_card, preprocess_card
+import pytest
+
+from api.card_processing import ROLE_CLASSES_KEY, extract_frame_data_from_raw_card, preprocess_card, role_classes
 
 # Project root directory for accessing sample data
 _PROJECT_ROOT = pathlib.Path(__file__).parent.parent.parent
@@ -443,3 +445,248 @@ class TestCardProcessing:
         assert back.get("creature_power") is None
         assert front["card_types"] == ["Creature"]
         assert back["card_types"] == ["Instant"]
+
+
+_EVERYWHERE_LEGAL = {"commander": "legal", "brawl": "legal", "competitivebrawl": "legal", "duel": "legal", "oathbreaker": "legal"}
+# Printed before Arena: playable in the paper formats, not in Brawl.
+_PAPER_ONLY = _EVERYWHERE_LEGAL | {"brawl": "not_legal", "competitivebrawl": "not_legal"}
+
+
+def _face(type_line: str, oracle_text: str = "", toughness: str | None = None) -> dict[str, Any]:
+    """One card face, shaped as Scryfall sends it: `toughness` is absent, not null, without one."""
+    face: dict[str, Any] = {"type_line": type_line, "oracle_text": oracle_text}
+    if toughness is not None:
+        face["toughness"] = toughness
+    return face
+
+
+def _role_card(  # noqa: PLR0913
+    type_line: str,
+    *,
+    oracle_text: str = "",
+    toughness: str | None = None,
+    layout: str = "normal",
+    legalities: dict[str, str] | None = None,
+    faces: list[dict[str, Any]] | None = None,
+    name: str = "Role Test",
+    all_parts: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    """The fields `role_classes` reads, on a card shaped as Scryfall sends it."""
+    card = {"id": str(uuid.uuid4()), "name": name, "layout": layout, "legalities": legalities or _EVERYWHERE_LEGAL}
+    card |= _face(type_line, oracle_text, toughness)
+    if faces is not None:
+        card["card_faces"] = faces
+    if all_parts is not None:
+        card["all_parts"] = all_parts
+    return card
+
+
+def _meld_parts(*roles_and_names: tuple[str, str], own: dict[str, Any] | None = None) -> list[dict[str, str]]:
+    """`all_parts` entries; the one named like `own` carries its id, the rest a stranger's."""
+    return [
+        {"component": role, "name": name, "id": own["id"] if own is not None and own["name"] == name else str(uuid.uuid4())}
+        for role, name in roles_and_names
+    ]
+
+
+_BRISELA_PARTS = (
+    ("meld_result", "Brisela, Voice of Nightmares"),
+    ("meld_part", "Bruna, the Fading Light"),
+    ("meld_part", "Gisela, the Broken Blade"),
+)
+
+# Each case is a real card, reduced to the fields the rules read, with api.scryfall.com's answer
+# for it (2026-09-26). (id, card, the role classes it carries)
+_ROLE_CASES: list[tuple[str, dict[str, Any], set[str]]] = [
+    (
+        "a legendary creature leads every kind of deck",
+        _role_card("Legendary Creature — Bird Wizard", toughness="3"),
+        {"spell", "commander", "brawler", "duelcommander"},
+    ),
+    ("an instant is a spell and nothing else", _role_card("Instant"), {"spell"}),
+    ("a nonlegendary creature is no commander", _role_card("Creature — Human Monk", toughness="2"), {"spell"}),
+    # Derevi, Empyrial Tactician: Duel Commander's "banned as commander" list is `restricted`.
+    (
+        "duel's restricted is banned as commander",
+        _role_card("Legendary Creature — Bird Wizard", toughness="3", legalities=_EVERYWHERE_LEGAL | {"duel": "restricted"}),
+        {"spell", "commander", "brawler"},
+    ),
+    # Griselbrand.
+    (
+        "a banned commander is no commander",
+        _role_card("Legendary Creature — Demon", toughness="7", legalities=_PAPER_ONLY | {"commander": "banned"}),
+        {"spell", "duelcommander"},
+    ),
+    # Arena's legends are `not_legal` in Commander, not banned, and Scryfall counts them.
+    (
+        "not_legal in commander still counts",
+        _role_card("Legendary Creature — Human Soldier", toughness="1", legalities={"commander": "not_legal", "brawl": "legal"}),
+        {"spell", "commander", "brawler"},
+    ),
+    # Tajic, Legion's Valor: brawl-legal, banned in competitive brawl.
+    (
+        "a competitive brawl ban is no brawler",
+        _role_card(
+            "Legendary Creature — Human Soldier",
+            toughness="1",
+            legalities={"commander": "not_legal", "brawl": "legal", "competitivebrawl": "banned"},
+        ),
+        {"spell", "commander"},
+    ),
+    # Heart of Kiran: a printed toughness leads Commander and Brawl decks, not Duel Commander ones.
+    ("a legendary vehicle", _role_card("Legendary Artifact — Vehicle", toughness="4"), {"spell", "commander", "brawler"}),
+    # Acolyte of Bahamut (never on Arena).
+    ("a background", _role_card("Legendary Enchantment — Background", legalities=_PAPER_ONLY), {"spell", "commander"}),
+    ("a legendary artifact with no toughness", _role_card("Legendary Artifact"), {"spell"}),
+    # Teyo: Brawl takes a legendary planeswalker; Oathbreaker takes any.
+    ("a legendary planeswalker", _role_card("Legendary Planeswalker — Teyo"), {"spell", "brawler", "oathbreaker"}),
+    # Grist, the Hunger Tide: a creature everywhere but the battlefield.
+    (
+        "a planeswalker that is a creature off the battlefield",
+        _role_card(
+            "Legendary Planeswalker — Grist",
+            oracle_text="As long as Grist isn\u2019t on the battlefield, it\u2019s a 1/1 Insect creature in addition to its other types.\n+1: Create a token.",
+        ),
+        {"spell", "commander", "brawler", "duelcommander", "oathbreaker"},
+    ),
+    (
+        "a planeswalker that can be your commander",
+        _role_card(
+            "Legendary Planeswalker — Daretti",
+            oracle_text="+2: Discard up to two cards.\nDaretti, Scrap Savant can be your commander.",
+        ),
+        {"spell", "commander", "brawler", "duelcommander", "oathbreaker"},
+    ),
+    # Budoka Pupil // Ichiga, Who Topples Oaks: the legend is the FLIPPED half.
+    (
+        "a flip card's flipped legend",
+        _role_card(
+            "Creature — Human Monk // Legendary Creature — Spirit",
+            layout="flip",
+            toughness="2",
+            legalities=_PAPER_ONLY,
+            faces=[_face("Creature — Human Monk", toughness="2"), _face("Legendary Creature — Spirit", toughness="3")],
+        ),
+        {"spell"},
+    ),
+    # Homura, Human Ascendant // Homura's Essence.
+    (
+        "a flip card's legendary front",
+        _role_card(
+            "Legendary Creature — Human Monk // Legendary Enchantment",
+            layout="flip",
+            toughness="4",
+            legalities=_PAPER_ONLY,
+            faces=[_face("Legendary Creature — Human Monk", toughness="4"), _face("Legendary Enchantment")],
+        ),
+        {"spell", "commander", "duelcommander"},
+    ),
+    # Westvale Abbey // Ormendahl, Profane Prince: a land you play, a legend you turn it into.
+    (
+        "a transform card's legendary back",
+        _role_card(
+            "Land // Legendary Creature — Demon",
+            layout="transform",
+            faces=[_face("Land"), _face("Legendary Creature — Demon", toughness="7")],
+        ),
+        set(),
+    ),
+    # Kytheon, Hero of Akros // Gideon, Battle-Forged: the planeswalker is a back, so no oathbreaker.
+    (
+        "a legendary creature with a planeswalker back",
+        _role_card(
+            "Legendary Creature — Human Soldier // Legendary Planeswalker — Gideon",
+            layout="transform",
+            faces=[_face("Legendary Creature — Human Soldier", toughness="1"), _face("Legendary Planeswalker — Gideon")],
+        ),
+        {"spell", "commander", "brawler", "duelcommander"},
+    ),
+    # Valki, God of Lies // Tibalt, Cosmic Impostor: castable as either, led by the front.
+    (
+        "a modal card with a planeswalker back",
+        _role_card(
+            "Legendary Creature — God // Legendary Planeswalker — Tibalt",
+            layout="modal_dfc",
+            faces=[_face("Legendary Creature — God", toughness="1"), _face("Legendary Planeswalker — Tibalt")],
+        ),
+        {"spell", "commander", "brawler", "duelcommander"},
+    ),
+    # Agadeem's Awakening // Agadeem, the Undercrypt.
+    (
+        "a modal spell // land",
+        _role_card("Sorcery // Land", layout="modal_dfc", faces=[_face("Sorcery"), _face("Land")]),
+        {"spell"},
+    ),
+    ("a split card", _role_card("Instant // Sorcery", layout="split", faces=[_face("Instant"), _face("Sorcery")]), {"spell"}),
+    ("a land", _role_card("Land"), set()),
+    # Seat of the Synod: an Artifact that is a land is not cast.
+    ("an artifact land", _role_card("Artifact Land"), set()),
+    # Ferris Wheel: Attractions are visited, not cast.
+    ("an attraction", _role_card("Artifact — Attraction"), set()),
+    ("a conspiracy", _role_card("Conspiracy"), set()),
+    # Aswan Jaguar: the creature spelling before Sixth Edition is a spell on Scryfall.
+    ("a pre-Sixth-Edition Summon", _role_card("Summon Jaguar", toughness="2"), {"spell"}),
+    ("a token", _role_card("Token Legendary Creature — God", layout="token", toughness="5"), set()),
+]
+
+
+class TestRoleClasses:
+    """`role_classes`: who can lead a deck, and what is cast, read from the face you cast."""
+
+    @pytest.mark.parametrize(
+        ("card", "expected"), [(card, expected) for _, card, expected in _ROLE_CASES], ids=[name for name, _, _ in _ROLE_CASES]
+    )
+    def test_role_classes(self, card: dict[str, Any], expected: set[str]) -> None:
+        assert set(role_classes(card)) == expected
+
+    def test_meld_result_is_a_spell_and_no_commander(self) -> None:
+        """Brisela, Voice of Nightmares: a legendary creature nobody can cast."""
+        card = _role_card("Legendary Creature — Eldrazi Angel", layout="meld", toughness="10", name="Brisela, Voice of Nightmares")
+        card["all_parts"] = _meld_parts(*_BRISELA_PARTS, own=card)
+        assert set(role_classes(card)) == {"spell"}
+
+    def test_meld_part_is_a_commander(self) -> None:
+        """Gisela, the Broken Blade: the half you cast leads a deck."""
+        card = _role_card("Legendary Creature — Angel Horror", layout="meld", toughness="3", name="Gisela, the Broken Blade")
+        card["all_parts"] = _meld_parts(*_BRISELA_PARTS, own=card)
+        assert set(role_classes(card)) == {"spell", "commander", "brawler", "duelcommander"}
+
+    def test_meld_result_is_found_by_name_when_all_parts_names_a_sibling_printing(self) -> None:
+        """Ragnarok, Divine Deliverance fin/99b: none of its `all_parts` ids is its own."""
+        result = _role_card("Legendary Creature — Beast Avatar", layout="meld", toughness="6", name="Ragnarok, Divine Deliverance")
+        part = _role_card("Legendary Creature — Human Cleric", layout="meld", toughness="2", name="Vanille, Cheerful l\u2019Cie")
+        parts = _meld_parts(
+            ("meld_part", "Fang, Fearless l\u2019Cie"),
+            ("meld_result", "Ragnarok, Divine Deliverance"),
+            ("meld_part", "Vanille, Cheerful l\u2019Cie"),
+        )
+        result["all_parts"] = part["all_parts"] = parts
+        assert set(role_classes(result)) == {"spell"}
+        assert set(role_classes(part)) == {"spell", "commander", "brawler", "duelcommander"}
+
+    def test_preprocess_card_writes_the_cards_role_classes_onto_every_face(self) -> None:
+        """Both face rows share a scryfall_id and one survives the upsert; either must hold the card's answer."""
+        card = create_test_card(
+            name="Kytheon, Hero of Akros // Gideon, Battle-Forged",
+            type_line="Legendary Creature — Human Soldier // Legendary Planeswalker — Gideon",
+            legalities=_EVERYWHERE_LEGAL,
+            layout="transform",
+            card_faces=[
+                {
+                    "name": "Kytheon, Hero of Akros",
+                    "type_line": "Legendary Creature — Human Soldier",
+                    "power": "2",
+                    "toughness": "1",
+                },
+                {"name": "Gideon, Battle-Forged", "type_line": "Legendary Planeswalker — Gideon", "loyalty": "3"},
+            ],
+        )
+        front, back = preprocess_card(card)
+        expected = ["spell", "commander", "brawler", "duelcommander"]
+        assert front["raw_card_blob"][ROLE_CLASSES_KEY] == expected
+        assert back["raw_card_blob"][ROLE_CLASSES_KEY] == expected
+
+    def test_preprocess_card_leaves_a_card_with_no_role_class_untouched(self) -> None:
+        card = create_test_card(type_line="Land", legalities=_EVERYWHERE_LEGAL)
+        (row,) = preprocess_card(card)
+        assert ROLE_CLASSES_KEY not in row["raw_card_blob"]

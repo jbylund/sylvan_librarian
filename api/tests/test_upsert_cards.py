@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import logging
 import multiprocessing
+import re
 import uuid
 from unittest.mock import patch
 
 import psycopg
 import pytest
 
-from api.admin_resource import AdminResource, _build_boolean_is_tags_sql
+from api.admin_resource import BOOLEAN_IS_TAGS, AdminResource, _build_boolean_is_tags_sql
 from api.api_resource import APIResource
 from api.card_processing import preprocess_card
 from api.db.bulk_upsert import bulk_upsert
@@ -75,6 +76,45 @@ class TestBuildBooleanIsTagsSql:
         assert "%(num_chunks)s" in sql
         assert "%(chunk_index)s" in sql
         assert "jsonb_object_agg" not in sql
+
+    def test_sql_never_passes_postgres_more_than_100_arguments_per_call(self) -> None:
+        """Postgres refuses a function call with more than 100 arguments, and a pair is two.
+
+        One `jsonb_build_object` over the whole table held until the table passed 50 rows
+        (2026-09-03, the promo_types enumeration), when every import failed with "cannot pass
+        more than 100 arguments to a function". The builder chunks the pairs; this pins the chunk
+        size to the cap, on a synthetic table and on the real one.
+        """
+        tags = {f"tag{i}": "cards.raw_card_blob->'reserved' = 'true'::jsonb" for i in range(101)}
+        calls = _build_boolean_is_tags_sql(tags).split("jsonb_build_object(")[1:]
+        assert len(calls) == 3
+        assert all(call.count("CASE WHEN") <= 50 for call in calls)
+        real_calls = _build_boolean_is_tags_sql(BOOLEAN_IS_TAGS).split("jsonb_build_object(")[1:]
+        assert len(real_calls) > 1
+        assert all(call.count("CASE WHEN") <= 50 for call in real_calls)
+
+    def test_sql_reads_the_blob_once_per_row(self) -> None:
+        """The tag expressions read a subquery that has already produced the blob, not the table.
+
+        `raw_card_blob` is TOASTed, and each `cards.raw_card_blob->...` against the table detoasts
+        it again: with 122 tags a first sync of the 2026-08-16 bulk took 35 s per chunk, past the
+        import's 30 s statement_timeout, and 10 s once the blob is produced once. `OFFSET 0` is
+        what stops the planner flattening the subquery back onto the table.
+        """
+        sql = _build_boolean_is_tags_sql({"reserved": "cards.raw_card_blob->'reserved' = 'true'::jsonb"})
+        subquery = sql[sql.index("FROM (") : sql.index(") cards")]
+        assert "cards.raw_card_blob || '{}'::jsonb AS raw_card_blob" in subquery
+        assert "FROM magic.cards cards" in subquery
+        assert subquery.rstrip().endswith("OFFSET 0")
+        assert sql.index("CASE WHEN") < sql.index("FROM (")
+
+    def test_every_tag_expression_reads_only_columns_the_subquery_provides(self) -> None:
+        """An expression naming a column the subquery does not select would fail every import."""
+        sql = _build_boolean_is_tags_sql(BOOLEAN_IS_TAGS)
+        subquery = sql[sql.index("FROM (") : sql.index(") cards")]
+        provided = set(re.findall(r"cards\.(\w+)", subquery)) | {"raw_card_blob"}
+        read = {column for expr in BOOLEAN_IS_TAGS.values() for column in re.findall(r"cards\.(\w+)", expr)}
+        assert read <= provided
 
 
 def _is_tags_for(api_resource: APIResource, scryfall_id: str) -> dict:
@@ -208,7 +248,188 @@ class TestBooleanIsTags:
         tags = _is_tags_for(api_resource, card["id"])
         assert tags.get("instore") is True
         assert "fnm" not in tags
+
+    def test_undocumented_promo_type_lands_as_is_tag(self, api_resource: APIResource) -> None:
+        """A `promo_types` member Scryfall's syntax page never lists still becomes a tag.
+
+        `is:serialized` is 292 cards on api.scryfall.com (2026-09-03) and was a silent zero here
+        until the vocabulary was enumerated from the printings instead of read off the page.
+        """
+        card = make_raw_card(name="Serialized Import Test")
+        card["promo_types"] = ["serialized"]
+        api_resource.admin._upsert_cards([card])
+        assert _is_tags_for(api_resource, card["id"]).get("serialized") is True
+
+    @staticmethod
+    def _meld_all_parts(own_id: str, own_role: str) -> list[dict]:
+        """A meld card's `all_parts`: this card in `own_role`, plus the other two members."""
+        other_roles = ["meld_part", "meld_part", "meld_result"]
+        other_roles.remove(own_role)
+        parts = [{"object": "related_card", "id": own_id, "component": own_role, "name": "Own Half"}]
+        parts.extend(
+            {"object": "related_card", "id": str(uuid.uuid4()), "component": role, "name": f"Other {i}"}
+            for i, role in enumerate(other_roles)
+        )
+        return parts
+
+    def test_meld_part_reads_the_cards_own_all_parts_entry(self, api_resource: APIResource) -> None:
+        """Every meld card lists all three members, so the role must come from ITS OWN entry."""
+        card = make_raw_card(name="Meld Part Import Test")
+        card["layout"] = "meld"
+        card["all_parts"] = self._meld_all_parts(card["id"], "meld_part")
+        api_resource.admin._upsert_cards([card])
+        tags = _is_tags_for(api_resource, card["id"])
+        assert tags.get("meldpart") is True
+        assert "meldresult" not in tags
+
+    def test_meld_result_reads_the_cards_own_all_parts_entry(self, api_resource: APIResource) -> None:
+        card = make_raw_card(name="Meld Result Import Test")
+        card["layout"] = "meld"
+        card["all_parts"] = self._meld_all_parts(card["id"], "meld_result")
+        api_resource.admin._upsert_cards([card])
+        tags = _is_tags_for(api_resource, card["id"])
+        assert tags.get("meldresult") is True
+        assert "meldpart" not in tags
+
+    def test_meld_role_falls_back_to_the_cards_name_when_all_parts_names_a_sibling_printing(
+        self, api_resource: APIResource
+    ) -> None:
+        """A reprint whose `all_parts` carries another printing's ids still gets its role.
+
+        Ragnarok, Divine Deliverance fin/99b and Vanille, Cheerful l'Cie fin/211 are this shape in
+        the 2026-08-16 bulk: all three entries are there, none under the printing's own id.
+        """
+        result = make_raw_card(name="Sibling Ids Melded")
+        part = make_raw_card(name="Sibling Ids Half")
+        for card in (result, part):
+            card["layout"] = "meld"
+            card["all_parts"] = [
+                {"object": "related_card", "id": str(uuid.uuid4()), "component": "meld_part", "name": "Sibling Ids Half"},
+                {"object": "related_card", "id": str(uuid.uuid4()), "component": "meld_part", "name": "Sibling Ids Other Half"},
+                {"object": "related_card", "id": str(uuid.uuid4()), "component": "meld_result", "name": "Sibling Ids Melded"},
+            ]
+        api_resource.admin._upsert_cards([result, part])
+        result_tags = _is_tags_for(api_resource, result["id"])
+        assert result_tags.get("meldresult") is True
+        assert "meldpart" not in result_tags
+        part_tags = _is_tags_for(api_resource, part["id"])
+        assert part_tags.get("meldpart") is True
+        assert "meldresult" not in part_tags
+
+    def test_meld_name_fallback_does_not_override_the_cards_own_entry(self, api_resource: APIResource) -> None:
+        """An entry under the card's own id is the answer, even beside a meld entry of its name."""
+        card = make_raw_card(name="Shared Name Import Test")
+        card["all_parts"] = [
+            {"object": "related_card", "id": card["id"], "component": "combo_piece", "name": "Shared Name Import Test"},
+            {"object": "related_card", "id": str(uuid.uuid4()), "component": "meld_result", "name": "Shared Name Import Test"},
+        ]
+        api_resource.admin._upsert_cards([card])
+        tags = _is_tags_for(api_resource, card["id"])
+        assert "meldpart" not in tags
+        assert "meldresult" not in tags
+
+    def test_a_token_sharing_the_cards_name_gives_it_no_meld_role(self, api_resource: APIResource) -> None:
+        """The name fallback reads meld components only: a same-named token entry decides nothing."""
+        card = make_raw_card(name="Token Namesake Import Test")
+        card["all_parts"] = [
+            {"object": "related_card", "id": str(uuid.uuid4()), "component": "token", "name": "Token Namesake Import Test"},
+            {"object": "related_card", "id": str(uuid.uuid4()), "component": "meld_part", "name": "Someone Else"},
+        ]
+        api_resource.admin._upsert_cards([card])
+        tags = _is_tags_for(api_resource, card["id"])
+        assert "meldpart" not in tags
+        assert "meldresult" not in tags
+
+    def test_other_cards_meld_roles_do_not_tag_this_card(self, api_resource: APIResource) -> None:
+        """`all_parts` naming OTHER cards' roles (a token maker, a combo piece) is not a meld role."""
+        card = make_raw_card(name="Meld Bystander Import Test")
+        card["all_parts"] = [
+            {"object": "related_card", "id": str(uuid.uuid4()), "component": "meld_part", "name": "Someone Else"},
+            {"object": "related_card", "id": str(uuid.uuid4()), "component": "meld_result", "name": "Someone Else Melded"},
+            {"object": "related_card", "id": card["id"], "component": "combo_piece", "name": "Meld Bystander Import Test"},
+        ]
+        api_resource.admin._upsert_cards([card])
+        tags = _is_tags_for(api_resource, card["id"])
+        assert "meldpart" not in tags
+        assert "meldresult" not in tags
         assert "buyabox" not in tags
+
+    @staticmethod
+    def _faced_card(name: str, layout: str, faces: list[dict]) -> dict:
+        """A two-faced raw card, legal where a commander needs it to be."""
+        card = make_raw_card(name=name)
+        card["layout"] = layout
+        card["type_line"] = " // ".join(face["type_line"] for face in faces)
+        card["legalities"] = {"commander": "legal", "brawl": "legal", "duel": "legal", "oathbreaker": "legal"}
+        card["card_faces"] = [{"name": f"{name} face {i}", "colors": [], **face} for i, face in enumerate(faces, start=1)]
+        return card
+
+    def test_role_classes_are_read_from_the_front_face(self, api_resource: APIResource) -> None:
+        """A legendary creature with a planeswalker back leads a deck; the stored row is one face of it.
+
+        Kytheon, Hero of Akros // Gideon, Battle-Forged: the row a predicate sees may be the
+        planeswalker, which has no toughness and is not the face anyone casts.
+        """
+        card = self._faced_card(
+            "Front Legend Import Test",
+            "transform",
+            [
+                {"type_line": "Legendary Creature — Human Soldier", "power": "2", "toughness": "1"},
+                {"type_line": "Legendary Planeswalker — Gideon", "loyalty": "3"},
+            ],
+        )
+        api_resource.admin._upsert_cards([card])
+        tags = _is_tags_for(api_resource, card["id"])
+        assert {tag for tag in ("commander", "brawler", "duelcommander", "oathbreaker", "spell") if tags.get(tag)} == {
+            "commander",
+            "brawler",
+            "duelcommander",
+            "spell",
+        }
+
+    def test_a_legendary_back_face_is_no_commander(self, api_resource: APIResource) -> None:
+        """Westvale Abbey // Ormendahl, Profane Prince: a land you play, a legend you turn it into."""
+        card = self._faced_card(
+            "Back Legend Import Test",
+            "transform",
+            [{"type_line": "Land"}, {"type_line": "Legendary Creature — Demon", "power": "9", "toughness": "7"}],
+        )
+        api_resource.admin._upsert_cards([card])
+        tags = _is_tags_for(api_resource, card["id"])
+        assert not {"commander", "brawler", "duelcommander", "oathbreaker", "spell"} & set(tags)
+
+    def test_a_meld_result_is_a_spell_and_no_commander(self, api_resource: APIResource) -> None:
+        """Ragnarok, Divine Deliverance fin/99b, whose `all_parts` names a sibling printing's ids.
+
+        The SQL `meldresult` row and `role_classes` each decide "is this the result" for
+        themselves; this is the card on which the two must agree.
+        """
+        card = make_raw_card(name="Melded Legend Import Test")
+        card |= {"layout": "meld", "type_line": "Legendary Creature — Beast Avatar", "power": "7", "toughness": "6"}
+        card["legalities"] = {"commander": "legal", "brawl": "legal", "duel": "legal"}
+        card["all_parts"] = [
+            {"object": "related_card", "id": str(uuid.uuid4()), "component": "meld_part", "name": "Melded Legend Half"},
+            {"object": "related_card", "id": str(uuid.uuid4()), "component": "meld_result", "name": "Melded Legend Import Test"},
+        ]
+        api_resource.admin._upsert_cards([card])
+        tags = _is_tags_for(api_resource, card["id"])
+        assert tags.get("meldresult") is True
+        assert tags.get("spell") is True
+        assert not {"commander", "brawler", "duelcommander"} & set(tags)
+
+    def test_a_card_that_loses_its_role_loses_the_tag(self, api_resource: APIResource) -> None:
+        """A commander ban arrives as a legality change; the next import takes the tag back off."""
+        card = make_raw_card(name="Banned Later Import Test")
+        card |= {"type_line": "Legendary Creature — Demon", "power": "7", "toughness": "7"}
+        card["legalities"] = {"commander": "legal", "vintage": "legal"}
+        api_resource.admin._upsert_cards([card])
+        assert _is_tags_for(api_resource, card["id"]).get("commander") is True
+
+        banned = make_raw_card(card_id=card["id"], name="Banned Later Import Test")
+        banned |= {"type_line": "Legendary Creature — Demon", "power": "7", "toughness": "7", "oracle_id": card["oracle_id"]}
+        banned["legalities"] = {"commander": "banned", "vintage": "legal"}
+        api_resource.admin._upsert_cards([banned])
+        assert "commander" not in _is_tags_for(api_resource, card["id"])
 
     def test_partner_keyword_lands_as_is_tag(self, api_resource: APIResource) -> None:
         card = make_raw_card(name="Partner Import Test")
@@ -481,4 +702,6 @@ class TestUpsertBehavior:
             cursor.execute("SELECT prefer_score, card_is_tags FROM magic.cards WHERE scryfall_id = %s", (card_id,))
             row = cursor.fetchone()
         assert row["prefer_score"] == 42.0
-        assert row["card_is_tags"] == {"is:instant": True}
+        # `spell` is a key the import manages (make_raw_card is an Instant) and is synced on every
+        # upsert; the backfilled key beside it is the one that must survive.
+        assert row["card_is_tags"] == {"is:instant": True, "spell": True}

@@ -27,6 +27,148 @@ def parse_type_line(type_line: str) -> tuple[list[str], list[str]]:
     return card_types, card_subtypes or []
 
 
+# ── Role classes: who can lead a deck, and what is cast ──────────────────────
+# `is:commander`, `is:brawler`, `is:duelcommander`, `is:oathbreaker` and `is:spell` are questions
+# about ONE face -- the one you cast -- and about the printing's own legalities. They are decided
+# here, from the card as Scryfall sends it, because this is the only place that still holds the
+# faces: a faced card is stored as a row per face under one scryfall_id, so a query predicate sees
+# whichever face the row kept and can never ask "is the FRONT a legendary creature". See
+# `role_classes` for the rules; BOOLEAN_IS_TAGS reads the result back off raw_card_blob.
+ROLE_CLASSES_KEY = "role_classes"
+
+# Layouts that are not a card anyone casts or chooses to lead a deck.
+_NOT_A_CARD_LAYOUTS = frozenset({"token", "double_faced_token", "emblem", "planar", "scheme", "vanguard", "art_series"})
+
+# Layouts whose every face can be cast: both halves of a split, an adventure or a prepare card, and
+# either side of a modal DFC. On every other faced layout (transform, flip, reversible) only the
+# front is cast; the other face is turned to.
+_EVERY_FACE_CAST_LAYOUTS = frozenset({"split", "adventure", "prepare", "modal_dfc"})
+
+# Card types a spell can have, and the ones nothing is cast as. A face with a spell type is a spell
+# even beside a never-cast word (Theros's `Hero Artifact -- Equipment`); a word in neither set
+# counts as castable, which is Scryfall's reading of `Summon` and `Eaturecray` too. Title-cased to
+# match parse_type_line().
+_SPELL_TYPES = frozenset(
+    {"Artifact", "Battle", "Creature", "Enchantment", "Instant", "Kindred", "Tribal", "Planeswalker", "Sorcery"}
+)
+_NEVER_CAST_TYPES = frozenset(
+    {"Card", "Plane", "Phenomenon", "Scheme", "Vanguard", "Conspiracy", "Emblem", "Dungeon", "Hero", "Event", "Boss", "Stickers"}
+)
+# Artifact subtypes that are never cast: Attractions are visited, Contraptions assembled.
+_NEVER_CAST_SUBTYPES = frozenset({"Attraction", "Contraption"})
+
+
+def _front_faces(card: dict[str, Any]) -> list[dict[str, Any]]:
+    """The faces that decide who can lead a deck: face 0, or every half of a split card.
+
+    Face 0 rather than the card's own keys, because a faced card's top-level `type_line` is the
+    joined one ("Creature -- Human Monk // Legendary Creature -- Human Monk") and a reversible
+    card carries no top-level type line at all.
+    """
+    faces = card.get("card_faces") or []
+    if not faces:
+        return [card]
+    return faces if card.get("layout") == "split" else faces[:1]
+
+
+def _cast_faces(card: dict[str, Any]) -> list[dict[str, Any]]:
+    """The faces that can be cast: all of them on an _EVERY_FACE_CAST_LAYOUTS card, else the front."""
+    faces = card.get("card_faces") or []
+    if faces and card.get("layout") in _EVERY_FACE_CAST_LAYOUTS:
+        return faces
+    return _front_faces(card)
+
+
+def _is_meld_result(card: dict[str, Any]) -> bool:
+    """Whether this card is the RESULT of a meld -- the same rule BOOLEAN_IS_TAGS' `meldresult` reads.
+
+    The role is the `component` of the card's own `all_parts` entry, found by id, or by the card's
+    own name when a reprint's `all_parts` lists a sibling printing's ids.
+    """
+    parts = card.get("all_parts") or []
+    own = next((part for part in parts if part.get("id") == card.get("id")), None)
+    if own is not None:
+        return own.get("component") == "meld_result"
+    return any(part.get("name") == card.get("name") and part.get("component") == "meld_result" for part in parts)
+
+
+def _is_spell_face(face: dict[str, Any]) -> bool:
+    """Whether one castable face is a spell: not a land or token, and not a never-cast type."""
+    card_types, card_subtypes = parse_type_line(face.get("type_line") or "")
+    types = set(card_types)
+    if not types or types & {"Land", "Token"}:
+        return False
+    if not types & _SPELL_TYPES and types & _NEVER_CAST_TYPES:
+        return False
+    return not _NEVER_CAST_SUBTYPES & set(card_subtypes)
+
+
+def _creature_outside_the_battlefield(oracle_text: str) -> bool:
+    """Grist, the Hunger Tide: "As long as Grist isn't on the battlefield, it's a 1/1 Insect creature"."""
+    text = oracle_text.lower().replace("\u2019", "'")
+    return any("isn't on the battlefield, it's a" in sentence and "creature" in sentence for sentence in re.split(r"[.\n]", text))
+
+
+def role_classes(card: dict[str, Any]) -> list[str]:
+    """The role classes (`commander`, `brawler`, `duelcommander`, `oathbreaker`, `spell`) of a raw card.
+
+    Takes the card as Scryfall sends it, `card_faces` and all. Each rule was fitted to
+    api.scryfall.com's own answer card for card (see docs/issues/00985-is-tag-remaining-coverage.md
+    for the measurements):
+
+    - `spell`: some castable face (`_cast_faces`) is a spell (`_is_spell_face`). A meld result is a
+      spell there, so this does not ask about melds.
+    - The four deck-leading classes read the FRONT face (`_front_faces`) and are never a meld
+      result:
+        - a legendary Creature, a legendary card that is a creature outside the battlefield
+          (Grist), or any card whose text says it "can be your commander";
+        - for `commander` and `brawler`, also a legendary card with a printed toughness (Vehicles,
+          Spacecraft) or a Background -- `duelcommander` counts neither;
+        - for `brawler`, also a legendary Planeswalker;
+        - `oathbreaker` is its own shape: the front face is a Planeswalker.
+    - Legality comes from the printing's own `legalities`: `commander` is anything not banned in
+      Commander; `brawler` is legal in Brawl and not banned in `competitivebrawl`; `duelcommander`
+      is LEGAL in Duel, where `restricted` is how Scryfall writes "banned as commander";
+      `oathbreaker` is legal in Oathbreaker.
+    """
+    if card.get("layout") in _NOT_A_CARD_LAYOUTS:
+        return []
+    classes = []
+    if any(_is_spell_face(face) for face in _cast_faces(card)):
+        classes.append("spell")
+    if _is_meld_result(card):
+        return classes
+
+    creature = other_permanent = legendary_walker = walker = False
+    for face in _front_faces(card):
+        card_types, card_subtypes = parse_type_line(face.get("type_line") or "")
+        if "Token" in card_types:
+            continue
+        oracle_text = face.get("oracle_text") or ""
+        legendary = "Legendary" in card_types
+        walker |= "Planeswalker" in card_types
+        legendary_walker |= legendary and "Planeswalker" in card_types
+        creature |= "can be your commander" in oracle_text.lower() or (
+            legendary and ("Creature" in card_types or _creature_outside_the_battlefield(oracle_text))
+        )
+        other_permanent |= legendary and (face.get("toughness") is not None or "Background" in card_subtypes)
+
+    legalities = card.get("legalities") or {}
+    if (creature or other_permanent) and legalities.get("commander") != "banned":
+        classes.append("commander")
+    if (
+        (creature or other_permanent or legendary_walker)
+        and legalities.get("brawl") == "legal"
+        and legalities.get("competitivebrawl") != "banned"
+    ):
+        classes.append("brawler")
+    if creature and legalities.get("duel") == "legal":
+        classes.append("duelcommander")
+    if walker and legalities.get("oathbreaker") == "legal":
+        classes.append("oathbreaker")
+    return classes
+
+
 def maybeify(func: Callable) -> Callable:
     """Convert value to int (via float first), returning None if conversion fails."""
 
@@ -150,6 +292,11 @@ def preprocess_card(card: dict[str, Any]) -> list[dict[str, Any]]:  # noqa: PLR0
     if "card_name" not in card:
         # Non-recursive case: first time seeing this card
         card["card_name"] = card.get("name")
+        # Decided here, while the card still has all its faces, and carried onto every face's
+        # raw_card_blob by the merge below -- so whichever face row survives the upsert, it holds
+        # the CARD's answer. Omitted when empty, which leaves a land's blob as Scryfall sent it.
+        if classes := role_classes(card):
+            card[ROLE_CLASSES_KEY] = classes
     else:
         # Recursive case: processing a face
         card["face_name"] = card.get("name")

@@ -37,10 +37,6 @@ EQUIVALENCES = [
     ("is:colorshifted", "frame:colorshifted"),
     ("is:manland", "t:land o:become o:creature o:/still a.* land/"),
     ("is:creatureland", "t:land o:become o:creature o:/still a.* land/"),
-    (
-        "is:commander",
-        '((t:legendary (toughness>=0 or t:background)) or o:"can be your commander") -banned:commander',
-    ),
     ("is:fetchland", "otag:cycle-fetchland"),
     ("is:checkland", "otag:cycle-checkland"),
     ("is:painland", "otag:cycle-painland"),
@@ -70,6 +66,17 @@ EQUIVALENCES = [
     ("is:surveilland", "otag:cycle-dual-surveil-land"),
     ("is:tricycleland", "otag:tricycle-land"),
     ("is:pathway", "otag:cycle-pathway"),
+    # Spelling aliases of stored tags: the expansion is the OTHER is: value, which stays a leaf.
+    ("is:arenaleague", "is:arena_league"),
+    ("is:intropack", "is:intro_pack"),
+    ("is:judgegift", "is:judge_gift"),
+    ("is:mediainsert", "is:media_insert"),
+    ("is:planeswalkerdeck", "is:planeswalker_deck"),
+    ("is:setpromo", "is:set_promo"),
+    ("is:rainbow", "is:rainbowfoil"),
+    # Columns this parser already has, under their `is:` spelling.
+    ("is:borderless", "border:borderless"),
+    ("is:tombstone", "frame:tombstone"),
     # composes under negation and inside compounds
     ("-frame:old", "-(frame:1993 or frame:1997)"),
     ("t:goblin frame:modern", "t:goblin frame:2003"),
@@ -103,6 +110,19 @@ def test_unimplemented_is_tag_passes_through(parse_query) -> None:
     assert root.operator == ":"
     assert root.lhs.original_attribute == "is"
     assert root.rhs.value == "promo"
+
+
+@pytest.mark.parametrize("value", ["commander", "brawler", "duelcommander", "oathbreaker", "spell"])
+def test_role_classes_are_stored_tags_not_rewrites(parse_query, value: str) -> None:
+    """The role classes stay `is:` leaves: the importer decides them from the face you cast.
+
+    A rewrite here would shadow the stored tag with a predicate over one face's row -- the thing
+    `card_processing.role_classes` exists to replace.
+    """
+    root = parse_query(f"is:{value}").root
+    assert root.operator == ":"
+    assert root.lhs.original_attribute == "is"
+    assert root.rhs.value == value
 
 
 def test_real_frame_value_not_rewritten(parse_query) -> None:
