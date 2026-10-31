@@ -167,7 +167,7 @@ STATIC_VALUES: dict[str, list[str]] = {
     # Anything outside this set parses but falls through to a `card_is_tags` lookup, and that column
     # carries only the two booleans the import syncs from the bulk blob — `is:reserved` is the one to
     # reach for. Values with no key there still match zero cards, as `is:reprint`, `is:token` and
-    # `is:spell` did in the old load-generator list. All 48 are kept rather
+    # `is:spell` did in the old load-generator list. All 49 are kept rather
     # than a token few: the family's share of traffic is set by its weight, not by how many values
     # it holds, and each expands to a genuinely different shape — layout lookups, type unions, an
     # oracle-text heuristic, a numeric conjunction.
@@ -203,6 +203,7 @@ STATIC_VALUES: dict[str, list[str]] = {
         "is:old",
         "is:outlaw",
         "is:party",
+        "is:partner",
         "is:painland",
         "is:pathway",
         "is:permanent",
