@@ -249,6 +249,25 @@ struct OracleCard {
     // clear (~98.2% of cards), the card-level word below is exact.
     legality_divergent: bool,
 
+    // Scryfall's count keywords -- `prints`, `sets`, `paperprints`, `papersets`, `illustrations`
+    // -- each a count over ALL of this card's printings (distinct set/collector-number slots less
+    // the variations, distinct set codes, the same two over the printings of paper sets, distinct
+    // artworks). Decided at IMPORT by `_sync_print_counts` (api/admin_resource.py), which writes
+    // the same five numbers onto every row of the card, for the reason `tri()` cannot: it holds
+    // one card and one printing and never sees the siblings; the rules are in its docstring. The
+    // loader takes them from the first row of the group. Plain
+    // u16 with PRINT_COUNT_NONE for "not yet counted" (a NULL column) rather than Option<u16>,
+    // which archives at 4 bytes each, and declared HERE rather than beside `edhrec_rank` on
+    // purpose: `oracle_id` below is 16-aligned and the fields above end at byte 129, so these
+    // ten bytes ride padding the row already had and the archived card stays 288 bytes
+    // (declared after `cubecobra_score` they made it 304). Pinned by
+    // `the_count_columns_ride_padding_the_rows_already_had`.
+    print_count: u16,
+    set_count: u16,
+    paper_print_count: u16,
+    paper_set_count: u16,
+    illustration_count: u16,
+
     // 0 = null; see parse_uuid_or_hash().
     oracle_id: u128,
 
@@ -323,6 +342,19 @@ struct Printing {
     price_eur: Option<u32>,
     price_tix: Option<u32>,
     prefer_score: Option<f32>,
+    // Scryfall's `artists`: how many artists THIS printing credits (the length of its
+    // `artist_ids`), written by `_sync_print_counts` beside the card-level counts above.
+    // ARTIST_COUNT_NONE = not yet counted.
+    artist_count: u8,
+    // Scryfall's `cheapest:usd` / `cheapest:eur` / `cheapest:tix`: this printing's answers to each
+    // term AND to each negated term, three bits per currency, as `_sync_cheapest_codes`
+    // (api/admin_resource.py) decided them at import against the card's lowest price -- which
+    // `tri()` cannot see, holding one card and one printing. See CHEAPEST_TERM for the bits and
+    // the sync's docstring for the rule. CHEAPEST_CODES_NONE = not yet computed (a NULL column).
+    // Declared directly after `artist_count` on purpose: that byte sits at 4 mod 8 and the
+    // legality word below is 8-aligned, so these two bytes ride the same padding and the
+    // archived printing stays 160 bytes. Pinned by `the_cheapest_codes_ride_padding_too`.
+    cheapest_codes: u16,
 
     // This printing's exact legality word; only consulted when the owning
     // card's legality_divergent flag is set.
@@ -383,6 +415,15 @@ struct CardRow {
     price_tix: Option<u32>,
     prefer_score: Option<f32>,
     cubecobra_score: Option<f32>,
+    // The count-keyword columns; see OracleCard / Printing for what each one is.
+    print_count: u16,
+    set_count: u16,
+    paper_print_count: u16,
+    paper_set_count: u16,
+    illustration_count: u16,
+    artist_count: u8,
+    // `cheapest_codes` as stored; see Printing.
+    cheapest_codes: u16,
 
     card_subtypes: Vec<u16>,
     card_keywords: Vec<u16>,
@@ -645,6 +686,91 @@ fn opt_u32(d: &Bound<PyDict>, key: &str) -> Option<u32> {
     opt_f32(d, key).map(|v| v as u32)
 }
 
+/// "Not yet counted" for the card-level count columns (`OracleCard.print_count` and its four
+/// siblings): the column is NULL until `_sync_print_counts` has run over the card.
+pub(crate) const PRINT_COUNT_NONE: u16 = u16::MAX;
+/// The same for `Printing.artist_count`.
+pub(crate) const ARTIST_COUNT_NONE: u8 = u8::MAX;
+
+/// A count column as stored: its value, saturating one below the sentinel, or the sentinel when
+/// the column is NULL or absent (rows older than the column, hand-built test dicts).
+fn count_u16(d: &Bound<PyDict>, key: &str) -> u16 {
+    opt_f32(d, key).map_or(PRINT_COUNT_NONE, |v| (v as u16).min(PRINT_COUNT_NONE - 1))
+}
+
+fn count_u8(d: &Bound<PyDict>, key: &str) -> u8 {
+    opt_f32(d, key).map_or(ARTIST_COUNT_NONE, |v| (v as u8).min(ARTIST_COUNT_NONE - 1))
+}
+
+/// The bits of `Printing.cheapest_codes` (`magic.cards.cheapest_codes`), three per currency at
+/// `CheapestCurrency::shift()`. The same three constants and shifts are CHEAPEST_TERM,
+/// CHEAPEST_NEGATED_TERM, CHEAPEST_UNKNOWN and CHEAPEST_SHIFTS in api/parsing/db_info.py, which
+/// is where the sync that writes them and the SQL lane that reads them take them from.
+///
+///   `CHEAPEST_TERM`          `cheapest:<currency>` is true of the printing
+///   `CHEAPEST_NEGATED_TERM`  `-cheapest:<currency>` is true of it. Stored rather than derived
+///                            because on api.scryfall.com the negated TERM is an expression of
+///                            its own -- `(price IS NULL OR price <> M) AND (foil IS NULL OR
+///                            foil = M)` -- and not the complement: `-cheapest:usd e:khm` is 5
+///                            printings where `cheapest:usd e:khm` is 222 of 407, one in both
+///   `CHEAPEST_UNKNOWN`       both are SQL NULL: the printing is priced and its card has no
+///                            lowest price (every priced printing of it is memorabilia)
+pub(crate) const CHEAPEST_TERM: u16 = 1;
+pub(crate) const CHEAPEST_NEGATED_TERM: u16 = 2;
+pub(crate) const CHEAPEST_UNKNOWN: u16 = 4;
+/// "Not yet computed": the column is NULL until `_sync_cheapest_codes` has run over the card.
+/// Out of reach of any real value, which uses nine bits.
+pub(crate) const CHEAPEST_CODES_NONE: u16 = u16::MAX;
+const CHEAPEST_CODES_MASK: u16 = 0x1FF;
+
+/// One currency of `cheapest:` -- what `filter::FilterExpr::Cheapest` asks for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum CheapestCurrency {
+    Usd,
+    Eur,
+    Tix,
+}
+
+impl CheapestCurrency {
+    /// The canonical names the Python `CheapestNode` serializes.
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "usd" => Some(Self::Usd),
+            "eur" => Some(Self::Eur),
+            "tix" => Some(Self::Tix),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn shift(self) -> u32 {
+        match self {
+            Self::Usd => 0,
+            Self::Eur => 3,
+            Self::Tix => 6,
+        }
+    }
+}
+
+/// A printing's answer to `cheapest:<currency>`, or to the negated TERM when `negated_term`,
+/// read off its stored codes. None is SQL's NULL: the codes are not computed yet, or the
+/// printing is priced and its card has no lowest price to compare with.
+pub(crate) fn cheapest_answer(codes: u16, currency: CheapestCurrency, negated_term: bool) -> Option<bool> {
+    if codes == CHEAPEST_CODES_NONE {
+        return None;
+    }
+    let bits = codes >> currency.shift();
+    if bits & CHEAPEST_UNKNOWN != 0 {
+        return None;
+    }
+    Some(bits & if negated_term { CHEAPEST_NEGATED_TERM } else { CHEAPEST_TERM } != 0)
+}
+
+/// `cheapest_codes` as stored, or the sentinel when the column is NULL or absent (rows older
+/// than the column, hand-built test dicts).
+fn cheapest_codes(d: &Bound<PyDict>, key: &str) -> u16 {
+    opt_f32(d, key).map_or(CHEAPEST_CODES_NONE, |v| (v as u16) & CHEAPEST_CODES_MASK)
+}
+
 fn str_list(d: &Bound<PyDict>, key: &str) -> Vec<String> {
     d.get_item(key)
         .ok()
@@ -841,6 +967,13 @@ fn card_from_pydict(d: &Bound<PyDict>, it: &mut Interner, vocab: &mut VocabInter
         price_tix: opt_price_cents(d, "price_tix"),
         prefer_score: opt_f32(d, "prefer_score"),
         cubecobra_score: opt_f32(d, "cubecobra_score"),
+        print_count: count_u16(d, "card_print_count"),
+        set_count: count_u16(d, "card_set_count"),
+        paper_print_count: count_u16(d, "card_paper_print_count"),
+        paper_set_count: count_u16(d, "card_paper_set_count"),
+        illustration_count: count_u16(d, "card_illustration_count"),
+        artist_count: count_u8(d, "artist_count"),
+        cheapest_codes: cheapest_codes(d, "cheapest_codes"),
 
         card_types,
         card_subtypes: str_list_to_ids(d, "card_subtypes", vocab)?,
@@ -13262,7 +13395,19 @@ const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 //
 // 2026082501 — `SortPermutations` gains per-order printing-span prefix sums, used to turn a bound on
 // cards visited into a sound O(1) bound on printings examined. Entirely inside `CardIndexes` again.
-const ARCHIVE_FORMAT_VERSION: u32 = 2026090801;
+//
+// 2026100401 — `OracleCard` gains the five card-level counts behind Scryfall's `prints`, `sets`,
+// `paperprints`, `papersets` and `illustrations`, and `Printing` gains `artist_count` (`artists`).
+// Neither row's SIZE moves — the ten card bytes and the one printing byte all land in padding the
+// rows already had — so the header's `AOracleCard`/`APrinting` sizes cannot catch it: an archive
+// written before this constant would be read with garbage (old padding) in the six new fields.
+// This bump is the only thing that rejects it.
+//
+// 2026100402 — `Printing` gains `cheapest_codes`, the stored answers to Scryfall's `cheapest:usd` /
+// `cheapest:eur` / `cheapest:tix` and their negated terms. Two more bytes of the same padding, so
+// again no row size moves and only this constant rejects an older archive -- which would be read
+// with old padding as the codes.
+const ARCHIVE_FORMAT_VERSION: u32 = 2026100402;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -13835,6 +13980,12 @@ impl QueryEngine {
                     planeswalker_loyalty: row.planeswalker_loyalty,
                     edhrec_rank: row.edhrec_rank,
                     cubecobra_score: row.cubecobra_score,
+                    // The first row's copy: `_sync_print_counts` wrote the same five on every row.
+                    print_count: row.print_count,
+                    set_count: row.set_count,
+                    paper_print_count: row.paper_print_count,
+                    paper_set_count: row.paper_set_count,
+                    illustration_count: row.illustration_count,
                     name_rank: 0, // assigned after grouping by assign_name_ranks
 
                     card_subtypes: std::mem::take(&mut row.card_subtypes),
@@ -13866,6 +14017,8 @@ impl QueryEngine {
                 price_eur: row.price_eur,
                 price_tix: row.price_tix,
                 prefer_score: row.prefer_score,
+                artist_count: row.artist_count,
+                cheapest_codes: row.cheapest_codes,
                 card_legalities: row.card_legalities,
                 card_art_tags: row.card_art_tags,
                 card_is_tags: row.card_is_tags,

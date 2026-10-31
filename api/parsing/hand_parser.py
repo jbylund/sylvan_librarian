@@ -11,9 +11,9 @@ import datetime
 from dataclasses import dataclass
 from enum import Enum, auto
 
-from api.parsing.card_query_nodes import CardAttributeNode, CardBinaryOperatorNode, ExactNameNode
+from api.parsing.card_query_nodes import CardAttributeNode, CardBinaryOperatorNode, CheapestNode, ExactNameNode
 from api.parsing.colors import COLOR_ALIAS_TO_CODES
-from api.parsing.db_info import ALIAS_TO_FIELD_INFOS, ParserClass
+from api.parsing.db_info import ALIAS_TO_FIELD_INFOS, CHEAPEST_CURRENCY_SYMBOLS, ParserClass
 from api.parsing.mana_symbols import first_invalid_mana_symbol
 from api.parsing.nodes import (
     AndNode,
@@ -111,6 +111,20 @@ _WORD_START = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_")
 _WORD_CONT = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789.")
 _DIGIT = frozenset("0123456789")
 _SPACE = frozenset(" \t\r\n")
+
+
+def _in_currency_position(tokens: list[Token]) -> bool:
+    """Whether the next token is the value of a CURRENCY keyword (`cheapest:` / `cheapest=`).
+
+    `$` and `€` are two of the words Scryfall reads as a currency, and they are values nowhere
+    else, so the lexer admits them here only: everywhere else they stay the lex error they were.
+    """
+    return (
+        len(tokens) >= 2  # noqa: PLR2004
+        and tokens[-1].type == TT.OP
+        and tokens[-2].type == TT.WORD
+        and _ALIAS_TO_PC.get(str(tokens[-2].value).lower()) == ParserClass.CURRENCY
+    )
 
 
 def _is_word_start(c: str) -> bool:
@@ -319,6 +333,12 @@ def tokenize(src: str) -> list[Token]:  # noqa: C901, PLR0912, PLR0915
             pos = j
             continue
 
+        # A currency symbol, as the value of `cheapest:` and nowhere else.
+        if c in CHEAPEST_CURRENCY_SYMBOLS and _in_currency_position(tokens):
+            tokens.append(Token(TT.WORD, c, start, sb))
+            pos += 1
+            continue
+
         msg = f"Unexpected character {c!r} at position {pos}"
         raise LexError(msg)
 
@@ -418,10 +438,17 @@ class Parser:
         """Parse an optionally-negated primary expression."""
         if self.peek().type == TT.MINUS:
             self.consume()
+            negates_group = self.peek().type == TT.LPAREN
             operand = self.parse_primary()
             if isinstance(operand, BinaryOperatorNode) and operand.operator in ("+", "-", "*", "/"):
                 msg = "Cannot negate an arithmetic expression"
                 raise ParseError(msg)
+            # `-cheapest:usd` is an expression of its own on Scryfall, not the complement of
+            # `cheapest:usd`; only the negated GROUP `-(cheapest:usd)` is the complement. This is
+            # the one place that can still tell the two apart -- parse_group returns its inner
+            # node bare -- so the term's `-` is folded into the node here (see CheapestNode).
+            if isinstance(operand, CheapestNode) and not negates_group:
+                return operand.as_negated_term()
             return NotNode(operand)
         return self.parse_primary()
 
@@ -525,6 +552,10 @@ class Parser:
                 op = self.consume().value
                 return CardBinaryOperatorNode(lhs, op, self.parse_num_expr_value())
             return lhs
+
+        # ── `cheapest:` — a closed vocabulary of currencies, and a node of its own ──
+        if pc == ParserClass.CURRENCY and next_tok.type == TT.OP:
+            return self.parse_cheapest()
 
         # ── known non-NUMERIC attribute ──
         bang_alias = pc is not None and next_tok.type == TT.BANG and pc in _BANG_ALIAS_CLASSES
@@ -766,6 +797,27 @@ class Parser:
             return StringValueNode(val)
         msg = f"Expected color value, got {tok.value!r} at position {tok.pos}"
         raise ParseError(msg)
+
+    def parse_cheapest(self) -> CheapestNode:
+        """Parse the operator and value of `cheapest:`: `:` or `=`, then a currency word.
+
+        On Scryfall any other operator matches nothing and any other word is "Unknown currency";
+        both are refused here, as an unknown colour is. The word may be quoted.
+        """
+        op_tok = self.consume()  # OP
+        if op_tok.value not in (":", "="):
+            msg = f"cheapest takes ':' or '=', got {op_tok.value!r} at position {op_tok.pos}"
+            raise ParseError(msg)
+        tok = self.peek()
+        if tok.type not in (TT.WORD, TT.QUOTED):
+            msg = f"Expected a currency, got {tok.value!r} at position {tok.pos}"
+            raise ParseError(msg)
+        self.consume()
+        try:
+            return CheapestNode.from_word(str(tok.value))
+        except ValueError as exc:
+            msg = f"{exc} at position {tok.pos}"
+            raise ParseError(msg) from exc
 
     def parse_date_value(self) -> QueryNode:
         """Parse a date value: YYYY or YYYY-MM-DD (hyphens must have no surrounding spaces)."""

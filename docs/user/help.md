@@ -141,6 +141,13 @@ usd>=10
 eur<2
 ```
 
+Use `cheapest:` with `usd`, `eur` or `tix` to find the printings that carry their card's lowest price.
+
+```
+cheapest:usd set:KHM
+t:dragon cheapest:eur
+```
+
 ### Loyalty
 
 Use `loyalty` or `loy` with a comparison operator.

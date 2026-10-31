@@ -87,7 +87,7 @@ For complete details on data sources, attribution, and intellectual property, se
 ### In Development 🚧
 - Double-faced card support improvements
 - Comprehensive tagging features
-- Additional search operators (`cube:`, `papersets:`)
+- Additional search operators (`cube:`)
 - Enhanced documentation
 
 ## Legal & Compliance

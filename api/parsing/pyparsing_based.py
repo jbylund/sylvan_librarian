@@ -22,9 +22,10 @@ from pyparsing import (
     one_of,
 )
 
-from api.parsing.card_query_nodes import CardAttributeNode, ExactNameNode, to_card_query_ast
+from api.parsing.card_query_nodes import CardAttributeNode, CheapestNode, ExactNameNode, to_card_query_ast
 from api.parsing.colors import COLOR_ALIAS_TO_CODES
 from api.parsing.db_info import (
+    CHEAPEST_CURRENCY_SYMBOLS,
     NUMERIC_CARD_ATTRIBUTES,
     PARSER_CLASS_TO_FIELD_INFOS,
     ParserClass,
@@ -58,6 +59,9 @@ DEFAULT_OPERATORS = one_of(": > < >= <= = !=")
 # #903 cause C) — not on TEXT/LEGALITY, so those conditions keep using DEFAULT_OPERATORS. '!='
 # still wins over bare '!' here: DEFAULT_OPERATORS is tried first and already matches it whole.
 EQ_ALIAS_OPERATORS = DEFAULT_OPERATORS | Literal("!").set_parse_action(lambda: "=")
+
+# `$` and `€`: currency words that are not words (see CHEAPEST_CURRENCY_SYMBOLS), as a character class.
+_CURRENCY_SYMBOL_PATTERN = "[" + "".join(re.escape(symbol) for symbol in sorted(CHEAPEST_CURRENCY_SYMBOLS)) + "]"
 
 _NUMERIC_LITERAL_RE = re.compile(r"^\d+(\.\d+)?$")
 _COMPARISON_OPERATORS = frozenset({">", "<", ">=", "<=", "=", "!=", ":"})
@@ -326,6 +330,40 @@ def create_color_parsers() -> dict[str, ParserElement]:
     }
 
 
+def create_cheapest_parsers(quoted_string: ParserElement) -> tuple[ParserElement, ParserElement]:
+    """Create the parsers for `cheapest:<currency>` and for its negated term.
+
+    The first takes `:` or `=` only and a word from a closed vocabulary (bare, quoted, or one of
+    the two symbols), validated in the parse action the way make_mana_value_node validates a cost;
+    it mirrors hand_parser.parse_cheapest.
+
+    The second exists because the negated TERM is its own expression on Scryfall, not the
+    complement (see CheapestNode), and handle_negation cannot tell `-x` from `-(x)` once the
+    group has returned its inner node -- so the term's `-` is matched here, ahead of the generic
+    negation, and folded into the node.
+
+    Args:
+        quoted_string: The shared quoted-string element.
+
+    Returns:
+        (cheapest_condition, negated_cheapest_condition)
+    """
+
+    def make_cheapest_node(tokens: list[object]) -> CheapestNode:
+        """Create a CheapestNode from [attribute, operator, currency word]."""
+        word = tokens[2]
+        return CheapestNode.from_word(word[1] if isinstance(word, tuple) else str(word))
+
+    currency_attr_word = create_attribute_parser(ParserClass.CURRENCY)
+    currency_value = quoted_string | Regex(_CURRENCY_SYMBOL_PATTERN) | Regex(r"\w+")
+    cheapest_condition = currency_attr_word + one_of(": =") + currency_value
+    cheapest_condition.set_parse_action(make_cheapest_node)
+
+    negated_cheapest_condition = Literal("-").suppress() + cheapest_condition.copy()
+    negated_cheapest_condition.add_parse_action(lambda tokens: tokens[0].as_negated_term())
+    return cheapest_condition, negated_cheapest_condition
+
+
 def create_all_condition_parsers(basic_parsers: dict, mana_parsers: dict, color_parsers: dict) -> dict[str, ParserElement]:
     """Create all condition parsers using factory functions.
 
@@ -394,6 +432,8 @@ def create_all_condition_parsers(basic_parsers: dict, mana_parsers: dict, color_
     year_value = Regex(r"\d{4}")
     year_condition = create_condition_parser(year_attr_word, year_value, operators=EQ_ALIAS_OPERATORS)
 
+    cheapest_condition, negated_cheapest_condition = create_cheapest_parsers(quoted_string)
+
     attr_attr_condition = (
         (numeric_attr_word + DEFAULT_OPERATORS + numeric_attr_word)
         | (mana_attr_word + DEFAULT_OPERATORS + mana_attr_word)
@@ -413,6 +453,7 @@ def create_all_condition_parsers(basic_parsers: dict, mana_parsers: dict, color_
         | color_condition
         | date_condition
         | year_condition
+        | cheapest_condition
         | unified_numeric_comparison
         | text_condition
         | attr_attr_condition
@@ -434,6 +475,7 @@ def create_all_condition_parsers(basic_parsers: dict, mana_parsers: dict, color_
         "year_condition": year_condition,
         "attr_attr_condition": attr_attr_condition,
         "condition": condition,
+        "negated_cheapest_condition": negated_cheapest_condition,
         "hyphenated_condition": hyphenated_condition,
         "numeric_attr_word": numeric_attr_word,
     }
@@ -499,6 +541,7 @@ def get_parse_expr() -> ParserElement:  # noqa: PLR0915
     arithmetic_expr = condition_parsers["arithmetic_expr"]
     condition = condition_parsers["condition"]
     hyphenated_condition = condition_parsers["hyphenated_condition"]
+    negated_cheapest_condition = condition_parsers["negated_cheapest_condition"]
     attr_attr_condition = condition_parsers["attr_attr_condition"]
 
     _word_for_exact = word.copy()
@@ -550,7 +593,7 @@ def get_parse_expr() -> ParserElement:  # noqa: PLR0915
     negatable_factor = Optional(operator_not) + negatable_primary
     negatable_factor.set_parse_action(handle_negation)
 
-    factor = condition | hyphenated_condition | arithmetic_expr | negatable_factor | standalone_numeric
+    factor = negated_cheapest_condition | condition | hyphenated_condition | arithmetic_expr | negatable_factor | standalone_numeric
 
     def handle_and(tokens: list[object]) -> object:
         """Group AND operands into an AndNode (AND binds tighter than OR)."""
@@ -639,10 +682,16 @@ def _get_implicit_and_tokenizer() -> ParserElement:
     # as a standalone keyword. Mirrors regex_after_op's same trick for the same reason.
     word_after_op = comparison_tok + string_value_tok
 
+    # `$` and `€` are values too, as the currency of `cheapest:` -- and only in value position, so
+    # they are matched with the operator like the two above. The grammar decides which keyword
+    # may take one; this only keeps the tokenizer from refusing the character outright.
+    currency_symbol_after_op = comparison_tok + Regex(_CURRENCY_SYMBOL_PATTERN).set_parse_action(lambda t: t[0])
+
     one_token = (
         quoted_raw
         | regex_after_op
         | word_after_op
+        | currency_symbol_after_op
         | lparen_tok
         | rparen_tok
         | and_tok
