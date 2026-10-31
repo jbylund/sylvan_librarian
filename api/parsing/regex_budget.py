@@ -74,12 +74,77 @@ def _collect_regex_patterns(node: QueryNode) -> list[str]:
     return []
 
 
+def _translate_are_escapes(pattern: str) -> str:
+    r"""Rewrite the PostgreSQL ARE escapes Python's ``re`` cannot spell.
+
+    ``o:/.../`` is documented against PostgreSQL's ``~*``, whose word-boundary
+    escapes are ``\y``/``\Y``/``\m``/``\M``. Python's ``re`` rejects all four
+    outright, so measuring a pattern's budget with ``re._parser`` requires the
+    same rewrite ``CompiledRegex`` applies before handing the pattern to the
+    engine -- keep this table and the one in ``card_engine/src/regex_compat.rs``
+    in step, or a pattern the engine runs is one this module cannot cost.
+
+    ``\m``/``\M`` have no Python spelling either and become lookaround, which is
+    what the engine does with them. They therefore COST lookaround budget here,
+    and that is the honest accounting: they are exactly what puts the pattern on
+    the backtracking engine that ``MAX_LOOKAROUNDS_PER_PATTERN`` exists to bound.
+
+    ``\Z`` needs no entry -- Python and ARE agree it is end-of-string.
+
+    Only the returned string is measured; the pattern stored on the node is left
+    alone, because the SQL path hands it to PostgreSQL, which speaks ARE natively.
+    """
+    out: list[str] = []
+    # Position within the current bracket expression, if any: `None` outside one,
+    # else the count of characters consumed since `[`. A `]` in the first position
+    # is a literal member (POSIX), not the close, which is why this is a count and
+    # not a flag.
+    class_pos: int | None = None
+    i = 0
+    while i < len(pattern):
+        char = pattern[i]
+        if char == "\\":
+            if i + 1 >= len(pattern):
+                out.append("\\")
+                break
+            nxt = pattern[i + 1]
+            if class_pos is None:
+                out.append(_ARE_ESCAPES.get(nxt, "\\" + nxt))
+            else:
+                out.append("\\" + nxt)
+                class_pos += 2
+            i += 2
+            continue
+        if class_pos is None:
+            if char == "[":
+                class_pos = 0
+        elif class_pos == 0 and char == "^":
+            pass
+        elif class_pos == 0 and char == "]":
+            class_pos = 1
+        elif char == "]":
+            class_pos = None
+        else:
+            class_pos += 1
+        out.append(char)
+        i += 1
+    return "".join(out)
+
+
+_ARE_ESCAPES = {
+    "y": r"\b",
+    "Y": r"\B",
+    "m": r"(?<!\w)(?=\w)",
+    "M": r"(?<=\w)(?!\w)",
+}
+
+
 def _enforce_pattern_limits(pattern: str) -> None:
     if len(pattern.encode("utf-8")) > MAX_PATTERN_UTF8_BYTES:
         raise QueryBudgetExceeded(kind="regex_pattern")
 
     try:
-        parsed = sre_parser.parse(pattern, re.IGNORECASE)
+        parsed = sre_parser.parse(_translate_are_escapes(pattern), re.IGNORECASE)
     except re.error as exc:
         raise InvalidRegexPatternError(reason=_python_regex_error_reason(exc)) from None
 

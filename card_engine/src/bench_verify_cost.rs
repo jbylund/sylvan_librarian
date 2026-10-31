@@ -37,7 +37,7 @@ use rkyv::Archived;
 
 use super::{
     archive_header, archive_payload, expand_text_ids, str_at, trigram_candidates, CardData, CmpOp, ColorField, CollField, FilterExpr,
-    Mmap, NumExpr, NumField, TextField, TextSearchField, TYPE_CREATURE, ARCHIVE_HEADER_LEN,
+    Mmap, NumExpr, NumField, TextField, TextSearchField, TYPE_CREATURE, ARCHIVE_HEADER_LEN, REGEX_MACHINERY_NS100,
 };
 use crate::filter::compile_search_regex_for_test;
 
@@ -218,7 +218,7 @@ fn bench_regex_backtrack_tier() {
         assert_eq!(pattern_requires_backtrack(pat), expect_backtrack, "{pat}");
         let re = compile_search_regex_for_test(pat);
         let ns = time_kernel(&format!("  {pat:<28}"), n, || {
-            texts.iter().filter(|s| re.is_match(s).unwrap_or(false)).count() as u32
+            texts.iter().filter(|s| re.is_match(s)).count() as u32
         });
         if expect_backtrack {
             backtrack_ns = backtrack_ns.max(ns);
@@ -357,4 +357,102 @@ fn bench_price_and_range_verify_cost() {
         &FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::CollectorNumberInt), op: CmpOp::Lt, rhs: NumExpr::Const(100.0) },
     );
     run("YearCmp (year>2020)", &FilterExpr::YearCmp { op: CmpOp::Gt, year: 2020 });
+}
+
+/// Per-candidate cost of the backtracking engine against the linear one, which
+/// is what `REGEX_BACKTRACK_NS100` has to price.
+///
+/// A lookaround pattern cannot run on `regex` at all, so the two engines cannot
+/// be timed on the *same* query. Instead this times both on the patterns they
+/// can both run — an unanchored literal and one with live metacharacters —
+/// which isolates engine overhead from pattern difficulty, and then times a
+/// real lookaround pattern on the backtracking engine alone to confirm it sits
+/// in the same range rather than off in another regime.
+///
+/// Self-contained: unlike the rest of this module it synthesizes its corpus, so
+/// it runs without `real.store`. Oracle text is the field these patterns are
+/// aimed at, so strings are built at its shape (~150 chars, lowercase words).
+/// The absolute ns are therefore not corpus-faithful; the *ratio* is what the
+/// tier is derived from, and that is a property of the two engines.
+///
+///     cargo test --release bench_backtrack_engine -- --ignored --nocapture
+#[test]
+#[ignore = "micro-benchmark; self-contained (no real.store needed)"]
+fn bench_backtrack_engine() {
+    const WORDS: [&str; 12] = [
+        "draw", "a", "card", "sacrifice", "creature", "target", "player", "discards", "flying", "trample", "counter", "spell",
+    ];
+    let n: usize = 20_000;
+    let corpus: Vec<String> = (0..n)
+        .map(|i| {
+            let mut s = String::with_capacity(160);
+            let mut w = i as u32;
+            while s.len() < 150 {
+                w = w.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                s.push_str(WORDS[(w >> 16) as usize % WORDS.len()]);
+                s.push(' ');
+            }
+            s
+        })
+        .collect();
+    let texts: Vec<&str> = corpus.iter().map(String::as_str).collect();
+
+    println!("\n{n} synthetic oracle texts (~150 chars) — linear vs backtracking engine");
+
+    let mut ratios = Vec::new();
+    let mut shared_linear_ns = Vec::new();
+    for (label, pattern) in [("bare literal", "draw a card"), ("metacharacters", "draw (a|two) cards?")] {
+        let fast = Regex::new(&format!("(?i){pattern}")).unwrap();
+        let fast_ns = time_kernel(
+            &format!("regex        {label}"),
+            n,
+            || texts.iter().filter(|s| fast.is_match(s)).count() as u32,
+        );
+        let slow = fancy_regex::Regex::new(&format!("(?i){pattern}")).unwrap();
+        let slow_ns = time_kernel(
+            &format!("fancy_regex  {label}"),
+            n,
+            || texts.iter().filter(|s| slow.is_match(s).unwrap_or(false)).count() as u32,
+        );
+        println!("  → fancy/regex = {:.2}x", slow_ns / fast_ns);
+        ratios.push(slow_ns / fast_ns);
+        shared_linear_ns.push(fast_ns);
+    }
+
+    // The patterns that actually reach the backtracking engine in production:
+    // `regex` rejects all three, so there is no linear number to divide by.
+    let mut lookaround_ns = Vec::new();
+    for (label, pattern) in [
+        ("negative lookahead", r"draw (?!two)"),
+        ("positive lookahead", r"(?=.*sacrifice)draw"),
+        ("lookbehind", r"(?<=draw )a card"),
+    ] {
+        let re = fancy_regex::Regex::new(&format!("(?i){pattern}")).unwrap();
+        lookaround_ns.push(time_kernel(
+            &format!("fancy_regex  {label}"),
+            n,
+            || texts.iter().filter(|s| re.is_match(s).unwrap_or(false)).count() as u32,
+        ));
+    }
+
+    // Two separate findings, and only the second one prices the tier.
+    //
+    // On a pattern both engines accept they are the same speed, because
+    // fancy_regex delegates to the `regex` crate whenever a pattern needs
+    // nothing more. So routing a pattern through CompiledRegex::Backtrack
+    // costs nothing *as an engine choice* — there is no dispatch tax to price.
+    //
+    // What costs is lookaround itself: no linear-time guarantee, and each
+    // assertion re-scans. That is what REGEX_BACKTRACK_NS100 has to express,
+    // and it is why the tier is derived from these patterns rather than from
+    // the engine-vs-engine ratio above.
+    let engine_ratio: f64 = ratios.iter().sum::<f64>() / ratios.len() as f64;
+    let shared_ns: f64 = shared_linear_ns.iter().sum::<f64>() / shared_linear_ns.len() as f64;
+    let lookaround_mean: f64 = lookaround_ns.iter().sum::<f64>() / lookaround_ns.len() as f64;
+    println!("\n  same-pattern engine ratio (fancy/regex) = {engine_ratio:.2}x  — no dispatch tax");
+    println!("  lookaround / linear-regex               = {:.0}x  ({lookaround_mean:.0} vs {shared_ns:.0} ns/card)", lookaround_mean / shared_ns);
+    println!(
+        "  REGEX_MACHINERY_NS100 = {REGEX_MACHINERY_NS100} → suggests REGEX_BACKTRACK_NS100 ≈ {:.0}",
+        f64::from(REGEX_MACHINERY_NS100) * (lookaround_mean / shared_ns)
+    );
 }

@@ -132,6 +132,7 @@ def _make_cards(rng: random.Random) -> list[dict[str, Any]]:
         if rng.random() < 0.1:
             types.append("Artifact")
         is_creature = "Creature" in types
+        subtypes = sorted(rng.sample(SUBTYPES, rng.randint(1, 2))) if is_creature else []
         name = f"{rng.choice(WORDS)} {rng.choice(WORDS)} {i}"
         n_printings = rng.choice([1, 2, 3, 3, 4, 5])
         oracle = " ".join(rng.sample(ORACLE_WORDS, rng.randint(1, 3))) if rng.random() < 0.9 else None
@@ -170,7 +171,13 @@ def _make_cards(rng: random.Random) -> list[dict[str, Any]]:
             "card_colors": dict.fromkeys(colors, True),
             "card_color_identity": dict.fromkeys(identity, True),
             "card_types": types,
-            "card_subtypes": sorted(rng.sample(SUBTYPES, rng.randint(1, 2))) if is_creature else [],
+            "card_subtypes": subtypes,
+            # The PRINTED type line, consistent with the two arrays above, because `t:` is a
+            # substring of it rather than membership in them: the loader interns this string and
+            # the engine answers every type predicate from it, so a row without one answers `t:`
+            # with nothing. `card_processing` builds the real corpus's three fields from the same
+            # source for the same reason.
+            "type_line": " ".join(types) + (" \u2014 " + " ".join(subtypes) if subtypes else ""),
             "card_keywords": dict.fromkeys(rng.sample(KEYWORDS, rng.randint(0, 2)), True) if is_creature else {},
             "cmc": rng.choice([0, 1, 1, 2, 2, 3, 3, 4, 5, 6, 8]) if "Land" not in types else None,
             "creature_power": rng.randint(0, 8) if is_creature else None,
@@ -212,8 +219,9 @@ def _ref_leaf(frag: str, card: dict[str, Any]) -> bool | None:  # noqa: PLR0911,
         have = {c.lower() for c in card["card_color_identity"]}
         return have <= set(frag[3:]) if frag.startswith("id:") else have == set(frag[3:])
     if field == "t":
-        want = rest.capitalize()
-        return want in card["card_types"] or want in card["card_subtypes"]
+        # A SUBSTRING of the printed type line, not membership in the type/subtype arrays --
+        # `t:creat` matches every Creature on api.scryfall.com. Case-insensitive, unanchored.
+        return rest.lower() in card["type_line"].lower()
     if field == "kw":
         return rest.strip('"').lower() in card["card_keywords"]
     if frag.startswith("cmc"):

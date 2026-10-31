@@ -113,6 +113,10 @@ pub(crate) fn has_printing_varying_leaf(f: &FilterExpr) -> bool {
         | FilterExpr::ExactName(_)
         | FilterExpr::NameMatch { .. }
         | FilterExpr::OracleMatch { .. }
+        // Card-invariant for the same reason TextField::TypeLine is: the type
+        // line is oracle data that every printing of the card shares.
+        | FilterExpr::TypeLineContains { .. }
+        | FilterExpr::TypeLineMatch { .. }
         | FilterExpr::ColorCmp { .. }
         | FilterExpr::TypeCmp { .. }
         | FilterExpr::ManaCostCmp { .. }
@@ -480,6 +484,18 @@ fn estimate_leaf(f: &FilterExpr, indexes: &Archived<CardIndexes>, n_cards: u32, 
         // gids.len() an undercount; not exercised here).
         FilterExpr::NameMatch { ids } => exact(ids.len() as u32),
         FilterExpr::OracleMatch { gids } => exact(gids.len() as u32),
+        // Unbound only: the needle has not been resolved to lines yet, so nothing about its
+        // selectivity is known without doing the scan `bind_type_lines` would have done.
+        FilterExpr::TypeLineContains { .. } => unknown(n),
+        // `bind_type_lines` keeps the dense line ids alongside the global ones,
+        // and the CSR row of each is exactly the cards carrying that line — so
+        // summing the rows is the exact card count, not a proxy.
+        FilterExpr::TypeLineMatch { line_ids, .. } => exact(
+            line_ids
+                .iter()
+                .map(|&t| u32::from(indexes.type_lines.offsets[t as usize + 1]) - u32::from(indexes.type_lines.offsets[t as usize]))
+                .sum(),
+        ),
 
         FilterExpr::DateCmp { op, value } => match date_range_bounds(*op, *value) {
             None => unknown(n),
