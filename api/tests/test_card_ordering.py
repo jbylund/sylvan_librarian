@@ -57,3 +57,51 @@ def test_orderby_column_in_compiled_sql(stub_api_resource: APIResource, ordering
     """Every CardOrdering value should produce its mapped column in the compiled SQL."""
     needle = f", {expected_column} AS sort_value FROM magic.cards"
     assert needle in _compiled_sql(stub_api_resource, ordering)
+
+
+# The columns the SQL path sorts each ordering by. Written out rather than imported so that the
+# mapping is asserted against something, not against itself.
+EXPECTED_SORT_COLUMNS = {
+    CardOrdering.ARTIST: "lower(card_artist)",
+    CardOrdering.CMC: "cmc",
+    CardOrdering.COLOR: "color_order",
+    CardOrdering.CUBECOBRA: "cubecobra_score",
+    CardOrdering.EDHREC: "edhrec_rank",
+    CardOrdering.EUR: "price_eur",
+    CardOrdering.NAME: "lower(card_name)",
+    CardOrdering.POWER: "creature_power",
+    CardOrdering.RARITY: "card_rarity_int",
+    CardOrdering.RELEASED: "released_at",
+    CardOrdering.SET: "lower(card_set_code)",
+    CardOrdering.TIX: "price_tix",
+    CardOrdering.TOUGHNESS: "creature_toughness",
+    CardOrdering.USD: "price_usd",
+}
+
+
+def test_every_ordering_has_an_expected_column() -> None:
+    assert set(EXPECTED_SORT_COLUMNS) == set(CardOrdering)
+
+
+@pytest.mark.parametrize("ordering", sorted(EXPECTED_SORT_COLUMNS), ids=str)
+def test_ordering_sorts_by_its_own_column(stub_api_resource: APIResource, ordering: CardOrdering) -> None:
+    """`sql_orderby` falls back to edhrec_rank on a missing entry, so an unmapped ordering is silent.
+
+    Iterating the enum rather than a list of the orderings that happen to be wired means a member
+    added without its `sql_orderby` entry fails here.
+    """
+    needle = f", {EXPECTED_SORT_COLUMNS[ordering]} AS sort_value FROM magic.cards"
+    assert needle in _compiled_sql(stub_api_resource, ordering)
+
+
+def test_color_breaks_a_block_by_name_ascending_whatever_the_direction(stub_api_resource: APIResource) -> None:
+    """Scryfall's `dir=desc` turns the colour blocks and not the names inside them.
+
+    So the name is its own ORDER BY term, always ascending, between the stored block and the edhrec
+    tiebreak every ordering has -- and only `order=color` carries it.
+    """
+    compiled = _compiled_sql(stub_api_resource, CardOrdering.COLOR)
+    assert ", lower(card_name) AS sort_name, color_order AS sort_value FROM magic.cards" in compiled
+    assert "ORDER BY sort_value ASC NULLS LAST, sort_name ASC, edhrec_rank ASC NULLS LAST" in compiled
+    for ordering in sorted(set(CardOrdering) - {CardOrdering.COLOR}):
+        assert "sort_name" not in _compiled_sql(stub_api_resource, ordering), ordering

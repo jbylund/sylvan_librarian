@@ -112,6 +112,64 @@ def extract_frame_data_from_raw_card(raw_card: dict) -> dict[str, bool]:
     return frame_data
 
 
+# Scryfall's `order=color`, as one number per card -- the `color_order` column, which both search
+# lanes sort by. Decided here, at import, because the rule reads the FRONT FACE of a multi-faced card
+# and a stored row holds one face's colours and types, which is not always the front's.
+#
+# Three blocks, each in the order the game prints its colour combinations (_COLOR_COMBINATIONS):
+#
+#    0..30   cards with a colour that are not lands, by their COLOURS
+#   32..63   colourless cards that are not lands, by their COLOUR IDENTITY (Eldrazi Skyspawner,
+#            devoid with a blue cost, ahead of Sol Ring)
+#   64..95   lands, by their COLOUR IDENTITY whatever their colours (Dryad Arbor, a green card,
+#            beside Forest; Hengegate Pathway after both; Wastes last)
+#
+# A card Scryfall gives no top-level `colors` -- a transforming or modal double-faced card, whose
+# colours are on its faces -- is read by its front face in both respects: Brigid, Clachan's Heart
+# (white front, green back) is a white card, Emeria's Call (a white sorcery whose back is a land)
+# is a white card, and Westvale Abbey (a land whose back is a black creature) is a land.
+#
+# Measured on api.scryfall.com, 2026-10-09: `e:znr` and `is:transform (t:land or t:artifact)` in
+# both directions, `e:isd`, `t:land c>=1`, `c>=4 -t:land year>=2015` and
+# `e:mom (t:artifact or t:land or is:dfc)` -- 1,232 rows, and not one of them is out of this order.
+_COLOR_COMBINATIONS = (
+    *("W", "U", "B", "R", "G"),
+    *("WU", "UB", "BR", "RG", "GW", "WB", "UR", "BG", "RW", "GU"),
+    *("WUB", "UBR", "BRG", "RGW", "GWU", "WBG", "URW", "BGU", "RWB", "GUR"),
+    *("WUBR", "UBRG", "BRGW", "RGWU", "GWUB"),
+    "WUBRG",
+    "",
+)
+_COLOR_COMBINATION_RANK = {frozenset(combination): rank for rank, combination in enumerate(_COLOR_COMBINATIONS)}
+_COLOR_ORDER_COLORLESS = 32
+_COLOR_ORDER_LAND = 64
+
+
+def color_order_rank(card: dict[str, Any]) -> int:
+    """Where a raw Scryfall card sorts under `order=color` -- see _COLOR_COMBINATIONS above.
+
+    Args:
+        card: The card object as Scryfall serves it, `card_faces` included.
+
+    Returns:
+        0..30 for a coloured non-land, 32..63 for a colourless non-land, 64..95 for a land.
+    """
+    faces = card.get("card_faces") or []
+    front = faces[0] if faces else card
+    colors = card["colors"] if "colors" in card else front.get("colors") or []
+    # The front face's own type line; a split or adventure card has it only joined at the top
+    # level ("Instant // Instant"), where the front is the part before the slashes.
+    front_type_line = (front.get("type_line") or card.get("type_line") or "").partition("//")[0]
+    front_types, _ = parse_type_line(front_type_line)
+    identity_rank = _COLOR_COMBINATION_RANK.get(frozenset(card.get("color_identity") or []), _COLOR_COMBINATION_RANK[frozenset()])
+    if "Land" in front_types:
+        return _COLOR_ORDER_LAND + identity_rank
+    color_rank = _COLOR_COMBINATION_RANK.get(frozenset(colors), _COLOR_COMBINATION_RANK[frozenset()])
+    if color_rank == _COLOR_COMBINATION_RANK[frozenset()]:
+        return _COLOR_ORDER_COLORLESS + identity_rank
+    return color_rank
+
+
 def preprocess_card(card: dict[str, Any]) -> list[dict[str, Any]]:  # noqa: PLR0915,C901,PLR0912
     """Preprocess a card to remove invalid cards and add necessary fields.
 
@@ -150,6 +208,8 @@ def preprocess_card(card: dict[str, Any]) -> list[dict[str, Any]]:  # noqa: PLR0
     if "card_name" not in card:
         # Non-recursive case: first time seeing this card
         card["card_name"] = card.get("name")
+        # Read off the whole card, before the faces are split below: every face's row inherits it.
+        card["color_order"] = color_order_rank(card)
     else:
         # Recursive case: processing a face
         card["face_name"] = card.get("name")
