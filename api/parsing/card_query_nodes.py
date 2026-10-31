@@ -13,6 +13,7 @@ from api.parsing.db_info import (
     CARD_SUPERTYPES,
     CARD_TYPES,
     FORMAT_CODE_TO_NAME,
+    GAME_IS_TAG_PREFIX,
     FieldType,
     ParserClass,
 )
@@ -683,6 +684,11 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
             return f"the artist is {rhs_str}" if self.operator == "=" else f"the artist contains {rhs_str}"
         if db_column_name == "card_set_code" and self.operator in (":", "="):
             return f"the set contains {rhs_str}"
+        # `game:paper` reaches here with its rhs already rewritten to the stored `game_paper`
+        # key (rewrite.py's prefix_game_values); explain the value the user typed, not the
+        # storage key.
+        if db_column_name == "card_is_tags" and attr_node.original_attribute == "game" and self.operator == ":":
+            return f"the game is {rhs_str.removeprefix(GAME_IS_TAG_PREFIX)}"
 
         # Default format using attribute name
         lhs_str = attr_node.to_human_explanation()

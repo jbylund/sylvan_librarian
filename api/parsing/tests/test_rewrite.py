@@ -9,7 +9,7 @@ docs/issues/00713-is-tag-recovery.md.
 import pytest
 
 from api.parsing import generate_sql_query, parse_scryfall_query
-from api.parsing.nodes import RegexValueNode
+from api.parsing.nodes import RegexValueNode, StringValueNode
 from api.parsing.rewrite import _regex_plain_literal
 
 # (synonym query, canonical expansion) — the two must produce identical ASTs.
@@ -144,6 +144,71 @@ def test_not_expands_to_negated_is(parse_query, not_query: str, expansion: str) 
 def test_not_generates_same_sql_as_negated_is(not_query: str, expansion: str) -> None:
     """The rewrite is real end-to-end: not: and -is: emit identical SQL + params."""
     assert generate_sql_query(parse_scryfall_query(not_query)) == generate_sql_query(parse_scryfall_query(expansion))
+
+
+# ── game: is a prefixed is: tag ──────────────────────────────────────────────
+# `game:paper` looks up the `game_paper` key the import writes (BOOLEAN_IS_TAGS), never a bare
+# `paper`: game: and is: share card_is_tags, so without the prefix `game:promo` would answer
+# is:promo's promos where Scryfall matches nothing for an unknown game.
+
+
+@pytest.mark.parametrize(
+    argnames=["query", "expected_value"],
+    argvalues=[
+        ("game:paper", "game_paper"),
+        ("game:PAPER", "game_paper"),  # lowered before prefixing
+        ('game:"mtgo"', "game_mtgo"),
+        ("game:promo", "game_promo"),  # unknown game -> a key no row carries
+    ],
+    ids=["paper", "upper", "quoted", "unknown"],
+)
+def test_game_value_is_prefixed(parse_query, query: str, expected_value: str) -> None:
+    """The rhs takes the game_ prefix; the lhs stays the `game` attribute on card_is_tags."""
+    root = parse_query(query).root
+    assert root.lhs.original_attribute == "game"
+    assert root.lhs.attribute_name == "card_is_tags"
+    assert isinstance(root.rhs, StringValueNode)
+    assert root.rhs.value == expected_value
+
+
+def test_game_prefix_applies_under_negation_and_in_compounds(parse_query) -> None:
+    """`-game:mtgo` and `t:goblin game:paper` reach their game leaf through NotNode / AndNode."""
+    negated = parse_query("-game:mtgo").root
+    assert negated.operand.rhs.value == "game_mtgo"
+    compound = parse_query("t:goblin game:paper").root
+    game_leaves = [op for op in compound.operands if getattr(op.lhs, "original_attribute", None) == "game"]
+    assert [leaf.rhs.value for leaf in game_leaves] == ["game_paper"]
+
+
+def test_game_regex_becomes_plain_string(parse_query) -> None:
+    """A regex rhs is prefixed as a PLAIN string: `game:/^pap/` names a tag nothing carries.
+
+    Left as a pattern it could match `game_paper` and answer a query Scryfall rejects.
+    """
+    root = parse_query("game:/^pap/").root
+    assert isinstance(root.rhs, StringValueNode)
+    assert root.rhs.value == "game_^pap"
+
+
+def test_is_leaf_with_same_value_is_not_prefixed(parse_query) -> None:
+    """The pass keys on original_attribute: `is:paper` keeps its bare value."""
+    root = parse_query("is:paper").root
+    assert root.lhs.original_attribute == "is"
+    assert root.rhs.value == "paper"
+    assert parse_query("game:paper") != parse_query("is:paper")
+
+
+def test_game_generates_same_sql_as_prefixed_is_tag() -> None:
+    """The prefix is the whole mechanism: `game:paper` is `is:game_paper` at the SQL layer."""
+    assert generate_sql_query(parse_scryfall_query("game:paper")) == generate_sql_query(parse_scryfall_query("is:game_paper"))
+
+
+def test_game_explanation_names_the_game_not_the_storage_key(parse_query) -> None:
+    """The explanation says what the user typed (`game` / `paper`), not `game_paper`."""
+    explanation = parse_query("game:paper").to_human_explanation()
+    assert "game" in explanation
+    assert "paper" in explanation
+    assert "game_" not in explanation
 
 
 # ── #734: plain-literal regex -> substring lowering ──────────────────────────

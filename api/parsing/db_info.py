@@ -28,6 +28,17 @@ class ParserClass(StrEnum):
     YEAR = "year"  # Year fields with 4-digit year values
 
 
+# `game:` values are stored in card_is_tags under this prefix (`game_paper`, `game_mtgo`, ...),
+# never bare. `game:` and `is:` read the same column, so a bare `paper` key would make an
+# unknown game value answer some unrelated is: tag -- `game:promo` would return is:promo's
+# promos (6,126 of them on api.scryfall.com, 2026-09-03) where Scryfall warns "Unknown game
+# `promo`" and matches nothing. The import side (api/admin_resource.py's BOOLEAN_IS_TAGS) and
+# the query side (api/parsing/rewrite.py's prefix_game_values) both build keys from this one
+# constant; it lives here rather than in admin_resource because api/parsing must not import
+# api/admin_resource.
+GAME_IS_TAG_PREFIX = "game_"
+
+
 class FieldInfo:
     """Information about a database field and its search aliases."""
 
@@ -221,6 +232,18 @@ DB_COLUMNS = [
         db_column_name="card_is_tags",
         field_type=FieldType.JSONB_OBJECT,
         search_aliases=["not"],
+        parser_class=ParserClass.TEXT,
+    ),
+    # Same pattern as `not` above: a distinct FieldInfo on card_is_tags, so `game:paper` reads
+    # the column the import writes `game_paper` into, and rewrite.py's prefix_game_values
+    # recognises the leaf via original_attribute to supply the GAME_IS_TAG_PREFIX. Scryfall's
+    # vocabulary is five words -- paper/mtgo/arena (32,729 / 30,707 / 16,070 cards on
+    # api.scryfall.com, 2026-09-03) plus astral and sega, two old digital-only releases that
+    # are valid values there (12 cards under include_extras, no "Unknown game" warning).
+    FieldInfo(
+        db_column_name="card_is_tags",
+        field_type=FieldType.JSONB_OBJECT,
+        search_aliases=["game"],
         parser_class=ParserClass.TEXT,
     ),
     FieldInfo(

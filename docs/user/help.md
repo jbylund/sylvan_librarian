@@ -15,6 +15,7 @@ Enter any combination of filters below. Filters are AND-combined by default; see
    - [Keywords](#keywords)
    - [Rarity](#rarity)
    - [Set](#set)
+   - [Game](#game)
    - [Price](#price)
    - [Loyalty](#loyalty)
    - [Mana Production](#mana-production)
@@ -129,6 +130,15 @@ Use `set:` with the set code.
 ```
 set:MH2
 set:DMU
+```
+
+### Game
+
+Use `game:` to keep printings available in a given game: `paper`, `mtgo`, or `arena`.
+
+```
+game:paper
+t:goblin game:arena
 ```
 
 ### Price
