@@ -70,6 +70,25 @@ EQUIVALENCES = [
     ("is:surveilland", "otag:cycle-dual-surveil-land"),
     ("is:tricycleland", "otag:tricycle-land"),
     ("is:pathway", "otag:cycle-pathway"),
+    # Spelling aliases of stored tags: the expansion is the OTHER is: value, which stays a leaf.
+    ("is:arenaleague", "is:arena_league"),
+    ("is:intropack", "is:intro_pack"),
+    ("is:judgegift", "is:judge_gift"),
+    ("is:mediainsert", "is:media_insert"),
+    ("is:planeswalkerdeck", "is:planeswalker_deck"),
+    ("is:setpromo", "is:set_promo"),
+    ("is:rainbow", "is:rainbowfoil"),
+    # Columns this parser already has, under their `is:` spelling.
+    ("is:borderless", "border:borderless"),
+    ("is:tombstone", "frame:tombstone"),
+    # Other words for a stored tag (2026-10-04).
+    ("is:cardmarketid", "is:cardmarket"),
+    ("is:illustrationid", "is:illustration"),
+    ("is:multiverseid", "is:multiverse"),
+    ("is:tcgplayerid", "is:tcgplayer"),
+    ("is:ci", "is:indicator"),
+    ("is:colorindicator", "is:indicator"),
+    ("is:displaycommander", "is:thick"),
     # composes under negation and inside compounds
     ("-frame:old", "-(frame:1993 or frame:1997)"),
     ("t:goblin frame:modern", "t:goblin frame:2003"),

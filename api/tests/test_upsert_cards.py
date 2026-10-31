@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import multiprocessing
+import re
 import uuid
 from unittest.mock import patch
 
 import psycopg
 import pytest
 
-from api.admin_resource import AdminResource, _build_boolean_is_tags_sql
+from api.admin_resource import BOOLEAN_IS_TAGS, AdminResource, _build_boolean_is_tags_sql
 from api.api_resource import APIResource
 from api.card_processing import preprocess_card
 from api.db.bulk_upsert import bulk_upsert
@@ -75,6 +77,45 @@ class TestBuildBooleanIsTagsSql:
         assert "%(num_chunks)s" in sql
         assert "%(chunk_index)s" in sql
         assert "jsonb_object_agg" not in sql
+
+    def test_sql_never_passes_postgres_more_than_100_arguments_per_call(self) -> None:
+        """Postgres refuses a function call with more than 100 arguments, and a pair is two.
+
+        One `jsonb_build_object` over the whole table held until the table passed 50 rows
+        (2026-09-03, the promo_types enumeration), when every import failed with "cannot pass
+        more than 100 arguments to a function". The builder chunks the pairs; this pins the chunk
+        size to the cap, on a synthetic table and on the real one.
+        """
+        tags = {f"tag{i}": "cards.raw_card_blob->'reserved' = 'true'::jsonb" for i in range(101)}
+        calls = _build_boolean_is_tags_sql(tags).split("jsonb_build_object(")[1:]
+        assert len(calls) == 3
+        assert all(call.count("CASE WHEN") <= 50 for call in calls)
+        real_calls = _build_boolean_is_tags_sql(BOOLEAN_IS_TAGS).split("jsonb_build_object(")[1:]
+        assert len(real_calls) > 1
+        assert all(call.count("CASE WHEN") <= 50 for call in real_calls)
+
+    def test_sql_reads_the_blob_once_per_row(self) -> None:
+        """The tag expressions read a subquery that has already produced the blob, not the table.
+
+        `raw_card_blob` is TOASTed, and each `cards.raw_card_blob->...` against the table detoasts
+        it again: with 122 tags a first sync of the 2026-08-16 bulk took 35 s per chunk, past the
+        import's 30 s statement_timeout, and 10 s once the blob is produced once. `OFFSET 0` is
+        what stops the planner flattening the subquery back onto the table.
+        """
+        sql = _build_boolean_is_tags_sql({"reserved": "cards.raw_card_blob->'reserved' = 'true'::jsonb"})
+        subquery = sql[sql.index("FROM (") : sql.index(") cards")]
+        assert "cards.raw_card_blob || '{}'::jsonb AS raw_card_blob" in subquery
+        assert "FROM magic.cards cards" in subquery
+        assert subquery.rstrip().endswith("OFFSET 0")
+        assert sql.index("CASE WHEN") < sql.index("FROM (")
+
+    def test_every_tag_expression_reads_only_columns_the_subquery_provides(self) -> None:
+        """An expression naming a column the subquery does not select would fail every import."""
+        sql = _build_boolean_is_tags_sql(BOOLEAN_IS_TAGS)
+        subquery = sql[sql.index("FROM (") : sql.index(") cards")]
+        provided = set(re.findall(r"cards\.(\w+)", subquery)) | {"raw_card_blob"}
+        read = {column for expr in BOOLEAN_IS_TAGS.values() for column in re.findall(r"cards\.(\w+)", expr)}
+        assert read <= provided
 
 
 def _is_tags_for(api_resource: APIResource, scryfall_id: str) -> dict:
@@ -208,6 +249,153 @@ class TestBooleanIsTags:
         tags = _is_tags_for(api_resource, card["id"])
         assert tags.get("instore") is True
         assert "fnm" not in tags
+
+    def test_undocumented_promo_type_lands_as_is_tag(self, api_resource: APIResource) -> None:
+        """A `promo_types` member Scryfall's syntax page never lists still becomes a tag.
+
+        `is:serialized` is 292 cards on api.scryfall.com (2026-09-03) and was a silent zero here
+        until the vocabulary was enumerated from the printings instead of read off the page.
+        """
+        card = make_raw_card(name="Serialized Import Test")
+        card["promo_types"] = ["serialized"]
+        api_resource.admin._upsert_cards([card])
+        assert _is_tags_for(api_resource, card["id"]).get("serialized") is True
+
+    @pytest.mark.parametrize("member", ["premiereshop", "schinesealtart", "setextension", "singularityfoil", "themepack"])
+    def test_promo_type_the_first_enumeration_never_paged_lands_as_is_tag(self, api_resource: APIResource, member: str) -> None:
+        """Five `promo_types` members found by probing `is:` values rather than paging printings.
+
+        On api.scryfall.com (2026-10-04) `is:premiereshop` is 6 cards, `is:schinesealtart` 37,
+        `is:setextension` 46, `is:singularityfoil` 1 and `is:themepack` 30; each was a silent zero
+        here. The tag is the member's own name, and no other of the five rides along.
+        """
+        card = make_raw_card(name=f"Swept Promo Type {member}")
+        card["promo_types"] = [member]
+        api_resource.admin._upsert_cards([card])
+        tags = _is_tags_for(api_resource, card["id"])
+        assert tags.get(member) is True
+        others = {"premiereshop", "schinesealtart", "setextension", "singularityfoil", "themepack"} - {member}
+        assert not others & tags.keys()
+
+    def test_content_warning_flag_lands_as_contentwarning(self, api_resource: APIResource) -> None:
+        """`is:contentwarning` reads Scryfall's `content_warning` flag: 7 cards there (2026-10-04)."""
+        card = make_raw_card(name="Content Warning Import Test")
+        card["content_warning"] = True
+        api_resource.admin._upsert_cards([card])
+        assert _is_tags_for(api_resource, card["id"]).get("contentwarning") is True
+
+    def test_content_warning_false_or_absent_sets_no_tag(self, api_resource: APIResource) -> None:
+        """Exactly `true`, like every boolean row: a false flag and a missing one write nothing."""
+        unwarned = make_raw_card(name="Content Warning False")
+        unwarned["content_warning"] = False
+        plain = make_raw_card(name="Content Warning Absent")
+        api_resource.admin._upsert_cards([unwarned, plain])
+        assert "contentwarning" not in _is_tags_for(api_resource, unwarned["id"])
+        assert "contentwarning" not in _is_tags_for(api_resource, plain["id"])
+
+    def test_content_warning_removal_strips_the_tag(self, api_resource: APIResource) -> None:
+        """The sync converges both ways: a re-import without the flag removes the tag."""
+        card = make_raw_card(name="Content Warning Withdrawn")
+        card["content_warning"] = True
+        api_resource.admin._upsert_cards([card])
+        assert _is_tags_for(api_resource, card["id"]).get("contentwarning") is True
+        reimport = make_raw_card(card_id=card["id"], name="Content Warning Withdrawn")
+        reimport["oracle_text"] = "changed so the reimport writes"
+        api_resource.admin._upsert_cards([reimport])
+        assert "contentwarning" not in _is_tags_for(api_resource, card["id"])
+
+    @staticmethod
+    def _meld_all_parts(own_id: str, own_role: str) -> list[dict]:
+        """A meld card's `all_parts`: this card in `own_role`, plus the other two members."""
+        other_roles = ["meld_part", "meld_part", "meld_result"]
+        other_roles.remove(own_role)
+        parts = [{"object": "related_card", "id": own_id, "component": own_role, "name": "Own Half"}]
+        parts.extend(
+            {"object": "related_card", "id": str(uuid.uuid4()), "component": role, "name": f"Other {i}"}
+            for i, role in enumerate(other_roles)
+        )
+        return parts
+
+    def test_meld_part_reads_the_cards_own_all_parts_entry(self, api_resource: APIResource) -> None:
+        """Every meld card lists all three members, so the role must come from ITS OWN entry."""
+        card = make_raw_card(name="Meld Part Import Test")
+        card["layout"] = "meld"
+        card["all_parts"] = self._meld_all_parts(card["id"], "meld_part")
+        api_resource.admin._upsert_cards([card])
+        tags = _is_tags_for(api_resource, card["id"])
+        assert tags.get("meldpart") is True
+        assert "meldresult" not in tags
+
+    def test_meld_result_reads_the_cards_own_all_parts_entry(self, api_resource: APIResource) -> None:
+        card = make_raw_card(name="Meld Result Import Test")
+        card["layout"] = "meld"
+        card["all_parts"] = self._meld_all_parts(card["id"], "meld_result")
+        api_resource.admin._upsert_cards([card])
+        tags = _is_tags_for(api_resource, card["id"])
+        assert tags.get("meldresult") is True
+        assert "meldpart" not in tags
+
+    def test_meld_role_falls_back_to_the_cards_name_when_all_parts_names_a_sibling_printing(
+        self, api_resource: APIResource
+    ) -> None:
+        """A reprint whose `all_parts` carries another printing's ids still gets its role.
+
+        Ragnarok, Divine Deliverance fin/99b and Vanille, Cheerful l'Cie fin/211 are this shape in
+        the 2026-08-16 bulk: all three entries are there, none under the printing's own id.
+        """
+        result = make_raw_card(name="Sibling Ids Melded")
+        part = make_raw_card(name="Sibling Ids Half")
+        for card in (result, part):
+            card["layout"] = "meld"
+            card["all_parts"] = [
+                {"object": "related_card", "id": str(uuid.uuid4()), "component": "meld_part", "name": "Sibling Ids Half"},
+                {"object": "related_card", "id": str(uuid.uuid4()), "component": "meld_part", "name": "Sibling Ids Other Half"},
+                {"object": "related_card", "id": str(uuid.uuid4()), "component": "meld_result", "name": "Sibling Ids Melded"},
+            ]
+        api_resource.admin._upsert_cards([result, part])
+        result_tags = _is_tags_for(api_resource, result["id"])
+        assert result_tags.get("meldresult") is True
+        assert "meldpart" not in result_tags
+        part_tags = _is_tags_for(api_resource, part["id"])
+        assert part_tags.get("meldpart") is True
+        assert "meldresult" not in part_tags
+
+    def test_meld_name_fallback_does_not_override_the_cards_own_entry(self, api_resource: APIResource) -> None:
+        """An entry under the card's own id is the answer, even beside a meld entry of its name."""
+        card = make_raw_card(name="Shared Name Import Test")
+        card["all_parts"] = [
+            {"object": "related_card", "id": card["id"], "component": "combo_piece", "name": "Shared Name Import Test"},
+            {"object": "related_card", "id": str(uuid.uuid4()), "component": "meld_result", "name": "Shared Name Import Test"},
+        ]
+        api_resource.admin._upsert_cards([card])
+        tags = _is_tags_for(api_resource, card["id"])
+        assert "meldpart" not in tags
+        assert "meldresult" not in tags
+
+    def test_a_token_sharing_the_cards_name_gives_it_no_meld_role(self, api_resource: APIResource) -> None:
+        """The name fallback reads meld components only: a same-named token entry decides nothing."""
+        card = make_raw_card(name="Token Namesake Import Test")
+        card["all_parts"] = [
+            {"object": "related_card", "id": str(uuid.uuid4()), "component": "token", "name": "Token Namesake Import Test"},
+            {"object": "related_card", "id": str(uuid.uuid4()), "component": "meld_part", "name": "Someone Else"},
+        ]
+        api_resource.admin._upsert_cards([card])
+        tags = _is_tags_for(api_resource, card["id"])
+        assert "meldpart" not in tags
+        assert "meldresult" not in tags
+
+    def test_other_cards_meld_roles_do_not_tag_this_card(self, api_resource: APIResource) -> None:
+        """`all_parts` naming OTHER cards' roles (a token maker, a combo piece) is not a meld role."""
+        card = make_raw_card(name="Meld Bystander Import Test")
+        card["all_parts"] = [
+            {"object": "related_card", "id": str(uuid.uuid4()), "component": "meld_part", "name": "Someone Else"},
+            {"object": "related_card", "id": str(uuid.uuid4()), "component": "meld_result", "name": "Someone Else Melded"},
+            {"object": "related_card", "id": card["id"], "component": "combo_piece", "name": "Meld Bystander Import Test"},
+        ]
+        api_resource.admin._upsert_cards([card])
+        tags = _is_tags_for(api_resource, card["id"])
+        assert "meldpart" not in tags
+        assert "meldresult" not in tags
         assert "buyabox" not in tags
 
     def test_partner_keyword_lands_as_is_tag(self, api_resource: APIResource) -> None:
@@ -243,15 +431,252 @@ class TestBooleanIsTags:
 
     def test_scryfallpreview_source_lands_as_is_tag(self, api_resource: APIResource) -> None:
         card = make_raw_card(name="Scryfall Preview Import Test")
-        card["preview"] = {"source": "Scryfall"}
+        card["preview"] = {"source": "Scryfall", "source_uri": "https://scryfall.com/card/war/176/snarespinner"}
         api_resource.admin._upsert_cards([card])
         assert _is_tags_for(api_resource, card["id"]).get("scryfallpreview") is True
+
+    def test_scryfall_source_without_a_card_page_does_not_set_scryfallpreview(self, api_resource: APIResource) -> None:
+        """The 2026 `slz` shape: source Scryfall, URI the set page -- 321 printings Scryfall's list lacks."""
+        card = make_raw_card(name="Scryfall Set Page Preview Test")
+        card["preview"] = {"source": "Scryfall", "source_uri": "https://scryfall.com/sets/slz?order=spoiled"}
+        api_resource.admin._upsert_cards([card])
+        assert "scryfallpreview" not in _is_tags_for(api_resource, card["id"])
+
+    @pytest.mark.parametrize(("set_code", "number"), [("uma", "50"), ("grn", "103"), ("plst", "GRN-103")])
+    def test_scryfallpreview_names_the_three_printings_with_no_preview_object(
+        self, api_resource: APIResource, set_code: str, number: str
+    ) -> None:
+        card = make_raw_card(name=f"Previewed Without a Preview {set_code}")
+        card["set"], card["collector_number"] = set_code, number
+        api_resource.admin._upsert_cards([card])
+        assert _is_tags_for(api_resource, card["id"]).get("scryfallpreview") is True
+
+    def test_scryfallpreview_does_not_name_the_neighbouring_printings(self, api_resource: APIResource) -> None:
+        card = make_raw_card(name="Previewed Neighbour")
+        card["set"], card["collector_number"] = "uma", "51"
+        api_resource.admin._upsert_cards([card])
+        assert "scryfallpreview" not in _is_tags_for(api_resource, card["id"])
 
     def test_other_preview_source_does_not_set_scryfallpreview(self, api_resource: APIResource) -> None:
         card = make_raw_card(name="Other Preview Source Test")
         card["preview"] = {"source": "The Command Zone"}
         api_resource.admin._upsert_cards([card])
         assert "scryfallpreview" not in _is_tags_for(api_resource, card["id"])
+
+
+# ---------------------------------------------------------------------------
+# is: values that are a field, a list of sets or names, or a set type (2026-10-04 sweep)
+# ---------------------------------------------------------------------------
+
+_PRESENCE_TAGS = ("arenaid", "cardmarket", "illustration", "image", "mtgoid", "multiverse", "placeholderimage", "tcgplayer")
+
+
+def _tag_expression_over(api_resource: APIResource, tag: str, blob: dict) -> bool:
+    """Evaluate one BOOLEAN_IS_TAGS expression over a literal blob, as the sync's subquery presents it."""
+    with api_resource.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+        cursor.execute(
+            f"SELECT COALESCE(({BOOLEAN_IS_TAGS[tag]}), false) AS answer FROM (SELECT %(blob)s::jsonb AS raw_card_blob) cards",
+            {"blob": json.dumps(blob)},
+        )
+        return cursor.fetchone()["answer"]
+
+
+def _tags_after_import(api_resource: APIResource, name: str, **fields: object) -> dict:
+    """Import one otherwise-plain card carrying `fields` and return the tags the sync wrote."""
+    card = make_raw_card(name=name)
+    card.update(fields)
+    api_resource.admin._upsert_cards([card])
+    return _is_tags_for(api_resource, card["id"])
+
+
+class TestPresenceIsTags:
+    """`is:mtgoid`, `is:tcgplayer`, ...: the printing CARRIES the field. Two-valued, read off the blob."""
+
+    @pytest.mark.parametrize(
+        ("tag", "field", "value"),
+        [
+            ("mtgoid", "mtgo_id", 12345),
+            ("arenaid", "arena_id", 67890),
+            ("tcgplayer", "tcgplayer_id", 111),
+            ("cardmarket", "cardmarket_id", 222),
+            ("multiverse", "multiverse_ids", [333]),
+            ("multiverse", "multiverse_ids", [333, 334]),
+            ("illustration", "illustration_id", "0aeebaf5-8c7d-4636-9e82-8c27447861f7"),
+            ("image", "image_status", "highres_scan"),
+            ("image", "image_status", "placeholder"),
+            ("placeholderimage", "image_status", "placeholder"),
+        ],
+    )
+    def test_the_field_sets_its_own_tag(self, api_resource: APIResource, tag: str, field: str, value: object) -> None:
+        tags = _tags_after_import(api_resource, f"Presence {tag} {field}", **{field: value})
+        assert tags.get(tag) is True
+
+    @pytest.mark.parametrize(
+        ("tag", "field", "value"),
+        [
+            # the FOIL / ETCHED id is a different field: one printing carries the foil id alone
+            # (63,188 against 63,187) and 892 carry the etched TCGplayer id alone
+            ("mtgoid", "mtgo_foil_id", 12345),
+            ("tcgplayer", "tcgplayer_etched_id", 111),
+            ("multiverse", "multiverse_ids", []),
+            ("image", "image_status", "missing"),
+            ("placeholderimage", "image_status", "highres_scan"),
+            ("placeholderimage", "image_status", "missing"),
+            # Scryfall omits the key; a JSON null is not an id either
+            ("arenaid", "arena_id", None),
+            ("cardmarket", "cardmarket_id", None),
+            ("illustration", "illustration_id", None),
+        ],
+    )
+    def test_the_lookalike_or_the_empty_field_sets_no_tag(
+        self, api_resource: APIResource, tag: str, field: str, value: object
+    ) -> None:
+        tags = _tags_after_import(api_resource, f"Absence {tag} {field}", **{field: value})
+        assert tag not in tags
+
+    def test_a_printing_with_no_image_status_has_no_image(self, api_resource: APIResource) -> None:
+        """Every card object in the bulk files carries an `image_status`; one without has nothing to show."""
+        tags = _tags_after_import(api_resource, "No Image Status")
+        assert "image" not in tags
+        assert "placeholderimage" not in tags
+
+    def test_ids_do_not_ride_along(self, api_resource: APIResource) -> None:
+        """Each tag reads only its own field: an Arena id sets `arenaid` and none of the other seven."""
+        tags = _tags_after_import(api_resource, "Arena Id Alone", arena_id=1, image_status="missing")
+        assert tags.get("arenaid") is True
+        assert not {t for t in _PRESENCE_TAGS if t != "arenaid"} & tags.keys()
+
+    def test_a_face_s_artwork_counts_when_the_printing_has_none_of_its_own(self, api_resource: APIResource) -> None:
+        """The blob of a card kept with its faces (#894) holds the artwork on the face, not the printing."""
+        assert _tag_expression_over(api_resource, "illustration", {"card_faces": [{"name": "A", "illustration_id": "x"}]})
+        assert _tag_expression_over(api_resource, "illustration", {"illustration_id": "x"})
+        assert not _tag_expression_over(api_resource, "illustration", {"card_faces": [{"name": "A"}, {"name": "B"}]})
+
+
+class TestClassIsTags:
+    """`is:back`, `is:indicator`, `is:fbb`, `is:tron`, ...: a field, a list of sets, a list of names, a set type."""
+
+    def test_a_back_of_its_own_sets_back(self, api_resource: APIResource) -> None:
+        tags = _tags_after_import(api_resource, "Own Back", card_back_id="11111111-2222-3333-4444-555555555555")
+        assert tags.get("back") is True
+
+    def test_the_shared_magic_back_is_not_back(self, api_resource: APIResource) -> None:
+        tags = _tags_after_import(api_resource, "Magic Back", card_back_id="0aeebaf5-8c7d-4636-9e82-8c27447861f7")
+        assert "back" not in tags
+
+    def test_no_card_back_id_is_not_back(self, api_resource: APIResource) -> None:
+        assert "back" not in _tags_after_import(api_resource, "No Back Id")
+
+    def test_a_two_faced_card_is_not_back_for_having_a_second_face(self, api_resource: APIResource) -> None:
+        """`is:back` is not "has a back face": no two-sided card is in Scryfall's 3,330."""
+        tags = _tags_after_import(
+            api_resource,
+            "Two Faces // Magic Back",
+            layout="transform",
+            card_back_id="0aeebaf5-8c7d-4636-9e82-8c27447861f7",
+            card_faces=[
+                {"name": "Two Faces", "type_line": "Creature — Human"},
+                {"name": "Magic Back", "type_line": "Creature — Werewolf"},
+            ],
+        )
+        assert "back" not in tags
+
+    def test_a_colour_indicator_sets_indicator(self, api_resource: APIResource) -> None:
+        assert _tags_after_import(api_resource, "Indicated", color_indicator=["U"]).get("indicator") is True
+
+    def test_a_colour_indicator_on_a_face_sets_indicator(self, api_resource: APIResource) -> None:
+        """Read over a blob that keeps its faces (#894): the indicator is on the back, not the printing."""
+        faces = [{"name": "Plain"}, {"name": "Indicated", "color_indicator": ["R"]}]
+        assert _tag_expression_over(api_resource, "indicator", {"card_faces": faces})
+        assert not _tag_expression_over(api_resource, "indicator", {"card_faces": [{"name": "Plain"}, {"name": "Also"}]})
+        assert not _tag_expression_over(api_resource, "indicator", {"card_faces": [{"color_indicator": []}]})
+
+    def test_an_empty_colour_indicator_is_not_indicator(self, api_resource: APIResource) -> None:
+        assert "indicator" not in _tags_after_import(api_resource, "Not Indicated", color_indicator=[])
+
+    @pytest.mark.parametrize(
+        ("set_code", "expected"),
+        [
+            ("fbb", True),
+            ("bchr", True),
+            ("ren", True),
+            ("rin", True),
+            ("4bb", True),
+            ("3ed", False),
+            ("tst", False),
+            ("fbbx", False),
+        ],
+    )
+    def test_fbb_is_five_sets(self, api_resource: APIResource, set_code: str, expected: bool) -> None:
+        tags = _tags_after_import(api_resource, f"FBB {set_code}", set=set_code)
+        assert tags.get("fbb", False) is expected
+
+    @pytest.mark.parametrize("name", ["Urza's Mine", "Urza's Power Plant", "Urza's Tower"])
+    def test_the_three_urza_lands_set_tron(self, api_resource: APIResource, name: str) -> None:
+        assert _tags_after_import(api_resource, name).get("tron") is True
+
+    def test_another_urza_card_is_not_tron(self, api_resource: APIResource) -> None:
+        assert "tron" not in _tags_after_import(api_resource, "Urza's Saga")
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "Blazemire Verge",
+            "Bleachbone Verge",
+            "Floodfarm Verge",
+            "Gloomlake Verge",
+            "Hushwood Verge",
+            "Riverpyre Verge",
+            "Sunbillow Verge",
+            "Thornspire Verge",
+            "Wastewood Verge",
+            "Willowrush Verge",
+        ],
+    )
+    def test_each_verge_sets_vergeland(self, api_resource: APIResource, name: str) -> None:
+        assert _tags_after_import(api_resource, name).get("vergeland") is True
+
+    def test_a_card_named_verge_is_not_vergeland(self, api_resource: APIResource) -> None:
+        assert "vergeland" not in _tags_after_import(api_resource, "Verge of Collapse")
+
+    @pytest.mark.parametrize(
+        ("set_code", "frame", "rarity", "expected"),
+        [
+            ("tsb", "1997", "special", True),
+            ("tsr", "1997", "common", True),
+            ("tsr", "2015", "common", False),
+            ("plst", "1997", "special", True),
+            ("plst", "1997", "common", False),
+            ("plst", "2015", "special", False),
+            ("tsp", "2003", "common", False),
+        ],
+    )
+    def test_timeshifted_is_the_old_frame_of_two_sets_and_the_lists_special_reprints(
+        self, api_resource: APIResource, set_code: str, frame: str, rarity: str, expected: bool
+    ) -> None:
+        tags = _tags_after_import(api_resource, f"Timeshift {set_code} {frame} {rarity}", set=set_code, frame=frame, rarity=rarity)
+        assert tags.get("timeshifted", False) is expected
+
+    def test_the_moonlit_basics_set_moonlitland(self, api_resource: APIResource) -> None:
+        assert _tags_after_import(api_resource, "Moonlit", promo_types=["moonlitland"]).get("moonlitland") is True
+        assert "moonlitland" not in _tags_after_import(api_resource, "Not Moonlit", promo_types=["event"])
+
+    @pytest.mark.parametrize(
+        ("tag", "set_type"),
+        [
+            ("dueldeck", "duel_deck"),
+            ("fromthevault", "from_the_vault"),
+        ],
+    )
+    def test_a_set_type_word_is_that_set_type(self, api_resource: APIResource, tag: str, set_type: str) -> None:
+        tags = _tags_after_import(api_resource, f"Set Type {set_type}", set_type=set_type)
+        assert tags.get(tag) is True
+        others = {"dueldeck", "fromthevault"} - {tag}
+        assert not others & tags.keys()
+
+    def test_a_set_type_word_is_not_another_set_type(self, api_resource: APIResource) -> None:
+        tags = _tags_after_import(api_resource, "Core Set Card", set_type="core")
+        assert not {"dueldeck", "fromthevault"} & tags.keys()
 
 
 # ---------------------------------------------------------------------------
