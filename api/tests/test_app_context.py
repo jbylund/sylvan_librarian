@@ -9,6 +9,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from api.app_context import MIN_IMPORT_CARDS, AppContext
+from api.parsing import set_dates
+from api.parsing.set_dates import replace_set_release_dates, set_release_date
 
 
 def _mock_pool_returning(num_cards: int) -> MagicMock:
@@ -69,6 +71,68 @@ class TestSetupComplete(unittest.TestCase):
         pool.connection.side_effect = RuntimeError("connection refused")
         ctx = AppContext(reader_pool=pool, writer_pool=MagicMock(), engine=MagicMock())
         assert ctx.setup_complete() is False
+
+
+def _mock_pool_returning_rows(rows: list[dict]) -> MagicMock:
+    """A mock connection pool whose fetchall() returns *rows*."""
+    pool = MagicMock()
+    cursor = MagicMock()
+    cursor.fetchall.return_value = rows
+    pool.connection.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value = cursor
+    return pool
+
+
+class TestSetReleaseDates(unittest.TestCase):
+    """The set-code -> release-date registry: loaded once per import per process, never a search failure."""
+
+    def setUp(self) -> None:
+        self._saved = dict(set_dates._SET_RELEASE_DATES)
+        replace_set_release_dates({})
+
+    def tearDown(self) -> None:
+        replace_set_release_dates(self._saved)
+
+    def _make_context(self, rows: list[dict]) -> AppContext:
+        return AppContext(
+            reader_pool=_mock_pool_returning_rows(rows),
+            writer_pool=MagicMock(),
+            engine=MagicMock(),
+            last_import_time=multiprocessing.Value("d", 1.0, lock=True),
+        )
+
+    def test_loads_once_per_last_import_time(self) -> None:
+        ctx = self._make_context([{"code": "hob", "released_at": "2026-08-14"}])
+        ctx.ensure_set_release_dates()
+        ctx.ensure_set_release_dates()
+        ctx.reader_pool.connection.assert_called_once()
+        assert set_release_date("hob") == "2026-08-14"
+        assert set_release_date("HOB") == "2026-08-14"
+
+    def test_changed_last_import_time_reloads(self) -> None:
+        ctx = self._make_context([{"code": "hob", "released_at": "2026-08-14"}])
+        ctx.ensure_set_release_dates()
+        cursor = ctx.reader_pool.connection.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value
+        cursor.fetchall.return_value = [{"code": "hob", "released_at": "2026-08-14"}, {"code": "zzt", "released_at": "2020-01-01"}]
+        ctx.last_import_time.value = 2.0
+        ctx.ensure_set_release_dates()
+        assert ctx.reader_pool.connection.call_count == 2
+        assert set_release_date("zzt") == "2020-01-01"
+
+    def test_database_error_is_swallowed_and_retried(self) -> None:
+        ctx = self._make_context([{"code": "hob", "released_at": "2026-08-14"}])
+        ctx.reader_pool.connection.side_effect = RuntimeError("connection refused")
+        ctx.ensure_set_release_dates()  # must not raise: a search never fails on this table
+        assert set_release_date("hob") is None
+        # Nothing was cached on failure, so the next call tries the database again.
+        ctx.reader_pool.connection.side_effect = None
+        ctx.ensure_set_release_dates()
+        assert set_release_date("hob") == "2026-08-14"
+
+    def test_refresh_raises_on_database_error(self) -> None:
+        ctx = self._make_context([])
+        ctx.reader_pool.connection.side_effect = RuntimeError("connection refused")
+        with pytest.raises(RuntimeError):
+            ctx.refresh_set_release_dates()
 
 
 class TestBumpCacheGeneration(unittest.TestCase):

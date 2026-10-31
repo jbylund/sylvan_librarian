@@ -131,6 +131,24 @@ set:MH2
 set:DMU
 ```
 
+### Release Date
+
+Use `date:` with a full date (`YYYY-MM-DD`), a month (`YYYY-MM`), a year (`YYYY`), or a set code, which stands for that set's release date. A month or year is the whole span it names: `date:2021` is every card released in 2021, `date<=2021` everything before 2022, and `date>2021` everything from 2022 on.
+
+```
+date>=2024-01-01
+date:2007-07
+date<2000
+date>=hob
+```
+
+Use `year:` with a four-digit year. `year:` does not take a set code.
+
+```
+year:2019
+year>=2020
+```
+
 ### Price
 
 Use `usd` or `eur` with a comparison operator.
