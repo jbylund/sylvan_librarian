@@ -123,6 +123,8 @@ pub(crate) enum NumField {
     PriceEur,
     PriceTix,
     PreferScore,
+    /// Scryfall's `pt` / `powtou`: power plus toughness. See `power_plus_toughness`.
+    PowTou,
 }
 
 fn attr_to_num_field(attr: &str) -> Option<NumField> {
@@ -130,6 +132,7 @@ fn attr_to_num_field(attr: &str) -> Option<NumField> {
         "cmc"                  => Some(NumField::Cmc),
         "creature_power"       => Some(NumField::Power),
         "creature_toughness"   => Some(NumField::Toughness),
+        "power_plus_toughness" => Some(NumField::PowTou),
         "planeswalker_loyalty" => Some(NumField::Loyalty),
         "card_rarity_int"      => Some(NumField::RarityInt),
         "collector_number_int" => Some(NumField::CollectorNumberInt),
@@ -179,6 +182,47 @@ fn field_num(card: &AOracleCard, printing: Option<&APrinting>, f: NumField) -> N
         NumField::PriceEur           => printing.map_or(NumVal::PDep, |p| known_cents(p.price_eur.as_ref().map(|v| u32::from(*v)))),
         NumField::PriceTix           => printing.map_or(NumVal::PDep, |p| known_cents(p.price_tix.as_ref().map(|v| u32::from(*v)))),
         NumField::PreferScore        => printing.map_or(NumVal::PDep, |p| known(p.prefer_score.as_ref().map(|v| f32::from(*v)))),
+        NumField::PowTou             => power_plus_toughness(card),
+    }
+}
+
+/// `pt` / `powtou` — Scryfall's combined power-and-toughness keyword — for one card.
+///
+/// Both spellings take all seven operators there and stand on either side of a comparison with
+/// another column. Measured on api.scryfall.com 2026-10-03: `pt=2` and `powtou=2` 2,129, `pt:6`
+/// 2,724, `pt<6` 10,818, `pt<=6` 13,542, `pt>6` 5,357, `pt>=6` 8,081, `pt!=6` 16,175; `pt>pow`
+/// 18,477, `pt=pow` 472, `pow>pt` 44, `pt>mv` 15,207, `mv>pt` 1,364.
+///
+/// THE VALUES ARE THE ONES `pow` AND `tou` ALREADY COMPARE, so every printed form means here
+/// what it means for those two columns: on Scryfall Char-Rumbler's `-1/3` is `pt=2`,
+/// Tarmogoyf's `*/1+*` is `pt=1` and Lord of Extinction's `*/*` is `pt=0`. A starred stat is
+/// stored absent here today, for `pow` and `tou` alike, and `pt` follows them.
+///
+/// NULL when the card has no power or no toughness, like any numeric column over an absent
+/// value: `-(pt>=0) t:instant e:khm` is 404 on Scryfall (36 instants, none matched), the same
+/// three-valued NOT `-(pow>=0)` shows there.
+///
+/// ON SCRYFALL IT IS THE FRONT FACE'S SUM — each row scoped `!"<name>"`, so it is 1 or 404:
+///
+///   Delver of Secrets // Insectile Aberration  1/1 // 3/2   pt=2 1   pt=5 404   pt=3 404   pt=4 404
+///   Akki Lavarunner // Tok-Tok (flip)          1/1 // 2/2   pt=2 1   pt=4 404
+///   Westvale Abbey // Ormendahl                —   // 9/7   pt=16 404   pt>=0 404   (pow>=0 is 1)
+///   Bonecrusher Giant // Stomp (adventure)     4/3          pt=7 1
+///   Brisela, Voice of Nightmares (meld result) 9/10         pt=19 1
+///
+/// This store holds ONE power and toughness per card, the pair `pow` and `tou` read, and this
+/// adds those two. For a card whose stored pair is its front face's that is Scryfall's answer;
+/// reading the front face's own pair wants per-face stats in the store, which it does not have.
+///
+/// COMPUTED, not stored: two loads and an add per candidate card, no column, no index, no archive
+/// change. It is card-level, so it is never `PDep`; it is not a joint-tuple index column
+/// (`num_field_in_arith_tuple_scope`), so a `pt` term is evaluated per candidate like `edhrec` is.
+fn power_plus_toughness(card: &AOracleCard) -> NumVal {
+    let power = card.creature_power.as_ref().map(|v| f32::from(*v));
+    let toughness = card.creature_toughness.as_ref().map(|v| f32::from(*v));
+    match (power, toughness) {
+        (Some(p), Some(t)) => NumVal::Known(f64::from(p) + f64::from(t)),
+        _ => NumVal::Null,
     }
 }
 
@@ -865,6 +909,8 @@ fn leaf_compares_printing_field(f: &FilterExpr) -> bool {
                 | NumField::PriceTix
                 | NumField::PreferScore => true,
                 NumField::Cmc | NumField::Power | NumField::Toughness | NumField::Loyalty | NumField::EdhrEc => false,
+                // The card's own stats: oracle-level, the same for every printing.
+                NumField::PowTou => false,
             },
             NumExpr::Arith(lhs, _, rhs) => num_pdep(lhs) || num_pdep(rhs),
         }

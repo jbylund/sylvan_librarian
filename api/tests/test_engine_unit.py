@@ -340,6 +340,44 @@ class TestArithmetic:
         assert total == 24
 
 
+class TestPowerPlusToughness:
+    """`pt` / `powtou`, Scryfall's combined power-and-toughness keyword, from the query string.
+
+    Measured on api.scryfall.com 2026-10-03: both spellings take all seven operators (`pt=2` and
+    `powtou=2` 2,129, `pt<6` 10,818, `pt>=6` 8,081) and stand on either side of a column
+    comparison (`pt>pow` 18,477, `pow>pt` 44, `mv>pt` 1,364).
+    """
+
+    def test_it_is_the_sum_of_the_two_stats(self, engine: QueryEngine) -> None:
+        # Shivan Dragon is 5/5 and Serra Angel 4/4 — the same cards `pow+tou` finds.
+        total, cards = _run(engine, "pt>8")
+        assert total == 5
+        assert {c["name"] for c in cards} == {"Shivan Dragon"}
+        assert {c["name"] for c in _run(engine, "pt=8")[1]} == {"Serra Angel"}
+
+    def test_both_spellings_take_every_comparator(self, engine: QueryEngine) -> None:
+        for op in ("=", ":", "<", "<=", ">", ">=", "!="):
+            arithmetic = f"pow+tou{'=' if op == ':' else op}6"
+            expected = _run(engine, arithmetic)[0]
+            assert _run(engine, f"pt{op}6")[0] == expected, op
+            assert _run(engine, f"powtou{op}6")[0] == expected, op
+        assert _run(engine, "pt<6")[0] > 0
+        assert _run(engine, "pt>=6")[0] > 0
+
+    def test_it_stands_on_either_side_of_a_column_comparison(self, engine: QueryEngine) -> None:
+        # A sum exceeds its own power exactly when the toughness is positive.
+        assert _run(engine, "pt>pow")[0] == _run(engine, "tou>0")[0] > 0
+        assert _run(engine, "pow<pt")[0] == _run(engine, "tou>0")[0]
+        assert _run(engine, "pt>cmc")[0] == _run(engine, "pow+tou>cmc")[0] > 0
+        assert _run(engine, "cmc>pt")[0] == _run(engine, "cmc>pow+tou")[0]
+
+    def test_a_card_without_stats_has_no_sum(self, engine: QueryEngine) -> None:
+        # NULL, so neither the term nor its negation finds an instant.
+        assert _run(engine, "pt>=-100 t:instant")[0] == 0
+        assert _run(engine, "-(pt>=-100) t:instant")[0] == 0
+        assert _run(engine, "t:instant")[0] > 0
+
+
 class TestCollectionOperators:
     """Non-colon operators on type/subtype/keyword fields.
 

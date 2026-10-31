@@ -78,6 +78,13 @@ toughness<3
 pow>tou
 ```
 
+`pt` (or `powtou`) is a card's power plus its toughness, and takes the same comparisons.
+
+```
+pt<6
+pt>mv
+```
+
 ### Oracle Text
 
 Use `o:` or `oracle:` to search rules text. Quote phrases with spaces or punctuation. Use `flavor:` or `ft:` for flavor text.

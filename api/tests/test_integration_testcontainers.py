@@ -136,6 +136,24 @@ class TestContainerIntegration:
         assert len(cards) == 1
         assert cards[0]["name"] == "Serra Angel"
 
+    def test_power_plus_toughness_search(self: TestContainerIntegration, api_resource: APIResource) -> None:
+        """`pt` / `powtou` is the sum of the row's two stat columns on the SQL path."""
+
+        def names(query: str) -> set[str]:
+            return {c["name"] for c in api_resource._search_sql(**search_kwargs(query, limit=10))["cards"]}
+
+        # Serra Angel is the 4/4. Scoped by its power, as the test above is, so that a card
+        # another test imported cannot join the set.
+        assert names("pt=8 power=4") == {"Serra Angel"}
+        assert names("powtou=8 power=4") == {"Serra Angel"}
+        assert names("pt<8 power=4") == set()
+        # A column on the other side: the sum exceeds the power when the toughness is positive.
+        assert names("pt>pow power=4") == {"Serra Angel"}
+        assert names("pow>pt power=4") == set()
+        # No stats, no sum: NULL under the term and under its negation.
+        assert names('pt>=0 name:"Lightning Bolt"') == set()
+        assert names('-(pt>=0) name:"Lightning Bolt"') == set()
+
     def test_mana_cost_search(self: TestContainerIntegration, api_resource: APIResource) -> None:
         """mana: is exact-symbol containment (plus cmc) — hybrid keys don't split."""
         result = api_resource._search_sql(**search_kwargs("mana:{R}", limit=10))
