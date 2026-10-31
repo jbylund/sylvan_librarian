@@ -53,7 +53,10 @@ _NUMERIC_ALIASES: frozenset[str] = frozenset(alias for alias, pc in _ALIAS_TO_PC
 
 # On Scryfall '!' is an alias for '=' on these classes only (verified live, #903 cause C) — on
 # TEXT/LEGALITY it isn't an operator at all, and a trailing bang there falls through to the
-# existing exact-name-prefix reading of the next factor instead.
+# existing exact-name-prefix reading of the next factor instead. The alias also only holds when
+# the bang is GLUED to both sides: measured live, `c!w` is 5,071 where `c !w` is 0 (name-and-
+# exact-name reading) and `c! w` / `cmc! 3` are not the alias either — so a spaced bang keeps
+# the exact-name-prefix reading a space always had.
 _BANG_ALIAS_CLASSES: frozenset[ParserClass] = frozenset(
     {ParserClass.COLOR, ParserClass.MANA, ParserClass.RARITY, ParserClass.YEAR, ParserClass.DATE}
 )
@@ -506,8 +509,9 @@ class Parser:
 
         # ── NUMERIC attribute ──
         if pc == ParserClass.NUMERIC:
-            if next_tok.type in (TT.OP, TT.BANG):
-                op = "=" if next_tok.type == TT.BANG else next_tok.value
+            bang_alias = next_tok.type == TT.BANG and not next_tok.space_before and not self.peek(1).space_before
+            if next_tok.type == TT.OP or bang_alias:
+                op = "=" if bang_alias else next_tok.value
                 self.consume()
                 return CardBinaryOperatorNode(CardAttributeNode(wl, ParserClass.NUMERIC), op, self.parse_num_expr_value())
             if next_tok.type in _ARITH_OPS and not next_tok.space_before:
@@ -527,7 +531,13 @@ class Parser:
             return lhs
 
         # ── known non-NUMERIC attribute ──
-        bang_alias = pc is not None and next_tok.type == TT.BANG and pc in _BANG_ALIAS_CLASSES
+        bang_alias = (
+            pc is not None
+            and next_tok.type == TT.BANG
+            and not next_tok.space_before
+            and not self.peek(1).space_before
+            and pc in _BANG_ALIAS_CLASSES
+        )
         if pc is not None and (next_tok.type == TT.OP or bang_alias):
             op = "=" if bang_alias else next_tok.value
             self.consume()

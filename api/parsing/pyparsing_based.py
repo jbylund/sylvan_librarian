@@ -57,7 +57,10 @@ DEFAULT_OPERATORS = one_of(": > < >= <= = !=")
 # On Scryfall '!' is an alias for '=' on COLOR/MANA/NUMERIC/RARITY/YEAR/DATE only (verified live,
 # #903 cause C) — not on TEXT/LEGALITY, so those conditions keep using DEFAULT_OPERATORS. '!='
 # still wins over bare '!' here: DEFAULT_OPERATORS is tried first and already matches it whole.
-EQ_ALIAS_OPERATORS = DEFAULT_OPERATORS | Literal("!").set_parse_action(lambda: "=")
+# The bang must be GLUED to both sides (leave_whitespace for the left, the lookahead for the
+# right): measured live, `c!w` is 5,071 where `c !w` is 0 and `c! w` is not the alias either —
+# a spaced bang keeps the exact-name-prefix reading it always had.
+EQ_ALIAS_OPERATORS = DEFAULT_OPERATORS | Regex(r"!(?=\S)").leave_whitespace().set_parse_action(lambda: "=")
 
 _NUMERIC_LITERAL_RE = re.compile(r"^\d+(\.\d+)?$")
 _COMPARISON_OPERATORS = frozenset({">", "<", ">=", "<=", "=", "!=", ":"})
