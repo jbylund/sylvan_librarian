@@ -2245,7 +2245,8 @@
     "set_name": "Limited Edition Alpha",
     "type_line": "Instant",
     "prefer_score": 160.67825,
-    "cubecobra_score": 0.12056577
+    "cubecobra_score": 0.12056577,
+    "scryfall_prefer_score": -9.0
   },
   {
     "scryfall_id": "b5d3dcab-2260-479d-9ef6-dfb92d4f6061",
@@ -2328,7 +2329,8 @@
     "set_name": "Limited Edition Beta",
     "type_line": "Instant",
     "prefer_score": 160.67825,
-    "cubecobra_score": 0.12056577
+    "cubecobra_score": 0.12056577,
+    "scryfall_prefer_score": -8.0
   },
   {
     "scryfall_id": "ff1b8fc5-604a-4449-a73d-861e53642a70",
@@ -2411,7 +2413,8 @@
     "set_name": "Unlimited Edition",
     "type_line": "Instant",
     "prefer_score": 146.67825,
-    "cubecobra_score": 0.12056577
+    "cubecobra_score": 0.12056577,
+    "scryfall_prefer_score": -7.0
   },
   {
     "scryfall_id": "b539a9de-037a-4b7a-80a5-0514680af095",
@@ -2494,7 +2497,8 @@
     "set_name": "Magic Player Rewards 2009",
     "type_line": "Instant",
     "prefer_score": 162.88457,
-    "cubecobra_score": 0.12056577
+    "cubecobra_score": 0.12056577,
+    "scryfall_prefer_score": -6.0
   },
   {
     "scryfall_id": "435589bb-27c6-4a6d-9d63-394d5092b9d8",
@@ -2577,7 +2581,8 @@
     "set_name": "Magic 2010",
     "type_line": "Instant",
     "prefer_score": 178.88457,
-    "cubecobra_score": 0.12056577
+    "cubecobra_score": 0.12056577,
+    "scryfall_prefer_score": 0.0
   },
   {
     "scryfall_id": "e768c957-3a1f-42f5-853a-96942f645df5",
@@ -2660,7 +2665,8 @@
     "set_name": "Magic 2011",
     "type_line": "Instant",
     "prefer_score": 178.88457,
-    "cubecobra_score": 0.12056577
+    "cubecobra_score": 0.12056577,
+    "scryfall_prefer_score": -5.0
   },
   {
     "scryfall_id": "6881d7c8-5bb7-4f8c-9f03-50fb1309d9c8",
@@ -2744,7 +2750,8 @@
     "set_name": "Avatar: The Last Airbender Eternal",
     "type_line": "Instant",
     "prefer_score": 148.32175,
-    "cubecobra_score": 0.12056577
+    "cubecobra_score": 0.12056577,
+    "scryfall_prefer_score": -4.0
   },
   {
     "scryfall_id": "b6bc6ff3-f466-4cb0-8b4e-a20d8ed129c8",
@@ -2828,7 +2835,8 @@
     "set_name": "Wizards Play Network 2026",
     "type_line": "Instant",
     "prefer_score": 159.32175,
-    "cubecobra_score": 0.12056577
+    "cubecobra_score": 0.12056577,
+    "scryfall_prefer_score": -3.0
   },
   {
     "scryfall_id": "dc12105d-7536-429b-9510-4f56bfc0c497",
@@ -2911,7 +2919,8 @@
     "set_name": "Secret Lair Drop",
     "type_line": "Instant",
     "prefer_score": 178.32175,
-    "cubecobra_score": 0.12056577
+    "cubecobra_score": 0.12056577,
+    "scryfall_prefer_score": -2.0
   },
   {
     "scryfall_id": "bde26955-6de3-4212-9e1a-5e11f73ebf44",
@@ -2994,7 +3003,8 @@
     "set_name": "Secret Lair Drop",
     "type_line": "Instant",
     "prefer_score": 173.32175,
-    "cubecobra_score": 0.12056577
+    "cubecobra_score": 0.12056577,
+    "scryfall_prefer_score": -1.0
   },
   {
     "scryfall_id": "48ee3939-bc12-4275-a446-9de36f0b4672",

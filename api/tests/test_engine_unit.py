@@ -549,6 +549,21 @@ class TestPrefer:
         _, cards = _run(engine, 'name="Lightning Bolt"', unique="card", prefer="newest")
         assert cards[0]["set_code"] == "sld"
 
+    def test_prefer_scryfall_picks_scryfalls_representative(self, engine: QueryEngine) -> None:
+        # scryfall_prefer_score 0 sits on m10 in the fixture -- deliberately NOT the newest
+        # printing (sld) nor the default prefer's pick, mirroring the real corpus where
+        # Scryfall's representative is rarely the newest printing. prefer=scryfall must follow
+        # the stored score, not release order and not prefer_score.
+        _, cards = _run(engine, 'name="Lightning Bolt"', unique="card", prefer="scryfall")
+        assert cards[0]["set_code"] == "m10"
+
+    def test_prefer_scryfall_unscored_cards_still_resolve(self, engine: QueryEngine) -> None:
+        # Only the Bolts carry scryfall_prefer_score in the fixture; every other card still
+        # returns exactly one deterministic printing (all-None ties fall to store order).
+        total, cards = _run(engine, unique="card", prefer="scryfall")
+        assert total == 16
+        assert len({c["name"] for c in cards}) == 16
+
     def test_prefer_default_returns_one_per_oracle(self, engine: QueryEngine) -> None:
         total, cards = _run(engine, unique="card", prefer="default")
         assert total == 16

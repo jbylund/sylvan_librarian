@@ -43,6 +43,7 @@ EXPECTED_PUBLIC_ROUTES = {
 EXPECTED_ADMIN_ROUTES = {
     "backfill_cubecobra_scores",
     "backfill_prefer_scores",
+    "backfill_scryfall_prefer_scores",
     "discover_is_tags_from_syntax",
     "import_all_is_tags",
     "import_art_tags",
