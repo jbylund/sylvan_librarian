@@ -50,6 +50,7 @@ from api.scryfall_bulk_data_fetcher import BulkDataKey, ScryfallBulkDataFetcher
 from api.settings import settings
 from api.tag_import import import_art_tags as _import_art_tags
 from api.tag_import import import_oracle_tags as _import_oracle_tags
+from api.tag_import import import_scryfall_representatives as _import_scryfall_representatives
 from api.utils import db_utils, multiprocessing_utils
 from api.utils.caching import cached
 from api.utils.http_utils import make_user_agent
@@ -396,6 +397,10 @@ class AdminResource:
             # first boot, and nothing rescored until the next import. Oracle tags feed search
             # rather than scoring, so their position relative to the backfill does not matter.
             _import_art_tags(self.app_context.writer_pool, self._bulk_data_fetcher)
+            # Before the backfill, for the same reason art tags are: the prefer score reads this
+            # table, so populating it afterwards would score every card unpinned and leave it that
+            # way until the next import.
+            _import_scryfall_representatives(self.app_context.writer_pool, self._bulk_data_fetcher)
             self.backfill_prefer_scores()
             self.backfill_cubecobra_scores()
             _import_oracle_tags(self.app_context.writer_pool, self._bulk_data_fetcher)

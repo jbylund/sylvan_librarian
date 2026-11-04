@@ -259,3 +259,75 @@ class TestBackfillCubecobraScores:
         api_resource.admin._insert_cubecobra_data({oracle_id: {"elo": 1500.0, "cube_count": 7, "pick_count": 9}})
 
         assert api_resource.admin.backfill_cubecobra_scores()["cards_with_cubecobra_data"] == before + 1
+
+
+class TestRepresentativePin:
+    """Scryfall's own representative choice pins prefer_score — and yields to art_style.
+
+    The label is its `oracle_cards` dump: one card object per oracle_id, and that object IS the
+    printing Scryfall shows. See the `representative` component in backfill_prefer_scores.sql.
+    """
+
+    @staticmethod
+    def _label(api: APIResource, scryfall_id: str) -> None:
+        with api.app_context.writer_pool.connection() as conn, conn.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO magic.scryfall_representatives (scryfall_id) VALUES (%s) ON CONFLICT DO NOTHING",
+                (scryfall_id,),
+            )
+
+    @staticmethod
+    def _score(api: APIResource, scryfall_id: str) -> float:
+        with api.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+            cursor.execute("SELECT prefer_score FROM magic.cards WHERE scryfall_id = %s", (scryfall_id,))
+            return cursor.fetchone()["prefer_score"]
+
+    def test_a_labelled_printing_is_pinned(self, api_resource: APIResource) -> None:
+        cid = str(uuid.uuid4())
+        _insert_card(api_resource, make_raw_card(card_id=cid, name=f"Pinned {uuid.uuid4()}"))
+        api_resource.admin.backfill_prefer_scores()
+        before = self._score(api_resource, cid)
+
+        self._label(api_resource, cid)
+        api_resource.admin.backfill_prefer_scores()
+        after = self._score(api_resource, cid)
+
+        # The pin dominates every real component sum rather than nudging it.
+        assert after - before > 900, f"labelled printing not pinned ({before} -> {after})"
+
+    def test_an_unlabelled_printing_is_unchanged(self, api_resource: APIResource) -> None:
+        """Empty/partial label table must score exactly as before — the dump is an OPTIONAL input."""
+        cid = str(uuid.uuid4())
+        _insert_card(api_resource, make_raw_card(card_id=cid, name=f"Unpinned {uuid.uuid4()}"))
+        api_resource.admin.backfill_prefer_scores()
+        first = self._score(api_resource, cid)
+        api_resource.admin.backfill_prefer_scores()
+        assert self._score(api_resource, cid) == first
+        assert first < 900, "an unlabelled printing must not carry the pin"
+
+    def test_the_pin_yields_to_art_style(self, api_resource: APIResource) -> None:
+        """An off-style label loses the pin when an on-style printing of the same card exists.
+
+        This is the whole reason the component is not simply "defer to Scryfall": its dump favours
+        the most recent recognizable printing, which on 213 cards is licensed-crossover art that
+        art_style demotes on purpose (177 of 177 labelled comparisons).
+        """
+        name = f"Crossover {uuid.uuid4()}"
+        on_id, off_id = str(uuid.uuid4()), str(uuid.uuid4())
+        on_raw = make_raw_card(card_id=on_id, name=name)
+        off_raw = make_raw_card(card_id=off_id, name=name)
+        off_raw["oracle_id"] = on_raw["oracle_id"]  # same card, two printings
+        _insert_card(api_resource, on_raw)
+        _insert_card(api_resource, off_raw)
+
+        # Mark the labelled printing off-style the way the tagger would.
+        with api_resource.app_context.writer_pool.connection() as conn, conn.cursor() as cursor:
+            cursor.execute(
+                "UPDATE magic.cards SET card_art_tags = %s::jsonb WHERE scryfall_id = %s",
+                ('{"external-ip": true}', off_id),
+            )
+        self._label(api_resource, off_id)
+        api_resource.admin.backfill_prefer_scores()
+
+        assert self._score(api_resource, off_id) < 900, "an off-style label must not be pinned"
+        assert self._score(api_resource, on_id) < 900, "the on-style sibling is not labelled either"
