@@ -678,6 +678,39 @@ def test_is_tag_sql_translation(parse_query, input_query: str, expected_sql: str
 
 
 @pytest.mark.parametrize(
+    argnames=("input_query", "expected_sql", "expected_parameters"),
+    argvalues=[
+        # game: reads card_is_tags like is:, but under the game_ prefix (rewrite.py's
+        # prefix_game_values), so an unknown game (`game:promo` -> game_promo) matches nothing
+        # instead of answering is:promo.
+        (
+            "game:paper",
+            r"(card.card_is_tags @> %(p_dict_eydnYW1lX3BhcGVyJzogVHJ1ZX0)s)",
+            {"p_dict_eydnYW1lX3BhcGVyJzogVHJ1ZX0": {"game_paper": True}},
+        ),
+        # Lowered before prefixing: the stored key is game_paper, never game_PAPER.
+        (
+            "game:PAPER",
+            r"(card.card_is_tags @> %(p_dict_eydnYW1lX3BhcGVyJzogVHJ1ZX0)s)",
+            {"p_dict_eydnYW1lX3BhcGVyJzogVHJ1ZX0": {"game_paper": True}},
+        ),
+        (
+            "-game:mtgo",
+            r"NOT ((card.card_is_tags @> %(p_dict_eydnYW1lX210Z28nOiBUcnVlfQ)s))",
+            {"p_dict_eydnYW1lX210Z28nOiBUcnVlfQ": {"game_mtgo": True}},
+        ),
+    ],
+)
+def test_game_sql_translation(parse_query, input_query: str, expected_sql: str, expected_parameters: dict) -> None:
+    """game: generates a prefixed card_is_tags containment check."""
+    parsed = parse_query(input_query)
+    context = QueryContext()
+    observed_sql = parsed.to_sql(context)
+    assert observed_sql == expected_sql, f"\nExpected: {expected_sql}\nObserved: {observed_sql}"
+    assert context == expected_parameters, f"\nExpected params: {expected_parameters}\nObserved params: {context}"
+
+
+@pytest.mark.parametrize(
     argnames="tag_value",
     argvalues=["creature", "modal-dfc", "spell"],
 )
