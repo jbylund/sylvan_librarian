@@ -3,4 +3,4 @@ maturin
 pytest
 pytest-cov
 pytest-profiling
-ruff
+ruff==0.17.4
