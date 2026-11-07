@@ -1289,3 +1289,35 @@ def test_a_tilde_inside_a_word_keeps_the_word_whole() -> None:
     node = hand_parser.parse_str_to_query("o:a~b").root
     assert isinstance(node, BinaryOperatorNode)
     assert node.rhs == StringValueNode("a~b")
+
+
+@pytest.mark.parametrize(
+    ("bare", "quoted"),
+    [
+        ("name:jace, re", 'name:"jace," re'),
+        ("jace, re", '"jace," re'),
+        ("(jace, re)", '("jace," re)'),
+        ("name:jace,", 'name:"jace,"'),
+        ("name:jace,re", 'name:"jace,re"'),
+        ("o:draw, flying", 'o:"draw," flying'),
+        ("name:,", 'name:","'),
+        (",", '","'),
+        (",jace", '",jace"'),
+    ],
+)
+def test_a_comma_parses_the_same_bare_as_quoted(bare: str, quoted: str) -> None:
+    """A `,` in a value is an ordinary character, so the bare and quoted spellings are one search.
+
+    It used to be "Unexpected character" and kill the whole query, which bit names typed from a
+    card ("Jace, Reality Sculptor" -> `jace, re`). Scryfall instead drops a comma after a name word
+    (api.scryfall.com 2026-11-07: `name:jace, re` is 6 cards, `name:"jace," re` is 2); here the
+    comma stays literal, so `jace, re` finds the 2 names that have one.
+    """
+    assert hand_parser.parse_str_to_query(bare).root == hand_parser.parse_str_to_query(quoted).root
+
+
+def test_a_comma_inside_a_word_keeps_the_word_whole() -> None:
+    """`name:jace,re` is the one value "jace,re", not two terms."""
+    node = hand_parser.parse_str_to_query("name:jace,re").root
+    assert isinstance(node, BinaryOperatorNode)
+    assert node.rhs == StringValueNode("jace,re")
