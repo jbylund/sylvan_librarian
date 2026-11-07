@@ -191,12 +191,23 @@ async function main() {
     document.getElementById('card-loading').textContent = 'Invalid card URL.';
     return;
   }
-  const [, rawSetCode, collectorNumber] = parts;
+  const [, rawSetCode, rawCollectorNumber] = parts;
   const setCode = rawSetCode.toLowerCase();
+  // location.pathname is percent-encoded: /card/war/2★ arrives as "2%E2%98%85", which matches
+  // no printing, and would never equal a printing's collector_number in the filters below.
+  let collectorNumber = rawCollectorNumber;
+  try {
+    collectorNumber = decodeURIComponent(rawCollectorNumber);
+  } catch (_) {
+    // A malformed escape is not a real collector number; search for it as written.
+  }
 
   let card;
   try {
-    const resp = await fetch(`/search?q=${encodeURIComponent(`set:${setCode} cn:${collectorNumber}`)}&unique=printing`);
+    // Quoted: an unquoted collector number with a symbol in it (cn:2★) does not parse.
+    const resp = await fetch(
+      `/search?q=${encodeURIComponent(`set:${setCode} cn:"${escapeExactName(collectorNumber)}"`)}&unique=printing`
+    );
     const data = await resp.json();
     // cn: matches on collector_number_int, which collapses numbers differing only by
     // letters/symbols (e.g. "2018" vs "2018A") — pick the exact printing, not data.cards[0].

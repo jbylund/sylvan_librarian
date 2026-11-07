@@ -717,6 +717,26 @@ describe('CardSearch performSearch', () => {
 
     expect(global.fetch).toHaveBeenCalled();
   });
+
+  // Typing `t:elf`, then `)`, then backspacing to `t:elf` again used to leave the validation error
+  // on screen over an empty grid: showError cleared the grid but not lastCompletedUrl, so the
+  // reverted query was skipped as "already displayed" and no fetch was issued.
+  it('re-fetches the last successful query after a validation error cleared the grid', async () => {
+    delete search.showError; // use the real one, which clears the grid
+    global.fetch.mockClear();
+    global.fetch.mockResolvedValue({ ok: true, json: async () => ({ cards: [], total_cards: 0 }) });
+
+    await search.performSearch('t:elf');
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(search.lastCompletedUrl).not.toBeNull();
+
+    await search.performSearch('t:elf)');
+    expect(search.statusMessage.innerHTML).toContain('error-message');
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+
+    await search.performSearch('t:elf');
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('CardSearch getColumnsFromViewportWidth', () => {

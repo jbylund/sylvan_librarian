@@ -176,8 +176,7 @@ ensure_pydocker: ensure_uv
 	$(PYTHON) -m uv pip install docker
 
 ensure_ruff: ensure_uv
-	@$(PYTHON) -m ruff --version > /dev/null || \
-	$(PYTHON) -m uv pip install ruff
+	@$(PYTHON) -m uv pip install --quiet "$$(grep '^ruff==' requirements/test.txt)"
 
 ensure_uv:
 	@$(PYTHON) -m uv --version > /dev/null || \
