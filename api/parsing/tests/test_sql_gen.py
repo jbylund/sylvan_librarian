@@ -1545,3 +1545,62 @@ def test_commander_colour_alias_generates_same_sql(parse_query, alias_query: str
     canonical_sql = parse_query(canonical_query).to_sql(canonical_context)
     assert alias_sql == canonical_sql
     assert alias_context == canonical_context
+
+
+# ── a regex on a tag/JSONB_OBJECT column keeps its pattern ───────────────────
+#
+# WHAT THIS PINS IS A WRONG ANSWER, not a missing feature. `card_keywords`, `card_frame_data`,
+# `card_oracle_tags`, `card_art_tags` and `card_is_tags` are JSONB_OBJECT columns whose
+# comparison-key readers take a STRING and normalize it into one tag name. A RegexValueNode handed
+# to one of them came out as the letters its pattern happens to contain: `otag:/^remov/` became
+# the tag `^remov`, `kw:/f.y/` the keyword `f.y`. No such tag exists, so BOTH paths — the engine,
+# through the key list `_rhs_to_json` emitted, and PostgreSQL, through `@>` — answered a different
+# query with confidence and returned nothing. That is the same shape the JSONB_ARRAY branch was
+# already fixed for (`t:/^drag/` folding an empty array into `TypeCmp { mask: 0 }`).
+COLLECTION_REGEX_QUERIES = [
+    ("kw:/f.y/", "card_keywords"),
+    ("keyword:/^fly/", "card_keywords"),
+    ("frame:/^199/", "card_frame_data"),
+    ("otag:/^remov/", "card_oracle_tags"),
+    ("function:/^remov/", "card_oracle_tags"),
+    ("art:/^drag/", "card_art_tags"),
+    ("is:/^prom/", "card_is_tags"),
+]
+
+
+@pytest.mark.parametrize(
+    argnames=["query", "attribute"],
+    argvalues=COLLECTION_REGEX_QUERIES,
+    ids=[q for q, _ in COLLECTION_REGEX_QUERIES],
+)
+def test_collection_regex_keeps_its_pattern(query: str, attribute: str) -> None:
+    """The node reaches the engine as a regex, so `build_text_filter` can decline it."""
+    rhs = parsing.parse_scryfall_query(query).to_json()
+    assert "RegexValueNode" in repr(rhs), f"{query} lost its pattern before the engine saw it"
+    assert attribute in repr(rhs)
+
+
+@pytest.mark.parametrize(
+    argnames=["query", "attribute"],
+    argvalues=COLLECTION_REGEX_QUERIES,
+    ids=[q for q, _ in COLLECTION_REGEX_QUERIES],
+)
+def test_collection_regex_refuses_on_the_sql_path(query: str, attribute: str) -> None:
+    """...and the SQL fallback refuses rather than looking up the tag the pattern spells.
+
+    `_search_sql` turns a ValueError out of `generate_sql_query` into a 400, which is the right
+    answer for a column neither path can run a pattern against — and strictly better than the
+    empty result set it used to return.
+    """
+    with pytest.raises(ValueError, match=f"regex is not supported on {attribute}"):
+        generate_sql_query(parsing.parse_scryfall_query(query))
+
+
+@pytest.mark.parametrize(
+    argnames="query",
+    argvalues=["is:/promo/", "kw:/flying/", "otag:/removal/", "frame:/1997/"],
+)
+def test_plain_literal_collection_regex_still_lowers(query: str) -> None:
+    """A metacharacter-free pattern is still lowered to the tag it spells, so nothing that answered stops."""
+    assert "RegexValueNode" not in repr(parsing.parse_scryfall_query(query).to_json())
+    generate_sql_query(parsing.parse_scryfall_query(query))

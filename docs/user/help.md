@@ -202,12 +202,60 @@ Prefix a name with `!` to match only that card:
 
 ### Regular Expressions
 
-Use `/pattern/` with `name:`, `type:`, or `oracle:`. Standard regex syntax applies.
+Use `/pattern/` with `name:`, `type:`, `oracle:`, `flavor:`, `artist:`, `set:`, `layout:`,
+`border:`, `watermark:`, `number:`, and `mana:`. Standard regex syntax applies, plus the three
+extensions below.
 
 ```
 name:/^Lightning/
 o:/(flying|trample)/
+mana:/^\{R\}$/       mono-red costs, exactly
 ```
+
+**`~` is the card's own self-reference**, on `oracle:` only. It matches the card's name, the short
+form a legendary's rules text uses ("Rankle" for *Rankle, Master of Pranks*), and the "this
+creature" / "this spell" / "this land" family of phrases. Elsewhere — on `name:`, `type:`,
+`flavor:`, `mana:` — it is the literal character.
+
+```
+o:/~ deals/          cards that damage something by naming themselves
+o:/~/ -o:/this/      the ones that use their own name rather than a phrase
+```
+
+A pattern that contains a `~` anywhere is matched against the rules text with every one of those
+self-references already replaced by a `~`. So in such a pattern the tilde is one ordinary
+character — not a word character, and `[~]` names it — and the name or phrase it replaced is no
+longer there to match: `o:/(~|this \w+) deals/` does not find "this creature deals" through its
+second arm, only through its first.
+
+**`\s…` shorthands** name a symbol class, and are not the whitespace escape:
+
+| | | | |
+| --- | --- | --- | --- |
+| `\ss` | any card symbol | `\smr` | the same mana symbol twice |
+| `\sm` | any mana symbol | `\spt` | an X/X power/toughness |
+| `\sc` | any coloured mana symbol | `\spp` | a +X/+X |
+| `\smh` | any hybrid symbol | `\smm` | a -X/-X |
+| `\smp` | any Phyrexian symbol | | |
+
+```
+o:/\smh/             cards whose text prints a hybrid symbol
+o:/\spp/             cards that put a +X/+X counter somewhere
+```
+
+Inside a character class nothing is expanded: `[\sm]` is still "whitespace or the letter m".
+
+**A pattern reads rules text one line at a time.** `^` and `$` anchor to a line, and neither `.`
+nor a negated class crosses a line break: `o:/enters tapped, [^.]*untap/` does not run from a
+trigger line into the bullet under it. `\n`, `\s` and `(.|\n)` do cross.
+
+**Word boundaries** may be spelled the PostgreSQL way — `\y` for a boundary and `\m` for the
+start of a word — as well as the usual `\b`.
+
+**A pattern is lowercased before it is read**, as Scryfall lowercases the whole query. For the
+letters that changes nothing, since matching ignores case anyway; for an escape it does: `\S` is
+`\s`, `\W` is `\w`, `\D` is `\d`, `\B` is `\b`. So `[\s\S]*` is a run of whitespace, not "anything" —
+write `(.|\n)*` to cross lines.
 
 ---
 

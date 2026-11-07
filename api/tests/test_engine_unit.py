@@ -357,15 +357,15 @@ class TestCollectionOperators:
         assert total_pw == 17
         assert total_creature == 1
 
-    def test_type_eq_exact(self, engine: QueryEngine) -> None:
-        # 34 creature printings are exactly {Creature} (the 33 pre-existing
-        # ones plus Monastery Messenger); Cathedral Membrane is {Artifact,
-        # Creature}, not exactly {Creature}. Both planeswalkers carry
-        # Legendary too, so t=planeswalker matches nothing.
-        total_creature, _ = _run(engine, "t=creature")
-        total_pw, _ = _run(engine, "t=planeswalker")
-        assert total_creature == 34
-        assert total_pw == 0
+    def test_type_eq_is_the_same_substring_as_colon(self, engine: QueryEngine) -> None:
+        # `=` is NOT set equality on a type. Measured on api.scryfall.com 2026-08-16:
+        # `t=creature e:khm` returns 151, the same as `t:creature e:khm`, and
+        # `t="legendary creature"` returns 32 -- set equality would answer 0 for the second,
+        # since no card's type array is exactly ["Legendary", "Creature"] once subtypes exist.
+        # DELIBERATE DIVERGENCE from the SQL path, which still compares the type ARRAY: this
+        # engine answers what api.scryfall.com answers (see the PR description).
+        assert _run(engine, "t=creature")[0] == _run(engine, "t:creature")[0]
+        assert _run(engine, "t=planeswalker")[0] == _run(engine, "t:planeswalker")[0]
 
     def test_type_lt_matches_nothing(self, engine: QueryEngine) -> None:
         # Proper subset of {Creature} is the empty type set — no card is typeless.

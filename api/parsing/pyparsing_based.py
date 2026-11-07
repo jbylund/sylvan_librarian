@@ -59,6 +59,10 @@ DEFAULT_OPERATORS = one_of(": > < >= <= = !=")
 # still wins over bare '!' here: DEFAULT_OPERATORS is tried first and already matches it whole.
 EQ_ALIAS_OPERATORS = DEFAULT_OPERATORS | Literal("!").set_parse_action(lambda: "=")
 
+# Mirrors hand_parser._MANA_REGEX_ALIASES: the MANA-class aliases that take a regex, which is
+# `mana`/`m` and not `devotion`.
+_MANA_REGEX_ALIASES = frozenset({"mana", "m"})
+
 _NUMERIC_LITERAL_RE = re.compile(r"^\d+(\.\d+)?$")
 _COMPARISON_OPERATORS = frozenset({">", "<", ">=", "<=", "=", "!=", ":"})
 
@@ -319,11 +323,59 @@ def create_color_parsers() -> dict[str, ParserElement]:
     # on validity, and a colour name accepted by only one of them is exactly that failure).
     color_word = make_regex_pattern(COLOR_ALIAS_TO_CODES)
     color_letter_pattern = Regex(r"[wubrgcWUBRGC]+")
-    color_value = color_word | color_letter_pattern
+
+    def make_slashed_color_value(tokens: list[str]) -> StringValueNode:
+        r"""A `/.../` colour value is the text between the slashes, not a regex.
+
+        Scryfall runs no regex on a colour column — `c:/w/` is 7,105 there and so is `c:w`, and
+        `c:/white/` and `c:/yore-tiller/` behave the same way (measured 2026-08-28). It validates
+        the text the delimiters contained, which is why `c:/xyz/` answers `Unknown color "x"`:
+        the term is echoed WITH its slashes and the letter is named from WITHOUT them. Shared
+        with hand_parser._color_value_from_text through the same two acceptances.
+        """
+        value = tokens[0][1:-1].replace("\\/", "/")
+        if value.lower() not in COLOR_ALIAS_TO_CODES and not all(c in "wubrgcWUBRGC" for c in value):
+            msg = f"Invalid color value {value!r}"
+            raise ValueError(msg)
+        return StringValueNode(value)
+
+    slashed_color_value = QuotedString("/", esc_char="\\", unquote_results=False, convert_whitespace_escapes=False).set_parse_action(
+        make_slashed_color_value,
+    )
+    color_value = color_word | color_letter_pattern | slashed_color_value
 
     return {
         "color_value": color_value,
     }
+
+
+def create_mana_regex_condition(mana_attr_word: ParserElement, regex_pattern: ParserElement) -> ParserElement:
+    r"""`mana:/.../` is a REGEX over the printed cost string — see hand_parser.parse_mana_value.
+
+    Scoped to `mana`/`m` and to `:`/`=` because Scryfall's is: `devotion:/r/` is `Unknown regular
+    expression keyword "devotion"` there and `mana>=/{r}/` is `Unknown mana symbols "//"`, while
+    `mana=/{r}/` is 6,853 (2026-08-28). Outside that scope the parse action raises, and the hand
+    parser reaches its own "Expected mana value" for the same inputs.
+
+    Args:
+        mana_attr_word: Parser for a MANA-class attribute alias.
+        regex_pattern: Parser for a `/.../` delimited pattern.
+
+    Returns:
+        Parser element matching a mana-column regex condition.
+    """
+
+    def make_mana_regex_condition(tokens: list[object]) -> BinaryOperatorNode:
+        """Build the leaf, rejecting the aliases and operators Scryfall does not take a regex on."""
+        attr, operator, value = tokens
+        if attr.original_attribute.lower() not in _MANA_REGEX_ALIASES or operator not in (":", "="):
+            msg = f"Unknown regular expression keyword {attr.original_attribute!r}"
+            raise ValueError(msg)
+        return BinaryOperatorNode(create_value_node(attr), operator, create_value_node(value))
+
+    condition = mana_attr_word + EQ_ALIAS_OPERATORS + regex_pattern
+    condition.set_parse_action(make_mana_regex_condition)
+    return condition
 
 
 def create_all_condition_parsers(basic_parsers: dict, mana_parsers: dict, color_parsers: dict) -> dict[str, ParserElement]:
@@ -381,6 +433,8 @@ def create_all_condition_parsers(basic_parsers: dict, mana_parsers: dict, color_
     mana_value_or_string = mana_value | mana_quoted_value
     mana_condition = create_condition_parser(mana_attr_word, mana_value_or_string, operators=EQ_ALIAS_OPERATORS)
 
+    mana_regex_condition = create_mana_regex_condition(mana_attr_word, basic_parsers["regex_pattern"])
+
     color_condition = create_condition_parser(color_attr_word, color_value | quoted_string, operators=EQ_ALIAS_OPERATORS)
 
     regex_pattern = basic_parsers["regex_pattern"]
@@ -407,7 +461,8 @@ def create_all_condition_parsers(basic_parsers: dict, mana_parsers: dict, color_
     attr_attr_condition.set_parse_action(make_binary_operator_node)
 
     condition = (
-        mana_condition
+        mana_regex_condition
+        | mana_condition
         | rarity_condition
         | legality_condition
         | color_condition
@@ -426,6 +481,7 @@ def create_all_condition_parsers(basic_parsers: dict, mana_parsers: dict, color_
         "arithmetic_expr": arithmetic_expr,
         "unified_numeric_comparison": unified_numeric_comparison,
         "mana_condition": mana_condition,
+        "mana_regex_condition": mana_regex_condition,
         "color_condition": color_condition,
         "rarity_condition": rarity_condition,
         "legality_condition": legality_condition,
