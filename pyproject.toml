@@ -15,6 +15,7 @@ ignore = [
     "FBT003",
     "S105",
     "S608",
+    "SIM102", # a nested if can read more clearly than one condition joined with `and`
     "SIM117",
     "COM812", # trailing comma - enforced by ruff format
     "S311",   # random is fine for non-cryptographic use in this codebase

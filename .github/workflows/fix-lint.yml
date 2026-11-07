@@ -28,7 +28,7 @@ jobs:
           python-version: '3.13'
 
       - name: Install ruff
-        run: pip install ruff
+        run: pip install "$(grep '^ruff==' requirements/test.txt)"
 
       - name: Run ruff fix and format
         run: |
