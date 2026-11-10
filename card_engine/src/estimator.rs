@@ -87,6 +87,7 @@ pub(crate) fn has_printing_varying_leaf(f: &FilterExpr) -> bool {
                     | NumField::PriceUsd
                     | NumField::PriceEur
                     | NumField::PriceTix
+                    | NumField::ArtistCount
                     | NumField::PreferScore
             ),
             NumExpr::Arith(lhs, _, rhs) => num_varying(lhs) || num_varying(rhs),
@@ -96,6 +97,10 @@ pub(crate) fn has_printing_varying_leaf(f: &FilterExpr) -> bool {
         FilterExpr::NumericCmp { lhs, rhs, .. } => num_varying(lhs) || num_varying(rhs),
         FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. } => true,
         FilterExpr::ArtistMatch { .. } | FilterExpr::FlavorMatch { .. } => true,
+        // ...and so are the cheapest codes: the answer is the printing's, not the card's.
+        FilterExpr::Cheapest { .. } => true,
+        // ...and `new:rarity`: the printing's own bit.
+        FilterExpr::NewRarity => true,
         FilterExpr::TextContains { field, .. } => matches!(field, TextSearchField::FlavorTextLower),
         FilterExpr::TextExact { field, .. } | FilterExpr::TextRegex { field, .. } => matches!(
             field,
@@ -351,6 +356,10 @@ fn estimate_leaf(f: &FilterExpr, indexes: &Archived<CardIndexes>, n_cards: u32, 
         // signature — so PR1 returns the sound "unknown" for it. (Not exercised
         // by the fuzz corpus, which emits TextExact{NameLower}, not ExactName.)
         FilterExpr::ExactName(_) => unknown(n),
+        // No index answers `cheapest:`; it is a bit test on each candidate printing.
+        FilterExpr::Cheapest { .. } => unknown(n),
+        // Nor does one answer `new:rarity`; it is a byte read off each candidate printing.
+        FilterExpr::NewRarity => unknown(n),
 
         FilterExpr::NumericCmp { lhs, op, rhs } => {
             // Only the simple `Field(f) op Const(c)` / `Const op Field(f)`
@@ -392,6 +401,13 @@ fn estimate_leaf(f: &FilterExpr, indexes: &Archived<CardIndexes>, n_cards: u32, 
                 },
                 // Unindexed fields (loyalty/edhrec/prefer_score) → sound unknown.
                 NumField::Loyalty | NumField::EdhrEc | NumField::PreferScore => unknown(n),
+                // The count keywords: unindexed too, one field read per candidate.
+                NumField::PrintCount
+                | NumField::SetCount
+                | NumField::PaperPrintCount
+                | NumField::PaperSetCount
+                | NumField::IllustrationCount
+                | NumField::ArtistCount => unknown(n),
             }
         }
 
