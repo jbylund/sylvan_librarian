@@ -1261,31 +1261,63 @@ def test_hyphenated_words_edge_cases_fail(invalid_query: str) -> None:
 
 
 @pytest.mark.parametrize("query", ["o:~", "o:~x", "o:a~b", "name:~", "t:~", "~"])
-def test_tilde_is_an_ordinary_value_character(query: str) -> None:
+def test_tilde_is_an_ordinary_value_character(parse_query, query: str) -> None:
     """A `~` in a value lexes; it used to be "Unexpected character" and kill the whole query.
 
     Measured on api.scryfall.com 2026-09-18: every one of these parses there and only the
     rules-text one matches -- `o:~` 19,407, while `o:~x`, `o:a~b`, `name:~`, `t:~` and a bare `~`
     are each 0 WITHOUT a query error.
     """
-    hand_parser.parse_str_to_query(query)
+    parse_query(query)
 
 
-def test_tilde_parses_the_same_bare_as_quoted() -> None:
+def test_tilde_parses_the_same_bare_as_quoted(parse_query) -> None:
     """`o:~` and `o:"~"` are one search, which is what makes this a lexer fix and not a semantic one.
 
     Both answer 19,407 on api.scryfall.com (2026-09-18). The quoted spelling always lexed -- it is
     a string token -- so only the bare one was ever broken, and the two must now agree.
     """
-    assert hand_parser.parse_str_to_query("o:~").root == hand_parser.parse_str_to_query('o:"~"').root
+    assert parse_query("o:~").root == parse_query('o:"~"').root
 
 
-def test_a_tilde_inside_a_word_keeps_the_word_whole() -> None:
+def test_a_tilde_inside_a_word_keeps_the_word_whole(parse_query) -> None:
     """The continuation half: `~` joins its word rather than splitting it.
 
     `o:a~b` is a valid empty search on api.scryfall.com (2026-09-18) rather than two terms, so the
     value has to arrive as the single string "a~b".
     """
-    node = hand_parser.parse_str_to_query("o:a~b").root
+    node = parse_query("o:a~b").root
     assert isinstance(node, BinaryOperatorNode)
     assert node.rhs == StringValueNode("a~b")
+
+
+@pytest.mark.parametrize(
+    ("bare", "quoted"),
+    [
+        ("name:jace, re", 'name:"jace," re'),
+        ("jace, re", '"jace," re'),
+        ("(jace, re)", '("jace," re)'),
+        ("name:jace,", 'name:"jace,"'),
+        ("name:jace,re", 'name:"jace,re"'),
+        ("o:draw, flying", 'o:"draw," flying'),
+        ("name:,", 'name:","'),
+        (",", '","'),
+        (",jace", '",jace"'),
+    ],
+)
+def test_a_comma_parses_the_same_bare_as_quoted(parse_query, bare: str, quoted: str) -> None:
+    """A `,` in a value is an ordinary character, so the bare and quoted spellings are one search.
+
+    It used to be "Unexpected character" and kill the whole query, which bit names typed from a
+    card ("Jace, Reality Sculptor" -> `jace, re`). Scryfall instead drops a comma after a name word
+    (api.scryfall.com 2026-11-07: `name:jace, re` is 6 cards, `name:"jace," re` is 2); here the
+    comma stays literal, so `jace, re` finds the 2 names that have one.
+    """
+    assert parse_query(bare).root == parse_query(quoted).root
+
+
+def test_a_comma_inside_a_word_keeps_the_word_whole(parse_query) -> None:
+    """`name:jace,re` is the one value "jace,re", not two terms."""
+    node = parse_query("name:jace,re").root
+    assert isinstance(node, BinaryOperatorNode)
+    assert node.rhs == StringValueNode("jace,re")

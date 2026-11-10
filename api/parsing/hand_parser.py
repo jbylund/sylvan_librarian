@@ -108,10 +108,12 @@ class Token:
 
 
 _ARITH_OPS: frozenset[TT] = frozenset({TT.PLUS, TT.MINUS, TT.STAR, TT.SLASH})
-# `~` is an ordinary value character, at the start of a word and inside one, as on Scryfall. What it
-# means in rules text (the card's own name) is not handled here.
-_WORD_START = frozenset(string.ascii_letters + "_~")
-_WORD_CONT = frozenset(string.ascii_letters + string.digits + "_.~")
+# `~` and `,` are ordinary value characters, at the start of a word and inside one, so a bare value
+# is the same search as its quoted spelling (`name:jace,` is `name:"jace,"`). pyparsing_based's
+# _VALUE_PUNCT holds the same characters. What `~` means in rules text (the card's own name) is not
+# handled here.
+_WORD_START = frozenset(string.ascii_letters + "_~,")
+_WORD_CONT = frozenset(string.ascii_letters + string.digits + "_.~,")
 _DIGIT = frozenset(string.digits)
 _SPACE = frozenset(" \t\r\n")
 
