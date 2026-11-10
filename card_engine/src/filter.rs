@@ -123,6 +123,18 @@ pub(crate) enum NumField {
     PriceEur,
     PriceTix,
     PreferScore,
+    /// Scryfall's count keywords. The first five are CARD-level counts over all of the card's
+    /// printings (`prints`, `sets`, `paperprints`, `papersets`, `illustrations`) and `ArtistCount`
+    /// (`artists`) is the printing's own; all six are numbers `_sync_print_counts` wrote at import,
+    /// NULL until it has run. Measured on api.scryfall.com 2026-10-03: Lightning Bolt is
+    /// `prints=77`, `sets=46`, `paperprints=68`, `papersets=41`, `illustrations=33`. Unindexed —
+    /// one field read per candidate, like `edhrec`.
+    PrintCount,
+    SetCount,
+    PaperPrintCount,
+    PaperSetCount,
+    IllustrationCount,
+    ArtistCount,
 }
 
 fn attr_to_num_field(attr: &str) -> Option<NumField> {
@@ -138,6 +150,12 @@ fn attr_to_num_field(attr: &str) -> Option<NumField> {
         "price_eur"            => Some(NumField::PriceEur),
         "price_tix"            => Some(NumField::PriceTix),
         "prefer_score"         => Some(NumField::PreferScore),
+        "card_print_count"        => Some(NumField::PrintCount),
+        "card_set_count"          => Some(NumField::SetCount),
+        "card_paper_print_count"  => Some(NumField::PaperPrintCount),
+        "card_paper_set_count"    => Some(NumField::PaperSetCount),
+        "card_illustration_count" => Some(NumField::IllustrationCount),
+        "artist_count"            => Some(NumField::ArtistCount),
         _ => None,
     }
 }
@@ -179,7 +197,21 @@ fn field_num(card: &AOracleCard, printing: Option<&APrinting>, f: NumField) -> N
         NumField::PriceEur           => printing.map_or(NumVal::PDep, |p| known_cents(p.price_eur.as_ref().map(|v| u32::from(*v)))),
         NumField::PriceTix           => printing.map_or(NumVal::PDep, |p| known_cents(p.price_tix.as_ref().map(|v| u32::from(*v)))),
         NumField::PreferScore        => printing.map_or(NumVal::PDep, |p| known(p.prefer_score.as_ref().map(|v| f32::from(*v)))),
+        NumField::PrintCount         => card_count(u16::from(card.print_count)),
+        NumField::SetCount           => card_count(u16::from(card.set_count)),
+        NumField::PaperPrintCount    => card_count(u16::from(card.paper_print_count)),
+        NumField::PaperSetCount      => card_count(u16::from(card.paper_set_count)),
+        NumField::IllustrationCount  => card_count(u16::from(card.illustration_count)),
+        NumField::ArtistCount        => printing.map_or(NumVal::PDep, |p| {
+            if p.artist_count == super::ARTIST_COUNT_NONE { NumVal::Null } else { NumVal::Known(f64::from(p.artist_count)) }
+        }),
     }
+}
+
+/// A card-level count column: NULL until `_sync_print_counts` has counted the card. Zero is a
+/// value, not an absence — `paperprints=0` is the cards printed only in digital sets.
+fn card_count(v: u16) -> NumVal {
+    if v == super::PRINT_COUNT_NONE { NumVal::Null } else { NumVal::Known(f64::from(v)) }
 }
 
 #[derive(Clone)]
@@ -863,8 +895,15 @@ fn leaf_compares_printing_field(f: &FilterExpr) -> bool {
                 | NumField::PriceUsd
                 | NumField::PriceEur
                 | NumField::PriceTix
+                | NumField::ArtistCount
                 | NumField::PreferScore => true,
                 NumField::Cmc | NumField::Power | NumField::Toughness | NumField::Loyalty | NumField::EdhrEc => false,
+                // The five card-level counts are the same number on every printing of the card.
+                NumField::PrintCount
+                | NumField::SetCount
+                | NumField::PaperPrintCount
+                | NumField::PaperSetCount
+                | NumField::IllustrationCount => false,
             },
             NumExpr::Arith(lhs, _, rhs) => num_pdep(lhs) || num_pdep(rhs),
         }

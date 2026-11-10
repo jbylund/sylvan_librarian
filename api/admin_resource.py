@@ -198,6 +198,126 @@ WHERE
     cards.card_is_tags IS DISTINCT FROM proposed.proposed_is_tags
 """
 
+# Same chunking motive as _BOOLEAN_IS_TAGS_SYNC_CHUNK_COUNT, but by ORACLE id, not printing: a
+# per-card count is only chunkable if every row of a card lands in the same chunk.
+_PRINT_COUNTS_SYNC_CHUNK_COUNT = 4
+
+# The six columns _sync_print_counts maintains, in the order the statement writes them.
+PRINT_COUNT_COLUMNS = (
+    "card_print_count",
+    "card_set_count",
+    "card_paper_print_count",
+    "card_paper_set_count",
+    "card_illustration_count",
+    "artist_count",
+)
+
+
+def _build_print_counts_sql() -> str:
+    """Build the count-keyword sync statement: five per-card counts written onto every row of the card.
+
+    Scryfall's `prints`, `sets`, `paperprints`, `papersets` and `illustrations` each compare a
+    count over ALL of a card's printings, and `artists` a count on the printing itself. A SQL row
+    is one printing and the engine's `tri()` holds one card and one printing, so neither can count
+    siblings at query time; the numbers are decided here, once per import.
+
+    The rules, measured on api.scryfall.com 2026-10-03 and 2026-10-04 by reading every printing of
+    a card and binary-searching the value Scryfall holds (`!"Lightning Bolt" prints>=K`):
+
+    - `prints`: distinct (set, collector number) SLOTS -- not rows, so a slot printed in eleven
+      languages counts once -- over every printing, extras, promos and memorabilia included.
+    - A VARIATION is not a print. Embermage Goblin is ons/200 and the foil-only ons/200★, which
+      Scryfall marks `variation: true`, and is `prints=1`, `paperprints=1`. The slot is what is
+      skipped, when ANY row of it carries the flag: Monstrous Growth's por/173† is flagged in
+      four languages and not in Japanese, and the card is `prints=9` of its ten slots. Its
+      artwork and its set still count (`!"Embermage Goblin" illustrations=2`).
+    - `sets`: distinct set codes over every row (`sets=1` is `is:unique`).
+    - `paperprints` / `papersets`: the same two counts over the rows of PAPER SETS. The set
+      decides, not the row's own `games`: "Name Sticker" Goblin's only printing, unf/107m, is
+      `games: [mtgo]` in a paper set and is `paperprints=1`; Rakshasa Vizier's Arena-only
+      ktk/193y makes it 4, not 3. Zero is a value: a card printed only in digital sets is
+      `paperprints=0`.
+    - `illustrations`: distinct artworks; a printing with no illustration id contributes none.
+    - `artists`: how many artists the PRINTING credits, the length of its `artist_ids`.
+
+    A PAPER SET is one with any row on paper. That is Scryfall's `digital` flag on the Set object
+    read off the rows: over the 1,052 sets in the default_cards bulk file of 2026-10-03, "no card
+    of the set has paper in `games`" and `/sets`' `digital` agree on every one. Derived rather
+    than stored because this schema has no sets table.
+
+    They are counts over the rows this table holds, so they are exact for a card whose every
+    printing is imported and low by the printings `preprocess_card` drops.
+
+    Callers pass ``num_chunks`` and ``chunk_index`` as query parameters. Chunking is by
+    ``hashtext(oracle_id)`` rather than scryfall_id: the counts are per card, so every row of a
+    card must fall in the same chunk or a count taken inside a chunk would be partial. `paper_sets`
+    is the one CTE that is NOT chunked: whether a set is on paper is a fact about every card in
+    it. Rows with a NULL oracle_id (no card to belong to) keep NULL counts.
+
+    api/db/2026-10-04-01-print-counts.sql carries the same statement, unchunked, as its backfill.
+    """
+    columns = ", ".join(PRINT_COUNT_COLUMNS)
+    return f"""
+WITH paper_sets AS (
+    SELECT DISTINCT lower(cards.card_set_code) AS set_code
+    FROM magic.cards cards
+    WHERE COALESCE(cards.raw_card_blob->'games', '[]'::jsonb) ? 'paper'
+), card_rows AS (
+    SELECT
+        cards.oracle_id,
+        lower(cards.card_set_code) AS set_code,
+        cards.collector_number,
+        cards.illustration_id,
+        paper_sets.set_code IS NOT NULL AS in_paper_set,
+        bool_or(COALESCE(cards.raw_card_blob->>'variation', 'false') = 'true') OVER (
+            PARTITION BY cards.oracle_id, lower(cards.card_set_code), cards.collector_number
+        ) AS slot_is_variation
+    FROM magic.cards cards
+    LEFT JOIN paper_sets ON paper_sets.set_code = lower(cards.card_set_code)
+    WHERE cards.oracle_id IS NOT NULL
+      AND (abs(hashtext(cards.oracle_id::text)) %% %(num_chunks)s) = %(chunk_index)s
+), per_card AS (
+    SELECT
+        card_rows.oracle_id,
+        count(DISTINCT (card_rows.set_code, card_rows.collector_number))
+            FILTER (WHERE NOT card_rows.slot_is_variation) AS prints,
+        count(DISTINCT card_rows.set_code) AS sets,
+        count(DISTINCT (card_rows.set_code, card_rows.collector_number))
+            FILTER (WHERE NOT card_rows.slot_is_variation AND card_rows.in_paper_set) AS paper_prints,
+        count(DISTINCT card_rows.set_code) FILTER (WHERE card_rows.in_paper_set) AS paper_sets,
+        count(DISTINCT card_rows.illustration_id) AS illustrations
+    FROM card_rows
+    GROUP BY card_rows.oracle_id
+), proposed AS (
+    SELECT
+        cards.scryfall_id,
+        LEAST(per_card.prints, 32767)::smallint AS card_print_count,
+        LEAST(per_card.sets, 32767)::smallint AS card_set_count,
+        LEAST(per_card.paper_prints, 32767)::smallint AS card_paper_print_count,
+        LEAST(per_card.paper_sets, 32767)::smallint AS card_paper_set_count,
+        LEAST(per_card.illustrations, 32767)::smallint AS card_illustration_count,
+        LEAST(
+            CASE WHEN jsonb_typeof(cards.raw_card_blob->'artist_ids') = 'array'
+                 THEN jsonb_array_length(cards.raw_card_blob->'artist_ids') ELSE 0 END,
+            32767
+        )::smallint AS artist_count
+    FROM magic.cards cards
+    JOIN per_card ON per_card.oracle_id = cards.oracle_id
+)
+UPDATE magic.cards
+SET ({columns}) = (
+    proposed.card_print_count, proposed.card_set_count, proposed.card_paper_print_count,
+    proposed.card_paper_set_count, proposed.card_illustration_count, proposed.artist_count
+)
+FROM proposed
+WHERE
+    cards.scryfall_id = proposed.scryfall_id AND
+    ({", ".join(f"cards.{column}" for column in PRINT_COUNT_COLUMNS)})
+    IS DISTINCT FROM
+    ({", ".join(f"proposed.{column}" for column in PRINT_COUNT_COLUMNS)})
+"""
+
+
 CUSTOM_IS_TAGS = [
     "historic",  # artifact, legendary, saga
     "permanent",  # ...
@@ -833,6 +953,40 @@ class AdminResource:
             logger.info("Synced boolean is: tags on %d printings", updated_count)
         return updated_count
 
+    def _sync_print_counts(self, conn: Connection) -> int:
+        """Sync the count-keyword columns (PRINT_COUNT_COLUMNS) -- per-card counts, on every row.
+
+        Runs after every import because a new printing changes the counts of EVERY row of its
+        card: a reprint makes all of that card's older rows `prints` + 1, and only a whole-card
+        recount reaches them. Touches only rows whose numbers differ, so a re-import that adds
+        nothing writes nothing. See _build_print_counts_sql for the rules.
+
+        Args:
+        ----
+            conn (Connection): open connection; committed here once per chunk.
+
+        Returns:
+        -------
+            int: rows whose counts changed.
+
+        """
+        updated_count = 0
+        sync_sql = _build_print_counts_sql()
+        with conn.cursor() as cursor:
+            for chunk_index in range(_PRINT_COUNTS_SYNC_CHUNK_COUNT):
+                cursor.execute(
+                    sync_sql,
+                    {
+                        "num_chunks": _PRINT_COUNTS_SYNC_CHUNK_COUNT,
+                        "chunk_index": chunk_index,
+                    },
+                )
+                updated_count += cursor.rowcount
+                conn.commit()
+        if updated_count:
+            logger.info("Synced print counts on %d printings", updated_count)
+        return updated_count
+
     def _add_is_tag_to_printings(self, *, is_tag: str) -> dict[str, Any]:
         """Add a specific is: tag to all printings matching that tag using Scryfall search.
 
@@ -1256,6 +1410,7 @@ class AdminResource:
 
                 if cards_sent:
                     self._sync_boolean_is_tags(conn)
+                    self._sync_print_counts(conn)
 
                 if cards_sent == 0:
                     if stream.raw == 0:

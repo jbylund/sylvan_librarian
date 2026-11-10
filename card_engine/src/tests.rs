@@ -21,6 +21,7 @@ use super::{
     CollField, CmpOp, FilterExpr, InlineStr, Interner, ManaCost, OracleCard, Printing, TagIndex,
     TextField, TextSearchField, Tri, SortedTrigramIndex, VocabInterner, ARTIST_NONE, NONE_STR, TYPE_ARTIFACT, TYPE_CREATURE,
     TYPE_ENCHANTMENT, TYPE_INSTANT, TYPE_LAND, TYPE_LEGENDARY, TYPE_PLANESWALKER, TYPE_SNOW, TYPE_SORCERY,
+    ARTIST_COUNT_NONE, PRINT_COUNT_NONE,
 };
 use rkyv::{rancor::Error, Archived};
 use std::collections::HashMap;
@@ -229,6 +230,11 @@ fn stub_card(oracle_id: u128, card_types: u16, subtypes: &[&str], vocab: &mut Vo
         mana_cost: ManaCost { core: 0, hybrids: Vec::new(), devotion: 0, cmc: 0.0 },
         creature_power_text_id: NONE_STR,
         creature_toughness_text_id: NONE_STR,
+        print_count: PRINT_COUNT_NONE,
+        set_count: PRINT_COUNT_NONE,
+        paper_print_count: PRINT_COUNT_NONE,
+        paper_set_count: PRINT_COUNT_NONE,
+        illustration_count: PRINT_COUNT_NONE,
     }
 }
 
@@ -256,6 +262,7 @@ fn stub_printing(scryfall_id: u128, illustration_id: u128, prefer_score: Option<
         card_art_tags: Vec::new(),
         card_is_tags: Vec::new(),
         card_frame_data: Vec::new(),
+        artist_count: ARTIST_COUNT_NONE,
         artwork_group_id: 0, // placeholder; store_of overwrites via assign_artwork_groups
     }
 }
@@ -2143,6 +2150,8 @@ fn fuzz_num_field_str(f: NumField) -> &'static str {
         NumField::Cmc => "cmc", NumField::Power => "power", NumField::Toughness => "toughness", NumField::Loyalty => "loyalty",
         NumField::RarityInt => "rarity", NumField::CollectorNumberInt => "cn", NumField::EdhrEc => "edhrec",
         NumField::PriceUsd => "usd", NumField::PriceEur => "eur", NumField::PriceTix => "tix", NumField::PreferScore => "prefer",
+        NumField::PrintCount => "prints", NumField::SetCount => "sets", NumField::PaperPrintCount => "paperprints",
+        NumField::PaperSetCount => "papersets", NumField::IllustrationCount => "illustrations", NumField::ArtistCount => "artists",
     }
 }
 fn fuzz_num_expr_str(e: &NumExpr) -> String {
@@ -13469,4 +13478,142 @@ fn limit_zero_yields_no_rows_and_the_full_total() {
             }
         }
     }
+}
+
+// ─── The count keywords ───────────────────────────────────────────────────────
+
+/// `prints`, `sets`, `paperprints`, `papersets`, `illustrations` and `artists` are numbers
+/// `_sync_print_counts` wrote at import; the engine only compares them. Three cards, shaped on the
+/// values api.scryfall.com holds (2026-10-03):
+///
+///   card 1  Reset-like:   prints 3, sets 3, paperprints 2, papersets 2, illustrations 2; 3 printings,
+///           the second crediting two artists and the third none
+///   card 2  digital-only: prints 1, sets 1, paperprints 0, papersets 0, illustrations 1
+///   card 3  not yet counted (every column NULL) — the state of a row between the migration and
+///           the first sync, which must satisfy neither a comparison nor its negation
+#[test]
+fn count_keywords_compare_the_numbers_written_at_import() {
+    fn leaf(attr: &str, op: &str, rhs: serde_json::Value) -> FilterExpr {
+        let json = serde_json::json!({
+            "node_type": "CardBinaryOperatorNode",
+            "kwargs": {
+                "lhs": { "node_type": "CardAttributeNode", "kwargs": { "attribute_name": attr, "original_attribute": attr } },
+                "op": op,
+                "rhs": rhs
+            }
+        });
+        super::filter::build_filter(&json).expect("a count comparison builds")
+    }
+    fn number(value: f64) -> serde_json::Value {
+        serde_json::json!({ "node_type": "NumericValueNode", "kwargs": { "value": value } })
+    }
+    fn column(attr: &str) -> serde_json::Value {
+        serde_json::json!({ "node_type": "CardAttributeNode", "kwargs": { "attribute_name": attr, "original_attribute": attr } })
+    }
+    fn found(data: &CardData, mut filter: FilterExpr, unique: &str) -> Vec<u128> {
+        let bytes = rkyv::to_bytes::<Error>(data).expect("serialize");
+        let a = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+        let (_, page) = run_query(&QueryCtx::from(a), &mut filter, None, unique, "default", "name", "asc", 100, 0);
+        let mut out: Vec<u128> =
+            page.iter().map(|r| if unique == "card" { u128::from(r.0.oracle_id) } else { u128::from(r.1.scryfall_id) }).collect();
+        out.sort_unstable();
+        out
+    }
+    let cards_with = |data: &CardData, attr: &str, op: &str, v: f64| found(data, leaf(attr, op, number(v)), "card");
+    let not = |f: FilterExpr| FilterExpr::Not(Box::new(f));
+    let none = Vec::<u128>::new;
+
+    let mut vocab = VocabInterner::new();
+    let cards = (1..=3).map(|id| stub_card(id, TYPE_CREATURE, &[], &mut vocab)).collect();
+    // Printing ids are sequential: card 1 owns 1, 2, 3; card 2 owns 4; card 3 owns 5.
+    let mut data = store_of(cards, &[3, 1, 1], vocab);
+    {
+        let reset = &mut data.cards[0];
+        (reset.print_count, reset.set_count, reset.paper_print_count, reset.paper_set_count, reset.illustration_count) = (3, 3, 2, 2, 2);
+        let digital = &mut data.cards[1];
+        (digital.print_count, digital.set_count, digital.paper_print_count, digital.paper_set_count, digital.illustration_count) =
+            (1, 1, 0, 0, 1);
+    }
+    for (printing, artists) in data.printings.iter_mut().zip([1u8, 2, 0, 1]) {
+        printing.artist_count = artists;
+    }
+    assert_eq!(data.cards[2].print_count, PRINT_COUNT_NONE, "card 3 is the not-yet-counted row");
+    assert_eq!(data.printings[4].artist_count, ARTIST_COUNT_NONE);
+
+    // Each keyword reads its own column, under every comparator.
+    assert_eq!(cards_with(&data, "card_print_count", "=", 3.0), vec![1]);
+    assert_eq!(cards_with(&data, "card_print_count", ":", 1.0), vec![2], "':' reads as '='");
+    assert_eq!(cards_with(&data, "card_print_count", ">=", 1.0), vec![1, 2]);
+    assert_eq!(cards_with(&data, "card_print_count", ">", 1.0), vec![1]);
+    assert_eq!(cards_with(&data, "card_print_count", "<", 3.0), vec![2]);
+    assert_eq!(cards_with(&data, "card_print_count", "<=", 3.0), vec![1, 2]);
+    assert_eq!(cards_with(&data, "card_print_count", "!=", 3.0), vec![2]);
+    assert_eq!(cards_with(&data, "card_set_count", "=", 1.0), vec![2]);
+    assert_eq!(cards_with(&data, "card_set_count", "=", 3.0), vec![1]);
+    assert_eq!(cards_with(&data, "card_paper_print_count", "=", 2.0), vec![1]);
+    assert_eq!(cards_with(&data, "card_paper_set_count", "=", 2.0), vec![1]);
+    assert_eq!(cards_with(&data, "card_illustration_count", "=", 2.0), vec![1]);
+    assert_eq!(cards_with(&data, "card_illustration_count", "=", 1.0), vec![2]);
+
+    // Zero is a value, not an absence: the digital-only card is `paperprints=0`.
+    assert_eq!(cards_with(&data, "card_paper_print_count", "=", 0.0), vec![2]);
+    assert_eq!(cards_with(&data, "card_paper_set_count", "=", 0.0), vec![2]);
+    assert_eq!(cards_with(&data, "card_paper_print_count", ">=", 0.0), vec![1, 2]);
+
+    // NULL: the uncounted card survives neither a comparison nor its negation.
+    for attr in ["card_print_count", "card_set_count", "card_paper_print_count", "card_paper_set_count", "card_illustration_count"] {
+        assert_eq!(cards_with(&data, attr, ">=", 0.0), vec![1, 2], "{attr}");
+        assert_eq!(found(&data, not(leaf(attr, ">=", number(0.0))), "card"), none(), "{attr}");
+        assert_eq!(cards_with(&data, attr, "=", f64::from(PRINT_COUNT_NONE)), none(), "{attr}: the sentinel is not a count");
+    }
+
+    // A column on either side: `prints>sets` (119 in Kaldheim), `prints>paperprints`, `illustrations>=prints`.
+    assert_eq!(found(&data, leaf("card_print_count", ">", column("card_paper_print_count")), "card"), vec![1, 2]);
+    assert_eq!(found(&data, leaf("card_print_count", ">", column("card_set_count")), "card"), none());
+    assert_eq!(found(&data, leaf("card_print_count", "=", column("card_set_count")), "card"), vec![1, 2]);
+    assert_eq!(found(&data, leaf("card_illustration_count", ">=", column("card_print_count")), "card"), vec![2]);
+    assert_eq!(found(&data, leaf("card_set_count", "<", column("card_illustration_count")), "card"), none());
+
+    // The five card-level counts are the same on every printing of the card...
+    assert_eq!(found(&data, leaf("card_print_count", "=", number(3.0)), "printing"), vec![1, 2, 3]);
+    // ...and `artists` is the PRINTING's own: 631 printings credit two artists on Scryfall, 12 none.
+    assert_eq!(found(&data, leaf("artist_count", "=", number(2.0)), "printing"), vec![2]);
+    assert_eq!(found(&data, leaf("artist_count", "=", number(0.0)), "printing"), vec![3]);
+    assert_eq!(found(&data, leaf("artist_count", "=", number(1.0)), "printing"), vec![1, 4]);
+    assert_eq!(found(&data, leaf("artist_count", ">=", number(0.0)), "printing"), vec![1, 2, 3, 4]);
+    assert_eq!(found(&data, not(leaf("artist_count", ">=", number(0.0))), "printing"), none(), "printing 5 is NULL");
+    // Under unique=card a card matches when SOME printing of it does.
+    assert_eq!(found(&data, leaf("artist_count", "=", number(2.0)), "card"), vec![1]);
+    assert_eq!(found(&data, leaf("artist_count", ">=", column("card_print_count")), "printing"), vec![4]);
+
+    // Only `artists` varies by printing; the planner must know which is which.
+    assert!(super::estimator::has_printing_varying_leaf(&leaf("artist_count", "=", number(2.0))));
+    for attr in ["card_print_count", "card_set_count", "card_paper_print_count", "card_paper_set_count", "card_illustration_count"] {
+        assert!(!super::estimator::has_printing_varying_leaf(&leaf(attr, "=", number(1.0))), "{attr}");
+    }
+}
+
+/// The six count columns were placed in padding both rows already had, so the store does not
+/// grow: ten bytes on ~33k cards and one on ~100k printings would otherwise be ~0.5 MB of archive
+/// for six keywords (declared beside `edhrec_rank` the five card counts took the archived card
+/// from 288 bytes to 304). Pinned as a RELATION between offsets rather than as the two sizes, so
+/// another change to either row does not trip it — only moving these fields out of the padding
+/// does.
+#[test]
+fn the_count_columns_ride_padding_the_rows_already_had() {
+    use std::mem::offset_of;
+    type ACard = Archived<OracleCard>;
+    type APrint = Archived<Printing>;
+
+    // The card: five u16 between `legality_divergent` and the 16-aligned `oracle_id`. They fit
+    // the gap iff `oracle_id` still starts at the first 16-byte boundary after the bool.
+    let after_bool = offset_of!(ACard, legality_divergent) + 1;
+    assert_eq!(offset_of!(ACard, oracle_id), after_bool.next_multiple_of(16), "the counts pushed oracle_id to the next boundary");
+    assert!(offset_of!(ACard, print_count) >= after_bool);
+    assert!(offset_of!(ACard, illustration_count) + 2 <= offset_of!(ACard, oracle_id));
+
+    // The printing: one u8 before the 8-aligned legality word. It is free iff the byte it took
+    // was padding, i.e. it does not itself start on the boundary the word would have started on.
+    assert_ne!(offset_of!(APrint, artist_count) % 8, 0, "artist_count starts a new word instead of filling one");
+    assert_eq!(offset_of!(APrint, card_legalities), (offset_of!(APrint, artist_count) + 1).next_multiple_of(8));
 }

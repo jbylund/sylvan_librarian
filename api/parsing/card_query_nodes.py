@@ -170,6 +170,12 @@ class CardAttributeNode(AttributeNode):
             "price_eur": "price (EUR)",
             "price_tix": "price (TIX)",
             "edhrec_rank": "EDHREC rank",
+            "card_print_count": "number of printings",
+            "card_set_count": "number of sets",
+            "card_paper_print_count": "number of paper printings",
+            "card_paper_set_count": "number of paper sets",
+            "card_illustration_count": "number of illustrations",
+            "artist_count": "number of artists",
         }
         return name_map.get(self.attribute_name, self.attribute_name.replace("_", " "))
 

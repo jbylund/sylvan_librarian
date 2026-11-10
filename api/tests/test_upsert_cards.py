@@ -10,13 +10,14 @@ from unittest.mock import patch
 import psycopg
 import pytest
 
-from api.admin_resource import AdminResource, _build_boolean_is_tags_sql
+from api.admin_resource import PRINT_COUNT_COLUMNS, AdminResource, _build_boolean_is_tags_sql, _build_print_counts_sql
 from api.api_resource import APIResource
 from api.card_processing import preprocess_card
 from api.db.bulk_upsert import bulk_upsert
 from api.scryfall_bulk_data_fetcher import BulkDataKey
 from api.tests.helpers import make_raw_card
 from api.tests.support import mock_app_context
+from api.utils.db_utils import get_migrations
 
 # ---------------------------------------------------------------------------
 # Status-code tests
@@ -252,6 +253,212 @@ class TestBooleanIsTags:
         card["preview"] = {"source": "The Command Zone"}
         api_resource.admin._upsert_cards([card])
         assert "scryfallpreview" not in _is_tags_for(api_resource, card["id"])
+
+
+# ---------------------------------------------------------------------------
+# Count keywords (prints / sets / paperprints / papersets / illustrations / artists)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildPrintCountsSql:
+    """_build_print_counts_sql chunks by ORACLE id and writes all six columns."""
+
+    def test_sql_chunks_by_oracle_id_with_bound_parameters(self) -> None:
+        sql = _build_print_counts_sql()
+        # Per card, so a card's rows must share a chunk: hashed on oracle_id, not scryfall_id.
+        assert "hashtext(cards.oracle_id::text)" in sql
+        assert "hashtext(cards.scryfall_id::text)" not in sql
+        assert "%(num_chunks)s" in sql
+        assert "%(chunk_index)s" in sql
+        for column in PRINT_COUNT_COLUMNS:
+            assert column in sql
+
+    def test_migration_backfill_counts_the_same_way(self) -> None:
+        """The migration's one-off backfill is the sync statement without the chunk predicate."""
+        migration = next(m for m in get_migrations() if m["file_name"] == "2026-10-04-01-print-counts.sql")["file_contents"]
+
+        def counting_ctes(sql: str) -> list[str]:
+            # Everything that decides a number: from the first CTE to the UPDATE, whitespace folded.
+            return sql[sql.index("WITH paper_sets AS (") : sql.index("UPDATE magic.cards")].split()
+
+        chunk_predicate = "AND (abs(hashtext(cards.oracle_id::text)) %% %(num_chunks)s) = %(chunk_index)s"
+        sync_sql = _build_print_counts_sql()
+        assert chunk_predicate in sync_sql
+        assert counting_ctes(migration) == counting_ctes(sync_sql.replace(chunk_predicate, ""))
+
+    def test_a_paper_set_is_decided_over_the_whole_table_not_the_chunk(self) -> None:
+        """Whether a set is on paper is a fact about every card in it, so `paper_sets` is unchunked."""
+        sync_sql = _build_print_counts_sql()
+        paper_sets = sync_sql[sync_sql.index("WITH paper_sets AS (") : sync_sql.index("), card_rows AS (")]
+        assert "? 'paper'" in paper_sets
+        assert "hashtext" not in paper_sets
+
+
+def _printing(oracle_id: str, set_code: str, number: str, **extra: object) -> dict:
+    """One raw printing of the card `oracle_id`, at the slot (set_code, number)."""
+    card = make_raw_card(name=f"Count Test {oracle_id[:8]}")
+    card |= {"oracle_id": oracle_id, "set": set_code, "collector_number": number, "lang": "en"} | extra
+    return card
+
+
+def _counts_for(api_resource: APIResource, scryfall_id: str) -> tuple:
+    with api_resource.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+        cursor.execute(
+            f"SELECT {', '.join(PRINT_COUNT_COLUMNS)} FROM magic.cards WHERE scryfall_id = %(sid)s",
+            {"sid": scryfall_id},
+        )
+        row = cursor.fetchone()
+    return tuple(row[column] for column in PRINT_COUNT_COLUMNS)
+
+
+class TestPrintCounts:
+    """The six count columns are written at import, per card, onto every row of it.
+
+    Tuples below are (prints, sets, paperprints, papersets, illustrations, artists) -- the first
+    five are the card's and identical on each of its rows; the last is the row's own.
+    """
+
+    def test_counts_are_slots_sets_and_artworks_over_the_whole_card(self, api_resource: APIResource) -> None:
+        oracle_id = str(uuid.uuid4())
+        art_a, art_b = str(uuid.uuid4()), str(uuid.uuid4())
+        artist_1, artist_2 = str(uuid.uuid4()), str(uuid.uuid4())
+        first = _printing(oracle_id, "pca", "1", illustration_id=art_a, artist_ids=[artist_1])
+        # The same SLOT in a second language: a row, not a print.
+        first_ja = _printing(oracle_id, "pca", "1", illustration_id=art_a, artist_ids=[artist_1], lang="ja")
+        # A second slot in the same set, new artwork, two artists.
+        second = _printing(oracle_id, "pca", "2", illustration_id=art_b, artist_ids=[artist_1, artist_2])
+        # A second set, reusing the first artwork, and crediting nobody.
+        third = _printing(oracle_id, "pcb", "1", illustration_id=art_a)
+        # Another card entirely: its rows must not leak into these counts.
+        other = _printing(str(uuid.uuid4()), "pca", "3", illustration_id=str(uuid.uuid4()), artist_ids=[artist_2])
+
+        api_resource.admin._upsert_cards([first, first_ja, second, third, other])
+
+        # 4 rows, 3 slots, 2 sets, 2 artworks.
+        assert _counts_for(api_resource, first["id"]) == (3, 2, 3, 2, 2, 1)
+        assert _counts_for(api_resource, first_ja["id"]) == (3, 2, 3, 2, 2, 1)
+        assert _counts_for(api_resource, second["id"]) == (3, 2, 3, 2, 2, 2)
+        assert _counts_for(api_resource, third["id"]) == (3, 2, 3, 2, 2, 0)
+        assert _counts_for(api_resource, other["id"]) == (1, 1, 1, 1, 1, 1)
+
+    def test_a_printing_without_an_illustration_id_adds_no_artwork(self, api_resource: APIResource) -> None:
+        """`illustrations=0` is four cards on Scryfall: zero is a value, not an absence."""
+        oracle_id = str(uuid.uuid4())
+        card = _printing(oracle_id, "pcc", "1")
+        api_resource.admin._upsert_cards([card])
+
+        assert _counts_for(api_resource, card["id"]) == (1, 1, 1, 1, 0, 0)
+
+    def test_a_reprint_recounts_every_row_of_the_card(self, api_resource: APIResource) -> None:
+        """A new printing changes the counts on the card's OLDER rows, which the import did not touch."""
+        oracle_id = str(uuid.uuid4())
+        art = str(uuid.uuid4())
+        original = _printing(oracle_id, "pcd", "1", illustration_id=art)
+        api_resource.admin._upsert_cards([original])
+        assert _counts_for(api_resource, original["id"]) == (1, 1, 1, 1, 1, 0)
+
+        reprint = _printing(oracle_id, "pce", "7", illustration_id=str(uuid.uuid4()))
+        api_resource.admin._upsert_cards([reprint])
+
+        assert _counts_for(api_resource, original["id"]) == (2, 2, 2, 2, 2, 0)
+        assert _counts_for(api_resource, reprint["id"]) == (2, 2, 2, 2, 2, 0)
+
+    def test_a_printing_is_a_paper_print_by_its_set_not_its_own_games(self, api_resource: APIResource) -> None:
+        """`paperprints` / `papersets` count the rows of PAPER SETS -- sets with any row on paper.
+
+        Measured on api.scryfall.com 2026-10-04: "Name Sticker" Goblin's only printing, unf/107m,
+        is `games: [mtgo]` in Unfinity, a paper set, and the card is `paperprints=1`; Rakshasa
+        Vizier's Arena-only ktk/193y makes it `paperprints=4`, not 3. `paperprints=0` is the 654
+        cards printed only in digital sets.
+
+        preprocess_card drops a printing without paper in `games`, so the digital rows are made
+        here by editing the stored blob, and the sync is run as the import runs it.
+        """
+        oracle_id = str(uuid.uuid4())
+        # pcf is a paper set: this row is on paper.
+        paper = _printing(oracle_id, "pcf", "1", illustration_id=str(uuid.uuid4()))
+        # pcg is a digital set: no row of it is on paper.
+        arena = _printing(oracle_id, "pcg", "1", illustration_id=str(uuid.uuid4()))
+        digital_only = _printing(str(uuid.uuid4()), "pcg", "2", illustration_id=str(uuid.uuid4()))
+        # A card whose ONLY printing is digital, in the paper set: the "Name Sticker" Goblin shape.
+        mtgo_in_paper_set = _printing(str(uuid.uuid4()), "pcf", "2m", illustration_id=str(uuid.uuid4()))
+        api_resource.admin._upsert_cards([paper, arena, digital_only, mtgo_in_paper_set])
+
+        with api_resource.app_context.writer_pool.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """UPDATE magic.cards SET raw_card_blob = raw_card_blob || '{"games": ["arena", "mtgo"]}'::jsonb
+                       WHERE scryfall_id = ANY(%(ids)s::uuid[])""",
+                    {"ids": [arena["id"], digital_only["id"], mtgo_in_paper_set["id"]]},
+                )
+            conn.commit()
+            # The digital set's rows lose their paper counts; the digital row of the paper set keeps its own.
+            assert api_resource.admin._sync_print_counts(conn) == 3
+
+        assert _counts_for(api_resource, paper["id"]) == (2, 2, 1, 1, 2, 0)
+        assert _counts_for(api_resource, arena["id"]) == (2, 2, 1, 1, 2, 0)
+        assert _counts_for(api_resource, digital_only["id"]) == (1, 1, 0, 0, 1, 0)
+        assert _counts_for(api_resource, mtgo_in_paper_set["id"]) == (1, 1, 1, 1, 1, 0)
+
+    def test_a_variation_is_not_a_print(self, api_resource: APIResource) -> None:
+        """A slot Scryfall marks `variation: true` adds no print, but its artwork and set still count.
+
+        Measured on api.scryfall.com 2026-10-04: Embermage Goblin is ons/200 and the foil-only
+        ons/200★, and `!"Embermage Goblin" prints=1`, `paperprints=1` and `illustrations=2` each
+        find it where `prints=2` finds nothing.
+        """
+        oracle_id = str(uuid.uuid4())
+        regular = _printing(oracle_id, "pci", "200", illustration_id=str(uuid.uuid4()))
+        variation = _printing(oracle_id, "pci", "200★", illustration_id=str(uuid.uuid4()), variation=True)
+        # A card whose only slot in a second set is a variation: the set still counts.
+        other_oracle = str(uuid.uuid4())
+        plain = _printing(other_oracle, "pci", "201", illustration_id=str(uuid.uuid4()))
+        lone_variation = _printing(other_oracle, "pcj", "9†", illustration_id=plain["illustration_id"], variation=True)
+
+        api_resource.admin._upsert_cards([regular, variation, plain, lone_variation])
+
+        # Two slots, one print, two artworks -- and the variation row answers with the card's counts.
+        assert _counts_for(api_resource, regular["id"]) == (1, 1, 1, 1, 2, 0)
+        assert _counts_for(api_resource, variation["id"]) == (1, 1, 1, 1, 2, 0)
+        assert _counts_for(api_resource, plain["id"]) == (1, 2, 1, 2, 1, 0)
+        assert _counts_for(api_resource, lone_variation["id"]) == (1, 2, 1, 2, 1, 0)
+
+    def test_a_variation_slot_is_out_whole_when_one_language_of_it_lacks_the_flag(self, api_resource: APIResource) -> None:
+        """The SLOT is skipped, not the rows: Scryfall's flag is not the same on every language of one.
+
+        Monstrous Growth's por/173† is `variation: true` in English, German, Spanish and French
+        and `false` in Japanese on api.scryfall.com (2026-10-04), and the card is `prints=9` of
+        its ten slots. Skipping rows would leave the slot standing on the Japanese one.
+        """
+        oracle_id = str(uuid.uuid4())
+        art = str(uuid.uuid4())
+        regular = _printing(oracle_id, "pck", "173", illustration_id=art)
+        flagged = _printing(oracle_id, "pck", "173†", illustration_id=art, variation=True)
+        unflagged_ja = _printing(oracle_id, "pck", "173†", illustration_id=art, variation=False, lang="ja")
+
+        api_resource.admin._upsert_cards([regular, flagged, unflagged_ja])
+
+        for row in (regular, flagged, unflagged_ja):
+            assert _counts_for(api_resource, row["id"]) == (1, 1, 1, 1, 1, 0)
+
+    def test_sync_converges_and_a_reimport_does_not_blank_the_counts(self, api_resource: APIResource) -> None:
+        oracle_id = str(uuid.uuid4())
+        card = _printing(oracle_id, "pch", "1", illustration_id=str(uuid.uuid4()), artist_ids=[str(uuid.uuid4())])
+        api_resource.admin._upsert_cards([card])
+        assert _counts_for(api_resource, card["id"]) == (1, 1, 1, 1, 1, 1)
+
+        # Nothing changed, so a second sync rewrites no row at all.
+        with api_resource.app_context.writer_pool.connection() as conn:
+            assert api_resource.admin._sync_print_counts(conn) == 0
+
+        # The bulk stream never carries the count columns; a re-import that rewrites the row
+        # must leave them standing rather than reset them to NULL.
+        reimport = _printing(oracle_id, "pch", "1", illustration_id=card["illustration_id"], artist_ids=card["artist_ids"])
+        reimport["id"] = card["id"]
+        reimport["oracle_text"] = "changed so the reimport writes"
+        with patch.object(AdminResource, "_sync_print_counts", return_value=0):
+            api_resource.admin._upsert_cards([reimport])
+        assert _counts_for(api_resource, card["id"]) == (1, 1, 1, 1, 1, 1)
 
 
 # ---------------------------------------------------------------------------
