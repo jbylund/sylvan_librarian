@@ -390,8 +390,8 @@ fn estimate_leaf(f: &FilterExpr, indexes: &Archived<CardIndexes>, n_cards: u32, 
                     Some(None) => project(0, n_cards, n_printings),
                     Some(Some((lo, hi))) => project(range_count(&indexes.collector_number, lo, hi), n_cards, n_printings),
                 },
-                // Unindexed fields (loyalty/edhrec/prefer_score) → sound unknown.
-                NumField::Loyalty | NumField::EdhrEc | NumField::PreferScore => unknown(n),
+                // Unindexed fields (loyalty/edhrec/prefer_score/pt) → sound unknown.
+                NumField::Loyalty | NumField::EdhrEc | NumField::PreferScore | NumField::PowTou => unknown(n),
             }
         }
 

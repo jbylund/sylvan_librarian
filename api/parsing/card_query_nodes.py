@@ -136,6 +136,10 @@ class CardAttributeNode(AttributeNode):
             SQL string for the attribute reference.
         """
         del context
+        # `pt` / `powtou` is not a column: it is the sum of the two that are. NULL when either is,
+        # as the engine's is.
+        if self.attribute_name == "power_plus_toughness":
+            return "(card.creature_power + card.creature_toughness)"
         # attribute_name is already set to the correct db_column_name in __init__
         return f"card.{self.attribute_name}"
 
@@ -146,6 +150,7 @@ class CardAttributeNode(AttributeNode):
             "cmc": "mana value",
             "creature_power": "power",
             "creature_toughness": "toughness",
+            "power_plus_toughness": "power plus toughness",
             "card_color_identity": "color identity",
             "card_colors": "color",
             "card_name": "name",

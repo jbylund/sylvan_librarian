@@ -2143,6 +2143,7 @@ fn fuzz_num_field_str(f: NumField) -> &'static str {
         NumField::Cmc => "cmc", NumField::Power => "power", NumField::Toughness => "toughness", NumField::Loyalty => "loyalty",
         NumField::RarityInt => "rarity", NumField::CollectorNumberInt => "cn", NumField::EdhrEc => "edhrec",
         NumField::PriceUsd => "usd", NumField::PriceEur => "eur", NumField::PriceTix => "tix", NumField::PreferScore => "prefer",
+        NumField::PowTou => "pt",
     }
 }
 fn fuzz_num_expr_str(e: &NumExpr) -> String {
@@ -13469,4 +13470,73 @@ fn limit_zero_yields_no_rows_and_the_full_total() {
             }
         }
     }
+}
+
+/// `pt` / `powtou` is the card's power plus its toughness, over the same two values `pow` and
+/// `tou` compare. Each stat line is a card probed on api.scryfall.com 2026-10-03, scoped
+/// `!"<name>"` so the reference answer is 1 or 404.
+#[test]
+fn power_plus_toughness_is_the_sum_of_the_cards_two_stats() {
+    fn card_with(power: Option<i8>, toughness: Option<i8>) -> Vec<u8> {
+        let mut vocab = VocabInterner::new();
+        let mut card = stub_card(1, 0, &[], &mut vocab);
+        card.creature_power = power;
+        card.creature_toughness = toughness;
+        rkyv::to_bytes::<Error>(&card).expect("serialize").into_vec()
+    }
+    let strings: Vec<String> = Vec::new();
+    let strings_bytes = rkyv::to_bytes::<Error>(&strings).expect("serialize strings");
+    let strings = rkyv::access::<super::AStrings, Error>(&strings_bytes).expect("access strings");
+    let pt = |op, v: f64| FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::PowTou), op, rhs: NumExpr::Const(v) };
+    let verdict = |bytes: &[u8], f: &FilterExpr| {
+        let card = rkyv::access::<Archived<OracleCard>, Error>(bytes).expect("access");
+        f.eval_card(card, strings)
+    };
+    let is = |got: Tri, want: Tri| got == want;
+
+    // Heart of Kiran 4/4 -> pt=8; Bonecrusher Giant 4/3 -> pt=7; Brisela 9/10 -> pt=19;
+    // Char-Rumbler -1/3 -> pt=2; Delver of Secrets' front 1/1 -> pt=2.
+    for (p, t, sum) in [(4, 4, 8.0), (4, 3, 7.0), (9, 10, 19.0), (-1, 3, 2.0), (1, 1, 2.0)] {
+        let card = card_with(Some(p), Some(t));
+        assert!(is(verdict(&card, &pt(CmpOp::Eq, sum)), Tri::True), "{p}/{t} is pt={sum}");
+        assert!(is(verdict(&card, &pt(CmpOp::Ne, sum)), Tri::False));
+        assert!(is(verdict(&card, &pt(CmpOp::Lt, sum + 1.0)), Tri::True));
+        assert!(is(verdict(&card, &pt(CmpOp::Gt, sum)), Tri::False));
+    }
+
+    // No stats at all (Lightning Bolt): NULL, and NULL under the negation too —
+    // `-(pt>=0) t:instant e:khm` is 404 on Scryfall.
+    let bolt = card_with(None, None);
+    assert!(is(verdict(&bolt, &pt(CmpOp::Ge, 0.0)), Tri::Null));
+    assert!(is(verdict(&bolt, &FilterExpr::Not(Box::new(pt(CmpOp::Ge, 0.0)))), Tri::Null));
+    // One stat without the other is no sum either.
+    assert!(is(verdict(&card_with(Some(2), None), &pt(CmpOp::Ge, 0.0)), Tri::Null));
+    assert!(is(verdict(&card_with(None, Some(2)), &pt(CmpOp::Ge, 0.0)), Tri::Null));
+
+    // It stands on either side of a column comparison: `pt>pow` is every card with a positive
+    // toughness, `pow>pt` the ones with a negative one, and `pt=pow` a toughness of exactly 0.
+    let cmp_fields = |lhs, op, rhs| FilterExpr::NumericCmp { lhs: NumExpr::Field(lhs), op, rhs: NumExpr::Field(rhs) };
+    let kiran = card_with(Some(4), Some(4));
+    assert!(is(verdict(&kiran, &cmp_fields(NumField::PowTou, CmpOp::Gt, NumField::Power)), Tri::True));
+    assert!(is(verdict(&kiran, &cmp_fields(NumField::Power, CmpOp::Gt, NumField::PowTou)), Tri::False));
+    assert!(is(verdict(&card_with(Some(3), Some(-1)), &cmp_fields(NumField::Power, CmpOp::Gt, NumField::PowTou)), Tri::True));
+    assert!(is(verdict(&card_with(Some(3), Some(0)), &cmp_fields(NumField::PowTou, CmpOp::Eq, NumField::Power)), Tri::True));
+    assert!(is(verdict(&bolt, &cmp_fields(NumField::PowTou, CmpOp::Gt, NumField::Power)), Tri::Null));
+
+    // It is a numeric field by NAME, which is what the parser emits for both spellings.
+    let built = super::build_filter(&serde_json::json!({
+        "node_type": "CardBinaryOperatorNode",
+        "kwargs": {
+            "lhs": {"node_type": "CardAttributeNode", "kwargs": {"attribute_name": "power_plus_toughness", "original_attribute": "pt"}},
+            "op": "<",
+            "rhs": {"node_type": "NumericValueNode", "kwargs": {"value": 6}},
+        },
+    }))
+    .expect("pt<6 must build");
+    assert!(is(verdict(&card_with(Some(1), Some(1)), &built), Tri::True));
+    assert!(is(verdict(&kiran, &built), Tri::False));
+    // Evaluated per candidate, not through the joint-tuple index: it is not one of its columns,
+    // and a `pt` on either side keeps the whole comparison off it.
+    assert!(!is_arith_tuple_route(&built));
+    assert!(!is_arith_tuple_route(&cmp_fields(NumField::Power, CmpOp::Gt, NumField::PowTou)));
 }
