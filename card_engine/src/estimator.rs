@@ -95,6 +95,8 @@ pub(crate) fn has_printing_varying_leaf(f: &FilterExpr) -> bool {
     match f {
         FilterExpr::NumericCmp { lhs, rhs, .. } => num_varying(lhs) || num_varying(rhs),
         FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. } => true,
+        // A printing's own id and the artwork it carries are per-printing facts.
+        FilterExpr::ScryfallIdMatch { .. } | FilterExpr::IllustrationIdMatch { .. } => true,
         FilterExpr::ArtistMatch { .. } | FilterExpr::FlavorMatch { .. } => true,
         FilterExpr::TextContains { field, .. } => matches!(field, TextSearchField::FlavorTextLower),
         FilterExpr::TextExact { field, .. } | FilterExpr::TextRegex { field, .. } => matches!(
@@ -480,6 +482,10 @@ fn estimate_leaf(f: &FilterExpr, indexes: &Archived<CardIndexes>, n_cards: u32, 
         // gids.len() an undercount; not exercised here).
         FilterExpr::NameMatch { ids } => exact(ids.len() as u32),
         FilterExpr::OracleMatch { gids } => exact(gids.len() as u32),
+
+        // A Scryfall id names at most one printing; an illustration id a handful (the printings
+        // sharing one artwork). Neither has a count to read here, so "unknown" is the sound answer.
+        FilterExpr::ScryfallIdMatch { .. } | FilterExpr::IllustrationIdMatch { .. } => unknown(n),
 
         FilterExpr::DateCmp { op, value } => match date_range_bounds(*op, *value) {
             None => unknown(n),

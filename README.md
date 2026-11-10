@@ -92,6 +92,7 @@ Sylvan Librarian is an open source implementation of Scryfall, a Magic: The Gath
 | **Devotion Search**        | `devotion:`                                   | ✔        | ✔           | Mana cost devotion calculations with split mana support   |
 | **Format Legality**        | `format:`, `legal:`, `banned:`, `restricted:` | ✔        | ✔           | Competitive play support                                  |
 | **Collector Numbers**      | `number:`, `cn:`                              | ✔        | ✔           | Card collector number search                              |
+| **Printing Ids**           | `scryfallid:`, `illustrationid:`              | ✔        | ✔           | One printing by its id; every printing of one artwork     |
 | **Card Layout**            | `layout:`                                     | ✔        | ✔           | Card layout types (normal, split, transform, etc.)        |
 | **Card Border**            | `border:`                                     | ✔        | ✔           | Border colors (black, white, borderless, etc.)            |
 | **Special Properties**     | `is:`                                         | ✔        | ✔           | Card classifications (creature, spell, permanent, etc.)   |
