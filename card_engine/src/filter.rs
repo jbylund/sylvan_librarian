@@ -85,6 +85,9 @@ pub(crate) enum ArithOp {
     Sub,
     Mul,
     Div,
+    /// The remainder, which no query spells: the parser writes it for `mv:even` / `mv:odd`
+    /// (`(mv % 2) = 0|1`) and nothing else. See `ArithOp::Mod`'s arm in `eval_arith_with`.
+    Mod,
 }
 
 // ─── Four-valued evaluation result ────────────────────────────────────────────
@@ -234,6 +237,16 @@ impl NumExpr {
                 ArithOp::Mul => NumVal::Known(l * r),
                 ArithOp::Div => {
                     if r == 0.0 { NumVal::Null } else { NumVal::Known(l / r) }
+                }
+                // `mv:even` and `mv:odd`. A FRACTIONAL MANA VALUE IS NEITHER, which the float
+                // remainder gives without a special case: Little Girl's 0.5 leaves 0.5, not 0
+                // and not 1. Measured on api.scryfall.com 2026-10-03 — `mv:even` 17,331 and
+                // `mv:odd` 16,317 are one short of the corpus's 33,649, `-(mv:even or mv:odd)`
+                // is Little Girl alone, and `mv:even mv=0.5` / `mv:odd mv=0.5` are both 404. No
+                // mana value is negative, so the remainder's sign never comes up; a zero
+                // divisor is NULL exactly as division's is.
+                ArithOp::Mod => {
+                    if r == 0.0 { NumVal::Null } else { NumVal::Known(l % r) }
                 }
             },
         }
@@ -1736,6 +1749,7 @@ fn build_num_expr(v: &Value) -> Result<NumExpr, String> {
                 "-" => ArithOp::Sub,
                 "*" => ArithOp::Mul,
                 "/" => ArithOp::Div,
+                "%" => ArithOp::Mod,
                 _ => return Err(format!("expected arithmetic op, got: {op_str}")),
             };
             let lhs = build_num_expr(&kw["lhs"])?;

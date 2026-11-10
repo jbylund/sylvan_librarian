@@ -620,6 +620,21 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
         if isinstance(self.rhs, str) and not self.rhs.strip():
             return ""
 
+        # `mv:even` / `mv:odd` as the parser lowers them -- `(<attribute> % 2) = 0|1` -- said the
+        # way they were typed. The remainder is how the two words are answered, not something a
+        # reader asked for: without this the explanation of `mv:even` is "mana value % 2 is 0".
+        if (
+            self.operator == "="
+            and isinstance(self.lhs, CardBinaryOperatorNode)
+            and self.lhs.operator == "%"
+            and isinstance(self.lhs.lhs, CardAttributeNode)
+            and isinstance(self.lhs.rhs, NumericValueNode)
+            and self.lhs.rhs.value == 2  # noqa: PLR2004
+            and isinstance(self.rhs, NumericValueNode)
+            and self.rhs.value in (0, 1)
+        ):
+            return f"the {self.lhs.lhs.to_human_explanation()} is {'even' if self.rhs.value == 0 else 'odd'}"
+
         # Get left and right explanations
         lhs_str = self.lhs.to_human_explanation()
         rhs_str = self._explain_value(self.rhs, self.lhs) if isinstance(self.rhs, ValueNode) else self.rhs.to_human_explanation()
