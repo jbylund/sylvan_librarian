@@ -12,6 +12,11 @@ from api.parsing.db_info import (
     ALIAS_TO_FIELD_INFOS,
     CARD_SUPERTYPES,
     CARD_TYPES,
+    CHEAPEST_CURRENCY_WORDS,
+    CHEAPEST_NEGATED_TERM,
+    CHEAPEST_SHIFTS,
+    CHEAPEST_TERM,
+    CHEAPEST_UNKNOWN,
     FORMAT_CODE_TO_NAME,
     FieldType,
     ParserClass,
@@ -170,6 +175,12 @@ class CardAttributeNode(AttributeNode):
             "price_eur": "price (EUR)",
             "price_tix": "price (TIX)",
             "edhrec_rank": "EDHREC rank",
+            "card_print_count": "number of printings",
+            "card_set_count": "number of sets",
+            "card_paper_print_count": "number of paper printings",
+            "card_paper_set_count": "number of paper sets",
+            "card_illustration_count": "number of illustrations",
+            "artist_count": "number of artists",
         }
         return name_map.get(self.attribute_name, self.attribute_name.replace("_", " "))
 
@@ -513,6 +524,85 @@ class ExactNameNode(QueryNode):
     def to_human_explanation(self) -> str:
         """Return a human-readable explanation for an exact name search."""
         return f'exact name is "{self.value}"'
+
+
+class CheapestNode(QueryNode):
+    """Scryfall's `cheapest:usd` / `cheapest:eur` / `cheapest:tix`: the printings carrying their card's lowest price.
+
+    A node of its own rather than a comparison, for two reasons. The answer is not a property of
+    the row -- "lowest" is over the card's other printings -- so it is decided at import and read
+    here from `magic.cards.cheapest_codes` (see `_build_cheapest_codes_sql` in
+    api/admin_resource.py, which carries the rule). And the negated TERM is not the complement
+    of the term: on api.scryfall.com (2026-10-04) `cheapest:usd e:khm` is 222 of Kaldheim's 407
+    printings and `-cheapest:usd e:khm` is 5, one printing in both, where the negated GROUP
+    `-(cheapest:usd) e:khm` is the other 185. `-x` and `-(x)` are the same `NotNode` in this
+    AST, so the parsers fold a `-` written directly on the term into `negated_term` here and
+    leave a `NotNode` only for the group -- which then negates whichever of the two it wraps
+    (`-(-cheapest:usd) e:khm` is 402).
+
+    Three-valued: a priced printing of a card that has no lowest price (every priced printing of
+    it is in a memorabilia set) is SQL NULL, in neither the term nor its complement.
+    """
+
+    def __init__(self, currency: str, *, negated_term: bool = False) -> None:
+        """Initialize from a canonical currency (`usd`, `eur` or `tix`); see `from_word` for user input."""
+        if currency not in CHEAPEST_SHIFTS:
+            msg = f"Unknown currency: {currency}"
+            raise ValueError(msg)
+        self.currency = currency
+        self.negated_term = negated_term
+
+    @classmethod
+    def from_word(cls, word: str) -> CheapestNode:
+        """Build the positive term from the word a user typed, in any case.
+
+        Raises:
+            ValueError: If the word is not one Scryfall reads as a currency.
+        """
+        currency = CHEAPEST_CURRENCY_WORDS.get(word.strip().lower())
+        if currency is None:
+            msg = f"Unknown currency: {word}. Valid currencies are: {tuple(CHEAPEST_CURRENCY_WORDS)}"
+            raise ValueError(msg)
+        return cls(currency)
+
+    def as_negated_term(self) -> CheapestNode:
+        """Return `-cheapest:<currency>`, the negated TERM, for this positive term."""
+        return CheapestNode(self.currency, negated_term=True)
+
+    def kwargs(self) -> dict:
+        """Return this node's kwargs dict for Rust engine JSON serialization."""
+        return {"currency": self.currency, "negated_term": self.negated_term}
+
+    def to_sql(self, context: QueryContext) -> str:
+        """Generate SQL reading this currency's bits of `cheapest_codes`.
+
+        NULL when the column is (the sync has not reached the card) or when the unknown bit is
+        set, so a `NOT` around it stays NULL, as it does on Scryfall.
+        """
+        del context
+        shift = CHEAPEST_SHIFTS[self.currency]
+        answer = (CHEAPEST_NEGATED_TERM if self.negated_term else CHEAPEST_TERM) << shift
+        unknown = CHEAPEST_UNKNOWN << shift
+        return f"(CASE WHEN (card.cheapest_codes & {unknown}) = 0 THEN (card.cheapest_codes & {answer}) <> 0 END)"
+
+    def to_human_explanation(self) -> str:
+        """Return a human-readable explanation of the term."""
+        verb = "is not" if self.negated_term else "is"
+        return f"the printing {verb} the card's cheapest in {self.currency.upper()}"
+
+    def __repr__(self) -> str:
+        """Return a string representation of the CheapestNode."""
+        return f"CheapestNode({self.currency!r}, negated_term={self.negated_term})"
+
+    def __eq__(self, other: object) -> bool:
+        """Check equality with another CheapestNode based on currency and polarity."""
+        if not isinstance(other, CheapestNode):
+            return False
+        return self.currency == other.currency and self.negated_term == other.negated_term
+
+    def __hash__(self) -> int:
+        """Return a hash based on currency and polarity."""
+        return hash(("CheapestNode", self.currency, self.negated_term))
 
 
 class CardBinaryOperatorNode(BinaryOperatorNode):

@@ -84,6 +84,7 @@ Sylvan Librarian is an open source implementation of Scryfall, a Magic: The Gath
 | **Numeric Attributes**     | `cmc:`, `power:`, `toughness:`, `loyalty:`    | ✔        | ✔           | Complete with all comparison operators                    |
 | **Colors & Identity**      | `color:`, `identity:`, `c:`, `id:`            | ✔        | ✔           | JSONB-based with complex color logic                      |
 | **Pricing Data**           | `usd:`, `eur:`, `tix:`                        | ✔        | ✔           | Complete with all comparison operators                    |
+| **Cheapest Printing**      | `cheapest:usd`, `cheapest:eur`, `cheapest:tix` | ✔       | ✔           | The printings carrying their card's lowest price          |
 | **Advanced Logic**         | `AND`, `OR`, `NOT`, `()`                      | ✔        | ✔           | Full boolean logic support                                |
 | **Keywords**               | `keyword:`                                    | ✔        | ✔           | JSONB object storage                                      |
 | **Mana Costs**             | `mana:`, `m:`                                 | ✔        | ✔           | Both JSONB and text representations                       |
@@ -97,7 +98,8 @@ Sylvan Librarian is an open source implementation of Scryfall, a Magic: The Gath
 | **Special Properties**     | `is:`                                         | ✔        | ✔           | Card classifications (creature, spell, permanent, etc.)   |
 | **Comparison Operators**   | `=`, `<`, `>`, `<=`, `>=`, `!=`, `<>`         | ✔        | ✔           | All comparison operators supported                        |
 | **Regular Expressions**    | `/pattern/`                                   | ✔        | ✔           | Pattern matching with regex syntax                        |
-| **Collection Features**    | `cube:`, `papersets:`                         | ✔        | ✘           | Collection and cube inclusion features                    |
+| **Print Counts**           | `prints:`, `sets:`, `papersets:`, `artists:`  | ✔        | ✔           | Counts over a card's printings, with all comparison operators |
+| **Collection Features**    | `cube:`                                       | ✔        | ✘           | Cube inclusion features                                   |
 | **Arithmetic Expressions** | `cmc+1<power`, `power-toughness=0`            | ✘        | ✔           | Advanced mathematical expressions                         |
 
 
