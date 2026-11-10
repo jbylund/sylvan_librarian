@@ -13470,3 +13470,64 @@ fn limit_zero_yields_no_rows_and_the_full_total() {
         }
     }
 }
+
+/// `sync_format_shifts` reconciled the process-global registry with the archive by LENGTH, so an
+/// archive of the same size with different assignments was "already caught up": every legality bit
+/// was then read from the wrong 2-bit field, and the sorted snapshot stayed on the old assignment.
+/// Agreement is now by content, disagreement replaces the registry, and every change bumps the
+/// generation the snapshot is keyed on.
+#[test]
+fn sync_format_shifts_adopts_an_equal_length_reassignment() {
+    use super::legality::{format_shift, format_shift_or_assign, format_shifts_sorted, sync_format_shifts};
+    let archived_map = |pairs: &[(&str, u8)]| {
+        let m: HashMap<String, u8> = pairs.iter().map(|(f, s)| (f.to_string(), *s)).collect();
+        rkyv::to_bytes::<Error>(&m).expect("serialize")
+    };
+    let sorted_of = |names: &[&str]| -> Vec<(String, u8)> {
+        let snap = format_shifts_sorted();
+        snap.iter().filter(|(f, _)| names.contains(&f.as_str())).cloned().collect()
+    };
+    let names = ["sync_test_a", "sync_test_b", "sync_test_c"];
+
+    let a = archived_map(&[("sync_test_a", 0), ("sync_test_b", 2), ("sync_test_c", 4)]);
+    let a = rkyv::access::<Archived<HashMap<String, u8>>, Error>(&a).expect("access");
+    sync_format_shifts(a);
+    assert_eq!((format_shift("sync_test_a"), format_shift("sync_test_b"), format_shift("sync_test_c")), (Some(0), Some(2), Some(4)));
+    assert_eq!(sorted_of(&names), vec![("sync_test_a".to_string(), 0), ("sync_test_b".to_string(), 2), ("sync_test_c".to_string(), 4)]);
+
+    // Same length, a and b swapped. A length comparison sees nothing to do here.
+    let b = archived_map(&[("sync_test_a", 2), ("sync_test_b", 0), ("sync_test_c", 4)]);
+    let b = rkyv::access::<Archived<HashMap<String, u8>>, Error>(&b).expect("access");
+    sync_format_shifts(b);
+    assert_eq!(
+        (format_shift("sync_test_a"), format_shift("sync_test_b"), format_shift("sync_test_c")),
+        (Some(2), Some(0), Some(4)),
+        "an equal-length reassignment must be adopted"
+    );
+    assert_eq!(
+        sorted_of(&names),
+        vec![("sync_test_a".to_string(), 2), ("sync_test_b".to_string(), 0), ("sync_test_c".to_string(), 4)],
+        "the sorted snapshot is keyed on the generation, not the count"
+    );
+
+    // Agreement is a no-op: the same snapshot Arc keeps being served, so the derived caches keyed on
+    // its identity are not rebuilt either.
+    let before = format_shifts_sorted();
+    sync_format_shifts(b);
+    assert!(std::sync::Arc::ptr_eq(&before, &format_shifts_sorted()), "a sync that agrees must not move the generation");
+
+    // A reload after an adoption assigns the lowest FREE shift, not `len * 2`: with c at 4 and b
+    // gone, `len * 2` would have been 4 -- a collision with c.
+    let holed = archived_map(&[("sync_test_a", 0), ("sync_test_c", 4)]);
+    let holed = rkyv::access::<Archived<HashMap<String, u8>>, Error>(&holed).expect("access");
+    sync_format_shifts(holed);
+    assert_eq!(format_shift("sync_test_b"), None, "replaced, not merged: b is gone");
+    assert_eq!(format_shift_or_assign("sync_test_d"), Some(2));
+    assert_eq!(format_shift_or_assign("sync_test_e"), Some(6));
+    assert_eq!(format_shift_or_assign("sync_test_d"), Some(2), "already assigned");
+    assert_eq!(
+        sorted_of(&["sync_test_a", "sync_test_c", "sync_test_d", "sync_test_e"]),
+        vec![("sync_test_a".to_string(), 0), ("sync_test_c".to_string(), 4), ("sync_test_d".to_string(), 2), ("sync_test_e".to_string(), 6)],
+        "appends move the generation too"
+    );
+}
