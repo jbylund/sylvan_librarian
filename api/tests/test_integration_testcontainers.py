@@ -464,3 +464,54 @@ class TestContainerIntegration:
             api_resource.app_context.engine = saved_engine
             shm_path.unlink(missing_ok=True)
             shm_path.with_suffix(".lock").unlink(missing_ok=True)
+
+    @pytest.mark.usefixtures("engine_enabled")
+    def test_collector_number_above_65535_agrees_on_both_lanes(self: TestContainerIntegration, api_resource: APIResource) -> None:
+        """A collector number past 65,535 is the same answer from the engine as from SQL.
+
+        The column is an integer and the dated promos run past 200,000 ("2024-10" is 202410). The
+        engine held the number in a u16 filled by a saturating cast, so it stored each of them as
+        65535: `cn>65535` found nothing and `cn:65535` found them all, while SQL was right.
+        """
+        numbers = {
+            "Lightning Bolt": ("65535", 65535),
+            "Black Lotus": ("2024-10", 202410),
+            "Serra Angel": ("2026-25", 202625),
+        }
+        with api_resource.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+            for name, (collector_number, collector_number_int) in numbers.items():
+                cursor.execute(
+                    "UPDATE magic.cards SET collector_number = %s, collector_number_int = %s WHERE card_name = %s",
+                    (collector_number, collector_number_int, name),
+                )
+            conn.commit()
+
+        # A private store, for the reason test_cubecobra_ordering gives.
+        shm_path = pathlib.Path(tempfile.gettempdir()) / f"sylvan_librarian_it_{uuid.uuid4().hex}"
+        saved_engine = api_resource.app_context.engine
+        api_resource.app_context.engine = QueryEngine(shm_path=str(shm_path))
+        try:
+            api_resource.app_context.reload_engine(force=True)
+            expected = {
+                "cn>65535": ["Black Lotus", "Serra Angel"],
+                "cn>=65535": ["Black Lotus", "Lightning Bolt", "Serra Angel"],
+                "cn:65535": ["Lightning Bolt"],
+                "cn=202410": ["Black Lotus"],
+                "cn>=202410": ["Black Lotus", "Serra Angel"],
+                "cn>202410": ["Serra Angel"],
+                "cn>202625": [],
+            }
+            for query, names in expected.items():
+                for lane in (api_resource._search_sql, api_resource._search_engine):
+                    result = lane(**search_kwargs(query, limit=100))
+                    assert sorted(card["name"] for card in result["cards"]) == names, f"{query} via {lane.__name__}"
+                    assert result["total_cards"] == len(names), f"{query} via {lane.__name__}"
+            # Below the old ceiling nothing above it leaks in: `cn<65536` was every printing.
+            for lane in (api_resource._search_sql, api_resource._search_engine):
+                below = {card["name"] for card in lane(**search_kwargs("cn<65536", limit=100))["cards"]}
+                assert "Lightning Bolt" in below, lane.__name__
+                assert not below & {"Black Lotus", "Serra Angel"}, lane.__name__
+        finally:
+            api_resource.app_context.engine = saved_engine
+            shm_path.unlink(missing_ok=True)
+            shm_path.with_suffix(".lock").unlink(missing_ok=True)

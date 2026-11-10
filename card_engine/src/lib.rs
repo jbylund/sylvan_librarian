@@ -312,7 +312,20 @@ struct Printing {
     released_at_int: Option<u32>,      // yyyymmdd, parsed once at load; date/year filters and prefer use this
 
     card_rarity_int: Option<u8>,       // 0-5
-    collector_number_int: Option<u16>, // some sets exceed i8::MAX
+    // The collector number's digits as one integer ("123a" -> 123, "2025-25" -> 202525, "★" ->
+    // None): what `cn>=`/`cn<` and a numeric `cn:` compare.
+    //
+    // u32, and it was a bug that it was not. It was `Option<u16>`, filled by a saturating
+    // `as u16`, so each number above 65,535 was STORED as 65,535: `cn>65535` matched nothing,
+    // `cn<65536` matched every printing and `cn:65535` matched every printing above it. The
+    // column it is loaded from is a Postgres `integer`, and Scryfall's dated promos run to
+    // 202,625 ("2026-25").
+    //
+    // The row does not grow for it. `Option<u16>` archived as four bytes (tag, pad, value) and
+    // this is four bytes too, holding `n + 1` with 0 for None (`CollectorInt`), where rkyv's own
+    // `Option<u32>` is eight. Read it through `ArchivedPrinting::collector_int`.
+    #[rkyv(with = CollectorInt)]
+    collector_number_int: Option<u32>,
     // Integer cents, not f32 dollars: every real price is exactly cent-precise (checked against
     // the corpus, 0 of 81,540 priced printings differ from their rounded-to-cent value by more
     // than 0.001), and storing the lossy f32 approximation instead of the exact integer caused
@@ -376,7 +389,7 @@ struct CardRow {
     creature_toughness: Option<i8>,
     planeswalker_loyalty: Option<u8>,
     card_rarity_int: Option<u8>,
-    collector_number_int: Option<u16>,
+    collector_number_int: Option<u32>,
     edhrec_rank: Option<u32>,
     price_usd: Option<u32>, // integer cents -- see Printing's field for why
     price_eur: Option<u32>,
@@ -401,6 +414,51 @@ struct CardRow {
 // Type aliases for the archived (mmap-backed) store types
 pub(crate) type AOracleCard = Archived<OracleCard>;
 pub(crate) type APrinting = Archived<Printing>;
+
+/// The largest collector integer a row can hold: `CollectorInt` stores `n + 1`, and
+/// `int_range_bounds` works in half-open u32 ranges, so `u32::MAX` itself is never a value.
+pub(crate) const COLLECTOR_INT_MAX: u32 = u32::MAX - 1;
+
+/// A loader's integer as a collector number: negative is absent, and anything past the ceiling is
+/// the ceiling (the column is a Postgres `integer`, so nothing real reaches it).
+pub(crate) fn collector_int_from_i64(n: i64) -> Option<u32> {
+    (n >= 0).then(|| u32::try_from(n).map_or(COLLECTOR_INT_MAX, |v| v.min(COLLECTOR_INT_MAX)))
+}
+
+/// How `Printing::collector_number_int` is archived: one u32 holding `n + 1`, 0 for None. Four
+/// bytes where rkyv's own `Option<u32>` is eight, which is the whole reason it exists — it is the
+/// four bytes the `Option<u16>` it replaces took. 0 for None keeps `Option`'s order in the stored
+/// value: absent below every present number.
+struct CollectorInt;
+
+impl rkyv::with::ArchiveWith<Option<u32>> for CollectorInt {
+    type Archived = Archived<u32>;
+    type Resolver = ();
+
+    fn resolve_with(field: &Option<u32>, (): (), out: rkyv::Place<Self::Archived>) {
+        field.map_or(0, |n| n.min(COLLECTOR_INT_MAX) + 1).resolve((), out);
+    }
+}
+
+impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::with::SerializeWith<Option<u32>, S> for CollectorInt {
+    fn serialize_with(_: &Option<u32>, _: &mut S) -> Result<(), S::Error> {
+        Ok(())
+    }
+}
+
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::with::DeserializeWith<Archived<u32>, Option<u32>, D> for CollectorInt {
+    fn deserialize_with(field: &Archived<u32>, _: &mut D) -> Result<Option<u32>, D::Error> {
+        Ok(u32::from(*field).checked_sub(1))
+    }
+}
+
+impl ArchivedPrinting {
+    /// `collector_number_int` as stored by `CollectorInt`.
+    #[inline]
+    pub(crate) fn collector_int(&self) -> Option<u32> {
+        u32::from(self.collector_number_int).checked_sub(1)
+    }
+}
 // Archived string table (CardData.strings)
 pub(crate) type AStrings = Archived<Vec<String>>;
 // Archived CSR boundary table (CardData.offsets)
@@ -637,8 +695,13 @@ fn opt_u8(d: &Bound<PyDict>, key: &str) -> Option<u8> {
     opt_f32(d, key).map(|v| v as u8)
 }
 
-fn opt_u16(d: &Bound<PyDict>, key: &str) -> Option<u16> {
-    opt_f32(d, key).map(|v| v as u16)
+/// `collector_number_int`, read as an integer and not through `opt_f32`: f32 is exact only to
+/// 2^24, and the `as u16` this replaced stored every number above 65,535 as 65,535 (see
+/// `Printing::collector_number_int`). A negative or non-integer value reads as absent.
+fn opt_collector_int(d: &Bound<PyDict>, key: &str) -> Option<u32> {
+    let v = d.get_item(key).ok().flatten()?;
+    let n = v.extract::<i64>().ok().or_else(|| v.extract::<f64>().ok().filter(|f| f.fract() == 0.0).map(|f| f as i64))?;
+    collector_int_from_i64(n)
 }
 
 fn opt_u32(d: &Bound<PyDict>, key: &str) -> Option<u32> {
@@ -834,7 +897,7 @@ fn card_from_pydict(d: &Bound<PyDict>, it: &mut Interner, vocab: &mut VocabInter
         creature_toughness: opt_i8(d, "creature_toughness"),
         planeswalker_loyalty: opt_u8(d, "planeswalker_loyalty"),
         card_rarity_int: opt_u8(d, "card_rarity_int"),
-        collector_number_int: opt_u16(d, "collector_number_int"),
+        collector_number_int: opt_collector_int(d, "collector_number_int"),
         edhrec_rank: opt_u32(d, "edhrec_rank"),
         price_usd: opt_price_cents(d, "price_usd"),
         price_eur: opt_price_cents(d, "price_eur"),
@@ -13262,7 +13325,12 @@ const ARCHIVE_MAGIC: [u8; 8] = *b"ATCARDS\0";
 //
 // 2026082501 — `SortPermutations` gains per-order printing-span prefix sums, used to turn a bound on
 // cards visited into a sound O(1) bound on printings examined. Entirely inside `CardIndexes` again.
-const ARCHIVE_FORMAT_VERSION: u32 = 2026090801;
+//
+// 2026100801 — `Printing::collector_number_int` was `Option<u16>` and is one u32 holding `n + 1`
+// (`CollectorInt`), in the same four bytes. `size_of::<APrinting>` does not move, so the header's
+// sizes cannot catch it: a reader pairing this code with an older store would read (tag, pad, u16)
+// as one integer.
+const ARCHIVE_FORMAT_VERSION: u32 = 2026100801;
 const ARCHIVE_HEADER_LEN: usize = 16;
 
 fn archive_header() -> [u8; ARCHIVE_HEADER_LEN] {
@@ -13917,7 +13985,7 @@ impl QueryEngine {
         let price_usd_idx = build_printing_value_index(&printings, &cards, &offsets, |p| p.price_usd);
         let price_eur_idx = build_printing_value_index(&printings, &cards, &offsets, |p| p.price_eur);
         let price_tix_idx = build_printing_value_index(&printings, &cards, &offsets, |p| p.price_tix);
-        let collector_number_idx = build_printing_value_index(&printings, &cards, &offsets, |p| p.collector_number_int.map(u32::from));
+        let collector_number_idx = build_printing_value_index(&printings, &cards, &offsets, |p| p.collector_number_int);
         let released_at_cards = build_range_card_counts(&released_at_idx, &printing_to_card, cards.len(), &printings, &artwork_base);
         let price_usd_cards = build_range_card_counts(&price_usd_idx, &printing_to_card, cards.len(), &printings, &artwork_base);
         let price_eur_cards = build_range_card_counts(&price_eur_idx, &printing_to_card, cards.len(), &printings, &artwork_base);
