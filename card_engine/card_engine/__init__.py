@@ -48,6 +48,7 @@ ENGINE_COLUMNS: list[str] = [
     "card_border",
     "card_color_identity",
     "card_colors",
+    "color_order",
     "card_frame_data",
     "card_is_tags",
     "card_keywords",

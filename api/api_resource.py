@@ -24,7 +24,7 @@ from cachebox import LRUCache, TTLCache
 
 from api.admin_resource import ADMIN_MOUNT_PREFIX, AdminContext, AdminResource
 from api.app_context import AppContext
-from api.enums import CardOrdering, PreferOrder, ResponseShape, SortDirection, UniqueOn
+from api.enums import CardOrdering, PreferOrder, ResponseShape, SortDirection, UniqueOn, resolve_direction
 from api.middlewares.timing import record_span
 from api.noscript_helpers import generate_results_count_html, generate_results_html
 from api.parsing import generate_sql_query, parse_scryfall_query
@@ -135,6 +135,11 @@ RESULT_FIELD_COLUMNS: dict[str, str] = {
     "illustration_id": "illustration_id",
     "scryfall_id": "scryfall_id",
     "price_usd": "price_usd",
+    # The other two currencies CardOrdering already sorts by (see the sql_orderby map's
+    # EUR/TIX entries). Without these a caller can rank a page by EUR or TIX and then have
+    # no way to read the number it was ranked on. Both are real magic.cards columns.
+    "price_eur": "price_eur",
+    "price_tix": "price_tix",
     "prefer_score": "prefer_score",
     # Card-data fields consumers need to run their own downstream filtering
     # (Scryfall JSON names and shapes): layout and rarity are plain text,
@@ -833,6 +838,13 @@ class APIResource:
         offset: int = DEFAULT_OFFSET,
         fields: Sequence[str] | None = None,
     ) -> dict[str, Any]:
+        # AUTO is a request-level spelling neither search path knows, resolved on the way in so
+        # nothing downstream can see it. Resolved in each path rather than once in `_search`
+        # because what AUTO means depends on `orderby`: doing it here is necessarily after
+        # everything upstream that can still change `orderby` -- today nothing, once the in-query
+        # directives land their fold. Resolving before that fold would answer `order:usd` with the
+        # default ordering's direction and hand the engine the literal "auto".
+        direction = resolve_direction(direction, orderby)
         logger.info("Searching engine for %r", query)
         query_explanation = parsed_query.to_human_explanation() if query else ""
         try:
@@ -880,6 +892,13 @@ class APIResource:
         offset: int = DEFAULT_OFFSET,
         fields: Sequence[str] | None = None,
     ) -> dict[str, Any]:
+        # AUTO is a request-level spelling neither search path knows, resolved on the way in so
+        # nothing downstream can see it. Resolved in each path rather than once in `_search`
+        # because what AUTO means depends on `orderby`: doing it here is necessarily after
+        # everything upstream that can still change `orderby` -- today nothing, once the in-query
+        # directives land their fold. Resolving before that fold would answer `order:usd` with the
+        # default ordering's direction and hand the engine the literal "auto".
+        direction = resolve_direction(direction, orderby)
         logger.info("Searching SQL for %r", query)
         resolved_fields = self._resolve_result_fields(fields)
         query_explanation = parsed_query.to_human_explanation() if query else ""
@@ -898,7 +917,19 @@ class APIResource:
             CardOrdering.RARITY: "card_rarity_int",
             CardOrdering.TOUGHNESS: "creature_toughness",
             CardOrdering.USD: "price_usd",
+            CardOrdering.EUR: "price_eur",
+            CardOrdering.TIX: "price_tix",
             CardOrdering.CUBECOBRA: "cubecobra_score",
+            CardOrdering.RELEASED: "released_at",
+            # lower() for the same reason as name: the engine ranks the lowercased artist, and set
+            # codes are stored lowercase but nothing constrains them to be.
+            CardOrdering.ARTIST: "lower(card_artist)",
+            CardOrdering.SET: "lower(card_set_code)",
+            # Scryfall's colour order is not an expression over card_colors: it is the game's own
+            # order of the colour combinations, by the front face, with colourless cards and lands
+            # placed by identity. That is decided at import (color_order_rank in
+            # api/card_processing.py) and stored, so this path and the engine sort by one number.
+            CardOrdering.COLOR: "color_order",
         }.get(orderby, "edhrec_rank")
         sql_direction = {
             "asc": "ASC",
@@ -932,7 +963,13 @@ class APIResource:
         _result_cols = ",\n                    ".join(
             f"{RESULT_FIELD_COLUMNS[name]}{RESULT_FIELD_OUTPUT_CAST.get(name, '')} AS {name}" for name in resolved_fields
         )
-        _order_by = f"""sort_value {sql_direction} NULLS LAST,
+        # Inside one colour block Scryfall's rows are by name, ascending in BOTH directions:
+        # `dir=desc` reverses the blocks and not the names under them. The engine packs the name
+        # rank under the block the same way (sort_key_bits). lower() for the reason order=name has.
+        _name_under_color = orderby == CardOrdering.COLOR
+        _tiebreak_col = "\n                    lower(card_name) AS sort_name," if _name_under_color else ""
+        _tiebreak_order = "\n                    sort_name ASC," if _name_under_color else ""
+        _order_by = f"""sort_value {sql_direction} NULLS LAST,{_tiebreak_order}
                     edhrec_rank ASC NULLS LAST,
                     prefer_score DESC NULLS LAST"""
         _count_nulls = ",\n                    ".join(f"null AS {name}" for name in resolved_fields)
@@ -942,7 +979,7 @@ class APIResource:
             query_sql = f"""
             WITH matching_cards AS NOT MATERIALIZED (
                 SELECT
-                    {_select_cols}
+                    {_select_cols}{_tiebreak_col}
                     {sql_orderby} AS sort_value
                 FROM
                     magic.cards AS card
@@ -974,7 +1011,7 @@ class APIResource:
             query_sql = f"""
             WITH distinct_cards AS (
                 SELECT DISTINCT ON ({distinct_on})
-                    {_select_cols}
+                    {_select_cols}{_tiebreak_col}
                     {sql_orderby} AS sort_value
                 FROM
                     magic.cards AS card
