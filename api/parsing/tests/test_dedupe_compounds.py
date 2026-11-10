@@ -41,7 +41,7 @@ def test_deduplicate_compound_operands(parse_query, query: str, canonical_query:
 
 def test_regex_budget_counts_duplicates_before_dedupe() -> None:
     """Identical regex leaves still hit the leaf limit even though dedupe would collapse them."""
-    query = " ".join("o:/(?=.*draw)/" for _ in range(MAX_REGEX_LEAVES_PER_QUERY + 1))
+    query = " ".join("o:/(?=draw)/" for _ in range(MAX_REGEX_LEAVES_PER_QUERY + 1))
     with pytest.raises(QueryBudgetExceeded) as exc_info:
         parse_scryfall_query(query)
     assert exc_info.value.kind == "regex_leaves"
