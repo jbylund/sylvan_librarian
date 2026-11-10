@@ -13,6 +13,7 @@ from api.parsing.db_info import (
     CARD_SUPERTYPES,
     CARD_TYPES,
     FORMAT_CODE_TO_NAME,
+    LEGALITY_ALIAS_TO_STATUS,
     FieldType,
     ParserClass,
 )
@@ -172,6 +173,32 @@ class CardAttributeNode(AttributeNode):
             "edhrec_rank": "EDHREC rank",
         }
         return name_map.get(self.attribute_name, self.attribute_name.replace("_", " "))
+
+    def _identity(self) -> tuple[str, object, str | None]:
+        """What this node means, for equality and hashing.
+
+        The base class compares the DB column alone, which is too coarse for a card attribute: several
+        aliases map to one column while asking different questions of it. ``date:`` and ``year:`` both
+        read ``released_at`` (distinct FieldInfos, distinct parser classes); ``legal:``, ``banned:`` and
+        ``restricted:`` all read ``card_legalities`` but check different statuses. Comparing columns
+        made ``restricted:vintage legal:vintage`` "duplicate" operands, and the dedup pass in
+        ``rewrite.py`` silently dropped one. The FieldInfo is the resolved (alias, parser class) pair,
+        so it already separates every case but legality's, whose one FieldInfo carries every alias --
+        hence the explicit status. Plain synonyms (``c`` / ``color``, ``f`` / ``legal``) still compare
+        equal, so a genuinely repeated filter still collapses.
+        """
+        status = LEGALITY_ALIAS_TO_STATUS.get(self.original_attribute) if self.attribute_name == "card_legalities" else None
+        return (self.attribute_name, self.field_infos[0], status)
+
+    def __eq__(self, other: object) -> bool:
+        """Equal when the other node resolves to the same field and asks the same question of it."""
+        if not isinstance(other, CardAttributeNode):
+            return False
+        return self._identity() == other._identity()
+
+    def __hash__(self) -> int:
+        """Hash consistent with ``__eq__``."""
+        return hash(("CardAttributeNode", self._identity()))
 
     def __repr__(self) -> str:
         """Return a string representation of the card attribute node."""
@@ -340,14 +367,9 @@ def get_legality_comparison_object(val: str, attr: str) -> dict[str, str]:
     # Map single letter format codes to full format names
     format_name = FORMAT_CODE_TO_NAME.get(format_name, format_name)
 
-    # Map search attribute to legality status
-    if attr in ("format", "f", "legal"):
-        status = "legal"
-    elif attr == "banned":
-        status = "banned"  # Scryfall uses "banned" for banned cards
-    elif attr == "restricted":
-        status = "restricted"
-    else:
+    # Map search attribute to legality status (Scryfall uses "banned" for banned cards)
+    status = LEGALITY_ALIAS_TO_STATUS.get(attr)
+    if status is None:
         msg = f"Unknown legality attribute: {attr}"
         raise ValueError(msg)
 

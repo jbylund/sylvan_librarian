@@ -331,6 +331,18 @@ CARD_TYPES = {
     "Tribal",
 }
 
+# The legality aliases share one column but do not ask the same question of it: the alias picks the
+# status the value is checked against. Everything that reads an alias's meaning goes through this
+# table, so "same field" and "same predicate" cannot drift apart (CardAttributeNode equality, and the
+# SQL / engine rhs builders in card_query_nodes).
+LEGALITY_ALIAS_TO_STATUS = {
+    "format": "legal",
+    "f": "legal",
+    "legal": "legal",
+    "banned": "banned",
+    "restricted": "restricted",
+}
+
 FORMAT_CODE_TO_NAME = {
     "m": "modern",
     "s": "standard",
