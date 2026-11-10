@@ -76,7 +76,7 @@ Sylvan Librarian is an open source implementation of Scryfall, a Magic: The Gath
 | **Type Search**            | `type:`, `t:`                                 | ✔        | ✔           | Exact matching with intelligent autocomplete              |
 | **Flavor Text**            | `flavor:`                                     | ✔        | ✔           | Full text search with pattern matching                    |
 | **Artist Search**          | `artist:`, `a:`                               | ✔        | ✔           | Full text search with trigram indexing                    |
-| **Set Search**             | `set:`, `s:`                                  | ✔        | ✔           | Dedicated indexed column with exact matching              |
+| **Set Search**             | `set:`, `s:`, `e:`, `edition:`                | ✔        | ✔           | Dedicated indexed column with exact matching              |
 | **Rarity Search**          | `rarity:`, `r:`                               | ✔        | ✔           | Integer-based ordering with all comparison operators      |
 | **Frame Search**           | `frame:`                                      | ✔        | ✔           | Card frame type and visual properties search              |
 | **Watermark Search**       | `watermark:`                                  | ✔        | ✔           | Card watermark and visual properties search               |
@@ -91,7 +91,8 @@ Sylvan Librarian is an open source implementation of Scryfall, a Magic: The Gath
 | **Date Search**            | `date:`, `year:`                              | ✔        | ✔           | Card release date filtering with comparison operators     |
 | **Devotion Search**        | `devotion:`                                   | ✔        | ✔           | Mana cost devotion calculations with split mana support   |
 | **Format Legality**        | `format:`, `legal:`, `banned:`, `restricted:` | ✔        | ✔           | Competitive play support                                  |
-| **Collector Numbers**      | `number:`, `cn:`                              | ✔        | ✔           | Card collector number search                              |
+| **Collector Numbers**      | `number:`, `cn:`, `collector:`                | ✔        | ✔           | Card collector number search                              |
+| **EDHREC Rank**            | `edhrec:`, `edhrecrank:`                      | ✔        | ✔           | Numeric rank search with all comparison operators         |
 | **Card Layout**            | `layout:`                                     | ✔        | ✔           | Card layout types (normal, split, transform, etc.)        |
 | **Card Border**            | `border:`                                     | ✔        | ✔           | Border colors (black, white, borderless, etc.)            |
 | **Special Properties**     | `is:`                                         | ✔        | ✔           | Card classifications (creature, spell, permanent, etc.)   |
