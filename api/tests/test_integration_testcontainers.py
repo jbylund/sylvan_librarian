@@ -11,11 +11,11 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from api.admin_resource import AdminContext
+from api.admin_resource import PRINT_COUNT_COLUMNS, AdminContext
 from api.api_resource import APIResource
 from api.app_context import AppContext
-from api.enums import CardOrdering, ResponseShape, SortDirection
-from api.tests.helpers import search_kwargs
+from api.enums import CardOrdering, ResponseShape, SortDirection, UniqueOn
+from api.tests.helpers import make_raw_card, search_kwargs
 from api.tests.support import override_attr
 from card_engine import QueryEngine
 
@@ -48,6 +48,134 @@ def api_resource(postgres_container: None) -> Generator[APIResource]:
     yield api
     api.app_context.reader_pool.close()
     api.app_context.writer_pool.close()
+
+
+# (query, the cards among Lightning Bolt / Serra Angel / Black Lotus BOTH lanes must answer) for
+# test_count_keywords_agree_on_both_lanes, which writes the six count columns on those three.
+_BOLT, _ANGEL, _LOTUS = "Lightning Bolt", "Serra Angel", "Black Lotus"
+_COUNT_KEYWORD_LANE_CASES: list[tuple[str, set[str]]] = [
+    ("prints=77", {_BOLT}),
+    ("prints:3", {_ANGEL}),
+    ("prints>=3", {_BOLT, _ANGEL}),
+    ("prints<3", {_LOTUS}),
+    ("prints!=1", {_BOLT, _ANGEL}),
+    ("sets=46", {_BOLT}),
+    ("sets=1", {_LOTUS}),
+    ("paperprints=68", {_BOLT}),
+    ("papersets=41", {_BOLT}),
+    ("illustrations=33", {_BOLT}),
+    ("illustrations>=2", {_BOLT, _ANGEL}),
+    ("artists=2", {_ANGEL}),
+    ("artists=1", {_BOLT}),
+    # Zero is a value, not NULL: the digital-only card that credits nobody.
+    ("paperprints=0", {_LOTUS}),
+    ("papersets=0", {_LOTUS}),
+    ("illustrations=0", {_LOTUS}),
+    ("artists=0", {_LOTUS}),
+    # A column on either side.
+    ("prints>sets", {_BOLT}),
+    ("prints=sets", {_ANGEL, _LOTUS}),
+    ("prints>paperprints", {_BOLT, _ANGEL, _LOTUS}),
+    ("illustrations>=prints", set()),
+    ("cmc<prints", {_BOLT, _LOTUS}),
+    # NULL on every card the sync has not reached: neither the comparison nor its negation.
+    ("prints>=0", {_BOLT, _ANGEL, _LOTUS}),
+    ("-prints>=0", set()),
+    ("-artists>=0", set()),
+    ("-prints=77", {_ANGEL, _LOTUS}),
+]
+
+
+# The set test_cheapest_agrees_on_both_lanes imports its printings into; each is named below by
+# its collector number.
+_CHEAPEST_SET = "zzc"
+
+# (query, the collector numbers of _CHEAPEST_SET BOTH lanes must answer). The rows:
+#   card A   1  usd 0.50 / 0.50   eur 0.40          tix 0.02
+#            2  usd 2.94 / 1.59   eur 0.60 / 0.40   tix 0.05
+#            3  usd  --  / 0.50   (foil-only: it enters the dollar minimum, and equals it)
+#            4  unpriced
+#   card B   5  usd 5.00, eur foil 3.00, in a memorabilia set -- so card B has no lowest price
+#            6  unpriced
+#   card C   7  priced, with the column put back to NULL: a row the sync has not reached
+_CHEAPEST_LANE_CASES: list[tuple[str, set[str]]] = [
+    ("cheapest:usd", {"1", "3"}),
+    ("cheapest:$", {"1", "3"}),
+    ("cheapest=Dollar", {"1", "3"}),
+    # The negated TERM: no plain price equal to the minimum AND no foil price that is not it.
+    # Printing 3 is in both lists; printing 2, priced both ways and neither the minimum, in neither.
+    ("-cheapest:usd", {"3", "4", "6"}),
+    # The negated GROUP: the complement -- and the NULLs (5, 7) are in neither.
+    ("-(cheapest:usd)", {"2", "4", "6"}),
+    ("-(-cheapest:usd)", {"1", "2"}),
+    # Euros: the minimum is the plain price alone (0.40), and printing 2's foil equals it.
+    ("cheapest:eur", {"1", "2"}),
+    ("cheapest:€", {"1", "2"}),
+    ("-cheapest:eur", {"2", "3", "4", "6"}),
+    ("-(cheapest:eur)", {"3", "4", "6"}),
+    ("-(-cheapest:eur)", {"1"}),
+    # Tix has no foil price, so its negated term is its complement; card B has no tix at all.
+    ("cheapest:tix", {"1"}),
+    ("cheapest:mtgo", {"1"}),
+    ("-cheapest:tix", {"2", "3", "4", "5", "6"}),
+    ("-(cheapest:tix)", {"2", "3", "4", "5", "6"}),
+    ("-(-cheapest:tix)", {"1"}),
+    # Composed.
+    ("cheapest:usd cheapest:eur", {"1"}),
+    ("cheapest:usd -cheapest:usd", {"3"}),
+    ("cheapest:usd or cheapest:eur", {"1", "2", "3"}),
+    ("-(cheapest:usd or cheapest:tix)", {"2", "4", "6"}),
+]
+
+# The set test_new_rarity_agrees_on_both_lanes imports into, and what both lanes must answer.
+# One card (oracle id A) and a second (B), every printing named by its collector number:
+#   card A   1  rare      2001-01-01   the first rare                              -> new
+#            2  rare      2005-01-01   a reprint                                   -> not
+#            3  uncommon  2002-01-01   the first uncommon                          -> new
+#            4  rare      2001-01-01   same day as 1, a variation (variation last) -> not
+#            5  rare      2000-01-01   a promo-set printing, outside the rule      -> not
+#   card B   6  mythic    2001-01-01   its only printing                           -> new
+#            7  rare      2003-01-01   its masterpiece printing (not wot)          -> not
+#   card C   8  common    2001-01-01   the sync's column put back to NULL           -> in neither
+_NEW_RARITY_SET = "zzn"
+_NEW_RARITY_LANE_CASES: list[tuple[str, set[str]]] = [
+    ("new:rarity", {"1", "3", "6"}),
+    ("NEW=Rarity", {"1", "3", "6"}),
+    ('new:"rarity"', {"1", "3", "6"}),
+    ("-new:rarity", {"2", "4", "5", "7"}),
+    ("-(new:rarity)", {"2", "4", "5", "7"}),
+    ("-(-new:rarity)", {"1", "3", "6"}),
+    ("new:rarity or -new:rarity", {"1", "2", "3", "4", "5", "6", "7"}),
+    ("new:rarity r:rare", {"1"}),
+    ("new:rarity -r:rare", {"3", "6"}),
+    ("-new:rarity r:rare", {"2", "4", "5", "7"}),
+    ("new:rarity or r:rare", {"1", "2", "3", "4", "5", "6", "7"}),
+]
+
+_NEW_FLAGS_SET = "zzf"
+_NEW_FLAGS_LANE_CASES: list[tuple[str, set[str]]] = [
+    ("new:card", {"1", "6"}),
+    ("NEW=Paper", {"1", "6"}),
+    ('new:"cardboard"', {"1", "6"}),
+    ("new:printed", {"1", "6"}),
+    ("-new:card", {"2", "3", "4", "5", "7"}),
+    ("new:frame", {"1", "2", "4", "6"}),
+    ("-new:frame", {"3", "5", "7"}),
+    ("new:foil", {"3", "6"}),
+    ("-new:foil", {"1", "2", "4", "5", "7"}),
+    ("new:nonfoil", {"1", "7"}),
+    ("-new:nonfoil", {"2", "3", "4", "5", "6"}),
+    ("new:art", {"1", "3"}),
+    ("new:illustration", {"1", "3"}),
+    ("-new:art", {"2", "4", "5", "6", "7"}),
+    ("-(-new:art)", {"1", "3"}),
+    ("new:art or -new:art", {"1", "2", "3", "4", "5", "6", "7"}),
+    ("new:card new:foil", {"6"}),
+    ("new:card -new:foil", {"1"}),
+    ("new:frame -new:card", {"2", "4"}),
+    ("new:art new:rarity", {"1"}),
+    ("new:foil or new:nonfoil", {"1", "3", "6", "7"}),
+]
 
 
 class TestContainerIntegration:
@@ -461,6 +589,284 @@ class TestContainerIntegration:
             names = [card["name"] for card in result["cards"] if card["name"] in scores]
             assert names == ["Serra Angel", "Black Lotus", "Lightning Bolt"]
         finally:
+            api_resource.app_context.engine = saved_engine
+            shm_path.unlink(missing_ok=True)
+            shm_path.with_suffix(".lock").unlink(missing_ok=True)
+
+    @pytest.mark.usefixtures("engine_enabled")
+    def test_count_keywords_agree_on_both_lanes(self: TestContainerIntegration, api_resource: APIResource) -> None:
+        """`prints`, `sets`, `paperprints`, `papersets`, `illustrations` and `artists` answer alike in SQL and the engine.
+
+        Both lanes read the same six columns, written here as `_sync_print_counts` writes them, so
+        what this checks is the plumbing a unit test cannot: that the migration added the columns,
+        that ENGINE_COLUMNS selects them and the loader reads them, and that NULL (a card the sync
+        has not reached -- every other row of the fixture data) behaves the same on both sides.
+        """
+        counts = {
+            # Each tuple is prints, sets, paperprints, papersets, illustrations, artists.
+            _BOLT: (77, 46, 68, 41, 33, 1),
+            _ANGEL: (3, 3, 2, 2, 2, 2),
+            # A digital-only card that credits no artist: zero is a value.
+            _LOTUS: (1, 1, 0, 0, 0, 0),
+        }
+        known = set(counts)
+        assignment = ", ".join(f"{column} = %s" for column in PRINT_COUNT_COLUMNS)
+
+        def write(values: dict[str, tuple]) -> None:
+            with api_resource.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+                for name, numbers in values.items():
+                    cursor.execute(f"UPDATE magic.cards SET {assignment} WHERE card_name = %s", (*numbers, name))
+                conn.commit()
+
+        # Private store for the same reason test_cubecobra_ordering swaps one in.
+        shm_path = pathlib.Path(tempfile.gettempdir()) / f"sylvan_librarian_it_{uuid.uuid4().hex}"
+        saved_engine = api_resource.app_context.engine
+        write(counts)
+        api_resource.app_context.engine = QueryEngine(shm_path=str(shm_path))
+        try:
+            api_resource.app_context.reload_engine(force=True)
+
+            for query, expected in _COUNT_KEYWORD_LANE_CASES:
+                sql = {card["name"] for card in api_resource._search_sql(**search_kwargs(query, limit=100))["cards"]}
+                engine = {card["name"] for card in api_resource._search_engine(**search_kwargs(query, limit=100))["cards"]}
+                assert sql == engine, query
+                assert sql & known == expected, query
+        finally:
+            write(dict.fromkeys(counts, (None,) * len(PRINT_COUNT_COLUMNS)))
+            api_resource.app_context.engine = saved_engine
+            shm_path.unlink(missing_ok=True)
+            shm_path.with_suffix(".lock").unlink(missing_ok=True)
+
+    @pytest.mark.usefixtures("engine_enabled")
+    def test_cheapest_agrees_on_both_lanes(self: TestContainerIntegration, api_resource: APIResource) -> None:
+        """`cheapest:usd` / `:eur` / `:tix`, their negated terms and negated groups answer alike in SQL and the engine.
+
+        End to end: the printings go through the importer, whose sync decides `cheapest_codes`;
+        the engine is loaded from the table; and both lanes are asked the same questions, per
+        printing. That covers what the unit tests cannot -- that the migration added the column,
+        that ENGINE_COLUMNS selects it and the loader reads it, and that both kinds of NULL (the
+        unknown bit, and a column the sync has not written) come out the same on both sides.
+        """
+        card_a, card_b, card_c = (str(uuid.uuid4()) for _ in range(3))
+
+        def printing(oracle_id: str, number: str, prices: dict[str, str], set_type: str = "expansion") -> dict:
+            card = make_raw_card(name=f"Cheapest Lane {oracle_id[:8]}")
+            return card | {
+                "oracle_id": oracle_id,
+                "set": _CHEAPEST_SET,
+                "collector_number": number,
+                "set_type": set_type,
+                "prices": prices,
+            }
+
+        printings = [
+            printing(card_a, "1", {"usd": "0.50", "usd_foil": "0.50", "eur": "0.40", "tix": "0.02"}),
+            printing(card_a, "2", {"usd": "2.94", "usd_foil": "1.59", "eur": "0.60", "eur_foil": "0.40", "tix": "0.05"}),
+            printing(card_a, "3", {"usd_foil": "0.50"}),
+            printing(card_a, "4", {}),
+            printing(card_b, "5", {"usd": "5.00", "eur_foil": "3.00"}, set_type="memorabilia"),
+            printing(card_b, "6", {}),
+            printing(card_c, "7", {"usd": "1.00", "eur": "1.00", "tix": "1.00"}),
+        ]
+        numbers = {card["collector_number"] for card in printings}
+
+        def answer(search: object, query: str, unique: UniqueOn) -> list[dict]:
+            return search(**(search_kwargs(query, limit=1000) | {"unique": unique}))["cards"]
+
+        # Private store for the same reason test_cubecobra_ordering swaps one in.
+        shm_path = pathlib.Path(tempfile.gettempdir()) / f"sylvan_librarian_it_{uuid.uuid4().hex}"
+        saved_engine = api_resource.app_context.engine
+        api_resource.app_context.engine = QueryEngine(shm_path=str(shm_path))
+        try:
+            api_resource.admin._upsert_cards(printings)
+            with api_resource.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+                cursor.execute("UPDATE magic.cards SET cheapest_codes = NULL WHERE oracle_id = %s", (card_c,))
+                conn.commit()
+            api_resource.app_context.reload_engine(force=True)
+
+            for query, expected in _CHEAPEST_LANE_CASES:
+                in_set = f"e:{_CHEAPEST_SET} ({query})"
+                sql = {card["collector_number"] for card in answer(api_resource._search_sql, in_set, UniqueOn.PRINTING)}
+                engine = {card["collector_number"] for card in answer(api_resource._search_engine, in_set, UniqueOn.PRINTING)}
+                assert sql == engine, query
+                assert sql == expected, query
+                assert sql <= numbers
+                # And on rows this test did not shape: the three fixture cards, which the sync
+                # reached with whatever prices their blobs hold, grouped by card. Scoped by name
+                # because the session database also holds every other test file's cards.
+                fixture_cards = f'({query}) (name:"lightning bolt" or name:"serra angel" or name:"black lotus")'
+                sql_cards = {card["name"] for card in answer(api_resource._search_sql, fixture_cards, UniqueOn.CARD)}
+                engine_cards = {card["name"] for card in answer(api_resource._search_engine, fixture_cards, UniqueOn.CARD)}
+                assert sql_cards == engine_cards, query
+        finally:
+            with api_resource.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+                cursor.execute("DELETE FROM magic.cards WHERE card_set_code = %s", (_CHEAPEST_SET,))
+                conn.commit()
+            api_resource.app_context.engine = saved_engine
+            shm_path.unlink(missing_ok=True)
+            shm_path.with_suffix(".lock").unlink(missing_ok=True)
+
+    @pytest.mark.usefixtures("engine_enabled")
+    def test_new_rarity_agrees_on_both_lanes(self: TestContainerIntegration, api_resource: APIResource) -> None:
+        """`new:rarity` and its negation answer alike in SQL and the engine.
+
+        End to end: the printings go through the importer, whose sync decides `new_rarity`; the
+        engine is loaded from the table; and both lanes are asked the same questions, per
+        printing. That covers what the unit tests cannot -- that the migration added the column,
+        that ENGINE_COLUMNS selects it and the loader reads it, and that a column the sync has not
+        written (NULL) comes out the same on both sides.
+        """
+        card_a, card_b, card_c = (str(uuid.uuid4()) for _ in range(3))
+
+        def printing(oracle_id: str, number: str, rarity: str, released_at: str, **extra: object) -> dict:
+            card = make_raw_card(name=f"New Rarity Lane {oracle_id[:8]}", rarity=rarity)
+            return (
+                card
+                | {
+                    "oracle_id": oracle_id,
+                    "set": _NEW_RARITY_SET,
+                    "collector_number": number,
+                    "released_at": released_at,
+                    "set_type": "expansion",
+                }
+                | extra
+            )
+
+        printings = [
+            printing(card_a, "1", "rare", "2001-01-01"),
+            printing(card_a, "2", "rare", "2005-01-01"),
+            printing(card_a, "3", "uncommon", "2002-01-01"),
+            printing(card_a, "4", "rare", "2001-01-01", variation=True),
+            printing(card_a, "5", "rare", "2000-01-01", set_type="promo"),
+            printing(card_b, "6", "mythic", "2001-01-01"),
+            printing(card_b, "7", "rare", "2003-01-01", set_type="masterpiece"),
+            printing(card_c, "8", "common", "2001-01-01"),
+        ]
+        numbers = {card["collector_number"] for card in printings}
+
+        def answer(search: object, query: str) -> set[str]:
+            cards = search(**(search_kwargs(query, limit=1000) | {"unique": UniqueOn.PRINTING}))["cards"]
+            return {card["collector_number"] for card in cards}
+
+        def names(search: object, query: str) -> set[str]:
+            return {card["name"] for card in search(**(search_kwargs(query, limit=1000) | {"unique": UniqueOn.CARD}))["cards"]}
+
+        # Private store for the same reason test_cubecobra_ordering swaps one in.
+        shm_path = pathlib.Path(tempfile.gettempdir()) / f"sylvan_librarian_it_{uuid.uuid4().hex}"
+        saved_engine = api_resource.app_context.engine
+        api_resource.app_context.engine = QueryEngine(shm_path=str(shm_path))
+        try:
+            api_resource.admin._upsert_cards(printings)
+            with api_resource.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+                cursor.execute("UPDATE magic.cards SET new_rarity = NULL WHERE oracle_id = %s", (card_c,))
+                conn.commit()
+            api_resource.app_context.reload_engine(force=True)
+
+            for query, expected in _NEW_RARITY_LANE_CASES:
+                in_set = f"e:{_NEW_RARITY_SET} ({query})"
+                sql = answer(api_resource._search_sql, in_set)
+                engine = answer(api_resource._search_engine, in_set)
+                assert sql == engine, query
+                assert sql == expected, query
+                assert sql <= numbers
+                # And on rows this test did not shape: the three fixture cards, which the sync
+                # reached with whatever their blobs hold, grouped by card. Scoped by name because
+                # the session database also holds every other test file's cards.
+                fixture_cards = f'({query}) (name:"lightning bolt" or name:"serra angel" or name:"black lotus")'
+                sql_cards = names(api_resource._search_sql, fixture_cards)
+                engine_cards = names(api_resource._search_engine, fixture_cards)
+                assert sql_cards == engine_cards, query
+        finally:
+            with api_resource.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+                cursor.execute("DELETE FROM magic.cards WHERE card_set_code = %s", (_NEW_RARITY_SET,))
+                conn.commit()
+            api_resource.app_context.engine = saved_engine
+            shm_path.unlink(missing_ok=True)
+            shm_path.with_suffix(".lock").unlink(missing_ok=True)
+
+    def test_new_flags_agree_on_both_lanes(self: TestContainerIntegration, api_resource: APIResource) -> None:
+        """`new:card`, `new:frame`, `new:foil`, `new:nonfoil`, `new:art` and their negations answer alike in SQL and the engine.
+
+        End to end: the printings go through the importer, whose sync decides `new_flags`; the
+        engine is loaded from the table; and both lanes are asked the same questions, per
+        printing. That covers what the unit tests cannot -- that the migration added the column,
+        that ENGINE_COLUMNS selects it and the loader reads it, that the bit the Python node sends
+        is the bit the sync wrote, and that a column the sync has not written (NULL) comes out the
+        same on both sides.
+        """
+        card_a, card_b, card_c = (str(uuid.uuid4()) for _ in range(3))
+        art_one, art_two = str(uuid.uuid4()), str(uuid.uuid4())
+
+        def printing(oracle_id: str, number: str, released_at: str, art: str, **extra: object) -> dict:
+            card = make_raw_card(name=f"New Flags Lane {oracle_id[:8]}")
+            return (
+                card
+                | {
+                    "oracle_id": oracle_id,
+                    "set": _NEW_FLAGS_SET,
+                    "collector_number": number,
+                    "released_at": released_at,
+                    "set_type": "expansion",
+                    "frame": "1997",
+                    "finishes": ["nonfoil"],
+                    "illustration_id": art,
+                }
+                | extra
+            )
+
+        printings = [
+            # card A: its first printing; a new frame; its first foil in a new artwork; a variation
+            # that is the first in a frame of its own; a memorabilia printing earlier than all of
+            # them.
+            printing(card_a, "1", "2001-01-01", art_one),
+            printing(card_a, "2", "2005-01-01", art_one, frame="2003"),
+            printing(card_a, "3", "2006-01-01", art_two, frame="2003", finishes=["foil"]),
+            printing(card_a, "4", "2007-01-01", art_two, frame="2015", variation=True),
+            printing(card_a, "5", "2000-01-01", art_one, set_type="memorabilia"),
+            # card B: a foil-only first printing in card A's artwork, then its first nonfoil.
+            printing(card_b, "6", "2002-01-01", art_one, finishes=["foil"]),
+            printing(card_b, "7", "2003-01-01", art_one),
+            # card C: the sync's answer is blanked below, so it is in no list and no complement.
+            printing(card_c, "8", "2001-01-01", str(uuid.uuid4())),
+        ]
+        numbers = {card["collector_number"] for card in printings}
+
+        def answer(search: object, query: str) -> set[str]:
+            cards = search(**(search_kwargs(query, limit=1000) | {"unique": UniqueOn.PRINTING}))["cards"]
+            return {card["collector_number"] for card in cards}
+
+        def names(search: object, query: str) -> set[str]:
+            return {card["name"] for card in search(**(search_kwargs(query, limit=1000) | {"unique": UniqueOn.CARD}))["cards"]}
+
+        # Private store for the same reason test_cubecobra_ordering swaps one in.
+        shm_path = pathlib.Path(tempfile.gettempdir()) / f"sylvan_librarian_it_{uuid.uuid4().hex}"
+        saved_engine = api_resource.app_context.engine
+        api_resource.app_context.engine = QueryEngine(shm_path=str(shm_path))
+        try:
+            api_resource.admin._upsert_cards(printings)
+            with api_resource.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+                cursor.execute("UPDATE magic.cards SET new_flags = NULL WHERE oracle_id = %s", (card_c,))
+                conn.commit()
+            api_resource.app_context.reload_engine(force=True)
+
+            for query, expected in _NEW_FLAGS_LANE_CASES:
+                in_set = f"e:{_NEW_FLAGS_SET} ({query})"
+                sql = answer(api_resource._search_sql, in_set)
+                engine = answer(api_resource._search_engine, in_set)
+                assert sql == engine, query
+                assert sql == expected, query
+                assert sql <= numbers
+                # And on rows this test did not shape: the three fixture cards, which the sync
+                # reached with whatever their blobs hold, grouped by card. Scoped by name because
+                # the session database also holds every other test file's cards.
+                fixture_cards = f'({query}) (name:"lightning bolt" or name:"serra angel" or name:"black lotus")'
+                sql_cards = names(api_resource._search_sql, fixture_cards)
+                engine_cards = names(api_resource._search_engine, fixture_cards)
+                assert sql_cards == engine_cards, query
+        finally:
+            with api_resource.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+                cursor.execute("DELETE FROM magic.cards WHERE card_set_code = %s", (_NEW_FLAGS_SET,))
+                conn.commit()
             api_resource.app_context.engine = saved_engine
             shm_path.unlink(missing_ok=True)
             shm_path.with_suffix(".lock").unlink(missing_ok=True)

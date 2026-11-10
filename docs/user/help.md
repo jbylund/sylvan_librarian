@@ -122,6 +122,30 @@ r:common
 r>=rare
 ```
 
+Use `new:rarity` to find the printings that are the first of their card at their rarity. `-new:rarity` finds the rest.
+
+```
+new:rarity set:KHM
+t:dragon new:rarity r:mythic
+```
+
+`new:` has other values, each finding the printings that are the first with something. `-new:` in front of any of them finds the rest.
+
+| Term | Finds |
+| --- | --- |
+| `new:card` (or `new:paper`, `new:printed`, `new:cardboard`) | A card's first printing |
+| `new:frame` | A card's first printing in each frame (1993, 1997, 2003, 2015, future) |
+| `new:foil` | A card's first printing in traditional foil |
+| `new:nonfoil` | A card's first nonfoil printing |
+| `new:art` (or `new:illustration`) | The first printing of each artwork, whichever card it is on |
+
+```
+new:card set:KHM
+new:art a:"Rebecca Guay"
+t:angel new:foil year<=2005
+-new:art set:M21
+```
+
 ### Set
 
 Use `set:` with the set code.
@@ -139,6 +163,13 @@ Use `usd` or `eur` with a comparison operator.
 usd<5
 usd>=10
 eur<2
+```
+
+Use `cheapest:` with `usd`, `eur` or `tix` to find the printings that carry their card's lowest price.
+
+```
+cheapest:usd set:KHM
+t:dragon cheapest:eur
 ```
 
 ### Loyalty
