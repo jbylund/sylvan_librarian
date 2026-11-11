@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import multiprocessing
+import pathlib
 import uuid
 from unittest.mock import patch
 
@@ -15,7 +17,7 @@ from api.api_resource import APIResource
 from api.card_processing import preprocess_card
 from api.db.bulk_upsert import bulk_upsert
 from api.scryfall_bulk_data_fetcher import BulkDataKey
-from api.tests.helpers import make_raw_card
+from api.tests.helpers import make_raw_card, search_kwargs
 from api.tests.support import mock_app_context
 
 # ---------------------------------------------------------------------------
@@ -482,3 +484,128 @@ class TestUpsertBehavior:
             row = cursor.fetchone()
         assert row["prefer_score"] == 42.0
         assert row["card_is_tags"] == {"is:instant": True}
+
+
+# ---------------------------------------------------------------------------
+# Double-faced card face search (#873, #400)
+# ---------------------------------------------------------------------------
+
+
+def _load_fixture_cards(filename: str) -> list[dict]:
+    """Load a JSON fixture of raw Scryfall card dicts from api/tests/fixtures/."""
+    path = pathlib.Path(__file__).parent / "fixtures" / filename
+    return json.loads(path.read_text())
+
+
+def _load_sample_card(filename: str) -> dict:
+    """Load a single raw Scryfall card dict from docs/sample_data/."""
+    path = pathlib.Path(__file__).parent.parent.parent / "docs" / "sample_data" / filename
+    return json.loads(path.read_text())
+
+
+class TestDoubleFacedCardFaceSearch:
+    """`o:`/`t:`/`kw:` must match when ANY face matches, not just the one the collapse kept.
+
+    Scryfall's own rule is that a query matches a double-faced card when any face matches it,
+    not just whichever face survived the upsert's scryfall_id dedup (#873, #400).
+
+    Each test runs the same query through both search paths: `_search_sql` (the Postgres path)
+    and, with the engine loaded from the same just-written rows, `_search_engine` (the Rust
+    engine) -- both read from `magic.cards`, so the ingestion-side fix (merge_dfc_faces) fixes
+    both without any card_engine/ code change.
+    """
+
+    def _assert_matches_both_paths(self, api_resource: APIResource, query: str, expected_name: str) -> None:
+        sql_result = api_resource._search_sql(**search_kwargs(query, limit=50))
+        assert any(c["name"] == expected_name for c in sql_result["cards"]), (
+            f"SQL path: {query!r} did not match {expected_name!r}: {[c['name'] for c in sql_result['cards']]}"
+        )
+
+        api_resource.app_context.reload_engine(force=True)
+        engine_result = api_resource._search_engine(**search_kwargs(query, limit=50))
+        assert any(c["name"] == expected_name for c in engine_result["cards"]), (
+            f"Engine path: {query!r} did not match {expected_name!r}: {[c['name'] for c in engine_result['cards']]}"
+        )
+
+    @pytest.fixture(autouse=True)
+    def _import_obyras_attendants(self, api_resource: APIResource) -> None:
+        api_resource.admin._upsert_cards([_load_sample_card("obyras_attendants.json")])
+
+    @pytest.mark.usefixtures("engine_enabled")
+    def test_oracle_text_matches_front_face_only_text(self, api_resource: APIResource) -> None:
+        """Obyra's Attendants' front face text is just "Flying"; the back is a different Instant.
+
+        Before the fix the stored row kept only the last-processed (back) face's oracle text, so
+        `o:flying` missed this card entirely.
+        """
+        self._assert_matches_both_paths(api_resource, "o:flying t:faerie", "Obyra's Attendants // Desperate Parry")
+
+    @pytest.mark.usefixtures("engine_enabled")
+    def test_oracle_text_still_matches_back_face_text(self, api_resource: APIResource) -> None:
+        """Sanity: back-face text (already the winning face pre-fix) must keep matching."""
+        self._assert_matches_both_paths(api_resource, 'o:"-4/-0"', "Obyra's Attendants // Desperate Parry")
+
+    @pytest.mark.usefixtures("engine_enabled")
+    def test_type_matches_front_face_type_alongside_back_face_type(self, api_resource: APIResource) -> None:
+        """Front face is a Creature, back face is an Instant.
+
+        Before the fix, only the back face's type ("Instant") survived the collapse, so
+        `t:creature` missed this card.
+        """
+        self._assert_matches_both_paths(api_resource, "t:creature t:faerie", "Obyra's Attendants // Desperate Parry")
+
+    @pytest.mark.usefixtures("engine_enabled")
+    def test_type_still_matches_back_face_type(self, api_resource: APIResource) -> None:
+        """Sanity: the back face's own type (already the winning face pre-fix) still matches."""
+        self._assert_matches_both_paths(api_resource, "t:instant t:adventure", "Obyra's Attendants // Desperate Parry")
+
+    @pytest.mark.usefixtures("engine_enabled")
+    def test_keyword_search_combined_with_a_face_specific_type(self, api_resource: APIResource) -> None:
+        """`kw:flying` alone already matched before this fix.
+
+        `card_keywords` comes from Scryfall's card-level `keywords` list, identical on every
+        face's processed row. Paired with `t:faerie` (a subtype that exists only on the front
+        face) the combined query still fails pre-fix -- confirming the fix doesn't just add
+        types in isolation, it makes them composable with an already-working predicate the way
+        a real query would combine them.
+        """
+        self._assert_matches_both_paths(api_resource, "kw:flying t:faerie", "Obyra's Attendants // Desperate Parry")
+
+
+class TestPlaneswalkerCommanderQuery:
+    """The exact query from #873.
+
+    Transforming/modal-DFC planeswalkers that are also Legendary Creatures on their other face
+    were missed because that face's "Creature" type never reached the stored row.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _import_cards(self, api_resource: APIResource) -> None:
+        cards = _load_fixture_cards("dfc_planeswalker_cards.json")
+        result = api_resource.admin._upsert_cards(cards)
+        assert result["status"] == "success"
+
+    @pytest.mark.usefixtures("engine_enabled")
+    @pytest.mark.parametrize(
+        "expected_name",
+        [
+            "Ral, Monsoon Mage // Ral, Leyline Prodigy",
+            "Jace, Vryn's Prodigy // Jace, Telepath Unbound",
+            "Valki, God of Lies // Tibalt, Cosmic Impostor",
+        ],
+    )
+    def test_commander_eligible_planeswalker_query_from_873(self, api_resource: APIResource, expected_name: str) -> None:
+        """`t:planeswalker (t:legendary t:creature or o:"can be your commander")`.
+
+        The front face of each of these is a Legendary Creature, the back a Legendary
+        Planeswalker; before the fix the stored row kept only one face's types, so none of them
+        had both "Creature" and "Planeswalker" at once.
+        """
+        query = 't:planeswalker (t:legendary t:creature or o:"can be your commander")'
+
+        sql_result = api_resource._search_sql(**search_kwargs(query, limit=50))
+        assert any(c["name"] == expected_name for c in sql_result["cards"]), [c["name"] for c in sql_result["cards"]]
+
+        api_resource.app_context.reload_engine(force=True)
+        engine_result = api_resource._search_engine(**search_kwargs(query, limit=50))
+        assert any(c["name"] == expected_name for c in engine_result["cards"]), [c["name"] for c in engine_result["cards"]]
