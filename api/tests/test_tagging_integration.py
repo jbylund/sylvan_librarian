@@ -187,8 +187,16 @@ class TestAliasPropagation:
         with patch("api.tag_import._sync_card_tags", side_effect=capture), patch("api.tag_import._sync_hierarchy"):
             import_art_tags(pool, fetcher)
 
-        # "open mouth" is stored slugified, which is the form slugify_tag() turns the query into.
-        assert captured["id_to_tags"]["illus-x"] == {"loose-lips": True, "open-mouth": True, "mouth-open": True}
+        # "open mouth" is stored slugified, and every key also punctuation-blind (fold_tag), which is
+        # the form the query side matches.
+        assert captured["id_to_tags"]["illus-x"] == {
+            "loose-lips": True,
+            "looselips": True,
+            "open-mouth": True,
+            "openmouth": True,
+            "mouth-open": True,
+            "mouthopen": True,
+        }
 
     def test_descendant_carries_an_ancestors_alias(self) -> None:
         # A card tagged only `campfire` must answer art:flames, since Scryfall resolves flames ->

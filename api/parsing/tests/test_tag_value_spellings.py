@@ -16,7 +16,7 @@ tag_import stores (`open mouth` -> `open-mouth`) reachable.
 import pytest
 
 from api.parsing import generate_sql_query, parse_scryfall_query
-from api.parsing.card_query_nodes import slugify_tag
+from api.parsing.card_query_nodes import fold_tag, slugify_tag
 from api.parsing.pyparsing_based import parse_str_to_query as pyparsing_parse_str_to_query
 
 # (spelling as written, the hyphenated spelling it must match)
@@ -27,6 +27,13 @@ TAG_VALUE_CASES = [
     ('otag:"creature removal"', "otag:creature-removal"),
     ("otag:Removal-Creature", "otag:removal-creature"),
     ('t:creature art:"three figures"', "t:creature art:three-figures"),
+    # Punctuation is ignored outright (api.scryfall.com 2026-11-13): board-wipe, board_wipe and
+    # boardwipe are all otag:sweeper's 952 through its alias `boardwipe`; aura and au-ra are 44.
+    ("otag:board-wipe", "otag:boardwipe"),
+    ("otag:board_wipe", "otag:boardwipe"),
+    ("otag:wrath-of-god", "otag:wrathofgod"),
+    ("art:au-ra", "art:aura"),
+    ("art:black-beard", "art:blackbeard"),
 ]
 
 
@@ -62,3 +69,24 @@ SLUGIFY_CASES = [
 def test_slugify_tag(written: str, expected: str) -> None:
     """Runs of non-alphanumerics collapse to a single hyphen, with no leading or trailing one."""
     assert slugify_tag(written) == expected
+
+
+FOLD_CASES = [
+    ("board-wipe", "boardwipe"),
+    ("Board Wipe", "boardwipe"),
+    ("board_wipe", "boardwipe"),
+    ("wrath of god", "wrathofgod"),
+    ("avacyn's collar", "avacynscollar"),
+    ("107.3f x card", "1073fxcard"),
+    ("", ""),
+]
+
+
+@pytest.mark.parametrize(
+    argnames=["written", "expected"],
+    argvalues=FOLD_CASES,
+    ids=[written or "empty" for written, _ in FOLD_CASES],
+)
+def test_fold_tag(written: str, expected: str) -> None:
+    """Every non-alphanumeric is removed: the spelling Scryfall matches a tag value under."""
+    assert fold_tag(written) == expected

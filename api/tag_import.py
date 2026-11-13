@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
-from api.parsing.card_query_nodes import slugify_tag
+from api.parsing.card_query_nodes import fold_tag, slugify_tag
 from api.scryfall_bulk_data_fetcher import BulkDataKey, ScryfallBulkDataFetcher
 
 if TYPE_CHECKING:
@@ -66,28 +66,16 @@ def _build_slug_to_aliases(tags: list[dict]) -> dict[str, frozenset[str]]:
     forms reach the same stored key -- half the art aliases are spelled with spaces ("open mouth",
     an alias of `loose-lips`), and `slugify_tag` normalizes the search term the same way.
 
-    An alias that lands on a real tag slug, or that two tags both claim, is ambiguous, so it is
-    dropped rather than guessed at: the slug always wins. Neither dump contains one today (checked
-    against both), so this is a guard against upstream data changing, not a live case.
+    An alias that two tags both claim, or that is also another tag's slug, goes to every tag that
+    claims it: Scryfall answers the UNION there (see fold_tag), so `art:blackbeard` returns the
+    `black-beard` tag's artworks and the `edward-teach` tag's, whose alias it is.
     """
-    slugs = {tag["slug"] for tag in tags}
-    claimants: dict[str, set[str]] = collections.defaultdict(set)
+    slug_to_aliases: dict[str, set[str]] = collections.defaultdict(set)
     for tag in tags:
         for alias in tag.get("aliases") or []:
             slugified = slugify_tag(alias)
             if slugified:
-                claimants[slugified].add(tag["slug"])
-
-    slug_to_aliases: dict[str, set[str]] = collections.defaultdict(set)
-    dropped = []
-    for alias, claiming_slugs in claimants.items():
-        if alias in slugs or len(claiming_slugs) > 1:
-            dropped.append(alias)
-            continue
-        slug_to_aliases[next(iter(claiming_slugs))].add(alias)
-
-    if dropped:
-        logger.warning("Dropping %d ambiguous tag aliases: %s", len(dropped), sorted(dropped))
+                slug_to_aliases[tag["slug"]].add(slugified)
 
     return {slug: frozenset(aliases) for slug, aliases in slug_to_aliases.items()}
 
@@ -99,6 +87,10 @@ def _build_tag_keys(tags: list[dict], uuid_to_slug: dict[str, str]) -> dict[str,
     each of those. Aliases have to ride along on the ancestors too, because Scryfall resolves an
     alias to its tag *before* expanding the hierarchy: `art:flames` returns exactly what `art:fire`
     does, descendants included, not just the artworks tagged `fire` directly.
+
+    Each of those also gets its punctuation-blind spelling (fold_tag), which is the key the query
+    side matches: Scryfall ignores punctuation in a tag value and unions every tag that reads the
+    same, so `otag:board-wipe` reaches the alias `boardwipe` and `art:au-ra` reaches `aura` too.
     """
     all_ancestors = _build_all_ancestors(tags, uuid_to_slug)
     slug_to_aliases = _build_slug_to_aliases(tags)
@@ -106,7 +98,8 @@ def _build_tag_keys(tags: list[dict], uuid_to_slug: dict[str, str]) -> dict[str,
     tag_keys: dict[str, frozenset[str]] = {}
     for slug, ancestors in all_ancestors.items():
         keys = {slug, *ancestors}
-        tag_keys[slug] = frozenset(keys.union(*(slug_to_aliases.get(key, frozenset()) for key in keys)))
+        keys = keys.union(*(slug_to_aliases.get(key, frozenset()) for key in keys))
+        tag_keys[slug] = frozenset(keys | {fold_tag(key) for key in keys})
 
     return tag_keys
 

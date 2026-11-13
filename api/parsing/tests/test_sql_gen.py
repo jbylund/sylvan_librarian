@@ -570,14 +570,14 @@ def test_keyword_sql_translation(parse_query, input_query: str, expected_sql: st
         # Oracle tag search with hyphenated term - this currently fails but should work
         (
             "otag:dual-land",
-            r"(card.card_oracle_tags @> %(p_dict_eydkdWFsLWxhbmQnOiBUcnVlfQ)s)",
-            {"p_dict_eydkdWFsLWxhbmQnOiBUcnVlfQ": {"dual-land": True}},
+            r"(card.card_oracle_tags @> %(p_dict_eydkdWFsbGFuZCc6IFRydWV9)s)",
+            {"p_dict_eydkdWFsbGFuZCc6IFRydWV9": {"dualland": True}},
         ),
         # Oracle tag with quoted hyphenated term should also work (and currently does)
         (
             'otag:"dual-land"',
-            r"(card.card_oracle_tags @> %(p_dict_eydkdWFsLWxhbmQnOiBUcnVlfQ)s)",
-            {"p_dict_eydkdWFsLWxhbmQnOiBUcnVlfQ": {"dual-land": True}},
+            r"(card.card_oracle_tags @> %(p_dict_eydkdWFsbGFuZCc6IFRydWV9)s)",
+            {"p_dict_eydkdWFsbGFuZCc6IFRydWV9": {"dualland": True}},
         ),
         # Oracle tag with alias 'otag'
         (
@@ -588,14 +588,14 @@ def test_keyword_sql_translation(parse_query, input_query: str, expected_sql: st
         # Oracle tag with numeric prefix like "40k-model" - issue #110
         (
             "otag:40k-model",
-            r"(card.card_oracle_tags @> %(p_dict_eyc0MGstbW9kZWwnOiBUcnVlfQ)s)",
-            {"p_dict_eyc0MGstbW9kZWwnOiBUcnVlfQ": {"40k-model": True}},
+            r"(card.card_oracle_tags @> %(p_dict_eyc0MGttb2RlbCc6IFRydWV9)s)",
+            {"p_dict_eyc0MGttb2RlbCc6IFRydWV9": {"40kmodel": True}},
         ),
         # Oracle tag with complex hyphenated value containing digits
         (
             "otag:cycle-shm-common-hybrid-1-drop",
-            r"(card.card_oracle_tags @> %(p_dict_eydjeWNsZS1zaG0tY29tbW9uLWh5YnJpZC0xLWRyb3AnOiBUcnVlfQ)s)",
-            {"p_dict_eydjeWNsZS1zaG0tY29tbW9uLWh5YnJpZC0xLWRyb3AnOiBUcnVlfQ": {"cycle-shm-common-hybrid-1-drop": True}},
+            r"(card.card_oracle_tags @> %(p_dict_eydjeWNsZXNobWNvbW1vbmh5YnJpZDFkcm9wJzogVHJ1ZX0)s)",
+            {"p_dict_eydjeWNsZXNobWNvbW1vbmh5YnJpZDFkcm9wJzogVHJ1ZX0": {"cycleshmcommonhybrid1drop": True}},
         ),
     ],
 )
@@ -623,8 +623,8 @@ def test_oracle_tag_sql_translation(parse_query, input_query: str, expected_sql:
         ),
         (
             "art:cycle-abu-dual-land",
-            r"(card.card_art_tags @> %(p_dict_eydjeWNsZS1hYnUtZHVhbC1sYW5kJzogVHJ1ZX0)s)",
-            {"p_dict_eydjeWNsZS1hYnUtZHVhbC1sYW5kJzogVHJ1ZX0": {"cycle-abu-dual-land": True}},
+            r"(card.card_art_tags @> %(p_dict_eydjeWNsZWFidWR1YWxsYW5kJzogVHJ1ZX0)s)",
+            {"p_dict_eydjeWNsZWFidWR1YWxsYW5kJzogVHJ1ZX0": {"cycleabudualland": True}},
         ),
     ],
 )

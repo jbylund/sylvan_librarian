@@ -301,6 +301,28 @@ def slugify_tag(val: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", val.strip().lower()).strip("-")
 
 
+def fold_tag(val: str) -> str:
+    """Return the punctuation-blind spelling a tag value is matched under.
+
+    Scryfall ignores punctuation when it matches a tag value, and answers the UNION of every tag
+    whose slug or alias then reads the same. Measured on api.scryfall.com 2026-11-13:
+    `otag:board-wipe`, `otag:board_wipe` and `otag:boardwipe` all return 952 (only `boardwipe` is
+    a listed alias of `sweeper`); `art:black-beard` and `art:blackbeard` both return 14, which is
+    `art:black-beard or art:edward-teach` (`edward-teach` carries the alias "Blackbeard");
+    `art:aura` and `art:au-ra` both return 44, two real slugs a hyphen apart.
+
+    tag_import writes this spelling of every key a card carries, so matching the folded search
+    term against the folded keys is exactly that union, with no query-time lookup.
+
+    Args:
+        val: Tag string as the searcher wrote it, or a stored slug or alias.
+
+    Returns:
+        The value lowercased with every non-alphanumeric removed, e.g. "Board Wipe" -> "boardwipe".
+    """
+    return re.sub(r"[^a-z0-9]+", "", val.lower())
+
+
 def get_oracle_tags_comparison_object(val: str) -> dict[str, bool]:
     """Convert oracle tag string to comparison object for database queries.
 
@@ -308,9 +330,9 @@ def get_oracle_tags_comparison_object(val: str) -> dict[str, bool]:
         val: Oracle tag string to normalize.
 
     Returns:
-        Dictionary mapping normalized oracle tag to True.
+        Dictionary mapping the folded oracle tag to True (see fold_tag).
     """
-    return {slugify_tag(val): True}
+    return {fold_tag(val): True}
 
 
 def get_art_tags_comparison_object(val: str) -> dict[str, bool]:
@@ -320,9 +342,9 @@ def get_art_tags_comparison_object(val: str) -> dict[str, bool]:
         val: Art tag string to normalize.
 
     Returns:
-        Dictionary mapping normalized art tag to True.
+        Dictionary mapping the folded art tag to True (see fold_tag).
     """
-    return {slugify_tag(val): True}
+    return {fold_tag(val): True}
 
 
 def get_is_tags_comparison_object(val: str) -> dict[str, bool]:

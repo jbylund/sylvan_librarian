@@ -144,3 +144,29 @@ So: the number was wrong and is corrected, the trade it fed into is unchanged fo
   `card_art_tags` / `card_oracle_tags` and the engine reloads.
 - An alias that ever does collide with a slug, or that two tags claim, is dropped with a warning
   rather than guessed at — the slug wins. Neither dump contains one today.
+
+## Addendum (2026-11-13): punctuation is ignored, and a shared spelling is a union
+
+Re-probing api.scryfall.com showed two more rules, both of which the slug-only version missed:
+
+```
+otag:sweeper 952   otag:boardwipe 952   otag:board-wipe 952   otag:board_wipe 952
+otag:wrath-of-god 952   otag:wrathofgod 952
+art:black-beard 14   art:blackbeard 14   art:edward-teach 1   art:black-beard or art:edward-teach 14
+art:aura 44   art:au-ra 44   art:betor 7   art:b-etor 7   art:seaweed 52   art:sea-weed 52
+```
+
+1. **Punctuation is ignored outright, not just folded to a hyphen.** `boardwipe` is the listed
+   alias of `sweeper`; `board-wipe` is in neither dump, yet answers the same 952.
+2. **A spelling several tags share answers all of them.** `black-beard` is a real art tag (13
+   artworks) and "Blackbeard" is an alias of `edward-teach` (1); both spellings answer 14. `aura`
+   and `au-ra` are two real slugs a hyphen apart, and both answer their union. So the "an alias
+   colliding with a slug is dropped, the slug wins" guard above was the opposite of Scryfall: an
+   ambiguous alias now goes to every tag that claims it.
+
+Both fall out of one change. Every key a card carries is also written punctuation-blind
+(`fold_tag`: lowercase, every non-alphanumeric removed), and the search term is folded the same
+way, so `card_oracle_tags @> {"boardwipe": true}` is exactly the union of every tag whose slug or
+alias reads `boardwipe`, descendants included. Query time stays an exact key match. The cost is one
+extra key per hyphenated slug or alias a card carries; slugs without punctuation fold to
+themselves and add nothing.

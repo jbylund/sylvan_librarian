@@ -68,20 +68,21 @@ class TestBuildSlugToAliases:
         tags = [{"id": "u1", "slug": "fire"}, {"id": "u2", "slug": "flying", "aliases": []}]
         assert _build_slug_to_aliases(tags) == {}
 
-    def test_alias_colliding_with_a_slug_is_dropped(self) -> None:
-        # An alias that is also a real tag's slug would silently merge two tags; the slug wins.
+    def test_alias_colliding_with_a_slug_unions(self) -> None:
+        # Scryfall answers the union: art:blackbeard is the black-beard tag AND edward-teach, whose
+        # alias "Blackbeard" folds to the same spelling (2026-11-13, 14 = 13 + 1).
         tags = [
-            {"id": "u1", "slug": "fire", "aliases": ["flying"]},
-            {"id": "u2", "slug": "flying", "aliases": []},
+            {"id": "u1", "slug": "edward-teach", "aliases": ["Blackbeard"]},
+            {"id": "u2", "slug": "black-beard", "aliases": []},
         ]
-        assert _build_slug_to_aliases(tags) == {}
+        assert _build_slug_to_aliases(tags) == {"edward-teach": frozenset({"blackbeard"})}
 
-    def test_alias_claimed_by_two_tags_is_dropped(self) -> None:
+    def test_alias_claimed_by_two_tags_goes_to_both(self) -> None:
         tags = [
             {"id": "u1", "slug": "fire", "aliases": ["open flame"]},
             {"id": "u2", "slug": "campfire", "aliases": ["open-flame"]},
         ]
-        assert _build_slug_to_aliases(tags) == {}
+        assert _build_slug_to_aliases(tags) == {"fire": frozenset({"open-flame"}), "campfire": frozenset({"open-flame"})}
 
     def test_alias_repeated_by_one_tag_is_kept(self) -> None:
         # Two spellings of one alias collapse to the same slug -- not a conflict.
@@ -109,8 +110,19 @@ class TestBuildTagKeys:
         ]
         uuid_to_slug = {"u1": "permanent", "u2": "land-type"}
         result = _build_tag_keys(tags, uuid_to_slug)
-        assert result["land-type"] == frozenset({"land-type", "permanent"})
+        assert result["land-type"] == frozenset({"land-type", "landtype", "permanent"})
         assert result["permanent"] == frozenset({"permanent"})
+
+    def test_every_key_carries_its_punctuation_blind_spelling(self) -> None:
+        # The query side folds the search term (fold_tag), so otag:board-wipe reaches the alias
+        # `boardwipe` and art:au-ra reaches the slug `aura` -- Scryfall's union, 2026-11-13.
+        tags = [
+            {"id": "u1", "slug": "sweeper", "parent_ids": [], "aliases": ["boardwipe", "wrath of god"]},
+            {"id": "u2", "slug": "au-ra", "parent_ids": []},
+        ]
+        result = _build_tag_keys(tags, {"u1": "sweeper", "u2": "au-ra"})
+        assert result["sweeper"] == frozenset({"sweeper", "boardwipe", "wrath-of-god", "wrathofgod"})
+        assert result["au-ra"] == frozenset({"au-ra", "aura"})
 
 
 class TestAPIResourceEndpoints:
