@@ -283,6 +283,14 @@ DB_COLUMNS = [
         search_aliases=["year"],
         parser_class=ParserClass.YEAR,
     ),
+    # Not a column: `prefer:` picks which printing of each card is returned. Both parsers read it as
+    # a text condition and post_parse lifts it onto Query.prefer before anything generates SQL.
+    FieldInfo(
+        db_column_name="prefer",
+        field_type=FieldType.TEXT,
+        search_aliases=["prefer"],
+        parser_class=ParserClass.TEXT,
+    ),
 ]
 
 KNOWN_CARD_ATTRIBUTES = set()
