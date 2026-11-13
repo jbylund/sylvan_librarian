@@ -95,6 +95,8 @@ Sylvan Librarian is an open source implementation of Scryfall, a Magic: The Gath
 | **Card Layout**            | `layout:`                                     | ✔        | ✔           | Card layout types (normal, split, transform, etc.)        |
 | **Card Border**            | `border:`                                     | ✔        | ✔           | Border colors (black, white, borderless, etc.)            |
 | **Special Properties**     | `is:`                                         | ✔        | ✔           | Card classifications (creature, spell, permanent, etc.)   |
+| **Game Availability**      | `game:paper`, `game:mtgo`, `game:arena`       | ✔        | ✔           | Printings available in a game (SQL path; engine declines) |
+| **Preferred Printing**     | `prefer:usd-low`, `prefer:oldest`, ...        | ✔        | ✔           | Picks each card's printing; overrides the `prefer` param  |
 | **Comparison Operators**   | `=`, `<`, `>`, `<=`, `>=`, `!=`, `<>`         | ✔        | ✔           | All comparison operators supported                        |
 | **Regular Expressions**    | `/pattern/`                                   | ✔        | ✔           | Pattern matching with regex syntax                        |
 | **Collection Features**    | `cube:`, `papersets:`                         | ✔        | ✘           | Collection and cube inclusion features                    |
@@ -421,7 +423,7 @@ The `/search` endpoint accepts the following query parameters:
 - `orderby` (string, default `edhrec`): Field to sort by (`name`, `cmc`, `power`, `toughness`, `edhrec`, `rarity`, `usd`, `cubecobra`).
 - `direction` (string, default `asc`): Sort direction (`asc` or `desc`).
 - `unique` (string, default `card`): Result deduplication mode (`card`, `art`/`artwork`, `prints`/`printing`).
-- `prefer` (string, default `default`): Preferred printing selection when grouping (`oldest`, `newest`, `usd-low`, `usd-high`, `promo`, `default`).
+- `prefer` (string, default `default`): Preferred printing selection when grouping (`oldest`, `newest`, `usd-low`, `usd-high`, `promo`, `default`). A `prefer:` in the query takes precedence.
 - `fields` (string): Comma-separated list of fields to return per card (see `RESULT_FIELD_COLUMNS` in `api/api_resource.py`).
 - `shape` (string, default `rows`): Response layout format (`rows` for list of card objects, `columnar` for columnar field dictionary).
 

@@ -28,6 +28,7 @@ from api.enums import CardOrdering, PreferOrder, ResponseShape, SortDirection, U
 from api.middlewares.timing import record_span
 from api.noscript_helpers import generate_results_count_html, generate_results_html
 from api.parsing import generate_sql_query, parse_scryfall_query
+from api.parsing.prefer import prefer_order_name
 from api.parsing.query_budget import (
     QUERY_REGEX_REJECTED_MESSAGE,
     InvalidRegexPatternError,
@@ -263,6 +264,16 @@ def _copy_query_result(result: dict[str, Any]) -> dict[str, Any]:
     if "result" in copied:
         copied["result"] = [dict(row) for row in copied["result"]]
     return copied
+
+
+def _query_prefer_or(parsed_query: Query, prefer: PreferOrder) -> PreferOrder:
+    """Return the query's own `prefer:` if it has one, else *prefer* (the request parameter).
+
+    The query text is the user's own words, so it wins over the parameter.
+    """
+    if parsed_query.prefer is None:
+        return prefer
+    return PreferOrder(prefer_order_name(parsed_query.prefer))
 
 
 class APIResource:
@@ -730,6 +741,7 @@ class APIResource:
             )
         except ValueError as err:
             _raise_query_bad_request(exc_name="ValueError", query=query, description=f'Failed to parse query: "{query}"', err=err)
+        prefer = _query_prefer_or(parsed_query, prefer)
 
         if not settings.enable_engine:
             pass  # feature-gated off: SQL serves everything, the store never loads
