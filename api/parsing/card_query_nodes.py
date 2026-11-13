@@ -12,6 +12,7 @@ from api.parsing.db_info import (
     ALIAS_TO_FIELD_INFOS,
     CARD_SUPERTYPES,
     CARD_TYPES,
+    DERIVED_COLUMN_SQL,
     FORMAT_CODE_TO_NAME,
     FieldType,
     ParserClass,
@@ -137,7 +138,7 @@ class CardAttributeNode(AttributeNode):
         """
         del context
         # attribute_name is already set to the correct db_column_name in __init__
-        return f"card.{self.attribute_name}"
+        return DERIVED_COLUMN_SQL.get(self.attribute_name) or f"card.{self.attribute_name}"
 
     def to_human_explanation(self) -> str:
         """Convert to human-readable explanation."""
@@ -681,6 +682,8 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
             return f"the rarity {operator_str} {rhs_str}"
         if db_column_name == "card_artist" and self.operator in (":", "="):
             return f"the artist is {rhs_str}" if self.operator == "=" else f"the artist contains {rhs_str}"
+        if db_column_name == "card_games" and self.operator in (":", "="):
+            return f"it's available in {rhs_str.lower()}"
         if db_column_name == "card_set_code" and self.operator in (":", "="):
             return f"the set contains {rhs_str}"
 
@@ -1064,6 +1067,9 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
             # is: tags are stored in lowercase, similar to oracle tags
             rhs = get_is_tags_comparison_object(self.rhs.value.strip())
             placeholder = context.add(rhs)
+        elif attr == "card_games":
+            # Scryfall's games array holds lowercase names: ["paper", "mtgo", "arena"]
+            placeholder = context.add([self.rhs.value.strip().lower()])
         elif attr == "card_legalities":
             # Handle legality searches - need original search attribute for status mapping
             original_attr = getattr(self.lhs, "original_attribute", attr)
