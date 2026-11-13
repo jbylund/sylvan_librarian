@@ -78,7 +78,7 @@ INSERT INTO magic.cards (
     '{T}, Sacrifice Black Lotus: Add three mana of any one color.',
     NULL,
     NULL,
-    '{"mana-acceleration": true}',
+    '{"mana-acceleration": true, "manaacceleration": true}',
     '1',
     1,
     '2024-02-23'
