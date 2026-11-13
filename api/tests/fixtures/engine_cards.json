@@ -441,7 +441,8 @@
     "card_name": "Counterspell",
     "card_name_folded": "counterspell",
     "card_oracle_tags": {
-      "counter-spell": true
+      "counter-spell": true,
+      "counterspell": true
     },
     "card_rarity_int": 1,
     "card_set_code": "lea",
@@ -525,7 +526,8 @@
     "card_name": "Counterspell",
     "card_name_folded": "counterspell",
     "card_oracle_tags": {
-      "counter-spell": true
+      "counter-spell": true,
+      "counterspell": true
     },
     "card_rarity_int": 1,
     "card_set_code": "leb",
@@ -609,7 +611,8 @@
     "card_name": "Counterspell",
     "card_name_folded": "counterspell",
     "card_oracle_tags": {
-      "counter-spell": true
+      "counter-spell": true,
+      "counterspell": true
     },
     "card_rarity_int": 0,
     "card_set_code": "ema",
@@ -693,7 +696,8 @@
     "card_name": "Counterspell",
     "card_name_folded": "counterspell",
     "card_oracle_tags": {
-      "counter-spell": true
+      "counter-spell": true,
+      "counterspell": true
     },
     "card_rarity_int": 0,
     "card_set_code": "a25",
@@ -777,7 +781,8 @@
     "card_name": "Counterspell",
     "card_name_folded": "counterspell",
     "card_oracle_tags": {
-      "counter-spell": true
+      "counter-spell": true,
+      "counterspell": true
     },
     "card_rarity_int": 2,
     "card_set_code": "pmei",
@@ -861,7 +866,8 @@
     "card_name": "Counterspell",
     "card_name_folded": "counterspell",
     "card_oracle_tags": {
-      "counter-spell": true
+      "counter-spell": true,
+      "counterspell": true
     },
     "card_rarity_int": 2,
     "card_set_code": "sld",
