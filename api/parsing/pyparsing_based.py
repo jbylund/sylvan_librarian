@@ -67,6 +67,12 @@ _FP_UNSAFE_CHARS = frozenset("()\"'/{+*")
 _FP_TERM_START_OPS = frozenset("><=!:")
 _FP_TERM_END_OPS = frozenset("><=!:-")
 
+# Punctuation that is an ordinary value character, at the start of a word and inside one, so a bare
+# value is the same search as its quoted spelling (`name:jace,` is `name:"jace,"`). The hand parser's
+# _WORD_START/_WORD_CONT hold the same characters; test_parser_parity checks that the two agree.
+# Goes inside a regex character class, so it must not contain `]`, `\`, `^` or `-`.
+_VALUE_PUNCT = "~,"
+
 
 def make_regex_pattern(words: Iterable[str]) -> Regex:
     """Create a regex pattern for matching words with word boundaries.
@@ -229,8 +235,9 @@ def create_basic_parsers() -> dict[str, ParserElement]:
     # [^\W\d] is "word char that's not a digit" — i.e. any Unicode letter or underscore
     # (Python 3 `re` treats `\w`/`\W` as Unicode-aware by default for str patterns), so
     # bare words can start with accented letters like "Éowyn" (#649) without also
-    # allowing a leading digit.
-    word = Regex(r"[^\W\d][\w-]*\w|[^\W\d]").set_parse_action(make_word)
+    # allowing a leading digit. _VALUE_PUNCT may start, continue and end a word.
+    word_start = rf"(?:[^\W\d]|[{_VALUE_PUNCT}])"
+    word = Regex(rf"{word_start}[\w{_VALUE_PUNCT}-]*[\w{_VALUE_PUNCT}]|{word_start}").set_parse_action(make_word)
 
     literal_number = float_number | integer
     # Signed literals are wired into the right-hand side of a numeric comparison only (see
@@ -238,7 +245,7 @@ def create_basic_parsers() -> dict[str, ParserElement]:
     negative_float = Regex(r"-\d+\.\d*").set_parse_action(lambda t: float(t[0]))
     negative_integer = Regex(r"-\d+\b").set_parse_action(lambda t: int(t[0]))
     signed_literal_number = negative_float | negative_integer | literal_number
-    string_value_word = Regex(r"\w[\w.-]*")
+    string_value_word = Regex(rf"[\w{_VALUE_PUNCT}][\w.{_VALUE_PUNCT}-]*")
 
     return {
         "attrop": attrop,
@@ -418,7 +425,7 @@ def create_all_condition_parsers(basic_parsers: dict, mana_parsers: dict, color_
         | attr_attr_condition
     )
 
-    hyphenated_condition = text_attr_word + Literal(":") + Regex(r"\w[\w-]*")
+    hyphenated_condition = text_attr_word + Literal(":") + Regex(rf"[\w{_VALUE_PUNCT}][\w{_VALUE_PUNCT}-]*")
     hyphenated_condition.set_parse_action(make_binary_operator_node)
 
     return {
@@ -620,7 +627,7 @@ def _get_implicit_and_tokenizer() -> ParserElement:
 
     float_tok = Regex(r"\b\d+\.\d*\b").set_parse_action(lambda t: t[0])
 
-    string_value_tok = Regex(r"\w([\w.-]*[\w.])?").set_parse_action(lambda t: t[0])
+    string_value_tok = Regex(rf"[\w{_VALUE_PUNCT}]([\w.{_VALUE_PUNCT}-]*[\w.{_VALUE_PUNCT}])?").set_parse_action(lambda t: t[0])
 
     curly_mana_symbol = Regex(r"\{[^}]+\}")
     # Mirrors create_mana_parsers' simple_mana_symbol (#954): any letter or digit, so a bare run

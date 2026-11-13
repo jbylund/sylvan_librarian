@@ -22,6 +22,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -189,6 +190,42 @@ def fetch_cards_from_db(
     return cards
 
 
+def get_session() -> requests.Session:
+    """Return the requests Session for the calling process, creating it on first use.
+
+    Connections are pooled per process rather than per request. The sync makes one request
+    per image over tens of thousands of images, and without a Session each one pays a fresh
+    TCP handshake plus a TLS negotiation to the same host.
+
+    Returns:
+        A Session identifying itself to Scryfall, reused for the life of the process.
+    """
+    return _get_session(os.getpid())
+
+
+@lru_cache(maxsize=1)
+def _get_session(_pid: int) -> requests.Session:
+    """Build the Session for one process; the pid argument exists only as the cache key.
+
+    Keyed on pid because the worker pool forks: a Session created in the parent would hand
+    every child a copy of the same open sockets, and concurrent use of a shared TLS connection
+    corrupts the stream. A child's first call misses on its own pid and builds its own pool,
+    without depending on how the pool is started. maxsize=1 keeps only the current process's
+    session, so the inherited parent entry is evicted rather than held for the whole run.
+
+    Args:
+        _pid: The calling process's id, from os.getpid().
+
+    Returns:
+        A new Session identifying itself to Scryfall.
+    """
+    session = requests.Session()
+    # Scryfall rejects HTTP-library default User-Agents with 400 generic_user_agent, and
+    # rejects a request that sends no User-Agent at all.
+    session.headers["User-Agent"] = make_user_agent()
+    return session
+
+
 def download_image(url: str, output_path: Path) -> bool:
     """Download an image from a URL.
 
@@ -200,9 +237,7 @@ def download_image(url: str, output_path: Path) -> bool:
         True if successful, False otherwise
     """
     try:
-        # Scryfall rejects HTTP-library default User-Agents with 400 generic_user_agent, and
-        # rejects a request that sends no User-Agent at all.
-        response = requests.get(url, timeout=30, stream=True, headers={"User-Agent": make_user_agent()})
+        response = get_session().get(url, timeout=30, stream=True)
         response.raise_for_status()
 
         with output_path.open("wb") as f:
@@ -505,7 +540,11 @@ def configure_env() -> None:
     """Load environment variables from env.json file."""
     with Path("env.json").open("r") as f:
         env = json.load(f)
-    os.environ.update(env)
+    # setdefault, not update: env.json supplies defaults, so an explicitly exported PGHOST or
+    # PGPORT still wins. `update` silently discarded them, which left editing env.json as the
+    # only way to point the script at a database.
+    for key, value in env.items():
+        os.environ.setdefault(key, str(value))
 
 
 def check_cwebp() -> None:
