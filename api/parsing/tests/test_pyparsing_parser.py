@@ -1206,6 +1206,15 @@ def test_parse_combined_produces_queries() -> None:
             "a-b-c",
             BinaryOperatorNode(CardAttributeNode("name", ParserClass.TEXT), ":", StringValueNode("a-b-c")),
         ),
+        # A run of hyphens is kept in the one name word, after a plain word and after a numeric alias
+        (
+            "a--b---c",
+            BinaryOperatorNode(CardAttributeNode("name", ParserClass.TEXT), ":", StringValueNode("a--b---c")),
+        ),
+        (
+            "power--sink",
+            BinaryOperatorNode(CardAttributeNode("name", ParserClass.TEXT), ":", StringValueNode("power--sink")),
+        ),
         # Trailing dot in oracle text value (sentence-ending period)
         (
             "o:token.",
@@ -1243,6 +1252,8 @@ def test_parse_hyphenated_words(test_input: str, expected_ast: QueryNode) -> Non
     argnames="invalid_query",
     argvalues=[
         "word-",  # Standalone word ending with hyphen
+        "word--",  # A run of hyphens with nothing behind it glues nothing
+        "some--word-",  # ...nor does a single one after a glued run
         "-",  # Standalone hyphen
     ],
 )
