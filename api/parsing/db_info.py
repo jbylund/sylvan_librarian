@@ -129,6 +129,22 @@ DB_COLUMNS = [
         search_aliases=["toughness", "tou"],
         parser_class=ParserClass.NUMERIC,
     ),
+    # Scryfall's COMBINED power-and-toughness keyword, under both of its spellings. Not a stored
+    # column: the engine adds the card's two stats per candidate card (card_engine's
+    # `power_plus_toughness`, which carries the measurements), and the SQL path spells it as
+    # the sum of the row's two columns (CardAttributeNode.to_sql). A numeric alias like any other,
+    # so every comparator, a column on either side (`pt>pow`, `mv>pt`) and arithmetic all reach it
+    # through the code that already serves `pow` and `tou`.
+    #
+    # Measured on api.scryfall.com 2026-10-03: `pt=2` and `powtou=2` 2,129, `pt:6` and `powtou:6`
+    # 2,724, `pt<6` 10,818, `pt<=6` 13,542, `pt>6` 5,357, `pt>=6` 8,081, `pt!=6` 16,175 -- all
+    # seven operators, on both spellings.
+    FieldInfo(
+        db_column_name="power_plus_toughness",
+        field_type=FieldType.NUMERIC,
+        search_aliases=["powtou", "pt"],
+        parser_class=ParserClass.NUMERIC,
+    ),
     FieldInfo(
         db_column_name="planeswalker_loyalty",
         field_type=FieldType.NUMERIC,
