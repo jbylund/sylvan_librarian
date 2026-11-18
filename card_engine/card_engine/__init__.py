@@ -84,4 +84,13 @@ ENGINE_COLUMNS: list[str] = [
     "type_line",
     "prefer_score",
     "cubecobra_score",
+    # The count keywords (`prints`, `sets`, `paperprints`, `papersets`, `illustrations`,
+    # `artists`): six smallints _sync_print_counts writes at import. The first five are per card
+    # and identical on every row of it; `artist_count` is the printing's own.
+    "card_print_count",
+    "card_set_count",
+    "card_paper_print_count",
+    "card_paper_set_count",
+    "card_illustration_count",
+    "artist_count",
 ]

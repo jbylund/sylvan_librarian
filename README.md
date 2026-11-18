@@ -97,7 +97,8 @@ Sylvan Librarian is an open source implementation of Scryfall, a Magic: The Gath
 | **Special Properties**     | `is:`                                         | ✔        | ✔           | Card classifications (creature, spell, permanent, etc.)   |
 | **Comparison Operators**   | `=`, `<`, `>`, `<=`, `>=`, `!=`, `<>`         | ✔        | ✔           | All comparison operators supported                        |
 | **Regular Expressions**    | `/pattern/`                                   | ✔        | ✔           | Pattern matching with regex syntax                        |
-| **Collection Features**    | `cube:`, `papersets:`                         | ✔        | ✘           | Collection and cube inclusion features                    |
+| **Print Counts**           | `prints:`, `sets:`, `papersets:`, `artists:`  | ✔        | ✔           | Counts over a card's printings, with all comparison operators |
+| **Collection Features**    | `cube:`                                       | ✔        | ✘           | Cube inclusion features                                   |
 | **Arithmetic Expressions** | `cmc+1<power`, `power-toughness=0`            | ✘        | ✔           | Advanced mathematical expressions                         |
 
 

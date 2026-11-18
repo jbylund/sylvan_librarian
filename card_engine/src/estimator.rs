@@ -87,6 +87,7 @@ pub(crate) fn has_printing_varying_leaf(f: &FilterExpr) -> bool {
                     | NumField::PriceUsd
                     | NumField::PriceEur
                     | NumField::PriceTix
+                    | NumField::ArtistCount
                     | NumField::PreferScore
             ),
             NumExpr::Arith(lhs, _, rhs) => num_varying(lhs) || num_varying(rhs),
@@ -392,6 +393,13 @@ fn estimate_leaf(f: &FilterExpr, indexes: &Archived<CardIndexes>, n_cards: u32, 
                 },
                 // Unindexed fields (loyalty/edhrec/prefer_score) → sound unknown.
                 NumField::Loyalty | NumField::EdhrEc | NumField::PreferScore => unknown(n),
+                // The count keywords: unindexed too, one field read per candidate.
+                NumField::PrintCount
+                | NumField::SetCount
+                | NumField::PaperPrintCount
+                | NumField::PaperSetCount
+                | NumField::IllustrationCount
+                | NumField::ArtistCount => unknown(n),
             }
         }
 

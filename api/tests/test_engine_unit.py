@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from api.parsing import parse_scryfall_query
-from card_engine import QueryEngine, UnknownFieldError
+from card_engine import ENGINE_COLUMNS, QueryEngine, UnknownFieldError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
@@ -318,6 +318,113 @@ class TestFilters:
         # Finks (6) + Monastery Messenger (1) + Cathedral Membrane (1)
         assert total == 28
         assert all(c["name"] != "Serra Angel" for c in cards)
+
+
+@pytest.fixture(scope="module", name="counted")
+def counted_fixture(fresh_engine: Callable[[], QueryEngine]) -> QueryEngine:
+    """The fixture store with the count columns stamped on four cards, as `_sync_print_counts` would."""
+    rows = json.loads(_FIXTURE.read_text())
+    per_card = {
+        # Each tuple is prints, sets, paperprints, papersets, illustrations.
+        "Black Lotus": (5, 5, 5, 5, 1),
+        "Sol Ring": (5, 4, 3, 2, 5),
+        "Lightning Bolt": (10, 9, 10, 9, 4),
+        # A digital-only card: zero is a value.
+        "Shivan Dragon": (5, 5, 0, 0, 2),
+    }
+    seen: dict[str, int] = {}
+    for row in rows:
+        name = row["card_name"]
+        nth = seen[name] = seen.get(name, 0) + 1
+        if name in per_card:
+            (
+                row["card_print_count"],
+                row["card_set_count"],
+                row["card_paper_print_count"],
+                row["card_paper_set_count"],
+                row["card_illustration_count"],
+            ) = per_card[name]
+            # The first printing of each credits two artists, the second none, the rest one.
+            row["artist_count"] = {1: 2, 2: 0}.get(nth, 1)
+    e = fresh_engine()
+    e.reload([{column: row.get(column) for column in ENGINE_COLUMNS} for row in rows])
+    return e
+
+
+class TestCountKeywords:
+    """`prints`, `sets`, `paperprints`, `papersets`, `illustrations` and `artists` through the parser.
+
+    The engine does not count anything: the six numbers are columns `_sync_print_counts` writes at
+    import and ENGINE_COLUMNS selects. The fixture rows predate the columns, so the counts are
+    stamped on here the way the sync would -- five identical on every row of a card, one per row.
+    """
+
+    def test_the_count_columns_are_selected_for_the_engine(self) -> None:
+        """A Rust field is inert until ENGINE_COLUMNS selects its column."""
+        for column in (
+            "card_print_count",
+            "card_set_count",
+            "card_paper_print_count",
+            "card_paper_set_count",
+            "card_illustration_count",
+            "artist_count",
+        ):
+            assert column in ENGINE_COLUMNS
+
+    @pytest.mark.parametrize(
+        ("query", "expected"),
+        [
+            ("prints=5", {"Black Lotus", "Sol Ring", "Shivan Dragon"}),
+            ("prints:10", {"Lightning Bolt"}),
+            ("prints>=5", {"Black Lotus", "Sol Ring", "Shivan Dragon", "Lightning Bolt"}),
+            ("prints>5", {"Lightning Bolt"}),
+            ("prints<10", {"Black Lotus", "Sol Ring", "Shivan Dragon"}),
+            ("prints!=5", {"Lightning Bolt"}),
+            ("sets=4", {"Sol Ring"}),
+            ("sets>=5", {"Black Lotus", "Shivan Dragon", "Lightning Bolt"}),
+            ("paperprints=3", {"Sol Ring"}),
+            ("papersets=2", {"Sol Ring"}),
+            # Zero is a value: the digital-only card, and only it.
+            ("paperprints=0", {"Shivan Dragon"}),
+            ("papersets=0", {"Shivan Dragon"}),
+            ("illustrations=1", {"Black Lotus"}),
+            ("illustrations>=4", {"Sol Ring", "Lightning Bolt"}),
+            # A column on either side.
+            ("prints>sets", {"Sol Ring", "Lightning Bolt"}),
+            ("prints=sets", {"Black Lotus", "Shivan Dragon"}),
+            ("prints>paperprints", {"Sol Ring", "Shivan Dragon"}),
+            ("illustrations>=prints", {"Sol Ring"}),
+            ("cmc<prints", {"Black Lotus", "Sol Ring", "Lightning Bolt"}),
+            # Composed with another term.
+            ("prints>=5 t:artifact", {"Black Lotus", "Sol Ring"}),
+        ],
+    )
+    def test_card_level_counts(self, counted: QueryEngine, query: str, expected: set[str]) -> None:
+        _, cards = _run(counted, query, unique="card")
+        assert set(_names(cards)) == expected
+
+    def test_an_uncounted_card_is_null(self, counted: QueryEngine) -> None:
+        """Rows the sync has not reached hold NULL: neither the comparison nor its negation."""
+        counted_names = {"Black Lotus", "Sol Ring", "Lightning Bolt", "Shivan Dragon"}
+        for keyword in ("prints", "sets", "paperprints", "papersets", "illustrations", "artists"):
+            _, cards = _run(counted, f"{keyword}>=0", unique="card")
+            assert set(_names(cards)) == counted_names, keyword
+            total, _ = _run(counted, f"-{keyword}>=0", unique="card")
+            assert total == 0, keyword
+
+    def test_artists_is_the_printings_own_count(self, counted: QueryEngine) -> None:
+        # One printing of each of the four counted cards credits two artists, one credits none.
+        total, cards = _run(counted, "artists=2")
+        assert total == 4
+        assert sorted(_names(cards)) == ["Black Lotus", "Lightning Bolt", "Shivan Dragon", "Sol Ring"]
+        assert _run(counted, "artists=0")[0] == 4
+        assert _run(counted, "artists=1")[0] == 5 + 5 + 10 + 5 - 8
+        assert _run(counted, "artists=3")[0] == 0
+        # Under unique=card a card matches when some printing of it does.
+        assert _run(counted, "artists=2", unique="card")[0] == 4
+        # The card-level counts, by contrast, are the same on every printing of the card.
+        assert _run(counted, "prints=10")[0] == 10
+        assert _run(counted, "artists>=prints")[0] == 0
 
 
 class TestArithmetic:
