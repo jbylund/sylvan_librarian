@@ -183,6 +183,22 @@ DB_COLUMNS = [
         search_aliases=[],
         parser_class=ParserClass.TEXT,
     ),
+    # Scryfall's two PRINTING-id keywords, each under both of its spellings (measured on
+    # api.scryfall.com 2026-10-03): `scryfallid:` names one printing, `illustrationid:` every
+    # printing carrying one artwork. Both columns are UUIDs, compared as text and by equality only
+    # -- see CardAttributeNode.to_sql and CardBinaryOperatorNode._handle_colon_operator.
+    FieldInfo(
+        db_column_name="scryfall_id",
+        field_type=FieldType.TEXT,
+        search_aliases=["scryfallid", "scryfall_id"],
+        parser_class=ParserClass.TEXT,
+    ),
+    FieldInfo(
+        db_column_name="illustration_id",
+        field_type=FieldType.TEXT,
+        search_aliases=["illustrationid", "illustration_id"],
+        parser_class=ParserClass.TEXT,
+    ),
     FieldInfo(
         db_column_name="oracle_text",
         field_type=FieldType.TEXT,

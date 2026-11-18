@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from api.parsing import parse_scryfall_query
-from card_engine import QueryEngine, UnknownFieldError
+from card_engine import QueryEngine, RetryableQueryError, UnknownFieldError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
@@ -1495,3 +1495,73 @@ class TestRouterDispatchScope:
                 assert picked[0] in scope, f"{query}@{limit}: picked {picked[0]}, which this acquire cannot run"
                 checked += 1
         assert checked, "no query in PLANE_QUERIES acquired through a plane or candidate list"
+
+
+class TestPrintingIds:
+    """`scryfallid:` names one printing; `illustrationid:` every printing of one artwork.
+
+    Measured on api.scryfall.com 2026-10-03: `scryfallid:860aa0fe-…` is 1 card (Reset, me3/48)
+    under `scryfall_id:`, `=`, upper case and quotes alike; `illustrationid:9e42d409-…` is 1 card
+    and 2 under `unique=prints`; `-scryfallid:<id> !"Reset"` is the card's other 2 printings.
+    """
+
+    # Black Lotus, lea -- and the artwork its five fixture printings share.
+    LOTUS_LEA = "b0faa7f2-b547-42c4-a810-839da50dadfe"
+    LOTUS_ART = "54436824-977b-4dc7-8de1-8498e73e5ef2"
+    NOBODY = "11111111-1111-4111-8111-111111111111"
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            f"scryfallid:{LOTUS_LEA}",
+            f"scryfall_id:{LOTUS_LEA}",
+            f"scryfallid={LOTUS_LEA}",
+            f"scryfallid:{LOTUS_LEA.upper()}",
+            f'scryfallid:"{LOTUS_LEA}"',
+        ],
+    )
+    def test_scryfallid_names_one_printing(self, engine: QueryEngine, query: str) -> None:
+        total, cards = _run(engine, query, fields=["name", "set_code", "scryfall_id"])
+        assert total == 1
+        assert cards == [{"name": "Black Lotus", "set_code": "lea", "scryfall_id": self.LOTUS_LEA}]
+
+    @pytest.mark.parametrize("unique", ["card", "artwork", "printing"])
+    def test_scryfallid_names_one_printing_under_every_rollup(self, engine: QueryEngine, unique: str) -> None:
+        total, cards = _run(engine, f"scryfallid:{self.LOTUS_LEA}", unique=unique, fields=["scryfall_id"])
+        assert total == 1
+        assert cards == [{"scryfall_id": self.LOTUS_LEA}]
+
+    def test_negated_scryfallid_is_the_other_printings(self, engine: QueryEngine) -> None:
+        total, cards = _run(engine, f'-scryfallid:{self.LOTUS_LEA} name:"black lotus"', fields=["scryfall_id"])
+        assert total == 4
+        assert self.LOTUS_LEA not in {c["scryfall_id"] for c in cards}
+
+    @pytest.mark.parametrize(
+        "query",
+        [f"illustrationid:{LOTUS_ART}", f"illustration_id:{LOTUS_ART}", f"illustrationid={LOTUS_ART.upper()}"],
+    )
+    def test_illustrationid_names_every_printing_of_an_artwork(self, engine: QueryEngine, query: str) -> None:
+        total, cards = _run(engine, query, fields=["name", "illustration_id"])
+        assert total == 5
+        assert {(c["name"], c["illustration_id"]) for c in cards} == {("Black Lotus", self.LOTUS_ART)}
+        # One card, as Scryfall counts it without unique=prints.
+        assert _run(engine, query, unique="card")[0] == 1
+
+    def test_negated_illustrationid_is_not_the_complement(self, engine: QueryEngine) -> None:
+        # Every fixture printing carries an illustration id, and a printing whose own id is some
+        # OTHER artwork is SQL NULL: it survives neither the term nor its negation, which is the
+        # 404 `-illustrationid:<id> !"Reset"` answers on Scryfall.
+        assert _run(engine, f"-illustrationid:{self.LOTUS_ART}")[0] == 0
+        assert _run(engine, f"-illustrationid:{self.NOBODY}")[0] == 0
+
+    def test_an_id_no_printing_has_matches_nothing(self, engine: QueryEngine) -> None:
+        assert _run(engine, f"scryfallid:{self.NOBODY}")[0] == 0
+        assert _run(engine, f"illustrationid:{self.NOBODY}")[0] == 0
+        assert _run(engine, "scryfallid:abc")[0] == 0
+        assert _run(engine, f"scryfallid:{self.LOTUS_LEA} or scryfallid:{self.NOBODY}")[0] == 1
+
+    @pytest.mark.parametrize("operator", [">", "<", ">=", "<=", "!="])
+    def test_an_ordered_comparison_is_declined_to_sql(self, engine: QueryEngine, operator: str) -> None:
+        # An id has no order, so the engine builds no predicate for one and the SQL path answers.
+        with pytest.raises(RetryableQueryError):
+            _run(engine, f"scryfallid{operator}{self.LOTUS_LEA}")
