@@ -7,6 +7,8 @@ import pathlib
 import uuid
 from typing import Any
 
+import pytest
+
 from api.card_processing import extract_frame_data_from_raw_card, preprocess_card
 
 # Project root directory for accessing sample data
@@ -396,6 +398,147 @@ class TestCardProcessing:
         result = result[0]
         assert result["creature_power"] is None
         assert result["creature_toughness"] is None
+
+    def test_preprocess_card_keeps_a_fractional_mana_value(self) -> None:
+        """A half-mana card's cmc survives the import cast.
+
+        Scryfall types cmc Decimal, and the {HW} symbol is what makes that matter:
+        /cards/named?exact=Little+Girl answers "mana_cost":"{HW}", "cmc":0.5. The cast here
+        used to be int(float(val)), which turned that into 0 — the same value a zero-cost
+        card has. (Little Girl itself is still filtered out of the corpus by the funny-set
+        and legality rules above; this is about the cast, not the corpus.)
+        """
+        card = create_test_card(name="Little Girl", mana_cost="{HW}", cmc=0.5, power="1", toughness="1")
+
+        result = preprocess_card(card)
+
+        assert result[0]["cmc"] == 0.5
+
+    def test_preprocess_card_keeps_a_whole_mana_value_whole(self) -> None:
+        """Widening the cast must not perturb the ~31.5k rows that are already integral."""
+        card = create_test_card(name="Lightning Bolt", mana_cost="{R}", cmc=1)
+
+        result = preprocess_card(card)
+
+        assert result[0]["cmc"] == 1
+
+    def test_preprocess_card_keeps_a_fractional_power_and_toughness(self) -> None:
+        """A printed half survives the import cast, in the column the query compares.
+
+        Power and toughness are STRINGS in Scryfall's schema, and eleven cards print a half
+        in them — checked against the live API on 2026-08-17,
+        /cards/named?exact=Little+Girl answers "power":".5", "toughness":".5". The cast here
+        used to be int(float(val)), which turned .5 into 0.
+        """
+        card = create_test_card(name="Little Girl", power=".5", toughness=".5")
+
+        result = preprocess_card(card)
+
+        assert result[0]["creature_power"] == 0.5
+        assert result[0]["creature_toughness"] == 0.5
+
+    def test_preprocess_card_does_not_round_a_half_onto_its_floor(self) -> None:
+        """The direction an integer column gets wrong SILENTLY.
+
+        `power=2` finding nothing when a 2.5 card exists would be visible. `power=2`
+        matching that card is not — and truncation does the second, not the first.
+        """
+        card = create_test_card(name="Smart Ass", power="2.5", toughness="1")
+
+        result = preprocess_card(card)
+
+        assert result[0]["creature_power"] == 2.5
+        assert result[0]["creature_power"] != 2
+
+    def test_preprocess_card_keeps_whole_stats_whole(self) -> None:
+        """Widening the cast must not perturb the rows that are already integral."""
+        card = create_test_card(name="Grizzly Bears", power="2", toughness="2")
+
+        result = preprocess_card(card)
+
+        assert result[0]["creature_power"] == 2
+        assert result[0]["creature_toughness"] == 2
+
+    def test_preprocess_card_keeps_a_negative_power(self) -> None:
+        """Power is signed and stays so: Char-Rumbler and Spinal Parasite print -1."""
+        card = create_test_card(name="Spinal Parasite", power="-1", toughness="-1")
+
+        result = preprocess_card(card)
+
+        assert result[0]["creature_power"] == -1
+        assert result[0]["creature_toughness"] == -1
+
+    @pytest.mark.parametrize(
+        ("name", "type_line", "power", "toughness"),
+        [
+            ("Old Fogey", "Summon — Dinosaur", "7", "7"),
+            ("Flanking Licid", "Summon Licid", "1", "1"),
+            ("Atinlay Igpay", "Eaturecray — Igpay", "3", "3"),
+        ],
+    )
+    def test_preprocess_card_keeps_a_printed_stat_behind_a_noncanonical_type_line(
+        self,
+        name: str,
+        type_line: str,
+        power: str,
+        toughness: str,
+    ) -> None:
+        """A printed power/toughness is data even when the type line does not say Creature.
+
+        The pre-Sixth-Edition `Summon` template is what most of these are, preserved verbatim by
+        Scryfall on the printings that used it; Atinlay Igpay is the pig-latin one. Checked
+        against the live API on 2026-08-17, `-t:creature -t:vehicle -t:spacecraft (pow>=0 or
+        pow<0) include:extras` with unique=prints returns exactly eighteen printings, and
+        api.scryfall.com searches every one of them numerically — `pow=3` and `tou=3` both count
+        Atinlay Igpay, `tou>=3.5` counts Old Fogey. The keys, not the parsed type, decide whether
+        a stat exists.
+        """
+        card = create_test_card(name=name, type_line=type_line, power=power, toughness=toughness)
+
+        result = preprocess_card(card)[0]
+
+        assert result["creature_power"] == float(power)
+        assert result["creature_toughness"] == float(toughness)
+        assert result["creature_power_text"] == power
+        assert result["creature_toughness_text"] == toughness
+
+    @pytest.mark.parametrize("type_line", ["Summon — Dinosaur", "Eaturecray — Igpay"])
+    def test_preprocess_card_does_not_invent_a_creature_type_from_a_printed_stat(self, type_line: str) -> None:
+        """Keeping the stat must not widen the type parse, or `t:creature` breaks instead.
+
+        `Summon` and `Eaturecray` are unrecognised words and stay that way. Teaching
+        parse_type_line to read them as `Creature` would have made the stat counts agree too,
+        at the price of a card type the printing does not have.
+        """
+        card = create_test_card(type_line=type_line, power="3", toughness="3")
+
+        result = preprocess_card(card)[0]
+
+        assert "Creature" not in result["card_types"]
+
+    def test_preprocess_card_does_not_give_a_face_the_card_level_stat(self) -> None:
+        """A face's stats are the face's. The raw-key rule above is for whole cards only.
+
+        `merged = card | face_data` lets a face inherit the card-level `power`, and Scryfall
+        publishes one there for adventures: Obyra's Attendants is `3`/`4` at the top level while
+        its Adventure face prints neither. For a face the parsed type line is the only
+        trustworthy signal — and all eighteen noncanonical-type-line printings are single-faced,
+        so nothing is lost by keeping the face path on the type gate.
+        """
+        sample_file = _SAMPLE_DATA_DIR / "obyras_attendants.json"
+        with sample_file.open() as f:
+            obyras_attendants = json.load(f)
+
+        assert obyras_attendants["power"] == "3"
+        assert "power" not in obyras_attendants["card_faces"][1]
+
+        _front, back = preprocess_card(obyras_attendants)
+
+        assert back["card_types"] == ["Instant"]
+        assert back["creature_power"] is None
+        assert back["creature_power_text"] is None
+        assert back["creature_toughness"] is None
+        assert back["creature_toughness_text"] is None
 
     def test_preprocess_hound_tamer_dfc(self) -> None:
         """Test preprocess_card processes Hound Tamer DFC sample data correctly."""

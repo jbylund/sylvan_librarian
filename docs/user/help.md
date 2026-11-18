@@ -68,6 +68,13 @@ cmc<=2
 cmc>=5
 ```
 
+`cmc:even` and `cmc:odd` (or `mv:`, `manavalue:`, and `=` for `:`) match by parity. Zero is even;
+a fractional mana value is neither.
+
+```
+mv:odd t:creature
+```
+
 ### Power and Toughness
 
 Use `power` / `pow` and `toughness` / `tou`. Values can be compared to each other.

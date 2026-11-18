@@ -1,0 +1,47 @@
+-- cmc has been `integer` since the great reset, and Scryfall has never typed it that way: its
+-- own docs list cmc as Decimal, and the API answers `"cmc":1.0` for Lightning Bolt even though
+-- one is a whole number. The reason the type matters and not just the formatting is the
+-- half-mana symbol {HW}: /cards/named?exact=Little+Girl answers `"mana_cost":"{HW}"`,
+-- `"cmc":0.5`. An integer column cannot hold that value, so the importer's int cast silently
+-- rounds it to 0 and the card becomes indistinguishable from a zero-cost card. (Its printed
+-- `"power":".5"` / `"toughness":".5"` are STRINGS in Scryfall's own schema and are already
+-- stored as text here — they need nothing.)
+--
+-- This is a CAPABILITY change, not a corpus change. api/card_processing.py still drops
+-- set_type == "funny", and Little Girl is legal in no format so the legality filter above that
+-- would drop it anyway; after this migration every row in the table is still integral. What
+-- changes is that the column stops being the thing that would lose the fraction if the corpus
+-- filter were ever relaxed.
+--
+-- `real` rather than `numeric`, deliberately:
+--
+--   * It is EXACT over the whole domain. Every value Scryfall publishes is either a whole
+--     number or a half step, and binary floating point represents halves exactly; integers are
+--     exact in f32 up to 2^24, which covers the corpus maximum by a wide margin (the largest
+--     mana value in all of Scryfall is Gleemax at 1,000,000, itself exactly representable).
+--     `numeric` would buy exactness for arbitrary decimals the domain does not contain.
+--
+--   * It is the same 4 bytes as `integer`, so the row layout does not grow and neither do the
+--     three btree indexes that carry cmc (idx_cards_cmc_edhrec_btree_include and the two
+--     include-lists in idx_cards_setcode_edhrec_btree_include /
+--     idx_cards_cardname_edhrec_btree_include). `numeric` is variable-width and would widen
+--     all three for a precision nothing asks for.
+--
+--   * It matches what the reader actually stores. card_engine holds cmc as an f32 (see
+--     OracleCard in card_engine/src/lib.rs); a `numeric` column would be exact in Postgres and
+--     then round on its way into the engine, which is a worse place for the rounding to live
+--     than nowhere. It also matches how psycopg hands the value over: `real` arrives as a
+--     Python float, straight into the engine's `opt_f32`, whereas `numeric` arrives as a
+--     `decimal.Decimal`.
+--
+--   * The schema already uses `real` for the three price columns, for the same reasons.
+--
+-- ALTER ... TYPE rewrites the table and rebuilds the dependent indexes, holding an ACCESS
+-- EXCLUSIVE lock for the duration. Sized against the corpus (~31.5k oracle rows) that is a
+-- sub-second rewrite, well inside what the import path's own upsert already blocks for.
+--
+-- The USING clause is spelled out rather than left implicit: integer -> real is an assignment
+-- cast Postgres will do on its own, but writing it makes the widening the migration's stated
+-- intent rather than a coincidence of cast rules.
+ALTER TABLE magic.cards
+    ALTER COLUMN cmc TYPE real USING cmc::real;
