@@ -1,7 +1,7 @@
 """Tests for tag import module."""
 
 from api.api_resource import APIResource
-from api.tag_import import _build_all_ancestors, _build_uuid_to_slug
+from api.tag_import import _build_all_ancestors, _build_slug_to_aliases, _build_tag_keys, _build_uuid_to_slug
 
 
 class TestBuildAllAncestors:
@@ -56,6 +56,73 @@ class TestBuildUuidToSlug:
 
     def test_empty_list(self) -> None:
         assert _build_uuid_to_slug([]) == {}
+
+
+class TestBuildSlugToAliases:
+    def test_aliases_are_slugified(self) -> None:
+        # The real shape: `loose-lips` carries a spaced alias Scryfall resolves for art:"open mouth".
+        tags = [{"id": "u1", "slug": "loose-lips", "aliases": ["open mouth", "mouth open"]}]
+        assert _build_slug_to_aliases(tags) == {"loose-lips": frozenset({"open-mouth", "mouth-open"})}
+
+    def test_tags_without_aliases_are_absent(self) -> None:
+        tags = [{"id": "u1", "slug": "fire"}, {"id": "u2", "slug": "flying", "aliases": []}]
+        assert _build_slug_to_aliases(tags) == {}
+
+    def test_alias_colliding_with_a_slug_unions(self) -> None:
+        # Scryfall answers the union: art:blackbeard is the black-beard tag AND edward-teach, whose
+        # alias "Blackbeard" folds to the same spelling (2026-11-13, 14 = 13 + 1).
+        tags = [
+            {"id": "u1", "slug": "edward-teach", "aliases": ["Blackbeard"]},
+            {"id": "u2", "slug": "black-beard", "aliases": []},
+        ]
+        assert _build_slug_to_aliases(tags) == {"edward-teach": frozenset({"blackbeard"})}
+
+    def test_alias_claimed_by_two_tags_goes_to_both(self) -> None:
+        tags = [
+            {"id": "u1", "slug": "fire", "aliases": ["open flame"]},
+            {"id": "u2", "slug": "campfire", "aliases": ["open-flame"]},
+        ]
+        assert _build_slug_to_aliases(tags) == {"fire": frozenset({"open-flame"}), "campfire": frozenset({"open-flame"})}
+
+    def test_alias_repeated_by_one_tag_is_kept(self) -> None:
+        # Two spellings of one alias collapse to the same slug -- not a conflict.
+        tags = [{"id": "u1", "slug": "loose-lips", "aliases": ["open mouth", "Open Mouth"]}]
+        assert _build_slug_to_aliases(tags) == {"loose-lips": frozenset({"open-mouth"})}
+
+
+class TestBuildTagKeys:
+    def test_slug_ancestors_and_their_aliases(self) -> None:
+        # `flames` is an alias of `fire`, which has `campfire` under it. Scryfall resolves the
+        # alias before expanding the hierarchy, so art:flames must reach the descendant too.
+        tags = [
+            {"id": "u1", "slug": "fire", "parent_ids": [], "aliases": ["flames"]},
+            {"id": "u2", "slug": "campfire", "parent_ids": ["u1"], "aliases": ["camp fire"]},
+        ]
+        uuid_to_slug = {"u1": "fire", "u2": "campfire"}
+        result = _build_tag_keys(tags, uuid_to_slug)
+        assert result["fire"] == frozenset({"fire", "flames"})
+        assert result["campfire"] == frozenset({"campfire", "camp-fire", "fire", "flames"})
+
+    def test_no_aliases_is_slug_plus_ancestors(self) -> None:
+        tags = [
+            {"id": "u1", "slug": "permanent", "parent_ids": []},
+            {"id": "u2", "slug": "land-type", "parent_ids": ["u1"]},
+        ]
+        uuid_to_slug = {"u1": "permanent", "u2": "land-type"}
+        result = _build_tag_keys(tags, uuid_to_slug)
+        assert result["land-type"] == frozenset({"land-type", "landtype", "permanent"})
+        assert result["permanent"] == frozenset({"permanent"})
+
+    def test_every_key_carries_its_punctuation_blind_spelling(self) -> None:
+        # The query side folds the search term (fold_tag), so otag:board-wipe reaches the alias
+        # `boardwipe` and art:au-ra reaches the slug `aura` -- Scryfall's union, 2026-11-13.
+        tags = [
+            {"id": "u1", "slug": "sweeper", "parent_ids": [], "aliases": ["boardwipe", "wrath of god"]},
+            {"id": "u2", "slug": "au-ra", "parent_ids": []},
+        ]
+        result = _build_tag_keys(tags, {"u1": "sweeper", "u2": "au-ra"})
+        assert result["sweeper"] == frozenset({"sweeper", "boardwipe", "wrath-of-god", "wrathofgod"})
+        assert result["au-ra"] == frozenset({"au-ra", "aura"})
 
 
 class TestAPIResourceEndpoints:
