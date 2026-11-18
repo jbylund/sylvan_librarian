@@ -123,6 +123,18 @@ pub(crate) enum NumField {
     PriceEur,
     PriceTix,
     PreferScore,
+    /// Scryfall's count keywords. The first five are CARD-level counts over all of the card's
+    /// printings (`prints`, `sets`, `paperprints`, `papersets`, `illustrations`) and `ArtistCount`
+    /// (`artists`) is the printing's own; all six are numbers `_sync_print_counts` wrote at import,
+    /// NULL until it has run. Measured on api.scryfall.com 2026-10-03: Lightning Bolt is
+    /// `prints=77`, `sets=46`, `paperprints=68`, `papersets=41`, `illustrations=33`. Unindexed —
+    /// one field read per candidate, like `edhrec`.
+    PrintCount,
+    SetCount,
+    PaperPrintCount,
+    PaperSetCount,
+    IllustrationCount,
+    ArtistCount,
 }
 
 fn attr_to_num_field(attr: &str) -> Option<NumField> {
@@ -138,6 +150,12 @@ fn attr_to_num_field(attr: &str) -> Option<NumField> {
         "price_eur"            => Some(NumField::PriceEur),
         "price_tix"            => Some(NumField::PriceTix),
         "prefer_score"         => Some(NumField::PreferScore),
+        "card_print_count"        => Some(NumField::PrintCount),
+        "card_set_count"          => Some(NumField::SetCount),
+        "card_paper_print_count"  => Some(NumField::PaperPrintCount),
+        "card_paper_set_count"    => Some(NumField::PaperSetCount),
+        "card_illustration_count" => Some(NumField::IllustrationCount),
+        "artist_count"            => Some(NumField::ArtistCount),
         _ => None,
     }
 }
@@ -179,7 +197,21 @@ fn field_num(card: &AOracleCard, printing: Option<&APrinting>, f: NumField) -> N
         NumField::PriceEur           => printing.map_or(NumVal::PDep, |p| known_cents(p.price_eur.as_ref().map(|v| u32::from(*v)))),
         NumField::PriceTix           => printing.map_or(NumVal::PDep, |p| known_cents(p.price_tix.as_ref().map(|v| u32::from(*v)))),
         NumField::PreferScore        => printing.map_or(NumVal::PDep, |p| known(p.prefer_score.as_ref().map(|v| f32::from(*v)))),
+        NumField::PrintCount         => card_count(u16::from(card.print_count)),
+        NumField::SetCount           => card_count(u16::from(card.set_count)),
+        NumField::PaperPrintCount    => card_count(u16::from(card.paper_print_count)),
+        NumField::PaperSetCount      => card_count(u16::from(card.paper_set_count)),
+        NumField::IllustrationCount  => card_count(u16::from(card.illustration_count)),
+        NumField::ArtistCount        => printing.map_or(NumVal::PDep, |p| {
+            if p.artist_count == super::ARTIST_COUNT_NONE { NumVal::Null } else { NumVal::Known(f64::from(p.artist_count)) }
+        }),
     }
+}
+
+/// A card-level count column: NULL until `_sync_print_counts` has counted the card. Zero is a
+/// value, not an absence — `paperprints=0` is the cards printed only in digital sets.
+fn card_count(v: u16) -> NumVal {
+    if v == super::PRINT_COUNT_NONE { NumVal::Null } else { NumVal::Known(f64::from(v)) }
 }
 
 #[derive(Clone)]
@@ -508,6 +540,24 @@ pub(crate) enum FilterExpr {
     Not(Box<FilterExpr>),
     ExactName(String),
 
+    /// Scryfall's `cheapest:usd` / `cheapest:eur` / `cheapest:tix`: the printing carries its card's
+    /// lowest price in that currency. Read off `Printing.cheapest_codes`, which
+    /// `_sync_cheapest_codes` (api/admin_resource.py) wrote at import; its docstring carries the
+    /// measured rule.
+    ///
+    /// `negated_term` is `-cheapest:usd`, which on api.scryfall.com is an expression of its own
+    /// and NOT the complement of the term (5 printings of Kaldheim where the term is 222 of 407).
+    /// The parsers fold the term's own `-` into this flag, so a `Not` over either polarity stays
+    /// what Scryfall's negated GROUP is, the complement: `-(cheapest:usd) e:khm` 185,
+    /// `-(-cheapest:usd) e:khm` 402.
+    ///
+    /// Three-valued: a priced printing of a card with no lowest price is SQL NULL, in neither
+    /// list nor either complement.
+    Cheapest {
+        currency: super::CheapestCurrency,
+        negated_term: bool,
+    },
+
     NumericCmp {
         lhs: NumExpr,
         op: CmpOp,
@@ -714,8 +764,10 @@ pub(crate) fn verify_cost_tier(f: &FilterExpr) -> u32 {
         FilterExpr::Not(inner) => verify_cost_tier(inner),
         // Exhaustive, not `_ => MASK_COMPARE_NS100`: a new variant must get a
         // considered cost here rather than silently inheriting the cheapest.
+        // (`Cheapest` is one u16 load, a shift and two bit tests.)
         FilterExpr::True
         | FilterExpr::ExactName(_)
+        | FilterExpr::Cheapest { .. }
         | FilterExpr::NumericCmp { .. }
         | FilterExpr::TextExact { .. }
         | FilterExpr::ColorCmp { .. }
@@ -863,8 +915,15 @@ fn leaf_compares_printing_field(f: &FilterExpr) -> bool {
                 | NumField::PriceUsd
                 | NumField::PriceEur
                 | NumField::PriceTix
+                | NumField::ArtistCount
                 | NumField::PreferScore => true,
                 NumField::Cmc | NumField::Power | NumField::Toughness | NumField::Loyalty | NumField::EdhrEc => false,
+                // The five card-level counts are the same number on every printing of the card.
+                NumField::PrintCount
+                | NumField::SetCount
+                | NumField::PaperPrintCount
+                | NumField::PaperSetCount
+                | NumField::IllustrationCount => false,
             },
             NumExpr::Arith(lhs, _, rhs) => num_pdep(lhs) || num_pdep(rhs),
         }
@@ -873,6 +932,8 @@ fn leaf_compares_printing_field(f: &FilterExpr) -> bool {
         FilterExpr::NumericCmp { lhs, rhs, .. } => num_pdep(lhs) || num_pdep(rhs),
         FilterExpr::DateCmp { .. } | FilterExpr::YearCmp { .. } => true,
         FilterExpr::ArtistMatch { .. } | FilterExpr::FlavorMatch { .. } => true,
+        // The cheapest codes are the printing's own: one printing of a card is its cheapest, the next is not.
+        FilterExpr::Cheapest { .. } => true,
         // Exhaustive over TextSearchField (no `matches!`), same reason as num_pdep.
         FilterExpr::TextContains { field, .. } => match field {
             TextSearchField::FlavorTextLower => true,
@@ -1461,6 +1522,11 @@ impl FilterExpr {
 
             FilterExpr::ExactName(lower) => tri_bool(card.card_name_lower.as_str() == lower.as_str()),
 
+            FilterExpr::Cheapest { currency, negated_term } => {
+                let Some(p) = printing else { return Tri::PrintingDep };
+                super::cheapest_answer(u16::from(p.cheapest_codes), *currency, *negated_term).map_or(Tri::Null, tri_bool)
+            }
+
             FilterExpr::NumericCmp { lhs, op, rhs } => {
                 numeric_cmp_tri(lhs, *op, rhs, &|f| field_num(card, printing, f))
             }
@@ -1781,6 +1847,16 @@ pub(crate) fn build_filter(v: &Value) -> Result<FilterExpr, String> {
         "ExactNameNode" => {
             let value = kw["value"].as_str().unwrap_or("").to_string();
             Ok(FilterExpr::ExactName(value))
+        }
+
+        // `cheapest:<currency>`. The Python node has already resolved the word the user typed
+        // (`$`, `dollar`, `mtgo`, ...) to one of three canonical names, and folded a `-` written
+        // directly on the term into `negated_term`; a `-` on a group arrives as a NotNode.
+        "CheapestNode" => {
+            let name = kw["currency"].as_str().unwrap_or("");
+            let currency = super::CheapestCurrency::from_name(name).ok_or_else(|| format!("unknown currency: {name}"))?;
+            let negated_term = kw["negated_term"].as_bool().unwrap_or(false);
+            Ok(FilterExpr::Cheapest { currency, negated_term })
         }
 
         "CardBinaryOperatorNode" => build_binary(kw),

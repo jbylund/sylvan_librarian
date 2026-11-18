@@ -26,6 +26,7 @@ class ParserClass(StrEnum):
     TEXT = "text"  # Simple text fields (name, artist, oracle text)
     DATE = "date"  # Date fields with full date values
     YEAR = "year"  # Year fields with 4-digit year values
+    CURRENCY = "currency"  # `cheapest:` -- the value is one of a closed set of currency words
 
 
 class FieldInfo:
@@ -141,6 +142,47 @@ DB_COLUMNS = [
         search_aliases=[],
         parser_class=ParserClass.NUMERIC,
     ),
+    # Scryfall's six COUNT keywords (measured on api.scryfall.com 2026-10-03: Lightning Bolt is
+    # `prints=77`, `sets=46`, `paperprints=68`, `papersets=41`, `illustrations=33`). Five are
+    # counts over all of the card's printings and `artists` is the printing's own; none can be
+    # computed from one row at query time, so each is a column _sync_print_counts
+    # (api/admin_resource.py) writes at import. Ordinary numeric columns from here on.
+    FieldInfo(
+        db_column_name="card_print_count",
+        field_type=FieldType.NUMERIC,
+        search_aliases=["prints"],
+        parser_class=ParserClass.NUMERIC,
+    ),
+    FieldInfo(
+        db_column_name="card_set_count",
+        field_type=FieldType.NUMERIC,
+        search_aliases=["sets"],
+        parser_class=ParserClass.NUMERIC,
+    ),
+    FieldInfo(
+        db_column_name="card_paper_print_count",
+        field_type=FieldType.NUMERIC,
+        search_aliases=["paperprints"],
+        parser_class=ParserClass.NUMERIC,
+    ),
+    FieldInfo(
+        db_column_name="card_paper_set_count",
+        field_type=FieldType.NUMERIC,
+        search_aliases=["papersets"],
+        parser_class=ParserClass.NUMERIC,
+    ),
+    FieldInfo(
+        db_column_name="card_illustration_count",
+        field_type=FieldType.NUMERIC,
+        search_aliases=["illustrations"],
+        parser_class=ParserClass.NUMERIC,
+    ),
+    FieldInfo(
+        db_column_name="artist_count",
+        field_type=FieldType.NUMERIC,
+        search_aliases=["artists"],
+        parser_class=ParserClass.NUMERIC,
+    ),
     FieldInfo(
         db_column_name="mana_cost_jsonb",
         field_type=FieldType.JSONB_OBJECT,
@@ -170,6 +212,19 @@ DB_COLUMNS = [
         field_type=FieldType.NUMERIC,
         search_aliases=["tix"],
         parser_class=ParserClass.NUMERIC,
+    ),
+    # Scryfall's `cheapest:usd` / `cheapest:eur` / `cheapest:tix`: the printings carrying their
+    # card's lowest price in that currency. The lowest price is over the card's OTHER printings,
+    # which no row sees at query time, so the answers are decided at import and packed into one
+    # smallint -- see CHEAPEST_TERM below and _build_cheapest_codes_sql in api/admin_resource.py.
+    # A parser class of its own because the value is a closed vocabulary (CHEAPEST_CURRENCY_WORDS)
+    # and because `-cheapest:usd` is NOT the complement of `cheapest:usd`; both parsers build a
+    # CheapestNode for it rather than a generic comparison.
+    FieldInfo(
+        db_column_name="cheapest_codes",
+        field_type=FieldType.NUMERIC,
+        search_aliases=["cheapest"],
+        parser_class=ParserClass.CURRENCY,
     ),
     FieldInfo(
         db_column_name="produced_mana",
@@ -309,6 +364,41 @@ for col in DB_COLUMNS:
 
     for ialias in col.search_aliases:
         SEARCH_NAME_TO_DB_NAME[ialias.lower()] = col.db_column_name
+
+
+# The words Scryfall reads as a currency in `cheapest:<word>`, in any case (api.scryfall.com,
+# 2026-10-04): `usd`, `$` and `dollar` are one currency, `eur`, `euro` and `€` another, `tix` and
+# `mtgo` the third. `dollars`, `euros`, `ticket`, `tickets`, `usdfoil`, `eurfoil`, `tcgplayer`
+# and `cardmarket` are each "Unknown currency" there.
+CHEAPEST_CURRENCY_WORDS: dict[str, str] = {
+    "usd": "usd",
+    "$": "usd",
+    "dollar": "usd",
+    "eur": "eur",
+    "euro": "eur",
+    "€": "eur",
+    "tix": "tix",
+    "mtgo": "tix",
+}
+
+# The two of them that are not words: a bare `$` or `€` is a value only directly after `cheapest`
+# and its operator. Both parsers read this, so neither accepts the symbol anywhere else.
+CHEAPEST_CURRENCY_SYMBOLS: frozenset[str] = frozenset(word for word in CHEAPEST_CURRENCY_WORDS if not word.isalnum())
+
+# `magic.cards.cheapest_codes` packs three bits per currency, at CHEAPEST_SHIFTS[currency]:
+#
+#   CHEAPEST_TERM          `cheapest:<currency>` is true of this printing
+#   CHEAPEST_NEGATED_TERM  `-cheapest:<currency>` is true of it -- its own expression on Scryfall,
+#                          not the complement, so it cannot be derived from the bit above
+#   CHEAPEST_UNKNOWN       both are SQL NULL: the printing is priced and its card has no lowest
+#                          price to compare with. Never set together with either bit above.
+#
+# The whole column is NULL until the sync has run over the card. card_engine/src/lib.rs carries
+# the same three constants and shifts; test_engine_unit.py pins the two copies against each other.
+CHEAPEST_TERM = 1
+CHEAPEST_NEGATED_TERM = 2
+CHEAPEST_UNKNOWN = 4
+CHEAPEST_SHIFTS: dict[str, int] = {"usd": 0, "eur": 3, "tix": 6}
 
 
 CARD_SUPERTYPES = {
