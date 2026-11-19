@@ -15,6 +15,13 @@ from api.admin_resource import AdminContext
 from api.api_resource import APIResource
 from api.app_context import AppContext
 from api.enums import CardOrdering, ResponseShape, SortDirection
+from api.tests.color_order_cards import (
+    ASCENDING_NAMES,
+    COLOR_ORDER_CARDS,
+    COLOR_ORDER_SET_CODE,
+    DESCENDING_NAMES,
+    color_order_raw_cards,
+)
 from api.tests.helpers import search_kwargs
 from api.tests.support import override_attr
 from card_engine import QueryEngine
@@ -461,6 +468,69 @@ class TestContainerIntegration:
             names = [card["name"] for card in result["cards"] if card["name"] in scores]
             assert names == ["Serra Angel", "Black Lotus", "Lightning Bolt"]
         finally:
+            api_resource.app_context.engine = saved_engine
+            shm_path.unlink(missing_ok=True)
+            shm_path.with_suffix(".lock").unlink(missing_ok=True)
+
+    @pytest.mark.usefixtures("engine_enabled")
+    def test_order_color_is_scryfalls_order_on_both_lanes(self: TestContainerIntegration, api_resource: APIResource) -> None:
+        """Eighteen real cards through the importer: both lanes answer Scryfall's sequence, both ways.
+
+        Then the migration's backfill, which can only read the stored row: exact for every card whose
+        row holds its front face's colours and types, and placed by the stored face for the rest
+        until an import writes the card's own value over it.
+        """
+        query = f"set:{COLOR_ORDER_SET_CODE}"
+        importer_values = {card["name"]: rank for rank, card in COLOR_ORDER_CARDS}
+
+        def stored_values() -> dict[str, int | None]:
+            with api_resource.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+                cursor.execute("SELECT card_name, color_order FROM magic.cards WHERE card_set_code = %s", (COLOR_ORDER_SET_CODE,))
+                return {row["card_name"]: row["color_order"] for row in cursor.fetchall()}
+
+        def names(search: object, direction: SortDirection) -> list[str]:
+            result = search(**search_kwargs(query, limit=100, orderby=CardOrdering.COLOR, direction=direction))
+            return [card["name"] for card in result["cards"]]
+
+        shm_path = pathlib.Path(tempfile.gettempdir()) / f"sylvan_librarian_it_{uuid.uuid4().hex}"
+        saved_engine = api_resource.app_context.engine
+        api_resource.app_context.engine = QueryEngine(shm_path=str(shm_path))
+        try:
+            result = api_resource.admin._upsert_cards(color_order_raw_cards())
+            assert result["status"] == "success", result
+            assert stored_values() == importer_values
+
+            api_resource.app_context.reload_engine(force=True)
+            for search in (api_resource._search_sql, api_resource._search_engine):
+                assert names(search, SortDirection.ASC) == ASCENDING_NAMES, search.__name__
+                assert names(search, SortDirection.DESC) == DESCENDING_NAMES, search.__name__
+
+            # The backfill is the migration's own statement, run again over rows it has not seen.
+            migration = pathlib.Path(__file__).parent.parent / "db" / "2026-10-09-01-color-order.sql"
+            with api_resource.app_context.writer_pool.connection() as conn, conn.cursor() as cursor:
+                cursor.execute("UPDATE magic.cards SET color_order = NULL WHERE card_set_code = %s", (COLOR_ORDER_SET_CODE,))
+                cursor.execute(migration.read_text())
+                conn.commit()
+            # Five double-faced cards are stored with their BACK face's colours and types, and that
+            # is the face the backfill places them by: Emeria's Call and Search for Azcanta as lands,
+            # Valki as black-red, Westvale Abbey as a black card. Arlinn Kord, Nicol Bolas and
+            # Hengegate Pathway have the same colours and types on both faces.
+            stored_face_values = {
+                "Emeria's Call // Emeria, Shattered Skyclave": 64,
+                "Search for Azcanta // Azcanta, the Sunken Ruin": 64 + 1,
+                "Valki, God of Lies // Tibalt, Cosmic Impostor": 7,
+                "Westvale Abbey // Ormendahl, Profane Prince": 2,
+            }
+            assert stored_values() == importer_values | stored_face_values
+
+            # ...and the next import puts those four right, rewriting no other row.
+            result = api_resource.admin._upsert_cards(color_order_raw_cards())
+            assert result["cards_updated"] == len(stored_face_values), result
+            assert stored_values() == importer_values
+        finally:
+            with api_resource.app_context.writer_pool.connection() as conn, conn.cursor() as cursor:
+                cursor.execute("DELETE FROM magic.cards WHERE card_set_code = %s", (COLOR_ORDER_SET_CODE,))
+                conn.commit()
             api_resource.app_context.engine = saved_engine
             shm_path.unlink(missing_ok=True)
             shm_path.with_suffix(".lock").unlink(missing_ok=True)

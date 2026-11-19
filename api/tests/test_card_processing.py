@@ -7,7 +7,10 @@ import pathlib
 import uuid
 from typing import Any
 
-from api.card_processing import extract_frame_data_from_raw_card, preprocess_card
+import pytest
+
+from api.card_processing import color_order_rank, extract_frame_data_from_raw_card, preprocess_card
+from api.tests.color_order_cards import COLOR_ORDER_CARDS, color_order_raw_cards
 
 # Project root directory for accessing sample data
 _PROJECT_ROOT = pathlib.Path(__file__).parent.parent.parent
@@ -443,3 +446,70 @@ class TestCardProcessing:
         assert back.get("creature_power") is None
         assert front["card_types"] == ["Creature"]
         assert back["card_types"] == ["Instant"]
+
+
+class TestColorOrderRank:
+    """`color_order` -- a card's place under Scryfall's `order=color`, decided at import."""
+
+    @pytest.mark.parametrize(("expected", "card"), COLOR_ORDER_CARDS, ids=[card["name"] for _rank, card in COLOR_ORDER_CARDS])
+    def test_a_real_card_takes_scryfalls_place(self, expected: int, card: dict[str, Any]) -> None:
+        assert color_order_rank(card) == expected
+
+    def test_the_eighteen_are_listed_in_the_order_the_rank_gives(self) -> None:
+        """The pool is Scryfall's ascending answer, so rank then name must reproduce it as listed."""
+        listed = [card["name"] for _rank, card in COLOR_ORDER_CARDS]
+        ranks = {card["name"]: rank for rank, card in COLOR_ORDER_CARDS}
+        assert sorted(listed, key=lambda name: (ranks[name], name.lower())) == listed
+
+    def test_every_pair_and_triple_has_its_own_place_in_the_games_order(self) -> None:
+        """The pairs do not tie: allied then enemy, shards then wedges, each in its printed sequence."""
+        combinations = [
+            *("W", "U", "B", "R", "G"),
+            *("WU", "UB", "BR", "RG", "GW", "WB", "UR", "BG", "RW", "GU"),
+            *("WUB", "UBR", "BRG", "RGW", "GWU", "WBG", "URW", "BGU", "RWB", "GUR"),
+            *("WUBR", "UBRG", "BRGW", "RGWU", "GWUB", "WUBRG"),
+        ]
+        ranks = [color_order_rank({"colors": list(c), "color_identity": list(c), "type_line": "Instant"}) for c in combinations]
+        assert ranks == list(range(31))
+        # Whatever order Scryfall lists the letters in: its arrays are alphabetical, not WUBRG.
+        assert color_order_rank({"colors": ["G", "W"], "color_identity": ["G", "W"], "type_line": "Instant"}) == combinations.index(
+            "GW"
+        )
+
+    def test_a_colourless_card_and_a_land_are_placed_by_identity_after_every_colour(self) -> None:
+        artifact = {"colors": [], "type_line": "Artifact"}
+        land = {"colors": [], "type_line": "Land"}
+        assert color_order_rank(artifact | {"color_identity": ["W"]}) == 32
+        assert color_order_rank(artifact | {"color_identity": ["G", "U"]}) == 32 + 14
+        assert color_order_rank(artifact | {"color_identity": []}) == 32 + 31
+        assert color_order_rank(land | {"color_identity": ["W"]}) == 64
+        assert color_order_rank(land | {"color_identity": []}) == 64 + 31
+        # A land with a colour of its own is still a land, by its identity.
+        assert color_order_rank({"colors": ["G"], "color_identity": ["G"], "type_line": "Land Creature — Forest Dryad"}) == 64 + 4
+
+    def test_the_front_face_decides_and_the_back_face_does_not(self) -> None:
+        """Brigid, Clachan's Heart: a white front and a green back is a white card, not green-white."""
+        brigid = {
+            "name": "Brigid, Clachan's Heart // Brigid, Doun's Mind",
+            "type_line": "Legendary Creature — Kithkin Warrior // Legendary Creature — Kithkin Soldier",
+            "color_identity": ["G", "W"],
+            "card_faces": [
+                {"name": "Brigid, Clachan's Heart", "type_line": "Legendary Creature — Kithkin Warrior", "colors": ["W"]},
+                {"name": "Brigid, Doun's Mind", "type_line": "Legendary Creature — Kithkin Soldier", "colors": ["G"]},
+            ],
+        }
+        assert color_order_rank(brigid) == 0
+        turned = brigid | {"card_faces": brigid["card_faces"][::-1]}
+        assert color_order_rank(turned) == 4
+
+    def test_a_word_that_only_contains_land_is_not_a_land(self) -> None:
+        assert color_order_rank({"colors": [], "color_identity": [], "type_line": "Artifact — Landmark"}) == 32 + 31
+        assert color_order_rank({"colors": ["U"], "color_identity": ["U"], "type_line": "Creature — Islandwalker"}) == 1
+
+    def test_preprocess_card_writes_it_on_every_row_of_a_card(self) -> None:
+        """Every face's row carries the CARD's place, so whichever row is stored holds the front's answer."""
+        expected = {card["name"]: rank for rank, card in COLOR_ORDER_CARDS}
+        for raw in color_order_raw_cards():
+            rows = preprocess_card(raw)
+            assert rows, raw["name"]
+            assert [row["color_order"] for row in rows] == [expected[raw["name"]]] * len(rows), raw["name"]
