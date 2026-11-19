@@ -1731,7 +1731,12 @@ fn fuzz_leaf_loyalty(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
     FuzzSpec::Leaf(FuzzLeaf::Loyalty { op: fuzz_op(rng), val: rng.random_range(2..=7u8) as f64 })
 }
 fn fuzz_leaf_collector_number(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
-    FuzzSpec::Leaf(FuzzLeaf::CollectorNumber { op: fuzz_op(rng), val: fuzz_weighted(rng, &[(10.0, 2), (50.0, 3), (100.0, 3), (250.0, 2), (500.0, 1)]) })
+    // The last three straddle 65,535, where the stored number once saturated (a u16): the fixture
+    // numbers one printing in twelve from 61,800 to 105,000.
+    FuzzSpec::Leaf(FuzzLeaf::CollectorNumber {
+        op: fuzz_op(rng),
+        val: fuzz_weighted(rng, &[(10.0, 2), (50.0, 3), (100.0, 3), (250.0, 2), (500.0, 1), (65_535.0, 1), (65_536.0, 1), (80_000.0, 1)]),
+    })
 }
 fn fuzz_leaf_price(rng: &mut rand::rngs::SmallRng) -> FuzzSpec {
     // Dollars; thresholds straddle the corpus's skew (median ~$0.33, 99th ~$60). eur and tix are drawn
@@ -2252,7 +2257,7 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
         rarity: Option<u8>,
         border: Option<&'static str>,
         legality_word: u64,
-        collector_number: Option<u16>,
+        collector_number: Option<u32>,
         price_usd: Option<u32>,
         price_eur: Option<u32>,
         price_tix: Option<u32>,
@@ -2401,7 +2406,15 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
                 None
             };
             let border = BORDERS[rng.random_range(0..BORDERS.len())];
-            let cn = if rng.random_bool(0.95) { Some(rng.random_range(1..=300u16)) } else { None };
+            // One number in twelve is lifted to 61,800..=105,000, across the 65,535 a u16 stops at,
+            // as a function of the SAME draw: the generator's stream, and so every other fixture
+            // value the suites below were tuned against, is what it was.
+            let cn = if rng.random_bool(0.95) {
+                let n = u32::from(rng.random_range(1..=300u16));
+                Some(if n.is_multiple_of(12) { 60_000 + n * 150 } else { n })
+            } else {
+                None
+            };
             // One draw per price column, INDEPENDENTLY. Three separate draws rather than one scaled
             // three ways, and independent null rates, because the point of fuzzing all three is to
             // catch a narrowing that reads the wrong index or the wrong column: derived values would
@@ -2515,7 +2528,7 @@ fn fuzz_store_n(rng: &mut rand::rngs::SmallRng, ncards: usize) -> CardData {
     data.indexes.price_usd = build_printing_value_index(&data.printings, &data.cards, &data.offsets, |p| p.price_usd);
     data.indexes.price_eur = build_printing_value_index(&data.printings, &data.cards, &data.offsets, |p| p.price_eur);
     data.indexes.price_tix = build_printing_value_index(&data.printings, &data.cards, &data.offsets, |p| p.price_tix);
-    data.indexes.collector_number = build_printing_value_index(&data.printings, &data.cards, &data.offsets, |p| p.collector_number_int.map(u32::from));
+    data.indexes.collector_number = build_printing_value_index(&data.printings, &data.cards, &data.offsets, |p| p.collector_number_int);
     // Rarity was MISSING from this list until the exact-total arm needed it, so it sat at its empty
     // default: `idx.len() == 0` with a populated rarity histogram. Nothing failed, because the only
     // consumer was the `rarity` orderby walk, which declines on an empty index and falls back --
@@ -6961,7 +6974,7 @@ fn collector_number_narrowing() {
     data.printings[2].collector_number_int = Some(101);
     // printings[3] has no numeric part: absent from the index
     data.indexes.collector_number =
-        build_printing_value_index(&data.printings, &data.cards, &data.offsets, |p| p.collector_number_int.map(u32::from));
+        build_printing_value_index(&data.printings, &data.cards, &data.offsets, |p| p.collector_number_int);
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
@@ -7007,6 +7020,87 @@ fn collector_number_narrowing() {
     assert_eq!(narrow(&or), Some(vec![0, 1]));
 }
 
+/// A collector number above 65,535 is the number it is. The field was an `Option<u16>` filled by a
+/// saturating cast, so "2024-10" (202,410) was STORED as 65,535 — `cn>65535` matched nothing,
+/// `cn<65536` everything, and `cn:65535` every printing above it. Narrowing (the range index),
+/// verification (`field_num`) and the archived encoding each get their own assertion here, because
+/// each had its own copy of the width.
+#[test]
+fn a_collector_number_above_65535_is_stored_narrowed_and_verified_as_itself() {
+    let mut vocab = VocabInterner::new();
+    let cards = vec![stub_card(1, TYPE_CREATURE, &[], &mut vocab), stub_card(2, TYPE_CREATURE, &[], &mut vocab), stub_card(3, TYPE_CREATURE, &[], &mut vocab)];
+    let mut data = store_of(cards, &[2, 2, 2], vocab);
+    let numbers = [Some(62_501), Some(65_535), Some(65_536), Some(80_937), Some(202_625), None];
+    for (p, n) in data.printings.iter_mut().zip(numbers) {
+        p.collector_number_int = n;
+    }
+    data.indexes.collector_number = build_printing_value_index(&data.printings, &data.cards, &data.offsets, |p| p.collector_number_int);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    // The archived encoding round-trips every value, the absent one included...
+    let stored: Vec<Option<u32>> = archived.printings.iter().map(|p| p.collector_int()).collect();
+    assert_eq!(stored, numbers);
+    // ...in the four bytes the `Option<u16>` took, where a plain `Option<u32>` takes eight...
+    assert_eq!(std::mem::size_of_val(&archived.printings[0].collector_number_int), 4);
+    assert_eq!(std::mem::size_of::<Archived<Option<u16>>>(), 4);
+    assert_eq!(std::mem::size_of::<Archived<Option<u32>>>(), 8);
+    // ...and through rkyv's own deserialize.
+    let back: CardData = rkyv::deserialize::<CardData, Error>(archived).expect("deserialize");
+    assert_eq!(back.printings.iter().map(|p| p.collector_number_int).collect::<Vec<_>>(), numbers);
+    // The ceiling is the largest value, not a wrap to "absent": `n + 1` must not overflow.
+    let mut top_vocab = VocabInterner::new();
+    let mut top = store_of(vec![stub_card(1, TYPE_CREATURE, &[], &mut top_vocab)], &[1], top_vocab);
+    top.printings[0].collector_number_int = Some(u32::MAX);
+    let top_bytes = rkyv::to_bytes::<Error>(&top).expect("serialize");
+    let top_archived = rkyv::access::<Archived<CardData>, Error>(&top_bytes).expect("access");
+    assert_eq!(top_archived.printings[0].collector_int(), Some(super::COLLECTOR_INT_MAX));
+    assert_eq!(super::collector_int_from_i64(-1), None);
+    assert_eq!(super::collector_int_from_i64(0), Some(0));
+    assert_eq!(super::collector_int_from_i64(80_937), Some(80_937));
+    assert_eq!(super::collector_int_from_i64(i64::from(i32::MAX)), Some(i32::MAX as u32));
+    assert_eq!(super::collector_int_from_i64(i64::MAX), Some(super::COLLECTOR_INT_MAX));
+
+    let cn = |op, v| FilterExpr::NumericCmp { lhs: NumExpr::Field(NumField::CollectorNumberInt), op, rhs: NumExpr::Const(v) };
+    let narrow = |f: &FilterExpr| match narrow_candidates(f, &archived.indexes, &archived.offsets, &archived.cards) {
+        Some(Candidates::Printings(v)) => v,
+        Some(Candidates::PrintingBits(b)) => super::bitmap_card_ids(&b),
+        _ => panic!("cn must narrow in printing space"),
+    };
+    // What the query answers end to end (narrowing AND verification), as printing indexes — the
+    // stub printings' scryfall ids are their index plus one.
+    let answer = |f: FilterExpr| {
+        let mut f = f;
+        let (total, page) = run_query(&QueryCtx::from(archived), &mut f, None, "printing", "default", "edhrec", "asc", 100, 0);
+        let mut ids: Vec<u32> = page.iter().map(|(_, p)| (u128::from(p.scryfall_id) - 1) as u32).collect();
+        ids.sort_unstable();
+        assert_eq!(total, ids.len());
+        ids
+    };
+    for (op, v, want) in [
+        (CmpOp::Eq, 80_937.0, vec![3]),
+        (CmpOp::Eq, 65_535.0, vec![1]),
+        (CmpOp::Eq, 65_536.0, vec![2]),
+        (CmpOp::Gt, 65_535.0, vec![2, 3, 4]),
+        (CmpOp::Ge, 65_535.0, vec![1, 2, 3, 4]),
+        (CmpOp::Lt, 65_536.0, vec![0, 1]),
+        (CmpOp::Le, 65_536.0, vec![0, 1, 2]),
+        (CmpOp::Gt, 80_936.0, vec![3, 4]),
+        (CmpOp::Lt, 80_938.0, vec![0, 1, 2, 3]),
+        (CmpOp::Ge, 202_625.0, vec![4]),
+        (CmpOp::Gt, 202_625.0, vec![]),
+        (CmpOp::Gt, 16_777_217.0, vec![]),
+    ] {
+        assert_eq!(narrow(&cn(op, v)), want, "narrowing cn {op:?} {v}");
+        assert_eq!(answer(cn(op, v)), want, "answer to cn {op:?} {v}");
+    }
+    // Ne does not narrow, so this one is verification alone — the half that read the field as f32.
+    // The numberless printing matches no comparison, as in SQL.
+    assert_eq!(answer(cn(CmpOp::Ne, 80_937.0)), vec![0, 1, 2, 4]);
+    let both = FilterExpr::And(vec![cn(CmpOp::Gt, 80_936.0), cn(CmpOp::Lt, 80_938.0)]);
+    assert_eq!(answer(both), vec![3]);
+}
+
 // ─── #634 Step 1: all_match promotion ─────────────────────────────────────────
 
 /// The regression this suite exists to prevent: a printing-space predicate
@@ -7025,7 +7119,7 @@ fn all_match_promotion_never_fires_for_printing_space_tight_results() {
     data.printings[0].collector_number_int = Some(100);
     data.printings[1].collector_number_int = Some(228);
     data.printings[2].collector_number_int = Some(101);
-    data.indexes.collector_number = build_printing_value_index(&data.printings, &data.cards, &data.offsets, |p| p.collector_number_int.map(u32::from));
+    data.indexes.collector_number = build_printing_value_index(&data.printings, &data.cards, &data.offsets, |p| p.collector_number_int);
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
 
@@ -8270,7 +8364,7 @@ fn negated_range_narrowing() {
     data.indexes.price_usd = build_printing_value_index(&data.printings, &data.cards, &data.offsets, |p| p.price_usd);
     data.indexes.price_eur = build_printing_value_index(&data.printings, &data.cards, &data.offsets, |p| p.price_eur);
     data.indexes.price_tix = build_printing_value_index(&data.printings, &data.cards, &data.offsets, |p| p.price_tix);
-    data.indexes.collector_number = build_printing_value_index(&data.printings, &data.cards, &data.offsets, |p| p.collector_number_int.map(u32::from));
+    data.indexes.collector_number = build_printing_value_index(&data.printings, &data.cards, &data.offsets, |p| p.collector_number_int);
     data.indexes.released_at = build_printing_value_index(&data.printings, &data.cards, &data.offsets, |p| p.released_at_int);
     let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
     let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
