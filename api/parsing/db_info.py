@@ -283,7 +283,28 @@ DB_COLUMNS = [
         search_aliases=["year"],
         parser_class=ParserClass.YEAR,
     ),
+    # Scryfall's `games` (paper, mtgo, arena) per printing. Not a column of its own: read from the
+    # raw card blob, see DERIVED_COLUMN_SQL.
+    FieldInfo(
+        db_column_name="card_games",
+        field_type=FieldType.JSONB_OBJECT,
+        search_aliases=["game"],
+        parser_class=ParserClass.TEXT,
+    ),
+    # Not a column: `prefer:` picks which printing of each card is returned. Both parsers read it as
+    # a text condition and post_parse lifts it onto Query.prefer before anything generates SQL.
+    FieldInfo(
+        db_column_name="prefer",
+        field_type=FieldType.TEXT,
+        search_aliases=["prefer"],
+        parser_class=ParserClass.TEXT,
+    ),
 ]
+
+# Fields kept inside another column rather than in one of their own: the SQL that reads them.
+DERIVED_COLUMN_SQL = {
+    "card_games": "(card.raw_card_blob->'games')",
+}
 
 KNOWN_CARD_ATTRIBUTES = set()
 NUMERIC_CARD_ATTRIBUTES: set[str] = set()

@@ -448,9 +448,10 @@ class TrueNode(LeafNode):
 class Query(QueryNode):
     """Top-level query container node for the AST."""
 
-    def __init__(self: Query, root: QueryNode) -> None:
-        """Initialize a Query with the root QueryNode."""
+    def __init__(self: Query, root: QueryNode, prefer: str | None = None) -> None:
+        """Initialize a Query with the root QueryNode and the `prefer:` value lifted out of it, if any."""
         self.root = root
+        self.prefer = prefer
 
     def to_json(self) -> dict:
         """Delegate to the root node."""
@@ -466,17 +467,19 @@ class Query(QueryNode):
 
     def __repr__(self: Query) -> str:
         """Return a string representation of the Query node."""
-        return f"Query({self.root})"
+        if self.prefer is None:
+            return f"Query({self.root})"
+        return f"Query({self.root}, prefer={self.prefer!r})"
 
     def __eq__(self: Query, other: object) -> bool:
-        """Check equality with another Query based on the root node."""
+        """Check equality with another Query based on the root node and the lifted prefer."""
         if not isinstance(other, Query):
             return False
-        return self.root == other.root
+        return self.root == other.root and self.prefer == other.prefer
 
     def __hash__(self: Query) -> int:
         """Return a hash based on the root node."""
-        return hash(("Query", self.root))
+        return hash(("Query", self.root, self.prefer))
 
 
 def flatten_nested_operations(node: QueryNode) -> QueryNode:
