@@ -20,6 +20,11 @@ if TYPE_CHECKING:
 # for any card with no type in this set. Title-cased to match parse_type_line().
 PERMANENT_CARD_TYPES = {"Artifact", "Battle", "Creature", "Enchantment", "Land", "Planeswalker"}
 
+# Scryfall's set_type for the products that are collectible objects rather than tournament-legal
+# printings: World Championship decks, Collectors' Edition, 30th Anniversary, the oversized promo
+# sets -- 30a, ced, cei, ovnt, ptc, o90p, olep, wc97..wc04, 99 sets in all.
+MEMORABILIA_SET_TYPE = "memorabilia"
+
 
 def parse_type_line(type_line: str) -> tuple[list[str], list[str]]:
     """Parse the type line of a card."""
@@ -126,6 +131,34 @@ def preprocess_card(card: dict[str, Any]) -> list[dict[str, Any]]:  # noqa: PLR0
     if "paper" not in card.get("games", []):
         return []
     if card.get("set_type") == "funny":
+        return []
+    # Memorabilia, for the same reason one line up: a product that is a collectible object rather
+    # than a tournament-legal printing. Scryfall hides these from any search that does not name
+    # their set -- measured 2026-08-11, `!"Ancestral Recall"` returns 9 of its 18 printings and
+    # `!"Birds of Paradise"` 42 of 43 -- so importing them makes ordinary queries disagree with it.
+    # Concretely they supplied the CHEAPEST printing for 184 cards, which is exactly the printing a
+    # price ordering is defined to return.
+    #
+    # Dropped at import rather than filtered at query time, and that is the load-bearing decision.
+    # To be correct a query-time predicate has to sit in the filter TREE -- the representative walk
+    # picks among printings that pass the residual, so a flag outside it would let a hidden
+    # printing stand for its card -- and a conjunct present on every query breaks four of the six
+    # physical plans, which gate on the filter being literally `True` or on a range being bare:
+    # PlanePopcountOrder, CardRangePopcount, PrintingRangeScan, and `all_match_known`'s
+    # constant-count arms. Measured at +59..115us per query on a 112,932-printing store.
+    #
+    # What this gives up instead: `set:cei` and its 98 siblings return nothing, where Scryfall
+    # returns them. No CARD is lost -- measured, 0 of 31,724 cards are printed only in memorabilia
+    # sets -- so it changes which printing represents a card, never whether the card is findable.
+    if card.get("set_type") == MEMORABILIA_SET_TYPE:
+        return []
+    # Oversized printings, same reasoning. Every card that exists ONLY oversized -- all 207
+    # planes, all 102 schemes, all 32 paper Vanguard avatars, Garruk the Slayer -- is not_legal
+    # in every format, so the legality gate above already refuses it before this line runs.
+    # Measured 2026-08-27: after the gates above, exactly 240 oversized printings survive, 230 of
+    # them memorabilia; this line removes the last 10, the p09/p10/p11 oversized box-topper
+    # promos, each of which has normal-sized printings. So no card is lost here either.
+    if card.get("oversized"):
         return []
 
     # Filter out unplayable cards: Cards and Tokens
