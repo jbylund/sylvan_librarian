@@ -3118,8 +3118,14 @@ impl ArchivedPrintingValueIndex {
 
     /// The half-open value range `[lo, hi)` as a `pids` offset pair — the `(s, e)` every filter
     /// consumer used to get from two `partition_point`s over the pair vec.
+    ///
+    /// Callers compute `e - s` and slice `pids[s..e]`, so the pair is kept ordered even for an inverted
+    /// `(lo, hi)`: an empty range, never a wrap or a panic. Every bound producer is meant to hand over
+    /// `lo <= hi` already -- the debug assertion is what says so.
     fn range(&self, lo: u32, hi: u32) -> (usize, usize) {
-        (self.offset_of(lo), self.offset_of(hi))
+        debug_assert!(lo <= hi, "value range must be ordered: [{lo}, {hi})");
+        let s = self.offset_of(lo);
+        (s, s.max(self.offset_of(hi)))
     }
 
     /// Printing ids whose key is in `[lo, hi)`, key-major.
@@ -3455,21 +3461,34 @@ fn snap_to_nearest_cent(cents: f64) -> f64 {
 /// are chosen so the range is exact for every op — `cn<100.5` means
 /// value <= 100. Outer None = Ne (never narrows); inner None = provably empty
 /// (an exact empty narrowing, not "no index").
+///
+/// `hi` never exceeds `u32::MAX`: a half-open bound cannot include `u32::MAX` itself (there is no
+/// `u32::MAX + 1`), so the top value of the domain is treated as never present -- it is the null
+/// sentinel in every sort key, never a stored value. Before this the `+ 1` after clamping to
+/// `u32::MAX` produced 2^32, truncated to `hi = 0`, and consumers computed `e - s` (wrapping) and
+/// sliced `pids[s..e]` (panicking) on any `<= 4294967295` query.
 fn int_range_bounds(op: CmpOp, value: f64) -> Option<Option<(u32, u32)>> {
     const TOP: i64 = u32::MAX as i64;
+    if value.is_nan() {
+        return match op {
+            CmpOp::Ne => None,
+            _ => Some(None), // nothing compares to NaN
+        };
+    }
     let (lo, hi): (i64, i64) = match op {
         CmpOp::Ne => return None,
         CmpOp::Eq => {
-            if value.fract() != 0.0 || value < 0.0 || value > TOP as f64 {
+            if value.fract() != 0.0 || value < 0.0 || value >= TOP as f64 {
                 return Some(None);
             }
             (value as i64, value as i64 + 1)
         }
         CmpOp::Lt => (0, value.ceil().clamp(0.0, TOP as f64) as i64),
-        CmpOp::Le => (0, value.floor().clamp(-1.0, TOP as f64) as i64 + 1),
-        CmpOp::Gt => (value.floor().clamp(-1.0, TOP as f64) as i64 + 1, TOP),
+        CmpOp::Le => (0, value.floor().clamp(-1.0, (TOP - 1) as f64) as i64 + 1),
+        CmpOp::Gt => (value.floor().clamp(-1.0, (TOP - 1) as f64) as i64 + 1, TOP),
         CmpOp::Ge => (value.ceil().clamp(0.0, TOP as f64) as i64, TOP),
     };
+    debug_assert!(hi <= TOP && lo >= 0, "int_range_bounds must stay inside the u32 domain: ({lo}, {hi})");
     if hi <= lo {
         return Some(None);
     }
