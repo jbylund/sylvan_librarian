@@ -6,7 +6,7 @@ use super::{
     assign_artwork_groups, build_artwork_base_from, build_bit_planes, build_border_printing_planes, build_rarity_printing_planes, build_divergent_ids, build_name_bigram_index, build_name_unigram_index, build_printing_to_card, flavor_fingerprint, flavor_match_sets,
     cards_of_printings, count_common_keywords, count_common_types,
     build_artist_index, build_printing_value_index, build_arith_tuple_index, is_arith_tuple_route, range_candidates, narrow_candidates, narrow_candidates_exact, rarity_candidates,
-    range_too_broad_to_narrow, run_query, run_query_routed, run_query_with_plan, explain, explain_analyze, AcquireFacts, PlanEstimate, PlanTrial,
+    absent_sorts_highest, perm_primary_key, range_too_broad_to_narrow, run_query, run_query_routed, run_query_with_plan, explain, explain_analyze, AcquireFacts, PlanEstimate, PlanTrial,
     acquire_plan_features, take_phase_stats, PagingTaken, CountSource, NarrowedRepr,
     EXACT_VALUE_TOTALS, RangeCardCounts, narrow_rec, ValueTotals, PairTotals, build_all_value_totals, build_pair_totals, build_range_card_counts, exact_result_total,
     PhysicalPlan, PlanScope, CandidatePlan, ComposePaging, trigram_candidates, finalize_trigram_index, PrintingValueIndex, NARROW_FLOOR,
@@ -7537,10 +7537,16 @@ fn artwork_group_ids_handle_more_than_64_groups() {
     assert!(chosen.contains(&2) && !chosen.contains(&1));
 }
 
-// Permutations put missing sort values last in both directions and reverse
-// only the non-null primary order, matching sort_key_bits semantics.
+/// Permutations put a missing sort value where the LOWEST value goes — first ascending, last
+/// descending — matching `perm_primary_key`/`sort_key_bits` and what Scryfall does (measured
+/// 2026-08-11: `set:m10 order=power dir=asc` leads with the null-power cards, `dir=desc` trails
+/// with them).
+///
+/// Same three-card fixture as when this asserted nulls-LAST in both directions. The descending
+/// expectation is deliberately unchanged: that is the evidence only the ascending side moved, and
+/// therefore that only the ascending permutations need rebuilding.
 #[test]
-fn sort_permutations_nulls_last_both_directions() {
+fn sort_permutations_put_a_missing_magnitude_lowest() {
     let mut vocab = VocabInterner::new();
     let mut cards = vec![
         stub_card(1, TYPE_CREATURE, &[], &mut vocab),
@@ -7552,11 +7558,11 @@ fn sort_permutations_nulls_last_both_directions() {
     cards[2].cmc = Some(1);
     let mut data = store_of(cards, &[2, 1, 3], vocab);
     data.indexes.sort_perms = build_sort_permutations(&data.cards, &data.offsets);
-    assert_eq!(data.indexes.sort_perms.cmc[0], vec![2, 0, 1], "asc: 1, 5, null");
+    assert_eq!(data.indexes.sort_perms.cmc[0], vec![1, 2, 0], "asc: null, 1, 5");
     assert_eq!(data.indexes.sort_perms.cmc[1], vec![0, 2, 1], "desc: 5, 1, null");
     assert_eq!(
         data.indexes.sort_perms.cmc_printings_prefix[0],
-        vec![0, 3, 5, 6],
+        vec![0, 1, 4, 6],
         "asc printing spans follow card order",
     );
     assert_eq!(
@@ -7572,9 +7578,107 @@ fn sort_permutations_nulls_last_both_directions() {
             .indexes
             .sort_perms
             .printings_examined_upper(SortCol::Cmc, false, 1.01, archived.cards.len()),
-        Some(5),
+        Some(4),
         "fractional card bounds ceil before the O(1) printing-prefix lookup",
     );
+}
+
+/// And a missing RANK goes where the highest value goes — LAST ascending, FIRST descending, the
+/// exact opposite end, in the same stored array shape.
+///
+/// Measured on api.scryfall.com over `e:khm order=edhrec unique=prints` (425 printings, 33 of them
+/// unranked): ascending page 1 runs 199, 378, 378 … 8068 with not one null in its 175 rows, and
+/// `dir=desc` page 1 LEADS with 33 nulls before 13065, 13021, 13021 …
+///
+/// `edhrec` is the DEFAULT `order=`, so this is the ordering an unordered search gets.
+#[test]
+fn sort_permutations_put_a_missing_rank_highest() {
+    let mut vocab = VocabInterner::new();
+    let mut cards = vec![
+        stub_card(1, TYPE_CREATURE, &[], &mut vocab),
+        stub_card(2, TYPE_CREATURE, &[], &mut vocab),
+        stub_card(3, TYPE_CREATURE, &[], &mut vocab),
+    ];
+    cards[0].edhrec_rank = Some(500);
+    cards[1].edhrec_rank = None;
+    cards[2].edhrec_rank = Some(12);
+    let data = store_of(cards, &[1, 1, 1], vocab);
+    let perms = build_sort_permutations(&data.cards, &data.offsets);
+    assert_eq!(perms.edhrec[0], vec![2, 0, 1], "asc: 12, 500, unranked LAST");
+    assert_eq!(perms.edhrec[1], vec![1, 0, 2], "desc: unranked FIRST, 500, 12");
+    // The inverses are built per direction rather than derived, so they have to move with it.
+    assert_eq!(perms.edhrec_inv[0], vec![1, 2, 0], "asc inverse: card 1 is unranked, so position 2");
+    assert_eq!(perms.edhrec_inv[1], vec![1, 0, 2], "desc inverse: card 1 is unranked, so position 0");
+}
+
+/// The definition, pinned directly on the key function rather than through a permutation, for every
+/// column: absent sits on the side `absent_sorts_highest` names, and the direction reflects it.
+///
+/// Table-driven off the enum so a column ADDED to `SortCol` cannot silently inherit an
+/// unconsidered answer — the match in `absent_sorts_highest` has no wildcard arm.
+#[test]
+fn a_missing_primary_sorts_on_its_column_side() {
+    let columns = [
+        (SortCol::Cmc, false),
+        (SortCol::Power, false),
+        (SortCol::Toughness, false),
+        (SortCol::Rarity, false),
+        (SortCol::PriceUsd, false),
+        (SortCol::Cubecobra, false),
+        (SortCol::Name, false),
+        (SortCol::EdhrecRank, true),
+    ];
+    for (sort_col, highest) in columns {
+        assert_eq!(absent_sorts_highest(sort_col), highest, "the measured table moved for {sort_col:?}");
+        for descending in [false, true] {
+            let absent = perm_primary_key(None, sort_col, descending);
+            for v in [-1000.0f32, -1.5, 0.0, 1.0, 42.0, 514_202.0, f32::MAX] {
+                let present = perm_primary_key(Some(v), sort_col, descending);
+                assert_ne!(present, absent, "a real value collided with the sentinel ({sort_col:?} v={v} desc={descending})");
+                // Absent is "above every value" for the HIGHEST arm, and the direction negates the
+                // comparison exactly as it negates the value.
+                let absent_first = highest == descending;
+                if absent_first {
+                    assert!(present > absent, "{sort_col:?} desc={descending}: {v} should sort after absent");
+                } else {
+                    assert!(present < absent, "{sort_col:?} desc={descending}: {v} should sort before absent");
+                }
+            }
+        }
+    }
+}
+
+/// The same rule through the QUERY path rather than the stored array: `order=edhrec` must page an
+/// unranked card last ascending and first descending, whichever plan the router picks.
+///
+/// This is the shape of the api.scryfall.com anchor — `e:khm order=edhrec dir=desc` page 1 leads
+/// with 33 unranked printings — reduced to a fixture the engine suite can run offline. `run_query`
+/// rather than `build_sort_permutations` is the point: it is the half a reader would expect to
+/// follow from the permutation and does not have to, because a gathered plan builds its own key.
+#[test]
+fn order_edhrec_pages_an_unranked_card_last_ascending_and_first_descending() {
+    let mut vocab = VocabInterner::new();
+    let mut cards = vec![
+        stub_card(1, TYPE_CREATURE, &[], &mut vocab),
+        stub_card(2, TYPE_CREATURE, &[], &mut vocab),
+        stub_card(3, TYPE_CREATURE, &[], &mut vocab),
+    ];
+    cards[0].edhrec_rank = Some(13065);
+    cards[1].edhrec_rank = None;
+    cards[2].edhrec_rank = Some(199);
+    let data = store_of(cards, &[1, 1, 1], vocab);
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    // scryfall_id is the printing index + 1 (store_of), so the unranked card is printing 1 -> id 2.
+    let ids = |direction: &str| -> Vec<u128> {
+        let mut filter = FilterExpr::True;
+        let (_total, page) =
+            run_query(&QueryCtx::from(archived), &mut filter, None, "card", "default", "edhrec", direction, 100, 0);
+        page.iter().map(|(_, p)| u128::from(p.scryfall_id)).collect()
+    };
+    assert_eq!(ids("asc"), vec![3, 1, 2], "asc: 199, 13065, then the unranked card");
+    assert_eq!(ids("desc"), vec![2, 1, 3], "desc: the unranked card, then 13065, 199");
 }
 
 #[test]
@@ -8575,6 +8679,14 @@ fn orderby_walk_matches_gather_composed() {
                             let (gather, _) = super::gather_composed_page(
                                 &QueryCtx::from(archived), &params, &pbits, card_bits.as_deref(),
                             );
+                            // Ascending is only offered when the column has no nulls at all —
+                            // the walk cannot place a null block that sorts BEFORE what it emits,
+                            // and its decline test only detects a null SUFFIX. Production routes
+                            // through `orderby_walk_available`; mirror that here rather than
+                            // calling the walk into a state it documents as wrong.
+                            if !super::orderby_walk_available(sort_col, descending, &archived.indexes) {
+                                continue;
+                            }
                             let walk = super::walk_value_orderby_page(&QueryCtx::from(archived), &params, idx, &pbits, total);
                             if let Some((walk, _)) = walk {
                                 walked += 1;
