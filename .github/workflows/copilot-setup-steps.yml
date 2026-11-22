@@ -29,10 +29,10 @@ jobs:
         with:
           python-version: '3.13'
 
-      - name: Install libev (needed to compile bjoern, the WSGI server)
+      - name: Install libuv (needed to compile freastal, the WSGI server)
         run: |
           sudo apt-get update -qqq
-          sudo apt-get install -qqq -y libev-dev
+          sudo apt-get install -qqq -y libuv1-dev
 
       - name: Install uv and Python dependencies
         run: |

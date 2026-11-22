@@ -6,6 +6,7 @@ import json
 import logging
 import multiprocessing
 import os
+import sys
 from typing import TYPE_CHECKING
 
 import falcon
@@ -171,7 +172,7 @@ class ApiWorker(multiprocessing.Process):
         logging.basicConfig(level=logging.INFO)
         logging.info("Starting worker with pid %d", os.getpid())
         try:
-            import bjoern
+            import freastal
 
             app = self.get_api(
                 cache_generation=self.cache_generation,
@@ -180,13 +181,29 @@ class ApiWorker(multiprocessing.Process):
                 last_import_time=self.last_import_time,
                 schema_setup_event=self.schema_setup_event,
             )  # Get the Falcon app
-            bjoern.run(
-                wsgi_app=app,
+            # workers=1 because entrypoint.py already forks one ApiWorker per core; freastal's own
+            # `workers` would fork a second layer underneath them.
+            #
+            # Those siblings each bind the same port, so the group needs SO_REUSEPORT -- but
+            # freastal decides its tri-state default from its OWN `workers` count, which is 1 here
+            # and cannot see them. So ask for it explicitly, and only where it works: macOS accepts
+            # SO_REUSEPORT but does not load-balance TCP listeners, and freastal raises there rather
+            # than silently delivering every connection to one worker. Passing True unconditionally
+            # would make the server refuse to start on a developer's Mac.
+            #
+            # Multi-worker local runs on macOS are no worse off than before -- verified that bjoern
+            # also fails the second bind there with EADDRINUSE, reuse_port=True notwithstanding.
+            #
+            # bjoern's `listen_backlog=4096` has no freastal equivalent, so the accept queue falls
+            # back to the library default. That is the one behavioural difference here, and it only
+            # shows under a connection burst deeper than that backlog.
+            freastal.serve(
+                app,
                 host=self.host,
                 port=self.port,
-                reuse_port=True,
-                listen_backlog=1024 * 4,
-            )  # Start the Bjoern server
+                workers=1,
+                reuse_port=True if sys.platform.startswith("linux") else None,
+            )  # Start the freastal server
         except Exception as oops:
             logger.error("Error running server: %s", oops, exc_info=True)
             if self.exit_flag:

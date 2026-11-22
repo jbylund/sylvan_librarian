@@ -34,7 +34,7 @@ RUN apt-get update -qqq && apt-get install -qqq -y \
     build-essential \
     curl \
     dumb-init \
-    libev-dev \
+    libuv1-dev \
     libpq-dev \
     libpython3-dev \
     python3 \
