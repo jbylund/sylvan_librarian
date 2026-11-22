@@ -530,11 +530,12 @@ class Parser:
                 self.consume()
                 return CardBinaryOperatorNode(CardAttributeNode(wl, ParserClass.NUMERIC), op, self.parse_num_expr_value())
             if next_tok.type in _ARITH_OPS and not next_tok.space_before:
+                start = self.pos
                 lhs = self._arith_tail(CardAttributeNode(wl, ParserClass.NUMERIC))
-                if isinstance(lhs, CardAttributeNode):
-                    # The operator has no numeric term after it, so this is not arithmetic: `power-sink`
-                    # is the hyphenated name word `some-word` is. Returning the bare attribute left the
-                    # `-` unconsumed and failed the parse.
+                if self.pos == start:
+                    # The operator has no numeric term after it, so nothing was consumed and this is not
+                    # arithmetic: `power-sink` is the hyphenated name word `some-word` is. Returning the
+                    # bare attribute left the `-` unconsumed and failed the parse.
                     return self.parse_hyphenated_name(word)
                 lhs = self._spaced_arith_tail(lhs)
                 if self.peek().type == TT.OP:
