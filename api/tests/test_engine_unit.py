@@ -73,6 +73,68 @@ def engine_fixture(fresh_engine: Callable[[], QueryEngine]) -> QueryEngine:
     return e
 
 
+#: Ascending, and one of them is a half — see TestFractionalManaValue.
+_HALF_MANA_CMCS = (0.0, 0.5, 1.0, 2.5, 3.0)
+
+
+@pytest.fixture(scope="module", name="half_mana_engine")
+def half_mana_engine_fixture(fresh_engine: Callable[[], QueryEngine]) -> QueryEngine:
+    """Five cards named after their own mana value, one of them a half.
+
+    Built off a real fixture row so every other column is a shape the engine has already
+    been loaded with; only the identity fields and cmc vary.
+    """
+    template = json.loads(_FIXTURE.read_text())[0]
+    cards = []
+    for i, cmc in enumerate(_HALF_MANA_CMCS):
+        card = dict(template)
+        card["card_name"] = f"Card {cmc}"
+        card["card_name_folded"] = card["card_name"].lower()
+        card["cmc"] = cmc
+        card["oracle_id"] = str(uuid.UUID(int=i + 1))
+        card["scryfall_id"] = str(uuid.UUID(int=1000 + i))
+        card["illustration_id"] = str(uuid.UUID(int=2000 + i))
+        card["edhrec_rank"] = i + 1
+        cards.append(card)
+    e = fresh_engine()
+    e.reload(cards)
+    return e
+
+
+#: (power, toughness), ascending by power, and three of the six are halves — see
+#: TestFractionalPowerAndToughness. The negative is as real as the halves: Char-Rumbler and
+#: Spinal Parasite print a -1 power.
+_HALF_STATS = ((-1.0, -1.0), (0.0, 0.5), (0.5, 0.5), (1.5, 1.0), (2.5, 3.5), (3.5, 2.0))
+
+
+@pytest.fixture(scope="module", name="half_stat_engine")
+def half_stat_engine_fixture(fresh_engine: Callable[[], QueryEngine]) -> QueryEngine:
+    """Six cards named after their own power/toughness, three of them fractional.
+
+    Built off a real fixture row for the same reason `half_mana_engine` is: every other
+    column stays a shape the engine has already been loaded with, and only the identity
+    fields and the two stat columns vary.
+    """
+    template = json.loads(_FIXTURE.read_text())[0]
+    cards = []
+    for i, (power, toughness) in enumerate(_HALF_STATS):
+        card = dict(template)
+        card["card_name"] = f"Card {power}/{toughness}"
+        card["card_name_folded"] = card["card_name"].lower()
+        card["creature_power"] = power
+        card["creature_toughness"] = toughness
+        card["creature_power_text"] = str(power)
+        card["creature_toughness_text"] = str(toughness)
+        card["oracle_id"] = str(uuid.UUID(int=i + 1))
+        card["scryfall_id"] = str(uuid.UUID(int=1000 + i))
+        card["illustration_id"] = str(uuid.UUID(int=2000 + i))
+        card["edhrec_rank"] = i + 1
+        cards.append(card)
+    e = fresh_engine()
+    e.reload(cards)
+    return e
+
+
 def _run(
     engine: QueryEngine,
     q: str = "",
@@ -582,6 +644,97 @@ class TestSort:
         _, desc_cards = _run(engine, 'name="Lightning Bolt"', orderby="edhrec", direction="desc")
         # Reversed direction should produce reversed order (10 distinct printings)
         assert _names(asc_cards) == list(reversed(_names(desc_cards)))
+
+
+class TestFractionalManaValue:
+    """A mana value is a Decimal in Scryfall's schema, and one card exercises that.
+
+    The half-mana symbol {HW} gives Little Girl (Unhinged) a mana value of exactly 0.5 —
+    checked against the live API on 2026-08-12, /cards/named?exact=Little+Girl answers
+    "mana_cost":"{HW}", "cmc":0.5, and it is the only card in the whole corpus with a
+    fractional one. It is not in the dataset (api/card_processing.py drops set_type ==
+    "funny", and it is legal in no format either), so this builds its own store rather
+    than adding a 91st printing to the shared fixture: the point is that the value can
+    make the round trip from a query string, through the parser, into the engine and back
+    out in the right order — not that the corpus contains it.
+
+    Each of these fails when cmc is an integer, and in both directions: `mv=0.5` finds
+    nothing, and `mv=0` starts finding the half-mana card.
+    """
+
+    def test_half_mana_value_is_findable(self, half_mana_engine: QueryEngine) -> None:
+        total, cards = _run(half_mana_engine, "mv=0.5")
+        assert total == 1
+        assert _names(cards) == ["Card 0.5"]
+
+    def test_zero_does_not_match_a_half(self, half_mana_engine: QueryEngine) -> None:
+        """The direction an integer column gets wrong silently: 0.5 truncates onto 0."""
+        total, cards = _run(half_mana_engine, "cmc=0")
+        assert total == 1
+        assert _names(cards) == ["Card 0.0"]
+
+    def test_a_half_sits_strictly_between_its_neighbours(self, half_mana_engine: QueryEngine) -> None:
+        assert _run(half_mana_engine, "mv<1")[0] == 2  # 0 and 0.5
+        assert _run(half_mana_engine, "mv>0.5")[0] == 3  # 1, 2.5, 3 — not 0.5 itself
+        assert _run(half_mana_engine, "mv>=0.5 mv<=2.5")[0] == 3  # 0.5, 1, 2.5
+
+    def test_every_alias_spells_the_same_fraction(self, half_mana_engine: QueryEngine) -> None:
+        """The cmc / mv / manavalue aliases are one field (api/parsing/db_info.py), fraction included."""
+        for alias in ("cmc", "mv", "manavalue"):
+            assert _run(half_mana_engine, f"{alias}=2.5")[0] == 1, alias
+
+    def test_sort_orders_a_half_between_the_integers(self, half_mana_engine: QueryEngine) -> None:
+        _, cards = _run(half_mana_engine, orderby="cmc", direction="asc")
+        assert _names(cards) == [f"Card {cmc}" for cmc in _HALF_MANA_CMCS]
+
+
+class TestFractionalPowerAndToughness:
+    """Power and toughness are strings in Scryfall's schema, and eleven cards print a half.
+
+    Checked against the live API on 2026-08-17: /cards/named?exact=Little+Girl answers
+    "power":".5", "toughness":".5", and `(power=.5 or power=1.5 or power=2.5 or power=3.5 or
+    toughness=.5 or toughness=1.5 or toughness=2.5 or toughness=3.5) include:extras` returns
+    exactly eleven cards, all Unhinged. None of them is in the dataset — card_processing drops
+    set_type == "funny" — so this builds its own store, exactly as TestFractionalManaValue
+    does: the point is that the value makes the round trip from a query string, through the
+    parser, into the engine and back out in the right order.
+
+    Each of these fails when the columns are integers, and the SECOND direction is the one
+    that matters: `power=0.5` finding nothing is visible, while `power=2` quietly gaining
+    every 2.5 card is not. Truncation over-catches the floor; it does not lose rows.
+    """
+
+    def test_a_half_is_findable(self, half_stat_engine: QueryEngine) -> None:
+        total, cards = _run(half_stat_engine, "power=0.5")
+        assert total == 1
+        assert _names(cards) == ["Card 0.5/0.5"]
+
+    def test_a_floor_does_not_match_the_half_above_it(self, half_stat_engine: QueryEngine) -> None:
+        """The silent direction. `pow=0` must find only the card that actually prints 0."""
+        assert _names(_run(half_stat_engine, "pow=0")[1]) == ["Card 0.0/0.5"]
+        assert _run(half_stat_engine, "pow=2")[0] == 0
+        assert _run(half_stat_engine, "pow=3")[0] == 0
+        assert _run(half_stat_engine, "tou=0")[0] == 0
+
+    def test_a_half_sits_strictly_between_its_neighbours(self, half_stat_engine: QueryEngine) -> None:
+        assert _run(half_stat_engine, "tou<1")[0] == 3  # -1, and both 0.5s
+        assert _run(half_stat_engine, "pow>2")[0] == 2  # 2.5 and 3.5
+        assert _run(half_stat_engine, "pow>=0.5 pow<=2.5")[0] == 3  # 0.5, 1.5, 2.5
+
+    def test_every_alias_spells_the_same_fraction(self, half_stat_engine: QueryEngine) -> None:
+        """power/pow and toughness/tou are one field each (api/parsing/db_info.py)."""
+        for alias in ("power", "pow"):
+            assert _run(half_stat_engine, f"{alias}=2.5")[0] == 1, alias
+        for alias in ("toughness", "tou"):
+            assert _run(half_stat_engine, f"{alias}=3.5")[0] == 1, alias
+
+    def test_a_half_compares_against_the_other_column(self, half_stat_engine: QueryEngine) -> None:
+        """Field-vs-field, where truncation would tie 1.5/1 at 1/1 instead of ordering it."""
+        assert _names(_run(half_stat_engine, "pow>tou")[1]) == ["Card 1.5/1.0", "Card 3.5/2.0"]
+
+    def test_sort_orders_a_half_between_the_integers(self, half_stat_engine: QueryEngine) -> None:
+        _, cards = _run(half_stat_engine, orderby="power", direction="asc")
+        assert _names(cards) == [f"Card {p}/{t}" for p, t in _HALF_STATS]
 
 
 class TestDevotion:
