@@ -35,6 +35,7 @@ class EngineField(enum.StrEnum):
     CARD_ORACLE_TAGS = enum.auto()
     CARD_ART_TAGS = enum.auto()
     CARD_IS_TAGS = enum.auto()
+    CARD_IN_TAGS = enum.auto()
     CARD_FRAME_DATA = enum.auto()
 
 
@@ -49,6 +50,7 @@ ENGINE_COLUMNS: list[str] = [
     "card_color_identity",
     "card_colors",
     "card_frame_data",
+    "card_in_tags",
     "card_is_tags",
     "card_keywords",
     "card_layout",

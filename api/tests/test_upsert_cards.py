@@ -254,6 +254,70 @@ class TestBooleanIsTags:
         assert "scryfallpreview" not in _is_tags_for(api_resource, card["id"])
 
 
+def _in_tags_for(api_resource: APIResource, scryfall_id: str) -> dict:
+    with api_resource.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+        cursor.execute(
+            "SELECT card_in_tags FROM magic.cards WHERE scryfall_id = %(sid)s",
+            {"sid": scryfall_id},
+        )
+        row = cursor.fetchone()
+    return row["card_in_tags"] if row else {}
+
+
+class TestInTags:
+    """card_in_tags is the per-card union over every printing, written onto every row of the card."""
+
+    @staticmethod
+    def _two_printings(name: str) -> tuple[dict, dict]:
+        # Printing A: a paper booster common in set aaa, nonfoil ONLY, 2015 frame, English.
+        first = make_raw_card(name=name, rarity="common")
+        first.update({"set": "aaa", "set_type": "expansion", "lang": "en", "frame": "2015", "booster": True})
+        first["finishes"] = ["nonfoil"]
+        first["games"] = ["paper"]
+        # Printing B: the same card as a DIGITAL promo, rare, foil only, on Arena as well as paper
+        # (preprocess_card drops any printing without "paper" in games, so an Arena-only row never
+        # reaches the table; `digital` is what the finish rule reads, not the game list). Its set
+        # code, set type and games all count; its rarity does not (promo set type) and neither
+        # does its foil (digital). Same oracle_id makes it the same card.
+        second = make_raw_card(name=name, rarity="rare")
+        second["oracle_id"] = first["oracle_id"]
+        second.update({"set": "bbb", "set_type": "promo", "lang": "en", "frame": "2015", "booster": False, "digital": True})
+        second["finishes"] = ["foil"]
+        second["games"] = ["paper", "arena"]
+        return first, second
+
+    def test_union_lands_on_every_row_under_each_namespaces_rule(self, api_resource: APIResource) -> None:
+        first, second = self._two_printings(f"In Tags Union {uuid.uuid4().hex[:8]}")
+        api_resource.admin._upsert_cards([first, second])
+        expected = dict.fromkeys(
+            ["aaa", "bbb", "expansion", "promo", "common", "en", "paper", "arena", "2015", "nonfoil", "booster"], True
+        )
+        assert _in_tags_for(api_resource, first["id"]) == expected
+        # The SAME union on the other row -- that is what makes `in:aaa` return the bbb printing.
+        assert _in_tags_for(api_resource, second["id"]) == expected
+        # The two rules that subtract: the promo's rarity is decorative, and a digital printing's
+        # finish is not a paper finish. Neither word reached the union.
+        assert "rare" not in expected
+        assert "foil" not in expected
+
+    def test_reimport_converges_the_union(self, api_resource: APIResource) -> None:
+        first, second = self._two_printings(f"In Tags Converge {uuid.uuid4().hex[:8]}")
+        api_resource.admin._upsert_cards([first, second])
+        assert _in_tags_for(api_resource, first["id"]).get("bbb") is True
+        # Printing B moves to set ccc (a fresh dict, as the bulk stream would hand us): bbb must
+        # leave the union on BOTH rows and ccc must arrive on both.
+        moved = make_raw_card(card_id=second["id"], name=second["name"], rarity="rare")
+        moved["oracle_id"] = first["oracle_id"]
+        moved.update({"set": "ccc", "set_type": "promo", "lang": "en", "frame": "2015", "booster": False, "digital": True})
+        moved["finishes"] = ["foil"]
+        moved["games"] = ["paper", "arena"]
+        api_resource.admin._upsert_cards([moved])
+        for sid in (first["id"], second["id"]):
+            tags = _in_tags_for(api_resource, sid)
+            assert tags.get("ccc") is True, tags
+            assert "bbb" not in tags, tags
+
+
 # ---------------------------------------------------------------------------
 # _CardStream counting tests
 # ---------------------------------------------------------------------------
