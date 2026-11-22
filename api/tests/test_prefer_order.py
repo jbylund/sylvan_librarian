@@ -63,6 +63,15 @@ class TestPreferOrder(unittest.TestCase):
         assert PreferOrder.USD_LOW == "usd_low"
         assert PreferOrder.USD_HIGH == "usd_high"
         assert PreferOrder.PROMO == "promo"
+        assert PreferOrder.EUR_LOW == "eur_low"
+        assert PreferOrder.EUR_HIGH == "eur_high"
+        assert PreferOrder.TIX_LOW == "tix_low"
+        assert PreferOrder.TIX_HIGH == "tix_high"
+        assert PreferOrder.DEFAULT_FRAME == "default_frame"
+        assert PreferOrder.ATYPICAL == "atypical"
+        assert PreferOrder.UNIVERSESBEYOND == "universesbeyond"
+        assert PreferOrder.NOTUNIVERSESBEYOND == "notuniversesbeyond"
+        assert PreferOrder.BORDERLESS == "borderless"
 
     def test_search_accepts_prefer_parameter(self) -> None:
         """Test that search method accepts prefer parameter without error."""
@@ -77,3 +86,17 @@ class TestPreferOrder(unittest.TestCase):
         assert "price_usd" in self._search_sql("cmc=3", PreferOrder.USD_LOW)["compiled"]
         assert "price_usd" in self._search_sql("cmc=3", PreferOrder.USD_HIGH)["compiled"]
         assert "prefer_score" in self._search_sql("cmc=3", PreferOrder.DEFAULT)["compiled"]
+        assert "price_eur" in self._search_sql("cmc=3", PreferOrder.EUR_LOW)["compiled"]
+        assert "price_eur" in self._search_sql("cmc=3", PreferOrder.EUR_HIGH)["compiled"]
+        assert "price_tix" in self._search_sql("cmc=3", PreferOrder.TIX_LOW)["compiled"]
+        assert "price_tix" in self._search_sql("cmc=3", PreferOrder.TIX_HIGH)["compiled"]
+        # The class prefers have no SQL expression; the engine path answers them, and the SQL
+        # path keeps the default order rather than raising on an unmapped member.
+        for member in (
+            PreferOrder.DEFAULT_FRAME,
+            PreferOrder.ATYPICAL,
+            PreferOrder.UNIVERSESBEYOND,
+            PreferOrder.NOTUNIVERSESBEYOND,
+            PreferOrder.BORDERLESS,
+        ):
+            assert "prefer_score" in self._search_sql("cmc=3", member)["compiled"]
