@@ -8720,6 +8720,88 @@ fn color_cmp_ge_empty_mask_is_colorless_only() {
     check(ColorField::ColorIdentity, &[0]);
 }
 
+// Scryfall numeric color syntax (id>=3, c=2, produces>=2, and the colour-COUNT
+// names the parser lowers to them): ColorCountCmp compares the popcount of the
+// field against the queried count. Checked for every op × count 0..=6 over all
+// THREE fields against a popcount oracle on the color-diverse plane fixture.
+//
+// THE ORACLE IS DELIBERATELY WIDTH-AWARE, because the width is the thing under
+// test: five bits for the colour columns, where a C-bit identity (card 9) must
+// count as ZERO, and SIX for produced_mana, where card 5 produces only C and
+// must count as ONE. Both directions are asserted outright below so that
+// "fixing" the asymmetry fails loudly.
+#[test]
+fn color_count_cmp_matches_popcount_oracle() {
+    let data = plane_fixture_store();
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+
+    let cmp = |op: CmpOp, a: u32, b: u32| match op {
+        CmpOp::Eq => a == b,
+        CmpOp::Ne => a != b,
+        CmpOp::Lt => a < b,
+        CmpOp::Le => a <= b,
+        CmpOp::Gt => a > b,
+        CmpOp::Ge => a >= b,
+    };
+    for op in [CmpOp::Eq, CmpOp::Ne, CmpOp::Lt, CmpOp::Le, CmpOp::Gt, CmpOp::Ge] {
+        for count in 0u8..=6 {
+            for field in [ColorField::Colors, ColorField::ColorIdentity, ColorField::ProducedMana] {
+                let f = FilterExpr::ColorCountCmp { field, op, count };
+                for (cid, card) in archived.cards.iter().enumerate() {
+                    let (bits, mask) = match field {
+                        ColorField::Colors => (card.card_colors, 0b1_1111),
+                        ColorField::ColorIdentity => (card.card_color_identity, 0b1_1111),
+                        // SIX bits: colorless is a producible VALUE, not the absence of one.
+                        ColorField::ProducedMana => (card.produced_mana, 0b11_1111),
+                    };
+                    let want = cmp(op, u32::from(bits & mask).count_ones(), u32::from(count));
+                    assert_eq!(
+                        f.eval_card(card, &archived.strings) == Tri::True,
+                        want,
+                        "color-count mismatch at card {cid} ({op:?} {count})"
+                    );
+                }
+            }
+        }
+    }
+}
+
+// The Python side serializes a numeric color comparison as a raw
+// NumericValueNode rhs (not the usual color-letter list); build_binary must
+// turn that into ColorCountCmp — with ":" behaving as equality, matching the
+// live Scryfall API — on all three fields. produced_mana counts too, over six
+// values rather than five: `produces>=2` is 1,460 on api.scryfall.com where
+// `produces=2` is 504, and `produces:m` is the same 1,460 once lowered.
+#[test]
+fn build_filter_numeric_color_rhs() {
+    let node = |attr: &str, orig: &str, op: &str, n: u8| {
+        serde_json::json!({
+            "node_type": "CardBinaryOperatorNode",
+            "kwargs": {
+                "lhs": {"node_type": "CardAttributeNode", "kwargs": {"attribute_name": attr, "original_attribute": orig}},
+                "op": op,
+                "rhs": {"node_type": "NumericValueNode", "kwargs": {"value": n}},
+            },
+        })
+    };
+
+    let f = super::build_filter(&node("card_color_identity", "id", ">=", 3)).expect("id>=3 must build");
+    assert!(matches!(f, FilterExpr::ColorCountCmp { field: ColorField::ColorIdentity, op: CmpOp::Ge, count: 3 }));
+
+    let f = super::build_filter(&node("card_colors", "c", ":", 2)).expect("c:2 must build");
+    assert!(matches!(f, FilterExpr::ColorCountCmp { field: ColorField::Colors, op: CmpOp::Eq, count: 2 }));
+
+    let f = super::build_filter(&node("card_color_identity", "id", "=", 0)).expect("id=0 must build");
+    assert!(matches!(f, FilterExpr::ColorCountCmp { field: ColorField::ColorIdentity, op: CmpOp::Eq, count: 0 }));
+
+    let f = super::build_filter(&node("produced_mana", "produces", "=", 2)).expect("produces=2 must build");
+    assert!(matches!(f, FilterExpr::ColorCountCmp { field: ColorField::ProducedMana, op: CmpOp::Eq, count: 2 }));
+
+    let f = super::build_filter(&node("produced_mana", "produces", ">=", 1)).expect("produces>=1 must build");
+    assert!(matches!(f, FilterExpr::ColorCountCmp { field: ColorField::ProducedMana, op: CmpOp::Ge, count: 1 }));
+}
+
 // produced_mana must be its own independent transposition, not derived from
 // colors or identity: card 0 (colorless, produces everything) and card 5
 // (Fallaji Wayfarer, colors=WUBR/identity=G, produces only C) both have
