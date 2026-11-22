@@ -259,3 +259,119 @@ class TestBackfillCubecobraScores:
         api_resource.admin._insert_cubecobra_data({oracle_id: {"elo": 1500.0, "cube_count": 7, "pick_count": 9}})
 
         assert api_resource.admin.backfill_cubecobra_scores()["cards_with_cubecobra_data"] == before + 1
+
+
+# ---------------------------------------------------------------------------
+# backfill_scryfall_prefer_scores
+# ---------------------------------------------------------------------------
+
+
+class TestBackfillScryfallPreferScores:
+    """scryfall_prefer_score reproduces Scryfall's per-card printing ordering.
+
+    Their representative (magic.scryfall_representatives) first, then their prints-listing order:
+    release date, set code, collector number, all descending. See
+    backfill_scryfall_prefer_scores.sql for the probes that established the tie-breaks.
+    """
+
+    @staticmethod
+    def _label(api: APIResource, scryfall_id: str) -> None:
+        with api.app_context.writer_pool.connection() as conn, conn.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO magic.scryfall_representatives (scryfall_id) VALUES (%s) ON CONFLICT DO NOTHING",
+                (scryfall_id,),
+            )
+
+    @staticmethod
+    def _scores(api: APIResource, scryfall_ids: list[str]) -> dict[str, float]:
+        with api.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT scryfall_id, scryfall_prefer_score FROM magic.cards WHERE scryfall_id = ANY(%s)",
+                (scryfall_ids,),
+            )
+            return {str(r["scryfall_id"]): r["scryfall_prefer_score"] for r in cursor.fetchall()}
+
+    @staticmethod
+    def _printing(name: str, oracle_id: str, released_at: str, set_code: str, collector_number: str) -> dict:
+        raw = make_raw_card(name=name)
+        raw["oracle_id"] = oracle_id
+        raw["released_at"] = released_at
+        raw["set"] = set_code
+        raw["collector_number"] = collector_number
+        return raw
+
+    def test_representative_tops_the_ordering_even_when_older(self, api_resource: APIResource) -> None:
+        """The labelled printing scores 0 and the rest follow the prints listing beneath it.
+
+        The label deliberately sits on an OLDER printing than the newest -- on the real corpus
+        Scryfall's representative is rarely the newest printing, so release order alone must not
+        be able to outrank the pin.
+        """
+        name = f"Scryfall Order {uuid.uuid4()}"
+        oracle_id = str(uuid.uuid4())
+        rep = self._printing(name, oracle_id, "2024-01-01", "aaa", "7")
+        newest_hi = self._printing(name, oracle_id, "2025-05-01", "zzz", "10")
+        newest_lo = self._printing(name, oracle_id, "2025-05-01", "zzz", "3")
+        oldest = self._printing(name, oracle_id, "2020-01-01", "tst", "1")
+        for raw in (rep, newest_hi, newest_lo, oldest):
+            _insert_card(api_resource, raw)
+        self._label(api_resource, rep["id"])
+
+        api_resource.admin.backfill_scryfall_prefer_scores()
+        scores = self._scores(api_resource, [rep["id"], newest_hi["id"], newest_lo["id"], oldest["id"]])
+
+        # rep pinned first; then released desc, and within the tied date collector number desc.
+        assert scores == {
+            rep["id"]: 0.0,
+            newest_hi["id"]: -1.0,
+            newest_lo["id"]: -2.0,
+            oldest["id"]: -3.0,
+        }
+
+    def test_same_date_ties_break_by_set_code_descending(self, api_resource: APIResource) -> None:
+        """Same release date, different sets: set CODE descending, as Scryfall's listing orders it."""
+        name = f"Scryfall Set Tie {uuid.uuid4()}"
+        oracle_id = str(uuid.uuid4())
+        low_set = self._printing(name, oracle_id, "2025-05-01", "fdc", "2")
+        high_set = self._printing(name, oracle_id, "2025-05-01", "pfd", "1")
+        for raw in (low_set, high_set):
+            _insert_card(api_resource, raw)
+
+        api_resource.admin.backfill_scryfall_prefer_scores()
+        scores = self._scores(api_resource, [low_set["id"], high_set["id"]])
+
+        assert scores == {high_set["id"]: 0.0, low_set["id"]: -1.0}
+
+    def test_unlabelled_card_is_still_fully_ranked(self, api_resource: APIResource) -> None:
+        """No representative label at all: the card still gets the prints-listing ordering."""
+        name = f"Scryfall Unlabelled {uuid.uuid4()}"
+        oracle_id = str(uuid.uuid4())
+        newer = self._printing(name, oracle_id, "2023-06-01", "bbb", "5")
+        older = self._printing(name, oracle_id, "2021-06-01", "ccc", "9")
+        for raw in (newer, older):
+            _insert_card(api_resource, raw)
+
+        api_resource.admin.backfill_scryfall_prefer_scores()
+        scores = self._scores(api_resource, [newer["id"], older["id"]])
+
+        assert scores == {newer["id"]: 0.0, older["id"]: -1.0}
+
+    def test_leaves_prefer_score_alone(self, api_resource: APIResource) -> None:
+        """The Scryfall backfill must not touch the curated default prefer_score."""
+        raw = make_raw_card(name=f"Scryfall Separate {uuid.uuid4()}")
+        _insert_card(api_resource, raw)
+        api_resource.admin.backfill_prefer_scores()
+
+        with api_resource.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+            cursor.execute("SELECT prefer_score FROM magic.cards WHERE scryfall_id = %s", (raw["id"],))
+            before = cursor.fetchone()["prefer_score"]
+
+        self._label(api_resource, raw["id"])
+        result = api_resource.admin.backfill_scryfall_prefer_scores()
+        assert result["status"] == "success"
+
+        with api_resource.app_context.reader_pool.connection() as conn, conn.cursor() as cursor:
+            cursor.execute("SELECT prefer_score FROM magic.cards WHERE scryfall_id = %s", (raw["id"],))
+            after = cursor.fetchone()["prefer_score"]
+
+        assert after == before
