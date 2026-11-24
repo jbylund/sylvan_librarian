@@ -13522,6 +13522,15 @@ fn bind_and_split_filter(
     sync_format_shifts(&data.format_shifts);
     clear_regex_match_failed();
     let mut filter_expr = build_filter(&json_val).map_err(map_build_filter_err)?;
+    // `f:x` is `Or(legal, restricted)`; the restricted arm goes where this store has no printing
+    // restricted in `x` (`ValueTotals::legality` is exact and complete).
+    filter_expr.drop_empty_legality_arms(&|shift| {
+        data.indexes
+            .value_totals
+            .legality
+            .get(&legality_totals_key(shift, LEGALITY_RESTRICTED).into())
+            .is_some_and(|t| u32::from(t.printings) > 0 || u32::from(t.cards) > 0)
+    });
     filter_expr.bind(&data.coll_vocab, &data.artist_vocab, &data.mana_vocab, &data.indexes.flavor, &data.strings);
     check_regex_match_failed()?;
 

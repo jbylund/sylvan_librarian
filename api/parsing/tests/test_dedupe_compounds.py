@@ -80,6 +80,8 @@ def test_dedup_only_merges_leaves_that_mean_the_same_thing(parse_query, query: s
 def test_prefix_sensitive_leaves_both_reach_the_sql() -> None:
     """The dropped operand was a real filter: both legality statuses must survive to the SQL."""
     sql, params = generate_sql_query(parse_scryfall_query("restricted:vintage legal:vintage"))
-    assert sql.count("card.card_legalities") == 2
+    # Three references: `restricted:vintage`, and `legal:vintage` as legal OR restricted (a restricted
+    # card is playable in its format; test_sql_gen.test_legality_search_sql_translation).
+    assert sql.count("card.card_legalities") == 3
     assert {"vintage": "restricted"} in params.values()
     assert {"vintage": "legal"} in params.values()

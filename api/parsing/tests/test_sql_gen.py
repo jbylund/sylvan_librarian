@@ -1155,12 +1155,15 @@ def test_legality_search_sql_translation(parse_query, input_query: str, expected
     observed_sql = parsed.to_sql(context)
     # Note: The parameter names will be auto-generated hashes, so we need a more flexible comparison
     assert "card.card_legalities @>" in observed_sql, f"Expected JSONB containment in SQL: {observed_sql}"
-    # Check that we have exactly one parameter
-    assert len(context) == 1, f"Expected exactly one parameter in context: {context}"
-
-    # Verify the parameter value matches expected format and status
-    param_value = next(iter(context.values()))
-    assert param_value == expected_parameters, f"Expected parameter value: {expected_parameters}, got: {param_value}"
+    ((format_name, status),) = expected_parameters.items()
+    values = list(context.values())
+    if status == "legal":
+        # `f:`/`format:`/`legal:` also keep a card RESTRICTED in the format (`f:vintage` keeps Black
+        # Lotus on Scryfall): legal OR restricted, as the engine builds it.
+        assert values == [expected_parameters, {format_name: "restricted"}], f"Expected legal and restricted: {values}"
+        assert " OR " in observed_sql, f"Expected legal OR restricted: {observed_sql}"
+    else:
+        assert values == [expected_parameters], f"Expected exactly one parameter: {values}"
 
 
 def test_legality_invalid_attribute() -> None:

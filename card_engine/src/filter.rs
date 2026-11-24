@@ -1011,6 +1011,37 @@ fn artist_match_ids(artist_vocab: &AStrings, pred: impl Fn(&str) -> bool) -> Vec
 }
 
 impl FilterExpr {
+    /// `f:x` builds `Or(legal, restricted)` (see the `card_legalities` arm of `build_binary`); where
+    /// the store holds no printing restricted in `x` — `restricted` answers whether one does — the Or
+    /// becomes its legal leaf alone. Sound for any store (a leaf that matches nothing adds nothing
+    /// to an Or), and what keeps `f:commander`, the commonest filter there is, on the single-leaf
+    /// shape the planes, estimates and narrowing were built for.
+    pub(crate) fn drop_empty_legality_arms(&mut self, restricted: &dyn Fn(u8) -> bool) {
+        match self {
+            FilterExpr::Or(children)
+                if children.len() == 2
+                    && matches!(
+                        (&children[0], &children[1]),
+                        (
+                            FilterExpr::Legality { shift: a, expected: LEGALITY_LEGAL },
+                            FilterExpr::Legality { shift: b, expected: LEGALITY_RESTRICTED },
+                        // No shift: a format no loaded card carries, where both arms match nothing.
+                        ) if a == b && a.is_none_or(|shift| !restricted(shift))
+                    ) =>
+            {
+                let legal = children.swap_remove(0);
+                *self = legal;
+            }
+            FilterExpr::And(children) | FilterExpr::Or(children) => {
+                for c in children.iter_mut() {
+                    c.drop_empty_legality_arms(restricted);
+                }
+            }
+            FilterExpr::Not(inner) => inner.drop_empty_legality_arms(restricted),
+            _ => {}
+        }
+    }
+
     /// Per-query binding against the store's vocab tables, called once before
     /// matching. Two rewrites happen here:
     ///
@@ -1898,13 +1929,24 @@ fn build_binary(kw: &Value) -> Result<FilterExpr, String> {
             .and_then(|a| a.first())
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let expected = match orig {
-            "format" | "f" | "legal" => LEGALITY_LEGAL,
-            "banned"                 => LEGALITY_BANNED,
-            "restricted"             => LEGALITY_RESTRICTED,
-            _                        => LEGALITY_LEGAL,
-        };
-        return Ok(FilterExpr::Legality { shift: format_shift(format), expected });
+        let shift = format_shift(format);
+        let leaf = |expected| FilterExpr::Legality { shift, expected };
+        // `f:`, `format:` and `legal:` mean "playable in the format", and a restricted card is.
+        // Measured on api.scryfall.com 2026-11-23: Yuriko, the Tiger's Shadow is
+        // `competitivebrawl: restricted` and `!"Yuriko, the Tiger's Shadow" f:competitivebrawl` is 1;
+        // `f:vintage t:artifact cmc=0` is 80, Black Lotus and the five Moxen among them, where reading
+        // "legal" alone gives 70. `banned:` and `restricted:` stay exact.
+        //
+        // An Or of the two status leaves the planes already index, rather than a new leaf every plan,
+        // estimate and narrowing arm would have to learn — and `drop_empty_legality_arms` takes the
+        // restricted arm out again at bind wherever the store holds no printing restricted in that
+        // format (every format but vintage and Competitive Brawl), so `f:commander` keeps the
+        // single-leaf shape every fast path was built for.
+        return Ok(match orig {
+            "banned" => leaf(LEGALITY_BANNED),
+            "restricted" => leaf(LEGALITY_RESTRICTED),
+            _ => FilterExpr::Or(vec![leaf(LEGALITY_LEGAL), leaf(LEGALITY_RESTRICTED)]),
+        });
     }
 
     if attr == "card_types" {
