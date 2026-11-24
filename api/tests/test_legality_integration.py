@@ -5,6 +5,13 @@ import pytest
 from api.parsing import generate_sql_query, parse_scryfall_query
 
 
+def legality_params(format_name: str, status: str) -> list[dict[str, str]]:
+    """The parameters a legality term binds: `f:`/`format:`/`legal:` also match restricted, as on Scryfall."""
+    if status == "legal":
+        return [{format_name: "legal"}, {format_name: "restricted"}]
+    return [{format_name: status}]
+
+
 class TestLegalityIntegration:
     """Test legality search functionality with end-to-end integration."""
 
@@ -16,11 +23,8 @@ class TestLegalityIntegration:
 
         # Should generate JSONB containment query
         assert "card.card_legalities @>" in sql
-        assert len(params) == 1
-
-        # Parameter should contain format -> legal mapping
-        param_value = next(iter(params.values()))
-        assert param_value == {"standard": "legal"}
+        # Parameters should be the format's legal and restricted mappings
+        assert list(params.values()) == legality_params("standard", "legal")
 
     def test_banned_search_integration(self) -> None:
         """Test that banned search generates correct SQL end-to-end."""
@@ -30,11 +34,8 @@ class TestLegalityIntegration:
 
         # Should generate JSONB containment query
         assert "card.card_legalities @>" in sql
-        assert len(params) == 1
-
         # Parameter should contain format -> banned mapping
-        param_value = next(iter(params.values()))
-        assert param_value == {"modern": "banned"}
+        assert list(params.values()) == legality_params("modern", "banned")
 
     def test_restricted_search_integration(self) -> None:
         """Test that restricted search generates correct SQL end-to-end."""
@@ -44,11 +45,8 @@ class TestLegalityIntegration:
 
         # Should generate JSONB containment query
         assert "card.card_legalities @>" in sql
-        assert len(params) == 1
-
         # Parameter should contain format -> restricted mapping
-        param_value = next(iter(params.values()))
-        assert param_value == {"vintage": "restricted"}
+        assert list(params.values()) == legality_params("vintage", "restricted")
 
     def test_format_alias_integration(self) -> None:
         """Test that format alias 'f:' works correctly."""
@@ -58,11 +56,8 @@ class TestLegalityIntegration:
 
         # Should generate JSONB containment query
         assert "card.card_legalities @>" in sql
-        assert len(params) == 1
-
-        # Parameter should contain format -> legal mapping
-        param_value = next(iter(params.values()))
-        assert param_value == {"commander": "legal"}
+        # Parameters should be the format's legal and restricted mappings
+        assert list(params.values()) == legality_params("commander", "legal")
 
     def test_legal_explicit_integration(self) -> None:
         """Test that explicit 'legal:' search works correctly."""
@@ -72,11 +67,8 @@ class TestLegalityIntegration:
 
         # Should generate JSONB containment query
         assert "card.card_legalities @>" in sql
-        assert len(params) == 1
-
-        # Parameter should contain format -> legal mapping
-        param_value = next(iter(params.values()))
-        assert param_value == {"legacy": "legal"}
+        # Parameters should be the format's legal and restricted mappings
+        assert list(params.values()) == legality_params("legacy", "legal")
 
     def test_complex_legality_query_integration(self) -> None:
         """Test complex queries combining legality searches."""
@@ -90,13 +82,8 @@ class TestLegalityIntegration:
         assert len(sql_parts) == 2
         assert all("card.card_legalities @>" in part for part in sql_parts)
 
-        # Should have two parameters
-        assert len(params) == 2
-
-        # Parameters should contain the expected mappings
-        param_values = list(params.values())
-        expected_values = [{"standard": "legal"}, {"modern": "banned"}]
-        assert all(val in param_values for val in expected_values)
+        # `format:standard` binds legal and restricted, `banned:modern` binds banned
+        assert list(params.values()) == legality_params("standard", "legal") + legality_params("modern", "banned")
 
     def test_case_insensitive_format_integration(self) -> None:
         """Test that format names are case-insensitive."""
@@ -110,11 +97,8 @@ class TestLegalityIntegration:
 
             # Should generate JSONB containment query
             assert "card.card_legalities @>" in sql
-            assert len(params) == 1
-
             # Parameter should contain lowercase format name
-            param_value = next(iter(params.values()))
-            assert param_value == {expected_format: expected_status}
+            assert list(params.values()) == legality_params(expected_format, expected_status)
 
     def test_quoted_format_names_integration(self) -> None:
         """Test that quoted format names with spaces work correctly."""
@@ -124,11 +108,8 @@ class TestLegalityIntegration:
 
         # Should generate JSONB containment query
         assert "card.card_legalities @>" in sql
-        assert len(params) == 1
-
         # Parameter should contain the format with spaces
-        param_value = next(iter(params.values()))
-        assert param_value == {"historic brawl": "legal"}
+        assert list(params.values()) == legality_params("historic brawl", "legal")
 
     @pytest.mark.parametrize(
         ("query", "expected_format", "expected_status"),
@@ -147,8 +128,5 @@ class TestLegalityIntegration:
 
         # Should generate JSONB containment query
         assert "card.card_legalities @>" in sql
-        assert len(params) == 1
-
         # Parameter should contain expected format and status
-        param_value = next(iter(params.values()))
-        assert param_value == {expected_format: expected_status}
+        assert list(params.values()) == legality_params(expected_format, expected_status)

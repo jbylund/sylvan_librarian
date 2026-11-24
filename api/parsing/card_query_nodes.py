@@ -1091,6 +1091,12 @@ class CardBinaryOperatorNode(BinaryOperatorNode):
             original_attr = getattr(self.lhs, "original_attribute", attr)
             rhs = get_legality_comparison_object(self.rhs.value.strip(), original_attr)
             placeholder = context.add(rhs)
+            # `f:`, `format:` and `legal:` mean "playable in the format", and a restricted card is:
+            # `f:vintage` keeps Black Lotus on Scryfall. The engine builds the same Or (filter.rs).
+            ((format_name, status),) = rhs.items()
+            if status == "legal" and self.operator in (":", ">="):
+                restricted = context.add({format_name: "restricted"})
+                return f"({lhs_sql} @> {placeholder} OR {lhs_sql} @> {restricted})"
         else:
             msg = f"Unknown attribute: {attr}"
             raise ValueError(msg)

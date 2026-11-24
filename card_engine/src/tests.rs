@@ -1085,6 +1085,59 @@ fn legal_plane_fixture() -> CardData {
     data
 }
 
+/// `f:` keeps a RESTRICTED card (api.scryfall.com: `!"Yuriko, the Tiger's Shadow" f:competitivebrawl`
+/// is 1, `f:vintage t:artifact cmc=0` is 80 with Black Lotus and the Moxen): the build is
+/// `Or(legal, restricted)`, and over the fixture's format C (shift 4) it is card1 — restricted
+/// there — and not card0 or card2, banned there (card2's other printing is merely legal: in).
+#[test]
+fn a_format_term_keeps_restricted_cards() {
+    let mut data = legal_plane_fixture();
+    // The fixture writes format C on the PRINTINGS only; a card that is not `legality_divergent` is
+    // verified against its own card-level word, so give card0 and card1 the C status their single
+    // printings carry, as the importer always does (card2 is divergent and reads its printings).
+    data.cards[0].card_legalities |= 0b11 << 4;
+    data.cards[1].card_legalities |= 0b10 << 4;
+    let bytes = rkyv::to_bytes::<Error>(&data).expect("serialize");
+    let archived = rkyv::access::<Archived<CardData>, Error>(&bytes).expect("access");
+    let restricted = FilterExpr::Legality { shift: Some(4), expected: crate::legality::LEGALITY_RESTRICTED };
+    let legal = FilterExpr::Legality { shift: Some(4), expected: crate::legality::LEGALITY_LEGAL };
+    let count = |mut f: FilterExpr| run_query(&QueryCtx::from(archived), &mut f, None, "card", "default", "edhrec", "asc", 100, 0).0;
+    assert_eq!(count(legal.clone()), 1, "legal alone: card2's legal printing only");
+    assert_eq!(count(FilterExpr::Or(vec![legal, restricted.clone()])), 2, "f:C — card1 (restricted) and card2");
+    assert_eq!(count(restricted), 1, "restricted:C is exactly card1");
+}
+
+/// The restricted arm `f:x` builds is dropped at bind where the store holds no printing restricted
+/// in `x`, so `f:commander` keeps its single-leaf shape and every plan built for it.
+#[test]
+fn a_format_with_nothing_restricted_binds_to_its_legal_leaf_alone() {
+    use crate::legality::{LEGALITY_BANNED, LEGALITY_LEGAL, LEGALITY_RESTRICTED};
+    crate::legality::format_shift_or_assign("vintage");
+    let term = |alias: &str| {
+        serde_json::json!({
+            "node_type": "CardBinaryOperatorNode",
+            "kwargs": {
+                "lhs": {"node_type": "CardAttributeNode", "kwargs": {"attribute_name": "card_legalities", "original_attribute": alias}},
+                "op": ":",
+                "rhs": ["vintage"],
+            }
+        })
+    };
+    let built = || crate::build_filter(&term("f")).expect("builds");
+    assert!(matches!(built(), FilterExpr::Or(ref arms) if arms.len() == 2), "f: builds legal OR restricted");
+    let mut none = built();
+    none.drop_empty_legality_arms(&|_| false);
+    assert!(matches!(none, FilterExpr::Legality { expected: LEGALITY_LEGAL, .. }), "nothing restricted: the legal leaf alone");
+    let mut some = built();
+    some.drop_empty_legality_arms(&|_| true);
+    assert!(matches!(some, FilterExpr::Or(_)), "restricted printings present: both arms stay");
+    for (alias, status) in [("banned", LEGALITY_BANNED), ("restricted", LEGALITY_RESTRICTED)] {
+        let mut exact = crate::build_filter(&term(alias)).expect("builds");
+        exact.drop_empty_legality_arms(&|_| false);
+        assert!(matches!(exact, FilterExpr::Legality { expected, .. } if expected == status), "{alias}: exact");
+    }
+}
+
 #[test]
 fn legal_plane_narrows_positive_includes_divergent() {
     let data = legal_plane_fixture();
