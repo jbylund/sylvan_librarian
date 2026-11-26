@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 from api.parsing.card_query_nodes import calculate_devotion, fold_accents, mana_cost_str_to_dict
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
 
 # Card types that can exist as a permanent on the battlefield. Devotion (MTG
@@ -279,3 +279,39 @@ def preprocess_card(card: dict[str, Any]) -> list[dict[str, Any]]:  # noqa: PLR0
         card.setdefault(key, {})
 
     return [card]
+
+
+def _ordered_union(value_lists: Iterable[list[str]]) -> list[str]:
+    """Union several lists into one, keeping first-seen order and no duplicates."""
+    seen: dict[str, None] = {}
+    for values in value_lists:
+        seen.update(dict.fromkeys(values))
+    return list(seen)
+
+
+def merge_dfc_faces(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse preprocess_card's one-row-per-face output into the single row magic.cards stores.
+
+    `magic.cards` has one row per `scryfall_id`, and every face of a double-faced card shares
+    that id. Left alone, `api.db.bulk_upsert`'s last-value-wins dedup silently keeps only
+    whichever face was processed last -- that face's type, subtypes and oracle text overwrite
+    the other face's, which simply vanishes from the stored row (#873, #400). Scryfall's own
+    rule is that `o:`/`t:`/`kw:` match a double-faced card when ANY face matches, so this unions
+    those three fields across faces instead of picking one.
+
+    `card_keywords` needs no merging: Scryfall's `keywords` is a card-level list (never
+    per-face), so every face's processed row already carries the identical value. Every other
+    field (mana cost, colors, power/toughness, ...) keeps today's last-face-wins value --
+    unioning those is a separate, larger change (#400) that this fix does not attempt.
+
+    For a single-faced card (the common case) *rows* already has exactly one entry and is
+    returned unchanged.
+    """
+    if len(rows) <= 1:
+        return rows
+
+    merged = copy.deepcopy(rows[-1])
+    merged["card_types"] = _ordered_union(row["card_types"] for row in rows)
+    merged["card_subtypes"] = _ordered_union(row["card_subtypes"] for row in rows)
+    merged["oracle_text"] = "\n // \n".join(text for row in rows if (text := row.get("oracle_text")))
+    return [merged]
